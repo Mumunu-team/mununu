@@ -102,7 +102,19 @@ pub fn run_ast_json(
         cmd.arg(f);
     }
 
-    let output = cmd.output().map_err(|e| AdapterError {
+    // mununu#504 — bounded. This ran as a bare `.output()`. slang runs FIRST, before anything is
+    // known about the design, so a hang here loses the run with no output and nothing to report.
+    let outcome = match crate::adapter::lift_timeout() {
+        Some(t) => crate::adapter::run_with_timeout(&mut cmd, None, t),
+        None => cmd.output().map(|o| {
+            Some((
+                o.status,
+                String::from_utf8_lossy(&o.stdout).into_owned(),
+                String::from_utf8_lossy(&o.stderr).into_owned(),
+            ))
+        }),
+    }
+    .map_err(|e| AdapterError {
         kind: AdapterErrorKind::UnsupportedConstruct,
         message: format!(
             "adapter/slang: failed to run `{} --ast-json`: {e}",
@@ -110,6 +122,26 @@ pub fn run_ast_json(
         ),
         location: None,
     })?;
+    // A slang timeout stays a hard error, unlike yosys/sv2v: slang is what DISCOVERS the
+    // properties, so at this point there is no property list to degrade into an all-`unknown`
+    // report. The honest outcome is a clear failure naming the cap.
+    let Some((status, stdout, stderr_s)) = outcome else {
+        return Err(AdapterError {
+            kind: AdapterErrorKind::ParseError,
+            message: format!(
+                "adapter/slang: `slang --ast-json` exceeded the lift timeout and was killed. \
+                 slang runs before the property list exists, so there is nothing to report a \
+                 partial verdict for. Raise or disable the cap with {}=<ms> (0 disables).",
+                crate::adapter::LIFT_TIMEOUT_ENV
+            ),
+            location: None,
+        });
+    };
+    let output = std::process::Output {
+        status,
+        stdout: stdout.into_bytes(),
+        stderr: stderr_s.into_bytes(),
+    };
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     if stdout.trim().is_empty() {

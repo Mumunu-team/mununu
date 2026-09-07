@@ -505,6 +505,42 @@ pub(crate) fn locate_tool(
 /// std-only (no `wait-timeout` crate, no coreutils `timeout`) so it is portable
 /// and adds no dependency: model checkers like Pono's IC3 can run unbounded, and
 /// this is the portfolio's guard against a single member hanging the whole run.
+/// mununu#504 — the wall-clock cap for the three lift subprocesses (yosys, slang, sv2v).
+///
+/// All three used a bare `Command::output()`, which blocks forever. That is the *first* way a
+/// consumer loses a whole run: the lift runs BEFORE any property is attempted, so a hung tool
+/// emits zero output and every property reads as absent. btormc and pono have been bounded by
+/// `run_with_timeout` for a long time; this closes the gap for the lift.
+///
+/// Env-overridable via `MUNUNU_LIFT_TIMEOUT_MS` (one variable for all three — YAGNI over three
+/// until a measurement says otherwise). `0` disables the cap, matching the escape-hatch
+/// convention the other budgets use.
+pub(crate) const LIFT_TIMEOUT_ENV: &str = "MUNUNU_LIFT_TIMEOUT_MS";
+
+/// Default lift cap: 15 minutes. Deliberately generous — a large multi-file elaboration under
+/// `--single-unit` legitimately takes minutes, and a cap that fires on real work is worse than
+/// no cap at all (it converts a slow success into a spurious failure).
+const DEFAULT_LIFT_TIMEOUT_MS: u64 = 15 * 60 * 1000;
+
+/// The lift subprocess cap. `None` ⇒ uncapped (`MUNUNU_LIFT_TIMEOUT_MS=0`).
+pub(crate) fn lift_timeout() -> Option<std::time::Duration> {
+    parse_lift_timeout_ms(std::env::var(LIFT_TIMEOUT_ENV).ok())
+}
+
+/// Pure parse of `MUNUNU_LIFT_TIMEOUT_MS`, extracted so the ladder is unit-testable without
+/// touching process-global environment: a positive integer → that many ms; `0` → uncapped;
+/// unset or unparseable → the default.
+pub(crate) fn parse_lift_timeout_ms(v: Option<String>) -> Option<std::time::Duration> {
+    match v.as_deref().map(str::trim) {
+        Some("0") => None,
+        Some(s) => match s.parse::<u64>() {
+            Ok(ms) if ms > 0 => Some(std::time::Duration::from_millis(ms)),
+            _ => Some(std::time::Duration::from_millis(DEFAULT_LIFT_TIMEOUT_MS)),
+        },
+        None => Some(std::time::Duration::from_millis(DEFAULT_LIFT_TIMEOUT_MS)),
+    }
+}
+
 pub(crate) fn run_with_timeout(
     command: &mut std::process::Command,
     stdin_data: Option<&[u8]>,
