@@ -615,6 +615,75 @@ fn conj_bool(constraints: &[z3::ast::Bool]) -> z3::ast::Bool {
     }
 }
 
+/// mununu#512 — build the `∀`-quantified inner body for a must-edge query,
+/// SUBSTITUTING the next state instead of quantifying over it.
+///
+/// The next state is FUNCTIONALLY DETERMINED: BTOR2 `next` is a function per state
+/// cell. The original encoding introduced fresh `state_next` / `state_next_arr`
+/// constants, CONSTRAINED them with `transition`, and then `∀`-bound them —
+/// semantically equivalent, and noted as such in the code, but binding the next-state
+/// ARRAY moves the query from QF_AUFBV (decidable) into AUFBV + `∀`-array (not). Z3
+/// answers `Unknown`, `Unknown` is read as `NotMust`, and the νµ starves for
+/// must-edges on every array-bearing design.
+///
+/// Substituting `state_next := next_expr(state_curr, inputs)` removes the variables,
+/// so no `∀`-array remains and the `transition` conjunct is unnecessary — it is the
+/// definition being substituted. The remaining `∀` ranges over input bit-vectors only.
+///
+/// **SOUNDNESS: a completeness fix, not a semantic change.** The substituted query is
+/// equivalent to the quantified one, so a proven `Must` is genuinely a must-edge; the
+/// only movement is `Unknown → Must`. When the view carries no recorded expressions
+/// (built without `transition`), the previous encoding is used unchanged rather than
+/// silently weakening the query.
+fn must_inner_body_and_bounds(
+    view: &Btor2SmtView,
+    tgt_conj: &z3::ast::Bool,
+) -> (z3::ast::Bool, Vec<z3::ast::BV>, Vec<z3::ast::Array>) {
+    use z3::ast::Ast as _;
+    if view.state_next_expr.is_empty() && view.state_next_arr_expr.is_empty() {
+        let body = z3::ast::Bool::and(&[&view.transition, tgt_conj]).not();
+        return (
+            body,
+            universal_bound_bvs(view),
+            universal_bound_arrays(view),
+        );
+    }
+    let mut body = tgt_conj.clone();
+    let bv_subs: Vec<(z3::ast::BV, z3::ast::BV)> = view
+        .state_next
+        .iter()
+        .filter_map(|(nid, var)| {
+            view.state_next_expr
+                .get(nid)
+                .map(|e| (var.clone(), e.clone()))
+        })
+        .collect();
+    if !bv_subs.is_empty() {
+        let pairs: Vec<(&z3::ast::BV, &z3::ast::BV)> =
+            bv_subs.iter().map(|(a, b)| (a, b)).collect();
+        body = body.substitute(&pairs);
+    }
+    let arr_subs: Vec<(z3::ast::Array, z3::ast::Array)> = view
+        .state_next_arr
+        .iter()
+        .filter_map(|(nid, var)| {
+            view.state_next_arr_expr
+                .get(nid)
+                .map(|e| (var.clone(), e.clone()))
+        })
+        .collect();
+    if !arr_subs.is_empty() {
+        let pairs: Vec<(&z3::ast::Array, &z3::ast::Array)> =
+            arr_subs.iter().map(|(a, b)| (a, b)).collect();
+        body = body.substitute(&pairs);
+    }
+    (
+        body.not(),
+        view.inputs.values().cloned().collect(),
+        Vec::new(),
+    )
+}
+
 /// R.2.5b session-2 follow-up (2026-06-09) — collect the universal-
 /// quantification bound vars (inputs + state_next BVs) for the ∀∃
 /// must-edge check. Returns a Vec of cloned BVs whose references the
@@ -690,16 +759,72 @@ where
         return SmtMustVerdict::Unknown;
     };
 
-    // Inner body: ¬(transition ∧ ∧ tgt_i).
+    // mununu#512 — SUBSTITUTE the next state instead of quantifying over it.
+    //
+    // The next state is FUNCTIONALLY DETERMINED: BTOR2 `next` is a function per
+    // state cell, so `state_next` is not an independent variable. The previous
+    // encoding introduced fresh `state_next` / `state_next_arr` constants, CONSTRAINED
+    // them with `transition`, and then `∀`-bound them. That is semantically
+    // equivalent, but binding the next-state ARRAY moves the query from QF_AUFBV
+    // (decidable) into AUFBV + ∀-array (not) — Z3 answers `Unknown`, `Unknown` is
+    // read as `NotMust`, and the νµ starves for must-edges on every array-bearing
+    // design.
+    //
+    // Substituting `state_next := next_expr(state_curr, inputs)` removes the
+    // variables entirely, so no `∀`-array remains and the `transition` conjunct is
+    // unnecessary (it is the definition being substituted). The remaining `∀` is over
+    // finite input bit-vectors.
+    //
+    // SOUNDNESS: this is a COMPLETENESS fix, not a semantic change. The substituted
+    // query is equivalent to the quantified one, so a proven `Must` is genuinely a
+    // must-edge; the only movement is `Unknown → Must`.
+    use z3::ast::Ast as _;
     let tgt_conj = conj_bool(&tgt_constraints);
-    let inner_body = z3::ast::Bool::and(&[&view.transition, &tgt_conj]).not();
-
-    // Universal bounds: every input BV + every state_next BV. The
-    // state_next is determined by (state_curr, inputs) via transition;
-    // universally quantifying over both is equivalent semantically
-    // and is the cleanest encoding given the view's BV vocabulary.
-    let bound_bvs = universal_bound_bvs(view);
-    let bound_arrs = universal_bound_arrays(view);
+    let (inner_body, bound_refs_owned) =
+        if view.state_next_expr.is_empty() && view.state_next_arr_expr.is_empty() {
+            // No recorded expressions (a view built without `transition`) — keep the
+            // previous encoding rather than silently weaken the query.
+            let body = z3::ast::Bool::and(&[&view.transition, &tgt_conj]).not();
+            let mut bvs = universal_bound_bvs(view);
+            bvs.retain(|_| true);
+            (body, (bvs, universal_bound_arrays(view)))
+        } else {
+            let mut body = tgt_conj.clone();
+            // BV next-state variables → their defining expressions.
+            let bv_subs: Vec<(z3::ast::BV, z3::ast::BV)> = view
+                .state_next
+                .iter()
+                .filter_map(|(nid, var)| {
+                    view.state_next_expr
+                        .get(nid)
+                        .map(|e| (var.clone(), e.clone()))
+                })
+                .collect();
+            if !bv_subs.is_empty() {
+                let pairs: Vec<(&z3::ast::BV, &z3::ast::BV)> =
+                    bv_subs.iter().map(|(a, b)| (a, b)).collect();
+                body = body.substitute(&pairs);
+            }
+            // Array next-state variables → their defining `ite`/`store` expressions.
+            let arr_subs: Vec<(z3::ast::Array, z3::ast::Array)> = view
+                .state_next_arr
+                .iter()
+                .filter_map(|(nid, var)| {
+                    view.state_next_arr_expr
+                        .get(nid)
+                        .map(|e| (var.clone(), e.clone()))
+                })
+                .collect();
+            if !arr_subs.is_empty() {
+                let pairs: Vec<(&z3::ast::Array, &z3::ast::Array)> =
+                    arr_subs.iter().map(|(a, b)| (a, b)).collect();
+                body = body.substitute(&pairs);
+            }
+            // Only the INPUTS remain universally bound — finite bit-vectors.
+            let inputs: Vec<z3::ast::BV> = view.inputs.values().cloned().collect();
+            (body.not(), (inputs, Vec::new()))
+        };
+    let (bound_bvs, bound_arrs) = bound_refs_owned;
     let mut bound_refs: Vec<&dyn z3::ast::Ast> =
         bound_bvs.iter().map(|bv| bv as &dyn z3::ast::Ast).collect();
     bound_refs.extend(bound_arrs.iter().map(|a| a as &dyn z3::ast::Ast));
@@ -790,10 +915,8 @@ where
     let tgt_disjuncts_refs: Vec<&z3::ast::Bool> = tgt_disjuncts.iter().collect();
     let any_tgt = z3::ast::Bool::or(&tgt_disjuncts_refs);
 
-    let inner_body = z3::ast::Bool::and(&[&view.transition, &any_tgt]).not();
-
-    let bound_bvs = universal_bound_bvs(view);
-    let bound_arrs = universal_bound_arrays(view);
+    // mununu#512 — substitute the next state rather than quantify over it.
+    let (inner_body, bound_bvs, bound_arrs) = must_inner_body_and_bounds(view, &any_tgt);
     let mut bound_refs: Vec<&dyn z3::ast::Ast> =
         bound_bvs.iter().map(|bv| bv as &dyn z3::ast::Ast).collect();
     bound_refs.extend(bound_arrs.iter().map(|a| a as &dyn z3::ast::Ast));
@@ -1024,9 +1147,8 @@ where
         return SmtMustVerdict::Unknown;
     };
     let tgt_conj = conj_bool(&tgt_constraints);
-    let inner_body = z3::ast::Bool::and(&[&view.transition, &tgt_conj]).not();
-    let bound_bvs = universal_bound_bvs(view);
-    let bound_arrs = universal_bound_arrays(view);
+    // mununu#512 — substitute the next state rather than quantify over it.
+    let (inner_body, bound_bvs, bound_arrs) = must_inner_body_and_bounds(view, &tgt_conj);
     let mut bound_refs: Vec<&dyn z3::ast::Ast> =
         bound_bvs.iter().map(|bv| bv as &dyn z3::ast::Ast).collect();
     bound_refs.extend(bound_arrs.iter().map(|a| a as &dyn z3::ast::Ast));
@@ -1087,9 +1209,8 @@ where
     }
     let tgt_disjuncts_refs: Vec<&z3::ast::Bool> = tgt_disjuncts.iter().collect();
     let any_tgt = z3::ast::Bool::or(&tgt_disjuncts_refs);
-    let inner_body = z3::ast::Bool::and(&[&view.transition, &any_tgt]).not();
-    let bound_bvs = universal_bound_bvs(view);
-    let bound_arrs = universal_bound_arrays(view);
+    // mununu#512 — substitute the next state rather than quantify over it.
+    let (inner_body, bound_bvs, bound_arrs) = must_inner_body_and_bounds(view, &any_tgt);
     let mut bound_refs: Vec<&dyn z3::ast::Ast> =
         bound_bvs.iter().map(|bv| bv as &dyn z3::ast::Ast).collect();
     bound_refs.extend(bound_arrs.iter().map(|a| a as &dyn z3::ast::Ast));

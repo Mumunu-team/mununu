@@ -97,6 +97,18 @@ pub struct Btor2SmtView {
     /// is the element width. Memory cells only flow into the BV
     /// world through `Op::Read` (→ `select`); their own next-state
     /// is an extensional array equality in the transition relation.
+    /// mununu#512 — the next-step **expression** for each BV state cell, i.e. the
+    /// value `next` assigns, built over current-state + inputs only. The transition
+    /// builder already computes this to constrain [`Self::state_next`]; exposing it
+    /// lets a query SUBSTITUTE the next state instead of quantifying over it, which
+    /// is what keeps an array-bearing must-edge query inside the decidable fragment.
+    /// Empty until [`Btor2Backend::transition`] has run.
+    pub state_next_expr: HashMap<Nid, z3::ast::BV>,
+    /// mununu#512 — the array counterpart of [`Self::state_next_expr`]
+    /// (`ite(we, store(mem, waddr, wdata), mem)`). This is the one that matters:
+    /// universally binding `state_next_arr` is what pushes the query from QF_AUFBV
+    /// into AUFBV + ∀-array.
+    pub state_next_arr_expr: HashMap<Nid, z3::ast::Array>,
     pub state_curr_arr: HashMap<Nid, z3::ast::Array>,
     /// §Phase 10 stage 3.c.1 — Z3 Array handle for the next-step
     /// value of each array-sorted state cell. Mirror of
@@ -140,6 +152,18 @@ impl Btor2SmtView {
     /// signal value.
     pub fn curr_signal(&self, nid: Nid) -> Option<&z3::ast::BV> {
         self.signal_bvs.get(&nid)
+    }
+
+    /// mununu#512 — the next-step EXPRESSION for a BV state cell, if the transition
+    /// has been built. Prefer this over [`Self::next_state`] in a query that would
+    /// otherwise have to quantify over the next state.
+    pub fn next_state_expr(&self, nid: Nid) -> Option<&z3::ast::BV> {
+        self.state_next_expr.get(&nid)
+    }
+
+    /// mununu#512 — the next-step EXPRESSION for an array state cell.
+    pub fn next_state_arr_expr(&self, nid: Nid) -> Option<&z3::ast::Array> {
+        self.state_next_arr_expr.get(&nid)
     }
 
     /// Bit-width of a signal by NID.
@@ -299,6 +323,8 @@ pub fn encode_design_with_theory(
         signals,
         signal_bvs: HashMap::new(),
         transition: z3::ast::Bool::from_bool(true),
+        state_next_expr: HashMap::new(),
+        state_next_arr_expr: HashMap::new(),
     };
     let mut backend = Z3Backend::from_view(file, &view);
     walk_design(file, &mut backend).map_err(|e| match e {
@@ -314,7 +340,10 @@ pub fn encode_design_with_theory(
             op_name: "uninitialized-init-value",
         },
     })?;
-    view.transition = backend.transition(&view)?;
+    let (t, next_expr, next_arr_expr) = backend.transition(&view)?;
+    view.transition = t;
+    view.state_next_expr = next_expr;
+    view.state_next_arr_expr = next_arr_expr;
 
     // H.E.1 — retain the backend's per-node BV cache (current-cycle value of
     // every walked node) so the per-cube combinational-label pass (H.E.2) can
@@ -439,6 +468,8 @@ pub(crate) fn encode_primed(
         signals: view.signals.clone(),
         signal_bvs: HashMap::new(),
         transition: z3::ast::Bool::from_bool(true),
+        state_next_expr: HashMap::new(),
+        state_next_arr_expr: HashMap::new(),
     };
     let mut backend = Z3Backend::from_view(file, &primed_view);
     walk_design(file, &mut backend).map_err(|e| match e {
@@ -1055,7 +1086,24 @@ impl<'a> Z3Backend<'a> {
     /// §Phase 10 step 1c.2 — array-`next` support. The walk itself
     /// stays BV-valued (it skips array-sorted op nodes); arrays appear
     /// only here, as the RHS of the array-equality conjuncts.
-    pub(crate) fn transition(&mut self, view: &Btor2SmtView) -> Result<z3::ast::Bool, EncodeError> {
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn transition(
+        &mut self,
+        view: &Btor2SmtView,
+    ) -> Result<
+        (
+            z3::ast::Bool,
+            HashMap<Nid, z3::ast::BV>,
+            HashMap<Nid, z3::ast::Array>,
+        ),
+        EncodeError,
+    > {
+        // mununu#512 — record the next-state EXPRESSIONS alongside the equalities.
+        // They are already computed here to constrain the fresh `state_next*`
+        // variables; exposing them lets a query substitute the next state instead of
+        // quantifying over it.
+        let mut next_expr: HashMap<Nid, z3::ast::BV> = HashMap::new();
+        let mut next_arr_expr: HashMap<Nid, z3::ast::Array> = HashMap::new();
         let array_curr = if self.state_curr_arr.is_empty() {
             None
         } else {
@@ -1076,6 +1124,7 @@ impl<'a> Z3Backend<'a> {
                         &mut self.cache,
                         &mut self.array_cache,
                     )?;
+                    next_arr_expr.insert(*state, value_arr.clone());
                     conjuncts.push(arr_next.eq(&value_arr));
                     continue;
                 }
@@ -1104,15 +1153,17 @@ impl<'a> Z3Backend<'a> {
                         operand_width: value_bv.get_size(),
                     });
                 }
+                next_expr.insert(*state, value_bv.clone());
                 conjuncts.push(next_bv.eq(&value_bv));
             }
         }
-        Ok(if conjuncts.is_empty() {
+        let t = if conjuncts.is_empty() {
             z3::ast::Bool::from_bool(true)
         } else {
             let refs: Vec<&z3::ast::Bool> = conjuncts.iter().collect();
             z3::ast::Bool::and(&refs)
-        })
+        };
+        Ok((t, next_expr, next_arr_expr))
     }
 }
 
@@ -1499,7 +1550,8 @@ mod tests {
                 .unwrap_or_else(|e| panic!("walk_design {name}: {e:?}"));
             let walk_transition = backend
                 .transition(&ref_view)
-                .unwrap_or_else(|e| panic!("backend.transition {name}: {e:?}"));
+                .unwrap_or_else(|e| panic!("backend.transition {name}: {e:?}"))
+                .0;
 
             // The two Bools reference identical Z3 consts (same names);
             // they are equivalent iff `ref XOR walk` is UNSAT.
@@ -1560,7 +1612,8 @@ mod tests {
             walk_design(&file, &mut backend).expect("walk_design mem");
             let walk_transition = backend
                 .transition(&ref_view)
-                .expect("backend.transition mem");
+                .expect("backend.transition mem")
+                .0;
             let solver = z3::Solver::new();
             solver.assert(ref_view.transition.xor(&walk_transition));
             assert_eq!(
@@ -1621,7 +1674,7 @@ mod tests {
             let mut backend =
                 Z3Backend::from_view(&file, &uf_view).with_uf_wrapped(HashSet::from([4, 5]));
             walk_design(&file, &mut backend).expect("walk uf");
-            let uf_transition = backend.transition(&uf_view).expect("uf transition");
+            let uf_transition = backend.transition(&uf_view).expect("uf transition").0;
             let s1_next = uf_view.state_next.get(&6).expect("s1_next");
             let s2_next = uf_view.state_next.get(&7).expect("s2_next");
 
