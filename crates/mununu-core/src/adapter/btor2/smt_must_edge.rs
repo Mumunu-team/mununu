@@ -82,7 +82,7 @@ pub enum SmtMustVerdict {
 /// relation, hence a *more conservative* (more ⊥) but always SOUND abstraction. This turns a
 /// cube that grinds on a wide combinational cone (e.g. i2c's 196-bit freed-input cone) into a
 /// fast, deterministic ⊥ instead of a hang.
-fn cube_smt_rlimit() -> Option<u32> {
+pub(crate) fn cube_smt_rlimit() -> Option<u32> {
     parse_cube_smt_rlimit(std::env::var("MUNUNU_CUBE_SMT_RLIMIT").ok())
 }
 
@@ -549,7 +549,7 @@ where
     let mut params = z3::Params::new();
     params.set_u32("timeout", timeout_ms);
     if let Some(rl) = cube_smt_rlimit() {
-        params.set_u32("rlimit", rl); // ③b deterministic bound (SOUNDNESS: Unknown → NotMust → weaker must)
+        params.set_u32("rlimit", rl); // ③b deterministic bound (SOUNDNESS: Unknown → May → DENSER may, never sparser)
     }
     solver.set_params(&params);
     solver.assert(&view.transition);
@@ -1309,7 +1309,7 @@ where
     let mut params = z3::Params::new();
     params.set_u32("timeout", timeout_ms);
     if let Some(rl) = cube_smt_rlimit() {
-        params.set_u32("rlimit", rl); // ③b deterministic bound (SOUNDNESS: Unknown → NotMust → weaker must)
+        params.set_u32("rlimit", rl); // ③b deterministic bound (SOUNDNESS: Unknown → May → DENSER may, never sparser)
     }
     solver.set_params(&params);
 
