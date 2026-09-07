@@ -1821,7 +1821,9 @@ pub struct Btor2CegarResponse {
     /// Predicate set at termination (initial + every added predicate).
     pub final_predicates: Vec<PredicateView>,
     /// Why the loop stopped: `"converged"` |
-    /// `"bounded-iterations-reached"` | `"predicate-source-exhausted"`.
+    /// `"bounded-iterations-reached"` | `"predicate-source-exhausted"` |
+    /// `"budget-expired"` (mununu#504 — the wall clock ran out, as opposed to the refinement
+    /// cap being reached; the verdict is the last completed iteration's and is sound).
     pub terminated_with: String,
     /// Cell-count summary of the final 3-valued verdict.
     pub verdict: CegarVerdictSummary,

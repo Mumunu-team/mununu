@@ -59,6 +59,7 @@ pub mod promela;
 pub mod reach_portfolio;
 pub mod reach_rescue;
 pub mod recoverability;
+pub mod run_budget;
 pub mod sidecar;
 pub mod slang;
 pub mod state_enum;
@@ -433,6 +434,12 @@ pub enum AdapterErrorKind {
     IrConsistencyError,
     /// CTXDSL emission failed.
     EmitError,
+    /// mununu#504 — a wall-clock or resource budget expired mid-verification. Distinct from the
+    /// other kinds because it is NOT a defect in the input: the design is fine, we simply stopped.
+    /// `verify_auto` maps it to `Unknown`, never `Skipped` — `ci_exit_code` does not fail on
+    /// `skipped`, so a strict `--fail-on unknown` gate would otherwise go GREEN on a property
+    /// that timed out.
+    ResourceBudgetExceeded,
 }
 
 impl fmt::Display for AdapterError {

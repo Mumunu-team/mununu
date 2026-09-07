@@ -200,6 +200,12 @@ pub(crate) fn execute(
         PortfolioMode::Parallel => {
             // Scoped threads borrow the task's sources / yosys_opts; each owns its option clone
             // AND its own clone of the shared prepared model (so no engine re-runs the prep).
+            // mununu#504 — a spawned thread inherits NOTHING from the parent's thread-local
+            // budget, so each engine thread must re-install it, or the parallel portfolio would
+            // silently run unbounded while the sequential one is bounded.
+            // `run_budget`'s `budget_is_not_inherited_by_a_spawned_thread` pins that behaviour,
+            // and this is the site it exists to protect.
+            let parent_budget = crate::adapter::run_budget::current();
             let runs: Vec<(&str, Result<AutoVerifyReport, AdapterError>)> =
                 std::thread::scope(|scope| {
                     let handles: Vec<(&str, _)> = plan
@@ -208,9 +214,11 @@ pub(crate) fn execute(
                         .map(|op| {
                             let o = mk_opts(op);
                             let pm = prepared.clone();
+                            let b = parent_budget.clone();
                             (
                                 op.label,
                                 scope.spawn(move || {
+                                    let _g = crate::adapter::run_budget::enter(&b);
                                     verify_auto_impl(task.sources, task.yosys_opts, &o, Some(pm))
                                 }),
                             )

@@ -2271,6 +2271,11 @@ fn run_cegar_build_response(params: CegarRunParams<'_>) -> Result<Btor2CegarResp
             CegarTermination::Converged => "converged",
             CegarTermination::BoundedIterationsReached => "bounded-iterations-reached",
             CegarTermination::PredicateSourceExhausted => "predicate-source-exhausted",
+            // mununu#504 — a NEW wire value. Distinct from "bounded-iterations-reached": that
+            // means the refinement cap was reached, this means the wall clock ran out. They
+            // suggest different remedies (more rounds vs more time), so a consumer must be able
+            // to tell them apart.
+            CegarTermination::BudgetExpired => "budget-expired",
         }
         .to_string(),
         verdict: summarize(&trace.final_verdict),
