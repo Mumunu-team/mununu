@@ -2277,21 +2277,41 @@ pub fn predicate_cube_lift(
         ) = if use_session_may_hyper {
             let (may, hyper) = sts.may_and_hyper_must_edges(&cube_preds, 5_000);
             (may, Some(hyper))
-        } else if lift_opts.may_postimage
-            && predicates.len() >= 2
-            && let Some(map) = compute_all_may_edges_smt_postimage(
+        } else if lift_opts.may_postimage && predicates.len() >= 2 {
+            // mununu#504 — THREE outcomes, and conflating two of them is the trap `MayPostimage`
+            // exists to prevent. `NotApplicable` falls back to the all-pairs seam;
+            // `BudgetExceeded` must NOT, because that seam is O(2^2|P|) — strictly slower than
+            // the post-image we just abandoned for lack of time.
+            match compute_all_may_edges_smt_postimage(
                 &file,
                 &predicates,
                 &lift_opts.compound_exprs,
                 crate::adapter::btor2::smt_must_edge::cube_smt_rlimit(),
-            )
-        {
-            let mut pairs: Vec<(usize, usize)> = map
-                .into_iter()
-                .flat_map(|(src, tgts)| tgts.into_iter().map(move |t| (src, t)))
-                .collect();
-            pairs.sort_unstable();
-            (pairs, None)
+            ) {
+                MayPostimage::Complete(map) => {
+                    let mut pairs: Vec<(usize, usize)> = map
+                        .into_iter()
+                        .flat_map(|(src, tgts)| tgts.into_iter().map(move |t| (src, t)))
+                        .collect();
+                    pairs.sort_unstable();
+                    (pairs, None)
+                }
+                MayPostimage::NotApplicable => (sts.may_edges(&cube_preds, 5_000), None),
+                MayPostimage::BudgetExceeded => {
+                    return Err(AdapterError {
+                        kind: crate::adapter::AdapterErrorKind::ResourceBudgetExceeded,
+                        location: None,
+                        message: format!(
+                            "adapter/btor2/predicate_cube_lift: the wall-clock budget expired \
+                             while computing the may-relation over {} cubes. Raise or clear {} / \
+                             {}, or narrow the property's cone.",
+                            1usize << predicates.len(),
+                            crate::adapter::run_budget::PROPERTY_BUDGET_ENV,
+                            crate::adapter::run_budget::RUN_BUDGET_ENV,
+                        ),
+                    });
+                }
+            }
         } else {
             (sts.may_edges(&cube_preds, 5_000), None)
         };
@@ -2714,6 +2734,35 @@ fn collect_boolean_input_symbols(
 ///
 /// P1 increment 1: validated by `p1_smt_postimage_may_edges_match_concrete_oracle`. P1.4: wired into
 /// `predicate_cube_lift` behind `PredicateCubeLiftOptions::may_postimage`.
+/// mununu#504 — the post-image outcome. THREE cases, not two.
+///
+/// The trap this exists to avoid: `None` already meant *"not applicable, fall back"*, and the
+/// fallback is the O(2^2|P|) all-pairs seam — **slower** than the post-image. So returning `None`
+/// on a budget expiry would make a timeout strictly WORSE than doing nothing, by dropping a
+/// 2^|P| loop into a 2^2|P| one at exactly the moment we are out of time.
+#[derive(Debug)]
+enum MayPostimage {
+    /// The complete post-image may-relation.
+    Complete(std::collections::HashMap<usize, Vec<usize>>),
+    /// Not applicable to this input (an unresolvable predicate, or |P| out of range). The caller
+    /// falls back to the all-pairs seam — the historical `None`.
+    NotApplicable,
+    /// The wall-clock budget expired mid-enumeration. NOT a partial map: the caller must abort
+    /// the lift, never fall back.
+    BudgetExceeded,
+}
+
+#[cfg(test)]
+impl MayPostimage {
+    /// Test-only unwrap to the completed map.
+    fn expect(self, msg: &str) -> std::collections::HashMap<usize, Vec<usize>> {
+        match self {
+            MayPostimage::Complete(m) => m,
+            other => panic!("{msg}: expected Complete, got {other:?}"),
+        }
+    }
+}
+
 /// `rlimit`: the deterministic z3 resource bound, passed in rather than read from the
 /// environment so the `Unknown`-saturation path (mununu#504) is testable without mutating
 /// process-global state — the same pure-helper idiom `memory_budget.rs` uses. Production passes
@@ -2726,14 +2775,14 @@ fn compute_all_may_edges_smt_postimage(
         crate::adapter::btor2::predicate_expr::PredicateExpr,
     >,
     rlimit: Option<u32>,
-) -> Option<std::collections::HashMap<usize, Vec<usize>>> {
+) -> MayPostimage {
     use crate::adapter::btor2::predicate_expr::{CmpOp, PredicateExpr};
     let n = predicates.len();
     if n == 0 || n > 20 {
-        return None; // outside the cube-space bound; caller uses the eager path
+        return MayPostimage::NotApplicable; // outside the cube-space bound; eager path handles it
     }
     let cfg = z3::Config::new();
-    z3::with_z3_config(&cfg, || {
+    let res = z3::with_z3_config(&cfg, || {
         let view = encode_design_for_lift(file).ok()?;
         let nid_map = crate::adapter::btor2::smt_must_edge::build_register_nid_map(&view);
         // Effective constraint per predicate: a compound (by name) or the simple `reg == value`.
@@ -2771,8 +2820,11 @@ fn compute_all_may_edges_smt_postimage(
             .map(|e| e.build_constraint(&next))
             .collect::<Option<Vec<_>>>()?;
 
+        let mut budget_expired = false;
         let mut params = z3::Params::new();
-        params.set_u32("timeout", 5000);
+        // mununu#504 — clamp the per-query timeout to the time actually left, so the LAST query
+        // cannot overshoot the deadline by its own full 5 s.
+        params.set_u32("timeout", crate::adapter::run_budget::clamp_query_ms(5000));
         // mununu#504 — the deterministic resource bound, the same lever every check in
         // `smt_must_edge` already applies. It was missing HERE, on the post-image path, which is
         // the measured hang suspect (`for cube in 0..2^n` around an all-SAT loop, x17 CEGAR
@@ -2785,6 +2837,15 @@ fn compute_all_may_edges_smt_postimage(
         let mut out: std::collections::HashMap<usize, Vec<usize>> =
             std::collections::HashMap::new();
         for cube in 0..(1usize << n) {
+            // mununu#504 — the outer poll. This loop is the measured hang: up to 2^|P| cubes,
+            // x17 CEGAR rounds, x N properties, previously with only a per-QUERY timeout and no
+            // aggregate bound. Bailing here is signalled to the caller as `BudgetExceeded`, NOT
+            // as a partial map: a truncated may-relation is an under-approximation (see the
+            // saturation note in the all-SAT loop below).
+            if crate::adapter::run_budget::expired() {
+                budget_expired = true;
+                break;
+            }
             let solver = z3::Solver::new();
             solver.set_params(&params);
             solver.assert(&view.transition);
@@ -2815,6 +2876,14 @@ fn compute_all_may_edges_smt_postimage(
             let mut targets: Vec<usize> = Vec::new();
             let mut inconclusive = false;
             loop {
+                // mununu#504 — the inner poll. One z3 query is the interruptible unit, so the
+                // worst-case overshoot past the deadline is a single query (and `clamp_query_ms`
+                // below bounds even that).
+                if crate::adapter::run_budget::expired() {
+                    budget_expired = true;
+                    inconclusive = true; // do not trust a partial enumeration
+                    break;
+                }
                 match solver.check() {
                     z3::SatResult::Sat => {}
                     z3::SatResult::Unsat => break, // enumeration provably complete
@@ -2860,8 +2929,18 @@ fn compute_all_may_edges_smt_postimage(
             targets.dedup();
             out.insert(cube, targets);
         }
-        Some(out)
-    })
+        if budget_expired {
+            return Some(Err(())); // budget expiry, distinct from "not applicable"
+        }
+        Some(Ok(out))
+    });
+    // Three-way at the boundary: `None` = not applicable (fall back), `Some(Err)` = budget
+    // expiry (abort, never fall back — the fallback is SLOWER), `Some(Ok)` = complete.
+    match res {
+        None => MayPostimage::NotApplicable,
+        Some(Err(())) => MayPostimage::BudgetExceeded,
+        Some(Ok(map)) => MayPostimage::Complete(map),
+    }
 }
 
 /// P1 (scalable-KMTS) increment 2 — the compound-aware MUST-edge pass for the post-image lazy path.
@@ -2961,6 +3040,60 @@ mod tests {
             },
         );
         (btor2, preds, compound)
+    }
+
+    #[test]
+    /// mununu#504 — an expired budget must report `BudgetExceeded`, NOT `NotApplicable`.
+    ///
+    /// This is the trap `MayPostimage` exists for. `NotApplicable` means "fall back to the
+    /// all-pairs seam", and that seam is O(2^2|P|) — **slower** than the post-image loop we just
+    /// abandoned for lack of time. Conflating the two would make a timeout strictly worse than
+    /// having no budget at all.
+    fn postimage_reports_budget_expiry_distinctly_from_not_applicable() {
+        use crate::adapter::run_budget::{Budget, enter};
+        const B: &str = "1 sort bitvec 1\n\
+                         2 state 1 q\n\
+                         3 zero 1\n\
+                         4 init 1 2 3\n\
+                         5 next 1 2 2\n";
+        let file = crate::adapter::btor2::parser::parse(B).expect("parse");
+        let preds = vec![PredicateSpec {
+            name: "q == 1".into(),
+            register: "q".into(),
+            value: 1,
+        }];
+        let compound = std::collections::HashMap::new();
+
+        // Expired budget ⇒ BudgetExceeded, promptly.
+        let t0 = std::time::Instant::now();
+        let out = {
+            let _g = enter(&Budget::with_ms(0));
+            compute_all_may_edges_smt_postimage(&file, &preds, &compound, None)
+        };
+        assert!(
+            matches!(out, MayPostimage::BudgetExceeded),
+            "an expired budget must be distinguishable from `not applicable`; got {out:?}"
+        );
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(5),
+            "must bail promptly, took {:?}",
+            t0.elapsed()
+        );
+
+        // Control: unbounded ⇒ the real relation, so the assertion above is about the BUDGET and
+        // not about this fixture being unusable.
+        let ok = compute_all_may_edges_smt_postimage(&file, &preds, &compound, None);
+        assert!(
+            matches!(ok, MayPostimage::Complete(_)),
+            "with no budget the same call completes; got {ok:?}"
+        );
+
+        // And `NotApplicable` remains reachable for its own reason (|P| = 0), unchanged.
+        let na = compute_all_may_edges_smt_postimage(&file, &[], &compound, None);
+        assert!(
+            matches!(na, MayPostimage::NotApplicable),
+            "the out-of-range case still says NotApplicable; got {na:?}"
+        );
     }
 
     #[test]

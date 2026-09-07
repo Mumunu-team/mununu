@@ -410,6 +410,11 @@ pub enum CegarTermination {
     /// MVP `WeakestPrecondition` / `CraigInterpolation` sources hit
     /// this immediately because they are not yet implemented.
     PredicateSourceExhausted,
+    /// mununu#504 — a wall-clock budget expired between refinement rounds. The verdict is the
+    /// last completed iteration's, which is independently SOUND: less refinement means more ⊥,
+    /// never a wrong verdict. Distinct from `BoundedIterationsReached` so a caller can tell
+    /// "we ran out of time" from "we ran out of rounds" — they suggest different remedies.
+    BudgetExpired,
 }
 
 /// R.5 — Outcome of the CEGAR refinement loop.
@@ -981,6 +986,34 @@ pub fn cegar_refine_loop(
     };
 
     for iteration in 0..=cegar_opts.max_iterations {
+        // mununu#504 — the CEGAR round poll, and note this is NOT an error path.
+        //
+        // Each iteration's verdict is independently SOUND under the 3-valued KMTS semantics;
+        // refinement only sharpens it. So stopping early means LESS refinement, hence MORE ⊥ —
+        // never a wrong verdict. Breaking here therefore falls into the same exit the
+        // iteration-cap already uses, and the caller sees an ordinary (possibly ⊥) result.
+        //
+        // The one case that IS an error is expiry before iteration 0 produced anything: there is
+        // no sound verdict to report at all, so the caller must not be handed a fabricated one.
+        if iteration > 0
+            && crate::adapter::run_budget::expired()
+            && let Some(last) = iterations.last()
+        {
+            // NOT a `break`: the loop is followed by `unreachable!()`, so falling out of it would
+            // panic. Return the last completed iteration's verdict instead.
+            return Ok(CegarTrace {
+                final_verdict: last.verdict.clone(),
+                final_predicates: current_predicates.clone(),
+                terminated_with: CegarTermination::BudgetExpired,
+                lazy_lift_pending: true,
+                approximant_reuse_enabled: cegar_opts.enable_approximant_reuse,
+                warnings: warnings.clone(),
+                init_refinement_candidates: init_refinement_candidates.iter().cloned().collect(),
+                final_clts: captured_clts.take(),
+                counterexample: None,
+                iterations,
+            });
+        }
         // 1. Lift the BTOR2 with the current predicate set.
         //
         // **Sub-item 2.4 (2026-06-04)**: the lift-strategy flag

@@ -612,10 +612,31 @@ impl SmtEncode for BtorSts<'_> {
             let nid_map = build_register_nid_map_with_inputs(&view);
             let mut edges = Vec::new();
             for i in 0..n_cubes {
+                // mununu#504 — SOUNDNESS, and the direction here is the OPPOSITE of the must
+                // side. `may` OVER-approximates: correctness needs may ⊇ concrete. So when the
+                // budget expires we SATURATE — every remaining pair becomes a may-edge. A denser
+                // may relation means more ⊥, never a wrong verdict. DROPPING the remaining pairs
+                // (the intuitive "stop early") would UNDER-approximate and could manufacture a
+                // spurious definite `True` for a box property, which is a wrong answer rather
+                // than a slow one.
+                if crate::adapter::run_budget::expired() {
+                    for si in i..n_cubes {
+                        for sj in 0..n_cubes {
+                            edges.push((si, sj));
+                        }
+                    }
+                    break;
+                }
                 for j in 0..n_cubes {
                     if matches!(
                         smt_per_target_may_check_uniform(
-                            &view, &primed, i as u64, j as u64, predicates, &nid_map, timeout_ms,
+                            &view,
+                            &primed,
+                            i as u64,
+                            j as u64,
+                            predicates,
+                            &nid_map,
+                            crate::adapter::run_budget::clamp_query_ms(timeout_ms),
                         ),
                         SmtMayVerdict::May
                     ) {
@@ -623,6 +644,8 @@ impl SmtEncode for BtorSts<'_> {
                     }
                 }
             }
+            edges.sort_unstable();
+            edges.dedup();
             edges
         })
     }
@@ -681,9 +704,25 @@ impl SmtEncode for BtorSts<'_> {
             let nid_map = build_register_nid_map_with_inputs(&view);
             let mut edges = Vec::new();
             for &(i, j) in candidates {
+                // mununu#504 — SOUNDNESS, and note this is the MIRROR IMAGE of `may_edges`.
+                // `must` UNDER-approximates: an edge is included only on a PROVED ∀∃ obligation.
+                // So on expiry we DROP the remaining candidates and stop. Fewer must-edges means
+                // a weaker must relation, hence more ⊥ — never a wrong verdict. SATURATING here
+                // (the may-side move) would assert obligations nobody proved, which is unsound.
+                // This also matches the contract already documented on this method: a timeout
+                // "conservatively drops the edge".
+                if crate::adapter::run_budget::expired() {
+                    break;
+                }
                 if matches!(
                     smt_per_target_must_check_uniform(
-                        &view, &primed, i as u64, j as u64, predicates, &nid_map, timeout_ms,
+                        &view,
+                        &primed,
+                        i as u64,
+                        j as u64,
+                        predicates,
+                        &nid_map,
+                        crate::adapter::run_budget::clamp_query_ms(timeout_ms),
                     ),
                     SmtMustVerdict::Must
                 ) {
@@ -834,6 +873,73 @@ mod tests {
     // uart_tx pattern where Yosys' flatten strips the `_q` symbol from the
     // state line (the DR1 #1 blocker).
     const ALIASED_BTOR2: &str = "1 sort bitvec 4\n2 zero 4\n3 state 4 cnt_d\n4 init 4 3 2\n5 uext 4 3 0 cnt_q\n6 next 4 3 2\n";
+
+    /// mununu#504 — the two budget degradations point in OPPOSITE directions, and getting
+    /// either backwards is an unsoundness rather than a slowdown. This test asserts both in one
+    /// place so a future change cannot quietly flip one to match the other.
+    ///
+    /// - `may` OVER-approximates (may ⊇ concrete) ⇒ on expiry **saturate**. Dropping edges would
+    ///   under-approximate and could manufacture a spurious definite `True` for a box property.
+    /// - `must` UNDER-approximates (only proved ∀∃ obligations) ⇒ on expiry **drop**. Saturating
+    ///   would assert obligations nobody proved.
+    ///
+    /// Forced with an already-expired budget, so it is deterministic and runs in milliseconds.
+    #[test]
+    fn budget_expiry_saturates_may_and_drops_must() {
+        use crate::adapter::btor2::kmts_lift::PredicateSpec;
+        use crate::adapter::run_budget::{Budget, enter};
+        // `q' = q` — a held register, so the TRUE may-relation is strictly sparser than the full
+        // grid (cube 0 reaches only cube 0). Without that, saturation would be indistinguishable
+        // from the correct answer and this test would prove nothing.
+        const B: &str = "1 sort bitvec 1\n2 state 1 q\n3 zero 1\n4 init 1 2 3\n5 next 1 2 2\n";
+        let file = parser::parse(B).expect("parse");
+        let sts = BtorSts::new(&file);
+        let preds = vec![PredicateSpec {
+            name: "q == 1".into(),
+            register: "q".into(),
+            value: 1,
+        }];
+
+        // Control first: unbounded, the real relations.
+        let may_real = sts.may_edges(&preds, 5_000);
+        let must_real = sts.must_edges_over(&preds, &[(0, 0), (1, 1)], 5_000);
+        assert!(
+            may_real.len() < 4,
+            "the TRUE may relation must be sparser than the full grid, else saturation is \
+             untestable on this fixture; got {may_real:?}"
+        );
+
+        let t0 = std::time::Instant::now();
+        let (may_starved, must_starved) = {
+            let _g = enter(&Budget::with_ms(0));
+            (
+                sts.may_edges(&preds, 5_000),
+                sts.must_edges_over(&preds, &[(0, 0), (1, 1)], 5_000),
+            )
+        };
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(5),
+            "an expired budget must bail fast, took {:?}",
+            t0.elapsed()
+        );
+
+        assert_eq!(
+            may_starved,
+            vec![(0, 0), (0, 1), (1, 0), (1, 1)],
+            "MAY must SATURATE to the full grid on expiry (over-approximation); a sparser set \
+             here is an under-approximated may relation, which is UNSOUND"
+        );
+        assert!(
+            must_starved.is_empty(),
+            "MUST must DROP on expiry (under-approximation); a non-empty set here asserts \
+             obligations nobody proved, which is UNSOUND. got {must_starved:?}"
+        );
+        assert!(
+            !must_real.is_empty(),
+            "the unstarved must relation is non-empty, so the emptiness above is the BUDGET and \
+             not a degenerate fixture"
+        );
+    }
 
     #[test]
     fn btor_sts_resolve_register_follows_uext_alias_to_state_cell() {
