@@ -2279,8 +2279,12 @@ pub fn predicate_cube_lift(
             (may, Some(hyper))
         } else if lift_opts.may_postimage
             && predicates.len() >= 2
-            && let Some(map) =
-                compute_all_may_edges_smt_postimage(&file, &predicates, &lift_opts.compound_exprs)
+            && let Some(map) = compute_all_may_edges_smt_postimage(
+                &file,
+                &predicates,
+                &lift_opts.compound_exprs,
+                crate::adapter::btor2::smt_must_edge::cube_smt_rlimit(),
+            )
         {
             let mut pairs: Vec<(usize, usize)> = map
                 .into_iter()
@@ -2710,6 +2714,10 @@ fn collect_boolean_input_symbols(
 ///
 /// P1 increment 1: validated by `p1_smt_postimage_may_edges_match_concrete_oracle`. P1.4: wired into
 /// `predicate_cube_lift` behind `PredicateCubeLiftOptions::may_postimage`.
+/// `rlimit`: the deterministic z3 resource bound, passed in rather than read from the
+/// environment so the `Unknown`-saturation path (mununu#504) is testable without mutating
+/// process-global state — the same pure-helper idiom `memory_budget.rs` uses. Production passes
+/// `smt_must_edge::cube_smt_rlimit()`; a test passes `Some(1)` to force every query `Unknown`.
 fn compute_all_may_edges_smt_postimage(
     file: &crate::adapter::btor2::ast::Btor2File,
     predicates: &[PredicateSpec],
@@ -2717,6 +2725,7 @@ fn compute_all_may_edges_smt_postimage(
         String,
         crate::adapter::btor2::predicate_expr::PredicateExpr,
     >,
+    rlimit: Option<u32>,
 ) -> Option<std::collections::HashMap<usize, Vec<usize>>> {
     use crate::adapter::btor2::predicate_expr::{CmpOp, PredicateExpr};
     let n = predicates.len();
@@ -2764,6 +2773,15 @@ fn compute_all_may_edges_smt_postimage(
 
         let mut params = z3::Params::new();
         params.set_u32("timeout", 5000);
+        // mununu#504 — the deterministic resource bound, the same lever every check in
+        // `smt_must_edge` already applies. It was missing HERE, on the post-image path, which is
+        // the measured hang suspect (`for cube in 0..2^n` around an all-SAT loop, x17 CEGAR
+        // rounds x N properties). Unset by default ⇒ no behaviour change; set, it turns a grind
+        // into a fast, deterministic result. Safe to apply only because the `Unknown` arm below
+        // now saturates instead of silently truncating — see that comment.
+        if let Some(rl) = rlimit {
+            params.set_u32("rlimit", rl);
+        }
         let mut out: std::collections::HashMap<usize, Vec<usize>> =
             std::collections::HashMap::new();
         for cube in 0..(1usize << n) {
@@ -2779,9 +2797,36 @@ fn compute_all_may_edges_smt_postimage(
                 }
             }
             // All-SAT: project `cube_curr ∧ T` onto the next-state predicate valuation.
+            //
+            // SOUNDNESS (mununu#504, 2026-09-07) — `may` OVER-approximates: soundness requires
+            // may ⊇ concrete. This loop used to be `while matches!(solver.check(), Sat)`, so an
+            // `Unknown` (a z3 timeout, or an rlimit hit) exited the loop and stored the PARTIAL
+            // enumeration as if it were complete — a TRUNCATED may-relation, i.e. an
+            // UNDER-approximation. That is unsound in the definite direction: `[]φ` is True when
+            // all may-successors satisfy φ, so dropping may-edges can manufacture a spurious
+            // definite True. It was already reachable with the 5 s per-query timeout on a wide
+            // cone; adding an rlimit (which exists precisely to make queries return `Unknown`)
+            // would have made it routine.
+            //
+            // On a non-`Sat` INCONCLUSIVE result we therefore SATURATE this cube — every target
+            // is a may-successor — which is the sound direction (denser may ⇒ more ⊥, never a
+            // wrong verdict). `Unsat` is different: it is a real proof that no further next-state
+            // valuation exists, so it ends the enumeration normally.
             let mut targets: Vec<usize> = Vec::new();
-            while matches!(solver.check(), z3::SatResult::Sat) {
+            let mut inconclusive = false;
+            loop {
+                match solver.check() {
+                    z3::SatResult::Sat => {}
+                    z3::SatResult::Unsat => break, // enumeration provably complete
+                    z3::SatResult::Unknown => {
+                        inconclusive = true;
+                        break;
+                    }
+                }
                 let Some(model) = solver.get_model() else {
+                    // `Sat` with no retrievable model: we cannot block this valuation, so we
+                    // cannot trust the enumeration to terminate correctly either.
+                    inconclusive = true;
                     break;
                 };
                 let mut tgt = 0usize;
@@ -2806,6 +2851,10 @@ fn compute_all_may_edges_smt_postimage(
                 if targets.len() > (1usize << n) {
                     break; // safety: at most 2^n distinct next cubes
                 }
+            }
+            if inconclusive {
+                // Sound fallback for this cube only: every cube is a may-successor.
+                targets = (0..(1usize << n)).collect();
             }
             targets.sort_unstable();
             targets.dedup();
@@ -2912,6 +2961,70 @@ mod tests {
             },
         );
         (btor2, preds, compound)
+    }
+
+    #[test]
+    /// mununu#504 — the post-image all-SAT loop must SATURATE, never truncate, when a query is
+    /// inconclusive.
+    ///
+    /// `may` OVER-approximates, so soundness needs may ⊇ concrete. The loop used to be
+    /// `while matches!(solver.check(), Sat)`, so an `Unknown` exited it and stored the PARTIAL
+    /// enumeration as complete — an under-approximation, which can manufacture a spurious
+    /// definite `True` for a box property (`[]φ` is True when all may-successors satisfy φ, so
+    /// dropping successors makes it easier to hold).
+    ///
+    /// Forced deterministically with `rlimit = 1`: every z3 query returns `Unknown` immediately,
+    /// on any machine, in milliseconds. The result must be the FULL target grid, not a partial
+    /// or empty one.
+    fn postimage_saturates_rather_than_truncating_on_an_inconclusive_query() {
+        // `q' = q` — a HELD register. Its true may-relation is strictly sparser than the full
+        // grid (cube 0 reaches only cube 0, cube 1 only cube 1), which is what makes saturation
+        // distinguishable from the exact answer. A design with a free input driving `q` would
+        // have the full grid as its TRUE relation, and the test would prove nothing — the
+        // control assertion at the end of this test exists to catch exactly that mistake.
+        const B: &str = "1 sort bitvec 1\n\
+                         2 state 1 q\n\
+                         3 zero 1\n\
+                         4 init 1 2 3\n\
+                         5 next 1 2 2\n";
+        let file = crate::adapter::btor2::parser::parse(B).expect("parse");
+        let preds = vec![PredicateSpec {
+            name: "q == 1".into(),
+            register: "q".into(),
+            value: 1,
+        }];
+        let compound = std::collections::HashMap::new();
+
+        let t0 = std::time::Instant::now();
+        let starved = compute_all_may_edges_smt_postimage(&file, &preds, &compound, Some(1))
+            .expect("post-image still returns a map");
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(5),
+            "an rlimit-starved run must fail FAST, not grind"
+        );
+
+        // |P| = 1 ⇒ 2 cubes. Every cube must reach every cube: the sound over-approximation.
+        for cube in 0..2usize {
+            let targets = starved
+                .get(&cube)
+                .unwrap_or_else(|| panic!("cube {cube} present"));
+            assert_eq!(
+                targets.as_slice(),
+                &[0usize, 1],
+                "cube {cube}: an inconclusive enumeration must SATURATE to every target; a \
+                 partial set here is an under-approximated may relation, which is unsound"
+            );
+        }
+
+        // Control: with no rlimit the same call computes the REAL (sparser) relation, so the
+        // assertion above is testing saturation and not merely a degenerate design.
+        let exact = compute_all_may_edges_smt_postimage(&file, &preds, &compound, None)
+            .expect("post-image");
+        assert!(
+            exact.values().any(|t| t.len() < 2),
+            "the unstarved relation must be strictly sparser somewhere, else this test proves \
+             nothing about saturation; got {exact:?}"
+        );
     }
 
     #[test]
@@ -3035,7 +3148,7 @@ mod tests {
         }
 
         // Post-image path.
-        let may = compute_all_may_edges_smt_postimage(&file, &preds, &compound).expect("may");
+        let may = compute_all_may_edges_smt_postimage(&file, &preds, &compound, None).expect("may");
         let sharp = postimage_sharp_edges(&file, &preds, &compound, &may).expect("sharp");
 
         for i in 0..4usize {
@@ -3128,8 +3241,8 @@ mod tests {
                     .insert(cube_of(nxt["x"], nxt["y"]));
             }
         }
-        let got =
-            compute_all_may_edges_smt_postimage(&file, &preds, &compound).expect("post-image");
+        let got = compute_all_may_edges_smt_postimage(&file, &preds, &compound, None)
+            .expect("post-image");
         for cube in 0..4usize {
             let mine: std::collections::BTreeSet<usize> = got
                 .get(&cube)
