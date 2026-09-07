@@ -1,6 +1,6 @@
 # Mununu
 
-> **Alpha Software** — Mununu is under active development. APIs, syntax, and behavior may change. We welcome feedback and bug reports via [GitHub Issues](https://github.com/vscorza/mununu/issues).
+> **Alpha Software** — Mununu is under active development. APIs, syntax, and behavior may change. We welcome feedback and bug reports via [GitHub Issues](https://github.com/Mumunu-team/mununu/issues).
 
 Mununu is a formal verification tool for reactive systems modeled as **Compositional Labeled Transition Systems (CLTS)**. It helps hardware verification engineers and system designers verify protocols, synthesize controllers, and check temporal properties -- all from a single, readable DSL.
 
@@ -49,11 +49,11 @@ A playlist walking through Mununu from first principles:
 
 | Repository | Description |
 |------------|-------------|
-| [mununu](https://github.com/vscorza/mununu) | Backend -- CLI, verification engine, API server |
-| [mununu-ui](https://github.com/vscorza/mununu-ui) | Frontend -- web UI for graph visualization, evaluation, and synthesis |
+| [mununu](https://github.com/Mumunu-team/mununu) | Backend -- CLI, verification engine, API server |
+| [mununu-ui](https://github.com/Mumunu-team/mununu-ui) | Frontend -- web UI for graph visualization, evaluation, and synthesis |
 
 ## We'd Love Your Feedback
 
 Mununu is in its early stages and we are actively shaping the tool based on real-world use cases. If you run into a bug, have a feature request, or just want to share how you are using Mununu, please open an issue:
 
-[GitHub Issues](https://github.com/vscorza/mununu/issues)
+[GitHub Issues](https://github.com/Mumunu-team/mununu/issues)

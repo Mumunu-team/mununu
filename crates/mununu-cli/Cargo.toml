@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.91"
 authors = ["Mariano Cerrutti <vscorza@gmail.com>"]
 description = "Mununu CLI — command-line interface for verification and synthesis"
-repository = "https://github.com/vscorza/mununu"
+repository = "https://github.com/Mumunu-team/mununu"
 license-file = "../../LICENSE"
 # Mununu Non-Commercial License → not for crates.io; marks this a private/own
 # crate so the cargo-deny license gate skips it (deny.toml).

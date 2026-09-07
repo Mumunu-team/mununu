@@ -1,6 +1,6 @@
 # Compositional Extraction
 
-> **Alpha Software** — Mununu is under active development. APIs, syntax, and behavior may change. We welcome feedback and bug reports via [GitHub Issues](https://github.com/vscorza/mununu/issues).
+> **Alpha Software** — Mununu is under active development. APIs, syntax, and behavior may change. We welcome feedback and bug reports via [GitHub Issues](https://github.com/Mumunu-team/mununu/issues).
 
 Compositional extraction lets you generate **multi-automaton models** from source code in one pass — for concurrency / race-condition modeling where N instances of a class contend for a shared resource. Pre-Phase-A this work was done by hand, writing the espec's `composition` block manually after looking at source. With compositional extraction, the user declares the topology in the extract config and the extractor stitches the per-instance automata together with correct label rewriting.
 
@@ -63,7 +63,7 @@ The rewriting is deterministic and three-rule:
 2. Every label `L` not in `composition.shared[]` becomes `<name>__<L>`.
 3. Labels in `composition.shared[]` are kept verbatim across all instances.
 
-By construction, the union of all instances' label sets has the shared labels as the alphabet intersection. The composition engine ([crates/mununu-core/src/composition/mod.rs](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/composition/mod.rs)) uses that intersection to enforce joint firing — which is exactly what the user wants for synchronization.
+By construction, the union of all instances' label sets has the shared labels as the alphabet intersection. The composition engine ([crates/mununu-core/src/composition/mod.rs](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/composition/mod.rs)) uses that intersection to enforce joint firing — which is exactly what the user wants for synchronization.
 
 **Why prefix-by-default:** if the default were "no rewriting," all labels would intersect by name and accidentally synchronize. Prefix-by-default makes the safe choice (independence / no synchronization) the no-config behavior — users opt in to synchronization by listing labels.
 

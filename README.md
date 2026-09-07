@@ -2,7 +2,7 @@
 
 **Formal verification and controller synthesis for reactive systems**
 
-[![CI](https://github.com/vscorza/mununu/actions/workflows/ci.yml/badge.svg)](https://github.com/vscorza/mununu/actions/workflows/ci.yml)
+[![CI](https://github.com/Mumunu-team/mununu/actions/workflows/ci.yml/badge.svg)](https://github.com/Mumunu-team/mununu/actions/workflows/ci.yml)
 [![Rust 1.91+](https://img.shields.io/badge/rust-1.91%2B-orange.svg)](https://www.rust-lang.org/)
 [![License: Non-Commercial](https://img.shields.io/badge/license-Non--Commercial-blue.svg)](LICENSE)
 
@@ -26,13 +26,13 @@ Mununu is a verification tool for analyzing and synthesizing controllers for rea
 - **RTL property verification** &mdash; Check a SystemVerilog module's own assertions with **no sidecar** via `sv verify-auto`, or decide **safety**, **response-liveness** (`AG(request → AF grant)`), and **recoverability** (`AG EF good` &mdash; the branching "can it always get back?" property SVA cannot express) over SV or BTOR2 with the `sv`/`btor2 verify` / `verify-liveness` / `verify-recoverability` verbs. All speak one verdict vocabulary. See [`docs/verifying-rtl.md`](docs/verifying-rtl.md).
 - **CI & agent integration** &mdash; The verify verbs are **CI gates**: the verdict drives the process exit code (`--fail-on`, `--quiet`), so a GitHub Actions step fails on a real violation. An RTL-writing agent can POST raw SV to the HTTP API and get per-property verdicts back. See [`wiki/CI-and-Agent-Integration.md`](wiki/CI-and-Agent-Integration.md).
 - **REST API** &mdash; Built-in HTTP server for integration with web frontends
-- **Web UI** &mdash; Interactive editor, graph visualization, and verification via [mununu-ui](https://github.com/vscorza/mununu-ui)
+- **Web UI** &mdash; Interactive editor, graph visualization, and verification via [mununu-ui](https://github.com/Mumunu-team/mununu-ui)
 
 ## Quick Start
 
 ```bash
 # Build from source
-git clone https://github.com/vscorza/mununu.git
+git clone https://github.com/Mumunu-team/mununu.git
 cd mununu
 cargo build --release
 
@@ -284,7 +284,7 @@ from raw SystemVerilog) and a BTOR2-direct form (`btor2 …`).
 
 Full route list: [`api/server.rs`](crates/mununu-core/src/api/server.rs) ·
 [`api/handlers.rs`](crates/mununu-core/src/api/handlers.rs) ·
-[`mununu-ui/src/api/endpoints.ts`](https://github.com/vscorza/mununu-ui/blob/main/src/api/endpoints.ts).
+[`mununu-ui/src/api/endpoints.ts`](https://github.com/Mumunu-team/mununu-ui/blob/main/src/api/endpoints.ts).
 
 Source layout — a Cargo workspace (Edition 2024) of three crates:
 
@@ -353,7 +353,7 @@ Requires **Rust 1.91+** (Edition 2024).
 
 ```bash
 # Clone and build
-git clone https://github.com/vscorza/mununu.git
+git clone https://github.com/Mumunu-team/mununu.git
 cd mununu
 cargo build --release
 
@@ -373,7 +373,7 @@ Several mununu pipelines invoke external tools via subprocess. **All are optiona
 
 ## Web UI
 
-The companion [mununu-ui](https://github.com/vscorza/mununu-ui) project provides:
+The companion [mununu-ui](https://github.com/Mumunu-team/mununu-ui) project provides:
 
 - Monaco-based CTXDSL editor with syntax highlighting
 - Interactive graph visualization (Cytoscape/Dagre) with controllable/uncontrollable edge styling

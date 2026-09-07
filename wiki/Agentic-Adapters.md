@@ -1,6 +1,6 @@
 # Agentic Adapters
 
-> **Source of truth:** [`crates/mununu-core/src/adapter/crewai/`](https://github.com/vscorza/mununu/tree/main/crates/mununu-core/src/adapter/crewai/), [`crates/mununu-core/src/adapter/langgraph/`](https://github.com/vscorza/mununu/tree/main/crates/mununu-core/src/adapter/langgraph/) — surface: CLI+API+UI.
+> **Source of truth:** [`crates/mununu-core/src/adapter/crewai/`](https://github.com/Mumunu-team/mununu/tree/main/crates/mununu-core/src/adapter/crewai/), [`crates/mununu-core/src/adapter/langgraph/`](https://github.com/Mumunu-team/mununu/tree/main/crates/mununu-core/src/adapter/langgraph/) — surface: CLI+API+UI.
 
 Mununu ships **native parsers** for CrewAI and LangGraph workflow exports. Drop a `.crewai.json` / `.langgraph.json` file into the CLI, the HTTP API, or the UI wizard and the corresponding adapter translates it into CTXDSL automata directly — no manual rewrite into XState required.
 
@@ -8,7 +8,7 @@ For broader context on agentic verification (counterexample interpretation, MCP 
 
 ## CrewAI adapter
 
-> **Source of truth:** [`adapter::crewai::CrewaiAdapter`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/adapter/crewai/mod.rs) — surface: CLI+API+UI.
+> **Source of truth:** [`adapter::crewai::CrewaiAdapter`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/adapter/crewai/mod.rs) — surface: CLI+API+UI.
 
 ### What it accepts
 
@@ -33,11 +33,11 @@ Detection runs on file extension (`.crewai.json` / `.crewai`) and on content (`a
 
 ### How it translates
 
-> **Source of truth:** [`adapter::crewai::translate::to_ir`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/adapter/crewai/translate.rs) — surface: CLI+API+UI.
+> **Source of truth:** [`adapter::crewai::translate::to_ir`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/adapter/crewai/translate.rs) — surface: CLI+API+UI.
 
 - **One automaton per agent.** States: `Idle -> Executing -> Done -> Idle`. Labels: `agent_<role>_start` (controllable — the supervisor dispatches), `agent_<role>_complete` (uncontrollable — the LLM completes when it completes).
 - **One supervisor automaton.** States `Init -> AfterTask_1 -> ... -> AfterTask_N` driven by `agent_<role>_complete` events in declared task order.
-- **Asynchronous composition** over `[supervisor, agent_1, ..., agent_N]` per the [agentic adapter soundness notes](https://github.com/vscorza/mununu/blob/main/docs/adapters/agentic.md) — LLM latency is non-deterministic, so synchronous one-step rendezvous is unsound for liveness without explicit fairness.
+- **Asynchronous composition** over `[supervisor, agent_1, ..., agent_N]` per the [agentic adapter soundness notes](https://github.com/Mumunu-team/mununu/blob/main/docs/adapters/agentic.md) — LLM latency is non-deterministic, so synchronous one-step rendezvous is unsound for liveness without explicit fairness.
 - **`__mununu` block overrides** controllability classifications via the same convention as the XState adapter.
 
 `process = "sequential"` is fully modelled; `hierarchical` and `consensual` emit an `ApproximateTranslation` warning and fall back to sequential. Native support for those processes is a planned follow-up.
@@ -52,7 +52,7 @@ Detection runs on file extension (`.crewai.json` / `.crewai`) and on content (`a
 
 ## LangGraph adapter
 
-> **Source of truth:** [`adapter::langgraph::LangGraphAdapter`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/adapter/langgraph/mod.rs) — surface: CLI+API+UI.
+> **Source of truth:** [`adapter::langgraph::LangGraphAdapter`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/adapter/langgraph/mod.rs) — surface: CLI+API+UI.
 
 ### What it accepts
 
@@ -78,7 +78,7 @@ Three accepted shapes: flat `{nodes, edges}` (canonical), wrapped `{graph: {node
 
 ### How it translates
 
-> **Source of truth:** [`adapter::langgraph::translate::to_ir`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/adapter/langgraph/translate.rs) — surface: CLI+API+UI.
+> **Source of truth:** [`adapter::langgraph::translate::to_ir`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/adapter/langgraph/translate.rs) — surface: CLI+API+UI.
 
 - **One state per node.** The entry-point node (or the first node if absent) becomes the initial state.
 - **One transition per edge** with label `node_<from>_enter`. Conditional edges get a per-condition suffix: `node_<from>_<condition>_enter`.
@@ -87,7 +87,7 @@ Three accepted shapes: flat `{nodes, edges}` (canonical), wrapped `{graph: {node
 
 ## Property templates for agentic flows
 
-> **Source of truth:** [`adapter::templates::builtin_templates`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/adapter/templates/builtin_templates.json) — surface: CLI+API+UI.
+> **Source of truth:** [`adapter::templates::builtin_templates`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/adapter/templates/builtin_templates.json) — surface: CLI+API+UI.
 
 Three templates tagged `agentic` in the builtin catalog cover the most common verification questions:
 
@@ -113,7 +113,7 @@ mununu context eval graph.json --adapter langgraph --formula safety
 
 ## HTTP API
 
-> **Source of truth:** [`api::handlers::context_import_handler`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API.
+> **Source of truth:** [`api::handlers::context_import_handler`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API.
 
 `POST /api/v1/context/import` accepts `format = "crewai"` or `format = "langgraph"` in addition to the legacy `auto | xstate | systemverilog | sv-yosys | tlsf | aiger | btor2 | promela | extraction` set.
 
@@ -126,13 +126,13 @@ curl -X POST http://127.0.0.1:8080/api/v1/context/import \
 
 ## Web UI
 
-> **Source of truth:** [`mununu-ui/src/types/workflow.ts`](https://github.com/vscorza/mununu-ui/blob/main/src/types/workflow.ts) — surface: UI.
+> **Source of truth:** [`mununu-ui/src/types/workflow.ts`](https://github.com/Mumunu-team/mununu-ui/blob/main/src/types/workflow.ts) — surface: UI.
 
 The Extraction tab's domain selector exposes **CrewAI Agentic** and **LangGraph Workflow** as dedicated wizards. Drop a `.crewai.json` / `.langgraph.json`, click **Run Translate**, then switch to the Verification tab to evaluate properties on the emitted CTXDSL.
 
 ## End-to-end examples
 
-> **Source of truth:** [`examples/verify/crewai_handoff/`](https://github.com/vscorza/mununu/tree/main/examples/verify/crewai_handoff/), [`examples/verify/langgraph_workflow/`](https://github.com/vscorza/mununu/tree/main/examples/verify/langgraph_workflow/) — surface: CLI.
+> **Source of truth:** [`examples/verify/crewai_handoff/`](https://github.com/Mumunu-team/mununu/tree/main/examples/verify/crewai_handoff/), [`examples/verify/langgraph_workflow/`](https://github.com/Mumunu-team/mununu/tree/main/examples/verify/langgraph_workflow/) — surface: CLI.
 
 Two verify-framework fixtures exercise the adapters end-to-end through `mununu verify`:
 

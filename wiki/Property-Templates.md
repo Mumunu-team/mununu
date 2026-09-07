@@ -37,7 +37,7 @@ Templates resolve to standard `PropertyFormula::MuCalculus(String)` at instantia
 
 ## Behavioral property patterns by design class
 
-> Source of truth: [`scan_annotation_properties`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/adapter/slang/verify_auto.rs#L995) — surface: (CLI+API+UI)
+> Source of truth: [`scan_annotation_properties`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/adapter/slang/verify_auto.rs#L995) — surface: (CLI+API+UI)
 
 Beyond the atomic templates above, common **behavior classes** warrant recurring *branching-time* patterns —
 `AG EF` recoverability, `EF` reachability, error-recovery round-trips — that a plain safety invariant cannot
@@ -85,7 +85,7 @@ Example — an I²C master (protocol + shared-bus classes), `<error>` = `AL == 1
 
 ## Abstraction-predicate hints (`@mununu_predicate`)
 
-> Source of truth: [`MununuTag::Predicate`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/mununu_annotations/mod.rs) / [`seed_from_formula`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/adapter/slang/verify_auto.rs) — surface: (CLI+API+UI)
+> Source of truth: [`MununuTag::Predicate`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/mununu_annotations/mod.rs) / [`seed_from_formula`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/adapter/slang/verify_auto.rs) — surface: (CLI+API+UI)
 
 When a cube ⊥ is caused by a *missing* abstraction predicate — the property's own atoms don't pin the
 inductive invariant that decides it — you can **seed extra cube dimensions** without changing the property.
@@ -148,7 +148,7 @@ mununu templates --json
 
 ### In `verify.toml`
 
-> Source of truth: [`PropertySpec`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/verify/config.rs#L307) — surface: CLI+API.
+> Source of truth: [`PropertySpec`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/verify/config.rs#L307) — surface: CLI+API.
 
 ```toml
 [[properties]]
@@ -160,7 +160,7 @@ over = "System"
 
 **`TARGET` and other `Predicate`/`State` parameters must be bare identifiers**
 (alphanumeric plus `_`) — see
-[`validate_param_value`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/adapter/templates/mod.rs#L305).
+[`validate_param_value`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/adapter/templates/mod.rs#L305).
 This applies to **both** template surfaces: `verify.toml` `args` and
 `context eval --template-arg`. An expression is rejected on either:
 

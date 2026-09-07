@@ -2,7 +2,7 @@
 
 > **Audience:** anyone passing a BTOR2 file to `mununu btor2 verify*` / `cegar` / `game` — hand-written, third-party (HWMCC, btor2tools), or emitted by a non-mununu frontend. **`sv verify-auto` users are unaffected**; see below.
 >
-> **Related:** [mununu#498](https://github.com/vscorza/mununu/issues/498) (the sibling finding; the parent fix shipped in #502).
+> **Related:** [mununu#498](https://github.com/Mumunu-team/mununu/issues/498) (the sibling finding; the parent fix shipped in #502).
 >
 > **TL;DR:** the exact engine used to pin an un-`init`ed register to **zero**. The BTOR2 format leaves it **unconstrained**, which is what `btormc` and Pono implement. mununu now matches the format. Verdicts on the direct-BTOR2 path can change — **only ever `Holds` → `Violated`** — and the engine now *decides* cases where it previously had to abstain.
 
@@ -80,7 +80,7 @@ The first runs against the real btor2tools file and asserts agreement with `btor
 
 ## Provenance
 
-- Found while fixing [mununu#498](https://github.com/vscorza/mununu/issues/498) — a test asserting `$anyconst` reachability failed, and the honest reading was that the test was right and the code was not.
+- Found while fixing [mununu#498](https://github.com/Mumunu-team/mununu/issues/498) — a test asserting `$anyconst` reachability failed, and the honest reading was that the test was right and the code was not.
 - Fix: `BddBitBlaster::initial_state_bdd` in `crates/mununu-core/src/adapter/btor2/symbolic_bitblast.rs`.
 - Policy: [`../policies/cross-repo-impact.md`](../policies/cross-repo-impact.md).
 
@@ -88,4 +88,4 @@ The first runs against the real btor2tools file and asserts agreement with `btor
 
 - **`--no-gate-reset` and CWE-1245.** That flag is documented as letting the design choose its own power-up "including the undefined-encoding scenarios CWE-1245 detection relies on". Under the old zero-pin every register powered up at 0, which may be a *legal* encoding — so that detection may have been blind to the scenario it exists for. This change plausibly fixes it. **Unverified**; worth one experiment.
 - **`state_cell_init_values`** (the cube path) still defaults to 0 for a state with no `init`. It feeds a different engine and was not touched here; whether it has the same asymmetry is a separate question.
-- **[mununu#504](https://github.com/vscorza/mununu/issues/504)** — the exact engine can stack-overflow rather than abstain on a large design. Unrelated, found in the same sweep.
+- **[mununu#504](https://github.com/Mumunu-team/mununu/issues/504)** — the exact engine can stack-overflow rather than abstain on a large design. Unrelated, found in the same sweep.

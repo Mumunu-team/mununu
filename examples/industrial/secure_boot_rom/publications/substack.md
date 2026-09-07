@@ -33,7 +33,7 @@ You want to prove three things about this design:
 
 (1) and (2) are safety properties. (3) is a liveness property. A formal verifier sees only what it can see. If it cannot see inside the SHA core or the RSA-verify core, it cannot prove a property that depends on their internals. The honest move is to verify the surrounding controller logic against a *contract* describing how each closed IP behaves. If the contract is right, the proof transfers to the real device. If the contract is wrong, the proof is meaningless.
 
-This post walks the whole story end-to-end against the example at [`examples/industrial/secure_boot_rom/`](https://github.com/vscorza/mununu/tree/main/examples/industrial/secure_boot_rom). You can reproduce every command. The transcript below is byte-deterministic — run `validate.sh` against the same commit and you will get the same output character-for-character.
+This post walks the whole story end-to-end against the example at [`examples/industrial/secure_boot_rom/`](https://github.com/Mumunu-team/mununu/tree/main/examples/industrial/secure_boot_rom). You can reproduce every command. The transcript below is byte-deterministic — run `validate.sh` against the same commit and you will get the same output character-for-character.
 
 ## The conservative default — a chaotic stub
 
@@ -182,12 +182,12 @@ The liveness verdict ("eventually boots") is the one that does not transfer. Und
 
 ## What this example does not claim
 
-Per [mununu's claims-integrity rules](https://github.com/vscorza/mununu/blob/main/CLAUDE.md), the example is explicit about its boundaries:
+Per [mununu's claims-integrity rules](https://github.com/Mumunu-team/mununu/blob/main/CLAUDE.md), the example is explicit about its boundaries:
 
 - It does not claim mununu found a vulnerability in any commercial secure-boot ROM. The vendor-IP black boxes are stylised; the boot controller is hand-authored for the demonstration.
 - It does not claim the closed-IP contract clauses are accurate to any vendor's real datasheet. They are illustrative of the *contract shape*.
 - It does not prove a real device is secure. The proof is conditional on the contracts; the contracts are conditional on the vendors honouring their datasheets.
-- This particular example does not exercise vendor source-comment annotations (`@mununu_guarantee` on the wrapper module) or contract-corpus lookups. Those mechanisms ship in [`examples/industrial/tls_handshake/`](https://github.com/vscorza/mununu/tree/main/examples/industrial/tls_handshake) — the next post in this series. The secure boot ROM example deliberately stays at the chaotic-stub baseline so the reader can see the unannotated default behaviour first.
+- This particular example does not exercise vendor source-comment annotations (`@mununu_guarantee` on the wrapper module) or contract-corpus lookups. Those mechanisms ship in [`examples/industrial/tls_handshake/`](https://github.com/Mumunu-team/mununu/tree/main/examples/industrial/tls_handshake) — the next post in this series. The secure boot ROM example deliberately stays at the chaotic-stub baseline so the reader can see the unannotated default behaviour first.
 
 What the example *does* claim: every concept introduced here — chaotic stub, gap markers, controllability rule, discharge graph, mu-rank witness — is exercised end-to-end against the mununu binary on `main`, with a byte-deterministic transcript anyone can reproduce.
 
@@ -195,18 +195,18 @@ What the example *does* claim: every concept introduced here — chaotic stub, g
 
 The vocabulary is borrowed. Chaotic-stub semantics come from Kupferman, Vardi, and Wolper's *Module Checking* (CAV '96 / J. ACM 47(2), 2000). Contract-shaped automata at module boundaries come from de Alfaro and Henzinger's *Interface Automata* (ESEC/FSE 2001). Assume-guarantee discharge comes from Pnueli's *In Transition from Global to Modular Temporal Reasoning about Programs* (NATO ASI 13, 1985) and Abadi and Lamport's *Conjoining Specifications* (ACM TOPLAS 17(3), 1995). The circular reasoning rule comes from McMillan's *Circular Compositional Reasoning about Liveness* (CHARME 1999). The controllability framing comes from Alur and Henzinger's *Reactive Modules* (FMSD 15(1), 1999). The whole compositional verification programme traces back to de Roever, Langmaack, and Pnueli's *Compositionality: The Significant Difference* (COMPOS '97, LNCS 1536).
 
-What mununu (the [open-source compositional model checker](https://github.com/vscorza/mununu) this example runs against) contributes is the *integration*: a single workflow that pulls all of these into a CLI you can run today against a real example, with the right diagnostics where they matter, and the discipline of refusing to silently accept anything unsound. The contract subsystem this post walks through — chaotic-stub defaults that always emit a structured gap report, an automatic discharge-graph analysis that catches circular reasoning, and the lightweight mu-rank witness that auto-accepts well-formed circular contracts — is the piece that landed this milestone.
+What mununu (the [open-source compositional model checker](https://github.com/Mumunu-team/mununu) this example runs against) contributes is the *integration*: a single workflow that pulls all of these into a CLI you can run today against a real example, with the right diagnostics where they matter, and the discipline of refusing to silently accept anything unsound. The contract subsystem this post walks through — chaotic-stub defaults that always emit a structured gap report, an automatic discharge-graph analysis that catches circular reasoning, and the lightweight mu-rank witness that auto-accepts well-formed circular contracts — is the piece that landed this milestone.
 
 ## What's next
 
 This is post 1 of a four-part series. The remaining three each lead with a different real-world architecture:
 
-- **Post 2 — A two-pipeline SoC.** Why the same SoC can be verified at two precision tiers (protocol-level vs gate-level) without forcing the user to pick. Worked example: [`examples/industrial/dual_frontend_soc/`](https://github.com/vscorza/mununu/tree/main/examples/industrial/dual_frontend_soc).
-- **Post 3 — A TLS handshake driving closed-IP crypto.** When the closed IP is *not unique* (AES-CTR is AES-CTR), a shared corpus replaces per-project contract authoring. Worked example: [`examples/industrial/tls_handshake/`](https://github.com/vscorza/mununu/tree/main/examples/industrial/tls_handshake).
-- **Post 4 — A UART driver + UART peripheral.** Cross-boundary HW/SW codesign verification: firmware C + peripheral SV with a register-map sidecar gluing the two sides. Worked example: [`examples/industrial/codesign_uart/`](https://github.com/vscorza/mununu/tree/main/examples/industrial/codesign_uart).
+- **Post 2 — A two-pipeline SoC.** Why the same SoC can be verified at two precision tiers (protocol-level vs gate-level) without forcing the user to pick. Worked example: [`examples/industrial/dual_frontend_soc/`](https://github.com/Mumunu-team/mununu/tree/main/examples/industrial/dual_frontend_soc).
+- **Post 3 — A TLS handshake driving closed-IP crypto.** When the closed IP is *not unique* (AES-CTR is AES-CTR), a shared corpus replaces per-project contract authoring. Worked example: [`examples/industrial/tls_handshake/`](https://github.com/Mumunu-team/mununu/tree/main/examples/industrial/tls_handshake).
+- **Post 4 — A UART driver + UART peripheral.** Cross-boundary HW/SW codesign verification: firmware C + peripheral SV with a register-map sidecar gluing the two sides. Worked example: [`examples/industrial/codesign_uart/`](https://github.com/Mumunu-team/mununu/tree/main/examples/industrial/codesign_uart).
 
-The repo: [github.com/vscorza/mununu](https://github.com/vscorza/mununu).
-The example: [`examples/industrial/secure_boot_rom/`](https://github.com/vscorza/mununu/tree/main/examples/industrial/secure_boot_rom).
-The design doc: [`docs/design/black-box-modules.md`](https://github.com/vscorza/mununu/blob/main/docs/design/black-box-modules.md).
+The repo: [github.com/Mumunu-team/mununu](https://github.com/Mumunu-team/mununu).
+The example: [`examples/industrial/secure_boot_rom/`](https://github.com/Mumunu-team/mununu/tree/main/examples/industrial/secure_boot_rom).
+The design doc: [`docs/design/black-box-modules.md`](https://github.com/Mumunu-team/mununu/blob/main/docs/design/black-box-modules.md).
 
 — Mariano Cerrutti

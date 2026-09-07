@@ -108,7 +108,7 @@ The synthesis options panel in [mununu-ui](https://github.com/your-org/mununu-ui
 
 ## Example: alternation-4 benchmark
 
-The shipped example [`examples/bus_arbiter_retry.ctxdsl`](https://github.com/vscorza/mununu/blob/main/examples/bus_arbiter_retry.ctxdsl) is a 4-state bus-arbiter system whose property has alternation depth **4** — two strict mu/nu alternations beyond GR(1). It demonstrates `parity-game` mode running on a formula that's strictly outside the `product-game` mode's correctness guarantee.
+The shipped example [`examples/bus_arbiter_retry.ctxdsl`](https://github.com/Mumunu-team/mununu/blob/main/examples/bus_arbiter_retry.ctxdsl) is a 4-state bus-arbiter system whose property has alternation depth **4** — two strict mu/nu alternations beyond GR(1). It demonstrates `parity-game` mode running on a formula that's strictly outside the `product-game` mode's correctness guarantee.
 
 The property is the **recurrence-after-stability** pattern from the Manna-Pnueli temporal hierarchy (Σ₃-complete; appears in SYNTCOMP `lily-demo` and `amba_decomposed_lock_*`):
 
@@ -140,7 +140,7 @@ All modes happen to agree on realizability for this small system because it admi
 
 ## Example: dual-channel arbiter — memory + strategy selection
 
-[`examples/dual_arbiter_alt4.ctxdsl`](https://github.com/vscorza/mununu/blob/main/examples/dual_arbiter_alt4.ctxdsl) extends the bus arbiter with a SECOND independent channel. The property is the conjunction of two recurrence-after-stability obligations (one per channel) — still alternation 4. This example exercises both required behaviours of memory-aware synthesis:
+[`examples/dual_arbiter_alt4.ctxdsl`](https://github.com/Mumunu-team/mununu/blob/main/examples/dual_arbiter_alt4.ctxdsl) extends the bus arbiter with a SECOND independent channel. The property is the conjunction of two recurrence-after-stability obligations (one per channel) — still alternation 4. This example exercises both required behaviours of memory-aware synthesis:
 
 1. **The controller must remember which liveness goal it is currently servicing.** Both channels can be in `Pending`/`Granted`/`Retrying` simultaneously, and the controller must rotate between obligations to make fair progress on both.
 2. **The controller must disable controllable transitions.** Each `Granted` state has multiple outgoing controllables (`release` + `swap`); the synthesized strategy picks one and implicitly disables the others.
@@ -166,6 +166,6 @@ The 17-transition gap between `projection` and `functional` is the most direct e
 
 ## Implementation references
 
-- [`crates/mununu-core/src/context/mod.rs`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/context/mod.rs) — `ControllerMode` enum + synthesis branches
-- [`crates/mununu-core/src/mu_calculus/parity_game.rs`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/mu_calculus/parity_game.rs) — explicit parity-game construction + Zielonka solver
-- [`crates/mununu-core/tests/soundness.rs`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/tests/soundness.rs) — per-mode regression + cross-mode realizability agreement tests
+- [`crates/mununu-core/src/context/mod.rs`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/context/mod.rs) — `ControllerMode` enum + synthesis branches
+- [`crates/mununu-core/src/mu_calculus/parity_game.rs`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/mu_calculus/parity_game.rs) — explicit parity-game construction + Zielonka solver
+- [`crates/mununu-core/tests/soundness.rs`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/tests/soundness.rs) — per-mode regression + cross-mode realizability agreement tests

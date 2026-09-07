@@ -5,13 +5,13 @@ Thank you for your interest in contributing to Mununu!
 ## Prerequisites
 
 - **Rust 1.91+** &mdash; Install via [rustup](https://rustup.rs/)
-- **Node.js 20+** &mdash; Only needed if working on [mununu-ui](https://github.com/vscorza/mununu-ui)
+- **Node.js 20+** &mdash; Only needed if working on [mununu-ui](https://github.com/Mumunu-team/mununu-ui)
 
 ## Getting Started
 
 ```bash
 # Clone the repository
-git clone https://github.com/vscorza/mununu.git
+git clone https://github.com/Mumunu-team/mununu.git
 cd mununu
 
 # Install pre-commit hooks (required)

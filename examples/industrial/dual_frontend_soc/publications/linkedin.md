@@ -12,6 +12,6 @@ The principle: **unify the seams, leave the cores free.** One IR, one compositio
 
 Reproducible end-to-end: `./examples/industrial/dual_frontend_soc/validate.sh`.
 Full write-up: [Substack link TBD].
-Code: github.com/vscorza/mununu.
+Code: github.com/Mumunu-team/mununu.
 
 #formalverification #rtl #systemverilog #hardware #verification

@@ -1,6 +1,6 @@
 # CLI Reference
 
-> **Alpha Software** — Mununu is under active development. APIs, syntax, and behavior may change. We welcome feedback and bug reports via [GitHub Issues](https://github.com/vscorza/mununu/issues).
+> **Alpha Software** — Mununu is under active development. APIs, syntax, and behavior may change. We welcome feedback and bug reports via [GitHub Issues](https://github.com/Mumunu-team/mununu/issues).
 
 ## Overview
 
@@ -290,7 +290,7 @@ mununu context predicates examples/hw/arbiter.ctxdsl --automaton Arbiter
 
 Run the general N-source verification framework against a `verify.toml` manifest. The manifest lists sources (any combination of `ctxdsl`, `xstate`, `crewai`, `langgraph`, `sv-yosys`, `c-codesign`, `extraction`), an alphabet-binding strategy, a composition shape, and properties. See [Verify Project Flow](Verify-Project-Flow.md) for the conceptual model and the `verify.toml` schema.
 
-> Source of truth: [`mununu-cli::handle_verify`](https://github.com/vscorza/mununu/blob/main/crates/mununu-cli/src/main.rs) — surface: CLI.
+> Source of truth: [`mununu-cli::handle_verify`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-cli/src/main.rs) — surface: CLI.
 
 ```
 mununu verify <CONFIG> [options]
@@ -318,7 +318,7 @@ mununu verify examples/verify/langgraph_workflow/verify.toml --json
 mununu verify examples/verify/uart_codesign_chaotic/verify.toml --strict
 ```
 
-**See also**: every entry in [`examples/verify/`](https://github.com/vscorza/mununu/tree/main/examples/verify/) ships a `validate.sh` script that calls `mununu verify` and diffs against a checked-in `transcript.txt` — useful copy-paste starting points.
+**See also**: every entry in [`examples/verify/`](https://github.com/Mumunu-team/mununu/tree/main/examples/verify/) ships a `validate.sh` script that calls `mununu verify` and diffs against a checked-in `transcript.txt` — useful copy-paste starting points.
 
 ---
 

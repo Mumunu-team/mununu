@@ -1,10 +1,10 @@
-> **Alpha Software** — Mununu is under active development. APIs, syntax, and behavior may change. We welcome feedback and bug reports via [GitHub Issues](https://github.com/vscorza/mununu/issues).
+> **Alpha Software** — Mununu is under active development. APIs, syntax, and behavior may change. We welcome feedback and bug reports via [GitHub Issues](https://github.com/Mumunu-team/mununu/issues).
 
 # API Reference
 
 Mununu exposes a REST API for programmatic access to context summarization, controller synthesis, graph generation, formula verification, predicate-abstraction CEGAR, AST extraction, assume/guarantee contracts, and HW/SW codesign. The server is built on [Axum](https://github.com/tokio-rs/axum) and listens on a configurable address (default `127.0.0.1:3000`).
 
-> Source of truth: [`api::server::create_router`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/api/server.rs) — surface: API. (Route table — the canonical list of live endpoints.)
+> Source of truth: [`api::server::create_router`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/api/server.rs) — surface: API. (Route table — the canonical list of live endpoints.)
 
 Start the server with:
 
@@ -69,7 +69,7 @@ All request and response bodies use `application/json`. CORS is open by default 
 
 Returns the server health status. Use this for readiness probes and connectivity checks.
 
-> Source of truth: [`api::handlers::health_check`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API.
+> Source of truth: [`api::handlers::health_check`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API.
 
 ### Response
 
@@ -92,7 +92,7 @@ curl http://localhost:3000/api/v1/health
 
 Parse a CTXDSL context (with optional sidecar files) and return a summary of all automata, formulas, and declared controllers. Controllers are synthesized on the fly so the response includes realizability and size metrics.
 
-> Source of truth: [`api::handlers::context_summarize_handler`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API.
+> Source of truth: [`api::handlers::context_summarize_handler`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API.
 
 > **Adapter formats:** this endpoint accepts CTXDSL only. To summarize an external format (`.xstate.json`, `.sv`, `.tlsf`, `.aag`/`.aig`, `.pml`, `.espec.json`), first translate via [`POST /api/v1/context/import`](#post-apiv1contextimport) and pass the resulting `ctxdsl` field to this endpoint. The CLI command `mununu context summarize <file> --adapter <format>` does this two-step internally; clients of the HTTP API must do it explicitly. The same convention applies to `/context/verify` and `/context/synthesize`.
 
@@ -178,7 +178,7 @@ curl -X POST http://localhost:3000/api/v1/context/summarize \
 
 Synthesize a controller for a given automaton and mu-calculus formula. The controller restricts the system's controllable transitions so that the formula is satisfied. When the specification is realizable, the response includes the controller serialized as CTXDSL source (and, optionally, in a native target format).
 
-> Source of truth: [`api::handlers::context_synthesize_handler`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API.
+> Source of truth: [`api::handlers::context_synthesize_handler`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API.
 
 ### Request Body
 
@@ -331,7 +331,7 @@ curl -X POST http://localhost:3000/api/v1/context/synthesize \
 
 Generate Cytoscape-compatible graph elements for automata, compositions, and (optionally) synthesized controllers. Returns nodes and edges that can be rendered directly in a Cytoscape.js visualization layer.
 
-> Source of truth: [`api::handlers::context_graphs_handler`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API.
+> Source of truth: [`api::handlers::context_graphs_handler`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API.
 
 ### Request Body
 
@@ -450,7 +450,7 @@ curl -X POST http://localhost:3000/api/v1/context/graphs \
 
 Evaluate mu-calculus formulas over automata and report which initial states satisfy or violate each formula. When a formula is not satisfied and `counterstrategy` is requested, the response includes the environment's winning region and a Cytoscape graph of the counterstrategy automaton.
 
-> Source of truth: [`api::handlers::context_verify_handler`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API.
+> Source of truth: [`api::handlers::context_verify_handler`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API.
 
 ### Request Body
 
@@ -541,7 +541,7 @@ curl -X POST http://localhost:3000/api/v1/context/verify \
 
 Import an external format (XState, SystemVerilog, TLSF, AIGER, BTOR2, Promela, CrewAI, LangGraph, extraction) and translate it to CTXDSL.
 
-> Source of truth: [`api::handlers::context_import_handler`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API.
+> Source of truth: [`api::handlers::context_import_handler`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API.
 
 ### Request Body
 
@@ -599,7 +599,7 @@ See [Adapter Formats](Adapter-Formats.md) for details on each supported format.
 
 List the predicate names declared per automaton in a parsed and realized context. Mirrors `mununu context predicates`. Useful for populating predicate pickers in clients before issuing a verify/synthesize request.
 
-> Source of truth: [`api::handlers::context_predicates_handler`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API.
+> Source of truth: [`api::handlers::context_predicates_handler`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API.
 
 ### Request Body
 
@@ -630,7 +630,7 @@ curl -X POST http://localhost:3000/api/v1/context/predicates \
 
 Run the general N-source verification framework against a `verify.toml` manifest. Mirrors `mununu verify` (CLI). See [Verify Project Flow](Verify-Project-Flow.md) for the conceptual model.
 
-> Source of truth: [`api::handlers::verify_project_handler`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API.
+> Source of truth: [`api::handlers::verify_project_handler`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API.
 
 ### Request Body
 
@@ -645,7 +645,7 @@ Supply exactly one of `config` (pre-parsed) or `config_toml` (raw verify.toml te
 
 ### Response Body
 
-`VerifyReport` — see [`verify::report::VerifyReport`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/verify/report.rs) for the full shape.
+`VerifyReport` — see [`verify::report::VerifyReport`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/verify/report.rs) for the full shape.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -673,7 +673,7 @@ curl -X POST http://localhost:3000/api/v1/verify \
 
 Analyze a `verify.toml` config's memory posture and return advisory warnings (over-approximation risks, unbounded counters, large enumeration domains). Mirrors `mununu verify memory-check`. The analysis is **pure** (it inspects only the parsed config), so no `base_dir` is required. The handler is **advisory** — warnings appear in the body but never surface as a 4xx; callers decide whether to gate on them.
 
-> Source of truth: [`api::handlers::memory_check_handler`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API.
+> Source of truth: [`api::handlers::memory_check_handler`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API.
 
 ### Request Body
 
@@ -686,7 +686,7 @@ Supply exactly one of `config` or `config_toml`.
 
 ### Response Body
 
-`MemoryCheckReport` — see [`verify::memory_check::MemoryCheckReport`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/verify/memory_check.rs) for the full shape (per-source posture entries plus aggregate advisory warnings).
+`MemoryCheckReport` — see [`verify::memory_check::MemoryCheckReport`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/verify/memory_check.rs) for the full shape (per-source posture entries plus aggregate advisory warnings).
 
 ### Example
 
@@ -702,7 +702,7 @@ curl -X POST http://localhost:3000/api/v1/verify/memory-check \
 
 Run the CEGAR predicate-abstraction-refinement loop over a BTOR2 design and return the per-iteration refinement trace. Mirrors `mununu btor2 cegar`. See [Predicate-Cube CEGAR](Predicate-Cube-CEGAR.md) for the algorithm and the 3-valued (Kleene) verdict semantics.
 
-> Source of truth: [`api::handlers::btor2_cegar_handler`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API.
+> Source of truth: [`api::handlers::btor2_cegar_handler`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API.
 
 ### Request Body
 
@@ -774,7 +774,7 @@ curl -X POST http://localhost:3000/api/v1/btor2/cegar \
 
 SV-direct CEGAR (cegar-extraction Stage 2): lift a SystemVerilog design to a single flattened BTOR2 (sv2v + Yosys) in one call, then run the same predicate-abstraction refinement loop as [`/api/v1/btor2/cegar`](#post-apiv1btor2cegar) and return the same response. Mirrors `mununu sv cegar`. Lets an SV workflow run CEGAR without a manual emit-BTOR2-per-module step.
 
-> Source of truth: [`api::handlers::sv_cegar_handler`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API.
+> Source of truth: [`api::handlers::sv_cegar_handler`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API.
 
 ### Request Body
 
@@ -816,7 +816,7 @@ curl -X POST http://localhost:3000/api/v1/sv/cegar \
 
 List the available domain profiles (language + description) for AST extraction. Mirrors `mununu extraction domains`.
 
-> Source of truth: [`api::handlers::extraction_domains_handler`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API.
+> Source of truth: [`api::handlers::extraction_domains_handler`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API.
 
 ### Response Body
 
@@ -838,7 +838,7 @@ curl http://localhost:3000/api/v1/extraction/domains
 
 List the supported composition modes (synchronous / asynchronous) that the extraction config's `composition.type` accepts.
 
-> Source of truth: [`api::handlers::extraction_composition_modes_handler`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API.
+> Source of truth: [`api::handlers::extraction_composition_modes_handler`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API.
 
 ### Response Body
 
@@ -860,7 +860,7 @@ curl http://localhost:3000/api/v1/extraction/composition-modes
 
 Scan source code for concurrency idioms and propose `composition.instances[]` / `shared[]` blocks for an extraction config. Output is **suggestion-grade** — the user reviews each finding before promoting it into the config. Mirrors `mununu extraction propose-composition`. An empty `findings` list is the common case, not an error.
 
-> Source of truth: [`api::handlers::extraction_propose_composition_handler`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API. (Requires the `ast-extract` feature.)
+> Source of truth: [`api::handlers::extraction_propose_composition_handler`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API. (Requires the `ast-extract` feature.)
 
 ### Request Body
 
@@ -873,7 +873,7 @@ Scan source code for concurrency idioms and propose `composition.instances[]` / 
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `findings` | `DetectedConcurrency[]` | Detected concurrency findings in source order. See [`concurrency_detect::DetectedConcurrency`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/adapter/extraction/ast_extract/concurrency_detect.rs) for the full shape (`kind`, source span, `suggested_instance_names`, `suggested_class_hint`). |
+| `findings` | `DetectedConcurrency[]` | Detected concurrency findings in source order. See [`concurrency_detect::DetectedConcurrency`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/adapter/extraction/ast_extract/concurrency_detect.rs) for the full shape (`kind`, source span, `suggested_instance_names`, `suggested_class_hint`). |
 
 ### Example
 
@@ -889,7 +889,7 @@ curl -X POST http://localhost:3000/api/v1/extraction/propose-composition \
 
 Run AST-based extraction from source code (TypeScript / Python / Rust) and produce an `.espec.json` extraction spec. Mirrors `mununu extraction extract`.
 
-> Source of truth: [`api::handlers::extraction_extract_handler`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API. (Requires the `ast-extract` feature.)
+> Source of truth: [`api::handlers::extraction_extract_handler`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API. (Requires the `ast-extract` feature.)
 
 ### Request Body
 
@@ -926,7 +926,7 @@ See [Compositional Extraction Tutorial](Compositional-Extraction-Tutorial.md) fo
 
 Validate an extraction spec against its source code: detect drifted/mismatched anchors and uncovered accesses. Mirrors `mununu extraction validate`.
 
-> Source of truth: [`api::handlers::extraction_validate_handler`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API.
+> Source of truth: [`api::handlers::extraction_validate_handler`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API.
 
 ### Request Body
 
@@ -960,15 +960,15 @@ curl -X POST http://localhost:3000/api/v1/extraction/validate \
 
 Validate an assume/guarantee contract set's discharge graph (SCC analysis). Mirrors `mununu contract validate`. The request body **is** a `ContractSet` (no wrapper); the response **is** a `DischargeVerdict`.
 
-> Source of truth: [`api::handlers::contract_validate_handler`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API.
+> Source of truth: [`api::handlers::contract_validate_handler`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API.
 
 ### Request Body
 
-A [`contract::ContractSet`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/contract/mod.rs) JSON value — clauses (assume/guarantee) plus the discharge edges between them.
+A [`contract::ContractSet`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/contract/mod.rs) JSON value — clauses (assume/guarantee) plus the discharge edges between them.
 
 ### Response Body
 
-A [`contract::discharge::DischargeVerdict`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/contract/discharge.rs) — whether the discharge graph is sound, with any offending cycles / undischarged obligations.
+A [`contract::discharge::DischargeVerdict`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/contract/discharge.rs) — whether the discharge graph is sound, with any offending cycles / undischarged obligations.
 
 ### Example
 
@@ -984,13 +984,13 @@ curl -X POST http://localhost:3000/api/v1/contract/validate \
 
 Run phase-1 contract discovery on a black-box interface description: classify labels (controllable / uncontrollable), detect fairness gaps, and resolve `@mununu_interface contract://` corpus references. Mirrors `mununu contract discover`. The server still emits structured `tracing::warn!` diagnostics; the response carries the full `Phase1Output` for the UI.
 
-> Source of truth: [`api::handlers::contract_discover_handler`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API.
+> Source of truth: [`api::handlers::contract_discover_handler`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API.
 
 ### Request Body
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `interface` | `BlackBoxInterface` | Yes | Black-box interface description. See [`contract::discover::BlackBoxInterface`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/contract/discover.rs). |
+| `interface` | `BlackBoxInterface` | Yes | Black-box interface description. See [`contract::discover::BlackBoxInterface`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/contract/discover.rs). |
 | `force_controllable` | `string[]` | No | Labels to force-classify as controllable. Defaults to `[]`. |
 | `force_uncontrollable` | `string[]` | No | Labels to force-classify as uncontrollable. Defaults to `[]`. |
 | `emit_fairness_gap` | `boolean` | No | Emit fairness-gap markers. Defaults to `false`. |
@@ -998,7 +998,7 @@ Run phase-1 contract discovery on a black-box interface description: classify la
 
 ### Response Body
 
-A [`contract::discover::Phase1Output`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/contract/discover.rs) — classified labels, fairness-gap markers, and corpus resolutions.
+A [`contract::discover::Phase1Output`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/contract/discover.rs) — classified labels, fairness-gap markers, and corpus resolutions.
 
 ---
 
@@ -1006,7 +1006,7 @@ A [`contract::discover::Phase1Output`](https://github.com/vscorza/mununu/blob/ma
 
 Query the contract corpus (Document D task D2) by `<domain>/<name>` plus parameters, and return the ranked candidate list. Mirrors `mununu contract query`.
 
-> Source of truth: [`api::handlers::contract_query_handler`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API.
+> Source of truth: [`api::handlers::contract_query_handler`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API.
 
 ### Request Body
 
@@ -1020,7 +1020,7 @@ Query the contract corpus (Document D task D2) by `<domain>/<name>` plus paramet
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `candidates` | `ContractEntry[]` | Ranked matching corpus entries. See [`corpus::ContractEntry`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/corpus/mod.rs). |
+| `candidates` | `ContractEntry[]` | Ranked matching corpus entries. See [`corpus::ContractEntry`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/corpus/mod.rs). |
 
 ### Example
 
@@ -1036,7 +1036,7 @@ curl -X POST http://localhost:3000/api/v1/contract/query \
 
 HITL stage-4 review surface (Document A §A7 / Document D §D.8). Wraps phase-1/phase-2 discovery and adds a flat list of proposed clauses extracted from `@mununu_assume` / `@mununu_guarantee` annotations and resolved corpus references. Mirrors `mununu contract review`. The approve/edit/reject UX lives in the CLI / UI surfaces.
 
-> Source of truth: [`api::handlers::contract_review_handler`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API.
+> Source of truth: [`api::handlers::contract_review_handler`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API.
 
 ### Request Body
 
@@ -1044,7 +1044,7 @@ Same shape as [`/api/v1/contract/discover`](#post-apiv1contractdiscover): `inter
 
 ### Response Body
 
-A [`contract::review::ReviewPackage`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/contract/review.rs) — the phase-1 output plus the proposed-clause list for the review UI.
+A [`contract::review::ReviewPackage`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/contract/review.rs) — the phase-1 output plus the proposed-clause list for the review UI.
 
 ---
 
@@ -1052,13 +1052,13 @@ A [`contract::review::ReviewPackage`](https://github.com/vscorza/mununu/blob/mai
 
 HW/SW codesign verification (Document C task C4). Compose firmware CTXDSL with a register-map sidecar, splice the coupling fragment, realize the composed context, and evaluate a named formula. Returns the verdict plus the composed CTXDSL so the UI can render both. Mirrors `mununu codesign verify`.
 
-> Source of truth: [`api::handlers::codesign_verify_handler`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API.
+> Source of truth: [`api::handlers::codesign_verify_handler`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API.
 
 ### Request Body
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `register_map` | `RegisterMap` | Yes | Register-map sidecar as a parsed JSON value. Same shape the CLI loads from `register_map.json`. See [`codesign::register_map::RegisterMap`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/codesign/register_map.rs). |
+| `register_map` | `RegisterMap` | Yes | Register-map sidecar as a parsed JSON value. Same shape the CLI loads from `register_map.json`. See [`codesign::register_map::RegisterMap`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/codesign/register_map.rs). |
 | `firmware_ctxdsl` | `string` | Yes | Firmware CTXDSL document text. |
 | `formula` | `string` | Yes | Formula name to evaluate in the composed context. |
 | `automaton` | `string \| null` | No | Composition / automaton to evaluate over. Defaults to the codesign composition `<PERIPHERAL>System`. |
@@ -1095,7 +1095,7 @@ curl -X POST http://localhost:3000/api/v1/codesign/verify \
 
 HW/SW codesign label-alphabet reconciliation (Document C §C.5 hard gate against silent over-approximation). Refuses to compose `firmware ‖ peripheral` when the two extractions disagree on the rendezvous-label alphabet. Mirrors `mununu codesign reconcile-labels`. **Always returns 200 OK**; the `mismatch` field distinguishes the outcome.
 
-> Source of truth: [`api::handlers::codesign_reconcile_labels_handler`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API.
+> Source of truth: [`api::handlers::codesign_reconcile_labels_handler`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API.
 
 ### Request Body
 
@@ -1109,7 +1109,7 @@ HW/SW codesign label-alphabet reconciliation (Document C §C.5 hard gate against
 | Field | Type | Description |
 |-------|------|-------------|
 | `shared` | `string[]` | Shared canonical alphabet (sorted) when the alphabets agree; empty on mismatch. |
-| `mismatch` | `ReconcileMismatch \| null` | `null` when the alphabets reconcile; otherwise `{ firmware_only, peripheral_only }`. See [`codesign::reconcile::ReconcileMismatch`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/codesign/reconcile.rs). |
+| `mismatch` | `ReconcileMismatch \| null` | `null` when the alphabets reconcile; otherwise `{ firmware_only, peripheral_only }`. See [`codesign::reconcile::ReconcileMismatch`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/codesign/reconcile.rs). |
 
 ### Example
 
@@ -1125,7 +1125,7 @@ curl -X POST http://localhost:3000/api/v1/codesign/reconcile-labels \
 
 Emit a standalone chaotic-stub CTXDSL document from a register-map sidecar. The result has its own `context { … }` wrapper, ready to drop into a `verify.toml` as a `ctxdsl` source. Mirrors `mununu codesign emit-chaotic-stub`.
 
-> Source of truth: [`api::handlers::codesign_emit_chaotic_stub_handler`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API.
+> Source of truth: [`api::handlers::codesign_emit_chaotic_stub_handler`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API.
 
 ### Request Body
 
@@ -1156,7 +1156,7 @@ curl -X POST http://localhost:3000/api/v1/codesign/emit-chaotic-stub \
 
 List available property templates. Templates provide parameterized mu-calculus formula patterns that can be used in `template_ref` fields of verify and synthesize requests.
 
-> Source of truth: [`api::handlers::templates_handler`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API.
+> Source of truth: [`api::handlers::templates_handler`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API.
 
 ### Query Parameters
 

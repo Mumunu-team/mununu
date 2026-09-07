@@ -1,6 +1,6 @@
 # CTXDSL Language Reference
 
-> **Alpha Software** — Mununu is under active development. APIs, syntax, and behavior may change. We welcome feedback and bug reports via [GitHub Issues](https://github.com/vscorza/mununu/issues).
+> **Alpha Software** — Mununu is under active development. APIs, syntax, and behavior may change. We welcome feedback and bug reports via [GitHub Issues](https://github.com/Mumunu-team/mununu/issues).
 
 CTXDSL is Mununu's domain-specific language for defining automata, compositions, properties, and controllers in a single file. This page is the complete syntax reference.
 
@@ -139,11 +139,11 @@ states {
 }
 ```
 
-The block lives inside the optional outer state block; it can coexist with a `vars { … }` block in any order. Reserved-keyword names (e.g. `state`, `on`, `group`) are accepted as keys so the round-trip with adapter-emitted CTXDSL is safe. See [`examples/hw/traffic_light_valuations.ctxdsl`](https://github.com/vscorza/mununu/blob/main/examples/hw/traffic_light_valuations.ctxdsl) for the canonical worked example.
+The block lives inside the optional outer state block; it can coexist with a `vars { … }` block in any order. Reserved-keyword names (e.g. `state`, `on`, `group`) are accepted as keys so the round-trip with adapter-emitted CTXDSL is safe. See [`examples/hw/traffic_light_valuations.ctxdsl`](https://github.com/Mumunu-team/mununu/blob/main/examples/hw/traffic_light_valuations.ctxdsl) for the canonical worked example.
 
 #### Per-state 3-valued (Kleene) predicates
 
-> Source of truth: [`Clts::with_3valued_predicate`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/clts/mod.rs) + [`parse_three_valued_pair`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/context_dsl/parser.rs) — surface: CLI+API+UI (the realized CLTS evaluates under any surface).
+> Source of truth: [`Clts::with_3valued_predicate`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/clts/mod.rs) + [`parse_three_valued_pair`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/context_dsl/parser.rs) — surface: CLI+API+UI (the realized CLTS evaluates under any surface).
 
 A state may carry a `predicates_3v { … }` block with `predicate = tristate;` pairs, where the tristate is `true`, `false`, or `unknown`. Unlike the 2-valued `predicates` block (which asserts a predicate *holds* at a state), these carry a full Kleene verdict and realize into the CLTS's `state_3valued_predicates` map (`KleeneT` / `KleeneF` / `KleeneBot`) — the round-trippable surface for a predicate-cube KMTS produced by the BTOR2 predicate-abstraction lift.
 
@@ -244,7 +244,7 @@ Three behaviours are load-bearing and easy to get wrong:
 
 Bound every variable with a guard on the transition that increments it; an unbounded variable enumerates until it hits the state cap.
 
-See [`docs/ctxdsl-modelling-guide.md`](https://github.com/vscorza/mununu/blob/main/docs/ctxdsl-modelling-guide.md) for the full list, each entry verified against the shipped binary, plus the checklist for trusting a hand-authored model.
+See [`docs/ctxdsl-modelling-guide.md`](https://github.com/Mumunu-team/mununu/blob/main/docs/ctxdsl-modelling-guide.md) for the full list, each entry verified against the shipped binary, plus the checklist for trusting a hand-authored model.
 
 ### Transitions
 

@@ -2,7 +2,7 @@
 
 > **Audience:** ROSF (API consumer via `--profile industrial`), monono (direct CLI + API consumer, primary beneficiary), any orchestrator that runs `sv verify-auto` on SystemVerilog with `@mununu_assume` annotations.
 >
-> **Related:** [mununu#477](https://github.com/vscorza/mununu/issues/477) — the ticket. Prior briefings on this track: [`2026-09-fairness-note-honesty.md`](2026-09-fairness-note-honesty.md) (Option A note honesty fix, mununu#487) and [`2026-09-fair-cycle-l2s.md`](2026-09-fair-cycle-l2s.md) (Option B PR 1 — the standalone `btor2 verify-liveness-under-fairness` verb, mununu#488). **This is Option B PR 2 and closes the ticket.**
+> **Related:** [mununu#477](https://github.com/Mumunu-team/mununu/issues/477) — the ticket. Prior briefings on this track: [`2026-09-fairness-note-honesty.md`](2026-09-fairness-note-honesty.md) (Option A note honesty fix, mununu#487) and [`2026-09-fair-cycle-l2s.md`](2026-09-fair-cycle-l2s.md) (Option B PR 1 — the standalone `btor2 verify-liveness-under-fairness` verb, mununu#488). **This is Option B PR 2 and closes the ticket.**
 >
 > **TL;DR:** `// @mununu_assume GF <REG op VALUE>` in a SystemVerilog source is now **auto-applied** by `sv verify-auto` to any response-shape guarantee (`AG(a → AF b)`) in the same source. **No new verdict values; no new response fields; wire format unchanged.** The change is a runtime-dispatch upgrade: response-shape guarantees under fairness assumes now flow through PR 1's fair-cycle primitive instead of the plain response-liveness rescue, producing definite `holds` verdicts on cases that previously stayed `unknown`. Consumers observe the change as a new note kind (`fair-cycle-rescue`) accompanying properties the fair-cycle path decided.
 
@@ -84,7 +84,7 @@ Multiple `@mununu_assume GF <atom>` accumulate as a conjunction `(⋀ⱼ GF fair
 ## Provenance
 
 - Fix commit: (pending merge — branch `feat/477-b-sv-verify-auto-fairness-bridge`).
-- Ticket: [mununu#477](https://github.com/vscorza/mununu/issues/477) — **closes on merge**.
+- Ticket: [mununu#477](https://github.com/Mumunu-team/mununu/issues/477) — **closes on merge**.
 - Prior briefings on this track: [`2026-09-fairness-note-honesty.md`](2026-09-fairness-note-honesty.md), [`2026-09-fair-cycle-l2s.md`](2026-09-fair-cycle-l2s.md).
 - Design record: `.claude/plans/477-b-fair-cycle-l2s.md` — plan doc; this PR completes its Phase 4-6.
 - Policy: [`../policies/cross-repo-impact.md`](../policies/cross-repo-impact.md).

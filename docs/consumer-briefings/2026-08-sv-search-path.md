@@ -63,7 +63,7 @@
 ## Provenance
 
 - Fix commit: (pending merge — see branch `fix/475-search-path-single-file` in the mununu repo)
-- Issue: mununu#475 item 3 — <https://github.com/vscorza/mununu/issues/475>
+- Issue: mununu#475 item 3 — <https://github.com/Mumunu-team/mununu/issues/475>
 - Policy this briefing was written to satisfy: [`docs/policies/cross-repo-impact.md`](../policies/cross-repo-impact.md)
 - Sibling briefing (items 1, 2, 4, 5): [`2026-08-sv-lint-mutate-ergonomics.md`](2026-08-sv-lint-mutate-ergonomics.md)
 

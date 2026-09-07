@@ -1,6 +1,6 @@
 # Exact-Symbolic Engine (D1)
 
-> **Source of truth:** [`adapter::btor2::symbolic_bitblast::exact_symbolic_verdict`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/adapter/btor2/symbolic_bitblast.rs#L1694), [`--engine exact-symbolic`](https://github.com/vscorza/mununu/blob/main/crates/mununu-cli/src/main.rs#L207), [`VerifyRequest.engine`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/api/models.rs#L1057), [`verifyAuto engine`](https://github.com/vscorza/mununu-ui/blob/main/src/api/endpoints.ts#L551) — surface: CLI+API+UI (`mununu sv verify-auto --engine exact-symbolic`, `POST /api/v1/sv/verify-auto` with `"engine": "exact-symbolic"`, the verify-auto UI engine selector).
+> **Source of truth:** [`adapter::btor2::symbolic_bitblast::exact_symbolic_verdict`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/adapter/btor2/symbolic_bitblast.rs#L1694), [`--engine exact-symbolic`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-cli/src/main.rs#L207), [`VerifyRequest.engine`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/api/models.rs#L1057), [`verifyAuto engine`](https://github.com/Mumunu-team/mununu-ui/blob/main/src/api/endpoints.ts#L551) — surface: CLI+API+UI (`mununu sv verify-auto --engine exact-symbolic`, `POST /api/v1/sv/verify-auto` with `"engine": "exact-symbolic"`, the verify-auto UI engine selector).
 
 The exact-symbolic engine is mununu's **third RTL verification engine**. Where the
 [Predicate-Cube CEGAR](Predicate-Cube-CEGAR) path abstracts the design into a small
@@ -50,7 +50,7 @@ refinement mode.
 
 ## Engine portfolio (`--engine portfolio-sequential` / `portfolio-parallel`)
 
-> **Source of truth:** [`verify_auto_portfolio`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/adapter/slang/verify_auto.rs#L1318), [`EngineArg::PortfolioSequential`](https://github.com/vscorza/mununu/blob/main/crates/mununu-cli/src/main.rs#L213), [`engine: "portfolio-*"`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/api/handlers.rs#L814), [`verifyAuto engine`](https://github.com/vscorza/mununu-ui/blob/main/src/components/extraction/SvVerifyAutoRunner.tsx#L221) — surface: CLI+API+UI (`mununu sv verify-auto --engine portfolio-sequential`, `POST /api/v1/sv/verify-auto` with `"engine": "portfolio-parallel"`, the verify-auto UI engine selector).
+> **Source of truth:** [`verify_auto_portfolio`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/adapter/slang/verify_auto.rs#L1318), [`EngineArg::PortfolioSequential`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-cli/src/main.rs#L213), [`engine: "portfolio-*"`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/api/handlers.rs#L814), [`verifyAuto engine`](https://github.com/Mumunu-team/mununu-ui/blob/main/src/components/extraction/SvVerifyAutoRunner.tsx#L221) — surface: CLI+API+UI (`mununu sv verify-auto --engine portfolio-sequential`, `POST /api/v1/sv/verify-auto` with `"engine": "portfolio-parallel"`, the verify-auto UI engine selector).
 
 **`portfolio-sequential` is the `sv verify-auto` default** (2026-07-06): the exact-first,
 cube-fallback schedule is the most precise sound choice and no slower than the former `explicit`
@@ -60,7 +60,7 @@ FSM outright). Pass `--engine explicit` to force the single predicate-abstractio
 The three engines are **complementary, not dominated**: the exact engine decides everything
 within its bit cap, and where even cone-of-influence leaves the cone too wide, the two cube
 engines each decide properties the other leaves `⊥`. A cross-engine differential
-([`diff_corpus_cegar_vs_symbolic_engine_parity`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/tests/differential_oracle_e2e.rs)) proves they **never contradict**
+([`diff_corpus_cegar_vs_symbolic_engine_parity`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/tests/differential_oracle_e2e.rs)) proves they **never contradict**
 on a definite verdict. The portfolio exploits that: run several engines, take the definite
 verdict from whichever produces one. It is a **budget knob**:
 
@@ -111,7 +111,7 @@ Every property the [Mu-Calculus Reference](Mu-Calculus-Reference) can express, e
 - **Inevitability / liveness** — `AF p`, `AG AF p` = `νX. ((μY. (p ∨ [] Y)) ∧ [] X)`.
   This is the class the cube path returns `⊥` for.
 - **Assume-guarantee / GR(1) fair cycles** — via the Emerson–Lei `¬EF badcycle`
-  construction (see [`gr1_response_formula`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/mu_calculus/mod.rs)).
+  construction (see [`gr1_response_formula`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/mu_calculus/mod.rs)).
 
 All three liveness classes are **alternating fixpoints** (a `μ` nested inside a `ν`).
 Alternation is exactly where naive over- or under-approximation collapses, because the
@@ -123,7 +123,7 @@ edges; see [Predicate-Cube CEGAR](Predicate-Cube-CEGAR).)
 ## Definite `Violated` comes with a counterexample
 
 For an `AF p`-shaped violation the engine returns a concrete
-[`StallLasso`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/adapter/btor2/symbolic_bitblast.rs#L1869): a reset → prefix → `¬p` cycle — a real infinite run on which `p`
+[`StallLasso`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/adapter/btor2/symbolic_bitblast.rs#L1869): a reset → prefix → `¬p` cycle — a real infinite run on which `p`
 never holds. A liveness failure is a lasso, not a finite prefix, which is why bounded
 model checking neither proves nor refutes these properties without separate fairness
 machinery; the exact engine returns the lasso directly.
@@ -134,7 +134,7 @@ machinery; the exact engine returns the lasso directly.
 > where the predicate-cube path answers `⊥`. Companion verdicts on the same design are
 > definite `Holds`: `AG EF (bit_cnt_q == 0)` (recoverability — reset always drains the
 > counter) and `AG (bit_cnt_q < 12)` (a bounded-counter safety invariant). See
-> [`e2e_d1_uart_tx_exact_liveness_verdict`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/adapter/btor2/symbolic_bitblast.rs).
+> [`e2e_d1_uart_tx_exact_liveness_verdict`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/adapter/btor2/symbolic_bitblast.rs).
 
 ## Reset gating (required)
 
@@ -155,7 +155,7 @@ includes the reset edge.
   design; there is no `⊥` to interpret.
 - **Bounded by BDD size.** The bit-blaster builds BDDs over *every* register + input
   bit (no cone-of-influence restriction yet). A design whose register+input bit count
-  exceeds the cap ([`MAX_BITBLAST_BITS = 40`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/adapter/btor2/symbolic_bitblast.rs#L195)) is rejected with a clean error *before* the
+  exceeds the cap ([`MAX_BITBLAST_BITS = 40`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/adapter/btor2/symbolic_bitblast.rs#L195)) is rejected with a clean error *before* the
   BDD manager is allocated, and `verify-auto` degrades that property to `Skipped` — a
   wide datapath belongs on the [Predicate-Cube CEGAR](Predicate-Cube-CEGAR) path with
   its honest `⊥` and CEGAR refinement. The engineering choice, per property and per
@@ -164,4 +164,4 @@ includes the reset edge.
 - **The model is what yosys emits.** The verdict is exact *for the bit-blasted BTOR2*;
   its transfer to the real system still depends on the extraction (black-boxed
   submodules, `setundef` discipline, the reset model). This is the standard
-  [claims-integrity](https://github.com/vscorza/mununu/blob/main/docs/policies/claims-integrity.md) boundary, not specific to this engine.
+  [claims-integrity](https://github.com/Mumunu-team/mununu/blob/main/docs/policies/claims-integrity.md) boundary, not specific to this engine.
