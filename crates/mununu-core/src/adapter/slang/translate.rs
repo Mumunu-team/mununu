@@ -912,12 +912,23 @@ fn bool_expr(expr: &Value) -> Result<String, String> {
                 other => Err(format!("unsupported binary op: {other}")),
             }
         }
-        // Bit-select `sig[i]` — distinguish constant (needs a bit-level model
-        // predicate; H.1 seeding) from dynamic (index is a signal; not a
-        // propositional atom at all). Both rejected, never silently dropped.
+        // `sig[i]` — three distinct refusals, never silently dropped. mununu#514: this used to
+        // report ONLY the two bit-select cases, so an ARRAY read (`mem[0]`, an unpacked
+        // dimension) was reported as a "constant bit-select" and the reader was pointed at a
+        // bit-level model predicate — a workaround that cannot apply to array CONTENT. Tell the
+        // three apart, because they have different causes and different (non-)remedies.
         "ElementSelect" => {
             let selector = unwrap(child(expr, "selector")?);
-            if sv_integer(selector).is_some() {
+            let base = unwrap(child(expr, "value")?);
+            if is_unpacked_array(base) {
+                let name = signal_name(base).unwrap_or("<expr>");
+                Err(format!(
+                    "`{name}` is an unpacked array, so `{name}[…]` reads array CONTENT, not a \
+                     bit. mununu cannot express an array-content atom from SVA at ANY index — \
+                     constant or signal. This is a translation limit, not an undecidable \
+                     property: the atom never reaches an engine. See mununu#514"
+                ))
+            } else if sv_integer(selector).is_some() {
                 Err(
                     "constant bit-select `sig[k]` needs a bit-level model predicate \
                      (H.1 auto-seeding); not a Tier-1c atom"
@@ -1370,6 +1381,23 @@ fn unwrap(mut e: &Value) -> &Value {
 
 /// Bit-width of an expression from its slang `type` string. `logic[7:0]`→8,
 /// `logic`/`bit`/`reg`→1, unknown→1 (the safe scalar default).
+/// Is this expression's type an UNPACKED array (i.e. a memory), as opposed to a packed vector?
+///
+/// mununu#514 — the discriminator is slang's own notation, not a heuristic: slang renders an
+/// unpacked dimension with a `$` prefix, so `logic [14:0] mem [0:319]` types as
+/// `logic[14:0]$[0:319]` while the packed `logic [7:0] vec` types as `logic[7:0]`. A packed
+/// multi-dimensional type (`logic[3:0][7:0]`) carries no `$`, so this separates "memory" from
+/// "wide vector" — which is the distinction that matters, because BTOR2 arrays come precisely
+/// from unpacked dimensions via yosys `memory_collect`.
+///
+/// Measured against slang's `--ast-json` on a fixture carrying both forms (2026-09-07).
+fn is_unpacked_array(expr: &Value) -> bool {
+    unwrap(expr)
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|t| t.contains("$["))
+}
+
 fn signal_width(expr: &Value) -> u32 {
     let Some(ty) = expr.get("type").and_then(Value::as_str) else {
         return 1;
@@ -1873,6 +1901,86 @@ mod tests {
         });
         let err = bool_expr(&expr).expect_err("dynamic index must reject");
         assert!(err.contains("dynamic bit-select"), "got: {err}");
+    }
+
+    /// mununu#514 — the constant-index bit-select branch had NO test, which is how the array
+    /// case came to share its message. Pins the bit-select side so the array split below cannot
+    /// swallow it.
+    #[test]
+    fn xl1c_constant_bit_select_is_rejected_as_a_bit_select() {
+        // `vec[3]` on a PACKED vector — a genuine bit-select.
+        let expr = serde_json::json!({
+            "kind": "ElementSelect",
+            "selector": {"kind": "IntegerLiteral", "value": "3"},
+            "value": {"kind": "NamedValue", "symbol": "1 vec", "type": "logic[7:0]"}
+        });
+        let err = bool_expr(&expr).expect_err("constant bit-select must reject");
+        assert!(err.contains("constant bit-select"), "got: {err}");
+        assert!(
+            !err.contains("unpacked array"),
+            "a packed vector must NOT be reported as an array: {err}"
+        );
+    }
+
+    /// mununu#514 — an ARRAY read is not a bit-select. `mem` is `logic [14:0] mem [0:319]`,
+    /// which slang types `logic[14:0]$[0:319]` (the `$` marks the unpacked dimension —
+    /// measured against `slang --ast-json`, not guessed).
+    ///
+    /// This used to report "constant bit-select `sig[k]` needs a bit-level model predicate",
+    /// pointing the reader at a workaround that cannot apply to array CONTENT. It cost monono
+    /// a block: they reduced a quantified clear-on-read property to a single literal index to
+    /// make it expressible, and were refused anyway with the wrong reason.
+    #[test]
+    fn array_element_select_is_refused_as_an_array_not_a_bit_select() {
+        let expr = serde_json::json!({
+            "kind": "ElementSelect",
+            "selector": {"kind": "IntegerLiteral", "value": "0"},
+            "value": {"kind": "NamedValue", "symbol": "1 mem", "type": "logic[14:0]$[0:319]"}
+        });
+        let err = bool_expr(&expr).expect_err("array element-select must reject");
+        assert!(err.contains("unpacked array"), "got: {err}");
+        assert!(err.contains("mem"), "names the signal: {err}");
+        assert!(
+            !err.contains("bit-level model predicate"),
+            "must NOT offer the bit-select workaround for an array: {err}"
+        );
+        assert!(
+            err.contains("ANY index"),
+            "must say the limit is not specific to a constant index: {err}"
+        );
+    }
+
+    /// The same array refusal for a SIGNAL index — the limit is the array, not the index form.
+    #[test]
+    fn array_element_select_with_signal_index_is_also_refused_as_an_array() {
+        let expr = serde_json::json!({
+            "kind": "ElementSelect",
+            "selector": {"kind": "NamedValue", "symbol": "2 rd_x", "type": "logic[8:0]"},
+            "value": {"kind": "NamedValue", "symbol": "1 mem", "type": "logic[14:0]$[0:319]"}
+        });
+        let err = bool_expr(&expr).expect_err("array element-select must reject");
+        assert!(err.contains("unpacked array"), "got: {err}");
+        assert!(
+            !err.contains("dynamic bit-select"),
+            "an array read is not a dynamic bit-select: {err}"
+        );
+    }
+
+    /// A PACKED multi-dimensional type carries no `$`, so it must stay a bit-select.
+    #[test]
+    fn packed_multidim_is_not_treated_as_an_unpacked_array() {
+        let ty =
+            serde_json::json!({"kind": "NamedValue", "symbol": "1 p", "type": "logic[3:0][7:0]"});
+        assert!(
+            !is_unpacked_array(&ty),
+            "packed 2-D is not an unpacked array"
+        );
+        let arr =
+            serde_json::json!({"kind": "NamedValue", "symbol": "1 m", "type": "logic[7:0]$[0:3]"});
+        assert!(
+            is_unpacked_array(&arr),
+            "unpacked dimension detected via `$[`"
+        );
     }
 
     #[test]
