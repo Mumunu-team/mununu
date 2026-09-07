@@ -2,7 +2,7 @@
 
 > **Audience:** monono (primary reporter — their `mem_router` contrast pair depends on this), ROSF (API consumer via `--profile industrial`), any orchestrator gating on `sv verify-auto` verdicts and needing to distinguish `unknown` variants.
 >
-> **Related:** [mununu#492](https://github.com/vscorza/mununu/issues/492) — the ticket. Complements mununu#490 (process-memory ceiling; distinguishes "ran out of memory" from "engine did not decide") by adding the third distinction: "the property shape doesn't fit the rescue lane" vs "the engine gave up."
+> **Related:** [mununu#492](https://github.com/Mumunu-team/mununu/issues/492) — the ticket. Complements mununu#490 (process-memory ceiling; distinguishes "ran out of memory" from "engine did not decide") by adding the third distinction: "the property shape doesn't fit the rescue lane" vs "the engine gave up."
 >
 > **TL;DR:** two changes to the `sv verify-auto` ⊥-escalation. **(A)** The safety-rescue lane now decides `AG(compound_boolean_of_single_atoms)` — exclusion (`!a || !b`), implication (`!a || b`), conjunctive (`a && b`) — with leaves resolved through state cells / output nets / **primary inputs** (the last is essential for zero-state / stateless models). The ticket's `mem_router_faulty` case now returns `VIOLATED` instead of `UNKNOWN`. **(B)** For any property that stays ⊥ after escalation, a new `bottom-reason` verification note classifies why — `safety-shape-not-reducible`, `no-state-model-non-safety`, or `unclassified`. Purely additive; wire format unchanged; consumers observe a new note kind on residual-⊥ properties.
 
@@ -76,7 +76,7 @@
 ## Provenance
 
 - Fix commit: (pending merge — branch `fix/492-compound-safety-and-bottom-diagnostic`).
-- Ticket: [mununu#492](https://github.com/vscorza/mununu/issues/492).
+- Ticket: [mununu#492](https://github.com/Mumunu-team/mununu/issues/492).
 - Design record: `.claude/plans/492-compound-safety-and-bottom-diagnostic.md`.
 - Policy: [`../policies/cross-repo-impact.md`](../policies/cross-repo-impact.md).
 - Related shipped work: mununu#490 (process-memory ceiling — distinguishes "ran out of memory" from "engine did not decide"; this PR adds the third distinction "shape doesn't fit the rescue lane").

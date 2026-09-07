@@ -1,6 +1,6 @@
 # Getting Started
 
-> **Alpha Software** — Mununu is under active development. APIs, syntax, and behavior may change. We welcome feedback and bug reports via [GitHub Issues](https://github.com/vscorza/mununu/issues).
+> **Alpha Software** — Mununu is under active development. APIs, syntax, and behavior may change. We welcome feedback and bug reports via [GitHub Issues](https://github.com/Mumunu-team/mununu/issues).
 
 This page walks you through installing Mununu, running your first verification, and connecting the web UI.
 
@@ -21,7 +21,7 @@ cargo --version
 Clone the repository and build the release binary:
 
 ```bash
-git clone https://github.com/vscorza/mununu.git
+git clone https://github.com/Mumunu-team/mununu.git
 cd mununu
 cargo build --release
 ```
@@ -114,7 +114,7 @@ cargo run --features api -- server --addr 0.0.0.0:9090
 
 ## Connect mununu-ui
 
-The [mununu-ui](https://github.com/vscorza/mununu-ui) frontend provides interactive graph visualization, formula evaluation, and controller synthesis through your browser. Follow the setup instructions in the mununu-ui repository to point it at your running API server.
+The [mununu-ui](https://github.com/Mumunu-team/mununu-ui) frontend provides interactive graph visualization, formula evaluation, and controller synthesis through your browser. Follow the setup instructions in the mununu-ui repository to point it at your running API server.
 
 ## Next Steps
 

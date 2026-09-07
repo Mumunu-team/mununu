@@ -14,11 +14,11 @@ The **protocol-level** answer treats registers as enums, models counters with ex
 
 The **gate-level** answer bit-blasts everything, including the open RTL, and asks "is there a corner case where the carry chain overflows?" That answer needs a verifier that drops every abstraction and reasons over arbitrary widths.
 
-You should not have to pick. The SoC has both kinds of questions; you should be able to ask both. This post walks through how that works in practice — against the example at [`examples/industrial/dual_frontend_soc/`](https://github.com/vscorza/mununu/tree/main/examples/industrial/dual_frontend_soc), reproducible byte-for-byte.
+You should not have to pick. The SoC has both kinds of questions; you should be able to ask both. This post walks through how that works in practice — against the example at [`examples/industrial/dual_frontend_soc/`](https://github.com/Mumunu-team/mununu/tree/main/examples/industrial/dual_frontend_soc), reproducible byte-for-byte.
 
 ## Two frontends, one IR
 
-mununu, the [open-source compositional model checker](https://github.com/vscorza/mununu) the example runs against, ships two SystemVerilog frontends. One is a Rust-native pipeline that parses a tightly-scoped subset of SV and builds symbolic Kripke structures via SMT — that is the protocol-level path. The other shells out to yosys, runs `flatten`, and bit-blasts the resulting BTOR2 netlist — that is the gate-level path. Same input language, two completely different extraction techniques.
+mununu, the [open-source compositional model checker](https://github.com/Mumunu-team/mununu) the example runs against, ships two SystemVerilog frontends. One is a Rust-native pipeline that parses a tightly-scoped subset of SV and builds symbolic Kripke structures via SMT — that is the protocol-level path. The other shells out to yosys, runs `flatten`, and bit-blasts the resulting BTOR2 netlist — that is the gate-level path. Same input language, two completely different extraction techniques.
 
 People ask why. The instinct is "one of them must be the wrong call." It isn't. The dual-frontend SoC example is the answer: an SoC with two different verification questions you want answered against two different precision tiers, with one shared CTXDSL definition and one shared composition primitive.
 
@@ -28,7 +28,7 @@ mununu's two pipelines land in the same shape: one IR (`AdapterIR`), one composi
 
 ## What the SoC example actually does
 
-The SoC has three modules. The `HostController` and `UART` are hand-authored CTXDSL automata representing the open RTL. The `DDR3_PHY_V2` is a 2-state chaotic stub modelling the closed IP — exactly the chaotic-stub default from [Document A](https://github.com/vscorza/mununu/blob/main/docs/design/black-box-modules.md) §2. They compose asynchronously over a shared label alphabet: `req_burst`, `addr_valid`, `rdata`, `ddr_ready`, `ddr_busy`, and the UART's send/receive labels.
+The SoC has three modules. The `HostController` and `UART` are hand-authored CTXDSL automata representing the open RTL. The `DDR3_PHY_V2` is a 2-state chaotic stub modelling the closed IP — exactly the chaotic-stub default from [Document A](https://github.com/Mumunu-team/mununu/blob/main/docs/design/black-box-modules.md) §2. They compose asynchronously over a shared label alphabet: `req_burst`, `addr_valid`, `rdata`, `ddr_ready`, `ddr_busy`, and the UART's send/receive labels.
 
 The first thing the example walks is how the DDR PHY's interface JSON came into existence. In a real flow, mununu's extractor would emit it automatically when it encountered `(* blackbox *)` in the SV. The example uses `mununu contract sidecars` — the library helper the adapters call — to produce the same JSON shape directly:
 
@@ -92,11 +92,11 @@ Each row in the second list has a real trade-off. Collapsing them would lose hal
 
 ## What this example does not claim
 
-Per [mununu's claims-integrity rules](https://github.com/vscorza/mununu/blob/main/CLAUDE.md):
+Per [mununu's claims-integrity rules](https://github.com/Mumunu-team/mununu/blob/main/CLAUDE.md):
 
 - No claim that any commercial DDR3 PHY or any specific SoC has a bug.
 - The example uses `mununu contract sidecars` as a stand-in for adapter auto-emission. The JSON shape is identical to what the yosys-side integration will produce, but the producer is different until that integration lands.
-- The example does not exercise vendor `@mununu_guarantee` source-comment annotations. The annotation grammar ships in the [`examples/industrial/tls_handshake/`](https://github.com/vscorza/mununu/tree/main/examples/industrial/tls_handshake) example — the next post in this series. This example deliberately stays at the chaotic-stub baseline so the reader can see what the unannotated default looks like across both RTL frontends.
+- The example does not exercise vendor `@mununu_guarantee` source-comment annotations. The annotation grammar ships in the [`examples/industrial/tls_handshake/`](https://github.com/Mumunu-team/mununu/tree/main/examples/industrial/tls_handshake) example — the next post in this series. This example deliberately stays at the chaotic-stub baseline so the reader can see what the unannotated default looks like across both RTL frontends.
 - The proof is conditional on the chaotic-stub contract; a vendor-supplied latency-bound contract would tighten it.
 
 ## Where this fits
@@ -109,11 +109,11 @@ What is new is the stage-1 integration between the extractors and the contract s
 
 This is post 2 of a four-part series. Each remaining post leads with a different real-world architecture:
 
-- **Post 3 — A TLS handshake driving closed-IP crypto.** When the closed IP is *not unique* (AES-CTR is AES-CTR), a shared corpus replaces per-project contract authoring. Worked example: [`examples/industrial/tls_handshake/`](https://github.com/vscorza/mununu/tree/main/examples/industrial/tls_handshake).
-- **Post 4 — A UART driver + UART peripheral.** Cross-boundary HW/SW codesign verification: firmware C + peripheral SV with a register-map sidecar gluing the two sides. Worked example: [`examples/industrial/codesign_uart/`](https://github.com/vscorza/mununu/tree/main/examples/industrial/codesign_uart).
+- **Post 3 — A TLS handshake driving closed-IP crypto.** When the closed IP is *not unique* (AES-CTR is AES-CTR), a shared corpus replaces per-project contract authoring. Worked example: [`examples/industrial/tls_handshake/`](https://github.com/Mumunu-team/mununu/tree/main/examples/industrial/tls_handshake).
+- **Post 4 — A UART driver + UART peripheral.** Cross-boundary HW/SW codesign verification: firmware C + peripheral SV with a register-map sidecar gluing the two sides. Worked example: [`examples/industrial/codesign_uart/`](https://github.com/Mumunu-team/mununu/tree/main/examples/industrial/codesign_uart).
 
-The repo: [github.com/vscorza/mununu](https://github.com/vscorza/mununu).
-The example: [`examples/industrial/dual_frontend_soc/`](https://github.com/vscorza/mununu/tree/main/examples/industrial/dual_frontend_soc).
-The design doc: [`docs/design/rtl-frontend-unification.md`](https://github.com/vscorza/mununu/blob/main/docs/design/rtl-frontend-unification.md).
+The repo: [github.com/Mumunu-team/mununu](https://github.com/Mumunu-team/mununu).
+The example: [`examples/industrial/dual_frontend_soc/`](https://github.com/Mumunu-team/mununu/tree/main/examples/industrial/dual_frontend_soc).
+The design doc: [`docs/design/rtl-frontend-unification.md`](https://github.com/Mumunu-team/mununu/blob/main/docs/design/rtl-frontend-unification.md).
 
 — Mariano Cerrutti

@@ -75,8 +75,8 @@ docker run --rm -v "$(pwd)":/work -v mununu-target:/cargo-target \
 process. A test that ABORTS rather than fails — a stack overflow, or a panic while unwinding
 an exhausted BDD arena — does not unwind, so in a single shared libtest process it kills the
 run: no summary line, no failure list, and every later test silently skipped. That is how the
-ignored set drifted to 19 unnoticed failures ([mununu#503](https://github.com/vscorza/mununu/issues/503),
-found while triaging [mununu#504](https://github.com/vscorza/mununu/issues/504)). Isolated, an
+ignored set drifted to 19 unnoticed failures ([mununu#503](https://github.com/Mumunu-team/mununu/issues/503),
+found while triaging [mununu#504](https://github.com/Mumunu-team/mununu/issues/504)). Isolated, an
 abort becomes one `CRASH` row and the sweep still completes. The single-test command above stays
 the right tool for reproducing ONE test.
 

@@ -2,7 +2,7 @@
 
 > **Audience:** monono (primary reporter and beneficiary — their 25-check `sv verify-auto` lane hits this today), ROSF (API consumer via `--profile industrial`), any orchestrator running `sv verify-auto` under a memory-constrained container / CI runner.
 >
-> **Related:** [mununu#490](https://github.com/vscorza/mununu/issues/490) — the ticket. **Distinct from #462**: #462 fixed the BDD library's `Err(OutOfMemory)` handling (bit-blast library abstains cleanly). This ticket is one layer further out: the default allocator's `abort()` (exit 134) fires BEFORE any library-level budget check can, taking every property in the same invocation down with it.
+> **Related:** [mununu#490](https://github.com/Mumunu-team/mununu/issues/490) — the ticket. **Distinct from #462**: #462 fixed the BDD library's `Err(OutOfMemory)` handling (bit-blast library abstains cleanly). This ticket is one layer further out: the default allocator's `abort()` (exit 134) fires BEFORE any library-level budget check can, taking every property in the same invocation down with it.
 >
 > **TL;DR:** new `MUNUNU_MAX_PROCESS_MEMORY_BYTES` env var — a self-imposed process-RSS ceiling. When exceeded on `sv verify-auto`, remaining properties abstain (`unknown`) with a `memory-budget-exceeded` verification note; prior verdicts stay. **Default unset ⇒ disabled** — no behaviour change unless you opt in. Turns a crash-that-kills-the-lane into a graceful degradation.
 
@@ -76,7 +76,7 @@ mununu sv verify-auto design_2.sv
 ## Provenance
 
 - Fix commit: (pending merge — branch `fix/490-process-memory-ceiling`).
-- Ticket: [mununu#490](https://github.com/vscorza/mununu/issues/490).
+- Ticket: [mununu#490](https://github.com/Mumunu-team/mununu/issues/490).
 - Design record: `.claude/plans/490-process-memory-ceiling.md`.
 - Policy: [`../policies/cross-repo-impact.md`](../policies/cross-repo-impact.md).
 - Related shipped work: mununu#462 (BDD library OOM caught cleanly; this ticket is one layer further out).

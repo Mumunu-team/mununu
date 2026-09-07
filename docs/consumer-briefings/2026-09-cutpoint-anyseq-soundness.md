@@ -2,7 +2,7 @@
 
 > **Audience:** monono (reported it; runs `--cutpoint` in its formal lane and has withdrawn a verdict over it), ROSF, any consumer that passes `cutpoint` / `--cutpoint`, and anyone feeding hand-written BTOR2 or a non-Yosys frontend to the exact engine.
 >
-> **Related:** [mununu#498](https://github.com/vscorza/mununu/issues/498).
+> **Related:** [mununu#498](https://github.com/Mumunu-team/mununu/issues/498).
 >
 > **⚠ TL;DR — this is a soundness fix, and it CHANGES VERDICTS.** `--cutpoint` documented an over-approximation and delivered the opposite: a freed net was frozen at 0, so the model had *fewer* behaviours than the design. A safety property that is concretely **false** could come back **`HOLDS`**. If you have acted on any verdict produced under `--cutpoint`, **re-run it.** Verdicts obtained without cut points are unaffected.
 
@@ -91,7 +91,7 @@ Both were confirmed to **fail on the pre-fix code** — the e2e reproduces monon
 
 ## Provenance
 
-- Issue: [mununu#498](https://github.com/vscorza/mununu/issues/498), from monono's `sprite_fetch` formal lane, with a 30-line reduction (`mini_fetch`) supplied by the reporter.
+- Issue: [mununu#498](https://github.com/Mumunu-team/mununu/issues/498), from monono's `sprite_fetch` formal lane, with a 30-line reduction (`mini_fetch`) supplied by the reporter.
 - Fix: `BtorSts::states_with_next` in `crates/mununu-core/src/adapter/sts_ir.rs`.
 - Policy: [`../policies/cross-repo-impact.md`](../policies/cross-repo-impact.md).
 

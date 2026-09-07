@@ -15,15 +15,15 @@ provenance:
 
 # Five experiments and a regression-mitigation protocol — first lessons from optimizing a Rust verifier
 
-> Each result in this post is replayable: `make replay EXP=<EXP-ID>`. The numbers cited ship with provenance under [`experiments/`](https://github.com/vscorza/mununu/tree/main/experiments) — commit SHA, container digest, hardware fingerprint, the exact bench command, and the raw Criterion JSON.
+> Each result in this post is replayable: `make replay EXP=<EXP-ID>`. The numbers cited ship with provenance under [`experiments/`](https://github.com/Mumunu-team/mununu/tree/main/experiments) — commit SHA, container digest, hardware fingerprint, the exact bench command, and the raw Criterion JSON.
 
-This is a notebook entry from two weeks of performance work on [mununu](https://github.com/vscorza/mununu), a formal verifier for compositional labeled transition systems (CLTS). The intended outcome of the work was a set of optimization wins. The actual outcome was mostly methodology: the first candidate appeared to deliver a 5–7× speedup that turned out to be cache contamination, and the rest of the work has been about not repeating that mistake.
+This is a notebook entry from two weeks of performance work on [mununu](https://github.com/Mumunu-team/mununu), a formal verifier for compositional labeled transition systems (CLTS). The intended outcome of the work was a set of optimization wins. The actual outcome was mostly methodology: the first candidate appeared to deliver a 5–7× speedup that turned out to be cache contamination, and the rest of the work has been about not repeating that mistake.
 
 This post documents the contamination, the protocol that replaced it, and the results obtained under the protocol — including one confirmed speedup and one falsified hypothesis.
 
 ## EXP-0002: an apparent 5–7× speedup
 
-The starting point was a [structured evaluation of mununu's verification engine](https://github.com/vscorza/mununu/blob/main/.claude/plans/do-a-deep-evaluation-sparkling-origami.md) covering CLTS storage, composition, bisimulation minimization, and mu-calculus fixpoint evaluation. It identified roughly twenty candidate optimizations ranked by effort and expected payoff.
+The starting point was a [structured evaluation of mununu's verification engine](https://github.com/Mumunu-team/mununu/blob/main/.claude/plans/do-a-deep-evaluation-sparkling-origami.md) covering CLTS storage, composition, bisimulation minimization, and mu-calculus fixpoint evaluation. It identified roughly twenty candidate optimizations ranked by effort and expected payoff.
 
 The lowest-risk item, §A1, replaced `WitnessMap.iteration_ranks: HashMap<(usize, FormulaVarId), usize>` with a struct-of-arrays `Vec<Vec<u32>>` indexed by `[var.index()][state_idx]`, using `u32::MAX` as the absent sentinel. The motivation was straightforward: contiguous Vec indexing avoids the scatter pattern of HashMap probes, the access pattern is sequential write per fixpoint iteration and sequential read during signature comparison, and the predicted speedup on synthesis-bound benches was at least 2×.
 
@@ -59,7 +59,7 @@ The protocol uses four levels of measurement, each with a defined purpose and a 
 
 **Level 4 — dedicated runner.** Required for paper-grade evidence. Uses the dev container so kernel and glibc match across machines, with Turbo Boost disabled, CPU pinning, and a `--robust` significance gate that runs Mann–Whitney on per-iteration times alongside Criterion's bootstrap.
 
-Each level is recorded as an architectural decision in [ADR-0006](https://github.com/vscorza/mununu/blob/main/notebook/decisions.md). Every published EXP archive states the level it was recorded at; cross-level comparisons carry an explicit caveat.
+Each level is recorded as an architectural decision in [ADR-0006](https://github.com/Mumunu-team/mununu/blob/main/notebook/decisions.md). Every published EXP archive states the level it was recorded at; cross-level comparisons carry an explicit caveat.
 
 ## EXP-0002a: re-running the original benches under L3
 
@@ -110,7 +110,7 @@ The EXP-0010 archive documents three contributing factors. The hot map keys are 
 
 This is consistent with hashbrown's published benchmarks, which show FxHash beating SipHash on lookups in maps with millions of entries but trading workload-by-workload below a few thousand entries.
 
-The change was reverted. Plan §B2 is recorded as falsified; [ADR-0009](https://github.com/vscorza/mununu/blob/main/notebook/decisions.md) requires future drop-in replacement hypotheses to be benched at L3 before landing.
+The change was reverted. Plan §B2 is recorded as falsified; [ADR-0009](https://github.com/Mumunu-team/mununu/blob/main/notebook/decisions.md) requires future drop-in replacement hypotheses to be benched at L3 before landing.
 
 ## A bug in the protocol's robust gate
 
@@ -140,6 +140,6 @@ The next post in this series covers memory: how dhat-instrumented benches relate
 
 ---
 
-**Reproducibility footer.** This post cites EXP-0001-baseline-cliff, EXP-0002-iter-rank-soa, EXP-0002a-warmup-rerun, EXP-0002b-synth-bench, and EXP-0010-fxhash-composition. Each archive is at `experiments/<EXP-ID>/` in the [mununu](https://github.com/vscorza/mununu) repo and replays via `make replay EXP=<EXP-ID>`. Hardware fingerprints, commit SHAs, container digests, and exact bench commands are committed alongside every result. ADRs 0006–0009 in [`notebook/decisions.md`](https://github.com/vscorza/mununu/blob/main/notebook/decisions.md) record the protocol decisions referenced in this post.
+**Reproducibility footer.** This post cites EXP-0001-baseline-cliff, EXP-0002-iter-rank-soa, EXP-0002a-warmup-rerun, EXP-0002b-synth-bench, and EXP-0010-fxhash-composition. Each archive is at `experiments/<EXP-ID>/` in the [mununu](https://github.com/Mumunu-team/mununu) repo and replays via `make replay EXP=<EXP-ID>`. Hardware fingerprints, commit SHAs, container digests, and exact bench commands are committed alongside every result. ADRs 0006–0009 in [`notebook/decisions.md`](https://github.com/Mumunu-team/mununu/blob/main/notebook/decisions.md) record the protocol decisions referenced in this post.
 
-**Tooling.** The L3 protocol is implemented in [`scripts/bench_compare.sh`](https://github.com/vscorza/mununu/blob/main/scripts/bench_compare.sh) and [`scripts/bench_diff.sh`](https://github.com/vscorza/mununu/blob/main/scripts/bench_diff.sh). Both are under 200 lines of shell and Python and depend only on Criterion 0.8 and standard tools (no scipy dependency for Mann–Whitney). The dev container, hardware fingerprint capture, and EXP archive scaffolding are at [`scripts/`](https://github.com/vscorza/mununu/tree/main/scripts) and [`docker/Dockerfile.dev`](https://github.com/vscorza/mununu/blob/main/docker/Dockerfile.dev).
+**Tooling.** The L3 protocol is implemented in [`scripts/bench_compare.sh`](https://github.com/Mumunu-team/mununu/blob/main/scripts/bench_compare.sh) and [`scripts/bench_diff.sh`](https://github.com/Mumunu-team/mununu/blob/main/scripts/bench_diff.sh). Both are under 200 lines of shell and Python and depend only on Criterion 0.8 and standard tools (no scipy dependency for Mann–Whitney). The dev container, hardware fingerprint capture, and EXP archive scaffolding are at [`scripts/`](https://github.com/Mumunu-team/mununu/tree/main/scripts) and [`docker/Dockerfile.dev`](https://github.com/Mumunu-team/mununu/blob/main/docker/Dockerfile.dev).

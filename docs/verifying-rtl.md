@@ -759,7 +759,7 @@ JSON.
 jobs:
   recoverability:
     runs-on: ubuntu-latest
-    container: ghcr.io/vscorza/mununu-sva:latest   # bundles slang + sv2v + yosys
+    container: ghcr.io/mumunu-team/mununu-sva:latest   # bundles slang + sv2v + yosys
     steps:
       - uses: actions/checkout@v4
       - run: |

@@ -30,7 +30,7 @@ Requires `yosys` (and `sv2v` for SV-2017 constructs) on `PATH`. Steps 2-4 are it
 > predicate-cube paths flow through the same frontend-agnostic **STS-IR seam** and the
 > one 3-valued evaluator. For the whole architecture — explicit vs symbolic (BDD, R-F5)
 > engines, the IR layering, and how over/under/⊥ approximation + may/must edges operate —
-> see [`docs/design/post-rf5-architecture.md`](https://github.com/vscorza/mununu/blob/main/docs/design/post-rf5-architecture.md).
+> see [`docs/design/post-rf5-architecture.md`](https://github.com/Mumunu-team/mununu/blob/main/docs/design/post-rf5-architecture.md).
 
 ---
 

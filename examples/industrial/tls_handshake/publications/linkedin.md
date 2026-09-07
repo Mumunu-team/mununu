@@ -12,6 +12,6 @@ Safety properties hold over all reachable composed states under chaotic crypto. 
 
 Reproducible end-to-end: `./examples/industrial/tls_handshake/validate.sh`.
 Full write-up: [Substack link TBD].
-Code: github.com/vscorza/mununu.
+Code: github.com/Mumunu-team/mununu.
 
 #formalverification #tls #hardware #verification

@@ -1,6 +1,6 @@
 # Hardware Verification Patterns
 
-> **Alpha Software** — Mununu is under active development. APIs, syntax, and behavior may change. We welcome feedback and bug reports via [GitHub Issues](https://github.com/vscorza/mununu/issues).
+> **Alpha Software** — Mununu is under active development. APIs, syntax, and behavior may change. We welcome feedback and bug reports via [GitHub Issues](https://github.com/Mumunu-team/mununu/issues).
 
 This page collects hardware-focused verification patterns with abbreviated CTXDSL and key properties. Each pattern maps to a real protocol or hardware component and demonstrates how to model and verify it in Mununu.
 

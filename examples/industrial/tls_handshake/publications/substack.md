@@ -21,13 +21,13 @@ To prove anything beyond raw safety you need a *contract* for the AES core: an a
 
 Today, the answer in most formal-verification flows is "you write it by hand." Every project, every team, every audit. Most of that work duplicates work someone, somewhere, has already done — because **AES-CTR is AES-CTR.** The same standard (NIST SP 800-38A) defines the same modes; the same safety obligations apply; the same handshake shape sits in every datasheet.
 
-This post walks through what changes when the same closed-IP module can be matched against a *shared* library of vetted contracts instead. The worked example lives at [`examples/industrial/tls_handshake/`](https://github.com/vscorza/mununu/tree/main/examples/industrial/tls_handshake) and is reproducible end-to-end: run `validate.sh` against the pinned commit and you get the byte-deterministic transcript quoted below.
+This post walks through what changes when the same closed-IP module can be matched against a *shared* library of vetted contracts instead. The worked example lives at [`examples/industrial/tls_handshake/`](https://github.com/Mumunu-team/mununu/tree/main/examples/industrial/tls_handshake) and is reproducible end-to-end: run `validate.sh` against the pinned commit and you get the byte-deterministic transcript quoted below.
 
 ## A queryable library, modelled on what already worked elsewhere
 
 Most non-hardware verification ecosystems have already solved the per-project duplication problem with a shared library: the Accellera Open Verification Library (OVL) for parameterised assertion-checkers; the SV-COMP repository of 30,000+ public C verification benchmarks; SMT-LIB for queryable solver artefacts. None of these is novel. What was missing was the hardware-side equivalent for *component contracts*.
 
-A **contract corpus** — what [`docs/design/contract-corpus-and-config.md`](https://github.com/vscorza/mununu/blob/main/docs/design/contract-corpus-and-config.md) calls the M3 deliverable — is that equivalent: a queryable, version-pinned repository of vetted black-box contracts, structured as a directory tree, one file per entry. Annotations on closed-IP wrappers point directly at corpus entries via a URI; the discovery pipeline resolves the URI, replaces the chaotic stub with the vetted contract, and reports exactly what changed. The rest of this post walks the example end-to-end.
+A **contract corpus** — what [`docs/design/contract-corpus-and-config.md`](https://github.com/Mumunu-team/mununu/blob/main/docs/design/contract-corpus-and-config.md) calls the M3 deliverable — is that equivalent: a queryable, version-pinned repository of vetted black-box contracts, structured as a directory tree, one file per entry. Annotations on closed-IP wrappers point directly at corpus entries via a URI; the discovery pipeline resolves the URI, replaces the chaotic stub with the vetted contract, and reports exactly what changed. The rest of this post walks the example end-to-end.
 
 ## What the corpus actually looks like
 
@@ -84,7 +84,7 @@ That is step 1 of the example transcript. Useful for sanity-checking what is in 
 
 ## The annotation grammar — closing the loop
 
-The corpus is one half of the integration. The other half is the **annotation grammar** ([Document D §D.5](https://github.com/vscorza/mununu/blob/main/docs/design/contract-corpus-and-config.md#d5-source-comment-annotation-grammar)). A vendor's RTL — or, equivalently, the JSON sidecar describing a closed-IP module — carries an annotation that points directly at a corpus entry:
+The corpus is one half of the integration. The other half is the **annotation grammar** ([Document D §D.5](https://github.com/Mumunu-team/mununu/blob/main/docs/design/contract-corpus-and-config.md#d5-source-comment-annotation-grammar)). A vendor's RTL — or, equivalently, the JSON sidecar describing a closed-IP module — carries an annotation that points directly at a corpus entry:
 
 ```verilog
 (* mununu_blackbox *)
@@ -233,6 +233,6 @@ This is post 3 of a four-document arc. Post 1 ([secure boot ROM](../../secure_bo
 
 The TLS handshake example is reproducible right now. Clone the mununu repo, `cd` into the example directory, run `validate.sh`, and you get exactly the transcript quoted above. The corpus, the annotations, the gap-downgrade behaviour — all on `main`.
 
-If you have a closed-IP module whose contract you would like to contribute to the corpus, the schema is `corpus/<domain>/<name>@<version>.json` and the format is in [Document D §D.2](https://github.com/vscorza/mununu/blob/main/docs/design/contract-corpus-and-config.md). Community-tier provenance is the default; mununu-verified is a curated promotion.
+If you have a closed-IP module whose contract you would like to contribute to the corpus, the schema is `corpus/<domain>/<name>@<version>.json` and the format is in [Document D §D.2](https://github.com/Mumunu-team/mununu/blob/main/docs/design/contract-corpus-and-config.md). Community-tier provenance is the default; mununu-verified is a curated promotion.
 
-Code: [github.com/vscorza/mununu](https://github.com/vscorza/mununu).
+Code: [github.com/Mumunu-team/mununu](https://github.com/Mumunu-team/mununu).

@@ -159,7 +159,7 @@ write_btor design.btor
 
 ### How the BTOR2 reader treats the design
 
-Four CLTS-aligned transformations applied at read time (per [`adapter::btor2::bit_blast`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/adapter/btor2/bit_blast.rs)):
+Four CLTS-aligned transformations applied at read time (per [`adapter::btor2::bit_blast`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/adapter/btor2/bit_blast.rs)):
 
 1. **Per-signal labels.** Each transition carries one `<signal>=<value>` label per non-clock input — `transition s0 -> s253 on label rst_0;` — using mununu's native multi-label transition support. Properties refer to individual signals via `[(rst_0)] φ` rather than enumerating compound `env_NNNN` strings. The CLTS alphabet shrinks from `2^N` (compound) to `2N` (per-signal-value) entries.
 2. **Implicit clock.** Each CLTS transition represents one clock edge; `clk` does not appear in the alphabet. The reader auto-detects clock-shaped input names (`clk`, `clock`, `ck`, `clk_i`, `i_clk`, `iclk`, `clki`) and elides them from enumeration. Multi-clock and negedge designs are out of scope for Phase 1 — the reader errors explicitly.
@@ -193,7 +193,7 @@ mununu context eval design.btor --adapter btor2 --formula safety_bad_0 --automat
 
 ### Soundness
 
-- **Bit-blasting is exact** for the operators marked `is_blastable()` in [`btor2::ast::Op`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/adapter/btor2/ast.rs).
+- **Bit-blasting is exact** for the operators marked `is_blastable()` in [`btor2::ast::Op`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/adapter/btor2/ast.rs).
 - **Implicit clock is sound for posedge-only single-clock designs** — multi-clock and negedge are explicitly rejected at read time.
 - **`async2sync` preserves synchronous structure** for both register cells and `chformal`-lowered assertions.
 - **`setundef -zero`** in the Yosys script makes X / undef bits deterministic; X-aware verification is out of mununu's roadmap scope.

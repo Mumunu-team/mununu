@@ -12,6 +12,6 @@ The property "no host-bus unlock without a completed verify" holds under chaotic
 
 Reproducible end-to-end: `./examples/industrial/secure_boot_rom/validate.sh`.
 Full write-up: [Substack link TBD].
-Code: github.com/vscorza/mununu.
+Code: github.com/Mumunu-team/mununu.
 
 #formalverification #secureboot #hardware #verification

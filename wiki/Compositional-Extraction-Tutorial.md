@@ -22,15 +22,15 @@ The `mununu` and `mununu-extract` binaries land in `target/release/` and are inv
 
 ## Path A — Public synthetic fixture
 
-The repo ships a minimal worker-race fixture under [examples/ast_extract/typescript/](https://github.com/vscorza/mununu/tree/main/examples/ast_extract/typescript/). One `Worker` class with a `_committed` flag, plus a hand-modelled shared file. Two instances of the worker contending over the file is the smallest non-trivial composition that produces a real race witness.
+The repo ships a minimal worker-race fixture under [examples/ast_extract/typescript/](https://github.com/Mumunu-team/mununu/tree/main/examples/ast_extract/typescript/). One `Worker` class with a `_committed` flag, plus a hand-modelled shared file. Two instances of the worker contending over the file is the smallest non-trivial composition that produces a real race witness.
 
 ### Files
 
 | Path | Role |
 |------|------|
-| [examples/ast_extract/typescript/parallel_workers.ts](https://github.com/vscorza/mununu/blob/main/examples/ast_extract/typescript/parallel_workers.ts) | Source code (one `Worker` class). |
-| [examples/ast_extract/typescript/parallel_workers_compositional.extract.json](https://github.com/vscorza/mununu/blob/main/examples/ast_extract/typescript/parallel_workers_compositional.extract.json) | Extract config with `composition.instances[]`, `composition.resources[]`, and two properties. |
-| [examples/ast_extract/typescript/parallel_workers_compositional.expected.txt](https://github.com/vscorza/mununu/blob/main/examples/ast_extract/typescript/parallel_workers_compositional.expected.txt) | Reference verdicts — diff your output against this. |
+| [examples/ast_extract/typescript/parallel_workers.ts](https://github.com/Mumunu-team/mununu/blob/main/examples/ast_extract/typescript/parallel_workers.ts) | Source code (one `Worker` class). |
+| [examples/ast_extract/typescript/parallel_workers_compositional.extract.json](https://github.com/Mumunu-team/mununu/blob/main/examples/ast_extract/typescript/parallel_workers_compositional.extract.json) | Extract config with `composition.instances[]`, `composition.resources[]`, and two properties. |
+| [examples/ast_extract/typescript/parallel_workers_compositional.expected.txt](https://github.com/Mumunu-team/mununu/blob/main/examples/ast_extract/typescript/parallel_workers_compositional.expected.txt) | Reference verdicts — diff your output against this. |
 
 ### Run it
 
@@ -196,9 +196,9 @@ cat /tmp/findings.json
 
 The output is **suggestion-grade**: the user reviews each finding, picks one, and writes a real extract config around it. The Phase B pre-pass is not a replacement for authoring the composition block; it's a starting point.
 
-The Web UI exposes the same flow as a one-click button — see [mununu-ui's local-testing guide](https://github.com/vscorza/mununu-ui/blob/main/docs/phase-b-local-testing.md) for the UI walkthrough.
+The Web UI exposes the same flow as a one-click button — see [mununu-ui's local-testing guide](https://github.com/Mumunu-team/mununu-ui/blob/main/docs/phase-b-local-testing.md) for the UI walkthrough.
 
-The Phase B detectors and the concurrency idioms they recognise live in [`concurrency_detect.rs`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/adapter/extraction/ast_extract/concurrency_detect.rs) — read the pattern matchers there for the exact coverage and its limits.
+The Phase B detectors and the concurrency idioms they recognise live in [`concurrency_detect.rs`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/adapter/extraction/ast_extract/concurrency_detect.rs) — read the pattern matchers there for the exact coverage and its limits.
 
 ---
 
@@ -224,10 +224,10 @@ npm run dev
 
 1. Open `http://localhost:5173`.
 2. Sidebar → **Extraction** → **Software Extraction** workflow.
-3. **Load Source**: drop or paste [examples/ast_extract/typescript/parallel_workers.ts](https://github.com/vscorza/mununu/blob/main/examples/ast_extract/typescript/parallel_workers.ts). The file extension `.ts` is recognised → the Phase B `Suggest from source` button will appear in the compose step.
+3. **Load Source**: drop or paste [examples/ast_extract/typescript/parallel_workers.ts](https://github.com/Mumunu-team/mununu/blob/main/examples/ast_extract/typescript/parallel_workers.ts). The file extension `.ts` is recognised → the Phase B `Suggest from source` button will appear in the compose step.
 4. **Extract Model**: the step renders an `ExtractConfigEditor` JSON textarea.
    - Click **Start from template** to seed a default config (single-class targeting `Worker`, sourced from the loaded filename).
-   - Replace the placeholder `targets[]` block with the real one — easiest path: open [parallel_workers_compositional.extract.json](https://github.com/vscorza/mununu/blob/main/examples/ast_extract/typescript/parallel_workers_compositional.extract.json), copy the body, paste it into the editor.
+   - Replace the placeholder `targets[]` block with the real one — easiest path: open [parallel_workers_compositional.extract.json](https://github.com/Mumunu-team/mununu/blob/main/examples/ast_extract/typescript/parallel_workers_compositional.extract.json), copy the body, paste it into the editor.
    - The summary panel below the textarea reports `source.file`, `language`, `targets (N)`, `composition`, and `properties (N)` once the JSON is valid.
    - Click **Run extract**. The backend returns the multi-automaton espec (3 automata for the parallel-workers fixture: `worker_a`, `worker_b`, `shared_file`). The result message reads `Extracted 3 automaton/a. 0 warning(s).`
 5. **Compose Instances**: visual editor over the composition sub-block. Three things you can do here:
@@ -272,9 +272,9 @@ If you need to extend or debug the pipeline:
 
 | Component | Location |
 |-----------|----------|
-| Extract-config schema | [crates/mununu-core/src/adapter/extraction/ast_extract/config.rs](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/adapter/extraction/ast_extract/config.rs) — `ExtractionConfig`, `CompositionConfig`, `ResourceDecl`. |
-| Per-instance label rewriting | [crates/mununu-core/src/adapter/extraction/ast_extract/mod.rs](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/adapter/extraction/ast_extract/mod.rs) — `rewrite_labels_for_instance`. |
+| Extract-config schema | [crates/mununu-core/src/adapter/extraction/ast_extract/config.rs](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/adapter/extraction/ast_extract/config.rs) — `ExtractionConfig`, `CompositionConfig`, `ResourceDecl`. |
+| Per-instance label rewriting | [crates/mununu-core/src/adapter/extraction/ast_extract/mod.rs](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/adapter/extraction/ast_extract/mod.rs) — `rewrite_labels_for_instance`. |
 | Resource → automaton emission | Same file — `build_resource_automaton`. |
-| Composition engine | [crates/mununu-core/src/composition/mod.rs](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/composition/mod.rs) — alphabet-intersection synchronization. |
-| Phase B detectors | [crates/mununu-core/src/adapter/extraction/ast_extract/concurrency_detect.rs](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/adapter/extraction/ast_extract/concurrency_detect.rs). |
-| Property templates | [crates/mununu-core/src/adapter/templates/builtin_templates.json](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/adapter/templates/builtin_templates.json) — `no_clobber`, `clobber_reachable`, `mutual_exclusion`, `bounded_handoff`, `no_lost_update`. |
+| Composition engine | [crates/mununu-core/src/composition/mod.rs](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/composition/mod.rs) — alphabet-intersection synchronization. |
+| Phase B detectors | [crates/mununu-core/src/adapter/extraction/ast_extract/concurrency_detect.rs](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/adapter/extraction/ast_extract/concurrency_detect.rs). |
+| Property templates | [crates/mununu-core/src/adapter/templates/builtin_templates.json](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/adapter/templates/builtin_templates.json) — `no_clobber`, `clobber_reachable`, `mutual_exclusion`, `bounded_handoff`, `no_lost_update`. |

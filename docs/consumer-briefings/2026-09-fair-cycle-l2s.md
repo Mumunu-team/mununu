@@ -2,7 +2,7 @@
 
 > **Audience:** ROSF (API consumer via `--profile industrial`), monono (direct CLI + API consumer), any orchestrator that wants to decide `AG(request → AF grant)` under a `GF` environment fairness assumption.
 >
-> **Related:** [mununu#477](https://github.com/vscorza/mununu/issues/477) — the ticket asking for fairness-constrained MC on the SV path. This is **PR 1 of 2** for Option B: the standalone primitive + a `btor2`-direct verb. **PR 2** wires this into `sv verify-auto` so `// @mununu_assume GF x` is auto-applied on the SV path.
+> **Related:** [mununu#477](https://github.com/Mumunu-team/mununu/issues/477) — the ticket asking for fairness-constrained MC on the SV path. This is **PR 1 of 2** for Option B: the standalone primitive + a `btor2`-direct verb. **PR 2** wires this into `sv verify-auto` so `// @mununu_assume GF x` is auto-applied on the SV path.
 >
 > **TL;DR:** new `mununu btor2 verify-liveness-under-fairness` verb + `POST /api/v1/btor2/verify-liveness-under-fairness` endpoint decide `(⋀ⱼ GF fairⱼ) → AG(request → AF grant)` via the Emerson–Lei fair-cycle extension of the plain l2s. **Purely additive** — existing `verify-liveness` behaviour is byte-for-byte unchanged (guarded by a regression test). Consumers who parse the plain `verify-liveness` response can consume the new verb with zero shape changes (same `Btor2VerifyLivenessResponse`).
 
@@ -84,7 +84,7 @@ The response reuses `Btor2VerifyLivenessResponse` — same `verdict` / `property
 ## Provenance
 
 - Fix commit: (pending merge — branch `feat/477-b-fair-cycle-l2s-primitive`).
-- Ticket: [mununu#477](https://github.com/vscorza/mununu/issues/477).
+- Ticket: [mununu#477](https://github.com/Mumunu-team/mununu/issues/477).
 - Prior briefing on this track: [`2026-09-fairness-note-honesty.md`](2026-09-fairness-note-honesty.md) — Option A note honesty fix.
 - Follow-up: PR 2 will wire `// @mununu_assume GF x` on `sv verify-auto` to auto-dispatch to this primitive.
 - Design record: agent-side plan doc `.claude/plans/477-b-fair-cycle-l2s.md`.

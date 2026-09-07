@@ -71,7 +71,7 @@ Five fallback conditions still hit the Phase A refusal (definite `Skipped`, neve
 ## Provenance
 
 - Fix commit: (pending merge — see branch `fix/476-antecedent-shadow-synth` in the mununu repo)
-- Issue: mununu#476 — <https://github.com/vscorza/mununu/issues/476>
+- Issue: mununu#476 — <https://github.com/Mumunu-team/mununu/issues/476>
 - Design: `docs/design/antecedent-shadow-synthesis.md`
 - Policy this briefing was written to satisfy: `docs/policies/cross-repo-impact.md`
 

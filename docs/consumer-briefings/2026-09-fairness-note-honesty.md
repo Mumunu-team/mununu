@@ -2,7 +2,7 @@
 
 > **Audience:** ROSF (API consumer via `--profile industrial`), monono (direct CLI + API consumer), any orchestrator that parses the `sv verify-auto` `annotation-properties` verification note.
 >
-> **Related:** [mununu#477](https://github.com/vscorza/mununu/issues/477) — the ticket that surfaced the misleading framing.
+> **Related:** [mununu#477](https://github.com/Mumunu-team/mununu/issues/477) — the ticket that surfaced the misleading framing.
 >
 > **TL;DR:** the `annotation-properties` note text on the `sv verify-auto` response has been rewritten. It no longer reads as "the tool cannot do fairness-constrained model checking"; it points users at the routes that ARE shipped (`mununu btor2 game --objective recurrence` and CTXDSL's GR(1) engine). Same note kind, same level, same items list — **only the `detail` string changed.** No wire-format shape change; a consumer that only inspects `verdict` / `kind` / `level` is unaffected. Two doc pages were also updated (`Composition.md` gains a composition footgun gotcha; `Property-Templates.md` clarifies where fairness IS supported).
 
@@ -50,7 +50,7 @@
 ## Provenance
 
 - Fix commit: (pending merge — branch `fix/477-annotation-note-fairness-honesty`).
-- Ticket: [mununu#477](https://github.com/vscorza/mununu/issues/477).
+- Ticket: [mununu#477](https://github.com/Mumunu-team/mununu/issues/477).
 - Follow-up track: agent-side plan `477-fairness-assumption-sv-bridge.md` — the Option B full bridge; not scoped for this PR.
 - Policy: [`../policies/cross-repo-impact.md`](../policies/cross-repo-impact.md).
 

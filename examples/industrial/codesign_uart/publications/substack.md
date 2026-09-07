@@ -25,7 +25,7 @@ This post walks through what mununu — a formal model checker for compositional
 
 ## The example, end to end
 
-The full setup lives at [`examples/industrial/codesign_uart/`](https://github.com/vscorza/mununu/tree/main/examples/industrial/codesign_uart) in the mununu repository. You can reproduce every line by running `./examples/industrial/codesign_uart/validate.sh`. The transcript is byte-deterministic.
+The full setup lives at [`examples/industrial/codesign_uart/`](https://github.com/Mumunu-team/mununu/tree/main/examples/industrial/codesign_uart) in the mununu repository. You can reproduce every line by running `./examples/industrial/codesign_uart/validate.sh`. The transcript is byte-deterministic.
 
 The setup has three pieces:
 
@@ -166,9 +166,9 @@ This is the closing post of a four-post arc. The earlier three:
 
 The codesign workflow uses all three. The chaotic stub is from post 1. The peripheral RTL is either custom-SV or yosys-extracted per post 2. The `@mununu_guarantee` annotation that resolves the `sending_reachable` violation is from post 3. The capstone here is putting them together to verify a UART driver that nobody could have verified per-side.
 
-The Document C design doc for this work lives at [`docs/design/hw-sw-codesign-extraction.md`](https://github.com/vscorza/mununu/blob/main/docs/design/hw-sw-codesign-extraction.md). The implementation plan, the worked example, the soundness considerations specific to codesign, and the open questions for follow-up are all there.
+The Document C design doc for this work lives at [`docs/design/hw-sw-codesign-extraction.md`](https://github.com/Mumunu-team/mununu/blob/main/docs/design/hw-sw-codesign-extraction.md). The implementation plan, the worked example, the soundness considerations specific to codesign, and the open questions for follow-up are all there.
 
-The code: [github.com/vscorza/mununu](https://github.com/vscorza/mununu).
-The example: [`examples/industrial/codesign_uart/`](https://github.com/vscorza/mununu/tree/main/examples/industrial/codesign_uart).
+The code: [github.com/Mumunu-team/mununu](https://github.com/Mumunu-team/mununu).
+The example: [`examples/industrial/codesign_uart/`](https://github.com/Mumunu-team/mununu/tree/main/examples/industrial/codesign_uart).
 
 — Mariano Cerrutti

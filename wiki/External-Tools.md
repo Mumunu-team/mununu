@@ -1,6 +1,6 @@
 # External Tools
 
-> Source of truth: [`docs/external-tools.md`](https://github.com/vscorza/mununu/blob/main/docs/external-tools.md) — the canonical, always-current install + integration reference. This wiki page is a summary; see the doc for per-OS install, discovery, and missing-tool behaviour.
+> Source of truth: [`docs/external-tools.md`](https://github.com/Mumunu-team/mununu/blob/main/docs/external-tools.md) — the canonical, always-current install + integration reference. This wiki page is a summary; see the doc for per-OS install, discovery, and missing-tool behaviour.
 
 Mununu's verification engine, model checker, and synthesiser are **pure Rust + the linked Z3 library**. Several pipelines additionally invoke external command-line tools. Every external tool is **optional** — mununu functions without it and emits a structured warning/error (or falls back) when a pipeline needs a missing tool, never silently failing.
 
@@ -23,7 +23,7 @@ Discovered subprocess tools follow one pattern: the `MUNUNU_<TOOL>_PATH` env var
 - **Linked (Z3 only):** compiled into the mununu binary via the `z3` Rust crate. Z3 is **MIT** (permissive) — safe.
 - **Subprocess / pipe (everything else):** mununu runs the tool as a separate process. This is **"mere aggregation"** — the tool's license does **not** contaminate mununu's source license, even for copyleft tools (Verilator is LGPL-3 / Artistic-2). None are bundled into a mununu artifact; you install them yourself.
 
-The only real license-contamination vector — the **linked Cargo crate graph** — is guarded in CI by `cargo deny check licenses` (a deny-by-default permissive allow-list; see [`deny.toml`](https://github.com/vscorza/mununu/blob/main/deny.toml)).
+The only real license-contamination vector — the **linked Cargo crate graph** — is guarded in CI by `cargo deny check licenses` (a deny-by-default permissive allow-list; see [`deny.toml`](https://github.com/Mumunu-team/mununu/blob/main/deny.toml)).
 
 ## See also
 

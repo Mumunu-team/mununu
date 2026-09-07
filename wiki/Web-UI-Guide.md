@@ -1,8 +1,8 @@
-> **Alpha Software** — Mununu is under active development. APIs, syntax, and behavior may change. We welcome feedback and bug reports via [GitHub Issues](https://github.com/vscorza/mununu/issues).
+> **Alpha Software** — Mununu is under active development. APIs, syntax, and behavior may change. We welcome feedback and bug reports via [GitHub Issues](https://github.com/Mumunu-team/mununu/issues).
 
 # Web UI Guide
 
-The Mununu web interface ([mununu-ui](https://github.com/vscorza/mununu-ui)) is a React/TypeScript application that provides an interactive environment for writing CTXDSL specifications, visualizing automata, synthesizing controllers, and verifying mu-calculus properties. It communicates with the Mununu REST API and renders results in real time.
+The Mununu web interface ([mununu-ui](https://github.com/Mumunu-team/mununu-ui)) is a React/TypeScript application that provides an interactive environment for writing CTXDSL specifications, visualizing automata, synthesizing controllers, and verifying mu-calculus properties. It communicates with the Mununu REST API and renders results in real time.
 
 ---
 
@@ -29,7 +29,7 @@ The Mununu web interface ([mununu-ui](https://github.com/vscorza/mununu-ui)) is 
 ### Installation
 
 ```bash
-git clone https://github.com/vscorza/mununu-ui.git
+git clone https://github.com/Mumunu-team/mununu-ui.git
 cd mununu-ui
 npm install
 npm run dev
@@ -281,4 +281,4 @@ Large state spaces (10,000+ states after unrolling) increase evaluation time. Co
 
 - [API Reference](./API-Reference) -- Full REST API documentation.
 - [References](./References) -- Academic background on mu-calculus, synthesis, and verification.
-- [mununu-ui repository](https://github.com/vscorza/mununu-ui) -- Source code, issues, and contribution guidelines.
+- [mununu-ui repository](https://github.com/Mumunu-team/mununu-ui) -- Source code, issues, and contribution guidelines.

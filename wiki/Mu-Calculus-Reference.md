@@ -1,6 +1,6 @@
 # Mu-Calculus Reference
 
-> **Alpha Software** — Mununu is under active development. APIs, syntax, and behavior may change. We welcome feedback and bug reports via [GitHub Issues](https://github.com/vscorza/mununu/issues).
+> **Alpha Software** — Mununu is under active development. APIs, syntax, and behavior may change. We welcome feedback and bug reports via [GitHub Issues](https://github.com/Mumunu-team/mununu/issues).
 
 Mununu uses the modal mu-calculus as its core property language. This page covers every operator, explains fixpoint iteration, and lists common formula patterns you can reuse.
 

@@ -11,6 +11,6 @@ I asked a formal model checker — mununu — what it actually knows about this 
 The remedy is not a code fix. The firmware is correct. The remedy is to write down the missing assumption — the peripheral's progress guarantee — and make it part of the proof. That conversation is exactly what compositional verification is for.
 
 Full write-up: [Substack link TBD].
-Code: github.com/vscorza/mununu.
+Code: github.com/Mumunu-team/mununu.
 
 #formalverification #embedded #firmware #verification

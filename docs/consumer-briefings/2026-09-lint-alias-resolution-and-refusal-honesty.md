@@ -2,7 +2,7 @@
 
 > **Audience:** monono (reported both), ROSF, anyone running `mununu sv lint` or reading a `verify-auto` `Skipped` reason.
 >
-> **Related:** [mununu#506](https://github.com/vscorza/mununu/issues/506), [mununu#507](https://github.com/vscorza/mununu/issues/507). Follows #496 / #502.
+> **Related:** [mununu#506](https://github.com/Mumunu-team/mununu/issues/506), [mununu#507](https://github.com/Mumunu-team/mununu/issues/507). Follows #496 / #502.
 >
 > **TL;DR:** the #496 registered-read rule was **near-vacuous** — it fired only on registers with *no reset*, which is almost none. Fixed. And the partial-write refusal asserted a cause it could not see, pointing consumers at correct RTL; it now reports what it actually knows. **`sv lint` will report findings it previously missed.**
 
@@ -105,4 +105,4 @@ The e2e lifts the reset-bearing faulty design **and its satisfying twin** with r
 
 - ~~**`sv lint` skips every dotted (`u_inst.sig`) Op symbol.**~~ **Fixed** in the same series. The filter existed to suppress `<function>.<arg>` false positives (mununu#475), but on a flattened integrator *every* hierarchical alias is dotted, so it suppressed the whole design — which is why `sv lint` reported 0 findings while `verify-auto` refused on the same file. They were not disagreeing; `sv lint` was not looking. It now skips a dotted symbol only when no prefix of it names an instance scope, discriminated by the fact that **a function has no registers**: a prefix appearing on a `state` symbol names an instance. The #475 fixture is retained as the false-positive guard. Residual: an instance with no state at all is still skipped. **Expect additional `sv lint` findings on hierarchical designs.**
 - **Declaration-order divergence.** monono found `video_sdram.sv` / `video_out_core.sv` used 47 and 12 signals *above their declarations*; verilator accepts this, slang rejects it, and bound SVA forces the slang lift. Such a file is invisible to both `sv lint` and the formal lane, and a verilator-first lint lane cannot see the gap. Worth recording in the RTL-frontend docs as a known divergence.
-- [mununu#504](https://github.com/vscorza/mununu/issues/504) — the exact engine can stack-overflow rather than abstain on a large design.
+- [mununu#504](https://github.com/Mumunu-team/mununu/issues/504) — the exact engine can stack-overflow rather than abstain on a large design.

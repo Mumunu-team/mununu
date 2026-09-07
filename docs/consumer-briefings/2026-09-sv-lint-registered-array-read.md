@@ -2,7 +2,7 @@
 
 > **Audience:** monono (direct CLI consumer; runs `sv lint` in its formal gate — and the design this rule comes from), ROSF (API consumer via `POST /api/v1/sv/lint`), mununu-ui, any orchestrator that parses `sv lint` findings.
 >
-> **Related:** [mununu#496](https://github.com/vscorza/mununu/issues/496).
+> **Related:** [mununu#496](https://github.com/Mumunu-team/mununu/issues/496).
 >
 > **TL;DR:** `sv lint` now runs **two** structural checks instead of one, and every finding carries a **`rule`** tag saying which fired (plus an optional **`detail`**). The new rule flags a **registered array read whose address register can change in the same cycle its data is consumed** — the fault that shipped a sprite bank shifted by one halfword, twice, in the same block. **Additive JSON only**; existing fields are unchanged. A consumer that ignores unknown fields needs no change, but **a clean design may now report findings it did not before**, so the CI gate can newly fail — which is the point.
 
@@ -114,7 +114,7 @@ never on the bare host.
 
 ## Provenance
 
-- Issue: [mununu#496](https://github.com/vscorza/mununu/issues/496), filed from monono's `docs/postmortem-v04c-sprite-path.md`.
+- Issue: [mununu#496](https://github.com/Mumunu-team/mununu/issues/496), filed from monono's `docs/postmortem-v04c-sprite-path.md`.
 - Core: `lint_registered_array_read_moving_address` in `crates/mununu-core/src/adapter/sv_verify.rs`.
 - Docs: [`docs/verifying-rtl.md`](../verifying-rtl.md) §"Registered array reads against a moving address", [`docs/cli-cookbook.md`](../cli-cookbook.md).
 - Policy: [`../policies/cross-repo-impact.md`](../policies/cross-repo-impact.md).

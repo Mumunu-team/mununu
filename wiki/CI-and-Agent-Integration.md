@@ -1,8 +1,8 @@
 # CI and Agent Integration
 
-> **Source of truth:** [`crates/mununu-cli/src/main.rs`](https://github.com/vscorza/mununu/blob/main/crates/mununu-cli/src/main.rs) (CI-gate exit codes) + [`crates/mununu-core/src/api/server.rs`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/api/server.rs) (HTTP routes) — surface: CLI+API.
+> **Source of truth:** [`crates/mununu-cli/src/main.rs`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-cli/src/main.rs) (CI-gate exit codes) + [`crates/mununu-core/src/api/server.rs`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/api/server.rs) (HTTP routes) — surface: CLI+API.
 
-This page covers driving mununu from **CI** (GitHub Actions and friends, via the CLI's exit codes) and from an **external agent** that writes RTL (via the HTTP API). For the property vocabulary itself — safety / response-liveness / recoverability and the no-sidecar `sv verify-auto` — see [`docs/verifying-rtl.md`](https://github.com/vscorza/mununu/blob/main/docs/verifying-rtl.md).
+This page covers driving mununu from **CI** (GitHub Actions and friends, via the CLI's exit codes) and from an **external agent** that writes RTL (via the HTTP API). For the property vocabulary itself — safety / response-liveness / recoverability and the no-sidecar `sv verify-auto` — see [`docs/verifying-rtl.md`](https://github.com/Mumunu-team/mununu/blob/main/docs/verifying-rtl.md).
 
 Every verdict is one of `holds` / `violated` / `unknown` / `skipped`; a definite `holds` / `violated` is **sound**, `unknown` / `skipped` are honest abstentions.
 
@@ -10,7 +10,7 @@ Every verdict is one of `holds` / `violated` / `unknown` / `skipped`; a definite
 
 ## 1. In CI: the verify verbs are gates
 
-> **Source of truth:** [`FailOn` / `ci_exit_code` / `worst_verdict`](https://github.com/vscorza/mununu/blob/main/crates/mununu-cli/src/main.rs) — surface: CLI.
+> **Source of truth:** [`FailOn` / `ci_exit_code` / `worst_verdict`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-cli/src/main.rs) — surface: CLI.
 
 Every verify verb — `btor2 verify` / `verify-liveness` / `verify-recoverability`, the SV-direct `sv verify` / `verify-liveness` / `verify-recoverability`, and `sv verify-auto` — maps its verdict to a **process exit code**, so a workflow step fails on a real violation with no JSON parsing.
 
@@ -35,7 +35,7 @@ on: [push, pull_request]
 jobs:
   recoverability:
     runs-on: ubuntu-latest
-    container: ghcr.io/vscorza/mununu-sva:latest   # slang + sv2v + yosys + mununu
+    container: ghcr.io/mumunu-team/mununu-sva:latest   # slang + sv2v + yosys + mununu
     steps:
       - uses: actions/checkout@v4
       # Fail the PR if the FSM can no longer get back to idle.
@@ -54,7 +54,7 @@ jobs:
 
 ### The zero-input FSM auto-scan (`check-fsm`)
 
-> **Source of truth:** [`fsm_encoding_scan`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/adapter/fsm_scan.rs) + `btor2 check-fsm` / `POST /api/v1/btor2/check-fsm` — surface: CLI+API+UI.
+> **Source of truth:** [`fsm_encoding_scan`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/adapter/fsm_scan.rs) + `btor2 check-fsm` / `POST /api/v1/btor2/check-fsm` — surface: CLI+API+UI.
 
 Every verb above needs a property or a target atom. **`btor2 check-fsm` needs neither.** It discovers every FSM-like state register, derives each one's set of **legal encodings** from the design itself (the constants its own logic compares it against, plus its reset value), and checks — starting from the real reset state — whether any **illegal encoding** (a value outside that set) is reachable. A reachable illegal encoding (`verdict: violated`) is an unambiguous bug: some input drives the FSM past its enum (an incomplete `case`, a missing `default`, a decoder that emits an out-of-range code).
 
@@ -80,7 +80,7 @@ A `holds` register provably stays within its encoding (validated on the real Ope
 
 ## 2. From an agent that writes RTL: the HTTP API
 
-> **Source of truth:** [`sv_verify_auto_handler`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) + the `/api/v1/sv/*` routes — surface: API.
+> **Source of truth:** [`sv_verify_auto_handler`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) + the `/api/v1/sv/*` routes — surface: API.
 
 Start the server (built with `--features api`) on a host that has the SV toolchain:
 
@@ -124,12 +124,12 @@ The agent can skip the SV lift entirely and post pre-lifted BTOR2 to `/api/v1/bt
 - **Coverage is a fragment.** Assertions outside the supported SVA fragment come back in `unsupported`; some designs hit the abstraction ceiling and return `unknown`. A definite verdict is sound; treat `unknown` / `skipped` as "not decided here," never as "safe."
 - **Safety-⊥ escalation is automatic.** When the cube abstraction leaves a *safety* AG-invariant `⊥`, `verify-auto` retries it with the multi-engine reachability portfolio (exact ⊕ native ⊕ spacer ⊕ btormc ⊕ Pono) and records a `portfolio-rescue` note if it decides. `--no-rescue` / `rescue_bottom_safety: false` opts out.
 
-> **Source of truth:** [`escalate_bottom_safety`](https://github.com/vscorza/mununu/blob/main/crates/mununu-core/src/adapter/slang/verify_auto.rs) — surface: CLI+API.
+> **Source of truth:** [`escalate_bottom_safety`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/adapter/slang/verify_auto.rs) — surface: CLI+API.
 
 ---
 
 ## See also
 
-- [`docs/verifying-rtl.md`](https://github.com/vscorza/mununu/blob/main/docs/verifying-rtl.md) — the property verbs, the no-sidecar flow, and the honest caveats.
+- [`docs/verifying-rtl.md`](https://github.com/Mumunu-team/mununu/blob/main/docs/verifying-rtl.md) — the property verbs, the no-sidecar flow, and the honest caveats.
 - [External-Tools](External-Tools) — installing slang / sv2v / Yosys and the discovery env vars.
 - [API-Reference](API-Reference) — the full HTTP surface.

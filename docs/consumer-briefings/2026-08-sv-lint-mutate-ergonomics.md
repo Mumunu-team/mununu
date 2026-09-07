@@ -66,7 +66,7 @@
 ## Provenance
 
 - Fix commit: (pending merge — see branch `fix/475-sv-lint-mutate-ergonomics` in the mununu repo)
-- Issue: mununu#475 — <https://github.com/vscorza/mununu/issues/475>
+- Issue: mununu#475 — <https://github.com/Mumunu-team/mununu/issues/475>
 - Policy this briefing was written to satisfy: [`docs/policies/cross-repo-impact.md`](../policies/cross-repo-impact.md)
 - Sibling briefing (mununu#476 antecedent shadow-synth): [`2026-08-antecedent-shadow-synth.md`](2026-08-antecedent-shadow-synth.md)
 
