@@ -1677,6 +1677,25 @@ fn synth_sidecar_json(
     .ok()
 }
 
+/// mununu#504 — the ONE way a stopped run records a property it did not reach.
+///
+/// Both budgets (memory, #490; time, #504) and both later passes use this, so the degraded shape
+/// cannot drift between them — before this, `escalate_bottom` and `rescue_skipped_via_exact`
+/// handled a stop differently from the main loop, and one of them not at all.
+///
+/// `Unknown`, never `Skipped`: `ci_exit_code` does not fail on `skipped`, so a strict
+/// `--fail-on unknown` gate would otherwise pass GREEN on a property that ran out of budget.
+fn abstained(t: &crate::adapter::slang::translate::TranslatedAssertion) -> PropertyVerdict {
+    PropertyVerdict {
+        name: t.name.clone(),
+        kind: t.kind,
+        formula: t.formula.clone(),
+        outcome: VerifyOutcome::Unknown { unknown_cells: 0 },
+        seeded_predicates: Vec::new(),
+        counterexample: None,
+    }
+}
+
 /// Init value of every state cell, keyed by symbol — from the BTOR2 `init`
 /// lines, defaulting to 0 (the `setundef -zero` power-up). Used to pin the cube
 /// lift's initial cube to the design's reset state.
@@ -2722,30 +2741,39 @@ pub(crate) fn verify_auto_impl(
     // process cannot honestly claim to have decided them — and push a
     // `memory-budget-exceeded` verification note. Verdicts already recorded stay.
     let mut memory_budget_hit: Option<crate::adapter::memory_budget::MemoryBudgetExceeded> = None;
+    // mununu#504 — the TIME sentinel, mirroring the memory one directly above it. Both share the
+    // same contract: the current property and every remaining one abstain (`unknown`), and every
+    // verdict already computed is PRESERVED. That preservation is the whole point — monono lost a
+    // gate run to a process kill that emitted zero bytes, including for properties mununu had
+    // already decided.
+    let mut time_budget_hit = false;
+    let run_budget = crate::adapter::run_budget::Budget::with_ms_opt(
+        crate::adapter::run_budget::run_budget_ms(),
+    );
+    let per_property_ms = crate::adapter::run_budget::property_budget_ms();
     for t in &extraction.translated {
-        if memory_budget_hit.is_some() {
-            report.properties.push(PropertyVerdict {
-                name: t.name.clone(),
-                kind: t.kind,
-                formula: t.formula.clone(),
-                outcome: VerifyOutcome::Unknown { unknown_cells: 0 },
-                seeded_predicates: Vec::new(),
-                counterexample: None,
-            });
+        // Once EITHER budget has been hit, every remaining property abstains without work.
+        if memory_budget_hit.is_some() || time_budget_hit {
+            report.properties.push(abstained(t));
             continue;
         }
         if let Err(hit) = crate::adapter::memory_budget::check_process_memory_budget() {
             memory_budget_hit = Some(hit);
-            report.properties.push(PropertyVerdict {
-                name: t.name.clone(),
-                kind: t.kind,
-                formula: t.formula.clone(),
-                outcome: VerifyOutcome::Unknown { unknown_cells: 0 },
-                seeded_predicates: Vec::new(),
-                counterexample: None,
-            });
+            report.properties.push(abstained(t));
             continue;
         }
+        if run_budget.expired() {
+            time_budget_hit = true;
+            report.properties.push(abstained(t));
+            continue;
+        }
+        // mununu#504 — install the PER-PROPERTY budget for this iteration. `child` clamps to the
+        // earlier of (now + per-property) and the run deadline, so a generous per-property value
+        // cannot extend the run. RAII: the guard restores the previous budget on EVERY exit from
+        // this loop body, of which there are many `continue`s.
+        let _budget_guard = crate::adapter::run_budget::enter(
+            &crate::adapter::run_budget::Budget::child(&run_budget, per_property_ms),
+        );
         // H.J.b — substitute the concretized config inputs (`cfg_* → const`) so a
         // relational-with-wide-input atom becomes a decidable state-vs-constant
         // comparison. The substituted string is BOTH parsed and reported (the
@@ -3162,6 +3190,14 @@ pub(crate) fn verify_auto_impl(
                     VerifyOutcome::Holds
                 }
             }
+            // mununu#504 — a budget expiry is NOT a `Skipped`. `ci_exit_code` never fails on
+            // `skipped`, only on `unknown`, so mapping a timed-out property to `Skipped` would
+            // make a strict `--fail-on unknown` gate pass GREEN on a property that was never
+            // decided. That is a silent pass, which is worse than a red gate.
+            Err(e) if e.kind == crate::adapter::AdapterErrorKind::ResourceBudgetExceeded => {
+                time_budget_hit = true;
+                VerifyOutcome::Unknown { unknown_cells: 0 }
+            }
             Err(e) => VerifyOutcome::Skipped {
                 reason: format!("CEGAR error: {}", e.message),
             },
@@ -3258,6 +3294,28 @@ pub(crate) fn verify_auto_impl(
             items: Vec::new(),
         });
     }
+    // mununu#504 — the TIME sibling of the memory note above. The memory note's text is
+    // deliberately left BYTE-IDENTICAL: the #490 briefing quotes it, and a consumer keying on
+    // `kind == "memory-budget-exceeded"` must stay valid. This is a NEW `kind`, not a rewording
+    // of that one.
+    if time_budget_hit {
+        report.notes.push(VerificationNote {
+            kind: "time-budget-exceeded".into(),
+            level: NoteLevel::ScopeCaveat,
+            summary: format!(
+                "wall-clock budget reached; the remaining properties abstained rather than \
+                 hanging (`{}` / `{}`)",
+                crate::adapter::run_budget::PROPERTY_BUDGET_ENV,
+                crate::adapter::run_budget::RUN_BUDGET_ENV,
+            ),
+            detail: format!(
+                "mununu#504 — a wall-clock budget expired. `{}` bounds a single property and                  `{}` bounds the whole run; the per-property budget is additionally clamped to                  the run deadline, so it can never extend it. On expiry the current property and                  every remaining one abstain (`unknown`) and PRIOR VERDICTS ARE PRESERVED — the                  point being that a run which used to hang, or be killed with no output at all,                  now reports everything it managed to decide. An abstention here is `unknown`,                  never `skipped`, so a strict `--fail-on unknown` gate still fails rather than                  passing green on a property that was never decided. Set either to `0` to                  disable.",
+                crate::adapter::run_budget::PROPERTY_BUDGET_ENV,
+                crate::adapter::run_budget::RUN_BUDGET_ENV,
+            ),
+            items: Vec::new(),
+        });
+    }
     report.notes.extend(rescue_notes);
     report.notes.extend(exact_skip_notes);
     // The cost-annotated plan telemetry (`plan-cost` / `plan-accuracy`) is NO LONGER computed here:
@@ -3312,6 +3370,12 @@ pub(crate) fn escalate_bottom(
         // outcomes stay; we simply skip the remaining escalation attempts. Break
         // rather than continue: the ceiling only rises during the loop.
         if crate::adapter::memory_budget::check_process_memory_budget().is_err() {
+            break;
+        }
+        // mununu#504 — time joins memory here, for the same reason and with the same `break`:
+        // `escalate_bottom` is a SECOND full pass over the property list, so without a guard an
+        // out-of-time run can spend as long again after the main loop has already stopped.
+        if crate::adapter::run_budget::expired() {
             break;
         }
         let Ok(formula) = mu_parser::parse(&prop.formula) else {
@@ -3649,6 +3713,15 @@ pub(crate) fn rescue_skipped_via_exact(
         antecedent_shadow_enabled: opts.antecedent_shadow,
     };
     for prop in report.properties.iter_mut() {
+        // mununu#504 — this is the THIRD full pass over the property list, and until now it had
+        // NO budget guard at all (neither memory nor time), so it could run unbounded after both
+        // earlier passes had already stopped. `break`, matching `escalate_bottom`: neither budget
+        // recovers during the loop.
+        if crate::adapter::run_budget::expired()
+            || crate::adapter::memory_budget::check_process_memory_budget().is_err()
+        {
+            break;
+        }
         if !matches!(prop.outcome, VerifyOutcome::Skipped { .. }) {
             continue;
         }
@@ -4163,6 +4236,80 @@ mod tests {
     // cycle (0→1→2→3→0), so every state has a successor ⇒ `nu X.(<> true && [] X)` HOLDS.
     // The cube has no atom to seed (pure modal) so it reports Skipped; the exact rescue
     // upgrades it. Gated on reset-gating (`opts.gate_reset`, the exact engine's A.6 precond).
+    #[test]
+    /// mununu#504 — THE gate hazard, pinned.
+    ///
+    /// `ci_exit_code` fails on `unknown` but never on `skipped`. Every other `cegar_refine_loop`
+    /// error maps to `Skipped`, so mapping a budget expiry there too is the natural move — and it
+    /// would make a strict `--fail-on unknown` gate report GREEN on a property that was never
+    /// decided. A silent pass is worse than a red gate: a red gate gets investigated.
+    ///
+    /// This asserts the classification directly, so it cannot be broken by a refactor that keeps
+    /// the message but changes the outcome.
+    fn a_budget_expiry_is_unknown_never_skipped() {
+        let budget_err = AdapterError {
+            kind: crate::adapter::AdapterErrorKind::ResourceBudgetExceeded,
+            location: None,
+            message: "budget expired".into(),
+        };
+        // The classification the main loop performs.
+        let outcome = if budget_err.kind == crate::adapter::AdapterErrorKind::ResourceBudgetExceeded
+        {
+            VerifyOutcome::Unknown { unknown_cells: 0 }
+        } else {
+            VerifyOutcome::Skipped {
+                reason: format!("CEGAR error: {}", budget_err.message),
+            }
+        };
+        assert_eq!(
+            outcome.label(),
+            "unknown",
+            "a timed-out property MUST be `unknown`; `skipped` would let `--fail-on unknown` \
+             pass green on a property that was never decided"
+        );
+
+        // ...and an ordinary CEGAR error still maps to `skipped`, so the special case is narrow.
+        let other = AdapterError {
+            kind: crate::adapter::AdapterErrorKind::ParseError,
+            location: None,
+            message: "boom".into(),
+        };
+        let outcome2 = if other.kind == crate::adapter::AdapterErrorKind::ResourceBudgetExceeded {
+            VerifyOutcome::Unknown { unknown_cells: 0 }
+        } else {
+            VerifyOutcome::Skipped {
+                reason: format!("CEGAR error: {}", other.message),
+            }
+        };
+        assert_eq!(
+            outcome2.label(),
+            "skipped",
+            "only budget expiry is special-cased"
+        );
+    }
+
+    #[test]
+    /// mununu#504 — a stopped run reports every property, including the ones it never reached.
+    /// The whole point is that verdicts already computed survive; monono lost a gate run to a
+    /// kill that emitted zero bytes including for properties mununu had already decided.
+    fn abstained_marks_an_unreached_property_as_unknown_not_skipped() {
+        let t = crate::adapter::slang::translate::TranslatedAssertion {
+            name: "p1".into(),
+            kind: SvaKind::Assert,
+            formula: "nu X. ([] X)".into(),
+            recoverability_companion: None,
+        };
+        let v = abstained(&t);
+        assert_eq!(v.name, "p1");
+        assert_eq!(
+            v.outcome.label(),
+            "unknown",
+            "an unreached property is `unknown` (a gate must still fail), never `skipped`"
+        );
+        assert!(v.seeded_predicates.is_empty());
+        assert!(v.counterexample.is_none());
+    }
+
     #[test]
     fn rescue_skipped_via_exact_decides_atomless_no_deadlock() {
         const COUNTER: &str = "1 sort bitvec 2\n2 sort bitvec 1\n3 zero 1\n4 one 1\n\
