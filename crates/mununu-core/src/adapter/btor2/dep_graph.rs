@@ -68,6 +68,21 @@ impl DepGraphBuilder for Btor2File {
 /// Walk from `nid` through the operand DAG, collecting the symbols of
 /// every `State` and `Input` terminal reached. `visited` guards against
 /// cycles (BTOR2 is acyclic by definition but defensive coding is cheap).
+///
+/// # Recursion depth (measured 2026-09-07, mununu#504)
+///
+/// This recurses once per operand-DAG LEVEL, so its depth is bounded by the
+/// design's expression depth rather than by anything mununu chooses — which
+/// made it a suspect when the exact engine was reported aborting on a stack
+/// overflow. It is not: measured over every `.btor2` / `.btor` in the repo,
+/// the deepest operand DAG is **239** levels (`ponylink-slaveTXlen-sat`, 3950
+/// nodes); every RTL lift is under 50. At ~100-150 bytes per frame that is
+/// ~35 KB against a 2 MiB default thread stack — roughly 60x headroom.
+///
+/// BTOR2 stays word-level through `write_btor`, so depth tracks RTL expression
+/// nesting, not bit width: a 32-bit add is one level, not 32. Rewriting this
+/// iteratively would therefore buy nothing measurable today. Revisit if a
+/// frontend ever emits gate-level BTOR2, where the depth argument changes.
 fn collect_operand_terminals(
     file: &Btor2File,
     nid: Nid,
