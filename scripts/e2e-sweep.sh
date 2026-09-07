@@ -30,13 +30,20 @@ CARGO="${CARGO:-cargo}"
 FILTER="${FILTER:-e2e_}"
 
 echo "== building e2e test binaries =="
-lib_bin=$($CARGO test -p mununu-core --lib --all-features --no-run --message-format=json 2>/dev/null \
-  | grep -o '"executable":"[^"]*mununu_core[^"]*"' | tail -1 | cut -d'"' -f4)
-oracle_bin=$($CARGO test -p mununu-core --test differential_oracle_e2e --all-features --no-run --message-format=json 2>/dev/null \
-  | grep -o '"executable":"[^"]*differential_oracle_e2e[^"]*"' | tail -1 | cut -d'"' -f4)
+# `--message-format=json` puts artifact records on stdout and compiler
+# diagnostics on stderr. Keep stderr on the terminal: swallowing it turns a
+# build failure into a silent "could not locate the binary", which is exactly
+# the kind of opaque failure this script exists to prevent.
+build_bin() { # $1 = cargo target args (word-split intentionally), $2 = binary-name match
+  # shellcheck disable=SC2086
+  $CARGO test $1 --all-features --no-run --message-format=json \
+    | grep -o "\"executable\":\"[^\"]*$2[^\"]*\"" | tail -1 | cut -d'"' -f4
+}
+lib_bin=$(build_bin "-p mununu-core --lib" "mununu_core")
+oracle_bin=$(build_bin "-p mununu-core --test differential_oracle_e2e" "differential_oracle_e2e")
 
 if [ -z "${lib_bin:-}" ]; then
-  echo "FATAL: could not locate the mununu-core lib test binary — build failed?" >&2
+  echo "FATAL: could not locate the mununu-core lib test binary — see the build output above." >&2
   exit 2
 fi
 
