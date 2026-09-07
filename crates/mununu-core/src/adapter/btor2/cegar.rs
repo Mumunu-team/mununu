@@ -2451,6 +2451,107 @@ mod tests {
     }
 
     #[test]
+    /// mununu#503 — a property whose atoms are ALL derived labels seeds ZERO cube dimensions.
+    /// Every may-edge path used to be gated on `!predicates.is_empty()`, so such a property got
+    /// a 1-cube, 0-edge KMTS, and `downgrade_unsatisfiable_cells` masked the cell to ⊥ because
+    /// its proxy reads "no outgoing edges" as "unsatisfiable cube". Result: the property
+    /// returned Unknown regardless of what it asserted.
+    ///
+    /// `nu X. ([] X)` is the sharpest witness: it contains NO atom at all, so a ⊥ here cannot be
+    /// blamed on atom binding — it is true at every state of every KMTS, by definition.
+    fn zero_dimension_lift_decides_a_formula_with_no_atoms() {
+        let formula = crate::mu_calculus::parser::parse("nu X. ([] X)").expect("formula parses");
+        let sidecar = serde_json::json!({
+            "module": "cegar",
+            "source": "zero_dim.btor2",
+            "compound_predicates": [
+                {"name": "trigger_i != trigger_active",
+                 "expr": "trigger_i != trigger_active",
+                 "derived": true}
+            ],
+            "combinational_predicates": [],
+            "signals": []
+        })
+        .to_string();
+        let opts = AdapterOptions {
+            sidecar_json: Some(sidecar),
+            ..Default::default()
+        };
+        let trace = cegar_refine_loop(
+            &formula,
+            ZERO_DIM_BTOR2,
+            Vec::new(), // <- no cube dimensions: the whole point
+            &Environment::new(1),
+            &opts,
+            &CegarOptions::default(),
+        )
+        .expect("cegar runs");
+        let v = &trace.final_verdict;
+        let cells: Vec<Trit> = (0..v.len()).map(|i| v.verdict_at(i)).collect();
+        assert_eq!(
+            cells,
+            vec![Trit::True],
+            "`nu X. ([] X)` must be True at the single universal cube; ⊥ here means the cube \
+             was emitted edgeless and masked by downgrade_unsatisfiable_cells"
+        );
+    }
+
+    #[test]
+    /// mununu#503 — the same zero-dimension shape, now with the derived label carrying real
+    /// content. `trigger_active` is a `uext` alias of `not(trigger_i)`, so
+    /// `trigger_i != trigger_active` is a TAUTOLOGY over the combinational relation and must
+    /// reach a definite True. This is the reduction of the sysrst `sva_2` failure.
+    fn zero_dimension_lift_decides_a_derived_label_tautology() {
+        let formula =
+            crate::mu_calculus::parser::parse("nu X. (((trigger_i != trigger_active)) && [] X)")
+                .expect("formula parses");
+        let sidecar = serde_json::json!({
+            "module": "cegar",
+            "source": "zero_dim.btor2",
+            "compound_predicates": [
+                {"name": "trigger_i != trigger_active",
+                 "expr": "trigger_i != trigger_active",
+                 "derived": true}
+            ],
+            "combinational_predicates": [],
+            "signals": []
+        })
+        .to_string();
+        let opts = AdapterOptions {
+            sidecar_json: Some(sidecar),
+            ..Default::default()
+        };
+        let trace = cegar_refine_loop(
+            &formula,
+            ZERO_DIM_BTOR2,
+            Vec::new(),
+            &Environment::new(1),
+            &opts,
+            &CegarOptions::default(),
+        )
+        .expect("cegar runs");
+        let v = &trace.final_verdict;
+        assert_eq!(
+            v.verdict_at(0),
+            Trit::True,
+            "`b != !b` is valid over the combinational relation, so AG of it must HOLD"
+        );
+    }
+
+    /// mununu#503 fixture — one state, one free input, and a combinational alias
+    /// `trigger_active = uext(not(trigger_i))`. A property over `trigger_i != trigger_active`
+    /// binds ONLY as a derived label (an input operand is not a sound cube dimension), so it
+    /// seeds zero dimensions — the degenerate cube space this defect lived in.
+    const ZERO_DIM_BTOR2: &str = "1 sort bitvec 1\n\
+                                  2 state 1 q\n\
+                                  3 zero 1\n\
+                                  4 init 1 2 3\n\
+                                  5 input 1 trigger_i\n\
+                                  6 not 1 5\n\
+                                  7 uext 1 6 0 trigger_active\n\
+                                  8 next 1 2 5\n";
+
+    #[test]
     fn downgrade_unsatisfiable_cells_masks_edgeless_cells_to_bottom() {
         use crate::clts::{Clts, DefaultLabelIdx, DefaultStateIdx, LabelControllability};
         use bitvec::prelude::*;

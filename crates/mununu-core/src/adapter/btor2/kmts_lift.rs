@@ -1574,12 +1574,12 @@ struct CubeSamplingCtx<'a> {
 /// callers' prior gating) or when every `simulate_one_step` invocation
 /// errors for this cube.
 fn cube_sampling_edges(cube_index: usize, ctx: &CubeSamplingCtx) -> Vec<(usize, LabelDescriptor)> {
-    // Gating: matches the eager lifter's `!predicates.is_empty()` check.
-    // We allow n_inputs == 0 (n_combos == 1) so a single iteration runs
-    // with empty input_values — both callers did the same.
-    if ctx.predicates.is_empty() {
-        return Vec::new();
-    }
+    // mununu#503 — the `ctx.predicates.is_empty()` early return is GONE. With zero dimensions
+    // there is one cube holding every concrete state, and the canonical representative below
+    // still simulates a step and maps back to cube 0, yielding the self-loop the KMTS must have.
+    // Returning empty here produced an edgeless cell that `downgrade_unsatisfiable_cells` then
+    // masked to ⊥. `n_inputs == 0` (n_combos == 1) was already allowed — a single iteration with
+    // empty `input_values` — and that is exactly the shape this case needs.
 
     // Build canonical representative for cube_index.
     let mut registers: std::collections::HashMap<String, u128> = std::collections::HashMap::new();
@@ -2213,9 +2213,17 @@ pub fn predicate_cube_lift(
     // this excludes an edge ONLY when Z3 proves it impossible. Edges
     // are collected inside the Z3 scope and emitted after it (the
     // builder is not borrowed into the closure).
-    if matches!(lift_opts.may_edge_inference, MayEdgeInference::SmtAllPairs)
-        && !predicates.is_empty()
-    {
+    // mununu#503 — NO `!predicates.is_empty()` guard. A property whose atoms are all DERIVED
+    // labels (relational-with-input / combinational-of-input) contributes ZERO cube dimensions,
+    // and this block used to be skipped for it — emitting a 1-cube, 0-edge KMTS. An edgeless
+    // cell is then masked to ⊥ by `downgrade_unsatisfiable_cells` (cegar.rs), whose proxy reads
+    // "no outgoing edges" as "unsatisfiable cube". The result was that EVERY such property
+    // returned Unknown regardless of what it asserted — even `nu X. ([] X)`, which is true at
+    // every state of every KMTS. At |P| = 0 this block does exactly one 0 -> 0 check, which is
+    // cheap and EXACT: a total design yields the self-loop, and a design whose `constraint`
+    // admits no transition correctly yields none (⊥ there is right). The `"step"` label is also
+    // interned here, so skipping the block left the KMTS with no labels at all.
+    if matches!(lift_opts.may_edge_inference, MayEdgeInference::SmtAllPairs) {
         let step_label = builder
             .labels()
             .intern(["step"])
@@ -2401,9 +2409,10 @@ pub fn predicate_cube_lift(
         predicate_image_pending = false;
     }
 
+    // mununu#503 — `!predicates.is_empty()` removed here too; see the note on the SmtAllPairs
+    // block above. `max_input_bits > 0` stays: that one is a real opt-out, not a shape guard.
     if !matches!(lift_opts.may_edge_inference, MayEdgeInference::SmtAllPairs)
         && lift_opts.max_input_bits > 0
-        && !predicates.is_empty()
     {
         let mut sampled_targets_per_source: Vec<std::collections::BTreeSet<usize>> =
             vec![std::collections::BTreeSet::new(); state_ids.len()];
@@ -2903,6 +2912,43 @@ mod tests {
             },
         );
         (btor2, preds, compound)
+    }
+
+    #[test]
+    /// mununu#503 — the LIFT-LEVEL pin for the zero-dimension defect. With no cube dimensions
+    /// there is exactly one cube (the universal set), and a lift from a TOTAL transition
+    /// relation must give it a self-loop. Every may-edge path used to be gated on
+    /// `!predicates.is_empty()`, so this lift produced a 1-state, 0-edge, 0-LABEL KMTS —
+    /// which `downgrade_unsatisfiable_cells` then masks to ⊥ (its proxy reads "no outgoing
+    /// edges" as "unsatisfiable cube"). Asserting the edge HERE localises a future regression
+    /// to the lift rather than to a verdict several layers up.
+    fn zero_dimension_lift_still_emits_the_universal_cube_self_loop() {
+        const B: &str = "1 sort bitvec 1\n\
+                         2 state 1 q\n\
+                         3 zero 1\n\
+                         4 init 1 2 3\n\
+                         5 input 1 en\n\
+                         6 next 1 2 5\n";
+        let out = lift_predicate_cube(
+            Vec::new(), // zero dimensions — the degenerate cube space
+            B,
+            &AdapterOptions::default(),
+            &PredicateCubeLiftOptions {
+                may_edge_inference: MayEdgeInference::SmtAllPairs,
+                ..Default::default()
+            },
+            crate::adapter::btor2::cegar::LiftStrategy::Eager,
+        )
+        .expect("zero-dimension lift succeeds");
+
+        assert_eq!(out.cube_count, 1, "|P| = 0 ⇒ exactly one universal cube");
+        assert_eq!(out.clts.state_count(), 1, "one cube ⇒ one state");
+        let s0 = crate::clts::StateId::<DefaultStateIdx>::from_index(0).expect("state 0");
+        assert!(
+            !out.clts.outgoing(s0).is_empty(),
+            "the universal cube of a TOTAL design must have a self-loop; an edgeless cell is \
+             indistinguishable from an unsatisfiable one and gets masked to ⊥"
+        );
     }
 
     #[test]

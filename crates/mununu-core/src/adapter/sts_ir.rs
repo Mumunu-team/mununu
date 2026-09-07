@@ -360,9 +360,11 @@ impl<'a> BtorSts<'a> {
         };
         use crate::adapter::sidecar::predicate_image::btor2_encode::encode_primed;
 
-        if predicates.is_empty() {
-            return (Vec::new(), Vec::new());
-        }
+        // mununu#503 — no empty-predicate early return. At |P| = 0 there is ONE cube (the
+        // universal set) and the loops below reduce to a single 0 -> 0 check. Returning no
+        // edges here left that cube edgeless, which `downgrade_unsatisfiable_cells` masks to ⊥
+        // — silently making every derived-label-only property Unknown. See the note in
+        // `predicate_cube_lift`'s SmtAllPairs block.
         let n_cubes = 1usize << predicates.len();
         let cfg = z3::Config::new();
         z3::with_z3_config(&cfg, || {
@@ -575,9 +577,9 @@ impl SmtEncode for BtorSts<'_> {
         };
         use crate::adapter::sidecar::predicate_image::btor2_encode::encode_primed;
 
-        if predicates.is_empty() {
-            return Vec::new();
-        }
+        // mununu#503 — no empty-predicate early return: at |P| = 0 the single universal cube
+        // still has a self-loop to compute, and returning no edges left it edgeless (⇒ masked
+        // to ⊥ by `downgrade_unsatisfiable_cells`).
         // P0 — faithful, memory-aware encode (array theory for `$mem`
         // cells), matching the production `predicate_cube_lift`. (DR0 used
         // the BvOnly `encode_design`.)
@@ -630,9 +632,9 @@ impl SmtEncode for BtorSts<'_> {
         predicates: &[P],
         timeout_ms: u32,
     ) -> Vec<(usize, usize)> {
-        if predicates.is_empty() {
-            return Vec::new();
-        }
+        // mununu#503 — no empty-predicate early return: at |P| = 0 the single universal cube
+        // still has a self-loop to compute, and returning no edges left it edgeless (⇒ masked
+        // to ⊥ by `downgrade_unsatisfiable_cells`).
         // The all-pairs ∀∃ must is exactly `must_edges_over` applied to the
         // full `0..2^p × 0..2^p` grid — one image, two candidate shapes.
         let n_cubes = 1usize << predicates.len();
@@ -653,7 +655,9 @@ impl SmtEncode for BtorSts<'_> {
         };
         use crate::adapter::sidecar::predicate_image::btor2_encode::encode_primed;
 
-        if predicates.is_empty() || candidates.is_empty() {
+        // mununu#503 — the `predicates.is_empty()` half of this guard is gone (see the sibling
+        // note above); `candidates.is_empty()` stays, since no candidate targets means no work.
+        if candidates.is_empty() {
             return Vec::new();
         }
         // H.U.1c — same encode + the next-cycle node cache (`encode_primed`)
@@ -701,9 +705,9 @@ impl SmtEncode for BtorSts<'_> {
         };
         use crate::adapter::sidecar::predicate_image::btor2_encode::encode_primed;
 
-        if predicates.is_empty() {
-            return Vec::new();
-        }
+        // mununu#503 — no empty-predicate early return: at |P| = 0 the single universal cube
+        // still has a self-loop to compute, and returning no edges left it edgeless (⇒ masked
+        // to ⊥ by `downgrade_unsatisfiable_cells`).
         // Candidate hyper-must target set per source = its may-successor
         // set (sorted, deduped). A source with no may-successors gets no
         // hyper-must edge (an empty T is trivially NotMust).
