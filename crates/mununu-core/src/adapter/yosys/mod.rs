@@ -597,16 +597,32 @@ fn run_sv_flatten_btor2_concrete(
     if let Some(plugin) = &slang_plugin {
         yosys_cmd.arg("-m").arg(plugin);
     }
-    let output = yosys_cmd
-        .arg("-q")
-        .arg("-p")
-        .arg(&script)
-        .output()
-        .map_err(|e| AdapterError {
-            kind: AdapterErrorKind::ParseError,
-            message: format!("adapter/yosys: failed to spawn yosys: {e}"),
-            location: None,
-        })?;
+    yosys_cmd.arg("-q").arg("-p").arg(&script);
+    // mununu#504 — bounded. This ran as a bare `.output()`, i.e. forever. The lift precedes every
+    // property, so a hung yosys emits ZERO output and the whole run reads as absent — one of the
+    // two ways a consumer loses a full gate run. `run_yosys` 700 lines below has used this same
+    // helper for the per-module path all along.
+    let outcome = match crate::adapter::lift_timeout() {
+        Some(t) => crate::adapter::run_with_timeout(&mut yosys_cmd, None, t),
+        None => yosys_cmd.output().map(|o| {
+            Some((
+                o.status,
+                String::from_utf8_lossy(&o.stdout).into_owned(),
+                String::from_utf8_lossy(&o.stderr).into_owned(),
+            ))
+        }),
+    }
+    .map_err(|e| AdapterError {
+        kind: AdapterErrorKind::ParseError,
+        message: format!("adapter/yosys: failed to spawn yosys: {e}"),
+        location: None,
+    })?;
+    let (status, stdout_s, stderr_s) = lift_timeout_outcome(outcome, "yosys")?;
+    let output = std::process::Output {
+        status,
+        stdout: stdout_s.into_bytes(),
+        stderr: stderr_s.into_bytes(),
+    };
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1325,6 +1341,27 @@ fn run_yosys(yosys: &Path, script: &str, timeout: Duration) -> Result<(), Adapte
 /// (timed out ⇒ killed) becomes an actionable scope error rather than a hang;
 /// a non-zero exit surfaces yosys's own stderr. Split out so the error paths are
 /// unit-testable without spawning a slow subprocess.
+/// mununu#504 — map a bounded lift-subprocess outcome, splitting the TIMEOUT case out from the
+/// normal one. Pure (`Option<(ExitStatus, String, String)>` in, `Result` out) so the timeout path
+/// is unit-testable without spawning anything — the same shape as
+/// [`yosys_run_outcome_to_result`], for the same reason.
+fn lift_timeout_outcome(
+    outcome: Option<(std::process::ExitStatus, String, String)>,
+    tool: &str,
+) -> Result<(std::process::ExitStatus, String, String), AdapterError> {
+    outcome.ok_or_else(|| AdapterError {
+        kind: AdapterErrorKind::ParseError,
+        message: format!(
+            "adapter/yosys: `{tool}` exceeded the lift timeout and was killed. The lift runs \
+             before any property is attempted, so this would otherwise hang with no output at \
+             all. Raise or disable the cap with {}=<ms> (0 disables), or reduce the design \
+             (fewer sources, a narrower --top).",
+            crate::adapter::LIFT_TIMEOUT_ENV
+        ),
+        location: None,
+    })
+}
+
 fn yosys_run_outcome_to_result(
     outcome: Option<(std::process::ExitStatus, String, String)>,
     script: &str,
@@ -1954,11 +1991,28 @@ fn run_sv2v(
         cmd.arg(format!("-I{}", dir.display()));
     }
     cmd.args(sources);
-    let result = cmd.output().map_err(|e| AdapterError {
+    // mununu#504 — bounded; see the note on the main yosys lift.
+    let outcome = match crate::adapter::lift_timeout() {
+        Some(t) => crate::adapter::run_with_timeout(&mut cmd, None, t),
+        None => cmd.output().map(|o| {
+            Some((
+                o.status,
+                String::from_utf8_lossy(&o.stdout).into_owned(),
+                String::from_utf8_lossy(&o.stderr).into_owned(),
+            ))
+        }),
+    }
+    .map_err(|e| AdapterError {
         kind: AdapterErrorKind::ParseError,
         message: format!("adapter/yosys: failed to spawn sv2v: {e}"),
         location: None,
     })?;
+    let (status, stdout_s, stderr_s) = lift_timeout_outcome(outcome, "sv2v")?;
+    let result = std::process::Output {
+        status,
+        stdout: stdout_s.into_bytes(),
+        stderr: stderr_s.into_bytes(),
+    };
     if !result.status.success() {
         let stderr = String::from_utf8_lossy(&result.stderr);
         let stdout = String::from_utf8_lossy(&result.stdout);
@@ -2343,6 +2397,81 @@ mod tests {
 
     // P1.1 — Auto-frontend fallback attempt ordering (the slang branch itself needs the plugin /
     // mununu-sva image; the ordering is deterministic + host-testable).
+    #[test]
+    /// mununu#504 — a lift-subprocess timeout must produce an ACTIONABLE error naming the cap,
+    /// not a bare failure. Pure mapper, so this runs without spawning anything.
+    fn lift_timeout_outcome_maps_a_kill_to_an_actionable_error() {
+        let err = lift_timeout_outcome(None, "yosys").expect_err("timeout is an error");
+        assert!(
+            err.message.contains("exceeded the lift timeout"),
+            "{}",
+            err.message
+        );
+        assert!(
+            err.message.contains("MUNUNU_LIFT_TIMEOUT_MS"),
+            "must name the knob that changes it: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("before any property"),
+            "must explain WHY this costs the whole run: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    /// The non-timeout path is passed through untouched, so bounding the call cannot change
+    /// behaviour on a design that completes.
+    fn lift_timeout_outcome_passes_a_completed_run_through() {
+        let st = std::process::Command::new("true")
+            .status()
+            .expect("`true` runs");
+        let (status, out, err) =
+            lift_timeout_outcome(Some((st, "OUT".into(), "ERR".into())), "yosys")
+                .expect("completed run is not an error");
+        assert!(status.success());
+        assert_eq!(out, "OUT");
+        assert_eq!(err, "ERR");
+    }
+
+    #[test]
+    /// mununu#504 — the ladder, pure. `0` disables (the escape-hatch convention the other
+    /// budgets use); a positive value is honoured; unset or garbage falls back to the default.
+    fn lift_timeout_ms_parses_the_whole_ladder() {
+        use crate::adapter::parse_lift_timeout_ms;
+        assert_eq!(parse_lift_timeout_ms(Some("0".into())), None, "0 disables");
+        assert_eq!(
+            parse_lift_timeout_ms(Some("1500".into())),
+            Some(std::time::Duration::from_millis(1500))
+        );
+        let default = parse_lift_timeout_ms(None).expect("unset ⇒ default");
+        assert_eq!(default, std::time::Duration::from_secs(15 * 60));
+        assert_eq!(
+            parse_lift_timeout_ms(Some("garbage".into())),
+            Some(default),
+            "unparseable falls back to the default rather than disabling the cap"
+        );
+        assert_eq!(parse_lift_timeout_ms(Some("  0  ".into())), None, "trimmed");
+    }
+
+    #[test]
+    /// mununu#504 — the helper really does kill a hung child, and fast. This is what turns
+    /// "does it hang?" into a deterministic sub-second test instead of a six-hour one.
+    fn run_with_timeout_kills_a_hanging_child_quickly() {
+        let t0 = std::time::Instant::now();
+        let mut cmd = std::process::Command::new("sleep");
+        cmd.arg("30");
+        let outcome =
+            crate::adapter::run_with_timeout(&mut cmd, None, std::time::Duration::from_millis(150))
+                .expect("spawn ok");
+        assert!(outcome.is_none(), "a killed child reports as a timeout");
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(5),
+            "must return promptly after the cap, took {:?}",
+            t0.elapsed()
+        );
+    }
+
     #[test]
     fn auto_frontend_attempt_order() {
         // No slang plugin → the sole attempt is read_verilog (unchanged legacy behaviour).
