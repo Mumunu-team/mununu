@@ -8421,30 +8421,76 @@ endmodule
 
         eprintln!("\n=== R-F5.5d sysrst: explicit vs symbolic ===");
         eprintln!("explicit engine: {dt_x:?}   symbolic engine: {dt_s:?}");
-        // The full sysrst design exceeds the symbolic bit-blast cap (no COI yet;
-        // R-F5.6), so every property degrades to Skipped with the bit-cap reason
-        // — GRACEFULLY, not a mid-construction OoM panic. That the run completes
-        // (no panic) + reaches this assertion is the wiring + graceful-degradation
-        // validation on real RTL.
-        let mut sym_skipped_bitcap = 0;
+        // What this test is FOR: on a real design the symbolic engine either DECIDES or
+        // ABSTAINS HONESTLY — never a mid-construction OoM panic, and never a process abort
+        // (mununu#504). So the assertion is over the engine's ABSTENTION CONTRACT, not over
+        // which budget happens to fire.
+        //
+        // It used to require a Skip carrying the BIT-CAP reason. That pinned one mechanism,
+        // and the R-F5.6 COI restriction then made it unreachable: every cone now fits under
+        // the cap, so sysrst abstains on the NODE budget (and on two unsupported combinational
+        // predicates) instead. The test failed while the engine was behaving BETTER than when
+        // it was written — a stale assertion, not a regression. Measured 2026-09-07:
+        // bit-cap Skips = 0; every abstention named the NODE budget or a declared feature gap.
+        //
+        // Assert the NEGATIVE (no opaque/internal failure) and TALLY the positive. A whitelist
+        // of accepted reason strings would drift exactly the way the bit-cap assertion did, so
+        // the budgets below are counted for the diagnostic, never required.
+        let looks_like_a_defect = |reason: &str| {
+            let r = reason.to_ascii_lowercase();
+            [
+                "panic",
+                "internal error",
+                "unwrap",
+                "index out of bounds",
+                "overflowed its stack",
+            ]
+            .iter()
+            .any(|m| r.contains(m))
+        };
+        let mut sym_abstained = 0;
+        let mut named_budget = 0;
         for (px, ps) in explicit.properties.iter().zip(symbolic.properties.iter()) {
             assert_eq!(px.name, ps.name, "property order aligns across engines");
             eprintln!(
                 "  {}: explicit={:?}  symbolic={:?}",
                 px.name, px.outcome, ps.outcome
             );
-            if let VerifyOutcome::Skipped { reason } = &ps.outcome
-                && reason.contains("register+input bits")
-            {
-                sym_skipped_bitcap += 1;
+            if let VerifyOutcome::Skipped { reason } = &ps.outcome {
+                assert!(
+                    !reason.trim().is_empty(),
+                    "{}: an abstention must explain itself — an empty reason gives a consumer \
+                     nothing to act on",
+                    ps.name
+                );
+                assert!(
+                    !looks_like_a_defect(reason),
+                    "{}: the symbolic engine abstained by FAILING, not by deciding it could not \
+                     decide. An abstention is a supported outcome; a panic surfaced as a reason \
+                     string is a defect: {reason}",
+                    ps.name
+                );
+                sym_abstained += 1;
+                if [
+                    "register+input bits",
+                    "NODE budget",
+                    "ITERATION budget",
+                    "WALL-CLOCK budget",
+                ]
+                .iter()
+                .any(|m| reason.contains(m))
+                {
+                    named_budget += 1;
+                }
             }
         }
-        eprintln!("symbolic bit-cap Skips: {sym_skipped_bitcap}");
+        eprintln!("symbolic abstentions: {sym_abstained} (of which {named_budget} name a budget)");
         assert!(
-            sym_skipped_bitcap >= 1,
-            "the full sysrst design exceeds the symbolic bit-blast cap → every property \
-             degrades to a Skipped (bit-cap) verdict GRACEFULLY (no OoM panic); the R-F5.6 \
-             COI restriction is what lets the symbolic engine scale to real designs"
+            sym_abstained >= 1,
+            "sysrst is the graceful-degradation case: its 32-bit detect timer does not compress \
+             to a tractable BDD, so at least one property must ABSTAIN rather than panic or \
+             abort. Zero abstentions means this design no longer exercises the degradation path \
+             — pick a harder one rather than deleting the assertion"
         );
     }
 

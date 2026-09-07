@@ -71,6 +71,15 @@ docker run --rm -v "$(pwd)":/work -v mununu-target:/cargo-target \
   mununu-sva cargo test -p mununu-core --lib --all-features e2e_ -- --ignored --nocapture
 ```
 
+**For the WHOLE sweep, use `make e2e`** (`scripts/e2e-sweep.sh`), which runs one test per
+process. A test that ABORTS rather than fails — a stack overflow, or a panic while unwinding
+an exhausted BDD arena — does not unwind, so in a single shared libtest process it kills the
+run: no summary line, no failure list, and every later test silently skipped. That is how the
+ignored set drifted to 19 unnoticed failures ([mununu#503](https://github.com/vscorza/mununu/issues/503),
+found while triaging [mununu#504](https://github.com/vscorza/mununu/issues/504)). Isolated, an
+abort becomes one `CRASH` row and the sweep still completes. The single-test command above stays
+the right tool for reproducing ONE test.
+
 **Host caveat.** slang ships prebuilts only for `linux-x86_64` and `macos-arm64`. On an Intel (x86_64) macOS host there is no native slang binary, and the workspace's `z3-sys` link also differs from the dev image — so the Linux `mununu-sva` image (which runs natively on x86_64 hosts) is the supported way to run these tests there. The `e2e_csrng_real_sva_verdict_breakdown` test reads only vendored fixtures (`examples/verify/m2_opentitan_csrng_main_sm` + the standard prim_assert macros from `examples/verify/m0_opentitan_prim_arbiter`), so it is fully reproducible.
 
 **[RULE] Validate any slang / SVA-touching change in the `mununu-sva` image — never on the bare host (added 2026-07-13).** The dev host commonly has `sv2v` + `yosys` but **not** `slang`. That combination is a trap, not a convenience:

@@ -447,7 +447,12 @@ pub fn decide_reach_portfolio_parallel_with_timeout(
 /// [`native_bmc::DEFAULT_MAX_K`] so a *deep* violation is caught, while the wall
 /// deadline + per-query timeout keep the (eagerly-built) unrolling bounded.
 const OWNED_DEEP_CEX_MAX_K: u32 = 128;
-/// Per-z3-check timeout inside the owned deep CEX search.
+/// Per-z3-check timeout inside the owned deep CEX search. Gated to match its only
+/// use site: with the `boolector` feature on, the deep-CEX direction runs through
+/// the native Boolector BMC instead, so an ungated const is dead code and fails the
+/// documented pre-push check (`clippy --workspace --all-features -D warnings`).
+/// `make ci` does not pass `--all-features`, which is why CI stayed green.
+#[cfg(not(feature = "boolector"))]
 const OWNED_CEX_QUERY_MS: u32 = 15_000;
 
 /// The **owned-standalone** driver: decide `bad`-reachability with ONLY the

@@ -17,7 +17,7 @@ BASELINE   ?= main
 PROPTEST_CASES ?= 64
 
 .PHONY: build test lint verify ci clean help \
-        test-fast e2e test-properties stress fuzz proptest-deep \
+        test-fast e2e e2e-oneshot test-properties stress fuzz proptest-deep \
         coverage mem-profile sweep \
         bench-baseline bench-compare bench-record \
         experiment replay publish-prep
@@ -27,7 +27,8 @@ help:
 	@echo "  build          - cargo build --release for mununu-cli and mununu-extract"
 	@echo "  test           - cargo test --workspace"
 	@echo "  test-fast      - cargo test --lib + integration tests, sub-minute (pre-commit gate)"
-	@echo "  e2e            - SVA-verification e2e suite (#[ignore]d; run inside the mununu-sva image)"
+	@echo "  e2e            - SVA-verification e2e suite, one test per process (#[ignore]d; run inside the mununu-sva image)"
+	@echo "  e2e-oneshot    - same suite in a single libtest process (an aborting test loses the run)"
 	@echo "  lint           - cargo fmt --check && cargo clippy -D warnings"
 	@echo "  verify         - cargo run mununu against $(VERIFY_FILE)"
 	@echo "  ci             - lint + test (the gate)"
@@ -115,7 +116,18 @@ test-fast:
 # corpus monotone-verdict ledger + census, the cegar↔symbolic↔exact parity
 # gate, the portfolio e2e, the Verilator counterexample-replay gate) plus the
 # adapter's `e2e_`-prefixed lib tests (verify-auto / extract-sva on real RTL).
+# mununu#504 — this runs ONE TEST PER PROCESS via scripts/e2e-sweep.sh. A test
+# that ABORTS (stack overflow, or a panic while unwinding an exhausted BDD
+# arena) does not unwind, so in a single shared libtest process it kills the
+# run: no summary, no failure list, and every later test silently skipped.
+# That is how the set drifted to 19 unnoticed failures (mununu#503). Isolated,
+# an abort becomes one CRASH row and the sweep still completes.
+#
+# `make e2e-oneshot` keeps the old single-process form for a quick local run.
 e2e:
+	./scripts/e2e-sweep.sh
+
+e2e-oneshot:
 	$(CARGO) test -p mununu-core --lib --all-features e2e_ -- --ignored --nocapture
 	$(CARGO) test -p mununu-core --test differential_oracle_e2e --all-features -- --ignored --nocapture
 
