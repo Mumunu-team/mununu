@@ -391,7 +391,10 @@ mod tests {
     fn shipped_defaults_are_the_measured_ones() {
         assert_eq!(DEFAULT_PROPERTY_BUDGET_MS, 900_000, "15 min/property");
         assert_eq!(DEFAULT_RUN_BUDGET_MS, 3_600_000, "1 h/run");
-        assert!(
+        // `const` block: both operands are constants, so this is a COMPILE-TIME check rather
+        // than a runtime one — stronger, and it satisfies clippy's `assertions_on_constants`
+        // (which CI enforces via `-D warnings`).
+        const _: () = assert!(
             DEFAULT_PROPERTY_BUDGET_MS * 2 < DEFAULT_RUN_BUDGET_MS,
             "the run budget must comfortably exceed a single property's, else one slow property \
              consumes the whole run"
