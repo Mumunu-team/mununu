@@ -2767,6 +2767,15 @@ pub(crate) fn verify_auto_impl(
             report.properties.push(abstained(t));
             continue;
         }
+        // mununu#504 — per-property wall time, opt-in via `MUNUNU_PROPERTY_TIMING=1`.
+        //
+        // This exists because a per-property budget DEFAULT must be MEASURED, not guessed: a cap
+        // that fires on legitimate work turns a slow success into a spurious `unknown` across
+        // every consumer's gate, which is worse than having no cap. It is also useful on its own
+        // — it answers "which property is eating the run?", which no existing diagnostic does.
+        let prop_t0 = std::env::var("MUNUNU_PROPERTY_TIMING")
+            .is_ok()
+            .then(std::time::Instant::now);
         // mununu#504 — install the PER-PROPERTY budget for this iteration. `child` clamps to the
         // earlier of (now + per-property) and the run deadline, so a generous per-property value
         // cannot extend the run. RAII: the guard restores the previous budget on EVERY exit from
@@ -3207,6 +3216,14 @@ pub(crate) fn verify_auto_impl(
         // definite cube verdict is sound by over-approximation; the A.4 honest-⊥
         // downgrade (a stopgap for the retired sampling-may under-approximation)
         // is no longer needed.
+        if let Some(t0) = prop_t0 {
+            eprintln!(
+                "[mununu-timing] property={} outcome={} elapsed_ms={}",
+                t.name,
+                outcome.label(),
+                t0.elapsed().as_millis()
+            );
+        }
         report.properties.push(PropertyVerdict {
             name: t.name.clone(),
             kind: t.kind,

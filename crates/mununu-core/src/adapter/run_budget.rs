@@ -172,9 +172,60 @@ pub enum StopReason {
     Cancelled,
 }
 
-/// Pure parse of a budget env value: a positive integer → that many ms; `0`, unset, or
-/// unparseable → `None` (unbounded). Extracted so the ladder is testable without mutating
-/// process-global environment, mirroring `memory_budget.rs`.
+/// Default per-property budget: **15 minutes**.
+///
+/// MEASURED, not guessed (mununu#504, 2026-09-07, `MUNUNU_PROPERTY_TIMING=1` over the real-design
+/// e2e corpus, n = 122 properties):
+///
+/// | p50 | p90 | p99 | max |
+/// |---|---|---|---|
+/// | 2.2 s | 14.7 s | 41.3 s | **49.1 s** |
+///
+/// 15 minutes is ~18x the observed maximum. That is deliberately far more headroom than the
+/// "3x p99" rule of thumb, for two reasons:
+///
+/// 1. **The corpus is smaller than a consumer's real gate.** Tuning a default to our own e2e set
+///    would be tuning to the easy case.
+/// 2. **The two failure modes are not symmetric.** Too high means a hang takes longer to catch —
+///    annoying. Too low means mununu abstains on work that was *succeeding*, and since a budget
+///    abstention is `unknown` (never `skipped`, so that a gate still fails), that turns
+///    currently-GREEN gates RED across every consumer, for properties that were fine. The
+///    asymmetry says: err high.
+///
+/// A single ⊥ property routed through the full rescue ladder can also legitimately spend minutes
+/// (btormc 60 s + pono 60 s + SPACER + native + interpolation, sequentially), which the corpus
+/// above did not fully exercise.
+const DEFAULT_PROPERTY_BUDGET_MS: u64 = 15 * 60 * 1000;
+
+/// Default whole-run budget: **1 hour**.
+///
+/// This is the one that addresses the reported incident. monono lost a full `make formal` run to
+/// a SIX-HOUR hang; a per-property cap alone would not have saved them (42 properties x 15 min is
+/// still 10 hours in the worst case), but an hour-long run budget turns that six-hour loss into a
+/// report after one hour with the undecided tail marked `unknown`.
+const DEFAULT_RUN_BUDGET_MS: u64 = 60 * 60 * 1000;
+
+/// Pure parse of a budget env value against a default: a positive integer → that many ms;
+/// **`0` → `None` (explicitly disabled)**; unset or unparseable → the default.
+///
+/// Note the ladder differs from the pre-default version: unset now means "use the default", not
+/// "unbounded". `0` is the escape hatch, matching the convention the other budgets use, and
+/// unparseable falls back to the default rather than silently uncapping — the safe direction.
+pub fn parse_budget_ms_with_default(v: Option<String>, default_ms: u64) -> Option<u64> {
+    match v.as_deref().map(str::trim) {
+        Some("0") => None,
+        Some(s) => Some(
+            s.parse::<u64>()
+                .ok()
+                .filter(|&ms| ms > 0)
+                .unwrap_or(default_ms),
+        ),
+        None => Some(default_ms),
+    }
+}
+
+/// Pure parse with NO default — a positive integer or `None`. Retained for callers that want an
+/// explicit-only reading.
 pub fn parse_budget_ms(v: Option<String>) -> Option<u64> {
     v.as_deref()
         .map(str::trim)
@@ -182,14 +233,18 @@ pub fn parse_budget_ms(v: Option<String>) -> Option<u64> {
         .filter(|&ms| ms > 0)
 }
 
-/// The configured per-property budget (`MUNUNU_PROPERTY_BUDGET_MS`), or `None`.
+/// The per-property budget: `MUNUNU_PROPERTY_BUDGET_MS`, else [`DEFAULT_PROPERTY_BUDGET_MS`].
+/// `0` disables.
 pub fn property_budget_ms() -> Option<u64> {
-    parse_budget_ms(std::env::var(PROPERTY_BUDGET_ENV).ok())
+    parse_budget_ms_with_default(
+        std::env::var(PROPERTY_BUDGET_ENV).ok(),
+        DEFAULT_PROPERTY_BUDGET_MS,
+    )
 }
 
-/// The configured whole-run budget (`MUNUNU_VERIFY_BUDGET_MS`), or `None`.
+/// The whole-run budget: `MUNUNU_VERIFY_BUDGET_MS`, else [`DEFAULT_RUN_BUDGET_MS`]. `0` disables.
 pub fn run_budget_ms() -> Option<u64> {
-    parse_budget_ms(std::env::var(RUN_BUDGET_ENV).ok())
+    parse_budget_ms_with_default(std::env::var(RUN_BUDGET_ENV).ok(), DEFAULT_RUN_BUDGET_MS)
 }
 
 #[cfg(test)]
@@ -303,6 +358,47 @@ mod tests {
     fn clamp_query_ms_passes_through_when_unbounded() {
         let _g = enter(&Budget::unbounded());
         assert_eq!(clamp_query_ms(5000), 5000);
+    }
+
+    #[test]
+    /// mununu#504 C5 — the DEFAULTED ladder. Unset now means "use the default", not "unbounded";
+    /// `0` is the escape hatch; garbage falls back to the default rather than silently uncapping.
+    fn parse_budget_with_default_ladder() {
+        assert_eq!(
+            parse_budget_ms_with_default(None, 900_000),
+            Some(900_000),
+            "unset ⇒ the DEFAULT (this is the C5 behaviour change)"
+        );
+        assert_eq!(
+            parse_budget_ms_with_default(Some("0".into()), 900_000),
+            None,
+            "0 is the explicit escape hatch"
+        );
+        assert_eq!(
+            parse_budget_ms_with_default(Some(" 250 ".into()), 900_000),
+            Some(250),
+            "an explicit value wins, trimmed"
+        );
+        assert_eq!(
+            parse_budget_ms_with_default(Some("garbage".into()), 900_000),
+            Some(900_000),
+            "unparseable falls back to the default, NOT to unbounded — the safe direction"
+        );
+    }
+
+    #[test]
+    /// The shipped defaults, pinned so a change is deliberate and shows up in review.
+    fn shipped_defaults_are_the_measured_ones() {
+        assert_eq!(DEFAULT_PROPERTY_BUDGET_MS, 900_000, "15 min/property");
+        assert_eq!(DEFAULT_RUN_BUDGET_MS, 3_600_000, "1 h/run");
+        // `const` block: both operands are constants, so this is a COMPILE-TIME check rather
+        // than a runtime one — stronger, and it satisfies clippy's `assertions_on_constants`
+        // (which CI enforces via `-D warnings`).
+        const _: () = assert!(
+            DEFAULT_PROPERTY_BUDGET_MS * 2 < DEFAULT_RUN_BUDGET_MS,
+            "the run budget must comfortably exceed a single property's, else one slow property \
+             consumes the whole run"
+        );
     }
 
     #[test]
