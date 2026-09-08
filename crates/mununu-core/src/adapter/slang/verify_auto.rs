@@ -6825,7 +6825,31 @@ endmodule
             ..Default::default()
         };
 
-        // (1) WITHOUT cut points: the 48-bit counter is in the state cone → Skipped.
+        // (1) WITHOUT cut points.
+        //
+        // mununu#503 — this used to assert `Skipped`, i.e. that the wide-counter cone was beyond
+        // the exact engine. **That premise is now unsatisfiable by ANY counter width**, and it is
+        // worth recording why, because the obvious repair does not work:
+        //
+        //   - narrow counter  ⇒ `default_cap_for_cone(c) = max(40, min(c, 192))` admits the cone
+        //     (it rejects only above 192 bits), so the exact engine decides directly;
+        //   - wide counter    ⇒ the exact engine DOES abstain, but the `Err` arm then routes to
+        //     `try_ranking_recoverability`, and a well-founded datapath descent decides
+        //     `AG EF (reg == N)` **without caring about the width at all**.
+        //
+        // Measured: at 256 bits the no-cut run still returns `Holds`, in 5.2 s. So bumping the
+        // fixture — the repair #380 applied to every other exact-abstention fixture, and what I
+        // first tried here — cannot work: the deciding mechanism is not width-sensitive.
+        //
+        // The engine simply got better than this demonstration. What remains true, and is what
+        // this test now pins:
+        //   - the cut is APPLIED and the control-slice note names the cut net (assertion 3);
+        //   - cutting does not COST the verdict — the property still decides under the cut.
+        //
+        // What this test no longer demonstrates is the cut's *value* (turning an undecidable cone
+        // into a decidable one). Showing that needs a property shape the ranking rescue cannot
+        // reduce; inventing one here would be fabricating a demo, so it is left undone and
+        // recorded in #503 instead.
         let no_cut = verify_auto(&sources, &base, &vopts()).expect("verify_auto runs (no cut)");
         let g0 = no_cut
             .properties
@@ -6834,8 +6858,9 @@ endmodule
             .expect("annotated guarantee present");
         eprintln!("no-cut:   {} => {:?}", g0.name, g0.outcome);
         assert!(
-            matches!(g0.outcome, VerifyOutcome::Skipped { .. }),
-            "without cut points the wide-counter cone should be Skipped, got {:?}",
+            !matches!(g0.outcome, VerifyOutcome::Violated { .. }),
+            "the guarantee must not be VIOLATED without cut points — the FSM does reach DONE; \
+             a violation here would be a real regression rather than a capacity effect, got {:?}",
             g0.outcome
         );
 
