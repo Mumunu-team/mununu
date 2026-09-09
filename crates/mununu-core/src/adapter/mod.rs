@@ -53,6 +53,7 @@ pub mod langgraph;
 pub mod liveness_rescue;
 pub mod memory_budget;
 pub mod microcode;
+pub mod partial_json;
 pub mod partition;
 pub mod pono;
 pub mod promela;

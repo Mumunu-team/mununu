@@ -2807,7 +2807,24 @@ pub(crate) fn verify_auto_impl(
         crate::adapter::run_budget::run_budget_ms(),
     );
     let per_property_ms = crate::adapter::run_budget::property_budget_ms();
+    // mununu#504 C7 — the SIGKILL-survivable breadcrumb. The budgets above preserve verdicts when
+    // MUNUNU can observe its own trouble; they are powerless against a kill from outside (the
+    // kernel OOM killer, a CI step timeout), which runs no Rust code at all. That is the exact
+    // failure in the comment above: "monono lost a gate run to a process kill that emitted zero
+    // bytes, including for properties mununu had already decided." Opt-in via
+    // `MUNUNU_VERIFY_AUTO_PARTIAL_JSON=<path>`; disabled and zero-cost otherwise.
+    let mut breadcrumb = crate::adapter::partial_json::Breadcrumb::from_env();
     for t in &extraction.translated {
+        // Flush whatever the PREVIOUS iteration decided, before this one starts its (possibly
+        // very long, possibly fatal) work. One call here covers all nine `properties.push` sites
+        // in this loop, several of which sit behind a `continue`.
+        breadcrumb.record_pending(
+            report
+                .properties
+                .iter()
+                .map(|p| (p.name.as_str(), p.outcome.label())),
+            "main",
+        );
         // Once EITHER budget has been hit, every remaining property abstains without work.
         if memory_budget_hit.is_some() || time_budget_hit {
             report.properties.push(abstained(t));
@@ -3303,6 +3320,26 @@ pub(crate) fn verify_auto_impl(
     // `rescue_bottom_*` opt and only fires on its recognized shape. (P2.1b routes the
     // re-plan entry through the planner, delegating the edge-application to the existing
     // rescue subsystem — verdict-equivalent; P2.1c adds the soundness plan-invariants.)
+    // C7 — the last iteration's verdict has not been flushed yet (the flush happens at the top of
+    // the NEXT iteration, and there isn't one).
+    breadcrumb.record_pending(
+        report
+            .properties
+            .iter()
+            .map(|p| (p.name.as_str(), p.outcome.label())),
+        "main",
+    );
+    // The re-plan below can turn an `unknown` into a definite verdict, so a breadcrumb written
+    // before it is not the final answer. Snapshot the pre-escalation outcomes and append a second
+    // record for anything that MOVED — a consumer takes the last line per property name.
+    let pre_replan_outcomes: Option<Vec<&'static str>> = breadcrumb.is_active().then(|| {
+        report
+            .properties
+            .iter()
+            .map(|p| p.outcome.label())
+            .collect()
+    });
+
     let rescue_notes = crate::planner::replan(
         &mut report,
         &btor2,
@@ -3310,6 +3347,16 @@ pub(crate) fn verify_auto_impl(
         opts,
         &ann_scan.fairness_assumes,
     );
+
+    // C7 — append an `escalated` record for every verdict the re-plan MOVED. Only the movers, so
+    // the file stays a log of what changed rather than a duplicated dump.
+    if let Some(before) = pre_replan_outcomes {
+        for (i, p) in report.properties.iter().enumerate() {
+            if before.get(i).copied() != Some(p.outcome.label()) {
+                breadcrumb.record(i, &p.name, p.outcome.label(), "escalated", None);
+            }
+        }
+    }
 
     // Lever (b) — exact-symbolic rescue for cube-SKIPPED properties. The predicate cube
     // cannot seed an ATOM-LESS modal formula (no-deadlock `nu X.(<> true && [] X)`, a pure
@@ -7955,6 +8002,91 @@ endmodule
                 .map(|p| &p.outcome)
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    #[ignore = "requires slang + sv2v + Yosys + z3; run with --ignored"]
+    fn e2e_partial_json_breadcrumb_records_every_verdict() {
+        // mununu#504 C7 — the WIRING test. `partial_json`'s own unit tests cover the record
+        // format and the cursor; what only an end-to-end run can show is that `verify_auto`
+        // actually CALLS it, and that every property reaches the file. A breadcrumb that is
+        // never written looks identical to one that is written correctly until the day a
+        // process is killed and you go looking for it.
+        //
+        // CONCURRENCY: the env var is process-global and the `--ignored` e2e tests run in
+        // parallel, so another `verify_auto` starting mid-test would `File::create` (truncate)
+        // this same path. The var is therefore REMOVED as soon as our run returns and before we
+        // read, which leaves only a microsecond window rather than the whole test body.
+        let sv = "module fsm (input logic clk, input logic rst_n, input logic go);\n\
+                  logic [1:0] state;\n\
+                  always_ff @(posedge clk) begin\n\
+                    if (!rst_n) state <= 2'd0;\n\
+                    else state <= (state == 2'd2) ? 2'd0 : state + 2'd1;\n\
+                  end\n\
+                  ok:  assert property (@(posedge clk) state != 2'd3);\n\
+                  bad: assert property (@(posedge clk) state == 2'd1);\n\
+                  endmodule\n";
+        let sources = vec![("fsm.sv".to_string(), sv.to_string())];
+        let yopts = YosysOptions {
+            top: Some("fsm".to_string()),
+            use_sv2v: true,
+            ..Default::default()
+        };
+
+        let dir = std::env::temp_dir().join(format!("mununu-c7-e2e-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("breadcrumb.ndjson");
+        // SAFETY: set immediately before the run and removed immediately after; see the
+        // concurrency note above.
+        unsafe {
+            std::env::set_var(crate::adapter::partial_json::PARTIAL_JSON_ENV, &path);
+        }
+        let report = verify_auto(&sources, &yopts, &VerifyAutoOptions::default());
+        unsafe {
+            std::env::remove_var(crate::adapter::partial_json::PARTIAL_JSON_ENV);
+        }
+        let report = report.expect("verify_auto runs end-to-end");
+
+        let content = std::fs::read_to_string(&path).expect("the breadcrumb was written");
+        let records: Vec<serde_json::Value> = content
+            .lines()
+            .map(|l| {
+                serde_json::from_str(l)
+                    .unwrap_or_else(|e| panic!("line is valid JSON: {l:?} ({e})"))
+            })
+            .collect();
+        assert!(
+            !records.is_empty(),
+            "verify_auto must write records; an empty file means the wiring is not called"
+        );
+
+        // The LAST record per property name is the authoritative verdict — the escalation pass
+        // can append a second one. That is the contract a consumer follows.
+        for p in &report.properties {
+            let last = records
+                .iter()
+                .filter(|r| r["property"] == p.name.as_str())
+                .next_back()
+                .unwrap_or_else(|| {
+                    panic!(
+                        "property `{}` never reached the breadcrumb; records: {:?}",
+                        p.name,
+                        records.iter().map(|r| &r["property"]).collect::<Vec<_>>()
+                    )
+                });
+            assert_eq!(
+                last["outcome"],
+                p.outcome.label(),
+                "the last breadcrumb record for `{}` must match the final report verdict",
+                p.name
+            );
+            assert!(
+                last["phase"] == "main" || last["phase"] == "escalated",
+                "every record carries a known phase; got {:?}",
+                last["phase"]
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
