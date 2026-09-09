@@ -238,7 +238,7 @@ Consumers keying on `verification_notes[i].kind` can distinguish "the engine gav
 
 The four exact-engine budgets above (`BIT_CAP` / `NODE` / `ITERATION` / `WALL-CLOCK`) protect the exact engine's own fixpoint. They do NOT stop the default Rust allocator from calling `abort()` (exit 134) on a failed allocation, which crashes the whole process and takes every property in the same invocation down with it. A verify-lane consumer then sees a crash instead of an `unknown` verdict, so a run that would have decided N-1 properties reports none.
 
-`MUNUNU_MAX_PROCESS_MEMORY_BYTES` is a **caller-configurable process-RSS ceiling** that mununu polls itself between properties and at each `escalate_bottom` step. When the ceiling is exceeded, the current + remaining properties abstain (`unknown`) with a `memory-budget-exceeded` verification note, and prior verdicts are preserved. This trades an OS-level `abort()` for a graceful degradation, so a downstream gate can distinguish "ran out of memory" from "the engine did not decide."
+`MUNUNU_MAX_PROCESS_MEMORY_BYTES` is a **process-RSS ceiling** — auto-derived from a detected container limit, or set explicitly — that mununu polls itself between properties and at each `escalate_bottom` step. When the ceiling is exceeded, the current + remaining properties abstain (`unknown`) with a `memory-budget-exceeded` verification note, and prior verdicts are preserved. This trades an OS-level `abort()` for a graceful degradation, so a downstream gate can distinguish "ran out of memory" from "the engine did not decide."
 
 **The default changed in mununu#504 C6 — unset now means AUTO, not disabled.**
 
