@@ -191,6 +191,20 @@ pub fn reduce_ag_boolean_body(formula: &Formula) -> Option<NodeId> {
 /// Walk the subtree; verify it is only And/Or/Not/True/False/Predicate and every
 /// Predicate leaf parses as `PredicateExpr::Cmp`. A single modal / fixpoint /
 /// variable / CmpReg / CmpRegAddend / Select rejects the whole tree.
+///
+/// mununu#503 — uses [`parse_predicate_atom_bool`], NOT the strict
+/// [`parse_predicate_expr`]. A **bare 1-bit identifier** (`trigger_active`,
+/// `event_detected_o`) is how the SVA translator emits "signal is true", and the strict
+/// parser requires an operator, so it returns `Err` and rejected the ENTIRE tree. That is
+/// why every sysrst `|->` property was classified `safety-shape-not-reducible` and never
+/// reached the rescue lane at all — a whole property class turned away at the gate by a
+/// leaf-parsing detail.
+///
+/// The relaxed reading is `signal != 0`, not `== 1`: for a multi-bit signal `== 1` would
+/// spuriously exclude the truthy values 2, 3, … (see that function's own soundness note).
+/// [`crate::adapter::btor2::bad_monitor`]'s compound compiler uses the same entry point, so
+/// the gate and the compiler cannot disagree about what a leaf means — the disagreement
+/// being precisely this bug.
 fn is_compilable_boolean_body(formula: &Formula, id: NodeId) -> bool {
     match formula.node(id) {
         Node::True | Node::False => true,
@@ -199,7 +213,10 @@ fn is_compilable_boolean_body(formula: &Formula, id: NodeId) -> bool {
             is_compilable_boolean_body(formula, *l) && is_compilable_boolean_body(formula, *r)
         }
         Node::Predicate(atom) => {
-            matches!(parse_predicate_expr(atom), Ok(PredicateExpr::Cmp { .. }))
+            matches!(
+                crate::adapter::btor2::predicate_expr::parse_predicate_atom_bool(atom),
+                Ok(PredicateExpr::Cmp { .. })
+            )
         }
         _ => false,
     }
@@ -412,6 +429,39 @@ mod tests {
         assert!(
             reduce_ag_invariant(&f).is_none(),
             "the single-atom reducer must stay strict on compound shapes"
+        );
+    }
+
+    #[test]
+    /// mununu#503 — a body whose leaves are BARE 1-bit identifiers must be reducible.
+    ///
+    /// This is the shape every SVA `|->` produces once the translator emits `sig` rather than
+    /// `sig == 1`. The strict `parse_predicate_expr` requires an operator, so it returned `Err`
+    /// and rejected the whole tree — which is why every sysrst `|->` property was classified
+    /// `safety-shape-not-reducible` and never reached the rescue lane. The gate and the monitor
+    /// compiler now share `parse_predicate_atom_bool`, so they cannot disagree about a leaf.
+    fn bare_identifier_leaves_are_reducible() {
+        // `AG(!(a && b) || c)` with every leaf a bare identifier — the `|->` shape.
+        let f = crate::mu_calculus::parser::parse(
+            "nu X. (((!((trigger_active && cfg_enable_i))) || event_detected_o) && [] X)",
+        )
+        .expect("formula parses");
+        assert!(
+            reduce_ag_boolean_body(&f).is_some(),
+            "bare 1-bit identifiers are the SVA translator's `signal is true` form; rejecting \
+             them turns away an entire property class at the reducibility gate"
+        );
+    }
+
+    #[test]
+    /// The relaxation must not widen what else is accepted: a relational leaf (`CmpReg`) is
+    /// still rejected, because the compound monitor cannot compile it.
+    fn relational_leaves_are_still_rejected() {
+        let f = crate::mu_calculus::parser::parse("nu X. ((cnt_q >= cnt_q__past) && [] X)")
+            .expect("formula parses");
+        assert!(
+            reduce_ag_boolean_body(&f).is_none(),
+            "a reg-vs-reg relational leaf has no compound-monitor encoding and must stay rejected"
         );
     }
 
