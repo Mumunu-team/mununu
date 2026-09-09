@@ -264,11 +264,55 @@ fn is_box_to_var(formula: &Formula, id: NodeId, var: FormulaVarId) -> bool {
 ///
 /// On `Some`, the second component is the raw [`ReachOutcome`] (which engines
 /// decided each side), for diagnostics / a witness note.
+/// mununu#503 — why the safety-rescue lane declined a property, when it did.
+///
+/// Every decline used to be a bare `None`, and one of them threw away a fully descriptive
+/// `AdapterError` via `.ok()?`. A consumer following the `bottom-reason` note's advice — *"check
+/// for a sibling `bit-cap` / `abstained` note"* — found nothing, because the lane emitted nothing.
+/// The trail ended, and a residual ⊥ could not be attributed at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RescueDecline {
+    /// Neither reducer matched the formula's shape (`AG(atom)` / `AG(boolean-of-atoms)`).
+    ShapeNotReducible,
+    /// The shape reduced, but the monitor emitter refused it — carries the emitter's own
+    /// message, which names the offending leaf. This is the one that was being discarded.
+    MonitorEmissionFailed(String),
+    /// The emitted monitor did not re-parse as BTOR2 (an internal inconsistency).
+    MonitoredDesignUnparseable(String),
+}
+
+impl std::fmt::Display for RescueDecline {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RescueDecline::ShapeNotReducible => write!(
+                f,
+                "the formula matched neither `AG(atom)` nor `AG(boolean-of-atoms)`"
+            ),
+            RescueDecline::MonitorEmissionFailed(m) => {
+                write!(f, "the bad-monitor emitter refused the reduced body: {m}")
+            }
+            RescueDecline::MonitoredDesignUnparseable(m) => {
+                write!(f, "the emitted monitor did not re-parse: {m}")
+            }
+        }
+    }
+}
+
+/// Thin wrapper preserving the original signature for existing callers.
 pub fn reach_portfolio_rescue(
     design_btor2: &str,
     formula: &Formula,
     reset_pinned: bool,
 ) -> Option<(RescueVerdict, ReachOutcome)> {
+    reach_portfolio_rescue_diagnosed(design_btor2, formula, reset_pinned).ok()
+}
+
+/// As [`reach_portfolio_rescue`], but reports WHY it declined instead of returning a bare `None`.
+pub fn reach_portfolio_rescue_diagnosed(
+    design_btor2: &str,
+    formula: &Formula,
+    reset_pinned: bool,
+) -> Result<(RescueVerdict, ReachOutcome), RescueDecline> {
     // Try the existing single-atom reducer first — preserves byte-for-byte
     // emission on the shipped case. Fall back to the compound-atom reducer
     // (mununu#492) for `AG(compound_boolean_expression)` and for atoms bound
@@ -284,16 +328,20 @@ pub fn reach_portfolio_rescue(
                 // The single-atom emitter refused the signal (zero-state atom
                 // on a primary input, say). Try the compound path — its leaf
                 // resolution includes primary inputs.
-                let root = reduce_ag_boolean_body(formula)?;
-                emit_ag_boolean_invariant_monitor(design_btor2, formula, root, reset_pinned).ok()?
+                let root =
+                    reduce_ag_boolean_body(formula).ok_or(RescueDecline::ShapeNotReducible)?;
+                emit_ag_boolean_invariant_monitor(design_btor2, formula, root, reset_pinned)
+                    .map_err(|e| RescueDecline::MonitorEmissionFailed(e.message))?
             }
         }
     } else {
         // Non-single-atom shape — try compound.
-        let root = reduce_ag_boolean_body(formula)?;
-        emit_ag_boolean_invariant_monitor(design_btor2, formula, root, reset_pinned).ok()?
+        let root = reduce_ag_boolean_body(formula).ok_or(RescueDecline::ShapeNotReducible)?;
+        emit_ag_boolean_invariant_monitor(design_btor2, formula, root, reset_pinned)
+            .map_err(|e| RescueDecline::MonitorEmissionFailed(e.message))?
     };
-    let file = parser::parse(&monitored).ok()?;
+    let file = parser::parse(&monitored)
+        .map_err(|e| RescueDecline::MonitoredDesignUnparseable(e.message))?;
     let outcome = decide_reach_portfolio(&file);
     let verdict = match outcome.verdict {
         ReachVerdict::Unreachable => RescueVerdict::Holds,
@@ -301,7 +349,7 @@ pub fn reach_portfolio_rescue(
         // Undecided, or a contradiction alarm — never silently pick a side.
         ReachVerdict::Unknown | ReachVerdict::Contradiction => RescueVerdict::Inconclusive,
     };
-    Some((verdict, outcome))
+    Ok((verdict, outcome))
 }
 
 /// The concrete counterexample trace for an AG-invariant the reachability portfolio

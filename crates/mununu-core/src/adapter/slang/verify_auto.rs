@@ -3371,7 +3371,7 @@ pub(crate) fn escalate_bottom(
         LivenessVerdict, reduce_ag_ef_target, reduce_response_af, response_liveness_rescue,
         response_liveness_rescue_under_fairness,
     };
-    use crate::adapter::reach_rescue::{RescueVerdict, reach_portfolio_rescue};
+    use crate::adapter::reach_rescue::RescueVerdict;
     use crate::adapter::recoverability::{verify_recoverability, verify_recoverability_scalable};
     use crate::mu_calculus::{PropertyClass, parser as mu_parser};
     use crate::verdict::PropertyVerdict;
@@ -3400,9 +3400,44 @@ pub(crate) fn escalate_bottom(
         };
         match formula.property_class() {
             PropertyClass::Safety if opts.rescue_bottom_safety => {
-                if let Some((verdict, reach)) =
-                    reach_portfolio_rescue(design_btor2, &formula, reset_pinned)
-                {
+                // mununu#503 — use the DIAGNOSED variant so a decline is reported instead of
+                // vanishing. Before this, every decline was a bare `None`: the `bottom-reason`
+                // note told the consumer to "check for a sibling `bit-cap` / `abstained` note",
+                // and there was none, so a residual ⊥ could not be attributed at all.
+                let rescued = crate::adapter::reach_rescue::reach_portfolio_rescue_diagnosed(
+                    design_btor2,
+                    &formula,
+                    reset_pinned,
+                );
+                let rescued = match rescued {
+                    Ok(v) => Some(v),
+                    Err(why) => {
+                        notes.push(VerificationNote {
+                            kind: "safety-rescue-declined".into(),
+                            level: NoteLevel::ScopeCaveat,
+                            summary: format!(
+                                "`{}`: the safety-rescue lane declined — {why}",
+                                prop.name
+                            ),
+                            detail: "mununu#503 — the reachability rescue is what decides an \
+                                     AG-safety property the cube abstraction left ⊥, by \
+                                     compiling it to a `bad`-monitor and running the concrete \
+                                     portfolio. When it declines, the ⊥ stands. The reason above \
+                                     distinguishes the two cases a consumer must act on \
+                                     differently: a SHAPE the reducers do not match (reshape the \
+                                     property, or a new reducer is needed) versus a LEAF the \
+                                     monitor emitter cannot resolve to a state cell, output port \
+                                     or primary input (an internal combinational wire, typically \
+                                     — the property is fine, the monitor simply has nothing to \
+                                     observe). Neither is a resource abstain, so a bigger budget \
+                                     will not help either one."
+                                .into(),
+                            items: Vec::new(),
+                        });
+                        None
+                    }
+                };
+                if let Some((verdict, reach)) = rescued {
                     let engines = engines_of(&reach);
                     match verdict {
                         RescueVerdict::Holds => {
