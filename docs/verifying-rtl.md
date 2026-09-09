@@ -267,6 +267,34 @@ MUNUNU_MAX_PROCESS_MEMORY_BYTES=0 mununu sv verify-auto design.sv
 
 **Complementary to `--config-value`.** The bit cap counts kept cone bits AFTER COI and AFTER pinning, so `--config-value SIG=V` shrinks the real problem and often keeps a property under the memory ceiling that would otherwise trip it. `@mununu_predicate` hints do NOT — they seed cube dimensions, and an alternating νμ formula is decided by the exact engine which does not use them.
 
+### Crash-survivable partial verdicts: `MUNUNU_VERIFY_AUTO_PARTIAL_JSON` (mununu#504 C7)
+
+> Source of truth: [`adapter::partial_json::Breadcrumb`](../crates/mununu-core/src/adapter/partial_json.rs) — surface: (CLI+API+UI, env var — process-global)
+
+It is read inside `verify_auto` itself, so it applies to **any** process running a verification — the CLI, and equally the API server, which can be OOM-killed mid-request and would otherwise return nothing for properties it had already decided.
+
+The memory ceiling above degrades gracefully when mununu can observe its own trouble. It cannot help when the process is killed from **outside** — the kernel OOM killer, a CI step timeout, `docker stop`. `SIGKILL` runs no Rust code: no destructor, no panic handler, no report. A lane that verified 24 of 25 properties then reports nothing at all.
+
+Point `MUNUNU_VERIFY_AUTO_PARTIAL_JSON` at a path and `sv verify-auto` appends one JSON object per line as each property completes, flushing after every write:
+
+```bash
+MUNUNU_VERIFY_AUTO_PARTIAL_JSON=/tmp/verdicts.ndjson mununu sv verify-auto design.sv
+```
+
+```json
+{"index":0,"property":"fifo_sva_0","outcome":"holds","phase":"main"}
+{"index":1,"property":"fifo_sva_1","outcome":"unknown","phase":"main"}
+{"index":1,"property":"fifo_sva_1","outcome":"holds","phase":"escalated"}
+```
+
+**Read the LAST record per property name.** A verdict can change after the main loop — the ⊥ re-plan pass may turn an `unknown` into a definite verdict, and appends a second record with `"phase":"escalated"`. Only properties that actually moved get a second record.
+
+**It is a diagnostic, never a gate.** An unwritable path, a full disk, or a serialization problem is swallowed after a single warning; a breadcrumb must not be able to fail a verification run, which would trade a recoverable crash for an unconditional one.
+
+**One path, one run.** The file is truncated on open, so a process that calls `verify_auto` more than once — the API server across requests, `sv mutate`'s baseline-then-mutant pair — reuses the path and the last opener wins. Use a distinct path per run when that matters.
+
+**Not a substitute for the report.** It carries verdicts only — no counterexamples, notes, or seeded predicates. A run that finishes normally still emits the full report, and consumers should prefer it. This is for the run that does not get to finish.
+
 ### Pinning a config input: `--config-value`
 
 > Source of truth: [`partition_config_pins`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) — surface: (CLI+API+UI)
