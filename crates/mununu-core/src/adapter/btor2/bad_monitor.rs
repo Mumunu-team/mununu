@@ -502,7 +502,7 @@ pub fn emit_ag_boolean_invariant_monitor(
     root: crate::mu_calculus::NodeId,
     reset_pinned: bool,
 ) -> Result<String, AdapterError> {
-    use crate::adapter::btor2::predicate_expr::{PredicateExpr, parse_predicate_expr};
+    use crate::adapter::btor2::predicate_expr::{PredicateExpr, parse_predicate_atom_bool};
     use crate::mu_calculus::Node as MuNode;
 
     let file = parser::parse(content).map_err(|mut e| {
@@ -601,7 +601,12 @@ pub fn emit_ag_boolean_invariant_monitor(
                 appended.push(format!("{n} or {bool_sort} {a} {b}"));
                 Ok(n)
             }
-            MuNode::Predicate(atom) => match parse_predicate_expr(atom) {
+            // mununu#503 — `parse_predicate_atom_bool`, matching the gate in
+            // `reach_rescue::is_compilable_boolean_body`. A bare identifier is "signal is
+            // true" ⇒ `!= 0` (sound for any width; `== 1` would exclude truthy 2, 3, …).
+            // The gate and this compiler MUST use the same entry point: if the gate accepts a
+            // leaf this rejects, a property passes reducibility and then fails to compile.
+            MuNode::Predicate(atom) => match parse_predicate_atom_bool(atom) {
                 Ok(PredicateExpr::Cmp {
                     register,
                     op,
