@@ -68,6 +68,98 @@ use crate::adapter::yosys::YosysOptions;
 use crate::adapter::{AdapterError, AdapterErrorKind};
 use crate::mu_calculus::{Formula, Node};
 
+/// mununu#518 — split a design's `state` symbols into **BV-sorted** cells and **array-sorted**
+/// ones (memories), by the same `bv_width(..).is_some()` discriminator the rest of the pipeline
+/// uses.
+///
+/// Returns `(bv, array)`. Only the BV set is the seedable-atom universe: an atom over a memory
+/// has no BV to bind to, and admitting one produced a confident wrong answer rather than an
+/// error. The array set is kept — not discarded — so a refusal can name the memory and say why,
+/// which is the difference between "unknown signal" and "that is a memory".
+///
+/// A state with no symbol contributes to neither set (nothing could name it in a property).
+pub(crate) fn partition_state_cells_by_sort(
+    file: &crate::adapter::btor2::ast::Btor2File,
+    symbols: &std::collections::HashMap<crate::adapter::btor2::ast::Nid, String>,
+) -> (HashSet<String>, HashSet<String>) {
+    let mut bv = HashSet::new();
+    let mut arrays = HashSet::new();
+    for l in &file.lines {
+        let crate::adapter::btor2::ast::Node::State { sort, .. } = &l.node else {
+            continue;
+        };
+        let Some(name) = symbols.get(&l.nid).cloned() else {
+            continue;
+        };
+        if crate::adapter::btor2::parser::bv_width(file, *sort).is_some() {
+            bv.insert(name);
+        } else {
+            arrays.insert(name);
+        }
+    }
+    (bv, arrays)
+}
+
+/// mununu#518 — every register name a predicate atom mentions.
+///
+/// `Select`'s `array` operand is included deliberately: an atom over a memory CELL
+/// (`mem[i] == v`) names the memory, and the caller's whole purpose is to notice that.
+fn atom_register_names(
+    expr: &crate::adapter::btor2::predicate_expr::PredicateExpr,
+    out: &mut Vec<String>,
+) {
+    use crate::adapter::btor2::predicate_expr::PredicateExpr as P;
+    match expr {
+        P::Cmp { register, .. } => out.push(register.clone()),
+        P::CmpReg { lhs, rhs, .. } | P::CmpRegAddend { lhs, rhs, .. } => {
+            out.push(lhs.clone());
+            out.push(rhs.clone());
+        }
+        P::Select { array, index, .. } => {
+            out.push(array.clone());
+            out.push(index.clone());
+        }
+        P::And(a, b) | P::Or(a, b) => {
+            atom_register_names(a, out);
+            atom_register_names(b, out);
+        }
+        // No catch-all arm: every variant is named above, so a NEW `PredicateExpr` variant
+        // becomes a compile error here rather than a silently unchecked atom.
+        P::Not(inner) => atom_register_names(inner, out),
+    }
+}
+
+/// mununu#518 — the memories a formula's atoms name, if any.
+///
+/// A BTOR2 array state has no BV to bind to, so an atom over one cannot become a cube dimension.
+/// Before the sort filter it was admitted as though it could; now it is simply unknown to the
+/// seeder, and "unknown signal" is a bad thing to tell someone who wrote a perfectly sensible
+/// name. Naming the memory turns a confusing non-result into an actionable one.
+fn formula_atoms_naming_memories(formula: &Formula, memories: &HashSet<String>) -> Vec<String> {
+    if memories.is_empty() {
+        return Vec::new();
+    }
+    let mut hits: Vec<String> = Vec::new();
+    for node in formula.nodes() {
+        let Node::Predicate(atom) = node else {
+            continue;
+        };
+        let Ok(expr) = crate::adapter::btor2::predicate_expr::parse_predicate_atom_bool(atom)
+        else {
+            continue;
+        };
+        let mut names = Vec::new();
+        atom_register_names(&expr, &mut names);
+        for n in names {
+            if memories.contains(&n) && !hits.contains(&n) {
+                hits.push(n);
+            }
+        }
+    }
+    hits.sort();
+    hits
+}
+
 /// Per-property verification outcome.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VerifyOutcome {
@@ -2641,12 +2733,14 @@ pub(crate) fn verify_auto_impl(
         e
     })?;
     let symbols = crate::adapter::btor2::parser::collect_symbols(&file);
-    let state_cells: HashSet<String> = file
-        .lines
-        .iter()
-        .filter(|l| matches!(l.node, crate::adapter::btor2::ast::Node::State { .. }))
-        .filter_map(|l| symbols.get(&l.nid).cloned())
-        .collect();
+    // mununu#518 — BV-sorted states ONLY. A BTOR2 *array* state (a memory) is also a
+    // `Node::State` and carries a symbol, so it used to land here beside a scalar register and
+    // `resolves_to_state` answered true for it — admitting a memory as a BV cube dimension for
+    // which no BV exists. Arrays are deliberately excluded from the BV signal vector in
+    // `predicate_image/btor2_encode.rs` (they are Z3 `Array` constants resolved by name through a
+    // separate map), and `bv_width` returning `None` is the BV/array discriminator used
+    // everywhere else — so this brings the seedable-atom universe into line with it.
+    let (state_cells, array_state_cells) = partition_state_cells_by_sort(&file, &symbols);
     // Total REGISTER lines — a `state` that carries a `next` function. A zero/low
     // count is the headline signal that state was cut or optimized away.
     //
@@ -3030,6 +3124,32 @@ pub(crate) fn verify_auto_impl(
                 counterexample,
             });
             continue;
+        }
+
+        // mununu#518 — a property naming a MEMORY cannot bind it as a cube dimension: a BTOR2
+        // array state has no BV. Before the sort filter it was admitted as though it could, which
+        // is worse than refusing — it produced a confident wrong answer. Now it is simply unknown
+        // to the seeder, and "unknown signal" is an unhelpful thing to tell someone who wrote a
+        // perfectly sensible name, so say what it actually is.
+        for mem in formula_atoms_naming_memories(&formula, &array_state_cells) {
+            report.notes.push(VerificationNote {
+                kind: "array-atom-unsupported".into(),
+                level: NoteLevel::ScopeCaveat,
+                summary: format!(
+                    "`{}`: the atom names `{mem}`, which is a MEMORY (a BTOR2 array state), not a \
+                     scalar register; memory atoms are not supported as cube dimensions and the \
+                     property cannot be decided from them",
+                    t.name
+                ),
+                detail:
+                    "mununu#518 — arrays are encoded as SMT `Array` constants resolved through \
+                         a separate name map, not as entries in the bit-vector signal vector, so \
+                         there is no BV for a cube dimension to range over. Rephrase the property \
+                         over a scalar register (a read port's output, say), or over a specific \
+                         cell if the design exposes one."
+                        .into(),
+                items: vec![mem.clone()],
+            });
         }
 
         let mut seeded = seed_from_formula(
@@ -8001,6 +8121,85 @@ endmodule
                 .iter()
                 .map(|p| &p.outcome)
                 .collect::<Vec<_>>()
+        );
+    }
+
+    // mununu#518 — a design with BOTH an array state and a scalar one. The scalar is the control:
+    // a filter that over-fires would drop it too, and the fix would look like it worked.
+    const MIXED_ARRAY_AND_SCALAR: &str = "\
+1 sort bitvec 1
+2 sort bitvec 4
+3 sort array 2 2
+4 state 3 mem
+5 state 2 cnt
+6 zero 2
+7 init 2 5 6
+8 next 2 5 5
+";
+
+    #[test]
+    fn array_states_are_not_admitted_as_bv_state_cells() {
+        let file = crate::adapter::btor2::parser::parse(MIXED_ARRAY_AND_SCALAR).expect("parse");
+        let symbols = crate::adapter::btor2::parser::collect_symbols(&file);
+        let (bv, arrays) = partition_state_cells_by_sort(&file, &symbols);
+        assert!(
+            !bv.contains("mem"),
+            "an array state has no BV to bind to; admitting it as a cube dimension is the \
+             mununu#518 defect. Got bv={bv:?}"
+        );
+        assert!(
+            bv.contains("cnt"),
+            "the scalar control must survive the filter — a filter that drops everything would \
+             pass the assertion above while breaking every real design. Got bv={bv:?}"
+        );
+        assert!(
+            arrays.contains("mem"),
+            "the memory is KEPT (separately) so a refusal can name it. Got arrays={arrays:?}"
+        );
+    }
+
+    #[test]
+    fn a_real_yosys_memory_is_classified_as_an_array() {
+        // The lifted ibex register file — `16 state 14 mem` over `14 sort array 11 11`. Real
+        // yosys output, not a hand-written shape.
+        let raw = include_str!("../../../tests/data/ibex_register_file_fpga_16x4.btor2");
+        let file = crate::adapter::btor2::parser::parse(raw).expect("parse");
+        let symbols = crate::adapter::btor2::parser::collect_symbols(&file);
+        let (bv, arrays) = partition_state_cells_by_sort(&file, &symbols);
+        assert!(
+            arrays.contains("mem"),
+            "`mem` is an array state; got arrays={arrays:?}"
+        );
+        assert!(
+            !bv.contains("mem"),
+            "and must NOT appear among the BV state cells; got bv={bv:?}"
+        );
+    }
+
+    #[test]
+    fn a_formula_naming_a_memory_is_reported_by_name() {
+        let memories: HashSet<String> = ["mem".to_string()].into_iter().collect();
+        let f = crate::mu_calculus::parser::parse("nu X. ((mem == 3) && [] X)").expect("parse");
+        assert_eq!(
+            formula_atoms_naming_memories(&f, &memories),
+            vec!["mem".to_string()],
+            "the memory must be named so the note can say what the signal actually is"
+        );
+    }
+
+    #[test]
+    fn a_formula_over_scalars_names_no_memory() {
+        // The negative control: the diagnostic must not fire on ordinary properties.
+        let memories: HashSet<String> = ["mem".to_string()].into_iter().collect();
+        let f = crate::mu_calculus::parser::parse("nu X. ((cnt == 3) && [] X)").expect("parse");
+        assert!(
+            formula_atoms_naming_memories(&f, &memories).is_empty(),
+            "a property over a scalar register must not be flagged"
+        );
+        // And with no memories in the design at all, nothing is ever flagged.
+        assert!(
+            formula_atoms_naming_memories(&f, &HashSet::new()).is_empty(),
+            "a design with no arrays can never produce this note"
         );
     }
 
