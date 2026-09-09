@@ -3351,12 +3351,16 @@ pub(crate) fn verify_auto_impl(
         report.notes.push(VerificationNote {
             kind: "memory-budget-exceeded".into(),
             level: NoteLevel::ScopeCaveat,
+            // mununu#504 C6 — name the ceiling's PROVENANCE, not the env var unconditionally.
+            // Since unset resolves to an auto ceiling, "via `MUNUNU_MAX_PROCESS_MEMORY_BYTES`"
+            // would attribute the limit to a variable the operator never set, and send them
+            // looking for a value that is not there.
             summary: format!(
-                "process memory ceiling reached ({} B in use, ceiling {} B via \
-                 `{}`); the remaining properties abstained rather than aborting the process",
+                "process memory ceiling reached ({} B in use, ceiling {} B, {}); the remaining \
+                 properties abstained rather than aborting the process",
                 hit.current_rss_bytes,
                 hit.limit_bytes,
-                crate::adapter::memory_budget::MEMORY_BUDGET_ENV,
+                crate::adapter::memory_budget::ceiling_provenance(),
             ),
             detail: "mununu#490 — `MUNUNU_MAX_PROCESS_MEMORY_BYTES` is a self-imposed \
                      process-RSS ceiling. When the ceiling is exceeded between properties, the \

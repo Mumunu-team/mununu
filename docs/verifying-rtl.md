@@ -232,22 +232,36 @@ Two properties of this path are worth knowing:
 
 Consumers keying on `verification_notes[i].kind` can distinguish "the engine gave up" from "the property shape doesn't fit this rescue lane," and act accordingly. Prior to mununu#492, the two cases were indistinguishable — a critical distinction for contrast pairs where a stateless block's supposed-to-fail twin was returning ⊥ instead of VIOLATED (the ticket's `mem_router_faulty` case).
 
-### Process-wide memory ceiling: `MUNUNU_MAX_PROCESS_MEMORY_BYTES` (mununu#490)
+### Process-wide memory ceiling: `MUNUNU_MAX_PROCESS_MEMORY_BYTES` (mununu#490, default revised in #504)
 
 > Source of truth: [`adapter::memory_budget::check_process_memory_budget`](../crates/mununu-core/src/adapter/memory_budget.rs) — surface: (CLI+API+UI, env var — process-global)
 
 The four exact-engine budgets above (`BIT_CAP` / `NODE` / `ITERATION` / `WALL-CLOCK`) protect the exact engine's own fixpoint. They do NOT stop the default Rust allocator from calling `abort()` (exit 134) on a failed allocation, which crashes the whole process and takes every property in the same invocation down with it. A verify-lane consumer then sees a crash instead of an `unknown` verdict, so a run that would have decided N-1 properties reports none.
 
-`MUNUNU_MAX_PROCESS_MEMORY_BYTES` is a **caller-configurable process-RSS ceiling** that mununu polls itself between properties and at each `escalate_bottom` step. When the ceiling is exceeded, the current + remaining properties abstain (`unknown`) with a `memory-budget-exceeded` verification note, and prior verdicts are preserved. This trades an OS-level `abort()` for a graceful degradation, so a downstream gate can distinguish "ran out of memory" from "the engine did not decide."
+`MUNUNU_MAX_PROCESS_MEMORY_BYTES` is a **process-RSS ceiling** — auto-derived from a detected container limit, or set explicitly — that mununu polls itself between properties and at each `escalate_bottom` step. When the ceiling is exceeded, the current + remaining properties abstain (`unknown`) with a `memory-budget-exceeded` verification note, and prior verdicts are preserved. This trades an OS-level `abort()` for a graceful degradation, so a downstream gate can distinguish "ran out of memory" from "the engine did not decide."
 
-Default unset ⇒ disabled (no ceiling; current behaviour). Set to a byte count to enable:
+**The default changed in mununu#504 C6 — unset now means AUTO, not disabled.**
+
+| value | ceiling |
+|---|---|
+| a positive integer | that many bytes (explicit; unchanged) |
+| `0` | **disabled** — the deliberate escape hatch |
+| non-numeric | disabled, with a debug log |
+| **unset** | **auto**: 80% of a detected cgroup limit (v2 `/sys/fs/cgroup/memory.max`, then v1 `memory/memory.limit_in_bytes`), or **disabled** when no limit is detected |
 
 ```bash
-# Cap at 24 GiB:
+# Explicit — cap at 24 GiB:
 MUNUNU_MAX_PROCESS_MEMORY_BYTES=25769803776 mununu sv verify-auto design.sv
+
+# Opt OUT of the auto ceiling entirely:
+MUNUNU_MAX_PROCESS_MEMORY_BYTES=0 mununu sv verify-auto design.sv
 ```
 
-**Recommended setting:** 70-80% of the process's real memory limit (`ulimit -m`, container `--memory`), leaving headroom for allocator overhead + non-mununu memory. Sizing too tight causes spurious abstentions on properties that would have decided; sizing too loose lets the process abort before the ceiling fires.
+**Why the default moved.** The ceiling converts an allocator `abort()` — which kills every property in the invocation — into per-property abstentions. Defaulting it off meant the protection was absent exactly where it is needed most: a containerised CI lane, whose operator has no reason to know the variable exists until a run has already crashed.
+
+**What it costs, stated plainly.** An auto ceiling can abstain on a run that would have finished, because RSS at 80% of the limit does not guarantee an OOM. Three things bound that: the ceiling engages only when a container limit is actually **detected** (an unconstrained developer machine gets no ceiling and behaves exactly as before), 80% is deliberately loose, and `=0` turns it off. An unlimited cgroup (`max`, or a v1 "unlimited" sentinel) counts as no limit.
+
+**Sizing an explicit value:** 70-80% of the process's real memory limit (`ulimit -m`, container `--memory`), leaving headroom for allocator overhead + non-mununu memory. Sizing too tight causes spurious abstentions on properties that would have decided; sizing too loose lets the process abort before the ceiling fires.
 
 **Coarse granularity.** The check fires BETWEEN checkpoints (per property + per escalation step). It does NOT catch an allocation that fails within a single BDD blast between checkpoints — a single property's blowup can still crash the process. The ceiling is a graceful-degradation lever for the multi-property `sv verify-auto` lane, not an absolute crash guarantee.
 
