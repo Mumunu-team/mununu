@@ -9,15 +9,46 @@ name: E2E (SVA verification)
 # cegar↔symbolic↔exact parity gate, the portfolio e2e, and the RTL-replay gate
 # run automatically instead of only on a manual local docker invocation.
 #
-# Nightly (schedule) + on-demand (workflow_dispatch); not per-PR — building the
-# sva image + running the full corpus under real slang/yosys/Verilator costs
-# minutes, disproportionate for every push. A red run here is a soundness/
-# precision regression the fast PR gate cannot see.
+# ⚠ THE NIGHTLY SCHEDULE IS DISABLED (2026-09-09). This workflow has NEVER
+# produced a verification signal.
+#
+# Every scheduled run since it was added (2026-07-06) failed at the "Build
+# mununu-sva image" step, before a single test executed:
+#
+#   failed to resolve source metadata for docker.io/library/hw-verif:latest:
+#   pull access denied, repository does not exist
+#
+# `docker/Dockerfile.sva` does `COPY --from=hw-verif:latest /opt/oss-cad-suite`.
+# That image is built from the SIBLING repo `hw-verification-uba` and exists only
+# on a contributor's machine — it is never published, so CI cannot pull it.
+#
+# This matters beyond a red badge: it explains how the `#[ignore]`d set drifted to
+# 19 failures unnoticed (mununu#503). The assumption was "nobody read the
+# nightly"; the truth is there was nothing to read. A workflow that is
+# permanently red signals nothing, and worse, it trains people to ignore it.
+#
+# TO RESTORE, pick one and re-add the `schedule:` block below:
+#   (a) drop the sibling-image dependency — `Dockerfile.sva` needs ONLY
+#       `/opt/oss-cad-suite`, and `hw-verification-uba/Dockerfile` itself gets
+#       that from a PUBLIC YosysHQ release
+#       (`oss-cad-suite-build/releases/.../oss-cad-suite-linux-x64-*.tgz`),
+#       exactly how this repo already fetches slang and sv2v. Self-contained,
+#       ~1GB download in CI (buildx-cached);
+#   (b) publish `hw-verif` to `ghcr.io/mumunu-team/` and pull it here — keeps the
+#       reuse, but publishes another repo's image and needs `packages: write`
+#       plus a cross-repo build. Someone should review what that image carries
+#       before it goes to a registry.
+#
+# Until then the suite runs LOCALLY, which is where it has always actually run:
+#   docker run --rm -v "$(pwd)":/work -v mununu-target:/cargo-target \
+#     mununu-sva make e2e
+# (`make e2e` runs one test per process — mununu#504 — so an aborting test
+# reports as one CRASH row instead of destroying the run's summary.)
+#
+# `workflow_dispatch` is kept so the workflow can still be triggered by hand once
+# the image problem is fixed.
 
 on:
-  schedule:
-    # 04:00 UTC nightly (after typical merge activity settles).
-    - cron: "0 4 * * *"
   workflow_dispatch: {}
 
 permissions:

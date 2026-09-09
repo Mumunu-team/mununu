@@ -80,6 +80,15 @@ found while triaging [mununu#504](https://github.com/Mumunu-team/mununu/issues/5
 abort becomes one `CRASH` row and the sweep still completes. The single-test command above stays
 the right tool for reproducing ONE test.
 
+**The CI nightly is DISABLED and never worked (2026-09-09).** `.github/workflows/e2e.yml` has
+produced no verification signal since it was added: every scheduled run failed at *"Build
+mununu-sva image"*, because `docker/Dockerfile.sva` does `COPY --from=hw-verif:latest`, and that
+image is built from the sibling `hw-verification-uba` repo and never published — CI cannot pull it.
+This is how the `#[ignore]`d set drifted to 19 failures unnoticed ([mununu#503](https://github.com/Mumunu-team/mununu/issues/503)):
+not "nobody read the nightly", but nothing to read. **So the e2e suite is verified LOCALLY, in the
+image, as the commands above show — treat that as the only e2e signal.** The workflow file records
+the two ways to restore it.
+
 **Host caveat.** slang ships prebuilts only for `linux-x86_64` and `macos-arm64`. On an Intel (x86_64) macOS host there is no native slang binary, and the workspace's `z3-sys` link also differs from the dev image — so the Linux `mununu-sva` image (which runs natively on x86_64 hosts) is the supported way to run these tests there. The `e2e_csrng_real_sva_verdict_breakdown` test reads only vendored fixtures (`examples/verify/m2_opentitan_csrng_main_sm` + the standard prim_assert macros from `examples/verify/m0_opentitan_prim_arbiter`), so it is fully reproducible.
 
 **[RULE] Validate any slang / SVA-touching change in the `mununu-sva` image — never on the bare host (added 2026-07-13).** The dev host commonly has `sv2v` + `yosys` but **not** `slang`. That combination is a trap, not a convenience:
