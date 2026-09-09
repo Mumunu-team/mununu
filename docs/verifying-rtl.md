@@ -210,9 +210,23 @@ trial-and-error.
 
 **Compound-safety rescue.** A residual ⊥ on a safety property of the shape `AG(compound)` — where `compound` is a boolean tree over `And`/`Or`/`Not`/`True`/`False`/`Predicate` nodes and each `Predicate` leaf is a single `REG op VALUE` comparison — is now decided by the reachability portfolio. Widens the existing single-atom escalation to accept exclusion (`!a || !b`), implication (`!a || b`), and conjunctive (`a && b`) shapes, and — critically — resolves each leaf via state cell → output net → **primary input**, so a zero-state model (a purely combinational block like `mem_router`) can have its properties decided at k=0 without a state cone to walk. Preserves byte-for-byte behavior on the shipped single-atom path (single-atom shapes route through the original emitter; the compound emitter is a fallback).
 
+
+**Non-overlapped implication (`|=>`) rescue (mununu#503).**
+
+> Source of truth: [`reach_rescue::reduce_ag_implies_next`](../crates/mununu-core/src/adapter/reach_rescue.rs) — surface: (CLI+API+UI, via `sv verify-auto`'s escalation pass)
+
+A residual ⊥ on `A |=> C` — which lifts to `nu X. ((¬A ∨ [] C) ∧ [] X)`, i.e. `AG (A → AX C)` — is now reduced to a `bad` monitor and decided by the reachability portfolio, alongside the `AG(compound)` shape above. The monitor synthesises a 1-bit latch (`mununu_ante_prev`, `init 0`, `next = A`) and asserts `bad = mununu_ante_prev ∧ ¬C`.
+
+Two properties of this path are worth knowing:
+
+- **The antecedent may be compound and the consequent may be combinational.** Both were hard limits of the earlier single-atom emitter, and both are what real assertions need — OpenTitan's `sysrst_ctrl_detect` states its FSM transitions as `state_q == DetectSt && !trigger_active && cfg_enable_i |=> state_q == IdleSt`.
+- **It decides properties the concrete oracle cannot cross-check.** `concrete_oracle::ag_implies_next` refuses an input-dependent consequent because it evaluates the consequent as a function of the next *state* and has no next-cycle input to evaluate against. A `bad` monitor has no such gap — the next cycle's inputs are part of the trace. Where a differential is wanted for these, the exact-symbolic engine is the cross-check, not the oracle.
+
+**What still declines.** A register-vs-register leaf (`cnt_q >= cfg_debounce_timer_i`) is a `CmpReg`, which the leaf compiler does not accept; a nested-box consequent (`a |=> ##1 b`, and the nested form the translator emits for multi-element antecedents) is not a boolean body. Both decline as `safety-shape-not-reducible` rather than being mis-compiled — a modality silently flattened into a boolean would be a soundness bug, not a wider reach.
+
 **`bottom-reason` note.** For any property that stays ⊥ after the escalation pass, a new `bottom-reason` verification note classifies WHY the ⊥ stands:
 
-- **`safety-shape-not-reducible`** — the property is Safety-class but neither reducer accepts its shape (a compound with a register-vs-register `CmpReg` leaf, a non-standard AG outer shape, etc.). NOT the same as a resource abstain — this needs a property reshape or a new rescue reducer, not a bigger budget.
+- **`safety-shape-not-reducible`** — the property is Safety-class but **no** reducer accepts its shape (a compound with a register-vs-register `CmpReg` leaf, a nested-box consequent from `##k` / a multi-element antecedent, a non-standard AG outer shape, etc.). NOT the same as a resource abstain — this needs a property reshape or a new rescue reducer, not a bigger budget.
 - **`no-state-model-non-safety`** — the design has zero state registers AND this property is non-Safety (liveness / recoverability). On a stateless model, `AG EF good` is vacuously true and `AG(a → AF b)`'s l2s reduction has no lasso to close. The ⊥ is a modelling issue (compose with a stateful context or restrict to tier-1 safety), not an engine cap.
 - **`unclassified`** — the classifier did not narrow further; most commonly a resource abstain the engine already flagged with a `bit-cap` / `abstained on the …` sibling note.
 
