@@ -7122,21 +7122,29 @@ endmodule
             );
         }
         assert_eq!(
-            holds, 12,
-            "config concretization lifts sysrst 9 → 12 HOLDS (sva_5/7/10/11); got {holds}"
+            holds, 14,
+            "config concretization lifts sysrst 9 → 12 HOLDS (sva_5/7/10/11), and the mununu#503 \
+             `|=>` rescue reducer adds sva_12 (pulse) + sva_14 (counter reset) for 14; got {holds}"
         );
-        // The residual ⊥ are the non-timer cases: sva_12 (pulse), sva_13/14
-        // (counter monotonicity/reset), sva_15 (arithmetic). H.H NOTE: the
-        // counter-bound `cnt_q <= 7` is auto-seeded here (the counter-bound note
-        // fires, asserted below), but it does NOT flip sva_13/14/15 — their ⊥ is
-        // co-dominated by the `cnt_clr` combinational-input ANTECEDENT (a separate
-        // cone-unwrap lever), not the counter bound. The bound is necessary infra
-        // (it excludes the abstract wraparound) but not sufficient for THIS fixture.
-        // The demonstrator `e2e_counter_bound_flips_saturating_monotonicity` below
-        // isolates a property where the bound alone flips ⊥ → HOLDS.
+        // The residual ⊥ are now just sva_13 (counter monotonicity) and sva_15 (arithmetic).
+        //
+        // mununu#503 — sva_12 and sva_14 USED to be residual ⊥ here and are not any more: their
+        // `A |=> C` shape now reduces to a `bad` monitor and the reachability portfolio decides
+        // both HOLDS (`portfolio-rescue` notes name engines `exact, native` and
+        // `exact, native, spacer`). What still declines is a REGISTER-VS-REGISTER consequent —
+        // sva_13's `cnt_q >= cnt_q__past` and sva_15's `cnt_q == cnt_q__past + 1` are `CmpReg` /
+        // `CmpRegAddend` leaves, which the boolean compiler does not accept. That is a leaf-shape
+        // gap, NOT the `cnt_clr` antecedent: the antecedent was never the blocker for sva_14,
+        // whose consequent (`cnt_q == 0`) is a plain comparison and now decides.
+        //
+        // H.H NOTE: the counter-bound `cnt_q <= 7` is auto-seeded here (the counter-bound note
+        // fires, asserted below), but it does NOT flip sva_13/15 — the bound is necessary infra
+        // (it excludes the abstract wraparound) but not sufficient for THIS fixture. The
+        // demonstrator `e2e_counter_bound_flips_saturating_monotonicity` below isolates a property
+        // where the bound alone flips ⊥ → HOLDS.
         assert_eq!(
-            unknown, 4,
-            "the non-timer residual ⊥ remain (bound is inert here — cnt_clr antecedent co-blocks); got UNKNOWN={unknown}"
+            unknown, 2,
+            "only the register-vs-register consequents (sva_13/15) stay ⊥; got UNKNOWN={unknown}"
         );
         // H.H — the counter-bound note fires (auto-inferred `cnt_q <= 7` from the
         // sibling `cnt_q >= cfg_detect_timer_i` comparison), even though it does not
@@ -7655,14 +7663,25 @@ endmodule
             "sva_2 (`trigger_i != !trigger_i` tautology) reaches a sound HOLDS; got {:?}",
             sva2.outcome
         );
-        // H.U.2 — a combinational output that is a function of STATE
-        // (`event_detected_o` / `event_detected_pulse_o` = f(state_q)) binds as a
-        // CUBE DIMENSION and reaches a DEFINITE verdict: sva_1
-        // (`cfg_enable_i → ¬event_detected_o ∧ ¬event_detected_pulse_o`) and
-        // sva_12 (`event_pulse → AX ¬event_pulse`) both HOLD. The still-⊥ props
-        // (sva_4..11) are ⊥ from their combinational-of-*input* antecedents
-        // (`trigger_active`/`cnt_q >= cfg_*`), NOT from any combinational binding
-        // gap — every combinational atom binds (SKIPPED is 0, asserted above).
+        // H.U.2 — the combinational `event_detected_*` outputs SEED as predicates, and both
+        // sva_1 (`cfg_enable_i → ¬event_detected_o ∧ ¬event_detected_pulse_o`) and sva_12
+        // (`event_pulse |=> ¬event_pulse`) reach a DEFINITE HOLDS. The still-⊥ props are ⊥ from
+        // their combinational-of-*input* antecedents (`trigger_active` / `cnt_q >= cfg_*`), NOT
+        // from any combinational binding gap — every combinational atom binds (SKIPPED is 0,
+        // asserted above).
+        //
+        // mununu#503 — the two properties hold by DIFFERENT mechanisms, and this comment used to
+        // assert the wrong one for sva_12:
+        //
+        // - **sva_1 decides in the cube.** Its atoms are pinned as cube dimensions.
+        // - **sva_12 does NOT.** It carries a `portfolio-rescue` note, i.e. the cube left it ⊥ and
+        //   the `|=>` reducer + reachability portfolio decided it. The old comment claimed
+        //   `event_detected_pulse_o = f(state_q)` and so "binds as a CUBE DIMENSION" — but the RTL
+        //   (sysrst_ctrl_detect.sv:122-215) makes that output a function of `cfg_enable_i`,
+        //   `trigger_i` and the timers as well, so `cone_reaches_input` correctly classifies it
+        //   `InputDependent` and it becomes a per-cube derived LABEL, which the cube cannot pin.
+        //   The assertion below is therefore on the VERDICT only; it deliberately does not claim a
+        //   binding mechanism, because for sva_12 that claim was false.
         for name in ["sysrst_ctrl_detect_sva_1", "sysrst_ctrl_detect_sva_12"] {
             let p = report
                 .properties
@@ -7678,8 +7697,8 @@ endmodule
             );
             assert!(
                 matches!(p.outcome, VerifyOutcome::Holds),
-                "{name} reaches a DEFINITE HOLDS (event_detected_* binds as a \
-                 function-of-state cube dimension); got {:?}",
+                "{name} reaches a DEFINITE HOLDS — sva_1 from the cube, sva_12 via the \
+                 mununu#503 `|=>` rescue lane; got {:?}",
                 p.outcome
             );
         }
@@ -7776,8 +7795,11 @@ endmodule
         }
         // The remaining ⊥ are the RELATIONAL-with-input compounds (`cnt_q >=
         // cfg_*_timer_i`, sva_5/7/10/11) — the input operand is inside a
-        // relational, which the cone-input seeder does not unwrap — plus the
-        // cnt_clr cases (sva_13/14). Honest ⊥, never a spurious verdict.
+        // relational, which the cone-input seeder does not unwrap — plus sva_13/15, whose
+        // consequents are register-vs-register (`cnt_q >= cnt_q__past`,
+        // `cnt_q == cnt_q__past + 1`). mununu#503: sva_14 is NO LONGER among them — its
+        // `cnt_clr |=> cnt_q == 0` reduces and the portfolio decides it. Honest ⊥, never a
+        // spurious verdict.
         for name in ["sysrst_ctrl_detect_sva_5", "sysrst_ctrl_detect_sva_7"] {
             let p = report
                 .properties

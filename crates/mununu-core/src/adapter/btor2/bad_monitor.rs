@@ -510,6 +510,268 @@ pub fn emit_latched_predicate_state_named(
     Ok(format!("{}\n{}\n", content.trim_end(), appended.join("\n")))
 }
 
+/// mununu#503 — compile a pure-boolean mu-calculus subtree into BTOR2 nodes, returning the NID of
+/// the resulting 1-bit expression.
+///
+/// Extracted verbatim from [`emit_ag_boolean_invariant_monitor`] so the `|=>` monitor
+/// ([`emit_ag_implies_next_compound_monitor`]) compiles its antecedent and consequent through the
+/// SAME code path. Two monitors that disagree about what a leaf means is exactly the class of bug
+/// mununu#503 already hit once (the gate and the compiler disagreeing about bare identifiers), so
+/// there is deliberately one compiler, not two.
+///
+/// Accepts `And`/`Or`/`Not`/`True`/`False`/`Predicate` only — a modal, fixpoint, or variable node
+/// is an error, not a silent skip. Leaves resolve state cell → output net → primary input →
+/// named combinational net.
+pub(crate) fn compile_boolean_subtree(
+    formula: &crate::mu_calculus::Formula,
+    id: crate::mu_calculus::NodeId,
+    file: &crate::adapter::btor2::ast::Btor2File,
+    reset_pinned: bool,
+    bool_sort: Nid,
+    next_nid: &mut Nid,
+    appended: &mut Vec<String>,
+) -> Result<Nid, AdapterError> {
+    use crate::adapter::btor2::predicate_expr::{PredicateExpr, parse_predicate_atom_bool};
+    use crate::mu_calculus::Node as MuNode;
+
+    match formula.node(id) {
+        MuNode::True => {
+            let n = *next_nid;
+            *next_nid += 1;
+            appended.push(format!("{n} constd {bool_sort} 1"));
+            Ok(n)
+        }
+        MuNode::False => {
+            let n = *next_nid;
+            *next_nid += 1;
+            appended.push(format!("{n} constd {bool_sort} 0"));
+            Ok(n)
+        }
+        MuNode::Not(inner) => {
+            let a = compile_boolean_subtree(
+                formula,
+                *inner,
+                file,
+                reset_pinned,
+                bool_sort,
+                next_nid,
+                appended,
+            )?;
+            let n = *next_nid;
+            *next_nid += 1;
+            appended.push(format!("{n} not {bool_sort} {a}"));
+            Ok(n)
+        }
+        MuNode::And(l, r) => {
+            let a = compile_boolean_subtree(
+                formula,
+                *l,
+                file,
+                reset_pinned,
+                bool_sort,
+                next_nid,
+                appended,
+            )?;
+            let b = compile_boolean_subtree(
+                formula,
+                *r,
+                file,
+                reset_pinned,
+                bool_sort,
+                next_nid,
+                appended,
+            )?;
+            let n = *next_nid;
+            *next_nid += 1;
+            appended.push(format!("{n} and {bool_sort} {a} {b}"));
+            Ok(n)
+        }
+        MuNode::Or(l, r) => {
+            let a = compile_boolean_subtree(
+                formula,
+                *l,
+                file,
+                reset_pinned,
+                bool_sort,
+                next_nid,
+                appended,
+            )?;
+            let b = compile_boolean_subtree(
+                formula,
+                *r,
+                file,
+                reset_pinned,
+                bool_sort,
+                next_nid,
+                appended,
+            )?;
+            let n = *next_nid;
+            *next_nid += 1;
+            appended.push(format!("{n} or {bool_sort} {a} {b}"));
+            Ok(n)
+        }
+        // mununu#503 — `parse_predicate_atom_bool`, matching the gate in
+        // `reach_rescue::is_compilable_boolean_body`. A bare identifier is "signal is
+        // true" ⇒ `!= 0` (sound for any width; `== 1` would exclude truthy 2, 3, …).
+        // The gate and this compiler MUST use the same entry point: if the gate accepts a
+        // leaf this rejects, a property passes reducibility and then fails to compile.
+        MuNode::Predicate(atom) => match parse_predicate_atom_bool(atom) {
+            Ok(PredicateExpr::Cmp {
+                register,
+                op,
+                value,
+            }) => {
+                let (sig_nid, sig_sort) = state_nid_and_sort(file, &register, reset_pinned)
+                    .or_else(|| output_nid_and_sort(file, &register))
+                    .or_else(|| input_nid_and_sort(file, &register))
+                    // mununu#503 — last: a named internal combinational net.
+                    .or_else(|| comb_nid_and_sort(file, &register))
+                    .ok_or_else(|| {
+                        err(format!(
+                            "adapter/btor2/bad_monitor: leaf atom `{register}` does not \
+                             resolve to a state cell, output port, primary input, or named \
+                             internal net"
+                        ))
+                    })?;
+                let const_nid = *next_nid;
+                *next_nid += 1;
+                appended.push(format!("{const_nid} constd {sig_sort} {value}"));
+                let cmp_kw = btor2_cmp_keyword(op);
+                let n = *next_nid;
+                *next_nid += 1;
+                appended.push(format!("{n} {cmp_kw} {bool_sort} {sig_nid} {const_nid}"));
+                Ok(n)
+            }
+            Ok(_) => Err(err(format!(
+                "adapter/btor2/bad_monitor: leaf atom `{atom}` uses a relational / addend / \
+                 select shape not supported by the compound monitor"
+            ))),
+            Err(e) => Err(err(format!(
+                "adapter/btor2/bad_monitor: leaf atom `{atom}` did not parse as a predicate \
+                 expression: {e:?}"
+            ))),
+        },
+        other => Err(err(format!(
+            "adapter/btor2/bad_monitor: compound safety monitor accepts \
+             And/Or/Not/True/False/Predicate only; found {other:?}"
+        ))),
+    }
+}
+
+/// mununu#503 — append a `bad` monitor for `AG (A → AX C)`, the shape SVA's `A |=> C` lifts to
+/// (`nu X. ((¬A ∨ [] C) ∧ [] X)`).
+///
+/// Widens [`emit_ag_implies_next_monitor`] on the two axes that kept it from reaching real
+/// properties: the antecedent may be a **compound** boolean expression (it took a single
+/// [`OracleAtom`]), and the consequent may be **combinational** (it required a state cell).
+/// `sysrst_ctrl_detect_sva_12` — `event_detected_pulse_o |=> !event_detected_pulse_o` — needs
+/// both: `event_detected_pulse_o` is a combinational output of state AND inputs, so it is neither
+/// a state cell nor a primary input.
+///
+/// `neg_ante` is the `¬A` disjunct **as it appears in the formula**, not `A`; the antecedent is
+/// recovered as `not(compile(neg_ante))`. Taking it in that form is what lets a compound
+/// antecedent through unchanged — whatever `¬A` is, the same compiler handles it.
+///
+/// Emits `bad = mununu_ante_prev ∧ ¬C`, where `mununu_ante_prev` ([`ANTE_PREV_SYMBOL`]) is a fresh
+/// 1-bit latch with `init 0`, `next = A`.
+///
+/// # Soundness
+///
+/// `bad` is reachable ⟺ ∃ a trace and a cycle `t` with `A` true at `t` and `C` false at `t+1` —
+/// exactly a violation of `AG (A → AX C)`. Three things make that equivalence hold:
+///
+/// - **`init 0` fabricates no obligation at reset.** Nothing precedes cycle 0, so the latch must
+///   read false there; an `init 1` would report a violation on a design that never asserted `A`.
+/// - **The latch is a pure monitor.** It adds no input, no constraint, and never feeds back into
+///   the original transition relation, so the reachable-state set of the design is unchanged and
+///   the counterexample projects back to the original registers.
+/// - **A free next-cycle input is the correct reading of `[] C`.** `C` combinational means its
+///   value at `t+1` depends on the inputs at `t+1`; `bad` reachability quantifies existentially
+///   over those, which is precisely `¬(∀ successors. C)`. SVA agrees: `A |=> C` is violated iff
+///   SOME trace has `A` then `¬C`. This is why the monitor decides a property the predicate cube
+///   cannot — the cube must pin an input-dependent label to a cube dimension and abstains instead.
+///
+/// Note the contrast with [`crate::adapter::btor2::concrete_oracle::ag_implies_next`], which
+/// REFUSES an input-dependent consequent (`ag_implies_next_rejects_input_consequent`). That is a
+/// real limitation of an oracle that evaluates the consequent as a function of the next STATE: it
+/// has no next-cycle input to evaluate against. A `bad` monitor has no such gap — the next cycle's
+/// inputs are part of the trace — which is why this path decides properties the oracle cannot
+/// cross-check, and why the oracle is not the differential for them.
+pub fn emit_ag_implies_next_compound_monitor(
+    content: &str,
+    formula: &crate::mu_calculus::Formula,
+    neg_ante: crate::mu_calculus::NodeId,
+    cons: crate::mu_calculus::NodeId,
+    reset_pinned: bool,
+) -> Result<String, AdapterError> {
+    let file = parser::parse(content).map_err(|mut e| {
+        e.message = format!("adapter/btor2/bad_monitor: {}", e.message);
+        e
+    })?;
+
+    let mut next_nid: Nid = file.lines.iter().map(|l| l.nid).max().unwrap_or(0) + 1;
+    let mut appended: Vec<String> = Vec::new();
+    let bool_sort = find_or_make_bool_sort(&file, &mut next_nid, &mut appended);
+
+    // A = ¬(¬A) — the formula carries the negated antecedent, so undo it here.
+    let neg_ante_nid = compile_boolean_subtree(
+        formula,
+        neg_ante,
+        &file,
+        reset_pinned,
+        bool_sort,
+        &mut next_nid,
+        &mut appended,
+    )?;
+    let ante = next_nid;
+    next_nid += 1;
+    appended.push(format!("{ante} not {bool_sort} {neg_ante_nid}"));
+
+    // ¬C, evaluated at the cycle the latch exposes.
+    let cons_nid = compile_boolean_subtree(
+        formula,
+        cons,
+        &file,
+        reset_pinned,
+        bool_sort,
+        &mut next_nid,
+        &mut appended,
+    )?;
+    let cons_fail = next_nid;
+    next_nid += 1;
+    appended.push(format!("{cons_fail} not {bool_sort} {cons_nid}"));
+
+    // mununu_ante_prev latch: init 0, next = A. (`init` requires the state NID > the value NID,
+    // so `zero` is emitted before the state — the ordering emit_ag_implies_next_monitor relies on.)
+    let zero_bool = next_nid;
+    next_nid += 1;
+    appended.push(format!("{zero_bool} zero {bool_sort}"));
+    let ante_prev = next_nid;
+    next_nid += 1;
+    appended.push(format!("{ante_prev} state {bool_sort} {ANTE_PREV_SYMBOL}"));
+    let ante_prev_init = next_nid;
+    next_nid += 1;
+    appended.push(format!(
+        "{ante_prev_init} init {bool_sort} {ante_prev} {zero_bool}"
+    ));
+    let ante_prev_next = next_nid;
+    next_nid += 1;
+    appended.push(format!(
+        "{ante_prev_next} next {bool_sort} {ante_prev} {ante}"
+    ));
+
+    // bad = ante_prev && !C; named for `observe`.
+    let bad_cond = next_nid;
+    next_nid += 1;
+    appended.push(format!(
+        "{bad_cond} and {bool_sort} {ante_prev} {cons_fail} {BAD_COND_SYMBOL}"
+    ));
+    let bad_line = next_nid;
+    appended.push(format!("{bad_line} bad {bad_cond}"));
+
+    Ok(format!("{}\n{}\n", content.trim_end(), appended.join("\n")))
+}
+
 /// mununu#492 — append a `bad` monitor for `AG (COMPOUND)` where `COMPOUND` is a
 /// boolean expression tree over `And`/`Or`/`Not`/`True`/`False`/`Predicate` mu-calc
 /// nodes; each `Predicate` leaf resolves via state cell → output net → primary input.
@@ -531,9 +793,6 @@ pub fn emit_ag_boolean_invariant_monitor(
     root: crate::mu_calculus::NodeId,
     reset_pinned: bool,
 ) -> Result<String, AdapterError> {
-    use crate::adapter::btor2::predicate_expr::{PredicateExpr, parse_predicate_atom_bool};
-    use crate::mu_calculus::Node as MuNode;
-
     let file = parser::parse(content).map_err(|mut e| {
         e.message = format!("adapter/btor2/bad_monitor: {}", e.message);
         e
@@ -543,142 +802,7 @@ pub fn emit_ag_boolean_invariant_monitor(
     let mut appended: Vec<String> = Vec::new();
     let bool_sort = find_or_make_bool_sort(&file, &mut next_nid, &mut appended);
 
-    // Walk the mu-calc subtree rooted at `id`; emit BTOR2 nodes; return the
-    // NID of the compiled boolean expression (1-bit).
-    fn compile(
-        formula: &crate::mu_calculus::Formula,
-        id: crate::mu_calculus::NodeId,
-        file: &crate::adapter::btor2::ast::Btor2File,
-        reset_pinned: bool,
-        bool_sort: Nid,
-        next_nid: &mut Nid,
-        appended: &mut Vec<String>,
-    ) -> Result<Nid, AdapterError> {
-        match formula.node(id) {
-            MuNode::True => {
-                let n = *next_nid;
-                *next_nid += 1;
-                appended.push(format!("{n} constd {bool_sort} 1"));
-                Ok(n)
-            }
-            MuNode::False => {
-                let n = *next_nid;
-                *next_nid += 1;
-                appended.push(format!("{n} constd {bool_sort} 0"));
-                Ok(n)
-            }
-            MuNode::Not(inner) => {
-                let a = compile(
-                    formula,
-                    *inner,
-                    file,
-                    reset_pinned,
-                    bool_sort,
-                    next_nid,
-                    appended,
-                )?;
-                let n = *next_nid;
-                *next_nid += 1;
-                appended.push(format!("{n} not {bool_sort} {a}"));
-                Ok(n)
-            }
-            MuNode::And(l, r) => {
-                let a = compile(
-                    formula,
-                    *l,
-                    file,
-                    reset_pinned,
-                    bool_sort,
-                    next_nid,
-                    appended,
-                )?;
-                let b = compile(
-                    formula,
-                    *r,
-                    file,
-                    reset_pinned,
-                    bool_sort,
-                    next_nid,
-                    appended,
-                )?;
-                let n = *next_nid;
-                *next_nid += 1;
-                appended.push(format!("{n} and {bool_sort} {a} {b}"));
-                Ok(n)
-            }
-            MuNode::Or(l, r) => {
-                let a = compile(
-                    formula,
-                    *l,
-                    file,
-                    reset_pinned,
-                    bool_sort,
-                    next_nid,
-                    appended,
-                )?;
-                let b = compile(
-                    formula,
-                    *r,
-                    file,
-                    reset_pinned,
-                    bool_sort,
-                    next_nid,
-                    appended,
-                )?;
-                let n = *next_nid;
-                *next_nid += 1;
-                appended.push(format!("{n} or {bool_sort} {a} {b}"));
-                Ok(n)
-            }
-            // mununu#503 — `parse_predicate_atom_bool`, matching the gate in
-            // `reach_rescue::is_compilable_boolean_body`. A bare identifier is "signal is
-            // true" ⇒ `!= 0` (sound for any width; `== 1` would exclude truthy 2, 3, …).
-            // The gate and this compiler MUST use the same entry point: if the gate accepts a
-            // leaf this rejects, a property passes reducibility and then fails to compile.
-            MuNode::Predicate(atom) => match parse_predicate_atom_bool(atom) {
-                Ok(PredicateExpr::Cmp {
-                    register,
-                    op,
-                    value,
-                }) => {
-                    let (sig_nid, sig_sort) = state_nid_and_sort(file, &register, reset_pinned)
-                        .or_else(|| output_nid_and_sort(file, &register))
-                        .or_else(|| input_nid_and_sort(file, &register))
-                        // mununu#503 — last: a named internal combinational net.
-                        .or_else(|| comb_nid_and_sort(file, &register))
-                        .ok_or_else(|| {
-                            err(format!(
-                                "adapter/btor2/bad_monitor: leaf atom `{register}` does not \
-                                 resolve to a state cell, output port, primary input, or named \
-                                 internal net"
-                            ))
-                        })?;
-                    let const_nid = *next_nid;
-                    *next_nid += 1;
-                    appended.push(format!("{const_nid} constd {sig_sort} {value}"));
-                    let cmp_kw = btor2_cmp_keyword(op);
-                    let n = *next_nid;
-                    *next_nid += 1;
-                    appended.push(format!("{n} {cmp_kw} {bool_sort} {sig_nid} {const_nid}"));
-                    Ok(n)
-                }
-                Ok(_) => Err(err(format!(
-                    "adapter/btor2/bad_monitor: leaf atom `{atom}` uses a relational / addend / \
-                     select shape not supported by the compound monitor"
-                ))),
-                Err(e) => Err(err(format!(
-                    "adapter/btor2/bad_monitor: leaf atom `{atom}` did not parse as a predicate \
-                     expression: {e:?}"
-                ))),
-            },
-            other => Err(err(format!(
-                "adapter/btor2/bad_monitor: compound safety monitor accepts \
-                 And/Or/Not/True/False/Predicate only; found {other:?}"
-            ))),
-        }
-    }
-
-    let inv_expr = compile(
+    let inv_expr = compile_boolean_subtree(
         formula,
         root,
         &file,

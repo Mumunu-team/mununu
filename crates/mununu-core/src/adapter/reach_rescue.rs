@@ -188,6 +188,93 @@ pub fn reduce_ag_boolean_body(formula: &Formula) -> Option<NodeId> {
     Some(compound_id)
 }
 
+/// mununu#503 — the `|=>` shape: `nu X. ((¬A ∨ [] C) ∧ [] X)`, i.e. `AG (A → AX C)`.
+///
+/// Returns `(neg_ante_id, cons_id)` — the `¬A` disjunct **as written** and the boolean subtree
+/// under the consequent box. The caller recovers `A` by negating; see
+/// [`crate::adapter::btor2::bad_monitor::emit_ag_implies_next_compound_monitor`].
+///
+/// This is the sibling of [`reduce_ag_boolean_body`], which handles the OVERLAPPED `|->`
+/// (`nu X. ((¬A ∨ C) ∧ [] X)` — no inner box). The two are distinguished by exactly one thing:
+/// whether a disjunct of the implication is a box.
+///
+/// # What it deliberately does not match
+///
+/// - **Both disjuncts boxes** (`[] p ∨ [] q`) — ambiguous about which is the consequent, so the
+///   shape match stays unambiguous rather than guessing.
+/// - **A nested box consequent** (`a |=> ##1 b` ⇒ `[] [] b`, and multi-element antecedents, which
+///   [`crate::adapter::slang::translate`] emits as nested `(!(b) || [] (!(a) || [] c))`). The inner
+///   box is not a compilable boolean body, so these decline — honestly, rather than by
+///   mis-compiling a modality into a boolean.
+/// - **`[] X` as the consequent.** The recursion variable is not a boolean body either, so a
+///   degenerate `nu X. ((¬A ∨ [] X) ∧ [] X)` cannot be mistaken for an implication.
+pub fn reduce_ag_implies_next(formula: &Formula) -> Option<(NodeId, NodeId)> {
+    let Node::Nu { var, body } = formula.node(formula.root()) else {
+        return None;
+    };
+    let Node::And(l, r) = formula.node(*body) else {
+        return None;
+    };
+    let (implication_id, modal_id) = classify_and(formula, *l, *r, *var)?;
+    // The outer recursion box must be unconstrained, as in reduce_ag_boolean_body.
+    let Node::Modal {
+        kind: ModalKind::Box,
+        guard,
+        target,
+    } = formula.node(modal_id)
+    else {
+        return None;
+    };
+    if *guard != Guard::default() {
+        return None;
+    }
+    match formula.node(*target) {
+        Node::Variable(v) if *v == *var => {}
+        _ => return None,
+    }
+
+    // `¬A ∨ [] C` — exactly one disjunct is a box (the consequent).
+    let Node::Or(a, b) = formula.node(implication_id) else {
+        return None;
+    };
+    let (neg_ante, cons_modal) = match (is_plain_box(formula, *a), is_plain_box(formula, *b)) {
+        (true, false) => (*b, *a),
+        (false, true) => (*a, *b),
+        _ => return None,
+    };
+    let Node::Modal {
+        kind: ModalKind::Box,
+        guard,
+        target: cons,
+        ..
+    } = formula.node(cons_modal)
+    else {
+        return None;
+    };
+    if *guard != Guard::default() {
+        return None;
+    }
+    // Both sides must compile to pure boolean expressions — a modal or fixpoint inside either is
+    // out of the fragment.
+    if !is_compilable_boolean_body(formula, neg_ante) || !is_compilable_boolean_body(formula, *cons)
+    {
+        return None;
+    }
+    Some((neg_ante, *cons))
+}
+
+/// A `[…]` box node, whatever its target — as opposed to [`is_box_to_var`], which additionally
+/// requires the target to be the recursion variable.
+fn is_plain_box(formula: &Formula, id: NodeId) -> bool {
+    matches!(
+        formula.node(id),
+        Node::Modal {
+            kind: ModalKind::Box,
+            ..
+        }
+    )
+}
+
 /// Walk the subtree; verify it is only And/Or/Not/True/False/Predicate and every
 /// Predicate leaf parses as `PredicateExpr::Cmp`. A single modal / fixpoint /
 /// variable / CmpReg / CmpRegAddend / Select rejects the whole tree.
@@ -298,6 +385,33 @@ impl std::fmt::Display for RescueDecline {
     }
 }
 
+/// The compound-shape emission chain: `AG(boolean)` first, then `AG(A → AX C)`.
+///
+/// Ordered so the shipped `|->` / plain-invariant path emits byte-for-byte as before; the `|=>`
+/// reducer is reached only when the body is not a pure boolean invariant. A property matching
+/// NEITHER declines as [`RescueDecline::ShapeNotReducible`], which is what the `bottom-reason`
+/// note reports.
+fn emit_boolean_or_implies_next(
+    design_btor2: &str,
+    formula: &Formula,
+    reset_pinned: bool,
+) -> Result<String, RescueDecline> {
+    if let Some(root) = reduce_ag_boolean_body(formula) {
+        return emit_ag_boolean_invariant_monitor(design_btor2, formula, root, reset_pinned)
+            .map_err(|e| RescueDecline::MonitorEmissionFailed(e.message));
+    }
+    let (neg_ante, cons) =
+        reduce_ag_implies_next(formula).ok_or(RescueDecline::ShapeNotReducible)?;
+    crate::adapter::btor2::bad_monitor::emit_ag_implies_next_compound_monitor(
+        design_btor2,
+        formula,
+        neg_ante,
+        cons,
+        reset_pinned,
+    )
+    .map_err(|e| RescueDecline::MonitorEmissionFailed(e.message))
+}
+
 /// Thin wrapper preserving the original signature for existing callers.
 pub fn reach_portfolio_rescue(
     design_btor2: &str,
@@ -328,17 +442,12 @@ pub fn reach_portfolio_rescue_diagnosed(
                 // The single-atom emitter refused the signal (zero-state atom
                 // on a primary input, say). Try the compound path — its leaf
                 // resolution includes primary inputs.
-                let root =
-                    reduce_ag_boolean_body(formula).ok_or(RescueDecline::ShapeNotReducible)?;
-                emit_ag_boolean_invariant_monitor(design_btor2, formula, root, reset_pinned)
-                    .map_err(|e| RescueDecline::MonitorEmissionFailed(e.message))?
+                emit_boolean_or_implies_next(design_btor2, formula, reset_pinned)?
             }
         }
     } else {
-        // Non-single-atom shape — try compound.
-        let root = reduce_ag_boolean_body(formula).ok_or(RescueDecline::ShapeNotReducible)?;
-        emit_ag_boolean_invariant_monitor(design_btor2, formula, root, reset_pinned)
-            .map_err(|e| RescueDecline::MonitorEmissionFailed(e.message))?
+        // Non-single-atom shape — try compound, then the `|=>` implication.
+        emit_boolean_or_implies_next(design_btor2, formula, reset_pinned)?
     };
     let file = parser::parse(&monitored)
         .map_err(|e| RescueDecline::MonitoredDesignUnparseable(e.message))?;
@@ -751,6 +860,148 @@ mod tests {
                 .iter()
                 .any(|e| *e == "btormc" || *e == "pono"),
             "a subprocess member must carry the beyond-cap verdict; got {outcome:?}"
+        );
+    }
+
+    // `q` toggles every cycle (q' = !q), so a high `q` is ALWAYS followed by a low one.
+    // `zero` precedes `state` because BTOR2 `init` needs the value NID below the state NID.
+    const TOGGLING_PULSE: &str = "\
+1 sort bitvec 1
+2 zero 1
+3 state 1 q
+4 init 1 3 2
+5 not 1 3
+6 next 1 3 5
+";
+
+    // Same shape, but `q` latches a FREE input, so it can stay high two cycles running.
+    const FREE_PULSE: &str = "\
+1 sort bitvec 1
+2 zero 1
+3 state 1 q
+4 init 1 3 2
+5 input 1 d
+6 next 1 3 5
+7 input 1 e
+";
+
+    #[test]
+    fn implies_next_matches_the_non_overlapped_shape() {
+        // `q |=> !q`  →  nu X. ((!(q==1) || [] (!(q==1))) && [] X)
+        let f = parse("nu X. (((!(q == 1)) || [] (!(q == 1))) && [] X)");
+        assert!(
+            reduce_ag_implies_next(&f).is_some(),
+            "the `|=>` shape must match the implies-next reducer"
+        );
+        assert!(
+            reduce_ag_boolean_body(&f).is_none(),
+            "and must NOT match the boolean-body reducer — the inner box is not a boolean, so a \
+             reducer that accepted it would be compiling a modality away"
+        );
+    }
+
+    #[test]
+    fn implies_next_declines_the_overlapped_shape() {
+        // `q |-> !q` has no inner box; that is reduce_ag_boolean_body's shape, not this one.
+        let f = parse("nu X. (((!(q == 1)) || (!(q == 1))) && [] X)");
+        assert!(reduce_ag_implies_next(&f).is_none(), "`|->` is not `|=>`");
+        assert!(
+            reduce_ag_boolean_body(&f).is_some(),
+            "the overlapped form still belongs to the boolean-body reducer"
+        );
+    }
+
+    #[test]
+    fn implies_next_declines_a_nested_box_consequent() {
+        // `q |=> ##1 r` ⇒ `[] [] r`. The inner box is not a compilable boolean body.
+        let f = parse("nu X. (((!(q == 1)) || [] [] (r == 1)) && [] X)");
+        assert!(
+            reduce_ag_implies_next(&f).is_none(),
+            "a nested box must decline rather than be mis-compiled into a boolean"
+        );
+    }
+
+    #[test]
+    fn implies_next_declines_when_both_disjuncts_are_boxes() {
+        let f = parse("nu X. ((([] (q == 1)) || [] (r == 1)) && [] X)");
+        assert!(
+            reduce_ag_implies_next(&f).is_none(),
+            "which disjunct is the consequent is ambiguous — the match must not guess"
+        );
+    }
+
+    #[test]
+    fn implies_next_declines_a_recursion_variable_consequent() {
+        // Degenerate `nu X. ((!A || [] X) && [] X)` must not read as an implication.
+        let f = parse("nu X. (((!(q == 1)) || [] X) && [] X)");
+        assert!(
+            reduce_ag_implies_next(&f).is_none(),
+            "the recursion variable is not a boolean consequent"
+        );
+    }
+
+    #[test]
+    /// NEGATIVE CONTROL — the test that actually proves the monitor fires.
+    ///
+    /// `q` latches a free input, so `q` high twice running is reachable and `q |=> !q` is
+    /// genuinely VIOLATED. A latch wired wrong (init 1, or `next` reading the consequent) would
+    /// report Holds here, and a monitor that never fires would pass every positive test.
+    fn implies_next_catches_a_pulse_that_can_stay_high() {
+        let f = parse("nu X. (((!(q == 1)) || [] (!(q == 1))) && [] X)");
+        let (verdict, _) = reach_portfolio_rescue(FREE_PULSE, &f, false)
+            .expect("the `|=>` shape must now reach the rescue lane");
+        assert_eq!(
+            verdict,
+            RescueVerdict::Violated,
+            "`q` can stay high for two cycles, so the property is violated"
+        );
+    }
+
+    #[test]
+    /// The positive twin: over a design where the pulse genuinely cannot repeat, the same property
+    /// must HOLD — so the monitor is not simply reporting everything violated.
+    fn implies_next_holds_on_a_toggling_pulse() {
+        let f = parse("nu X. (((!(q == 1)) || [] (!(q == 1))) && [] X)");
+        let (verdict, _) = reach_portfolio_rescue(TOGGLING_PULSE, &f, false)
+            .expect("the `|=>` shape must reach the rescue lane");
+        assert_eq!(
+            verdict,
+            RescueVerdict::Holds,
+            "`q` toggles, so a high `q` is always followed by a low one"
+        );
+    }
+
+    #[test]
+    /// `init 0` must fabricate no obligation at reset. Over the toggling design the antecedent is
+    /// false at cycle 0 (q inits low); a latch initialised to 1 would report a violation at the
+    /// very first step on a design that never asserted the antecedent.
+    fn implies_next_makes_no_obligation_at_reset() {
+        // `!q |=> q` — holds on the toggler (low is always followed by high), and would be
+        // violated at cycle 0 by a latch that came up asserted.
+        let f = parse("nu X. (((!(q == 0)) || [] (q == 1)) && [] X)");
+        let (verdict, _) = reach_portfolio_rescue(TOGGLING_PULSE, &f, false).expect("reducible");
+        assert_eq!(
+            verdict,
+            RescueVerdict::Holds,
+            "an `init 1` latch would manufacture a cycle-0 violation here"
+        );
+    }
+
+    #[test]
+    /// The compound-antecedent axis — `emit_ag_implies_next_monitor` took a single atom, which is
+    /// half of why it never reached a real property.
+    fn implies_next_accepts_a_compound_antecedent() {
+        let f = parse("nu X. ((!((q == 1) && (e == 1)) || [] (q == 0)) && [] X)");
+        assert!(
+            reduce_ag_implies_next(&f).is_some(),
+            "a compound antecedent must match"
+        );
+        let (verdict, _) = reach_portfolio_rescue(FREE_PULSE, &f, false)
+            .expect("a compound antecedent must reach the rescue lane");
+        assert_eq!(
+            verdict,
+            RescueVerdict::Violated,
+            "`e` is free, so `q && e` then `q` again is reachable"
         );
     }
 }
