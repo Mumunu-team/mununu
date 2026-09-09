@@ -155,6 +155,35 @@ pub(crate) fn input_nid_and_sort(
 /// never-granted path). A *negated* output operand is skipped — binding its
 /// un-negated net would flip the comparison sense — so it falls through to the
 /// caller's bind error rather than binding the wrong polarity.
+/// mununu#503 — resolve a named INTERNAL COMBINATIONAL net.
+///
+/// The monitor compiler could resolve a state cell, an output port, or a primary input — but not
+/// an internal wire, and that is what a great many SVA leaves actually are. `sysrst`'s
+/// `assign trigger_active = (trigger_i == 1'b0)` is the canonical case: every `|->` property over
+/// it was declined by the rescue lane with *"leaf atom `trigger_active` does not resolve to a
+/// state cell, output port, or primary input"*, so the ⊥ stood even though the property was fine
+/// and the monitor was one node reference away from being emittable.
+///
+/// Yosys names an internal net with a no-op alias line — `<nid> uext <sort> <src> 0 <name>` — so
+/// the symbol sits on an ordinary `Op` node. Referencing that nid from the `bad` expression is
+/// legal BTOR2: it is a combinational node in the same file, evaluated in the same cycle.
+///
+/// Tried LAST in the resolution chain, so a name that is also a state cell, output port, or input
+/// still binds to that first — this only widens what resolves, it never re-points an existing one.
+pub(crate) fn comb_nid_and_sort(
+    file: &crate::adapter::btor2::ast::Btor2File,
+    signal: &str,
+) -> Option<(Nid, Nid)> {
+    file.lines.iter().find_map(|l| match &l.node {
+        Node::Op {
+            sort,
+            symbol: Some(sym),
+            ..
+        } if sym == signal => Some((l.nid, *sort)),
+        _ => None,
+    })
+}
+
 pub(crate) fn output_nid_and_sort(
     file: &crate::adapter::btor2::ast::Btor2File,
     signal: &str,
@@ -615,10 +644,13 @@ pub fn emit_ag_boolean_invariant_monitor(
                     let (sig_nid, sig_sort) = state_nid_and_sort(file, &register, reset_pinned)
                         .or_else(|| output_nid_and_sort(file, &register))
                         .or_else(|| input_nid_and_sort(file, &register))
+                        // mununu#503 — last: a named internal combinational net.
+                        .or_else(|| comb_nid_and_sort(file, &register))
                         .ok_or_else(|| {
                             err(format!(
                                 "adapter/btor2/bad_monitor: leaf atom `{register}` does not \
-                                 resolve to a state cell, output port, or primary input"
+                                 resolve to a state cell, output port, primary input, or named \
+                                 internal net"
                             ))
                         })?;
                     let const_nid = *next_nid;

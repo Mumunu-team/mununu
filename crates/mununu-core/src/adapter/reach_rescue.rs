@@ -564,6 +564,51 @@ mod tests {
 4 input 1 c
 ";
 
+    /// mununu#503 — a design whose leaf is a NAMED INTERNAL NET, as yosys emits them
+    /// (`<nid> uext <sort> <src> 0 <name>` — a no-op alias line carrying the symbol).
+    ///
+    /// `hot` aliases `a`, so `AG(!(a == 1) || !(hot == 1))` is FALSIFIED by `a = 1`: the two
+    /// leaves are the same net, so they are true together. This is the NEGATIVE control for the
+    /// internal-net resolver — the check that actually matters, because a verdict comparison
+    /// cannot tell a correct encoding from one that silently observes the wrong node. A resolver
+    /// that mis-binds the leaf would most likely MISS this violation and report `Holds`.
+    const NAMED_INTERNAL_NET: &str = "\
+1 sort bitvec 1
+2 input 1 a
+3 input 1 b
+4 uext 1 2 0 hot
+";
+
+    #[test]
+    fn internal_net_leaf_is_observed_by_the_monitor() {
+        // `hot` IS `a`, so `!(a==1) || !(hot==1)` is false whenever a = 1 ⇒ VIOLATED.
+        let f = parse("nu X. (((!(a == 1)) || (!(hot == 1))) && [] X)");
+        let (verdict, _) = reach_portfolio_rescue(NAMED_INTERNAL_NET, &f, false)
+            .expect("an internal-net leaf must resolve, so the rescue fires");
+        assert_eq!(
+            verdict,
+            RescueVerdict::Violated,
+            "`hot` aliases `a`, so a = 1 falsifies the invariant. A monitor that mis-binds the \
+             internal net would miss this and report Holds — which is why the negative control \
+             is the test that matters here, not a verdict comparison"
+        );
+    }
+
+    #[test]
+    /// The positive twin: over the SAME design an invariant that genuinely holds must still hold,
+    /// so the resolver is not simply making everything violated.
+    fn internal_net_leaf_holds_when_the_invariant_is_true() {
+        // `!(hot==1) || (a==1)` — `hot` IS `a`, so this is a tautology ⇒ HOLDS.
+        let f = parse("nu X. (((!(hot == 1)) || (a == 1)) && [] X)");
+        let (verdict, _) = reach_portfolio_rescue(NAMED_INTERNAL_NET, &f, false)
+            .expect("an internal-net leaf must resolve");
+        assert_eq!(
+            verdict,
+            RescueVerdict::Holds,
+            "`hot` aliases `a`, so `hot -> a` is a tautology over the net"
+        );
+    }
+
     #[test]
     fn zero_state_exclusion_safety_gets_violated_via_compound_rescue() {
         // `AG(!(a == 1) || !(b == 1))` — a=1,b=1 falsifies. Expected: VIOLATED.
