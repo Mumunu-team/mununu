@@ -1,5 +1,12 @@
 # Consumer briefing — 2026-09 self-imposed process-memory ceiling `MUNUNU_MAX_PROCESS_MEMORY_BYTES` (mununu#490)
 
+> **⚠️ SUPERSEDED IN PART (mununu#504 C6) — see
+> [`2026-09-memory-ceiling-auto-default.md`](2026-09-memory-ceiling-auto-default.md).**
+> This briefing's *"Default unset ⇒ disabled — no behaviour change unless you opt in"* is
+> **no longer true**: unset now resolves to 80% of a detected cgroup memory limit, so the
+> ceiling is ON by default inside a memory-limited container. Everything else here — the
+> mechanism, the `memory-budget-exceeded` note, the coarse-granularity caveat — still holds.
+
 > **Audience:** monono (primary reporter and beneficiary — their 25-check `sv verify-auto` lane hits this today), ROSF (API consumer via `--profile industrial`), any orchestrator running `sv verify-auto` under a memory-constrained container / CI runner.
 >
 > **Related:** [mununu#490](https://github.com/Mumunu-team/mununu/issues/490) — the ticket. **Distinct from #462**: #462 fixed the BDD library's `Err(OutOfMemory)` handling (bit-blast library abstains cleanly). This ticket is one layer further out: the default allocator's `abort()` (exit 134) fires BEFORE any library-level budget check can, taking every property in the same invocation down with it.
