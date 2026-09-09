@@ -1758,8 +1758,64 @@ fn const_to_u64(
 /// `free_bits` returns `[base]` (the pre-H.B single reset cube), so state-only
 /// properties read exactly one cube. Bit `free_bits[k]` is toggled by bit `k` of
 /// the combination index.
+///
+/// Production always calls [`free_input_init_cubes_feasible`]; this unfiltered form is retained
+/// as the CONTROL the feasibility tests measure against — it is what shows the filter drops 26
+/// of 32 rather than silently dropping nothing.
+#[cfg(test)]
 fn free_input_init_cubes(base: usize, free_bits: &[u32]) -> Vec<usize> {
+    free_input_init_cubes_feasible(base, free_bits, &[])
+}
+
+/// mununu#503 — as `free_input_init_cubes`, but dropping cube valuations that are
+/// **mathematically empty**.
+///
+/// `free_dims` pairs each entry of `free_bits` with the `(register, value)` its dimension
+/// asserts. Two `Eq` dimensions over the SAME register with DIFFERENT values cannot both hold, so
+/// any combination setting both describes no concrete state at all.
+///
+/// # Why this matters
+///
+/// `$onehot0(oh_i)` over a primary input expands to one atom PER VALUE — `oh_i == 0`,
+/// `oh_i == 1`, `oh_i == 2`, `oh_i == 4`, `oh_i == 8` — i.e. five mutually exclusive dimensions on
+/// one register. Of the 2⁵ = 32 valuations only **6** are satisfiable (one per value, plus the
+/// all-false case realised by `oh_i ∈ {3,5,6,7,9..15}`). The other **26 are contradictory**, and
+/// `downgrade_unsatisfiable_cells` correctly masks them to ⊥ — but they were still enumerated as
+/// INITIAL cubes here, so `any_unknown` read an empty cube's ⊥ as an abstention and the whole
+/// property came back `Unknown { unknown_cells: 26 }`. 26 = 32 − 6, exactly.
+///
+/// The sibling test `e2e_onehot0_state_invariant_holds` isolates the variable: the same property
+/// over a STATE register has no free-input dimensions, so it yields ONE initial cube and decides.
+///
+/// # Soundness
+///
+/// Dropping a cube that asserts `reg == v₁ ∧ reg == v₂` (v₁ ≠ v₂) cannot lose a reachable initial
+/// state, because no state satisfies it. This is an exact reduction, not an approximation. The
+/// symbolic path already takes the same view — `symbolic_final_verdict` projects infeasible cubes
+/// to `F` as "never a reachable reset cube"; this brings the explicit path into line.
+fn free_input_init_cubes_feasible(
+    base: usize,
+    free_bits: &[u32],
+    free_dims: &[(String, u64)],
+) -> Vec<usize> {
     (0..(1usize << free_bits.len()))
+        .filter(|combo| {
+            if free_dims.len() != free_bits.len() {
+                return true; // no dimension metadata — enumerate as before
+            }
+            // Reject if any register is asserted at two DIFFERENT values at once.
+            let mut claimed: Vec<(&str, u64)> = Vec::new();
+            for (k, (reg, val)) in free_dims.iter().enumerate() {
+                if (combo >> k) & 1 != 1 {
+                    continue;
+                }
+                if claimed.iter().any(|(r, v)| *r == reg.as_str() && v != val) {
+                    return false;
+                }
+                claimed.push((reg.as_str(), *val));
+            }
+            true
+        })
         .map(|combo| {
             let mut c = base;
             for (k, &b) in free_bits.iter().enumerate() {
@@ -3124,11 +3180,15 @@ pub(crate) fn verify_auto_impl(
         }
         let mut base_init_cube = 0usize;
         let mut free_input_bits: Vec<u32> = Vec::new();
+        // mununu#503 — carry each free dimension's `(register, value)` so mutually exclusive
+        // combinations (two `Eq`s on one register) are not enumerated as initial cubes.
+        let mut free_input_dims: Vec<(String, u64)> = Vec::new();
         let mut bit = 0u32;
         for s in &seeded.specs {
             if seeded.input_registers.contains(&s.register) {
                 // Free input dimension — left unset in the base; enumerated below.
                 free_input_bits.push(bit);
+                free_input_dims.push((s.register.clone(), s.value));
             } else if init_for_cube.get(&s.register).copied().unwrap_or(0) == s.value {
                 base_init_cube |= 1 << bit;
             }
@@ -3142,7 +3202,8 @@ pub(crate) fn verify_auto_impl(
         }
         // All initial cubes = base ⊗ every combination of the free-input bits.
         // No free inputs ⇒ a single cube, identical to the pre-H.B single-read.
-        let init_cubes = free_input_init_cubes(base_init_cube, &free_input_bits);
+        let init_cubes =
+            free_input_init_cubes_feasible(base_init_cube, &free_input_bits, &free_input_dims);
 
         // R-F5.5d — the final 3-valued verdict over the cube space, from the
         // selected engine. The explicit path runs `cegar_refine_loop`; the
@@ -7151,6 +7212,72 @@ endmodule
             cb.items.iter().any(|i| i.contains("cnt_q <= 7")),
             "counter-bound note names the inferred bound; got {:?}",
             cb.items
+        );
+    }
+
+    #[test]
+    /// mununu#503 — the one-hot arithmetic, pinned without needing a lift.
+    ///
+    /// `$onehot0(oh_i)` over a primary INPUT expands to one atom per value, so five mutually
+    /// exclusive `Eq` dimensions land on one register. Only 6 of the 2⁵ = 32 valuations are
+    /// satisfiable — one per value, plus the all-false case (`oh_i ∈ {3,5,6,7,9..15}`). The other
+    /// 26 assert two different values for `oh_i` at once and describe no state at all.
+    ///
+    /// They were still enumerated as INITIAL cubes, so `any_unknown` read an empty cube's ⊥ as an
+    /// abstention: `Unknown { unknown_cells: 26 }`, and 26 = 32 − 6 exactly.
+    fn infeasible_free_input_cubes_are_not_initial() {
+        let bits: Vec<u32> = (0..5).collect();
+        let dims: Vec<(String, u64)> = [0u64, 1, 2, 4, 8]
+            .iter()
+            .map(|v| ("oh_i".to_string(), *v))
+            .collect();
+
+        let all = free_input_init_cubes(0, &bits);
+        assert_eq!(
+            all.len(),
+            32,
+            "unfiltered enumerates the whole polarity product"
+        );
+
+        let feasible = free_input_init_cubes_feasible(0, &bits, &dims);
+        assert_eq!(
+            feasible.len(),
+            6,
+            "5 single-value cubes + 1 all-false; the other 26 assert two values for `oh_i` at \
+             once and are empty. 32 - 6 = 26 — exactly the `unknown_cells` this produced"
+        );
+        assert!(
+            feasible.contains(&0),
+            "the all-false cube is feasible (oh_i takes a value outside the set)"
+        );
+    }
+
+    #[test]
+    /// The filter must not touch dimensions over DIFFERENT registers — those are independent, and
+    /// every combination of them is satisfiable.
+    fn distinct_registers_are_still_fully_enumerated() {
+        let bits: Vec<u32> = (0..3).collect();
+        let dims: Vec<(String, u64)> = vec![
+            ("a".to_string(), 1),
+            ("b".to_string(), 1),
+            ("c".to_string(), 1),
+        ];
+        assert_eq!(
+            free_input_init_cubes_feasible(0, &bits, &dims).len(),
+            8,
+            "three independent registers ⇒ all 2^3 combinations remain feasible"
+        );
+    }
+
+    #[test]
+    /// Same register, SAME value repeated is not a contradiction — only distinct values are.
+    fn same_register_same_value_is_not_excluded() {
+        let bits: Vec<u32> = (0..2).collect();
+        let dims: Vec<(String, u64)> = vec![("a".to_string(), 1), ("a".to_string(), 1)];
+        assert_eq!(
+            free_input_init_cubes_feasible(0, &bits, &dims).len(),
+            4,
+            "`a == 1` twice is consistent; excluding it would drop reachable states"
         );
     }
 
