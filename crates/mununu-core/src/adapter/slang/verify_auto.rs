@@ -8065,8 +8065,7 @@ endmodule
         for p in &report.properties {
             let last = records
                 .iter()
-                .filter(|r| r["property"] == p.name.as_str())
-                .next_back()
+                .rfind(|r| r["property"] == p.name.as_str())
                 .unwrap_or_else(|| {
                     panic!(
                         "property `{}` never reached the breadcrumb; records: {:?}",
