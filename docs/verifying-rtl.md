@@ -887,6 +887,7 @@ JSON.
 | `0` | property holds (or all properties hold) — the step passes |
 | `2` | a property is **violated** — the step fails |
 | `3` | a property is **unknown** *and* `--fail-on unknown` was set |
+| `4` | **an expectation was not met** (mununu#537) — the run worked and disagreed with a `--expect-*` claim. Distinct from `1` (the run failed) on purpose, and it SUPERSEDES `--fail-on`: under `--expect-violated`, `2` would fire on the very violation you asked for. |
 | `1` | tool / usage error (bad file, unparseable atom, missing toolchain) |
 
 - `--fail-on <violated\|unknown\|none>` picks the gate policy. Default `violated`:
