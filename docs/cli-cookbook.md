@@ -119,6 +119,32 @@ mununu --quiet sv lint rtl/mod.sv --frontend slang --fail-on none
 
 The JSON on stdout lists each flagged `signal` with a `kind` of `"register"` (the root — the register itself) or `"output"` (a downstream combinational output of one). See [`docs/verifying-rtl.md`](verifying-rtl.md) for the soundness background (the monono#partsel guard).
 
+## Gate CI on a SystemVerilog design's own assertions (machine-readable)
+
+> Source of truth: [`impl From<&AutoVerifyReport> for SvVerifyAutoResponse`](../crates/mununu-core/src/api/models.rs) — surface: (CLI+API)
+
+`mununu sv verify-auto --json` emits the **same document the HTTP API returns**, described by [`docs/api-schemas/sv-verify-auto-response.schema.json`](api-schemas/sv-verify-auto-response.schema.json) and pinned by a drift test. Parse that; do not parse the human transcript, whose layout is not a contract.
+
+```bash
+# every property and its verdict
+mununu --quiet sv verify-auto rtl/mod.sv --source rtl/mod_sva.sv --top mod --json \
+  | jq -r '.properties[] | "\(.name) \(.outcome)"'
+
+# anything that did NOT translate, with mununu's own reason
+mununu --quiet sv verify-auto rtl/mod.sv --json | jq -r '.unsupported[] | "\(.name): \(.reason)"'
+
+# the ⊥ figure, as a NUMBER (do not parse `detail`, which is prose)
+mununu --quiet sv verify-auto rtl/mod.sv --json \
+  | jq -r '.properties[] | select(.outcome=="unknown") | "\(.name) \(.unknown_cells)"'
+
+# what was this run scoped to?
+mununu --quiet sv verify-auto rtl/mod.sv --json | jq '.diagnostics | {frontend, config_values, cutpoints}'
+```
+
+**`properties[]` is the verdict record; the `notes` are commentary and must not be counted.** A property that is absent from `properties[]` is not being checked — look for it in `unsupported[]`, which says why.
+
+Exit codes are the usual gate (`0` pass, `2` violated, `3` unknown under `--fail-on unknown`, `1` tool error); `1` implies empty stdout, while `2`/`3` still emit the full document.
+
 ## Check that a design's properties are adequate (mutation testing)
 
 > Source of truth: [`mutate_and_compare`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L1824) — surface: (CLI+API+UI)

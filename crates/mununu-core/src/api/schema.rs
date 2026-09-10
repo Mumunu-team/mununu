@@ -177,6 +177,189 @@ mod tests {
 
     /// The response schema must reference every wire type documented in
     /// `docs/api-schemas/verdict.md` — `PropertyVerdictView`, `CounterexampleView`,
+    /// mununu#536 — a REAL report, serialized through the one shared conversion, must conform
+    /// to the published response schema.
+    ///
+    /// The other drift tests compare the schema against the Rust types. This one compares an
+    /// actual serialized document against the schema, which is the thing a consumer holds. It
+    /// is the test that makes the CLI's `--json` and the HTTP response unable to diverge
+    /// again: both call `SvVerifyAutoResponse::from(&report)`, so conformance here is
+    /// conformance for both surfaces.
+    ///
+    /// Checks in both directions — every `required` key is present, and every emitted key is
+    /// declared. A one-directional check would miss the failure that actually happened: a
+    /// serializer emitting a field the schema never mentioned.
+    #[test]
+    fn a_serialized_report_conforms_to_the_published_response_schema() {
+        use crate::adapter::slang::translate::SvaKind;
+        use crate::adapter::slang::verify_auto::{
+            AutoVerifyReport, ExactCounterexample, ModelDiagnostics, NoteLevel, PropertyVerdict,
+            VerificationNote, VerifyOutcome,
+        };
+
+        // Exercise every outcome arm and every optional field, so the check is not vacuous on
+        // a report that happens to omit the interesting parts.
+        let report = AutoVerifyReport {
+            properties: vec![
+                PropertyVerdict {
+                    name: "p_holds".into(),
+                    kind: SvaKind::Assert,
+                    formula: "nu X. (a && [] X)".into(),
+                    outcome: VerifyOutcome::Holds,
+                    seeded_predicates: vec!["a == 1".into()],
+                    counterexample: None,
+                },
+                PropertyVerdict {
+                    name: "p_violated".into(),
+                    kind: SvaKind::Cover,
+                    formula: "mu X. (b || <> X)".into(),
+                    outcome: VerifyOutcome::Violated { false_cells: 3 },
+                    seeded_predicates: vec![],
+                    counterexample: Some(ExactCounterexample {
+                        prefix: vec![vec![("q".into(), 0)]],
+                        cycle: vec![vec![("q".into(), 1)]],
+                        inputs: vec![vec![("d".into(), 1)]],
+                        unreachable_target: vec!["b".into()],
+                    }),
+                },
+                PropertyVerdict {
+                    name: "p_unknown".into(),
+                    kind: SvaKind::Assume,
+                    formula: "nu X. (c && [] X)".into(),
+                    outcome: VerifyOutcome::Unknown { unknown_cells: 32 },
+                    seeded_predicates: vec![],
+                    counterexample: None,
+                },
+                PropertyVerdict {
+                    name: "p_skipped".into(),
+                    kind: SvaKind::Assert,
+                    formula: "nu X. (d && [] X)".into(),
+                    outcome: VerifyOutcome::Skipped {
+                        reason: "bit cap".into(),
+                    },
+                    seeded_predicates: vec![],
+                    counterexample: None,
+                },
+            ],
+            unsupported: vec![("u0".into(), "unsupported binary op: BinaryAnd".into())],
+            diagnostics: ModelDiagnostics {
+                state_register_count: 2,
+                blackboxed_modules: vec!["m".into()],
+                gated_resets: vec!["rst_n=1".into()],
+                auto_provided_stubs: vec![],
+                frontend: Some("read_verilog + sv2v".into()),
+                frontend_fallback_reason: Some("slang errored".into()),
+                applied_config_values: vec!["cfg=7".into()],
+                cutpoint_signals: vec!["fits".into()],
+            },
+            notes: vec![VerificationNote {
+                kind: "coverage-summary".into(),
+                level: NoteLevel::Info,
+                summary: "4 assertion(s)".into(),
+                detail: "d".into(),
+                items: vec!["i".into()],
+            }],
+        };
+
+        let doc = serde_json::to_value(SvVerifyAutoResponse::from(&report))
+            .expect("the response serialises");
+        let schema =
+            serde_json::to_value(sv_verify_auto_response_schema()).expect("schema serialises");
+
+        // Walk one object against one schema node: required present, emitted declared.
+        fn conforms(
+            doc: &serde_json::Value,
+            node: &serde_json::Value,
+            schema: &serde_json::Value,
+            path: &str,
+        ) {
+            // Follow a `$ref` / `allOf` indirection to the definition it names.
+            let node = resolve(node, schema);
+            let Some(props) = node.get("properties").and_then(|p| p.as_object()) else {
+                return;
+            };
+            let obj = doc
+                .as_object()
+                .unwrap_or_else(|| panic!("{path}: expected an object"));
+            if let Some(req) = node.get("required").and_then(|r| r.as_array()) {
+                for r in req {
+                    let k = r.as_str().unwrap_or_default();
+                    assert!(
+                        obj.contains_key(k),
+                        "{path}.{k} is `required` by the schema but absent from the serialized \
+                         document — a consumer following the schema would break"
+                    );
+                }
+            }
+            for (k, v) in obj {
+                let Some(child) = props.get(k) else {
+                    panic!(
+                        "{path}.{k} is emitted but NOT declared in the schema — this is exactly \
+                         the drift the shared conversion exists to prevent"
+                    );
+                };
+                match v {
+                    serde_json::Value::Object(_) => {
+                        conforms(v, child, schema, &format!("{path}.{k}"))
+                    }
+                    serde_json::Value::Array(items) => {
+                        let inner = resolve(child, schema);
+                        if let Some(item_schema) = inner.get("items") {
+                            for (i, it) in items.iter().enumerate() {
+                                if it.is_object() || it.is_array() {
+                                    conforms(it, item_schema, schema, &format!("{path}.{k}[{i}]"));
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // `$ref: "#/definitions/X"`, or an `allOf: [{ $ref }]` wrapper (how schemars emits a
+        // named type behind an optional field).
+        fn resolve<'a>(
+            node: &'a serde_json::Value,
+            schema: &'a serde_json::Value,
+        ) -> &'a serde_json::Value {
+            if let Some(r) = node.get("$ref").and_then(|r| r.as_str())
+                && let Some(name) = r.strip_prefix("#/definitions/")
+                && let Some(def) = schema.get("definitions").and_then(|d| d.get(name))
+            {
+                return resolve(def, schema);
+            }
+            if let Some(all) = node.get("allOf").and_then(|a| a.as_array())
+                && let Some(first) = all.first()
+            {
+                return resolve(first, schema);
+            }
+            node
+        }
+
+        conforms(&doc, &schema, &schema, "$");
+
+        // Non-vacuity: the walk must actually have reached the fields mununu#536 added, or a
+        // conformance pass proves nothing about them.
+        assert_eq!(
+            doc["properties"][2]["unknown_cells"], 32,
+            "the ⊥ figure is machine-readable"
+        );
+        assert_eq!(doc["properties"][1]["false_cells"], 3);
+        assert_eq!(doc["properties"][3]["skip_reason"], "bit cap");
+        assert_eq!(doc["diagnostics"]["frontend"], "read_verilog + sv2v");
+        assert_eq!(doc["diagnostics"]["config_values"][0], "cfg=7");
+        assert_eq!(doc["diagnostics"]["cutpoints"][0], "fits");
+        assert_eq!(
+            doc["properties"][1]["counterexample"]["inputs"][0][0]["register"],
+            "d"
+        );
+        // `holds` carries no cell count, and the optional fields are OMITTED rather than null —
+        // a consumer checking `"unknown_cells" in p` must not see a null.
+        assert!(doc["properties"][0].get("unknown_cells").is_none());
+        assert!(doc["properties"][0].get("false_cells").is_none());
+    }
+
     /// `CexCellView`, `VerificationNoteView`, `ModelDiagnosticsView`,
     /// `UnsupportedAssertionView`. Guards against silent removal of a
     /// documented type from the schema tree.

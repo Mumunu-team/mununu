@@ -332,6 +332,20 @@ pub struct ModelDiagnostics {
     /// the one used succeeded), the prior attempt's error. `None` when there was no
     /// fallback (an explicit front end, or the first attempt succeeded).
     pub frontend_fallback_reason: Option<String>,
+    /// mununu#536 — config inputs pinned to constants for this run, each
+    /// `"<signal>=<value>"` (the `--config-value` / API `config_values` operands that were
+    /// actually APPLIED, not those merely requested).
+    ///
+    /// These already reach a human through the `config-concretization` note, but a note is
+    /// prose: a consumer asking "what was this verdict scoped to?" had to string-match a
+    /// summary line. A verdict pinned to `cfg_timer=7` is a claim about THAT configuration
+    /// and no other, so the scope belongs in the structured payload beside the verdicts.
+    pub applied_config_values: Vec<String>,
+    /// mununu#536 — signals cut to free inputs by `--cutpoint`, i.e. the control slice this
+    /// run verified under. Same reasoning as [`Self::applied_config_values`]: a cutpoint is
+    /// an over-approximation that shapes every verdict in the report, and it was reachable
+    /// only as `control-slice` note prose.
+    pub cutpoint_signals: Vec<String>,
 }
 
 /// Severity of a [`VerificationNote`] — how it bears on the verdict's trust.
@@ -516,6 +530,65 @@ fn partition_config_pins(
     (applied, unusable)
 }
 
+/// mununu#536 — the `coverage-summary` note, computed from a report's CURRENT verdicts.
+///
+/// Extracted so it can be recomputed AFTER the portfolio merge. It is the one note whose
+/// content is a function of the verdicts, which is exactly why it could go stale while every
+/// other note stayed true.
+fn coverage_summary_note(report: &AutoVerifyReport) -> VerificationNote {
+    let (mut holds, mut violated, mut unknown, mut skipped) = (0usize, 0usize, 0usize, 0usize);
+    for p in &report.properties {
+        match p.outcome {
+            VerifyOutcome::Holds => holds += 1,
+            VerifyOutcome::Violated { .. } => violated += 1,
+            VerifyOutcome::Unknown { .. } => unknown += 1,
+            VerifyOutcome::Skipped { .. } => skipped += 1,
+        }
+    }
+    VerificationNote {
+        kind: "coverage-summary".into(),
+        level: NoteLevel::Info,
+        summary: format!(
+            "{} assertion(s): {holds} definite (HOLDS), {violated} violated, {unknown} unknown (⊥), {skipped} skipped; {} untranslatable",
+            report.properties.len(),
+            report.unsupported.len(),
+        ),
+        detail: "A definite verdict transfers to the RTL (see abstraction-posture); ⊥ means the \
+                 abstraction is too coarse to decide — an honest 'don't know', not a violation."
+            .into(),
+        items: Vec::new(),
+    }
+}
+
+/// mununu#536 / mununu#498 — replace a report's `coverage-summary` note with one recomputed
+/// from its current verdicts.
+///
+/// # The bug this fixes
+///
+/// `merge_portfolio_reports` starts from `base.clone()`, where the base is the highest-precision
+/// engine, and that clone brings the base's NOTES with it. The merge then rewrites
+/// `properties[].outcome` with the first definite verdict across all engines — but nothing
+/// rewrote the notes, so the `coverage-summary` kept reporting the BASE ENGINE'S tally while
+/// `properties[]` reported the merged one. Since `portfolio-sequential` is the default engine,
+/// this was the common case, and it is exactly what mununu#498's minor and mununu#536 observed:
+/// a summary claiming `0 unknown` beside properties printing `UNKNOWN`.
+///
+/// A consumer that counted the summary line under-reported its own coverage. That was tolerable
+/// while the summary was prose a human skimmed; it is not tolerable inside a machine-readable
+/// report, which is why it is fixed in the same change that publishes one.
+fn refresh_coverage_summary(report: &mut AutoVerifyReport) {
+    let fresh = coverage_summary_note(report);
+    if let Some(slot) = report
+        .notes
+        .iter_mut()
+        .find(|n| n.kind == "coverage-summary")
+    {
+        *slot = fresh;
+    } else {
+        report.notes.push(fresh);
+    }
+}
+
 fn build_notes(
     report: &AutoVerifyReport,
     must_edge_inference: MustEdgeInference,
@@ -529,28 +602,7 @@ fn build_notes(
     let mut notes = Vec::new();
 
     // Coverage summary (Info) — the honest at-a-glance tally.
-    let (mut holds, mut violated, mut unknown, mut skipped) = (0usize, 0usize, 0usize, 0usize);
-    for p in &report.properties {
-        match p.outcome {
-            VerifyOutcome::Holds => holds += 1,
-            VerifyOutcome::Violated { .. } => violated += 1,
-            VerifyOutcome::Unknown { .. } => unknown += 1,
-            VerifyOutcome::Skipped { .. } => skipped += 1,
-        }
-    }
-    notes.push(VerificationNote {
-        kind: "coverage-summary".into(),
-        level: NoteLevel::Info,
-        summary: format!(
-            "{} assertion(s): {holds} definite (HOLDS), {violated} violated, {unknown} unknown (⊥), {skipped} skipped; {} untranslatable",
-            report.properties.len(),
-            report.unsupported.len(),
-        ),
-        detail: "A definite verdict transfers to the RTL (see abstraction-posture); ⊥ means the \
-                 abstraction is too coarse to decide — an honest 'don't know', not a violation."
-            .into(),
-        items: Vec::new(),
-    });
+    notes.push(coverage_summary_note(report));
 
     // #466 — which RTL front end produced the lift. `--frontend auto` picks one
     // silently, but read_verilog and yosys-slang differ in SOUNDNESS on partial
@@ -2105,6 +2157,10 @@ pub(crate) fn merge_portfolio_reports(
         ),
         items,
     });
+    // mununu#536 — every verdict is final now, so recompute the one note that counts them. The
+    // clone above carried the BASE engine's coverage summary, which the merge has just made
+    // wrong; see `refresh_coverage_summary`.
+    refresh_coverage_summary(&mut merged);
     if !contradictions.is_empty() {
         merged.notes.push(VerificationNote {
             kind: "portfolio-soundness-alarm".to_string(),
@@ -2219,7 +2275,7 @@ pub fn verify_auto(
     // former inline `verify_auto_portfolio`; the routing reasoning now lives in the planner.
     if opts.portfolio.is_some() {
         return match prepare_model(sources, yosys_opts, opts)? {
-            Prepared::Empty(report) => Ok(report),
+            Prepared::Empty(report) => Ok(*report),
             Prepared::Model(m) => {
                 let m = *m;
                 let task = crate::planner::VerificationTask {
@@ -2396,8 +2452,11 @@ impl PreparedModel {
 /// The result of `prepare_model`: either a design with NO translated properties (the empty report is
 /// final) or a fully-prepared [`PreparedModel`].
 pub(crate) enum Prepared {
-    /// No properties to verify — the report (posture + annotation note) is complete.
-    Empty(AutoVerifyReport),
+    /// No properties to verify — the report (posture + annotation note) is complete. Boxed for
+    /// the same reason `Model` is: `Prepared` is returned by value, and an `AutoVerifyReport`
+    /// carrying the full diagnostics + note set is not a cheap thing to move through the
+    /// enum's largest-variant footprint.
+    Empty(Box<AutoVerifyReport>),
     /// The prepared model, ready for `plan` + `verify_from_prepared`. Boxed — it is much larger
     /// than the `Empty` report, and `Prepared` is returned by value.
     Model(Box<PreparedModel>),
@@ -2477,7 +2536,7 @@ pub(crate) fn prepare_model(
         if let Some(n) = annotation_note(&ann_scan) {
             report.notes.push(n);
         }
-        return Ok(Prepared::Empty(report));
+        return Ok(Prepared::Empty(Box::new(report)));
     }
 
     // Reset inputs to pin inactive (reset-gating). Empty when gating is off or no `disable iff`
@@ -2722,7 +2781,7 @@ pub(crate) fn verify_auto_impl(
     } = match prepared {
         Some(m) => m,
         None => match prepare_model(sources, yosys_opts, opts)? {
-            Prepared::Empty(r) => return Ok(r),
+            Prepared::Empty(r) => return Ok(*r),
             Prepared::Model(m) => *m,
         },
     };
@@ -3498,6 +3557,14 @@ pub(crate) fn verify_auto_impl(
     } else {
         NotePosture::Cube
     };
+    // mununu#536 — record the run's SCOPE on the diagnostics, not only in note prose. Both
+    // operands are already in hand here (they are `build_notes` arguments); a consumer asking
+    // "what was this verdict scoped to?" should not have to parse a summary sentence.
+    report.diagnostics.applied_config_values = applied_config_values
+        .iter()
+        .map(|(sig, val)| format!("{sig}={val}"))
+        .collect();
+    report.diagnostics.cutpoint_signals = yosys_opts.cutpoint_signals.clone();
     report.notes = build_notes(
         &report,
         opts.must_edge_inference,
@@ -5176,6 +5243,87 @@ mod tests {
                 .any(|n| n.kind == "portfolio"
                     && n.items.iter().any(|i| i == "decided-by:symbolic=1")),
             "the note must attribute the verdict to the symbolic engine"
+        );
+    }
+
+    /// mununu#536 / mununu#498 — the merged report's `coverage-summary` must count the MERGED
+    /// verdicts, not the base engine's.
+    ///
+    /// The merge starts from `base.clone()`, which carries the base engine's notes; it then
+    /// rewrites `properties[].outcome` across engines. Nothing rewrote the summary, so it kept
+    /// reporting the base's tally. With `portfolio-sequential` as the DEFAULT engine this was
+    /// the common case, and it is what monono saw: a summary claiming `0 unknown` beside
+    /// properties printing `UNKNOWN`. A consumer counting the summary under-reported its own
+    /// coverage.
+    #[test]
+    fn portfolio_merge_recounts_the_coverage_summary() {
+        // The base (exact) leaves both ⊥; the explicit engine decides one. Merged: 1 holds, 1 ⊥.
+        let exact = (
+            "exact-symbolic",
+            Ok(mk_report(&[
+                (
+                    "p_decided_later",
+                    VerifyOutcome::Unknown { unknown_cells: 8 },
+                    None,
+                ),
+                (
+                    "p_stays_bottom",
+                    VerifyOutcome::Unknown { unknown_cells: 4 },
+                    None,
+                ),
+            ])),
+        );
+        let explicit = (
+            "explicit",
+            Ok(mk_report(&[
+                ("p_decided_later", VerifyOutcome::Holds, None),
+                (
+                    "p_stays_bottom",
+                    VerifyOutcome::Unknown { unknown_cells: 4 },
+                    None,
+                ),
+            ])),
+        );
+        let merged = merge_portfolio_reports(&[exact, explicit], PortfolioMode::Sequential)
+            .expect("merge ok");
+
+        // What the properties actually say, which is the record of truth.
+        let holds = merged
+            .properties
+            .iter()
+            .filter(|p| matches!(p.outcome, VerifyOutcome::Holds))
+            .count();
+        let unknown = merged
+            .properties
+            .iter()
+            .filter(|p| matches!(p.outcome, VerifyOutcome::Unknown { .. }))
+            .count();
+        assert_eq!(
+            (holds, unknown),
+            (1, 1),
+            "the merge decided exactly one property"
+        );
+
+        let cov = merged
+            .notes
+            .iter()
+            .find(|n| n.kind == "coverage-summary")
+            .expect("a coverage-summary note is present");
+        assert!(
+            cov.summary.contains("1 definite (HOLDS)") && cov.summary.contains("1 unknown"),
+            "the summary must count the MERGED verdicts (1 HOLDS, 1 ⊥). Before mununu#536 it \
+             reported the base engine's pre-merge tally (0 HOLDS, 2 ⊥) while the properties said \
+             otherwise — the disagreement a consumer parsed. Got: {}",
+            cov.summary
+        );
+        assert_eq!(
+            merged
+                .notes
+                .iter()
+                .filter(|n| n.kind == "coverage-summary")
+                .count(),
+            1,
+            "refreshing must REPLACE the stale note, not append a second contradicting one"
         );
     }
 

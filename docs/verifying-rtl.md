@@ -162,6 +162,48 @@ The response reports a verdict per translated assertion, plus a list of assertio
 that did **not** translate (surfaced honestly, never silently dropped) and
 model-level diagnostics.
 
+### The machine-readable report: `--json` (mununu#536)
+
+> Source of truth: [`impl From<&AutoVerifyReport> for SvVerifyAutoResponse`](../crates/mununu-core/src/api/models.rs) — surface: (CLI+API)
+
+**Do not parse the transcript.** `sv verify-auto --json` emits the *same document* the HTTP API returns, described by [`docs/api-schemas/sv-verify-auto-response.schema.json`](api-schemas/sv-verify-auto-response.schema.json) and pinned by a drift test. One shape, both surfaces:
+
+```bash
+mununu --quiet sv verify-auto design.sv --source design_sva.sv --top design --json
+```
+
+```jsonc
+{
+  "properties": [
+    { "name": "dut_sva_0", "kind": "assert", "formula": "nu X. …", "outcome": "holds",
+      "detail": null, "seeded_predicates": ["st_q == 2"] },
+    { "name": "dut_sva_1", "kind": "assert", "formula": "nu X. …", "outcome": "unknown",
+      "detail": "32768 cell(s)", "unknown_cells": 32768, "seeded_predicates": [] }
+  ],
+  "unsupported": [ { "name": "dut_sva_2", "kind": null,
+                     "reason": "unsupported binary op: BinaryAnd" } ],
+  "diagnostics": { "state_register_count": 12, "blackboxed_modules": [], "gated_resets": ["rst_n=1"],
+                   "auto_provided_stubs": [], "frontend": "read_verilog + sv2v",
+                   "config_values": ["cfg_timer=7"], "cutpoints": [] },
+  "notes": [ { "kind": "coverage-summary", "level": "info", "summary": "…", "items": [] } ]
+}
+```
+
+**`properties[]` is the verdict record. Notes are commentary — never count them.** A note is prose written for a human reading a terminal; `properties[]` is the answer. Concretely: read `outcome` per property, and take the ⊥ figure from `unknown_cells` (or `false_cells` / `skip_reason`) rather than parsing the `detail` sentence that contains it.
+
+```bash
+# every property and its verdict
+mununu --quiet sv verify-auto design.sv --json | jq -r '.properties[] | "\(.name) \(.outcome)"'
+
+# did anything fail to translate, and why?
+mununu --quiet sv verify-auto design.sv --json | jq -r '.unsupported[] | "\(.name): \(.reason)"'
+
+# act on a scope caveat without string-matching prose
+mununu --quiet sv verify-auto design.sv --json | jq '[.notes[] | select(.level=="scope-caveat")]'
+```
+
+`unsupported[]` carries mununu's own **reason** for every assertion it could not translate (`"unsupported binary op: BinaryAnd"`, `"dynamic bit-select …"`). An assertion that does not appear in `properties[]` is not being checked, and this is where it says why.
+
 ### Shrinking a parameterised design: `--param`
 
 > Source of truth: [`build_chparam_passes`](../crates/mununu-core/src/adapter/yosys/mod.rs) — surface: (CLI+API+UI)

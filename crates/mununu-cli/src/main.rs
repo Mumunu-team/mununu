@@ -3803,7 +3803,7 @@ fn sv_verify_auto(args: SvVerifyAutoArgs) -> Result<(), String> {
         .map_err(|e| format!("sv verify-auto: {}", e.message))?;
 
     if args.json {
-        render_verify_auto_json(&report);
+        render_verify_auto_json(&report)?;
     } else {
         render_verify_auto_text(&report);
     }
@@ -3946,96 +3946,25 @@ fn note_level_glyph(level: mununu_core::adapter::slang::verify_auto::NoteLevel) 
     }
 }
 
-/// Machine-stable kebab string for a note's severity (JSON + API parity).
-fn note_level_str(level: mununu_core::adapter::slang::verify_auto::NoteLevel) -> &'static str {
-    use mununu_core::adapter::slang::verify_auto::NoteLevel;
-    match level {
-        NoteLevel::Info => "info",
-        NoteLevel::ScopeCaveat => "scope-caveat",
-        NoteLevel::SoundnessCaveat => "soundness-caveat",
-    }
-}
-
-fn render_verify_auto_json(report: &mununu_core::adapter::slang::verify_auto::AutoVerifyReport) {
-    use mununu_core::adapter::slang::verify_auto::VerifyOutcome;
-    let props: Vec<serde_json::Value> = report
-        .properties
-        .iter()
-        .map(|p| {
-            let (status, detail) = match &p.outcome {
-                VerifyOutcome::Holds => ("holds", serde_json::Value::Null),
-                VerifyOutcome::Violated { false_cells } => (
-                    "violated",
-                    serde_json::json!({ "false_cells": false_cells }),
-                ),
-                VerifyOutcome::Unknown { unknown_cells } => (
-                    "unknown",
-                    serde_json::json!({ "unknown_cells": unknown_cells }),
-                ),
-                VerifyOutcome::Skipped { reason } => {
-                    ("skipped", serde_json::json!({ "reason": reason }))
-                }
-            };
-            // D1.8b — stall-lasso counterexample; each state is an ordered list of
-            // [register, value] pairs so the register order is preserved in JSON.
-            let counterexample = p.counterexample.as_ref().map(|c| {
-                let states = |v: &[Vec<(String, u64)>]| -> Vec<serde_json::Value> {
-                    v.iter()
-                        .map(|st| {
-                            serde_json::Value::Array(
-                                st.iter()
-                                    .map(|(k, val)| serde_json::json!([k, val]))
-                                    .collect(),
-                            )
-                        })
-                        .collect()
-                };
-                serde_json::json!({ "prefix": states(&c.prefix), "cycle": states(&c.cycle) })
-            });
-            serde_json::json!({
-                "name": p.name,
-                "kind": sva_kind_str(p.kind),
-                "formula": p.formula,
-                "outcome": status,
-                "detail": detail,
-                "seeded_predicates": p.seeded_predicates,
-                "counterexample": counterexample,
-            })
-        })
-        .collect();
-    let unsupported: Vec<serde_json::Value> = report
-        .unsupported
-        .iter()
-        .map(|(name, reason)| serde_json::json!({ "name": name, "reason": reason }))
-        .collect();
-    let notes: Vec<serde_json::Value> = report
-        .notes
-        .iter()
-        .map(|n| {
-            serde_json::json!({
-                "kind": n.kind,
-                "level": note_level_str(n.level),
-                "summary": n.summary,
-                "detail": n.detail,
-                "items": n.items,
-            })
-        })
-        .collect();
-    let out = serde_json::json!({
-        "properties": props,
-        "unsupported": unsupported,
-        "diagnostics": {
-            "state_register_count": report.diagnostics.state_register_count,
-            "blackboxed_modules": report.diagnostics.blackboxed_modules,
-            "gated_resets": report.diagnostics.gated_resets,
-            "auto_provided_stubs": report.diagnostics.auto_provided_stubs,
-        },
-        "notes": notes,
-    });
+fn render_verify_auto_json(
+    report: &mununu_core::adapter::slang::verify_auto::AutoVerifyReport,
+) -> Result<(), String> {
+    // mununu#536 — serialize the SAME type the HTTP API returns, via the one shared conversion
+    // (`impl From<&AutoVerifyReport> for SvVerifyAutoResponse`).
+    //
+    // This used to be an independent `serde_json::json!` literal, which meant two hand-written
+    // serializers for one documented shape. They had already drifted — `detail` was an object
+    // here and a string on the API, this one dropped `unreachable_target`, and neither carried
+    // the front end used — so a consumer reading
+    // `docs/api-schemas/sv-verify-auto-response.schema.json` and then running the CLI got a
+    // different document. Going through the shared type means the schema drift test now covers
+    // this output too, because it is literally the same type.
+    let view = mununu_core::api::models::SvVerifyAutoResponse::from(report);
     println!(
         "{}",
-        serde_json::to_string_pretty(&out).unwrap_or_else(|_| "{}".to_string())
+        serde_json::to_string_pretty(&view).map_err(|e| format!("serialize report: {e}"))?
     );
+    Ok(())
 }
 
 /// Shared CEGAR parameters for the CLI handlers. Both `btor2 cegar`

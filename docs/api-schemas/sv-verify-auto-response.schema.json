@@ -32,6 +32,16 @@
           },
           "type": "array"
         },
+        "inputs": {
+          "description": "P3 / mununu#536 — the per-cycle INPUT assignment that drives the trace, so the counterexample can be replayed against the RTL. Present on the core report all along; both wire shapes dropped it, which made a trace readable but not runnable.",
+          "items": {
+            "items": {
+              "$ref": "#/definitions/CexCellView"
+            },
+            "type": "array"
+          },
+          "type": "array"
+        },
         "prefix": {
           "description": "States from the reset state up to (excluding) the cycle entry.",
           "items": {
@@ -73,6 +83,38 @@
           },
           "type": "array"
         },
+        "config_values": {
+          "default": [],
+          "description": "mununu#536 — config inputs pinned for this run, each `\"<signal>=<value>\"`. A verdict under a pin is a claim about THAT configuration only, so the scope ships with it.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "cutpoints": {
+          "default": [],
+          "description": "mununu#536 — signals cut to free inputs by `--cutpoint`: the control slice these verdicts were reached under.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "frontend": {
+          "description": "`\"read_verilog + sv2v\"`, `\"yosys-slang (read_slang)\"`). `--frontend auto` picks one silently and the two paths differ in SOUNDNESS on partial writes (#464/#465), so \"which lift produced this verdict?\" is a question the payload must answer. It was previously reachable only as `lift-frontend` note prose.",
+          "title": "466 / mununu#536 — the RTL front end that produced the lift (e.g.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "frontend_fallback_reason": {
+          "description": "attempt's error. `None` when there was no fallback.",
+          "title": "466 — when `--frontend auto` FELL BACK (an earlier front end errored), the prior",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "gated_resets": {
           "description": "Reset inputs pinned inactive at the model level (`\"<signal>=<value>\"`), with their `disable iff` guards dropped from the formulas. Empty when reset-gating is off or no `disable iff` reset was recognized.",
           "items": {
@@ -110,9 +152,18 @@
           "description": "D1.8b — a concrete stall-lasso counterexample, present only for a Violated bare `AF p` decided by the exact engine (`engine: \"exact-symbolic\"`)."
         },
         "detail": {
-          "description": "`false_cells` (violated) / `unknown_cells` (unknown) / the skip reason.",
+          "description": "Human-readable detail: `\"N cell(s)\"` (violated/unknown) or the skip reason.\n\n**Prefer the structured fields below.** This is prose and stays only so existing consumers keep working; a gate that needs the figure should read `false_cells` / `unknown_cells` / `skip_reason` rather than parsing this string.",
           "type": [
             "string",
+            "null"
+          ]
+        },
+        "false_cells": {
+          "description": "mununu#536 — the cell count behind a `violated` verdict, machine-readable. `None` for every other outcome.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": [
+            "integer",
             "null"
           ]
         },
@@ -136,6 +187,22 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "skip_reason": {
+          "description": "mununu#536 — why a `skipped` property was not evaluated. `None` for every other outcome.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "unknown_cells": {
+          "description": "mununu#536 — the cell count behind an `unknown` (⊥) verdict, machine-readable. `None` for every other outcome.\n\nThis is the \"cell/budget figure that accompanies a ⊥\" the issue asks for: a ⊥ is a statement about how much of the cube space stayed undecided, and a consumer tracking whether refinement is helping needs the number, not a sentence containing it.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "required": [

@@ -1,5 +1,13 @@
 # mununu API — machine-readable JSON Schemas
 
+> **mununu#536 — one shape, two surfaces.** `sv-verify-auto-response.schema.json`
+> describes the HTTP response **and** the CLI's `mununu sv verify-auto --json`
+> output: both go through the single `impl From<&AutoVerifyReport> for
+> SvVerifyAutoResponse` in `crates/mununu-core/src/api/models.rs`, so the drift test
+> below covers both. There used to be two hand-written serializers for this shape and
+> they had diverged; a consumer reading this schema and then running the CLI got a
+> different document.
+
 This directory holds the **machine-readable** contract for mununu's HTTP API wire types, alongside the human-facing prose in [`verdict.md`](verdict.md).
 
 Each `*.schema.json` file is a JSON Schema (Draft-07) derived directly from the Rust source via `#[derive(schemars::JsonSchema)]` on the API types in [`crates/mununu-core/src/api/models.rs`](../../crates/mununu-core/src/api/models.rs). The generator lives at [`crates/mununu-core/src/api/schema.rs`](../../crates/mununu-core/src/api/schema.rs); the drift-detector at the bottom of that file's `#[cfg(test)]` block asserts every commit that the shipped file matches the current Rust types — a wire-format change without a schema update fails CI.
