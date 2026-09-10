@@ -1736,6 +1736,138 @@ pub struct SvVerifyAutoResponse {
     pub notes: Vec<VerificationNoteView>,
 }
 
+/// mununu#536 — the ONE report→wire conversion, shared by the HTTP handler and the CLI's
+/// `--json`.
+///
+/// # Why this exists
+///
+/// There used to be two hand-written serializers for the same report: the API handler built
+/// [`SvVerifyAutoResponse`] field by field, and the CLI built a `serde_json::json!` literal.
+/// Only the API shape was described by `docs/api-schemas/sv-verify-auto-response.schema.json`
+/// and guarded by the drift test, so **a consumer reading the published schema and then
+/// running the CLI got a different document** — and the two had already drifted: `detail` was
+/// an object on one and a string on the other, the CLI dropped `unreachable_target`, and
+/// neither carried the front end used.
+///
+/// Two serializers for one documented shape cannot be kept in step by discipline; the fix is
+/// for there to be one. With both surfaces going through here, the schema drift test covers
+/// the CLI output too, because it is literally the same type.
+impl From<&crate::adapter::slang::verify_auto::AutoVerifyReport> for SvVerifyAutoResponse {
+    fn from(report: &crate::adapter::slang::verify_auto::AutoVerifyReport) -> Self {
+        use crate::adapter::slang::translate::SvaKind;
+        use crate::adapter::slang::verify_auto::{NoteLevel, VerifyOutcome};
+
+        let cells = |v: &[Vec<(String, u64)>]| -> Vec<Vec<CexCellView>> {
+            v.iter()
+                .map(|st| {
+                    st.iter()
+                        .map(|(register, value)| CexCellView {
+                            register: register.clone(),
+                            value: *value,
+                        })
+                        .collect()
+                })
+                .collect()
+        };
+
+        let properties = report
+            .properties
+            .iter()
+            .map(|p| {
+                // `detail` stays prose for existing consumers; the structured fields beside it
+                // are what a gate should read.
+                let (outcome, detail, false_cells, unknown_cells, skip_reason) = match &p.outcome {
+                    VerifyOutcome::Holds => ("holds", None, None, None, None),
+                    VerifyOutcome::Violated { false_cells } => (
+                        "violated",
+                        Some(format!("{false_cells} cell(s)")),
+                        Some(*false_cells),
+                        None,
+                        None,
+                    ),
+                    VerifyOutcome::Unknown { unknown_cells } => (
+                        "unknown",
+                        Some(format!("{unknown_cells} cell(s)")),
+                        None,
+                        Some(*unknown_cells),
+                        None,
+                    ),
+                    VerifyOutcome::Skipped { reason } => (
+                        "skipped",
+                        Some(reason.clone()),
+                        None,
+                        None,
+                        Some(reason.clone()),
+                    ),
+                };
+                PropertyVerdictView {
+                    name: p.name.clone(),
+                    kind: match p.kind {
+                        SvaKind::Assert => "assert",
+                        SvaKind::Assume => "assume",
+                        SvaKind::Cover => "cover",
+                    }
+                    .to_string(),
+                    formula: p.formula.clone(),
+                    outcome: outcome.to_string(),
+                    detail,
+                    false_cells,
+                    unknown_cells,
+                    skip_reason,
+                    seeded_predicates: p.seeded_predicates.clone(),
+                    counterexample: p.counterexample.as_ref().map(|c| CounterexampleView {
+                        prefix: cells(&c.prefix),
+                        cycle: cells(&c.cycle),
+                        unreachable_target: c.unreachable_target.clone(),
+                        inputs: cells(&c.inputs),
+                    }),
+                }
+            })
+            .collect();
+
+        SvVerifyAutoResponse {
+            properties,
+            unsupported: report
+                .unsupported
+                .iter()
+                .map(|(name, reason)| UnsupportedAssertionView {
+                    name: name.clone(),
+                    // The core report flattens to `(name, reason)`, so the SVA kind is already
+                    // gone by the time it reaches here — always `None`, not "unknown".
+                    kind: None,
+                    reason: reason.clone(),
+                })
+                .collect(),
+            diagnostics: ModelDiagnosticsView {
+                state_register_count: report.diagnostics.state_register_count,
+                blackboxed_modules: report.diagnostics.blackboxed_modules.clone(),
+                gated_resets: report.diagnostics.gated_resets.clone(),
+                auto_provided_stubs: report.diagnostics.auto_provided_stubs.clone(),
+                frontend: report.diagnostics.frontend.clone(),
+                frontend_fallback_reason: report.diagnostics.frontend_fallback_reason.clone(),
+                config_values: report.diagnostics.applied_config_values.clone(),
+                cutpoints: report.diagnostics.cutpoint_signals.clone(),
+            },
+            notes: report
+                .notes
+                .iter()
+                .map(|n| VerificationNoteView {
+                    kind: n.kind.clone(),
+                    level: match n.level {
+                        NoteLevel::Info => "info",
+                        NoteLevel::ScopeCaveat => "scope-caveat",
+                        NoteLevel::SoundnessCaveat => "soundness-caveat",
+                    }
+                    .to_string(),
+                    summary: n.summary.clone(),
+                    detail: n.detail.clone(),
+                    items: n.items.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
 /// One provenance note (mirrors
 /// [`crate::adapter::slang::verify_auto::VerificationNote`]).
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -1768,6 +1900,25 @@ pub struct ModelDiagnosticsView {
     /// Cut flop-primitive modules for which a behavioral stub was auto-injected
     /// so the register survives the lift (e.g. `prim_sparse_fsm_flop`).
     pub auto_provided_stubs: Vec<String>,
+    /// #466 / mununu#536 — the RTL front end that produced the lift (e.g.
+    /// `"read_verilog + sv2v"`, `"yosys-slang (read_slang)"`). `--frontend auto` picks one
+    /// silently and the two paths differ in SOUNDNESS on partial writes (#464/#465), so
+    /// "which lift produced this verdict?" is a question the payload must answer. It was
+    /// previously reachable only as `lift-frontend` note prose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frontend: Option<String>,
+    /// #466 — when `--frontend auto` FELL BACK (an earlier front end errored), the prior
+    /// attempt's error. `None` when there was no fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frontend_fallback_reason: Option<String>,
+    /// mununu#536 — config inputs pinned for this run, each `"<signal>=<value>"`. A verdict
+    /// under a pin is a claim about THAT configuration only, so the scope ships with it.
+    #[serde(default)]
+    pub config_values: Vec<String>,
+    /// mununu#536 — signals cut to free inputs by `--cutpoint`: the control slice these
+    /// verdicts were reached under.
+    #[serde(default)]
+    pub cutpoints: Vec<String>,
 }
 
 /// One property's auto-verification verdict (mirrors `PropertyVerdict`).
@@ -1779,8 +1930,28 @@ pub struct PropertyVerdictView {
     pub formula: String,
     /// `"holds"` | `"violated"` | `"unknown"` | `"skipped"`.
     pub outcome: String,
-    /// `false_cells` (violated) / `unknown_cells` (unknown) / the skip reason.
+    /// Human-readable detail: `"N cell(s)"` (violated/unknown) or the skip reason.
+    ///
+    /// **Prefer the structured fields below.** This is prose and stays only so existing
+    /// consumers keep working; a gate that needs the figure should read `false_cells` /
+    /// `unknown_cells` / `skip_reason` rather than parsing this string.
     pub detail: Option<String>,
+    /// mununu#536 — the cell count behind a `violated` verdict, machine-readable.
+    /// `None` for every other outcome.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub false_cells: Option<usize>,
+    /// mununu#536 — the cell count behind an `unknown` (⊥) verdict, machine-readable.
+    /// `None` for every other outcome.
+    ///
+    /// This is the "cell/budget figure that accompanies a ⊥" the issue asks for: a ⊥ is a
+    /// statement about how much of the cube space stayed undecided, and a consumer tracking
+    /// whether refinement is helping needs the number, not a sentence containing it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unknown_cells: Option<usize>,
+    /// mununu#536 — why a `skipped` property was not evaluated. `None` for every other
+    /// outcome.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_reason: Option<String>,
     /// The cube predicates auto-seeded for this property (atom strings).
     pub seeded_predicates: Vec<String>,
     /// D1.8b — a concrete stall-lasso counterexample, present only for a Violated
@@ -1802,6 +1973,11 @@ pub struct CounterexampleView {
     /// stall-lasso / trap-path (liveness) counterexamples, which carry `prefix`/`cycle`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unreachable_target: Vec<String>,
+    /// P3 / mununu#536 — the per-cycle INPUT assignment that drives the trace, so the
+    /// counterexample can be replayed against the RTL. Present on the core report all along;
+    /// both wire shapes dropped it, which made a trace readable but not runnable.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inputs: Vec<Vec<CexCellView>>,
 }
 
 /// One register's concrete value in a counterexample state.

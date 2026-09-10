@@ -1749,7 +1749,7 @@ fn sv_verify_auto_handler_impl(
     request: SvVerifyAutoRequest,
 ) -> ApiResult<Json<SvVerifyAutoResponse>> {
     use crate::adapter::btor2::kmts_lift::MustEdgeInference;
-    use crate::adapter::slang::verify_auto::{VerifyAutoOptions, VerifyOutcome, verify_auto};
+    use crate::adapter::slang::verify_auto::{VerifyAutoOptions, verify_auto};
     use crate::adapter::yosys::YosysOptions;
 
     let mut sources: Vec<(String, String)> = vec![("top.sv".to_string(), request.source.clone())];
@@ -1874,99 +1874,11 @@ fn sv_verify_auto_handler_impl(
         details: None,
     })?;
 
-    let kind_str = |k: crate::adapter::slang::translate::SvaKind| -> String {
-        use crate::adapter::slang::translate::SvaKind;
-        match k {
-            SvaKind::Assert => "assert".to_string(),
-            SvaKind::Assume => "assume".to_string(),
-            SvaKind::Cover => "cover".to_string(),
-        }
-    };
-    let properties = report
-        .properties
-        .iter()
-        .map(|p| {
-            let (outcome, detail) = match &p.outcome {
-                VerifyOutcome::Holds => ("holds".to_string(), None),
-                VerifyOutcome::Violated { false_cells } => (
-                    "violated".to_string(),
-                    Some(format!("{false_cells} cell(s)")),
-                ),
-                VerifyOutcome::Unknown { unknown_cells } => (
-                    "unknown".to_string(),
-                    Some(format!("{unknown_cells} cell(s)")),
-                ),
-                VerifyOutcome::Skipped { reason } => ("skipped".to_string(), Some(reason.clone())),
-            };
-            // D1.8b — carry the exact engine's stall-lasso counterexample.
-            let counterexample = p.counterexample.as_ref().map(|c| {
-                let states = |v: &[Vec<(String, u64)>]| -> Vec<Vec<CexCellView>> {
-                    v.iter()
-                        .map(|st| {
-                            st.iter()
-                                .map(|(register, value)| CexCellView {
-                                    register: register.clone(),
-                                    value: *value,
-                                })
-                                .collect()
-                        })
-                        .collect()
-                };
-                CounterexampleView {
-                    prefix: states(&c.prefix),
-                    cycle: states(&c.cycle),
-                    unreachable_target: c.unreachable_target.clone(),
-                }
-            });
-            PropertyVerdictView {
-                name: p.name.clone(),
-                kind: kind_str(p.kind),
-                formula: p.formula.clone(),
-                outcome,
-                detail,
-                seeded_predicates: p.seeded_predicates.clone(),
-                counterexample,
-            }
-        })
-        .collect();
-    let unsupported = report
-        .unsupported
-        .iter()
-        .map(|(name, reason)| UnsupportedAssertionView {
-            name: name.clone(),
-            kind: None,
-            reason: reason.clone(),
-        })
-        .collect();
-    let notes = report
-        .notes
-        .iter()
-        .map(|n| crate::api::models::VerificationNoteView {
-            kind: n.kind.clone(),
-            level: match n.level {
-                crate::adapter::slang::verify_auto::NoteLevel::Info => "info",
-                crate::adapter::slang::verify_auto::NoteLevel::ScopeCaveat => "scope-caveat",
-                crate::adapter::slang::verify_auto::NoteLevel::SoundnessCaveat => {
-                    "soundness-caveat"
-                }
-            }
-            .to_string(),
-            summary: n.summary.clone(),
-            detail: n.detail.clone(),
-            items: n.items.clone(),
-        })
-        .collect();
-    Ok(Json(SvVerifyAutoResponse {
-        properties,
-        unsupported,
-        diagnostics: ModelDiagnosticsView {
-            state_register_count: report.diagnostics.state_register_count,
-            blackboxed_modules: report.diagnostics.blackboxed_modules.clone(),
-            gated_resets: report.diagnostics.gated_resets.clone(),
-            auto_provided_stubs: report.diagnostics.auto_provided_stubs.clone(),
-        },
-        notes,
-    }))
+    // mununu#536 — ONE conversion, shared with the CLI's `--json`. This used to be ~90 lines
+    // of hand-written field mapping that had already drifted from the CLI's independent
+    // `serde_json::json!` literal; see the `From` impl's doc comment for why there is now
+    // exactly one.
+    Ok(Json(SvVerifyAutoResponse::from(&report)))
 }
 
 /// Shared parameters for the CEGAR run/report logic, sourced identically

@@ -16,6 +16,28 @@
 
 Mununu's verify surfaces (CLI, HTTP API, UI) all speak one verdict vocabulary. This document pins down the JSON wire format for the `sv verify-auto` response — the shape downstream tools should code against.
 
+> **mununu#536 — this shape is also the CLI's.** `mununu sv verify-auto --json` emits the *same document* as the HTTP response; both go through one conversion, so the schema and the drift test cover both surfaces. Do not parse the human transcript: its layout is not a contract and has already broken a consumer's gate.
+
+### Which field is authoritative
+
+**`properties[]` is the verdict record. `notes[]` is commentary and must never be counted.**
+
+This needs saying because it has bitten a consumer. A note is prose written for a human skimming a terminal — the `coverage-summary` note in particular is a convenience tally, and a harness that counted it under-reported its own coverage. `properties[]` is the answer: one entry per translated assertion, and an assertion **absent** from it is not being checked (look for it in `unsupported[]`, which carries mununu's own reason).
+
+Read the figures from the structured fields, not from prose:
+
+| you want | read | not |
+|---|---|---|
+| the verdict | `properties[].outcome` | the `[assert]` transcript line |
+| the ⊥ cell count | `properties[].unknown_cells` | `detail` (a sentence containing the number) |
+| the violated cell count | `properties[].false_cells` | `detail` |
+| why a property was skipped | `properties[].skip_reason` | `detail` |
+| why an assertion is missing | `unsupported[].reason` | the `[unsupported]` transcript line |
+| a scope caveat to act on | `notes[].level == "scope-caveat"` | string-matching `summary` |
+| what the run was scoped to | `diagnostics.config_values` / `.cutpoints` / `.frontend` | the `config-concretization` / `control-slice` / `lift-frontend` note prose |
+
+`detail` remains for existing consumers, but it is prose and should be treated as such.
+
 ## Contents
 
 1. [PropertyVerdict — the four canonical outcomes](#propertyverdict--the-four-canonical-outcomes)
