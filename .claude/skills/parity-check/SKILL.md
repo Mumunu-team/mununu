@@ -1,15 +1,16 @@
 ---
 name: parity-check
 description: >
-  Verifies a feature is wired consistently across mununu's three user-facing
-  surfaces — CLI, HTTP API, and UI. Reports drift (a flag with no API peer,
-  an API field absent from the UI client, a route with no UI consumer) and
-  the inverse case (code added to one surface but not exercised by another).
+  Verifies a feature is wired consistently across mununu's user-facing
+  surfaces — CLI and HTTP API always, plus the UI for CTXDSL-related
+  capabilities. Reports drift (a flag with no API peer, a CTXDSL feature
+  absent from the UI client) and the inverse case (code added to one surface
+  but not exercised by another).
   Use when reviewing changes to user-exposed features, or as a sub-step of
   domain-adequacy and review-orchestrator.
 ---
 
-Run a CLI ↔ API ↔ UI parity check on $ARGUMENTS (a feature name, file list, or "changed files" if no args).
+Run a CLI ↔ API (↔ UI, for CTXDSL-related capabilities) parity check on $ARGUMENTS (a feature name, file list, or "changed files" if no args).
 
 ## Scope determination
 
@@ -17,13 +18,24 @@ If $ARGUMENTS is empty, derive scope from `git diff --name-only HEAD~1 HEAD`. Ot
 - A feature/flag name (e.g., `--extract-strategy`, `synthesize`, `eval`) — search all three surfaces for it.
 - A file path or list — check whether any of the three surfaces touched by those files have peer changes on the other two.
 
-## The three surfaces
+## The surfaces
+
+> **Revised 2026-09-10 (mununu#537).** CLI and API parity is required for **every** capability. UI
+> parity is required **only for CTXDSL-related** capabilities — those whose *subject* is a CTXDSL
+> model (authoring, evaluating, composing, visualizing, synthesizing from, or importing into one).
+> The UI is a CTXDSL workbench.
+>
+> For anything else — RTL / SVA verification verbs (`sv verify-auto`, `sv lint`, `sv mutate`, the
+> `btor2` verbs), contract / black-box tooling, CI-gate ergonomics (exit codes, report formats,
+> verdict expectations) — **a missing UI affordance is NOT drift and must not be reported as one.**
+> Mark the UI column `n/a`. These features are consumed by CI lanes and orchestrators, not by
+> someone at a canvas.
 
 | Surface | Files |
 |---|---|
 | **CLI** | `crates/mununu-cli/src/main.rs` and `src/main.rs` (clap `Args` structs and command handlers — note that mununu ships *two* binaries named `mununu`; a feature that exists on one but not the other is itself a parity drift) |
 | **HTTP API** | `crates/mununu-core/src/api/handlers.rs` (request/response signatures), `crates/mununu-core/src/api/models.rs` (types), `crates/mununu-core/src/api/server.rs` (routes) |
-| **UI** | `mununu-ui/src/api/endpoints.ts` (typed clients), `mununu-ui/src/hooks/useCtxdslEditor.ts`, `mununu-ui/src/hooks/useSummary.ts`, and any other hook/component that consumes the endpoint |
+| **UI** *(CTXDSL-related only)* | `mununu-ui/src/api/endpoints.ts` (typed clients), `mununu-ui/src/hooks/useCtxdslEditor.ts`, `mununu-ui/src/hooks/useSummary.ts`, and any other hook/component that consumes the endpoint |
 
 ## Known feature groups and where they live
 
@@ -38,7 +50,11 @@ When scope determination identifies a change in one of these groups, search ever
 | **SV / RTL** | `mununu sv init\|discover` | `/api/v1/context/import` (with `format=sv-yosys`/`systemverilog`) | Import workflows in `UnifiedEditor` |
 | **Templates** | `mununu templates` | `/api/v1/templates` | `TemplatePicker` |
 
-A new feature added to any of these groups must wire all three columns in the same PR. A feature added *outside* these groups (a new top-level subcommand or skill) must either land in all three surfaces or carry an explicit "CLI-only / API-only" justification under Procedure step 3.
+**UI-required groups** (CTXDSL-related): Context core, Extraction, Templates. A new feature in one of these wires all three columns in the same PR.
+
+**CLI + API groups** (not CTXDSL-related): Contracts, Codesign, SV / RTL. A new feature in one of these wires CLI + API; the UI column is `n/a` and its absence is not a finding. Existing UI panels for these groups stay — the obligation to *grow* them is what was removed, not the panels themselves.
+
+A feature added *outside* these groups must land on CLI **and** API, or carry an explicit "CLI-only / API-only" justification under Procedure step 3.
 
 ## Procedure
 
@@ -51,7 +67,7 @@ A new feature added to any of these groups must wire all three columns in the sa
    - **CLI-only**: legitimate if the flag is a developer convenience (e.g., one-shot `--adapter` that the API decomposes into `/import` + `/eval`). Justify in writing.
    - **API-only**: legitimate if the surface is intentionally programmatic (e.g., raw graph dumps consumed only by tooling).
    - **UI-only**: almost always a bug — UI affordances should map to a documented API + CLI verb.
-   - **CLI + API but no UI**: acceptable for power-user features; flag for follow-up.
+   - **CLI + API but no UI**: **for a CTXDSL-related capability**, drift — report it. For anything else (RTL/SVA, contracts, CI-gate ergonomics) this is the EXPECTED shape: mark the UI column `n/a` and do not report it.
    - **Inverse drift**: code added to one surface but not exercised by either of the others — call out.
 
 ## Report format
@@ -63,7 +79,8 @@ Emit a Markdown table. The caller (an agent or a review report) can quote it ver
 
 | Change / feature | CLI | API | UI | Drift? | Notes |
 |---|---|---|---|---|---|
-| `--extract-strategy` | ✓ main.rs:L | ✓ handlers.rs:L | ✗ | YES | API exposes `extract_strategy` field; UI client missing |
+| `--extract-strategy` | ✓ main.rs:L | ✓ handlers.rs:L | ✗ | YES | CTXDSL-related: API exposes `extract_strategy`; UI client missing |
+| `--expect-all-hold` | ✓ main.rs:L | ✓ models.rs:L | n/a | none | CI-gate ergonomics — not CTXDSL-related, so no UI is expected |
 | `/context/synthesize` returns `counterstrategy` | ✓ | ✓ models.rs:L | ✓ endpoints.ts:L | none | aligned |
 ```
 
@@ -78,5 +95,5 @@ When invoked standalone, prepend a one-paragraph executive summary: number of ch
 ## Important
 
 - A pre-existing parity gap discovered during the audit is itself a finding. Report it under the same table even if it predates the current change.
-- New examples or workflows added under `examples/` should be reachable from all three surfaces (loadable from the UI editor, summarizable via CLI, verifiable via API). If only one surface works, treat it as an incomplete deliverable.
+- New examples or workflows added under `examples/` should be reachable from CLI and API (summarizable via CLI, verifiable via API), and from the UI editor as well when the example is a CTXDSL model. If only one surface works, treat it as an incomplete deliverable.
 - Do not modify any source file. This skill is read-only.

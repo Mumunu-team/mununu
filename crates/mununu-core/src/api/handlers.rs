@@ -1878,7 +1878,22 @@ fn sv_verify_auto_handler_impl(
     // of hand-written field mapping that had already drifted from the CLI's independent
     // `serde_json::json!` literal; see the `From` impl's doc comment for why there is now
     // exactly one.
-    Ok(Json(SvVerifyAutoResponse::from(&report)))
+    let mut response = SvVerifyAutoResponse::from(&report);
+    // mununu#537 — check the caller's claims, if they made any. A malformed verdict spelling is
+    // a 400, never a silently dropped claim: a claim that does not run gates on nothing.
+    if let Some(req_exp) = &request.expectations {
+        let expectations = req_exp
+            .to_expectations()
+            .map_err(|message| ApiError::BadRequest {
+                message,
+                details: None,
+            })?;
+        if !expectations.is_empty() {
+            let result = crate::adapter::slang::expectations::evaluate(&report, &expectations);
+            response.expectations = Some((&result).into());
+        }
+    }
+    Ok(Json(response))
 }
 
 /// Shared parameters for the CEGAR run/report logic, sourced identically

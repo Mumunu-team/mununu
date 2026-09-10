@@ -66,6 +66,43 @@
       ],
       "type": "object"
     },
+    "ExpectationFailureView": {
+      "description": "mununu#537 — one unmet claim. `property` is absent for a run-level claim (the count).",
+      "properties": {
+        "property": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "reason"
+      ],
+      "type": "object"
+    },
+    "ExpectationResultView": {
+      "description": "mununu#537 — the verdict on a caller's declared expectations.\n\n`satisfied: false` corresponds to CLI exit code **4** — \"a verdict was not what you claimed\", deliberately distinct from a failed run (1) and from the ordinary verdict gate (2 / 3).",
+      "properties": {
+        "failures": {
+          "items": {
+            "$ref": "#/definitions/ExpectationFailureView"
+          },
+          "type": "array"
+        },
+        "satisfied": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "failures",
+        "satisfied"
+      ],
+      "type": "object"
+    },
     "ModelDiagnosticsView": {
       "description": "Model-level lift diagnostics (mirrors [`crate::adapter::slang::verify_auto::ModelDiagnostics`]).",
       "properties": {
@@ -282,6 +319,17 @@
         }
       ],
       "description": "Model-level diagnostics: state-register count + black-boxed (cut) modules. Lets a SKIPPED outcome point at its root cause."
+    },
+    "expectations": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ExpectationResultView"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "mununu#537 — the result of checking this run against the caller's declared expectations. `None` (and omitted) when no expectations were declared, in which case the ordinary verdict gate applies.\n\nPresent so a consumer learns **which** claim failed without parsing prose."
     },
     "notes": {
       "default": [],
