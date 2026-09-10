@@ -1,6 +1,43 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "definitions": {
+    "ExpectationsRequest": {
+      "description": "mununu#537 — the caller's claims about a run's verdicts.\n\nThere is deliberately **no** \"tolerate undecided\" field. Naming a property `unknown` in `named` is the sound version of that wish: it pins the abstention as a claim that fails when the property becomes decidable, instead of excusing it. See [`crate::adapter::slang::expectations`] for the incident that settled this.",
+      "properties": {
+        "all_hold": {
+          "default": false,
+          "description": "Every property must hold, with nothing unsupported, unknown or skipped.",
+          "type": "boolean"
+        },
+        "count": {
+          "default": null,
+          "description": "The property count must be exactly this — catches a binding that stopped binding, whose smaller all-green set otherwise reads as a clean pass.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "named": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "`name -> verdict` (`\"holds\"` | `\"violated\"` | `\"unknown\"` | `\"skipped\"`). Unnamed properties are ignored, except that an unnamed VIOLATED is still a failure.",
+          "type": "object"
+        },
+        "violated": {
+          "default": [],
+          "description": "These must be VIOLATED **and every other property must hold**.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
     "FileContent": {
       "description": "File content with optional name",
       "properties": {
@@ -67,6 +104,17 @@
         "string",
         "null"
       ]
+    },
+    "expectations": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ExpectationsRequest"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "mununu#537 — assert that this run produces the verdicts the caller claims. Omitted ⇒ no claim, and the response carries no `expectations` block.\n\nThe HTTP peer of the CLI's `--expect-all-hold` / `--expect-count` / `--expect-violated` / `--expect`. A gate driving mununu over HTTP wants the same three assertions a gate driving it on the command line does."
     },
     "gate_reset": {
       "default": null,

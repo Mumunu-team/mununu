@@ -171,13 +171,19 @@ Pass `--author="Mariano Cerrutti <vscorza@gmail.com>"` when committing, or set i
 
 ## Surface Parity
 
-Every user-visible capability ships on **CLI**, **HTTP API**, and **UI** in the same PR. The three surfaces are:
+**Every user-visible capability ships on CLI *and* HTTP API in the same PR. UI parity is required only for CTXDSL-related capabilities.** (Revised 2026-09-10; previously UI was mandatory for everything.)
 
 - **CLI**: a clap subcommand or flag in `crates/mununu-cli/src/main.rs`.
 - **API**: a handler in `crates/mununu-core/src/api/handlers.rs` (route in `server.rs`, types in `models.rs`).
-- **UI**: a typed client in `mununu-ui/src/api/endpoints.ts` or a hook/component that exercises the behavior.
+- **UI** *(CTXDSL-related capabilities only)*: a typed client in `mununu-ui/src/api/endpoints.ts` or a hook/component that exercises the behavior.
 
-The `/parity-check` skill verifies this automatically. PRs that drift the three surfaces are rejected. Single-surface exceptions (e.g., a developer-only CLI convenience) must declare themselves inline using the Documentation Traceability surface tag format: `surface: CLI-only — <one-line justification>`.
+**What counts as CTXDSL-related.** A capability whose *subject* is a CTXDSL model — authoring, evaluating, composing, visualizing, synthesizing from, or importing into one. The UI is a CTXDSL workbench, and that is the work it exists to support.
+
+Everything else is **CLI + API**, and the absence of a UI affordance for it is **not drift**: RTL / SVA verification verbs (`sv verify-auto`, `sv lint`, `sv mutate`, the `btor2` verbs), contract / black-box tooling, and CI-gate ergonomics (exit codes, report formats, verdict expectations). These are consumed by CI lanes and orchestrators, not by someone at a canvas — a UI control for "assert this run produced exactly these verdicts" would be an affordance with no user.
+
+This does **not** ask anyone to remove existing UI. It removes the obligation to grow it for work that is not about CTXDSL, so that a CI-facing feature is not blocked on, or padded with, a panel nobody opens.
+
+The `/parity-check` skill verifies this automatically. PRs that drift **CLI ↔ API** are rejected. A capability that lands on only one of those two must declare itself inline using the Documentation Traceability surface tag format: `surface: CLI-only — <one-line justification>`. A non-CTXDSL capability with no UI needs no such tag — that is now the expected shape.
 
 ## Soundness Guarantees
 

@@ -64,6 +64,96 @@ struct CiArgs {
     fail_on: FailOn,
 }
 
+/// mununu#537 — verdict EXPECTATION flags, flattened into `sv verify-auto` beside [`CiArgs`].
+///
+/// A verification gate never wants "did it pass"; it wants **"did exactly this happen"**. These
+/// are the three assertions every consumer driving mununu rebuilds in shell, moved to where the
+/// verdict vocabulary is defined. See [`mununu_core::adapter::slang::expectations`] for the
+/// semantics and for why there is deliberately no fourth "tolerate undecided" verb.
+#[derive(Args, Debug, Default)]
+struct ExpectArgs {
+    /// Require EVERY property to hold, with nothing unsupported, unknown or skipped.
+    ///
+    /// Stricter than `--fail-on unknown`: it also rejects `skipped` (which the CI gate treats as
+    /// a pass) and an assertion that did not translate — both are properties that are not being
+    /// checked, which is the failure this verb exists to catch.
+    #[arg(long, conflicts_with_all = ["expect_violated", "expect"])]
+    expect_all_hold: bool,
+
+    /// Require EXACTLY this many properties. Usable on its own.
+    ///
+    /// A binding that stopped binding produces FEWER properties, and a smaller all-green set
+    /// reads as a clean pass. This is the only check that catches it, because a property that
+    /// stopped being produced is invisible to every per-property check.
+    #[arg(long, value_name = "N")]
+    expect_count: Option<usize>,
+
+    /// Comma-separated property names that must be VIOLATED — and every OTHER property must
+    /// hold.
+    ///
+    /// For a contrast twin: a twin that breaks every property teaches nothing about which
+    /// property covers which fault, so the "everything else still holds" half is not optional.
+    #[arg(long, value_name = "NAMES", value_delimiter = ',')]
+    expect_violated: Vec<String>,
+
+    /// `NAME=VERDICT` pairs (`holds` | `violated` | `unknown` | `skipped`, case-insensitive),
+    /// comma-separated or repeated.
+    ///
+    /// Each named property must return exactly that verdict. Unnamed properties are ignored,
+    /// EXCEPT that an unnamed VIOLATED is still a failure — surprises are never silent.
+    ///
+    /// `NAME=unknown` is the sound way to record a ⊥: it pins the abstention as a CLAIM that
+    /// fails when the property becomes decidable, rather than excusing it. That is the point —
+    /// an upstream improvement should break the pin loudly, not pass in silence.
+    #[arg(long = "expect", value_name = "NAME=VERDICT", value_delimiter = ',')]
+    expect: Vec<String>,
+}
+
+impl ExpectArgs {
+    /// Parse into the core type. `Err` on a malformed `NAME=VERDICT`, which is a usage error
+    /// (exit 1) — never a silently dropped claim, which would gate on nothing.
+    fn to_expectations(
+        &self,
+    ) -> Result<mununu_core::adapter::slang::expectations::Expectations, String> {
+        use mununu_core::adapter::slang::expectations::{Expectations, ExpectedVerdict};
+        let mut named = Vec::new();
+        for pair in &self.expect {
+            let (name, verdict) = pair.split_once('=').ok_or_else(|| {
+                format!("--expect `{pair}`: expected NAME=VERDICT (e.g. `sva_1=unknown`)")
+            })?;
+            let v = ExpectedVerdict::parse(verdict).ok_or_else(|| {
+                format!(
+                    "--expect `{pair}`: `{verdict}` is not a verdict — use holds | violated |                      unknown | skipped"
+                )
+            })?;
+            if name.trim().is_empty() {
+                return Err(format!("--expect `{pair}`: the property name is empty"));
+            }
+            named.push((name.trim().to_string(), v));
+        }
+        Ok(Expectations {
+            all_hold: self.expect_all_hold,
+            count: self.expect_count,
+            violated: self
+                .expect_violated
+                .iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+            named,
+        })
+    }
+}
+
+/// mununu#537 — exit code for "a verdict was not what you claimed".
+///
+/// Distinct from every existing code on purpose: `1` is a tool/usage error (the run FAILED), `2`
+/// is a violated verdict and `3` an undecided one under the ordinary gate. A caller that declared
+/// expectations needs to tell "the run broke" apart from "the run worked and disagreed with me",
+/// and under `--expect-violated` the ordinary gate would exit 2 on the very violation that was
+/// asked for. So when expectations are declared they SUPERSEDE `--fail-on`.
+const EXPECTATIONS_UNMET_EXIT: i32 = 4;
+
 /// Map a single property verdict + the `--fail-on` policy to a process exit code.
 /// `0` = pass, `2` = violated, `3` = unknown. (`1` is reserved for tool/usage errors
 /// via `main`.) `holds` / `skipped` / any definite-good verdict is always `0`.
@@ -102,6 +192,89 @@ fn ci_gate_exit(verdict: &str, fail_on: FailOn) {
 #[cfg(test)]
 mod ci_gate_tests {
     use super::*;
+
+    // ---- mununu#537: expectation flag parsing --------------------------------------
+
+    fn expect_args(
+        all_hold: bool,
+        count: Option<usize>,
+        violated: &[&str],
+        expect: &[&str],
+    ) -> ExpectArgs {
+        ExpectArgs {
+            expect_all_hold: all_hold,
+            expect_count: count,
+            expect_violated: violated.iter().map(|s| s.to_string()).collect(),
+            expect: expect.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn no_expect_flags_is_an_empty_claim() {
+        // Which leaves the ordinary `--fail-on` gate in charge — the flags must not change
+        // behaviour for anyone who does not use them.
+        let exp = expect_args(false, None, &[], &[])
+            .to_expectations()
+            .expect("parses");
+        assert!(exp.is_empty());
+    }
+
+    #[test]
+    fn named_pairs_parse_case_insensitively() {
+        use mununu_core::adapter::slang::expectations::ExpectedVerdict;
+        let exp = expect_args(
+            false,
+            None,
+            &[],
+            &["a=HOLDS", "b=unknown", " c = Violated "],
+        )
+        .to_expectations()
+        .expect("parses");
+        assert_eq!(
+            exp.named,
+            vec![
+                ("a".to_string(), ExpectedVerdict::Holds),
+                ("b".to_string(), ExpectedVerdict::Unknown),
+                ("c".to_string(), ExpectedVerdict::Violated),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_malformed_pair_is_a_usage_error_not_a_dropped_claim() {
+        // A claim that silently does not run gates on NOTHING, which is worse than no claim at
+        // all: the caller believes they are covered.
+        let err = expect_args(false, None, &[], &["no_equals_sign"])
+            .to_expectations()
+            .expect_err("must reject");
+        assert!(err.contains("NAME=VERDICT"), "got: {err}");
+
+        let err = expect_args(false, None, &[], &["a=probably"])
+            .to_expectations()
+            .expect_err("must reject an unknown verdict");
+        assert!(err.contains("not a verdict"), "got: {err}");
+
+        let err = expect_args(false, None, &[], &["=holds"])
+            .to_expectations()
+            .expect_err("must reject an empty name");
+        assert!(err.contains("name is empty"), "got: {err}");
+    }
+
+    #[test]
+    fn the_expectation_exit_code_is_distinct_from_every_other() {
+        // The whole point of #537's exit contract: "a verdict was not what you claimed" must be
+        // tellable apart from "the run failed" (1) and from the ordinary gate (2 / 3).
+        assert_eq!(EXPECTATIONS_UNMET_EXIT, 4);
+        for verdict in ["holds", "violated", "unknown", "skipped"] {
+            for fail_on in [FailOn::Violated, FailOn::Unknown, FailOn::None] {
+                assert_ne!(
+                    ci_exit_code(verdict, fail_on),
+                    EXPECTATIONS_UNMET_EXIT,
+                    "the verdict gate must never produce the expectation code"
+                );
+            }
+        }
+    }
 
     #[test]
     fn default_fails_on_violated_only() {
@@ -1857,6 +2030,8 @@ struct SvVerifyAutoArgs {
     engine: EngineArg,
     #[command(flatten)]
     ci: CiArgs,
+    #[command(flatten)]
+    expect: ExpectArgs,
 }
 
 /// Shared SV → BTOR2 lift inputs for the SV-direct verbs (`sv verify` /
@@ -3802,10 +3977,34 @@ fn sv_verify_auto(args: SvVerifyAutoArgs) -> Result<(), String> {
     let report = verify_auto(&sources, &yopts, &opts)
         .map_err(|e| format!("sv verify-auto: {}", e.message))?;
 
+    // mununu#537 — evaluate the caller's claims against the report. `None` when nothing was
+    // claimed, which leaves the ordinary verdict gate in charge.
+    let expectations = args.expect.to_expectations()?;
+    let expectation_result = if expectations.is_empty() {
+        None
+    } else {
+        Some(mununu_core::adapter::slang::expectations::evaluate(
+            &report,
+            &expectations,
+        ))
+    };
     if args.json {
-        render_verify_auto_json(&report)?;
+        render_verify_auto_json(&report, &expectation_result)?;
     } else {
         render_verify_auto_text(&report);
+        render_expectations_text(&expectation_result);
+    }
+    // mununu#537 — when the caller DECLARED expectations, they supersede the verdict gate.
+    //
+    // This is required, not cosmetic: under `--expect-violated` the ordinary gate would exit 2 on
+    // the very violation that was asked for, so a satisfied contract could never exit 0. Exit 4
+    // says "a verdict was not what you claimed", distinct from 1 ("the run failed") and from the
+    // 2/3 the verdict gate uses when no claim was made.
+    if let Some(result) = &expectation_result {
+        if !result.satisfied {
+            std::process::exit(EXPECTATIONS_UNMET_EXIT);
+        }
+        return Ok(());
     }
     // CI gate: the most severe property verdict drives the exit code.
     let worst = worst_verdict(
@@ -3816,6 +4015,27 @@ fn sv_verify_auto(args: SvVerifyAutoArgs) -> Result<(), String> {
     );
     ci_gate_exit(worst, args.ci.fail_on);
     Ok(())
+}
+
+/// mununu#537 — the human-readable expectation verdict, printed after the report.
+fn render_expectations_text(
+    result: &Option<mununu_core::adapter::slang::expectations::ExpectationResult>,
+) {
+    let Some(result) = result else { return };
+    if result.satisfied {
+        println!("\nExpectations: MET");
+        return;
+    }
+    println!(
+        "\nExpectations: NOT MET ({} failure(s))",
+        result.failures.len()
+    );
+    for f in &result.failures {
+        match &f.property {
+            Some(name) => println!("  [expect] {name}: {}", f.reason),
+            None => println!("  [expect] {}", f.reason),
+        }
+    }
 }
 
 /// The canonical `PropertyVerdict` label for a `verify-auto` outcome.
@@ -3948,6 +4168,7 @@ fn note_level_glyph(level: mununu_core::adapter::slang::verify_auto::NoteLevel) 
 
 fn render_verify_auto_json(
     report: &mununu_core::adapter::slang::verify_auto::AutoVerifyReport,
+    expectations: &Option<mununu_core::adapter::slang::expectations::ExpectationResult>,
 ) -> Result<(), String> {
     // mununu#536 — serialize the SAME type the HTTP API returns, via the one shared conversion
     // (`impl From<&AutoVerifyReport> for SvVerifyAutoResponse`).
@@ -3959,7 +4180,10 @@ fn render_verify_auto_json(
     // `docs/api-schemas/sv-verify-auto-response.schema.json` and then running the CLI got a
     // different document. Going through the shared type means the schema drift test now covers
     // this output too, because it is literally the same type.
-    let view = mununu_core::api::models::SvVerifyAutoResponse::from(report);
+    let mut view = mununu_core::api::models::SvVerifyAutoResponse::from(report);
+    // mununu#537 — carry WHICH expectation failed in the machine-readable output, so a consumer
+    // never has to parse the human lines to find out. That is the point of doing #536 first.
+    view.expectations = expectations.as_ref().map(Into::into);
     println!(
         "{}",
         serde_json::to_string_pretty(&view).map_err(|e| format!("serialize report: {e}"))?

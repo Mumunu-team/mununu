@@ -204,6 +204,49 @@ mununu --quiet sv verify-auto design.sv --json | jq '[.notes[] | select(.level==
 
 `unsupported[]` carries mununu's own **reason** for every assertion it could not translate (`"unsupported binary op: BinaryAnd"`, `"dynamic bit-select …"`). An assertion that does not appear in `properties[]` is not being checked, and this is where it says why.
 
+### Asserting the verdicts you claim: `--expect-*` (mununu#537)
+
+> Source of truth: [`adapter::slang::expectations::evaluate`](../crates/mununu-core/src/adapter/slang/expectations.rs) — surface: (CLI+API)
+
+A verification gate never wants "did it pass". It wants **"did exactly this happen"**. Three verbs, on both surfaces:
+
+```bash
+# every property holds, nothing unsupported/unknown/skipped, and there are EXACTLY 8 of them
+mununu sv verify-auto dut.sv --source dut_sva.sv --top dut --expect-all-hold --expect-count 8
+
+# a contrast twin: these must be VIOLATED, and every other property must still HOLD
+mununu sv verify-auto faulty.sv --source dut_sva.sv --top dut --expect-violated dut_sva_sva_1
+
+# exact per-property claims; unnamed properties are ignored, but an unnamed VIOLATED still fails
+mununu sv verify-auto dut.sv --source dut_sva.sv --top dut \
+    --expect 'dut_sva_sva_0=holds,dut_sva_sva_1=unknown'
+```
+
+| flag | the failure it exists to catch |
+|---|---|
+| `--expect-all-hold` | stricter than `--fail-on unknown`: also rejects `skipped` (which the gate treats as a pass) and an assertion that did not translate — both are properties not being checked |
+| `--expect-count N` | a binding that stopped binding produces **fewer** properties, and a smaller all-green set reads as a clean pass. Nothing else catches it, because a property that stopped being produced is invisible to every per-property check |
+| `--expect-violated a,b` | a twin that breaks *every* property teaches nothing about which property covers which fault, so "everything else still holds" is not optional |
+| `--expect 'a=VERDICT,…'` | pins exact verdicts; an **unnamed** VIOLATED is still a failure, so the verb cannot become a way to ignore what you did not mention |
+
+**Exit codes.** Declaring an expectation **supersedes** `--fail-on` — it has to, or `--expect-violated` would exit 2 on the very violation you asked for.
+
+| exit | meaning |
+|---|---|
+| `0` | expectations met |
+| `4` | **a verdict was not what you claimed** |
+| `1` | the run failed (tool/usage error) — including a malformed `NAME=VERDICT` |
+
+`2` / `3` remain the ordinary verdict gate for runs that declare no expectations.
+
+#### Pinning a ⊥ is the sound way to record one
+
+`--expect 'sva_1=unknown'` records an abstention as a **claim**, and the claim fails when the property becomes decidable. That is the desired behaviour, not an annoyance: monono's `video_timing` twin pinned `sva_1=UNKNOWN`, mununu#503 made it decidable, and the gate failed on the next run — an upstream improvement surfaced as a signal instead of vanishing into silence.
+
+There is deliberately **no** "tolerate undecided" flag. One was written downstream and deleted: it was introduced for three abstaining assertions that turned out to be **false rather than hard**, and the excuse made the abstention comfortable until they were restated decidably and all nine held. A ⊥ should keep feeling like "not checked".
+
+The API peer is an `expectations` object on the request (`all_hold`, `count`, `violated`, `named`), with the result returned as `expectations: { satisfied, failures[] }` — so an HTTP consumer learns *which* claim failed without parsing prose.
+
 ### Shrinking a parameterised design: `--param`
 
 > Source of truth: [`build_chparam_passes`](../crates/mununu-core/src/adapter/yosys/mod.rs) — surface: (CLI+API+UI)
@@ -844,6 +887,7 @@ JSON.
 | `0` | property holds (or all properties hold) — the step passes |
 | `2` | a property is **violated** — the step fails |
 | `3` | a property is **unknown** *and* `--fail-on unknown` was set |
+| `4` | **an expectation was not met** (mununu#537) — the run worked and disagreed with a `--expect-*` claim. Distinct from `1` (the run failed) on purpose, and it SUPERSEDES `--fail-on`: under `--expect-violated`, `2` would fire on the very violation you asked for. |
 | `1` | tool / usage error (bad file, unparseable atom, missing toolchain) |
 
 - `--fail-on <violated\|unknown\|none>` picks the gate policy. Default `violated`:

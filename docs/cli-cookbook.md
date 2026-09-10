@@ -145,6 +145,25 @@ mununu --quiet sv verify-auto rtl/mod.sv --json | jq '.diagnostics | {frontend, 
 
 Exit codes are the usual gate (`0` pass, `2` violated, `3` unknown under `--fail-on unknown`, `1` tool error); `1` implies empty stdout, while `2`/`3` still emit the full document.
 
+### Assert the verdicts you claim (mununu#537)
+
+A gate rarely wants "did it pass" — it wants "did exactly this happen":
+
+```bash
+# every property holds, nothing unsupported/unknown/skipped, and EXACTLY 8 of them
+mununu sv verify-auto rtl/mod.sv --source rtl/mod_sva.sv --top mod --expect-all-hold --expect-count 8
+
+# a contrast twin: these must be VIOLATED, every other property must still HOLD
+mununu sv verify-auto rtl/faulty.sv --source rtl/mod_sva.sv --top mod --expect-violated mod_sva_sva_1
+
+# exact per-property claims; an UNNAMED violated is still a failure
+mununu sv verify-auto rtl/mod.sv --top mod --expect 'mod_sva_sva_0=holds,mod_sva_sva_1=unknown'
+```
+
+Declaring an expectation **supersedes** `--fail-on` (it must — `--expect-violated` would otherwise exit 2 on the violation you asked for). Exit `4` means "a verdict was not what you claimed"; `1` still means the run itself failed, including a malformed `NAME=VERDICT`.
+
+`--expect-count` is the one that catches a binding that stopped binding: fewer properties, all of them green, which otherwise reads as a clean pass.
+
 ## Check that a design's properties are adequate (mutation testing)
 
 > Source of truth: [`mutate_and_compare`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L1824) — surface: (CLI+API+UI)

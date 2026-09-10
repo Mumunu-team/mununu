@@ -1716,6 +1716,63 @@ pub struct SvVerifyAutoRequest {
     /// thread-safe (unlike the env var, which is process-global).
     #[serde(default)]
     pub no_antecedent_shadow: Option<bool>,
+    /// mununu#537 — assert that this run produces the verdicts the caller claims. Omitted ⇒ no
+    /// claim, and the response carries no `expectations` block.
+    ///
+    /// The HTTP peer of the CLI's `--expect-all-hold` / `--expect-count` / `--expect-violated` /
+    /// `--expect`. A gate driving mununu over HTTP wants the same three assertions a gate driving
+    /// it on the command line does.
+    #[serde(default)]
+    pub expectations: Option<ExpectationsRequest>,
+}
+
+/// mununu#537 — the caller's claims about a run's verdicts.
+///
+/// There is deliberately **no** "tolerate undecided" field. Naming a property `unknown` in
+/// `named` is the sound version of that wish: it pins the abstention as a claim that fails when
+/// the property becomes decidable, instead of excusing it. See
+/// [`crate::adapter::slang::expectations`] for the incident that settled this.
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+pub struct ExpectationsRequest {
+    /// Every property must hold, with nothing unsupported, unknown or skipped.
+    #[serde(default)]
+    pub all_hold: bool,
+    /// The property count must be exactly this — catches a binding that stopped binding, whose
+    /// smaller all-green set otherwise reads as a clean pass.
+    #[serde(default)]
+    pub count: Option<usize>,
+    /// These must be VIOLATED **and every other property must hold**.
+    #[serde(default)]
+    pub violated: Vec<String>,
+    /// `name -> verdict` (`"holds"` | `"violated"` | `"unknown"` | `"skipped"`). Unnamed
+    /// properties are ignored, except that an unnamed VIOLATED is still a failure.
+    #[serde(default)]
+    pub named: std::collections::BTreeMap<String, String>,
+}
+
+impl ExpectationsRequest {
+    /// Convert to the core type. `Err` names the bad verdict spelling rather than dropping the
+    /// claim, because a silently-dropped claim gates on nothing.
+    pub fn to_expectations(
+        &self,
+    ) -> Result<crate::adapter::slang::expectations::Expectations, String> {
+        use crate::adapter::slang::expectations::{Expectations, ExpectedVerdict};
+        let mut named = Vec::new();
+        for (name, verdict) in &self.named {
+            let v = ExpectedVerdict::parse(verdict).ok_or_else(|| {
+                format!(
+                    "expectations.named[{name}]: `{verdict}` is not a verdict — use holds |                      violated | unknown | skipped"
+                )
+            })?;
+            named.push((name.clone(), v));
+        }
+        Ok(Expectations {
+            all_hold: self.all_hold,
+            count: self.count,
+            violated: self.violated.clone(),
+            named,
+        })
+    }
 }
 
 /// Response for `/api/v1/sv/verify-auto`.
@@ -1734,6 +1791,47 @@ pub struct SvVerifyAutoResponse {
     /// scope and caveats are explicit in the payload.
     #[serde(default)]
     pub notes: Vec<VerificationNoteView>,
+    /// mununu#537 — the result of checking this run against the caller's declared expectations.
+    /// `None` (and omitted) when no expectations were declared, in which case the ordinary
+    /// verdict gate applies.
+    ///
+    /// Present so a consumer learns **which** claim failed without parsing prose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expectations: Option<ExpectationResultView>,
+}
+
+/// mununu#537 — one unmet claim. `property` is absent for a run-level claim (the count).
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct ExpectationFailureView {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub property: Option<String>,
+    pub reason: String,
+}
+
+/// mununu#537 — the verdict on a caller's declared expectations.
+///
+/// `satisfied: false` corresponds to CLI exit code **4** — "a verdict was not what you claimed",
+/// deliberately distinct from a failed run (1) and from the ordinary verdict gate (2 / 3).
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct ExpectationResultView {
+    pub satisfied: bool,
+    pub failures: Vec<ExpectationFailureView>,
+}
+
+impl From<&crate::adapter::slang::expectations::ExpectationResult> for ExpectationResultView {
+    fn from(r: &crate::adapter::slang::expectations::ExpectationResult) -> Self {
+        Self {
+            satisfied: r.satisfied,
+            failures: r
+                .failures
+                .iter()
+                .map(|f| ExpectationFailureView {
+                    property: f.property.clone(),
+                    reason: f.reason.clone(),
+                })
+                .collect(),
+        }
+    }
 }
 
 /// mununu#536 — the ONE report→wire conversion, shared by the HTTP handler and the CLI's
@@ -1848,6 +1946,9 @@ impl From<&crate::adapter::slang::verify_auto::AutoVerifyReport> for SvVerifyAut
                 config_values: report.diagnostics.applied_config_values.clone(),
                 cutpoints: report.diagnostics.cutpoint_signals.clone(),
             },
+            // Expectations are not a property of the report — they are the caller's claim about
+            // it — so the conversion leaves this None and the caller fills it in.
+            expectations: None,
             notes: report
                 .notes
                 .iter()

@@ -24,6 +24,7 @@ use std::process::Command;
 
 use crate::adapter::{AdapterError, AdapterErrorKind};
 
+pub mod expectations;
 pub mod extract;
 pub mod prim_stubs;
 pub mod translate;
