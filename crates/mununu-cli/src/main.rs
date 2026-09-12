@@ -105,6 +105,13 @@ struct ExpectArgs {
     /// `NAME=unknown` is the sound way to record a ⊥: it pins the abstention as a CLAIM that
     /// fails when the property becomes decidable, rather than excusing it. That is the point —
     /// an upstream improvement should break the pin loudly, not pass in silence.
+    ///
+    /// mununu#544 — NAME may be the assertion's **SV label** (`a_reseed_only_at_a_span_edge`) or
+    /// its positional `<module>_sva_<index>`. **Prefer the label:** it is what the author wrote,
+    /// so a reorder is a no-op and a rename is a hard error. An index re-points on any
+    /// insertion mid-file, which fails silently — the pin still resolves, to a different
+    /// property. The label is tried first. `@mununu_guarantee` properties have no label and
+    /// stay positional (`ann_guarantee_<index>`).
     #[arg(long = "expect", value_name = "NAME=VERDICT", value_delimiter = ',')]
     expect: Vec<String>,
 }

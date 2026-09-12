@@ -203,6 +203,7 @@ mod tests {
             properties: vec![
                 PropertyVerdict {
                     name: "p_holds".into(),
+                    label: Some("a_holds_forever".into()),
                     kind: SvaKind::Assert,
                     formula: "nu X. (a && [] X)".into(),
                     outcome: VerifyOutcome::Holds,
@@ -211,6 +212,7 @@ mod tests {
                 },
                 PropertyVerdict {
                     name: "p_violated".into(),
+                    label: Some("c_cover_b".into()),
                     kind: SvaKind::Cover,
                     formula: "mu X. (b || <> X)".into(),
                     outcome: VerifyOutcome::Violated { false_cells: 3 },
@@ -224,6 +226,7 @@ mod tests {
                 },
                 PropertyVerdict {
                     name: "p_unknown".into(),
+                    label: None,
                     kind: SvaKind::Assume,
                     formula: "nu X. (c && [] X)".into(),
                     outcome: VerifyOutcome::Unknown { unknown_cells: 32 },
@@ -232,6 +235,7 @@ mod tests {
                 },
                 PropertyVerdict {
                     name: "p_skipped".into(),
+                    label: Some("a_wide_cone".into()),
                     kind: SvaKind::Assert,
                     formula: "nu X. (d && [] X)".into(),
                     outcome: VerifyOutcome::Skipped {

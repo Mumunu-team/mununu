@@ -796,6 +796,7 @@ mod tests {
         AutoVerifyReport {
             properties: vec![PropertyVerdict {
                 name: name.into(),
+                label: None,
                 kind: SvaKind::Assert,
                 formula: formula.into(),
                 outcome: VerifyOutcome::Skipped {
@@ -899,6 +900,7 @@ mod tests {
             properties: vec![
                 PropertyVerdict {
                     name: "p_wide".into(),
+                    label: None,
                     kind: SvaKind::Assert,
                     formula: "mu X.(big == 0 || <> X)".into(),
                     outcome: VerifyOutcome::Skipped {
@@ -912,6 +914,7 @@ mod tests {
                 },
                 PropertyVerdict {
                     name: "p_ok".into(),
+                    label: None,
                     kind: SvaKind::Assert,
                     formula: "big == 0".into(),
                     outcome: VerifyOutcome::Holds,

@@ -75,10 +75,17 @@ pub enum SvaKind {
 /// A successfully-translated assertion.
 #[derive(Debug, Clone)]
 pub struct TranslatedAssertion {
-    /// Best-effort name: `<module>_sva_<index>` (slang's `--ast-json` does not
-    /// attach the SV label to the assertion node — the label lives on a separate
-    /// symbol-table entry; XL.1c can recover it).
+    /// Positional name: `<module>_sva_<index>`. Stable within one run, but an insertion
+    /// mid-file re-points every later name — see [`Self::label`], which does not move.
     pub name: String,
+    /// mununu#544 — the assertion's SV **label**, when it has one.
+    ///
+    /// The label is what a human wrote (`a_reseed_only_at_a_span_edge:`), so it survives a
+    /// reorder and a rename becomes a hard error instead of a silent re-point. Consumers should
+    /// prefer it over [`Self::name`] when pinning an expectation.
+    ///
+    /// `None` for a genuinely unlabelled assertion, which keeps only its positional name.
+    pub label: Option<String>,
     pub kind: SvaKind,
     /// mu-calculus formula; guaranteed to parse via
     /// [`crate::mu_calculus::parser::parse`].
@@ -202,8 +209,8 @@ pub fn translate_ast_json_with_options(
         })?
     };
 
-    let mut found: Vec<(String, &Value)> = Vec::new();
-    collect_assertions(&root, "design", &mut found);
+    let mut found: Vec<(String, Option<String>, &Value)> = Vec::new();
+    collect_assertions(&root, "design", None, &mut found);
 
     // XL.6b follow-up — enum-constant resolution. slang keeps an enum-member
     // reference (e.g. `MainSmError`) as a `NamedValue`, NOT folded to its value,
@@ -213,8 +220,9 @@ pub fn translate_ast_json_with_options(
     let enum_values = collect_enum_values(&root);
 
     let mut report = TranslationReport::default();
-    for (idx, (module, node)) in found.iter().enumerate() {
+    for (idx, (module, label, node)) in found.iter().enumerate() {
         let name = format!("{module}_sva_{idx}");
+        let label = label.clone();
         let kind = match node.get("assertionKind").and_then(Value::as_str) {
             Some("Assert") => SvaKind::Assert,
             Some("Assume") => SvaKind::Assume,
@@ -252,6 +260,7 @@ pub fn translate_ast_json_with_options(
                 collect_shadow_signals(spec, &mut report.required_shadows);
                 report.translated.push(TranslatedAssertion {
                     name,
+                    label,
                     kind,
                     formula,
                     recoverability_companion,
@@ -299,11 +308,45 @@ fn collect_parameter_names(node: &Value, out: &mut Vec<String>) {
 
 /// Recursively collect `ConcurrentAssertion` nodes, tracking the nearest
 /// enclosing `name` (the module) for a best-effort assertion name.
-fn collect_assertions<'a>(node: &'a Value, enclosing: &str, out: &mut Vec<(String, &'a Value)>) {
+/// mununu#544 — recover an assertion's SV label from slang's `--ast-json`.
+///
+/// The label is NOT a field on the `ConcurrentAssertion` node, which carries only
+/// `assertionKind` / `ifTrue` / `kind` / `propertySpec` — which is why it was once believed
+/// absent. slang emits a labelled statement as an enclosing `Block` whose `block` field is the
+/// symbol-table entry, rendered as `"<address> <label>"`:
+///
+/// ```text
+/// ProceduralBlock → body: Block { block: "6338700059712 ap_bool", body: ConcurrentAssertion }
+/// ```
+///
+/// So the nearest enclosing `Block` names the assertion. Returns `None` when the field carries
+/// no identifier tail — an UNLABELLED assertion, whose tail is the bare address. A leading digit
+/// is a reliable discriminator because an SV identifier cannot start with one.
+fn block_label(block: &str) -> Option<String> {
+    let tail = block.rsplit(' ').next()?;
+    let mut chars = tail.chars();
+    let first = chars.next()?;
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return None;
+    }
+    if !chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$') {
+        return None;
+    }
+    Some(tail.to_string())
+}
+
+/// Collect every `ConcurrentAssertion`, with the module that encloses it and its SV label (see
+/// [`block_label`]) when it has one.
+fn collect_assertions<'a>(
+    node: &'a Value,
+    enclosing: &str,
+    label: Option<&str>,
+    out: &mut Vec<(String, Option<String>, &'a Value)>,
+) {
     match node {
         Value::Object(map) => {
             if map.get("kind").and_then(Value::as_str) == Some("ConcurrentAssertion") {
-                out.push((enclosing.to_string(), node));
+                out.push((enclosing.to_string(), label.map(str::to_string), node));
             }
             // Update the enclosing name for descendants when this node names one.
             let next = map
@@ -311,13 +354,23 @@ fn collect_assertions<'a>(node: &'a Value, enclosing: &str, out: &mut Vec<(Strin
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty())
                 .unwrap_or(enclosing);
+            // A `Block` carrying a symbol-table entry re-labels its descendants; the NEAREST
+            // enclosing one wins, so a nested block shadows an outer label rather than leaking it.
+            let owned = (map.get("kind").and_then(Value::as_str) == Some("Block"))
+                .then(|| {
+                    map.get("block")
+                        .and_then(Value::as_str)
+                        .and_then(block_label)
+                })
+                .flatten();
+            let next_label = owned.as_deref().or(label);
             for v in map.values() {
-                collect_assertions(v, next, out);
+                collect_assertions(v, next, next_label, out);
             }
         }
         Value::Array(items) => {
             for v in items {
-                collect_assertions(v, enclosing, out);
+                collect_assertions(v, enclosing, label, out);
             }
         }
         _ => {}
@@ -2515,6 +2568,78 @@ mod tests {
             "== is an XNOR expansion: {xnor}"
         );
         assert_ne!(xor, xnor, "XOR and XNOR expansions differ");
+    }
+
+    /// mununu#544 — every labelled assertion recovers the label its author wrote.
+    ///
+    /// monono's measurement: `--expect "a_reseed_only_at_a_span_edge=holds"` exited 4 while
+    /// `--expect "affine_spr_sva_sva_0=holds"` exited 0 on the same run — the index was the only
+    /// name that worked, so inserting a property mid-file silently re-pointed every later pin.
+    ///
+    /// The label was believed unavailable: it is not a field on the `ConcurrentAssertion` node.
+    /// It is on the enclosing `Block`, as `"<address> <label>"`.
+    #[test]
+    fn an_assertions_sv_label_is_recovered_from_the_enclosing_block() {
+        for (json, want) in [
+            (
+                TIER1_JSON,
+                vec!["ap_bool", "ap_impl", "ap_nimpl", "ap_assume", "cp_cover"],
+            ),
+            (
+                TIER2_JSON,
+                vec!["ap_stable", "ap_changed", "ap_rose", "ap_fell", "ap_past"],
+            ),
+        ] {
+            let report = translate_ast_json(json).expect("valid ast-json");
+            let got: Vec<String> = report
+                .translated
+                .iter()
+                .map(|t| {
+                    t.label
+                        .clone()
+                        .unwrap_or_else(|| panic!("{} recovered no label", t.name))
+                })
+                .collect();
+            assert_eq!(got, want, "labels must come back in source order");
+
+            // The positional name still exists alongside it — that is what keeps an upgrade
+            // migration-safe for a consumer holding index-based pins.
+            for (idx, t) in report.translated.iter().enumerate() {
+                assert!(
+                    t.name.ends_with(&format!("_sva_{idx}")),
+                    "positional name must survive: {}",
+                    t.name
+                );
+            }
+        }
+    }
+
+    /// ...and the extractor does not invent one. An UNLABELLED assertion's `Block` carries the
+    /// bare address, whose tail is all digits — and an SV identifier cannot start with a digit,
+    /// so that is a sound discriminator. Fabricating a label here would be worse than having
+    /// none: a consumer would pin to an address that changes every elaboration.
+    #[test]
+    fn an_unlabelled_assertion_gets_no_label_rather_than_an_address() {
+        assert_eq!(
+            super::block_label("6338700059712 ap_bool").as_deref(),
+            Some("ap_bool")
+        );
+        assert_eq!(
+            super::block_label("6338700059712"),
+            None,
+            "bare address is not a label"
+        );
+        assert_eq!(super::block_label(""), None);
+        assert_eq!(
+            super::block_label("6338700059712 9bad"),
+            None,
+            "cannot start with a digit"
+        );
+        assert_eq!(
+            super::block_label("6338700059712 a_reseed_only_at_a_span_edge").as_deref(),
+            Some("a_reseed_only_at_a_span_edge"),
+            "monono's actual label shape"
+        );
     }
 
     #[test]

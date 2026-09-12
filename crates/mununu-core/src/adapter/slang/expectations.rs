@@ -119,7 +119,19 @@ pub struct ExpectationResult {
 /// first, because a gate's output is read by someone deciding what to fix.
 pub fn evaluate(report: &AutoVerifyReport, exp: &Expectations) -> ExpectationResult {
     let mut failures = Vec::new();
-    let find = |name: &str| report.properties.iter().find(|p| p.name == name);
+    // mununu#544 — a claim may name a property by its SV **label** or by its positional
+    // `<module>_sva_<index>` name. Matching either is deliberately migration-safe: a consumer
+    // holding index-based pins keeps working on upgrade and can move to labels one property at a
+    // time, instead of in one cut. The label is tried FIRST so that a design where a label
+    // happens to collide with another property's positional name resolves to what the author
+    // wrote.
+    let find = |name: &str| {
+        report
+            .properties
+            .iter()
+            .find(|p| p.label.as_deref() == Some(name))
+            .or_else(|| report.properties.iter().find(|p| p.name == name))
+    };
 
     // --- the count ------------------------------------------------------------------
     // Checked first and independently: a property that silently stopped being produced is
@@ -277,6 +289,26 @@ mod tests {
                 .iter()
                 .map(|(name, outcome)| PropertyVerdict {
                     name: (*name).to_string(),
+                    label: None,
+                    kind: SvaKind::Assert,
+                    formula: format!("formula::{name}"),
+                    outcome: outcome.clone(),
+                    seeded_predicates: Vec::new(),
+                    counterexample: None,
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    /// A report whose properties carry BOTH a positional name and an SV label.
+    fn labelled_report(props: &[(&str, &str, VerifyOutcome)]) -> AutoVerifyReport {
+        AutoVerifyReport {
+            properties: props
+                .iter()
+                .map(|(name, label, outcome)| PropertyVerdict {
+                    name: (*name).to_string(),
+                    label: Some((*label).to_string()),
                     kind: SvaKind::Assert,
                     formula: format!("formula::{name}"),
                     outcome: outcome.clone(),
@@ -585,6 +617,65 @@ mod tests {
             res.failures.len(),
             3,
             "one count failure + two property failures"
+        );
+    }
+    /// mununu#544 — a claim may name a property by its SV LABEL.
+    ///
+    /// monono measured `--expect "a_reseed_only_at_a_span_edge=holds"` exiting 4 while the
+    /// positional `affine_spr_sva_sva_0` exited 0 on the same run. The label is what the author
+    /// wrote, so it survives a reorder; the index re-points on any insertion.
+    #[test]
+    fn a_claim_can_name_a_property_by_its_sv_label() {
+        let r = labelled_report(&[
+            (
+                "m_sva_0",
+                "a_reseed_only_at_a_span_edge",
+                VerifyOutcome::Holds,
+            ),
+            ("m_sva_1", "a_other", VerifyOutcome::Holds),
+        ]);
+        let res = evaluate(
+            &r,
+            &named(&[("a_reseed_only_at_a_span_edge", ExpectedVerdict::Holds)]),
+        );
+        assert!(
+            res.failures.is_empty(),
+            "the label must resolve: {:?}",
+            res.failures
+        );
+    }
+
+    /// ...and the POSITIONAL name keeps working, which is what makes an upgrade safe for a
+    /// consumer holding index-based pins: they migrate property-by-property, not in one cut.
+    #[test]
+    fn a_claim_by_positional_name_still_resolves_after_labels_land() {
+        let r = labelled_report(&[(
+            "m_sva_0",
+            "a_reseed_only_at_a_span_edge",
+            VerifyOutcome::Holds,
+        )]);
+        let res = evaluate(&r, &named(&[("m_sva_0", ExpectedVerdict::Holds)]));
+        assert!(
+            res.failures.is_empty(),
+            "an existing index pin must not break on upgrade: {:?}",
+            res.failures
+        );
+    }
+
+    /// A RENAME is now a hard error rather than a silent re-point — the whole point of the ask.
+    /// Before labels, renaming an assertion left its index intact, so the pin kept passing while
+    /// naming a different property than the author intended.
+    #[test]
+    fn a_renamed_label_fails_the_claim_instead_of_silently_re_pointing() {
+        let r = labelled_report(&[("m_sva_0", "a_renamed_by_someone", VerifyOutcome::Holds)]);
+        let res = evaluate(
+            &r,
+            &named(&[("a_reseed_only_at_a_span_edge", ExpectedVerdict::Holds)]),
+        );
+        assert_eq!(
+            res.failures.len(),
+            1,
+            "a claim naming a label that no longer exists must FAIL"
         );
     }
 }

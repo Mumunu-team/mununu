@@ -28,6 +28,7 @@ Read the figures from the structured fields, not from prose:
 
 | you want | read | not |
 |---|---|---|
+| which property this is | `properties[].label` (falls back to `.name`) | `properties[].name` alone — it is positional |
 | the verdict | `properties[].outcome` | the `[assert]` transcript line |
 | the ⊥ cell count | `properties[].unknown_cells` | `detail` (a sentence containing the number) |
 | the violated cell count | `properties[].false_cells` | `detail` |
@@ -89,7 +90,8 @@ Rust source: [`PropertyVerdictView`](../../crates/mununu-core/src/api/models.rs#
 
 ```jsonc
 {
-  "name":               "my_assertion",
+  "name":               "my_module_sva_0",    // POSITIONAL; re-points on an insertion
+  "label":              "my_assertion",        // the SV label; absent when unlabelled
   "kind":               "assert",              // "assert" | "assume" | "cover"
   "formula":            "nu X. ((!req || [] grant) && [] X)",  // mu-calc lift of the SVA
   "outcome":            "holds",               // canonical PropertyVerdict as-string
@@ -101,7 +103,15 @@ Rust source: [`PropertyVerdictView`](../../crates/mununu-core/src/api/models.rs#
 
 **Field-by-field:**
 
-- `name` — SVA label from the source (`assert property (foo) …` → `"foo"` when labelled).
+- `name` — **positional**: `<module>_sva_<index>`, or `ann_guarantee_<index>` for a
+  `@mununu_guarantee` annotation. *(Corrected in mununu#544: this field was previously documented
+  here as "SVA label from the source", which it never was. A consumer reasonably read that and
+  pinned an expectation to the label, which did not resolve.)* An insertion mid-file re-points
+  every later name, and the pin still resolves — to a different property. Prefer `label`.
+- `label` — mununu#544 — the assertion's **SV label**, when it has one (`a_reseed_only_at_a_span_edge:
+  assert property …` → `"a_reseed_only_at_a_span_edge"`). This is what the author wrote, so a
+  reorder is a no-op and a rename is a hard error. Absent for an unlabelled assertion and for
+  every `@mununu_guarantee` annotation. **`--expect NAME=VERDICT` accepts either**, label first.
 - `kind` — `"assert"` / `"assume"` / `"cover"`.
 - `formula` — the mu-calc string the engine actually evaluated. Round-trip-parseable via `mu_calculus::parser::parse`.
 - `outcome` — one of the four canonical `PropertyVerdict` values. This is the field to gate on.
