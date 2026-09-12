@@ -211,7 +211,15 @@
           "description": "`\"assert\"` | `\"assume\"` | `\"cover\"`.",
           "type": "string"
         },
+        "label": {
+          "description": "mununu#544 — the assertion's SV label, when it has one.\n\nThis is what the author wrote (`a_reseed_only_at_a_span_edge:`), so it survives a reorder and a rename becomes a hard error instead of a silent re-point. Absent for an unlabelled assertion and for every `@mununu_guarantee` annotation (which carry no name today).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "name": {
+          "description": "Positional name: `<module>_sva_<index>` (or `ann_guarantee_<index>`). An insertion mid-file re-points every later one — prefer `label` when pinning an expectation.",
           "type": "string"
         },
         "outcome": {

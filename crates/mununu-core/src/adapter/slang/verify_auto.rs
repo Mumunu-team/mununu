@@ -190,7 +190,13 @@ impl VerifyOutcome {
 /// One assertion's auto-verification result.
 #[derive(Debug, Clone)]
 pub struct PropertyVerdict {
+    /// Positional name: `<module>_sva_<index>` (or `ann_guarantee_<index>`). An insertion
+    /// mid-file re-points every later one — prefer [`Self::label`] when pinning.
     pub name: String,
+    /// mununu#544 — the assertion's SV label, when it has one. Survives a reorder; a rename
+    /// becomes a hard error rather than a silent re-point. `None` for an unlabelled assertion
+    /// and for every `@mununu_guarantee` annotation (which carry no name today).
+    pub label: Option<String>,
     pub kind: SvaKind,
     pub formula: String,
     pub outcome: VerifyOutcome,
@@ -1518,7 +1524,15 @@ fn scan_annotation_properties(sources: &[(String, String)]) -> AnnotationScan {
                     match crate::mu_calculus::parser::parse(body) {
                         Ok(_) => {
                             scan.guarantees.push(TranslatedAssertion {
+                                // mununu#544 — RESIDUAL GAP, stated rather than papered over.
+                                // `@mununu_guarantee` properties are positional too
+                                // (`ann_guarantee_<idx>`), and carry no label because
+                                // `MununuAnnotation` has no name field — only `tag`, `value` and
+                                // `source_line`. So an insertion mid-file re-points these exactly
+                                // as it used to re-point SVA names. Giving the annotation an
+                                // optional name is a separate surface change.
                                 name: format!("ann_guarantee_{idx}"),
+                                label: None,
                                 kind: SvaKind::Assert,
                                 formula: body.to_string(),
                                 recoverability_companion: None,
@@ -1832,6 +1846,7 @@ fn synth_sidecar_json(
 fn abstained(t: &crate::adapter::slang::translate::TranslatedAssertion) -> PropertyVerdict {
     PropertyVerdict {
         name: t.name.clone(),
+        label: t.label.clone(),
         kind: t.kind,
         formula: t.formula.clone(),
         outcome: VerifyOutcome::Unknown { unknown_cells: 0 },
@@ -3020,6 +3035,7 @@ pub(crate) fn verify_auto_impl(
             Err(e) => {
                 report.properties.push(PropertyVerdict {
                     name: t.name.clone(),
+                    label: t.label.clone(),
                     kind: t.kind,
                     formula: formula_str.clone(),
                     outcome: VerifyOutcome::Skipped {
@@ -3103,6 +3119,7 @@ pub(crate) fn verify_auto_impl(
             };
             report.properties.push(PropertyVerdict {
                 name: t.name.clone(),
+                label: t.label.clone(),
                 kind: t.kind,
                 formula: formula_str.clone(),
                 outcome: VerifyOutcome::Skipped {
@@ -3176,6 +3193,7 @@ pub(crate) fn verify_auto_impl(
             };
             report.properties.push(PropertyVerdict {
                 name: t.name.clone(),
+                label: t.label.clone(),
                 kind: t.kind,
                 formula: formula_str.clone(),
                 outcome,
@@ -3238,6 +3256,7 @@ pub(crate) fn verify_auto_impl(
             let reason = unseedable_skip_reason(&seeded.unseedable, &report.diagnostics);
             report.properties.push(PropertyVerdict {
                 name: t.name.clone(),
+                label: t.label.clone(),
                 kind: t.kind,
                 formula: formula_str.clone(),
                 outcome: VerifyOutcome::Skipped { reason },
@@ -3251,6 +3270,7 @@ pub(crate) fn verify_auto_impl(
         {
             report.properties.push(PropertyVerdict {
                 name: t.name.clone(),
+                label: t.label.clone(),
                 kind: t.kind,
                 formula: formula_str.clone(),
                 outcome: VerifyOutcome::Skipped {
@@ -3483,6 +3503,7 @@ pub(crate) fn verify_auto_impl(
         }
         report.properties.push(PropertyVerdict {
             name: t.name.clone(),
+            label: t.label.clone(),
             kind: t.kind,
             formula: formula_str.clone(),
             outcome,
@@ -4402,6 +4423,7 @@ mod tests {
                 .iter()
                 .map(|(name, outcome, cx)| PropertyVerdict {
                     name: name.to_string(),
+                    label: None,
                     kind: crate::adapter::slang::translate::SvaKind::Assert,
                     formula: format!("formula::{name}"),
                     outcome: outcome.clone(),
@@ -4432,6 +4454,7 @@ mod tests {
         use crate::adapter::slang::translate::SvaKind;
         let prop = |name: &str, formula: &str| PropertyVerdict {
             name: name.into(),
+            label: None,
             kind: SvaKind::Assert,
             formula: formula.into(),
             outcome: VerifyOutcome::Holds,
@@ -4495,6 +4518,7 @@ mod tests {
         let mut report = AutoVerifyReport {
             properties: vec![PropertyVerdict {
                 name: "big_zero".to_string(),
+                label: None,
                 kind: crate::adapter::slang::translate::SvaKind::Assert,
                 formula: "nu X. ((big == 0) && [] X)".to_string(),
                 outcome: VerifyOutcome::Unknown { unknown_cells: 1 },
@@ -4534,6 +4558,7 @@ mod tests {
         let mut report = AutoVerifyReport {
             properties: vec![PropertyVerdict {
                 name: "cnt_ne_3".to_string(),
+                label: None,
                 kind: crate::adapter::slang::translate::SvaKind::Assert,
                 formula: "nu X. ((cnt != 3) && [] X)".to_string(),
                 outcome: VerifyOutcome::Unknown { unknown_cells: 1 },
@@ -4646,6 +4671,7 @@ mod tests {
     fn abstained_marks_an_unreached_property_as_unknown_not_skipped() {
         let t = crate::adapter::slang::translate::TranslatedAssertion {
             name: "p1".into(),
+            label: None,
             kind: SvaKind::Assert,
             formula: "nu X. ([] X)".into(),
             recoverability_companion: None,
@@ -4668,6 +4694,7 @@ mod tests {
         let mut report = AutoVerifyReport {
             properties: vec![PropertyVerdict {
                 name: "no_deadlock".to_string(),
+                label: None,
                 kind: crate::adapter::slang::translate::SvaKind::Assert,
                 formula: "nu X.(<> true && [] X)".to_string(),
                 outcome: VerifyOutcome::Skipped {
@@ -4706,6 +4733,7 @@ mod tests {
         let mut report = AutoVerifyReport {
             properties: vec![PropertyVerdict {
                 name: "no_deadlock".to_string(),
+                label: None,
                 kind: crate::adapter::slang::translate::SvaKind::Assert,
                 formula: "nu X.(<> true && [] X)".to_string(),
                 outcome: VerifyOutcome::Skipped {
@@ -4744,6 +4772,7 @@ mod tests {
         let mut report = AutoVerifyReport {
             properties: vec![PropertyVerdict {
                 name: "recover".to_string(),
+                label: None,
                 kind: crate::adapter::slang::translate::SvaKind::Assert,
                 // AG EF (recoverability) — diamond inner, not an AG-invariant.
                 formula: "nu Y. ((mu X. ((big == 0) || <> X)) && [] Y)".to_string(),
@@ -4807,6 +4836,7 @@ mod tests {
         let mut report = AutoVerifyReport {
             properties: vec![PropertyVerdict {
                 name: "req_grant".to_string(),
+                label: None,
                 kind: crate::adapter::slang::translate::SvaKind::Assert,
                 formula: "nu Z. ((!(st == 1) || mu Y. ((st == 2) || [] Y)) && [] Z)".to_string(),
                 outcome: VerifyOutcome::Unknown { unknown_cells: 1 },
@@ -4860,6 +4890,7 @@ mod tests {
         let mut report = AutoVerifyReport {
             properties: vec![PropertyVerdict {
                 name: "req_ack".to_string(),
+                label: None,
                 kind: crate::adapter::slang::translate::SvaKind::Assert,
                 formula: "nu Z. ((!(req == 1) || mu Y. ((ack == 1) || [] Y)) && [] Z)".to_string(),
                 outcome: VerifyOutcome::Unknown { unknown_cells: 1 },
@@ -4896,6 +4927,7 @@ mod tests {
         let mut report = AutoVerifyReport {
             properties: vec![PropertyVerdict {
                 name: "req_ack".to_string(),
+                label: None,
                 kind: crate::adapter::slang::translate::SvaKind::Assert,
                 formula: "nu Z. ((!(req == 1) || mu Y. ((ack == 1) || [] Y)) && [] Z)".to_string(),
                 outcome: VerifyOutcome::Unknown { unknown_cells: 1 },
@@ -4944,6 +4976,7 @@ mod tests {
         let mut report = AutoVerifyReport {
             properties: vec![PropertyVerdict {
                 name: "recover".to_string(),
+                label: None,
                 kind: crate::adapter::slang::translate::SvaKind::Assert,
                 // A νμ recoverability (`AG(a → EF b)`), NOT the box-AF shape the primitive expects.
                 formula: "nu Z. ((!(req == 1) || mu Y. ((ack == 1) || <> Y)) && [] Z)".to_string(),
@@ -4980,6 +5013,7 @@ mod tests {
         let mut report = AutoVerifyReport {
             properties: vec![PropertyVerdict {
                 name: "recover".to_string(),
+                label: None,
                 kind: crate::adapter::slang::translate::SvaKind::Assert,
                 formula: "nu Z. ((!(st == 1) || mu Y. ((st == 2) || <> Y)) && [] Z)".to_string(),
                 outcome: VerifyOutcome::Unknown { unknown_cells: 1 },
@@ -5021,6 +5055,7 @@ mod tests {
         let mut report = AutoVerifyReport {
             properties: vec![PropertyVerdict {
                 name: "recover_idle".to_string(),
+                label: None,
                 kind: crate::adapter::slang::translate::SvaKind::Assert,
                 formula: "nu Y. ((mu X. ((st == 0) || <> X)) && [] Y)".to_string(),
                 outcome: VerifyOutcome::Unknown { unknown_cells: 1 },
@@ -5064,6 +5099,7 @@ mod tests {
         let mut report = AutoVerifyReport {
             properties: vec![PropertyVerdict {
                 name: "recover_to_zero".to_string(),
+                label: None,
                 kind: crate::adapter::slang::translate::SvaKind::Assert,
                 formula: "nu Y.((mu X.(cnt == 0 || <> X)) && [] Y)".to_string(),
                 outcome: VerifyOutcome::Unknown { unknown_cells: 1 },
@@ -5109,6 +5145,7 @@ mod tests {
         let mut report = AutoVerifyReport {
             properties: vec![PropertyVerdict {
                 name: "mem_router_exclusion".to_string(),
+                label: None,
                 kind: crate::adapter::slang::translate::SvaKind::Assert,
                 formula: "nu X. (((!(a == 1)) || (!(b == 1))) && [] X)".to_string(),
                 outcome: VerifyOutcome::Unknown { unknown_cells: 2 },
@@ -5153,6 +5190,7 @@ mod tests {
         let mut report = AutoVerifyReport {
             properties: vec![PropertyVerdict {
                 name: "compound_with_relational_leaf".to_string(),
+                label: None,
                 kind: crate::adapter::slang::translate::SvaKind::Assert,
                 formula: "nu X. (((a == 1) && (b == c)) && [] X)".to_string(),
                 outcome: VerifyOutcome::Unknown { unknown_cells: 1 },
@@ -5190,6 +5228,7 @@ mod tests {
         let mut report = AutoVerifyReport {
             properties: vec![PropertyVerdict {
                 name: "vacuous_recoverability".to_string(),
+                label: None,
                 kind: crate::adapter::slang::translate::SvaKind::Assert,
                 // AG EF (a == 1) — recoverability on a stateless model.
                 formula: "nu Y. ((mu X. ((a == 1) || <> X)) && [] Y)".to_string(),
@@ -5908,6 +5947,7 @@ module uart_tx(); endmodule"#;
         let translated = vec![
             crate::adapter::slang::translate::TranslatedAssertion {
                 name: "m_sva_5".into(),
+                label: None,
                 kind: SvaKind::Assert,
                 // `cnt_q >= cfg_detect_timer_i` — the comparison that reveals the bound.
                 formula: "nu X. ((cnt_q >= cfg_detect_timer_i) && [] X)".into(),
@@ -5915,6 +5955,7 @@ module uart_tx(); endmodule"#;
             },
             crate::adapter::slang::translate::TranslatedAssertion {
                 name: "m_sva_13".into(),
+                label: None,
                 kind: SvaKind::Assert,
                 // The monotonicity property — needs the bound but never names cfg.
                 formula: "nu X. ((cnt_q >= cnt_q__past) && [] X)".into(),
@@ -5937,6 +5978,7 @@ module uart_tx(); endmodule"#;
             properties: vec![
                 PropertyVerdict {
                     name: "p_holds".into(),
+                    label: None,
                     kind: SvaKind::Assert,
                     formula: "nu X. (a && [] X)".into(),
                     outcome: VerifyOutcome::Holds,
@@ -5945,6 +5987,7 @@ module uart_tx(); endmodule"#;
                 },
                 PropertyVerdict {
                     name: "p_unknown".into(),
+                    label: None,
                     kind: SvaKind::Assert,
                     formula: "nu X. (b && [] X)".into(),
                     outcome: VerifyOutcome::Unknown { unknown_cells: 2 },
@@ -6166,6 +6209,7 @@ module uart_tx(); endmodule"#;
         let report = AutoVerifyReport {
             properties: vec![PropertyVerdict {
                 name: "p".into(),
+                label: None,
                 kind: SvaKind::Assert,
                 formula: "nu X. (a && [] X)".into(),
                 outcome: VerifyOutcome::Holds,
@@ -6218,6 +6262,7 @@ module uart_tx(); endmodule"#;
         let report = AutoVerifyReport {
             properties: vec![PropertyVerdict {
                 name: "recover".into(),
+                label: None,
                 kind: SvaKind::Assert,
                 formula: "nu Y. ((mu X. (idle || <> X)) && [] Y)".into(),
                 outcome: VerifyOutcome::Holds,

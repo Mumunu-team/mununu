@@ -1900,6 +1900,7 @@ impl From<&crate::adapter::slang::verify_auto::AutoVerifyReport> for SvVerifyAut
                 };
                 PropertyVerdictView {
                     name: p.name.clone(),
+                    label: p.label.clone(),
                     kind: match p.kind {
                         SvaKind::Assert => "assert",
                         SvaKind::Assume => "assume",
@@ -2025,7 +2026,16 @@ pub struct ModelDiagnosticsView {
 /// One property's auto-verification verdict (mirrors `PropertyVerdict`).
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct PropertyVerdictView {
+    /// Positional name: `<module>_sva_<index>` (or `ann_guarantee_<index>`). An insertion
+    /// mid-file re-points every later one — prefer `label` when pinning an expectation.
     pub name: String,
+    /// mununu#544 — the assertion's SV label, when it has one.
+    ///
+    /// This is what the author wrote (`a_reseed_only_at_a_span_edge:`), so it survives a reorder
+    /// and a rename becomes a hard error instead of a silent re-point. Absent for an unlabelled
+    /// assertion and for every `@mununu_guarantee` annotation (which carry no name today).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     /// `"assert"` | `"assume"` | `"cover"`.
     pub kind: String,
     pub formula: String,
