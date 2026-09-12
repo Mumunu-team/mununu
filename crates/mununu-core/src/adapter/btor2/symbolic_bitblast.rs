@@ -973,6 +973,13 @@ impl BddBitBlaster {
         let k = pred_bdds.len();
 
         // Allocate 2k fresh predicate vars at the bottom of the order: p_i then p'_i.
+        //
+        // mununu#542 — the two `BDDFunction::var(..).unwrap()` below are the only `unwrap`s left
+        // in this function. Each allocates ONE node for a fresh variable: O(1), independent of the
+        // cone, and done at entry before any wide operation has grown the arena. They also sit
+        // inside `with_manager_exclusive`, whose closure returns a tuple rather than a `Result`, so
+        // propagating would mean restructuring the allocation for a case that cannot realistically
+        // arise. Every cone-sized operation below propagates via `oom`.
         let (present, next, present_varnos) = self._manager.with_manager_exclusive(|m| {
             let range = m.add_vars(2 * k as VarNo);
             let present: Vec<BDDFunction> = (0..k)
@@ -987,7 +994,7 @@ impl BddBitBlaster {
         // The cube of next predicate vars (to quantify out in a preimage).
         let mut next_cube = self.tt.clone();
         for v in &next {
-            next_cube = next_cube.and(v).unwrap();
+            next_cube = oom(next_cube.and(v))?;
         }
 
         // The present→next substitution: each register bit var ↦ its
@@ -1018,18 +1025,18 @@ impl BddBitBlaster {
             let is_ctrl = !cell.is_state && controllable.is_some_and(|c| c.contains(&cell.symbol));
             for v in &cell.vars {
                 if cell.is_state {
-                    reg_cube = reg_cube.and(v).unwrap();
+                    reg_cube = oom(reg_cube.and(v))?;
                 } else {
-                    input_cube = input_cube.and(v).unwrap();
+                    input_cube = oom(input_cube.and(v))?;
                     if is_ctrl {
-                        ctrl_cube = ctrl_cube.and(v).unwrap();
+                        ctrl_cube = oom(ctrl_cube.and(v))?;
                     } else {
-                        env_cube = env_cube.and(v).unwrap();
+                        env_cube = oom(env_cube.and(v))?;
                     }
                 }
             }
         }
-        let xi_cube = reg_cube.and(&input_cube).unwrap();
+        let xi_cube = oom(reg_cube.and(&input_cube))?;
 
         // A(x, p) and A'(x, i, p').
         let mut a = self.tt.clone();
@@ -1039,8 +1046,7 @@ impl BddBitBlaster {
             let pred_next = if sub_vars.is_empty() {
                 pred.clone()
             } else {
-                pred.substitute(&Subst::new(sub_vars.clone(), sub_repl.clone()))
-                    .unwrap()
+                oom(pred.substitute(&Subst::new(sub_vars.clone(), sub_repl.clone())))?
             };
             // p_i ⟺ pred  and  p'_i ⟺ pred_next  (via XNOR).
             let iff_present = oom(self.xor(&present[i], &pred)?.not())?;
@@ -1050,9 +1056,9 @@ impl BddBitBlaster {
         }
 
         // R_may = ∃(x ∪ i). A ∧ A'   (fused relational product).
-        let r_may = a
-            .apply_exists(BooleanOperator::And, &a_prime, &xi_cube)
-            .unwrap();
+        // The widest operation in this function — the fused relational product over the whole
+        // (register ∪ input) cube. mununu#542: exhausting the arena here must ABSTAIN, not panic.
+        let r_may = oom(a.apply_exists(BooleanOperator::And, &a_prime, &xi_cube))?;
 
         // The FEASIBLE present cubes `∃x. A(x,p)` — the cubes some concrete
         // register state inhabits. Used to restrict `R_must` (below) and to scope
@@ -1060,7 +1066,7 @@ impl BddBitBlaster {
         // `reg_cube` (unchanged) — the two-player GAME relation depends on this
         // exact value; the input-predicate hazard is handled by disabling `R_must`
         // on the standard path (below), not by re-scoping `feasible_present`.
-        let feasible_present = a.exists(&reg_cube).unwrap();
+        let feasible_present = oom(a.exists(&reg_cube))?;
 
         // SOUNDNESS (must ⊆ may fix, symbolic engine) — must-edges are DISABLED
         // (may-only, `r_must = None`) when a predicate is over an INPUT.
@@ -1083,30 +1089,29 @@ impl BddBitBlaster {
         // inputs explicitly as env/ctrl moves and *requires* `r_must` for the
         // controllable predecessor (`AbstractRelation::evaluate`); it does not go
         // through the box_pre panic, so it keeps its must-relation unchanged.
-        let inputs_in_predicates = feasible_present != a.exists(&xi_cube).unwrap();
+        let inputs_in_predicates = feasible_present != oom(a.exists(&xi_cube))?;
         let r_must = if inputs_in_predicates && controllable.is_none() {
             None
         } else {
-            must.map(|sem| {
+            must.map(|sem| -> Result<BDDFunction, String> {
                 let raw = match sem {
                     MustSemantics::ForallExists => {
                         // ∀x. ( A(x,p) → ∃i. A'(x,i,p') )
-                        let exists_i = a_prime.exists(&input_cube).unwrap();
-                        a.not()
-                            .unwrap()
-                            .or(&exists_i)
-                            .unwrap()
-                            .forall(&reg_cube)
-                            .unwrap()
+                        //
+                        // mununu#542 was reported here: the `∃i` exhausted the arena and
+                        // `.unwrap()` panicked, which aborts on the unwind of the exhausted
+                        // manager (see `oom`) — exit 101/134 and NO report, where the engine
+                        // owes an abstention.
+                        let exists_i = oom(a_prime.exists(&input_cube))?;
+                        let not_a = oom(a.not())?;
+                        let implies = oom(not_a.or(&exists_i))?;
+                        oom(implies.forall(&reg_cube))?
                     }
                     MustSemantics::ForallForall => {
                         // ∀(x ∪ i). ( A(x,p) → A'(x,i,p') )
-                        a.not()
-                            .unwrap()
-                            .or(&a_prime)
-                            .unwrap()
-                            .forall(&xi_cube)
-                            .unwrap()
+                        let not_a = oom(a.not())?;
+                        let implies = oom(not_a.or(&a_prime))?;
+                        oom(implies.forall(&xi_cube))?
                     }
                 };
                 // A vacuously-empty (unsatisfiable) source cube yields `¬A ≡ ⊤`
@@ -1115,8 +1120,9 @@ impl BddBitBlaster {
                 // Intersecting with `feasible_present` keeps must-edges leaving
                 // only inhabited cubes, so `R_must ⊆ R_may` holds globally over
                 // the `2^k` cube space (the R-F5.4.1 evaluator relies on it).
-                raw.and(&feasible_present).unwrap()
+                oom(raw.and(&feasible_present))
             })
+            .transpose()?
         };
 
         // P2.5-F — retain the concrete game pieces when a controllable partition was requested.

@@ -443,6 +443,31 @@ pub enum AdapterErrorKind {
     ResourceBudgetExceeded,
 }
 
+/// mununu#542 — classify an ENGINE error message as a budget abstention or a real defect.
+///
+/// The BDD / predicate-cube engines signal failure with a `String`, and every *abstention*
+/// message carries an `abstained on the <NODE|ITERATION|WALL-CLOCK|BIT CAP> budget` marker (see
+/// [`crate::adapter::btor2::symbolic_bitblast`]'s `oom` helper and the budget checks) or names
+/// OxiDD's `OutOfMemory` directly.
+///
+/// Such a message is NOT a defect in the input — the design is fine, we stopped — so it must
+/// reach `verify_auto` as [`AdapterErrorKind::ResourceBudgetExceeded`], which maps to `Unknown`.
+/// Any other kind falls into `verify_auto`'s generic arm and becomes `Skipped`, and
+/// `ci_exit_code` does not fail on `skipped` — so a strict `--fail-on unknown` gate would go
+/// GREEN on a property the engine never decided. That is the same silent pass mununu#504
+/// removed for the wall-clock budget; this extends it to the engine's other budgets, which were
+/// still arriving as `IrConsistencyError`.
+pub fn classify_engine_error(message: &str, default: AdapterErrorKind) -> AdapterErrorKind {
+    /// Markers that identify an abstention rather than a defect. Kept as substrings because the
+    /// engine layer's error channel is `String`; a marker change must update this list.
+    const BUDGET_MARKERS: [&str; 2] = ["abstained on the", "OutOfMemory"];
+    if BUDGET_MARKERS.iter().any(|m| message.contains(m)) {
+        AdapterErrorKind::ResourceBudgetExceeded
+    } else {
+        default
+    }
+}
+
 impl fmt::Display for AdapterError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(loc) = &self.location {
@@ -690,6 +715,57 @@ pub fn auto_translate(
 
 #[cfg(test)]
 mod tests {
+    /// mununu#542 — an engine BUDGET abstention must be classified `ResourceBudgetExceeded`, so
+    /// `verify_auto` maps it to `Unknown`.
+    ///
+    /// Before this, every engine error — including the NODE / ITERATION / WALL-CLOCK budget
+    /// abstentions and OxiDD's `OutOfMemory` — arrived as `IrConsistencyError` and fell into
+    /// `verify_auto`'s generic arm, which yields `Skipped`. `ci_exit_code` never fails on
+    /// `skipped`, so a strict `--fail-on unknown` gate went GREEN on a property the engine had
+    /// explicitly abstained on. mununu#504 removed that silent pass for the wall-clock budget at
+    /// the `verify_auto` seam; the engine's own budgets were still arriving misclassified.
+    #[test]
+    fn an_engine_budget_abstention_is_a_budget_error_not_an_ir_defect() {
+        use super::{AdapterErrorKind, classify_engine_error};
+
+        // Every abstention the engine can emit (cf. `symbolic_bitblast`'s `oom` helper and the
+        // NODE / ITERATION / WALL-CLOCK guards).
+        for msg in [
+            "symbolic bit-blaster: BDD arena exhausted (OxiDD OutOfMemory) — abstained on the \
+             NODE budget; the cone does not compress to a tractable BDD",
+            "abstained on the ITERATION budget",
+            "abstained on the WALL-CLOCK budget",
+            "abstained on the BIT CAP",
+            "called `Result::unwrap()` on an `Err` value: OutOfMemory",
+        ] {
+            assert_eq!(
+                classify_engine_error(msg, AdapterErrorKind::IrConsistencyError),
+                AdapterErrorKind::ResourceBudgetExceeded,
+                "abstention must reach verify_auto as a budget error, else it becomes \
+                 `Skipped` and no CI gate fails on it: {msg}"
+            );
+        }
+    }
+
+    /// ...and the special case stays NARROW: a real defect keeps its kind, so it still maps to
+    /// `Skipped` with its message. Widening this would hide genuine input defects as `unknown`.
+    #[test]
+    fn a_real_engine_defect_keeps_its_kind() {
+        use super::{AdapterErrorKind, classify_engine_error};
+
+        for msg in [
+            "adapter/btor2: operator Read unsupported in Phase 1 bit-blaster",
+            "label intern failed",
+            "builder.build failed",
+        ] {
+            assert_eq!(
+                classify_engine_error(msg, AdapterErrorKind::IrConsistencyError),
+                AdapterErrorKind::IrConsistencyError,
+                "a defect must NOT be laundered into a budget abstention: {msg}"
+            );
+        }
+    }
+
     use super::detect_format_by_extension;
     use std::path::Path;
 

@@ -50,7 +50,10 @@ pub struct SymbolicCubeVerdicts {
 
 fn ir_err(message: String) -> AdapterError {
     AdapterError {
-        kind: AdapterErrorKind::IrConsistencyError,
+        // mununu#542 — a budget abstention (NODE / ITERATION / WALL-CLOCK / OxiDD OutOfMemory)
+        // must NOT arrive as an IR defect: `verify_auto`'s generic error arm maps that to
+        // `Skipped`, which no CI gate fails on. Classify it so it lands as `Unknown`.
+        kind: crate::adapter::classify_engine_error(&message, AdapterErrorKind::IrConsistencyError),
         message: format!("adapter/btor2/symbolic_engine: {message}"),
         location: None,
     }
@@ -318,6 +321,34 @@ pub fn symbolic_cegar_refine(
 
 #[cfg(test)]
 mod tests {
+    /// mununu#542 — the WIRING: this module converts every engine `String` error, so a budget
+    /// abstention must leave here already classified. `verify_auto`'s generic arm maps anything
+    /// else to `Skipped`, and no CI gate fails on `skipped`.
+    ///
+    /// This is the half that was missing. `verify_auto` already mapped
+    /// `ResourceBudgetExceeded → Unknown` (mununu#504), but nothing on the symbolic path ever
+    /// produced that kind — `ir_err` stamped `IrConsistencyError` on everything.
+    #[test]
+    fn ir_err_classifies_a_budget_abstention_as_a_budget_error() {
+        use crate::adapter::AdapterErrorKind;
+
+        let e = super::ir_err(
+            "symbolic bit-blaster: BDD arena exhausted (OxiDD OutOfMemory) — abstained on the \
+             NODE budget; the cone does not compress to a tractable BDD"
+                .to_string(),
+        );
+        assert_eq!(
+            e.kind,
+            AdapterErrorKind::ResourceBudgetExceeded,
+            "an arena exhaustion is an abstention, not an IR defect — it must reach verify_auto \
+             as `unknown`, never `skipped`"
+        );
+
+        // A genuine IR defect keeps its kind and so still maps to `Skipped` with its message.
+        let d = super::ir_err("predicate register not found in the cone".to_string());
+        assert_eq!(d.kind, AdapterErrorKind::IrConsistencyError);
+    }
+
     use super::*;
     use crate::adapter::btor2::predicate_expr::CmpOp;
     use crate::clts::{Clts, DefaultLabelIdx, DefaultStateIdx, TransitionModality, Tristate};
