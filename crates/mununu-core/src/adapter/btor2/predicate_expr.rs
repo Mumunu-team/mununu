@@ -878,6 +878,69 @@ pub fn parse_predicate_atom_bool(s: &str) -> Result<PredicateExpr, PredicateExpr
 
 #[cfg(test)]
 mod tests {
+    /// mununu#543 PROBE — at what depth does a `PredicateExpr` chain overflow the stack?
+    ///
+    /// Not a regression test: it deliberately ABORTS the process when the depth exceeds what the
+    /// stack holds, which is the measurement. Driven one depth per process:
+    ///
+    /// ```bash
+    /// MUNUNU_PROBE_DEPTH=20000 MUNUNU_PROBE_OP=eval \
+    ///   cargo test -p mununu-core --lib -- --ignored probe_543_predicate_expr_depth --nocapture
+    /// ```
+    ///
+    /// `MUNUNU_PROBE_OP` selects which walk to exercise: `build` (construction only), `eval`,
+    /// `collect` (`collect_registers`), or `drop` (construct, then drop — the walk no depth bound
+    /// can ever catch, because it runs while unwinding).
+    ///
+    /// Exit 0 = survived that depth. Abort / exit 134 = that depth overflows.
+    #[test]
+    #[ignore = "mununu#543 probe — aborts by design; set MUNUNU_PROBE_DEPTH (and MUNUNU_PROBE_OP)"]
+    fn probe_543_predicate_expr_depth() {
+        let depth: usize = std::env::var("MUNUNU_PROBE_DEPTH")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1000);
+        let op = std::env::var("MUNUNU_PROBE_OP").unwrap_or_else(|_| "eval".to_string());
+
+        // A LEFT-leaning chain, exactly the shape `cvc5::sexpr_to_predicate_expr`'s fold builds
+        // from an interpolant's conjuncts: And(And(And(..), c), c).
+        let leaf = |i: usize| PredicateExpr::Cmp {
+            register: format!("r{i}"),
+            op: CmpOp::Eq,
+            value: i as u64,
+        };
+        let mut e = leaf(0);
+        for i in 1..depth {
+            e = PredicateExpr::And(Box::new(e), Box::new(leaf(i)));
+        }
+        eprintln!("[probe] built depth={depth} op={op}");
+
+        match op.as_str() {
+            "build" => {
+                // Construction is iterative; this arm measures the DROP implicitly at scope end,
+                // so `build` and `drop` differ only in whether a walk ran first.
+            }
+            "eval" => {
+                let regs: std::collections::HashMap<String, u128> =
+                    std::collections::HashMap::new();
+                let v = e.eval(&regs);
+                eprintln!("[probe] eval survived depth={depth} -> {v}");
+            }
+            "collect" => {
+                let mut out = std::collections::BTreeSet::new();
+                e.collect_registers(&mut out);
+                eprintln!(
+                    "[probe] collect survived depth={depth} -> {} regs",
+                    out.len()
+                );
+            }
+            "drop" => {}
+            other => panic!("unknown MUNUNU_PROBE_OP {other}"),
+        }
+        drop(e);
+        eprintln!("[probe] SURVIVED depth={depth} op={op} (including drop)");
+    }
+
     use super::*;
     use std::collections::HashMap;
 
