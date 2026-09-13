@@ -2292,27 +2292,39 @@ impl BddBitBlaster {
         violates: impl Fn(oxidd::LevelNo, oxidd::LevelNo) -> bool,
     ) -> Result<(), String> {
         use oxidd::{Edge, Function, HasLevel, InnerNode, Manager, Node};
+        // mununu#543 — oxidd's OWN node count for this diagram, taken BEFORE the shared borrow
+        // below (`node_count` acquires the manager lock itself, so calling it inside would
+        // re-enter). Compared against what the walk actually visits, to close the one assumption
+        // the positive control cannot reach: an inverted predicate fires on the FIRST inner node
+        // with children, so it proves the walk STARTS and reads levels — not that it is
+        // EXHAUSTIVE. If a subgraph were being skipped, both predicates would behave exactly as
+        // observed and a silent instrument could still be hiding the malformation. The consumer
+        // named that gap; this measures it instead of believing it.
+        //
+        // `node_count` counts terminals too, so the walk records every visited node, terminals
+        // included, and the two are directly comparable.
+        let expected_nodes = f.node_count();
         self._manager.with_manager_shared(|m| {
             let root = f.as_edge(m);
             let mut seen: std::collections::HashSet<oxidd::NodeID> =
                 std::collections::HashSet::new();
             // The explicit worklist that keeps this validator safe on a malformed diagram.
             let mut work: Vec<(oxidd::LevelNo, _)> = Vec::new();
-            match m.get_node(root) {
-                Node::Inner(n) => work.push((n.level(), root.borrowed())),
-                Node::Terminal(_) => return Ok(()),
-            }
+            work.push((0, root.borrowed()));
             while let Some((_, edge)) = work.pop() {
-                let Node::Inner(node) = m.get_node(&edge) else {
-                    continue;
-                };
-                let level = node.level();
                 if !seen.insert(edge.node_id()) {
                     continue;
                 }
+                let Node::Inner(node) = m.get_node(&edge) else {
+                    continue; // a terminal ends the descent, but it is COUNTED above
+                };
+                let level = node.level();
                 for child in node.children() {
                     let Node::Inner(cn) = m.get_node(&child) else {
-                        continue; // a terminal has no level and ends the descent
+                        // A terminal child still has to be counted, or the exhaustiveness
+                        // comparison below would under-count against `node_count`.
+                        seen.insert(child.node_id());
+                        continue;
                     };
                     let clevel = cn.level();
                     if violates(level, clevel) {
@@ -2326,6 +2338,14 @@ impl BddBitBlaster {
                     }
                     work.push((clevel, child));
                 }
+            }
+            if seen.len() != expected_nodes {
+                return Err(format!(
+                    "symbolic bit-blaster: level validation visited {} of {expected_nodes} nodes \
+                     while building {what} — the walk is NOT exhaustive, so its silence proves \
+                     nothing about the unvisited part of the diagram (mununu#543)",
+                    seen.len()
+                ));
             }
             Ok(())
         })
@@ -5921,9 +5941,20 @@ mod tests {
             "the fixture must be a real two-level diagram, or nothing is visited"
         );
 
-        // Production predicate: silent on a well-formed diagram.
+        // Production predicate: silent on a well-formed diagram. This ALSO exercises the
+        // exhaustiveness comparison — `validate_levels` errors if the walk visits fewer nodes
+        // than oxidd's own `node_count`, so a pass here means the walk reached the whole diagram
+        // and not merely its first inner node.
         bb.validate_levels(&conj, "control")
-            .expect("well-formed must pass");
+            .expect("well-formed must pass, and the walk must be exhaustive");
+        assert!(
+            {
+                use oxidd::Function as _;
+                conj.node_count() >= 3
+            },
+            "the fixture must have at least two inner nodes plus a terminal, or exhaustiveness \
+             is trivially satisfied"
+        );
 
         // INVERTED predicate: must fire on the first inner node with children.
         let err = bb
