@@ -248,6 +248,16 @@ pub struct BddBitBlaster {
     /// not sit at a deeper level, breaking the invariant `apply_bin` relies on (not caught here —
     /// the level count would still read ≤ 192 while the recursion runs away).
     declared_vars: std::sync::atomic::AtomicU32,
+    /// mununu#543 — both diagnostics' flags, read ONCE at build.
+    ///
+    /// They were read per BIT via `std::env::var`, from `check_node_budget` and the validator
+    /// hook inside `add_bits`' loop. When the variable IS set that allocates a `String` on every
+    /// call; when unset it still scans the environment. Either way it is work in the hottest loop
+    /// in the bit-blaster, and the suspected selector for the malformed-diagram defect is
+    /// allocation order — so the instrument was disturbing what it measures, worst in exactly the
+    /// arm where it was switched on.
+    report_levels: bool,
+    validate_levels_flag: bool,
     /// Node-budget guard: if the manager's live inner-node count exceeds this while
     /// building the transition BDDs (`walk_design`, `eval_op`), the build bails with a
     /// clean error (→ `Skipped`) instead of overflowing the fixed OxiDD arena and
@@ -416,6 +426,8 @@ impl BddBitBlaster {
         let mut blaster = BddBitBlaster {
             _manager: manager,
             declared_vars: std::sync::atomic::AtomicU32::new(total_bits),
+            report_levels: std::env::var("MUNUNU_REPORT_BDD_LEVELS").is_ok(),
+            validate_levels_flag: std::env::var("MUNUNU_VALIDATE_BDD_LEVELS").is_ok(),
             constraint_bdd: tt.clone(), // real value computed after walk_design (Pass 5)
             tt,
             ff,
@@ -601,6 +613,26 @@ impl BddBitBlaster {
     // ---- Boolean gadgets (each mirrors a concrete `eval_op` arm) ----
 
     fn xor(&self, a: &BDDFunction, b: &BDDFunction) -> Result<BDDFunction, String> {
+        // mununu#543 — validate the OPERANDS, before the apply that may not return.
+        //
+        // The first version of this check ran on each op's RESULT. A consumer then armed it and
+        // still got a stack overflow with ZERO violations reported, which is exactly what that
+        // placement predicts: the measured crash is inside this function, so `xor` never returns
+        // and a result check is unreachable on the only iteration that matters. An instrument
+        // placed after the constructor can only ever observe the ops that succeeded.
+        //
+        // Operands are the right precondition. `apply_bin` descends by `min(flevel, glevel)`, so
+        // if BOTH operands have strictly-increasing levels the descent is bounded by the level
+        // count and terminates. Therefore:
+        //   * a violation here means we built a malformed node in an EARLIER op — this names the
+        //     op that received it, and the producer is one step back;
+        //   * operands that validate and STILL overflow means the malformation is created inside
+        //     OxiDD's own `reduce`, which is a dependency defect and a far larger finding.
+        // So this is both the detector and the discriminator between those two.
+        if self.validate_levels_flag {
+            self.validate_levels(a, "xor operand a")?;
+            self.validate_levels(b, "xor operand b")?;
+        }
         // (a ∧ ¬b) ∨ (¬a ∧ b) — kept crate-portable (oxidd exposes `.and/.or/.not`).
         // Every apply is `oom(...)?` so an arena-exhausting op ABSTAINS (Err) rather
         // than `.unwrap()`-panicking / SIGABRT-ing on the exhausted-manager drop.
@@ -644,15 +676,20 @@ impl BddBitBlaster {
         for i in 0..width as usize {
             let ai = a.get(i).cloned().unwrap_or_else(|| self.ff.clone());
             let bi = b.get(i).cloned().unwrap_or_else(|| self.ff.clone());
+            // mununu#543 — operands BEFORE the applies. `xor` validates its own two operands;
+            // the carry chain below uses raw oxidd calls, so its operands are checked here.
+            if self.validate_levels_flag {
+                self.validate_levels(&ai, "add_bits operand a")?;
+                self.validate_levels(&bi, "add_bits operand b")?;
+                self.validate_levels(&carry, "add_bits carry-in")?;
+            }
             let axb = self.xor(&ai, &bi)?;
             let s = self.xor(&axb, &carry)?;
             // carry' = (ai ∧ bi) ∨ (carry ∧ (ai ⊕ bi))
             let c = oom(oom(ai.and(&bi))?.or(&oom(carry.and(&axb))?))?;
-            // mununu#543 — opt-in structural validation at the CONSTRUCTION site. `add_bits` is
-            // where the measured overflow happened (build_with_keep → eval_op → add_bits → xor),
-            // so a violation caught here names the operation that built the bad node instead of
-            // the apply that later fell into it.
-            if self.validate_levels_enabled() {
+            // The results are checked too, so the LAST bit's outputs — which never become another
+            // op's operands — are covered as well.
+            if self.validate_levels_flag {
                 self.validate_levels(&s, "add_bits sum bit")?;
                 self.validate_levels(&c, "add_bits carry")?;
             }
@@ -2254,11 +2291,6 @@ impl BddBitBlaster {
         })
     }
 
-    /// mununu#543 — is opt-in level validation on? Read per op; the walk itself is the cost.
-    fn validate_levels_enabled(&self) -> bool {
-        std::env::var("MUNUNU_VALIDATE_BDD_LEVELS").is_ok()
-    }
-
     fn check_node_budget(&self) -> Result<(), String> {
         // mununu#543 — read the LEVEL count alongside the node count. `add_bits` calls this once
         // per bit, so this runs inside the operation sequence that was measured overflowing, and
@@ -2277,7 +2309,7 @@ impl BddBitBlaster {
                  (mununu#543)"
             ));
         }
-        if std::env::var("MUNUNU_REPORT_BDD_LEVELS").is_ok() {
+        if self.report_levels {
             eprintln!("[mununu-bdd] op: live={live} vars={vars} levels={levels}");
         }
         if live > self.node_budget {
