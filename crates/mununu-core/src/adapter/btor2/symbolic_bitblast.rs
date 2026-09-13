@@ -232,6 +232,22 @@ pub struct BddBitBlaster {
     /// constraint-respecting transitions — modelling BTOR2 `constraint` (assume)
     /// soundly instead of over-approximating.
     constraint_bdd: BDDFunction,
+    /// mununu#543 — the variable count this build DECLARED, i.e. the single `add_vars` call's
+    /// width. Load-bearing as an INVARIANT, not a statistic.
+    ///
+    /// OxiDD's `apply_bin` descends strictly by level (cofactors only at `min(flevel, glevel)`),
+    /// so one recursive frame per level and depth is bounded by the manager's level count. The
+    /// bit cap refuses any build over `AUTO_CAP_CEILING` (192) BEFORE the manager is created, and
+    /// this is the only `add_vars` on it — so the level count can never exceed 192 and a single
+    /// apply can never nest deeper than that.
+    ///
+    /// A consumer measured a 74,598-frame `apply_bin` recursion inside ONE `xor`, ~388x that
+    /// ceiling. Both cannot be true. [`Self::check_node_budget`] therefore re-reads the manager's
+    /// live variable count and FAILS on drift, which distinguishes the two candidate causes:
+    /// variables appearing after build (caught here) versus a malformed diagram whose children do
+    /// not sit at a deeper level, breaking the invariant `apply_bin` relies on (not caught here —
+    /// the level count would still read ≤ 192 while the recursion runs away).
+    declared_vars: std::sync::atomic::AtomicU32,
     /// Node-budget guard: if the manager's live inner-node count exceeds this while
     /// building the transition BDDs (`walk_design`, `eval_op`), the build bails with a
     /// clean error (→ `Skipped`) instead of overflowing the fixed OxiDD arena and
@@ -337,13 +353,37 @@ impl BddBitBlaster {
             arena_nodes * 8 / 10
         };
         let manager = bdd::new_manager(arena_nodes, arena_nodes / 4, 1);
-        let (all_vars, var_base, tt, ff) = manager.with_manager_exclusive(|m| {
-            let range = m.add_vars(total_bits as VarNo);
-            let vars: Vec<BDDFunction> = (0..total_bits)
-                .map(|i| BDDFunction::var(m, range.start + i as VarNo).unwrap())
-                .collect();
-            (vars, range.start, BDDFunction::t(m), BDDFunction::f(m))
-        });
+        let (all_vars, var_base, tt, ff, built_vars, built_levels) = manager
+            .with_manager_exclusive(|m| {
+                let range = m.add_vars(total_bits as VarNo);
+                let vars: Vec<BDDFunction> = (0..total_bits)
+                    .map(|i| BDDFunction::var(m, range.start + i as VarNo).unwrap())
+                    .collect();
+                (
+                    vars,
+                    range.start,
+                    BDDFunction::t(m),
+                    BDDFunction::f(m),
+                    m.num_vars(),
+                    m.num_levels(),
+                )
+            });
+        // mununu#543 — the manager's own count, not ours. If these ever disagree, the level
+        // ceiling `apply_bin`'s depth bound rests on is not what we think it is.
+        if built_vars != total_bits || built_levels != total_bits {
+            return Err(format!(
+                "symbolic bit-blaster: declared {total_bits} variables but the manager reports \
+                 {built_vars} vars / {built_levels} levels — the BDD level ceiling is not what \
+                 the bit cap enforces, so no depth bound on a single apply can be trusted \
+                 (mununu#543)"
+            ));
+        }
+        if std::env::var("MUNUNU_REPORT_BDD_LEVELS").is_ok() {
+            eprintln!(
+                "[mununu-bdd] build: total_bits={total_bits} cap={cap} vars={built_vars} \
+                 levels={built_levels} arena={arena_nodes} budget={node_budget}"
+            );
+        }
 
         // Slice the flat variable pool out per KEPT cell (LSB-first); PIN each out-of-cone
         // leaf to a constant-0 BitVec (env only — never a `Cell`, so it is invisible to the
@@ -375,6 +415,7 @@ impl BddBitBlaster {
 
         let mut blaster = BddBitBlaster {
             _manager: manager,
+            declared_vars: std::sync::atomic::AtomicU32::new(total_bits),
             constraint_bdd: tt.clone(), // real value computed after walk_design (Pass 5)
             tt,
             ff,
@@ -980,6 +1021,12 @@ impl BddBitBlaster {
         // inside `with_manager_exclusive`, whose closure returns a tuple rather than a `Result`, so
         // propagating would mean restructuring the allocation for a case that cannot realistically
         // arise. Every cone-sized operation below propagates via `oom`.
+        // mununu#543 — these `2k` predicate variables are a DELIBERATE post-build addition, so
+        // account for them. `check_node_budget`'s drift check then catches only UNACCOUNTED growth,
+        // which is the case that would invalidate `apply_bin`'s per-level depth bound. Without
+        // this the check fires on legitimate refinement (measured: 3 → 7 vars with 2 predicates).
+        self.declared_vars
+            .fetch_add(2 * k as u32, std::sync::atomic::Ordering::Relaxed);
         let (present, next, present_varnos) = self._manager.with_manager_exclusive(|m| {
             let range = m.add_vars(2 * k as VarNo);
             let present: Vec<BDDFunction> = (0..k)
@@ -2126,9 +2173,26 @@ impl BddBitBlaster {
     /// `OutOfMemory` (whose `.unwrap()` panic would abort the process on the unwind of the
     /// exhausted manager, uncatchable by `catch_unwind`).
     fn check_node_budget(&self) -> Result<(), String> {
-        let live = self
+        // mununu#543 — read the LEVEL count alongside the node count. `add_bits` calls this once
+        // per bit, so this runs inside the operation sequence that was measured overflowing, and
+        // it is the cheapest place to catch variables appearing after build.
+        let (live, vars, levels) = self
             ._manager
-            .with_manager_shared(|m| m.approx_num_inner_nodes());
+            .with_manager_shared(|m| (m.approx_num_inner_nodes(), m.num_vars(), m.num_levels()));
+        let accounted = self
+            .declared_vars
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if vars != accounted || levels != accounted {
+            return Err(format!(
+                "symbolic bit-blaster: the manager holds {vars} vars / {levels} levels but only \
+                 {accounted} are accounted for — `apply_bin` recurses once per level, so its depth \
+                 bound is no longer the bit cap and a single apply can overflow the stack \
+                 (mununu#543)"
+            ));
+        }
+        if std::env::var("MUNUNU_REPORT_BDD_LEVELS").is_ok() {
+            eprintln!("[mununu-bdd] op: live={live} vars={vars} levels={levels}");
+        }
         if live > self.node_budget {
             return Err(format!(
                 "abstained on the NODE budget ({live} of {} live BDD nodes) — the property's cone \
