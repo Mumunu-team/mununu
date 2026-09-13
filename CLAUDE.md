@@ -370,8 +370,15 @@ Repro: none — containment only
 legitimate, often urgent change — turning a crash into a verdict, a budget into an abstention — but it
 does not establish a cause, so it leaves the cause issue open.
 
-**Why.** A fix for an unestablished cause is indistinguishable from a fix for a cause that does not
-exist, and we have shipped the latter. `crates/mununu-core/src/clts/mod.rs:1725` carries a custom
+**Why a FIELD and not a paragraph.** The failure this prevents is not theorising — a mechanism is what
+makes an observation actionable. It is writing the mechanism at the **same confidence as the
+observation, in the same sentence, in a tracked file.** The observations survive because they are cheap
+to check and someone checked them; the mechanisms die because they are expensive to check and nobody
+did. Prose cannot hold that distinction under editing; a field can. (The articulation is monono's,
+after three retractions on mununu#543 — theirs, and ours.)
+
+**Why at all.** A fix for an unestablished cause is indistinguishable from a fix for a cause that does
+not exist, and we have shipped the latter. `crates/mununu-core/src/clts/mod.rs:1725` carries a custom
 `Drop for Clts` whose stated purpose is to avoid a stack overflow from `Vec<Vec<Transition>>`
 "recursively dropping deeply nested structures" — but dropping a `Vec` **iterates** its elements;
 2000 inner `Vec`s do not nest 2000 frames deep. The impl defends against a mechanism that does not
