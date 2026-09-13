@@ -98,13 +98,58 @@ const PRECISION_LADDER: [EngineOp; 3] = [
     },
 ];
 
+/// mununu#543 W1 — order the precision ladder by how many properties the planner predicts each
+/// operator will decide, descending, with the ladder itself as the stable tiebreak.
+///
+/// The planner has computed a per-property `predicted_engine` since P2.2d and spent it purely on
+/// telemetry, while the portfolio ran a HARDCODED `exact → symbolic → explicit` regardless. Under
+/// `Sequential` the portfolio early-exits once no ⊥ property remains, so running an operator the
+/// planner expects to decide nothing FIRST is a wasted pass over every property.
+///
+/// Deliberately conservative in two ways:
+///
+/// * **Ties keep precision order** (`sort_by_key` is stable). So when exact is predicted to decide
+///   as much as anything else — the common case — the order is byte-identical to before, and exact
+///   keeps its place. That matters beyond cost: exact is 2-valued, never ⊥ within its bit cap, and
+///   carries the richest witness, so demoting it when it WOULD have decided would buy a cheaper run
+///   at the price of a poorer counterexample.
+/// * **An empty rationale keeps the ladder.** No prepared model (the plan unit-tests) ⇒ no reorder.
+///
+/// This does NOT change verdicts. The merge takes the first *definite* verdict per property and the
+/// three engines are differential-validated never to contradict each other, so reordering can change
+/// which engine is *credited* for a verdict, never the verdict. That is the falsifier for this
+/// change: any verdict movement across the corpus means the engines do not in fact agree, and the
+/// reorder must be reverted rather than the disagreement papered over.
+fn ladder_ordered_by_prediction(rationale: &[RoutingRationale]) -> Vec<EngineOp> {
+    let mut ops = PRECISION_LADDER.to_vec();
+    if rationale.is_empty() {
+        return ops;
+    }
+    ops.sort_by_key(|op| {
+        std::cmp::Reverse(
+            rationale
+                .iter()
+                .filter(|r| r.predicted_engine == op.label)
+                .count(),
+        )
+    });
+    ops
+}
+
 /// Rule-based planner (P2.1a): reproduce today's fixed engine selection. A portfolio intent
 /// emits the full precision ladder in the requested mode; a single-engine intent emits just
 /// that operator. (P2.2 makes this cost-based off `ModelFacts` — cone-vs-cap, property-class
 /// → verdict requirement.)
 pub(crate) fn plan(prepared: Option<&PreparedModel>, opts: &VerifyAutoOptions) -> PhysicalPlan {
+    // The planner's cost reasoning, made explicit: from the prepared model's facts, predict the
+    // deciding engine + why for each property (the decision table). Empty when no model is supplied
+    // (the plan unit-tests build the ladder alone). This is what `execute` attaches as telemetry —
+    // and, since mununu#543 (W1), what ORDERS the ladder.
+    let rationale = prepared
+        .map(|m| annotate_routing(&m.btor2, &m.properties()))
+        .unwrap_or_default();
     let (ops, mode) = match opts.portfolio {
-        Some(mode) => (PRECISION_LADDER.to_vec(), mode),
+        Some(mode) => (ladder_ordered_by_prediction(&rationale), mode),
         None => (
             vec![EngineOp {
                 label: single_engine_label(opts),
@@ -114,12 +159,6 @@ pub(crate) fn plan(prepared: Option<&PreparedModel>, opts: &VerifyAutoOptions) -
             PortfolioMode::Sequential,
         ),
     };
-    // The planner's cost reasoning, made explicit: from the prepared model's facts, predict the
-    // deciding engine + why for each property (the decision table). Empty when no model is supplied
-    // (the plan unit-tests build the ladder alone). This is what `execute` attaches as telemetry.
-    let rationale = prepared
-        .map(|m| annotate_routing(&m.btor2, &m.properties()))
-        .unwrap_or_default();
     PhysicalPlan {
         ops,
         mode,
@@ -751,6 +790,73 @@ mod tests {
             exact_symbolic: exact,
             ..Default::default()
         }
+    }
+
+    /// mununu#543 W1 — the ladder is ordered by the planner's own per-property prediction.
+    ///
+    /// The prediction has existed since P2.2d and was spent purely on telemetry while the
+    /// portfolio ran a hardcoded `exact → symbolic → explicit`. Under `Sequential` the portfolio
+    /// early-exits once no ⊥ property remains, so running an operator the planner expects to
+    /// decide nothing FIRST is a wasted pass over every property.
+    #[test]
+    fn w1_ladder_is_ordered_by_predicted_decider_count() {
+        use super::{RoutingRationale, ladder_ordered_by_prediction};
+        use crate::mu_calculus::PropertyClass;
+        let r = |engine: &'static str| RoutingRationale {
+            property: format!("p_{engine}"),
+            class: PropertyClass::Safety,
+            cone_bits: 8,
+            cap: 40,
+            diameter_log2: None,
+            predicted_engine: engine,
+            why: String::new(),
+        };
+
+        // Planner expects `explicit` to decide two and `symbolic` one; exact none.
+        let ops = ladder_ordered_by_prediction(&[r("explicit"), r("explicit"), r("symbolic")]);
+        let labels: Vec<&str> = ops.iter().map(|o| o.label).collect();
+        assert_eq!(
+            labels,
+            vec!["explicit", "symbolic", "exact-symbolic"],
+            "the operator predicted to decide most properties runs first"
+        );
+    }
+
+    /// ...and it is CONSERVATIVE: a tie keeps precision order, so exact keeps its place whenever
+    /// it is predicted to decide as much as anything else. That is not only about cost — exact is
+    /// 2-valued, never ⊥ within its bit cap, and carries the richest witness, so demoting it when
+    /// it would have decided buys a cheaper run at the price of a poorer counterexample.
+    #[test]
+    fn w1_a_tie_keeps_the_precision_ladder_and_no_model_keeps_it_too() {
+        use super::{PRECISION_LADDER, RoutingRationale, ladder_ordered_by_prediction};
+        use crate::mu_calculus::PropertyClass;
+        let ladder: Vec<&str> = PRECISION_LADDER.iter().map(|o| o.label).collect();
+
+        // No prepared model ⇒ no rationale ⇒ no reorder.
+        let empty = ladder_ordered_by_prediction(&[]);
+        assert_eq!(
+            empty.iter().map(|o| o.label).collect::<Vec<_>>(),
+            ladder,
+            "an empty rationale must leave the ladder untouched"
+        );
+
+        // One property each ⇒ all counts equal ⇒ stable sort preserves precision order.
+        let r = |engine: &'static str| RoutingRationale {
+            property: format!("p_{engine}"),
+            class: PropertyClass::Safety,
+            cone_bits: 8,
+            cap: 40,
+            diameter_log2: None,
+            predicted_engine: engine,
+            why: String::new(),
+        };
+        let tied =
+            ladder_ordered_by_prediction(&[r("exact-symbolic"), r("symbolic"), r("explicit")]);
+        assert_eq!(
+            tied.iter().map(|o| o.label).collect::<Vec<_>>(),
+            ladder,
+            "a tie must keep exact first — precision order is the tiebreak"
+        );
     }
 
     #[test]
