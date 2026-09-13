@@ -3158,6 +3158,74 @@ pub(crate) fn verify_auto_impl(
             let exact_opts = ExactSymbolicOptions {
                 antecedent_shadow_enabled: opts.antecedent_shadow,
             };
+
+            // mununu#543 W3 — opt-in ISOLATION. `oxidd`'s `apply_bin` can recurse unboundedly on a
+            // malformed diagram created inside OxiDD's own `reduce`, and in-process containment is
+            // impossible: a `stacker` red zone cannot fire inside the dependency, and a guard-page
+            // SIGSEGV aborts whichever thread it lands on. Out of process it IS containable — the
+            // child's death is a wait status, so this property becomes `unknown` with a note and
+            // every OTHER property in the run still reports. A consumer measured losing 5 of 8 full
+            // lane runs (62%) to that abort.
+            if crate::adapter::engine_isolate::enabled() {
+                use crate::adapter::engine_isolate::Isolated;
+                let iso = crate::adapter::engine_isolate::exact_symbolic(
+                    &btor2,
+                    &formula_str,
+                    opts.antecedent_shadow,
+                );
+                // `Unavailable` falls THROUGH to the in-process path: isolation could not be
+                // attempted, which is our problem and not a reason to abstain on the property.
+                if !matches!(iso, Isolated::Unavailable(_)) {
+                    let outcome = match &iso {
+                        Isolated::Holds => VerifyOutcome::Holds,
+                        // No witness under isolation — the child returns a verdict, not a
+                        // counterexample. Recorded in `engine_isolate`'s docs; a consumer gating on
+                        // `properties[].outcome` is unaffected, one reading traces is not.
+                        Isolated::Violated => VerifyOutcome::Violated { false_cells: 1 },
+                        Isolated::Abstained(why) => VerifyOutcome::Skipped {
+                            reason: format!("exact symbolic MC (isolated): {why}"),
+                        },
+                        // THE CASE THIS EXISTS FOR. `unknown`, never `skipped`: the engine was
+                        // attempted and reached no answer, and `ci_exit_code` does not fail on
+                        // `skipped` — so `skipped` here would let a strict gate pass green on a
+                        // property whose engine crashed.
+                        Isolated::Died(_) => VerifyOutcome::Unknown { unknown_cells: 0 },
+                        Isolated::Unavailable(_) => unreachable!("filtered above"),
+                    };
+                    if let Isolated::Died(why) = &iso {
+                        report.notes.push(VerificationNote {
+                            kind: "engine-isolation".to_string(),
+                            level: NoteLevel::ScopeCaveat,
+                            summary: format!(
+                                "`{}`: the exact-symbolic engine DIED in its isolated child — {why}. \
+                                 The property is `unknown`; every other property in this run is \
+                                 unaffected, which is what isolation buys (mununu#543).",
+                                t.name
+                            ),
+                            detail: "The engine ran in a child process because \
+                                     MUNUNU_ISOLATE_ENGINES is set. Without isolation this death \
+                                     would have ended the whole run with no report at all. The \
+                                     underlying defect is an unbounded recursion in OxiDD's \
+                                     `apply_bin` on a malformed diagram; it is not a defect in the \
+                                     design under verification, and this property's verdict is \
+                                     absent rather than negative."
+                                .to_string(),
+                            items: vec![format!("property:{}", t.name)],
+                        });
+                    }
+                    report.properties.push(PropertyVerdict {
+                        name: t.name.clone(),
+                        label: t.label.clone(),
+                        kind: t.kind,
+                        formula: formula_str.clone(),
+                        outcome,
+                        seeded_predicates: Vec::new(),
+                        counterexample: None,
+                    });
+                    continue;
+                }
+            }
+
             let (outcome, counterexample) = match exact_symbolic_verdict_with_witness_and_options(
                 &btor2,
                 &formula,

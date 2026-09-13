@@ -315,8 +315,37 @@ mod ci_gate_tests {
     }
 }
 
+/// mununu#543 W3 — args for the hidden `internal-engine-eval` verb.
+#[derive(Args, Debug)]
+struct InternalEngineEvalArgs {
+    /// The lifted BTOR2 model (already cone-restricted, pinned and shadow-augmented).
+    #[arg(long = "btor2", value_name = "FILE")]
+    btor2: std::path::PathBuf,
+    /// The μ-calculus formula to evaluate, as the engine would receive it.
+    #[arg(long = "formula", value_name = "MU")]
+    formula: String,
+    /// Mirror of `sv verify-auto --no-antecedent-shadow`, so the child matches the parent's posture.
+    #[arg(long = "no-antecedent-shadow")]
+    no_antecedent_shadow: bool,
+}
+
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// mununu#543 W3 — INTERNAL. Evaluate one property with the exact-symbolic engine and print a
+    /// one-line verdict, so the parent can run this engine in a CHILD PROCESS.
+    ///
+    /// Hidden because it is not a user surface: it exists so a stack overflow inside OxiDD's
+    /// `apply_bin` becomes a child's wait status instead of killing the whole run. See
+    /// `adapter::engine_isolate` for why in-process containment is impossible (a `stacker` red zone
+    /// cannot fire inside the dependency, and a guard-page SIGSEGV aborts regardless of which
+    /// thread it happens on).
+    ///
+    /// Takes the ARTIFACTS, not a recipe: a lifted BTOR2 file and the μ-calculus formula. The lift,
+    /// cone restriction, config pins and shadow synthesis are already applied by the time this
+    /// runs, so there is no CLI surface to reconstruct and no option struct to serialise — the
+    /// child runs the identical code path on identical inputs.
+    #[command(name = "internal-engine-eval", hide = true)]
+    InternalEngineEval(InternalEngineEvalArgs),
     /// Inspect or manipulate Context DSL artefacts.
     Context {
         #[command(subcommand)]
@@ -3010,6 +3039,7 @@ fn print_inspection_human(report: &mununu_core::verify::InspectionReport) {
 
 fn dispatch(command: Commands) -> Result<(), String> {
     match command {
+        Commands::InternalEngineEval(args) => internal_engine_eval(args),
         Commands::Context { command } => handle_context(*command),
         Commands::Extraction { command } => handle_extraction(*command),
         Commands::Sv { command } => handle_sv(*command),
@@ -8714,4 +8744,53 @@ mod sv_lift_search_path_tests {
             "--exclude faulty must also filter search-path scans: {names:?}"
         );
     }
+}
+
+/// mununu#543 W3 — the hidden child: evaluate ONE property with `exact-symbolic` and print a
+/// single machine-readable verdict line.
+///
+/// Deliberately minimal, because everything it does not do is what makes it safe. It does not lift,
+/// does not restrict a cone, does not pin a config and does not re-read the parent's options — all
+/// of that is already baked into the BTOR2 it is handed. So there is no way for the child to verify
+/// a different question than the parent asked, which is the failure mode that would make isolation
+/// worse than the crash.
+///
+/// Output contract, read by `adapter::engine_isolate`:
+///
+/// ```text
+/// VERDICT holds
+/// VERDICT violated
+/// VERDICT abstained <the engine's own reason>
+/// ```
+///
+/// **No verdict line means the engine died**, which is the whole point: the parent reads the
+/// absence plus the wait status rather than needing the child to report its own death.
+///
+/// The witness is not returned in this slice — a `violated` here carries no counterexample. Stated
+/// in `engine_isolate`'s docs too, because a silently thinner result is worse than a stated one.
+fn internal_engine_eval(args: InternalEngineEvalArgs) -> Result<(), String> {
+    use mununu_core::adapter::btor2::symbolic_bitblast::{
+        ExactSymbolicOptions, ExactVerdict, exact_symbolic_verdict_with_witness_and_options,
+    };
+
+    let btor2 = std::fs::read_to_string(&args.btor2).map_err(|e| {
+        format!(
+            "internal-engine-eval: cannot read {}: {e}",
+            args.btor2.display()
+        )
+    })?;
+    let formula = mununu_core::mu_calculus::parser::parse(&args.formula)
+        .map_err(|e| format!("internal-engine-eval: cannot parse the formula: {e:?}"))?;
+    let opts = ExactSymbolicOptions {
+        antecedent_shadow_enabled: !args.no_antecedent_shadow,
+    };
+
+    match exact_symbolic_verdict_with_witness_and_options(&btor2, &formula, &opts) {
+        Ok((ExactVerdict::Holds, _)) => println!("VERDICT holds"),
+        Ok((ExactVerdict::Violated, _)) => println!("VERDICT violated"),
+        // An engine abstention is a RESULT, not a failure — it must reach the parent as one, or the
+        // parent would read it as a death and report `unknown` without the engine's reason.
+        Err(e) => println!("VERDICT abstained {e}"),
+    }
+    Ok(())
 }
