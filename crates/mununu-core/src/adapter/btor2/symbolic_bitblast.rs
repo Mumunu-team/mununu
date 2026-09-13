@@ -648,6 +648,14 @@ impl BddBitBlaster {
             let s = self.xor(&axb, &carry)?;
             // carry' = (ai ∧ bi) ∨ (carry ∧ (ai ⊕ bi))
             let c = oom(oom(ai.and(&bi))?.or(&oom(carry.and(&axb))?))?;
+            // mununu#543 — opt-in structural validation at the CONSTRUCTION site. `add_bits` is
+            // where the measured overflow happened (build_with_keep → eval_op → add_bits → xor),
+            // so a violation caught here names the operation that built the bad node instead of
+            // the apply that later fell into it.
+            if self.validate_levels_enabled() {
+                self.validate_levels(&s, "add_bits sum bit")?;
+                self.validate_levels(&c, "add_bits carry")?;
+            }
             sum.push(s);
             carry = c;
             self.check_node_budget()?;
@@ -2172,6 +2180,85 @@ impl BddBitBlaster {
     /// budget — together they keep the arena from ever actually filling, so OxiDD never returns
     /// `OutOfMemory` (whose `.unwrap()` panic would abort the process on the unwind of the
     /// exhausted manager, uncatchable by `catch_unwind`).
+    /// mununu#543 — validate the BDD level invariant on one diagram: every child of a node sits
+    /// at a STRICTLY GREATER level.
+    ///
+    /// This is the invariant OxiDD's `apply_bin` depends on and does not check. It takes cofactors
+    /// only at `min(flevel, glevel)` and passes the other operand through unchanged, so the level
+    /// strictly increases per step — and `SequentialRecursor::binary` is `#[inline(always)]`, so it
+    /// is one stack frame per level. Depth is therefore bounded by the manager's level count, which
+    /// the bit cap holds at ≤ `AUTO_CAP_CEILING` (192).
+    ///
+    /// A consumer measured 74,612 frames at an 8 MB stack and 598,904 at 64 MB — a ratio of 8.0269
+    /// against a stack ratio of 8.0000, i.e. depth is a pure function of available stack. That is an
+    /// UNBOUNDED descent, which 192 levels cannot produce, so the invariant is being violated
+    /// somewhere. Reordering is excluded (no call site in this repo, and `Manager::reorder` needs
+    /// `&mut` while the failing apply holds a shared borrow), and the level COUNT is measured
+    /// correct (144/144 on their lift, no drift). A malformed diagram is what remains.
+    ///
+    /// **Deliberately ITERATIVE.** A recursive validator would overflow on exactly the diagram it
+    /// exists to catch, and the visited set makes it terminate even on a cycle — the two failure
+    /// shapes we cannot yet distinguish.
+    ///
+    /// Costs O(nodes) per call, so it is opt-in via `MUNUNU_VALIDATE_BDD_LEVELS=1`. Running it on
+    /// each of OUR op results names the CONSTRUCTION site; validating inside the apply would only
+    /// report that something upstream had already gone wrong.
+    ///
+    /// **UNPROVEN IN THE FIRING DIRECTION, and that is not fixable here.** The accept case is
+    /// tested (`level_validation_accepts_a_well_formed_diagram`, on a genuine two-level diagram so
+    /// the walk descends rather than bailing at a terminal). The REJECT case has no test, because a
+    /// malformed node cannot be constructed through OxiDD's public API — `reduce` is what maintains
+    /// the invariant, and nothing we can call bypasses it. A hand-rolled "test" comparing level
+    /// numbers would assert arithmetic about its own fixture, not this walk; one was written and
+    /// deleted rather than kept as coverage. So this validator is justified by the measured
+    /// unbounded descent and by reading, and its detection is confirmed only when it fires on a
+    /// real run.
+    fn validate_levels(&self, f: &BDDFunction, what: &str) -> Result<(), String> {
+        use oxidd::{Edge, Function, HasLevel, InnerNode, Manager, Node};
+        self._manager.with_manager_shared(|m| {
+            let root = f.as_edge(m);
+            let mut seen: std::collections::HashSet<oxidd::NodeID> =
+                std::collections::HashSet::new();
+            // The explicit worklist that keeps this validator safe on a malformed diagram.
+            let mut work: Vec<(oxidd::LevelNo, _)> = Vec::new();
+            match m.get_node(root) {
+                Node::Inner(n) => work.push((n.level(), root.borrowed())),
+                Node::Terminal(_) => return Ok(()),
+            }
+            while let Some((_, edge)) = work.pop() {
+                let Node::Inner(node) = m.get_node(&edge) else {
+                    continue;
+                };
+                let level = node.level();
+                if !seen.insert(edge.node_id()) {
+                    continue;
+                }
+                for child in node.children() {
+                    let Node::Inner(cn) = m.get_node(&child) else {
+                        continue; // a terminal has no level and ends the descent
+                    };
+                    let clevel = cn.level();
+                    if clevel <= level {
+                        return Err(format!(
+                            "symbolic bit-blaster: MALFORMED BDD while building {what} — a node at \
+                             level {level} has a child at level {clevel}, which is not strictly \
+                             deeper. `apply_bin` descends one frame per level and assumes this \
+                             invariant, so it would recurse until the stack ends rather than \
+                             terminate (mununu#543)"
+                        ));
+                    }
+                    work.push((clevel, child));
+                }
+            }
+            Ok(())
+        })
+    }
+
+    /// mununu#543 — is opt-in level validation on? Read per op; the walk itself is the cost.
+    fn validate_levels_enabled(&self) -> bool {
+        std::env::var("MUNUNU_VALIDATE_BDD_LEVELS").is_ok()
+    }
+
     fn check_node_budget(&self) -> Result<(), String> {
         // mununu#543 — read the LEVEL count alongside the node count. `add_bits` calls this once
         // per bit, so this runs inside the operation sequence that was measured overflowing, and
@@ -5690,6 +5777,42 @@ pub(crate) fn bdd_nodes_height(f: &BDDFunction) -> (usize, usize) {
 
 #[cfg(test)]
 mod tests {
+    /// mununu#543 — the validator accepts a WELL-FORMED diagram and is not vacuous.
+    ///
+    /// A validator that never fires is indistinguishable from one that cannot fire, so this pairs
+    /// with the negative direction below: the walk must actually reach inner nodes and compare
+    /// levels, not bail at the root.
+    #[test]
+    fn level_validation_accepts_a_well_formed_diagram() {
+        // Two variables, so `x ∧ y` has an inner node with an inner child — the walk has
+        // something to descend through.
+        let src = "\
+1 sort bitvec 1
+2 input 1 a
+3 input 1 b
+4 and 1 2 3
+5 state 1 q
+6 next 1 5 4
+";
+        let bb =
+            super::BddBitBlaster::build(&crate::adapter::btor2::parser::parse(src).expect("parse"))
+                .expect("build");
+        // Two distinct leaf variables conjoined: a genuine two-level diagram, so the walk has an
+        // inner node with an inner child to descend through rather than bailing at a terminal.
+        let a = bb.env[&2][0].clone();
+        let b = bb.env[&3][0].clone();
+        let conj = {
+            use oxidd::BooleanFunction;
+            a.and(&b).expect("and")
+        };
+        assert!(
+            conj != bb.ff && conj != bb.tt,
+            "the fixture must not collapse to a terminal, or the walk proves nothing"
+        );
+        bb.validate_levels(&conj, "test")
+            .expect("a well-formed diagram must validate");
+    }
+
     /// mununu#543 PROBE — reproduce monono's abort in-house, on THEIR model.
     ///
     /// Their bundle names the dying property exactly, every time: index 1 of 4,
