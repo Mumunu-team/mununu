@@ -2303,12 +2303,20 @@ impl ExactModel {
     /// BDD over `(state, input)` = "the successor of this state under this input
     /// satisfies `φ`". Simultaneous substitution ⇒ the concrete next-state
     /// relation. `pub` so the D1.8 lasso extractor can pick a `φ`-preserving input.
-    pub fn to_next(&self, phi: &BDDFunction) -> BDDFunction {
+    ///
+    /// mununu#543 — fallible because the substitution is a **cone-sized** OxiDD operation on the
+    /// μ-fixpoint's hot path, run once per iteration, and it can exhaust the arena. It used to
+    /// `.unwrap()`. A consumer's RTL comment named this exact site (`symbolic_bitblast.rs:2305`,
+    /// `OutOfMemory`) months before we looked, and mununu#542's sweep covered
+    /// `abstract_relation_impl` and never reached it. An `Err` routes through
+    /// `classify_engine_error` to `ResourceBudgetExceeded` ⇒ `unknown` — the honest verdict for
+    /// "could not finish". A panic while the manager is exhausted aborts on the unwind instead,
+    /// taking every other property in the process with it.
+    pub fn to_next(&self, phi: &BDDFunction) -> Result<BDDFunction, String> {
         if self.sub_vars.is_empty() {
-            phi.clone()
+            Ok(phi.clone())
         } else {
-            phi.substitute(&Subst::new(self.sub_vars.clone(), self.sub_repl.clone()))
-                .unwrap()
+            oom(phi.substitute(&Subst::new(self.sub_vars.clone(), self.sub_repl.clone())))
         }
     }
 
@@ -2325,28 +2333,20 @@ impl ExactModel {
     /// `⟨⟩φ` — some **constraint-respecting** successor satisfies `φ`:
     /// `∃i. constraint(s,i) ∧ to_next(φ)`. `constraint = tt` (unconstrained) makes
     /// this the plain `∃i. to_next(φ)`, so an unconstrained design is unchanged.
-    pub fn diamond_pre(&self, phi: &BDDFunction) -> BDDFunction {
+    pub fn diamond_pre(&self, phi: &BDDFunction) -> Result<BDDFunction, String> {
         use oxidd::BooleanFunctionQuant;
-        self.to_next(phi)
-            .and(&self.constraint)
-            .unwrap()
-            .exists(&self.input_cube)
-            .unwrap()
+        oom(oom(self.to_next(phi)?.and(&self.constraint))?.exists(&self.input_cube))
     }
 
     /// `[]φ` — **every constraint-respecting** successor satisfies `φ`:
     /// `∀i. constraint(s,i) ⟹ to_next(φ)` = `∀i. ¬constraint(s,i) ∨ to_next(φ)`.
     /// The dual of the constrained diamond; `constraint = tt` gives the plain
     /// `∀i. to_next(φ)`.
-    pub fn box_pre(&self, phi: &BDDFunction) -> BDDFunction {
+    pub fn box_pre(&self, phi: &BDDFunction) -> Result<BDDFunction, String> {
         use oxidd::BooleanFunctionQuant;
-        self.constraint
-            .not()
-            .unwrap()
-            .or(&self.to_next(phi))
-            .unwrap()
-            .forall(&self.input_cube)
-            .unwrap()
+        let not_c = oom(self.constraint.not())?;
+        let implies = oom(not_c.or(&self.to_next(phi)?))?;
+        oom(implies.forall(&self.input_cube))
     }
 
     /// P2.5-F — the CONTROLLABLE PREDECESSOR `CPre_ctrl(φ)`: the states from which the controller can
@@ -2361,36 +2361,27 @@ impl ExactModel {
     /// `Control::Controllable` the box/diamond kind is subsumed by the controllability structure — the
     /// same operator as the explicit reference (`evaluator.rs::modal_trit_core`), which the two-player
     /// exact engine is differentially validated against.
-    pub fn cpre_controllable(&self, phi: &BDDFunction) -> BDDFunction {
+    pub fn cpre_controllable(&self, phi: &BDDFunction) -> Result<BDDFunction, String> {
         use oxidd::BooleanFunctionQuant;
         // ∃ctrl: a constraint-respecting transition into φ (per state + environment move).
-        let reachable = self
-            .to_next(phi)
-            .and(&self.constraint)
-            .unwrap()
-            .exists(&self.ctrl_cube)
-            .unwrap();
+        let step = oom(self.to_next(phi)?.and(&self.constraint))?;
+        let reachable = oom(step.exists(&self.ctrl_cube))?;
         // ∀env: the controller has such a response to every environment move.
-        reachable.forall(&self.env_cube).unwrap()
+        oom(reachable.forall(&self.env_cube))
     }
 
     /// P2.5-F — the ENVIRONMENT PREDECESSOR `CPre_env(φ)`, the De Morgan dual of
     /// [`Self::cpre_controllable`]: the states from which the ENVIRONMENT can force `φ` against every
     /// controllable move — `{ s : ∃ env, ∀ ctrl, constraint ⟹ next ∈ φ }`. Used for the environment
     /// side of the game (e.g. extracting the counterstrategy region when the controller loses).
-    pub fn cpre_environment(&self, phi: &BDDFunction) -> BDDFunction {
+    pub fn cpre_environment(&self, phi: &BDDFunction) -> Result<BDDFunction, String> {
         use oxidd::BooleanFunctionQuant;
         // ∀ctrl: every controllable response leads (constraint-respecting) into φ.
-        let forced = self
-            .constraint
-            .not()
-            .unwrap()
-            .or(&self.to_next(phi))
-            .unwrap()
-            .forall(&self.ctrl_cube)
-            .unwrap();
+        let not_c = oom(self.constraint.not())?;
+        let implies = oom(not_c.or(&self.to_next(phi)?))?;
+        let forced = oom(implies.forall(&self.ctrl_cube))?;
         // ∃env: some environment move imposes that.
-        forced.exists(&self.env_cube).unwrap()
+        oom(forced.exists(&self.env_cube))
     }
 
     /// P2.5-F (strategy extraction) — the `(state, ctrl-input)` pairs from which, WHATEVER the
@@ -2398,27 +2389,20 @@ impl ExactModel {
     /// keep`. `cpre_controllable(keep) = ctrl_forcing_moves(keep).∃ctrl`. A single state's slice,
     /// projected onto the controllable inputs, is the controller's forced move there (env-oblivious /
     /// positional; with no environment inputs it is the whole move).
-    pub fn ctrl_forcing_moves(&self, keep: &BDDFunction) -> BDDFunction {
+    pub fn ctrl_forcing_moves(&self, keep: &BDDFunction) -> Result<BDDFunction, String> {
         use oxidd::BooleanFunctionQuant;
-        self.to_next(keep)
-            .and(&self.constraint)
-            .unwrap()
-            .forall(&self.env_cube)
-            .unwrap()
+        let step = oom(self.to_next(keep)?.and(&self.constraint))?;
+        oom(step.forall(&self.env_cube))
     }
 
     /// Dual — the `(state, env-input)` pairs from which, WHATEVER the controller does, the successor is
     /// in `keep`: `∀ctrl. constraint ⟹ next ∈ keep`. The environment's forcing moves, for the
     /// counterstrategy when the controller loses.
-    pub fn env_forcing_moves(&self, keep: &BDDFunction) -> BDDFunction {
+    pub fn env_forcing_moves(&self, keep: &BDDFunction) -> Result<BDDFunction, String> {
         use oxidd::BooleanFunctionQuant;
-        self.constraint
-            .not()
-            .unwrap()
-            .or(&self.to_next(keep))
-            .unwrap()
-            .forall(&self.ctrl_cube)
-            .unwrap()
+        let not_c = oom(self.constraint.not())?;
+        let implies = oom(not_c.or(&self.to_next(keep)?))?;
+        oom(implies.forall(&self.ctrl_cube))
     }
 
     // ---- Phase 2b: symbolic environment-strategy synthesis ----------------------------------------
@@ -2434,12 +2418,12 @@ impl ExactModel {
     /// `EF good = μX. good ∨ ◇X` — the RECOVERABLE region (states from which `good` is reachable under
     /// some input path). Least fixpoint from ⊥. Mirrors [`BddBitBlaster::not_ef_p`] without the final
     /// negation.
-    pub fn ef_region(&self, good: &BDDFunction) -> BDDFunction {
+    pub fn ef_region(&self, good: &BDDFunction) -> Result<BDDFunction, String> {
         let mut ef = self.ff.clone();
         loop {
-            let next = good.or(&self.diamond_pre(&ef)).unwrap();
+            let next = oom(good.or(&self.diamond_pre(&ef)?))?;
             if next == ef {
-                return ef;
+                return Ok(ef);
             }
             ef = next;
         }
@@ -2449,12 +2433,12 @@ impl ExactModel {
     /// pick inputs to STAY in `r` forever (Eve owns all inputs, `◇` = ∃input is her move). With
     /// `r = ef_region(good)` this is the set from which an environment strategy keeps `AG EF good`.
     /// Greatest fixpoint from ⊤.
-    pub fn env_maintain_region(&self, r: &BDDFunction) -> BDDFunction {
+    pub fn env_maintain_region(&self, r: &BDDFunction) -> Result<BDDFunction, String> {
         let mut s = self.tt.clone();
         loop {
-            let next = r.and(&self.diamond_pre(&s)).unwrap();
+            let next = oom(r.and(&self.diamond_pre(&s)?))?;
             if next == s {
-                return s;
+                return Ok(s);
             }
             s = next;
         }
@@ -2463,8 +2447,8 @@ impl ExactModel {
     /// The `(state, input)` pairs whose constraint-respecting successor lies in `keep`:
     /// `to_next(keep) ∧ constraint`. Conjoined with a state set, it is the strategy's admissible
     /// moves from those states — the raw material for extracting a concrete strategy witness.
-    pub fn move_into(&self, keep: &BDDFunction) -> BDDFunction {
-        self.to_next(keep).and(&self.constraint).unwrap()
+    pub fn move_into(&self, keep: &BDDFunction) -> Result<BDDFunction, String> {
+        oom(self.to_next(keep)?.and(&self.constraint))
     }
 
     /// `μX. (region ∧ target) ∨ (region ∧ ◇X)` — states in `region` from which `target` is reachable
@@ -2472,14 +2456,18 @@ impl ExactModel {
     /// environment strategy's non-vacuity: from `init` inside the maintainable region `S`, can the
     /// environment reach a `¬good` state while staying in `S` (i.e. does the strategy genuinely LEAVE
     /// `good`, or does it vacuously sit on `good` forever)?
-    pub fn ef_within(&self, region: &BDDFunction, target: &BDDFunction) -> BDDFunction {
-        let seed = target.and(region).unwrap();
+    pub fn ef_within(
+        &self,
+        region: &BDDFunction,
+        target: &BDDFunction,
+    ) -> Result<BDDFunction, String> {
+        let seed = oom(target.and(region))?;
         let mut ef = seed.clone();
         loop {
-            let step = region.and(&self.diamond_pre(&ef)).unwrap();
-            let next = seed.or(&step).unwrap();
+            let step = oom(region.and(&self.diamond_pre(&ef)?))?;
+            let next = oom(seed.or(&step))?;
             if next == ef {
-                return ef;
+                return Ok(ef);
             }
             ef = next;
         }
@@ -2572,13 +2560,13 @@ impl ExactModel {
                 match guard.control {
                     // Single-agent: box = ∀input, diamond = ∃input.
                     Control::All => match kind {
-                        ModalKind::Box => self.box_pre(&phi),
-                        ModalKind::Diamond => self.diamond_pre(&phi),
+                        ModalKind::Box => self.box_pre(&phi)?,
+                        ModalKind::Diamond => self.diamond_pre(&phi)?,
                     },
                     // Two-player: the controllability structure subsumes the box/diamond kind (matching
                     // the explicit reference `evaluator.rs::modal_trit_core`).
-                    Control::Controllable => self.cpre_controllable(&phi),
-                    Control::Environment => self.cpre_environment(&phi),
+                    Control::Controllable => self.cpre_controllable(&phi)?,
+                    Control::Environment => self.cpre_environment(&phi)?,
                 }
             }
             MuNode::Mu { var, body } => self.fixpoint(f, *var, *body, atoms, bindings, false)?,
@@ -2667,20 +2655,24 @@ impl ExactModel {
     /// cheap path. Not memoized (varies per target).
     ///
     /// [`ModelFacts::cone_counter_diameter_log2`]: crate::adapter::btor2::model_facts::ModelFacts::cone_counter_diameter_log2
-    pub fn reach_diameter_to(&self, target: &BDDFunction, k_max: usize) -> DiameterEstimate {
+    pub fn reach_diameter_to(
+        &self,
+        target: &BDDFunction,
+        k_max: usize,
+    ) -> Result<DiameterEstimate, String> {
         let mut x = self.ff.clone();
         for depth in 0..k_max {
             // ◇x under the exact modal preimage (∃ inputs, constraint-respecting), then
             // `target ∨ ◇x` — the monotone `EF(target)` step. Saturation `next == x` is exact
             // (ROBDDs are canonical), and the depth at saturation IS the reach diameter.
-            let pre = self.diamond_pre(&x);
+            let pre = self.diamond_pre(&x)?;
             let next = target.or(&pre).unwrap();
             if next == x {
-                return DiameterEstimate::Saturated(depth);
+                return Ok(DiameterEstimate::Saturated(depth));
             }
             x = next;
         }
-        DiameterEstimate::ExceedsBound(k_max)
+        Ok(DiameterEstimate::ExceedsBound(k_max))
     }
 }
 
@@ -3282,7 +3274,7 @@ pub fn kmts_two_player_verdict_cegar(
         let mut added = false;
         let current = pred_bdds.clone();
         for p in &current {
-            let wp = exact.cpre_controllable(p);
+            let wp = exact.cpre_controllable(p)?;
             if !pred_bdds.contains(&wp) {
                 pred_bdds.push(wp);
                 added = true;
@@ -3728,8 +3720,8 @@ pub fn exact_env_strategy(btor2_content: &str, good: &str) -> Result<EnvStrategy
     };
     let init = bb.initial_state_bdd(&file)?;
 
-    let r = exact.ef_region(&good_bdd);
-    let s = exact.env_maintain_region(&r);
+    let r = exact.ef_region(&good_bdd)?;
+    let s = exact.env_maintain_region(&r)?;
     // init ⊆ S ⟺ init ∧ ¬S is empty.
     let escaping = init.and(&s.not().unwrap()).unwrap();
     if escaping == *exact.ff() {
@@ -3739,7 +3731,7 @@ pub fn exact_env_strategy(btor2_content: &str, good: &str) -> Result<EnvStrategy
         // staying in `S`. (Free-model non-vacuity is not enough: the strategy, not the free design,
         // decides whether `good` is left.)
         let not_good = good_bdd.not().unwrap();
-        let can_leave = init.and(&exact.ef_within(&s, &not_good)).unwrap();
+        let can_leave = init.and(&exact.ef_within(&s, &not_good)?).unwrap();
         if can_leave == *exact.ff() {
             return Ok(EnvStrategyOutcome::Inapplicable(format!(
                 "an environment strategy would keep the design in `{good}` forever — vacuous, not a \
@@ -3748,7 +3740,7 @@ pub fn exact_env_strategy(btor2_content: &str, good: &str) -> Result<EnvStrategy
         }
         // The environment can maintain recoverability. Witness a first move: an initial state in S
         // with an admissible input keeping the successor in S — `init ∧ S ∧ move_into(S)`.
-        let move_set = init.and(&s).unwrap().and(&exact.move_into(&s)).unwrap();
+        let move_set = init.and(&s).unwrap().and(&exact.move_into(&s)?).unwrap();
         let first_move = if move_set == *exact.ff() {
             std::collections::BTreeMap::new()
         } else {
@@ -4519,7 +4511,7 @@ impl BddBitBlaster {
     /// [`eval_step`]: BddBitBlaster::eval_step
     pub fn exact_stall_lasso(&self, file: &Btor2File, p: &BDDFunction) -> Option<StallLasso> {
         let exact = self.exact_model();
-        let stall = self.eg_not_p(&exact, p);
+        let stall = self.eg_not_p(&exact, p).ok()?;
         // A stall state that is also initial ⇒ AF p is violated from reset.
         let init = self.initial_state_bdd(file).ok()?;
         let bad = init.and(&stall).unwrap();
@@ -4527,7 +4519,8 @@ impl BddBitBlaster {
             return None;
         }
         let s = self.pick_state_assignment(&bad);
-        Some(self.walk_stall_cycle(&exact, &stall, s, Vec::new(), Vec::new()))
+        self.walk_stall_cycle(&exact, &stall, s, Vec::new(), Vec::new())
+            .ok()
     }
 
     /// D1.8b-2 — extract a [`StallLasso`] witnessing that `AG AF p` is **Violated**:
@@ -4549,7 +4542,7 @@ impl BddBitBlaster {
         p: &BDDFunction,
     ) -> Option<StallLasso> {
         let exact = self.exact_model();
-        let stall = self.eg_not_p(&exact, p);
+        let stall = self.eg_not_p(&exact, p).ok()?;
         if stall == self.ff {
             return None;
         }
@@ -4557,7 +4550,7 @@ impl BddBitBlaster {
         let mut layers = vec![stall.clone()];
         loop {
             let prev = layers.last().unwrap();
-            let next = prev.or(&exact.diamond_pre(prev)).unwrap();
+            let next = prev.or(&exact.diamond_pre(prev).ok()?).unwrap();
             if &next == prev {
                 break;
             }
@@ -4585,7 +4578,7 @@ impl BddBitBlaster {
                 .unwrap_or(1);
             let good = self
                 .state_minterm(&s)
-                .and(&exact.to_next(&layers[k - 1]))
+                .and(&exact.to_next(&layers[k - 1]).ok()?)
                 .unwrap();
             if good == self.ff {
                 return Some(StallLasso {
@@ -4602,7 +4595,8 @@ impl BddBitBlaster {
             }
             s = ns;
         }
-        Some(self.walk_stall_cycle(&exact, &stall, s, prefix, inputs))
+        self.walk_stall_cycle(&exact, &stall, s, prefix, inputs)
+            .ok()
     }
 
     /// P3 — extract a concrete path witnessing that `AG EF p` is **Violated**: a state
@@ -4623,7 +4617,7 @@ impl BddBitBlaster {
         p: &BDDFunction,
     ) -> Option<StallLasso> {
         let exact = self.exact_model();
-        let trap = self.not_ef_p(&exact, p);
+        let trap = self.not_ef_p(&exact, p).ok()?;
         if trap == self.ff {
             return None; // EF p holds everywhere ⇒ AG EF p holds
         }
@@ -4631,7 +4625,7 @@ impl BddBitBlaster {
         let mut layers = vec![trap.clone()];
         loop {
             let prev = layers.last().unwrap();
-            let next = prev.or(&exact.diamond_pre(prev)).unwrap();
+            let next = prev.or(&exact.diamond_pre(prev).ok()?).unwrap();
             if &next == prev {
                 break;
             }
@@ -4661,7 +4655,7 @@ impl BddBitBlaster {
                 .unwrap_or(1);
             let good = self
                 .state_minterm(&s)
-                .and(&exact.to_next(&layers[k - 1]))
+                .and(&exact.to_next(&layers[k - 1]).ok()?)
                 .unwrap();
             if good == self.ff {
                 return Some(StallLasso {
@@ -4698,7 +4692,7 @@ impl BddBitBlaster {
         let mut layers = vec![p.clone()];
         loop {
             let prev = layers.last().unwrap();
-            let next = prev.or(&exact.diamond_pre(prev)).unwrap();
+            let next = prev.or(&exact.diamond_pre(prev).ok()?).unwrap();
             if &next == prev {
                 break;
             }
@@ -4727,7 +4721,7 @@ impl BddBitBlaster {
                 .unwrap_or(1);
             let step = self
                 .state_minterm(&s)
-                .and(&exact.to_next(&layers[k - 1]))
+                .and(&exact.to_next(&layers[k - 1]).ok()?)
                 .unwrap();
             if step == self.ff {
                 return None; // no rank-decreasing move (should not happen inside the attractor)
@@ -4757,7 +4751,7 @@ impl BddBitBlaster {
         let mut layers = vec![good.clone()];
         loop {
             let prev = layers.last().unwrap();
-            let next = prev.or(&exact.diamond_pre(prev)).unwrap();
+            let next = prev.or(&exact.diamond_pre(prev).ok()?).unwrap();
             if &next == prev {
                 break;
             }
@@ -4838,7 +4832,7 @@ impl BddBitBlaster {
             }
             let m = self
                 .state_minterm(s)
-                .and(&exact.move_into(&layers[(*k - 1) as usize]))
+                .and(&exact.move_into(&layers[(*k - 1) as usize]).ok()?)
                 .unwrap();
             moves_by_val
                 .entry(v)
@@ -4893,7 +4887,7 @@ impl BddBitBlaster {
         let not_good = good.not().unwrap();
         let mut stall = self.tt.clone();
         loop {
-            let next = not_good.and(&exact.cpre_environment(&stall)).unwrap();
+            let next = not_good.and(&exact.cpre_environment(&stall).ok()?).unwrap();
             if next == stall {
                 break;
             }
@@ -4906,7 +4900,7 @@ impl BddBitBlaster {
         let mut layers = vec![stall.clone()];
         loop {
             let prev = layers.last().unwrap();
-            let next = prev.or(&exact.cpre_environment(prev)).unwrap();
+            let next = prev.or(&exact.cpre_environment(prev).ok()?).unwrap();
             if &next == prev {
                 break;
             }
@@ -4926,9 +4920,9 @@ impl BddBitBlaster {
          -> Option<(BTreeMap<String, u128>, BTreeMap<String, u128>)> {
             let moves = self
                 .state_minterm(s)
-                .and(&exact.env_forcing_moves(target))
+                .and(&exact.env_forcing_moves(target).ok()?)
                 .unwrap()
-                .and(&exact.to_next(target))
+                .and(&exact.to_next(target).ok()?)
                 .unwrap();
             if moves == self.ff {
                 return None;
@@ -5092,7 +5086,7 @@ impl BddBitBlaster {
         layers: &[BDDFunction],
         recur_target: Option<&BDDFunction>,
         ranked: &RankedStates,
-    ) -> MealyStrategy {
+    ) -> Result<MealyStrategy, String> {
         let (reached, min_rank) = ranked;
         const MAX_REACTIVE_MOVES: usize = 256;
         let is_ctrl = |c: &&Cell| -> bool { !c.is_state && controllable.contains(&c.symbol) };
@@ -5132,7 +5126,7 @@ impl BddBitBlaster {
                 &layers[(*rank - 1) as usize]
             };
             // Moore fast-path: a single controllable move robust to every environment input.
-            let moore = mt.and(&exact.ctrl_forcing_moves(target)).unwrap();
+            let moore = mt.and(&exact.ctrl_forcing_moves(target)?).unwrap();
             if moore != self.ff {
                 let mut forced_ctrl = BTreeMap::new();
                 for cell in self.cells.iter().filter(is_ctrl) {
@@ -5153,7 +5147,7 @@ impl BddBitBlaster {
             }
             // Reactive: enumerate one controllable response per environment-input valuation. The state is
             // in the attractor, so `∀env ∃ctrl` — every environment column has a response.
-            let mut rem = mt.and(&exact.move_into(target)).unwrap();
+            let mut rem = mt.and(&exact.move_into(target)?).unwrap();
             let mut moves: Vec<MealyMove> = Vec::new();
             for _ in 0..MAX_REACTIVE_MOVES {
                 if rem == self.ff {
@@ -5192,10 +5186,10 @@ impl BddBitBlaster {
             });
         }
         entries.sort_by(|a, b| a.rank.cmp(&b.rank).then(a.state_value.cmp(&b.state_value)));
-        MealyStrategy {
+        Ok(MealyStrategy {
             state_register: reg_name.to_string(),
             entries,
-        }
+        })
     }
 
     /// P2.5-F (b) — the CONTROLLER's Mealy strategy for a REALIZABLE recurrence (Büchi) game `GF good`
@@ -5226,10 +5220,10 @@ impl BddBitBlaster {
         // Büchi winning region W = νZ. Attr_ctrl(good ∧ CPre_ctrl Z): start at ⊤ and shrink.
         let mut w = self.tt.clone();
         loop {
-            let recur = good.and(&exact.cpre_controllable(&w)).unwrap();
+            let recur = good.and(&exact.cpre_controllable(&w).ok()?).unwrap();
             let mut attr = recur;
             loop {
-                let next = attr.or(&exact.cpre_controllable(&attr)).unwrap();
+                let next = attr.or(&exact.cpre_controllable(&attr).ok()?).unwrap();
                 if next == attr {
                     break;
                 }
@@ -5245,11 +5239,11 @@ impl BddBitBlaster {
             return None; // unrealizable Büchi → the env starvation lasso is the witness, not a strategy
         }
         // Attractor layers to the recur set R = good ∧ CPre_ctrl W (L_0 = R, …, L_last = W).
-        let recur = good.and(&exact.cpre_controllable(&w)).unwrap();
+        let recur = good.and(&exact.cpre_controllable(&w).ok()?).unwrap();
         let mut layers = vec![recur];
         loop {
             let prev = layers.last().unwrap();
-            let next = prev.or(&exact.cpre_controllable(prev)).unwrap();
+            let next = prev.or(&exact.cpre_controllable(prev).ok()?).unwrap();
             if &next == prev {
                 break;
             }
@@ -5264,7 +5258,8 @@ impl BddBitBlaster {
                 &layers,
                 Some(&w),
                 &ranked,
-            ),
+            )
+            .ok()?,
         ))
     }
 
@@ -5298,7 +5293,7 @@ impl BddBitBlaster {
         let mut layers = vec![good.clone()];
         loop {
             let prev = layers.last().unwrap();
-            let next = prev.or(&exact.cpre_controllable(prev)).unwrap();
+            let next = prev.or(&exact.cpre_controllable(prev).ok()?).unwrap();
             if &next == prev {
                 break;
             }
@@ -5335,7 +5330,8 @@ impl BddBitBlaster {
                     &layers,
                     None,
                     &ranked,
-                ),
+                )
+                .ok()?,
             ))
         } else {
             // ENVIRONMENT counterstrategy — positional (the environment is the first-mover). At each
@@ -5351,7 +5347,7 @@ impl BddBitBlaster {
                 }
                 let m = self
                     .state_minterm(s)
-                    .and(&exact.env_forcing_moves(&region))
+                    .and(&exact.env_forcing_moves(&region).ok()?)
                     .unwrap();
                 moves_by_val
                     .entry(v)
@@ -5407,9 +5403,19 @@ impl BddBitBlaster {
             for (reg, val) in self.eval_step(&full) {
                 ns.insert(reg, val);
             }
-            rem = rem
-                .and(&exact.to_next(&self.state_minterm(&ns)).not().unwrap())
-                .unwrap();
+            // mununu#543 — an arena exhaustion here TRUNCATES the enumeration rather than
+            // propagating. Sound for this caller class: these are concrete WITNESS successors, so
+            // a short list is fewer pieces of evidence, never wrong evidence. Propagating would
+            // force `reachable_ranked_states` (infallible, `-> RankedStates`) to invent a verdict-
+            // shaped failure, which is worse. Callers already handle an empty/short list.
+            let Ok(nx) = exact.to_next(&self.state_minterm(&ns)) else {
+                break;
+            };
+            let Ok(notx) = oom(nx.not()) else { break };
+            let Ok(next_rem) = oom(rem.and(&notx)) else {
+                break;
+            };
+            rem = next_rem;
             outs.push(ns);
         }
         outs
@@ -5435,31 +5441,31 @@ impl BddBitBlaster {
     /// `¬EF p = ¬(μX. (p ∨ ◇X))` over the exact model — the "trap" region: states from which
     /// `p` is unreachable. `◇` is `∃input` (`diamond_pre`), so `EF p` is the states with SOME
     /// path to `p`. Least fixpoint from ⊥.
-    fn not_ef_p(&self, exact: &ExactModel, p: &BDDFunction) -> BDDFunction {
+    fn not_ef_p(&self, exact: &ExactModel, p: &BDDFunction) -> Result<BDDFunction, String> {
         let mut ef = self.ff.clone();
         loop {
-            let next = p.or(&exact.diamond_pre(&ef)).unwrap();
+            let next = oom(p.or(&exact.diamond_pre(&ef)?))?;
             if next == ef {
                 break;
             }
             ef = next;
         }
-        ef.not().unwrap()
+        oom(ef.not())
     }
 
     /// `stall = EG ¬p = νZ. (¬p ∧ ◇Z)` over the exact model — the states with an
     /// infinite `p`-avoiding path (`¬⟦AF p⟧`). Greatest fixpoint from ⊤.
-    fn eg_not_p(&self, exact: &ExactModel, p: &BDDFunction) -> BDDFunction {
-        let not_p = p.not().unwrap();
+    fn eg_not_p(&self, exact: &ExactModel, p: &BDDFunction) -> Result<BDDFunction, String> {
+        let not_p = oom(p.not())?;
         let mut stall = self.tt.clone();
         loop {
-            let next = not_p.and(&exact.diamond_pre(&stall)).unwrap();
+            let next = oom(not_p.and(&exact.diamond_pre(&stall)?))?;
             if next == stall {
                 break;
             }
             stall = next;
         }
-        stall
+        Ok(stall)
     }
 
     /// P3 — the INPUT part of a full (state+input) assignment: the values of the design's
@@ -5486,30 +5492,30 @@ impl BddBitBlaster {
         mut s: BTreeMap<String, u128>,
         mut prefix: Vec<BTreeMap<String, u128>>,
         mut inputs: Vec<BTreeMap<String, u128>>,
-    ) -> StallLasso {
+    ) -> Result<StallLasso, String> {
         let mut cyc: Vec<BTreeMap<String, u128>> = Vec::new();
         for _ in 0..1_000_000 {
             if let Some(j) = cyc.iter().position(|prev| *prev == s) {
                 let cycle = cyc.split_off(j);
                 prefix.extend(cyc); // pre-cycle stall states → prefix
-                return StallLasso {
+                return Ok(StallLasso {
                     prefix,
                     cycle,
                     inputs,
-                };
+                });
             }
             cyc.push(s.clone());
             // The successors-in-stall set for state = s (inputs free) is
             // `state_minterm(s) ∧ to_next(stall)` — non-empty because s ∈ stall =
             // ¬p ∧ ◇stall guarantees a stall-successor under some input.
-            let good = self.state_minterm(&s).and(&exact.to_next(stall)).unwrap();
+            let good = self.state_minterm(&s).and(&exact.to_next(stall)?).unwrap();
             if good == self.ff {
                 prefix.extend(cyc);
-                return StallLasso {
+                return Ok(StallLasso {
                     prefix,
                     cycle: Vec::new(),
                     inputs,
-                };
+                });
             }
             // Pick a full (state = s, input) assignment, step concretely, and keep
             // held registers (no `Next` line) at their current value.
@@ -5522,11 +5528,11 @@ impl BddBitBlaster {
             s = ns;
         }
         prefix.extend(cyc);
-        StallLasso {
+        Ok(StallLasso {
             prefix,
             cycle: Vec::new(),
             inputs,
-        }
+        })
     }
 
     /// The minterm fixing only the STATE bits to `state` (input bits left free).
@@ -5620,6 +5626,95 @@ pub(crate) fn bdd_nodes_height(f: &BDDFunction) -> (usize, usize) {
 
 #[cfg(test)]
 mod tests {
+    /// mununu#543 PROBE — reproduce monono's abort in-house, on THEIR model.
+    ///
+    /// Their bundle names the dying property exactly, every time: index 1 of 4,
+    /// `a_stat_moves_only_on_a_toggle`
+    ///
+    /// ```text
+    /// assert property (@(posedge clk_dst) disable iff (!rst_dst_n)
+    ///     (tog_dst_q == tog_dst_d_q) |=> (stat == $past(stat)));
+    /// ```
+    ///
+    /// 32-bit `$past` shadow, planner reports a 144-bit cone against a 144-bit cap — EXACTLY at
+    /// the cap — and their design lift is 130 lines / 13 state bits, so the depth is in the
+    /// ALGORITHM, not the model. That is why this probe is worth running on the real lift rather
+    /// than a synthetic chain: the synthetic version cannot exhibit an algorithmic blowup.
+    ///
+    /// Drive it in a loop, one process per attempt (their measured rate for this block is ~40%,
+    /// ~80 s per attempt through the full SV path; this skips the lift, so it is far cheaper):
+    ///
+    /// ```bash
+    /// for i in $(seq 1 40); do
+    ///   MUNUNU_PROBE_BTOR=/tmp/monono-543-repro/spr_cost.design.btor \
+    ///     cargo test -p mununu-core --lib -- --ignored probe_543_spr_cost >/dev/null 2>&1
+    ///   echo "$i -> $?"
+    /// done
+    /// ```
+    ///
+    /// Exit 0 = survived. 101/134 = reproduced (panic / abort).
+    #[test]
+    #[ignore = "mununu#543 probe — set MUNUNU_PROBE_BTOR to monono's spr_cost.design.btor"]
+    fn probe_543_spr_cost_past_shadow_at_the_cap() {
+        let Ok(path) = std::env::var("MUNUNU_PROBE_BTOR") else {
+            eprintln!("[probe] MUNUNU_PROBE_BTOR unset — skipping");
+            return;
+        };
+        let base = std::fs::read_to_string(&path).expect("read the lift");
+
+        // mununu#543 — PIN THE RESETS FIRST. The first version of this probe omitted them, and
+        // monono's measured comparison caught it: their lift keeps `rst_src_n` / `rst_dst_n` as
+        // FREE inputs (lines 7-8 of the bundle's design.btor), because `--config-value` is applied
+        // after the lift by `pin::pin_inputs_to_constants` (verify_auto.rs:2667), not by yosys.
+        // A free reset lets the design reset at every step, which widens the reachable space
+        // enormously — so the un-pinned probe exhausted the arena 10/10 while the real run
+        // DECIDES 4/4. The un-pinned instance is strictly HARDER, which means it excluded
+        // nothing: an instance that gives up sooner cannot bound what happens after that point.
+        let pins: Vec<(String, u64)> =
+            vec![("rst_src_n".to_string(), 1), ("rst_dst_n".to_string(), 1)];
+        let (base, pinned) = crate::adapter::btor2::pin::pin_inputs_to_constants(&base, &pins);
+        eprintln!("[probe] pinned: {pinned:?}");
+        assert_eq!(
+            pinned.len(),
+            2,
+            "both resets must pin, else the probe is not the real instance"
+        );
+
+        // MUNUNU_PROBE_SECOND_SHADOW=1 adds the 20-bit `bytes_q` shadow alongside the 32-bit
+        // `stat` one. That is EXACTLY the configuration monono's own SVA header records as having
+        // panicked at `symbolic_bitblast.rs:2305` with `OutOfMemory` — so this arm reproduces
+        // their documented incident rather than a synthetic analogue.
+        let second = std::env::var("MUNUNU_PROBE_SECOND_SHADOW").is_ok();
+        let bases: &[(&str, u32)] = if second {
+            &[("stat", 1), ("bytes_q", 1)]
+        } else {
+            &[("stat", 1)]
+        };
+        let augmented = crate::adapter::btor2::shadow::augment_with_past_shadows(&base, bases)
+            .expect("shadow augmentation");
+        eprintln!(
+            "[probe] base {} lines -> augmented {} lines (shadows: {})",
+            base.lines().count(),
+            augmented.lines().count(),
+            if second { "stat + bytes_q" } else { "stat" }
+        );
+
+        // `(tog_dst_q == tog_dst_d_q) |=> (stat == stat__past)` as the engine sees it after the
+        // SVA lift: an AG over an implication whose consequent is one step ahead.
+        let src = if second {
+            "nu Y. (((!(tog_dst_q == tog_dst_d_q)) || ([] (stat == stat__past) && [] (bytes_q == bytes_q__past))) && [] Y)"
+        } else {
+            "nu Y. (((!(tog_dst_q == tog_dst_d_q)) || [] (stat == stat__past)) && [] Y)"
+        };
+        let formula = crate::mu_calculus::parser::parse(src).expect("formula parses");
+
+        let opts = super::ExactSymbolicOptions::default();
+        match super::exact_symbolic_verdict_with_witness_and_options(&augmented, &formula, &opts) {
+            Ok((v, _)) => eprintln!("[probe] SURVIVED — verdict {v:?}"),
+            Err(e) => eprintln!("[probe] SURVIVED — abstained: {e}"),
+        }
+    }
+
     use super::*;
     use crate::adapter::btor2::bit_blast::simulate_one_step;
     use crate::adapter::btor2::parser;
@@ -5773,13 +5868,18 @@ mod tests {
         // k_max BELOW the diameter → ExceedsBound (the measured diameter signal — this is what the
         // structural counter proxy could only GUESS, and got wrong for up-counters / near targets).
         assert_eq!(
-            model.reach_diameter_to(&target, 8),
+            model
+                .reach_diameter_to(&target, 8)
+                .expect("diameter pre-pass"),
             DiameterEstimate::ExceedsBound(8),
             "an 8-step bound cannot reach cnt==0 from the far end of a 4-bit drain"
         );
         // k_max ABOVE the diameter → Saturated at the TRUE distance (~15), and it is measured, not
         // assumed — the pre-pass ran the exact engine's own EF fixpoint, bounded.
-        match model.reach_diameter_to(&target, 64) {
+        match model
+            .reach_diameter_to(&target, 64)
+            .expect("diameter pre-pass")
+        {
             DiameterEstimate::Saturated(d) => assert!(
                 (12..=17).contains(&d),
                 "a 4-bit drain saturates at diameter ~15, measured: {d}"
@@ -6494,8 +6594,8 @@ mod tests {
         let bb = BddBitBlaster::build(&file).expect("build");
         let exact = bb.exact_model();
         let phi = bb.predicate_bdd(pred).expect("phi bdd");
-        let dia = exact.diamond_pre(&phi);
-        let boxed = exact.box_pre(&phi);
+        let dia = exact.diamond_pre(&phi).expect("diamond_pre");
+        let boxed = exact.box_pre(&phi).expect("box_pre");
 
         // The minterm BDD (over state vars) for one register valuation.
         let state_minterm = |regs: &HashMap<String, u128>| -> BDDFunction {
