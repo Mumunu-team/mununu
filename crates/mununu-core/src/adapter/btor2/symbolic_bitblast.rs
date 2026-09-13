@@ -684,9 +684,25 @@ impl BddBitBlaster {
                 self.validate_levels(&carry, "add_bits carry-in")?;
             }
             let axb = self.xor(&ai, &bi)?;
+            // mununu#543 — `axb` and the carry chain's two intermediates are operands of applies
+            // that do NOT go through `xor`'s own operand check, because the carry line uses raw
+            // oxidd calls. The consumer spotted that gap in the previous version: operands were
+            // only PARTLY validated, so an overflow with zero violations stayed ambiguous between
+            // "malformed node entering an unchecked apply" and "malformation created inside
+            // OxiDD's reduce". The chain is split here so EVERY apply has all of its operands
+            // validated immediately before it, which makes the next capture decisive either way.
+            if self.validate_levels_flag {
+                self.validate_levels(&axb, "add_bits axb (carry-chain operand)")?;
+            }
             let s = self.xor(&axb, &carry)?;
             // carry' = (ai ∧ bi) ∨ (carry ∧ (ai ⊕ bi))
-            let c = oom(oom(ai.and(&bi))?.or(&oom(carry.and(&axb))?))?;
+            let ab = oom(ai.and(&bi))?;
+            let c_axb = oom(carry.and(&axb))?;
+            if self.validate_levels_flag {
+                self.validate_levels(&ab, "add_bits ai&bi (or operand)")?;
+                self.validate_levels(&c_axb, "add_bits carry&axb (or operand)")?;
+            }
+            let c = oom(ab.or(&c_axb))?;
             // The results are checked too, so the LAST bit's outputs — which never become another
             // op's operands — are covered as well.
             if self.validate_levels_flag {
@@ -2251,6 +2267,30 @@ impl BddBitBlaster {
     /// unbounded descent and by reading, and its detection is confirmed only when it fires on a
     /// real run.
     fn validate_levels(&self, f: &BDDFunction, what: &str) -> Result<(), String> {
+        // mununu#543 — the production predicate: a child must be STRICTLY deeper.
+        self.walk_levels(f, what, |parent, child| child <= parent)
+    }
+
+    /// The walk behind [`Self::validate_levels`], with the violation predicate INJECTED.
+    ///
+    /// Parameterised for one reason: it makes a **positive control** possible. A malformed
+    /// diagram cannot be built through OxiDD's public API, so the reject direction has no data-side
+    /// test — which left "operands are well-formed" and "this walk cannot detect the malformation"
+    /// producing identical output. A consumer refused to read the first from a silent instrument
+    /// with no demonstrated firing capability, correctly.
+    ///
+    /// Inverting the PREDICATE tests the instrument without needing malformed data: demand that
+    /// children be strictly shallower, run on any well-formed diagram, and it must fire on the
+    /// first inner node with children. If it stayed silent, the walk never visits children at all
+    /// — a `Node::Inner` match that does not hold, a visited-set bug, an empty worklist — and every
+    /// "no violation" result would mean nothing. See
+    /// `level_validation_fires_when_the_predicate_is_inverted`.
+    fn walk_levels(
+        &self,
+        f: &BDDFunction,
+        what: &str,
+        violates: impl Fn(oxidd::LevelNo, oxidd::LevelNo) -> bool,
+    ) -> Result<(), String> {
         use oxidd::{Edge, Function, HasLevel, InnerNode, Manager, Node};
         self._manager.with_manager_shared(|m| {
             let root = f.as_edge(m);
@@ -2275,7 +2315,7 @@ impl BddBitBlaster {
                         continue; // a terminal has no level and ends the descent
                     };
                     let clevel = cn.level();
-                    if clevel <= level {
+                    if violates(level, clevel) {
                         return Err(format!(
                             "symbolic bit-blaster: MALFORMED BDD while building {what} — a node at \
                              level {level} has a child at level {clevel}, which is not strictly \
@@ -5843,6 +5883,59 @@ mod tests {
         );
         bb.validate_levels(&conj, "test")
             .expect("a well-formed diagram must validate");
+    }
+
+    /// mununu#543 POSITIVE CONTROL — the test that makes the validator's silence mean something.
+    ///
+    /// A consumer armed `validate_levels`, took a stack overflow inside `xor` whose two operands
+    /// had just passed it, and got zero violations. That is consistent with two very different
+    /// worlds: the operands really were well-formed (so the malformation is created inside OxiDD's
+    /// `reduce` — a dependency defect), or this walk cannot detect the malformation at all. They
+    /// refused to read the first from a silent instrument with no demonstrated firing capability,
+    /// which was right: every one of the ten instrument failures in that investigation "worked"
+    /// right up to the moment someone checked.
+    ///
+    /// A malformed diagram is not constructible through the public API, so the control inverts the
+    /// PREDICATE instead of the data: demand children be strictly SHALLOWER, run on a diagram
+    /// known to be well-formed, and require a violation. If this test ever goes quiet, the walk has
+    /// stopped visiting children and every "no violation" elsewhere is worthless.
+    #[test]
+    fn level_validation_fires_when_the_predicate_is_inverted() {
+        let src = "\
+1 sort bitvec 1
+2 input 1 a
+3 input 1 b
+4 and 1 2 3
+5 state 1 q
+6 next 1 5 4
+";
+        let bb =
+            super::BddBitBlaster::build(&crate::adapter::btor2::parser::parse(src).expect("parse"))
+                .expect("build");
+        let conj = {
+            use oxidd::BooleanFunction;
+            bb.env[&2][0].and(&bb.env[&3][0]).expect("and")
+        };
+        assert!(
+            conj != bb.ff && conj != bb.tt,
+            "the fixture must be a real two-level diagram, or nothing is visited"
+        );
+
+        // Production predicate: silent on a well-formed diagram.
+        bb.validate_levels(&conj, "control")
+            .expect("well-formed must pass");
+
+        // INVERTED predicate: must fire on the first inner node with children.
+        let err = bb
+            .walk_levels(&conj, "control", |parent, child| child > parent)
+            .expect_err(
+                "the inverted predicate MUST fire — if it does not, the walk never reaches a \
+                 child's level and every `validate_levels` success on this issue is vacuous",
+            );
+        assert!(
+            err.contains("MALFORMED BDD") && err.contains("control"),
+            "the firing path must produce the message consumers grep for: {err}"
+        );
     }
 
     /// mununu#543 PROBE — reproduce monono's abort in-house, on THEIR model.
