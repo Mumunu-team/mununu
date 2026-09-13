@@ -2165,8 +2165,11 @@ pub(crate) fn merge_portfolio_reports(
         summary: format!("portfolio-{mode_str}: {n_decided}/{n_props} properties decided"),
         detail: format!(
             "portfolio-{mode_str}: {} engine(s) ran ({}); {n_decided}/{n_props} properties decided. \
-             Each property took the definite verdict from the first engine (exact → symbolic → \
-             explicit) to decide it; a ⊥ means every engine left it undecided.",
+             Each property took the definite verdict from the first engine IN THE ORDER SHOWN \
+             ABOVE to decide it; a ⊥ means every engine left it undecided. Since mununu#543 (W1) \
+             that order is the planner's own per-property prediction, most-predicted-decider \
+             first, with the precision ladder (exact → symbolic → explicit) as the tiebreak — so \
+             it is no longer fixed, and `ran:` lists what actually ran.",
             engines_ran.len(),
             engines_ran.join(", ")
         ),
