@@ -40,6 +40,17 @@ FROM rust:${RUST_VERSION}-slim-bookworm
 # `crates/mununu-core/Cargo.toml`). `python3` is used by helper scripts
 # in scripts/. Single layer, --no-install-recommends, lists cleaned in
 # the same RUN.
+# `gdb` is here for mununu#543. A Rust stack overflow aborts with NO backtrace, so the only way to
+# name the recursion site is a debugger catching the guard-page SIGSEGV before the abort. No mununu
+# image carried a debugger, which made "send us a backtrace" an unreasonable ask of a consumer — that
+# was our packaging gap, not theirs. Invoke it as:
+#
+#   docker run --cap-add=SYS_PTRACE --security-opt seccomp=unconfined \
+#     -v "$(pwd)":/work -w /work mununu-dev \
+#     gdb --batch -ex run -ex "bt 40" -ex "bt -20" \
+#       --args ./mununu sv verify-auto <design> --frontend slang
+#
+# `bt 40` shows the recursion cycle, `bt -20` the entry path; the other ~40k frames are noise.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         pkg-config \
@@ -51,6 +62,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         make \
         python3 \
+        gdb \
     && rm -rf /var/lib/apt/lists/*
 
 # rustfmt and clippy are normally bundled in the rust:* official images,

@@ -15,14 +15,15 @@
 7. [Abstraction Guidelines](#abstraction-guidelines) `[RULE]`
 8. [Documentation Traceability](#documentation-traceability) `[RULE]`
 9. [Claims Integrity](#claims-integrity) `[RULE]`
-10. [Adapter / Emitter Capability Use](#adapter--emitter-capability-use) `[RULE]`
-11. [Git Operations & Destructive Commands](#git-operations--destructive-commands) `[RULE]`
-12. [Code Reuse, Dead Code, Performance, Security](#code-reuse-dead-code-performance-security) `[RULE]`
-13. [Available Agents and Skills](#available-agents-and-skills) `[REFERENCE]`
-14. [Private Files Policy](#private-files-policy) `[RULE]`
-15. [Reasoning & Recommendation Honesty](#reasoning--recommendation-honesty) `[RULE]`
-16. [Engine Specificity in Proposals](#engine-specificity-in-proposals) `[RULE]`
-17. [Reference Docs Index](#reference-docs-index) `[REFERENCE]`
+10. [Reproducers Before Fixes](#reproducers-before-fixes) `[RULE]`
+11. [Adapter / Emitter Capability Use](#adapter--emitter-capability-use) `[RULE]`
+12. [Git Operations & Destructive Commands](#git-operations--destructive-commands) `[RULE]`
+13. [Code Reuse, Dead Code, Performance, Security](#code-reuse-dead-code-performance-security) `[RULE]`
+14. [Available Agents and Skills](#available-agents-and-skills) `[REFERENCE]`
+15. [Private Files Policy](#private-files-policy) `[RULE]`
+16. [Reasoning & Recommendation Honesty](#reasoning--recommendation-honesty) `[RULE]`
+17. [Engine Specificity in Proposals](#engine-specificity-in-proposals) `[RULE]`
+18. [Reference Docs Index](#reference-docs-index) `[REFERENCE]`
 
 ---
 
@@ -353,6 +354,86 @@ The load-bearing rules at a glance:
 - **What is exempt.** Internal refactors that preserve every observable behaviour; test-only changes; doc changes that only clarify existing behaviour; changes to `REVIEW_LOG.md`, `ONBOARDING.md`, or `scratchpad/`.
 
 The full policy — trigger criteria, mandatory sections, standard Docker-rebuild verdict vocabulary, enforcement notes, and the historical context that motivated writing it down — is at [`docs/policies/cross-repo-impact.md`](docs/policies/cross-repo-impact.md). Read it before opening a PR that touches any mununu-consumer surface.
+
+## Reproducers Before Fixes
+
+**Rule.** A change that claims to fix a defect declares how the defect was reproduced, in a commit
+trailer, using exactly one of three values:
+
+```
+Repro: in-repo <test or fixture name>
+Repro: consumer-only <who> — <why it cannot be reproduced here>
+Repro: none — containment only
+```
+
+**`Repro: none — containment only` may NOT accompany `closes #N` on a defect issue.** Containment is a
+legitimate, often urgent change — turning a crash into a verdict, a budget into an abstention — but it
+does not establish a cause, so it leaves the cause issue open.
+
+**Why.** A fix for an unestablished cause is indistinguishable from a fix for a cause that does not
+exist, and we have shipped the latter. `crates/mununu-core/src/clts/mod.rs:1725` carries a custom
+`Drop for Clts` whose stated purpose is to avoid a stack overflow from `Vec<Vec<Transition>>`
+"recursively dropping deeply nested structures" — but dropping a `Vec` **iterates** its elements;
+2000 inner `Vec`s do not nest 2000 frames deep. The impl defends against a mechanism that does not
+exist, with a confident comment and no reproducer, and it has been load-bearing-looking ever since.
+
+Two more from the mununu#543 round, both caught only by measuring:
+
+- A consumer published a memory-pressure cause for an abort into four tracked files; their fifth run
+  refuted it. Their diagnosis of their own error is the rule worth importing: **before using a
+  measurement as evidence, ask what it would have shown if the hypothesis were false. If the answer is
+  "the same thing", it is not evidence — and its agreement with you is precisely why it is dangerous.**
+- Our own leading suspect for the same abort (`PredicateExpr`'s boxed recursion, whose depth is set by
+  a Craig interpolant's conjunct count rather than by the design) fit the reported clue exactly and was
+  killed by one afternoon's bisection: it needs ~32,000 nested conjuncts to overflow an 8 MB stack.
+
+**The two lanes, and why the distinction is the whole rule.**
+
+| | containment | cause fix |
+|---|---|---|
+| establishes a cause | no | yes |
+| reproducer required | no | **yes** |
+| may close the cause issue | **no** | yes |
+| must say so | `Repro: none — containment only` | `Repro: in-repo …` |
+
+Blurring them is the failure this rule exists to prevent: a containment that closes the issue retires
+the investigation while the defect is still there.
+
+**What counts as a reproducer.** A test or fixture that **fails on the parent commit and passes on
+this one**. A regression test that passes on the parent is decoration — it locks in behaviour, it does
+not demonstrate a defect.
+
+```bash
+make verify-repro TEST=<test name substring> [REF=HEAD~1]
+```
+
+**Advisory, with a reach limit worth stating** (measured 2026-09-13 against the two fixes that
+motivated the rule — mununu#542 and #544 — both of which came back `INCONCLUSIVE`). In Rust a unit
+test lives *inside* the production file it tests, so the script cannot separate the test from the fix
+by path: it copies the test-bearing file wholesale onto the parent, which copies the fix too. Three
+outcomes:
+
+| outcome | exit | meaning |
+|---|---|---|
+| `CONFIRMED` | 0 | the test builds at `REF` and **fails** — a genuine reproducer |
+| `FAIL — PASSES at REF` | 1 | **the case the rule most needs to catch.** Decoration, not a reproducer |
+| `INCONCLUSIVE` | 3 | the test needs API this commit introduced; **not a pass** — justify in the PR |
+
+So the script reliably catches *decoration* (whenever the test compiles against the parent) and
+reliably refuses to bless anything else. It does **not** mechanically confirm most API-introducing
+fixes, and pretending otherwise would make it the kind of green-while-checking-nothing gate this
+repo keeps finding in other people's CI. **The trailer and review are the enforcement; the script is
+an instrument.** A hunk-level version (applying only `mod tests` hunks) would raise the reach and is
+not yet written.
+
+**`consumer-only` is a real answer, not an escape hatch.** Some defects live in inputs we do not have
+(a consumer's proprietary RTL, a 1-2% timing-dependent abort). Naming the consumer and the obstacle is
+honest and useful; what it forbids is pretending. When a reproducer cannot come here, the fix's PR says
+what evidence *was* obtained and from whom, and — where a derived artifact would make the defect ours
+permanently (a generated BTOR2, a minimised netlist) — records whether that was requested.
+
+**Scope.** Defect fixes. A feature, a refactor that preserves behaviour, or a doc change needs no
+trailer. When in doubt, the question is whether the change asserts that something was *broken*.
 
 ## Adapter / Emitter Capability Use
 

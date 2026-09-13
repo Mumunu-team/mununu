@@ -32,6 +32,7 @@ help:
 	@echo "  lint           - cargo fmt --check && cargo clippy -D warnings"
 	@echo "  verify         - cargo run mununu against $(VERIFY_FILE)"
 	@echo "  ci             - lint + test (the gate)"
+	@echo "  verify-repro   - TEST=<name> [REF=HEAD~1] ; assert a defect reproducer FAILS at REF (CLAUDE.md: Reproducers Before Fixes)"
 	@echo "  clean          - cargo clean"
 	@echo
 	@echo "Properties / stress / fuzz:"
@@ -186,6 +187,9 @@ ci: lint test
 #
 # This target does NOT block commits/pushes; exit code 1 on threshold
 # breach is advisory only.
+verify-repro:
+	@scripts/verify-repro.sh
+
 docs-audit:
 	@scripts/docs-audit.sh $(DOCS_THRESHOLD)
 
