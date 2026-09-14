@@ -595,6 +595,76 @@ fn refresh_coverage_summary(report: &mut AutoVerifyReport) {
     }
 }
 
+/// mununu#548 — the merged portfolio report inherits the BASE engine's `abstraction-posture`
+/// note (`merge_portfolio_reports` does `base.clone()`), and that note describes ONE engine. When
+/// the base is exact-symbolic it asserts *"no abstraction … and there is no ⊥"* — while the merge
+/// has just folded in verdicts from engines that DO abstract, including the ⊥ they produced. A
+/// consumer then reads, in one report, that ⊥ cannot happen and a ⊥.
+///
+/// Exact sibling of [`refresh_coverage_summary`] (mununu#536), which fixes the same
+/// inherited-from-base defect for the note that counts verdicts. The clone is convenient for the
+/// property list and diagnostics; every note that describes the RUN rather than the design has to
+/// be recomputed after it.
+///
+/// Only rewrites on a genuinely multi-engine merge — a single-engine portfolio degenerates to that
+/// engine, and its posture note is then correct as written.
+/// mununu#548 — drop `bottom-reason` notes for properties the merge DECIDED.
+///
+/// `bottom_reason_note` explains why a property is ⊥, and is emitted per engine inside
+/// [`build_notes`]. When the base engine left `p` at ⊥ and a later engine decided it, the merge
+/// takes the definite verdict while `base.clone()` keeps the stale explanation — so the report
+/// says *"here is why `p` is ⊥"* about a property it also reports as HOLDS.
+///
+/// Conservative by construction: a note is dropped only when the property it names is now
+/// DEFINITE. A ⊥ that survived the merge keeps its explanation, which is the case the note exists
+/// for. Matching is on the `"<name>: "` prefix `bottom_reason_note` writes.
+fn drop_stale_bottom_reasons(report: &mut AutoVerifyReport) {
+    let decided: std::collections::HashSet<&str> = report
+        .properties
+        .iter()
+        .filter(|p| !matches!(p.outcome, VerifyOutcome::Unknown { .. }))
+        .map(|p| p.name.as_str())
+        .collect();
+    if decided.is_empty() {
+        return;
+    }
+    let stale: Vec<String> = decided.iter().map(|n| format!("{n}: ")).collect();
+    report.notes.retain(|n| {
+        n.kind != "bottom-reason" || !stale.iter().any(|pre| n.summary.starts_with(pre))
+    });
+}
+
+fn refresh_abstraction_posture(report: &mut AutoVerifyReport, engines_ran: &[String]) {
+    if engines_ran.len() < 2 {
+        return;
+    }
+    let Some(slot) = report
+        .notes
+        .iter_mut()
+        .find(|n| n.kind == "abstraction-posture")
+    else {
+        return;
+    };
+    slot.level = NoteLevel::ScopeCaveat;
+    slot.summary = format!(
+        "Portfolio run — {} engines ran; the abstraction posture is PER ENGINE, not per report.",
+        engines_ran.len()
+    );
+    slot.detail = format!(
+        "This report merges verdicts from {} engines ({}). They do NOT share an abstraction \
+         posture: `exact-symbolic` bit-blasts the full state and cannot return ⊥, while \
+         `symbolic` (predicate-cube KMTS) and `explicit` abstract and can. So a ⊥ anywhere in \
+         this report came from an ABSTRACTING engine, and a definite verdict is sound under the \
+         posture of whichever engine produced it — see the `portfolio` note's `decided-by:` items \
+         for the per-engine counts. The single-engine wording this note carries by default (\"no \
+         abstraction, so there is no ⊥\") describes only the highest-precision engine and is NOT \
+         a statement about the merged report.",
+        engines_ran.len(),
+        engines_ran.join(", ")
+    );
+    slot.items = engines_ran.iter().map(|e| format!("ran:{e}")).collect();
+}
+
 fn build_notes(
     report: &AutoVerifyReport,
     must_edge_inference: MustEdgeInference,
@@ -2179,6 +2249,12 @@ pub(crate) fn merge_portfolio_reports(
     // clone above carried the BASE engine's coverage summary, which the merge has just made
     // wrong; see `refresh_coverage_summary`.
     refresh_coverage_summary(&mut merged);
+    // mununu#548 — same inherited-from-base defect, different note: the posture note describes the
+    // BASE engine, not the merge. Must run AFTER `engines_ran` is known.
+    refresh_abstraction_posture(&mut merged, &engines_ran);
+    // mununu#548 — and a third note inherited from the base that the merge can falsify: an
+    // explanation of why a property is ⊥, kept for a property another engine has since decided.
+    drop_stale_bottom_reasons(&mut merged);
     if !contradictions.is_empty() {
         merged.notes.push(VerificationNote {
             kind: "portfolio-soundness-alarm".to_string(),
@@ -4504,6 +4580,147 @@ mod tests {
                 .collect(),
             ..Default::default()
         }
+    }
+
+    /// mununu#548 — the merged portfolio report must NOT carry the base engine's single-engine
+    /// abstraction posture. `merge_portfolio_reports` does `base.clone()`, so an exact-symbolic base
+    /// contributes a note asserting *"no abstraction … and there is no ⊥"* — while the merge folds
+    /// in a ⊥ from an abstracting engine. A consumer then reads, in ONE report, that ⊥ cannot
+    /// happen and a ⊥.
+    ///
+    /// The fixture is the reported shape: exact decides one property and leaves one ⊥, a second
+    /// engine runs, and the merged report still contains a ⊥.
+    #[test]
+    fn merged_portfolio_posture_note_does_not_claim_bottom_is_impossible() {
+        let exact_base = {
+            let mut r = mk_report(&[
+                ("p_decided", VerifyOutcome::Holds, None),
+                (
+                    "p_bottom",
+                    VerifyOutcome::Unknown { unknown_cells: 0 },
+                    None,
+                ),
+            ]);
+            // What a single-engine exact run attaches, verbatim from `build_notes`.
+            r.notes.push(VerificationNote {
+                kind: "abstraction-posture".into(),
+                level: NoteLevel::Info,
+                summary: "Exact-symbolic model checking — no abstraction, so a definite verdict \
+                          is sound and there is no ⊥."
+                    .into(),
+                detail: "the predicate abstraction that would produce ⊥ is not used".into(),
+                items: Vec::new(),
+            });
+            r
+        };
+        let symbolic = mk_report(&[
+            ("p_decided", VerifyOutcome::Holds, None),
+            (
+                "p_bottom",
+                VerifyOutcome::Unknown { unknown_cells: 0 },
+                None,
+            ),
+        ]);
+
+        let merged = merge_portfolio_reports(
+            &[
+                ("exact-symbolic", Ok(exact_base)),
+                ("symbolic", Ok(symbolic)),
+            ],
+            PortfolioMode::Sequential,
+        )
+        .expect("merge ok");
+
+        // The premise: the merged report really does contain a ⊥.
+        assert!(
+            merged
+                .properties
+                .iter()
+                .any(|p| matches!(p.outcome, VerifyOutcome::Unknown { .. })),
+            "fixture must produce a ⊥, or the note is not contradicted by anything"
+        );
+
+        let posture = merged
+            .notes
+            .iter()
+            .find(|n| n.kind == "abstraction-posture")
+            .expect("the posture note survives the merge");
+
+        // THE DEFECT: the inherited single-engine wording asserts ⊥ is impossible.
+        let text = format!("{} {}", posture.summary, posture.detail);
+        assert!(
+            !(text.contains("there is no ⊥") && !text.contains("PER ENGINE")),
+            "the merged posture note still claims ⊥ cannot happen: {text}"
+        );
+        // And it must say what IS true of a merged report: the posture is per engine.
+        assert!(
+            posture.summary.contains("PER ENGINE"),
+            "the merged posture note should scope itself to engines; got: {}",
+            posture.summary
+        );
+        assert!(
+            posture.detail.contains("exact-symbolic") && posture.detail.contains("symbolic"),
+            "it should name the engines that ran; got: {}",
+            posture.detail
+        );
+        assert_eq!(
+            posture.level,
+            NoteLevel::ScopeCaveat,
+            "a posture that does not describe the whole report is a scope caveat, not Info"
+        );
+    }
+
+    /// mununu#548 (second instance) — a `bottom-reason` note explains why a property is ⊥. It is
+    /// emitted PER ENGINE inside `build_notes`. If the base engine left a property ⊥ and a LATER
+    /// engine decided it, the merge takes the definite verdict — but `base.clone()` carries the
+    /// stale explanation, so the report says "here is why `p` is ⊥" about a property it also
+    /// reports as HOLDS.
+    #[test]
+    fn merged_portfolio_drops_bottom_reason_for_a_property_another_engine_decided() {
+        let exact_base = {
+            let mut r = mk_report(&[("p", VerifyOutcome::Unknown { unknown_cells: 0 }, None)]);
+            r.notes.push(VerificationNote {
+                kind: "bottom-reason".into(),
+                level: NoteLevel::ScopeCaveat,
+                summary: "p: ⊥ — safety-shape-not-reducible".into(),
+                detail: "the rescue could not reduce this shape".into(),
+                items: Vec::new(),
+            });
+            r
+        };
+        // A later engine DECIDES the same property.
+        let symbolic = mk_report(&[("p", VerifyOutcome::Holds, None)]);
+
+        let merged = merge_portfolio_reports(
+            &[
+                ("exact-symbolic", Ok(exact_base)),
+                ("symbolic", Ok(symbolic)),
+            ],
+            PortfolioMode::Sequential,
+        )
+        .expect("merge ok");
+
+        assert!(
+            matches!(
+                merged
+                    .properties
+                    .iter()
+                    .find(|q| q.name == "p")
+                    .map(|q| &q.outcome),
+                Some(VerifyOutcome::Holds)
+            ),
+            "premise: the merge must have taken the definite verdict"
+        );
+        let stale: Vec<&str> = merged
+            .notes
+            .iter()
+            .filter(|n| n.kind == "bottom-reason" && n.summary.starts_with("p:"))
+            .map(|n| n.summary.as_str())
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "the report explains why `p` is ⊥ while also reporting it HOLDS: {stale:?}"
+        );
     }
 
     fn cx_stub() -> ExactCounterexample {
