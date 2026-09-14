@@ -137,6 +137,12 @@ Rebuild only to pick up the new binary in the usual way — no image-definition 
   before adopting it lane-wide** — the arena setting and a per-block timeout are coupled, not
   independently tunable.
 
+- **Calibrated on both designs and contrast twins.** Twin max 31,014,613 vs design max 31,048,833 —
+  same ceiling. This mattered because the two populations are uncorrelated: `affine_sampler`'s twin is
+  **4,600× smaller** than its design (4,941 vs 22,867,186) while `video_timing`'s is **1,100× larger**
+  (7,980,029 vs 7,250). If you calibrate a budget for your own corpus, **measure twins too** — a
+  design-only set is not conservative, it is uncorrelated.
+
 - **We cannot predict which cones will abstain.** That is the finding, not an omission: no
   cone-intrinsic scalar separates decidable from undecidable here. `MUNUNU_BDD_REPORT_PEAK=1` is how
   you find out, per block, by measuring.

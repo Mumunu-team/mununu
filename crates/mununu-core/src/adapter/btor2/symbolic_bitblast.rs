@@ -2204,11 +2204,20 @@ fn fixpoint_iter_budget() -> usize {
 /// the deepest decider (818 626 iterations) peaks at 7.98 M. So 10 M sits ABOVE every deep decider
 /// and BELOW the shallow-wide ones, which the iteration half then spares.
 ///
-/// **⚠️ Calibrated on DESIGNS plus one TWIN, and the twin is what sets it.** The 7.98 M reading is
-/// a contrast twin (`video_timing_early_row`); the design's own peak in the same lane is **7 250**,
-/// three orders of magnitude lower. A mutated design has a different cone, so twins — not designs —
-/// set this ceiling, and only ONE of a consumer's 32 twins has been sampled. Revise on the twin
-/// maximum.
+/// **Calibrated against DESIGNS *and* CONTRAST TWINS — both populations, measured.** A consumer's
+/// 26-block lane gives twin max **31 014 613** against design max **31 048 833**: the ceiling is the
+/// same, so 10 M clears both (the shallow-wide cones are spared by the iteration half, not this one).
+///
+/// Twins had to be measured rather than assumed, because twin and design peaks are **uncorrelated**:
+/// ratios run from **0.0×** (`affine_sampler`: a 22.9 M design, a 4 941 twin — a mutation that breaks
+/// a datapath prunes the cone the property depended on) to **1 100×** (`video_timing`: a 7 250 design,
+/// a 7 980 029 twin — and it is that twin, not any design, that sets the deepest-decider bound this
+/// constant sits above). A calibration set of designs alone is not conservative; it is uncorrelated.
+///
+/// The iteration half was validated the same way: the two twins above 10 M converge in **12** and
+/// **36** iterations, and `max iters seen` across 9 and 26 readings equals the iteration count AT the
+/// peak — so no shallower-but-deeper evaluation hides under the maximum. Iteration counts are NOT
+/// assumed to track a design's; `video_timing` goes from 1 iteration to 818 626 under mutation.
 const FIXPOINT_NODE_SOFT_DEFAULT: usize = 10_000_000;
 
 /// Default for the LATENCY bound's iteration half. Every measured WIDE decider converges in ≤ 36
