@@ -45,6 +45,7 @@ pub mod crewai;
 pub mod cvc5;
 pub mod domain;
 pub mod emit;
+pub mod engine_isolate;
 pub mod extraction;
 pub mod fsm_scan;
 pub mod gr1_synth;
