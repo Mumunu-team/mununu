@@ -98,17 +98,48 @@ coupled group, which costs a measured 4× on `uart_msg_handler`. Neither composi
 diameter, an invariant of the transition system — see `measure_bdd_actual_size`. A 640×480 raster
 wrap needs 818,626 iterations under any order.
 
-## Why the default has not changed
+## Why the default has not changed — the counter-example SURVIVED its test
 
-One block regresses: `sdram_burst`, 52 s → 488 s. Its *node* evidence is unsound (see below), but
-its **time** evidence was not taken through that instrument and stands. That block is also a
-consumer's slowest and sits near their per-block timeout, so flipping the default would likely
-break their lane. The settling measurement is a single timing pair at a fixed arena, both arms.
+One block regresses, and the settling measurement has now been made: same block, **same arena
+(67 M fixed)**, same binary, 13 definite verdicts in all three arms.
 
-**If it evaporates, flip to interleaved unconditionally. If it holds, flip with a documented
-opt-out.** On everything else measured — 2.6× across 2,619 tests, 135× on one real test, and
-three consumer blocks collapsing by 115× to 20.2 M× — interleaved is very probably the right
-default.
+| `sdram_burst` | time | |
+|---|---|---|
+| cell-major (default) | 48 s | |
+| interleaved | 525 s | **10.9× slower** |
+| `deps` | 461 s | **9.6× slower** |
+
+So the earlier 52 s → 488 s was **not** arena thrash — the hypothesis that it was is refuted. At a
+fixed arena the order genuinely costs ~10× the WORK at whatever the real diagram size is. With the
+node axis dead for this block (GC equilibrium, below), the direct support for it being
+**operation-bound rather than size-bound** is exactly this: 48 s versus 525 s with the arena held
+constant.
+
+**And `deps` does not degenerate on this block** — it is the first and only case that
+distinguishes the two rules:
+
+```
+[order] mode="deps" cells=17 groups=3 singletons=2 largest=[15, 1, 1]
+```
+
+Three groups, not one. So the attribute idea is genuinely testable here rather than vacuous — and
+it **still regresses, 9.6×**. That is worse than "deps degenerates to interleaving": on the single
+block where it differs, it does not help. `deps` has now had its chance and should be deleted
+unless a new argument appears for it.
+
+(The cell count is **17**, not the 26 that a `state` count in the BTOR2 suggests — the order
+operates on kept cone cells. The `MUNUNU_BDD_ORDER_DEBUG` line is authoritative.)
+
+**What the evidence supports, stated precisely.** *"Interleave unless a block says otherwise, and
+here is the one that does"* — yes. *"Interleaving is better"* — no. *"It regresses on
+operation-bound cones"* — also no: that is one counter-example with no mechanism, and
+generalising from it would repeat the error this whole investigation kept making.
+
+**We have no mechanism for the regression.** That is the live cost of flipping: without one we
+cannot predict which *other* cones regress, and only 4 of a consumer's 26 blocks have been
+measured under interleaving — the 4 largest, which is the right bias for the question but means
+1-in-4 of the expensive ones regressed. The opt-out is therefore reactive: a block is discovered
+to need it by becoming 10× slower.
 
 ## ⚠️ A limit on the peak instrument that these measurements exposed
 
