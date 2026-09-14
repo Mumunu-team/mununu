@@ -2057,6 +2057,14 @@ pub struct ExactModel {
     /// Running total of fixpoint iterations. Interior-mutable because `evaluate` / `fixpoint`
     /// take `&self`; the exact eval is single-threaded per call.
     iters: std::cell::Cell<usize>,
+    /// mununu#553 INSTRUMENT — the exact engine's own BDD MANAGER, so [`Self::fixpoint`] can read
+    /// the live node count. [`BddBitBlaster::check_node_budget`] guards the BIT-BLASTING ops but is
+    /// a `BddBitBlaster` method: the μ-fixpoint has no view of the manager at all, so it cannot see
+    /// its own reach-set grow. Measurement only in this commit — nothing reads it as a budget yet.
+    manager: BDDManagerRef,
+    /// mununu#553 INSTRUMENT — peak live-node count across this `evaluate`, reported when
+    /// `MUNUNU_BDD_REPORT_PEAK` is set. Interior-mutable for the same reason as [`iters`](Self::iters).
+    peak_nodes: std::cell::Cell<usize>,
     /// Wall-clock backstop DEADLINE (`Instant::now()` + [`exact_time_budget`]), SAMPLED every 256
     /// iterations in [`Self::fixpoint`] BESIDE [`iter_budget`](Self::iter_budget) (so a fast
     /// control fixpoint never reads the clock). `None` = no time bound (pure determinism, for
@@ -2200,6 +2208,8 @@ impl BddBitBlaster {
             ff: self.ff.clone(),
             iter_budget: fixpoint_iter_budget(),
             iters: std::cell::Cell::new(0),
+            manager: self._manager.clone(),
+            peak_nodes: std::cell::Cell::new(0),
             deadline: exact_time_budget().map(|d| std::time::Instant::now() + d),
         }
     }
@@ -2502,7 +2512,22 @@ impl ExactModel {
         atoms: &HashMap<&str, BDDFunction>,
     ) -> Result<BDDFunction, String> {
         let mut bindings: HashMap<FormulaVarId, BDDFunction> = HashMap::new();
-        self.eval_node(formula, formula.root(), atoms, &mut bindings)
+        let r = self.eval_node(formula, formula.root(), atoms, &mut bindings);
+        // mununu#553 INSTRUMENT — the PEAK live-node count this evaluation reached. This is the
+        // measurement that has to size any node-based budget: our own corpus spans 82 k (fixtures)
+        // to 590 k (a real `uart_msg_handler` lift), and a default calibrated on the fixtures alone
+        // would silently kill the real verdict. One line per `evaluate`, off unless asked.
+        //
+        // Granularity: `approx_num_inner_nodes` accounts in ~2^16 chunks (every measured peak is
+        // ≡ 1 mod 65536), so read it as "this many nodes, to the nearest chunk".
+        if std::env::var_os("MUNUNU_BDD_REPORT_PEAK").is_some() {
+            eprintln!(
+                "[mununu#553] exact fixpoint: peak {} live BDD nodes in {} iteration(s)",
+                self.peak_nodes.get(),
+                self.iters.get()
+            );
+        }
+        r
     }
 
     /// Evaluate a specific sub-node `id` of `formula` to its state-set BDD (fresh
@@ -2617,6 +2642,15 @@ impl ExactModel {
                      MUNUNU_BDD_ITER_BUDGET, or use `--engine explicit`",
                     self.iter_budget
                 ));
+            }
+            // mununu#553 INSTRUMENT — record the peak live-node count. `approx_num_inner_nodes`
+            // is an O(1) read (the bit-blasting guard already calls it twice per op), so unlike
+            // the clock below it is sampled EVERY iteration. Records only; guards nothing.
+            let live = self
+                .manager
+                .with_manager_shared(|m| m.approx_num_inner_nodes());
+            if live > self.peak_nodes.get() {
+                self.peak_nodes.set(live);
             }
             // Wall-clock backstop beside the count budget — bail a deep-counter fixpoint (whose
             // cheap-but-many preimages reach `iter_budget` only after minutes) in seconds. The
@@ -5786,6 +5820,120 @@ mod tests {
             ),
             e => panic!("expected Saturated within the generous bound, got {e:?}"),
         }
+    }
+
+    /// mununu#553 PROBE — MEASUREMENT, not a gate. Option 3 replaces the wall clock with a
+    /// DETERMINISTIC cone-aware iteration bound, which presumes an iteration count can separate
+    /// "deep counter that never decides" from "deep but finite, decides". This measures whether
+    /// it can, and what the separation costs.
+    ///
+    /// **The falsifier.** If the per-iteration cost is the SAME across the two shapes, an
+    /// iteration cap separates them cleanly and option 3 is just a constant. If the deciding
+    /// shape's iterations are much MORE expensive, then any iteration cap low enough to cut the
+    /// counter fast also cuts the decider early — and the wall clock was measuring the right
+    /// thing all along, in which case say so instead of shipping a worse bound.
+    ///
+    /// engine: `exact-symbolic` (full-state ROBDD, OxiDD) — `reach_diameter_to`'s bounded
+    /// `EF(target)` diamond-preimage fixpoint, no budgets, wall clock irrelevant (it reads
+    /// neither `iter_budget` nor `deadline`).
+    #[test]
+    #[ignore = "probe: mununu#553 option-3 measurement; run with --ignored --nocapture"]
+    fn probe_553_iteration_cost_by_cone_shape() {
+        /// Wrapping modulus-`m` counter: `cnt = (cnt == m-1) ? 0 : cnt + 1`. The backward reach
+        /// diameter to `cnt == m-1` is exactly `m-1` — DEEP but FINITE, the video_timing shape.
+        fn wrap_counter(width: u32, m: u64) -> String {
+            format!(
+                "1 sort bitvec 1\n2 sort bitvec {width}\n3 state 2 cnt\n4 zero 2\n5 init 2 3 4\n\
+                 6 constd 2 {}\n7 eq 1 3 6\n8 one 2\n9 add 2 3 8\n10 ite 2 7 4 9\n11 next 2 3 10\n",
+                m - 1
+            )
+        }
+
+        eprintln!("\n===== #553 probe: iteration cost by cone shape =====");
+        eprintln!(
+            "{:<22} {:>9} {:>10} {:>12} {:>12} {:>10}",
+            "cone", "diameter", "ms", "us/iter", "live nodes", "nodes/it"
+        );
+
+        // (a) The DECIDING deep shape, swept over depth. If us/iter is flat in `m`, depth alone
+        // drives the cost and an iteration cap is the right currency.
+        for (w, m) in [(10u32, 800u64), (11, 2000), (12, 4000), (13, 8000)] {
+            let file = parser::parse(&wrap_counter(w, m)).expect("parse wrap counter");
+            let bb = BddBitBlaster::build(&file).expect("build");
+            let target = bb
+                .predicate_bdd(&PredicateExpr::Cmp {
+                    register: "cnt".into(),
+                    op: CmpOp::Eq,
+                    value: m - 1,
+                })
+                .expect("target bdd");
+            let model = bb.exact_model();
+            let t0 = std::time::Instant::now();
+            let est = model.reach_diameter_to(&target, (m + 64) as usize);
+            let ms = t0.elapsed().as_millis();
+            let iters = match est {
+                DiameterEstimate::Saturated(d) => d,
+                DiameterEstimate::ExceedsBound(k) => k,
+            };
+            let live = bb
+                ._manager
+                .with_manager_shared(|mgr| mgr.approx_num_inner_nodes());
+            eprintln!(
+                "{:<22} {:>9} {:>10} {:>12.1} {:>12} {:>10.1}",
+                format!("wrap{w}_m{m}"),
+                iters,
+                ms,
+                (t0.elapsed().as_micros() as f64) / (iters.max(1) as f64),
+                live,
+                (live as f64) / (iters.max(1) as f64),
+            );
+        }
+
+        // (b) The NON-deciding deep shape — twocount32's two free 32-bit counters, whose backward
+        // reach to `bad` has a ~2^32 diameter. A BOUNDED probe must stay cheap here, or option 3
+        // cannot bail fast either.
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/btor2/btor2tools_suite/twocount32.btor2");
+        let content = std::fs::read_to_string(&root).expect("read twocount32");
+        let file = parser::parse(&content).expect("parse twocount32");
+        let bb = BddBitBlaster::build(&file).expect("build twocount32");
+        // `bad` = (a == 3 && b == 3) — the conjunction the suite's `bad 19` names.
+        let a3 = bb
+            .predicate_bdd(&PredicateExpr::Cmp {
+                register: "a".into(),
+                op: CmpOp::Eq,
+                value: 3,
+            })
+            .expect("a==3");
+        let b3 = bb
+            .predicate_bdd(&PredicateExpr::Cmp {
+                register: "b".into(),
+                op: CmpOp::Eq,
+                value: 3,
+            })
+            .expect("b==3");
+        let target = a3.and(&b3).expect("bad cube");
+        let model = bb.exact_model();
+        for k_max in [256usize, 1024, 4096] {
+            let t0 = std::time::Instant::now();
+            let est = model.reach_diameter_to(&target, k_max);
+            let live = bb
+                ._manager
+                .with_manager_shared(|mgr| mgr.approx_num_inner_nodes());
+            eprintln!(
+                "{:<22} {:>9} {:>10} {:>12.1} {:>12} {:>10.1}",
+                format!("twocount32_k{k_max}"),
+                match est {
+                    DiameterEstimate::Saturated(d) => format!("sat@{d}"),
+                    DiameterEstimate::ExceedsBound(k) => format!(">{k}"),
+                },
+                t0.elapsed().as_millis(),
+                (t0.elapsed().as_micros() as f64) / (k_max as f64),
+                live,
+                (live as f64) / (k_max as f64),
+            );
+        }
+        eprintln!("===== end #553 probe =====\n");
     }
 
     /// A.4 — `ef_target_atoms` names the reachability target of a bare `EF p`
