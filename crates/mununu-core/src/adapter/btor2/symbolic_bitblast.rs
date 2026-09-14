@@ -2062,27 +2062,47 @@ pub struct ExactModel {
     /// a `BddBitBlaster` method: the μ-fixpoint has no view of the manager at all, so it cannot see
     /// its own reach-set grow. Measurement only in this commit — nothing reads it as a budget yet.
     manager: BDDManagerRef,
-    /// mununu#553 INSTRUMENT — peak live-node count across this `evaluate`, reported when
-    /// `MUNUNU_BDD_REPORT_PEAK` is set. Interior-mutable for the same reason as [`iters`](Self::iters).
+    /// mununu#553 — peak live-node count across this `evaluate`, reported when
+    /// `MUNUNU_BDD_REPORT_PEAK` is set. It is both the measurement that sized
+    /// [`FIXPOINT_NODE_BUDGET_DEFAULT`] and how a cone this guard cut reports the headroom it
+    /// actually needs. Interior-mutable for the same reason as [`iters`](Self::iters).
     peak_nodes: std::cell::Cell<usize>,
-    /// Wall-clock backstop DEADLINE (`Instant::now()` + [`exact_time_budget`]), SAMPLED every 256
-    /// iterations in [`Self::fixpoint`] BESIDE [`iter_budget`](Self::iter_budget) (so a fast
-    /// control fixpoint never reads the clock). `None` = no time bound (pure determinism, for
-    /// tests via `MUNUNU_BDD_TIME_BUDGET_MS=0`).
+    /// mununu#553 — the fixpoint LIVE-NODE budget: bail once the reach-set BDD passes it. This is
+    /// the DETERMINISTIC, machine-independent guard that replaced the wall-clock DEFAULT.
     ///
-    /// **Why a wall clock despite the iteration budget's determinism.** The iteration budget
-    /// bounds COUNT; a deep free-counter (`twocount32` — two 32-bit counters, ~2^32 diameter)
-    /// reaches it only after ~132 min of individually-cheap preimages, and no bit-COUNT cap can
-    /// exclude it without also excluding the tractable wide-CONTROL cones the P2.5-A cap-raise
-    /// exists to admit (i2c's 173-bit cone decides in 242 ms; twocount32's 65 bits < i2c's 173).
-    /// So the cap cannot separate them and this deadline must. It is a SECONDARY guard: it only
-    /// fires for a design the deterministic budgets abstain on ANYWAY, bounding how LONG the
-    /// abstain takes, not WHETHER it happens — so a non-pathological verdict (which finishes far
-    /// under it) stays machine-independent. Abstain is always sound (never a fabricated verdict),
-    /// so a machine-dependent abstain BOUNDARY is a robustness, not a soundness, property. The
-    /// interruptible unit is one fixpoint iteration; a single pathological in-op `apply_exists`
-    /// (not observed in-corpus — the BDD-blowup form is caught by the node budget) is the residual
-    /// gap a thread + `recv_timeout` would close (P2.5-A-follow).
+    /// **Why node count and not wall clock — measured, not assumed**
+    /// (`probe_553_iteration_cost_by_cone_shape`). The two shapes this must separate are not
+    /// "cheap-and-many vs expensive-and-few"; measured, they are:
+    ///
+    /// | cone | iters | µs/iter | peak nodes | nodes/iter |
+    /// |---|---|---|---|---|
+    /// | wrapping counter, depth 8064 (DECIDES) | 8064 | 5.5 | 25 959 | **3.2** |
+    /// | `uart_msg_handler` `AG EF`, real RTL (DECIDES) | 60 | — | 524 289 | 8 738 |
+    /// | `twocount32`, 4096 steps in (never decides) | 4096 | 26 059 | 4 999 635 | **1 221** |
+    ///
+    /// A deep cone is CHEAP and flat in depth; the pathological one gets 12.7× more expensive as
+    /// its reach-set grows without bound. So an ITERATION cap low enough to bail the counter in
+    /// seconds sits near ~1000 — on top of the ~800-step diameters that legitimately decide. And
+    /// growth RATE does not separate them either (`uart` runs at 8738 nodes/iter and decides).
+    /// Absolute node count does, and it is deterministic where the clock is not: across two runs
+    /// the counts were byte-identical while wall times moved up to 12 %.
+    fixpoint_node_budget: usize,
+    /// OPT-IN wall-clock backstop (`MUNUNU_BDD_TIME_BUDGET_MS`, **default `0` = OFF** since
+    /// mununu#553), sampled every `TIME_CHECK_STRIDE` iterations. It is no longer the default guard
+    /// because a wall clock makes the VERDICT host-dependent: the same command on a slower or
+    /// busier machine abstains where a faster one decides, and a time-abstention is
+    /// indistinguishable in the report from a real ⊥.
+    ///
+    /// That was not a theoretical cost. Turning this default off across a consumer's 71-check lane
+    /// moved three properties, all in the same direction: an ~800-step-diameter `|=>` from ⊥ to
+    /// VIOLATED, a block that had been falling through to slower engines after abstaining on time,
+    /// and an `AG EF` recoverability guarantee from ⊥ to HOLDS — the last on a card whose contract
+    /// had read "TIER 3 IS THEREFORE NOT ESTABLISHED FOR THIS BLOCK" since it shipped. The clock
+    /// was not buying speed; it was buying abstentions.
+    ///
+    /// Kept rather than deleted, because a caller who genuinely wants a hard time ceiling can still
+    /// ask for one, and because consumers already pass `MUNUNU_BDD_TIME_BUDGET_MS=0` for
+    /// determinism — that setting keeps working and now simply names the default.
     deadline: Option<std::time::Instant>,
 }
 
@@ -2112,16 +2132,55 @@ fn fixpoint_iter_budget() -> usize {
         .unwrap_or(1 << 20) // ~1M iterations; a counter's steps are cheap (small BDD) so this is fast to reach
 }
 
-/// The exact-engine WALL-CLOCK backstop: `MUNUNU_BDD_TIME_BUDGET_MS` or a default. See
-/// [`ExactModel::deadline`] for why this exists beside the deterministic iteration budget. `0`
-/// disables it (returns `None` ⇒ no time bound, for tests wanting pure determinism). The default
-/// (10 s) is ~40× i2c's measured 242 ms — generous for any tractable control cone — while cutting a
-/// deep-counter abstain from the iteration budget's ~minutes down to seconds.
+/// Default CAP for [`fixpoint_node_budget`], applied as `min(cap, BddBitBlaster::node_budget)`.
+///
+/// **Calibrated, not chosen.** Measured peaks of cones that DECIDE: fixtures ≤ 82 k; the real
+/// `uart_msg_handler` `AG EF` lift 393 k / 524 k / 590 k as the target moves. `twocount32`, which
+/// never decides, grows ~1220 nodes/iteration without bound and passes 2 M at ~1640 iterations.
+/// So 2 M keeps ~3.4× headroom over the largest measured decider while still bailing the
+/// pathological shape deterministically.
+///
+/// **Provisional, and thin.** 3.4× is not much, and the largest cones that matter are a
+/// consumer's, not ours. `MUNUNU_BDD_REPORT_PEAK=1` exists so those can be measured rather than
+/// guessed; raise this once they are known. Err HIGH when in doubt: a too-low value costs a
+/// VERDICT, which is the mununu#553 defect itself, whereas a too-high one costs wall clock that
+/// the harness's own per-block timeout already bounds — and a harness timeout is reported AS a
+/// timeout and names the block, where a silent engine abstention is not.
+const FIXPOINT_NODE_BUDGET_DEFAULT: usize = 1 << 21;
+
+/// The exact-engine fixpoint LIVE-NODE budget: `MUNUNU_BDD_FIXPOINT_NODES`, else
+/// [`FIXPOINT_NODE_BUDGET_DEFAULT`]. The deterministic guard that replaced the wall-clock default
+/// in mununu#553; see [`ExactModel::fixpoint_node_budget`] for the measurement behind the currency.
+///
+/// This is the caller-facing CAP only — [`BddBitBlaster::exact_model_partitioned`] applies it as
+/// `min(cap, node_budget)`, because a fixpoint budget ABOVE the blaster's arena-derived
+/// [`node_budget`](BddBitBlaster::node_budget) would let the fixpoint exhaust the OxiDD arena
+/// before this guard could fire — trading a clean abstain for the uncatchable allocation-`unwrap`
+/// SIGABRT that the node budget exists to prevent. `0` therefore means "no fixpoint-specific cap,
+/// fall back to the arena-derived budget", NOT "unbounded": unbounded is not on offer here, and to
+/// raise the real ceiling you must raise `MUNUNU_BDD_ARENA_NODES` too.
+fn fixpoint_node_budget() -> usize {
+    match std::env::var("MUNUNU_BDD_FIXPOINT_NODES")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+    {
+        Some(0) => usize::MAX,
+        Some(n) => n,
+        None => FIXPOINT_NODE_BUDGET_DEFAULT,
+    }
+}
+
+/// The exact-engine OPT-IN wall-clock backstop: `MUNUNU_BDD_TIME_BUDGET_MS`, **default `0` =
+/// disabled** since mununu#553. It used to default to 10 s, which made the verdict depend on how
+/// fast the host was: the same command could decide on one machine and report ⊥ on another, and the
+/// report could not tell that ⊥ from a real one. [`fixpoint_node_budget`] now does the job it was
+/// standing in for, deterministically. This remains for a caller who wants a hard time ceiling
+/// anyway — and says so in its abstention message, because such a verdict is not reproducible.
 fn exact_time_budget() -> Option<std::time::Duration> {
     let ms = std::env::var("MUNUNU_BDD_TIME_BUDGET_MS")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(10_000);
+        .unwrap_or(0);
     (ms != 0).then(|| std::time::Duration::from_millis(ms))
 }
 
@@ -2209,6 +2268,8 @@ impl BddBitBlaster {
             iter_budget: fixpoint_iter_budget(),
             iters: std::cell::Cell::new(0),
             manager: self._manager.clone(),
+            // Never above the arena-derived node budget — see `fixpoint_node_budget`.
+            fixpoint_node_budget: fixpoint_node_budget().min(self.node_budget),
             peak_nodes: std::cell::Cell::new(0),
             deadline: exact_time_budget().map(|d| std::time::Instant::now() + d),
         }
@@ -2522,9 +2583,10 @@ impl ExactModel {
         // ≡ 1 mod 65536), so read it as "this many nodes, to the nearest chunk".
         if std::env::var_os("MUNUNU_BDD_REPORT_PEAK").is_some() {
             eprintln!(
-                "[mununu#553] exact fixpoint: peak {} live BDD nodes in {} iteration(s)",
+                "[mununu#553] exact fixpoint: peak {} live BDD nodes in {} iteration(s), budget {}",
                 self.peak_nodes.get(),
-                self.iters.get()
+                self.iters.get(),
+                self.fixpoint_node_budget
             );
         }
         r
@@ -2643,32 +2705,47 @@ impl ExactModel {
                     self.iter_budget
                 ));
             }
-            // mununu#553 INSTRUMENT — record the peak live-node count. `approx_num_inner_nodes`
-            // is an O(1) read (the bit-blasting guard already calls it twice per op), so unlike
-            // the clock below it is sampled EVERY iteration. Records only; guards nothing.
+            // mununu#553 — the DETERMINISTIC work guard, and the one that now actually fires. The
+            // iteration budget above bounds DEPTH; this bounds the SIZE of the set being iterated,
+            // which is what distinguishes a deep-but-tractable cone (~3 nodes/iteration, converges)
+            // from a reach-set that does not compress (~1220 nodes/iteration, unbounded).
+            // `approx_num_inner_nodes` is an O(1) read — the bit-blasting guard already calls it
+            // twice per op — so unlike the clock it is sampled EVERY iteration, which also makes
+            // the abstention point exact rather than stride-quantised.
             let live = self
                 .manager
                 .with_manager_shared(|m| m.approx_num_inner_nodes());
             if live > self.peak_nodes.get() {
                 self.peak_nodes.set(live);
             }
-            // Wall-clock backstop beside the count budget — bail a deep-counter fixpoint (whose
-            // cheap-but-many preimages reach `iter_budget` only after minutes) in seconds. The
-            // per-iteration preimage is the interruptible unit; the `Instant::now()` read is
-            // SAMPLED every `TIME_CHECK_STRIDE` iterations, not every one, so a fast control
-            // fixpoint (converges in < a stride) never touches the clock — zero overhead on the
-            // common path, ~stride×per-iter granularity on a deep loop. See [`Self::deadline`] for
-            // why a wall clock is sound here despite the count budget.
+            if live > self.fixpoint_node_budget {
+                return Err(format!(
+                    "symbolic bit-blaster: abstained on the fixpoint NODE budget ({live} of {} \
+                     live BDD nodes, at fixpoint step {n}) — the property's reachable set does not \
+                     compress to a tractable BDD. This bound is DETERMINISTIC: the same command \
+                     abstains here on any machine. Raise MUNUNU_BDD_FIXPOINT_NODES (and, past the \
+                     arena-derived ceiling, MUNUNU_BDD_ARENA_NODES with it), or use \
+                     `--engine explicit`. MUNUNU_BDD_REPORT_PEAK=1 reports how much headroom the \
+                     cone actually needs",
+                    self.fixpoint_node_budget
+                ));
+            }
+            // OPT-IN wall-clock backstop (`MUNUNU_BDD_TIME_BUDGET_MS`, default OFF since #553 — it
+            // made the verdict host-dependent). Still sampled on a STRIDE rather than every
+            // iteration, because `Instant::now()` is not free the way the node read is.
             const TIME_CHECK_STRIDE: usize = 256;
             if n.is_multiple_of(TIME_CHECK_STRIDE)
                 && let Some(dl) = self.deadline
                 && std::time::Instant::now() > dl
             {
                 return Err(format!(
-                    "symbolic bit-blaster: abstained on the WALL-CLOCK budget (fixpoint still \
-                     iterating at {n} steps) — the property's reachable diameter is too large to \
-                     decide in the time budget; raise MUNUNU_BDD_TIME_BUDGET_MS (default 10000 ms; \
-                     0 disables), or use `--engine explicit`"
+                    "symbolic bit-blaster: abstained on the OPT-IN WALL-CLOCK budget (fixpoint \
+                     still iterating at {n} steps). This budget is OFF by default and was enabled \
+                     explicitly via MUNUNU_BDD_TIME_BUDGET_MS, so this abstention is \
+                     NON-DETERMINISTIC — a faster or less busy machine may DECIDE the same \
+                     property from the same command, and this ⊥ is not distinguishable in the \
+                     report from a real one. Unset MUNUNU_BDD_TIME_BUDGET_MS for the deterministic \
+                     fixpoint NODE budget instead, or use `--engine explicit`"
                 ));
             }
             bindings.insert(var, x.clone());
@@ -5931,6 +6008,29 @@ mod tests {
                 (t0.elapsed().as_micros() as f64) / (k_max as f64),
                 live,
                 (live as f64) / (k_max as f64),
+            );
+        }
+        // (c) THE COST OF THE FIX. The guard's own bail on the pathological shape, through the
+        // real `exact_bad_reachable` path — how long a hopeless cone grinds before abstaining, and
+        // whether it abstains at the SAME point every time (the property the wall clock lacked).
+        eprintln!("\n-- bail through the real guard (twocount32, `bad` reachability) --");
+        for run in 1..=3 {
+            let t0 = std::time::Instant::now();
+            let r = exact_bad_reachable(&content);
+            let step = r.as_ref().err().and_then(|e| {
+                e.split("at fixpoint step ")
+                    .nth(1)
+                    .and_then(|t| t.split(')').next())
+                    .map(str::to_string)
+            });
+            eprintln!(
+                "  run {run}: {:>8} ms  bail at step {}  [{}]",
+                t0.elapsed().as_millis(),
+                step.as_deref().unwrap_or("-"),
+                match &r {
+                    Ok(v) => format!("decided {v}"),
+                    Err(_) => "abstained".to_string(),
+                }
             );
         }
         eprintln!("===== end #553 probe =====\n");
