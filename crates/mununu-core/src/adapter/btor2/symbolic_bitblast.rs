@@ -2688,6 +2688,15 @@ impl ExactModel {
         // to 590 k (a real `uart_msg_handler` lift), and a default calibrated on the fixtures alone
         // would silently kill the real verdict. One line per `evaluate`, off unless asked.
         //
+        // ⚠️ VALID ONLY WHEN THE ARENA IS LARGER THAN THE CONE NEEDS. `approx_num_inner_nodes`
+        // counts allocated-including-dead, so a too-small arena forces GC, GC reclaims dead nodes,
+        // and the high-water mark comes out LOW — non-monotonically, so it cannot be corrected for.
+        // Measured on one design at a fixed property, varying only the arena:
+        //     arena 1,048,576 -> peak   801,404      arena 1,638,400 -> peak 1,245,185
+        //     arena 1,310,720 -> peak   526,547      arena 2,097,152+ -> peak 1,638,401 (stable)
+        // So a peak at or near the arena is a LOWER BOUND on the cone, not a measurement of it.
+        // Raise `MUNUNU_BDD_ARENA_NODES` until the reading stops moving; only then read it as size.
+        //
         // Reproducibility, stated with its limit. For a fixed (design, property, config) the peak
         // reproduces across runs — but NOT always byte-exactly: a consumer measured one property at
         // 7,980,029 / 7,979,366 / 7,979,343 across three runs (a 686-node spread, 0.009%) while a

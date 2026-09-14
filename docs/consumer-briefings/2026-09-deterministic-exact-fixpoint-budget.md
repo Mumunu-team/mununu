@@ -99,6 +99,16 @@ for you. Three things that are not:
 
 **Anyone pinning `unknown`.** A pin that asserts `unknown` for a property whose cone fits may now fail. That is the fix working; re-pin to the definite verdict.
 
+**⚠️ A peak at or near the arena is a LOWER BOUND, not a measurement.** `approx_num_inner_nodes`
+counts allocated-including-dead nodes, so an arena smaller than the cone needs forces GC, and GC
+reclaims dead nodes — the high-water mark comes out LOW, and non-monotonically. Measured on one
+design at a fixed property, varying only the arena: 801,404 / 526,547 / 1,245,185 at arenas of
+1.05M / 1.31M / 1.64M, then stable at 1,638,401 from 2.10M upward. **Raise
+`MUNUNU_BDD_ARENA_NODES` until the reading stops moving; only then read it as the cone's size.**
+This is not hypothetical — a consumer's peak table taken at a 33.5M arena understated three of its
+four largest blocks, two by more than 2×, and the only block that read correctly was the one whose
+true peak fit the arena.
+
 **Sizing the budget.** `MUNUNU_BDD_REPORT_PEAK=1` prints one line per evaluation — take the **max per block**, not the sum, since a re-planned property evaluates more than once. Peaks reproduce across runs for a fixed design+property+config, but to about 0.01% rather than to the byte — one consumer property measured 7,980,029 / 7,979,366 / 7,979,343 across three runs while a second property in the same runs was byte-identical, and the iteration counts were identical every time. Size a budget with headroom, not to the exact number. `peak 1` means the fixpoint saturated to ⊤ (a terminal node). To raise the real ceiling you must raise `MUNUNU_BDD_ARENA_NODES` alongside `MUNUNU_BDD_FIXPOINT_NODES`: the budget is applied as `min(cap, node_budget)` precisely so a fixpoint cannot exhaust the OxiDD arena, which would trade a clean abstain for an uncatchable `SIGABRT`.
 
 ## Docker rebuild disposition
