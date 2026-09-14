@@ -98,7 +98,29 @@ coupled group, which costs a measured 4× on `uart_msg_handler`. Neither composi
 diameter, an invariant of the transition system — see `measure_bdd_actual_size`. A 640×480 raster
 wrap needs 818,626 iterations under any order.
 
-## Why the default has not changed — the counter-example SURVIVED its test
+## DECISION (2026-09-14): hold at cell-major
+
+The default **stays `cell-major`**. Both alternative orders remain opt-in. Recorded as a decision,
+not an omission, so nobody re-opens it from the win column alone.
+
+**The wins are real and large** — 2.6× across 2,619 tests, 135× on one real test, three consumer
+blocks at 115× / 2,458× / 20.2 M×. They were not judged insufficient.
+
+**What blocked the flip is the absence of a mechanism.** One measured block regresses 10.9×, and
+nobody can explain why. Without a mechanism there is no way to predict which *other* cones
+regress, so an opt-out is REACTIVE — a block is discovered to need it by becoming 10× slower in
+someone's lane. And the sample is 4 of a consumer's 26 blocks: the 4 largest, which is the right
+bias for the question, and **1 of those 4 regressed.** The remaining 22 are small, not proven safe.
+
+**What would reopen this:** a mechanism for the `sdram_burst` regression — i.e. a property of a
+cone that predicts, before running it, that interleaving will cost more work. With that, the
+default flips and the predictor picks the order per cone. Without it, the honest claim is only
+*"interleave unless a block says otherwise, and here is the one that does"* — which is a reason to
+ship the flag, which we have, not to change what everyone gets by default.
+
+`MUNUNU_BDD_VAR_ORDER=interleaved` is the recommended first thing to try on a slow cone.
+
+## The counter-example SURVIVED its test
 
 One block regresses, and the settling measurement has now been made: same block, **same arena
 (67 M fixed)**, same binary, 13 definite verdicts in all three arms.
@@ -140,6 +162,40 @@ cannot predict which *other* cones regress, and only 4 of a consumer's 26 blocks
 measured under interleaving — the 4 largest, which is the right bias for the question but means
 1-in-4 of the expensive ones regressed. The opt-out is therefore reactive: a block is discovered
 to need it by becoming 10× slower.
+
+## What would reopen the decision — the literature has a metric for exactly our failure
+
+The missing piece is a **mechanism**: something that predicts, before running a cone, that
+interleaving will cost more work on it. Static ordering for symbolic model checking has one.
+
+**Weighted Event Span (WES)** over a *dependency matrix* — rows = transitions/events, columns =
+variables, nonzero = that transition reads or writes that variable. Meijer & van de Pol show
+**bandwidth and wavefront reduction** minimise WES and thereby reduce **computational effort**;
+Cuthill–McKee (1969) and Sloan (1989) compute such orders in milliseconds with standard sparse-matrix
+routines, and the DCSH heuristic combines them for this purpose. FORCE and MINCE
+(Aloul/Markov/Sakallah) are the min-cut linear-placement relatives.
+
+**Why this metric fits.** WES predicts **effort**, not diagram size — and effort is precisely the axis
+`sdram_burst` regressed on: ~10× the work at essentially constant node count. Node counts are
+structurally blind to that, which is why the peak instrument explained nothing about that block.
+
+**Why `deps` failing does not refute the approach.** `deps` was *clustering* (union-find over
+co-occurrence); the literature does *linear placement*. Different algorithm, and ours was the crude
+approximation. The honest statement is "our clustering heuristic failed", not "attribute-derived
+ordering failed".
+
+**The cheap validation, and its falsifier.** Compute WES for the two orders we already have on the two
+blocks we already measured. It must rank **cell-major better for `sdram_burst`** and **interleaved
+better for `tlm_tx`**. If it does not reproduce measurements we already have, it is not our mechanism.
+No reordering algorithm is needed to run this check.
+
+Tracked as the **W-track** in [`.claude/plans/roadmap.md`](../../.claude/plans/roadmap.md).
+
+Sources: [Bandwidth and Wavefront Reduction for Static Variable Ordering in Symbolic Model
+Checking](https://arxiv.org/abs/1511.08678) · [MINCE](http://www.aloul.net/Papers/faloul_iwls01_mince.pdf) ·
+[FORCE](https://www.researchgate.net/publication/2565569_FORCE_A_Fast_and_Easy-to-Implement_Variable-Ordering_Heuristic) ·
+[DCSH / symbolic supervisor synthesis](https://link.springer.com/article/10.1007/s10626-024-00403-4) ·
+[Read, Write and Copy Dependencies for Symbolic Model Checking](https://link.springer.com/chapter/10.1007/978-3-319-13338-6_16)
 
 ## ⚠️ A limit on the peak instrument that these measurements exposed
 

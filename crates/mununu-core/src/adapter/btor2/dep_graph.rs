@@ -384,9 +384,8 @@ fn drain_cone(
 /// signal edges) but STOP at each `state`/`input` cell — do NOT follow a state's
 /// `next`. The NID counterpart of [`collect_operand_terminals`] that keeps
 /// anonymous cells; used by [`cone_reachable_leaves`]'s constraint pullback to
-/// decide whether a constraint's cone touches the current cone, and by the exact
-/// bit-blaster's dependency-aware VARIABLE ORDER to find which cells a `next` function reads.
-pub(crate) fn cone_combinational_leaf_nids(file: &Btor2File, start: Nid) -> HashSet<Nid> {
+/// decide whether a constraint's cone touches the current cone.
+fn cone_combinational_leaf_nids(file: &Btor2File, start: Nid) -> HashSet<Nid> {
     let mut seen: HashSet<Nid> = HashSet::new();
     let mut leaves: HashSet<Nid> = HashSet::new();
     let mut work: Vec<Nid> = vec![start];

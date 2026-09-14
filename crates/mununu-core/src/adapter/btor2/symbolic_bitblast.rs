@@ -371,169 +371,59 @@ impl BddBitBlaster {
         // init BDD, the input cube, and the next-state substitution).
         let mut env: HashMap<Nid, BitVec> = HashMap::new();
         let mut cells: Vec<Cell> = Vec::new();
-        // mununu#553 follow-up — the VARIABLE ORDER. Until now it was only ever CELL-MAJOR:
-        // every bit of one cell contiguous, cells in leaf order. `MUNUNU_BDD_VAR_ORDER` selects:
+        // mununu#553 follow-up — the VARIABLE ORDER. `MUNUNU_BDD_VAR_ORDER=interleaved` assigns
+        // bit-position-major (a0 b0 c0, a1 b1 c1, …) instead of the default CELL-MAJOR (every bit
+        // of one cell contiguous). Default UNCHANGED; see `docs/design/bdd-variable-ordering.md`.
         //
-        //   `cell-major`  (default) — a0 a1 a2 … b0 b1 b2 …
-        //   `interleaved`           — a0 b0 c0, a1 b1 c1, … (every cell paired with every other)
-        //   `deps`                  — interleave only cells that a `next` function READS TOGETHER
+        // Why it exists: cell-major is the textbook bad order for RELATIONAL structure — `a == b`
+        // is Θ(2^n) cell-major (the diagram must remember all of `a` before it sees any of `b`)
+        // and O(n) interleaved. A barrel shifter (SYMBOLIC shift amount) is worse still: 65 537
+        // nodes cell-major at 12 bits versus 1 interleaved, and it does not finish at 16. A
+        // CONSTANT shift amount is free under either order — it is wiring.
         //
-        // Measured motivation. Cell-major is the textbook bad order for RELATIONAL structure:
-        // `a == b` is Θ(2^n) cell-major (the diagram must remember all of `a` before it sees any
-        // of `b`) and O(n) interleaved — 84× / 806× / 2608× at n = 12 / 16 / 18. A barrel shifter
-        // (symbolic shift amount) is worse still: 65 537 nodes cell-major at 12 bits versus 1
-        // interleaved, and it does not finish at 16.
+        // Why it is not the DEFAULT: one measured consumer block regresses 10.9× in wall time at a
+        // fixed arena (48 s → 525 s, 13 definite verdicts in both arms), and nobody has a mechanism
+        // for it. Without one we cannot predict which other cones regress. Recommended as the first
+        // thing to try on a slow cone, not as what everyone gets.
         //
-        // But blind interleaving is not free. On a consumer's corpus three of four wide blocks
-        // collapsed (20.2 M×, 2458×, 115×) and the fourth REGRESSED — 1.08× on nodes and **9.4×
-        // slower in wall time**, i.e. the same diagram built with far more work. The two blocks
-        // differ in cell count (12 collapsed, 26 regressed), which is the cost interleaving pays:
-        // it spreads every cell across every other whether or not they interact.
-        //
-        // `deps` is the principled version. We compute the successor by FUNCTIONAL SUBSTITUTION
-        // (`to_next` substitutes each state var with its next-state function) rather than
-        // relationally over primed variables — there are no primed variables here, so the classic
-        // interleave-x-with-x' rule does not apply. What governs substitution cost instead is
-        // DEPENDENCY LOCALITY: a variable should sit near the variables its own next-state
-        // function reads. Cells read together by one `next` must be adjacent; cells that never
-        // meet gain nothing from being spread apart.
-        let order_mode = std::env::var("MUNUNU_BDD_VAR_ORDER").unwrap_or_default();
-        let interleave_all = order_mode.eq_ignore_ascii_case("interleaved");
-        let deps_mode = order_mode.eq_ignore_ascii_case("deps");
-        // Orthogonal to the mode: put INPUT cells after every state cell. `diamond_pre` does
-        // `∃ inputs` on every pre-image, and existential quantification is cheapest when the
-        // quantified variables sit near the LEAVES — quantifying a root variable forces the whole
-        // diagram to be rebuilt. This pulls against `deps` (an input read by a `next` wants to be
-        // near that register), so the two are measured separately rather than assumed to compose.
-        let inputs_last = std::env::var("MUNUNU_BDD_INPUTS_LAST").is_ok_and(|v| v != "0");
-
-        let kept: Vec<(Nid, bool, usize)> = leaf_specs
+        // A dependency-aware `deps` mode and an orthogonal `MUNUNU_BDD_INPUTS_LAST` were built,
+        // measured and REMOVED. `deps` clustered cells that some expression reads together; on
+        // every real lift it produced ONE cluster of all cells (so it WAS interleaving), and on the
+        // single block where it genuinely split (17 cells into 15+1+1) it still regressed 9.6×.
+        // `inputs-last` had no measured win in the form that does not break a coupled group. The
+        // evidence and the reasoning are in the design note so neither is re-derived.
+        let interleave = std::env::var("MUNUNU_BDD_VAR_ORDER")
+            .is_ok_and(|v| v.eq_ignore_ascii_case("interleaved"));
+        let kept_widths: Vec<usize> = leaf_specs
             .iter()
             .filter(|(nid, _, _, _)| is_kept(*nid))
-            .map(|(nid, _, is_state, w)| (*nid, *is_state, *w as usize))
+            .map(|(_, _, _, w)| *w as usize)
             .collect();
-        let n_kept = kept.len();
-        let cell_of: HashMap<Nid, usize> = kept
-            .iter()
-            .enumerate()
-            .map(|(i, (nid, _, _))| (*nid, i))
-            .collect();
-
-        // GROUPS: each group is a set of kept-cell indices laid out INTERLEAVED with one another;
-        // groups themselves are laid out contiguously, in order. cell-major = every cell alone;
-        // interleaved = one group of everything; deps = co-occurrence clusters.
-        let mut groups: Vec<Vec<usize>> = if interleave_all {
-            vec![(0..n_kept).collect()]
-        } else if deps_mode {
-            // Union-find over "read together by some `next` function".
-            let mut parent: Vec<usize> = (0..n_kept).collect();
-            fn find(parent: &mut Vec<usize>, x: usize) -> usize {
-                if parent[x] != x {
-                    let r = find(parent, parent[x]);
-                    parent[x] = r;
-                }
-                parent[x]
-            }
-            // Every expression the engine actually BUILDS contributes a hyperedge, not just the
-            // transition function: cells read together by a `bad` / `constraint` / named-output
-            // cone are coupled in the PROPERTY even when no `next` relates them. Seeding from
-            // `next` alone made the clustering degenerate to cell-major on most of the corpus
-            // (suite 123.9 s against blind interleaving's 47.7 s).
-            let seeds: Vec<Nid> = file
-                .lines
-                .iter()
-                .filter_map(|line| match &line.node {
-                    Node::Next { value, .. } | Node::Init { value, .. } => Some(value.nid()),
-                    Node::Bad { signal }
-                    | Node::Constraint { signal }
-                    | Node::Output { signal, .. } => Some(signal.nid()),
-                    _ => None,
-                })
-                .collect();
-            for seed in seeds {
-                let support: Vec<usize> =
-                    super::dep_graph::cone_combinational_leaf_nids(file, seed)
-                        .into_iter()
-                        .filter_map(|n| cell_of.get(&n).copied())
-                        .collect();
-                // Every pair read by the SAME expression is unioned — those are the cells whose
-                // bits must interleave for the substitution (or the property) to stay local.
-                if let Some(&first) = support.first() {
-                    for &other in &support[1..] {
-                        let (ra, rb) = (find(&mut parent, first), find(&mut parent, other));
-                        if ra != rb {
-                            parent[ra] = rb;
-                        }
-                    }
-                }
-            }
-            let mut by_root: HashMap<usize, Vec<usize>> = HashMap::new();
-            for c in 0..n_kept {
-                let r = find(&mut parent, c);
-                by_root.entry(r).or_default().push(c);
-            }
-            // Deterministic group order: by the smallest cell index each group contains.
-            let mut gs: Vec<Vec<usize>> = by_root.into_values().collect();
-            for g in &mut gs {
-                g.sort_unstable();
-            }
-            gs.sort_unstable_by_key(|g| g[0]);
-            gs
-        } else {
-            (0..n_kept).map(|c| vec![c]).collect()
-        };
-
-        if inputs_last {
-            // Move input cells to the BACK, but NEVER break a coupled group to do it.
-            //
-            // The two heuristics genuinely conflict, and the conflict is not hypothetical. A
-            // symbolic shift amount with no `next` line is classified input-like, yet the barrel
-            // shifter needs it interleaved with the register it shifts: splitting that pair sends
-            // the cone from 1 node back to 65 537. So only a group that is ENTIRELY inputs may be
-            // relocated — a mixed group is already telling us those cells are read together, which
-            // is the stronger signal.
-            let (mut keep, mut back): (Vec<Vec<usize>>, Vec<Vec<usize>>) = (Vec::new(), Vec::new());
-            for g in groups.drain(..) {
-                if g.iter().all(|&c| !kept[c].1) {
-                    back.push(g);
-                } else {
-                    keep.push(g);
-                }
-            }
-            keep.extend(back);
-            groups = keep;
-        }
-
-        if std::env::var_os("MUNUNU_BDD_ORDER_DEBUG").is_some() {
-            let mut sizes: Vec<usize> = groups.iter().map(Vec::len).collect();
-            sizes.sort_unstable_by(|a, b| b.cmp(a));
-            eprintln!(
-                "[order] mode={order_mode:?} inputs_last={inputs_last} cells={n_kept} \
-                 groups={} singletons={} largest={:?}",
-                groups.len(),
-                sizes.iter().filter(|&&n| n == 1).count(),
-                &sizes[..sizes.len().min(6)]
-            );
-        }
-        // Lay the groups out: contiguous between groups, bit-position-interleaved within one.
-        let mut slots: Vec<Vec<usize>> = vec![Vec::new(); n_kept];
-        let mut p = 0usize;
-        for g in &groups {
-            let maxw = g.iter().map(|&c| kept[c].2).max().unwrap_or(0);
+        let slots: Vec<Vec<usize>> = if interleave {
+            let maxw = kept_widths.iter().copied().max().unwrap_or(0);
+            let mut s: Vec<Vec<usize>> =
+                kept_widths.iter().map(|w| Vec::with_capacity(*w)).collect();
+            let mut p = 0usize;
             for j in 0..maxw {
-                for &c in g {
-                    if j < kept[c].2 {
-                        slots[c].push(p);
+                for (ci, w) in kept_widths.iter().enumerate() {
+                    if j < *w {
+                        s[ci].push(p);
                         p += 1;
                     }
                 }
             }
-        }
-        debug_assert_eq!(
-            p, total_bits as usize,
-            "every kept bit got exactly one slot"
-        );
-
+            s
+        } else {
+            let mut p = 0usize;
+            kept_widths
+                .iter()
+                .map(|w| {
+                    let v: Vec<usize> = (p..p + *w).collect();
+                    p += *w;
+                    v
+                })
+                .collect()
+        };
         let mut kept_ix = 0usize;
         for (nid, symbol, is_state, width) in leaf_specs {
             if is_kept(nid) {
