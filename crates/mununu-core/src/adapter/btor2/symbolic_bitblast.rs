@@ -239,6 +239,12 @@ pub struct BddBitBlaster {
     /// `catch_unwind` in [`exact_symbolic_verdict_with_witness`] is the backstop for a
     /// single op that jumps past the budget in one apply.
     node_budget: usize,
+    /// mununu#553 — the OxiDD arena size this blaster was built with. Held so
+    /// [`Self::exact_model_partitioned`] can cap the fixpoint's node budget at a safe fraction of
+    /// the ARENA. Capping it at [`node_budget`](Self::node_budget) instead would be wrong on the
+    /// small tier, where that budget is deliberately a quarter of the arena: the measured
+    /// raster-wrap cone peaks at 98% of it and would be cut with 2% to spare.
+    arena_nodes: usize,
 }
 
 impl BddBitBlaster {
@@ -323,16 +329,31 @@ impl BddBitBlaster {
         // Small tier: 2M budget in an 8M arena (6M headroom, ~128 MB). Wide tier: env-tunable
         // arena, 80 % budget (already ~20 % = several-M headroom). Combined with the start-of-op
         // guard in `eval_op`, no single op can reach the arena limit. Manager is per-blaster.
-        let arena_nodes: usize = if total_bits <= 40 {
-            1 << 23 // 8M nodes (~128 MB) — big headroom below the budget (was 2M)
-        } else {
-            std::env::var("MUNUNU_BDD_ARENA_NODES")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(1 << 25) // 32M nodes (~1 GB); bump via env for wider control cones
-        };
+        // mununu#553 — `MUNUNU_BDD_ARENA_NODES` is honoured in BOTH tiers. It used to be read only
+        // on the wide tier, so a ≤40-bit cone whose fixpoint outgrew the fixed 8M arena had NO
+        // escape hatch at all — it could only abstain or abort. A small bit COUNT does not imply a
+        // small BDD: the measured raster-wrap cone is 20 bits and peaks at 2.06M nodes.
+        //
+        // Defaults raised (small 1<<23→1<<24, wide 1<<25→1<<26) on consumer measurement: real
+        // DECIDING cones were found at 31.0M nodes against a 33.5M wide arena — 92.5% occupancy,
+        // where the headroom below the arena is what absorbs a single wide op's allocation after
+        // the last between-op check. At that occupancy the next slightly-wider cone does not
+        // abstain, it exhausts the arena inside one apply and takes the uncatchable SIGABRT path.
+        // Measured cost of the raise: ~160 MB of baseline RSS (190 → 350 MB on a real lift).
+        let arena_nodes: usize = std::env::var("MUNUNU_BDD_ARENA_NODES")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(if total_bits <= 40 {
+                1 << 24 // 16M nodes — the raster-wrap cone (20 bits, 2.06M) sits at 15% of its budget
+            } else {
+                1 << 26 // 64M nodes; the 31.0M consumer deciders sit at 58% rather than 92.5%
+            });
+        // The BIT-BLASTING op guard. Unchanged in shape: the small tier keeps a deliberately low
+        // 2M so a single wide op has the whole rest of the arena as headroom. This is a DIFFERENT
+        // budget from the fixpoint's — the two phases are disjoint, the relation is built under
+        // this one and then explored under `ExactModel::fixpoint_node_budget`.
         let node_budget = if total_bits <= 40 {
-            1 << 21 // 2M — decidability threshold; the 8M arena leaves 6M single-op headroom
+            1 << 21 // 2M — the 16M arena now leaves 14M single-op headroom
         } else {
             arena_nodes * 8 / 10
         };
@@ -350,14 +371,56 @@ impl BddBitBlaster {
         // init BDD, the input cube, and the next-state substitution).
         let mut env: HashMap<Nid, BitVec> = HashMap::new();
         let mut cells: Vec<Cell> = Vec::new();
-        let mut cursor = 0usize;
+        // mununu#553 follow-up — the VARIABLE ORDER, which until now was only ever CELL-MAJOR:
+        // every bit of one cell contiguous, cells in leaf order. That is the textbook bad order for
+        // RELATIONAL structure between two registers — `a == b` is O(n) nodes interleaved and
+        // Θ(2^n) cell-major, because cell-major must remember all of `a` before it sees any of `b`.
+        //
+        // `MUNUNU_BDD_VAR_ORDER=interleaved` assigns bit-position-major instead (a0 b0 c0, a1 b1 c1,
+        // …). EXPERIMENT ONLY for now — default unchanged. Ordering cannot help an
+        // ITERATION-bound cone (the fixpoint depth is the reachability diameter, invariant of the
+        // representation — see `measure_bdd_actual_size`), so this targets only the
+        // REPRESENTATION-bound shape: few iterations, enormous BDD.
+        let interleave = std::env::var("MUNUNU_BDD_VAR_ORDER")
+            .is_ok_and(|v| v.eq_ignore_ascii_case("interleaved"));
+        let kept_widths: Vec<usize> = leaf_specs
+            .iter()
+            .filter(|(nid, _, _, _)| is_kept(*nid))
+            .map(|(_, _, _, w)| *w as usize)
+            .collect();
+        let slots: Vec<Vec<usize>> = if interleave {
+            let maxw = kept_widths.iter().copied().max().unwrap_or(0);
+            let mut s: Vec<Vec<usize>> =
+                kept_widths.iter().map(|w| Vec::with_capacity(*w)).collect();
+            let mut p = 0usize;
+            for j in 0..maxw {
+                for (ci, w) in kept_widths.iter().enumerate() {
+                    if j < *w {
+                        s[ci].push(p);
+                        p += 1;
+                    }
+                }
+            }
+            s
+        } else {
+            let mut p = 0usize;
+            kept_widths
+                .iter()
+                .map(|w| {
+                    let v: Vec<usize> = (p..p + *w).collect();
+                    p += *w;
+                    v
+                })
+                .collect()
+        };
+        let mut kept_ix = 0usize;
         for (nid, symbol, is_state, width) in leaf_specs {
             if is_kept(nid) {
-                let vars: BitVec = all_vars[cursor..cursor + width as usize].to_vec();
-                let varnos: Vec<VarNo> = (0..width as usize)
-                    .map(|b| var_base + (cursor + b) as VarNo)
-                    .collect();
-                cursor += width as usize;
+                let pos = &slots[kept_ix];
+                kept_ix += 1;
+                let vars: BitVec = pos.iter().map(|&i| all_vars[i].clone()).collect();
+                let varnos: Vec<VarNo> = pos.iter().map(|&i| var_base + i as VarNo).collect();
+                debug_assert_eq!(vars.len(), width as usize);
                 env.insert(nid, vars.clone());
                 cells.push(Cell {
                     symbol,
@@ -383,6 +446,7 @@ impl BddBitBlaster {
             next_funcs: HashMap::new(),
             named_signals: HashMap::new(),
             node_budget,
+            arena_nodes,
         };
 
         // Passes 2–5 do all the BDD allocation. A cone that does not compress can EXHAUST the fixed
@@ -2067,26 +2131,29 @@ pub struct ExactModel {
     /// [`FIXPOINT_NODE_BUDGET_DEFAULT`] and how a cone this guard cut reports the headroom it
     /// actually needs. Interior-mutable for the same reason as [`iters`](Self::iters).
     peak_nodes: std::cell::Cell<usize>,
-    /// mununu#553 — the fixpoint LIVE-NODE budget: bail once the reach-set BDD passes it. This is
-    /// the DETERMINISTIC, machine-independent guard that replaced the wall-clock DEFAULT.
+    /// mununu#553 — the fixpoint LIVE-NODE budget: bail once the reach-set BDD passes it.
+    /// **80 % of the arena** by default; see [`fixpoint_node_budget`] for why there is no
+    /// hand-picked constant and for the four candidates a consumer sweep refuted.
     ///
-    /// **Why node count and not wall clock — measured, not assumed**
-    /// (`probe_553_iteration_cost_by_cone_shape`). The two shapes this must separate are not
-    /// "cheap-and-many vs expensive-and-few"; measured, they are:
+    /// It is a RESOURCE guard. It exists because [`BddBitBlaster::check_node_budget`] is a
+    /// `BddBitBlaster` method guarding the BIT-BLASTING ops, and `ExactModel` held no manager
+    /// reference at all — so the μ-fixpoint, the phase that actually grows without bound, ran with
+    /// no node guard whatsoever and could walk the arena to exhaustion. The 10 s wall clock was
+    /// standing in for this.
     ///
-    /// | cone | iters | µs/iter | peak nodes | nodes/iter |
-    /// |---|---|---|---|---|
-    /// | wrapping counter, depth 8064 (DECIDES) | 8064 | 5.5 | 25 959 | **3.2** |
-    /// | `uart_msg_handler` `AG EF`, real RTL (DECIDES) | 60 | — | 524 289 | 8 738 |
-    /// | `twocount32`, 4096 steps in (never decides) | 4096 | 26 059 | 4 999 635 | **1 221** |
-    ///
-    /// A deep cone is CHEAP and flat in depth; the pathological one gets 12.7× more expensive as
-    /// its reach-set grows without bound. So an ITERATION cap low enough to bail the counter in
-    /// seconds sits near ~1000 — on top of the ~800-step diameters that legitimately decide. And
-    /// growth RATE does not separate them either (`uart` runs at 8738 nodes/iter and decides).
-    /// Absolute node count does, and it is deterministic where the clock is not: across two runs
-    /// the counts were byte-identical while wall times moved up to 12 %.
-    fixpoint_node_budget: usize,
+    /// Clamped against the ARENA rather than [`BddBitBlaster::node_budget`], because on the small
+    /// tier that op budget is deliberately a quarter of the arena: the measured raster-wrap cone
+    /// peaks at **98 %** of it and a `min(cap, node_budget)` clamp would cut a deciding property
+    /// with 2 % to spare.
+    /// HARD arena-safety bound (80 % of the arena). Prevents the fixpoint walking the OxiDD arena
+    /// to exhaustion, which panics on the allocation `.unwrap()` while the exhausted manager is
+    /// dropped and aborts the process uncatchably. Rarely the one that fires — it is the net, not
+    /// the guard.
+    arena_safety_budget: usize,
+    /// LATENCY bound, node half (`MUNUNU_BDD_FIXPOINT_NODES`). See [`fixpoint_node_budget`].
+    node_soft: usize,
+    /// LATENCY bound, iteration half (`MUNUNU_BDD_FIXPOINT_ITERS`). See [`fixpoint_node_budget`].
+    iter_soft: usize,
     /// OPT-IN wall-clock backstop (`MUNUNU_BDD_TIME_BUDGET_MS`, **default `0` = OFF** since
     /// mununu#553), sampled every `TIME_CHECK_STRIDE` iterations. It is no longer the default guard
     /// because a wall clock makes the VERDICT host-dependent: the same command on a slower or
@@ -2132,50 +2199,82 @@ fn fixpoint_iter_budget() -> usize {
         .unwrap_or(1 << 20) // ~1M iterations; a counter's steps are cheap (small BDD) so this is fast to reach
 }
 
-/// Default CAP for [`fixpoint_node_budget`], applied as `min(cap, BddBitBlaster::node_budget)`.
+/// Default for the LATENCY bound's node half. Calibrated against every cone measured to DECIDE:
+/// a consumer's 26-block sweep tops out at 31.0 M, but those reach their peak in 1-36 iterations;
+/// the deepest decider (818 626 iterations) peaks at 7.98 M. So 10 M sits ABOVE every deep decider
+/// and BELOW the shallow-wide ones, which the iteration half then spares.
 ///
-/// **Calibrated, not chosen.** Measured peaks of cones that DECIDE: fixtures ≤ 82 k; the real
-/// `uart_msg_handler` `AG EF` lift 393 k / 524 k / 590 k as the target moves. `twocount32`, which
-/// never decides, grows ~1220 nodes/iteration without bound and passes 2 M at ~1640 iterations.
-/// So 2 M keeps ~3.4× headroom over the largest measured decider while still bailing the
-/// pathological shape deterministically.
-///
-/// **Provisional, and thin.** 3.4× is not much, and the largest cones that matter are a
-/// consumer's, not ours. `MUNUNU_BDD_REPORT_PEAK=1` exists so those can be measured rather than
-/// guessed; raise this once they are known. Err HIGH when in doubt: a too-low value costs a
-/// VERDICT, which is the mununu#553 defect itself, whereas a too-high one costs wall clock that
-/// the harness's own per-block timeout already bounds — and a harness timeout is reported AS a
-/// timeout and names the block, where a silent engine abstention is not.
-const FIXPOINT_NODE_BUDGET_DEFAULT: usize = 1 << 21;
+/// **⚠️ Calibrated on DESIGNS plus one TWIN, and the twin is what sets it.** The 7.98 M reading is
+/// a contrast twin (`video_timing_early_row`); the design's own peak in the same lane is **7 250**,
+/// three orders of magnitude lower. A mutated design has a different cone, so twins — not designs —
+/// set this ceiling, and only ONE of a consumer's 32 twins has been sampled. Revise on the twin
+/// maximum.
+const FIXPOINT_NODE_SOFT_DEFAULT: usize = 10_000_000;
 
-/// The exact-engine fixpoint LIVE-NODE budget: `MUNUNU_BDD_FIXPOINT_NODES`, else
-/// [`FIXPOINT_NODE_BUDGET_DEFAULT`]. The deterministic guard that replaced the wall-clock default
-/// in mununu#553; see [`ExactModel::fixpoint_node_budget`] for the measurement behind the currency.
+/// Default for the LATENCY bound's iteration half. Every measured WIDE decider converges in ≤ 36
+/// iterations, so 5 000 spares them by two orders of magnitude while a non-converging counter is
+/// still climbing at 8 190.
+const FIXPOINT_ITER_SOFT_DEFAULT: usize = 5_000;
+
+/// The LATENCY bound's iteration half: `MUNUNU_BDD_FIXPOINT_ITERS`, else
+/// [`FIXPOINT_ITER_SOFT_DEFAULT`]. `0` disables the latency bound entirely (the arena-safety net
+/// still applies).
+fn fixpoint_iter_soft() -> usize {
+    match std::env::var("MUNUNU_BDD_FIXPOINT_ITERS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+    {
+        Some(0) | None => FIXPOINT_ITER_SOFT_DEFAULT,
+        Some(n) => n,
+    }
+}
+
+/// The LATENCY bound's node half: `MUNUNU_BDD_FIXPOINT_NODES`, else [`FIXPOINT_NODE_SOFT_DEFAULT`],
+/// clamped to the arena-safety ceiling. Fires only in CONJUNCTION with the iteration half.
 ///
-/// This is the caller-facing CAP only — [`BddBitBlaster::exact_model_partitioned`] applies it as
-/// `min(cap, node_budget)`, because a fixpoint budget ABOVE the blaster's arena-derived
-/// [`node_budget`](BddBitBlaster::node_budget) would let the fixpoint exhaust the OxiDD arena
-/// before this guard could fire — trading a clean abstain for the uncatchable allocation-`unwrap`
-/// SIGABRT that the node budget exists to prevent. `0` therefore means "no fixpoint-specific cap,
-/// fall back to the arena-derived budget", NOT "unbounded": unbounded is not on offer here, and to
-/// raise the real ceiling you must raise `MUNUNU_BDD_ARENA_NODES` too.
+/// **Why a conjunction, and why not a single number.** mununu#553 tried four single scalars and a
+/// consumer's 26-block / 536-reading sweep refuted every one on the same property — a 640x480
+/// raster wrap, reproduced in-repo by `probe_553_raster_wrap_is_deep_and_wide` to within 0.1 %.
+/// Deciders and non-deciders OVERLAP 6.2x in node count (a 31.0 M cone decides; a 5.0 M one never
+/// does), so no node threshold orders them, and no iteration threshold does either (818 626
+/// iterations decides; ~2^32 does not).
+///
+/// What DOES separate them is being large *and still growing*. A cone that reaches 31 M in 13
+/// iterations has converged; one still climbing at 8 190 has not.
+///
+/// **This bound is about LATENCY, not decidability.** Deciding whether a fixpoint converges from a
+/// prefix of it is not available to us. What is available is noticing that a run has passed the
+/// envelope of every cone ever observed to converge, and stopping — deterministically, at the same
+/// step on every machine. Measured on `twocount32`: bail at step 8 190 on three consecutive runs,
+/// durations 291 / 283 / 262 s.
+///
+/// **Why it must exist at all.** Without it the exact engine grinds to the arena-safety ceiling —
+/// ~44 000 iterations, hours — and `sv verify-auto` calls the engine DIRECTLY (verify_auto.rs:3158,
+/// :4103), with no portfolio early-return to absorb it. The 15-minute per-property and 1-hour
+/// whole-run wall budgets then fire instead, producing a host-dependent `unknown`: mununu#553's own
+/// defect, one layer up. A generous bound does not merely cost time here, it reintroduces the bug.
 fn fixpoint_node_budget() -> usize {
     match std::env::var("MUNUNU_BDD_FIXPOINT_NODES")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
     {
+        // `0` disables the latency bound's node half (⇒ it never fires); the arena-safety net
+        // still applies, because exceeding the arena is not a budget question but a crash.
         Some(0) => usize::MAX,
+        None => FIXPOINT_NODE_SOFT_DEFAULT,
         Some(n) => n,
-        None => FIXPOINT_NODE_BUDGET_DEFAULT,
     }
 }
 
 /// The exact-engine OPT-IN wall-clock backstop: `MUNUNU_BDD_TIME_BUDGET_MS`, **default `0` =
 /// disabled** since mununu#553. It used to default to 10 s, which made the verdict depend on how
 /// fast the host was: the same command could decide on one machine and report ⊥ on another, and the
-/// report could not tell that ⊥ from a real one. [`fixpoint_node_budget`] now does the job it was
-/// standing in for, deterministically. This remains for a caller who wants a hard time ceiling
-/// anyway — and says so in its abstention message, because such a verdict is not reproducible.
+/// report could not tell that ⊥ from a real one. Measured on a consumer's 71-check lane, turning it
+/// off moved three properties and every one of them toward DECIDED — including an `AG EF`
+/// recoverability guarantee on a block whose contract had read "TIER 3 IS THEREFORE NOT ESTABLISHED
+/// FOR THIS BLOCK" since the card shipped. The clock was not buying speed, it was buying
+/// abstentions. This remains for a caller who wants a hard time ceiling anyway — and says so in its
+/// abstention message, because such a verdict is not reproducible.
 fn exact_time_budget() -> Option<std::time::Duration> {
     let ms = std::env::var("MUNUNU_BDD_TIME_BUDGET_MS")
         .ok()
@@ -2268,8 +2367,9 @@ impl BddBitBlaster {
             iter_budget: fixpoint_iter_budget(),
             iters: std::cell::Cell::new(0),
             manager: self._manager.clone(),
-            // Never above the arena-derived node budget — see `fixpoint_node_budget`.
-            fixpoint_node_budget: fixpoint_node_budget().min(self.node_budget),
+            arena_safety_budget: self.arena_nodes * 8 / 10,
+            node_soft: fixpoint_node_budget().min(self.arena_nodes * 8 / 10),
+            iter_soft: fixpoint_iter_soft(),
             peak_nodes: std::cell::Cell::new(0),
             deadline: exact_time_budget().map(|d| std::time::Instant::now() + d),
         }
@@ -2579,14 +2679,18 @@ impl ExactModel {
         // to 590 k (a real `uart_msg_handler` lift), and a default calibrated on the fixtures alone
         // would silently kill the real verdict. One line per `evaluate`, off unless asked.
         //
-        // Granularity: `approx_num_inner_nodes` accounts in ~2^16 chunks (every measured peak is
-        // ≡ 1 mod 65536), so read it as "this many nodes, to the nearest chunk".
+        // Reproducibility, stated with its limit. For a fixed (design, property, config) the peak
+        // reproduces across runs — but NOT always byte-exactly: a consumer measured one property at
+        // 7,980,029 / 7,979,366 / 7,979,343 across three runs (a 686-node spread, 0.009%) while a
+        // second property in the same runs was byte-identical and the ITERATION counts were
+        // identical in every case. So treat the peak as reproducible to ~0.01%, not to the byte,
+        // and do not build anything on exact equality of node counts.
         if std::env::var_os("MUNUNU_BDD_REPORT_PEAK").is_some() {
             eprintln!(
                 "[mununu#553] exact fixpoint: peak {} live BDD nodes in {} iteration(s), budget {}",
                 self.peak_nodes.get(),
                 self.iters.get(),
-                self.fixpoint_node_budget
+                self.node_soft
             );
         }
         r
@@ -2718,16 +2822,29 @@ impl ExactModel {
             if live > self.peak_nodes.get() {
                 self.peak_nodes.set(live);
             }
-            if live > self.fixpoint_node_budget {
+            // HARD arena-safety net. Exceeding the arena is not a budget question but a crash.
+            if live > self.arena_safety_budget {
                 return Err(format!(
-                    "symbolic bit-blaster: abstained on the fixpoint NODE budget ({live} of {} \
-                     live BDD nodes, at fixpoint step {n}) — the property's reachable set does not \
-                     compress to a tractable BDD. This bound is DETERMINISTIC: the same command \
-                     abstains here on any machine. Raise MUNUNU_BDD_FIXPOINT_NODES (and, past the \
-                     arena-derived ceiling, MUNUNU_BDD_ARENA_NODES with it), or use \
-                     `--engine explicit`. MUNUNU_BDD_REPORT_PEAK=1 reports how much headroom the \
-                     cone actually needs",
-                    self.fixpoint_node_budget
+                    "symbolic bit-blaster: abstained on the ARENA-SAFETY bound ({live} of {} live \
+                     BDD nodes, at fixpoint step {n}) — continuing risks exhausting the OxiDD \
+                     arena inside a single apply, which aborts the process uncatchably. Raise \
+                     MUNUNU_BDD_ARENA_NODES",
+                    self.arena_safety_budget
+                ));
+            }
+            // LATENCY bound — WIDE *and* DEEP. Neither half alone separates the measured cases:
+            // a 31 M-node cone DECIDES in 13 iterations, and an 818 626-iteration cone DECIDES at
+            // 7.98 M. Only their conjunction picks out the shape that is both large and still
+            // growing, which is the one that never converges.
+            if live > self.node_soft && n > self.iter_soft {
+                return Err(format!(
+                    "symbolic bit-blaster: abstained on the fixpoint LATENCY bound ({live} live \
+                     BDD nodes past {}, at step {n} past {}) — the reachable set is both large and \
+                     still growing, so it is not converging. The bail POINT is DETERMINISTIC (same \
+                     step on any machine); only its duration varies. Raise \
+                     MUNUNU_BDD_FIXPOINT_NODES / MUNUNU_BDD_FIXPOINT_ITERS, or use \
+                     `--engine explicit`. MUNUNU_BDD_REPORT_PEAK=1 reports the headroom needed",
+                    self.node_soft, self.iter_soft
                 ));
             }
             // OPT-IN wall-clock backstop (`MUNUNU_BDD_TIME_BUDGET_MS`, default OFF since #553 — it
@@ -6124,6 +6241,100 @@ mod tests {
             );
         }
         eprintln!("===== end #553 raster probe =====\n");
+    }
+
+    /// mununu#553 follow-up PROBE — is the REPRESENTATION-bound (wide) class order-sensitive?
+    ///
+    /// The consumer sweep split the hard cases in two. ITERATION-bound cones (`video_timing`:
+    /// 818 626 iterations, 10 nodes/iter) cannot be helped by variable ordering — the fixpoint depth
+    /// is the reachability diameter, an invariant of the transition system, which
+    /// `measure_bdd_actual_size` establishes. But REPRESENTATION-bound cones (`tlm_tx`: **20 185 089
+    /// nodes in ONE iteration**) had never been tested against ordering at all, and our order has
+    /// only ever been CELL-MAJOR.
+    ///
+    /// Two synthetic shapes, because they answer different halves of the question:
+    ///
+    /// - **RELATIONAL** (`bad = (a == b)`, two held registers). The textbook order-sensitive
+    ///   function: cell-major must remember all of `a` before it sees any of `b`, so Θ(2^n);
+    ///   interleaved compares bit by bit, O(n). If the wide class looks like this, a STATIC
+    ///   interleaved order is the lever — cheap, no `&mut Manager`, no interaction with the open
+    ///   OxiDD recursion bug.
+    /// - **ARITHMETIC** (`bad = (a * b == k)`). Multiplication has exponential BDD size under EVERY
+    ///   variable order (Bryant 1986), so this one must NOT improve. If the wide class looks like
+    ///   this instead, no ordering helps and the lever is W2' — teaching `BddBitBlaster` to honour
+    ///   the UF policy the predicate-cube path already honours (`uf_substitute` is a no-op stub
+    ///   here, so the exact engine bit-blasts multipliers in full).
+    ///
+    /// Run BOTH orders and compare:
+    /// ```text
+    /// cargo test -p mununu-core --lib probe_553_var_order_on_wide_class -- --ignored --nocapture
+    /// MUNUNU_BDD_VAR_ORDER=interleaved cargo test -p mununu-core --lib probe_553_var_order_on_wide_class -- --ignored --nocapture
+    /// ```
+    ///
+    /// engine: `exact-symbolic` (full-state ROBDD, OxiDD), bit-blast + `EF(bad)` fixpoint.
+    #[test]
+    #[ignore = "probe: mununu#553 variable-order sensitivity; run with --ignored --nocapture"]
+    fn probe_553_var_order_on_wide_class() {
+        let order = std::env::var("MUNUNU_BDD_VAR_ORDER").unwrap_or_else(|_| "cell-major".into());
+        eprintln!("\n===== #553 var-order probe — ORDER = {order} =====");
+        eprintln!(
+            "{:<26} {:>6} {:>14} {:>10}",
+            "shape", "n", "peak nodes", "ms"
+        );
+
+        // RELATIONAL: two held n-bit registers, `bad = (a == b)`. Held ⇒ the fixpoint saturates in
+        // a couple of iterations, so peak nodes measure the REPRESENTATION, not the depth.
+        for n in [8u32, 12, 16, 18] {
+            let src = format!(
+                "1 sort bitvec 1\n2 sort bitvec {n}\n3 state 2 a\n4 state 2 b\n5 eq 1 3 4\n6 bad 5\n"
+            );
+            let t0 = std::time::Instant::now();
+            let peak = match parser::parse(&src)
+                .ok()
+                .and_then(|f| BddBitBlaster::build(&f).ok())
+            {
+                Some(bb) => bb
+                    ._manager
+                    .with_manager_shared(|m| m.approx_num_inner_nodes())
+                    .to_string(),
+                None => "BUILD FAILED".into(),
+            };
+            eprintln!(
+                "{:<26} {:>6} {:>14} {:>10}",
+                "relational a==b",
+                n,
+                peak,
+                t0.elapsed().as_millis()
+            );
+        }
+
+        // ARITHMETIC: `bad = (a * b == 1)`. Order-IMMUNE by Bryant 1986 — this row is the control.
+        // If interleaving "improves" it, the experiment is measuring something else.
+        for n in [8u32, 10, 12] {
+            let src = format!(
+                "1 sort bitvec 1\n2 sort bitvec {n}\n3 state 2 a\n4 state 2 b\n\
+                 5 mul 2 3 4\n6 one 2\n7 eq 1 5 6\n8 bad 7\n"
+            );
+            let t0 = std::time::Instant::now();
+            let peak = match parser::parse(&src)
+                .ok()
+                .and_then(|f| BddBitBlaster::build(&f).ok())
+            {
+                Some(bb) => bb
+                    ._manager
+                    .with_manager_shared(|m| m.approx_num_inner_nodes())
+                    .to_string(),
+                None => "BUILD FAILED/ABSTAINED".into(),
+            };
+            eprintln!(
+                "{:<26} {:>6} {:>14} {:>10}",
+                "arithmetic a*b==1 (control)",
+                n,
+                peak,
+                t0.elapsed().as_millis()
+            );
+        }
+        eprintln!("===== end var-order probe ({order}) =====\n");
     }
 
     /// A.4 — `ef_target_atoms` names the reachability target of a bare `EF p`
