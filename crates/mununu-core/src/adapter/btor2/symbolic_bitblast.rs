@@ -6036,6 +6036,96 @@ mod tests {
         eprintln!("===== end #553 probe =====\n");
     }
 
+    /// mununu#553 PROBE — the DISCRIMINATING shape, in-repo. A raster counter pair (`hcount`
+    /// wraps at `H`, `vcount` advances on that wrap and wraps at `V`) reproduces the one property
+    /// that refuted every budget we proposed: the consumer's `a_frame_wraps_at_total`, a nine-line
+    /// SVA about a 640x480 raster, measured at **7 980 029 nodes in 818 626 iterations — DEEP AND
+    /// WIDE — and it DECIDES**.
+    ///
+    /// It is the counterexample to all four candidate budgets, which is why it is worth having here
+    /// rather than only in a consumer's lane:
+    ///
+    /// | budget | what it does to this property |
+    /// |---|---|
+    /// | wall clock (10 s default) | abstained — the original mununu#553 defect |
+    /// | iteration/diameter cap (~1000, to bail `twocount32` fast) | would cut it at 818 626 |
+    /// | live-node cap (2 M) | 3.8x over |
+    /// | 2-D `nodes AND iters` | exceeds BOTH thresholds whenever `twocount32` does |
+    ///
+    /// engine: `exact-symbolic` (full-state ROBDD, OxiDD) — `reach_diameter_to`'s bounded
+    /// `EF(target)` fixpoint, no budgets. Role: measurement.
+    #[test]
+    #[ignore = "probe: mununu#553 discriminating shape; run with --ignored --nocapture"]
+    fn probe_553_raster_wrap_is_deep_and_wide() {
+        /// `hcount` wraps at `h`; `vcount` advances on that wrap and wraps at `v`. Backward reach to
+        /// the frame-end state is ~`h*v` steps — deep — over a cone wide enough not to compress.
+        fn raster(hb: u32, h: u64, vb: u32, v: u64) -> String {
+            format!(
+                "1 sort bitvec 1\n2 sort bitvec {hb}\n3 sort bitvec {vb}\n\
+                 4 state 2 hcount\n5 state 3 vcount\n\
+                 6 zero 2\n7 zero 3\n8 init 2 4 6\n9 init 3 5 7\n\
+                 10 constd 2 {}\n11 constd 3 {}\n\
+                 12 eq 1 4 10\n13 eq 1 5 11\n\
+                 14 one 2\n15 one 3\n16 add 2 4 14\n17 add 3 5 15\n\
+                 18 ite 2 12 6 16\n19 next 2 4 18\n\
+                 20 ite 3 13 7 17\n21 ite 3 12 20 5\n22 next 3 5 21\n",
+                h - 1,
+                v - 1
+            )
+        }
+
+        eprintln!("\n===== #553 probe: the raster-wrap discriminating shape =====");
+        eprintln!(
+            "{:<24} {:>10} {:>12} {:>10} {:>12}",
+            "raster (h x v)", "iters", "peak nodes", "ms", "nodes/iter"
+        );
+        for (hb, h, vb, v) in [
+            (7u32, 100u64, 7u32, 50u64),
+            (10, 800, 10, 50),
+            (10, 800, 10, 200),
+            (10, 800, 10, 525),
+        ] {
+            let src = raster(hb, h, vb, v);
+            let file = parser::parse(&src).expect("parse raster");
+            let bb = BddBitBlaster::build(&file).expect("build raster");
+            let hend = bb
+                .predicate_bdd(&PredicateExpr::Cmp {
+                    register: "hcount".into(),
+                    op: CmpOp::Eq,
+                    value: h - 1,
+                })
+                .expect("hcount target");
+            let vend = bb
+                .predicate_bdd(&PredicateExpr::Cmp {
+                    register: "vcount".into(),
+                    op: CmpOp::Eq,
+                    value: v - 1,
+                })
+                .expect("vcount target");
+            let target = hend.and(&vend).expect("frame-end cube");
+            let model = bb.exact_model();
+            let t0 = std::time::Instant::now();
+            // k_max generously above h*v so the fixpoint SATURATES — we want the true depth.
+            let est = model.reach_diameter_to(&target, (h * v * 2 + 64) as usize);
+            let iters = match est {
+                DiameterEstimate::Saturated(d) => d,
+                DiameterEstimate::ExceedsBound(k) => k,
+            };
+            let live = bb
+                ._manager
+                .with_manager_shared(|m| m.approx_num_inner_nodes());
+            eprintln!(
+                "{:<24} {:>10} {:>12} {:>10} {:>12.1}",
+                format!("{h} x {v}"),
+                iters,
+                live,
+                t0.elapsed().as_millis(),
+                (live as f64) / (iters.max(1) as f64),
+            );
+        }
+        eprintln!("===== end #553 raster probe =====\n");
+    }
+
     /// A.4 — `ef_target_atoms` names the reachability target of a bare `EF p`
     /// (`μX. (p ∨ ◇X)`), whose violation is the "target unreachable" repair witness,
     /// and returns `None` for the liveness/recoverability shapes (which carry a concrete
