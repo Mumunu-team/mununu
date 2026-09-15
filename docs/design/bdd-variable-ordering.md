@@ -505,3 +505,72 @@ MUNUNU_BDD_VAR_ORDER=auto MUNUNU_BDD_ORDER_DEBUG=1 mununu btor2 verify-recoverab
   # 24-bit cone -> "not probing: under the 64-bit gate"
   # 83-bit cone -> "cell-major kept (challenger abandoned)"
 ```
+
+## ❌ SIFTING: EVALUATED AND DROPPED (2026-09-15) — the upstream primitive corrupts refcounts
+
+Dynamic reordering (Rudell sifting) is the textbook answer to "we cannot pick an order statically",
+and seven static predictors died here before anyone looked at it. It was evaluated properly and
+**dropped**. Recording the mechanism, because *"we looked at sifting and decided against it"* is worth
+far less to the next reader than the line number.
+
+### What `oxidd` 0.11 actually provides
+
+`oxidd-reorder` **is already a non-optional dependency of `oxidd`** — compiled into every build, just
+not re-exported from the facade. It ships `set_var_order` / `set_var_order_seq` (impose a given
+order) and `level_down` (the adjacent-swap primitive a sifting loop would be built from). It ships
+**no sifting heuristic**; upstream's README calls adding one "a low-hanging fruit". Every bound we
+need is satisfied: `ManagerRef::with_manager_exclusive` gives `&mut`, `oxidd_manager_index`
+implements `HasWorkers`, and `oxidd::bdd` is built on `NodeWithLevelCons`.
+
+### ⛔ And it aborts on the first real level swap
+
+| probe | result |
+|---|---|
+| identity permutation, 24 vars (zero swaps) | **survived** |
+| real permutation, **4 vars**, tiny diagram | **SIGABRT** |
+
+```
+assertion failed: _old_rc > 1
+`Edge`s must not be dropped. Use `Manager::drop_edge()`.
+FATAL: Some operation in `oxidd_reorder::level_down` panicked. Aborting.
+```
+
+Structural — not size, not arena occupancy, not our permutation arithmetic, not our held
+`BDDFunction` handles (identity enters the same `reorder()` bracket and is fine).
+
+**And the release-build behaviour is worse than the abort.** `debug_assert!(_old_rc > 1)`
+(`oxidd-manager-index/src/manager.rs:755`) is compiled out of a release build — which is what mununu
+ships. So this is a reference-count **underflow** that aborts loudly in a debug test build and
+**silently corrupts the node store in release**. Adopting it would reintroduce exactly the
+uncatchable-abort class mununu#553 spent effort removing, and worse: a quiet variant.
+
+**Probable cause, localised:** `level_down` does `let old_upper = LevelView::take(&mut lower)`
+(lib.rs:54), iterates it (:56) and reads from it (:116), then lets it fall out of scope **without
+ever draining or releasing the edges it still holds** — while the nodes it handed on were
+`clone_edge`'d rather than moved.
+
+**Circumstantial support that this path is unexercised:** `oxidd-reorder` 0.6.1 ships **no tests**;
+`LevelView::swap` has no caller anywhere in the shipped crates except `level_down` itself; and
+`set_var_order`'s only in-tree consumer is `oxidd-dump`'s dddmp importer, i.e. freshly-imported
+diagrams. Upstream's "low-hanging fruit" refers to writing the sifting LOOP — it is not a claim that
+the primitive can carry one.
+
+### Why we did not fork
+
+A local patch of `oxidd-reorder` alone is genuinely tractable — **717 lines**, one suspect function,
+against **14,670** for oxidd as a whole. It was still the wrong trade, for a reason that has nothing
+to do with the bug:
+
+**A size-minimising sifter is predicted to score 3 of 4 on our corpus — the same as the default we
+already ship for free.** `sdram_burst` is the case that decides it: near-equal diagrams under both
+orders (60.8 M vs 56.5 M, and both readings arena-contaminated) while the WORK differs **13.4×**. Size
+and cost provably diverge exactly where a chooser is most needed, and sifting optimises size.
+
+So forking a BDD library would buy a mechanism we predict cannot beat `MUNUNU_BDD_VAR_ORDER=interleaved`.
+
+### What survived
+
+`ExactModel`'s peak report now prints the **collected live count beside the allocated peak**. The gap
+between the two *is* the garbage, so a reader can finally tell whether a peak means anything — which
+is mununu#557's residue, and the instrument a consumer needed when they could not tell which budget
+was binding.

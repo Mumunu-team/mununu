@@ -341,6 +341,23 @@ impl BddBitBlaster {
         )
     }
 
+    /// Live node count, GC'd first.
+    ///
+    /// ⚠️ **NOT `approx_num_inner_nodes`.** That counter is allocated-INCLUDING-DEAD, so on a cone
+    /// at GC equilibrium it reports the ARENA rather than the diagram — measured 84-90% occupancy
+    /// across 33 M / 67 M / 134 M arenas on the same block (the defect behind mununu#557). Any
+    /// size comparison must collect first, and `num_inner_nodes` then sums the unique tables.
+    ///
+    /// This is the instrument a sifting heuristic would need thousands of times per pass, which is
+    /// why Stage 1 is not merely "write the loop": a GC per measurement may be too expensive, and
+    /// that is an open question rather than a solved one.
+    pub fn live_node_count(&self) -> usize {
+        self._manager.with_manager_shared(|m| {
+            m.gc();
+            m.num_inner_nodes()
+        })
+    }
+
     /// mununu#553 — build with the variable order given EXPLICITLY rather than read from the
     /// environment.
     ///
@@ -2888,10 +2905,19 @@ impl ExactModel {
             oxidd::bdd::print_stats();
         }
         if std::env::var_os("MUNUNU_BDD_REPORT_PEAK").is_some() {
+            // mununu#557 residue — the peak is ALLOCATED-INCLUDING-DEAD, so on a cone at GC
+            // equilibrium it tracks the ARENA rather than the diagram (measured 84-90% occupancy
+            // across 33 M / 67 M / 134 M arenas on one block). Printing it alone invited sizing
+            // decisions on garbage. So print the COLLECTED live count beside it: the gap between
+            // the two IS the garbage, and a reader can now see whether the peak means anything.
+            let live = self.manager.with_manager_shared(|m| {
+                m.gc();
+                m.num_inner_nodes()
+            });
             eprintln!(
                 "[mununu#553] exact fixpoint: peak {} ALLOCATED BDD nodes (incl. any awaiting \
-                 collection — an UPPER BOUND on the cone, not a measurement of it) in {} \
-                 iteration(s), budget {}",
+                 collection — an UPPER BOUND on the cone, not a measurement of it); {live} LIVE \
+                 after collection; in {} iteration(s), budget {}",
                 self.peak_nodes.get(),
                 self.iters.get(),
                 self.node_soft
@@ -10138,6 +10164,114 @@ mod tests {
             exact_env_strategy(POSITIONAL_TRAP, "not a valid atom").expect("runs"),
             EnvStrategyOutcome::Inapplicable(_)
         ));
+    }
+
+    /// E-1 — does building SECOND, into a process already carrying another arena, inflate the
+    /// APPLY-CALL count?
+    ///
+    /// **ONE ARM PER PROCESS, selected by `MUNUNU_E1_ARM`.** That is not a convenience — it is
+    /// forced twice over:
+    ///
+    /// 1. **Arm 0 is "a process that never built `cm`".** Three arms in one process cannot deliver
+    ///    it: by the time A and B run, the process HAS built `cm`; and if 0 runs first, A and B
+    ///    then run in a process already churned by 0. My first draft had all three in one test and
+    ///    was wrong on its own terms.
+    /// 2. **The counters are not readable in-process.** `oxidd_rules_bdd`'s `StatCounters` is
+    ///    private and `oxidd::bdd::print_stats()` returns `()`, printing to stderr — and it
+    ///    `swap(0, ..)`s as it goes, so it is read-AND-RESET. A before/after delta inside one test
+    ///    is not available at all.
+    ///
+    /// **What it decides.** The apply-call race is the only successor design either session has
+    /// called both *measuring* and *repeatable*: apply calls reproduced BYTE-IDENTICALLY at load
+    /// 1.7 and at load 4-6 (573,268 twice on `tlm_tx`). But `tlm_tx`'s interleaved BUILD is
+    /// bimodal — 240 ms once, >4,791 ms twice at identical settings — and the fast run was 20x
+    /// INSIDE its own deadline, so the deadline logic is not the cause. If that variance reaches
+    /// the WORK, a work-based race inherits the defect it was meant to escape.
+    ///
+    /// **The mechanism, corrected once.** NOT "the challenger starts in an arena already holding
+    /// the incumbent's nodes" — `bdd::new_manager` is called once per build, so each gets a fresh
+    /// arena AND its own identically-sized apply cache. What is true is that the PROCESS holds two
+    /// arenas at once. That costs wall time; whether it costs logical apply calls is the question.
+    ///
+    /// | arm | setup | |
+    /// |---|---|---|
+    /// | `0` | `il` alone, `cm` NEVER built | **the control** |
+    /// | `A` | `cm` built and KEPT ALIVE, then `il` | two arenas resident |
+    /// | `B` | `cm` built, DROPPED, then `il` | one arena, allocator churned |
+    ///
+    /// `A == B == 0` ⇒ immune, the race survives. `A > B == 0` ⇒ cache eviction under 2x
+    /// footprint. **`A == B > 0` ⇒ allocator churn from having built `cm` AT ALL** — which nobody
+    /// proposed, and which would survive every design that builds two orders in one process, the
+    /// apply-call race included. Without arm 0 that outcome is invisible. (Arm 0 is monono-45's
+    /// addition; I specified A/B with no control, one turn after writing that a control is what
+    /// licenses reading the other rows.)
+    ///
+    /// **PRE-REGISTERED before any number exists:** byte-identical across repeats of the same arm
+    /// is expected, and any non-zero spread is a FINDING, not a tolerance to absorb. A neighbouring
+    /// quantity here already drifts — one property's peak read 7,980,029 / 7,979,366 / 7,979,343
+    /// (0.009%) while a second in the same runs was byte-identical — so stability is per-quantity
+    /// and must be established, not assumed. **A within-arm drift refutes the race's premise and
+    /// makes the between-arm comparison meaningless; report it first.**
+    ///
+    /// ```text
+    /// for arm in 0 A B; do for r in 1 2; do
+    ///   MUNUNU_E1_ARM=$arm MUNUNU_BDD_STATS=1 \
+    ///   cargo test -p mununu-core --lib --features oxidd-statistics \
+    ///     probe_e1_apply_calls_by_arm -- --ignored --nocapture 2>&1 | grep -E "E-1|And"
+    /// done; done
+    /// ```
+    #[test]
+    #[ignore = "E-1 probe: one arm per process via MUNUNU_E1_ARM=0|A|B; needs --features oxidd-statistics"]
+    fn probe_e1_apply_calls_by_arm() {
+        let arm = std::env::var("MUNUNU_E1_ARM").unwrap_or_else(|_| "0".into());
+        let file = symbolic_shift_12();
+
+        // Hold the incumbent for arm A so it is still ALIVE while the challenger builds; that is
+        // the only difference between A and B, and it must outlive the measured build.
+        let _incumbent = match arm.as_str() {
+            "A" => Some(BddBitBlaster::build_with_keep_and_order(&file, None, false).expect("cm")),
+            "B" => {
+                // Built and dropped: one arena resident, but the allocator has been churned
+                // through a full build and freed — which is NOT the same heap as one that never
+                // saw it. Distinguishing that from arm 0 is arm B's whole purpose.
+                drop(BddBitBlaster::build_with_keep_and_order(&file, None, false).expect("cm"));
+                None
+            }
+            _ => None, // arm 0: the control — `cm` is never built in this process
+        };
+
+        // Reset the counters so what prints below covers the MEASURED build only. `print_stats`
+        // is read-and-reset, so this discards everything the setup above accrued.
+        #[cfg(feature = "oxidd-statistics")]
+        {
+            eprintln!("[E-1] (discarding setup counters for arm {arm})");
+            oxidd::bdd::print_stats();
+        }
+
+        let il = BddBitBlaster::build_with_keep_and_order(&file, None, true).expect("il");
+        let size = il.live_node_count();
+
+        eprintln!("[E-1] arm={arm} interleaved build complete, live nodes={size}");
+        eprintln!("[E-1] apply-call counters for the MEASURED build follow:");
+        #[cfg(feature = "oxidd-statistics")]
+        oxidd::bdd::print_stats();
+        #[cfg(not(feature = "oxidd-statistics"))]
+        eprintln!(
+            "[E-1] *** built WITHOUT --features oxidd-statistics — no counters, arm is void ***"
+        );
+
+        drop(il);
+    }
+
+    /// A symbolic shift amount: the shape where the two orders differ most (65,537 nodes
+    /// cell-major against 1 interleaved at 12 bits). Used as the reorder fixture because a
+    /// small difference between arms is still legible against it.
+    fn symbolic_shift_12() -> Btor2File {
+        parser::parse(
+            "1 sort bitvec 1\n2 sort bitvec 12\n3 state 2 x\n4 state 2 k\n5 zero 2\n\
+             6 init 2 3 5\n7 srl 2 3 4\n8 next 2 3 7\n",
+        )
+        .expect("fixture parses")
     }
 
     /// B-1 REPRODUCER (2026-09-15): `0` must mean DISABLED on every budget knob.
