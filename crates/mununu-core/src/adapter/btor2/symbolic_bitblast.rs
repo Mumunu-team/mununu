@@ -2716,7 +2716,9 @@ impl ExactModel {
         // and do not build anything on exact equality of node counts.
         if std::env::var_os("MUNUNU_BDD_REPORT_PEAK").is_some() {
             eprintln!(
-                "[mununu#553] exact fixpoint: peak {} live BDD nodes in {} iteration(s), budget {}",
+                "[mununu#553] exact fixpoint: peak {} ALLOCATED BDD nodes (incl. any awaiting \
+                 collection — an UPPER BOUND on the cone, not a measurement of it) in {} \
+                 iteration(s), budget {}",
                 self.peak_nodes.get(),
                 self.iters.get(),
                 self.node_soft
@@ -2854,10 +2856,12 @@ impl ExactModel {
             // HARD arena-safety net. Exceeding the arena is not a budget question but a crash.
             if live > self.arena_safety_budget {
                 return Err(format!(
-                    "symbolic bit-blaster: abstained on the ARENA-SAFETY bound ({live} of {} live \
-                     BDD nodes, at fixpoint step {n}) — continuing risks exhausting the OxiDD \
-                     arena inside a single apply, which aborts the process uncatchably. Raise \
-                     MUNUNU_BDD_ARENA_NODES",
+                    "symbolic bit-blaster: abstained on the ARENA-SAFETY bound ({live} of {} \
+                     ALLOCATED BDD nodes — including any awaiting collection — at fixpoint step \
+                     {n}) — continuing risks exhausting the OxiDD arena inside a single apply, \
+                     which aborts the process uncatchably. This bound is about the RESOURCE, not \
+                     the property: it says the run is near the arena, not that the cone is \
+                     irreducible. Raise MUNUNU_BDD_ARENA_NODES",
                     self.arena_safety_budget
                 ));
             }
@@ -2867,12 +2871,19 @@ impl ExactModel {
             // growing, which is the one that never converges.
             if live > self.node_soft && n > self.iter_soft {
                 return Err(format!(
-                    "symbolic bit-blaster: abstained on the fixpoint LATENCY bound ({live} live \
-                     BDD nodes past {}, at step {n} past {}) — the reachable set is both large and \
-                     still growing, so it is not converging. The bail POINT is DETERMINISTIC (same \
-                     step on any machine); only its duration varies. Raise \
-                     MUNUNU_BDD_FIXPOINT_NODES / MUNUNU_BDD_FIXPOINT_ITERS, or use \
-                     `--engine explicit`. MUNUNU_BDD_REPORT_PEAK=1 reports the headroom needed",
+                    "symbolic bit-blaster: abstained on the fixpoint LATENCY bound ({live} \
+                     ALLOCATED BDD nodes past {}, at fixpoint step {n} past {}) — the reachable set is \
+                     large and still growing, so it is not converging within budget. READ THE \
+                     COUNT CAREFULLY: it is ALLOCATED nodes and INCLUDES nodes awaiting garbage \
+                     collection, so it is an UPPER BOUND on the cone, not a measurement of it — \
+                     measured, one cone read 1638401 allocated against 58415 live, 28x. This is \
+                     therefore NOT a claim that the property's cone is irreducible; it is a claim \
+                     that this run allocated past its budget. A cone at a collection equilibrium \
+                     sits at 85-90% of whatever arena it is given, in which case the figure tracks \
+                     the ARENA rather than the design. The bail POINT is DETERMINISTIC (same step \
+                     on any machine); only its duration varies. Raise MUNUNU_BDD_FIXPOINT_NODES / \
+                     MUNUNU_BDD_FIXPOINT_ITERS (and MUNUNU_BDD_ARENA_NODES past the arena-derived \
+                     ceiling), or use `--engine explicit`",
                     self.node_soft, self.iter_soft
                 ));
             }
