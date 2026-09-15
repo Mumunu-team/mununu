@@ -3170,18 +3170,25 @@ pub(crate) fn verify_auto_impl(
         );
         // Once EITHER budget has been hit, every remaining property abstains without work.
         if memory_budget_hit.is_some() || time_budget_hit {
-            // Not "never attempted" — a budget already stopped the run, and retrying with more
-            // budget IS the right response here.
-            report
-                .properties
-                .push(abstained(t, BottomReason::BudgetExpired));
+            // Not "never attempted" — a budget already stopped the run. WHICH budget is known
+            // here, so say it: the memory and wall-clock cases need opposite responses.
+            report.properties.push(abstained(
+                t,
+                if memory_budget_hit.is_some() {
+                    BottomReason::MemoryCeilingExceeded
+                } else {
+                    BottomReason::BudgetExpired
+                },
+            ));
             continue;
         }
         if let Err(hit) = crate::adapter::memory_budget::check_process_memory_budget() {
             memory_budget_hit = Some(hit);
+            // NOT `BudgetExpired` — that is the wall clock. #558 conflated them, so a consumer
+            // branching on the tag would retry an RSS exhaustion with more TIME.
             report
                 .properties
-                .push(abstained(t, BottomReason::BudgetExpired));
+                .push(abstained(t, BottomReason::MemoryCeilingExceeded));
             continue;
         }
         if run_budget.expired() {
@@ -4273,7 +4280,28 @@ pub enum BottomReason {
         /// What the isolation layer reported about the death.
         detail: String,
     },
-    /// A per-property or per-run **resource budget** expired (`ResourceBudgetExceeded`).
+    /// The self-imposed **process-RSS ceiling** was exceeded
+    /// (`MUNUNU_MAX_PROCESS_MEMORY_BYTES`).
+    ///
+    /// **Split out from [`Self::BudgetExpired`] because the two need OPPOSITE responses and were
+    /// briefly conflated** (shipped in #558, corrected here). Retrying with more *time* cannot help
+    /// an RSS exhaustion; more memory, a smaller cone, or a lower engine tier can.
+    ///
+    /// **It is host-dependent WITHOUT a clock**, which is what makes it easy to miss. RSS depends
+    /// on allocator state, other processes, and the cgroup — so the same command on the same commit
+    /// abstains on a loaded container and decides on a quiet one, with no wall clock anywhere in
+    /// the mechanism. Since mununu#504 C6 the ceiling is **AUTO** when a cgroup limit is detected
+    /// (80% of it), i.e. **on by default inside a container**, so this can fire without anyone
+    /// having configured it.
+    ///
+    /// Recorded in the N-track sweep as one of only two budget knobs that are on by default AND
+    /// host-dependent.
+    MemoryCeilingExceeded,
+    /// A per-property or per-run **wall-clock** budget expired (`ResourceBudgetExceeded`).
+    ///
+    /// ⚠️ **This is the WALL-CLOCK budget only.** The RSS ceiling is
+    /// [`Self::MemoryCeilingExceeded`] — do not merge them: retrying with more time is right here
+    /// and useless there.
     ///
     /// Distinct from [`Self::EngineDidNotComplete`], which is a whole-run engine failure carrying
     /// that engine's own message. This one is the harness budget, and it is the one case where
@@ -4294,6 +4322,7 @@ impl BottomReason {
             Self::EngineContradiction { .. } => "engine-contradiction",
             Self::EngineCrashed { .. } => "engine-crashed",
             Self::BudgetExpired => "budget-expired",
+            Self::MemoryCeilingExceeded => "memory-ceiling-exceeded",
             Self::NotAttempted => "not-attempted",
         }
     }
@@ -4318,8 +4347,13 @@ impl BottomReason {
             Self::EngineCrashed { detail } => {
                 format!("the engine process CRASHED (not an abstention): {detail}")
             }
-            Self::BudgetExpired => "a resource budget expired — this is the case where retrying \
-                 with more budget is the right response"
+            Self::BudgetExpired => "a WALL-CLOCK budget expired — retrying with more time is the \
+                 right response here"
+                .to_string(),
+            Self::MemoryCeilingExceeded => "the process-RSS ceiling was exceeded \
+                 (MUNUNU_MAX_PROCESS_MEMORY_BYTES) — retrying with more TIME cannot help; more \
+                 memory, a smaller cone, or a lower engine tier can. Host-dependent without a \
+                 clock: RSS varies with allocator state and neighbouring processes"
                 .to_string(),
             Self::NotAttempted => {
                 "never attempted — filtered out before any engine ran".to_string()
@@ -6060,6 +6094,55 @@ mod tests {
         assert_eq!(
             merged.properties[0].outcome,
             VerifyOutcome::Unknown { unknown_cells: 8 }
+        );
+    }
+
+    /// REPRODUCER: a MEMORY ceiling and a WALL-CLOCK budget must not share a tag.
+    ///
+    /// #558 shipped both as `budget-expired`. A consumer branching on the tag — which is what the
+    /// field exists for, and what a consumer said they were about to write — would retry an RSS
+    /// exhaustion with more TIME, which cannot help.
+    ///
+    /// The two are host-dependent by DIFFERENT mechanisms, which is why merging them also loses a
+    /// diagnostic: the clock is obvious, while RSS varies with allocator state and neighbouring
+    /// processes, so a memory abstention is host-dependent with no clock anywhere in it.
+    #[test]
+    fn a_memory_ceiling_is_not_a_wall_clock_budget() {
+        let mem = BottomReason::MemoryCeilingExceeded;
+        let clock = BottomReason::BudgetExpired;
+
+        assert_ne!(
+            mem.tag(),
+            clock.tag(),
+            "a gate cannot branch if an RSS exhaustion and a timeout share a tag"
+        );
+
+        let m = mem.one_line();
+        assert!(
+            m.contains("MUNUNU_MAX_PROCESS_MEMORY_BYTES"),
+            "must name the knob that fired: {m}"
+        );
+        assert!(
+            m.contains("cannot help"),
+            "must say retrying with more TIME does not help — the opposite of the clock case: {m}"
+        );
+
+        // Assert the DISTINCTION, not a prose fragment. An `||` over two line-wrappings of the
+        // same sentence is a test accommodating the formatter: it would stay green if the text
+        // changed meaning while keeping either substring. What must hold is that the two give
+        // OPPOSITE advice about retrying.
+        let c = clock.one_line();
+        assert!(
+            c.contains("WALL-CLOCK"),
+            "the clock case must name its axis, or a reader cannot tell it from the RSS one: {c}"
+        );
+        assert!(
+            !c.contains("cannot help"),
+            "the clock case must NOT say retrying is useless — that is the memory case: {c}"
+        );
+        assert!(
+            !m.contains("WALL-CLOCK"),
+            "the memory case must not claim a clock fired; RSS is host-dependent WITHOUT one: {m}"
         );
     }
 

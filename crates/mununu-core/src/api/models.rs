@@ -2054,7 +2054,8 @@ pub struct BottomReasonView {
     ///
     /// | tag | what a gate should do |
     /// |---|---|
-    /// | `budget-expired` | **retry with more budget** — the ONLY tag where that helps |
+    /// | `budget-expired` | **WALL-CLOCK budget** — retry with more time |
+    /// | `memory-ceiling-exceeded` | the process-RSS ceiling (`MUNUNU_MAX_PROCESS_MEMORY_BYTES`). **More TIME cannot help** — needs more memory, a smaller cone, or a lower tier. Host-dependent *without* a clock: RSS varies with allocator state and neighbours |
     /// | `engine-did-not-complete` | read `detail`: it names the engine's own budget and knob |
     /// | `engine-contradiction` | 🔴 **SOUNDNESS ALARM.** Two engines returned OPPOSITE definite verdicts; one is unsound. **Retrying is actively wrong.** Escalate, do not re-run |
     /// | `engine-crashed` | the engine process died. Not an abstention; report it |
