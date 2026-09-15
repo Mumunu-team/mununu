@@ -210,6 +210,7 @@ mod tests {
                     seeded_predicates: vec!["a == 1".into()],
                     counterexample: None,
                     bottom_reason: None,
+                    decided_by: None,
                 },
                 PropertyVerdict {
                     name: "p_violated".into(),
@@ -225,6 +226,7 @@ mod tests {
                         unreachable_target: vec!["b".into()],
                     }),
                     bottom_reason: None,
+                    decided_by: None,
                 },
                 PropertyVerdict {
                     name: "p_unknown".into(),
@@ -235,6 +237,7 @@ mod tests {
                     seeded_predicates: vec![],
                     counterexample: None,
                     bottom_reason: None,
+                    decided_by: None,
                 },
                 PropertyVerdict {
                     name: "p_skipped".into(),
@@ -247,6 +250,7 @@ mod tests {
                     seeded_predicates: vec![],
                     counterexample: None,
                     bottom_reason: None,
+                    decided_by: None,
                 },
             ],
             unsupported: vec![("u0".into(), "unsupported binary op: BinaryAnd".into())],

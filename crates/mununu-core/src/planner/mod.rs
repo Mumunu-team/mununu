@@ -911,6 +911,7 @@ mod tests {
                 seeded_predicates: Vec::new(),
                 counterexample: None,
                 bottom_reason: None,
+                decided_by: None,
             }],
             unsupported: Vec::new(),
             diagnostics: Default::default(),
@@ -1019,6 +1020,7 @@ mod tests {
                     seeded_predicates: Vec::new(),
                     counterexample: None,
                     bottom_reason: None,
+                    decided_by: None,
                 },
                 PropertyVerdict {
                     name: "p_ok".into(),
@@ -1029,6 +1031,7 @@ mod tests {
                     seeded_predicates: Vec::new(),
                     counterexample: None,
                     bottom_reason: None,
+                    decided_by: None,
                 },
             ],
             unsupported: Vec::new(),

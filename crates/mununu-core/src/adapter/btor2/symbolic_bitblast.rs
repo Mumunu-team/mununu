@@ -2907,17 +2907,36 @@ impl ExactModel {
         if std::env::var_os("MUNUNU_BDD_REPORT_PEAK").is_some() {
             // mununu#557 residue — the peak is ALLOCATED-INCLUDING-DEAD, so on a cone at GC
             // equilibrium it tracks the ARENA rather than the diagram (measured 84-90% occupancy
-            // across 33 M / 67 M / 134 M arenas on one block). Printing it alone invited sizing
-            // decisions on garbage. So print the COLLECTED live count beside it: the gap between
-            // the two IS the garbage, and a reader can now see whether the peak means anything.
+            // across 33 M / 67 M / 134 M arenas on one block).
+            //
+            // ⚠️ READ WHAT THIS SECOND NUMBER IS, because an earlier version of this comment got it
+            // wrong. It is collected AFTER the fixpoint returns, so it counts what SURVIVES — the
+            // transition relation and the persistent structures — NOT the property's cone, whose
+            // working set is transient and already collected by the time we look.
+            //
+            // Demonstrated: two DIFFERENT properties on one design (`bank_open_q == 0`, 4
+            // iterations; `wr_wait_q == 0`, 6 iterations) report BYTE-IDENTICAL live counts of
+            // 1,037,805 cell-major / 4,831,066 interleaved. Two properties cannot share a diagram;
+            // what they share is the relation.
+            //
+            // So the gap between the two numbers is NOT "the garbage". It is the transient
+            // fixpoint working set, which was legitimately live AT the peak and is dead only now.
+            // Measuring the true peak-live would require collecting AT the peak, which is exactly
+            // what mununu#557's three abandoned attempts foundered on (live-lock).
+            //
+            // What it IS good for: the relation's size under the current variable order, which is
+            // the structure every fixpoint operates over and is strongly order-dependent — 4.66x
+            // smaller cell-major on the block above, at 5.17 s against 40.92 s.
             let live = self.manager.with_manager_shared(|m| {
                 m.gc();
                 m.num_inner_nodes()
             });
             eprintln!(
                 "[mununu#553] exact fixpoint: peak {} ALLOCATED BDD nodes (incl. any awaiting \
-                 collection — an UPPER BOUND on the cone, not a measurement of it); {live} LIVE \
-                 after collection; in {} iteration(s), budget {}",
+                 collection — an UPPER BOUND on the cone, not a measurement of it); {live} live \
+                 AFTER the fixpoint (this is the RESIDUAL — relation + persistent structures, NOT \
+                 this property's cone, whose working set is already collected); in {} \
+                 iteration(s), budget {}",
                 self.peak_nodes.get(),
                 self.iters.get(),
                 self.node_soft

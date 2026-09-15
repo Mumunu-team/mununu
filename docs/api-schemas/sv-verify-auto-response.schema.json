@@ -16,7 +16,7 @@
           ]
         },
         "kind": {
-          "description": "Stable kebab-case tag for gates: `safety-shape-not-reducible` | `no-state-model-non-safety` | `engine-did-not-complete` | `unclassified-bottom`.\n\n**`safety-shape-not-reducible` is NOT a resource abstain** — that property's shape is outside the rescue lane and a bigger budget cannot help it. A gate that retries with raised budgets should branch on this tag, not on the outcome alone.",
+          "description": "Stable kebab-case tag for gates. **Branch on this, never on the outcome alone** — every value below previously produced an identical `unknown` with `unknown_cells: 0`.\n\n| tag | what a gate should do | |---|---| | `budget-expired` | **retry with more budget** — the ONLY tag where that helps | | `engine-did-not-complete` | read `detail`: it names the engine's own budget and knob | | `engine-contradiction` | 🔴 **SOUNDNESS ALARM.** Two engines returned OPPOSITE definite verdicts; one is unsound. **Retrying is actively wrong.** Escalate, do not re-run | | `engine-crashed` | the engine process died. Not an abstention; report it | | `safety-shape-not-reducible` | the property's SHAPE is outside the rescue lane — a bigger budget **cannot** help. Reshape, or add a reducer | | `no-state-model-non-safety` | zero state registers; a modelling issue, not an engine cap | | `not-attempted` | filtered out before any engine ran | | `unclassified-bottom` | cause not established — do **not** treat as distinct-from-abstain |\n\nA gate that retries every `unknown` with raised budgets spins forever on `safety-shape-not-reducible` and `no-state-model-non-safety`, and re-runs an unsoundness on `engine-contradiction`.",
           "type": "string"
         }
       },
@@ -223,6 +223,13 @@
             }
           ],
           "description": "D1.8b — a concrete stall-lasso counterexample, present only for a Violated bare `AF p` decided by the exact engine (`engine: \"exact-symbolic\"`)."
+        },
+        "decided_by": {
+          "description": "Which portfolio engine produced this property's DEFINITE verdict. `None` for `⊥`.\n\n**A verdict's PROVENANCE, per property.** The companion to `bottom_reason`: that says why a `⊥` happened, this says who answered when one did not.\n\n**Why a gate should read it even when the verdict is `holds`.** Measured: at high arena occupancy a run still returned `holds`, but the exact engine dropped out and an abstracting engine supplied the verdict — sound under that engine's posture, but the **precision tier moved silently**. A gate pinning `holds` sees `holds` either way. Comparing this field against the previous run is how a consumer notices.\n\nPreviously available only as `decided-by:<engine>=<count>` in a report-level note: an AGGREGATE, which cannot say WHICH property changed tier, and filterable besides.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "detail": {
           "description": "Human-readable detail: `\"N cell(s)\"` (violated/unknown) or the skip reason.\n\n**Prefer the structured fields below.** This is prose and stays only so existing consumers keep working; a gate that needs the figure should read `false_cells` / `unknown_cells` / `skip_reason` rather than parsing this string.",

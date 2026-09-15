@@ -451,6 +451,50 @@ probes, tight), so it is `tlm_tx`-specific.
 **A single timing from any of these three is worthless.** Two runs per arm minimum, wall/CPU recorded
 beside each.
 
+#### ✅ ANSWERED (E-1, 2026-09-15): the apply-call race is IMMUNE to it
+
+Three arms, one process each, two repeats, on a 24-variable synthetic:
+
+| arm | setup | `And` calls |
+|---|---|---|
+| **0** | `il` alone, `cm` NEVER built *(control)* | **2,146** |
+| **A** | `cm` built and KEPT ALIVE, then `il` | **2,146** |
+| **B** | `cm` built, DROPPED, then `il` | **2,146** |
+
+**Byte-identical within every arm** (the pre-registered expectation), across a load swing of
+10.83 → 10.12 — cache queries 1,420, hits 491, and the hit *percentages* agreeing to seven decimal
+places. Live nodes 130 in all three.
+
+So **building second — into a process holding another live arena, or one whose allocator has been
+churned through a full build and freed — does not change the work by a single apply call.** The
+structural argument holds: the apply cache is per-manager and identically sized, so the challenger's
+recursion cannot see what else the process is carrying. monono-45's reading (that a work-based race
+would be misled by the same mechanism) is refuted by their own instrument.
+
+Arm 0 was monono-45's addition and it earned its place: without it, `A == B` would have been read as
+"immune" while both could have been inflated against a process that never built `cm`. That outcome —
+`A == B > 0`, allocator churn from building the incumbent AT ALL — would have killed every
+two-orders-in-one-process design including the race, and my original A/B had no way to see it.
+
+**An unplanned bonus.** Arms A and B print the DISCARDED setup build, so the same design got measured
+under both orders in one process:
+
+| | `And` calls | hit rate |
+|---|---|---|
+| cell-major (setup) | **201,060** | 49.7% |
+| interleaved (measured) | **2,146** | 34.6% |
+
+**93.7× fewer apply calls at a WORSE hit rate** — the exact signature from the `sdram_burst` /
+barrel-shifter diagnosis, reproduced deterministically on an in-repo synthetic for the first time,
+with no consumer RTL involved.
+
+**What it does NOT establish.** `tlm_tx`'s 20× build-time bimodality is real and still unexplained —
+now narrowed to something that costs WALL TIME without costing apply calls (allocation, GC, or
+page/cache behaviour). And this is a 130-node diagram; the mechanism tested is process-level so size
+should not matter, but that is reasoning, not measurement.
+
+#### (superseded) The original open question
+
 #### ❓ An open question this raises about the apply-call race
 
 monono-45's reading is that an apply-call race would hit `tlm_tx`'s bimodality too, and would hide it
@@ -568,9 +612,99 @@ and cost provably diverge exactly where a chooser is most needed, and sifting op
 
 So forking a BDD library would buy a mechanism we predict cannot beat `MUNUNU_BDD_VAR_ORDER=interleaved`.
 
-### What survived
+### What survived — and what it actually measures, corrected
 
-`ExactModel`'s peak report now prints the **collected live count beside the allocated peak**. The gap
-between the two *is* the garbage, so a reader can finally tell whether a peak means anything — which
-is mununu#557's residue, and the instrument a consumer needed when they could not tell which budget
-was binding.
+`ExactModel`'s peak report now prints a **collected live count beside the allocated peak**.
+
+⚠️ **The first description of this was WRONG and it shipped in `f73a931`'s commit message.** It said
+*"the gap between the two IS the garbage"*. It is not. The count is collected **after the fixpoint
+returns**, so it measures what **survives** — the transition relation and persistent structures —
+**not the property's cone**, whose working set is transient and already collected by then.
+
+**The demonstration.** Two different properties on the same design report **byte-identical** live
+counts:
+
+| target | iters | live (cell-major) | live (interleaved) |
+|---|---|---|---|
+| `bank_open_q == 0` | 4 | 1,037,805 | 4,831,066 |
+| `wr_wait_q == 0` | 6 | **1,037,805** | **4,831,066** |
+
+Two properties cannot share a diagram. What they share is the relation.
+
+So the gap between the two printed numbers is the **transient fixpoint working set** — legitimately
+live *at* the peak, dead only by the time it is measured. Getting the true peak-live needs collection
+*at* the peak, which is precisely what mununu#557's three abandoned attempts foundered on
+(live-lock). **That problem is not solved and this instrument does not solve it.**
+
+**What it is genuinely good for:** the relation's size under the current variable order — the
+structure every fixpoint operates over, and strongly order-dependent. On the block above,
+**4.66× smaller under cell-major, at 5.17 s against 40.92 s**. That is a real result about why the
+order matters; it is just not a measurement of a cone.
+
+**Why this is worth recording rather than quietly fixing:** the instrument was built *specifically*
+because `approx_num_inner_nodes` measures something other than what its name suggests, and then its
+own output was described as something other than what it measures — in the commit that shipped it,
+and in this document. The same category error, one layer up.
+
+## ⚠️ PARTIALLY MEASURED (2026-09-15, late) — and the first version of this section was WRONG
+
+**Read the scope before the numbers.** `sdram_burst` carries 13 asserts; the figures quoted earlier
+in this document are from ONE of them, and the measurement below is from a DIFFERENT one.
+
+Measured with the collected live count (`f73a931`), arena 67,108,864, target `wr_wait_q == 0`,
+**6 iterations**:
+
+| order | allocated peak | **LIVE** | verdict |
+|---|---|---|---|
+| cell-major | 1,048,577 | **1,037,805** | HOLDS |
+| interleaved | 5,505,025 | **4,831,066** | HOLDS |
+
+**This is block 14, not block 12.** The identification is by ITERATION COUNT, not by name: in the
+consumer's per-property transcript, 6 iterations is unique to block 14 and 11 to block 12. Their
+allocated pair for block 14 (2,459,670 / 6,290,592) agrees with these live counts **in direction** —
+two instruments, same answer.
+
+⛔ **`wr_wait_q` is not in the consumer's SVA contract at all** — 6 hits in the design, 0 in the
+properties. So the target reached for here was never one of the properties that produced the quoted
+figures.
+
+### What is settled, and what is not
+
+| | |
+|---|---|
+| **block 14** (6 iters) | cell-major's diagram is **4.66× smaller**, and it is the cheaper order. Size and cost AGREE. |
+| **block 12** (11 iters) | **UNMEASURED.** The 60,801,327 / 56,613,659 pair lives only here. |
+
+Block 12's readings sit at **90.6% and 84.4% arena occupancy** — the GC-equilibrium band — so they
+remain untrustworthy *as diagram sizes*. But "untrustworthy" is not "and here are the true values":
+the true values are unknown, and the ones above belong to a different cone.
+
+**Why block 12 may genuinely differ, rather than merely being unmeasured** (the consumer's
+hypothesis, and it is a good one): 11 iterations and a peak an order of magnitude above every SVA
+property make it the tier-3 `@mununu_guarantee` — the nested `νY.((µX. …) ∧ □Y)`. That is an
+**alternating** fixpoint, a fundamentally different shape from the eleven safety cones, and there is
+no reason a size/cost correlation established on safety properties should carry to it.
+
+### Consequently, two earlier claims are UNSUPPORTED rather than corrected
+
+1. **"Size and cost agree on `sdram_burst`"** — holds for block 14 only.
+2. **The sifting cap of "3 of 4"** rested on the block-12 pair, so it is neither established nor
+   refuted. ⚠️ **The decision to drop sifting is unaffected**: `level_down`'s reference-count
+   underflow aborts in debug and silently corrupts the node store in release, reproducible at four
+   variables. That leg is independent and sufficient. It is the *stated justification* that was
+   over-claimed, in a commit message and here.
+
+### 🔴 An instrument constraint this surfaced, for `bottom_reason` / `decided_by`
+
+The consumer's transcript has **14 peak blocks against 13 asserts** — the nested annotation emits
+**two** fixpoint records, presumably inner and outer. **Any per-property field that a consumer maps
+positionally will be off by one on every block containing an alternating property.** A property that
+emits two records needs a defined mapping, and nothing currently defines one.
+
+### Why this section was wrong the first time
+
+It asserted the quoted figures were "garbage, 59× too high" and gave true values — from a cone that
+was never the one in question. The error was not the measurement but the JOIN: a block was matched by
+design name while 13 properties on that design have 13 different answers. Second consecutive
+correction of this passage to be wrong, and the first was in a commit message that has landed.
+

@@ -1913,6 +1913,7 @@ impl From<&crate::adapter::slang::verify_auto::AutoVerifyReport> for SvVerifyAut
                     false_cells,
                     unknown_cells,
                     skip_reason,
+                    decided_by: p.decided_by.clone(),
                     bottom_reason: p.bottom_reason.as_ref().map(|r| {
                         use crate::adapter::slang::verify_auto::BottomReason;
                         BottomReasonView {
@@ -2048,12 +2049,23 @@ pub struct ModelDiagnosticsView {
 /// reached the reader it was written for.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct BottomReasonView {
-    /// Stable kebab-case tag for gates: `safety-shape-not-reducible` | `no-state-model-non-safety`
-    /// | `engine-did-not-complete` | `unclassified-bottom`.
+    /// Stable kebab-case tag for gates. **Branch on this, never on the outcome alone** — every
+    /// value below previously produced an identical `unknown` with `unknown_cells: 0`.
     ///
-    /// **`safety-shape-not-reducible` is NOT a resource abstain** — that property's shape is
-    /// outside the rescue lane and a bigger budget cannot help it. A gate that retries with raised
-    /// budgets should branch on this tag, not on the outcome alone.
+    /// | tag | what a gate should do |
+    /// |---|---|
+    /// | `budget-expired` | **retry with more budget** — the ONLY tag where that helps |
+    /// | `engine-did-not-complete` | read `detail`: it names the engine's own budget and knob |
+    /// | `engine-contradiction` | 🔴 **SOUNDNESS ALARM.** Two engines returned OPPOSITE definite verdicts; one is unsound. **Retrying is actively wrong.** Escalate, do not re-run |
+    /// | `engine-crashed` | the engine process died. Not an abstention; report it |
+    /// | `safety-shape-not-reducible` | the property's SHAPE is outside the rescue lane — a bigger budget **cannot** help. Reshape, or add a reducer |
+    /// | `no-state-model-non-safety` | zero state registers; a modelling issue, not an engine cap |
+    /// | `not-attempted` | filtered out before any engine ran |
+    /// | `unclassified-bottom` | cause not established — do **not** treat as distinct-from-abstain |
+    ///
+    /// A gate that retries every `unknown` with raised budgets spins forever on
+    /// `safety-shape-not-reducible` and `no-state-model-non-safety`, and re-runs an unsoundness on
+    /// `engine-contradiction`.
     pub kind: String,
     /// Human-readable one-liner. For `engine-did-not-complete` this is the ENGINE'S OWN abstention
     /// message, which names the budget it hit and its numbers — e.g. *"abstained on the ITERATION
@@ -2112,6 +2124,21 @@ pub struct PropertyVerdictView {
     /// outcome. See [`BottomReasonView`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bottom_reason: Option<BottomReasonView>,
+    /// Which portfolio engine produced this property's DEFINITE verdict. `None` for `⊥`.
+    ///
+    /// **A verdict's PROVENANCE, per property.** The companion to `bottom_reason`: that says why a
+    /// `⊥` happened, this says who answered when one did not.
+    ///
+    /// **Why a gate should read it even when the verdict is `holds`.** Measured: at high arena
+    /// occupancy a run still returned `holds`, but the exact engine dropped out and an abstracting
+    /// engine supplied the verdict — sound under that engine's posture, but the **precision tier
+    /// moved silently**. A gate pinning `holds` sees `holds` either way. Comparing this field
+    /// against the previous run is how a consumer notices.
+    ///
+    /// Previously available only as `decided-by:<engine>=<count>` in a report-level note: an
+    /// AGGREGATE, which cannot say WHICH property changed tier, and filterable besides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decided_by: Option<String>,
     /// The cube predicates auto-seeded for this property (atom strings).
     pub seeded_predicates: Vec<String>,
     /// D1.8b — a concrete stall-lasso counterexample, present only for a Violated
@@ -2274,6 +2301,7 @@ mod bottom_reason_view_tests {
             seeded_predicates: Vec::new(),
             counterexample: None,
             bottom_reason: reason,
+            decided_by: None,
         }
     }
 
@@ -2309,6 +2337,42 @@ mod bottom_reason_view_tests {
             r.detail.contains("MUNUNU_BDD_ITER_BUDGET"),
             "the knob to raise must survive to the API consumer: {}",
             r.detail
+        );
+    }
+
+    /// `decided_by` must vary PER PROPERTY within a single report.
+    ///
+    /// A test where every property shares an engine would pass on an implementation storing one
+    /// report-level value — which is exactly the aggregate (`decided-by:<engine>=<count>`) this
+    /// replaces, and exactly what hid a silent precision-tier change. The assertion has to be that
+    /// a MIXED report reports mixedly.
+    #[test]
+    fn decided_by_distinguishes_properties_within_one_report() {
+        let mut exact = bottom_prop(None);
+        exact.name = "sva_1".into();
+        exact.outcome = VerifyOutcome::Holds;
+        exact.decided_by = Some("exact-symbolic".into());
+
+        let mut abstracted = bottom_prop(None);
+        abstracted.name = "sva_2".into();
+        abstracted.outcome = VerifyOutcome::Holds;
+        abstracted.decided_by = Some("symbolic".into());
+
+        let report = AutoVerifyReport {
+            properties: vec![exact, abstracted],
+            ..Default::default()
+        };
+        let view = SvVerifyAutoResponse::from(&report);
+
+        assert_eq!(
+            view.properties[0].decided_by.as_deref(),
+            Some("exact-symbolic")
+        );
+        assert_eq!(
+            view.properties[1].decided_by.as_deref(),
+            Some("symbolic"),
+            "both properties HOLD, but a different engine answered each — an aggregate count \
+             cannot express this, and that is the case it hides"
         );
     }
 
