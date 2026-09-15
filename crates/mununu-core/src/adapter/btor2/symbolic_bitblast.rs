@@ -333,8 +333,18 @@ impl BddBitBlaster {
         // Probing costs roughly `factor × incumbent_build`, and that is only worth paying when a
         // wrong order would cost MORE than the probe. Measured, it often does not:
         //
+        //   BEFORE this gate existed (auto always probed):
         //   barrel shifter (24 bits)  cell-major 0.68-0.84 s  interleaved 0.30-0.37 s  auto 1.06-1.41 s
         //   sdram_burst (large)       cell-major 4.26-5.35 s  interleaved 60.7-67.5 s  auto 7.4-10.8 s
+        //
+        //   WITH the gate, idle host, 3 runs each:
+        //   barrel shifter (24 bits)  cell-major 0.53-0.59 s  interleaved 0.23 s       auto 0.55-0.80 s
+        //   sdram_burst   (83 bits)   cell-major 7.60-7.75 s  interleaved 45.6-55.3 s  auto 10.8-11.4 s
+        //
+        //   Read that second table honestly: on the corpus in THIS repository auto is pure cost. It
+        //   taxes sdram_burst ~45% for a choice that was already right, and the one design that
+        //   interleaving helps sits below the gate. Value needs a cone BOTH above the gate AND helped
+        //   by interleaving; there is none here, which is why `auto` is opt-in and claims nothing.
         //
         // On the small cone the probe pays for a losing build to win ~0.4 s and comes out behind
         // BOTH fixed orders even though it chooses correctly. Probe cost scales with the build; the
@@ -364,6 +374,24 @@ impl BddBitBlaster {
             return Ok(incumbent);
         }
 
+        // ⚠️ THE UNESTABLISHED ASSUMPTION UNDER THIS WHOLE MECHANISM: we race BUILD time, but what
+        // the caller pays is the SOLVE. On the two cones measured (barrel shifter, sdram_burst) the
+        // build ranks the orders the same way the full run does, in both directions — but that is
+        // n=2 and BOTH are the cones that motivated the mechanism, which is the same error shape as
+        // the six static predictors this replaced. Correlation is PLAUSIBLE because build cost and
+        // fixpoint cost share a common cause (the size of the relation diagram under that order),
+        // yet a shared cause permits divergence in magnitude, and magnitude is all a close call
+        // needs to flip.
+        //
+        // The failure it admits is ASYMMETRIC and SILENT. The probe's cost is bounded at
+        // `factor × incumbent_build`; a wrong PICK is not — it buys the losing order's entire solve.
+        // A cone cheap to bit-blast under interleaving whose fixpoint then visits an order of
+        // magnitude more sub-problems is chosen wrong, and the debug line below still reports a
+        // clean win while the run gets slower. Nothing in the output says otherwise.
+        //
+        // Raised by monono-45 (2026-09-15) during validation; open until a total-wall-time
+        // measurement across orders rules it out. See docs/design/bdd-variable-ordering.md.
+        //
         // The challenger may spend `factor` times what the incumbent did, plus a floor so a
         // sub-millisecond incumbent does not make the probe unwinnable by rounding.
         let budget = cell_major
@@ -6642,8 +6670,8 @@ mod tests {
         )];
         eprintln!("\n===== build-phase vs total, per order =====");
         eprintln!(
-            "{:<26} {:>12} {:>12}  {}",
-            "design", "cm build ms", "il build ms", "measured"
+            "{:<26} {:>12} {:>12}  measured",
+            "design", "cm build ms", "il build ms"
         );
         for (name, src, measured) in &cases {
             let file = parser::parse(src).expect("parse");

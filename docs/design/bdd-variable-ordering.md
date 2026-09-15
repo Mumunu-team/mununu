@@ -271,3 +271,85 @@ abstaining and re-reading would make the claim true. Tracked as follow-up.
 
 It also reframes the block: if the live set is small yet a 256 M-arena run took 2h07m, it is
 **operation-bound, not size-bound**, and no node budget should be firing on it.
+
+## SHIPPED (2026-09-15): `MUNUNU_BDD_VAR_ORDER=auto` — opt-in, and not yet shown to pay
+
+> Source of truth: [`ExactModel::build_auto`](../../crates/mununu-core/src/adapter/btor2/symbolic_bitblast.rs#L319) — surface: CLI-only — an engine-internal ordering knob read from the environment; the verdict it produces is identical under every order (ROBDD canonicity), so there is no API or UI behaviour to expose.
+
+Builds the incumbent order, then races a challenger under a deadline and keeps the cheaper build.
+The default is unchanged; nothing picks `auto` unless asked.
+
+### ⚠️ The load-bearing assumption, and it is NOT established: build time proxies solve time
+
+`build_auto` races **build** time and keeps the cheaper **build** — but what the user pays is the
+**solve**. On the two cones measured here, bit-blasting alone ranks the orders the same way the full
+run does, in *both* directions:
+
+| cone | cell-major build | interleaved build | full-run winner |
+|---|---|---|---|
+| barrel shifter | 86 ms | 48 ms | interleaved ✓ |
+| `sdram_burst` | 1,400 ms | 15,884 ms | cell-major ✓ |
+
+**That is n = 2, and both are the cones that motivated the mechanism.** An earlier draft of this
+section, and the commit message at `feat(exact): MUNUNU_BDD_VAR_ORDER=auto`, headlined it as *"the
+build phase is enough"* — a universal claim from two self-selected points. That is the **same error
+shape as the six predictors it replaced**: validated only on its own motivating case. Corrected here
+(monono-45 raised it, 2026-09-15, while the validation was in flight).
+
+**Why correlation is nevertheless expected — as a mechanism, not a result.** Build cost and fixpoint
+cost share a common cause: the size of the transition-relation diagram under that order. A larger
+relation makes *every* pre-image more expensive, so the two usually move together. But a shared cause
+permits divergence in magnitude, and magnitude is all a close call needs to flip.
+
+**The failure it admits is asymmetric, which is the part that matters.** The probe's cost is bounded
+at `factor × incumbent_build`. A wrong *pick* is not bounded — it buys the losing order's entire
+**solve**. So a cone that is cheap to bit-blast under interleaving but whose fixpoint then visits an
+order of magnitude more sub-problems would be chosen wrong, the debug line would still read
+`interleaved 300ms < cell-major 900ms — using interleaved`, and the run would get slower with no
+signal that anything went wrong. **That is the seventh-failure shape**, and until a measurement rules
+it out it is open.
+
+**The wall clock is sound here, and that is not a general licence.** ROBDDs are canonical: the order
+changes size and time, never the answer. The worst a mistimed probe can do is choose the slower
+order. *A clock may decide COST; it may never decide a VERDICT* — the distinction mununu#553 turned
+on, and the one the N-track audits for.
+
+**The gate is a bit count, and the first version was a stopwatch.** Gating on build time **flapped**:
+on a noisy host the build straddled the 500 ms threshold, so the same design probed on some runs and
+not others, and `auto` came out *worse than both fixed orders* on a small cone. It is now gated on
+cone **bit count** (`MUNUNU_BDD_AUTO_MIN_BITS`, default 64) — a property of the design, identical on
+every host. A clock is fine for the probe and wrong for the gate, because **the gate is a decision
+that should be repeatable.**
+
+### Honest state: validated for correctness, not for benefit
+
+Three runs each, idle host, after the gate fix:
+
+| cone | cell-major | interleaved | `auto` |
+|---|---|---|---|
+| barrel shifter, 24 bits *(under the gate)* | 0.53–0.59 s | **0.23 s** | 0.55–0.80 s |
+| `sdram_burst`, 83 bits | **7.60–7.75 s** | 45.6–55.3 s | 10.8–11.4 s |
+
+**On this corpus `auto` is pure cost.** It taxes `sdram_burst` ~45% for a choice that was already
+right, and the one design where interleaving wins sits below the gate. Its value can only appear on a
+cone that is **both** above the gate **and** helped by interleaving — and this repository has no such
+design. Nothing here demonstrates a benefit, and the shipped code claims none.
+
+The consumer does have them: `tlm_tx`, `sprite_render` and `affine_sampler` are all wide *and*
+interleaving-favouring, plus `sdram_burst` as the negative control and 22 small blocks with no known
+answer. **Those four figures are not the same kind of measurement, and an earlier draft presented
+them as though they were:** 20.2 M× / 2 458× / 115× are peak **node counts** of the built diagram (a
+build-phase property), while `sdram_burst`'s 0.09× is **total run time** (48 s vs 525 s at a fixed
+67 M arena). Mixing the axes is exactly how the build-proxies-solve assumption above stayed invisible.
+The validation therefore measures **total wall time under all three orders on all four**, which is the
+axis a user actually pays, and compares auto's choice against which fixed order genuinely finished
+first. **A probe that picks correctly on the four and does not regress
+the 22 would be validated on something other than its own motivating case** — the check all six
+failed predictors skipped. Until that runs, this is opt-in machinery with a mechanism behind it and
+no demonstrated win.
+
+```
+MUNUNU_BDD_VAR_ORDER=auto MUNUNU_BDD_ORDER_DEBUG=1 mununu btor2 verify-recoverability ...
+  # 24-bit cone -> "not probing: under the 64-bit gate"
+  # 83-bit cone -> "cell-major kept (challenger abandoned)"
+```
