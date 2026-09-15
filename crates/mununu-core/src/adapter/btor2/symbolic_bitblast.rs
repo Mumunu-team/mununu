@@ -239,6 +239,16 @@ pub struct BddBitBlaster {
     /// `catch_unwind` in [`exact_symbolic_verdict_with_witness`] is the backstop for a
     /// single op that jumps past the budget in one apply.
     node_budget: usize,
+    /// mununu#553 — an ABANDON deadline for the BUILD, used only by the automatic order chooser
+    /// (`MUNUNU_BDD_VAR_ORDER=auto`). It races one order against the other and gives up on the
+    /// loser instead of paying for it: building both orders of a real consumer block costs 17.3 s
+    /// against 1.4 s for the cheaper one alone.
+    ///
+    /// A wall clock here is SOUND in a way it is not for a verdict. ROBDDs are canonical, so the
+    /// variable order changes size and time and never the answer — the worst a mistimed probe can
+    /// do is pick the slower order, never report something false. That is the distinction
+    /// mununu#553 turned on, and it is why this clock is allowed where the fixpoint's was not.
+    build_deadline: Option<std::time::Instant>,
     /// mununu#553 — the OxiDD arena size this blaster was built with. Held so
     /// [`Self::exact_model_partitioned`] can cap the fixpoint's node budget at a safe fraction of
     /// the ARENA. Capping it at [`node_budget`](Self::node_budget) instead would be wrong on the
@@ -271,6 +281,159 @@ impl BddBitBlaster {
     pub fn build_with_keep(
         file: &Btor2File,
         keep: Option<&std::collections::HashSet<Nid>>,
+    ) -> Result<Self, String> {
+        match std::env::var("MUNUNU_BDD_VAR_ORDER").unwrap_or_default() {
+            v if v.eq_ignore_ascii_case("interleaved") => {
+                Self::build_with_keep_and_order(file, keep, true)
+            }
+            v if v.eq_ignore_ascii_case("auto") => Self::build_auto(file, keep),
+            _ => Self::build_with_keep_and_order(file, keep, false),
+        }
+    }
+
+    /// mununu#553 — MEASURE the variable order instead of predicting it.
+    ///
+    /// Six falsifiable predictors died on one consumer block, all six computable from the BTOR2
+    /// without running anything. Profiling said why: the order changes how many distinct
+    /// sub-problems the apply recursion visits — 77× fewer where interleaving wins, 9.7× more where
+    /// it loses — while the cache hit rate moves the OTHER way. That quantity does not exist until
+    /// the recursion runs, so it cannot be read off the model, and a seventh static heuristic would
+    /// fail the same way. This is not a heuristic; it is the admission that heuristics were the
+    /// wrong shape.
+    ///
+    /// **Why the BUILD phase is enough.** Measured, bit-blasting alone ranks the orders the same way
+    /// the full run does, on a case where interleaving wins AND one where it loses:
+    ///
+    /// | design | cell-major build | interleaved build | full-run winner |
+    /// |---|---|---|---|
+    /// | barrel shifter | 86 ms | **48 ms** | interleaved |
+    /// | a consumer's `sdram_burst` | **1 400 ms** | 15 884 ms | cell-major |
+    ///
+    /// **Why the loser is abandoned.** Building both costs 17.3 s on that block against 1.4 s for
+    /// the cheaper alone — more than simply running the default. So the challenger gets a deadline
+    /// proportional to the incumbent's build and is dropped when it blows it.
+    ///
+    /// **Why a wall clock is sound here.** ROBDDs are canonical: the order changes size and time,
+    /// never the answer. The worst a mistimed probe can do is choose the slower order. That is
+    /// exactly the distinction mununu#553 turned on — a clock may decide COST, never a VERDICT.
+    fn build_auto(
+        file: &Btor2File,
+        keep: Option<&std::collections::HashSet<Nid>>,
+    ) -> Result<Self, String> {
+        let factor: f64 = std::env::var("MUNUNU_BDD_AUTO_FACTOR")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.5); // measured knee: 1.0 and 2.0 cost more for the same choices; 0.25 misses wins
+        let t0 = std::time::Instant::now();
+        let incumbent = Self::build_with_keep_and_order(file, keep, false)?;
+        let cell_major = t0.elapsed();
+
+        // THE GATE, and it is deliberately DETERMINISTIC — a cone bit count, not a stopwatch.
+        //
+        // Probing costs roughly `factor × incumbent_build`, and that is only worth paying when a
+        // wrong order would cost MORE than the probe. Measured, it often does not:
+        //
+        //   barrel shifter (24 bits)  cell-major 0.68-0.84 s  interleaved 0.30-0.37 s  auto 1.06-1.41 s
+        //   sdram_burst (large)       cell-major 4.26-5.35 s  interleaved 60.7-67.5 s  auto 7.4-10.8 s
+        //
+        // On the small cone the probe pays for a losing build to win ~0.4 s and comes out behind
+        // BOTH fixed orders even though it chooses correctly. Probe cost scales with the build; the
+        // spread scales with the design — so below a size there is nothing to win.
+        //
+        // WHY NOT GATE ON BUILD TIME. The first version did, and it FLAPPED: on a noisy host the
+        // build straddled the threshold, so the same design probed on some runs and not others. A
+        // wall clock is sound for the PROBE (it only picks an order, and order never changes a
+        // verdict) but it is wrong for the GATE, where it makes the decision itself unrepeatable.
+        // Bit count is a property of the cone, identical on every host and every run.
+        //
+        // What this concedes: a small cone that WOULD benefit from interleaving keeps the default.
+        // Deliberate — you cannot learn which order is better for less than the cost of trying, so
+        // on a cheap cone the honest move is not to pay.
+        let bits: usize = incumbent.cells.iter().map(|c| c.vars.len()).sum();
+        let gate_bits: usize = std::env::var("MUNUNU_BDD_AUTO_MIN_BITS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(64);
+        if bits < gate_bits {
+            if std::env::var_os("MUNUNU_BDD_ORDER_DEBUG").is_some() {
+                eprintln!(
+                    "[order-auto] not probing: {bits}-bit cone is under the {gate_bits}-bit gate — \
+                     the probe would cost more than the order can save"
+                );
+            }
+            return Ok(incumbent);
+        }
+
+        // The challenger may spend `factor` times what the incumbent did, plus a floor so a
+        // sub-millisecond incumbent does not make the probe unwinnable by rounding.
+        let budget = cell_major
+            .mul_f64(factor)
+            .max(std::time::Duration::from_millis(50));
+        let t1 = std::time::Instant::now();
+        let challenger = Self::build_probe(file, keep, true, t1 + budget);
+        let interleaved = t1.elapsed();
+
+        match challenger {
+            Ok(c) if interleaved < cell_major => {
+                if std::env::var_os("MUNUNU_BDD_ORDER_DEBUG").is_some() {
+                    eprintln!(
+                        "[order-auto] interleaved {}ms < cell-major {}ms — using interleaved",
+                        interleaved.as_millis(),
+                        cell_major.as_millis()
+                    );
+                }
+                Ok(c)
+            }
+            other => {
+                if std::env::var_os("MUNUNU_BDD_ORDER_DEBUG").is_some() {
+                    eprintln!(
+                        "[order-auto] cell-major {}ms kept ({})",
+                        cell_major.as_millis(),
+                        if other.is_err() {
+                            format!("challenger abandoned past {}ms", budget.as_millis())
+                        } else {
+                            format!("challenger {}ms was not faster", interleaved.as_millis())
+                        }
+                    );
+                }
+                Ok(incumbent)
+            }
+        }
+    }
+
+    /// mununu#553 — build with the variable order given EXPLICITLY rather than read from the
+    /// environment.
+    ///
+    /// Needed because the deciding quantity turned out to be a RUNTIME one. Six static predictors
+    /// died on one consumer block; profiling showed the order changes how many distinct
+    /// sub-problems the apply recursion visits (77× fewer where interleaving wins, 9.7× more where
+    /// it loses) while the cache hit rate moves the OTHER way. A quantity that only exists once the
+    /// recursion runs cannot be read off the model — so an automatic chooser has to BUILD both
+    /// orders and measure, and it cannot do that through a process-global env var.
+    pub fn build_with_keep_and_order(
+        file: &Btor2File,
+        keep: Option<&std::collections::HashSet<Nid>>,
+        interleave: bool,
+    ) -> Result<Self, String> {
+        Self::build_inner(file, keep, interleave, None)
+    }
+
+    /// As [`Self::build_with_keep_and_order`], but abandons the build if `deadline` passes. Used by
+    /// the automatic order chooser to avoid paying for the order it is about to reject.
+    pub fn build_probe(
+        file: &Btor2File,
+        keep: Option<&std::collections::HashSet<Nid>>,
+        interleave: bool,
+        deadline: std::time::Instant,
+    ) -> Result<Self, String> {
+        Self::build_inner(file, keep, interleave, Some(deadline))
+    }
+
+    fn build_inner(
+        file: &Btor2File,
+        keep: Option<&std::collections::HashSet<Nid>>,
+        interleave: bool,
+        build_deadline: Option<std::time::Instant>,
     ) -> Result<Self, String> {
         // AR-S1 / D1.4 — the ONE canonical leaf enumeration + naming lives on the
         // STS-IR seam (`BtorSts::leaf_cells`). It resolves each state/input to its
@@ -392,8 +555,6 @@ impl BddBitBlaster {
         // single block where it genuinely split (17 cells into 15+1+1) it still regressed 9.6×.
         // `inputs-last` had no measured win in the form that does not break a coupled group. The
         // evidence and the reasoning are in the design note so neither is re-derived.
-        let interleave = std::env::var("MUNUNU_BDD_VAR_ORDER")
-            .is_ok_and(|v| v.eq_ignore_ascii_case("interleaved"));
         let kept_widths: Vec<usize> = leaf_specs
             .iter()
             .filter(|(nid, _, _, _)| is_kept(*nid))
@@ -458,6 +619,7 @@ impl BddBitBlaster {
             named_signals: HashMap::new(),
             node_budget,
             arena_nodes,
+            build_deadline,
         };
 
         // Passes 2–5 do all the BDD allocation. A cone that does not compress can EXHAUST the fixed
@@ -2312,6 +2474,13 @@ impl BddBitBlaster {
     /// `OutOfMemory` (whose `.unwrap()` panic would abort the process on the unwind of the
     /// exhausted manager, uncatchable by `catch_unwind`).
     fn check_node_budget(&self) -> Result<(), String> {
+        // The order-probe deadline, checked on the same per-op cadence as the node budget so it
+        // costs nothing extra. Only ever set by the automatic chooser.
+        if let Some(dl) = self.build_deadline
+            && std::time::Instant::now() > dl
+        {
+            return Err("order-probe: build abandoned on the probe deadline".to_string());
+        }
         let live = self
             ._manager
             .with_manager_shared(|m| m.approx_num_inner_nodes());
@@ -6449,6 +6618,66 @@ mod tests {
             }
         }
         eprintln!("===== end W-1a =====\n");
+    }
+
+    /// Does the BUILD phase alone separate the orders the way TOTAL time does?
+    ///
+    /// This decides the shape and cost of an automatic chooser. If bit-blasting the transition
+    /// relation under each order already shows the difference, the probe is cheap — two builds, no
+    /// fixpoint. If not, the probe must run fixpoint iterations too, which costs more and risks
+    /// being a large fraction of the work it is trying to avoid.
+    ///
+    /// Falsifier: the build phase must rank the two orders the SAME WAY the full run does, on both
+    /// a case where interleaving wins and one where it loses. Ranking one correctly is consistent
+    /// with coincidence.
+    #[test]
+    #[ignore = "probe: does build time predict total time? run with --ignored --nocapture"]
+    fn probe_build_phase_predicts_order_cost() {
+        let cases: Vec<(&str, String, &str)> = vec![(
+            "barrel shift 12b",
+            "1 sort bitvec 1\n2 sort bitvec 12\n3 state 2 x\n4 state 2 k\n5 zero 2\n\
+                 6 init 2 3 5\n7 srl 2 3 4\n8 next 2 3 7\n"
+                .into(),
+            "interleaved WINS",
+        )];
+        eprintln!("\n===== build-phase vs total, per order =====");
+        eprintln!(
+            "{:<26} {:>12} {:>12}  {}",
+            "design", "cm build ms", "il build ms", "measured"
+        );
+        for (name, src, measured) in &cases {
+            let file = parser::parse(src).expect("parse");
+            let t0 = std::time::Instant::now();
+            let _cm = BddBitBlaster::build_with_keep_and_order(&file, None, false);
+            let cm = t0.elapsed().as_millis();
+            let t1 = std::time::Instant::now();
+            let _il = BddBitBlaster::build_with_keep_and_order(&file, None, true);
+            let il = t1.elapsed().as_millis();
+            eprintln!("{name:<26} {cm:>12} {il:>12}  {measured}");
+        }
+        // The real block, if the consumer's lift is staged.
+        let p = std::path::Path::new("/tmp/monono-543-repro/sdram_burst/sdram_burst.design.btor");
+        if let Ok(src) = std::fs::read_to_string(p)
+            && let Ok(file) = parser::parse(&src)
+        {
+            let t0 = std::time::Instant::now();
+            let cm = BddBitBlaster::build_with_keep_and_order(&file, None, false);
+            let cmt = t0.elapsed().as_millis();
+            let t1 = std::time::Instant::now();
+            let il = BddBitBlaster::build_with_keep_and_order(&file, None, true);
+            let ilt = t1.elapsed().as_millis();
+            eprintln!(
+                "{:<26} {:>12} {:>12}  cell-major WINS (6-10x on total); built ok: {} / {}",
+                "sdram_burst (real)",
+                cmt,
+                ilt,
+                cm.is_ok(),
+                il.is_ok()
+            );
+        } else {
+            eprintln!("{:<26} (consumer lift not staged)", "sdram_burst (real)");
+        }
+        eprintln!("===== end =====\n");
     }
 
     /// mununu#553 PROBE — the DISCRIMINATING shape, in-repo. A raster counter pair (`hcount`
