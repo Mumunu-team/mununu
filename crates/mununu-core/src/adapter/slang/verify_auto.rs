@@ -4649,7 +4649,7 @@ mod tests {
         // THE DEFECT: the inherited single-engine wording asserts ⊥ is impossible.
         let text = format!("{} {}", posture.summary, posture.detail);
         assert!(
-            !(text.contains("there is no ⊥") && !text.contains("PER ENGINE")),
+            !text.contains("there is no ⊥") || text.contains("PER ENGINE"),
             "the merged posture note still claims ⊥ cannot happen: {text}"
         );
         // And it must say what IS true of a merged report: the posture is per engine.
