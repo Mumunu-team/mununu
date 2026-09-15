@@ -48,6 +48,12 @@ pub struct BitGraph {
     pub edges: HashSet<(BitRef, BitRef)>,
     /// Every leaf bit the design declares, whether or not it has an edge.
     pub nodes: HashSet<BitRef>,
+    /// Bits that SELECT rather than combine: a symbolic shift amount, an `ite` condition. They are
+    /// dense against the data they control, but unlike a multiplier's operands that density is
+    /// ORDERABLE — branch on the selector first and the rest is a wire. Distinguishing them is what
+    /// separates a barrel shifter (interleaving wins 65 537×) from a multiplier (order-immune),
+    /// which look identical on edge density alone.
+    pub selectors: HashSet<BitRef>,
 }
 
 impl BitGraph {
@@ -256,7 +262,10 @@ fn eval(
             }
             let data = all(&sa);
             g.add_cross(&data, &amount);
-            g.add_cross(&data, &data);
+            // NO data×data clique: a barrel shifter's inputs do not combine pairwise, they are
+            // SELECTED among. Adding that clique made the graph call this "near-complete, no order
+            // helps" when interleaving in fact wins 65 537× — the measured counter-example.
+            g.selectors.extend(amount.iter().copied());
             let mut u = data;
             u.extend(amount);
             vec![u; w]
@@ -344,6 +353,7 @@ fn eval(
                     let (t, f) = (bit(&st, i), bit(&sf, i));
                     g.add_cross(&cond, &t);
                     g.add_cross(&cond, &f);
+                    g.selectors.extend(cond.iter().copied());
                     g.add_cross(&t, &f);
                     let mut u = cond.clone();
                     u.extend(t);
@@ -362,6 +372,89 @@ fn eval(
             u.extend(y);
             vec![u; w.max(1)]
         }
+    }
+}
+
+/// W-3′ — what the graph SAYS about a design's variable order, as one line.
+///
+/// Three readings, and the third is the one that matters for a decision:
+///
+/// - **`mean_degree`** — how close to complete the graph is. High means no linear order can do
+///   much, so a reordering pass should DECLINE rather than pay for one.
+/// - **`aligned_fraction`** — of the edges, how many join bits at the SAME index (`a_i — b_i`).
+///   That is the structure interleaving exploits; a high fraction argues for interleaving.
+/// - **`cross_cell_fraction`** — how many edges leave their own cell. Near zero means the cells do
+///   not interact, so cell-major is right and interleaving would spread them for nothing.
+#[derive(Debug, Clone, Copy)]
+pub struct OrderVerdict {
+    pub bits: usize,
+    pub edges: usize,
+    pub mean_degree: f64,
+    pub aligned_fraction: f64,
+    pub cross_cell_fraction: f64,
+    /// Fraction of cross-cell edges with a SELECTOR endpoint — dense but orderable structure.
+    pub selector_fraction: f64,
+}
+
+impl OrderVerdict {
+    /// The recommendation this graph supports, in words. Deliberately conservative: it says
+    /// "no order helps" for a dense graph rather than picking one, because that is the case
+    /// where paying to reorder is waste — and it is the shape of the one block where blind
+    /// interleaving regressed 10.9×.
+    #[must_use]
+    pub fn recommends(&self) -> &'static str {
+        if self.edges == 0 || self.cross_cell_fraction < 0.05 {
+            "cell-major (cells barely interact)"
+        } else if self.selector_fraction > 0.5 {
+            // Checked BEFORE density: selector coupling is dense by nature but orderable, so a
+            // density test alone would wrongly decline the case interleaving helps most.
+            "interleaved (selector bits must sit among the data they control)"
+        } else if self.mean_degree > (self.bits as f64) * 0.5 {
+            "neither — graph is near-complete, no linear order helps"
+        } else if self.aligned_fraction > 0.5 {
+            "interleaved (aligned cross-cell structure dominates)"
+        } else {
+            "neither — cross-cell but not aligned"
+        }
+    }
+}
+
+/// Summarise `file`'s bit-level graph into the three readings above.
+#[must_use]
+pub fn order_verdict(file: &Btor2File) -> OrderVerdict {
+    let g = build(file);
+    let edges = g.edges.len();
+    let (mut aligned, mut cross, mut sel) = (0usize, 0usize, 0usize);
+    for (a, b) in &g.edges {
+        if a.0 != b.0 {
+            cross += 1;
+            if a.1 == b.1 {
+                aligned += 1;
+            }
+            if g.selectors.contains(a) || g.selectors.contains(b) {
+                sel += 1;
+            }
+        }
+    }
+    OrderVerdict {
+        bits: g.nodes.len(),
+        edges,
+        mean_degree: g.mean_degree(),
+        aligned_fraction: if cross == 0 {
+            0.0
+        } else {
+            aligned as f64 / cross as f64
+        },
+        cross_cell_fraction: if edges == 0 {
+            0.0
+        } else {
+            cross as f64 / edges as f64
+        },
+        selector_fraction: if cross == 0 {
+            0.0
+        } else {
+            sel as f64 / cross as f64
+        },
     }
 }
 
@@ -391,6 +484,100 @@ mod tests {
         let file = parser::parse(src).expect("parse");
         let g = build(&file);
         (file, g)
+    }
+
+    /// W-3′ — what the graph RECOMMENDS, against outcomes we have already measured.
+    ///
+    /// This is the half of the validation that can be done with designs we hold. The decisive half
+    /// is a consumer's `sdram_burst` — the only known case where CELL-MAJOR wins (10.9× in wall
+    /// time) — and the falsifier for the whole track is that the graph must NOT say "interleaved"
+    /// there. Its 52 symbolic-amount shifts at 33 bits should read as near-complete.
+    #[test]
+    #[ignore = "probe: W-3' order verdicts; run with --ignored --nocapture"]
+    fn probe_w3_order_verdict_against_measured_outcomes() {
+        let cases: Vec<(&str, String, &str)> = vec![
+            (
+                "relational a==b",
+                "1 sort bitvec 1\n2 sort bitvec 12\n3 state 2 a\n4 state 2 b\n5 eq 1 3 4\n6 bad 5\n".into(),
+                "interleaved WINS 84x",
+            ),
+            (
+                "barrel shift (symbolic amount)",
+                "1 sort bitvec 1\n2 sort bitvec 12\n3 state 2 x\n4 state 2 k\n5 zero 2\n\
+                 6 init 2 3 5\n7 srl 2 3 4\n8 next 2 3 7\n".into(),
+                "interleaved WINS 65537->1",
+            ),
+            (
+                "shift by a CONSTANT",
+                "1 sort bitvec 1\n2 sort bitvec 12\n3 state 2 x\n4 constd 2 5\n5 zero 2\n\
+                 6 init 2 3 5\n7 srl 2 3 4\n8 next 2 3 7\n".into(),
+                "TIE (1 node both)",
+            ),
+            (
+                "multiply (symbolic x symbolic)",
+                "1 sort bitvec 1\n2 sort bitvec 12\n3 state 2 a\n4 state 2 b\n5 mul 2 3 4\n\
+                 6 zero 2\n7 init 2 3 6\n8 next 2 3 5\n".into(),
+                "order-IMMUNE (0.97-1.06x)",
+            ),
+            (
+                "independent cells",
+                "1 sort bitvec 1\n2 sort bitvec 12\n3 state 2 a\n4 state 2 b\n5 one 2\n\
+                 6 add 2 3 5\n7 next 2 3 6\n8 add 2 4 5\n9 next 2 4 8\n".into(),
+                "no cross-cell structure",
+            ),
+        ];
+        eprintln!("\n===== W-3′: order verdict vs MEASURED outcome =====");
+        eprintln!(
+            "{:<32} {:>5} {:>7} {:>8} {:>7} {:>7} {:>6}  {:<52} measured",
+            "design", "bits", "edges", "mean-deg", "align", "cross", "sel", "graph recommends"
+        );
+        for (name, src, measured) in &cases {
+            let file = parser::parse(src).expect("parse");
+            let v = order_verdict(&file);
+            eprintln!(
+                "{:<32} {:>5} {:>7} {:>8.2} {:>8.2} {:>8.2}  {:<44} {}",
+                name,
+                v.bits,
+                v.edges,
+                v.mean_degree,
+                v.aligned_fraction,
+                v.cross_cell_fraction,
+                v.recommends(),
+                measured
+            );
+        }
+        for (name, rel) in [
+            (
+                "uart_msg_handler",
+                "scratchpad/uart_lift/uart_msg_handler.btor2",
+            ),
+            ("spiCtrl", "scratchpad/spictrl_lift/spiCtrl.btor2"),
+            (
+                "sd_data_master",
+                "scratchpad/sddm_lift/sd_data_master.btor2",
+            ),
+        ] {
+            let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+            let Ok(src) = std::fs::read_to_string(root.join(rel)) else {
+                continue;
+            };
+            let Ok(file) = parser::parse(&src) else {
+                continue;
+            };
+            let v = order_verdict(&file);
+            eprintln!(
+                "{:<32} {:>5} {:>7} {:>8.2} {:>8.2} {:>8.2}  {:<44} {}",
+                name,
+                v.bits,
+                v.edges,
+                v.mean_degree,
+                v.aligned_fraction,
+                v.cross_cell_fraction,
+                v.recommends(),
+                "TIE (real lift)"
+            );
+        }
+        eprintln!("===== end W-3′ =====\n");
     }
 
     /// W-2′ — an equality is ALIGNED and SPARSE: `a_i` meets `b_i` and NOTHING else.
