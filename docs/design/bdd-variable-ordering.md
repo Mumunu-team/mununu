@@ -321,6 +321,158 @@ cone **bit count** (`MUNUNU_BDD_AUTO_MIN_BITS`, default 64) — a property of th
 every host. A clock is fine for the probe and wrong for the gate, because **the gate is a decision
 that should be repeatable.**
 
+### ❌ FALSIFIED (2026-09-15): the consumer sweep — `auto` is 2 of 4, and the failure is architectural
+
+Run by monono-45 on binary `4b6193f`, arena pinned 67,108,864, **wall/CPU ratio 0.97–1.12 on every row**
+(so no starved runs), **verdicts identical across all twelve arms** — 24 properties, zero movement, so
+canonicity held and no soundness question arises anywhere in this.
+
+| block | cone | gate | `auto` picked | correct? | `auto` | cell-major | interleaved |
+|---|---|---|---|---|---|---|---|
+| `tlm_tx` | 50 b | **closed** | cell-major | **NO** | 10.3 s | 10.7 s | **0.33 s** |
+| `affine_sampler` | ≥64 b | open | interleaved | yes | 10.3 s | 70.7 s | **0.63 s** |
+| `sprite_render` | 45 b | **closed** | cell-major | **NO** | 195.7 s | 195.4 s | **0.56 s** |
+| `sdram_burst` | 83 b | open | cell-major | yes | **41.0 s** | 46.2 s | 710.2 s |
+
+**Work — apply calls, load- and host-independent, the best evidence in this document:**
+interleaved cheaper by **63.6× / 94.9× / 3,653×** on the first three; cell-major cheaper by **13.4×**
+on `sdram_burst`.
+
+**1. The gate was the whole failure.** Both wrong picks are cones it refused to look at; both correct
+picks are cones it looked at. `sprite_render` is a **45-bit** cone where interleaving is 3,653× cheaper
+in work and 348× in wall time — and the gate declined to spend ~1 ms to find that. The `twocount32`
+precedent already in this file said a bit count cannot predict cost; `sprite_render` is that sentence
+with a price tag.
+
+**2. `auto` is expensive even when RIGHT, and that is architectural.** On `affine_sampler` it picks
+correctly and still takes 10.3 s against 0.63 s — **16× the answer it chose** — because
+[`build_auto`](../../crates/mununu-core/src/adapter/btor2/symbolic_bitblast.rs#L319) builds the
+incumbent **in full** before racing. The comment claims the probe costs `factor × incumbent_build`;
+the true cost of being wrong is **1.0 × incumbent_build plus the probe, paid before any measurement
+exists.** You cannot probe your way out of a cost already paid.
+
+**3. The abandoned probe costs multiples of its budget.** `gate=32` on `tlm_tx`: a 4.8 s budget
+overran by **+39 s**, a 6.7 s budget by +9 s, wall/CPU 0.99 and 1.00 (so not contention). Run 3 is
+explained exactly by its parts (12.4 s build + 0.24 s probe + solve = 13.1 s); run 1 is not. **This is
+the arena-state-after-abandonment effect, and it outlives `auto` — any race must abandon a build.**
+n=2. OPEN.
+
+**4. And the probe FLAPS — the gate was the wrong half to make deterministic.** Same block, same
+settings, three runs: challenger abandoned, abandoned, then succeeded in 240 ms. The gate is
+repeatable and *the thing behind it is not*: a deadline of `factor × incumbent_build` is a wall clock,
+and **it decides the pick.** Making the gate a bit count while leaving the race a stopwatch does not
+deliver "a decision that is a function of the cone."
+
+**5. The ~45% `sdram_burst` tax does NOT reproduce.** `auto` 41.0/41.5/67.5 s against cell-major
+46.2/54.0 s — a wash, because the probe dies inside ~300 ms against a ~500 ms incumbent build. **The
+earlier 45% figure was measured on a loaded interactive desktop and is struck.**
+
+### DECISION FOLLOWS FROM THE ARITHMETIC, NOT FROM THE COUNT
+
+### ✅ MEASURED (2026-09-15): dropping the gate fixes the PICK perfectly and buys 11%
+
+`sprite_render`, `MUNUNU_BDD_AUTO_MIN_BITS=32`, three runs, **wall/CPU 1.00 throughout**, 7 HOLDS
+every run:
+
+| arm | wall |
+|---|---|
+| `auto` @ gate=64 (never probes) | 195.7 s |
+| `auto` @ gate=32 (probes) | 173.8 / 164.9 / 212.5 s |
+| plain cell-major | 195.4 s *(and one censored >1583 s — bimodal)* |
+| **plain interleaved** | **0.56 s** |
+
+**All 10 cones probed, all 10 picked interleaved, in all 3 runs — thirty decisions, thirty correct,
+zero flapping.** So the gate was the *entire* cause of the wrong pick, and lowering it is a complete
+fix for the pick.
+
+**It buys 11%, against an available 310×.** One line from the log says why:
+
+```
+interleaved 43ms < cell-major 11295ms
+```
+
+The probe costs **43 ms** and the incumbent build costs **11.3 s** — and `auto` pays that incumbent
+build **once per cone, ten times**, to discover the same answer ten times. Summing run 2's incumbent
+builds: **114.5 s of a 164.9 s total, i.e. 69% of the run is building an order it then discards.**
+
+**No configuration of gate or deadline recovers this**, because the cost is in neither. It is in
+building the incumbent to completion before measuring anything.
+
+#### ⚠️ Three estimates of this number, and the two corrections both moved it the wrong way
+
+| | value | error |
+|---|---|---|
+| first estimate (build ≈ 50% of total) | ~100 s | 1.7× optimistic |
+| "corrected" (affine_sampler's 14.3% build fraction, applied to this block) | ~28 s | **6× optimistic** |
+| **MEASURED** | **174 s** | — |
+
+`sprite_render`'s build fraction is **69%**, not 14.3% — five times the figure used to correct the
+first estimate, and *higher* than the 50% the first estimate assumed. So **the correction moved the
+number away from the truth, in the direction that made the corrector's own recommendation look
+better.** The weakness was named when the correction was sent — one block's ratio applied to another,
+the generalisation that has killed seven predictors here — and it stood as a correction anyway.
+
+> **Naming a caveat is not the same as heeding it.** (monono-45's retraction, 2026-09-15.)
+
+Use 174 s. Both estimates are struck.
+
+`auto` is **retired** — now on a measurement rather than on the projection, and the earlier
+"flipping the default makes `auto` worse" argument remains **unmeasured and uncitable** (the
+incumbent is hardcoded, so no configuration puts interleaved in that role).
+
+**If the race is ever wanted back, exactly one design delivers what was claimed: race on APPLY CALLS,
+not wall time.** And this is DEMONSTRATED rather than argued: the counters reproduced
+**byte-identically at load 1.7 and at load 4–6** — 573,268 both times on `tlm_tx` interleaved. That is
+precisely the property the deadline never had, shown rather than assumed. They are atomics on the hot
+path behind an opt-in feature, so the design trades a flapping decision for a permanent runtime tax —
+recorded here so nobody reinvents the deadline.
+
+**A related distinction worth keeping.** `tlm_tx`'s peak reproduced to the digit — 20,185,089 against
+a ledger entry recorded months earlier on a different engine. So the node axis is **stable** even
+though mununu#553 showed it is not **predictive**. Those are different failures and only the second is
+fatal; a stable-but-non-predictive quantity is still usable as a regression check.
+
+### ⚠️ THREE OF FOUR CONSUMER BLOCKS ARE BIMODAL IN SOMETHING — the most portable finding of the day
+
+Nobody set out to measure this, and it is more reusable than the ordering result that occasioned it.
+
+| block | bimodal in | measured |
+|---|---|---|
+| `sdram_burst` | total run time | 450 s / 6,180 s, identical settings |
+| `sprite_render` (cell-major) | total run time | 195.4 s / censored >1583 s, wall/CPU 1.00 both |
+| `tlm_tx` | **the interleaved BUILD itself** | 240 ms / >4,791 ms, identical settings |
+
+**`tlm_tx`'s is the strange one and it outlives `auto`.** At `gate=32` its challenger was abandoned
+twice and succeeded once — and the success took **240 ms against a 4,791 ms budget**, i.e. **20×
+inside the deadline**. So the two abandonments cannot be the deadline logic: the interleaved build's
+own cost is bimodal on that block. `sprite_render` shows nothing of the kind (33–247 ms across 30
+probes, tight), so it is `tlm_tx`-specific.
+
+**A single timing from any of these three is worthless.** Two runs per arm minimum, wall/CPU recorded
+beside each.
+
+#### ❓ An open question this raises about the apply-call race
+
+monono-45's reading is that an apply-call race would hit `tlm_tx`'s bimodality too, and would hide it
+better, "because the counter would simply come back large." **Their own earlier measurement appears to
+refute that:** apply calls on `tlm_tx` interleaved came back **byte-identical (573,268) at load 1.7
+and at load 4–6**. If the work is invariant while the build *time* varies 20×, then the bimodality is
+**not in the work** — it is in allocation, GC, or arena/page state — and a work-based race would see
+the same count both times and choose correctly.
+
+Unresolved, and it matters, because the apply-call race is the one design recorded above as both
+measuring and repeatable. The discriminating measurement is apply calls for the *build phase alone*
+across a bimodal pair on `tlm_tx`; the byte-identical figure was taken over a full run. Nobody has
+run it.
+
+### ⚠️ A SECOND BIMODAL BLOCK, and the most reusable finding of the day
+
+`sprite_render` under cell-major: **195.4 s on one run, censored >1583 s on the next**, wall/CPU 1.00
+on both, identical command. `sdram_burst` was already known bimodal (450 s then 6,180 s at identical
+settings). **Two blocks in this corpus where a single timing is worthless** — which is why the sweep
+used two runs per arm, and why any future measurement here does the same and records wall/CPU beside
+every number.
+
 ### Honest state: validated for correctness, not for benefit
 
 Three runs each, idle host, after the gate fix:

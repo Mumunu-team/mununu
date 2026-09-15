@@ -239,16 +239,6 @@ pub struct BddBitBlaster {
     /// `catch_unwind` in [`exact_symbolic_verdict_with_witness`] is the backstop for a
     /// single op that jumps past the budget in one apply.
     node_budget: usize,
-    /// mununu#553 — an ABANDON deadline for the BUILD, used only by the automatic order chooser
-    /// (`MUNUNU_BDD_VAR_ORDER=auto`). It races one order against the other and gives up on the
-    /// loser instead of paying for it: building both orders of a real consumer block costs 17.3 s
-    /// against 1.4 s for the cheaper one alone.
-    ///
-    /// A wall clock here is SOUND in a way it is not for a verdict. ROBDDs are canonical, so the
-    /// variable order changes size and time and never the answer — the worst a mistimed probe can
-    /// do is pick the slower order, never report something false. That is the distinction
-    /// mununu#553 turned on, and it is why this clock is allowed where the fixpoint's was not.
-    build_deadline: Option<std::time::Instant>,
     /// mununu#553 — the OxiDD arena size this blaster was built with. Held so
     /// [`Self::exact_model_partitioned`] can cap the fixpoint's node budget at a safe fraction of
     /// the ARENA. Capping it at [`node_budget`](Self::node_budget) instead would be wrong on the
@@ -282,186 +272,101 @@ impl BddBitBlaster {
         file: &Btor2File,
         keep: Option<&std::collections::HashSet<Nid>>,
     ) -> Result<Self, String> {
-        match std::env::var("MUNUNU_BDD_VAR_ORDER").unwrap_or_default() {
-            v if v.eq_ignore_ascii_case("interleaved") => {
-                Self::build_with_keep_and_order(file, keep, true)
-            }
-            v if v.eq_ignore_ascii_case("auto") => Self::build_auto(file, keep),
-            _ => Self::build_with_keep_and_order(file, keep, false),
+        let (interleave, warning) =
+            Self::resolve_var_order(&std::env::var("MUNUNU_BDD_VAR_ORDER").unwrap_or_default());
+        if let Some(w) = warning {
+            eprintln!("{w}");
         }
+        Self::build_with_keep_and_order(file, keep, interleave)
     }
 
-    /// mununu#553 — MEASURE the variable order instead of predicting it.
+    /// Decide the BDD variable order from the raw `MUNUNU_BDD_VAR_ORDER` value.
     ///
-    /// Six falsifiable predictors died on one consumer block, all six computable from the BTOR2
-    /// without running anything. Profiling said why: the order changes how many distinct
-    /// sub-problems the apply recursion visits — 77× fewer where interleaving wins, 9.7× more where
-    /// it loses — while the cache hit rate moves the OTHER way. That quantity does not exist until
-    /// the recursion runs, so it cannot be read off the model, and a seventh static heuristic would
-    /// fail the same way. This is not a heuristic; it is the admission that heuristics were the
-    /// wrong shape.
+    /// Pure and total so the config semantics are unit-testable without an env var, a BTOR2
+    /// fixture, or a BDD arena — the dispatch above is a two-line shell over this.
     ///
-    /// **Why the BUILD phase is enough.** Measured, bit-blasting alone ranks the orders the same way
-    /// the full run does, on a case where interleaving wins AND one where it loses:
+    /// Returns `(interleave, warning)`. **`interleave = true` is the DEFAULT** since the consumer
+    /// sweep of 2026-09-15, measured in APPLY CALLS (load- and host-independent — they reproduced
+    /// byte-identically at load 1.7 and at load 4–6): interleaved is cheaper by 63.6× / 94.9× /
+    /// 3,653× on three consumer blocks and costlier by 13.4× on one (`sdram_burst`, shift-dense),
+    /// with every synthetic shape and the whole lib suite (123.8 s → 48.2 s) agreeing. Cell-major's
+    /// worst case on a real block is UNBOUNDED: `sprite_render` measured 195.4 s on one run and was
+    /// censored past 1583 s on the next at identical settings.
     ///
-    /// | design | cell-major build | interleaved build | full-run winner |
-    /// |---|---|---|---|
-    /// | barrel shifter | 86 ms | **48 ms** | interleaved |
-    /// | a consumer's `sdram_burst` | **1 400 ms** | 15 884 ms | cell-major |
-    ///
-    /// **Why the loser is abandoned.** Building both costs 17.3 s on that block against 1.4 s for
-    /// the cheaper alone — more than simply running the default. So the challenger gets a deadline
-    /// proportional to the incumbent's build and is dropped when it blows it.
-    ///
-    /// **Why a wall clock is sound here.** ROBDDs are canonical: the order changes size and time,
-    /// never the answer. The worst a mistimed probe can do is choose the slower order. That is
-    /// exactly the distinction mununu#553 turned on — a clock may decide COST, never a VERDICT.
-    fn build_auto(
-        file: &Btor2File,
-        keep: Option<&std::collections::HashSet<Nid>>,
-    ) -> Result<Self, String> {
-        let factor: f64 = std::env::var("MUNUNU_BDD_AUTO_FACTOR")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0.5); // measured knee: 1.0 and 2.0 cost more for the same choices; 0.25 misses wins
-        let t0 = std::time::Instant::now();
-        let incumbent = Self::build_with_keep_and_order(file, keep, false)?;
-        let cell_major = t0.elapsed();
-
-        // THE GATE, and it is deliberately DETERMINISTIC — a cone bit count, not a stopwatch.
-        //
-        // Probing costs roughly `factor × incumbent_build`, and that is only worth paying when a
-        // wrong order would cost MORE than the probe. Measured, it often does not:
-        //
-        //   BEFORE this gate existed (auto always probed):
-        //   barrel shifter (24 bits)  cell-major 0.68-0.84 s  interleaved 0.30-0.37 s  auto 1.06-1.41 s
-        //   sdram_burst (large)       cell-major 4.26-5.35 s  interleaved 60.7-67.5 s  auto 7.4-10.8 s
-        //
-        //   WITH the gate, idle host, 3 runs each:
-        //   barrel shifter (24 bits)  cell-major 0.53-0.59 s  interleaved 0.23 s       auto 0.55-0.80 s
-        //   sdram_burst   (83 bits)   cell-major 7.60-7.75 s  interleaved 45.6-55.3 s  auto 10.8-11.4 s
-        //
-        //   Read that second table honestly: on the corpus in THIS repository auto is pure cost. It
-        //   taxes sdram_burst ~45% for a choice that was already right, and the one design that
-        //   interleaving helps sits below the gate. Value needs a cone BOTH above the gate AND helped
-        //   by interleaving; there is none here, which is why `auto` is opt-in and claims nothing.
-        //
-        // On the small cone the probe pays for a losing build to win ~0.4 s and comes out behind
-        // BOTH fixed orders even though it chooses correctly. Probe cost scales with the build; the
-        // spread scales with the design — so below a size there is nothing to win.
-        //
-        // WHY NOT GATE ON BUILD TIME. The first version did, and it FLAPPED: on a noisy host the
-        // build straddled the threshold, so the same design probed on some runs and not others. A
-        // wall clock is sound for the PROBE (it only picks an order, and order never changes a
-        // verdict) but it is wrong for the GATE, where it makes the decision itself unrepeatable.
-        // Bit count is a property of the cone, identical on every host and every run.
-        //
-        // What this concedes: a small cone that WOULD benefit from interleaving keeps the default.
-        // Deliberate — you cannot learn which order is better for less than the cost of trying, so
-        // on a cheap cone the honest move is not to pay.
-        let bits: usize = incumbent.cells.iter().map(|c| c.vars.len()).sum();
-        let gate_bits: usize = std::env::var("MUNUNU_BDD_AUTO_MIN_BITS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(64);
-        if bits < gate_bits {
-            if std::env::var_os("MUNUNU_BDD_ORDER_DEBUG").is_some() {
-                eprintln!(
-                    "[order-auto] not probing: {bits}-bit cone is under the {gate_bits}-bit gate — \
-                     the probe would cost more than the order can save"
-                );
-            }
-            return Ok(incumbent);
+    /// **Why an unrecognised value WARNS rather than falling through silently.** A consumer baking
+    /// this into a lane config who mistypes the spelling would otherwise get `interleaved`, and on a
+    /// shift-dense cone that is 46 s → 710 s — which inside a `timeout`-gated lane surfaces as a
+    /// TIMEOUT that reads as a finding about the engine. Same shape as a mistyped CTXDSL atom
+    /// evaluating vacuously TRUE: the input is invalid and the system does something reasonable
+    /// instead of complaining. **A config error must be loud precisely BECAUSE the fallback is
+    /// sensible.** (Articulation is monono-8d's, 2026-09-15.)
+    fn resolve_var_order(raw: &str) -> (bool, Option<String>) {
+        let v = raw.trim();
+        if v.is_empty() || v.eq_ignore_ascii_case("interleaved") {
+            return (true, None);
         }
-
-        // ⚠️ THE UNESTABLISHED ASSUMPTION UNDER THIS WHOLE MECHANISM: we race BUILD time, but what
-        // the caller pays is the SOLVE. On the two cones measured (barrel shifter, sdram_burst) the
-        // build ranks the orders the same way the full run does, in both directions — but that is
-        // n=2 and BOTH are the cones that motivated the mechanism, which is the same error shape as
-        // the six static predictors this replaced. Correlation is PLAUSIBLE because build cost and
-        // fixpoint cost share a common cause (the size of the relation diagram under that order),
-        // yet a shared cause permits divergence in magnitude, and magnitude is all a close call
-        // needs to flip.
-        //
-        // The failure it admits is ASYMMETRIC and SILENT. The probe's cost is bounded at
-        // `factor × incumbent_build`; a wrong PICK is not — it buys the losing order's entire solve.
-        // A cone cheap to bit-blast under interleaving whose fixpoint then visits an order of
-        // magnitude more sub-problems is chosen wrong, and the debug line below still reports a
-        // clean win while the run gets slower. Nothing in the output says otherwise.
-        //
-        // Raised by monono-45 (2026-09-15) during validation; open until a total-wall-time
-        // measurement across orders rules it out. See docs/design/bdd-variable-ordering.md.
-        //
-        // The challenger may spend `factor` times what the incumbent did, plus a floor so a
-        // sub-millisecond incumbent does not make the probe unwinnable by rounding.
-        let budget = cell_major
-            .mul_f64(factor)
-            .max(std::time::Duration::from_millis(50));
-        let t1 = std::time::Instant::now();
-        let challenger = Self::build_probe(file, keep, true, t1 + budget);
-        let interleaved = t1.elapsed();
-
-        match challenger {
-            Ok(c) if interleaved < cell_major => {
-                if std::env::var_os("MUNUNU_BDD_ORDER_DEBUG").is_some() {
-                    eprintln!(
-                        "[order-auto] interleaved {}ms < cell-major {}ms — using interleaved",
-                        interleaved.as_millis(),
-                        cell_major.as_millis()
-                    );
-                }
-                Ok(c)
-            }
-            other => {
-                if std::env::var_os("MUNUNU_BDD_ORDER_DEBUG").is_some() {
-                    eprintln!(
-                        "[order-auto] cell-major {}ms kept ({})",
-                        cell_major.as_millis(),
-                        if other.is_err() {
-                            format!("challenger abandoned past {}ms", budget.as_millis())
-                        } else {
-                            format!("challenger {}ms was not faster", interleaved.as_millis())
-                        }
-                    );
-                }
-                Ok(incumbent)
-            }
+        if v.eq_ignore_ascii_case("cell-major")
+            || v.eq_ignore_ascii_case("cell_major")
+            || v.eq_ignore_ascii_case("cellmajor")
+        {
+            return (false, None);
         }
+        // RETIRED 2026-09-15. A no-op rather than an error so existing consumer invocations keep
+        // working. The chooser was 2 of 4 on the consumer sweep and its failure was ARCHITECTURAL,
+        // not calibration: it built the incumbent in FULL before racing, so a wrong pick cost
+        // 1.0 × the wrong build before any measurement existed — and a CORRECT pick still did
+        // (`affine_sampler`: 10.3 s against the 0.63 s order it chose). The pick itself was decided
+        // by a wall clock that FLAPPED: challenger abandoned, abandoned, then 240 ms on three
+        // identical runs.
+        if v.eq_ignore_ascii_case("auto") {
+            return (
+                true,
+                Some(
+                    "[mununu#553] MUNUNU_BDD_VAR_ORDER=auto was RETIRED on 2026-09-15 and is now a \
+                     no-op — using the default (interleaved). It picked correctly on only 2 of 4 \
+                     consumer blocks; see docs/design/bdd-variable-ordering.md. Set \
+                     MUNUNU_BDD_VAR_ORDER=cell-major explicitly for a shift-dense cone."
+                        .to_string(),
+                ),
+            );
+        }
+        (
+            true,
+            Some(format!(
+                "[mununu] MUNUNU_BDD_VAR_ORDER={v:?} is not a recognised variable order — using \
+                 the default (interleaved). Valid: `interleaved` (default) or `cell-major`. This \
+                 is a CONFIG ERROR, not a fallback: if you meant cell-major you are now running \
+                 the order that is 15× slower on a shift-dense cone."
+            )),
+        )
     }
 
     /// mununu#553 — build with the variable order given EXPLICITLY rather than read from the
     /// environment.
     ///
-    /// Needed because the deciding quantity turned out to be a RUNTIME one. Six static predictors
-    /// died on one consumer block; profiling showed the order changes how many distinct
-    /// sub-problems the apply recursion visits (77× fewer where interleaving wins, 9.7× more where
-    /// it loses) while the cache hit rate moves the OTHER way. A quantity that only exists once the
-    /// recursion runs cannot be read off the model — so an automatic chooser has to BUILD both
-    /// orders and measure, and it cannot do that through a process-global env var.
+    /// Kept after the automatic chooser was RETIRED (2026-09-15) because tests and callers still
+    /// need to pin an order without a process-global env var.
+    ///
+    /// The history is worth keeping: the deciding quantity is a RUNTIME one. SEVEN static
+    /// predictors died — wall clock, iteration cap, node cap, a 2-D rule, Weighted Event Span,
+    /// selector fraction, and finally the chooser's own bit-count gate. Profiling showed the order
+    /// changes how many distinct sub-problems the apply recursion visits (63.6x/94.9x/3,653x fewer
+    /// where interleaving wins, 13.4x more where it loses) while the cache hit rate moves the OTHER
+    /// way. That quantity does not exist until the recursion runs, so it cannot be read off the
+    /// model — and measuring it by racing two builds did not work either, because the incumbent had
+    /// to be built in FULL first. See docs/design/bdd-variable-ordering.md.
     pub fn build_with_keep_and_order(
         file: &Btor2File,
         keep: Option<&std::collections::HashSet<Nid>>,
         interleave: bool,
     ) -> Result<Self, String> {
-        Self::build_inner(file, keep, interleave, None)
-    }
-
-    /// As [`Self::build_with_keep_and_order`], but abandons the build if `deadline` passes. Used by
-    /// the automatic order chooser to avoid paying for the order it is about to reject.
-    pub fn build_probe(
-        file: &Btor2File,
-        keep: Option<&std::collections::HashSet<Nid>>,
-        interleave: bool,
-        deadline: std::time::Instant,
-    ) -> Result<Self, String> {
-        Self::build_inner(file, keep, interleave, Some(deadline))
+        Self::build_inner(file, keep, interleave)
     }
 
     fn build_inner(
         file: &Btor2File,
         keep: Option<&std::collections::HashSet<Nid>>,
         interleave: bool,
-        build_deadline: Option<std::time::Instant>,
     ) -> Result<Self, String> {
         // AR-S1 / D1.4 — the ONE canonical leaf enumeration + naming lives on the
         // STS-IR seam (`BtorSts::leaf_cells`). It resolves each state/input to its
@@ -562,20 +467,26 @@ impl BddBitBlaster {
         // init BDD, the input cube, and the next-state substitution).
         let mut env: HashMap<Nid, BitVec> = HashMap::new();
         let mut cells: Vec<Cell> = Vec::new();
-        // mununu#553 follow-up — the VARIABLE ORDER. `MUNUNU_BDD_VAR_ORDER=interleaved` assigns
-        // bit-position-major (a0 b0 c0, a1 b1 c1, …) instead of the default CELL-MAJOR (every bit
-        // of one cell contiguous). Default UNCHANGED; see `docs/design/bdd-variable-ordering.md`.
+        // THE VARIABLE ORDER. `interleaved` is bit-position-major (a0 b0 c0, a1 b1 c1, …) and is
+        // the DEFAULT since 2026-09-15; CELL-MAJOR (every bit of one cell contiguous) is the
+        // opt-out. See `docs/design/bdd-variable-ordering.md`.
         //
-        // Why it exists: cell-major is the textbook bad order for RELATIONAL structure — `a == b`
+        // Why interleaved: cell-major is the textbook bad order for RELATIONAL structure — `a == b`
         // is Θ(2^n) cell-major (the diagram must remember all of `a` before it sees any of `b`)
         // and O(n) interleaved. A barrel shifter (SYMBOLIC shift amount) is worse still: 65 537
         // nodes cell-major at 12 bits versus 1 interleaved, and it does not finish at 16. A
         // CONSTANT shift amount is free under either order — it is wiring.
         //
-        // Why it is not the DEFAULT: one measured consumer block regresses 10.9× in wall time at a
-        // fixed arena (48 s → 525 s, 13 definite verdicts in both arms), and nobody has a mechanism
-        // for it. Without one we cannot predict which other cones regress. Recommended as the first
-        // thing to try on a slow cone, not as what everyone gets.
+        // Why it became the default (2026-09-15 consumer sweep, measured in APPLY CALLS, which are
+        // load- and host-independent): interleaved cheaper by 63.6x / 94.9x / 3,653x on three
+        // consumer blocks, costlier by 13.4x on one. Cell-major's worst case on a real block is
+        // UNBOUNDED — `sprite_render` measured 195.4 s then censored past 1583 s at identical
+        // settings. The wins are two orders of magnitude larger than the loss.
+        //
+        // WHEN TO SET cell-major: a SHIFT-DENSE cone. `sdram_burst` (52 symbolic-amount shifts at
+        // 33 bits) is the known case — 46 s cell-major against 710 s interleaved. Note the diagrams
+        // there are near-equal in size while the WORK differs 13.4x, so size does not explain it
+        // and no static predictor has ever called it correctly (seven have tried).
         //
         // A dependency-aware `deps` mode and an orthogonal `MUNUNU_BDD_INPUTS_LAST` were built,
         // measured and REMOVED. `deps` clustered cells that some expression reads together; on
@@ -647,7 +558,6 @@ impl BddBitBlaster {
             named_signals: HashMap::new(),
             node_budget,
             arena_nodes,
-            build_deadline,
         };
 
         // Passes 2–5 do all the BDD allocation. A cone that does not compress can EXHAUST the fixed
@@ -2502,13 +2412,6 @@ impl BddBitBlaster {
     /// `OutOfMemory` (whose `.unwrap()` panic would abort the process on the unwind of the
     /// exhausted manager, uncatchable by `catch_unwind`).
     fn check_node_budget(&self) -> Result<(), String> {
-        // The order-probe deadline, checked on the same per-op cadence as the node budget so it
-        // costs nothing extra. Only ever set by the automatic chooser.
-        if let Some(dl) = self.build_deadline
-            && std::time::Instant::now() > dl
-        {
-            return Err("order-probe: build abandoned on the probe deadline".to_string());
-        }
         let live = self
             ._manager
             .with_manager_shared(|m| m.approx_num_inner_nodes());
@@ -6830,7 +6733,7 @@ mod tests {
     #[test]
     #[ignore = "probe: mununu#553 variable-order sensitivity; run with --ignored --nocapture"]
     fn probe_553_var_order_on_wide_class() {
-        let order = std::env::var("MUNUNU_BDD_VAR_ORDER").unwrap_or_else(|_| "cell-major".into());
+        let order = std::env::var("MUNUNU_BDD_VAR_ORDER").unwrap_or_else(|_| "interleaved".into());
         eprintln!("\n===== #553 var-order probe — ORDER = {order} =====");
         eprintln!(
             "{:<26} {:>6} {:>14} {:>10}",
@@ -10175,5 +10078,77 @@ mod tests {
             exact_env_strategy(POSITIONAL_TRAP, "not a valid atom").expect("runs"),
             EnvStrategyOutcome::Inapplicable(_)
         ));
+    }
+
+    /// The DEFAULT is interleaved (2026-09-15 consumer sweep), and the aliases resolve.
+    #[test]
+    fn var_order_default_is_interleaved_and_cell_major_is_the_opt_out() {
+        for unset in ["", "   ", "interleaved", "INTERLEAVED"] {
+            let (interleave, warn) = BddBitBlaster::resolve_var_order(unset);
+            assert!(interleave, "{unset:?} must give interleaved (the default)");
+            assert!(warn.is_none(), "{unset:?} is valid and must not warn");
+        }
+        for cm in [
+            "cell-major",
+            "cell_major",
+            "cellmajor",
+            "Cell-Major",
+            " cell-major ",
+        ] {
+            let (interleave, warn) = BddBitBlaster::resolve_var_order(cm);
+            assert!(!interleave, "{cm:?} must give cell-major");
+            assert!(
+                warn.is_none(),
+                "{cm:?} is a valid spelling and must not warn"
+            );
+        }
+    }
+
+    /// REPRODUCER for the silent-config-error defect (2026-09-15).
+    ///
+    /// A mistyped order fell through to the default with NO diagnostic. In a consumer's
+    /// `timeout`-gated lane that is a config error presenting as an engine finding: on a
+    /// shift-dense cone the default is 46 s -> 710 s, the block crosses its budget, and the lane
+    /// reports a TIMEOUT that is not a verdict. The value must be REJECTED LOUDLY even though
+    /// the fallback is sensible — that is precisely why it must be loud.
+    #[test]
+    fn a_mistyped_var_order_warns_and_says_it_is_a_config_error() {
+        for typo in [
+            "cell_majr",
+            "cellmajor!",
+            "cell major",
+            "interlaved",
+            "sift",
+            "0",
+        ] {
+            let (interleave, warn) = BddBitBlaster::resolve_var_order(typo);
+            let w = warn.unwrap_or_else(|| panic!("{typo:?} must warn, not be silently absorbed"));
+            assert!(
+                w.contains("CONFIG ERROR"),
+                "{typo:?} must be named a CONFIG ERROR rather than a fallback, got: {w}"
+            );
+            assert!(
+                w.contains("cell-major") && w.contains("interleaved"),
+                "{typo:?}'s warning must name BOTH valid spellings, got: {w}"
+            );
+            assert!(interleave, "an invalid value still gets the default order");
+        }
+    }
+
+    /// `auto` is retired: a no-op that WARNS, not an error — existing consumer invocations must
+    /// keep working rather than start failing.
+    #[test]
+    fn retired_auto_is_a_warning_not_an_error_and_uses_the_default() {
+        let (interleave, warn) = BddBitBlaster::resolve_var_order("auto");
+        let w = warn.expect("`auto` must say it was retired rather than silently changing meaning");
+        assert!(
+            interleave,
+            "retired `auto` falls back to the default (interleaved)"
+        );
+        assert!(w.contains("RETIRED"), "must state it is retired, got: {w}");
+        assert!(
+            w.contains("2 of 4"),
+            "must state WHY it was retired so a reader need not find the doc, got: {w}"
+        );
     }
 }
