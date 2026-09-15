@@ -207,6 +207,28 @@ pub struct PropertyVerdict {
     /// engine (`--engine exact-symbolic`) reports a bare `AF p` property `Violated`
     /// and the stall is reachable at the reset state. `None` otherwise.
     pub counterexample: Option<ExactCounterexample>,
+    /// Why this property is `⊥`, when it is. `None` for a definite outcome.
+    ///
+    /// monono ask 26 — a FIELD rather than a note. See [`BottomReason`].
+    pub bottom_reason: Option<BottomReason>,
+    /// Which portfolio engine produced this property's DEFINITE verdict. `None` for `⊥`.
+    ///
+    /// **The companion to [`Self::bottom_reason`], and it covers the opposite case.** That field
+    /// explains a `⊥` whose cause was hidden; this one names the provenance of a verdict that
+    /// is *not* hidden and looks entirely ordinary.
+    ///
+    /// **Why it matters — a measured incident, not a hypothetical.** At 84% arena occupancy a
+    /// consumer's run still returned `holds`, but three engines ran where two arenas higher only
+    /// `exact-symbolic` was needed: the exact engine dropped out and an abstracting engine supplied
+    /// the verdict. The verdict is sound under that engine's posture, but **the precision tier
+    /// moved silently**. A gate pinning `holds` sees `holds` either way and records a pass.
+    ///
+    /// The information existed as `decided-by:<engine>=<count>` — an AGGREGATE, in a REPORT-level
+    /// note. A count cannot tell you which property changed tier, and a note is filterable. This is
+    /// per-property because a mixed report is exactly the case an aggregate misleads on: a consumer
+    /// transcript showed 7 properties decided by `exact-symbolic` and one by something else,
+    /// reported together.
+    pub decided_by: Option<String>,
 }
 
 /// D1.8b — a concrete stall-lasso counterexample for a `Violated` liveness property
@@ -618,6 +640,39 @@ fn refresh_coverage_summary(report: &mut AutoVerifyReport) {
 /// Conservative by construction: a note is dropped only when the property it names is now
 /// DEFINITE. A ⊥ that survived the merge keeps its explanation, which is the case the note exists
 /// for. Matching is on the `"<name>: "` prefix `bottom_reason_note` writes.
+/// monono ask 26 — attribute a residual ⊥ to the highest-precision engine that FAILED.
+///
+/// The counterpart to [`drop_stale_bottom_reasons`], and the mirror of the mununu#548 defect: there
+/// a note describing ONE engine was wrongly INHERITED by properties another engine decided; here a
+/// failing engine's reason was wrongly DROPPED. Same merge, opposite direction — and only the
+/// direction producing a *wrong statement* was fixed at the time, because an *absent* one does not
+/// look like a defect in a passing test.
+///
+/// Three deliberate restrictions, each of which is the #548 lesson applied:
+///
+/// 1. **Only non-definite properties.** A property another engine decided is not ⊥ and gets no
+///    reason, however loudly the exact engine failed.
+/// 2. **Never overwrite a more specific classification.** `SafetyShapeNotReducible` says the
+///    property's SHAPE is wrong and a bigger budget will not help; clobbering that with a resource
+///    message would send a consumer to raise a knob that cannot work.
+/// 3. **Only the FIRST failure**, which is the highest-precision one because `runs` is in precision
+///    order. Listing every engine's failure would imply each is independently responsible for this
+///    property, which is exactly the over-claim #548 was.
+fn attach_engine_failure_reason(report: &mut AutoVerifyReport, failures: &[(&str, String)]) {
+    let Some((engine, detail)) = failures.first() else {
+        return;
+    };
+    for p in report.properties.iter_mut() {
+        if outcome_definite(&p.outcome).is_some() || p.bottom_reason.is_some() {
+            continue;
+        }
+        p.bottom_reason = Some(BottomReason::EngineDidNotComplete {
+            engine: (*engine).to_string(),
+            detail: detail.clone(),
+        });
+    }
+}
+
 fn drop_stale_bottom_reasons(report: &mut AutoVerifyReport) {
     let decided: std::collections::HashSet<&str> = report
         .properties
@@ -1913,15 +1968,25 @@ fn synth_sidecar_json(
 ///
 /// `Unknown`, never `Skipped`: `ci_exit_code` does not fail on `skipped`, so a strict
 /// `--fail-on unknown` gate would otherwise pass GREEN on a property that ran out of budget.
-fn abstained(t: &crate::adapter::slang::translate::TranslatedAssertion) -> PropertyVerdict {
+///
+/// **`reason` is a parameter, not a constant, because this helper serves three different causes.**
+/// Wiring it to one value mislabelled every budget abstention as "never attempted" — an
+/// over-attribution of exactly the kind `bottom_reason` exists to end, and it survived until the
+/// call sites were read rather than assumed.
+fn abstained(
+    t: &crate::adapter::slang::translate::TranslatedAssertion,
+    reason: BottomReason,
+) -> PropertyVerdict {
     PropertyVerdict {
         name: t.name.clone(),
         label: t.label.clone(),
         kind: t.kind,
         formula: t.formula.clone(),
         outcome: VerifyOutcome::Unknown { unknown_cells: 0 },
+        bottom_reason: Some(reason),
         seeded_predicates: Vec::new(),
         counterexample: None,
+        decided_by: None,
     }
 }
 
@@ -2125,10 +2190,25 @@ pub(crate) fn merge_portfolio_reports(
     runs: &[(&str, Result<AutoVerifyReport, AdapterError>)],
     mode: PortfolioMode,
 ) -> Result<AutoVerifyReport, AdapterError> {
-    // Successful reports, in precision order (exact first). Errors contribute nothing.
+    // Successful reports, in precision order (exact first).
     let oks: Vec<(&str, &AutoVerifyReport)> = runs
         .iter()
         .filter_map(|(l, r)| r.as_ref().ok().map(|rep| (*l, rep)))
+        .collect();
+
+    // mununu#553 follow-up / monono ask 26 — THE ERRORS USED TO CONTRIBUTE NOTHING, and that was
+    // the defect. Each engine's `Err` carries its own abstention string, which NAMES the budget it
+    // hit and the numbers ("abstained on the ITERATION budget (N > M) — raise
+    // MUNUNU_BDD_ITER_BUDGET"). Seven such messages exist. All seven were discarded HERE, one
+    // function from the consumer's report, leaving a bare `⊥` plus a cube count — so the only
+    // available move was to try budget knobs blind. Measured cost: a consumer's red lane, an hour,
+    // and two refuted hypotheses, neither refuted from the `⊥` itself.
+    //
+    // Collected in PRECISION ORDER, so the first entry is the highest-precision engine that failed
+    // — the one whose completion would most likely have decided a residual `⊥`.
+    let engine_failures: Vec<(&str, String)> = runs
+        .iter()
+        .filter_map(|(l, r)| r.as_ref().err().map(|e| (*l, e.message.clone())))
         .collect();
     let Some(&(_, base)) = oks.first() else {
         // Every engine errored — surface the first (highest-precision) error.
@@ -2183,6 +2263,15 @@ pub(crate) fn merge_portfolio_reports(
                 falses.join(",")
             ));
             prop.outcome = VerifyOutcome::Unknown { unknown_cells: 0 };
+            // The most dangerous of the ⊥ causes to conflate: before this it was byte-identical
+            // to a timeout (`unknown`, `unknown_cells: 0`), so the obvious remedy — retry with a
+            // bigger budget — meant retrying an UNSOUNDNESS.
+            prop.bottom_reason = Some(BottomReason::EngineContradiction {
+                detail: contradictions
+                    .last()
+                    .cloned()
+                    .unwrap_or_else(|| prop.name.clone()),
+            });
             prop.counterexample = None;
             continue;
         }
@@ -2193,6 +2282,10 @@ pub(crate) fn merge_portfolio_reports(
         {
             prop.outcome = pv.outcome.clone();
             prop.counterexample = pv.counterexample.clone();
+            // The per-property attribution was already computed here and immediately aggregated
+            // into a COUNT on the next line — so the fact a consumer needs existed and was
+            // discarded one statement after being derived. Keep it.
+            prop.decided_by = Some((*label).to_string());
             *decided_by.entry(*label).or_default() += 1;
         } else {
             // All ⊥ — prefer an Unknown (abstraction attempted, undecided) over a Skipped
@@ -2255,6 +2348,9 @@ pub(crate) fn merge_portfolio_reports(
     // mununu#548 — and a third note inherited from the base that the merge can falsify: an
     // explanation of why a property is ⊥, kept for a property another engine has since decided.
     drop_stale_bottom_reasons(&mut merged);
+    // monono ask 26 — and the reason a ⊥ was previously unattributable: the failing engine's own
+    // abstention string, which names the budget it hit, was discarded here. Attach it now.
+    attach_engine_failure_reason(&mut merged, &engine_failures);
     if !contradictions.is_empty() {
         merged.notes.push(VerificationNote {
             kind: "portfolio-soundness-alarm".to_string(),
@@ -3074,17 +3170,25 @@ pub(crate) fn verify_auto_impl(
         );
         // Once EITHER budget has been hit, every remaining property abstains without work.
         if memory_budget_hit.is_some() || time_budget_hit {
-            report.properties.push(abstained(t));
+            // Not "never attempted" — a budget already stopped the run, and retrying with more
+            // budget IS the right response here.
+            report
+                .properties
+                .push(abstained(t, BottomReason::BudgetExpired));
             continue;
         }
         if let Err(hit) = crate::adapter::memory_budget::check_process_memory_budget() {
             memory_budget_hit = Some(hit);
-            report.properties.push(abstained(t));
+            report
+                .properties
+                .push(abstained(t, BottomReason::BudgetExpired));
             continue;
         }
         if run_budget.expired() {
             time_budget_hit = true;
-            report.properties.push(abstained(t));
+            report
+                .properties
+                .push(abstained(t, BottomReason::BudgetExpired));
             continue;
         }
         // mununu#504 — per-property wall time, opt-in via `MUNUNU_PROPERTY_TIMING=1`.
@@ -3122,6 +3226,8 @@ pub(crate) fn verify_auto_impl(
                     },
                     seeded_predicates: Vec::new(),
                     counterexample: None,
+                    bottom_reason: None,
+                    decided_by: None,
                 });
                 continue;
             }
@@ -3211,6 +3317,8 @@ pub(crate) fn verify_auto_impl(
                 },
                 seeded_predicates: Vec::new(),
                 counterexample: None,
+                bottom_reason: None,
+                decided_by: None,
             });
             continue;
         }
@@ -3294,9 +3402,22 @@ pub(crate) fn verify_auto_impl(
                         label: t.label.clone(),
                         kind: t.kind,
                         formula: formula_str.clone(),
+                        // ask 26 — the death reason was already captured for the
+                        // `engine-isolation` NOTE above. Carry it on the FIELD as well: a crash
+                        // and a budget abstention were previously byte-identical here
+                        // (`unknown`, `unknown_cells: 0`), so a consumer could not tell "your
+                        // engine died" from "this needed more budget" — and the note that said
+                        // so was filterable.
+                        bottom_reason: match &iso {
+                            Isolated::Died(why) => Some(BottomReason::EngineCrashed {
+                                detail: why.to_string(),
+                            }),
+                            _ => None,
+                        },
                         outcome,
                         seeded_predicates: Vec::new(),
                         counterexample: None,
+                        decided_by: None,
                     });
                     continue;
                 }
@@ -3346,6 +3467,8 @@ pub(crate) fn verify_auto_impl(
                 outcome,
                 seeded_predicates: Vec::new(),
                 counterexample,
+                bottom_reason: None,
+                decided_by: None,
             });
             continue;
         }
@@ -3409,6 +3532,8 @@ pub(crate) fn verify_auto_impl(
                 outcome: VerifyOutcome::Skipped { reason },
                 seeded_predicates: Vec::new(),
                 counterexample: None,
+                bottom_reason: None,
+                decided_by: None,
             });
             continue;
         }
@@ -3426,6 +3551,8 @@ pub(crate) fn verify_auto_impl(
                 },
                 seeded_predicates: Vec::new(),
                 counterexample: None,
+                bottom_reason: None,
+                decided_by: None,
             });
             continue;
         }
@@ -3656,6 +3783,8 @@ pub(crate) fn verify_auto_impl(
             outcome,
             seeded_predicates: seeded_names,
             counterexample: None,
+            bottom_reason: None,
+            decided_by: None,
         });
     }
 
@@ -4058,20 +4187,37 @@ pub(crate) fn escalate_bottom(
     // issue (which calls for a fix) from being confused with ⊥ from a resource cap
     // (which calls for a raise).
     let stateless_model = design_stateless(design_btor2);
-    for prop in report.properties.iter() {
+    for prop in report.properties.iter_mut() {
         if !matches!(prop.outcome, VerifyOutcome::Unknown { .. }) {
             continue;
         }
         let reason = classify_bottom_reason(prop, stateless_model);
-        notes.push(bottom_reason_note(&prop.name, reason));
+        notes.push(bottom_reason_note(&prop.name, reason.clone()));
+        // monono ask 26 — carried as a FIELD as well as a note. The note has existed since
+        // mununu#492 and never reached the consumer it was written for, because their harness
+        // filtered notes wholesale. A field cannot be filtered out by a consumer that does not
+        // know about it; a note can.
+        prop.bottom_reason = Some(reason);
     }
     notes
 }
 
-/// mununu#492 Part B — reason a residual ⊥ can be classified as, distinguishing
-/// the three mechanically-detectable cases from "unknown (no signal)".
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BottomReason {
+/// Why a property's residual outcome is `⊥`. mununu#492 Part B, extended by monono ask 26.
+///
+/// **Carried as a FIELD on [`PropertyVerdict`], not only as a note** — and the distinction is the
+/// whole point. A consumer that does not know about a field cannot silently filter it out; a
+/// consumer that does not know about a note routinely does. This has existed as a
+/// `bottom-reason` NOTE since mununu#492, and monono's formal lane discarded notes wholesale, so
+/// it never reached the one reader it was written for — while the engine's own abstention string
+/// was being dropped in [`merge_portfolio_reports`] under *"Errors contribute nothing."*
+///
+/// Measured cost of that pair: a consumer's red lane, an hour spent trying budget knobs blind in
+/// the wrong order, and two hypotheses refuted — neither of them from the `⊥` itself.
+///
+/// No longer `Copy`: [`Self::EngineDidNotComplete`] carries the engine's verbatim message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum BottomReason {
     /// The property is Safety-class but neither the single-atom nor the compound
     /// reducer could reduce it — its shape is out of what the rescue lane
     /// currently supports (e.g. a compound with a `CmpReg` register-vs-register
@@ -4087,6 +4233,99 @@ enum BottomReason {
     /// doesn't cover here). A downstream gate should NOT treat this as
     /// distinct-from-abstain without more evidence.
     UnclassifiedBottom,
+    /// monono ask 26 — a higher-precision engine **did not run to completion on this design**, so
+    /// the outcome came from a lower-precision one (or from none).
+    ///
+    /// **Read the attribution precisely.** `engine` and `detail` describe a WHOLE-RUN failure over
+    /// the design; they do NOT assert that this property caused it. The claim is exactly: this
+    /// property is `⊥`, and the engine most likely to have decided it stopped for the stated
+    /// reason. Conflating those is the mununu#548 defect — a note describing ONE engine inherited
+    /// by properties another engine decided — and is deliberately not repeated here.
+    ///
+    /// `detail` is the engine's verbatim string, which NAMES the budget and its numbers (e.g.
+    /// *"abstained on the ITERATION budget (N > M) … raise MUNUNU_BDD_ITER_BUDGET"*). Seven such
+    /// messages exist in the exact engine; all seven used to be discarded at the portfolio merge.
+    EngineDidNotComplete {
+        /// Portfolio label of the engine that failed, e.g. `exact-symbolic`.
+        engine: String,
+        /// The engine's verbatim abstention or error message.
+        detail: String,
+    },
+    /// 🔴 **A SOUNDNESS ALARM, not a resource problem.** Two portfolio engines returned OPPOSITE
+    /// definite verdicts on this property, so the merge forced `⊥` rather than silently picking
+    /// one. **One of those engines is unsound on this design and must be investigated.**
+    ///
+    /// Before mununu#553's follow-up this was indistinguishable from a timeout: both produced
+    /// `unknown` with `unknown_cells: 0`. A consumer retrying with a bigger budget would have been
+    /// retrying an unsoundness, and a gate counting `unknown`s would have scored it as ordinary
+    /// undecidedness. It is the single most dangerous of the five `⊥` causes to conflate.
+    EngineContradiction {
+        /// `Holds@[…] vs Violated@[…]`, naming which engines disagreed and how.
+        detail: String,
+    },
+    /// The engine process **crashed** (isolated run died — abort, OOM kill, signal). Not an
+    /// abstention: it was attempted and produced no answer at all.
+    ///
+    /// `unknown` rather than `skipped` deliberately, because `ci_exit_code` never fails on
+    /// `skipped` — so `skipped` here would let a strict gate pass GREEN on a property whose engine
+    /// crashed. Distinguishing it from a budget abstention is what this variant adds.
+    EngineCrashed {
+        /// What the isolation layer reported about the death.
+        detail: String,
+    },
+    /// A per-property or per-run **resource budget** expired (`ResourceBudgetExceeded`).
+    ///
+    /// Distinct from [`Self::EngineDidNotComplete`], which is a whole-run engine failure carrying
+    /// that engine's own message. This one is the harness budget, and it is the one case where
+    /// "retry with more budget" is the right consumer response.
+    BudgetExpired,
+    /// The property was **never attempted** — filtered out before any engine ran.
+    NotAttempted,
+}
+
+impl BottomReason {
+    /// Stable kebab-case tag, for gates and log greps.
+    pub fn tag(&self) -> &'static str {
+        match self {
+            Self::SafetyShapeNotReducible => "safety-shape-not-reducible",
+            Self::NoStateModelNonSafety => "no-state-model-non-safety",
+            Self::UnclassifiedBottom => "unclassified-bottom",
+            Self::EngineDidNotComplete { .. } => "engine-did-not-complete",
+            Self::EngineContradiction { .. } => "engine-contradiction",
+            Self::EngineCrashed { .. } => "engine-crashed",
+            Self::BudgetExpired => "budget-expired",
+            Self::NotAttempted => "not-attempted",
+        }
+    }
+
+    /// One-line rendering for the CLI, carrying the budget name where there is one.
+    pub fn one_line(&self) -> String {
+        match self {
+            Self::SafetyShapeNotReducible => "safety-shape-not-reducible — the property SHAPE is                  outside the rescue lane; needs a reshape or a new reducer, NOT a bigger budget"
+                .to_string(),
+            Self::NoStateModelNonSafety => "no-state-model-non-safety — the design has zero state                  registers; a modelling issue, not an engine cap"
+                .to_string(),
+            Self::UnclassifiedBottom => "unclassified — cause not established; do NOT read as                  distinct-from-abstain"
+                .to_string(),
+            Self::EngineDidNotComplete { engine, detail } => {
+                format!("engine `{engine}` did not complete on this design: {detail}")
+            }
+            Self::EngineContradiction { detail } => format!(
+                "SOUNDNESS ALARM — portfolio engines returned CONTRADICTING definite verdicts \
+                 ({detail}); one engine is unsound on this design. A bigger budget cannot help \
+                 and retrying is the wrong response."
+            ),
+            Self::EngineCrashed { detail } => {
+                format!("the engine process CRASHED (not an abstention): {detail}")
+            }
+            Self::BudgetExpired => "a resource budget expired — this is the case where retrying \
+                 with more budget is the right response"
+                .to_string(),
+            Self::NotAttempted => {
+                "never attempted — filtered out before any engine ran".to_string()
+            }
+        }
+    }
 }
 
 /// True when the design has no state registers (`state ...` lines).
@@ -4178,6 +4417,44 @@ fn bottom_reason_note(name: &str, reason: BottomReason) -> VerificationNote {
              classifier did not narrow it further', so the consumer looks at the engine-side \
              notes for the actionable answer."
                 .into(),
+        ),
+        // monono ask 26 — the case the sentence just above used to send readers hunting for.
+        // That advice ("check for a sibling `abstained on the …` note") was unactionable: the
+        // engine's abstention string was being DROPPED at the portfolio merge, so the sibling
+        // note it pointed at did not exist. Now the reason arrives here verbatim.
+        BottomReason::EngineDidNotComplete { engine, detail } => (
+            format!(
+                "`{name}`: ⊥ because engine `{engine}` did not complete on this design — \
+                 {detail}"
+            ),
+            format!(
+                "The abstention message above is the ENGINE'S OWN and names the budget it hit \
+                 plus the numbers, so it is directly actionable — raise the named knob, or route \
+                 the property elsewhere.\n\nRead the attribution precisely: `{engine}` failed \
+                 over the WHOLE DESIGN, which is not a claim that THIS property caused the \
+                 failure. What is claimed is that this property is ⊥ and the engine most likely \
+                 to have decided it stopped for the stated reason. (Conflating those is the \
+                 mununu#548 defect — a note describing one engine inherited by properties \
+                 another engine decided.)\n\nAlso carried as the structured \
+                 `bottom_reason` FIELD on the property, which a consumer cannot filter out by \
+                 not knowing about it — a note can be, and was, for the reader this was written \
+                 for."
+            ),
+        ),
+        // Every variant added after monono ask 26 renders from `one_line()`, which the compiler
+        // forces to stay exhaustive. So a new variant cannot silently acquire an empty or
+        // misleading note — the failure mode that let `unclassified-bottom` point readers at a
+        // sibling note the merge had already discarded.
+        other => (
+            format!("`{name}`: ⊥ — {}", other.one_line()),
+            format!(
+                "Machine-readable as the `bottom_reason` FIELD on this property (tag `{}`), which \
+                 a consumer cannot filter out by not knowing about it. Branch a gate on the TAG: \
+                 `budget-expired` is the one case where retrying with more budget is right; \
+                 `engine-contradiction` is a SOUNDNESS ALARM where retrying is actively wrong; \
+                 `safety-shape-not-reducible` needs a property reshape, not a bigger budget.",
+                other.tag()
+            ),
         ),
     };
     VerificationNote {
@@ -4576,6 +4853,8 @@ mod tests {
                     outcome: outcome.clone(),
                     seeded_predicates: Vec::new(),
                     counterexample: cx.clone(),
+                    bottom_reason: None,
+                    decided_by: None,
                 })
                 .collect(),
             ..Default::default()
@@ -4748,6 +5027,8 @@ mod tests {
             outcome: VerifyOutcome::Holds,
             seeded_predicates: Vec::new(),
             counterexample: None,
+            bottom_reason: None,
+            decided_by: None,
         };
         let build = |report: &AutoVerifyReport| {
             build_notes(
@@ -4812,6 +5093,8 @@ mod tests {
                 outcome: VerifyOutcome::Unknown { unknown_cells: 1 },
                 seeded_predicates: Vec::new(),
                 counterexample: None,
+                bottom_reason: None,
+                decided_by: None,
             }],
             ..Default::default()
         };
@@ -4852,6 +5135,8 @@ mod tests {
                 outcome: VerifyOutcome::Unknown { unknown_cells: 1 },
                 seeded_predicates: Vec::new(),
                 counterexample: None,
+                bottom_reason: None,
+                decided_by: None,
             }],
             ..Default::default()
         };
@@ -4964,7 +5249,7 @@ mod tests {
             formula: "nu X. ([] X)".into(),
             recoverability_companion: None,
         };
-        let v = abstained(&t);
+        let v = abstained(&t, BottomReason::NotAttempted);
         assert_eq!(v.name, "p1");
         assert_eq!(
             v.outcome.label(),
@@ -4991,6 +5276,8 @@ mod tests {
                 },
                 seeded_predicates: Vec::new(),
                 counterexample: None,
+                bottom_reason: None,
+                decided_by: None,
             }],
             ..Default::default()
         };
@@ -5029,6 +5316,8 @@ mod tests {
                 },
                 seeded_predicates: Vec::new(),
                 counterexample: None,
+                bottom_reason: None,
+                decided_by: None,
             }],
             ..Default::default()
         };
@@ -5067,6 +5356,8 @@ mod tests {
                 outcome: VerifyOutcome::Unknown { unknown_cells: 1 },
                 seeded_predicates: Vec::new(),
                 counterexample: None,
+                bottom_reason: None,
+                decided_by: None,
             }],
             ..Default::default()
         };
@@ -5130,6 +5421,8 @@ mod tests {
                 outcome: VerifyOutcome::Unknown { unknown_cells: 1 },
                 seeded_predicates: Vec::new(),
                 counterexample: None,
+                bottom_reason: None,
+                decided_by: None,
             }],
             ..Default::default()
         };
@@ -5184,6 +5477,8 @@ mod tests {
                 outcome: VerifyOutcome::Unknown { unknown_cells: 1 },
                 seeded_predicates: Vec::new(),
                 counterexample: None,
+                bottom_reason: None,
+                decided_by: None,
             }],
             ..Default::default()
         };
@@ -5221,6 +5516,8 @@ mod tests {
                 outcome: VerifyOutcome::Unknown { unknown_cells: 1 },
                 seeded_predicates: Vec::new(),
                 counterexample: None,
+                bottom_reason: None,
+                decided_by: None,
             }],
             ..Default::default()
         };
@@ -5271,6 +5568,8 @@ mod tests {
                 outcome: VerifyOutcome::Unknown { unknown_cells: 1 },
                 seeded_predicates: Vec::new(),
                 counterexample: None,
+                bottom_reason: None,
+                decided_by: None,
             }],
             ..Default::default()
         };
@@ -5307,6 +5606,8 @@ mod tests {
                 outcome: VerifyOutcome::Unknown { unknown_cells: 1 },
                 seeded_predicates: Vec::new(),
                 counterexample: None,
+                bottom_reason: None,
+                decided_by: None,
             }],
             ..Default::default()
         };
@@ -5349,6 +5650,8 @@ mod tests {
                 outcome: VerifyOutcome::Unknown { unknown_cells: 1 },
                 seeded_predicates: Vec::new(),
                 counterexample: None,
+                bottom_reason: None,
+                decided_by: None,
             }],
             ..Default::default()
         };
@@ -5393,6 +5696,8 @@ mod tests {
                 outcome: VerifyOutcome::Unknown { unknown_cells: 1 },
                 seeded_predicates: Vec::new(),
                 counterexample: None,
+                bottom_reason: None,
+                decided_by: None,
             }],
             ..Default::default()
         };
@@ -5439,6 +5744,8 @@ mod tests {
                 outcome: VerifyOutcome::Unknown { unknown_cells: 2 },
                 seeded_predicates: Vec::new(),
                 counterexample: None,
+                bottom_reason: None,
+                decided_by: None,
             }],
             ..Default::default()
         };
@@ -5484,6 +5791,8 @@ mod tests {
                 outcome: VerifyOutcome::Unknown { unknown_cells: 1 },
                 seeded_predicates: Vec::new(),
                 counterexample: None,
+                bottom_reason: None,
+                decided_by: None,
             }],
             ..Default::default()
         };
@@ -5523,6 +5832,8 @@ mod tests {
                 outcome: VerifyOutcome::Unknown { unknown_cells: 1 },
                 seeded_predicates: Vec::new(),
                 counterexample: None,
+                bottom_reason: None,
+                decided_by: None,
             }],
             ..Default::default()
         };
@@ -5749,6 +6060,159 @@ mod tests {
         assert_eq!(
             merged.properties[0].outcome,
             VerifyOutcome::Unknown { unknown_cells: 8 }
+        );
+    }
+
+    /// O-2 — the five ⊥ causes must be DISTINGUISHABLE, which is the whole point of the field.
+    ///
+    /// Before this they all produced `unknown` with `unknown_cells: 0`, so a consumer could not
+    /// tell a soundness alarm from a timeout. The assertion that matters is not that each has *a*
+    /// reason but that no two share a TAG — a gate branches on the tag, and two causes collapsing
+    /// onto one tag is the defect re-created one level up.
+    #[test]
+    fn the_five_bottom_causes_have_five_distinct_tags() {
+        let all = [
+            BottomReason::SafetyShapeNotReducible,
+            BottomReason::NoStateModelNonSafety,
+            BottomReason::UnclassifiedBottom,
+            BottomReason::EngineDidNotComplete {
+                engine: "exact-symbolic".into(),
+                detail: "abstained on the ITERATION budget".into(),
+            },
+            BottomReason::EngineContradiction {
+                detail: "Holds@[exact] vs Violated@[symbolic]".into(),
+            },
+            BottomReason::EngineCrashed {
+                detail: "signal 6".into(),
+            },
+            BottomReason::BudgetExpired,
+            BottomReason::NotAttempted,
+        ];
+        let tags: Vec<&str> = all.iter().map(|r| r.tag()).collect();
+        let mut uniq = tags.clone();
+        uniq.sort_unstable();
+        uniq.dedup();
+        assert_eq!(
+            uniq.len(),
+            tags.len(),
+            "two causes share a tag, so a gate cannot distinguish them: {tags:?}"
+        );
+        for r in &all {
+            assert!(!r.one_line().is_empty(), "{} has no rendering", r.tag());
+        }
+    }
+
+    /// The three causes a GATE must treat differently, pinned by the advice each one carries.
+    ///
+    /// Retrying with a bigger budget is right for exactly ONE of them. It cannot help a shape
+    /// problem, and on a contradiction it means retrying an UNSOUNDNESS — so the text has to say
+    /// so, because that is the only place a consumer learns it.
+    #[test]
+    fn only_a_budget_expiry_tells_the_reader_to_retry_with_more_budget() {
+        let budget = BottomReason::BudgetExpired.one_line();
+        assert!(
+            budget.contains("retry"),
+            "a budget expiry is THE case where retrying is right, and must say so: {budget}"
+        );
+
+        let contradiction = BottomReason::EngineContradiction {
+            detail: "Holds@[a] vs Violated@[b]".into(),
+        }
+        .one_line();
+        assert!(
+            contradiction.contains("SOUNDNESS"),
+            "a contradiction must be named a soundness alarm, not an abstention: {contradiction}"
+        );
+        assert!(
+            contradiction.contains("unsound"),
+            "must say an engine is unsound — the actionable part: {contradiction}"
+        );
+
+        let shape = BottomReason::SafetyShapeNotReducible.one_line();
+        assert!(
+            shape.contains("NOT a bigger budget") || shape.contains("not a bigger budget"),
+            "a shape problem must say a budget will not help, or a gate loops forever: {shape}"
+        );
+    }
+
+    /// REPRODUCER for monono ask 26 (2026-09-15).
+    ///
+    /// `merge_portfolio_reports` carried the comment *"Errors contribute nothing"* and meant it:
+    /// the exact engine's `Err` — which NAMES the budget it hit — was discarded, so a consumer saw
+    /// a bare `⊥` plus a cube count and could only try knobs blind. Cost: a red lane, an hour,
+    /// two refuted hypotheses, neither refuted from the ⊥ itself.
+    ///
+    /// Fails on the parent: `bottom_reason` does not exist there.
+    #[test]
+    fn a_failing_engines_budget_name_survives_the_merge() {
+        let exact = (
+            "exact-symbolic",
+            Err(AdapterError {
+                kind: AdapterErrorKind::IrConsistencyError,
+                message: "symbolic bit-blaster: abstained on the ITERATION budget (1048577 > \
+                          1048576) — raise MUNUNU_BDD_ITER_BUDGET"
+                    .to_string(),
+                location: None,
+            }),
+        );
+        let cube = (
+            "symbolic",
+            Ok(mk_report(&[(
+                "sva_1",
+                VerifyOutcome::Unknown { unknown_cells: 125 },
+                None,
+            )])),
+        );
+
+        let runs = vec![exact, cube];
+        let merged = merge_portfolio_reports(&runs, PortfolioMode::Sequential)
+            .expect("a surviving engine still yields a report");
+
+        let r = merged.properties[0]
+            .bottom_reason
+            .as_ref()
+            .expect("a residual ⊥ must say WHY, as a FIELD — a note is filterable, a field is not");
+        assert_eq!(r.tag(), "engine-did-not-complete");
+        let line = r.one_line();
+        assert!(
+            line.contains("ITERATION budget"),
+            "must carry the engine's own budget NAME — that is the actionable part: {line}"
+        );
+        assert!(
+            line.contains("MUNUNU_BDD_ITER_BUDGET"),
+            "must carry the KNOB to raise, so the reader need not guess: {line}"
+        );
+        assert!(
+            line.contains("exact-symbolic"),
+            "must attribute to the engine that failed: {line}"
+        );
+    }
+
+    /// The mununu#548 lesson, applied in the new direction: a property another engine DECIDED must
+    /// not inherit a failing engine's reason. #548 was this defect for notes; repeating it for the
+    /// field would be the same over-claim in a place consumers trust more.
+    #[test]
+    fn a_decided_property_never_inherits_a_failing_engines_reason() {
+        let exact = (
+            "exact-symbolic",
+            Err(AdapterError {
+                kind: AdapterErrorKind::IrConsistencyError,
+                message: "abstained on the ARENA-SAFETY bound".to_string(),
+                location: None,
+            }),
+        );
+        let cube = (
+            "symbolic",
+            Ok(mk_report(&[("sva_1", VerifyOutcome::Holds, None)])),
+        );
+
+        let runs = vec![exact, cube];
+        let merged = merge_portfolio_reports(&runs, PortfolioMode::Sequential).expect("merge ok");
+
+        assert!(
+            merged.properties[0].bottom_reason.is_none(),
+            "a property that HOLDS is not ⊥ and must carry no bottom-reason, however loudly \
+             another engine failed"
         );
     }
 
@@ -6272,6 +6736,8 @@ module uart_tx(); endmodule"#;
                     outcome: VerifyOutcome::Holds,
                     seeded_predicates: vec!["a".into()],
                     counterexample: None,
+                    bottom_reason: None,
+                    decided_by: None,
                 },
                 PropertyVerdict {
                     name: "p_unknown".into(),
@@ -6281,6 +6747,8 @@ module uart_tx(); endmodule"#;
                     outcome: VerifyOutcome::Unknown { unknown_cells: 2 },
                     seeded_predicates: vec!["b".into()],
                     counterexample: None,
+                    bottom_reason: None,
+                    decided_by: None,
                 },
             ],
             unsupported: vec![("u".into(), "reason".into())],
@@ -6503,6 +6971,8 @@ module uart_tx(); endmodule"#;
                 outcome: VerifyOutcome::Holds,
                 seeded_predicates: Vec::new(),
                 counterexample: None,
+                bottom_reason: None,
+                decided_by: None,
             }],
             unsupported: Vec::new(),
             diagnostics: ModelDiagnostics {
@@ -6556,6 +7026,8 @@ module uart_tx(); endmodule"#;
                 outcome: VerifyOutcome::Holds,
                 seeded_predicates: vec!["idle".into()],
                 counterexample: None,
+                bottom_reason: None,
+                decided_by: None,
             }],
             unsupported: Vec::new(),
             diagnostics: ModelDiagnostics {

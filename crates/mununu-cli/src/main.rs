@@ -4141,6 +4141,14 @@ fn render_verify_auto_text(report: &mununu_core::adapter::slang::verify_auto::Au
             verify_outcome_str(&p.outcome)
         );
         println!("        formula: {}", p.formula);
+        // monono ask 26 — WHY this property is ⊥, on the property's own lines rather than in a
+        // note. A consumer that filters notes (monono's formal lane did, wholesale) still sees
+        // this, and for a resource abstain the text is the ENGINE'S OWN message, which names the
+        // budget it hit and its numbers. Before this, a ⊥ arrived as a bare outcome plus a cube
+        // count and the only available move was to try budget knobs blind.
+        if let Some(r) = &p.bottom_reason {
+            println!("        bottom-reason [{}]: {}", r.tag(), r.one_line());
+        }
         if !p.seeded_predicates.is_empty() {
             println!("        predicates: {}", p.seeded_predicates.join(", "));
         }

@@ -272,6 +272,119 @@ impl BddBitBlaster {
         file: &Btor2File,
         keep: Option<&std::collections::HashSet<Nid>>,
     ) -> Result<Self, String> {
+        let (interleave, warning) =
+            Self::resolve_var_order(&std::env::var("MUNUNU_BDD_VAR_ORDER").unwrap_or_default());
+        if let Some(w) = warning {
+            eprintln!("{w}");
+        }
+        Self::build_with_keep_and_order(file, keep, interleave)
+    }
+
+    /// Decide the BDD variable order from the raw `MUNUNU_BDD_VAR_ORDER` value.
+    ///
+    /// Pure and total so the config semantics are unit-testable without an env var, a BTOR2
+    /// fixture, or a BDD arena — the dispatch above is a two-line shell over this.
+    ///
+    /// Returns `(interleave, warning)`. **`interleave = true` is the DEFAULT** since the consumer
+    /// sweep of 2026-09-15, measured in APPLY CALLS (load- and host-independent — they reproduced
+    /// byte-identically at load 1.7 and at load 4–6): interleaved is cheaper by 63.6× / 94.9× /
+    /// 3,653× on three consumer blocks and costlier by 13.4× on one (`sdram_burst`, shift-dense),
+    /// with every synthetic shape and the whole lib suite (123.8 s → 48.2 s) agreeing. Cell-major's
+    /// worst case on a real block is UNBOUNDED: `sprite_render` measured 195.4 s on one run and was
+    /// censored past 1583 s on the next at identical settings.
+    ///
+    /// **Why an unrecognised value WARNS rather than falling through silently.** A consumer baking
+    /// this into a lane config who mistypes the spelling would otherwise get `interleaved`, and on a
+    /// shift-dense cone that is 46 s → 710 s — which inside a `timeout`-gated lane surfaces as a
+    /// TIMEOUT that reads as a finding about the engine. Same shape as a mistyped CTXDSL atom
+    /// evaluating vacuously TRUE: the input is invalid and the system does something reasonable
+    /// instead of complaining. **A config error must be loud precisely BECAUSE the fallback is
+    /// sensible.** (Articulation is monono-8d's, 2026-09-15.)
+    fn resolve_var_order(raw: &str) -> (bool, Option<String>) {
+        let v = raw.trim();
+        if v.is_empty() || v.eq_ignore_ascii_case("interleaved") {
+            return (true, None);
+        }
+        if v.eq_ignore_ascii_case("cell-major")
+            || v.eq_ignore_ascii_case("cell_major")
+            || v.eq_ignore_ascii_case("cellmajor")
+        {
+            return (false, None);
+        }
+        // RETIRED 2026-09-15. A no-op rather than an error so existing consumer invocations keep
+        // working. The chooser was 2 of 4 on the consumer sweep and its failure was ARCHITECTURAL,
+        // not calibration: it built the incumbent in FULL before racing, so a wrong pick cost
+        // 1.0 × the wrong build before any measurement existed — and a CORRECT pick still did
+        // (`affine_sampler`: 10.3 s against the 0.63 s order it chose). The pick itself was decided
+        // by a wall clock that FLAPPED: challenger abandoned, abandoned, then 240 ms on three
+        // identical runs.
+        if v.eq_ignore_ascii_case("auto") {
+            return (
+                true,
+                Some(
+                    "[mununu#553] MUNUNU_BDD_VAR_ORDER=auto was RETIRED on 2026-09-15 and is now a \
+                     no-op — using the default (interleaved). It picked correctly on only 2 of 4 \
+                     consumer blocks; see docs/design/bdd-variable-ordering.md. Set \
+                     MUNUNU_BDD_VAR_ORDER=cell-major explicitly for a shift-dense cone."
+                        .to_string(),
+                ),
+            );
+        }
+        (
+            true,
+            Some(format!(
+                "[mununu] MUNUNU_BDD_VAR_ORDER={v:?} is not a recognised variable order — using \
+                 the default (interleaved). Valid: `interleaved` (default) or `cell-major`. This \
+                 is a CONFIG ERROR, not a fallback: if you meant cell-major you are now running \
+                 the order that is 15× slower on a shift-dense cone."
+            )),
+        )
+    }
+
+    /// Live node count, GC'd first.
+    ///
+    /// ⚠️ **NOT `approx_num_inner_nodes`.** That counter is allocated-INCLUDING-DEAD, so on a cone
+    /// at GC equilibrium it reports the ARENA rather than the diagram — measured 84-90% occupancy
+    /// across 33 M / 67 M / 134 M arenas on the same block (the defect behind mununu#557). Any
+    /// size comparison must collect first, and `num_inner_nodes` then sums the unique tables.
+    ///
+    /// This is the instrument a sifting heuristic would need thousands of times per pass, which is
+    /// why Stage 1 is not merely "write the loop": a GC per measurement may be too expensive, and
+    /// that is an open question rather than a solved one.
+    pub fn live_node_count(&self) -> usize {
+        self._manager.with_manager_shared(|m| {
+            m.gc();
+            m.num_inner_nodes()
+        })
+    }
+
+    /// mununu#553 — build with the variable order given EXPLICITLY rather than read from the
+    /// environment.
+    ///
+    /// Kept after the automatic chooser was RETIRED (2026-09-15) because tests and callers still
+    /// need to pin an order without a process-global env var.
+    ///
+    /// The history is worth keeping: the deciding quantity is a RUNTIME one. SEVEN static
+    /// predictors died — wall clock, iteration cap, node cap, a 2-D rule, Weighted Event Span,
+    /// selector fraction, and finally the chooser's own bit-count gate. Profiling showed the order
+    /// changes how many distinct sub-problems the apply recursion visits (63.6x/94.9x/3,653x fewer
+    /// where interleaving wins, 13.4x more where it loses) while the cache hit rate moves the OTHER
+    /// way. That quantity does not exist until the recursion runs, so it cannot be read off the
+    /// model — and measuring it by racing two builds did not work either, because the incumbent had
+    /// to be built in FULL first. See docs/design/bdd-variable-ordering.md.
+    pub fn build_with_keep_and_order(
+        file: &Btor2File,
+        keep: Option<&std::collections::HashSet<Nid>>,
+        interleave: bool,
+    ) -> Result<Self, String> {
+        Self::build_inner(file, keep, interleave)
+    }
+
+    fn build_inner(
+        file: &Btor2File,
+        keep: Option<&std::collections::HashSet<Nid>>,
+        interleave: bool,
+    ) -> Result<Self, String> {
         // AR-S1 / D1.4 — the ONE canonical leaf enumeration + naming lives on the
         // STS-IR seam (`BtorSts::leaf_cells`). It resolves each state/input to its
         // user-visible name via `collect_symbols` (walking Yosys's `uext _ NID 0 NAME`
@@ -371,20 +484,26 @@ impl BddBitBlaster {
         // init BDD, the input cube, and the next-state substitution).
         let mut env: HashMap<Nid, BitVec> = HashMap::new();
         let mut cells: Vec<Cell> = Vec::new();
-        // mununu#553 follow-up — the VARIABLE ORDER. `MUNUNU_BDD_VAR_ORDER=interleaved` assigns
-        // bit-position-major (a0 b0 c0, a1 b1 c1, …) instead of the default CELL-MAJOR (every bit
-        // of one cell contiguous). Default UNCHANGED; see `docs/design/bdd-variable-ordering.md`.
+        // THE VARIABLE ORDER. `interleaved` is bit-position-major (a0 b0 c0, a1 b1 c1, …) and is
+        // the DEFAULT since 2026-09-15; CELL-MAJOR (every bit of one cell contiguous) is the
+        // opt-out. See `docs/design/bdd-variable-ordering.md`.
         //
-        // Why it exists: cell-major is the textbook bad order for RELATIONAL structure — `a == b`
+        // Why interleaved: cell-major is the textbook bad order for RELATIONAL structure — `a == b`
         // is Θ(2^n) cell-major (the diagram must remember all of `a` before it sees any of `b`)
         // and O(n) interleaved. A barrel shifter (SYMBOLIC shift amount) is worse still: 65 537
         // nodes cell-major at 12 bits versus 1 interleaved, and it does not finish at 16. A
         // CONSTANT shift amount is free under either order — it is wiring.
         //
-        // Why it is not the DEFAULT: one measured consumer block regresses 10.9× in wall time at a
-        // fixed arena (48 s → 525 s, 13 definite verdicts in both arms), and nobody has a mechanism
-        // for it. Without one we cannot predict which other cones regress. Recommended as the first
-        // thing to try on a slow cone, not as what everyone gets.
+        // Why it became the default (2026-09-15 consumer sweep, measured in APPLY CALLS, which are
+        // load- and host-independent): interleaved cheaper by 63.6x / 94.9x / 3,653x on three
+        // consumer blocks, costlier by 13.4x on one. Cell-major's worst case on a real block is
+        // UNBOUNDED — `sprite_render` measured 195.4 s then censored past 1583 s at identical
+        // settings. The wins are two orders of magnitude larger than the loss.
+        //
+        // WHEN TO SET cell-major: a SHIFT-DENSE cone. `sdram_burst` (52 symbolic-amount shifts at
+        // 33 bits) is the known case — 46 s cell-major against 710 s interleaved. Note the diagrams
+        // there are near-equal in size while the WORK differs 13.4x, so size does not explain it
+        // and no static predictor has ever called it correctly (seven have tried).
         //
         // A dependency-aware `deps` mode and an orthogonal `MUNUNU_BDD_INPUTS_LAST` were built,
         // measured and REMOVED. `deps` clustered cells that some expression reads together; on
@@ -392,8 +511,6 @@ impl BddBitBlaster {
         // single block where it genuinely split (17 cells into 15+1+1) it still regressed 9.6×.
         // `inputs-last` had no measured win in the form that does not break a coupled group. The
         // evidence and the reasoning are in the design note so neither is re-derived.
-        let interleave = std::env::var("MUNUNU_BDD_VAR_ORDER")
-            .is_ok_and(|v| v.eq_ignore_ascii_case("interleaved"));
         let kept_widths: Vec<usize> = leaf_specs
             .iter()
             .filter(|(nid, _, _, _)| is_kept(*nid))
@@ -2201,13 +2318,70 @@ pub enum DiameterEstimate {
     ExceedsBound(usize),
 }
 
+/// Read a `usize` budget from the environment with ONE consistent contract across the family.
+///
+/// **mununu#553 follow-up / B-1 (2026-09-15).** Before this, `0` meant three different things
+/// across four sibling knobs, and the divergence cost a consumer an hour and sent their
+/// experiment BACKWARDS:
+///
+/// | knob | `0` used to mean |
+/// |---|---|
+/// | `MUNUNU_BDD_ITER_BUDGET` | **ZERO ITERATIONS — abstain immediately** |
+/// | `MUNUNU_BDD_FIXPOINT_ITERS` | the default (while its own doc claimed `0` disabled the bound) |
+/// | `MUNUNU_BDD_FIXPOINT_NODES` | disabled |
+/// | `MUNUNU_BDD_TIME_BUDGET_MS` | disabled |
+///
+/// `.unwrap_or(default)` fires only on a PARSE FAILURE, so `"0"` parsed fine and became the budget.
+/// A consumer set `MUNUNU_BDD_ITER_BUDGET=0` expecting "disabled", got "zero iterations", and their
+/// failures went 2 → 4 of 16 with new bottoms at 32 and 2 cells. They reported it charitably as
+/// *"`0` is not disabled for that knob, or it is disabled and something else binds"* — the
+/// uncharitable reading was the correct one.
+///
+/// **The contract now, for every budget:** `0` = DISABLED (no bound). An unparseable value WARNS
+/// and uses the default rather than being silently absorbed — same principle as
+/// [`BddBitBlaster::resolve_var_order`]: an input that cannot mean what the user intended must be
+/// loud, precisely BECAUSE the fallback is sensible.
+///
+/// Note "disabled" is never "unbounded in practice": the arena-safety net still applies, because
+/// exceeding the arena is a crash rather than a budget question.
+fn budget_from_env(var: &str, default: usize) -> usize {
+    let (value, warning) = resolve_budget(std::env::var(var).ok().as_deref(), default);
+    if let Some(w) = warning {
+        eprintln!("[mununu] {var}={w}");
+    }
+    value
+}
+
+/// The pure half of [`budget_from_env`], so the contract is unit-testable without setting a
+/// process-global environment variable (which races across parallel tests and makes the one
+/// property worth pinning — that `0` means DISABLED — untestable in practice).
+///
+/// Returns `(budget, warning)`. `raw = None` means the variable is unset.
+fn resolve_budget(raw: Option<&str>, default: usize) -> (usize, Option<String>) {
+    let Some(raw) = raw else {
+        return (default, None);
+    };
+    match raw.trim().parse::<usize>() {
+        // `0` = DISABLED, uniformly across the family. See the table above for what it used to
+        // mean on each knob.
+        Ok(0) => (usize::MAX, None),
+        Ok(n) => (n, None),
+        Err(_) => (
+            default,
+            Some(format!(
+                "{raw:?} is not a non-negative integer — using the default ({default}). This is a \
+                 CONFIG ERROR, not a fallback; `0` means DISABLED."
+            )),
+        ),
+    }
+}
+
 /// The exact-engine fixpoint iteration budget: `MUNUNU_BDD_ITER_BUDGET` or a default sized to
 /// catch a wide-counter diameter (`2^W`) while admitting any control fixpoint (small diameter).
 fn fixpoint_iter_budget() -> usize {
-    std::env::var("MUNUNU_BDD_ITER_BUDGET")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(1 << 20) // ~1M iterations; a counter's steps are cheap (small BDD) so this is fast to reach
+    // ~1M iterations; a counter's steps are cheap (small BDD) so this is fast to reach.
+    // `0` = DISABLED since B-1; it used to mean ZERO iterations, i.e. abstain immediately.
+    budget_from_env("MUNUNU_BDD_ITER_BUDGET", 1 << 20)
 }
 
 /// Default for the LATENCY bound's node half. Calibrated against every cone measured to DECIDE:
@@ -2240,11 +2414,14 @@ const FIXPOINT_ITER_SOFT_DEFAULT: usize = 5_000;
 /// [`FIXPOINT_ITER_SOFT_DEFAULT`]. `0` disables the latency bound entirely (the arena-safety net
 /// still applies).
 fn fixpoint_iter_soft() -> usize {
+    // B-1: `0` now DISABLES, as this function's doc comment has always claimed. The code
+    // previously returned the DEFAULT for `0`, so the documentation was wrong about its own knob.
     match std::env::var("MUNUNU_BDD_FIXPOINT_ITERS")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
     {
-        Some(0) | None => FIXPOINT_ITER_SOFT_DEFAULT,
+        Some(0) => usize::MAX,
+        None => FIXPOINT_ITER_SOFT_DEFAULT,
         Some(n) => n,
     }
 }
@@ -2714,10 +2891,51 @@ impl ExactModel {
         // second property in the same runs was byte-identical and the ITERATION counts were
         // identical in every case. So treat the peak as reproducible to ~0.01%, not to the byte,
         // and do not build anything on exact equality of node counts.
+        // mununu#553 W-3'' — dump OxiDD's per-operation apply-cache counters. Built only under the
+        // `oxidd-statistics` feature because the counters are atomics on the hot path: they perturb
+        // the timings they exist to explain, so this is a diagnostic build, never a shipped one.
+        //
+        // The question it answers: a consumer block costs 10.9x the WORK under a different variable
+        // order at 1.08x the node count. A cache that stops hitting is what that looks like, and
+        // the hit RATE is the only one of the candidate explanations that measures the recursion's
+        // behaviour rather than the diagram's shape.
+        #[cfg(feature = "oxidd-statistics")]
+        if std::env::var_os("MUNUNU_BDD_STATS").is_some() {
+            eprintln!("[mununu#553] --- OxiDD apply-cache counters ---");
+            oxidd::bdd::print_stats();
+        }
         if std::env::var_os("MUNUNU_BDD_REPORT_PEAK").is_some() {
+            // mununu#557 residue — the peak is ALLOCATED-INCLUDING-DEAD, so on a cone at GC
+            // equilibrium it tracks the ARENA rather than the diagram (measured 84-90% occupancy
+            // across 33 M / 67 M / 134 M arenas on one block).
+            //
+            // ⚠️ READ WHAT THIS SECOND NUMBER IS, because an earlier version of this comment got it
+            // wrong. It is collected AFTER the fixpoint returns, so it counts what SURVIVES — the
+            // transition relation and the persistent structures — NOT the property's cone, whose
+            // working set is transient and already collected by the time we look.
+            //
+            // Demonstrated: two DIFFERENT properties on one design (`bank_open_q == 0`, 4
+            // iterations; `wr_wait_q == 0`, 6 iterations) report BYTE-IDENTICAL live counts of
+            // 1,037,805 cell-major / 4,831,066 interleaved. Two properties cannot share a diagram;
+            // what they share is the relation.
+            //
+            // So the gap between the two numbers is NOT "the garbage". It is the transient
+            // fixpoint working set, which was legitimately live AT the peak and is dead only now.
+            // Measuring the true peak-live would require collecting AT the peak, which is exactly
+            // what mununu#557's three abandoned attempts foundered on (live-lock).
+            //
+            // What it IS good for: the relation's size under the current variable order, which is
+            // the structure every fixpoint operates over and is strongly order-dependent — 4.66x
+            // smaller cell-major on the block above, at 5.17 s against 40.92 s.
+            let live = self.manager.with_manager_shared(|m| {
+                m.gc();
+                m.num_inner_nodes()
+            });
             eprintln!(
                 "[mununu#553] exact fixpoint: peak {} ALLOCATED BDD nodes (incl. any awaiting \
-                 collection — an UPPER BOUND on the cone, not a measurement of it) in {} \
+                 collection — an UPPER BOUND on the cone, not a measurement of it); {live} live \
+                 AFTER the fixpoint (this is the RESIDUAL — relation + persistent structures, NOT \
+                 this property's cone, whose working set is already collected); in {} \
                  iteration(s), budget {}",
                 self.peak_nodes.get(),
                 self.iters.get(),
@@ -6193,6 +6411,311 @@ mod tests {
         eprintln!("===== end #553 probe =====\n");
     }
 
+    /// W-1a — WEIGHTED EVENT SPAN, the literature's metric for choosing a static variable order.
+    ///
+    /// Meijer & van de Pol show that bandwidth/wavefront reduction over a DEPENDENCY MATRIX (rows =
+    /// transitions/events, columns = variables, nonzero = that event reads or writes that variable)
+    /// minimises Weighted Event Span, and that minimising WES reduces COMPUTATIONAL EFFORT.
+    /// Cuthill–McKee (1969) and Sloan (1989) compute such orders in milliseconds.
+    ///
+    /// Effort is the axis we need: our one counter-example (`sdram_burst`, a consumer's) regresses
+    /// ~10× in WORK at essentially constant node count, and node counts are structurally blind to
+    /// that. This probe computes WES for the two orders we already ship, so the METRIC can be
+    /// judged before any reordering algorithm is written.
+    ///
+    /// `span(e) = max(pos) − min(pos) + 1` over the variable positions the event's cone touches;
+    /// WES here is the mean span, normalised by the variable count, so designs of different widths
+    /// are comparable. LOWER IS BETTER.
+    ///
+    /// ⚠️ **This cannot validate the metric on its own.** Every design we hold points the same way
+    /// (interleaved wins or ties); the only known case where CELL-MAJOR wins is the consumer's, and
+    /// a metric that cannot pick that one out is useless regardless of how it does here. Read a
+    /// green run as "the implementation is not obviously wrong", not as a result.
+    ///
+    /// engine: `exact-symbolic` (full-state ROBDD, OxiDD) — static ordering input only; computes no
+    /// BDD and changes no verdict.
+    #[test]
+    #[ignore = "probe: W-1a weighted event span; run with --ignored --nocapture"]
+    fn probe_w1_weighted_event_span_of_both_orders() {
+        /// Leaf cells (state/input) with widths — from the SAME source the real ordering uses
+        /// (`BtorSts::leaf_cells`), so the metric is computed over the variables the engine would
+        /// actually allocate rather than a re-derivation that could drift from it.
+        fn leaves(file: &Btor2File) -> Vec<(Nid, u32)> {
+            crate::adapter::sts_ir::BtorSts::new(file)
+                .leaf_cells()
+                .map(|cs| cs.iter().map(|c| (c.nid, c.width)).collect())
+                .unwrap_or_default()
+        }
+        /// The leaf cells one expression's combinational cone reads (stops at state/input).
+        fn support(file: &Btor2File, start: Nid) -> std::collections::HashSet<Nid> {
+            let (mut seen, mut out, mut work) = (
+                std::collections::HashSet::new(),
+                std::collections::HashSet::new(),
+                vec![start],
+            );
+            while let Some(nid) = work.pop() {
+                if !seen.insert(nid) {
+                    continue;
+                }
+                let Some(line) = file.lookup(nid) else {
+                    continue;
+                };
+                match &line.node {
+                    Node::State { .. } | Node::Input { .. } => {
+                        out.insert(nid);
+                    }
+                    Node::Op { args, .. } => work.extend(args.iter().map(|a| a.nid())),
+                    Node::Init { value, .. } | Node::Next { value, .. } => work.push(value.nid()),
+                    Node::Bad { signal }
+                    | Node::Constraint { signal }
+                    | Node::Output { signal, .. } => work.push(signal.nid()),
+                    _ => {}
+                }
+            }
+            out
+        }
+        /// Variable POSITIONS per cell under each order.
+        fn positions(cells: &[(Nid, u32)], interleaved: bool) -> HashMap<Nid, Vec<usize>> {
+            let mut m: HashMap<Nid, Vec<usize>> = HashMap::new();
+            if interleaved {
+                let maxw = cells.iter().map(|(_, w)| *w as usize).max().unwrap_or(0);
+                let mut p = 0usize;
+                for j in 0..maxw {
+                    for (nid, w) in cells {
+                        if j < *w as usize {
+                            m.entry(*nid).or_default().push(p);
+                            p += 1;
+                        }
+                    }
+                }
+            } else {
+                let mut p = 0usize;
+                for (nid, w) in cells {
+                    let v: Vec<usize> = (p..p + *w as usize).collect();
+                    p += *w as usize;
+                    m.insert(*nid, v);
+                }
+            }
+            m
+        }
+        /// Mean event span, normalised by the variable count. LOWER IS BETTER.
+        fn wes(file: &Btor2File, cells: &[(Nid, u32)], interleaved: bool) -> Option<f64> {
+            let pos = positions(cells, interleaved);
+            let nvars: usize = cells.iter().map(|(_, w)| *w as usize).sum();
+            if nvars == 0 {
+                return None;
+            }
+            let seeds: Vec<Nid> = file
+                .lines
+                .iter()
+                .filter_map(|l| match &l.node {
+                    Node::Next { value, .. } | Node::Init { value, .. } => Some(value.nid()),
+                    Node::Bad { signal }
+                    | Node::Constraint { signal }
+                    | Node::Output { signal, .. } => Some(signal.nid()),
+                    _ => None,
+                })
+                .collect();
+            let mut spans: Vec<f64> = Vec::new();
+            for seed in seeds {
+                let sup = support(file, seed);
+                let ps: Vec<usize> = sup
+                    .iter()
+                    .filter_map(|n| pos.get(n))
+                    .flatten()
+                    .copied()
+                    .collect();
+                if ps.is_empty() {
+                    continue;
+                }
+                let (lo, hi) = (ps.iter().min().unwrap(), ps.iter().max().unwrap());
+                spans.push((hi - lo + 1) as f64);
+            }
+            if spans.is_empty() {
+                return None;
+            }
+            Some(spans.iter().sum::<f64>() / spans.len() as f64 / nvars as f64)
+        }
+
+        // Designs whose ordering outcome we have MEASURED, so the metric can be checked against
+        // something rather than admired.
+        let cases: Vec<(&str, String, &str)> = vec![
+            (
+                "barrel shift (sym amount)",
+                "1 sort bitvec 1\n2 sort bitvec 12\n3 state 2 x\n4 state 2 k\n5 zero 2\n\
+                 6 init 2 3 5\n7 srl 2 3 4\n8 next 2 3 7\n"
+                    .into(),
+                "interleaved WINS 65537->1",
+            ),
+            (
+                "relational a==b",
+                "1 sort bitvec 1\n2 sort bitvec 12\n3 state 2 a\n4 state 2 b\n5 eq 1 3 4\n6 bad 5\n"
+                    .into(),
+                "interleaved WINS 84x",
+            ),
+            (
+                "multiply (sym)",
+                "1 sort bitvec 1\n2 sort bitvec 12\n3 state 2 x\n4 state 2 y\n5 zero 2\n\
+                 6 init 2 3 5\n7 mul 2 3 4\n8 next 2 3 7\n"
+                    .into(),
+                "interleaved slightly better",
+            ),
+            (
+                "independent cells (no cross-cell op)",
+                "1 sort bitvec 1\n2 sort bitvec 12\n3 state 2 a\n4 state 2 b\n5 one 2\n\
+                 6 add 2 3 5\n7 next 2 3 6\n8 add 2 4 5\n9 next 2 4 8\n"
+                    .into(),
+                "no measurement — control",
+            ),
+        ];
+
+        // Real lifts too: the synthetic cases above have TWO cells, so every event touches both and
+        // the span is the whole variable range under either order — the metric has no room to
+        // discriminate there. A metric needs many events each touching a SUBSET, which is what the
+        // lifts provide (7-10 cells).
+        let lifts: Vec<(&str, &str, &str)> = vec![
+            (
+                "uart_msg_handler (10 cells)",
+                "scratchpad/uart_lift/uart_msg_handler.btor2",
+                "TIE (524,289 both)",
+            ),
+            (
+                "spiCtrl (7 cells)",
+                "scratchpad/spictrl_lift/spiCtrl.btor2",
+                "TIE",
+            ),
+            (
+                "sd_data_master (10 cells)",
+                "scratchpad/sddm_lift/sd_data_master.btor2",
+                "TIE",
+            ),
+            (
+                "sd_cmd_serial_host",
+                "scratchpad/sdcmd_lift/sd_cmd_serial_host.named.btor2",
+                "TIE",
+            ),
+        ];
+
+        eprintln!("\n===== W-1a: weighted event span (LOWER IS BETTER) =====");
+        eprintln!(
+            "{:<34} {:>12} {:>12} {:>10}  measured outcome",
+            "design", "cell-major", "interleaved", "WES picks"
+        );
+        for (name, src, measured) in &cases {
+            let file = parser::parse(src).expect("parse");
+            let cells = leaves(&file);
+            let (cm, il) = (wes(&file, &cells, false), wes(&file, &cells, true));
+            match (cm, il) {
+                (Some(a), Some(b)) => eprintln!(
+                    "{:<34} {:>12.4} {:>12.4} {:>10}  {}",
+                    name,
+                    a,
+                    b,
+                    if b < a {
+                        "interleaved"
+                    } else if a < b {
+                        "cell-major"
+                    } else {
+                        "tie"
+                    },
+                    measured
+                ),
+                _ => eprintln!("{name:<34} {:>12} {:>12}", "n/a", "n/a"),
+            }
+        }
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for (name, rel, measured) in &lifts {
+            let Ok(src) = std::fs::read_to_string(root.join(rel)) else {
+                eprintln!("{name:<34} (not present)");
+                continue;
+            };
+            let Ok(file) = parser::parse(&src) else {
+                eprintln!("{name:<34} (parse failed)");
+                continue;
+            };
+            let cells = leaves(&file);
+            match (wes(&file, &cells, false), wes(&file, &cells, true)) {
+                (Some(a), Some(b)) => eprintln!(
+                    "{:<34} {:>12.4} {:>12.4} {:>10}  {} [{} cells]",
+                    name,
+                    a,
+                    b,
+                    if b < a {
+                        "interleaved"
+                    } else if a < b {
+                        "cell-major"
+                    } else {
+                        "tie"
+                    },
+                    measured,
+                    cells.len()
+                ),
+                _ => eprintln!("{name:<34} (no events)"),
+            }
+        }
+        eprintln!("===== end W-1a =====\n");
+    }
+
+    /// Does the BUILD phase alone separate the orders the way TOTAL time does?
+    ///
+    /// This decides the shape and cost of an automatic chooser. If bit-blasting the transition
+    /// relation under each order already shows the difference, the probe is cheap — two builds, no
+    /// fixpoint. If not, the probe must run fixpoint iterations too, which costs more and risks
+    /// being a large fraction of the work it is trying to avoid.
+    ///
+    /// Falsifier: the build phase must rank the two orders the SAME WAY the full run does, on both
+    /// a case where interleaving wins and one where it loses. Ranking one correctly is consistent
+    /// with coincidence.
+    #[test]
+    #[ignore = "probe: does build time predict total time? run with --ignored --nocapture"]
+    fn probe_build_phase_predicts_order_cost() {
+        let cases: Vec<(&str, String, &str)> = vec![(
+            "barrel shift 12b",
+            "1 sort bitvec 1\n2 sort bitvec 12\n3 state 2 x\n4 state 2 k\n5 zero 2\n\
+                 6 init 2 3 5\n7 srl 2 3 4\n8 next 2 3 7\n"
+                .into(),
+            "interleaved WINS",
+        )];
+        eprintln!("\n===== build-phase vs total, per order =====");
+        eprintln!(
+            "{:<26} {:>12} {:>12}  measured",
+            "design", "cm build ms", "il build ms"
+        );
+        for (name, src, measured) in &cases {
+            let file = parser::parse(src).expect("parse");
+            let t0 = std::time::Instant::now();
+            let _cm = BddBitBlaster::build_with_keep_and_order(&file, None, false);
+            let cm = t0.elapsed().as_millis();
+            let t1 = std::time::Instant::now();
+            let _il = BddBitBlaster::build_with_keep_and_order(&file, None, true);
+            let il = t1.elapsed().as_millis();
+            eprintln!("{name:<26} {cm:>12} {il:>12}  {measured}");
+        }
+        // The real block, if the consumer's lift is staged.
+        let p = std::path::Path::new("/tmp/monono-543-repro/sdram_burst/sdram_burst.design.btor");
+        if let Ok(src) = std::fs::read_to_string(p)
+            && let Ok(file) = parser::parse(&src)
+        {
+            let t0 = std::time::Instant::now();
+            let cm = BddBitBlaster::build_with_keep_and_order(&file, None, false);
+            let cmt = t0.elapsed().as_millis();
+            let t1 = std::time::Instant::now();
+            let il = BddBitBlaster::build_with_keep_and_order(&file, None, true);
+            let ilt = t1.elapsed().as_millis();
+            eprintln!(
+                "{:<26} {:>12} {:>12}  cell-major WINS (6-10x on total); built ok: {} / {}",
+                "sdram_burst (real)",
+                cmt,
+                ilt,
+                cm.is_ok(),
+                il.is_ok()
+            );
+        } else {
+            eprintln!("{:<26} (consumer lift not staged)", "sdram_burst (real)");
+        }
+        eprintln!("===== end =====\n");
+    }
+
     /// mununu#553 PROBE — the DISCRIMINATING shape, in-repo. A raster counter pair (`hcount`
     /// wraps at `H`, `vcount` advances on that wrap and wraps at `V`) reproduces the one property
     /// that refuted every budget we proposed: the consumer's `a_frame_wraps_at_total`, a nine-line
@@ -6315,7 +6838,7 @@ mod tests {
     #[test]
     #[ignore = "probe: mununu#553 variable-order sensitivity; run with --ignored --nocapture"]
     fn probe_553_var_order_on_wide_class() {
-        let order = std::env::var("MUNUNU_BDD_VAR_ORDER").unwrap_or_else(|_| "cell-major".into());
+        let order = std::env::var("MUNUNU_BDD_VAR_ORDER").unwrap_or_else(|_| "interleaved".into());
         eprintln!("\n===== #553 var-order probe — ORDER = {order} =====");
         eprintln!(
             "{:<26} {:>6} {:>14} {:>10}",
@@ -9660,5 +10183,238 @@ mod tests {
             exact_env_strategy(POSITIONAL_TRAP, "not a valid atom").expect("runs"),
             EnvStrategyOutcome::Inapplicable(_)
         ));
+    }
+
+    /// E-1 — does building SECOND, into a process already carrying another arena, inflate the
+    /// APPLY-CALL count?
+    ///
+    /// **ONE ARM PER PROCESS, selected by `MUNUNU_E1_ARM`.** That is not a convenience — it is
+    /// forced twice over:
+    ///
+    /// 1. **Arm 0 is "a process that never built `cm`".** Three arms in one process cannot deliver
+    ///    it: by the time A and B run, the process HAS built `cm`; and if 0 runs first, A and B
+    ///    then run in a process already churned by 0. My first draft had all three in one test and
+    ///    was wrong on its own terms.
+    /// 2. **The counters are not readable in-process.** `oxidd_rules_bdd`'s `StatCounters` is
+    ///    private and `oxidd::bdd::print_stats()` returns `()`, printing to stderr — and it
+    ///    `swap(0, ..)`s as it goes, so it is read-AND-RESET. A before/after delta inside one test
+    ///    is not available at all.
+    ///
+    /// **What it decides.** The apply-call race is the only successor design either session has
+    /// called both *measuring* and *repeatable*: apply calls reproduced BYTE-IDENTICALLY at load
+    /// 1.7 and at load 4-6 (573,268 twice on `tlm_tx`). But `tlm_tx`'s interleaved BUILD is
+    /// bimodal — 240 ms once, >4,791 ms twice at identical settings — and the fast run was 20x
+    /// INSIDE its own deadline, so the deadline logic is not the cause. If that variance reaches
+    /// the WORK, a work-based race inherits the defect it was meant to escape.
+    ///
+    /// **The mechanism, corrected once.** NOT "the challenger starts in an arena already holding
+    /// the incumbent's nodes" — `bdd::new_manager` is called once per build, so each gets a fresh
+    /// arena AND its own identically-sized apply cache. What is true is that the PROCESS holds two
+    /// arenas at once. That costs wall time; whether it costs logical apply calls is the question.
+    ///
+    /// | arm | setup | |
+    /// |---|---|---|
+    /// | `0` | `il` alone, `cm` NEVER built | **the control** |
+    /// | `A` | `cm` built and KEPT ALIVE, then `il` | two arenas resident |
+    /// | `B` | `cm` built, DROPPED, then `il` | one arena, allocator churned |
+    ///
+    /// `A == B == 0` ⇒ immune, the race survives. `A > B == 0` ⇒ cache eviction under 2x
+    /// footprint. **`A == B > 0` ⇒ allocator churn from having built `cm` AT ALL** — which nobody
+    /// proposed, and which would survive every design that builds two orders in one process, the
+    /// apply-call race included. Without arm 0 that outcome is invisible. (Arm 0 is monono-45's
+    /// addition; I specified A/B with no control, one turn after writing that a control is what
+    /// licenses reading the other rows.)
+    ///
+    /// **PRE-REGISTERED before any number exists:** byte-identical across repeats of the same arm
+    /// is expected, and any non-zero spread is a FINDING, not a tolerance to absorb. A neighbouring
+    /// quantity here already drifts — one property's peak read 7,980,029 / 7,979,366 / 7,979,343
+    /// (0.009%) while a second in the same runs was byte-identical — so stability is per-quantity
+    /// and must be established, not assumed. **A within-arm drift refutes the race's premise and
+    /// makes the between-arm comparison meaningless; report it first.**
+    ///
+    /// ```text
+    /// for arm in 0 A B; do for r in 1 2; do
+    ///   MUNUNU_E1_ARM=$arm MUNUNU_BDD_STATS=1 \
+    ///   cargo test -p mununu-core --lib --features oxidd-statistics \
+    ///     probe_e1_apply_calls_by_arm -- --ignored --nocapture 2>&1 | grep -E "E-1|And"
+    /// done; done
+    /// ```
+    #[test]
+    #[ignore = "E-1 probe: one arm per process via MUNUNU_E1_ARM=0|A|B; needs --features oxidd-statistics"]
+    fn probe_e1_apply_calls_by_arm() {
+        let arm = std::env::var("MUNUNU_E1_ARM").unwrap_or_else(|_| "0".into());
+        let file = symbolic_shift_12();
+
+        // Hold the incumbent for arm A so it is still ALIVE while the challenger builds; that is
+        // the only difference between A and B, and it must outlive the measured build.
+        let _incumbent = match arm.as_str() {
+            "A" => Some(BddBitBlaster::build_with_keep_and_order(&file, None, false).expect("cm")),
+            "B" => {
+                // Built and dropped: one arena resident, but the allocator has been churned
+                // through a full build and freed — which is NOT the same heap as one that never
+                // saw it. Distinguishing that from arm 0 is arm B's whole purpose.
+                drop(BddBitBlaster::build_with_keep_and_order(&file, None, false).expect("cm"));
+                None
+            }
+            _ => None, // arm 0: the control — `cm` is never built in this process
+        };
+
+        // Reset the counters so what prints below covers the MEASURED build only. `print_stats`
+        // is read-and-reset, so this discards everything the setup above accrued.
+        #[cfg(feature = "oxidd-statistics")]
+        {
+            eprintln!("[E-1] (discarding setup counters for arm {arm})");
+            oxidd::bdd::print_stats();
+        }
+
+        let il = BddBitBlaster::build_with_keep_and_order(&file, None, true).expect("il");
+        let size = il.live_node_count();
+
+        eprintln!("[E-1] arm={arm} interleaved build complete, live nodes={size}");
+        eprintln!("[E-1] apply-call counters for the MEASURED build follow:");
+        #[cfg(feature = "oxidd-statistics")]
+        oxidd::bdd::print_stats();
+        #[cfg(not(feature = "oxidd-statistics"))]
+        eprintln!(
+            "[E-1] *** built WITHOUT --features oxidd-statistics — no counters, arm is void ***"
+        );
+
+        drop(il);
+    }
+
+    /// A symbolic shift amount: the shape where the two orders differ most (65,537 nodes
+    /// cell-major against 1 interleaved at 12 bits). Used as the reorder fixture because a
+    /// small difference between arms is still legible against it.
+    fn symbolic_shift_12() -> Btor2File {
+        parser::parse(
+            "1 sort bitvec 1\n2 sort bitvec 12\n3 state 2 x\n4 state 2 k\n5 zero 2\n\
+             6 init 2 3 5\n7 srl 2 3 4\n8 next 2 3 7\n",
+        )
+        .expect("fixture parses")
+    }
+
+    /// B-1 REPRODUCER (2026-09-15): `0` must mean DISABLED on every budget knob.
+    ///
+    /// It used to mean three different things across four siblings. `MUNUNU_BDD_ITER_BUDGET=0`
+    /// meant ZERO ITERATIONS — abstain immediately — because `.unwrap_or(default)` fires only on a
+    /// PARSE FAILURE and `"0"` parses fine. A consumer set it expecting "disabled" and their
+    /// failures went 2 -> 4 of 16.
+    #[test]
+    fn zero_means_disabled_on_every_budget_knob() {
+        let (v, w) = resolve_budget(Some("0"), 1 << 20);
+        assert_eq!(
+            v,
+            usize::MAX,
+            "`0` must DISABLE the budget, never mean zero work"
+        );
+        assert!(
+            w.is_none(),
+            "`0` is a valid, documented value and must not warn"
+        );
+
+        for spaced in ["  0  ", "0\n"] {
+            let (v, _) = resolve_budget(Some(spaced), 7);
+            assert_eq!(v, usize::MAX, "{spaced:?} is still zero after trimming");
+        }
+    }
+
+    /// An unset variable takes the default; a real value is honoured verbatim.
+    #[test]
+    fn an_unset_budget_takes_the_default_and_a_real_value_is_honoured() {
+        assert_eq!(resolve_budget(None, 1 << 20).0, 1 << 20);
+        assert_eq!(resolve_budget(Some("5000"), 1 << 20).0, 5000);
+        assert!(resolve_budget(Some("5000"), 1 << 20).1.is_none());
+    }
+
+    /// An unparseable budget must WARN and say it is a config error — not be silently absorbed
+    /// into the default. Same principle as `resolve_var_order`: an input that cannot mean what the
+    /// user intended must be loud, precisely BECAUSE the fallback is sensible.
+    #[test]
+    fn an_unparseable_budget_warns_that_it_is_a_config_error() {
+        for junk in ["1_000_000", "1e6", "abc", "-1", "10MB", ""] {
+            let (v, w) = resolve_budget(Some(junk), 4242);
+            let w = w.unwrap_or_else(|| panic!("{junk:?} must warn, not be silently absorbed"));
+            assert_eq!(v, 4242, "{junk:?} falls back to the default");
+            assert!(
+                w.contains("CONFIG ERROR"),
+                "{junk:?} must be named a config error, got: {w}"
+            );
+            assert!(
+                w.contains("DISABLED"),
+                "{junk:?}'s warning must state what `0` means, since that is the likely intent: {w}"
+            );
+        }
+    }
+
+    /// The DEFAULT is interleaved (2026-09-15 consumer sweep), and the aliases resolve.
+    #[test]
+    fn var_order_default_is_interleaved_and_cell_major_is_the_opt_out() {
+        for unset in ["", "   ", "interleaved", "INTERLEAVED"] {
+            let (interleave, warn) = BddBitBlaster::resolve_var_order(unset);
+            assert!(interleave, "{unset:?} must give interleaved (the default)");
+            assert!(warn.is_none(), "{unset:?} is valid and must not warn");
+        }
+        for cm in [
+            "cell-major",
+            "cell_major",
+            "cellmajor",
+            "Cell-Major",
+            " cell-major ",
+        ] {
+            let (interleave, warn) = BddBitBlaster::resolve_var_order(cm);
+            assert!(!interleave, "{cm:?} must give cell-major");
+            assert!(
+                warn.is_none(),
+                "{cm:?} is a valid spelling and must not warn"
+            );
+        }
+    }
+
+    /// REPRODUCER for the silent-config-error defect (2026-09-15).
+    ///
+    /// A mistyped order fell through to the default with NO diagnostic. In a consumer's
+    /// `timeout`-gated lane that is a config error presenting as an engine finding: on a
+    /// shift-dense cone the default is 46 s -> 710 s, the block crosses its budget, and the lane
+    /// reports a TIMEOUT that is not a verdict. The value must be REJECTED LOUDLY even though
+    /// the fallback is sensible — that is precisely why it must be loud.
+    #[test]
+    fn a_mistyped_var_order_warns_and_says_it_is_a_config_error() {
+        for typo in [
+            "cell_majr",
+            "cellmajor!",
+            "cell major",
+            "interlaved",
+            "sift",
+            "0",
+        ] {
+            let (interleave, warn) = BddBitBlaster::resolve_var_order(typo);
+            let w = warn.unwrap_or_else(|| panic!("{typo:?} must warn, not be silently absorbed"));
+            assert!(
+                w.contains("CONFIG ERROR"),
+                "{typo:?} must be named a CONFIG ERROR rather than a fallback, got: {w}"
+            );
+            assert!(
+                w.contains("cell-major") && w.contains("interleaved"),
+                "{typo:?}'s warning must name BOTH valid spellings, got: {w}"
+            );
+            assert!(interleave, "an invalid value still gets the default order");
+        }
+    }
+
+    /// `auto` is retired: a no-op that WARNS, not an error — existing consumer invocations must
+    /// keep working rather than start failing.
+    #[test]
+    fn retired_auto_is_a_warning_not_an_error_and_uses_the_default() {
+        let (interleave, warn) = BddBitBlaster::resolve_var_order("auto");
+        let w = warn.expect("`auto` must say it was retired rather than silently changing meaning");
+        assert!(
+            interleave,
+            "retired `auto` falls back to the default (interleaved)"
+        );
+        assert!(w.contains("RETIRED"), "must state it is retired, got: {w}");
+        assert!(
+            w.contains("2 of 4"),
+            "must state WHY it was retired so a reader need not find the doc, got: {w}"
+        );
     }
 }
