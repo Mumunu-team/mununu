@@ -184,6 +184,17 @@ co-occurrence); the literature does *linear placement*. Different algorithm, and
 approximation. The honest statement is "our clustering heuristic failed", not "attribute-derived
 ordering failed".
 
+**❌ MEASURED, AND THE FALSIFIER FIRED (2026-09-15).** WES **never picks interleaved** — it ties or
+prefers cell-major on every design tested, including the three where interleaving wins by up to
+65 537×. The reason is a granularity mismatch, not calibration: `span` is minimised by grouping
+correlated variables contiguously, which is what cell-major does by construction, so a
+span-minimising metric prefers it almost by definition. And in the literature a *variable* is a whole
+state component, whereas ours is a **bit** — any event touching a cell touches all of its bits, so at
+bit granularity span is degenerate (1.0000 on every 2-cell case) and cannot see what interleaving
+exploits: **correlated bits being adjacent**. What would be needed is a bit-level correlation metric,
+which is a different object and not addressed by the surveyed work. Probe:
+`probe_w1_weighted_event_span_of_both_orders`.
+
 **The cheap validation, and its falsifier.** Compute WES for the two orders we already have on the two
 blocks we already measured. It must rank **cell-major better for `sdram_burst`** and **interleaved
 better for `tlm_tx`**. If it does not reproduce measurements we already have, it is not our mechanism.

@@ -6193,6 +6193,251 @@ mod tests {
         eprintln!("===== end #553 probe =====\n");
     }
 
+    /// W-1a — WEIGHTED EVENT SPAN, the literature's metric for choosing a static variable order.
+    ///
+    /// Meijer & van de Pol show that bandwidth/wavefront reduction over a DEPENDENCY MATRIX (rows =
+    /// transitions/events, columns = variables, nonzero = that event reads or writes that variable)
+    /// minimises Weighted Event Span, and that minimising WES reduces COMPUTATIONAL EFFORT.
+    /// Cuthill–McKee (1969) and Sloan (1989) compute such orders in milliseconds.
+    ///
+    /// Effort is the axis we need: our one counter-example (`sdram_burst`, a consumer's) regresses
+    /// ~10× in WORK at essentially constant node count, and node counts are structurally blind to
+    /// that. This probe computes WES for the two orders we already ship, so the METRIC can be
+    /// judged before any reordering algorithm is written.
+    ///
+    /// `span(e) = max(pos) − min(pos) + 1` over the variable positions the event's cone touches;
+    /// WES here is the mean span, normalised by the variable count, so designs of different widths
+    /// are comparable. LOWER IS BETTER.
+    ///
+    /// ⚠️ **This cannot validate the metric on its own.** Every design we hold points the same way
+    /// (interleaved wins or ties); the only known case where CELL-MAJOR wins is the consumer's, and
+    /// a metric that cannot pick that one out is useless regardless of how it does here. Read a
+    /// green run as "the implementation is not obviously wrong", not as a result.
+    ///
+    /// engine: `exact-symbolic` (full-state ROBDD, OxiDD) — static ordering input only; computes no
+    /// BDD and changes no verdict.
+    #[test]
+    #[ignore = "probe: W-1a weighted event span; run with --ignored --nocapture"]
+    fn probe_w1_weighted_event_span_of_both_orders() {
+        /// Leaf cells (state/input) with widths — from the SAME source the real ordering uses
+        /// (`BtorSts::leaf_cells`), so the metric is computed over the variables the engine would
+        /// actually allocate rather than a re-derivation that could drift from it.
+        fn leaves(file: &Btor2File) -> Vec<(Nid, u32)> {
+            crate::adapter::sts_ir::BtorSts::new(file)
+                .leaf_cells()
+                .map(|cs| cs.iter().map(|c| (c.nid, c.width)).collect())
+                .unwrap_or_default()
+        }
+        /// The leaf cells one expression's combinational cone reads (stops at state/input).
+        fn support(file: &Btor2File, start: Nid) -> std::collections::HashSet<Nid> {
+            let (mut seen, mut out, mut work) = (
+                std::collections::HashSet::new(),
+                std::collections::HashSet::new(),
+                vec![start],
+            );
+            while let Some(nid) = work.pop() {
+                if !seen.insert(nid) {
+                    continue;
+                }
+                let Some(line) = file.lookup(nid) else {
+                    continue;
+                };
+                match &line.node {
+                    Node::State { .. } | Node::Input { .. } => {
+                        out.insert(nid);
+                    }
+                    Node::Op { args, .. } => work.extend(args.iter().map(|a| a.nid())),
+                    Node::Init { value, .. } | Node::Next { value, .. } => work.push(value.nid()),
+                    Node::Bad { signal }
+                    | Node::Constraint { signal }
+                    | Node::Output { signal, .. } => work.push(signal.nid()),
+                    _ => {}
+                }
+            }
+            out
+        }
+        /// Variable POSITIONS per cell under each order.
+        fn positions(cells: &[(Nid, u32)], interleaved: bool) -> HashMap<Nid, Vec<usize>> {
+            let mut m: HashMap<Nid, Vec<usize>> = HashMap::new();
+            if interleaved {
+                let maxw = cells.iter().map(|(_, w)| *w as usize).max().unwrap_or(0);
+                let mut p = 0usize;
+                for j in 0..maxw {
+                    for (nid, w) in cells {
+                        if j < *w as usize {
+                            m.entry(*nid).or_default().push(p);
+                            p += 1;
+                        }
+                    }
+                }
+            } else {
+                let mut p = 0usize;
+                for (nid, w) in cells {
+                    let v: Vec<usize> = (p..p + *w as usize).collect();
+                    p += *w as usize;
+                    m.insert(*nid, v);
+                }
+            }
+            m
+        }
+        /// Mean event span, normalised by the variable count. LOWER IS BETTER.
+        fn wes(file: &Btor2File, cells: &[(Nid, u32)], interleaved: bool) -> Option<f64> {
+            let pos = positions(cells, interleaved);
+            let nvars: usize = cells.iter().map(|(_, w)| *w as usize).sum();
+            if nvars == 0 {
+                return None;
+            }
+            let seeds: Vec<Nid> = file
+                .lines
+                .iter()
+                .filter_map(|l| match &l.node {
+                    Node::Next { value, .. } | Node::Init { value, .. } => Some(value.nid()),
+                    Node::Bad { signal }
+                    | Node::Constraint { signal }
+                    | Node::Output { signal, .. } => Some(signal.nid()),
+                    _ => None,
+                })
+                .collect();
+            let mut spans: Vec<f64> = Vec::new();
+            for seed in seeds {
+                let sup = support(file, seed);
+                let ps: Vec<usize> = sup
+                    .iter()
+                    .filter_map(|n| pos.get(n))
+                    .flatten()
+                    .copied()
+                    .collect();
+                if ps.is_empty() {
+                    continue;
+                }
+                let (lo, hi) = (ps.iter().min().unwrap(), ps.iter().max().unwrap());
+                spans.push((hi - lo + 1) as f64);
+            }
+            if spans.is_empty() {
+                return None;
+            }
+            Some(spans.iter().sum::<f64>() / spans.len() as f64 / nvars as f64)
+        }
+
+        // Designs whose ordering outcome we have MEASURED, so the metric can be checked against
+        // something rather than admired.
+        let cases: Vec<(&str, String, &str)> = vec![
+            (
+                "barrel shift (sym amount)",
+                "1 sort bitvec 1\n2 sort bitvec 12\n3 state 2 x\n4 state 2 k\n5 zero 2\n\
+                 6 init 2 3 5\n7 srl 2 3 4\n8 next 2 3 7\n"
+                    .into(),
+                "interleaved WINS 65537->1",
+            ),
+            (
+                "relational a==b",
+                "1 sort bitvec 1\n2 sort bitvec 12\n3 state 2 a\n4 state 2 b\n5 eq 1 3 4\n6 bad 5\n"
+                    .into(),
+                "interleaved WINS 84x",
+            ),
+            (
+                "multiply (sym)",
+                "1 sort bitvec 1\n2 sort bitvec 12\n3 state 2 x\n4 state 2 y\n5 zero 2\n\
+                 6 init 2 3 5\n7 mul 2 3 4\n8 next 2 3 7\n"
+                    .into(),
+                "interleaved slightly better",
+            ),
+            (
+                "independent cells (no cross-cell op)",
+                "1 sort bitvec 1\n2 sort bitvec 12\n3 state 2 a\n4 state 2 b\n5 one 2\n\
+                 6 add 2 3 5\n7 next 2 3 6\n8 add 2 4 5\n9 next 2 4 8\n"
+                    .into(),
+                "no measurement — control",
+            ),
+        ];
+
+        // Real lifts too: the synthetic cases above have TWO cells, so every event touches both and
+        // the span is the whole variable range under either order — the metric has no room to
+        // discriminate there. A metric needs many events each touching a SUBSET, which is what the
+        // lifts provide (7-10 cells).
+        let lifts: Vec<(&str, &str, &str)> = vec![
+            (
+                "uart_msg_handler (10 cells)",
+                "scratchpad/uart_lift/uart_msg_handler.btor2",
+                "TIE (524,289 both)",
+            ),
+            (
+                "spiCtrl (7 cells)",
+                "scratchpad/spictrl_lift/spiCtrl.btor2",
+                "TIE",
+            ),
+            (
+                "sd_data_master (10 cells)",
+                "scratchpad/sddm_lift/sd_data_master.btor2",
+                "TIE",
+            ),
+            (
+                "sd_cmd_serial_host",
+                "scratchpad/sdcmd_lift/sd_cmd_serial_host.named.btor2",
+                "TIE",
+            ),
+        ];
+
+        eprintln!("\n===== W-1a: weighted event span (LOWER IS BETTER) =====");
+        eprintln!(
+            "{:<34} {:>12} {:>12} {:>10}  measured outcome",
+            "design", "cell-major", "interleaved", "WES picks"
+        );
+        for (name, src, measured) in &cases {
+            let file = parser::parse(src).expect("parse");
+            let cells = leaves(&file);
+            let (cm, il) = (wes(&file, &cells, false), wes(&file, &cells, true));
+            match (cm, il) {
+                (Some(a), Some(b)) => eprintln!(
+                    "{:<34} {:>12.4} {:>12.4} {:>10}  {}",
+                    name,
+                    a,
+                    b,
+                    if b < a {
+                        "interleaved"
+                    } else if a < b {
+                        "cell-major"
+                    } else {
+                        "tie"
+                    },
+                    measured
+                ),
+                _ => eprintln!("{name:<34} {:>12} {:>12}", "n/a", "n/a"),
+            }
+        }
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for (name, rel, measured) in &lifts {
+            let Ok(src) = std::fs::read_to_string(root.join(rel)) else {
+                eprintln!("{name:<34} (not present)");
+                continue;
+            };
+            let Ok(file) = parser::parse(&src) else {
+                eprintln!("{name:<34} (parse failed)");
+                continue;
+            };
+            let cells = leaves(&file);
+            match (wes(&file, &cells, false), wes(&file, &cells, true)) {
+                (Some(a), Some(b)) => eprintln!(
+                    "{:<34} {:>12.4} {:>12.4} {:>10}  {} [{} cells]",
+                    name,
+                    a,
+                    b,
+                    if b < a {
+                        "interleaved"
+                    } else if a < b {
+                        "cell-major"
+                    } else {
+                        "tie"
+                    },
+                    measured,
+                    cells.len()
+                ),
+                _ => eprintln!("{name:<34} (no events)"),
+            }
+        }
+        eprintln!("===== end W-1a =====\n");
+    }
+
     /// mununu#553 PROBE — the DISCRIMINATING shape, in-repo. A raster counter pair (`hcount`
     /// wraps at `H`, `vcount` advances on that wrap and wraps at `V`) reproduces the one property
     /// that refuted every budget we proposed: the consumer's `a_frame_wraps_at_total`, a nine-line

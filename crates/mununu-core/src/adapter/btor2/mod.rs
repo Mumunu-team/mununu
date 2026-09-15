@@ -25,6 +25,7 @@ pub mod array_prophecy;
 pub mod ast;
 pub mod bad_monitor;
 pub mod bit_blast;
+pub mod bit_interaction;
 pub mod bv;
 pub mod cegar;
 pub mod concrete_oracle;
