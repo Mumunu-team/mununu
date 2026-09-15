@@ -145,6 +145,12 @@ dhat = ["dep:dhat"]
 # member). C-compiles Boolector, so it is opt-in — validated in Docker, not in
 # the default `make ci`.
 boolector = ["dep:boolector"]
+# mununu#553 W-3'' — OxiDD's per-operation apply-cache counters (calls / cache queries / cache
+# hits / reduced). DIAGNOSTIC ONLY and opt-in: the counters are atomics on the hot path, so they
+# perturb the very timings they are used to explain. Enabled to answer one question — a consumer
+# block costs 10.9x the WORK under a different variable order at 1.08x the node count, which is
+# what a cache that stops hitting looks like. Measure with it, ship without it.
+oxidd-statistics = ["oxidd/statistics"]
 
 [[test]]
 name = "api_graph_valuations"

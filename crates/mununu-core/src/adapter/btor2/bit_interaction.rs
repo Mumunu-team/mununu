@@ -566,15 +566,15 @@ mod tests {
             };
             let v = order_verdict(&file);
             eprintln!(
-                "{:<32} {:>5} {:>7} {:>8.2} {:>8.2} {:>8.2}  {:<44} {}",
+                "{:<32} {:>5} {:>7} {:>8.2} {:>7.2} {:>7.2} {:>6.2}  {:<52} TIE (real lift)",
                 name,
                 v.bits,
                 v.edges,
                 v.mean_degree,
                 v.aligned_fraction,
                 v.cross_cell_fraction,
+                v.selector_fraction,
                 v.recommends(),
-                "TIE (real lift)"
             );
         }
         eprintln!("===== end W-3′ =====\n");

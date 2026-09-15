@@ -208,6 +208,50 @@ Checking](https://arxiv.org/abs/1511.08678) · [MINCE](http://www.aloul.net/Pape
 [DCSH / symbolic supervisor synthesis](https://link.springer.com/article/10.1007/s10626-024-00403-4) ·
 [Read, Write and Copy Dependencies for Symbolic Model Checking](https://link.springer.com/chapter/10.1007/978-3-319-13338-6_16)
 
+## ✅ DIAGNOSED (2026-09-15): the deciding quantity is APPLY-CALL COUNT, and it is not static
+
+Six falsifiable predictors died on one consumer block (`sdram_burst`): the 10 s wall clock, an
+iteration cap, a node cap, the 2-D rule, Weighted Event Span, and selector fraction. **Every one was
+computable from the BTOR2 without running anything.** Profiling the block — its lifted BTOR2 supplied
+by the consumer — says why.
+
+Enabling OxiDD's per-operation counters (`oxidd-statistics` feature, opt-in) under both orders:
+
+| | cell-major | interleaved | |
+|---|---|---|---|
+| `sdram_burst` `And` **calls** | 3,815,843 | **36,862,616** | **9.7× MORE** |
+| `sdram_burst` `And` hit rate | 35.3% | **45.8%** | *better* |
+| `sdram_burst` wall | 7.57 s | 45.79 s | 6.0× |
+| barrel shifter `And` **calls** | 201,538 | **2,630** | **77× FEWER** |
+| barrel shifter `And` hit rate | 49.6% | **32.1%** | *worse* |
+| barrel shifter outcome | — | — | interleaving wins 65 537× |
+
+**The apply-cache hypothesis is REFUTED, and by two directions rather than one.** The hit rate moves
+*opposite* to performance in both cases — worse-but-faster on the barrel shifter, better-but-slower
+on `sdram_burst`. One direction would have been unsupportive; two make it a refutation.
+
+**What tracks cost is the number of APPLY CALLS** — how many distinct sub-problems the recursion
+visits. 77× fewer where interleaving wins, 9.7× more where it loses. The cache is doing its job
+either way; the order changes how much work there is to cache.
+
+### Why this explains the six failures instead of joining them
+
+Apply-call count is a property of **the recursion on an order**, not of the model. It does not exist
+until you run. So the six deaths were not six bad heuristics — they were **a category error about
+where the answer lives**, and a seventh static predictor would die the same way.
+
+### Consequence: measure, do not predict
+
+Run a bounded prefix of the fixpoint under each order, count apply calls, keep the cheaper. Bounded
+cost, per-cone answer, no static prediction. **It also implies there may be no right DEFAULT** — only
+a cheap measurement made once per cone, which would make holding at cell-major correct permanently
+with the order chosen per run.
+
+**Validation available, and it is the check all six skipped:** a consumer holds four wide blocks with
+known answers (`tlm_tx` 20.2 M×, `sprite_render` 2 458×, `affine_sampler` 115×, `sdram_burst` 0.09×)
+plus 22 small ones with no answer. A probe that picks correctly on the four and does not regress the
+22 would be validated on something other than its own motivating case.
+
 ## ⚠️ A limit on the peak instrument that these measurements exposed
 
 `approx_num_inner_nodes` counts allocated-**including-dead** nodes. For a cone at GC equilibrium

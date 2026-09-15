@@ -2714,6 +2714,19 @@ impl ExactModel {
         // second property in the same runs was byte-identical and the ITERATION counts were
         // identical in every case. So treat the peak as reproducible to ~0.01%, not to the byte,
         // and do not build anything on exact equality of node counts.
+        // mununu#553 W-3'' — dump OxiDD's per-operation apply-cache counters. Built only under the
+        // `oxidd-statistics` feature because the counters are atomics on the hot path: they perturb
+        // the timings they exist to explain, so this is a diagnostic build, never a shipped one.
+        //
+        // The question it answers: a consumer block costs 10.9x the WORK under a different variable
+        // order at 1.08x the node count. A cache that stops hitting is what that looks like, and
+        // the hit RATE is the only one of the candidate explanations that measures the recursion's
+        // behaviour rather than the diagram's shape.
+        #[cfg(feature = "oxidd-statistics")]
+        if std::env::var_os("MUNUNU_BDD_STATS").is_some() {
+            eprintln!("[mununu#553] --- OxiDD apply-cache counters ---");
+            oxidd::bdd::print_stats();
+        }
         if std::env::var_os("MUNUNU_BDD_REPORT_PEAK").is_some() {
             eprintln!(
                 "[mununu#553] exact fixpoint: peak {} ALLOCATED BDD nodes (incl. any awaiting \
