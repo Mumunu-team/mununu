@@ -209,6 +209,7 @@ mod tests {
                     outcome: VerifyOutcome::Holds,
                     seeded_predicates: vec!["a == 1".into()],
                     counterexample: None,
+                    bottom_reason: None,
                 },
                 PropertyVerdict {
                     name: "p_violated".into(),
@@ -223,6 +224,7 @@ mod tests {
                         inputs: vec![vec![("d".into(), 1)]],
                         unreachable_target: vec!["b".into()],
                     }),
+                    bottom_reason: None,
                 },
                 PropertyVerdict {
                     name: "p_unknown".into(),
@@ -232,6 +234,7 @@ mod tests {
                     outcome: VerifyOutcome::Unknown { unknown_cells: 32 },
                     seeded_predicates: vec![],
                     counterexample: None,
+                    bottom_reason: None,
                 },
                 PropertyVerdict {
                     name: "p_skipped".into(),
@@ -243,6 +246,7 @@ mod tests {
                     },
                     seeded_predicates: vec![],
                     counterexample: None,
+                    bottom_reason: None,
                 },
             ],
             unsupported: vec![("u0".into(), "unsupported binary op: BinaryAnd".into())],

@@ -2301,13 +2301,70 @@ pub enum DiameterEstimate {
     ExceedsBound(usize),
 }
 
+/// Read a `usize` budget from the environment with ONE consistent contract across the family.
+///
+/// **mununu#553 follow-up / B-1 (2026-09-15).** Before this, `0` meant three different things
+/// across four sibling knobs, and the divergence cost a consumer an hour and sent their
+/// experiment BACKWARDS:
+///
+/// | knob | `0` used to mean |
+/// |---|---|
+/// | `MUNUNU_BDD_ITER_BUDGET` | **ZERO ITERATIONS — abstain immediately** |
+/// | `MUNUNU_BDD_FIXPOINT_ITERS` | the default (while its own doc claimed `0` disabled the bound) |
+/// | `MUNUNU_BDD_FIXPOINT_NODES` | disabled |
+/// | `MUNUNU_BDD_TIME_BUDGET_MS` | disabled |
+///
+/// `.unwrap_or(default)` fires only on a PARSE FAILURE, so `"0"` parsed fine and became the budget.
+/// A consumer set `MUNUNU_BDD_ITER_BUDGET=0` expecting "disabled", got "zero iterations", and their
+/// failures went 2 → 4 of 16 with new bottoms at 32 and 2 cells. They reported it charitably as
+/// *"`0` is not disabled for that knob, or it is disabled and something else binds"* — the
+/// uncharitable reading was the correct one.
+///
+/// **The contract now, for every budget:** `0` = DISABLED (no bound). An unparseable value WARNS
+/// and uses the default rather than being silently absorbed — same principle as
+/// [`BddBitBlaster::resolve_var_order`]: an input that cannot mean what the user intended must be
+/// loud, precisely BECAUSE the fallback is sensible.
+///
+/// Note "disabled" is never "unbounded in practice": the arena-safety net still applies, because
+/// exceeding the arena is a crash rather than a budget question.
+fn budget_from_env(var: &str, default: usize) -> usize {
+    let (value, warning) = resolve_budget(std::env::var(var).ok().as_deref(), default);
+    if let Some(w) = warning {
+        eprintln!("[mununu] {var}={w}");
+    }
+    value
+}
+
+/// The pure half of [`budget_from_env`], so the contract is unit-testable without setting a
+/// process-global environment variable (which races across parallel tests and makes the one
+/// property worth pinning — that `0` means DISABLED — untestable in practice).
+///
+/// Returns `(budget, warning)`. `raw = None` means the variable is unset.
+fn resolve_budget(raw: Option<&str>, default: usize) -> (usize, Option<String>) {
+    let Some(raw) = raw else {
+        return (default, None);
+    };
+    match raw.trim().parse::<usize>() {
+        // `0` = DISABLED, uniformly across the family. See the table above for what it used to
+        // mean on each knob.
+        Ok(0) => (usize::MAX, None),
+        Ok(n) => (n, None),
+        Err(_) => (
+            default,
+            Some(format!(
+                "{raw:?} is not a non-negative integer — using the default ({default}). This is a \
+                 CONFIG ERROR, not a fallback; `0` means DISABLED."
+            )),
+        ),
+    }
+}
+
 /// The exact-engine fixpoint iteration budget: `MUNUNU_BDD_ITER_BUDGET` or a default sized to
 /// catch a wide-counter diameter (`2^W`) while admitting any control fixpoint (small diameter).
 fn fixpoint_iter_budget() -> usize {
-    std::env::var("MUNUNU_BDD_ITER_BUDGET")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(1 << 20) // ~1M iterations; a counter's steps are cheap (small BDD) so this is fast to reach
+    // ~1M iterations; a counter's steps are cheap (small BDD) so this is fast to reach.
+    // `0` = DISABLED since B-1; it used to mean ZERO iterations, i.e. abstain immediately.
+    budget_from_env("MUNUNU_BDD_ITER_BUDGET", 1 << 20)
 }
 
 /// Default for the LATENCY bound's node half. Calibrated against every cone measured to DECIDE:
@@ -2340,11 +2397,14 @@ const FIXPOINT_ITER_SOFT_DEFAULT: usize = 5_000;
 /// [`FIXPOINT_ITER_SOFT_DEFAULT`]. `0` disables the latency bound entirely (the arena-safety net
 /// still applies).
 fn fixpoint_iter_soft() -> usize {
+    // B-1: `0` now DISABLES, as this function's doc comment has always claimed. The code
+    // previously returned the DEFAULT for `0`, so the documentation was wrong about its own knob.
     match std::env::var("MUNUNU_BDD_FIXPOINT_ITERS")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
     {
-        Some(0) | None => FIXPOINT_ITER_SOFT_DEFAULT,
+        Some(0) => usize::MAX,
+        None => FIXPOINT_ITER_SOFT_DEFAULT,
         Some(n) => n,
     }
 }
@@ -10078,6 +10138,59 @@ mod tests {
             exact_env_strategy(POSITIONAL_TRAP, "not a valid atom").expect("runs"),
             EnvStrategyOutcome::Inapplicable(_)
         ));
+    }
+
+    /// B-1 REPRODUCER (2026-09-15): `0` must mean DISABLED on every budget knob.
+    ///
+    /// It used to mean three different things across four siblings. `MUNUNU_BDD_ITER_BUDGET=0`
+    /// meant ZERO ITERATIONS — abstain immediately — because `.unwrap_or(default)` fires only on a
+    /// PARSE FAILURE and `"0"` parses fine. A consumer set it expecting "disabled" and their
+    /// failures went 2 -> 4 of 16.
+    #[test]
+    fn zero_means_disabled_on_every_budget_knob() {
+        let (v, w) = resolve_budget(Some("0"), 1 << 20);
+        assert_eq!(
+            v,
+            usize::MAX,
+            "`0` must DISABLE the budget, never mean zero work"
+        );
+        assert!(
+            w.is_none(),
+            "`0` is a valid, documented value and must not warn"
+        );
+
+        for spaced in ["  0  ", "0\n"] {
+            let (v, _) = resolve_budget(Some(spaced), 7);
+            assert_eq!(v, usize::MAX, "{spaced:?} is still zero after trimming");
+        }
+    }
+
+    /// An unset variable takes the default; a real value is honoured verbatim.
+    #[test]
+    fn an_unset_budget_takes_the_default_and_a_real_value_is_honoured() {
+        assert_eq!(resolve_budget(None, 1 << 20).0, 1 << 20);
+        assert_eq!(resolve_budget(Some("5000"), 1 << 20).0, 5000);
+        assert!(resolve_budget(Some("5000"), 1 << 20).1.is_none());
+    }
+
+    /// An unparseable budget must WARN and say it is a config error — not be silently absorbed
+    /// into the default. Same principle as `resolve_var_order`: an input that cannot mean what the
+    /// user intended must be loud, precisely BECAUSE the fallback is sensible.
+    #[test]
+    fn an_unparseable_budget_warns_that_it_is_a_config_error() {
+        for junk in ["1_000_000", "1e6", "abc", "-1", "10MB", ""] {
+            let (v, w) = resolve_budget(Some(junk), 4242);
+            let w = w.unwrap_or_else(|| panic!("{junk:?} must warn, not be silently absorbed"));
+            assert_eq!(v, 4242, "{junk:?} falls back to the default");
+            assert!(
+                w.contains("CONFIG ERROR"),
+                "{junk:?} must be named a config error, got: {w}"
+            );
+            assert!(
+                w.contains("DISABLED"),
+                "{junk:?}'s warning must state what `0` means, since that is the likely intent: {w}"
+            );
+        }
     }
 
     /// The DEFAULT is interleaved (2026-09-15 consumer sweep), and the aliases resolve.

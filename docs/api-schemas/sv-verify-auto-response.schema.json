@@ -1,6 +1,31 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "definitions": {
+    "BottomReasonView": {
+      "description": "monono ask 26 — WHY a property is `⊥`, machine-readable.\n\nThe complement to `unknown_cells`: that field says HOW MUCH of the cube space stayed undecided, this one says WHY nothing decided it. A consumer previously had the quantity and not the cause, so the only available move on a `⊥` was to try budget knobs blind.\n\nCarried as a FIELD rather than a note deliberately: a consumer that does not know about a field cannot silently filter it out, and a consumer that does not know about a note routinely does — which is exactly how the equivalent `bottom-reason` note (shipped in mununu#492) never reached the reader it was written for.",
+      "properties": {
+        "detail": {
+          "description": "Human-readable one-liner. For `engine-did-not-complete` this is the ENGINE'S OWN abstention message, which names the budget it hit and its numbers — e.g. *\"abstained on the ITERATION budget (1048577 > 1048576) … raise MUNUNU_BDD_ITER_BUDGET\"*.",
+          "type": "string"
+        },
+        "engine": {
+          "description": "Portfolio label of the engine that failed, for `engine-did-not-complete` only.\n\nDescribes a WHOLE-RUN failure over the design; it does **not** assert that this property caused it. The claim is that this property is `⊥` and the engine most likely to have decided it stopped for the stated reason.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "description": "Stable kebab-case tag for gates: `safety-shape-not-reducible` | `no-state-model-non-safety` | `engine-did-not-complete` | `unclassified-bottom`.\n\n**`safety-shape-not-reducible` is NOT a resource abstain** — that property's shape is outside the rescue lane and a bigger budget cannot help it. A gate that retries with raised budgets should branch on this tag, not on the outcome alone.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "detail",
+        "kind"
+      ],
+      "type": "object"
+    },
     "CexCellView": {
       "description": "One register's concrete value in a counterexample state.",
       "properties": {
@@ -177,6 +202,17 @@
     "PropertyVerdictView": {
       "description": "One property's auto-verification verdict (mirrors `PropertyVerdict`).",
       "properties": {
+        "bottom_reason": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/BottomReasonView"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "monono ask 26 — why an `unknown` (⊥) property was not decided. `None` for a definite outcome. See [`BottomReasonView`]."
+        },
         "counterexample": {
           "anyOf": [
             {

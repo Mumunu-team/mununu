@@ -295,6 +295,7 @@ mod tests {
                     outcome: outcome.clone(),
                     seeded_predicates: Vec::new(),
                     counterexample: None,
+                    bottom_reason: None,
                 })
                 .collect(),
             ..Default::default()
@@ -314,6 +315,7 @@ mod tests {
                     outcome: outcome.clone(),
                     seeded_predicates: Vec::new(),
                     counterexample: None,
+                    bottom_reason: None,
                 })
                 .collect(),
             ..Default::default()

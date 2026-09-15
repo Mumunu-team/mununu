@@ -1913,6 +1913,19 @@ impl From<&crate::adapter::slang::verify_auto::AutoVerifyReport> for SvVerifyAut
                     false_cells,
                     unknown_cells,
                     skip_reason,
+                    bottom_reason: p.bottom_reason.as_ref().map(|r| {
+                        use crate::adapter::slang::verify_auto::BottomReason;
+                        BottomReasonView {
+                            kind: r.tag().to_string(),
+                            detail: r.one_line(),
+                            engine: match r {
+                                BottomReason::EngineDidNotComplete { engine, .. } => {
+                                    Some(engine.clone())
+                                }
+                                _ => None,
+                            },
+                        }
+                    }),
                     seeded_predicates: p.seeded_predicates.clone(),
                     counterexample: p.counterexample.as_ref().map(|c| CounterexampleView {
                         prefix: cells(&c.prefix),
@@ -2023,6 +2036,38 @@ pub struct ModelDiagnosticsView {
     pub cutpoints: Vec<String>,
 }
 
+/// monono ask 26 — WHY a property is `⊥`, machine-readable.
+///
+/// The complement to `unknown_cells`: that field says HOW MUCH of the cube space stayed
+/// undecided, this one says WHY nothing decided it. A consumer previously had the quantity and
+/// not the cause, so the only available move on a `⊥` was to try budget knobs blind.
+///
+/// Carried as a FIELD rather than a note deliberately: a consumer that does not know about a
+/// field cannot silently filter it out, and a consumer that does not know about a note routinely
+/// does — which is exactly how the equivalent `bottom-reason` note (shipped in mununu#492) never
+/// reached the reader it was written for.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct BottomReasonView {
+    /// Stable kebab-case tag for gates: `safety-shape-not-reducible` | `no-state-model-non-safety`
+    /// | `engine-did-not-complete` | `unclassified-bottom`.
+    ///
+    /// **`safety-shape-not-reducible` is NOT a resource abstain** — that property's shape is
+    /// outside the rescue lane and a bigger budget cannot help it. A gate that retries with raised
+    /// budgets should branch on this tag, not on the outcome alone.
+    pub kind: String,
+    /// Human-readable one-liner. For `engine-did-not-complete` this is the ENGINE'S OWN abstention
+    /// message, which names the budget it hit and its numbers — e.g. *"abstained on the ITERATION
+    /// budget (1048577 > 1048576) … raise MUNUNU_BDD_ITER_BUDGET"*.
+    pub detail: String,
+    /// Portfolio label of the engine that failed, for `engine-did-not-complete` only.
+    ///
+    /// Describes a WHOLE-RUN failure over the design; it does **not** assert that this property
+    /// caused it. The claim is that this property is `⊥` and the engine most likely to have
+    /// decided it stopped for the stated reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine: Option<String>,
+}
+
 /// One property's auto-verification verdict (mirrors `PropertyVerdict`).
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct PropertyVerdictView {
@@ -2063,6 +2108,10 @@ pub struct PropertyVerdictView {
     /// outcome.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skip_reason: Option<String>,
+    /// monono ask 26 — why an `unknown` (⊥) property was not decided. `None` for a definite
+    /// outcome. See [`BottomReasonView`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bottom_reason: Option<BottomReasonView>,
     /// The cube predicates auto-seeded for this property (atom strings).
     pub seeded_predicates: Vec<String>,
     /// D1.8b — a concrete stall-lasso counterexample, present only for a Violated
@@ -2205,4 +2254,76 @@ pub struct PredicateView {
     pub name: String,
     pub register: String,
     pub value: u64,
+}
+
+#[cfg(test)]
+mod bottom_reason_view_tests {
+    use super::*;
+    use crate::adapter::slang::translate::SvaKind;
+    use crate::adapter::slang::verify_auto::{
+        AutoVerifyReport, BottomReason, PropertyVerdict, VerifyOutcome,
+    };
+
+    fn bottom_prop(reason: Option<BottomReason>) -> PropertyVerdict {
+        PropertyVerdict {
+            name: "sva_1".into(),
+            label: None,
+            kind: SvaKind::Assert,
+            formula: "AG p".into(),
+            outcome: VerifyOutcome::Unknown { unknown_cells: 125 },
+            seeded_predicates: Vec::new(),
+            counterexample: None,
+            bottom_reason: reason,
+        }
+    }
+
+    /// monono ask 26 — the API surface must carry the reason too, not just the CLI.
+    ///
+    /// Surface Parity: a capability ships on CLI *and* HTTP API in the same PR. The JSON-schema
+    /// drift detector pins the SHAPE of this field; nothing else asserts the CONVERSION fills it,
+    /// so without this test a refactor could null it out and stay green.
+    #[test]
+    fn the_api_view_carries_the_bottom_reason_and_its_gateable_tag() {
+        let report = AutoVerifyReport {
+            properties: vec![bottom_prop(Some(BottomReason::EngineDidNotComplete {
+                engine: "exact-symbolic".into(),
+                detail: "abstained on the ITERATION budget (1048577 > 1048576) — raise \
+                         MUNUNU_BDD_ITER_BUDGET"
+                    .into(),
+            }))],
+            ..Default::default()
+        };
+
+        let view = SvVerifyAutoResponse::from(&report);
+        let r = view.properties[0]
+            .bottom_reason
+            .as_ref()
+            .expect("an ⊥ property must carry its reason across the API boundary");
+
+        assert_eq!(
+            r.kind, "engine-did-not-complete",
+            "the tag is what a gate branches on"
+        );
+        assert_eq!(r.engine.as_deref(), Some("exact-symbolic"));
+        assert!(
+            r.detail.contains("MUNUNU_BDD_ITER_BUDGET"),
+            "the knob to raise must survive to the API consumer: {}",
+            r.detail
+        );
+    }
+
+    /// A definite verdict carries no reason — the mununu#548 direction, held at the API boundary
+    /// as well as internally.
+    #[test]
+    fn the_api_view_omits_the_reason_when_there_is_none() {
+        let report = AutoVerifyReport {
+            properties: vec![bottom_prop(None)],
+            ..Default::default()
+        };
+        assert!(
+            SvVerifyAutoResponse::from(&report).properties[0]
+                .bottom_reason
+                .is_none()
+        );
+    }
 }
