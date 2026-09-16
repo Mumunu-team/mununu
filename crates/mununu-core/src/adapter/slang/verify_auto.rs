@@ -3150,6 +3150,13 @@ pub(crate) fn verify_auto_impl(
         crate::adapter::run_budget::run_budget_ms(),
     );
     let per_property_ms = crate::adapter::run_budget::property_budget_ms();
+    // ⚠️ SCOPE, corrected 2026-09-15: these records cover THIS function only — the cube pass and
+    // the ⊥ re-plan. The planner's portfolio merge writes NONE, so on a portfolio run a property's
+    // last record can disagree with the final verdict. A consumer measured three properties whose
+    // last record read `unknown` and which ended the run decided, by engines that left no record.
+    // Neither "a `main` unknown means undecided" nor "no `escalated` record means escalation never
+    // reached it" survives that data; both were asserted and refuted the same day.
+    //
     // mununu#504 C7 — the SIGKILL-survivable breadcrumb. The budgets above preserve verdicts when
     // MUNUNU can observe its own trouble; they are powerless against a kill from outside (the
     // kernel OOM killer, a CI step timeout), which runs no Rust code at all. That is the exact
@@ -6144,6 +6151,88 @@ mod tests {
             !m.contains("WALL-CLOCK"),
             "the memory case must not claim a clock fired; RSS is host-dependent WITHOUT one: {m}"
         );
+    }
+
+    /// Does the MERGE preserve a `bottom_reason` an engine already attached?
+    ///
+    /// Ordering matters here and is easy to get backwards: `escalate_bottom` (which classifies a
+    /// residual ⊥ and sets the field) runs INSIDE `verify_auto_impl`, i.e. once PER ENGINE, and
+    /// `merge_portfolio_reports` runs AFTER. So by merge time each candidate may already carry a
+    /// reason, and the all-⊥ arm copies `outcome` from the chosen candidate — the question is
+    /// whether the reason travels with it.
+    #[test]
+    fn the_merge_preserves_a_reason_an_engine_already_attached() {
+        let mut exact_prop = mk_report(&[("p", VerifyOutcome::Unknown { unknown_cells: 0 }, None)]);
+        exact_prop.properties[0].bottom_reason = Some(BottomReason::UnclassifiedBottom);
+
+        let mut cube_prop =
+            mk_report(&[("p", VerifyOutcome::Unknown { unknown_cells: 125 }, None)]);
+        cube_prop.properties[0].bottom_reason = Some(BottomReason::UnclassifiedBottom);
+
+        let runs = vec![
+            ("exact-symbolic", Ok(exact_prop)),
+            ("symbolic", Ok(cube_prop)),
+        ];
+        let merged = merge_portfolio_reports(&runs, PortfolioMode::Sequential).expect("merge ok");
+
+        assert!(
+            matches!(merged.properties[0].outcome, VerifyOutcome::Unknown { .. }),
+            "precondition: still ⊥ after the merge"
+        );
+        assert!(
+            merged.properties[0].bottom_reason.is_some(),
+            "the merge must not drop a reason the engine already attached — `None` here is \
+             indistinguishable from a field that was never set, because \
+             `skip_serializing_if` omits the key entirely"
+        );
+    }
+
+    /// REPRODUCER (monono, 2026-09-15, post-#558): a residual ⊥ arrived at a consumer with the
+    /// `bottom_reason` key ABSENT from the property object — not `unclassified-bottom`, absent.
+    ///
+    /// Verbatim from their `--json` on `b8a2abb`:
+    ///
+    /// ```text
+    /// { "name": "video_timing_sva_sva_1", "outcome": "unknown",
+    ///   "detail": "125 cell(s)", "unknown_cells": 125, "seeded_predicates": [] }
+    /// ```
+    ///
+    /// while a DECIDED property in the same report carried `decided_by`. So the fields exist and
+    /// serialize; the ⊥ simply had `None`. **Every `⊥` must carry a reason — absence is a defect,
+    /// not a classification**, because `skip_serializing_if = "Option::is_none"` makes `None`
+    /// indistinguishable from a field that was never added.
+    #[test]
+    fn every_residual_bottom_carries_a_reason_after_escalation() {
+        const DESIGN: &str = "1 sort bitvec 1\n2 sort bitvec 8\n3 state 2 s\n4 zero 2\n\
+                              5 init 2 3 4\n6 next 2 3 3\n";
+        let mut report = AutoVerifyReport {
+            properties: vec![PropertyVerdict {
+                name: "video_timing_sva_sva_1".into(),
+                label: Some("a_frame_wraps_at_total".into()),
+                kind: crate::adapter::slang::translate::SvaKind::Assert,
+                formula: "nu X. (((!(((hcount_q == 799) && (vcount_q == 524))) || [] \
+                          (vcount_q == 0))) && [] X)"
+                    .into(),
+                outcome: VerifyOutcome::Unknown { unknown_cells: 125 },
+                seeded_predicates: Vec::new(),
+                counterexample: None,
+                bottom_reason: None,
+                decided_by: None,
+            }],
+            ..Default::default()
+        };
+        let opts = VerifyAutoOptions::default();
+        let _ = escalate_bottom(&mut report, DESIGN, false, &opts, &[]);
+
+        let p = &report.properties[0];
+        if matches!(p.outcome, VerifyOutcome::Unknown { .. }) {
+            assert!(
+                p.bottom_reason.is_some(),
+                "a residual ⊥ with NO reason is exactly what reached the consumer: the key is \
+                 omitted by `skip_serializing_if`, so `None` is indistinguishable from a field \
+                 that was never added"
+            );
+        }
     }
 
     /// O-2 — the five ⊥ causes must be DISTINGUISHABLE, which is the whole point of the field.
