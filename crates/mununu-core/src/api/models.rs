@@ -1914,7 +1914,26 @@ impl From<&crate::adapter::slang::verify_auto::AutoVerifyReport> for SvVerifyAut
                     unknown_cells,
                     skip_reason,
                     decided_by: p.decided_by.clone(),
-                    bottom_reason: p.bottom_reason.as_ref().map(|r| {
+                    // A `⊥` ALWAYS carries a reason, with `unclassified-bottom` as the floor.
+                    //
+                    // `skip_serializing_if = "Option::is_none"` omits the key entirely, so `None`
+                    // is indistinguishable from a field that was never added — which is precisely
+                    // the ambiguity this field exists to remove, reproduced in its own
+                    // serialization. A consumer hit it within hours: they had to report "the key is
+                    // absent" rather than "the reason is unclassified", and those are different
+                    // statements about the engine that they could not tell apart.
+                    //
+                    // So an undecided property with no classification gets the floor rather than
+                    // nothing. Absence now means only one thing: the outcome is definite.
+                    bottom_reason: p
+                        .bottom_reason
+                        .clone()
+                        .or_else(|| {
+                            matches!(p.outcome, VerifyOutcome::Unknown { .. })
+                                .then_some(crate::adapter::slang::verify_auto::BottomReason::UnclassifiedBottom)
+                        })
+                        .as_ref()
+                        .map(|r| {
                         use crate::adapter::slang::verify_auto::BottomReason;
                         BottomReasonView {
                             kind: r.tag().to_string(),
