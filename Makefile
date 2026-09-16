@@ -172,7 +172,18 @@ lint:
 verify:
 	$(CARGO) run --release --quiet -p mununu-cli -- context summarize $(VERIFY_FILE)
 
-ci: lint test
+# mununu#553 follow-up (2026-09-16) — `ci` MUST include the api-feature tests.
+#
+# CI ran `make ci` AND a separate `cargo test --lib api --features api` (ci.yml:47), so the
+# api-gated tests were invisible to every local gate: a pre-commit hook saw 2,648 tests where CI saw
+# 3,115. A PR passed the hook and failed CI on a test the hook structurally could not run — which is
+# exactly the broken contract the CI Requirements section warns about ("if a contributor cannot
+# reproduce a CI failure with `make ci`, the contract is broken").
+ci: lint test test-api
+
+# The api-feature tests, which `test` does not cover because the feature is off by default.
+test-api:
+	$(CARGO) test -p mununu-core --lib api --features api
 
 # Advisory documentation cadence check. Reports whether more than
 # THRESHOLD commits (default 10) have landed since the last touch of

@@ -2396,18 +2396,46 @@ mod bottom_reason_view_tests {
         );
     }
 
-    /// A definite verdict carries no reason — the mununu#548 direction, held at the API boundary
-    /// as well as internally.
+    /// Absence of a reason means EXACTLY ONE THING: the outcome is definite.
+    ///
+    /// This test previously asserted that an UNDECIDED property with no classification serialized
+    /// nothing — which was true, and was the defect. `skip_serializing_if = "Option::is_none"`
+    /// omits the key, so a consumer could not distinguish "mununu considered this and had no
+    /// reason" from "mununu never set the field". One did hit exactly that and had to report *"the
+    /// key is absent"* rather than *"the reason is unclassified"*.
+    ///
+    /// A ⊥ now always carries a reason (floor `unclassified-bottom`), so the property worth pinning
+    /// inverted: absence is reserved for a DEFINITE verdict, and an undecided property must never
+    /// be silent.
     #[test]
-    fn the_api_view_omits_the_reason_when_there_is_none() {
+    fn only_a_definite_verdict_omits_the_reason() {
+        let mut decided = bottom_prop(None);
+        decided.outcome = VerifyOutcome::Holds;
         let report = AutoVerifyReport {
-            properties: vec![bottom_prop(None)],
+            properties: vec![decided],
             ..Default::default()
         };
         assert!(
             SvVerifyAutoResponse::from(&report).properties[0]
                 .bottom_reason
-                .is_none()
+                .is_none(),
+            "a definite verdict has no ⊥ to explain"
+        );
+
+        // …and the inverse, which is the actual fix: an undecided property with NO classification
+        // still serializes a reason rather than an absent key.
+        let undecided = AutoVerifyReport {
+            properties: vec![bottom_prop(None)],
+            ..Default::default()
+        };
+        let v = SvVerifyAutoResponse::from(&undecided);
+        let r = v.properties[0]
+            .bottom_reason
+            .as_ref()
+            .expect("an undecided property must NEVER serialize without a reason");
+        assert_eq!(
+            r.kind, "unclassified-bottom",
+            "the floor, so absence can mean only `definite`"
         );
     }
 }
