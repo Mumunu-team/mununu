@@ -539,7 +539,7 @@ fn bitblast_oom_skip_note(name: &str, cone_bits: u32) -> VerificationNote {
         level: NoteLevel::ScopeCaveat,
         summary: format!(
             "`{name}`: Skipped — the BDD bit-blast exhausted its node arena on a {cone} (a SIZE \
-             threshold, not a malformed input); the engine abstained on this property so every \
+             threshold; the input is structurally fine); the engine abstained on this property so every \
              other property in the run still reports."
         ),
         detail: "The symbolic engine bit-blasts a property's cone-of-influence into a BDD; a wide \
