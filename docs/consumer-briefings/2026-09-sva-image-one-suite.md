@@ -133,6 +133,13 @@ is a precondition drift unrelated to the toolchain: the test assumes the CEGAR e
 on its own (`mu X. ((bit_cnt_q == 0) or <> X)` → True). Same class as the cutpoint test re-scoped
 in #526. Tracked as [mununu#562](https://github.com/Mumunu-team/mununu/issues/562), not fixed in this PR.
 
+**3. The restored nightly, on a GitHub runner** (`workflow_dispatch` on this branch, run
+[35398898859](https://github.com/Mumunu-team/mununu/actions/runs/35398898859)): the `mununu-sva`
+image built in **33 s** — the step that had failed on every scheduled run since 2026-07-06 — and
+the suite reported **37 passed, 1 failed, 0 crashed** in 8.5 min, the same result as the local
+sweep on this branch. The one failure is mununu#562, so **the nightly is red until #562 lands**;
+unlike the previous two months, that red now carries a summary line naming the test.
+
 ## Question 1 — was there a reason to hold yosys at 0.60?
 
 **No.** There was no pin and no decision. `Dockerfile.sva` copied `/opt/oss-cad-suite` out of
