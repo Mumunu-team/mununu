@@ -10470,7 +10470,7 @@ endmodule
 
     #[test]
     #[ignore = "requires slang + sv2v + yosys (mununu-sva image)"]
-    fn e2e_partsel_partial_write_refused_on_slang_decided_on_sv2v() {
+    fn e2e_partsel_partial_write_slang_refuses_or_agrees_with_sv2v() {
         const CC: &str = r#"// @mununu_guarantee nu X. ((a_q == 0) and [] X)
 // @mununu_guarantee nu X. ((b_q == 0) and [] X)
 // @mununu_guarantee nu X. ((c_q == 0) and [] X)
@@ -10531,38 +10531,49 @@ endmodule
                 .clone()
         };
 
-        // slang: `a_q` (plain-vector split → free inputs) is REFUSED (Skipped) — no
-        // silent HOLDS. `p_q` (packed-2-D split → anonymous sub-registers, NO free
-        // inputs) now DECIDES Violated via the NID-indexed COI. The faithful three
-        // decide Violated.
+        // What the yosys-slang plugin does with `a_q[11:8] <= val` is the PLUGIN's
+        // property, not ours, and it has already changed once under our feet:
+        //   * yosys-slang in oss-cad-suite 2025-12-31 (yosys 0.60+70) split `a_q`'s
+        //     unwritten bits into anonymous free inputs → verify-auto REFUSED the
+        //     property (Skipped) rather than read havoc bits;
+        //   * yosys-slang in oss-cad-suite 2026-08-24 (yosys 0.68+120) lifts it
+        //     faithfully — no anonymous inputs, `a_q` a plain state cell — so the
+        //     property DECIDES, and the refusal has nothing to refuse (measured
+        //     2026-09-18 when the image moved to that release).
+        // What IS ours, on either plugin: never a silent Holds, never a ⊥, and a
+        // decided verdict must agree with the faithful read_verilog + sv2v lift.
+        // The sv_verify e2e pins the lint side of the same agreement.
         let slang = run(crate::adapter::yosys::SvFrontend::Slang, false);
-        assert!(
-            matches!(
-                outcome_of(&slang, "a_q == 0"),
-                VerifyOutcome::Skipped { .. }
-            ),
-            "slang: AG(a_q==0) must be Skipped (unwritten bits are free inputs), never \
-             a silent Holds; got {:?}",
-            outcome_of(&slang, "a_q == 0")
-        );
+        let sv2v = run(crate::adapter::yosys::SvFrontend::Verilog, true);
+        for reg in ["a_q == 0", "b_q == 0", "c_q == 0", "d_q == 0", "p_q == 0"] {
+            let faithful = outcome_of(&sv2v, reg);
+            assert!(
+                matches!(faithful, VerifyOutcome::Violated { .. }),
+                "sv2v: AG({reg}) must be Violated (faithful lift, reachably non-zero); \
+                 got {faithful:?}"
+            );
+            match outcome_of(&slang, reg) {
+                VerifyOutcome::Skipped { .. } => eprintln!(
+                    "slang REFUSED AG({reg}) — this plugin splits the register into free inputs"
+                ),
+                VerifyOutcome::Violated { .. } => eprintln!(
+                    "slang DECIDED AG({reg}) = Violated, agreeing with the faithful sv2v lift"
+                ),
+                other => panic!(
+                    "slang: AG({reg}) must be refused (Skipped) or decide exactly as the \
+                     faithful sv2v lift (Violated) — never a silent Holds or a ⊥; got {other:?}"
+                ),
+            }
+        }
+        // The registers written in full (`b_q`, `c_q`, `d_q`) or split into anonymous
+        // SUB-REGISTERS (`p_q`, packed 2-D, kept by the NID-indexed COI) were never
+        // the refusal's target: on either plugin they decide.
         for reg in ["b_q == 0", "c_q == 0", "d_q == 0", "p_q == 0"] {
             assert!(
                 matches!(outcome_of(&slang, reg), VerifyOutcome::Violated { .. }),
                 "slang: AG({reg}) must be Violated (faithful register, or packed-2-D split \
                  kept by the NID COI); got {:?}",
                 outcome_of(&slang, reg)
-            );
-        }
-
-        // read_verilog + sv2v: every register lifts faithfully ⇒ ALL Violated (the
-        // guard does not over-refuse the good lift).
-        let sv2v = run(crate::adapter::yosys::SvFrontend::Verilog, true);
-        for reg in ["a_q == 0", "b_q == 0", "c_q == 0", "d_q == 0", "p_q == 0"] {
-            assert!(
-                matches!(outcome_of(&sv2v, reg), VerifyOutcome::Violated { .. }),
-                "sv2v: AG({reg}) must be Violated (faithful lift, reachably non-zero); \
-                 got {:?}",
-                outcome_of(&sv2v, reg)
             );
         }
     }

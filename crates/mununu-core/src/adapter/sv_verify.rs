@@ -1377,14 +1377,23 @@ mod tests {
     }
 
     // monono#partsel — the real slang lift of a plain-vector partial register
-    // assignment. `a_q[11:8] <= val` leaves `a_q`'s other bits undriven → slang
-    // models them as free inputs → `sv lint` flags `a_q`; `b_q` is written in full
-    // → faithful → not flagged. The `--frontend slang` path is what produces the
-    // free-input shape (read_verilog/sv2v models it differently), so this pins the
-    // slang front end. Runs only in the mununu-sva image.
+    // assignment, pinned as an AGREEMENT between the lint and the lift rather than
+    // as a fixed lift shape, because the shape is the PLUGIN's, not ours:
+    //   * yosys-slang in oss-cad-suite 2025-12-31 (yosys 0.60+70) split `a_q`'s
+    //     unwritten bits into anonymous free `input`s → the lint must flag `a_q`;
+    //   * yosys-slang in oss-cad-suite 2026-08-24 (yosys 0.68+120) lifts
+    //     `a_q[11:8] <= val` faithfully — no anonymous inputs, `a_q` a plain state
+    //     cell — so there is nothing to flag (measured 2026-09-18 when the image
+    //     moved to that release).
+    // The invariant: `a_q` is flagged EXACTLY WHEN the lift carries an anonymous
+    // free input, and the fully-written `b_q` is never flagged. The structural
+    // query itself is pinned against the captured old-plugin BTOR2
+    // (`SLANG_PARTSEL_LIFT`, in make-ci without slang), so a plugin that stops
+    // producing the shape does not silently retire the rule. Runs only in the
+    // mununu-sva image.
     #[test]
     #[ignore = "requires yosys-slang (mununu-sva docker image); run with --ignored"]
-    fn e2e_sv_lint_flags_slang_partial_write_register() {
+    fn e2e_sv_lint_flags_slang_partial_write_iff_the_lift_splits_it() {
         const SRC: &str = r#"module partsel_lint (
   input  logic       clk,
   input  logic       rst_n,
@@ -1411,15 +1420,34 @@ endmodule
             include_dirs: Vec::new(),
             frontend: SvFrontend::Slang,
         };
-        let findings = sv_lint_registers(&lift).expect("lint lifts + scans the design");
+        let btor2 = lift.lift().expect("the slang lift runs");
+        // An anonymous free input is an `input` line with no symbol — the design's
+        // own ports (`clk`, `rst_n`, `val`) carry theirs.
+        let anonymous_inputs = btor2
+            .lines()
+            .filter(|l| {
+                let toks: Vec<&str> = l
+                    .split(';')
+                    .next()
+                    .unwrap_or("")
+                    .split_whitespace()
+                    .collect();
+                toks.len() == 3 && toks[1] == "input"
+            })
+            .count();
+        let findings = lint_undriven_partial_writes(&btor2).expect("lint scans the lift");
         let names: Vec<&str> = findings.iter().map(|f| f.signal.as_str()).collect();
-        assert!(
+        eprintln!("slang lift: {anonymous_inputs} anonymous free input(s); lint flagged {names:?}");
+        assert_eq!(
             names.contains(&"a_q"),
-            "the partial-write register a_q must be flagged; got {names:?}"
+            anonymous_inputs > 0,
+            "a_q must be flagged exactly when the lift split it into free inputs \
+             ({anonymous_inputs} anonymous input(s)); got {names:?}"
         );
         assert!(
             !names.contains(&"b_q"),
-            "the fully-written register b_q is faithful and must NOT be flagged; got {names:?}"
+            "the fully-written register b_q is faithful on every plugin and must NOT be \
+             flagged; got {names:?}"
         );
     }
 

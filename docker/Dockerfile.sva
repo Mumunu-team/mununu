@@ -49,7 +49,13 @@ FROM mununu-dev:latest
 # sibling hw-verification-uba image — which had been built once, in June 2026,
 # from the 2025-12-31 release (yosys 0.60+70, Verilator 5.043). That is where
 # the older yosys came from: not a pin, not a decision, a stale sibling. There
-# is no reason to hold at 0.60. And because `hw-verif` was never published, the
+# is no reason to hold at 0.60. One MEASURED consequence of moving (2026-09-18,
+# full e2e sweep in both images): the 2026-08-24 yosys-slang plugin lifts a
+# plain-vector partial write (`q[hi:lo] <= d`) faithfully, where the 2025-12-31
+# one split the unwritten bits into anonymous free inputs — so properties over
+# such registers that verify-auto used to REFUSE on `--frontend slang` now
+# decide, exactly as the sv2v path always did (consumer briefing
+# 2026-09-sva-image-one-suite). And because `hw-verif` was never published, the
 # `COPY --from` made this image unbuildable anywhere but a contributor's
 # machine — every run of the e2e nightly failed before a test executed
 # (.github/workflows/e2e.yml). A public, tag-pinned download fixes both.

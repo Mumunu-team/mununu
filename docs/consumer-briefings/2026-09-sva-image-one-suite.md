@@ -18,8 +18,14 @@ oss-cad-suite (yosys 0.60+70, Verilator 5.043) and never published. It now downl
 `monono-dev` already pin** — asserts every version claim against the binaries at build time, and
 exposes the pins as image labels.
 
-**No Rust changed.** What changed is the compiler under the lift. The e2e sweep was run in the
-old and the new image at the same commit; the result is in *The measurement* below.
+**No engine code changed.** What changed is the compiler under the lift — and that has one
+measured, verdict-visible consequence: **on `--frontend slang`, a property over a plain-vector
+partial-write register (`q[hi:lo] <= d`) that used to be *refused* (`skipped`, "cone reaches a
+free input") now *decides*, exactly as the sv2v path always has**, because the 2026-08-24
+yosys-slang lifts such registers faithfully instead of splitting them into free inputs. Every
+other row of the e2e sweep and a three-row toolchain differential are identical between the
+images; the two e2e tests that pinned the old plugin's shape are re-scoped here. Details in
+*The measurement*.
 
 **Action for monono:** rebuild the image (one command, below); `tools/check-versions.sh --images`
 then reports full parity, and your reported tier can become enforced if you want it to. Your
@@ -61,7 +67,71 @@ Two decisions inside that table are mununu's, and are now written in the Dockerf
 
 ## The measurement
 
-<!-- SWEEP-RESULTS -->
+Two instruments, both run on 2026-09-18 on the Rust tree of `main` at `ec30b34` (this PR changes
+no engine code; its only Rust change is the two test re-scopes described below), old image
+(`hw-verif`'s 2025-12-31 suite) versus new (2026-08-24).
+
+**1. Toolchain differential — same release binary, same inputs, both images.** The `mununu`
+release binary was mounted read-only from the `mununu-target` volume (built 2026-09-16), so the
+only variable is the suite. Three rows, chosen to touch every changed tool on a verdict path:
+
+| row | design | path exercised | old image | new image |
+|---|---|---|---|---|
+| A | OpenTitan `csrng_main_sm` (vendored M.2 fixture + the M.0 standard `prim_assert` macros), `--must-edge-inference smt-hyper-must` | slang `--ast-json` SVA extraction → sv2v → yosys `read_verilog` → portfolio (exact-symbolic, symbolic, explicit) | 2/2 HOLDS | 2/2 HOLDS, same formulas |
+| B | 4-bit saturating counter with two concurrent SVA (`\|=>`, `disable iff`) + one `@mununu_guarantee` | slang extraction → sv2v → `read_verilog` → exact-symbolic | HOLDS / VIOLATED (1 cell) / HOLDS | identical |
+| C | same design, `--frontend slang` | slang extraction → **yosys-slang plugin (`read_slang`)** → exact-symbolic | HOLDS / VIOLATED (1 cell) / HOLDS | identical |
+
+The full report text — formulas, seeded predicates, every diagnostic note, `decided-by` per
+engine, planner routing — was diffed after scrubbing timings and temp-dir names: **identical
+apart from the toolchain banner.** Row C is the one that matters most for the plugin: `slang.so`
+and the slang CLI both moved (11.0.0 → 11.0.448) and the lift they produce decides the same.
+
+Two things the differential does *not* show, stated so nobody over-reads it: it is three
+designs, not the corpus, and it says nothing about the *performance* of the new yosys (both runs
+were made on a saturated host and the timings were scrubbed on purpose).
+
+**2. The `#[ignore]`d e2e sweep (`make e2e`, one test per process), both images.**
+
+| image | passed | failed | crashed | wall clock |
+|---|---|---|---|---|
+| old (`hw-verif`'s 2025-12-31 suite) | 37 | 1 | 0 | 2 h 14 min, of which ~1 h 50 min was compiling the `--all-features` test binaries into the volume (single-threaded rustc on the `mununu_core` test harness, 84 CPU-minutes) |
+| new (2026-08-24 suite) | 35 | 3 | 0 | 6 min — same binaries, reused |
+
+All 38 rows were compared one by one: 36 identical, 2 changed, both `PASS → FAIL`, both about
+the same thing.
+
+**The two rows that changed — the yosys-slang lift of a plain-vector partial write.** The design
+under both tests writes `a_q[11:8] <= val` and leaves the other twelve bits of `a_q` untouched.
+
+- The 2025-12-31 plugin lifted that as `a_q` = a `concat` mixing two **anonymous free inputs**
+  (BTOR2 nodes `19 input 18` and `23 input 6`, no symbol) — havoc bits. mununu's #464/#465
+  refusal and the #496 `sv lint` rule exist for exactly that shape: `AG(a_q == 0)` was **Skipped**
+  ("cone reaches a free input the lift could not attribute to a driver") rather than decided
+  over havoc, and `sv lint --frontend slang` flagged `a_q`.
+- The 2026-08-24 plugin lifts it **faithfully**: the only `input` nodes are the design's four
+  ports, `a_q` is a plain 16-bit state cell, the lint has nothing to flag, and `AG(a_q == 0)`
+  **decides Violated** — the same verdict the `read_verilog + sv2v` path has always given for the
+  same design, which the old test itself used as its "faithful" reference.
+
+So the new toolchain fixed the partial-write lift, and the two e2e tests were pinning the old
+plugin's *shape* rather than mununu's property. They are re-scoped in this PR to the invariant
+that holds on either plugin: `a_q` is flagged by the lint **exactly when** the lift carries an
+anonymous free input (`e2e_sv_lint_flags_slang_partial_write_iff_the_lift_splits_it`), and on
+the slang path a partial-write property is either refused or decides **exactly as the faithful
+sv2v lift** — never a silent Holds, never a ⊥
+(`e2e_partsel_partial_write_slang_refuses_or_agrees_with_sv2v`). The refusal and lint code are
+untouched; their structural query stays pinned by the non-ignored unit tests against the captured
+old-plugin BTOR2 (`SLANG_PARTSEL_LIFT`), so a plugin that stops producing the shape does not
+silently retire the rule. Both re-scoped tests were re-run in the new image and pass; the run
+prints the plugin's behaviour so the next toolchain bump can read it off the sweep log:
+`slang lift: 0 anonymous free input(s); lint flagged []` and `slang DECIDED AG(a_q == 0) =
+Violated, agreeing with the faithful sv2v lift` (and the same for `b_q`, `c_q`, `d_q`, `p_q`).
+
+**The row that fails in both images** — `e2e_portfolio_decides_what_the_default_engine_misses` —
+is a precondition drift unrelated to the toolchain: the test assumes the CEGAR engine leaves both
+`uart_tx` properties ⊥ so the portfolio has a gap to close, and the engine now decides one of them
+on its own (`mu X. ((bit_cnt_q == 0) or <> X)` → True). Same class as the cutpoint test re-scoped
+in #526. Tracked as [mununu#562](https://github.com/Mumunu-team/mununu/issues/562), not fixed in this PR.
 
 ## Question 1 — was there a reason to hold yosys at 0.60?
 
@@ -173,7 +243,11 @@ Three facts change the picture monono's handoff paints:
    are referenced by nothing** in mununu, mununu-private, monono or rosf (0 links each, ~0.4 GB
    each). They were a per-worker experiment that did not become a convention. Per-worker
    *volumes* are the wrong shape anyway: each is a full copy of the cache, and the only thing a
-   consumer needs to share is a 20 MB binary.
+   consumer needs to share is a 20 MB binary. (`mununu-cargo-home` is a different, smaller
+   itch: the image's `CARGO_HOME` is discarded with every `--rm` container, so each cargo run
+   re-downloads the registry index and crates — seconds, not minutes, observed on every run in
+   this measurement. Mounting a volume at `/usr/local/cargo/registry` would remove it; not done
+   here.)
 
 **mununu's view, for monono to consume:** the durable fix is not a volume layout but **a baked
 binary** — an image variant that builds `mununu` at a known commit into `/usr/local/bin` and needs
@@ -197,10 +271,17 @@ workload its own volume only if it must run concurrently with a release build, a
   `MUNUNU_YOSYS_EXPECTED` reported tier can become enforced if you want it; the measured argument
   for tolerating 0.60 in `versions.lock` can be retired (see Question 1). Re-run the gate; where a
   card or `metrics.md` says "yosys 0.60+70", the next run re-stamps it.
-- **What to expect:** identical verdicts on the blocks measured (see *The measurement*). Your own
-  lock already records byte-identical BTOR2 for `slot_arbiter` and `tmds_encoder` across 0.60 /
-  0.68. Rule 5 of your lock's bump procedure applies: if a verdict *does* move, that is the
-  finding.
+- **What to expect:** identical verdicts everywhere **except partial-write registers on the
+  slang front end** (cross-repo policy trigger 5 — a `skipped` that now decides). If any block of
+  yours had a property refused with the note *"cone reaches a free input the lift could not
+  attribute to a driver"* — the `monono#partsel` item — that property now returns `holds` or
+  `violated`, and `sv lint --frontend slang` no longer flags the register. `ci_exit_code` never
+  failed on `skipped` but does fail on `violated`, so a lane can turn red where a real violation
+  was previously hidden behind a refusal. That is the honest outcome, and it is lane-visible;
+  re-run the formal gate before trusting the old verdict record. Your own lock's measurement
+  (byte-identical BTOR2 for `slot_arbiter` and `tmds_encoder` across 0.60 / 0.68) stands for the
+  `read_verilog` path — the change is in the plugin, not in yosys proper. Rule 5 of your bump
+  procedure applies: a verdict that moves is the finding.
 - **Report parsing:** no shape change. Nothing in the JSON or the report text depends on the
   suite version.
 - **The `--env` stamp:** `check-versions.sh --env` will now print slang `11.0.448…` from
@@ -269,6 +350,10 @@ docker run --rm -v "$(pwd)":/work -v mununu-target:/cargo-target mununu-sva make
 
 ## Not covered here
 
+- **`e2e_portfolio_decides_what_the_default_engine_misses` fails in both images** (precondition
+  drift, unrelated to the toolchain; see *The measurement*). Filed as
+  [mununu#562](https://github.com/Mumunu-team/mununu/issues/562) rather than re-scoped here, so the
+  toolchain PR carries only toolchain-caused test changes.
 - **The shared base image itself.** Not built; Question 3 states the constraint and the PR shape
   that would let `mununu-sva` adopt one.
 - **A baked-binary `mununu-sva` variant** that frees `formal-docker` from the cargo volume.
