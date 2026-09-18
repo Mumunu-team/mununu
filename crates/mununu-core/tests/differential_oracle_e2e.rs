@@ -1407,11 +1407,16 @@ fn diff_corpus_cegar_vs_symbolic_engine_parity() {
 }
 
 /// The PORTFOLIO end-to-end gate. Runs uart_tx (both liveness properties, definite under the
-/// exact engine but ⊥ under the default `Cegar`) through the real `verify_auto → portfolio →
-/// merge` chain — validating the full integration the hermetic combiner tests can't: the engine
-/// dispatch, the scoped-thread parallel orchestration, and the sequential early-exit, all
-/// against live slang/sv2v/yosys + the three real engines. Asserts:
-///   1. `Cegar` alone leaves BOTH properties ⊥ — the baseline the portfolio must beat.
+/// exact engine) through the real `verify_auto → portfolio → merge` chain — validating the full
+/// integration the hermetic combiner tests can't: the engine dispatch, the scoped-thread
+/// parallel orchestration, and the sequential early-exit, all against live slang/sv2v/yosys +
+/// the three real engines. Asserts:
+///   1. `Cegar` alone leaves AT LEAST ONE of the two properties ⊥ — the gap the portfolio
+///      closes. When this test was written it left both ⊥; by 2026-09 the engine decided the
+///      diamond form (`mu X. ((bit_cnt_q == 0) or <> X)` → True) on its own and only the box
+///      form was still ⊥ (mununu#562), so the precondition is stated as the gap that is
+///      actually there and PRINTS it. If `Cegar` ever decides both, this fails loudly: the
+///      gap is gone and the test must move to a design that still has one, not be weakened.
 ///   2. Both portfolio modes DECIDE both properties, matching the exact oracle (AG-AF=Violated,
 ///      AG-EF=Holds) — the portfolio recovers what the default engine misses.
 ///   3. Sequential and Parallel agree exactly (same engines, same merge).
@@ -1426,13 +1431,22 @@ fn e2e_portfolio_decides_what_the_default_engine_misses() {
         "expected uart_tx as the first corpus design"
     );
 
-    // 1. Baseline: the default Cegar engine leaves both uart_tx liveness props ⊥.
+    // 1. Baseline: the default Cegar engine leaves at least one uart_tx liveness prop ⊥.
     let cegar = run_corpus_verdicts(uart, Engine::Cegar);
+    let still_bottom: Vec<&str> = cegar
+        .iter()
+        .filter(|(_, v, _)| *v == LedgerVerdict::Indefinite)
+        .map(|(n, _, _)| *n)
+        .collect();
+    eprintln!(
+        "Cegar alone leaves ⊥ on uart_tx: {still_bottom:?} (of {} properties)",
+        cegar.len()
+    );
     assert!(
-        cegar
-            .iter()
-            .all(|(_, v, _)| *v == LedgerVerdict::Indefinite),
-        "precondition: Cegar leaves uart_tx ⊥⊥ (the gap the portfolio closes); got {cegar:?}"
+        !still_bottom.is_empty(),
+        "precondition: Cegar must leave at least one uart_tx property ⊥ (the gap the portfolio \
+         closes) — if it decides both, this gate has no gap left to test on this design and \
+         must move to one that has; got {cegar:?}"
     );
 
     // 2 + 3. Both portfolio modes decide both properties, and agree with each other.
