@@ -69,3 +69,5 @@ docker run --rm -v $(pwd):/work hw-verif:latest make -C <leaf> sim
 ```
 
 See the `target-executor` agent's Phase 3.5 and `.claude/reviews/prospector/staging/RTL-002/repro/` for the canonical pattern.
+
+Since 2026-09-18 the opt-in `mununu-sva` image (`docker/Dockerfile.sva`) carries the same oss-cad-suite — tag-pinned to the release rosf and monono use, Verilator included — so the e2e suite's counterexample-replay gate runs there and the image no longer depends on `hw-verif` being built first. `hw-verif` stays the image the `target-executor` procedure names. `docker/README.md` shows how to read the toolchain pins off the `mununu-sva` image labels.

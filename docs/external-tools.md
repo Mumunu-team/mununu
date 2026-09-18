@@ -109,6 +109,8 @@ apt install yosys
 ### OSS-CAD-Suite (cross-platform, includes sby)
 The [OSS-CAD-Suite](https://github.com/YosysHQ/oss-cad-suite-build) ships Yosys + sby + many other YosysHQ tools as a self-contained release tarball. Recommended when you need both Yosys and sby together.
 
+It is also what the `mununu-sva` image (`docker/Dockerfile.sva`) carries — one tag-pinned release (`2026-08-24` → Yosys 0.68, the yosys-slang `slang.so` plugin, slang 11.0, Verilator 5.051, btormc, pono, cvc5), the same tag the sibling rosf and monono images pin, asserted at build time and readable off the image labels (`docker/README.md`). The suite does **not** ship sv2v; the image adds it separately.
+
 ### Discovery
 1. `MUNUNU_YOSYS_PATH` env var (explicit override).
 2. `yosys` on `$PATH`.
@@ -288,6 +290,10 @@ Used by:
 The [slang releases](https://github.com/MikePopoloski/slang/releases) page ships pre-built
 Linux x86_64 and macOS arm64 binaries. Download, extract, and either copy `slang` to
 `/usr/local/bin/` or set `MUNUNU_SLANG_PATH` to the extracted binary.
+
+The oss-cad-suite tarball (see the Yosys section) bundles a `slang` build too, alongside the
+`slang.so` yosys plugin built from the same snapshot; the `mununu-sva` image uses that one, so the
+SVA extractor and the `read_slang` RTL lift never disagree about the language front-end.
 
 ### Build from source
 ```bash

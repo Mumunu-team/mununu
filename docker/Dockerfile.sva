@@ -1,64 +1,143 @@
 # SVA-verification validation image — extends `mununu-dev` with the external
-# SystemVerilog toolchain (slang + sv2v + yosys) so the slang-gated
-# `verify-auto` / `extract-sva` e2e tests (normally `#[ignore]`d because the
-# tools are contributor-installed, not bundled) can run end-to-end. The Rust
-# toolchain, libz3 (linked), and the cargo cache volume all come from
-# `mununu-dev`; this image only adds the EDA front-ends.
+# SystemVerilog toolchain so the slang-gated `verify-auto` / `extract-sva` e2e
+# tests (`#[ignore]`d in `make ci` because the tools are contributor-installed,
+# not bundled) can run end-to-end. The Rust toolchain, libz3 (linked), and the
+# cargo cache volume all come from `mununu-dev`; this image only adds the EDA
+# front-ends and the oracles the e2e suite shells out to.
+#
+# What it carries, and from where:
+#   * ONE oss-cad-suite release (YosysHQ's public tarball, pinned by tag below):
+#     yosys + the yosys-slang plugin (`slang.so`, the `read_slang` RTL lift),
+#     the slang CLI (SVA extraction), Verilator (counterexample replay),
+#     btormc / pono / cvc5 / bitwuzla / boolector (reachability oracles).
+#   * sv2v, which the suite does not ship — pinned GitHub release.
 #
 # Why a separate image: per the project's "subprocess tools are not bundled"
-# policy, slang/sv2v/yosys stay out of `mununu-dev` (the build/test image). This
-# image is opt-in, for reproducing the SVA e2e validation on any host (including
-# Intel macOS, where slang ships no native prebuilt — this Linux/x86_64 image
-# runs natively there).
+# policy, none of the above goes into `mununu-dev` (the build/test image). This
+# image is opt-in, for reproducing the SVA e2e validation on any host —
+# including Intel macOS, where slang ships no native prebuilt; this Linux/x86_64
+# image runs natively there.
 #
 # Build (mununu-dev must exist first — see docs/dev-container.md):
 #   docker build -f docker/Dockerfile.dev -t mununu-dev .
 #   docker build -f docker/Dockerfile.sva -t mununu-sva .
 #
-# Run the slang-gated e2e tests (mount source + warm cargo cache volume):
+# Run the slang-gated e2e suite, one test per process (mount source + the warm
+# cargo cache volume):
 #   docker volume create mununu-target   # once
 #   docker run --rm -v "$(pwd)":/work -v mununu-target:/cargo-target \
-#     mununu-sva cargo test -p mununu-core --lib --all-features -- --ignored
+#     mununu-sva make e2e
+#
+# Ask the image what it carries WITHOUT running it (the labels are asserted at
+# build time against the tools themselves, so they cannot drift from the tree):
+#   docker image inspect mununu-sva \
+#     -f '{{ index .Config.Labels "io.github.mumunu-team.oss-cad-suite.tag" }}'
 FROM mununu-dev:latest
 
-# Pin the toolchain versions for reproducibility.
-ARG SLANG_VERSION=v11.0
+# ---------------------------------------------------------------------------
+# Pins. The suite tag is the single knob; everything else on this page is a
+# CLAIM about what that tag carries, and the assertion step below fails the
+# build if a claim is false — so bump the tag and the claims together.
+#
+# The same tag is pinned by the sibling images that lift or synthesise the same
+# RTL: rosf `docker/Dockerfile.hw` and monono `docker/Dockerfile.dev` (both
+# 2026-08-24 as of 2026-09-18; monono's `tools/versions.lock` is the consumer
+# side of that policy). One release, one compiler, everywhere the design goes.
+#
+# History, so nobody re-derives it: until 2026-09-18 this image did
+# `COPY --from=hw-verif:latest /opt/oss-cad-suite`, taking the suite from the
+# sibling hw-verification-uba image — which had been built once, in June 2026,
+# from the 2025-12-31 release (yosys 0.60+70, Verilator 5.043). That is where
+# the older yosys came from: not a pin, not a decision, a stale sibling. There
+# is no reason to hold at 0.60. One MEASURED consequence of moving (2026-09-18,
+# full e2e sweep in both images): the 2026-08-24 yosys-slang plugin lifts a
+# plain-vector partial write (`q[hi:lo] <= d`) faithfully, where the 2025-12-31
+# one split the unwritten bits into anonymous free inputs — so properties over
+# such registers that verify-auto used to REFUSE on `--frontend slang` now
+# decide, exactly as the sv2v path always did (consumer briefing
+# 2026-09-sva-image-one-suite). And because `hw-verif` was never published, the
+# `COPY --from` made this image unbuildable anywhere but a contributor's
+# machine — every run of the e2e nightly failed before a test executed
+# (.github/workflows/e2e.yml). A public, tag-pinned download fixes both.
+#
+# Bump procedure:
+#   curl -s https://api.github.com/repos/YosysHQ/oss-cad-suite-build/releases/latest | grep tag_name
+#   1. set OSS_CAD_SUITE_TAG / _DATE (the tag is dashed, the asset is not);
+#   2. build; the assertion step prints the versions it found — copy them into
+#      YOSYS_VERSION / VERILATOR_VERSION / SLANG_VERSION and build again;
+#   3. run the e2e sweep in the new image (CLAUDE.md §"SVA-verification e2e
+#      validation") — a lift-compiler change is validated by the lift, not by
+#      the version string;
+#   4. ship a consumer briefing (docs/policies/cross-repo-impact.md, trigger 6)
+#      so rosf / monono can bump their pins to the same tag.
+# ---------------------------------------------------------------------------
+ARG OSS_CAD_SUITE_TAG=2026-08-24
+ARG OSS_CAD_SUITE_DATE=20260824
+ARG YOSYS_VERSION=0.68
+ARG VERILATOR_VERSION=5.051
+ARG SLANG_VERSION=11.0
 ARG SV2V_VERSION=v0.0.13
 
 # libz3-dev (z3-sys links system libz3; some base images predate
 # `mununu-dev`'s libz3-dev layer, so install it here too) + unzip for the
-# sv2v release archive. yosys comes from oss-cad-suite below — the Debian
-# `yosys` package (0.23) is too old for the lift's `cutpoint -blackbox`.
+# sv2v release archive. No Debian `yosys`: its 0.23 predates the lift's
+# `cutpoint -blackbox`, and a second yosys on the image is exactly the kind of
+# shadowing the single-suite policy exists to prevent.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libz3-dev \
         unzip \
     && rm -rf /var/lib/apt/lists/*
 
-# yosys (recent, with `cutpoint -blackbox`) from the sibling RTL image's
-# oss-cad-suite. Reuses the locally-built `hw-verif:latest` (the same
-# toolchain `target-executor` uses for Verilator) rather than re-downloading
-# the ~1GB suite. The binaries are self-contained (rpath to its own lib), so
-# only PATH needs prepending — no global LD_LIBRARY_PATH (which would shadow
-# the system libz3 the Rust binary loads).
-COPY --from=hw-verif:latest /opt/oss-cad-suite /opt/oss-cad-suite
-ENV PATH="/opt/oss-cad-suite/bin:${PATH}"
+# The suite, streamed straight into /opt (no 1 GB temp file in the layer). The
+# binaries carry an rpath to their own lib tree, so only PATH needs extending —
+# NO global LD_LIBRARY_PATH, which would shadow the system libz3 the Rust
+# binary links. `perl` (full, for Verilator's FindBin wrapper) is already in
+# `mununu-dev` via build-essential.
+RUN curl -fsSL \
+      "https://github.com/YosysHQ/oss-cad-suite-build/releases/download/${OSS_CAD_SUITE_TAG}/oss-cad-suite-linux-x64-${OSS_CAD_SUITE_DATE}.tgz" \
+    | tar xz -C /opt
 
-# slang (SystemVerilog elaboration → --ast-json) — Linux x86_64 prebuilt.
-RUN curl -fsSL -o /tmp/slang.tar.gz \
-        "https://github.com/MikePopoloski/slang/releases/download/${SLANG_VERSION}/slang-linux-x86_64.tar.gz" \
-    && mkdir -p /tmp/slang && tar xzf /tmp/slang.tar.gz -C /tmp/slang \
-    && find /tmp/slang -name slang -type f -exec cp {} /usr/local/bin/slang \; \
-    && chmod +x /usr/local/bin/slang \
-    && rm -rf /tmp/slang /tmp/slang.tar.gz \
-    && slang --version
-
-# sv2v (SystemVerilog-2017 → Verilog-2005 normaliser) — Linux prebuilt.
+# sv2v (SystemVerilog-2017 → Verilog-2005 normaliser) — not in the suite;
+# Linux prebuilt from its GitHub release.
 RUN curl -fsSL -o /tmp/sv2v.zip \
         "https://github.com/zachjs/sv2v/releases/download/${SV2V_VERSION}/sv2v-Linux.zip" \
     && mkdir -p /tmp/sv2v && unzip -q /tmp/sv2v.zip -d /tmp/sv2v \
     && find /tmp/sv2v -name sv2v -type f -exec cp {} /usr/local/bin/sv2v \; \
     && chmod +x /usr/local/bin/sv2v \
-    && rm -rf /tmp/sv2v /tmp/sv2v.zip \
-    && sv2v --version
+    && rm -rf /tmp/sv2v /tmp/sv2v.zip
+
+# Prepending is safe HERE because `mununu-dev` carries none of these tools —
+# nothing gets shadowed. (An image that also has Debian's verilator would pick
+# the wrong one from a login shell; that is why a shared BASE image should keep
+# the suite off PATH and let each consumer resolve it deliberately.)
+ENV PATH="/opt/oss-cad-suite/bin:${PATH}"
+
+# Assert every claim above against the tree — in its own layer, so a wrong
+# claim costs a rebuild of this step, not a re-download of the suite. The
+# versions are printed first so a failed assertion tells you what to write.
+RUN set -e; \
+    echo "oss-cad-suite VERSION: $(cat /opt/oss-cad-suite/VERSION)"; \
+    yosys -V; verilator --version; slang --version; sv2v --version; \
+    test "$(cat /opt/oss-cad-suite/VERSION)" = "${OSS_CAD_SUITE_DATE}"; \
+    yosys -V            | grep -q "^Yosys ${YOSYS_VERSION}[+ ]"; \
+    verilator --version | grep -q "^Verilator ${VERILATOR_VERSION} "; \
+    slang --version     | grep -q "^slang version ${SLANG_VERSION}[.+]"; \
+    sv2v --version      | grep -q "^sv2v ${SV2V_VERSION}"; \
+    test -f /opt/oss-cad-suite/share/yosys/plugins/slang.so; \
+    command -v btormc pono cvc5 bitwuzla boolector >/dev/null
+
+# The labels a consumer can assert without `docker run`. They repeat the ARGs
+# verbatim, and the ARGs were just asserted against the binaries, so a label
+# here is a fact about the tree, not a hope.
+LABEL org.opencontainers.image.title="mununu-sva" \
+      org.opencontainers.image.description="mununu-dev + the pinned SystemVerilog toolchain (oss-cad-suite: yosys, yosys-slang, slang, Verilator, btormc, pono, cvc5; plus sv2v) for the slang-gated e2e suite" \
+      org.opencontainers.image.source="https://github.com/Mumunu-team/mununu" \
+      org.opencontainers.image.base.name="mununu-dev:latest" \
+      io.github.mumunu-team.oss-cad-suite.tag="${OSS_CAD_SUITE_TAG}" \
+      io.github.mumunu-team.oss-cad-suite.date="${OSS_CAD_SUITE_DATE}" \
+      io.github.mumunu-team.yosys.version="${YOSYS_VERSION}" \
+      io.github.mumunu-team.verilator.version="${VERILATOR_VERSION}" \
+      io.github.mumunu-team.slang.version="${SLANG_VERSION}" \
+      io.github.mumunu-team.sv2v.version="${SV2V_VERSION}"
 
 WORKDIR /work
