@@ -22,6 +22,16 @@ docker volume create mununu-target
 
 If you skip this volume, the container compiles from scratch every run (no cache survives `--rm`). The host's `target/` is never written to by the container, so host-side `cargo` and container-side `make` do not contend for the same artifacts.
 
+## Incremental compilation
+
+> Source of truth: [`docker/Dockerfile.dev`](../docker/Dockerfile.dev) (`ENV CARGO_INCREMENTAL=0`) — surface: CLI-only — a build-environment setting, not a mununu verb
+
+The image sets `CARGO_INCREMENTAL=0`. CI runs `make ci` with no volume at `/cargo-target`, so every run starts cold and incremental state would be written once and never read. With the `mununu-target` volume warm, incremental *does* speed up a re-run after a small edit to `mununu-core`; opt back in for that run:
+
+```bash
+docker run --rm -e CARGO_INCREMENTAL=1 -v $(pwd):/work -v mununu-target:/cargo-target mununu-dev make ci
+```
+
 ## Ephemeral run
 
 One-off command, warm cache via the named volume:

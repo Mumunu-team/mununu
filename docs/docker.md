@@ -6,6 +6,7 @@
 
 - **Multi-stage builds.** Use a full `rust` builder image to compile, then copy only the binary into a slim runtime image (`debian:bookworm-slim` or `gcr.io/distroless/cc`). CI tools stay in the build stage; the production image stays clean.
 - **Pin exact tags.** Never use `FROM ubuntu:latest` or `FROM rust:latest`. Use `FROM rust:1.82-slim-bookworm`. Builds must stay reproducible. If you update the tutorial Dockerfile's `ubuntu:24.04`, pin it to a digest or full minor tag.
+- **Turn incremental compilation off in image builds.** `ENV CARGO_INCREMENTAL=0` in every builder stage and in the dev image: an image build starts from a cold target dir and compiles once, so incremental state is a large `incremental/` tree written into the layer (or onto a CI runner) for a rebuild that never comes. Opt back in only for a warm local volume (`-e CARGO_INCREMENTAL=1`).
 - **Order layers by change frequency.** Copy `Cargo.toml` / `Cargo.lock` first and run a dummy build to cache dependencies, then copy `src/`. The dependency cache only busts when dependencies change, not on every source edit.
 
 ## Layer hygiene

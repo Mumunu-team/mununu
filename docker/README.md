@@ -19,6 +19,8 @@ docker run --rm \
   -v $(pwd):/work \
   -v mununu-target:/cargo-target \
   mununu-dev make ci
+# incremental compilation is off in the image (CI runs cold); for a tight local
+# edit-test loop on the warm volume, opt back in for that run: -e CARGO_INCREMENTAL=1
 
 # SVA e2e (needs mununu-dev first; ~2.6 GB suite download on first build)
 docker build -f docker/Dockerfile.sva -t mununu-sva .
