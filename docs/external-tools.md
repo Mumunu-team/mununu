@@ -47,7 +47,12 @@ export LIBRARY_PATH=/opt/homebrew/opt/z3/lib  # Apple Silicon
 apt install libz3-dev
 ```
 
-The `docker/Dockerfile.dev` image installs `libz3-dev` automatically.
+The `docker/Dockerfile.dev` image installs `libz3-dev` automatically — from **Debian trixie**
+(libz3 **4.13.3**) since 2026-09-22. That is deliberate: `z3-sys` 0.13 (the crate behind
+`z3 = "0.21"`) declares Z3 ≥ 4.13.3 as its minimum and detects the linked version at build
+time. Bookworm's 4.8.12 does still compile and link (verified before the base bump), because the
+crate only warns on the mismatch and mununu calls no version-gated API — but a host on 4.8.x is
+building against a library older than the crate's stated floor. Prefer ≥ 4.13.3.
 
 ### Build-from-source
 See the [upstream Z3 docs](https://github.com/Z3Prover/z3#building-z3-from-source-using-cmake).
