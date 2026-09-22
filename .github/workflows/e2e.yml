@@ -95,10 +95,11 @@ jobs:
 
       # Same `make e2e` line a contributor runs locally (the hw-verif principle:
       # the docker invocation must work identically in CI and on a laptop).
-      # No cargo cache survives a runner, so incremental artifacts are pure
-      # disk cost here.
+      # No cargo cache survives a runner, so incremental artifacts would be pure
+      # disk cost here; the image sets CARGO_INCREMENTAL=0 itself (inherited from
+      # docker/Dockerfile.dev), so nothing has to be passed on this line.
       - name: Run the SVA e2e suite in the sva image
         run: |
-          docker run --rm -e CARGO_INCREMENTAL=0 \
+          docker run --rm \
             -v ${{ github.workspace }}:/work mununu-sva:latest \
             make e2e

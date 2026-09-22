@@ -33,6 +33,8 @@
 #   docker image inspect mununu-sva \
 #     -f '{{ index .Config.Labels "io.github.mumunu-team.oss-cad-suite.tag" }}'
 FROM mununu-dev:latest
+# Inherits CARGO_TARGET_DIR=/cargo-target and CARGO_INCREMENTAL=0 from mununu-dev;
+# docker/Dockerfile.dev carries the policy and how to opt incremental back in.
 
 # ---------------------------------------------------------------------------
 # Pins. The suite tag is the single knob; everything else on this page is a

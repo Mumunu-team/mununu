@@ -10,6 +10,12 @@
 
 FROM rust:1.91-slim-bookworm AS builder
 WORKDIR /build
+# Nothing in an image build reuses incremental state: this stage starts from a
+# cold target dir and runs `cargo build` once, so incremental would only write an
+# `incremental/` tree into the layer for a rebuild that never comes. (cargo's
+# release profile is already non-incremental by default; this makes the intent
+# explicit and holds if the profile or the build line ever changes.)
+ENV CARGO_INCREMENTAL=0
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
 COPY src/ src/
