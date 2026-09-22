@@ -33,7 +33,16 @@
 # and will download a different toolchain if this ARG drifts. Keep
 # the two in lockstep on every bump.
 ARG RUST_VERSION=1.95
-FROM rust:${RUST_VERSION}-slim-bookworm
+# Debian trixie, not bookworm, since 2026-09-22 — for libz3. The `z3` crate is
+# linked against the system libz3 (below), and z3-sys 0.13 (z3 0.21, the
+# RUSTSEC-2026-0295 fix, mununu#568) declares Z3 >= 4.13.3 as its minimum:
+# bookworm ships libz3 4.8.12, trixie ships 4.13.3. The 4.8.12 combination did
+# compile and link (verified in the image before this bump), but only because
+# z3-sys downgrades the mismatch to a build-script warning and no API we call
+# is version-gated; an image whose library meets the crate's stated minimum is
+# the combination the crate is actually tested against. Everything else this
+# image installs exists under the same package names on trixie.
+FROM rust:${RUST_VERSION}-slim-trixie
 
 # Native deps required to build mununu's tree-sitter grammars + OpenSSL
 # bindings + Z3 (mandatory since Phase A.4 step 4.2 — see

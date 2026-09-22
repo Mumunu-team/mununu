@@ -12,6 +12,12 @@ Rare — only on Dockerfile or toolchain changes.
 docker build -f docker/Dockerfile.dev -t mununu-dev .
 ```
 
+## The base image
+
+> Source of truth: [`docker/Dockerfile.dev`](../docker/Dockerfile.dev) (`FROM rust:${RUST_VERSION}-slim-trixie`) — surface: CLI-only — a build-environment setting, not a mununu verb
+
+`rust:1.95-slim-trixie`: the pinned toolchain on Debian trixie. Trixie rather than bookworm because the workspace links the system libz3 and `z3-sys` 0.13 wants Z3 ≥ 4.13.3 — trixie ships 4.13.3, bookworm 4.8.12 (see [`external-tools.md`](external-tools.md#z3-required-linked-library)). `mununu-sva` inherits the base.
+
 ## Cargo cache volume
 
 Create a named volume once so subsequent runs stay warm. The container writes to `/cargo-target` (set by `CARGO_TARGET_DIR` in the image), **not** to the host's `target/`. Host and container caches stay independent.
