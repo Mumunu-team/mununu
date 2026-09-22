@@ -98,7 +98,7 @@ tree-sitter-rust = { version = "0.23", optional = true }
 # bundled Z3 source (slower; runner-OOM-prone in CI), enable the
 # `z3/bundled` feature explicitly:
 #   cargo build --features z3/bundled
-z3 = { version = "0.20" }
+z3 = { version = "0.21" }
 
 # Optional / feature-gated:
 #   `test_support`: deterministic CLTS generators (chain/ring/grid/hypercube/...)
