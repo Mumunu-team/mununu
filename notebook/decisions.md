@@ -21,7 +21,7 @@ Format (per Michael Nygard's ADR template, lightly adapted):
 
 **Date:** 2026-05-05
 **Status:** accepted
-**Context:** The optimization programme produces numbers (speedups, memory deltas, scaling curves) that will appear in blog posts and a peer-reviewed paper. Without a reproducibility contract — pinned toolchain, hardware fingerprints, deterministic inputs, archived raw outputs, single-command replay — those numbers are unverifiable and the paper is not submission-ready.
+**Context:** The optimization programme produces numbers (speedups, memory deltas, scaling curves) that will appear in blog posts and future write-ups. Without a reproducibility contract — pinned toolchain, hardware fingerprints, deterministic inputs, archived raw outputs, single-command replay — those numbers are unverifiable.
 **Decision:** Adopt the eight-file experiment archive convention (`experiments/EXP-NNNN-<slug>/`), the lab-notebook template (`log.md` + `notes.md`), the reproducibility scripts (`scripts/{capture_hw,bench_record,repro,bench_diff,check_repro}.sh`), and Makefile verbs (`experiment`, `replay`, `bench-record`, `bench-compare`, `publish-prep`). Every result cited in a write-up must replay green via `make replay EXP=NNNN`.
 **Consequences:** Up-front cost ~2.5 engineer-days. Steady-state cost: ~30 minutes per experiment for archive curation. Benefit: every paper claim is independently verifiable; blog posts ship with one-click replay; regressions surface in CI rather than in review.
 **Related EXP:** all (EXP-0001 onward).

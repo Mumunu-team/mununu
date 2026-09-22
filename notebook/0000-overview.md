@@ -15,7 +15,7 @@ This programme is a deliberate, sequenced run at:
 - **Parallelism:** rayon-based modal eval, BFS-frontier composition, batch property checks.
 - **SIMD:** verifying the autovectorized story; manual SIMD only where measured.
 
-It also doubles as a **publication artifact**: every commit produces a reproducible experiment archive that drops directly into a blog post and (subset) into a peer-reviewed paper. The blog series targets practitioners; the paper targets a CAV/TACAS/SPIN/ATVA-tier venue.
+It also doubles as a **publication artifact**: every commit produces a reproducible experiment archive that drops directly into a blog post or a future write-up. The blog series targets practitioners.
 
 ## Contract
 

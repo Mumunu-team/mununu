@@ -10,8 +10,7 @@
 //! Run explicitly with:
 //!   cargo test scalable_gr1 -- --ignored --nocapture
 //!
-//! Produces timing output suitable for Table 3 of the ICTAC 2026 paper.
-//! Add results to paper/mununu_ictac2026.tex Table~\ref{tab:state_scale}.
+//! Produces timing output for the state-scaling table.
 
 use std::time::Instant;
 
@@ -225,5 +224,5 @@ fn scalable_gr1_large() {
     }
 
     println!("{:=<70}", "");
-    println!("Copy eval times into Table 3 of paper/mununu_ictac2026.tex");
+    println!("Copy eval times into the state-scaling table");
 }
