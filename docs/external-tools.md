@@ -29,9 +29,9 @@ Every **discovered** tool above (all but Z3, which is linked, and circt-verilog,
 
 ## Z3 (required, linked library)
 
-> Source of truth: [`crates/mununu-core/Cargo.toml`](../crates/mununu-core/Cargo.toml#L57) — `z3 = "0.20"` — surface: build-time
+> Source of truth: [`crates/mununu-core/Cargo.toml`](../crates/mununu-core/Cargo.toml#L101) — `z3 = "0.21"` — surface: build-time
 
-Z3 is mununu's primary SMT backend, linked in-process via the `z3 = "0.20"` Rust crate. Unlike the other tools listed below, Z3 is **mandatory** — the workspace will not build without it.
+Z3 is mununu's primary SMT backend, linked in-process via the `z3 = "0.21"` Rust crate. Unlike the other tools listed below, Z3 is **mandatory** — the workspace will not build without it.
 
 ### macOS
 ```bash
