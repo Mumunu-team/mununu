@@ -1944,6 +1944,12 @@ impl From<&crate::adapter::slang::verify_auto::AutoVerifyReport> for SvVerifyAut
                                 }
                                 _ => None,
                             },
+                            determinism: r.determinism().tag().to_string(),
+                            budget: r.engine_budget().map(|b| b.tag().to_string()),
+                            budget_knob: r
+                                .engine_budget()
+                                .and_then(|b| b.knob())
+                                .map(str::to_string),
                         }
                     }),
                     seeded_predicates: p.seeded_predicates.clone(),
@@ -2075,7 +2081,7 @@ pub struct BottomReasonView {
     /// |---|---|
     /// | `budget-expired` | **WALL-CLOCK budget** — retry with more time |
     /// | `memory-ceiling-exceeded` | the process-RSS ceiling (`MUNUNU_MAX_PROCESS_MEMORY_BYTES`). **More TIME cannot help** — needs more memory, a smaller cone, or a lower tier. Host-dependent *without* a clock: RSS varies with allocator state and neighbours |
-    /// | `engine-did-not-complete` | read `detail`: it names the engine's own budget and knob |
+    /// | `engine-did-not-complete` | branch on **`budget`** — it names which engine budget fired, and `detail` carries the engine's own numbers |
     /// | `engine-contradiction` | 🔴 **SOUNDNESS ALARM.** Two engines returned OPPOSITE definite verdicts; one is unsound. **Retrying is actively wrong.** Escalate, do not re-run |
     /// | `engine-crashed` | the engine process died. Not an abstention; report it |
     /// | `safety-shape-not-reducible` | the property's SHAPE is outside the rescue lane — a bigger budget **cannot** help. Reshape, or add a reducer |
@@ -2098,6 +2104,30 @@ pub struct BottomReasonView {
     /// decided it stopped for the stated reason.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine: Option<String>,
+    /// mununu#553 ask 2 — **would the same command on the same commit abstain again?**
+    ///
+    /// | value | what a gate should do |
+    /// |---|---|
+    /// | `reproducible` | a property of the PROBLEM. Pin the `unknown` honestly, or raise the budget `budget` names |
+    /// | `host-dependent` | a property of the AFTERNOON. Treat as a **configuration result**, not a verdict about the design — the same command may DECIDE on a quieter machine |
+    /// | `unestablished` | not determined. Do not read as either |
+    ///
+    /// This is the field that makes a `⊥` actionable without string-matching `detail`. Note that
+    /// `budget-expired` (the 15-min per-property and 1-h whole-run harness clocks) is **on by
+    /// default**, so `host-dependent` is reachable on an ordinary run with nothing configured.
+    pub determinism: String,
+    /// mununu#553 ask 1 — which engine budget fired, for `engine-did-not-complete` only:
+    /// `iteration` · `node` · `bit-cap` · `arena-safety` · `fixpoint-latency` · `arena-exhausted`
+    /// · `wall-clock` · `unrecognised`.
+    ///
+    /// Previously all eight arrived as one `kind` and could only be told apart by regexing
+    /// `detail` — while the table above told gates to branch on `kind`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<String>,
+    /// The env knob to raise for `budget`, when raising one is the right response
+    /// (e.g. `MUNUNU_BDD_ITER_BUDGET`). Absent when no knob applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_knob: Option<String>,
 }
 
 /// One property's auto-verification verdict (mirrors `PropertyVerdict`).

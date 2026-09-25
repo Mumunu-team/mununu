@@ -318,6 +318,48 @@ Two properties of this path are worth knowing:
 
 Consumers keying on `verification_notes[i].kind` can distinguish "the engine gave up" from "the property shape doesn't fit this rescue lane," and act accordingly. Prior to mununu#492, the two cases were indistinguishable — a critical distinction for contrast pairs where a stateless block's supposed-to-fail twin was returning ⊥ instead of VIOLATED (the ticket's `mem_router_faulty` case).
 
+### Is this ⊥ reproducible? `determinism` and `budget` (mununu#553)
+
+> Source of truth: [`BottomReason::determinism`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) + [`classify_engine_budget`](../crates/mununu-core/src/adapter/mod.rs) — surface: (CLI+API)
+
+A `⊥` that names its cause still leaves the question a gate has to answer: **would running the
+same command again give a different answer?** A deterministic abstention is a property of the
+*problem* — pin it, or raise the budget it names. A host-dependent one is a property of the
+*afternoon*, and the right response is to treat it as a configuration result rather than a claim
+about the design. Both used to arrive identically.
+
+Every `bottom_reason` now carries **`determinism`** — `reproducible` · `host-dependent` ·
+`unestablished` — and an engine abstention additionally carries **`budget`** and
+**`budget_knob`**:
+
+```bash
+# the ⊥s you can honestly pin, and what to raise
+mununu --quiet sv verify-auto design.sv --json \
+  | jq '[.properties[] | select(.bottom_reason.determinism == "reproducible")
+         | {property: .name, budget: .bottom_reason.budget, raise: .bottom_reason.budget_knob}]'
+```
+
+**`budget-expired` is host-dependent and on by default.** It comes from the harness clocks
+`MUNUNU_PROPERTY_BUDGET_MS` (15 min per property) and `MUNUNU_VERIFY_BUDGET_MS` (1 h per run), so
+this case is reachable on an ordinary run with nothing configured. `memory-ceiling-exceeded` is
+host-dependent too — RSS varies with allocator state and neighbouring processes, with no clock
+anywhere in the mechanism.
+
+**Of the seven engine budgets, exactly one is host-dependent.** `iteration`, `node`, `bit-cap`,
+`arena-safety`, `fixpoint-latency` and `arena-exhausted` are deterministic total-work bounds;
+only `wall-clock` (`MUNUNU_BDD_TIME_BUDGET_MS`, **off by default since #553**) depends on the
+host.
+
+⚠️ Two honest limits. The node-shaped budgets are reproducible *to about 0.01%*, not to the byte,
+so a budget pinned exactly at a cone's measured peak can still flip — leave headroom.
+And `fixpoint-latency` is a **2-D** bound (nodes AND iterations): `budget_knob` names the node
+half, but raising `MUNUNU_BDD_FIXPOINT_ITERS` escapes it equally.
+
+**Why three values.** `unclassified-bottom`, and an engine marker the classifier does not
+recognise, have no established answer — a boolean would force one, and guessing `reproducible`
+would tell a consumer to pin a `⊥` that may not reproduce. Read `unestablished` as *"do not pin,
+do not retry-loop."*
+
 ### Process-wide memory ceiling: `MUNUNU_MAX_PROCESS_MEMORY_BYTES` (mununu#490, default revised in #504)
 
 > Source of truth: [`adapter::memory_budget::check_process_memory_budget`](../crates/mununu-core/src/adapter/memory_budget.rs) — surface: (CLI+API+UI, env var — process-global)

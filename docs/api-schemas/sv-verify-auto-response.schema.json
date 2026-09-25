@@ -4,8 +4,26 @@
     "BottomReasonView": {
       "description": "monono ask 26 — WHY a property is `⊥`, machine-readable.\n\nThe complement to `unknown_cells`: that field says HOW MUCH of the cube space stayed undecided, this one says WHY nothing decided it. A consumer previously had the quantity and not the cause, so the only available move on a `⊥` was to try budget knobs blind.\n\nCarried as a FIELD rather than a note deliberately: a consumer that does not know about a field cannot silently filter it out, and a consumer that does not know about a note routinely does — which is exactly how the equivalent `bottom-reason` note (shipped in mununu#492) never reached the reader it was written for.",
       "properties": {
+        "budget": {
+          "description": "mununu#553 ask 1 — which engine budget fired, for `engine-did-not-complete` only: `iteration` · `node` · `bit-cap` · `arena-safety` · `fixpoint-latency` · `arena-exhausted` · `wall-clock` · `unrecognised`.\n\nPreviously all eight arrived as one `kind` and could only be told apart by regexing `detail` — while the table above told gates to branch on `kind`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "budget_knob": {
+          "description": "The env knob to raise for `budget`, when raising one is the right response (e.g. `MUNUNU_BDD_ITER_BUDGET`). Absent when no knob applies.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "detail": {
           "description": "Human-readable one-liner. For `engine-did-not-complete` this is the ENGINE'S OWN abstention message, which names the budget it hit and its numbers — e.g. *\"abstained on the ITERATION budget (1048577 > 1048576) … raise MUNUNU_BDD_ITER_BUDGET\"*.",
+          "type": "string"
+        },
+        "determinism": {
+          "description": "mununu#553 ask 2 — **would the same command on the same commit abstain again?**\n\n| value | what a gate should do | |---|---| | `reproducible` | a property of the PROBLEM. Pin the `unknown` honestly, or raise the budget `budget` names | | `host-dependent` | a property of the AFTERNOON. Treat as a **configuration result**, not a verdict about the design — the same command may DECIDE on a quieter machine | | `unestablished` | not determined. Do not read as either |\n\nThis is the field that makes a `⊥` actionable without string-matching `detail`. Note that `budget-expired` (the 15-min per-property and 1-h whole-run harness clocks) is **on by default**, so `host-dependent` is reachable on an ordinary run with nothing configured.",
           "type": "string"
         },
         "engine": {
@@ -16,12 +34,13 @@
           ]
         },
         "kind": {
-          "description": "Stable kebab-case tag for gates. **Branch on this, never on the outcome alone** — every value below previously produced an identical `unknown` with `unknown_cells: 0`.\n\n| tag | what a gate should do | |---|---| | `budget-expired` | **WALL-CLOCK budget** — retry with more time | | `memory-ceiling-exceeded` | the process-RSS ceiling (`MUNUNU_MAX_PROCESS_MEMORY_BYTES`). **More TIME cannot help** — needs more memory, a smaller cone, or a lower tier. Host-dependent *without* a clock: RSS varies with allocator state and neighbours | | `engine-did-not-complete` | read `detail`: it names the engine's own budget and knob | | `engine-contradiction` | 🔴 **SOUNDNESS ALARM.** Two engines returned OPPOSITE definite verdicts; one is unsound. **Retrying is actively wrong.** Escalate, do not re-run | | `engine-crashed` | the engine process died. Not an abstention; report it | | `safety-shape-not-reducible` | the property's SHAPE is outside the rescue lane — a bigger budget **cannot** help. Reshape, or add a reducer | | `no-state-model-non-safety` | zero state registers; a modelling issue, not an engine cap | | `not-attempted` | filtered out before any engine ran | | `unclassified-bottom` | cause not established — do **not** treat as distinct-from-abstain |\n\nA gate that retries every `unknown` with raised budgets spins forever on `safety-shape-not-reducible` and `no-state-model-non-safety`, and re-runs an unsoundness on `engine-contradiction`.",
+          "description": "Stable kebab-case tag for gates. **Branch on this, never on the outcome alone** — every value below previously produced an identical `unknown` with `unknown_cells: 0`.\n\n| tag | what a gate should do | |---|---| | `budget-expired` | **WALL-CLOCK budget** — retry with more time | | `memory-ceiling-exceeded` | the process-RSS ceiling (`MUNUNU_MAX_PROCESS_MEMORY_BYTES`). **More TIME cannot help** — needs more memory, a smaller cone, or a lower tier. Host-dependent *without* a clock: RSS varies with allocator state and neighbours | | `engine-did-not-complete` | branch on **`budget`** — it names which engine budget fired, and `detail` carries the engine's own numbers | | `engine-contradiction` | 🔴 **SOUNDNESS ALARM.** Two engines returned OPPOSITE definite verdicts; one is unsound. **Retrying is actively wrong.** Escalate, do not re-run | | `engine-crashed` | the engine process died. Not an abstention; report it | | `safety-shape-not-reducible` | the property's SHAPE is outside the rescue lane — a bigger budget **cannot** help. Reshape, or add a reducer | | `no-state-model-non-safety` | zero state registers; a modelling issue, not an engine cap | | `not-attempted` | filtered out before any engine ran | | `unclassified-bottom` | cause not established — do **not** treat as distinct-from-abstain |\n\nA gate that retries every `unknown` with raised budgets spins forever on `safety-shape-not-reducible` and `no-state-model-non-safety`, and re-runs an unsoundness on `engine-contradiction`.",
           "type": "string"
         }
       },
       "required": [
         "detail",
+        "determinism",
         "kind"
       ],
       "type": "object"
