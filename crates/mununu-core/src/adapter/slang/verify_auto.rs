@@ -4318,7 +4318,85 @@ pub enum BottomReason {
     NotAttempted,
 }
 
+/// mununu#553 ask 2 — would re-running the SAME command on the SAME commit produce this `⊥`
+/// again?
+///
+/// **Why this is a field and not prose.** A deterministic abstention is a property of the
+/// PROBLEM: pin it, or raise the budget it names. A host-dependent one is a property of the
+/// AFTERNOON, and the right response is to treat it as a configuration error — a different
+/// action entirely. Before this, both arrived as `unknown` with the same shape, and the engine's
+/// own wall-clock message said so outright: *"this ⊥ is not distinguishable in the report from a
+/// real one."* A consumer asked for the distinction and said they would use it at once.
+///
+/// Three-valued deliberately. A bool would force a claim on [`BottomReason::UnclassifiedBottom`]
+/// and on an unrecognised engine budget, and "we did not establish this" is the honest answer
+/// there — the same discipline the `⊥` vocabulary itself follows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BottomDeterminism {
+    /// Same input ⇒ same `⊥`. Pin it, or raise the budget the reason names.
+    Reproducible,
+    /// Depends on the host — a wall clock, RSS, allocator state, or a kill from outside. The
+    /// same command may DECIDE on a quieter machine. Treat as a configuration error, not a
+    /// verdict about the design.
+    HostDependent,
+    /// Not established. Never read this as either of the others.
+    Unestablished,
+}
+
+impl BottomDeterminism {
+    /// Stable kebab-case tag for gates.
+    pub fn tag(&self) -> &'static str {
+        match self {
+            Self::Reproducible => "reproducible",
+            Self::HostDependent => "host-dependent",
+            Self::Unestablished => "unestablished",
+        }
+    }
+}
+
 impl BottomReason {
+    /// mununu#553 ask 1 — the engine budget this `⊥` names, when it names one.
+    ///
+    /// Derived from the engine's verbatim `detail` rather than stored, so every construction
+    /// site keeps working and the marker list stays in ONE place
+    /// ([`crate::adapter::classify_engine_budget`]).
+    pub fn engine_budget(&self) -> Option<crate::adapter::EngineBudget> {
+        match self {
+            Self::EngineDidNotComplete { detail, .. } => {
+                Some(crate::adapter::classify_engine_budget(detail))
+            }
+            _ => None,
+        }
+    }
+
+    /// mununu#553 ask 2 — see [`BottomDeterminism`].
+    pub fn determinism(&self) -> BottomDeterminism {
+        match self {
+            // Host-dependent, and the first two are ON BY DEFAULT — the per-property (15 min)
+            // and whole-run (1 h) harness clocks, and the cgroup-derived RSS ceiling. These are
+            // the cases the issue was filed about.
+            Self::BudgetExpired | Self::MemoryCeilingExceeded => BottomDeterminism::HostDependent,
+            // A kill from outside (OOM killer, signal) is by definition about the host.
+            Self::EngineCrashed { .. } => BottomDeterminism::HostDependent,
+            // Defer to the budget the engine named; an unrecognised marker stays unestablished.
+            Self::EngineDidNotComplete { .. } => {
+                match self.engine_budget().and_then(|b| b.is_host_dependent()) {
+                    Some(true) => BottomDeterminism::HostDependent,
+                    Some(false) => BottomDeterminism::Reproducible,
+                    None => BottomDeterminism::Unestablished,
+                }
+            }
+            // Cause not established, so determinism is not either.
+            Self::UnclassifiedBottom => BottomDeterminism::Unestablished,
+            // Shape, modelling, contradiction and never-attempted are all functions of the
+            // input alone.
+            Self::SafetyShapeNotReducible
+            | Self::NoStateModelNonSafety
+            | Self::EngineContradiction { .. }
+            | Self::NotAttempted => BottomDeterminism::Reproducible,
+        }
+    }
+
     /// Stable kebab-case tag, for gates and log greps.
     pub fn tag(&self) -> &'static str {
         match self {
@@ -4355,7 +4433,9 @@ impl BottomReason {
                 format!("the engine process CRASHED (not an abstention): {detail}")
             }
             Self::BudgetExpired => "a WALL-CLOCK budget expired — retrying with more time is the \
-                 right response here"
+                 right response here. HOST-DEPENDENT: the same command on a quieter or faster \
+                 machine may DECIDE this property, so treat a gate failure here as a \
+                 configuration result, not a verdict about the design"
                 .to_string(),
             Self::MemoryCeilingExceeded => "the process-RSS ceiling was exceeded \
                  (MUNUNU_MAX_PROCESS_MEMORY_BYTES) — retrying with more TIME cannot help; more \
@@ -6150,6 +6230,168 @@ mod tests {
         assert!(
             !m.contains("WALL-CLOCK"),
             "the memory case must not claim a clock fired; RSS is host-dependent WITHOUT one: {m}"
+        );
+    }
+
+    /// mununu#553 ask 2 — REPRODUCER: the ⊥ that fires on an ORDINARY run must say it is
+    /// host-dependent.
+    ///
+    /// The asymmetry this replaces: `MemoryCeilingExceeded`'s one-liner said *"Host-dependent
+    /// without a clock…"* while `BudgetExpired`'s said nothing about determinism at all — and
+    /// `BudgetExpired` is the one that fires from the 15-min per-property and 1-h whole-run
+    /// harness clocks, i.e. **on every default run, with nothing configured**. A consumer could
+    /// read the less-common case correctly and the common one not at all.
+    #[test]
+    fn the_default_on_wall_clock_reports_itself_as_host_dependent() {
+        assert_eq!(
+            BottomReason::BudgetExpired.determinism(),
+            BottomDeterminism::HostDependent,
+            "the harness wall clock is ON BY DEFAULT; a consumer must be able to tell its ⊥ from \
+             a real one without reading prose"
+        );
+        assert_eq!(
+            BottomReason::MemoryCeilingExceeded.determinism(),
+            BottomDeterminism::HostDependent,
+            "RSS is host-dependent too — without a clock anywhere in the mechanism"
+        );
+    }
+
+    /// mununu#553 ask 1+2 — the four budgets that used to share one tag are separable, and
+    /// exactly one of them is host-dependent.
+    ///
+    /// Before this, BIT CAP / node / iteration / latency / arena all arrived as
+    /// `engine-did-not-complete`, so a gate could only tell them apart by regexing the engine's
+    /// prose — while the API's own table told it to branch on the tag.
+    #[test]
+    fn engine_budgets_are_separable_and_only_the_clock_is_host_dependent() {
+        use crate::adapter::EngineBudget;
+        let case = |detail: &str| BottomReason::EngineDidNotComplete {
+            engine: "exact-symbolic".into(),
+            detail: detail.into(),
+        };
+
+        // Every marker the engine actually emits, verbatim in shape.
+        let cases = [
+            (
+                "abstained on the ITERATION budget (1048577 > 1048576)",
+                EngineBudget::Iteration,
+            ),
+            (
+                "abstained on the NODE budget (12 of 10 live BDD nodes)",
+                EngineBudget::Node,
+            ),
+            (
+                "cone is 200 bits (> 192) — abstained on the BIT CAP",
+                EngineBudget::BitCap,
+            ),
+            (
+                "abstained on the ARENA-SAFETY bound (live 9 of 10)",
+                EngineBudget::ArenaSafety,
+            ),
+            (
+                "abstained on the fixpoint LATENCY bound (nodes 11, iters 6000)",
+                EngineBudget::FixpointLatency,
+            ),
+            (
+                "BDD arena exhausted (OxiDD OutOfMemory)",
+                EngineBudget::ArenaExhausted,
+            ),
+            (
+                "abstained on the OPT-IN WALL-CLOCK budget (fixpoint)",
+                EngineBudget::WallClock,
+            ),
+        ];
+        for (detail, want) in cases {
+            assert_eq!(
+                case(detail).engine_budget(),
+                Some(want),
+                "misfiled: {detail}"
+            );
+        }
+
+        // The whole point: one of the seven is a property of the afternoon, six are not.
+        let host_dependent: Vec<_> = cases
+            .iter()
+            .filter(|(d, _)| case(d).determinism() == BottomDeterminism::HostDependent)
+            .map(|(_, b)| *b)
+            .collect();
+        assert_eq!(
+            host_dependent,
+            vec![EngineBudget::WallClock],
+            "exactly the OPT-IN wall clock is host-dependent; the rest are deterministic \
+             total-work bounds and a consumer should pin their ⊥ honestly"
+        );
+    }
+
+    /// An abstention marker the classifier does not recognise must stay UNESTABLISHED.
+    ///
+    /// The three-valued answer is the point: a bool would force a claim here, and guessing
+    /// `reproducible` would tell a consumer to pin a ⊥ that may not reproduce. The engine's
+    /// error channel is a `String`, so an unrecognised marker is a real possibility whenever a
+    /// message is reworded — and silence is the honest response, not a default.
+    #[test]
+    fn an_unrecognised_engine_budget_does_not_claim_determinism() {
+        let r = BottomReason::EngineDidNotComplete {
+            engine: "exact-symbolic".into(),
+            detail: "stopped for a reason this classifier has never seen".into(),
+        };
+        assert_eq!(
+            r.engine_budget(),
+            Some(crate::adapter::EngineBudget::Unrecognised)
+        );
+        assert_eq!(r.determinism(), BottomDeterminism::Unestablished);
+        assert_eq!(
+            BottomReason::UnclassifiedBottom.determinism(),
+            BottomDeterminism::Unestablished,
+            "an unestablished CAUSE cannot have an established determinism"
+        );
+    }
+
+    /// THE FALSIFIER from the plan: the separation must need no string matching.
+    ///
+    /// A consumer said they would use this "at once" — pin `unknown` honestly for the
+    /// deterministic budgets, treat the nondeterministic one as a configuration error. That is
+    /// only possible if the distinction is a FIELD. This test is the machine-readable half of
+    /// that promise: it touches `determinism()` and `tag()` and never reads `one_line()`.
+    #[test]
+    fn a_gate_separates_reproducible_from_host_dependent_without_reading_prose() {
+        let all = [
+            BottomReason::SafetyShapeNotReducible,
+            BottomReason::NoStateModelNonSafety,
+            BottomReason::UnclassifiedBottom,
+            BottomReason::EngineContradiction {
+                detail: "Holds vs Violated".into(),
+            },
+            BottomReason::EngineCrashed {
+                detail: "SIGABRT".into(),
+            },
+            BottomReason::MemoryCeilingExceeded,
+            BottomReason::BudgetExpired,
+            BottomReason::NotAttempted,
+        ];
+        for r in &all {
+            // Every reason answers, and the tag vocabulary is closed and stable.
+            assert!(
+                ["reproducible", "host-dependent", "unestablished"]
+                    .contains(&r.determinism().tag()),
+                "unknown determinism tag for {}",
+                r.tag()
+            );
+        }
+
+        // A soundness alarm is REPRODUCIBLE — retrying is wrong for a different reason than a
+        // budget, and a gate must not lump it in with the host-dependent cases.
+        assert_eq!(
+            BottomReason::EngineContradiction { detail: "x".into() }.determinism(),
+            BottomDeterminism::Reproducible
+        );
+        // A crash is about the host, even though it is not a budget at all.
+        assert_eq!(
+            BottomReason::EngineCrashed {
+                detail: "OOM kill".into()
+            }
+            .determinism(),
+            BottomDeterminism::HostDependent
         );
     }
 

@@ -469,6 +469,120 @@ pub fn classify_engine_error(message: &str, default: AdapterErrorKind) -> Adapte
     }
 }
 
+/// mununu#553 ask 1 — WHICH engine budget an abstention hit.
+///
+/// [`classify_engine_error`] answers *"is this an abstention or a defect?"*. This answers the
+/// question a consumer asks next, and could not answer before: **which** budget, so a gate can
+/// raise the right knob — or, via [`Self::is_host_dependent`], tell a reproducible abstention
+/// from one that depends on the afternoon.
+///
+/// Kept as substring matching for the same reason as `classify_engine_error`: the engine layer's
+/// error channel is a `String`. **A marker change must update [`classify_engine_budget`].**
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EngineBudget {
+    /// `MUNUNU_BDD_ITER_BUDGET` — the μ/ν pre-image step cap. Deterministic total work.
+    Iteration,
+    /// `MUNUNU_BDD_FIXPOINT_NODES` — the fixpoint live-node guard.
+    Node,
+    /// `MUNUNU_BDD_MAX_BITS` — the cone was wider than the bit cap, before any fixpoint ran.
+    BitCap,
+    /// The arena-safety bound: the fixpoint approached the OxiDD arena and stopped short of
+    /// the uncatchable in-apply exhaustion.
+    ArenaSafety,
+    /// The 2-D latency bound (nodes AND iterations together).
+    FixpointLatency,
+    /// The OxiDD arena was exhausted outright (`OutOfMemory`).
+    ArenaExhausted,
+    /// ⚠️ `MUNUNU_BDD_TIME_BUDGET_MS` — the OPT-IN engine wall clock. **The one engine budget
+    /// that is host-dependent**, which is why it defaults to off since mununu#553.
+    WallClock,
+    /// The message carried an abstention marker this classifier does not recognise. Never
+    /// claim determinism for it.
+    Unrecognised,
+}
+
+impl EngineBudget {
+    /// Stable kebab-case tag for gates and log greps.
+    pub fn tag(&self) -> &'static str {
+        match self {
+            Self::Iteration => "iteration",
+            Self::Node => "node",
+            Self::BitCap => "bit-cap",
+            Self::ArenaSafety => "arena-safety",
+            Self::FixpointLatency => "fixpoint-latency",
+            Self::ArenaExhausted => "arena-exhausted",
+            Self::WallClock => "wall-clock",
+            Self::Unrecognised => "unrecognised",
+        }
+    }
+
+    /// The env knob to raise, when there is one.
+    ///
+    /// ⚠️ [`Self::FixpointLatency`] is a **2-D** bound — it fires only when the node count AND
+    /// the iteration count are both past their softs — so raising `MUNUNU_BDD_FIXPOINT_ITERS`
+    /// escapes it just as well as the node knob named here. The field is singular; that is the
+    /// half it names.
+    pub fn knob(&self) -> Option<&'static str> {
+        match self {
+            Self::Iteration => Some("MUNUNU_BDD_ITER_BUDGET"),
+            Self::Node | Self::FixpointLatency => Some("MUNUNU_BDD_FIXPOINT_NODES"),
+            Self::BitCap => Some("MUNUNU_BDD_MAX_BITS"),
+            Self::ArenaSafety | Self::ArenaExhausted => Some("MUNUNU_BDD_ARENA_NODES"),
+            Self::WallClock => Some("MUNUNU_BDD_TIME_BUDGET_MS"),
+            Self::Unrecognised => None,
+        }
+    }
+
+    /// mununu#553 ask 2 — would the same command on the same commit abstain again?
+    ///
+    /// `None` = not established; never guess. `Some(true)` is reserved for the wall clock, the
+    /// only engine budget whose outcome is a property of the host rather than of the problem.
+    ///
+    /// ⚠️ The node-shaped budgets are reproducible *to about 0.01%*, not to the byte — a live
+    /// count can differ slightly between runs — so a budget set exactly at a cone's measured
+    /// peak can still flip. That is a reason to leave headroom, not a reason to call them
+    /// host-dependent.
+    pub fn is_host_dependent(&self) -> Option<bool> {
+        match self {
+            Self::WallClock => Some(true),
+            Self::Iteration
+            | Self::Node
+            | Self::BitCap
+            | Self::ArenaSafety
+            | Self::FixpointLatency
+            | Self::ArenaExhausted => Some(false),
+            Self::Unrecognised => None,
+        }
+    }
+}
+
+/// mununu#553 ask 1 — which budget an engine abstention names.
+///
+/// Substring matching against the engine's verbatim message, for the same reason
+/// [`classify_engine_error`] does: the channel is a `String`. Order matters — `OPT-IN
+/// WALL-CLOCK` must be tested before the bare budget words it also contains.
+pub fn classify_engine_budget(message: &str) -> EngineBudget {
+    // WALL-CLOCK first: its message also contains "budget", and mis-filing it as a deterministic
+    // budget is the exact confusion mununu#553 exists to remove.
+    if message.contains("WALL-CLOCK") {
+        EngineBudget::WallClock
+    } else if message.contains("OutOfMemory") || message.contains("arena exhausted") {
+        EngineBudget::ArenaExhausted
+    } else if message.contains("ARENA-SAFETY") {
+        EngineBudget::ArenaSafety
+    } else if message.contains("LATENCY") {
+        EngineBudget::FixpointLatency
+    } else if message.contains("ITERATION") {
+        EngineBudget::Iteration
+    } else if message.contains("NODE") {
+        EngineBudget::Node
+    } else if message.contains("BIT CAP") {
+        EngineBudget::BitCap
+    } else {
+        EngineBudget::Unrecognised
+    }
+}
+
 impl fmt::Display for AdapterError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(loc) = &self.location {

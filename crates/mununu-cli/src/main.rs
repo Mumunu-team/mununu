@@ -4147,7 +4147,22 @@ fn render_verify_auto_text(report: &mununu_core::adapter::slang::verify_auto::Au
         // budget it hit and its numbers. Before this, a ⊥ arrived as a bare outcome plus a cube
         // count and the only available move was to try budget knobs blind.
         if let Some(r) = &p.bottom_reason {
-            println!("        bottom-reason [{}]: {}", r.tag(), r.one_line());
+            // mununu#553 ask 1+2 — the tag says WHAT stopped, the budget says WHICH knob, and the
+            // determinism says whether re-running could give a different answer. A host-dependent
+            // ⊥ and a reproducible one call for opposite responses and used to render identically.
+            let budget = r
+                .engine_budget()
+                .map(|b| match b.knob() {
+                    Some(k) => format!(" budget={} ({k})", b.tag()),
+                    None => format!(" budget={}", b.tag()),
+                })
+                .unwrap_or_default();
+            println!(
+                "        bottom-reason [{}]{budget} determinism={}: {}",
+                r.tag(),
+                r.determinism().tag(),
+                r.one_line()
+            );
         }
         if !p.seeded_predicates.is_empty() {
             println!("        predicates: {}", p.seeded_predicates.join(", "));
