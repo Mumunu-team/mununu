@@ -111,7 +111,7 @@ The pre-KMTS primitives remain canonical for adapters that do not need predicate
 | `AbstractionType::Ignored` | Drop signal from state space | Any sidecar; preserved across S.3 | Sound for safety (model permits every concrete value); under-approximates liveness | Shipped |
 | Per-state predicate (`state_variable_bitset`) | Lift state name → mu-calculus predicate | [`clts/mod.rs`](../crates/mununu-core/src/clts/mod.rs); CTXDSL `predicates { … }` | Exact (no abstraction loss) | Shipped |
 | Per-state structured valuation | Hand-write display metadata on state | CTXDSL `state S { valuations { … } }`; `ContextDoc.state_valuations` | Exact (display-only by default; formal when paired with predicates) | Shipped |
-| Multi-label transitions | Collapse parallel edges → one transition w/ N labels | CTXDSL `transition s -> t on label a, label b;`; `SmallVec<[LabelId; 4]>` | Exact | Shipped |
+| Multi-label transitions | **Synchronisation vector**: the label SET is ONE compound action | CTXDSL `transition s -> t on label a, label b;`; `SmallVec<[LabelId; 4]>` | Exact for a single automaton. **Under composition it RESTRICTS**: see the warning below | Shipped |
 | Rich modal guards | One `[…]` / `<…>` combining labels + current/next predicates + controllability class + step bound | CTXDSL `[(labels = {a}, req_next = {active}, ctrl = controllable)] φ`; `Guard` struct | Exact | Shipped, under-used |
 | Chaotic stub on a label set | 1 state + self-loop per label for an unmodelled subsystem | hand-authored CTXDSL; future `codesign emit-chaotic-stub` generator | Sound for safety (over-approximation); **optimistic for liveness** | Pattern shipped; auto-gen pending |
 | Hide / reclassify-as-internal | Hide labels from observable alphabet at evaluation time | `mu_calculus::evaluate_with_options` `hide: Vec<String>`; `/context/verify` API `hide` | Preserves safety; **can lose liveness** (hidden label cannot be required) | Shipped |
@@ -119,6 +119,61 @@ The pre-KMTS primitives remain canonical for adapters that do not need predicate
 | Compositional stubs | Replace one source with `.espec.json` stub at verify time | `/context/verify` API `stubs`; matching CLI flag | Soundness depends on stub posture (chaotic vs. constrained) | Shipped |
 | Domain profiles | Bias AST extractor to one of `software` / `rtl` / `agentic` / `synthesis` / `universal` | `mununu-extract --domain`; `extraction/ast_extract/domain.rs` | Profile chooses defaults but does not enforce soundness — must be declared per-extraction | Shipped |
 | Mode filtering | One spec → multiple abstraction levels (e.g. `fixed` vs `vulnerable`) | `.espec.json` `mode` field | Per-mode posture declared inline | Shipped |
+
+### ⚠️ Multi-label transitions are synchronisation vectors, not alternation (mununu#570)
+
+> Source of truth: [`compose`](../crates/mununu-core/src/composition/mod.rs) — the pairing rule is a single line: two transitions pair only when their projections onto the **shared alphabet** are EQUAL as sets.
+
+`transition s -> t on label a, label b;` is **one compound action identified by the set `{a, b}`**.
+It does **not** fire on `a`, and it does **not** fire on `b`. It synchronises only with a partner
+transition whose shared-alphabet projection is exactly `{a, b}`.
+
+**This row's soundness column used to read "Exact" with the description "collapse parallel edges".
+Both halves were wrong**, and the difference is large enough to reduce a 7-automaton composition to
+one reachable state with a safety property "holding" vacuously.
+
+The worked case. `Multi` is the same in all four; only the partner changes:
+
+```
+automaton Multi {
+    controllable { label a; label b; }
+    states { state S0 initial; state S1; }
+    transitions { transition S0 -> S1 on label a, label b; }   // ONE action: {a,b}
+}
+```
+
+| partner's transitions | shared alphabet | `Multi` projects to | partner projects to | `EF S1` |
+|---|---|---|---|---|
+| `U0->U0 on a;` **and** `U0->U0 on b;` | `{a,b}` | `{a,b}` | `{a}` / `{b}` | **VIOLATED** — neither matches |
+| `U0->U0 on b;` only | `{b}` | `{b}` | `{b}` | HOLDS |
+| `U0->U0 on a;` only | `{a}` | `{a}` | `{a}` | HOLDS |
+| `U0->U0 on a, label b;` | `{a,b}` | `{a,b}` | `{a,b}` | HOLDS |
+
+**Row 1 is the trap, and it is not monotone.** Its partner permits strictly *more* behaviour than
+row 2's, yet the composition permits strictly *less* — it cannot move at all. That is because
+adding `a` to the partner does not merely grant a capability, it **enlarges the shared alphabet**,
+which retroactively changes `Multi`'s own projection from `{b}` to `{a,b}`. The alphabet is
+structural, not a permission set. This is ordinary alphabetised-parallel behaviour in the CSP
+family; it is only surprising because the comma reads like "or".
+
+**When you want alternation, write parallel edges.** An "I ignore the other automata's labels"
+self-loop is the common case, and the collapsed form is exactly wrong for it:
+
+```
+// WRONG — one unsatisfiable compound action; this automaton freezes under composition.
+transition Live -> Live on label ld_write, label ld_done, label cpu_write;
+
+// RIGHT — three alternatives, any one of which may fire.
+transition Live -> Live on label ld_write;
+transition Live -> Live on label ld_done;
+transition Live -> Live on label cpu_write;
+```
+
+**When you want conjunction, the collapsed form is correct and load-bearing.** A turn-based round
+carrying both an environment and a controller action (`emit.rs`'s `{env_*, ctrl_*}` pairs, the
+Skolem/Mealy game encoding) and a handshake where two parties must move together
+(`examples/verify/v10_mem_fabric_client_mux`, `on label grant, label refuse`) both mean *and*, and
+both would be silently wrong as parallel edges.
 
 ### Variants scheduled for removal in S.0 / S.1
 

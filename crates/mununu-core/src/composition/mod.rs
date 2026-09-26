@@ -396,6 +396,99 @@ fn transition_label_set(
 /// aggregates symbols across controllable, internal, and uncontrollable
 /// alphabets. The result is then normalised into a `BTreeSet` for callers
 /// that rely on deterministic ordering.
+/// mununu#570 — a multi-label transition that can never fire under this composition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeadCompoundAction {
+    /// The compound action's full label set, as written.
+    pub labels: Vec<String>,
+    /// Its projection onto the shared alphabet — the set a partner would have to match exactly.
+    pub shared_projection: Vec<String>,
+}
+
+/// mununu#570 — find compound actions that no partner transition can match.
+///
+/// **Why this is worth a static check.** A multi-label transition is a synchronisation vector: it
+/// pairs only with a partner whose shared-alphabet projection is SET-IDENTICAL. An author who
+/// writes `on label a, label b` meaning "either may happen" gets an action that can never fire,
+/// and the automaton freezes. Measured on a real 7-automaton model: 19 such self-loops reduced
+/// the composition to ONE reachable state, and a safety property "held" vacuously.
+///
+/// The existing 1-reachable-state warning catches only the total collapse. **This catches the
+/// partial case** — where the state space merely shrinks and the verdicts are still wrong with
+/// nothing saying so — which is the more dangerous of the two.
+///
+/// Pure and cheap: two passes over the transition lists, no product construction. A compound whose
+/// shared projection is EMPTY is not reported — its labels are local to this automaton, so it
+/// interleaves freely and is perfectly fine.
+pub fn dead_compound_actions(
+    left: &Clts<DefaultStateIdx, DefaultLabelIdx>,
+    right: &Clts<DefaultStateIdx, DefaultLabelIdx>,
+    shared_alphabet: &BTreeSet<String>,
+) -> Vec<DeadCompoundAction> {
+    let project = |clts: &Clts<DefaultStateIdx, DefaultLabelIdx>,
+                   t: &Transition<DefaultStateIdx, DefaultLabelIdx>|
+     -> Vec<String> {
+        let mut v: Vec<String> = t
+            .labels()
+            .iter()
+            .filter_map(|id| clts.label_payload(*id))
+            .flat_map(|p| p.iter().cloned())
+            .filter(|l| shared_alphabet.contains(l))
+            .collect();
+        v.sort();
+        v.dedup();
+        v
+    };
+    let all_labels = |clts: &Clts<DefaultStateIdx, DefaultLabelIdx>,
+                      t: &Transition<DefaultStateIdx, DefaultLabelIdx>|
+     -> Vec<String> {
+        let mut v: Vec<String> = t
+            .labels()
+            .iter()
+            .filter_map(|id| clts.label_payload(*id))
+            .flat_map(|p| p.iter().cloned())
+            .collect();
+        v.sort();
+        v.dedup();
+        v
+    };
+
+    // Every projection the partner can offer, anywhere in the automaton.
+    let matchable = |clts: &Clts<DefaultStateIdx, DefaultLabelIdx>| -> BTreeSet<Vec<String>> {
+        let mut out = BTreeSet::new();
+        for s in clts.states() {
+            for t in clts.outgoing(s).iter() {
+                out.insert(project(clts, t));
+            }
+        }
+        out
+    };
+
+    let mut found = Vec::new();
+    for (this, other) in [(left, right), (right, left)] {
+        let partner = matchable(other);
+        let mut seen: BTreeSet<Vec<String>> = BTreeSet::new();
+        for s in this.states() {
+            for t in this.outgoing(s).iter() {
+                let labels = all_labels(this, t);
+                if labels.len() < 2 {
+                    continue; // only a COMPOUND action can be unsatisfiable this way
+                }
+                let proj = project(this, t);
+                // An empty projection means every label is local: it interleaves, never blocked.
+                if proj.is_empty() || partner.contains(&proj) || !seen.insert(proj.clone()) {
+                    continue;
+                }
+                found.push(DeadCompoundAction {
+                    labels,
+                    shared_projection: proj,
+                });
+            }
+        }
+    }
+    found
+}
+
 fn collect_alphabet(clts: &Clts<DefaultStateIdx, DefaultLabelIdx>) -> BTreeSet<String> {
     clts.alphabet().into_iter().collect()
 }
@@ -503,6 +596,21 @@ pub fn compose(
         .intersection(&right_alphabet)
         .cloned()
         .collect();
+
+    // mununu#570 — a compound action no partner transition can match can NEVER fire, and its
+    // automaton is frozen at that state. Warn at composition time; this is a static check over
+    // the two label sets, with no state-space exploration.
+    for side in dead_compound_actions(left, right, &shared_alphabet) {
+        tracing::warn!(
+            "[mununu#570] compound action {{{}}} can never fire: no transition in the partner \
+             automaton projects to the same set over the shared alphabet {{{}}}. A multi-label \
+             transition is a SYNCHRONISATION VECTOR — it fires on the whole set together, not on \
+             any one label. If these are independent alternatives, write them as separate \
+             single-label transitions.",
+            side.labels.join(", "),
+            side.shared_projection.join(", "),
+        );
+    }
     let mut product_builder = ProductStateBuilder::default();
     let mut builder = Clts::builder();
     let mut pending_transitions = HashSet::new();
@@ -945,6 +1053,95 @@ mod tests {
 
     fn label_set(symbols: &[&str]) -> BTreeSet<String> {
         symbols.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// mununu#570 — the detector reproduces the filed repro's row 1 exactly.
+    ///
+    /// `Multi` carries ONE compound action `{a,b}`; the partner offers `{a}` and `{b}` as
+    /// separate edges. Neither projects to `{a,b}`, so the compound can never fire and `Multi`
+    /// freezes — which is how a real 7-automaton model collapsed to one reachable state with a
+    /// safety property holding vacuously.
+    #[test]
+    fn dead_compound_action_is_detected_when_no_partner_matches_the_set() -> TestResult {
+        let mut lb = Clts::builder();
+        let a = lb.labels().intern(["a"])?;
+        let b = lb.labels().intern(["b"])?;
+        lb.set_label_controllability(a, crate::clts::LabelControllability::Uncontrollable);
+        lb.set_label_controllability(b, crate::clts::LabelControllability::Uncontrollable);
+        lb.state("S0").initial("S0");
+        lb.state("S1");
+        lb.transition("S0", &[a, b], "S1"); // ONE action: {a,b}
+        let left = lb.build()?;
+
+        let mut rb = Clts::builder();
+        let ra = rb.labels().intern(["a"])?;
+        let rbl = rb.labels().intern(["b"])?;
+        rb.set_label_controllability(ra, crate::clts::LabelControllability::Uncontrollable);
+        rb.set_label_controllability(rbl, crate::clts::LabelControllability::Uncontrollable);
+        rb.state("U0").initial("U0");
+        rb.transition("U0", &[ra], "U0"); // two SEPARATE edges
+        rb.transition("U0", &[rbl], "U0");
+        let right = rb.build()?;
+
+        let shared = label_set(&["a", "b"]);
+        let dead = dead_compound_actions(&left, &right, &shared);
+        assert_eq!(
+            dead.len(),
+            1,
+            "the compound {{a,b}} is unmatchable and must be reported: {dead:?}"
+        );
+        assert_eq!(dead[0].labels, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(
+            dead[0].shared_projection,
+            vec!["a".to_string(), "b".to_string()]
+        );
+        Ok(())
+    }
+
+    /// mununu#570 — the three rows that DO fire must not be reported. A false positive here would
+    /// train readers to ignore the warning, which is worse than not having it.
+    #[test]
+    fn a_matchable_or_local_compound_is_not_reported() -> TestResult {
+        let build_multi = || -> CltsResult<Clts<DefaultStateIdx, DefaultLabelIdx>> {
+            let mut lb = Clts::builder();
+            let a = lb.labels().intern(["a"])?;
+            let b = lb.labels().intern(["b"])?;
+            lb.set_label_controllability(a, crate::clts::LabelControllability::Uncontrollable);
+            lb.set_label_controllability(b, crate::clts::LabelControllability::Uncontrollable);
+            lb.state("S0").initial("S0");
+            lb.state("S1");
+            lb.transition("S0", &[a, b], "S1");
+            lb.build()
+        };
+
+        // Row 4 — the partner offers the SAME compound. Matchable.
+        let mut rb = Clts::builder();
+        let ra = rb.labels().intern(["a"])?;
+        let rbl = rb.labels().intern(["b"])?;
+        rb.set_label_controllability(ra, crate::clts::LabelControllability::Uncontrollable);
+        rb.set_label_controllability(rbl, crate::clts::LabelControllability::Uncontrollable);
+        rb.state("U0").initial("U0");
+        rb.transition("U0", &[ra, rbl], "U0");
+        let compound_partner = rb.build()?;
+        assert!(
+            dead_compound_actions(&build_multi()?, &compound_partner, &label_set(&["a", "b"]))
+                .is_empty(),
+            "row 4 fires — a set-identical partner must not be flagged"
+        );
+
+        // Row 2 — the partner only knows `b`, so `a` is LOCAL to Multi and the projection is
+        // `{b}`, which the partner offers. Fires, and must not be flagged.
+        let mut rb2 = Clts::builder();
+        let rb2b = rb2.labels().intern(["b"])?;
+        rb2.set_label_controllability(rb2b, crate::clts::LabelControllability::Uncontrollable);
+        rb2.state("U0").initial("U0");
+        rb2.transition("U0", &[rb2b], "U0");
+        let b_only = rb2.build()?;
+        assert!(
+            dead_compound_actions(&build_multi()?, &b_only, &label_set(&["b"])).is_empty(),
+            "row 2 fires — a partial projection the partner offers must not be flagged"
+        );
+        Ok(())
     }
 
     #[test]
