@@ -237,6 +237,131 @@ pub fn augment_with_past_shadows(
 
 /// Can `base` be a `$past` shadow source in this model?
 ///
+/// mununu#565 — the minted symbol for `base[msb:lsb]`.
+///
+/// **One naming contract with the translator's `slice_atom_name`.** Both halves must agree or the
+/// atom never binds — the same pairing `shadow_stage_name` has with `past_shadow_name`, and the
+/// same reason it is a named function rather than an inline `format!`.
+fn slice_signal_name(base: &str, msb: u32, lsb: u32) -> String {
+    format!("{base}__bits{msb}_{lsb}")
+}
+
+/// The sort NID of a node that has one.
+fn sort_nid_of(node: &Node) -> Option<Nid> {
+    match node {
+        Node::Input { sort, .. } | Node::State { sort, .. } | Node::Const { sort, .. } => {
+            Some(*sort)
+        }
+        Node::Op { sort, .. } => Some(*sort),
+        _ => None,
+    }
+}
+
+/// mununu#565 — append a named `slice` node per `(base, msb, lsb)`, so an SVA bit-slice atom
+/// (`wdata[7:0] == 8'hA5`) binds to a plain BTOR2 symbol.
+///
+/// **Why a derived signal rather than a slice-aware atom.** `[` already means a Box modality to
+/// the mu-calculus lexer and an array index to `PredicateExpr`, so a bracketed atom would MISPARSE
+/// rather than fail. Minting the signal here leaves every layer below the translator untouched.
+///
+/// A slice is combinational, so this is strictly simpler than the `__past` chain: one node, no
+/// `state`/`next`/`init`, and no btormc NID-ordering constraint.
+///
+/// **Call AFTER [`augment_with_past_shadows`]** — `$past(sig[7:0])` slices the shadow, so
+/// `sig__past` must already be a symbol.
+///
+/// Idempotent. A base that does not resolve, or a slice outside its base's width, is SKIPPED: the
+/// property then declines to bind downstream with a named message, which beats aborting a whole
+/// run over one assertion.
+pub fn augment_with_slices(
+    content: &str,
+    slices: &[(&str, u32, u32)],
+) -> Result<String, AdapterError> {
+    if slices.is_empty() {
+        return Ok(content.to_string());
+    }
+    let file = parser::parse(content).map_err(|mut e| {
+        e.message = format!("adapter/btor2/shadow: {}", e.message);
+        e
+    })?;
+    // `collect_symbols` deliberately maps only Input/State nids to names (its pass 2 attaches an
+    // Op's symbol to the STATE it aliases, behind a width filter, so a narrow alias cannot
+    // false-positive onto a wide cell). A minted slice is an Op whose symbol names ITSELF, so it
+    // is invisible there — which is why this scans the lines directly for the idempotency check.
+    let symbols = parser::collect_symbols(&file);
+    let mut by_symbol: std::collections::HashMap<&str, Nid> =
+        symbols.iter().map(|(nid, s)| (s.as_str(), *nid)).collect();
+    for l in &file.lines {
+        if let Node::Op {
+            symbol: Some(sym), ..
+        } = &l.node
+        {
+            by_symbol.entry(sym.as_str()).or_insert(l.nid);
+        }
+    }
+
+    let mut sort_of_width: std::collections::HashMap<u32, Nid> = file
+        .lines
+        .iter()
+        .filter_map(|l| match &l.node {
+            Node::Sort {
+                sort: crate::adapter::btor2::ast::Sort::BitVec { width },
+            } => Some((*width, l.nid)),
+            _ => None,
+        })
+        .collect();
+
+    let mut next_nid: Nid = file.lines.iter().map(|l| l.nid).max().unwrap_or(0) + 1;
+    let mut appended: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for &(base, msb, lsb) in slices {
+        let symbol = slice_signal_name(base, msb, lsb);
+        if !seen.insert(symbol.clone()) || by_symbol.contains_key(symbol.as_str()) {
+            continue;
+        }
+        let Some(&base_nid) = by_symbol.get(base) else {
+            continue;
+        };
+        let base_width = file
+            .lines
+            .iter()
+            .find(|l| l.nid == base_nid)
+            .and_then(|l| sort_nid_of(&l.node))
+            .and_then(|sn| parser::bv_width(&file, sn))
+            .unwrap_or(0);
+        if base_width == 0 || msb >= base_width || lsb > msb {
+            continue;
+        }
+        let width = msb - lsb + 1;
+        let sort_nid = match sort_of_width.get(&width) {
+            Some(&n) => n,
+            None => {
+                let n = next_nid;
+                next_nid += 1;
+                appended.push(format!("{n} sort bitvec {width}"));
+                sort_of_width.insert(width, n);
+                n
+            }
+        };
+        appended.push(format!(
+            "{next_nid} slice {sort_nid} {base_nid} {msb} {lsb} {symbol}"
+        ));
+        next_nid += 1;
+    }
+
+    if appended.is_empty() {
+        return Ok(content.to_string());
+    }
+    let mut out = content.trim_end().to_string();
+    out.push('\n');
+    for line in appended {
+        out.push_str(&line);
+        out.push('\n');
+    }
+    Ok(out)
+}
+
 /// Exported so a caller that pre-filters bases uses the SAME rule as the
 /// augmentation itself. Two independent answers to "what is a valid base" is
 /// precisely how the input case stayed broken: the augmentation was taught to
@@ -360,6 +485,88 @@ mod tests {
 6 init 1 2 5
 7 next 1 2 4
 ";
+
+    /// mununu#565 — an 8-bit register `w`, wide enough to slice.
+    const WIDE: &str = "\
+1 sort bitvec 8
+2 state 1 w
+3 one 1
+4 add 1 2 3
+5 zero 1
+6 init 1 2 5
+7 next 1 2 4
+";
+
+    /// mununu#565 — a named `slice` node is appended, with the right sort and bounds.
+    #[test]
+    fn slices_append_a_named_node_of_the_sliced_width() {
+        let out = augment_with_slices(WIDE, &[("w", 3, 0)]).expect("augments");
+        let file = parser::parse(&out).expect("augmented btor2 parses");
+        // NB: `collect_symbols` maps only Input/State nids to names, so a minted Op symbol is
+        // looked up on the lines directly. That asymmetry is exactly what mununu#565's e2e has to
+        // prove harmless for BINDING — see the e2e in `verify_auto.rs`.
+        let nid = file
+            .lines
+            .iter()
+            .find(|l| matches!(&l.node, Node::Op { symbol: Some(sym), .. } if sym == "w__bits3_0"))
+            .map(|l| l.nid)
+            .expect("the minted symbol exists — the translator's atom names exactly this");
+        // It is a 4-bit slice, not an 8-bit alias.
+        let line = file.lines.iter().find(|l| l.nid == nid).expect("line");
+        let sort = sort_nid_of(&line.node).expect("slice has a sort");
+        assert_eq!(
+            parser::bv_width(&file, sort),
+            Some(4),
+            "w[3:0] is 4 bits wide; a wrong sort would bind the atom to the wrong value"
+        );
+    }
+
+    /// mununu#565 — idempotent, so a re-lift or a repeated base does not duplicate nodes.
+    #[test]
+    fn slices_are_idempotent_and_deduped() {
+        let once = augment_with_slices(WIDE, &[("w", 3, 0)]).expect("augments");
+        let twice = augment_with_slices(&once, &[("w", 3, 0)]).expect("augments again");
+        assert_eq!(
+            once, twice,
+            "re-augmenting an already-sliced model must be a no-op"
+        );
+
+        let dup = augment_with_slices(WIDE, &[("w", 3, 0), ("w", 3, 0)]).expect("augments");
+        assert_eq!(dup, once, "a repeated (base,msb,lsb) mints one node");
+    }
+
+    /// mununu#565 — a slice outside its base, or over an unknown base, is SKIPPED rather than
+    /// emitting a model the engines would reject.
+    ///
+    /// Skipping is deliberate: the property then declines to bind downstream with a named
+    /// message naming the atom, which beats aborting a whole multi-property run over one
+    /// assertion. An emitted out-of-range `slice` would instead be a malformed model.
+    #[test]
+    fn an_out_of_range_or_unknown_slice_is_skipped_not_emitted() {
+        // msb 9 on an 8-bit base.
+        let oob = augment_with_slices(WIDE, &[("w", 9, 0)]).expect("does not error");
+        assert_eq!(oob, WIDE, "an out-of-range slice must not be emitted");
+
+        // A base that is not in the model at all.
+        let unknown = augment_with_slices(WIDE, &[("nosuch", 3, 0)]).expect("does not error");
+        assert_eq!(unknown, WIDE, "an unresolvable base must not be emitted");
+
+        // And the empty list is the identity, so a slice-free design is byte-identical.
+        let none = augment_with_slices(WIDE, &[]).expect("does not error");
+        assert_eq!(none, WIDE, "no slices ⇒ the model is untouched");
+    }
+
+    /// mununu#565 — the naming contract with the translator. If these two ever disagree the atom
+    /// silently fails to bind, so the contract is asserted rather than assumed.
+    #[test]
+    fn slice_name_matches_the_translator_half_of_the_contract() {
+        assert_eq!(slice_signal_name("wdata", 7, 0), "wdata__bits7_0");
+        // `$past(sig[7:0])` slices the SHADOW, so the two contracts compose.
+        assert_eq!(
+            slice_signal_name(&shadow_stage_name("wdata", 1), 7, 0),
+            "wdata__past__bits7_0"
+        );
+    }
 
     #[test]
     fn augment_appends_state_next_init_for_a_base() {

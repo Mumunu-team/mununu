@@ -611,6 +611,41 @@ dropped — it needs a SERE→automaton subsystem): **unbounded** `##[m:$]` / `[
 *inside* a multi-element chain or in an antecedent, and repetition/nesting inside
 a chain element.
 
+**Which comparison OPERANDS are accepted** (mununu#565). Until now this fragment was documented
+only in the refusal message, so the boundary was discoverable only by hitting it — which is how a
+consumer spent two SVA rewrites on it. A comparison operand may be:
+
+| operand | example | notes |
+|---|---|---|
+| a signal | `state_q == IDLE` | register, output net, or primary input |
+| an integer literal | `8'hA5`, `3'd2`, `'0` | either side; the comparison is normalised |
+| a **bit-slice** | `wdata[7:0] == 8'hA5` | **`[hi:lo]` only** — see below |
+| `$past(x[, k])` | `d_q == $past(din)` | over a register or an input |
+| `$past` of a slice | `q == $past(src[7:0])` | translates; **skips** if the comparison is relational — see below |
+| a 1-bit boolean / reduction | `!a == b`, `\|vec == 1'b1` | both sides must be 1 bit |
+| `signal + literal` | `cnt == $past(cnt) + 1` | the sole arithmetic form |
+
+> Source of truth: [`compare`](../crates/mununu-core/src/adapter/slang/translate.rs) + [`augment_with_slices`](../crates/mununu-core/src/adapter/btor2/shadow.rs) — surface: (CLI+API)
+
+A bit-slice becomes a **named derived signal** in the lifted model (`wdata[7:0]` → `wdata__bits7_0`),
+minted exactly the way a `$past` base becomes a shadow register. That is why the atom you see in a
+formula or a counterexample is a plain identifier rather than bracketed: `[` already means a box
+modality in the mu-calculus, so a bracketed atom would misparse rather than fail.
+
+⚠️ **A slice inside a RELATIONAL atom (`reg == reg`) currently skips**, with the reason
+`atom(s) over non-state signals (combinational/IO — not cube-bindable)`. A *simple* atom
+(`slice == literal`) seeds via the input-dependent-combinational path and decides; a *relational*
+one requires its registers to be all-state, and a slice is combinational by construction. That
+rule predates slice support — `q == $past(src)` unsliced seeds fine — and lifting it is separate
+work. The property is skipped with a named atom, never given a verdict it did not earn.
+
+⚠️ **Only the `[hi:lo]` range form is supported. An indexed part-select — `x[i +: w]` or
+`x[i -: w]` — is refused with a reason, and that is deliberate rather than an oversight.** slang
+serialises `wdata[7 -: 8]` with `left: 7, right: 8`, which is the base index and the **width**, not
+a high and a low bit. Reading those two numbers as a range yields bits `[7:8]` — inverted, wrong,
+and silent. Declining is the honest option until the indexed arithmetic is written and tested;
+rewrite it as `wdata[7:0]`.
+
 The history functions work over a **register or a primary input**. That second
 half matters more than it sounds: it is what makes a data-integrity property —
 "what goes in comes out" — checkable at all, since the antecedent samples an
