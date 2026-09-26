@@ -2798,6 +2798,16 @@ pub(crate) fn prepare_model(
         .map(|s| (s.base.as_str(), s.depth))
         .collect();
     let btor2 = augment_with_past_shadows(&btor2, &shadow_bases)?;
+    // mununu#565 — mint a named `slice` node per bit-slice atom, AFTER the shadow pass so
+    // `$past(sig[7:0])` can slice `sig__past`. A slice is combinational, so this adds no state and
+    // cannot change a verdict for a design whose properties use no slice: with an empty list the
+    // function returns the input unchanged.
+    let slice_refs: Vec<(&str, u32, u32)> = extraction
+        .required_slices
+        .iter()
+        .map(|s| (s.base.as_str(), s.msb, s.lsb))
+        .collect();
+    let btor2 = crate::adapter::btor2::augment_with_slices(&btor2, &slice_refs)?;
 
     // mununu#459 — snapshot the model's real primary-input names BEFORE any pinning
     // rewrites them to constants, so a user `--config-value` can be validated
@@ -8063,6 +8073,117 @@ module uart_tx(); endmodule"#;
         let err = verify_auto(&[], &YosysOptions::default(), &VerifyAutoOptions::default())
             .expect_err("no sources");
         assert_eq!(err.kind, AdapterErrorKind::ParseError);
+    }
+
+    /// mununu#565 — a bit-slice comparison lifts, binds and DECIDES end to end.
+    ///
+    /// The refusal this replaces was `got left=Some("RangeSelect") right=Some("IntegerLiteral")`,
+    /// while the same claim over the whole word decided — so the gap was the slice, not the
+    /// comparison. Both the slice-vs-literal and the `$past`-of-a-slice guise are covered, plus
+    /// the whole-word control that already worked, so a regression in either direction shows up.
+    #[test]
+    #[ignore = "requires slang + sv2v + Yosys + z3 (use the mununu-sva docker image); run with --ignored"]
+    fn e2e_565_bit_slice_operand_decides_instead_of_being_refused() {
+        let design = "module slice_dut (input logic clk, input logic rst_n, input logic we,\n\
+                      input logic [31:0] wdata, output logic [7:0] shadow_q);\n\
+                        always_ff @(posedge clk or negedge rst_n) begin\n\
+                          if (!rst_n) shadow_q <= 8'd0;\n\
+                          else if (we) shadow_q <= wdata[7:0];\n\
+                        end\n\
+                        a_slice: assert property (@(posedge clk) disable iff (!rst_n)\n\
+                          (we && (wdata[7:0] == 8'hA5)) |=> (shadow_q == 8'hA5));\n\
+                        a_past_slice: assert property (@(posedge clk) disable iff (!rst_n)\n\
+                          we |=> (shadow_q == $past(wdata[7:0])));\n\
+                        a_whole_word: assert property (@(posedge clk) disable iff (!rst_n)\n\
+                          (we && (wdata == 32'h000000A5)) |=> (shadow_q == 8'hA5));\n\
+                      endmodule\n";
+        let sources = vec![("slice_dut.sv".to_string(), design.to_string())];
+        let yopts = YosysOptions {
+            top: Some("slice_dut".to_string()),
+            use_sv2v: true,
+            ..Default::default()
+        };
+        let report = verify_auto(&sources, &yopts, &VerifyAutoOptions::default())
+            .expect("verify_auto runs on a sliced design");
+
+        // The headline: nothing is refused for being a slice any more.
+        assert!(
+            !report
+                .unsupported
+                .iter()
+                .any(|(_, reason)| reason.contains("RangeSelect")),
+            "no property may be refused for carrying a bit-slice: {:?}",
+            report.unsupported
+        );
+        assert_eq!(
+            report.properties.len(),
+            3,
+            "all three assertions translate: {:?}",
+            report.unsupported
+        );
+
+        let by_name = |n: &str| {
+            report
+                .properties
+                .iter()
+                .find(|p| p.name == n)
+                .unwrap_or_else(|| panic!("{n} missing from {:?}", report.properties))
+        };
+
+        // (1) THE CAPABILITY. A slice compared to a literal decides. This is mununu#565's
+        // headline shape and the one that used to come back in `unsupported`.
+        assert!(
+            matches!(by_name("slice_dut_sva_0").outcome, VerifyOutcome::Holds),
+            "slice-vs-literal must DECIDE; got {:?}",
+            by_name("slice_dut_sva_0").outcome
+        );
+
+        // (2) THE CONTROL. The whole-word form already decided and must keep doing so.
+        assert!(
+            matches!(by_name("slice_dut_sva_2").outcome, VerifyOutcome::Holds),
+            "the whole-word control must still decide; got {:?}",
+            by_name("slice_dut_sva_2").outcome
+        );
+
+        // (3) THE BOUNDARY, measured rather than hoped for. `shadow_q == $past(wdata[7:0])` is a
+        // RELATIONAL atom, and `seed_from_formula` requires a compound's registers to be
+        // ALL-STATE (see its doc: "an input inside a compound is unseedable"). Slicing turns the
+        // `wdata__past` state cell into a combinational `Op`, so the compound stops being
+        // all-state and is skipped.
+        //
+        // That is a PRE-EXISTING rule about compounds, not something the slice support
+        // introduced — `shadow_q == $past(wdata)` (unsliced, both sides state) seeds fine. What
+        // matters for soundness is that it SKIPS WITH A NAMED REASON rather than guessing: the
+        // property is not silently dropped and not given a misleading verdict.
+        let skipped = &by_name("slice_dut_sva_1").outcome;
+        match skipped {
+            VerifyOutcome::Skipped { reason } => {
+                assert!(
+                    reason.contains("non-state") && reason.contains("wdata__past__bits7_0"),
+                    "the skip must NAME the atom and why it is unbindable: {reason}"
+                );
+            }
+            other => panic!(
+                "sva_1 is expected to skip on the all-state compound rule. If it now DECIDES, \
+                 that rule changed and this test should be tightened to assert the verdict: {other:?}"
+            ),
+        }
+
+        // And the minted derived signals are the ones the naming contract promises, so a
+        // counterexample or a seeded-predicate list names something a reader can find.
+        let atoms: String = report
+            .properties
+            .iter()
+            .map(|p| p.formula.clone())
+            .collect();
+        assert!(
+            atoms.contains("wdata__bits7_0"),
+            "the slice atom is a plain identifier: {atoms}"
+        );
+        assert!(
+            atoms.contains("wdata__past__bits7_0"),
+            "`$past` of a slice slices the SHADOW: {atoms}"
+        );
     }
 
     #[test]

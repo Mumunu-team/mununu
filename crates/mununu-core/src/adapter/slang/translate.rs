@@ -127,6 +127,24 @@ pub struct ShadowSignal {
     pub depth: u32,
 }
 
+/// mununu#565 — a bit-slice a translated formula reads as an atom, e.g. `wdata[7:0]`.
+///
+/// The BTOR2 augmentation mints one named `slice` node per entry, so the mu-calculus atom is a
+/// PLAIN IDENTIFIER (`wdata__bits7_0`). That is the whole design: `[` already means a Box
+/// modality to the mu-calculus lexer and an array index to `PredicateExpr`, so a bracketed atom
+/// would MISPARSE rather than fail. Minting a derived signal keeps every layer below the
+/// translator untouched — exactly how `$past` is handled ([`ShadowSignal`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SliceSignal {
+    /// The signal being sliced, as it appears in the lifted BTOR2 (may itself be a `__past`
+    /// shadow, for `$past(sig[7:0])`).
+    pub base: String,
+    /// Inclusive high bit.
+    pub msb: u32,
+    /// Inclusive low bit.
+    pub lsb: u32,
+}
+
 /// A reset signal recognized in a `disable iff (...)` guard: the input to pin
 /// to verify the running (post-reset) design.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,6 +167,9 @@ pub struct TranslationReport {
     /// (deduped by base). The XL.3b BTOR2 augmentation consumes this; an empty
     /// vec means no Tier-2 history was used.
     pub required_shadows: Vec<ShadowSignal>,
+    /// mununu#565: bit-slices the translated formulas reference as atoms (deduped). The BTOR2
+    /// augmentation mints a named `slice` node per entry; empty means no slice was used.
+    pub required_slices: Vec<SliceSignal>,
     /// Reset signals recognized in `disable iff` guards (deduped). Always
     /// recorded; whether the guard is dropped from the formula is controlled by
     /// [`TranslateOptions::gate_reset`]. The verify-auto path pins these inputs
@@ -258,6 +279,7 @@ pub fn translate_ast_json_with_options(
                 // XL.3: record the `__past` shadow flops this assertion needs
                 // (only for assertions that actually translated).
                 collect_shadow_signals(spec, &mut report.required_shadows);
+                collect_slice_signals(spec, &mut report.required_slices);
                 report.translated.push(TranslatedAssertion {
                     name,
                     label,
@@ -443,6 +465,49 @@ fn resolve_enum_refs(node: &Value, enums: &std::collections::HashMap<String, i64
 /// Tier-2 history call (`$past`/`$stable`/`$changed`/`$rose`/`$fell`) reads, so
 /// the BTOR2 augmentation knows which `__past` shadow flops to synthesise.
 /// Deduped by base name. Only call on specs that translated successfully.
+/// mununu#565 — collect every bit-slice the translated formulas will read as an atom.
+///
+/// Mirrors [`collect_shadow_signals`]: a separate walk over the spec, so `compare` stays a pure
+/// `Result<String, String>` with no side channel. Deduped by (base, msb, lsb).
+///
+/// A slice under `$past` is recorded against the SHADOW name, because that is the signal the
+/// minted `slice` node must read — `$past(sig[7:0])` is `slice(sig__past, 7, 0)`.
+fn collect_slice_signals(node: &Value, out: &mut Vec<SliceSignal>) {
+    match node {
+        Value::Object(map) => {
+            if is_past_call(node) {
+                if let Some(arg) = past_call_arg_node(node)
+                    && let Some(Ok((base, msb, lsb))) = slice_ref(arg)
+                {
+                    let depth = past_call_depth(node).unwrap_or(1);
+                    push_slice(out, past_shadow_name(&base, depth), msb, lsb);
+                }
+            } else if let Some(Ok((base, msb, lsb))) = slice_ref(node) {
+                push_slice(out, base, msb, lsb);
+            }
+            for v in map.values() {
+                collect_slice_signals(v, out);
+            }
+        }
+        Value::Array(items) => {
+            for v in items {
+                collect_slice_signals(v, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Dedupe helper for [`collect_slice_signals`].
+fn push_slice(out: &mut Vec<SliceSignal>, base: String, msb: u32, lsb: u32) {
+    if !out
+        .iter()
+        .any(|s| s.base == base && s.msb == msb && s.lsb == lsb)
+    {
+        out.push(SliceSignal { base, msb, lsb });
+    }
+}
+
 fn collect_shadow_signals(node: &Value, out: &mut Vec<ShadowSignal>) {
     match node {
         Value::Object(map) => {
@@ -1145,12 +1210,22 @@ fn compare(expr: &Value, op: &str) -> Result<String, String> {
     let left = unwrap(child(expr, "left")?);
     let right = unwrap(child(expr, "right")?);
 
-    // (1) signal OP literal
-    if let (Ok(sig), Some(lit)) = (signal_name(left), sv_integer(right)) {
+    // mununu#565 — a slice this translator refuses reports WHY, before the generic shape message
+    // below can blame the operand kind. An indexed part-select mis-sliced silently would be a
+    // soundness bug, not a narrower reach, so it declines loudly.
+    for side in [left, right] {
+        if let Some(Err(reason)) = slice_ref(side) {
+            return Err(reason);
+        }
+    }
+
+    // (1) signal OP literal — `signal` may be a bit-slice (mununu#565), which resolves to its
+    // minted derived signal so the atom stays a plain identifier.
+    if let (Some(sig), Some(lit)) = (cmp_signal_atom(left), sv_integer(right)) {
         return Ok(format!("({sig} {op} {lit})"));
     }
     // (2) literal OP signal  → flip to signal OP' literal
-    if let (Some(lit), Ok(sig)) = (sv_integer(left), signal_name(right)) {
+    if let (Some(lit), Some(sig)) = (sv_integer(left), cmp_signal_atom(right)) {
         return Ok(format!("({sig} {} {lit})", flip_op(op)));
     }
     // (3) boolean-expr ==/!= 0
@@ -1304,16 +1379,106 @@ fn is_past_call(expr: &Value) -> bool {
         && expr.get("subroutine").and_then(Value::as_str) == Some("$past")
 }
 
+/// mununu#565 — the minted atom name for `base[msb:lsb]`.
+///
+/// One naming contract with the BTOR2 side's `slice_stage_name`, exactly as
+/// [`past_shadow_name`] pairs with `shadow_stage_name`. Both halves must agree or the atom never
+/// binds.
+fn slice_atom_name(base: &str, msb: u32, lsb: u32) -> String {
+    format!("{base}__bits{msb}_{lsb}")
+}
+
+/// mununu#565 — recognise a bit-slice operand.
+///
+/// `None` when `expr` is not a `RangeSelect` at all. `Some(Err(..))` for a slice this translator
+/// deliberately refuses, so the caller reports a REASON rather than a generic shape complaint.
+///
+/// **Only `selectionKind == "Simple"` is accepted, and that limit is measured, not cautious.**
+/// Against slang 11.0.448, `wdata[7 -: 8]` serialises as `selectionKind: "IndexedDown"` with
+/// `left: 7, right: 8` — that is the base index and the **WIDTH**, not a bit range. Reading
+/// `left`/`right` as bounds there yields bits `[7:8]`: inverted and wrong, with no error. Refusing
+/// is the honest option until the indexed arithmetic is written and tested.
+fn slice_ref(expr: &Value) -> Option<Result<(String, u32, u32), String>> {
+    let expr = unwrap(expr);
+    if expr.get("kind").and_then(Value::as_str) != Some("RangeSelect") {
+        return None;
+    }
+    let kind = expr
+        .get("selectionKind")
+        .and_then(Value::as_str)
+        .unwrap_or("?");
+    if kind != "Simple" {
+        return Some(Err(format!(
+            "bit-slice with selectionKind `{kind}` (an indexed part-select such as `x[i +: w]` /              `x[i -: w]`) is not supported; slang reports its bounds as base-and-WIDTH rather than              high-and-low, so treating them as a range would silently slice the wrong bits. Use an              explicit `x[hi:lo]` range."
+        )));
+    }
+    // A slice of anything but a plain signal (a slice of a slice, of a concat, …) is out of scope.
+    let base = match expr.get("value").map(|v| signal_name(v)) {
+        Some(Ok(b)) => b.to_string(),
+        _ => {
+            return Some(Err(
+                "bit-slice base is not a plain signal reference; only `signal[hi:lo]` is supported"
+                    .to_string(),
+            ));
+        }
+    };
+    let hi = expr.get("left").and_then(sv_integer);
+    let lo = expr.get("right").and_then(sv_integer);
+    match (hi, lo) {
+        (Some(hi), Some(lo)) if hi >= 0 && lo >= 0 && hi >= lo => {
+            Some(Ok((base, hi as u32, lo as u32)))
+        }
+        _ => Some(Err(
+            "bit-slice bounds must be non-negative constant integer literals with hi >= lo"
+                .to_string(),
+        )),
+    }
+}
+
 /// A comparison operand that resolves to a mu-calc atom name: a plain signal, or
 /// `$past(signal[, k])` → its depth-`k` `__past` shadow. `None` for anything else.
 fn cmp_signal_atom(expr: &Value) -> Option<String> {
     let expr = unwrap(expr);
     if is_past_call(expr) {
+        // mununu#565 — `$past(sig[hi:lo])`. The shadow is over the WHOLE signal (shadow.rs keys on
+        // a BTOR2 symbol and copies its sort, so it has no notion of a bit range); the slice is
+        // then taken OF the shadow. So the atom is a slice of `<sig>__past`, and `shadow.rs` needs
+        // no change at all.
+        if let Some(arg) = past_call_arg_node(expr)
+            && let Some(Ok((base, msb, lsb))) = slice_ref(arg)
+        {
+            let depth = past_call_depth(expr).unwrap_or(1);
+            let shadow = past_shadow_name(&base, depth);
+            return Some(slice_atom_name(&shadow, msb, lsb));
+        }
         return past_call_arg(expr)
             .ok()
             .map(|(sig, _, depth)| past_shadow_name(sig, depth));
     }
+    // mununu#565 — a bare `sig[hi:lo]` operand becomes its minted derived signal.
+    if let Some(Ok((base, msb, lsb))) = slice_ref(expr) {
+        return Some(slice_atom_name(&base, msb, lsb));
+    }
     signal_name(expr).ok().map(|s| s.to_string())
+}
+
+/// mununu#565 — the first argument node of a `$past` call, unwrapped, without requiring it to be
+/// a plain signal (which [`past_call_arg`] does). Lets a slice argument be recognised.
+fn past_call_arg_node(call: &Value) -> Option<&Value> {
+    call.get("arguments")
+        .and_then(Value::as_array)
+        .filter(|a| !a.is_empty() && a.len() <= 2)
+        .map(|a| unwrap(&a[0]))
+}
+
+/// mununu#565 — the depth of a `$past` call (`1` when omitted).
+fn past_call_depth(call: &Value) -> Option<u32> {
+    let args = call.get("arguments").and_then(Value::as_array)?;
+    if args.len() < 2 {
+        return Some(1);
+    }
+    let d = sv_integer(unwrap(&args[1]))?;
+    (d >= 1).then_some(d as u32)
 }
 
 /// H.G — if `expr` is `signal + literal` (or `literal + signal`), return the
@@ -2313,6 +2478,128 @@ mod tests {
             }
         });
         assert_eq!(bool_expr(&cmp).unwrap(), "(x == y + 2)");
+    }
+
+    /// mununu#565 — a bit-slice against a literal is ACCEPTED and resolves to its minted signal.
+    ///
+    /// The shape is the one slang 11.0.448 actually emits, measured in `mununu-sva` rather than
+    /// guessed: base under `value`, bounds as `left`/`right`, `selectionKind: "Simple"`.
+    #[test]
+    fn xl565_slice_against_literal_resolves_to_a_minted_signal() {
+        let cmp = serde_json::json!({
+            "kind": "BinaryOp", "op": "Equality",
+            "left": {
+                "kind": "RangeSelect", "type": "logic[7:0]", "selectionKind": "Simple",
+                "value": {"kind": "NamedValue", "type": "logic[31:0]", "symbol": "1 wdata"},
+                "left":  {"kind": "IntegerLiteral", "type": "int", "value": "7", "constant": "7"},
+                "right": {"kind": "IntegerLiteral", "type": "int", "value": "0", "constant": "0"}
+            },
+            "right": {"kind": "IntegerLiteral", "type": "int", "value": "165", "constant": "165"}
+        });
+        // A PLAIN identifier: `[` is a Box modality to the mu-calculus lexer, so a bracketed atom
+        // would misparse rather than fail.
+        assert_eq!(bool_expr(&cmp).unwrap(), "(wdata__bits7_0 == 165)");
+    }
+
+    /// mununu#565 — REPRODUCER for the trap the falsifier caught.
+    ///
+    /// `wdata[7 -: 8]` serialises with `selectionKind: "IndexedDown"` and `left: 7, right: 8` —
+    /// base and **WIDTH**, not bounds. Reading them as a range gives bits `[7:8]`: inverted and
+    /// wrong, with no error anywhere. So the indexed forms decline with a NAMED reason rather than
+    /// being mis-compiled, which is the same call `xl1c_constant_bit_select_is_rejected_…` makes.
+    #[test]
+    fn xl565_indexed_part_select_declines_with_its_reason_not_a_wrong_slice() {
+        let cmp = serde_json::json!({
+            "kind": "BinaryOp", "op": "Equality",
+            "left": {
+                "kind": "RangeSelect", "type": "logic[7:0]", "selectionKind": "IndexedDown",
+                "value": {"kind": "NamedValue", "type": "logic[31:0]", "symbol": "1 wdata"},
+                "left":  {"kind": "IntegerLiteral", "type": "int", "value": "7", "constant": "7"},
+                "right": {"kind": "IntegerLiteral", "type": "int", "value": "8", "constant": "8"}
+            },
+            "right": {"kind": "IntegerLiteral", "type": "int", "value": "165", "constant": "165"}
+        });
+        let err = bool_expr(&cmp).expect_err("an indexed part-select must decline");
+        assert!(err.contains("IndexedDown"), "must name what it saw: {err}");
+        assert!(
+            err.contains("WIDTH") || err.contains("width"),
+            "must say WHY — bounds are base-and-width there: {err}"
+        );
+        // It must NOT silently produce a slice atom.
+        assert!(
+            !err.contains("__bits"),
+            "must not have minted anything: {err}"
+        );
+    }
+
+    /// mununu#565 — `$past(sig[hi:lo])` slices the SHADOW, so `shadow.rs` needs no change.
+    #[test]
+    fn xl565_past_over_a_slice_slices_the_shadow() {
+        let cmp = serde_json::json!({
+            "kind": "BinaryOp", "op": "Equality",
+            "left": {"kind": "NamedValue", "type": "logic[7:0]", "symbol": "1 shadow_q"},
+            "right": {
+                "kind": "Call", "subroutine": "$past",
+                "arguments": [{
+                    "kind": "RangeSelect", "type": "logic[7:0]", "selectionKind": "Simple",
+                    "value": {"kind": "NamedValue", "type": "logic[31:0]", "symbol": "2 wdata"},
+                    "left":  {"kind": "IntegerLiteral", "type": "int", "constant": "7"},
+                    "right": {"kind": "IntegerLiteral", "type": "int", "constant": "0"}
+                }]
+            }
+        });
+        assert_eq!(
+            bool_expr(&cmp).unwrap(),
+            "(shadow_q == wdata__past__bits7_0)",
+            "the slice is taken OF the one-cycle-old whole signal"
+        );
+    }
+
+    /// mununu#565 — the collector records what the BTOR2 pass must mint, deduped.
+    #[test]
+    fn xl565_collector_records_slices_once_each() {
+        let spec = serde_json::json!({
+            "a": {
+                "kind": "RangeSelect", "type": "logic[7:0]", "selectionKind": "Simple",
+                "value": {"kind": "NamedValue", "type": "logic[31:0]", "symbol": "1 wdata"},
+                "left":  {"kind": "IntegerLiteral", "constant": "7"},
+                "right": {"kind": "IntegerLiteral", "constant": "0"}
+            },
+            "b": {
+                "kind": "RangeSelect", "type": "logic[7:0]", "selectionKind": "Simple",
+                "value": {"kind": "NamedValue", "type": "logic[31:0]", "symbol": "1 wdata"},
+                "left":  {"kind": "IntegerLiteral", "constant": "7"},
+                "right": {"kind": "IntegerLiteral", "constant": "0"}
+            },
+            "c": {
+                "kind": "RangeSelect", "type": "logic[15:0]", "selectionKind": "Simple",
+                "value": {"kind": "NamedValue", "type": "logic[31:0]", "symbol": "1 wdata"},
+                "left":  {"kind": "IntegerLiteral", "constant": "31"},
+                "right": {"kind": "IntegerLiteral", "constant": "16"}
+            },
+            "indexed_is_not_collected": {
+                "kind": "RangeSelect", "type": "logic[7:0]", "selectionKind": "IndexedUp",
+                "value": {"kind": "NamedValue", "type": "logic[31:0]", "symbol": "1 wdata"},
+                "left":  {"kind": "IntegerLiteral", "constant": "0"},
+                "right": {"kind": "IntegerLiteral", "constant": "8"}
+            }
+        });
+        let mut out = Vec::new();
+        collect_slice_signals(&spec, &mut out);
+        out.sort_by_key(|s| (s.msb, s.lsb));
+        assert_eq!(
+            out.len(),
+            2,
+            "deduped, and the indexed form is not collected: {out:?}"
+        );
+        assert_eq!(
+            (out[0].base.as_str(), out[0].msb, out[0].lsb),
+            ("wdata", 7, 0)
+        );
+        assert_eq!(
+            (out[1].base.as_str(), out[1].msb, out[1].lsb),
+            ("wdata", 31, 16)
+        );
     }
 
     #[test]
