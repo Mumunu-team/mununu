@@ -40,15 +40,47 @@ Reset-gating then pins `rst_n=1` to keep the design out of reset — which **del
 
 A free start set **over-approximates** reachability, and that is sound for `HOLDS` and unsound for `VIOLATED`. This was that, exactly.
 
-## ⚠️ The issue's framing was inverted, and the inversion is worth reading
+## ⚠️ CORRECTION (2026-09-27): your framing was right, and an earlier version of this briefing said otherwise
 
-#577 reported the pair `AG(drop_q <= 1) VIOLATED` **and** `EF(drop_q == 2) VIOLATED` as a self-contradiction, and read the `EF` as the broken half.
+**An earlier version of this page claimed your `EF(drop_q == 2) VIOLATED` was "the correct half" and
+that #577's framing was inverted. That was wrong, it was not measured, and it is retracted here.**
 
-**The `EF` is the correct half.** A freer start set makes strictly *more* states reachable, so an existential refutation — *"unreachable even from this larger set"* — is a **stronger** claim under an over-approximation, and stays sound. The two verdicts were never contradicting each other: one was right and one was unsound, in precisely the direction the soundness table predicts.
+The reasoning was: a freer start set makes strictly more states reachable, so *"unreachable even
+from this larger set"* is a **stronger** claim and an existential refutation stays sound. That
+principle is true — but only for a refutation actually computed over that same freer model, and
+that qualifier is the whole argument. I asserted your verdict satisfied it without checking.
 
-That matters beyond this bug. **Debugging the reported framing would have meant debugging a correct answer.** When a report disagrees with itself, the over-approximation direction tells you which half to suspect before any measurement does.
+Measured, on the free-init model itself (the #552 dump, with `drop_q == 2` turned into a `bad` node
+and handed to the safety portfolio):
 
-The second, and more interesting, half of the same lesson: `drop_q`'s actual bound is `{0,1}` — three writes, not the two the issue's argument assumed, and your own SVA comment says so. The report was checked against the design, but nothing checked it against itself.
+```
+verdict: violated        <- the bad node IS reachable
+reachable_by: [btormc]
+```
+
+`drop_q` is free at cycle 0, so `drop_q == 2` is reachable **immediately**. `EF(drop_q == 2)` is
+therefore **true** on that model, and a `VIOLATED` there is not a sound refutation — it is simply
+wrong. **So both halves of the pair were wrong, the report genuinely did contradict itself, and you
+read it correctly.**
+
+What that implies, stated as the hypothesis it is rather than as a second confident mechanism: the
+two verdicts most likely came from **engines that disagree about the initial state**. From a
+zero-init start, the design bounds `drop_q` to `{0,1}` and `drop_q == 2` really is unreachable — so
+an engine assuming zero-init would report exactly the `EF` you saw, while an engine leaving
+init-less registers free reports exactly the `AG` you saw. One report, two initial states. mununu's
+own source already warns about that class of divergence for reset-less designs
+(`reset_init::inject_zero_init`). We have not measured which engine decided which half of *your*
+report, and will not claim it until we do; it is now the first thing
+[mununu#579](https://github.com/Mumunu-team/mununu/issues/579) has to answer.
+
+**None of this changes the fix or its validation** — the free registers, the `AG(drop_q <= k)`
+sweep, and the 6/6 `HOLDS` after [mununu#578](https://github.com/Mumunu-team/mununu/issues/578) are
+all measured and unaffected. What changes is the attribution of the `EF` half, and the lesson I drew
+from it. The real lesson is the one #577 already contained: **the report was checked against the
+design, and nothing checked it against itself** — including, it turns out, by me.
+
+(The other half of the original note stands: `drop_q`'s actual bound is `{0,1}` — three writes, not
+the two the issue's argument assumed, and your own SVA comment says so.)
 
 ## What you will see instead
 

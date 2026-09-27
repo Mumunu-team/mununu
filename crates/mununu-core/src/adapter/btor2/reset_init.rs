@@ -29,9 +29,16 @@
 //!
 //! Scope guard: only fires when reset-gating is on (`resets` non-empty — empty
 //! under `--no-gate-reset`, where the design chooses its own power-up, including
-//! the undefined-encoding scenarios CWE-1245 detection relies on) AND the design
-//! carries no `init` line already (the pure-async-reset shape; a design with an
-//! authoritative BTOR2 init is left untouched).
+//! the undefined-encoding scenarios CWE-1245 detection relies on). Eligibility is
+//! then decided **per state cell** (mununu#578): a cell that already carries an
+//! `init` line is authoritative and untouched, an array-sorted cell is skipped (a
+//! `constd` init is ill-typed for one), and a cell with no `next` is skipped
+//! because it is free by construction rather than by reset. The guard used to be
+//! per-DESIGN — one `init` anywhere disabled the pass — which meant a single
+//! yosys-emitted **memory** init left every async-reset flop in the design free at
+//! cycle 0. That is mununu#577: a free cycle-0 state over-approximates
+//! reachability, which licenses a definite HOLDS but never a definite VIOLATED,
+//! and it produced confident violations of properties the hardware satisfies.
 
 use crate::adapter::AdapterError;
 use crate::adapter::btor2::ast::{Nid, Node, Sort};
@@ -43,10 +50,14 @@ use std::collections::HashMap;
 /// design that has none. `resets` is the set of `(name, inactive_value)` reset
 /// pins verify-auto detected — the same set it pins inactive.
 ///
-/// No-op (returns `content` unchanged) when: `resets` is empty; the design has
-/// no state cells; or ANY state cell already carries an `init` line (then the
-/// BTOR2 init is authoritative and must not be advanced past — matching
-/// `apply_auto_reset`'s guard).
+/// No-op (returns `content` unchanged) when `resets` is empty or no state cell is eligible.
+///
+/// Eligibility is per cell (mununu#578). A cell is skipped when it already carries an `init`
+/// (authoritative — must not be advanced past, matching `apply_auto_reset`'s guard), when its sort
+/// is an array (a `constd` init is ill-typed, and a memory's power-up is not a scalar reset value),
+/// or when it has no `next` (a `--cutpoint` or blackboxed output: free at every cycle by
+/// deliberate construction, and pinning cycle 0 would narrow that abstraction — which removes
+/// start states, and so would be unsound for HOLDS rather than for VIOLATED).
 ///
 /// The post-reset state is `simulate_one_step` from the all-zero power-on cube
 /// with each reset input pinned to its ASSERTED level (the complement of its
@@ -64,15 +75,55 @@ pub fn inject_reset_init(content: &str, resets: &[(String, u64)]) -> Result<Stri
         e
     })?;
 
-    // Guard: only the pure-async-reset shape. Any existing `init` line means the
-    // BTOR2 init is authoritative — leave it untouched.
-    if file
+    // mununu#578 — the eligibility guard is PER STATE CELL, not per design.
+    //
+    // It used to be `if any line is an Init { return unchanged }`, which reads as "a design with
+    // an authoritative BTOR2 init must not be advanced past". The intent is right; the scope was
+    // not. Yosys emits an `init` for **every memory** it lifts, so one array init — a line that
+    // says nothing whatever about the scalar flops — switched the whole pass off. Measured on the
+    // design that found this (mununu#577): ONE `init`, for an array, against TEN init-less
+    // async-reset registers, every one of them left free at cycle 0. Those free registers then
+    // produced a confident `AG(drop_q <= 1) VIOLATED` on RTL that bounds `drop_q` at 1.
+    //
+    // Per-cell is also what the sibling `inject_zero_init` below already does, and the two now
+    // agree on which cells they may touch.
+    let has_init: std::collections::HashSet<Nid> = file
         .lines
         .iter()
-        .any(|l| matches!(&l.node, Node::Init { .. }))
-    {
-        return Ok(content.to_string());
-    }
+        .filter_map(|l| match &l.node {
+            Node::Init { state, .. } => Some(*state),
+            _ => None,
+        })
+        .collect();
+
+    // Array-sorted states are skipped: a `constd` init is ill-typed for one, and a memory's
+    // power-up is not a scalar reset value. (Same exclusion as `inject_zero_init`.) This is not
+    // merely tidiness — it is what the coarse guard was accidentally providing, since an
+    // array-bearing design never reached this loop at all.
+    let bitvec_sorts: std::collections::HashSet<Nid> = file
+        .lines
+        .iter()
+        .filter_map(|l| match &l.node {
+            Node::Sort {
+                sort: Sort::BitVec { .. },
+            } => Some(l.nid),
+            _ => None,
+        })
+        .collect();
+
+    // A state with NO `next` is free at EVERY cycle by construction — a `--cutpoint`, or a
+    // blackboxed submodule output. Nothing about a reset applies to it, and pinning its cycle-0
+    // value would silently narrow an abstraction the user asked for. Narrowing removes start
+    // states, so unlike the defect above it would be unsound for HOLDS — the opposite direction,
+    // and the more dangerous one.
+    let has_next: std::collections::HashSet<Nid> = file
+        .lines
+        .iter()
+        .filter_map(|l| match &l.node {
+            Node::Next { state, .. } => Some(*state),
+            _ => None,
+        })
+        .collect();
 
     // State cells (nid, sort, key). Yosys leaves the async2sync FSM register
     // unnamed; `simulate_one_step` keys those by `st_n<nid>`, so mirror that.
@@ -81,7 +132,11 @@ pub fn inject_reset_init(content: &str, resets: &[(String, u64)]) -> Result<Stri
         .lines
         .iter()
         .filter_map(|l| match &l.node {
-            Node::State { sort, .. } => {
+            Node::State { sort, .. }
+                if !has_init.contains(&l.nid)
+                    && bitvec_sorts.contains(sort)
+                    && has_next.contains(&l.nid) =>
+            {
                 let key = symbols
                     .get(&l.nid)
                     .cloned()
@@ -104,23 +159,167 @@ pub fn inject_reset_init(content: &str, resets: &[(String, u64)]) -> Result<Stri
             (name.clone(), asserted)
         })
         .collect();
-    let post_reset = simulate_one_step(&file, &HashMap::new(), &reset_inputs)?;
+    // mununu#578 — simulation is the PREFERRED reader, not the only one.
+    //
+    // `simulate_one_step` runs the Phase-1 bit-blaster, which does not implement the array
+    // operators: a design that READS a memory fails with *"operator Read unsupported"*. That never
+    // surfaced before because the per-design guard above turned the whole pass off for any design
+    // with a memory — the guard was quietly doing a second job nobody had written down, and
+    // narrowing it to the job it documents exposed the other one.
+    //
+    // Propagating that error is not an option: it would fail the run outright for a large class of
+    // ordinary RTL. Nor is giving up, which is what left mununu#577's registers free.
+    //
+    // So when the model cannot be simulated, read each reset value directly off the **arm of the
+    // reset mux that the pin will make dead**. `async2sync` emits `next(q) = ite(rst, d, RESET)`,
+    // so the reset value is sitting there as a literal; a register whose dead arm is not a constant
+    // is skipped rather than guessed. This reads strictly less than simulation (it cannot evaluate
+    // a computed reset, and it does not advance a reset-less register by a cycle), which is why it
+    // is the fallback and not the default.
+    let appended = match simulate_one_step(&file, &HashMap::new(), &reset_inputs) {
+        Ok(post_reset) => {
+            let mut next_nid: Nid = file.lines.iter().map(|l| l.nid).max().unwrap_or(0) + 1;
+            let mut appended: Vec<String> = Vec::new();
+            for (state_nid, sort_nid, key) in &states {
+                let value = post_reset.get(key).copied().unwrap_or(0);
+                let const_nid = next_nid;
+                next_nid += 1;
+                let init_nid = next_nid;
+                next_nid += 1;
+                appended.push(format!("{const_nid} constd {sort_nid} {value}"));
+                appended.push(format!(
+                    "{init_nid} init {sort_nid} {state_nid} {const_nid}"
+                ));
+            }
+            appended
+        }
+        Err(e) => {
+            tracing::debug!(
+                error = %e.message,
+                "mununu#578: model not simulable (array ops are outside the Phase-1 bit-blaster); \
+                 reading reset values off the reset mux instead"
+            );
+            reset_init_from_mux_arms(&file, &states, resets)
+        }
+    };
+    if appended.is_empty() {
+        return Ok(content.to_string());
+    }
+
+    Ok(format!("{}\n{}\n", content.trim_end(), appended.join("\n")))
+}
+
+/// Read each register's reset value off the arm of its reset mux that the reset pin will kill.
+///
+/// Used when [`simulate_one_step`] cannot run the model — in practice, whenever the design reads a
+/// memory, since the array operators are outside the Phase-1 bit-blaster. Returns the `constd` +
+/// `init` line pairs to append, which is empty when nothing is recoverable.
+///
+/// **Polarity is derived, not special-cased.** The pin ties the reset to its *inactive* level, so
+/// the arm that level does NOT select is what the design does while the reset is asserted — i.e.
+/// the reset value. An active-low `rst_n` pinned to 1 gives `ite(rst_n, d, RESET)` → the `else`
+/// arm; an active-high `rst` pinned to 0 gives `ite(rst, RESET, d)` → the `then` arm. A negated
+/// operand flips the selection.
+///
+/// A register whose dead arm is not a literal constant is **skipped**: `next = ite(rst, d, q)` is a
+/// flop that holds through reset and genuinely has no reset value, and anything computed is not a
+/// value this pass can name. Skipping leaves it free, which the mununu#577 guard then reports
+/// honestly — far better than inventing a zero.
+fn reset_init_from_mux_arms(
+    file: &crate::adapter::btor2::ast::Btor2File,
+    states: &[(Nid, Nid, String)],
+    resets: &[(String, u64)],
+) -> Vec<String> {
+    use crate::adapter::btor2::ast::{ConstValue, Op};
+
+    // Reset INPUT nids — this runs before the pin, so a reset is still a free input.
+    let symbols = parser::collect_symbols(file);
+    let want: HashMap<&str, u64> = resets.iter().map(|(n, v)| (n.as_str(), *v)).collect();
+    let reset_nids: HashMap<Nid, u64> = file
+        .lines
+        .iter()
+        .filter_map(|l| match &l.node {
+            Node::Input { .. } => {
+                let sym = symbols.get(&l.nid)?;
+                Some((l.nid, *want.get(sym.as_str())?))
+            }
+            _ => None,
+        })
+        .collect();
+    if reset_nids.is_empty() {
+        return Vec::new();
+    }
+
+    let next_of: HashMap<Nid, Nid> = file
+        .lines
+        .iter()
+        .filter_map(|l| match &l.node {
+            Node::Next { state, value, .. } => Some((*state, value.nid())),
+            _ => None,
+        })
+        .collect();
 
     let mut next_nid: Nid = file.lines.iter().map(|l| l.nid).max().unwrap_or(0) + 1;
     let mut appended: Vec<String> = Vec::new();
-    for (state_nid, sort_nid, key) in &states {
-        let value = post_reset.get(key).copied().unwrap_or(0);
+    for (state_nid, sort_nid, _) in states {
+        let Some(next_fn) = next_of.get(state_nid).and_then(|n| file.lookup(*n)) else {
+            continue;
+        };
+        let Node::Op {
+            op: Op::Ite, args, ..
+        } = &next_fn.node
+        else {
+            continue;
+        };
+        let [cond, then_arm, else_arm] = args.as_slice() else {
+            continue;
+        };
+        let Some(&inactive) = reset_nids.get(&cond.nid()) else {
+            continue;
+        };
+        let selects_then = if cond.is_negated() {
+            inactive == 0
+        } else {
+            inactive != 0
+        };
+        let dead = if selects_then { else_arm } else { then_arm };
+        // Only an UNNEGATED literal. A negated operand is a bit-inversion of the node, which is not
+        // a shape yosys emits for a reset arm; declining keeps this to the shape it was measured on.
+        if dead.is_negated() {
+            continue;
+        }
+        let Some(line) = file.lookup(dead.nid()) else {
+            continue;
+        };
+        let Node::Const { value, .. } = &line.node else {
+            continue;
+        };
+        let decimal: u128 = match value {
+            ConstValue::Zero => 0,
+            ConstValue::One => 1,
+            ConstValue::Bin(b) => match u128::from_str_radix(b, 2) {
+                Ok(v) => v,
+                Err(_) => continue,
+            },
+            ConstValue::Hex(h) => match u128::from_str_radix(h, 16) {
+                Ok(v) => v,
+                Err(_) => continue,
+            },
+            ConstValue::Dec(d) if *d >= 0 => *d as u128,
+            // `ones` needs the sort width to render as a decimal, and a negative `constd` is not a
+            // reset literal yosys emits. Skip rather than mis-render.
+            _ => continue,
+        };
         let const_nid = next_nid;
         next_nid += 1;
         let init_nid = next_nid;
         next_nid += 1;
-        appended.push(format!("{const_nid} constd {sort_nid} {value}"));
+        appended.push(format!("{const_nid} constd {sort_nid} {decimal}"));
         appended.push(format!(
             "{init_nid} init {sort_nid} {state_nid} {const_nid}"
         ));
     }
-
-    Ok(format!("{}\n{}\n", content.trim_end(), appended.join("\n")))
+    appended
 }
 
 /// Complete the BTOR2 init to the `setundef -zero` power-on: append an `init … 0`
@@ -204,6 +403,86 @@ pub fn inject_zero_init(content: &str) -> Result<String, AdapterError> {
 
 #[cfg(test)]
 mod tests {
+    /// mununu#578 — a MEMORY's `init` must not switch reset-init off for the scalar flops.
+    ///
+    /// This is the shape that produced mununu#577, reduced from the real dump: an array state
+    /// carrying the `init` yosys emits for every memory, beside an async-reset register carrying
+    /// none. The old guard was per-design (`if any Init exists { return unchanged }`), so that one
+    /// array line left `q` free at cycle 0 — and a free cycle-0 state over-approximates
+    /// reachability, which makes a `VIOLATED` unsound.
+    ///
+    /// The assertion is that `q` gets its RESET value (5), not merely that some init appeared: an
+    /// implementation that injected 0 would be equally "fixed" and equally wrong, since 0 is the
+    /// value the engines already defaulted to. And the array's own init must survive untouched —
+    /// injecting a `constd` at an array sort emits ill-typed BTOR2.
+    #[test]
+    fn a_memory_init_no_longer_suppresses_reset_init_for_the_scalar_flops() {
+        // `q` is async-reset to 5; `mem` is a memory with the init yosys always emits.
+        let btor2 = "1 sort bitvec 1\n\
+                     2 input 1 rst_n\n\
+                     3 sort bitvec 4\n\
+                     4 state 3 q\n\
+                     5 const 3 0101\n\
+                     6 input 3 d\n\
+                     7 ite 3 2 6 5\n\
+                     8 next 3 4 7\n\
+                     9 sort bitvec 8\n\
+                     10 sort array 3 9\n\
+                     11 state 10 mem\n\
+                     12 const 9 00000000\n\
+                     13 init 10 11 12\n";
+
+        let out = inject_reset_init(btor2, &[("rst_n".into(), 1)]).expect("array-bearing model");
+
+        assert!(
+            out.contains("init 3 4 "),
+            "the scalar flop must get an init — one array init used to suppress all of them:\n{out}"
+        );
+        assert!(
+            out.contains("constd 3 5"),
+            "and it must be the RESET value 5, not the 0 the engines already default to:\n{out}"
+        );
+        assert_eq!(
+            out.matches("init 10 11").count(),
+            1,
+            "the memory's own init is authoritative and must survive exactly once:\n{out}"
+        );
+        assert!(
+            !out.contains("constd 10 "),
+            "a constd at an ARRAY sort is ill-typed BTOR2 and must never be emitted:\n{out}"
+        );
+    }
+
+    /// A cutpoint is free at EVERY cycle, not merely at cycle 0 — reset-init must leave it alone.
+    ///
+    /// `--cutpoint` and submodule blackboxing both produce a state cell with no `next`. Pinning its
+    /// cycle-0 value removes start states, so — unlike the mununu#577 defect, which was unsound for
+    /// VIOLATED — this direction would be unsound for **HOLDS**. Fixing one must not introduce the
+    /// other, which is why the exclusion is asserted rather than left to the array filter.
+    #[test]
+    fn a_cutpoint_state_is_left_free_because_no_reset_reaches_it() {
+        let btor2 = "1 sort bitvec 1\n\
+                     2 input 1 rst_n\n\
+                     3 sort bitvec 4\n\
+                     4 state 3 q\n\
+                     5 const 3 0101\n\
+                     6 input 3 d\n\
+                     7 ite 3 2 6 5\n\
+                     8 next 3 4 7\n\
+                     9 state 3 cutpoint_net\n";
+
+        let out = inject_reset_init(btor2, &[("rst_n".into(), 1)]).expect("cutpoint model");
+
+        assert!(
+            out.contains("constd 3 5"),
+            "the reset register is still established:\n{out}"
+        );
+        assert!(
+            !out.contains("init 3 9 "),
+            "the cutpoint has no `next`, so it is free by construction and must stay free:\n{out}"
+        );
+    }
+
     use super::*;
 
     /// Resolve a state cell's init value (mirrors how the exact engine's

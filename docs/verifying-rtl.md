@@ -369,9 +369,11 @@ Every other `⊥` on this page is an engine that did not finish. This one is a v
 into `unknown`.
 
 **The mechanism.** An **asynchronous** reset lowers through yosys `async2sync` into a **mux**, not
-a BTOR2 `init` line. Reset-gating then pins the reset *inactive*, which removes the only remaining
-path to the reset values — and nothing replaces it. The affected registers are therefore **free at
-cycle 0**, and stay free. A measured case: eleven state cells, **one** `init` line.
+a BTOR2 `init` line. If nothing re-establishes those values, pinning the reset *inactive* removes
+the last path to them and the affected registers are **free at cycle 0** and stay free. A measured
+case: eleven state cells, **one** `init` line — and three confident violations of properties the
+hardware satisfies. [`reset_init::inject_reset_init`](../crates/mununu-core/src/adapter/btor2/reset_init.rs)
+now re-establishes them (mununu#578), so what remains is the residue described below.
 
 A free start set **over-approximates** reachability, and [`CLAUDE.md` §Soundness
 Guarantees](../CLAUDE.md#soundness-guarantees) is explicit about what that licenses — sound for
@@ -384,9 +386,14 @@ RTL bounds at 1 could begin at its 10-bit maximum.
 Mixed) whose cone touches an init-less register, and only when a reset was pinned inactive.
 
 - `HOLDS` is untouched — that is the direction over-approximation makes sound.
-- An **existential** refutation is untouched, and this is the part that surprises people: a freer
-  start set makes strictly more states reachable, so *"unreachable even from this larger set"* is a
-  **stronger** claim. An `EF` VIOLATED stays sound for exactly the reason the `AG` one does not.
+- An **existential** refutation is untouched: a freer start set makes strictly more states
+  reachable, so *"unreachable even from this larger set"* is a **stronger** claim, and an `EF`
+  VIOLATED stays sound for exactly the reason the `AG` one does not.
+  ⚠️ **That holds only for a refutation computed over the same freer model.** It is not a licence to
+  trust any `EF` VIOLATED sitting next to an unsound `AG`: if the two were decided by engines that
+  disagree about the initial state, the `EF` can be wrong on its own terms. Measured on mununu#577's
+  own model, the target its `EF` called unreachable was reachable at cycle 0 — see
+  [mununu#579](https://github.com/Mumunu-team/mununu/issues/579).
 
 ```bash
 # which properties had a verdict withheld, and how many registers each cone needs established
@@ -398,11 +405,18 @@ mununu --quiet sv verify-auto design.sv --json \
 `registers` is per-property, from that property's own cone. `determinism` is `reproducible`: this is
 a property of the model, not of the host, and **no budget is named because raising one cannot help.**
 
-**The remedy is to establish the initial state**, not to retry — hold the reset **active** for a
-cycle, or supply `init` via a sidecar. Doing so inside mununu (synthesising `init` from the reset
-mux) is tracked as [mununu#578](https://github.com/Mumunu-team/mununu/issues/578); until it lands,
-this is containment, and the honest reading of the `⊥` is *"the model does not yet describe your
-reset."*
+**Since [mununu#578](https://github.com/Mumunu-team/mununu/issues/578) the recoverable reset values
+are established automatically**, so this `⊥` no longer fires for the async-reset case that named it.
+A register still free here is one with **no reset value to recover**: it **holds through reset**
+(`next = ite(rst, d, q)`), so the design genuinely never resets it.
+
+**A `--cutpoint` is deliberately free and is NOT counted.** A cut lifts to a state with no `next` —
+free at every cycle because you asked for it, not because a reset path was lost. Withholding a
+verdict over one would be a precision loss rather than a soundness win, and would break the
+cut-point contract that applying a cut may not change a verdict; the existing cut-point caveat in
+the coverage summary is what governs a violation under a cut.
+
+The remedy is to supply an `init` via a sidecar. Retrying is never the answer.
 
 ### Process-wide memory ceiling: `MUNUNU_MAX_PROCESS_MEMORY_BYTES` (mununu#490, default revised in #504)
 

@@ -715,10 +715,36 @@ fn downgrade_violated_on_unestablished_init(report: &mut AutoVerifyReport, model
             _ => None,
         })
         .collect();
+    // mununu#578 — a state with NO `next` is excluded, and the distinction is load-bearing.
+    //
+    // Such a cell is a `--cutpoint` or a blackboxed submodule output: free at EVERY cycle because
+    // the user asked for it, not because a reset path was lost. Withholding a `Violated` over one
+    // is not a soundness win, it is a precision loss — the cutpoint contract already states that a
+    // violation under a cut may be spurious, and mununu warns accordingly rather than abstaining.
+    //
+    // Measured: with these included, `e2e_cutpoint_stays_an_over_approximation_no_verdict_flips`
+    // fails. Cutting a register leaves it init-less, and `AG(st_q == 0)` — violated because `st_q`
+    // leaves 0, which freeing the cut register can only make *more* reachable — was downgraded to
+    // ⊥ purely because a cut cell sat in its cone. A cut point must not change a verdict.
+    //
+    // This is the same line `reset_init::inject_reset_init` draws: free-by-construction is not a
+    // reset question. Both sides now agree on it.
+    let has_next: std::collections::HashSet<crate::adapter::btor2::ast::Nid> = file
+        .lines
+        .iter()
+        .filter_map(|l| match &l.node {
+            Node::Next { state, .. } => Some(*state),
+            _ => None,
+        })
+        .collect();
     let uninit: std::collections::HashSet<crate::adapter::btor2::ast::Nid> = file
         .lines
         .iter()
-        .filter(|l| matches!(l.node, Node::State { .. }) && !has_init.contains(&l.nid))
+        .filter(|l| {
+            matches!(l.node, Node::State { .. })
+                && !has_init.contains(&l.nid)
+                && has_next.contains(&l.nid)
+        })
         .map(|l| l.nid)
         .collect();
     if uninit.is_empty() {
@@ -4647,13 +4673,14 @@ impl BottomReason {
                 registers,
                 gated_resets,
             } => format!(
-                "the property's cone touches {registers} register(s) whose INITIAL VALUE was never \
-                 established: this design's reset is asynchronous (so it lifts to a mux, not a \
-                 BTOR2 `init`) and reset-gating pinned {} inactive, which removes the only \
-                 remaining path to the reset values. A free cycle-0 state OVER-approximates \
+                "the property's cone touches {registers} register(s) whose INITIAL VALUE is not \
+                 established, with {} pinned inactive. A free cycle-0 state OVER-approximates \
                  reachability, and that licenses a definite HOLDS but never a definite VIOLATED — \
-                 so the violation is withheld rather than reported. Establish the reset values \
-                 (pin the reset ACTIVE for a cycle, or supply `init` via a sidecar) and re-run.",
+                 so the violation is withheld rather than reported. Since mununu#578 the reset \
+                 values that CAN be recovered are established automatically, so a register still \
+                 free here is one with no reset value to recover — it HOLDS through reset \
+                 (`next = ite(rst, d, q)`). Supply an `init` for it via a sidecar to decide this \
+                 property; a `--cutpoint` is deliberately free and is NOT counted here.",
                 gated_resets.join(", ")
             ),
             Self::NotAttempted => {
@@ -6524,6 +6551,63 @@ mod tests {
         assert!(
             matches!(by("hold").outcome, VerifyOutcome::Holds),
             "a HOLDS is sound under a freer start set and must not be touched"
+        );
+    }
+
+    /// mununu#578 — a `--cutpoint` in the cone must NOT withhold a verdict.
+    ///
+    /// A cut register lifts to a state with no `next`: free at every cycle because the user asked
+    /// for it, not because a reset path was lost. Counting it as "unestablished" converts a sound
+    /// `VIOLATED` into ⊥ — a precision loss, not a soundness win — and breaks the cut-point
+    /// contract that applying a cut may not change a verdict.
+    ///
+    /// The e2e `e2e_cutpoint_stays_an_over_approximation_no_verdict_flips` is what caught this, and
+    /// it needs slang + yosys and a container. This is the same question at the layer the decision
+    /// is actually made (CLAUDE.md §14): `cut` has no `next`, `cnt` does, and only `cnt` may count.
+    #[test]
+    fn a_cutpoint_in_the_cone_does_not_withhold_a_violated() {
+        // `cut` is a cut register: a state with NO `next`. `cnt` is an ordinary init-less register.
+        const WITH_CUT: &str = "\
+1 sort bitvec 10
+2 state 1 cnt
+3 one 1
+4 add 1 2 3
+5 next 1 2 4
+6 state 1 cut
+";
+        let mk = |name: &str, formula: &str| PropertyVerdict {
+            name: name.into(),
+            label: None,
+            kind: SvaKind::Assert,
+            formula: formula.into(),
+            outcome: VerifyOutcome::Violated { false_cells: 1 },
+            seeded_predicates: Vec::new(),
+            counterexample: None,
+            bottom_reason: None,
+            decided_by: None,
+        };
+        let mut report = AutoVerifyReport {
+            properties: vec![
+                mk("over_cut_only", "nu X. ((cut <= 1) && [] X)"),
+                mk("over_real_reg", "nu X. ((cnt <= 1) && [] X)"),
+            ],
+            ..Default::default()
+        };
+        report.diagnostics.gated_resets = vec!["rst_n=1".into()];
+
+        downgrade_violated_on_unestablished_init(&mut report, WITH_CUT);
+
+        let by = |n: &str| report.properties.iter().find(|p| p.name == n).unwrap();
+        assert!(
+            matches!(by("over_cut_only").outcome, VerifyOutcome::Violated { .. }),
+            "a cut point is free BY CONSTRUCTION, so it must not withhold a verdict: {:?}",
+            by("over_cut_only").outcome
+        );
+        assert!(
+            matches!(by("over_real_reg").outcome, VerifyOutcome::Unknown { .. }),
+            "a genuine init-less REGISTER must still be withheld — narrowing the guard must not \
+             disable it: {:?}",
+            by("over_real_reg").outcome
         );
     }
 
