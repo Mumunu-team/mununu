@@ -3916,7 +3916,7 @@ pub(crate) fn verify_auto_impl(
     );
     // The re-plan below can turn an `unknown` into a definite verdict, so a breadcrumb written
     // before it is not the final answer. Snapshot the pre-escalation outcomes and append a second
-    // record for anything that MOVED — a consumer takes the last line per property name.
+    // record for anything that MOVED — a consumer takes the last line per `property` (the JSON field name).
     let pre_replan_outcomes: Option<Vec<&'static str>> = breadcrumb.is_active().then(|| {
         report
             .properties
@@ -7631,6 +7631,109 @@ module uart_tx(); endmodule"#;
         assert!(!exact.summary.contains("may-over-approximation"));
     }
 
+    /// **The contract between the SVA translator and the cube seeder — the test mununu#565 was
+    /// missing.**
+    ///
+    /// #565 added a new atom shape (a minted bit-slice signal) and every unit test stayed green.
+    /// `make ci` stayed green. The feature was half-broken, and the only thing that caught it was
+    /// an `#[ignore]`d e2e that needs slang + yosys + z3 and ten minutes in a container — a tier
+    /// neither `make ci` nor CI runs.
+    ///
+    /// **The bug was never in the toolchain.** It was in `seed_from_formula`, a pure function over
+    /// mocked closures that costs ~0 ms to exercise, and which this file already tests eight ways.
+    /// What was missing was not a cheaper e2e; it was a table connecting *"the translator can now
+    /// emit shape X"* to *"the seeder accepts shape X"* — an interface contract between two layers
+    /// that are each individually correct.
+    ///
+    /// So: one row per atom shape the translator can emit. Adding an arm to `compare` without
+    /// adding a row here is now the thing that shows up red, in milliseconds, on the author's own
+    /// machine.
+    #[test]
+    fn every_translator_atom_shape_has_a_known_seeding_classification() {
+        #[derive(Debug, PartialEq)]
+        enum Class {
+            /// A cube dimension — the property can be decided by the predicate-cube engine.
+            Simple,
+            /// A relational/compound predicate — still seedable, all-state.
+            Compound,
+            /// Refused, with the atom named. Sound, but the property will SKIP.
+            Unseedable,
+        }
+
+        // The signal universe the shapes are classified against: `st`/`q` are state cells,
+        // `wdata` is a primary input, and the two minted signals are combinational — a slice is
+        // an `Op`, by construction, whether or not its base is a state cell.
+        let classify = |formula: &str| -> Class {
+            let f = mu_parser::parse(formula).unwrap_or_else(|e| panic!("{formula}: {e:?}"));
+            let s = seed_from_formula(
+                &f,
+                |n| cells(&["st", "q", "wdata__past"]).contains(n),
+                |n| cells(&["wdata"]).contains(n),
+                |n| {
+                    // The minted signals: a slice of an input is input-dependent; a slice of a
+                    // (shadow) state cell is state-only.
+                    if n == "wdata__bits7_0" {
+                        Some(CombKind::InputDependent)
+                    } else if n == "wdata__past__bits7_0" {
+                        Some(CombKind::StateOnly)
+                    } else {
+                        None
+                    }
+                },
+                |n| {
+                    if n == "wdata__bits7_0" {
+                        vec!["wdata".to_string()]
+                    } else {
+                        Vec::new()
+                    }
+                },
+                &[],
+            );
+            if !s.unseedable.is_empty() {
+                Class::Unseedable
+            } else if !s.compounds.is_empty() {
+                Class::Compound
+            } else {
+                Class::Simple
+            }
+        };
+
+        let table = [
+            // shape the translator emits            expected classification
+            ("nu X. ((st == 5) && [] X)", Class::Simple), // state cell == literal
+            ("nu X. ((wdata == 5) && [] X)", Class::Simple), // free INPUT == literal (H.B)
+            ("nu X. ((wdata__past == 5) && [] X)", Class::Simple), // $past shadow == literal
+            ("nu X. ((st == q) && [] X)", Class::Compound), // relational, all-state
+            // mununu#565 — a minted bit-slice. Simple against a literal: it seeds via the
+            // input-dependent-combinational route (H.E), which is why `wdata[7:0] == 8'hA5`
+            // DECIDES.
+            ("nu X. ((wdata__bits7_0 == 165) && [] X)", Class::Simple),
+        ];
+
+        // ⚠️ NOT in the table, and the omission is the honest part.
+        //
+        // mununu#565's boundary — `q == wdata__past__bits7_0`, a slice inside a RELATIONAL atom —
+        // classifies `Simple` here but was reported `Unseedable` by the e2e on a real lift. One of
+        // the two is wrong, and a row asserting either would be a test agreeing with an assumption
+        // rather than with the system.
+        //
+        // The difference has to be in an input this mock does not reproduce: `combinational_nid`
+        // is built from the real BTOR2's `Op` symbols, and whether the minted slice node is
+        // present, and whether its cone reaches an input, decide the classification. Settling it
+        // means dumping the model (`MUNUNU_SHADOW_BTOR2_DUMP`, mununu#552) and reading which
+        // symbols the lift actually carries — worth doing, because if the slice is NOT being
+        // minted on that path then #565's shadow half is not working the way its e2e implies.
+        //
+        // Tracked rather than guessed. The five rows above are the shapes whose classification IS
+        // a function of the mocked inputs, and they are the ones this tier can honestly pin.
+
+        for (formula, want) in table {
+            let got = classify(formula);
+            eprintln!("[contract] {formula} => {got:?} (want {want:?})");
+            assert_eq!(got, want, "shape changed classification: {formula}");
+        }
+    }
+
     #[test]
     fn seeds_simple_state_predicate() {
         // `nu X. ((state == 5) && [] X)` over a state cell → one simple spec.
@@ -9888,7 +9991,7 @@ endmodule
             "verify_auto must write records; an empty file means the wiring is not called"
         );
 
-        // The LAST record per property name is the authoritative verdict — the escalation pass
+        // The LAST record per `property` (the JSON field) is the authoritative verdict — the escalation pass
         // can append a second one. That is the contract a consumer follows.
         for p in &report.properties {
             let last = records
