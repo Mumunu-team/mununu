@@ -2906,6 +2906,23 @@ pub(crate) fn prepare_model(
         None => btor2,
     };
 
+    // mununu#552 — dump here, at the LAST whole-design rewrite, so what lands on disk is what the
+    // engine is handed. The formulas carry the same `--config-value` substitution the per-property
+    // loop applies, so the pair is self-consistent.
+    {
+        let dumped: Vec<(String, String)> = extraction
+            .translated
+            .iter()
+            .map(|t| {
+                (
+                    t.name.clone(),
+                    substitute_config_in_formula(&t.formula, &applied_config_values),
+                )
+            })
+            .collect();
+        dump_prepared_model(&btor2, &dumped);
+    }
+
     Ok(Prepared::Model(Box::new(PreparedModel {
         btor2,
         report,
@@ -2914,6 +2931,74 @@ pub(crate) fn prepare_model(
         ann_scan,
         applied_config_values,
     })))
+}
+
+/// mununu#552 — the env var naming the post-shadow BTOR2 dump.
+///
+/// **Not `MUNUNU_KEEP_SHADOW_BTOR2`, which is what the issue proposed.** Both existing
+/// `MUNUNU_KEEP_*` vars are BOOLEAN keep-the-tempdir flags (`MUNUNU_KEEP_YOSYS_TMP`,
+/// `MUNUNU_KEEP_VERILATOR_TMP`); the path-valued precedents are `MUNUNU_INTERP_DUMP` and
+/// `MUNUNU_SPCR_OUT_DIR`. Borrowing the `KEEP_` prefix would name a convention this does not
+/// follow.
+const SHADOW_DUMP_ENV: &str = "MUNUNU_SHADOW_BTOR2_DUMP";
+
+/// mununu#552 — write the model the engine actually runs, plus the formulas it runs on.
+///
+/// **Why the pre-shadow lift was not enough.** A consumer could already obtain the lift
+/// (`MUNUNU_KEEP_YOSYS_TMP`, `sv emit-btor2-per-module`) but not the model after
+/// `augment_with_past_shadows` — and a `$past`-bearing property is exactly where the two differ,
+/// because the shadow chain is the part that widens the cone. Reproducing mununu#543 in-house
+/// meant hand-rebuilding the augmented model from a guessed base list, which could not settle
+/// whether the reconstruction matched the real lift. That cost two definite answers.
+///
+/// **One self-contained file.** The model alone is half a reproducer; the other half is the
+/// formula, including the `<base>__past` shadow atom names. Both go in, the formulas as BTOR2
+/// comments, so the artifact is handed over as a single file and still parses as BTOR2.
+///
+/// **It states what it does NOT contain.** Antecedent shadow synthesis (`_mununu_antshadow_<N>`)
+/// runs later, per-property, inside the engine, so it is not in this dump. A dump that silently
+/// omitted a rewrite would be the same trap this exists to close.
+///
+/// Diagnostic only: every failure is swallowed after one warning, mirroring
+/// [`crate::adapter::partial_json`]. A dump must never be able to change a verdict.
+fn dump_prepared_model(btor2: &str, properties: &[(String, String)]) {
+    let Ok(path) = std::env::var(SHADOW_DUMP_ENV) else {
+        return;
+    };
+    if path.trim().is_empty() {
+        return;
+    }
+    let mut out = String::new();
+    out.push_str("; mununu#552 — the BTOR2 the engine runs, dumped after model preparation.\n");
+    out.push_str("; INCLUDES: the SV lift, `$past` shadow registers, reset pinning,\n");
+    out.push_str(";           `--config-value` pins, and any `sv mutate` fault.\n");
+    out.push_str("; EXCLUDES: antecedent shadow synthesis (`_mununu_antshadow_*`), which runs\n");
+    out.push_str(";           LATER and PER-PROPERTY inside the engine. If you are reproducing\n");
+    out.push_str(
+        ";           an `A |=> C` with an input-derived antecedent, that rewrite is not\n",
+    );
+    out.push_str(";           in this file.\n");
+    out.push_str(";\n");
+    out.push_str("; Properties, as the engine parses them (post `--config-value` substitution).\n");
+    out.push_str(
+        "; Shadow atoms appear here as `<base>__past`; bit-slices as `<base>__bits<hi>_<lo>`.\n",
+    );
+    if properties.is_empty() {
+        out.push_str(";   (none)\n");
+    }
+    for (name, formula) in properties {
+        out.push_str(&format!("; {name}: {formula}\n"));
+    }
+    out.push_str(";\n");
+    out.push_str(btor2);
+    if !btor2.ends_with('\n') {
+        out.push('\n');
+    }
+    if let Err(e) = std::fs::write(&path, out) {
+        tracing::warn!(
+            "{SHADOW_DUMP_ENV}={path}: could not write the model dump ({e}); continuing without it"
+        );
+    }
 }
 
 /// The single-engine verify body: extraction → lift → reset/pin → per-property engine →
@@ -6241,6 +6326,62 @@ mod tests {
             !m.contains("WALL-CLOCK"),
             "the memory case must not claim a clock fired; RSS is host-dependent WITHOUT one: {m}"
         );
+    }
+
+    /// mununu#552 — the dump is a self-contained reproducer: the model AND the formulas.
+    #[test]
+    fn shadow_dump_writes_the_model_with_its_formulas() {
+        let dir = std::env::temp_dir().join(format!("mununu552-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        let path = dir.join("dump.btor2");
+        // SAFETY: single-threaded test scope; the var is read once inside the call below.
+        unsafe { std::env::set_var(SHADOW_DUMP_ENV, &path) };
+
+        let btor2 = "1 sort bitvec 4\n2 state 1 s\n";
+        let props = vec![("p0".to_string(), "nu X. ((s == 1) && [] X)".to_string())];
+        dump_prepared_model(btor2, &props);
+        unsafe { std::env::remove_var(SHADOW_DUMP_ENV) };
+
+        let got = std::fs::read_to_string(&path).expect("dump written");
+        // The model is present and still parses as BTOR2 (the header is all `;` comments).
+        assert!(
+            got.contains("2 state 1 s"),
+            "the model must be in it: {got}"
+        );
+        crate::adapter::btor2::parser::parse(&got)
+            .expect("the dump must still be valid BTOR2 — the header is comments, not prose");
+        // The formula is present, so the file is a whole reproducer rather than half of one.
+        assert!(
+            got.contains("p0: nu X."),
+            "the formula must be in it: {got}"
+        );
+        // And it declares what it does NOT contain — the trap this issue exists to close.
+        assert!(
+            got.contains("EXCLUDES") && got.contains("antshadow"),
+            "the dump must name the rewrite it omits: {got}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// mununu#552 — a dump must never be able to fail a verification run.
+    ///
+    /// Mirrors `partial_json`'s contract: unset is a no-op, an empty value is treated as unset,
+    /// and an unwritable path warns once rather than propagating. A diagnostic that can abort the
+    /// thing it is diagnosing is worse than no diagnostic.
+    #[test]
+    fn shadow_dump_is_diagnostic_only_and_cannot_fail_a_run() {
+        // Unset — no panic, no file, nothing.
+        unsafe { std::env::remove_var(SHADOW_DUMP_ENV) };
+        dump_prepared_model("1 sort bitvec 1\n", &[]);
+
+        // Empty — treated as unset, not as the path "".
+        unsafe { std::env::set_var(SHADOW_DUMP_ENV, "   ") };
+        dump_prepared_model("1 sort bitvec 1\n", &[]);
+
+        // Unwritable — warns, does not propagate.
+        unsafe { std::env::set_var(SHADOW_DUMP_ENV, "/nonexistent-dir-552/x.btor2") };
+        dump_prepared_model("1 sort bitvec 1\n", &[]);
+        unsafe { std::env::remove_var(SHADOW_DUMP_ENV) };
     }
 
     /// mununu#553 ask 2 — REPRODUCER: the ⊥ that fires on an ORDINARY run must say it is
