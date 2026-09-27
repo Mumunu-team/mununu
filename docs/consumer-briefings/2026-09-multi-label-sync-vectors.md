@@ -4,7 +4,7 @@
 >
 > **Related:** closes [mununu#570](https://github.com/Mumunu-team/mununu/issues/570).
 >
-> **TL;DR:** no semantics changed. **The documentation was wrong**, and there is now a warning for the case it misled people into. `on label a, label b` is **one compound action `{a,b}`** — it does not fire on `a`, and it does not fire on `b`. `docs/abstraction.md` claimed the opposite ("collapse parallel edges", soundness "Exact"); both halves were false, and the cost is a composition that silently freezes.
+> **TL;DR:** no semantics changed, and nothing you have written stops working. `on label a, label b` still means **one compound action `{a,b}`** — it does not fire on `a`, and it does not fire on `b`. What is new: a **`|` spelling for alternation** (`on label a | label b`), a **braced spelling** for the compound action (`on {label a, label b}`), corrected documentation, and a **warning** when a compound action can never fire. `docs/abstraction.md` had claimed "collapse parallel edges" with soundness "Exact"; both halves were false, and the cost is a composition that silently freezes.
 
 ## ⚠️ Action item: check your "I ignore the other labels" self-loops
 
@@ -14,7 +14,10 @@ This is the shape that bites:
 // WRONG — ONE unsatisfiable compound action. This automaton freezes under composition.
 transition Live -> Live on label ld_write, label ld_done, label cpu_write, label retire;
 
-// RIGHT — four alternatives, any one of which may fire.
+// RIGHT — alternation. The `|` spelling is new in this change.
+transition Live -> Live on label ld_write | label ld_done | label cpu_write | label retire;
+
+// …exactly equivalent to, and desugared into, what you would have written by hand:
 transition Live -> Live on label ld_write;
 transition Live -> Live on label ld_done;
 transition Live -> Live on label cpu_write;
@@ -84,6 +87,21 @@ Both mean *and*, and both would be silently wrong as parallel edges. **This is w
 was not changed to match the documentation** — doing so would have corrupted models that are
 correct today.
 
+## The new spellings
+
+Three spellings, two meanings. **Mixing `,` and `|` in one list is refused** with an error naming
+both meanings, rather than being resolved silently one way — which is how the original defect
+happened.
+
+| spelling | meaning |
+|---|---|
+| `on label a \| label b` | **alternation** — N alternatives, any ONE fires. Desugars to one single-label transition per alternative, each keeping the same target, guard, effects and modality |
+| `on {label a, label b}` | **synchronisation vector**, explicit — preferred for new models |
+| `on label a, label b` | synchronisation vector, legacy spelling — **unchanged, still valid** |
+
+A lone `|` was previously a hard *lex* error, so admitting it cannot change the meaning of any
+source that parses today. `||` still lexes as logical-or.
+
 ## Docker rebuild disposition
 
 | Image | Impact | Rebuild required? |
@@ -95,9 +113,9 @@ correct today.
 
 ## Not covered here
 
-- **A distinguishing syntax.** `on a \| b` for alternation vs `on {a, b}` for a sync vector would
-  make the intent unambiguous at the point of writing, rather than at the point of warning. That
-  is the real fix and it is a grammar change; this is not it.
+- **Nothing about the `,` form.** It still means a synchronisation vector, so v10's handshake and
+  `emit.rs`'s game rounds are untouched. The braced form is preferred for new models only because
+  a comma reads like "or"; both compile to the same action.
 - **No verdict changes.** Composition behaves exactly as before. What changed is the
   documentation, `CLAUDE.md`'s anti-pattern (which previously pushed authors *into* the collapsed
   form and now warns in both directions), and the new diagnostic.

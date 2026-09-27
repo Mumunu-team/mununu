@@ -191,6 +191,9 @@ pub enum Symbol {
     Slash,
     AmpAmp,
     PipePipe,
+    /// mununu#570 — `|`, the ALTERNATION separator in a transition label list
+    /// (`on a | b`), as distinct from the comma form, which is a synchronisation vector.
+    Pipe,
     Bang,
     EqEq,
     NotEq,
@@ -224,6 +227,7 @@ impl fmt::Display for Symbol {
             Slash => "/",
             AmpAmp => "&&",
             PipePipe => "||",
+            Pipe => "|",
             Bang => "!",
             EqEq => "==",
             NotEq => "!=",

@@ -832,13 +832,15 @@ impl<'a> Parser<'a> {
         self.expect_symbol(Symbol::LBrace)?;
         let mut transitions = Vec::new();
         while !self.check_symbol(Symbol::RBrace) {
-            transitions.push(self.parse_transition()?);
+            // mununu#570 — one declaration may yield SEVERAL transitions: `on a | b` is
+            // alternation and desugars here into one single-label transition per alternative.
+            transitions.extend(self.parse_transition()?);
         }
         self.expect_symbol(Symbol::RBrace)?;
         Ok(transitions)
     }
 
-    fn parse_transition(&mut self) -> Result<TransitionDecl, ParseError> {
+    fn parse_transition(&mut self) -> Result<Vec<TransitionDecl>, ParseError> {
         self.expect_keyword(Keyword::Transition)?;
         let source = self.parse_state_selector(true)?;
         self.expect_symbol(Symbol::Arrow)?;
@@ -855,10 +857,62 @@ impl<'a> Parser<'a> {
         // warning when the additional_targets are dropped this way.
         let (target, additional_targets) = self.parse_transition_target()?;
         self.expect_keyword(Keyword::On)?;
+
+        // mununu#570 — THREE spellings, two meanings.
+        //
+        //   `on a, b`    synchronisation vector (legacy spelling, unchanged)
+        //   `on {a, b}`  synchronisation vector, explicit — preferred, because a comma reads
+        //                like "or" to most authors and that misreading froze a real model
+        //   `on a | b`   ALTERNATION — desugars to one transition per label
+        //
+        // Mixing the separators is refused rather than guessed: `a, b | c` has no single
+        // meaning, and picking one silently is how the original defect happened.
+        let braced = self.match_symbol(Symbol::LBrace);
         let label = self.parse_transition_label()?;
         let mut additional_labels = Vec::new();
-        while self.match_symbol(Symbol::Comma) {
-            additional_labels.push(self.parse_transition_label()?);
+        let mut saw_comma = false;
+        let mut alternation = false;
+        loop {
+            if self.check_symbol(Symbol::Comma) {
+                if alternation {
+                    return Err(ParseError::UnexpectedToken {
+                        found: TokenKind::Symbol(Symbol::Comma),
+                        expected: "`|` — this label list mixes `,` (synchronisation vector: the \
+                                   labels fire TOGETHER as one action) with `|` (alternation: \
+                                   any ONE of them fires). Pick one",
+                        span: self.peek().span,
+                    });
+                }
+                self.match_symbol(Symbol::Comma);
+                saw_comma = true;
+                additional_labels.push(self.parse_transition_label()?);
+            } else if self.check_symbol(Symbol::Pipe) {
+                if braced {
+                    return Err(ParseError::UnexpectedToken {
+                        found: TokenKind::Symbol(Symbol::Pipe),
+                        expected: "`,` or `}` — `{…}` is the synchronisation-vector spelling, so \
+                                   its labels are separated by `,`. For alternation drop the \
+                                   braces and write `on label a | label b`",
+                        span: self.peek().span,
+                    });
+                }
+                if saw_comma {
+                    return Err(ParseError::UnexpectedToken {
+                        found: TokenKind::Symbol(Symbol::Pipe),
+                        expected: "`,` — this label list mixes `,` (synchronisation vector) with \
+                                   `|` (alternation). Pick one",
+                        span: self.peek().span,
+                    });
+                }
+                self.match_symbol(Symbol::Pipe);
+                alternation = true;
+                additional_labels.push(self.parse_transition_label()?);
+            } else {
+                break;
+            }
+        }
+        if braced {
+            self.expect_symbol(Symbol::RBrace)?;
         }
 
         let mut guard = None;
@@ -885,7 +939,32 @@ impl<'a> Parser<'a> {
 
         self.expect_symbol(Symbol::Semicolon)?;
 
-        Ok(TransitionDecl {
+        // mununu#570 — ALTERNATION desugars here, into one single-label transition per
+        // alternative. Doing it at the AST boundary is what keeps the change to the surface
+        // syntax: `realize`, the CLTS model, the emitter and every adapter see exactly what they
+        // saw before, because "N transitions with one label each" was always expressible — CTXDSL
+        // simply had no way to ASK for it on one line.
+        //
+        // Each copy keeps the same source, target, guard, effects and modality: the alternatives
+        // differ only in which label fires the otherwise-identical step.
+        if alternation {
+            let mut out = Vec::with_capacity(additional_labels.len() + 1);
+            for l in std::iter::once(label).chain(additional_labels) {
+                out.push(TransitionDecl {
+                    source: source.clone(),
+                    target: target.clone(),
+                    label: l,
+                    additional_labels: Vec::new(),
+                    guard: guard.clone(),
+                    effects: effects.clone(),
+                    modality,
+                    additional_targets: additional_targets.clone(),
+                });
+            }
+            return Ok(out);
+        }
+
+        Ok(vec![TransitionDecl {
             source,
             target,
             label,
@@ -894,7 +973,7 @@ impl<'a> Parser<'a> {
             effects,
             modality,
             additional_targets,
-        })
+        }])
     }
 
     /// R.5 Item K sub-item K.1b (2026-06-06) — parse the
@@ -1632,6 +1711,119 @@ mod tests {
 
     fn parse_ok(source: &str) -> ContextDoc {
         parse(source).expect("expected parse success")
+    }
+
+    /// mununu#570 — the three spellings, and what each produces.
+    fn labels_of(doc: &ContextDoc) -> Vec<Vec<String>> {
+        doc.automata[0]
+            .transitions
+            .iter()
+            .map(|t| {
+                std::iter::once(&t.label)
+                    .chain(t.additional_labels.iter())
+                    // NAMES only — `Debug` embeds spans, and `{` shifts every offset by one, so
+                    // comparing Debug output would make two identical actions look different.
+                    .map(|l| match l {
+                        TransitionLabel::Named { name, .. } => name.name.clone(),
+                        TransitionLabel::Epsilon(_) => "epsilon".to_string(),
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn one_automaton(transitions: &str) -> String {
+        format!(
+            "context c {{ automata {{ automaton A {{ states {{ state S initial; state T; }} \
+             transitions {{ {transitions} }} }} }} }}"
+        )
+    }
+
+    /// `on a | b` is ALTERNATION: two transitions, one label each.
+    ///
+    /// This is the spelling that did not exist, and its absence is what froze a 7-automaton
+    /// model — 19 "I ignore the other labels" self-loops written with commas became 19
+    /// unsatisfiable compound actions.
+    #[test]
+    fn xl570_pipe_is_alternation_and_desugars_to_one_transition_per_label() {
+        let doc = parse_ok(&one_automaton(
+            "transition S -> T on label a | label b | label c;",
+        ));
+        let got = labels_of(&doc);
+        assert_eq!(got.len(), 3, "one transition per alternative: {got:?}");
+        for t in &got {
+            assert_eq!(t.len(), 1, "each alternative is SINGLE-label: {t:?}");
+        }
+    }
+
+    /// `on a, b` stays a synchronisation vector — one transition carrying both labels. Existing
+    /// models (the v10 fabric handshake, emit.rs's `{env_*, ctrl_*}` rounds) depend on this.
+    #[test]
+    fn xl570_comma_is_still_a_synchronisation_vector() {
+        let doc = parse_ok(&one_automaton("transition S -> T on label a, label b;"));
+        let got = labels_of(&doc);
+        assert_eq!(got.len(), 1, "ONE compound action: {got:?}");
+        assert_eq!(got[0].len(), 2, "carrying both labels: {got:?}");
+    }
+
+    /// `on {a, b}` is the same thing, spelled so the reader cannot mistake it for "or".
+    #[test]
+    fn xl570_braces_are_the_explicit_synchronisation_vector() {
+        let braced = labels_of(&parse_ok(&one_automaton(
+            "transition S -> T on {label a, label b};",
+        )));
+        let comma = labels_of(&parse_ok(&one_automaton(
+            "transition S -> T on label a, label b;",
+        )));
+        assert_eq!(
+            braced, comma,
+            "`{{a,b}}` and `a, b` must be the same action"
+        );
+    }
+
+    /// Mixing the separators has no single meaning, so it is refused rather than guessed.
+    /// Silently picking one is how the original defect happened.
+    #[test]
+    fn xl570_mixing_separators_is_refused_with_a_reason() {
+        let err = parse(&one_automaton(
+            "transition S -> T on label a, label b | label c;",
+        ))
+        .expect_err("mixing `,` and `|` must be refused");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("synchronisation vector") && msg.contains("alternation"),
+            "the error must explain BOTH meanings, not just name a bad token: {msg}"
+        );
+
+        let err2 = parse(&one_automaton(
+            "transition S -> T on label a | label b, label c;",
+        ))
+        .expect_err("the other order must be refused too");
+        assert!(format!("{err2:?}").contains("Pick one"), "got: {err2:?}");
+    }
+
+    /// A braced list is the sync-vector spelling, so `|` inside it is a contradiction.
+    #[test]
+    fn xl570_pipe_inside_braces_is_refused() {
+        let err = parse(&one_automaton("transition S -> T on {label a | label b};"))
+            .expect_err("`|` inside `{{…}}` must be refused");
+        assert!(
+            format!("{err:?}").contains("drop the braces"),
+            "the error must say how to get alternation: {err:?}"
+        );
+    }
+
+    /// Alternation copies the whole step, not just the label — same target, guard and effects.
+    #[test]
+    fn xl570_alternation_copies_guard_and_target_to_every_alternative() {
+        let doc = parse_ok(&one_automaton(
+            "transition S -> T on label a | label b guard x == 1 effects { x = 2; };",
+        ));
+        assert_eq!(doc.automata[0].transitions.len(), 2);
+        for t in &doc.automata[0].transitions {
+            assert!(t.guard.is_some(), "each alternative keeps the guard");
+            assert_eq!(t.effects.len(), 1, "and the effects");
+        }
     }
 
     #[test]
