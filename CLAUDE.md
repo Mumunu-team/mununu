@@ -19,11 +19,12 @@
 11. [Adapter / Emitter Capability Use](#adapter--emitter-capability-use) `[RULE]`
 12. [Git Operations & Destructive Commands](#git-operations--destructive-commands) `[RULE]`
 13. [Code Reuse, Dead Code, Performance, Security](#code-reuse-dead-code-performance-security) `[RULE]`
-14. [Available Agents and Skills](#available-agents-and-skills) `[REFERENCE]`
-15. [Private Files Policy](#private-files-policy) `[RULE]`
-16. [Reasoning & Recommendation Honesty](#reasoning--recommendation-honesty) `[RULE]`
-17. [Engine Specificity in Proposals](#engine-specificity-in-proposals) `[RULE]`
-18. [Reference Docs Index](#reference-docs-index) `[REFERENCE]`
+14. [Test the Layer the Bug Lives In](#test-the-layer-the-bug-lives-in) `[RULE]`
+15. [Available Agents and Skills](#available-agents-and-skills) `[REFERENCE]`
+16. [Private Files Policy](#private-files-policy) `[RULE]`
+17. [Reasoning & Recommendation Honesty](#reasoning--recommendation-honesty) `[RULE]`
+18. [Engine Specificity in Proposals](#engine-specificity-in-proposals) `[RULE]`
+19. [Reference Docs Index](#reference-docs-index) `[REFERENCE]`
 
 ---
 
@@ -489,11 +490,51 @@ The CLTS data model and CTXDSL grammar already express more than most adapters r
 
 - **Before writing new utility code**, check if the functionality already exists. Prefer established libraries over hand-rolling for common tasks. Pin with ranges in `Cargo.toml`.
 - **Remove unused code and dependencies promptly.** Use `cargo clippy` and `cargo audit` to catch issues. No "just in case" packages.
-- **Test naming describes behavior, not implementation.** Prefer integration tests over excessive mocking. Pre-commit hook is the primary CI gate; GitHub Actions is secondary.
+- **Test naming describes behavior, not implementation.** Prefer integration tests over excessive mocking — but for an interface between two internal layers, see [Test the Layer the Bug Lives In](#test-the-layer-the-bug-lives-in), which is about a different question and resolves the apparent tension. Pre-commit hook is the primary CI gate; GitHub Actions is secondary.
 - **API handler performance.** Every handler re-parses and re-realizes context from scratch — keep handler logic lightweight after realization. **Never run controller synthesis in summary endpoints.** Summarize reports declarations; synthesis belongs only in the synthesis endpoint. Add timing instrumentation (`tracing::info!` with `Instant`) to any new handler; log parse, realize, and work phases separately. The UI client has a 10-second default timeout and a 120-second extended timeout; design accordingly.
 - **Formula inversion (fixpoint duality).** When inverting mu-calculus formulas, do NOT negate fixpoint variable references inside the body — the dual fixpoint's changed starting point handles the semantics. Negating variables causes infinite oscillation between all-true and all-false.
 - **Wiki maintenance.** Wiki pages live in `wiki/` and push to the GitHub wiki repo. Update when DSL syntax, endpoints, UI flow, composition modes, or formula operators change. Every CTXDSL example in wiki pages must be tested against the binary before publishing. Every wiki page must comply with Documentation Traceability.
 - **Security (OWASP).** Never interpolate user input into commands or templates. Validate and constrain all external input. No sensitive data in logs.
+
+## Test the Layer the Bug Lives In `[RULE]` (added 2026-09-27)
+
+**Rule.** When a change teaches one layer to produce something new, add a test **at the seam** where
+the next layer consumes it — in the cheapest tier that can express the question. Reach for an
+end-to-end test to *detect* a class of defect, never as the *home* for one.
+
+**Why.** mununu#565 taught the SVA translator a new atom shape (a minted bit-slice signal). Eighteen
+unit tests passed. `make ci` passed. The feature was half-broken, and the only thing that caught it
+was an `#[ignore]`d e2e needing slang + yosys + z3 and **ten minutes in a container** — a tier
+neither `make ci` nor CI runs (see the e2e note under CI Requirements).
+
+The defect was never in the toolchain. It was in `seed_from_formula`, a **pure function over mocked
+closures that the same file already tested eight ways, in 0.00 s**. What was missing was not a
+cheaper e2e; it was a table connecting *"the translator can now emit shape X"* to *"the consumer
+accepts shape X"* — an interface contract between two layers that were each individually correct.
+
+**How to comply.**
+
+- **Find the pure function.** Most cross-layer defects land in one: a classifier, a lowering, a
+  normaliser. If it takes closures or `&str` and returns a decision, it is testable in
+  microseconds. `every_translator_atom_shape_has_a_known_seeding_classification`
+  (`adapter/slang/verify_auto.rs`) is the worked example — one row per producible shape, so adding
+  a producer arm without a consumer row shows up red on the author's own machine.
+- **Keep the e2e, and keep it honest about its job.** It is the detector that tells you a seam
+  exists and the cross-check that the cheap tier is faithful. It is a bad regression home: too slow
+  to run, and in this repo it does not run at all by default.
+- **⚠️ Derive the mock from the real call site; never invent it.** A contract test is only as good
+  as the fidelity of its inputs, and a fabricated mock tests your assumption rather than the
+  system. When the cheap tier and the e2e disagree, **that disagreement is a finding** — record it
+  and go measure, rather than asserting whichever answer you expected. (Both halves of this were
+  learned the hard way in the same session: the first version of the test above encoded a
+  fabricated expectation, and its measured value still contradicts the e2e. The row was left out
+  with the discrepancy documented, not resolved by preference.)
+
+**Relationship to the existing guidance.** "Prefer integration tests over excessive mocking" still
+holds for *behaviour*. This rule is about *interfaces between internal layers*, where the
+integration test is the expensive detector and the seam test is the cheap gate. They are not in
+tension: one asks "does the feature work", the other asks "can the next layer consume what this one
+now emits".
 
 ## Available Agents and Skills
 
