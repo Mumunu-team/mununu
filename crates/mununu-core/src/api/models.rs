@@ -1950,6 +1950,12 @@ impl From<&crate::adapter::slang::verify_auto::AutoVerifyReport> for SvVerifyAut
                                 .engine_budget()
                                 .and_then(|b| b.knob())
                                 .map(str::to_string),
+                            registers: match r {
+                                BottomReason::UnestablishedInitialState { registers, .. } => {
+                                    Some(*registers)
+                                }
+                                _ => None,
+                            },
                         }
                     }),
                     seeded_predicates: p.seeded_predicates.clone(),
@@ -2084,6 +2090,7 @@ pub struct BottomReasonView {
     /// | `engine-did-not-complete` | branch on **`budget`** — it names which engine budget fired, and `detail` carries the engine's own numbers |
     /// | `engine-contradiction` | 🔴 **SOUNDNESS ALARM.** Two engines returned OPPOSITE definite verdicts; one is unsound. **Retrying is actively wrong.** Escalate, do not re-run |
     /// | `engine-crashed` | the engine process died. Not an abstention; report it |
+    /// | `unestablished-initial-state` | 🔴 **the withheld VIOLATED.** The property's cone touches `registers` register(s) with no established cycle-0 value, because an async reset lifted to a mux rather than a BTOR2 `init` and reset-gating then pinned that reset inactive. A free start set over-approximates reachability, which licenses a definite `HOLDS` but never a definite `VIOLATED` — so the violation is withheld. **Retrying cannot help.** Establish the reset values (hold the reset ACTIVE for a cycle, or supply `init` via a sidecar). Tracked as mununu#578 |
     /// | `safety-shape-not-reducible` | the property's SHAPE is outside the rescue lane — a bigger budget **cannot** help. Reshape, or add a reducer |
     /// | `no-state-model-non-safety` | zero state registers; a modelling issue, not an engine cap |
     /// | `not-attempted` | filtered out before any engine ran |
@@ -2128,6 +2135,15 @@ pub struct BottomReasonView {
     /// (e.g. `MUNUNU_BDD_ITER_BUDGET`). Absent when no knob applies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget_knob: Option<String>,
+    /// mununu#577 — how many registers in THIS property's cone have no established cycle-0 value,
+    /// for `unestablished-initial-state` only.
+    ///
+    /// Per-property, from the property's own cone — not a whole-design count — so it is the number
+    /// that sizes the remedy. It is a field for the same reason `budget` is: the count is otherwise
+    /// only inside `detail`'s prose, and a gate that greps prose for a number is the defect
+    /// mununu#553 was filed against.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registers: Option<usize>,
 }
 
 /// One property's auto-verification verdict (mirrors `PropertyVerdict`).
@@ -2387,6 +2403,49 @@ mod bottom_reason_view_tests {
             r.detail.contains("MUNUNU_BDD_ITER_BUDGET"),
             "the knob to raise must survive to the API consumer: {}",
             r.detail
+        );
+    }
+
+    /// mununu#577 — the withheld-VIOLATED reason must cross the API boundary with its COUNT as a
+    /// field, not only inside `detail`'s prose.
+    ///
+    /// The count is per-property (each property's own cone), so a gate sizing the remedy reads it
+    /// directly. Asserting only on `kind` would pass on an implementation that dropped the number
+    /// into prose and forced a consumer to grep for it — which is the defect mununu#553 was filed
+    /// against, and it would arrive here through the very field added to fix it.
+    #[test]
+    fn the_withheld_violated_carries_its_register_count_as_a_field() {
+        let report = AutoVerifyReport {
+            properties: vec![bottom_prop(Some(BottomReason::UnestablishedInitialState {
+                registers: 6,
+                gated_resets: vec!["rst_n".into()],
+            }))],
+            ..Default::default()
+        };
+
+        let view = SvVerifyAutoResponse::from(&report);
+        let r = view.properties[0]
+            .bottom_reason
+            .as_ref()
+            .expect("a withheld VIOLATED must carry its reason across the API boundary");
+
+        assert_eq!(
+            r.kind, "unestablished-initial-state",
+            "the tag is what a gate branches on"
+        );
+        assert_eq!(
+            r.registers,
+            Some(6),
+            "the register count must be a FIELD — a consumer must not have to parse `detail`"
+        );
+        assert_eq!(
+            r.determinism, "reproducible",
+            "this is a property of the model, not of the host: re-running will not change it"
+        );
+        assert!(
+            r.budget.is_none() && r.budget_knob.is_none(),
+            "no engine budget fired — raising one cannot help, and claiming a knob would send a \
+             gate into a retry loop: {r:?}"
         );
     }
 

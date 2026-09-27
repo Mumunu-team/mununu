@@ -360,6 +360,50 @@ recognise, have no established answer — a boolean would force one, and guessin
 would tell a consumer to pin a `⊥` that may not reproduce. Read `unestablished` as *"do not pin,
 do not retry-loop."*
 
+### The withheld VIOLATED: `unestablished-initial-state` (mununu#577)
+
+> Source of truth: [`BottomReason::UnestablishedInitialState`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) + [`downgrade_violated_on_unestablished_init`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) — surface: (CLI+API)
+
+Every other `⊥` on this page is an engine that did not finish. This one is a verdict that was
+**withheld because it could not be trusted** — the only place mununu turns a definite answer back
+into `unknown`.
+
+**The mechanism.** An **asynchronous** reset lowers through yosys `async2sync` into a **mux**, not
+a BTOR2 `init` line. Reset-gating then pins the reset *inactive*, which removes the only remaining
+path to the reset values — and nothing replaces it. The affected registers are therefore **free at
+cycle 0**, and stay free. A measured case: eleven state cells, **one** `init` line.
+
+A free start set **over-approximates** reachability, and [`CLAUDE.md` §Soundness
+Guarantees](../CLAUDE.md#soundness-guarantees) is explicit about what that licenses — sound for
+`HOLDS`, **unsound for `VIOLATED`**. So a universal property can be genuinely violated *in the
+model* by a start state the hardware never occupies. On the design that found this, `AG(drop_q <= k)`
+was violated for every `k` from 1 to 1022 and held only at 1023: the model believed a counter the
+RTL bounds at 1 could begin at its 10-bit maximum.
+
+**What is withheld, and what is not.** Only a `Violated` on a **universal** property (Safety /
+Mixed) whose cone touches an init-less register, and only when a reset was pinned inactive.
+
+- `HOLDS` is untouched — that is the direction over-approximation makes sound.
+- An **existential** refutation is untouched, and this is the part that surprises people: a freer
+  start set makes strictly more states reachable, so *"unreachable even from this larger set"* is a
+  **stronger** claim. An `EF` VIOLATED stays sound for exactly the reason the `AG` one does not.
+
+```bash
+# which properties had a verdict withheld, and how many registers each cone needs established
+mununu --quiet sv verify-auto design.sv --json \
+  | jq '[.properties[] | select(.bottom_reason.kind == "unestablished-initial-state")
+         | {property: .name, registers: .bottom_reason.registers}]'
+```
+
+`registers` is per-property, from that property's own cone. `determinism` is `reproducible`: this is
+a property of the model, not of the host, and **no budget is named because raising one cannot help.**
+
+**The remedy is to establish the initial state**, not to retry — hold the reset **active** for a
+cycle, or supply `init` via a sidecar. Doing so inside mununu (synthesising `init` from the reset
+mux) is tracked as [mununu#578](https://github.com/Mumunu-team/mununu/issues/578); until it lands,
+this is containment, and the honest reading of the `⊥` is *"the model does not yet describe your
+reset."*
+
 ### Process-wide memory ceiling: `MUNUNU_MAX_PROCESS_MEMORY_BYTES` (mununu#490, default revised in #504)
 
 > Source of truth: [`adapter::memory_budget::check_process_memory_budget`](../crates/mununu-core/src/adapter/memory_budget.rs) — surface: (CLI+API+UI, env var — process-global)

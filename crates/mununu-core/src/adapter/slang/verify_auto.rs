@@ -673,6 +673,90 @@ fn attach_engine_failure_reason(report: &mut AutoVerifyReport, failures: &[(&str
     }
 }
 
+/// mununu#577 — a `Violated` is not sound when the property's cone contains a register whose
+/// INITIAL VALUE was never established.
+///
+/// **The mechanism, measured on a real consumer design.** `sprite_eval.sv` resets asynchronously
+/// (`always_ff @(posedge clk or negedge rst_n)`). Yosys's `async2sync` lowers that into a reset
+/// MUX, not a BTOR2 `init`, so the lifted model carries **one `init` line for eleven state
+/// cells**. Reset-gating then pins `rst_n` INACTIVE — which deletes the only remaining mechanism
+/// that would ever drive those registers to their reset values — and nothing replaces it. Every
+/// affected register is therefore free at cycle 0 and forever after.
+///
+/// A free initial state is an OVER-APPROXIMATION of reachability, and
+/// [CLAUDE.md §Soundness Guarantees] is explicit about which direction that licenses: safety +
+/// over-approximation is sound for **HOLDS** and unsound for **VIOLATED**. The engine was emitting
+/// the one verdict it could not justify — `AG(drop_q <= 1) VIOLATED` on a counter the RTL bounds at
+/// 1, because in the model `drop_q` may simply START at 1023.
+///
+/// **Why only the universal direction is downgraded.** A freer initial state makes strictly MORE
+/// states reachable, so an existential refutation (`EF p` VIOLATED = "p unreachable even from this
+/// larger start set") is a *stronger* claim under the over-approximation and stays sound. That
+/// asymmetry is why `EF(drop_q == 2)` was right while `AG(drop_q <= 1)` was wrong, and why the two
+/// appeared to contradict each other.
+///
+/// This is an ABSTENTION, not a fix: the right repair is for reset-gating to establish the reset
+/// values it pins away. Until it does, a named `⊥` beats a confident wrong answer.
+fn downgrade_violated_on_unestablished_init(report: &mut AutoVerifyReport, model_btor2: &str) {
+    // Only fires when a reset was pinned inactive — that pin is what removes the reset path.
+    if report.diagnostics.gated_resets.is_empty() {
+        return;
+    }
+    let Ok(file) = crate::adapter::btor2::parser::parse(model_btor2) else {
+        return;
+    };
+    use crate::adapter::btor2::ast::Node;
+    // State cells carrying no `init` line: their cycle-0 value is unconstrained.
+    let has_init: std::collections::HashSet<crate::adapter::btor2::ast::Nid> = file
+        .lines
+        .iter()
+        .filter_map(|l| match &l.node {
+            Node::Init { state, .. } => Some(*state),
+            _ => None,
+        })
+        .collect();
+    let uninit: std::collections::HashSet<crate::adapter::btor2::ast::Nid> = file
+        .lines
+        .iter()
+        .filter(|l| matches!(l.node, Node::State { .. }) && !has_init.contains(&l.nid))
+        .map(|l| l.nid)
+        .collect();
+    if uninit.is_empty() {
+        return;
+    }
+
+    for p in report.properties.iter_mut() {
+        if !matches!(p.outcome, VerifyOutcome::Violated { .. }) {
+            continue;
+        }
+        let Ok(formula) = crate::mu_calculus::parser::parse(&p.formula) else {
+            continue;
+        };
+        // Existential refutations stay sound under a freer start set (see above).
+        if !matches!(
+            formula.property_class(),
+            crate::mu_calculus::PropertyClass::Safety | crate::mu_calculus::PropertyClass::Mixed
+        ) {
+            continue;
+        }
+        let atoms = crate::adapter::btor2::symbolic_bitblast::formula_seed_atoms(&formula);
+        let cone = crate::adapter::btor2::dep_graph::cone_leaf_nids(&file, &atoms);
+        let touched: Vec<String> = cone
+            .iter()
+            .filter(|n| uninit.contains(n))
+            .map(|n| n.to_string())
+            .collect();
+        if touched.is_empty() {
+            continue;
+        }
+        p.outcome = VerifyOutcome::Unknown { unknown_cells: 0 };
+        p.bottom_reason = Some(BottomReason::UnestablishedInitialState {
+            registers: touched.len(),
+            gated_resets: report.diagnostics.gated_resets.clone(),
+        });
+    }
+}
+
 fn drop_stale_bottom_reasons(report: &mut AutoVerifyReport) {
     let decided: std::collections::HashSet<&str> = report
         .properties
@@ -3971,6 +4055,10 @@ pub(crate) fn verify_auto_impl(
         .map(|(sig, val)| format!("{sig}={val}"))
         .collect();
     report.diagnostics.cutpoint_signals = yosys_opts.cutpoint_signals.clone();
+    // mununu#577 — withhold a `Violated` that rests on a register whose initial value was never
+    // established. Runs as a post-pass, after the rescue/escalation ladder, so it catches every
+    // path that can produce one rather than nine push sites.
+    downgrade_violated_on_unestablished_init(&mut report, &btor2);
     report.notes = build_notes(
         &report,
         opts.must_edge_inference,
@@ -4409,6 +4497,22 @@ pub enum BottomReason {
     /// that engine's own message. This one is the harness budget, and it is the one case where
     /// "retry with more budget" is the right consumer response.
     BudgetExpired,
+    /// mununu#577 — the property's cone contains a register whose INITIAL VALUE was never
+    /// established, so a `Violated` cannot be trusted.
+    ///
+    /// An async reset lowers to a mux rather than a BTOR2 `init`; reset-gating then pins the reset
+    /// INACTIVE, removing the only path that would drive those registers to their reset values.
+    /// The result is a free cycle-0 state — an over-approximation of reachability, which licenses
+    /// a definite `HOLDS` and **never** a definite `VIOLATED`.
+    ///
+    /// `determinism` is `Reproducible`: this is a property of the model, not of the host. Re-running
+    /// will not change it; establishing the reset values will.
+    UnestablishedInitialState {
+        /// How many init-less registers the property's cone touches.
+        registers: usize,
+        /// The resets pinned inactive, which is what removed the reset path.
+        gated_resets: Vec<String>,
+    },
     /// The property was **never attempted** — filtered out before any engine ran.
     NotAttempted,
 }
@@ -4488,6 +4592,7 @@ impl BottomReason {
             Self::SafetyShapeNotReducible
             | Self::NoStateModelNonSafety
             | Self::EngineContradiction { .. }
+            | Self::UnestablishedInitialState { .. }
             | Self::NotAttempted => BottomDeterminism::Reproducible,
         }
     }
@@ -4503,6 +4608,7 @@ impl BottomReason {
             Self::EngineCrashed { .. } => "engine-crashed",
             Self::BudgetExpired => "budget-expired",
             Self::MemoryCeilingExceeded => "memory-ceiling-exceeded",
+            Self::UnestablishedInitialState { .. } => "unestablished-initial-state",
             Self::NotAttempted => "not-attempted",
         }
     }
@@ -4537,6 +4643,19 @@ impl BottomReason {
                  memory, a smaller cone, or a lower engine tier can. Host-dependent without a \
                  clock: RSS varies with allocator state and neighbouring processes"
                 .to_string(),
+            Self::UnestablishedInitialState {
+                registers,
+                gated_resets,
+            } => format!(
+                "the property's cone touches {registers} register(s) whose INITIAL VALUE was never \
+                 established: this design's reset is asynchronous (so it lifts to a mux, not a \
+                 BTOR2 `init`) and reset-gating pinned {} inactive, which removes the only \
+                 remaining path to the reset values. A free cycle-0 state OVER-approximates \
+                 reachability, and that licenses a definite HOLDS but never a definite VIOLATED — \
+                 so the violation is withheld rather than reported. Establish the reset values \
+                 (pin the reset ACTIVE for a cycle, or supply `init` via a sidecar) and re-run.",
+                gated_resets.join(", ")
+            ),
             Self::NotAttempted => {
                 "never attempted — filtered out before any engine ran".to_string()
             }
@@ -6325,6 +6444,114 @@ mod tests {
         assert!(
             !m.contains("WALL-CLOCK"),
             "the memory case must not claim a clock fired; RSS is host-dependent WITHOUT one: {m}"
+        );
+    }
+
+    /// mununu#577 REPRODUCER — a `Violated` resting on an unestablished initial value is withheld.
+    ///
+    /// Measured on `sprite_eval`: an async reset lifts to a mux rather than a BTOR2 `init`, so the
+    /// model carried ONE `init` line for ELEVEN state cells; reset-gating then pinned `rst_n`
+    /// inactive, removing the last path to the reset values. `AG(drop_q <= 1)` came back a
+    /// confident VIOLATED on a counter the RTL bounds at 1, because in the model `drop_q` may
+    /// simply START at 1023.
+    ///
+    /// Fails on the parent commit, where the violation was reported as-is.
+    #[test]
+    fn a_violated_resting_on_an_unestablished_initial_value_is_withheld() {
+        // `cnt` has NO `init` line: its cycle-0 value is unconstrained.
+        const NO_INIT: &str = "\
+1 sort bitvec 10
+2 state 1 cnt
+3 one 1
+4 add 1 2 3
+5 next 1 2 4
+";
+        let mk = |name: &str, formula: &str, outcome: VerifyOutcome| PropertyVerdict {
+            name: name.into(),
+            label: None,
+            kind: SvaKind::Assert,
+            formula: formula.into(),
+            outcome,
+            seeded_predicates: Vec::new(),
+            counterexample: None,
+            bottom_reason: None,
+            decided_by: None,
+        };
+        let mut report = AutoVerifyReport {
+            properties: vec![
+                // universal, cone touches `cnt`, VIOLATED → must be withheld
+                mk(
+                    "ag",
+                    "nu X. ((cnt <= 1) && [] X)",
+                    VerifyOutcome::Violated { false_cells: 1 },
+                ),
+                // existential refutation → stays sound under a freer start set, left alone
+                mk(
+                    "ef",
+                    "mu Z. ((cnt == 2) || <> Z)",
+                    VerifyOutcome::Violated { false_cells: 1 },
+                ),
+                // a HOLDS is never made unsound by a freer start set
+                mk(
+                    "hold",
+                    "nu X. ((cnt <= 1023) && [] X)",
+                    VerifyOutcome::Holds,
+                ),
+            ],
+            ..Default::default()
+        };
+        report.diagnostics.gated_resets = vec!["rst_n=1".into()];
+
+        downgrade_violated_on_unestablished_init(&mut report, NO_INIT);
+
+        let by = |n: &str| report.properties.iter().find(|p| p.name == n).unwrap();
+        assert!(
+            matches!(by("ag").outcome, VerifyOutcome::Unknown { .. }),
+            "a universal VIOLATED over an init-less register must be withheld: {:?}",
+            by("ag").outcome
+        );
+        match &by("ag").bottom_reason {
+            Some(BottomReason::UnestablishedInitialState { registers, .. }) => {
+                assert_eq!(*registers, 1, "one init-less register in the cone");
+            }
+            other => panic!("expected the named reason, got {other:?}"),
+        }
+        assert!(
+            matches!(by("ef").outcome, VerifyOutcome::Violated { .. }),
+            "an EXISTENTIAL refutation is stronger under over-approximation and stays: {:?}",
+            by("ef").outcome
+        );
+        assert!(
+            matches!(by("hold").outcome, VerifyOutcome::Holds),
+            "a HOLDS is sound under a freer start set and must not be touched"
+        );
+    }
+
+    /// mununu#577 — the guard must NOT fire when no reset was pinned: then the free initial value
+    /// is the design's own, not something mununu removed.
+    #[test]
+    fn the_init_guard_does_not_fire_without_a_pinned_reset() {
+        const NO_INIT: &str =
+            "1 sort bitvec 10\n2 state 1 cnt\n3 one 1\n4 add 1 2 3\n5 next 1 2 4\n";
+        let mut report = AutoVerifyReport {
+            properties: vec![PropertyVerdict {
+                name: "ag".into(),
+                label: None,
+                kind: SvaKind::Assert,
+                formula: "nu X. ((cnt <= 1) && [] X)".into(),
+                outcome: VerifyOutcome::Violated { false_cells: 1 },
+                seeded_predicates: Vec::new(),
+                counterexample: None,
+                bottom_reason: None,
+                decided_by: None,
+            }],
+            ..Default::default()
+        };
+        // gated_resets deliberately EMPTY.
+        downgrade_violated_on_unestablished_init(&mut report, NO_INIT);
+        assert!(
+            matches!(report.properties[0].outcome, VerifyOutcome::Violated { .. }),
+            "with no reset pinned there is nothing mununu removed, so the verdict stands"
         );
     }
 

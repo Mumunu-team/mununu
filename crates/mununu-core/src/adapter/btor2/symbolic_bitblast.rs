@@ -8752,6 +8752,222 @@ mod tests {
     /// MC — it is built per-bit from the string, not parsed to u128. `wide` is a 130-bit const
     /// register the FSM never reads; the property is over the 1-bit `fsm`. Regression for the
     /// keymgr_ctrl "bad binary literal" Skip (256-bit key-state constants).
+    /// mununu#577 PROBE 4 — add an ARRAY state, the one structural feature left.
+    ///
+    /// Probes 1-3 all answered correctly. The real dump's remaining difference is two
+    /// array-sorted `state` cells (a memory), which is exactly what `BtorSts::leaf_cells` refuses
+    /// with *"state has non-bitvec sort"*. If the engine's own cone/leaf handling degrades in the
+    /// presence of an array it cannot describe, the counter's bound is evaluated against something
+    /// other than the counter — and the AG/EF pair comes apart.
+    #[test]
+    fn probe_577_array_bearing_model_ag_and_ef_must_agree() {
+        // The probe-2 bounded counter (drop_q ∈ {0,1}) plus an untouched memory.
+        const WITH_ARRAY: &str = "\
+1 sort bitvec 1
+2 sort bitvec 10
+3 state 1 st_q
+4 state 2 drop_q
+5 input 1 start
+6 zero 1
+7 zero 2
+8 init 1 3 6
+9 init 2 4 7
+10 one 2
+11 add 2 4 10
+12 not 1 3
+13 and 1 12 5
+14 next 1 3 13
+15 ite 2 5 7 4
+16 ite 2 3 11 15
+17 next 2 4 16
+18 sort bitvec 8
+19 sort array 2 18
+20 state 19 mem
+";
+        let v = |f: &str| {
+            let formula = crate::mu_calculus::parser::parse(f).expect("parses");
+            exact_symbolic_verdict(WITH_ARRAY, &formula)
+        };
+        let ag1 = v("nu X. ((drop_q <= 1) && [] X)");
+        let ef2 = v("mu Z. ((drop_q == 2) || <> Z)");
+        eprintln!("[577-4] AG(<=1) {ag1:?}");
+        eprintln!("[577-4] EF(==2) {ef2:?}");
+
+        let contradictory =
+            matches!(ag1, Ok(ExactVerdict::Violated)) && matches!(ef2, Ok(ExactVerdict::Violated));
+        assert!(
+            !contradictory,
+            "mununu#577 REPRODUCED via an ARRAY state: AG(drop_q<=1)={ag1:?} and \
+             EF(drop_q==2)={ef2:?} are mutually contradictory on a counter bounded at 1. The \
+             array is untouched by the property — its mere presence must not change the verdict."
+        );
+    }
+
+    /// mununu#577 PROBE 3 — the ALIAS shape, which is what the real lift emits.
+    ///
+    /// Probe 2 got the right answers, and the only structural difference from the real dump is
+    /// WHERE the register's name lives. yosys-slang emits the counter as an UNNAMED `state` and
+    /// puts the user name on a `uext` alias over the register's **next-value mux**:
+    ///
+    /// ```text
+    /// 23  state 21                 <- the register, unnamed
+    /// 24  ite 21 9 23 22           <- its next-value mux
+    /// 158 uext 21 24 0 drop_q      <- the NAME, on the MUX
+    /// ```
+    ///
+    /// So an atom over `drop_q` reaches the state only by tracing mux → state. If one evaluation
+    /// path takes the alias at face value (the mux = the NEXT value) while another resolves
+    /// through to the state (the CURRENT value), the two disagree — which is exactly the reported
+    /// symptom.
+    #[test]
+    fn probe_577_aliased_counter_ag_and_ef_must_agree() {
+        // Same bounded counter as probe 2 (drop_q only ever 0 or 1), but the register is UNNAMED
+        // and the name rides a `uext` over the next-value mux, as the real lift does.
+        const ALIASED: &str = "\
+1 sort bitvec 1
+2 sort bitvec 10
+3 state 1 st_q
+4 state 2
+5 input 1 start
+6 zero 1
+7 zero 2
+8 init 1 3 6
+9 init 2 4 7
+10 one 2
+11 add 2 4 10
+12 not 1 3
+13 and 1 12 5
+14 next 1 3 13
+15 ite 2 5 7 4
+16 ite 2 3 11 15
+17 next 2 4 16
+18 uext 2 16 0 drop_q
+";
+        let v = |f: &str| {
+            let formula = crate::mu_calculus::parser::parse(f).expect("parses");
+            exact_symbolic_verdict(ALIASED, &formula)
+        };
+        let ag1 = v("nu X. ((drop_q <= 1) && [] X)");
+        let ef2 = v("mu Z. ((drop_q == 2) || <> Z)");
+        eprintln!("[577-3] AG(<=1) {ag1:?}");
+        eprintln!("[577-3] EF(==2) {ef2:?}");
+
+        let contradictory =
+            matches!(ag1, Ok(ExactVerdict::Violated)) && matches!(ef2, Ok(ExactVerdict::Violated));
+        assert!(
+            !contradictory,
+            "mununu#577 REPRODUCED at the unit tier via the ALIAS shape: AG(drop_q<=1)={ag1:?} \
+             says some reachable state exceeds 1, while EF(drop_q==2)={ef2:?} says 2 is \
+             unreachable. On a counter bounded at 1 both cannot hold."
+        );
+    }
+
+    /// mununu#577 PROBE 2 — the design's ACTUAL shape: a counter that clears before it can
+    /// reach 2.
+    ///
+    /// The issue reasons from "the only non-reset write is `+1`", and that is not what the RTL
+    /// does. `sprite_eval.sv` also clears `drop_q` on every line start (`S_IDLE: if (start)`),
+    /// and the increment at :584 sets `st_q <= S_IDLE` in the SAME cycle — so the counter can
+    /// increment at most once per line and is cleared before it can go again. **`drop_q` only
+    /// ever holds 0 or 1.**
+    ///
+    /// That inverts which verdict is wrong. `EF(drop_q == 2)` VIOLATED is CORRECT; the spurious
+    /// one is `AG(drop_q <= 1)`, which must HOLD.
+    #[test]
+    fn probe_577_bounded_counter_ag_must_hold() {
+        // st_q: 0 = IDLE, 1 = BUSY.   drop_q' = BUSY ? drop_q+1 : (start ? 0 : drop_q)
+        // st_q' = IDLE && start.  So the walk is IDLE -(start)-> BUSY -> IDLE, incrementing once,
+        // and any restart clears. Reachable drop_q is exactly {0, 1}.
+        const BOUNDED: &str = "\
+1 sort bitvec 1
+2 sort bitvec 10
+3 state 1 st_q
+4 state 2 drop_q
+5 input 1 start
+6 zero 1
+7 zero 2
+8 init 1 3 6
+9 init 2 4 7
+10 one 2
+11 add 2 4 10
+12 not 1 3
+13 and 1 12 5
+14 next 1 3 13
+15 ite 2 5 7 4
+16 ite 2 3 11 15
+17 next 2 4 16
+";
+        let v = |f: &str| {
+            let formula = crate::mu_calculus::parser::parse(f).expect("parses");
+            exact_symbolic_verdict(BOUNDED, &formula)
+        };
+        let ef1 = v("mu Z. ((drop_q == 1) || <> Z)");
+        let ef2 = v("mu Z. ((drop_q == 2) || <> Z)");
+        let ag1 = v("nu X. ((drop_q <= 1) && [] X)");
+        eprintln!("[577-2] EF(==1) {ef1:?}   (want Holds)");
+        eprintln!("[577-2] EF(==2) {ef2:?}   (want Violated — 2 is genuinely unreachable)");
+        eprintln!("[577-2] AG(<=1) {ag1:?}   (want Holds — the bound is real)");
+
+        assert!(
+            matches!(ef2, Ok(ExactVerdict::Violated)),
+            "2 is unreachable on this shape: {ef2:?}"
+        );
+        assert_eq!(
+            ag1,
+            Ok(ExactVerdict::Holds),
+            "mununu#577 REPRODUCED: the counter is bounded by 1 and AG(drop_q <= 1) must HOLD"
+        );
+    }
+
+    /// mununu#577 PROBE — the minimal shape of the reported contradiction.
+    ///
+    /// A 10-bit `drop_q`, init 0, whose ONLY write is `+1`. Then `EF(drop_q == 2)` and
+    /// `AG(drop_q <= 1)` cannot both be VIOLATED: the first says 2 is unreachable, the second says
+    /// some reachable state has `drop_q >= 2`, and with a `+1`-only counter any value >= 3 must
+    /// pass through 2.
+    ///
+    /// Run first at the CHEAP tier (no monono sources, no slang, no container) per CLAUDE.md §14:
+    /// if the contradiction is in the exact fixpoint itself, this finds it in milliseconds; if it
+    /// does not reproduce, the mechanism needs the real design and THAT is the finding.
+    #[test]
+    fn probe_577_counter_ef_and_ag_must_agree() {
+        const COUNTER10: &str = "\
+1 sort bitvec 10
+2 zero 1
+3 state 1 drop_q
+4 init 1 3 2
+5 one 1
+6 add 1 3 5
+7 next 1 3 6
+";
+        let v = |f: &str| {
+            let formula = crate::mu_calculus::parser::parse(f).expect("parses");
+            exact_symbolic_verdict(COUNTER10, &formula)
+        };
+
+        let ef0 = v("mu Z. ((drop_q == 0) || <> Z)");
+        let ef1 = v("mu Z. ((drop_q == 1) || <> Z)");
+        let ef2 = v("mu Z. ((drop_q == 2) || <> Z)");
+        let ag0 = v("nu X. ((drop_q <= 0) && [] X)");
+        let ag1 = v("nu X. ((drop_q <= 1) && [] X)");
+        let agmax = v("nu X. ((drop_q <= 1023) && [] X)");
+        eprintln!("[577] EF(==0)   {ef0:?}");
+        eprintln!("[577] EF(==1)   {ef1:?}");
+        eprintln!("[577] EF(==2)   {ef2:?}");
+        eprintln!("[577] AG(<=0)   {ag0:?}");
+        eprintln!("[577] AG(<=1)   {ag1:?}");
+        eprintln!("[577] AG(<=1023) {agmax:?}");
+
+        // THE CONTRADICTION: these two cannot both be Violated.
+        let both_violated =
+            matches!(ef2, Ok(ExactVerdict::Violated)) && matches!(ag1, Ok(ExactVerdict::Violated));
+        assert!(
+            !both_violated,
+            "mununu#577 reproduced at the unit tier: EF(drop_q==2)={ef2:?} and \
+             AG(drop_q<=1)={ag1:?} are mutually contradictory on a +1-only counter"
+        );
+    }
+
     #[test]
     fn exact_verdict_tolerates_over_128_bit_binary_constant() {
         // 130-bit `wide` const held in a register out of the `fsm` cone; `fsm` toggles 0↔1.
