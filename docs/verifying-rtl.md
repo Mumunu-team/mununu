@@ -430,7 +430,7 @@ It is read inside `verify_auto` itself, so it applies to **any** process running
 
 The memory ceiling above degrades gracefully when mununu can observe its own trouble. It cannot help when the process is killed from **outside** — the kernel OOM killer, a CI step timeout, `docker stop`. `SIGKILL` runs no Rust code: no destructor, no panic handler, no report. A lane that verified 24 of 25 properties then reports nothing at all.
 
-Point `MUNUNU_VERIFY_AUTO_PARTIAL_JSON` at a path and `sv verify-auto` appends one JSON object per line as each property completes, flushing after every write:
+Point `MUNUNU_VERIFY_AUTO_PARTIAL_JSON` at a path and `sv verify-auto` appends one JSON object per property, flushing after every write. The record is written at the **top of the NEXT property's iteration** — flushing before the dangerous work is what makes the breadcrumb survive a death mid-property — **so the property that killed the process is the first one ABSENT from the file, not the last one present** (mununu#549):
 
 ```bash
 MUNUNU_VERIFY_AUTO_PARTIAL_JSON=/tmp/verdicts.ndjson mununu sv verify-auto design.sv
@@ -442,7 +442,7 @@ MUNUNU_VERIFY_AUTO_PARTIAL_JSON=/tmp/verdicts.ndjson mununu sv verify-auto desig
 {"index":1,"property":"fifo_sva_1","outcome":"holds","phase":"escalated"}
 ```
 
-**Read the LAST record per property name.** A verdict can change after the main loop — the ⊥ re-plan pass may turn an `unknown` into a definite verdict, and appends a second record with `"phase":"escalated"`. Only properties that actually moved get a second record.
+**Read the LAST record per `property`** (the JSON field is `property`; the Rust parameter is `name`, which is not what you grep for). A verdict can change after the main loop — the ⊥ re-plan pass may turn an `unknown` into a definite verdict, and appends a second record with `"phase":"escalated"`. Only properties that actually moved get a second record.
 
 **It is a diagnostic, never a gate.** An unwritable path, a full disk, or a serialization problem is swallowed after a single warning; a breadcrumb must not be able to fail a verification run, which would trade a recoverable crash for an unconditional one.
 

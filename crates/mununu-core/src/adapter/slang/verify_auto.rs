@@ -3916,7 +3916,7 @@ pub(crate) fn verify_auto_impl(
     );
     // The re-plan below can turn an `unknown` into a definite verdict, so a breadcrumb written
     // before it is not the final answer. Snapshot the pre-escalation outcomes and append a second
-    // record for anything that MOVED — a consumer takes the last line per property name.
+    // record for anything that MOVED — a consumer takes the last line per `property` (the JSON field name).
     let pre_replan_outcomes: Option<Vec<&'static str>> = breadcrumb.is_active().then(|| {
         report
             .properties
@@ -9991,7 +9991,7 @@ endmodule
             "verify_auto must write records; an empty file means the wiring is not called"
         );
 
-        // The LAST record per property name is the authoritative verdict — the escalation pass
+        // The LAST record per `property` (the JSON field) is the authoritative verdict — the escalation pass
         // can append a second one. That is the contract a consumer follows.
         for p in &report.properties {
             let last = records

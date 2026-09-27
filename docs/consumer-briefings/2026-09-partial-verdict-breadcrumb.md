@@ -6,7 +6,7 @@
 ## TL;DR
 
 New opt-in env var. Point `MUNUNU_VERIFY_AUTO_PARTIAL_JSON` at a path and `sv verify-auto` appends
-one JSON line per property as it completes, flushing every write. When the process is killed, the
+one JSON line per property, flushed at the top of the NEXT property's iteration, so the one that died is the first ABSENT. When the process is killed, the
 file holds every verdict it had already computed.
 
 ```bash
@@ -48,7 +48,7 @@ Newline-delimited JSON, one object per record:
 | `phase` | `main` (the per-property loop) or `escalated` (the ⊥ re-plan pass) |
 | `elapsed_ms` | present only when timing was recorded; **an absent timing is an absent key**, not `null` |
 
-### The one rule: read the LAST record per property name
+### The one rule: read the LAST record per `property`
 
 A verdict can change after the main loop. The ⊥ re-plan / escalation pass runs afterwards and can
 turn an `unknown` into a definite verdict; when it does, a second record is appended with

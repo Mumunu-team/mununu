@@ -49,7 +49,7 @@ The site was the `MustSemantics::ForallExists` must-edge `∃i` existential in `
 
 - **Expect new `unknown`s.** Any property whose engine abstained on a budget was reported `skipped` and is now `unknown`. Re-run and re-pin: `--expect NAME=unknown` is the sound way to record one.
 - **The six dead twins.** Your `expect_violated` reported `"1 violated as required"` on a run that produced no verdict lines. After this change that run yields a parseable report with `unknown`, so the comparison has something to iterate over. **The harness lesson stands independently:** a run producing zero verdict lines should fail your gate regardless of exit code — belt and braces.
-- **`MUNUNU_VERIFY_AUTO_PARTIAL_JSON` already does what you need — verified, no change required.** It flushes at the **top** of each property iteration, before that property's (possibly fatal) work. A death during property *N* leaves records for `0..N-1` on disk. Read the **last** record per property name.
+- **`MUNUNU_VERIFY_AUTO_PARTIAL_JSON` already does what you need — verified, no change required.** It flushes at the **top** of each property iteration, before that property's (possibly fatal) work. A death during property *N* leaves records for `0..N-1` on disk. Read the **last** record per `property` (that is the JSON field name).
 - **Your exit-134s are tracked separately** at [mununu#543](https://github.com/Mumunu-team/mununu/issues/543) and are **not** closed by this change. Your hypothesis that they share a root is plausible and now cheaper to test: if raising `MUNUNU_BDD_ARENA_NODES` removes them, they were this bug; if raising `RUST_MIN_STACK` removes them, they are genuine recursion. One knob at a time, ≥3 runs each given the reported flakiness.
 
 ### ROSF

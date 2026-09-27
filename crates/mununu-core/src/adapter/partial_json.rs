@@ -7,11 +7,17 @@
 //! starts from zero.
 //!
 //! **What it provides.** When `MUNUNU_VERIFY_AUTO_PARTIAL_JSON` names a path, `sv verify-auto`
-//! appends one JSON object per line as each property completes, flushing after every write. The
-//! file is therefore correct-as-of-the-last-flush at every instant, including the instant a
-//! `SIGKILL` arrives, so a consumer can recover the work that finished.
+//! appends one JSON object per property, flushing after every write. The record is written at the
+//! **top of the NEXT property's iteration**, not when the property itself finishes — see
+//! [`Breadcrumb::record_pending`], which is deliberate: flushing before the dangerous work is what
+//! makes the breadcrumb survive a death mid-property.
 //!
-//! **Read the LAST line per property name.** A verdict can change after the main loop: the ⊥
+//! **So the property that killed the process is the FIRST ONE ABSENT from the file**, not the last
+//! one present. That is the difference between debugging the property that died and debugging the
+//! one before it, which is why the wording matters (mununu#549).
+//!
+//! **Read the LAST line per `property`** — that is the JSON field name; the Rust parameter is
+//! called `name`, which is not what a reader greps for. A verdict can change after the main loop: the ⊥
 //! re-plan / escalation pass runs afterwards and may turn an `unknown` into a definite verdict.
 //! Lines carry a `phase` (`"main"` then `"escalated"`) and a property may appear twice. Taking the
 //! last occurrence gives the verdict the final report would have carried.
