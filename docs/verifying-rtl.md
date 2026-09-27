@@ -386,9 +386,14 @@ RTL bounds at 1 could begin at its 10-bit maximum.
 Mixed) whose cone touches an init-less register, and only when a reset was pinned inactive.
 
 - `HOLDS` is untouched — that is the direction over-approximation makes sound.
-- An **existential** refutation is untouched, and this is the part that surprises people: a freer
-  start set makes strictly more states reachable, so *"unreachable even from this larger set"* is a
-  **stronger** claim. An `EF` VIOLATED stays sound for exactly the reason the `AG` one does not.
+- An **existential** refutation is untouched: a freer start set makes strictly more states
+  reachable, so *"unreachable even from this larger set"* is a **stronger** claim, and an `EF`
+  VIOLATED stays sound for exactly the reason the `AG` one does not.
+  ⚠️ **That holds only for a refutation computed over the same freer model.** It is not a licence to
+  trust any `EF` VIOLATED sitting next to an unsound `AG`: if the two were decided by engines that
+  disagree about the initial state, the `EF` can be wrong on its own terms. Measured on mununu#577's
+  own model, the target its `EF` called unreachable was reachable at cycle 0 — see
+  [mununu#579](https://github.com/Mumunu-team/mununu/issues/579).
 
 ```bash
 # which properties had a verdict withheld, and how many registers each cone needs established
@@ -402,14 +407,16 @@ a property of the model, not of the host, and **no budget is named because raisi
 
 **Since [mununu#578](https://github.com/Mumunu-team/mununu/issues/578) the recoverable reset values
 are established automatically**, so this `⊥` no longer fires for the async-reset case that named it.
-A register still free here is one with **no reset value to recover**:
+A register still free here is one with **no reset value to recover**: it **holds through reset**
+(`next = ite(rst, d, q)`), so the design genuinely never resets it.
 
-- it **holds through reset** (`next = ite(rst, d, q)`) — the design genuinely never resets it; or
-- it is a **`--cutpoint`** or a blackboxed submodule output, which is free at *every* cycle by
-  deliberate construction and is not a reset question at all.
+**A `--cutpoint` is deliberately free and is NOT counted.** A cut lifts to a state with no `next` —
+free at every cycle because you asked for it, not because a reset path was lost. Withholding a
+verdict over one would be a precision loss rather than a soundness win, and would break the
+cut-point contract that applying a cut may not change a verdict; the existing cut-point caveat in
+the coverage summary is what governs a violation under a cut.
 
-The remedy is correspondingly different: supply an `init` via a sidecar, or drop the cutpoint and
-decide the property on the un-abstracted cone. Retrying is never the answer.
+The remedy is to supply an `init` via a sidecar. Retrying is never the answer.
 
 ### Process-wide memory ceiling: `MUNUNU_MAX_PROCESS_MEMORY_BYTES` (mununu#490, default revised in #504)
 

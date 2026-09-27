@@ -92,6 +92,7 @@ This changes the **initial state** of any design with a memory, which is the mos
 ## Not covered here
 
 - **Registers with no reset.** A flop that holds through reset (`next = ite(rst, d, q)`) genuinely has no reset value; it stays free, and the #577 guard still withholds a `VIOLATED` whose cone touches one. Correct, not a gap.
+- **Cut points do not trigger that guard.** A cut lifts to a state with no `next`, and the #577 guard now ignores those. Counting them withheld a *sound* `VIOLATED` — `AG(st_q == 0)` over a design whose `st_q` leaves 0 regardless of the cut register — which is a precision loss, and it broke the contract that applying a cut may not change a verdict. Caught by `e2e_cutpoint_stays_an_over_approximation_no_verdict_flips`, which is exactly what that test is for.
 - **Memory contents.** A memory's own `init` is authoritative and untouched.
 - **Simulation vs. the mux read.** mununu derives the post-reset state by simulating one
   reset-asserted cycle. That simulator does not implement the array operators, so a design that
