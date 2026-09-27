@@ -46,7 +46,7 @@ pub(crate) struct ModelFacts<'m> {
     model: &'m Btor2File,
     memories: OnceLock<Vec<MemoryCellMeta>>,
     theory: OnceLock<Theory>,
-    total_bits: OnceLock<u32>,
+    total_bits: OnceLock<Option<u32>>,
     free_inputs: OnceLock<Vec<InputFact>>,
     counters: OnceLock<Vec<crate::adapter::btor2::bit_blast::DownCounterMeta>>,
 }
@@ -65,16 +65,30 @@ impl<'m> ModelFacts<'m> {
 
     /// The design's state + input leaf cells (canonical seam `BtorSts::leaf_cells`), or an
     /// empty vec if the model is malformed (facts are best-effort, never fatal).
-    fn leaf_cells(&self) -> Vec<crate::adapter::sts_ir::LeafCell> {
-        BtorSts::new(self.model).leaf_cells().unwrap_or_default()
+    /// mununu#577 — the leaf cells, or `None` when the model cannot be analysed.
+    ///
+    /// **This used to be `.unwrap_or_default()`, and that was the defect.** `BtorSts::leaf_cells`
+    /// refuses a model it cannot describe — an array-sorted `state`, say: *"NID 198: state has
+    /// non-bitvec sort"*. Defaulting that `Err` to an EMPTY vec did not mean "no leaves"; it meant
+    /// **"this design is zero bits wide"**, and every fact derived from it inherited the lie:
+    /// `total_bits` → 0, `cone_bits` → 0, so `cone_bits <= cap` was trivially true and the planner
+    /// reported `cone 0b ≤ 40b cap → exact decides definitely` for a nine-register design.
+    ///
+    /// A design with a memory in it is the common case, not an edge case, so this fired on real
+    /// consumer RTL and made the routing telemetry confidently wrong.
+    fn leaf_cells(&self) -> Option<Vec<crate::adapter::sts_ir::LeafCell>> {
+        BtorSts::new(self.model).leaf_cells().ok()
     }
 
     /// Whole-design bit-blast width — the sum of ALL state+input leaf widths (the size the
     /// exact engine faces when NO cone restriction applies, `keep = None`). Memoized.
-    pub(crate) fn total_bits(&self) -> u32 {
-        *self
-            .total_bits
-            .get_or_init(|| self.leaf_cells().iter().map(|c| c.width).sum())
+    /// mununu#577 — `None` when the leaves cannot be computed, never a silent `0`. A caller that
+    /// treats "unknown width" as "zero width" concludes the design fits every cap.
+    pub(crate) fn total_bits(&self) -> Option<u32> {
+        *self.total_bits.get_or_init(|| {
+            self.leaf_cells()
+                .map(|cells| cells.iter().map(|c| c.width).sum())
+        })
     }
 
     /// The exact engine's cone-of-influence bit width for a property's `seed_atoms` (the
@@ -82,24 +96,29 @@ impl<'m> ModelFacts<'m> {
     /// [`crate::adapter::btor2::symbolic_bitblast::formula_seed_atoms`]) — the register+input
     /// bits it must bit-blast. Mirrors the engine's keep-set cone (`cone_leaf_nids`); an
     /// empty atom set ⇒ the whole design (`keep = None`). Not memoized (varies per atom set).
-    pub(crate) fn cone_bits(&self, seed_atoms: &[String]) -> u32 {
+    pub(crate) fn cone_bits(&self, seed_atoms: &[String]) -> Option<u32> {
         if seed_atoms.is_empty() {
             return self.total_bits();
         }
         let cone = cone_leaf_nids(self.model, seed_atoms);
-        self.leaf_cells()
-            .iter()
-            .filter(|c| cone.contains(&c.nid))
-            .map(|c| c.width)
-            .sum()
+        Some(
+            self.leaf_cells()?
+                .iter()
+                .filter(|c| cone.contains(&c.nid))
+                .map(|c| c.width)
+                .sum(),
+        )
     }
 
     /// `(cone_bits, cap)` for a property's seed atoms; `cone_bits > cap` is exactly the
     /// condition under which the exact engine bails to a `Skip` — the signal auto-config-value
     /// / auto-cutpoint act on.
-    pub(crate) fn cone_vs_cap(&self, seed_atoms: &[String]) -> (u32, u32) {
-        let cb = self.cone_bits(seed_atoms);
-        (cb, effective_bitblast_cap(cb))
+    /// mununu#577 — `None` when the cone width is unknown. **Callers must not substitute `0`**:
+    /// that is what made `cone_bits <= cap` trivially true on a design whose width had never been
+    /// established, and turned a routing prediction into a false claim of decidability.
+    pub(crate) fn cone_vs_cap(&self, seed_atoms: &[String]) -> Option<(u32, u32)> {
+        let cb = self.cone_bits(seed_atoms)?;
+        Some((cb, effective_bitblast_cap(cb)))
     }
 
     /// Detected down-counters of the model (`detect_down_counter`), computed once.
@@ -143,8 +162,12 @@ impl<'m> ModelFacts<'m> {
     /// The pinnable primary-input surface — all free `input` leaves, widest first. Memoized.
     pub(crate) fn free_inputs(&self) -> &[InputFact] {
         self.free_inputs.get_or_init(|| {
+            // mununu#577 — an unanalysable model yields NO pinnable inputs. That is the right
+            // answer for this list (it drives "what could I pin", not a width claim), and it
+            // fails safe: no auto-pin is attempted on a model we cannot describe.
             let mut v: Vec<InputFact> = self
                 .leaf_cells()
+                .unwrap_or_default()
                 .iter()
                 .filter(|c| !c.is_state)
                 .map(|c| InputFact {
@@ -245,9 +268,9 @@ mod tests {
         let file = parser::parse(COST_FIXTURE).expect("parse");
         let facts = ModelFacts::new(&file);
         // ctrl(8) + cfg(8) + en(1) + other(8) = 25.
-        assert_eq!(facts.total_bits(), 25);
+        assert_eq!(facts.total_bits(), Some(25));
         // Memoized: second read agrees.
-        assert_eq!(facts.total_bits(), 25);
+        assert_eq!(facts.total_bits(), Some(25));
     }
 
     #[test]
@@ -274,12 +297,12 @@ mod tests {
         let ctrl_cone = facts.cone_bits(&["ctrl".to_string()]);
         assert!(
             ctrl_cone < facts.total_bits(),
-            "ctrl's cone ({ctrl_cone}) must exclude the unrelated leaves"
+            "ctrl's cone ({ctrl_cone:?}) must exclude the unrelated leaves"
         );
-        assert_eq!(ctrl_cone, 8, "ctrl's cone is ctrl alone");
+        assert_eq!(ctrl_cone, Some(8), "ctrl's cone is ctrl alone");
         // `other`'s cone pulls in `cfg` (other' = cfg) ⇒ 8 + 8 = 16, and `cfg` is a pinnable
         // in-cone input while none is in ctrl's cone.
-        assert_eq!(facts.cone_bits(&["other".to_string()]), 16);
+        assert_eq!(facts.cone_bits(&["other".to_string()]), Some(16));
         assert_eq!(
             facts
                 .pinnable_cone_inputs(&["other".to_string()])
@@ -289,6 +312,47 @@ mod tests {
             vec!["cfg".to_string()]
         );
         assert!(facts.pinnable_cone_inputs(&["ctrl".to_string()]).is_empty());
+    }
+
+    /// mununu#577 REPRODUCER — an array-bearing design must not measure as ZERO bits.
+    ///
+    /// `BtorSts::leaf_cells` refuses a model with an array-sorted `state` ("NID N: state has
+    /// non-bitvec sort"), and `ModelFacts::leaf_cells` used to `.unwrap_or_default()` that `Err`
+    /// into an EMPTY vec. The consequence was not a missing fact but a FALSE one: `total_bits` and
+    /// `cone_bits` both reported **0**, so `cone_bits <= cap` was trivially true and the planner
+    /// announced `cone 0b ≤ 40b cap → exact decides definitely` for a nine-register consumer
+    /// design. A design with a memory in it is the common case.
+    ///
+    /// The fix is that "unknown" is now `None`, distinct from `Some(0)`. This test fails on the
+    /// parent commit, where both were `0`.
+    #[test]
+    fn an_unanalysable_model_reports_unknown_width_not_zero() {
+        // A 4-bit counter PLUS an array-sorted state (a memory), which is what makes
+        // `BtorSts::leaf_cells` refuse the model.
+        const WITH_MEMORY: &str = "\
+1 sort bitvec 4
+2 sort bitvec 8
+3 sort array 1 2
+4 state 1 cnt
+5 one 1
+6 add 1 4 5
+7 next 1 4 6
+8 state 3 mem
+";
+        let file = crate::adapter::btor2::parser::parse(WITH_MEMORY).expect("parses");
+        let facts = ModelFacts::new(&file);
+
+        assert_eq!(
+            facts.total_bits(),
+            None,
+            "an unanalysable model must report UNKNOWN width, never 0 — a 0 reads as \
+             \"fits every cap\" to every downstream check"
+        );
+        assert_eq!(
+            facts.cone_vs_cap(&["cnt".to_string()]),
+            None,
+            "and no cap comparison may be offered for a width that was never established"
+        );
     }
 
     // An 8-bit down-counter `cnt` (reload-at-0) plus an INDEPENDENT 1-bit toggle `flag`. The

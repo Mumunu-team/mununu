@@ -414,9 +414,13 @@ fn skip_over_cap_notes(report: &AutoVerifyReport, design_btor2: &str) -> Vec<Ver
         // This is the state-bit-count analogue of the skip-diameter-bound note. Matches both the
         // cube-path oom() string and the exact-build string (both contain "arena exhausted").
         if reason.contains("arena exhausted") {
+            // mununu#577 — `0` here used to mean two different things: "the cone really is
+            // zero bits" and "the width could not be established". The note now only claims a
+            // width it actually has.
             let cone_bits = crate::mu_calculus::parser::parse(&prop.formula)
-                .map(|f| facts.cone_vs_cap(&formula_seed_atoms(&f)).0)
-                .unwrap_or(0);
+                .ok()
+                .and_then(|f| facts.cone_vs_cap(&formula_seed_atoms(&f)))
+                .map(|(cb, _)| cb);
             notes.push(bitblast_oom_skip_note(&prop.name, cone_bits));
             continue;
         }
@@ -424,7 +428,13 @@ fn skip_over_cap_notes(report: &AutoVerifyReport, design_btor2: &str) -> Vec<Ver
             continue;
         };
         let atoms = formula_seed_atoms(&formula);
-        let (cone_bits, cap) = facts.cone_vs_cap(&atoms);
+        // mununu#577 — an UNKNOWN cone width must not read as "fits the cap". Previously
+        // `leaf_cells()` swallowed its error into an empty vec, so an array-bearing design
+        // measured 0 bits and `cone_bits <= cap` was trivially true — on a nine-register design.
+        // With the width unknown there is nothing to say about the cap, so say nothing.
+        let Some((cone_bits, cap)) = facts.cone_vs_cap(&atoms) else {
+            continue;
+        };
         if cone_bits <= cap {
             // Not a bit-CAP issue (the cone fits). Consult the DIAMETER proxy (P2.2c): an in-cone
             // down-counter of width W means the fixpoint may need ~2^W iterations, so exact
@@ -528,11 +538,13 @@ fn diameter_bound_skip_note(name: &str, counter_log2: u32) -> VerificationNote {
 /// re-elaborates with a smaller parameterised counter/register so its bits fit) and the fallback
 /// (`--engine explicit`). The state-bit-count analogue of `diameter_bound_skip_note`. Advisory
 /// only (a note, never a verdict change).
-fn bitblast_oom_skip_note(name: &str, cone_bits: u32) -> VerificationNote {
-    let cone = if cone_bits > 0 {
-        format!("~{cone_bits}-bit state cone")
-    } else {
-        "wide state cone".to_string()
+fn bitblast_oom_skip_note(name: &str, cone_bits: Option<u32>) -> VerificationNote {
+    // mununu#577 — `None` is "the width was never established", which is NOT the same claim as
+    // "the cone is wide". The old signature took a `u32` and read `0` as the latter, so a model
+    // whose leaves could not be computed was described as wide on no evidence.
+    let cone = match cone_bits {
+        Some(b) if b > 0 => format!("~{b}-bit state cone"),
+        _ => "state cone of unestablished width".to_string(),
     };
     VerificationNote {
         kind: "skip-bitblast-oom".into(),
@@ -669,7 +681,13 @@ pub fn annotate_routing(
         };
         let class = formula.property_class();
         let atoms = formula_seed_atoms(&formula);
-        let (cone_bits, cap) = facts.cone_vs_cap(&atoms);
+        // mununu#577 — no width, no prediction. `predict_engine` decides on `cone_bits <= cap`,
+        // so feeding it a defaulted 0 produced a confident "exact decides definitely" for a
+        // design whose width had never been established. An absent rationale is the honest
+        // output; a fabricated one is what sent a reader chasing the wrong half of a bug.
+        let Some((cone_bits, cap)) = facts.cone_vs_cap(&atoms) else {
+            continue;
+        };
         let diameter_log2 = facts.cone_counter_diameter_log2(&atoms);
         let (predicted_engine, why) = predict_engine(class, cone_bits, cap, diameter_log2);
         out.push(RoutingRationale {
