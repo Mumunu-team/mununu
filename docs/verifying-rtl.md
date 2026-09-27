@@ -395,6 +395,33 @@ MUNUNU_MAX_PROCESS_MEMORY_BYTES=0 mununu sv verify-auto design.sv
 
 **Complementary to `--config-value`.** The bit cap counts kept cone bits AFTER COI and AFTER pinning, so `--config-value SIG=V` shrinks the real problem and often keeps a property under the memory ceiling that would otherwise trip it. `@mununu_predicate` hints do NOT — they seed cube dimensions, and an alternating νμ formula is decided by the exact engine which does not use them.
 
+### Handing over a reproducer: `MUNUNU_SHADOW_BTOR2_DUMP` (mununu#552)
+
+> Source of truth: [`dump_prepared_model`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) — surface: (CLI+API, env var)
+
+`MUNUNU_KEEP_YOSYS_TMP=1` and `sv emit-btor2-per-module` give you the **pre-shadow** lift. They do
+not give you the model the engine ran, and for a `$past`-bearing property that is exactly where
+the two diverge — the shadow chain is the part that widens the cone. Reproducing mununu#543
+in-house meant hand-rebuilding the augmented model from a guessed base list, which could never
+settle whether the reconstruction matched the real lift. That cost two definite answers.
+
+```bash
+MUNUNU_SHADOW_BTOR2_DUMP=/tmp/repro.btor2 mununu sv verify-auto design.sv
+```
+
+One file, written once per run, carrying both halves of a reproducer: the BTOR2 **and** every
+property's mu-formula as BTOR2 comments — including the `<base>__past` shadow atoms and
+`<base>__bits<hi>_<lo>` slice atoms, which are the names a reader otherwise cannot reconstruct.
+The header is all `;` comments, so the file still parses as BTOR2 and can be fed straight to
+`btor2 verify`.
+
+**It states what it omits.** Antecedent shadow synthesis (`_mununu_antshadow_*`) runs *later* and
+*per-property* inside the engine, so it is not in the dump, and the header says so. A dump that
+silently dropped a rewrite would be the trap this exists to close.
+
+Diagnostic only, like the breadcrumb above: a write failure warns once and can never change a
+verdict.
+
 ### Crash-survivable partial verdicts: `MUNUNU_VERIFY_AUTO_PARTIAL_JSON` (mununu#504 C7)
 
 > Source of truth: [`adapter::partial_json::Breadcrumb`](../crates/mununu-core/src/adapter/partial_json.rs) — surface: (CLI+API+UI, env var — process-global)
