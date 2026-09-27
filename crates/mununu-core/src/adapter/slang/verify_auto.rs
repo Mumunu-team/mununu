@@ -4647,13 +4647,15 @@ impl BottomReason {
                 registers,
                 gated_resets,
             } => format!(
-                "the property's cone touches {registers} register(s) whose INITIAL VALUE was never \
-                 established: this design's reset is asynchronous (so it lifts to a mux, not a \
-                 BTOR2 `init`) and reset-gating pinned {} inactive, which removes the only \
-                 remaining path to the reset values. A free cycle-0 state OVER-approximates \
+                "the property's cone touches {registers} register(s) whose INITIAL VALUE is not \
+                 established, with {} pinned inactive. A free cycle-0 state OVER-approximates \
                  reachability, and that licenses a definite HOLDS but never a definite VIOLATED — \
-                 so the violation is withheld rather than reported. Establish the reset values \
-                 (pin the reset ACTIVE for a cycle, or supply `init` via a sidecar) and re-run.",
+                 so the violation is withheld rather than reported. Since mununu#578 the reset \
+                 values that CAN be recovered are established automatically, so a register still \
+                 free here is one with no reset value to recover: it holds through reset \
+                 (`next = ite(rst, d, q)`), or it is a `--cutpoint` / blackboxed output, which is \
+                 free at every cycle by construction and not a reset question at all. Supply an \
+                 `init` via a sidecar, or drop the cutpoint, to decide this property.",
                 gated_resets.join(", ")
             ),
             Self::NotAttempted => {

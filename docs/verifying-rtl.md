@@ -369,9 +369,11 @@ Every other `⊥` on this page is an engine that did not finish. This one is a v
 into `unknown`.
 
 **The mechanism.** An **asynchronous** reset lowers through yosys `async2sync` into a **mux**, not
-a BTOR2 `init` line. Reset-gating then pins the reset *inactive*, which removes the only remaining
-path to the reset values — and nothing replaces it. The affected registers are therefore **free at
-cycle 0**, and stay free. A measured case: eleven state cells, **one** `init` line.
+a BTOR2 `init` line. If nothing re-establishes those values, pinning the reset *inactive* removes
+the last path to them and the affected registers are **free at cycle 0** and stay free. A measured
+case: eleven state cells, **one** `init` line — and three confident violations of properties the
+hardware satisfies. [`reset_init::inject_reset_init`](../crates/mununu-core/src/adapter/btor2/reset_init.rs)
+now re-establishes them (mununu#578), so what remains is the residue described below.
 
 A free start set **over-approximates** reachability, and [`CLAUDE.md` §Soundness
 Guarantees](../CLAUDE.md#soundness-guarantees) is explicit about what that licenses — sound for
@@ -398,11 +400,16 @@ mununu --quiet sv verify-auto design.sv --json \
 `registers` is per-property, from that property's own cone. `determinism` is `reproducible`: this is
 a property of the model, not of the host, and **no budget is named because raising one cannot help.**
 
-**The remedy is to establish the initial state**, not to retry — hold the reset **active** for a
-cycle, or supply `init` via a sidecar. Doing so inside mununu (synthesising `init` from the reset
-mux) is tracked as [mununu#578](https://github.com/Mumunu-team/mununu/issues/578); until it lands,
-this is containment, and the honest reading of the `⊥` is *"the model does not yet describe your
-reset."*
+**Since [mununu#578](https://github.com/Mumunu-team/mununu/issues/578) the recoverable reset values
+are established automatically**, so this `⊥` no longer fires for the async-reset case that named it.
+A register still free here is one with **no reset value to recover**:
+
+- it **holds through reset** (`next = ite(rst, d, q)`) — the design genuinely never resets it; or
+- it is a **`--cutpoint`** or a blackboxed submodule output, which is free at *every* cycle by
+  deliberate construction and is not a reset question at all.
+
+The remedy is correspondingly different: supply an `init` via a sidecar, or drop the cutpoint and
+decide the property on the un-abstracted cone. Retrying is never the answer.
 
 ### Process-wide memory ceiling: `MUNUNU_MAX_PROCESS_MEMORY_BYTES` (mununu#490, default revised in #504)
 
