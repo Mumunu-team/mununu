@@ -163,11 +163,25 @@ self-loop is the common case, and the collapsed form is exactly wrong for it:
 // WRONG — one unsatisfiable compound action; this automaton freezes under composition.
 transition Live -> Live on label ld_write, label ld_done, label cpu_write;
 
-// RIGHT — three alternatives, any one of which may fire.
+// RIGHT — alternation: three alternatives, any ONE of which may fire (mununu#570).
+transition Live -> Live on label ld_write | label ld_done | label cpu_write;
+
+// …which is exactly equivalent to, and desugars into:
 transition Live -> Live on label ld_write;
 transition Live -> Live on label ld_done;
 transition Live -> Live on label cpu_write;
 ```
+
+**And when you do mean one joint action, say so with braces** — `on {label a, label b}`. The
+bare-comma form means the same thing and still works, but the braces stop a reader parsing the
+comma as "or":
+
+```
+transition Idle -> Active on {label grant, label accept};   // ONE action: both, together
+```
+
+Mixing the two separators in one list (`on label a, label b | label c`) has no single meaning and
+is refused with an error rather than resolved silently.
 
 **When you want conjunction, the collapsed form is correct and load-bearing.** A turn-based round
 carrying both an environment and a controller action (`emit.rs`'s `{env_*, ctrl_*}` pairs, the

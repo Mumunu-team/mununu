@@ -300,10 +300,15 @@ impl<'a> Lexer<'a> {
                         start_column,
                     )))
                 } else {
-                    Err(LexError::UnexpectedChar {
-                        ch: '|',
-                        span: Span::new(start_index, self.index, self.line, start_column),
-                    })
+                    // mununu#570 — a lone `|` is the ALTERNATION separator in a transition's
+                    // label list (`on a | b`). It was previously a hard lex error, so admitting
+                    // it cannot regress any source that parses today.
+                    Ok(Some(self.make_symbol(
+                        Symbol::Pipe,
+                        start_index,
+                        start_line,
+                        start_column,
+                    )))
                 }
             }
             '-' => {
@@ -662,15 +667,31 @@ mod tests {
         }
     }
 
+    /// mununu#570 — a lone `|` is now the ALTERNATION separator, not a lex error.
+    ///
+    /// This test previously asserted `lex("|")` fails, which pinned the old contract. That is
+    /// exactly why admitting `|` is safe: it was unreachable in any source that lexed, so no
+    /// existing model can change meaning. `||` must keep lexing as one token.
     #[test]
-    fn lexes_invalid_single_pipe() {
-        // Test error for single | (lines 303-307)
-        let result = lex("|");
-        assert!(result.is_err());
-        match result {
-            Err(LexError::UnexpectedChar { ch, .. }) => assert_eq!(ch, '|'),
-            _ => panic!("expected UnexpectedChar error for |"),
-        }
+    fn lexes_single_pipe_as_the_alternation_separator() {
+        let toks = lex("|").expect("a lone `|` now lexes");
+        assert!(
+            toks.iter()
+                .any(|t| matches!(t.kind, TokenKind::Symbol(Symbol::Pipe))),
+            "expected Symbol::Pipe, got {toks:?}"
+        );
+        // `||` must NOT split into two Pipes — logical-or still wins the longest match.
+        let or = lex("||").expect("`||` lexes");
+        assert!(
+            or.iter()
+                .any(|t| matches!(t.kind, TokenKind::Symbol(Symbol::PipePipe))),
+            "`||` must stay one token: {or:?}"
+        );
+        assert!(
+            !or.iter()
+                .any(|t| matches!(t.kind, TokenKind::Symbol(Symbol::Pipe))),
+            "`||` must not also yield a bare Pipe: {or:?}"
+        );
     }
 
     #[test]

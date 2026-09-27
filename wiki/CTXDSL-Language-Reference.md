@@ -256,11 +256,38 @@ Transitions connect states and carry one or more labels.
 transition Idle -> WaitAck on label req_assert;
 ```
 
-**Multi-label** -- the transition fires when all listed labels occur simultaneously:
+**Synchronisation vector** -- ONE compound action. The transition fires when all listed labels
+occur **together**; it does not fire on any one of them alone. Two spellings, identical meaning:
 
 ```
-transition Idle -> Active on label req_assert, label ack_assert;
+transition Idle -> Active on {label req_assert, label ack_assert};   // preferred
+transition Idle -> Active on label req_assert, label ack_assert;     // legacy, same thing
 ```
+
+Prefer the braced form. A comma reads like "or" to most people, and that misreading is not
+harmless: under composition a compound action pairs only with a partner transition whose
+shared-alphabet projection is **set-identical**, so a compound nobody can match makes the
+automaton freeze. A real 7-automaton model collapsed to one reachable state that way, with a
+safety property holding vacuously (mununu#570). mununu now warns when it detects one.
+
+**Alternation** -- N independent alternatives, any ONE of which fires the same step. This is what
+you want for an "I ignore the other automata's labels" self-loop:
+
+```
+transition Live -> Live on label ld_write | label ld_done | label cpu_write;
+```
+
+It is exactly equivalent to writing the transitions out separately, and that is how it is
+desugared — same source, target, guard, effects and modality on each:
+
+```
+transition Live -> Live on label ld_write;
+transition Live -> Live on label ld_done;
+transition Live -> Live on label cpu_write;
+```
+
+**Do not mix `,` and `|` in one list.** `on label a, label b | label c` has no single meaning and
+is refused with an error saying so, rather than being resolved silently one way.
 
 **Epsilon** -- an internal (silent) transition with no observable label:
 
