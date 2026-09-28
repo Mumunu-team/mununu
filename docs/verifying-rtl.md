@@ -394,6 +394,43 @@ recognise, have no established answer — a boolean would force one, and guessin
 would tell a consumer to pin a `⊥` that may not reproduce. Read `unestablished` as *"do not pin,
 do not retry-loop."*
 
+### Machine-readable output on every exit path: `--json` (mununu#541)
+
+> Source of truth: [`JsonArgs`](../crates/mununu-cli/src/main.rs) + [`exit_with_json_error`](../crates/mununu-cli/src/main.rs) — surface: (CLI+API)
+
+`sv verify-recoverability`, `sv verify-liveness` and `sv verify-liveness-all` **already print JSON on
+success** — they always did. What they lacked was the `--json` flag `sv verify-auto` established, so
+passing it failed argument parsing with exit 2, which reads exactly like "this verb has no structured
+output":
+
+```console
+$ mununu sv verify-recoverability design.sv --target "state == 0" --json
+error: unexpected argument '--json' found      # before mununu#541
+```
+
+The flag is now accepted on all three, and it does one thing worth having: **it makes JSON the output
+on every exit path, errors included.** Without it a failure prints prose to stderr, so a subprocess
+consumer parses two formats and picks by exit code.
+
+```console
+$ mununu --quiet sv verify-recoverability design.sv --target "state == 0" --json   # exit 0
+{ "file": "design.sv", "property": "AG EF (state == 0)", "verdict": "unknown" }
+
+$ mununu --quiet sv verify-liveness design.sv --request "a == 1" --grant "b == 1" --json   # exit 1
+{ "verb": "sv-verify-liveness", "file": "design.sv",
+  "error": "could not build the liveness monitor — an atom likely binds no signal in the design" }
+```
+
+The error document goes to **stdout**, beside the success document, so a consumer reads one stream;
+the prose still goes to stderr for a human watching the same run. `verb` and `file` are carried
+because a CI lane runs many invocations into one log and an error saying only `error` cannot be
+attributed.
+
+⚠️ **The success document is not schema-pinned yet.** `sv verify-auto`'s response has a JSON-schema
+drift detector; these three summaries are still built ad-hoc, so treat the field set as stable-by-
+convention rather than guaranteed. Pinning it is the remaining half of
+[mununu#541](https://github.com/Mumunu-team/mununu/issues/541).
+
 ### The withheld VIOLATED: `unestablished-initial-state` (mununu#577)
 
 > Source of truth: [`BottomReason::UnestablishedInitialState`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) + [`downgrade_violated_on_unestablished_init`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) — surface: (CLI+API)

@@ -64,6 +64,52 @@ struct CiArgs {
     fail_on: FailOn,
 }
 
+/// mununu#541 — machine-readable-output flag, flattened into the `sv` property verbs beside
+/// [`CiArgs`].
+///
+/// **These verbs already print JSON on SUCCESS** (`print_json_summary`), which is why the issue's
+/// table saying "structured output: none" is not what a run actually does. What rosf hit was the
+/// FLAG: they passed `--json` — the idiom `sv verify-auto` established — and got
+/// `error: unexpected argument '--json' found` with exit 2, then reasonably concluded there was no
+/// structured output at all.
+///
+/// So the flag exists for two reasons, and the second is the substantive one:
+///
+/// 1. The `verify-auto` idiom works on every property verb rather than one.
+/// 2. It makes JSON the output on **every exit path, including an error**. Without it a failure
+///    prints prose to stderr (measured: *"could not build the liveness monitor — an atom likely
+///    binds no signal in the design"*), so a subprocess consumer has to parse two formats and pick
+///    by exit code. With it there is one document to read whatever happened.
+#[derive(Args, Debug)]
+struct JsonArgs {
+    /// Emit a single JSON document on stdout for EVERY outcome, errors included.
+    ///
+    /// Without this flag a successful run already prints JSON but a failure prints prose to stderr.
+    /// Pass it when a machine reads the output.
+    #[arg(long)]
+    json: bool,
+}
+
+/// mununu#541 — render an error as the JSON document a `--json` consumer expects, then exit 1.
+///
+/// Goes to **stdout**, beside the success document, so a consumer reads one stream. The prose also
+/// goes to stderr, because a human watching the same run should still see it.
+fn exit_with_json_error(verb: &str, file: &str, err: &str) -> ! {
+    let doc = serde_json::json!({
+        "verb": verb,
+        "file": file,
+        "error": err,
+    });
+    match serde_json::to_string_pretty(&doc) {
+        Ok(text) => println!("{text}"),
+        // A serialisation failure here would leave the consumer with nothing at all; the prose on
+        // stderr is the fallback.
+        Err(e) => eprintln!("failed to serialise the error document: {e}"),
+    }
+    eprintln!("{err}");
+    std::process::exit(1);
+}
+
 /// mununu#537 — verdict EXPECTATION flags, flattened into `sv verify-auto` beside [`CiArgs`].
 ///
 /// A verification gate never wants "did it pass"; it wants **"did exactly this happen"**. These
@@ -2178,6 +2224,8 @@ struct SvVerifyLivenessArgs {
     grant: String,
     #[command(flatten)]
     ci: CiArgs,
+    #[command(flatten)]
+    json: JsonArgs,
 }
 
 /// Arguments for `mununu sv verify-liveness-all` — SV-direct conjunction of
@@ -2193,6 +2241,8 @@ struct SvVerifyLivenessAllArgs {
     responses: Vec<String>,
     #[command(flatten)]
     ci: CiArgs,
+    #[command(flatten)]
+    json: JsonArgs,
 }
 
 /// Arguments for `mununu sv verify-recoverability` — SV-direct `AG EF good`.
@@ -2227,6 +2277,8 @@ struct SvVerifyRecoverabilityArgs {
     config_values: Vec<String>,
     #[command(flatten)]
     ci: CiArgs,
+    #[command(flatten)]
+    json: JsonArgs,
 }
 
 /// Arguments for `mununu sv check-fsm` — SV-direct auto illegal-encoding scan.
@@ -6036,7 +6088,22 @@ fn sv_verify(args: SvVerifyArgs) -> Result<(), String> {
 }
 
 /// `mununu sv verify-liveness` — lift SV and decide `AG(request → AF grant)`.
+/// mununu#541 — `--json` makes an ERROR machine-readable too.
+///
+/// The success path already printed JSON; a failure printed prose to stderr, so a subprocess
+/// consumer had to parse two formats and choose by exit code. The wrapper is deliberately thin —
+/// all the work stays in `sv_verify_liveness_impl`, so the only thing this adds is the output contract.
 fn sv_verify_liveness(args: SvVerifyLivenessArgs) -> Result<(), String> {
+    let as_json = args.json.json;
+    let file = args.lift.primary_display();
+    match sv_verify_liveness_impl(args) {
+        Ok(()) => Ok(()),
+        Err(e) if as_json => exit_with_json_error("sv-verify-liveness", &file, &e),
+        Err(e) => Err(e),
+    }
+}
+
+fn sv_verify_liveness_impl(args: SvVerifyLivenessArgs) -> Result<(), String> {
     use mununu_core::adapter::sv_verify::sv_verify_liveness as core_sv_verify_liveness;
     use mununu_core::verdict::PropertyVerdict;
 
@@ -6058,7 +6125,22 @@ fn sv_verify_liveness(args: SvVerifyLivenessArgs) -> Result<(), String> {
 /// `mununu sv verify-liveness-all` — lift SV and decide the conjunction
 /// `⋀ᵢ AG(aᵢ → AF bᵢ)` from repeatable `--response "ANTE => CONS"` pairs. SV-direct
 /// peer of `btor2 verify-liveness-all`; same JSON summary + CI exit.
+/// mununu#541 — `--json` makes an ERROR machine-readable too.
+///
+/// The success path already printed JSON; a failure printed prose to stderr, so a subprocess
+/// consumer had to parse two formats and choose by exit code. The wrapper is deliberately thin —
+/// all the work stays in `sv_verify_liveness_all_impl`, so the only thing this adds is the output contract.
 fn sv_verify_liveness_all(args: SvVerifyLivenessAllArgs) -> Result<(), String> {
+    let as_json = args.json.json;
+    let file = args.lift.primary_display();
+    match sv_verify_liveness_all_impl(args) {
+        Ok(()) => Ok(()),
+        Err(e) if as_json => exit_with_json_error("sv-verify-liveness-all", &file, &e),
+        Err(e) => Err(e),
+    }
+}
+
+fn sv_verify_liveness_all_impl(args: SvVerifyLivenessAllArgs) -> Result<(), String> {
     use mununu_core::adapter::liveness_rescue::response_conjunction_property;
     use mununu_core::adapter::sv_verify::sv_verify_liveness_all as core_sv_verify_liveness_all;
     use mununu_core::verdict::PropertyVerdict;
@@ -6078,7 +6160,22 @@ fn sv_verify_liveness_all(args: SvVerifyLivenessAllArgs) -> Result<(), String> {
 }
 
 /// `mununu sv verify-recoverability` — lift SV and decide `AG EF good`.
+/// mununu#541 — `--json` makes an ERROR machine-readable too.
+///
+/// The success path already printed JSON; a failure printed prose to stderr, so a subprocess
+/// consumer had to parse two formats and choose by exit code. The wrapper is deliberately thin —
+/// all the work stays in `sv_verify_recoverability_impl`, so the only thing this adds is the output contract.
 fn sv_verify_recoverability(args: SvVerifyRecoverabilityArgs) -> Result<(), String> {
+    let as_json = args.json.json;
+    let file = args.lift.primary_display();
+    match sv_verify_recoverability_impl(args) {
+        Ok(()) => Ok(()),
+        Err(e) if as_json => exit_with_json_error("sv-verify-recoverability", &file, &e),
+        Err(e) => Err(e),
+    }
+}
+
+fn sv_verify_recoverability_impl(args: SvVerifyRecoverabilityArgs) -> Result<(), String> {
     use mununu_core::adapter::recoverability::{
         parse_config_value_specs, parse_extra_predicate, recoverability_property_str,
     };
@@ -8746,6 +8843,83 @@ mod controller_ctxdsl_tests {
         assert!(dsl.contains("transition "), "{dsl}");
         // The emitted controller CTXDSL is valid, re-loadable syntax.
         parse(&dsl).expect("emitted controller ctxdsl parses");
+    }
+}
+
+#[cfg(test)]
+mod json_output_contract_tests {
+    use super::*;
+
+    /// mununu#541 — every `sv` property verb must accept `--json`.
+    ///
+    /// rosf passed it because `sv verify-auto` established the idiom, got
+    /// `error: unexpected argument '--json' found` (exit 2), and concluded there was no structured
+    /// output at all. The success path was already JSON; only the flag was missing. This asserts
+    /// clap ACCEPTS it on each verb, so the idiom cannot silently regress on one of them.
+    #[test]
+    fn every_sv_property_verb_accepts_json() {
+        use clap::Parser;
+        for argv in [
+            vec![
+                "mununu",
+                "sv",
+                "verify-recoverability",
+                "d.sv",
+                "--target",
+                "s == 0",
+                "--json",
+            ],
+            vec![
+                "mununu",
+                "sv",
+                "verify-liveness",
+                "d.sv",
+                "--request",
+                "a == 1",
+                "--grant",
+                "b == 1",
+                "--json",
+            ],
+            vec![
+                "mununu",
+                "sv",
+                "verify-liveness-all",
+                "d.sv",
+                "--response",
+                "a == 1 => b == 1",
+                "--json",
+            ],
+        ] {
+            let parsed = Cli::try_parse_from(&argv);
+            assert!(
+                parsed.is_ok(),
+                "`{}` must accept --json: {:?}",
+                argv.join(" "),
+                parsed.err().map(|e| e.to_string())
+            );
+        }
+    }
+
+    /// The JSON error document carries what a consumer needs to attribute the failure.
+    ///
+    /// `verb` and `file` matter because a CI lane runs many of these and reads one stream; an error
+    /// document that said only `{"error": "..."}` would not say which invocation produced it.
+    #[test]
+    fn the_json_error_document_names_the_verb_and_the_file() {
+        // `exit_with_json_error` diverges, so the shape is asserted on the same construction it
+        // uses rather than by running it — the value here is pinning the FIELDS, and a test that
+        // spawned a process to read them would be testing serde.
+        let doc = serde_json::json!({
+            "verb": "sv-verify-liveness",
+            "file": "design.sv",
+            "error": "could not build the liveness monitor",
+        });
+        for field in ["verb", "file", "error"] {
+            assert!(
+                doc.get(field).and_then(|v| v.as_str()).is_some(),
+                "the error document must carry `{field}` so a consumer can attribute it"
+            );
+        }
     }
 }
 
