@@ -697,6 +697,68 @@ fn attach_engine_failure_reason(report: &mut AutoVerifyReport, failures: &[(&str
 ///
 /// This is an ABSTENTION, not a fix: the right repair is for reset-gating to establish the reset
 /// values it pins away. Until it does, a named `⊥` beats a confident wrong answer.
+/// mununu#579 — force `⊥` on any pair of properties in this report whose definite verdicts cannot
+/// both be right.
+///
+/// A pure post-pass: no engine work, no state-space cost, only the properties already in the report.
+/// The soundness reasoning and the (deliberately short) list of admitted pairs live in
+/// [`super::report_consistency`]; this function is the plumbing.
+///
+/// **It does not pick a winner.** Both properties are withheld with the same alarm, because a
+/// contradiction establishes that one verdict is broken and not which one. mununu#577 is the reason
+/// that is spelled out rather than assumed: the reading that looked obvious there blamed the correct
+/// half.
+///
+/// A property already carrying a `bottom_reason` is left alone — an existing cause is more specific
+/// than "something in this report disagrees".
+fn flag_self_contradictory_verdicts(report: &mut AutoVerifyReport) {
+    use super::report_consistency::{Shape, classify_shape, violated_pair_contradicts};
+
+    // (index, shape) for every property with a definite VIOLATED and a recognised shape.
+    let violated: Vec<(usize, Shape)> = report
+        .properties
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| {
+            matches!(p.outcome, VerifyOutcome::Violated { .. }) && p.bottom_reason.is_none()
+        })
+        .filter_map(|(i, p)| {
+            let formula = crate::mu_calculus::parser::parse(&p.formula).ok()?;
+            classify_shape(&formula).map(|sh| (i, sh))
+        })
+        .collect();
+    if violated.len() < 2 {
+        return;
+    }
+
+    // Collect first, mutate second: a property may contradict more than one partner, and the
+    // detail should name the partner rather than whichever happened to be visited last.
+    let mut hits: Vec<(usize, String)> = Vec::new();
+    for (ai, (i, a)) in violated.iter().enumerate() {
+        for (j, b) in violated.iter().skip(ai + 1) {
+            if !violated_pair_contradicts(a, b) {
+                continue;
+            }
+            let (na, nb) = (
+                report.properties[*i].name.clone(),
+                report.properties[*j].name.clone(),
+            );
+            hits.push((*i, format!("`{na}` VIOLATED is unsatisfiable together with `{nb}` VIOLATED over exactly negated atoms")));
+            hits.push((*j, format!("`{nb}` VIOLATED is unsatisfiable together with `{na}` VIOLATED over exactly negated atoms")));
+        }
+    }
+    for (i, detail) in hits {
+        let p = &mut report.properties[i];
+        // A pair may be hit twice; the first alarm already withheld it.
+        if p.bottom_reason.is_some() {
+            continue;
+        }
+        p.outcome = VerifyOutcome::Unknown { unknown_cells: 0 };
+        p.counterexample = None;
+        p.bottom_reason = Some(BottomReason::ReportSelfContradiction { detail });
+    }
+}
+
 fn downgrade_violated_on_unestablished_init(report: &mut AutoVerifyReport, model_btor2: &str) {
     // Only fires when a reset was pinned inactive — that pin is what removes the reset path.
     if report.diagnostics.gated_resets.is_empty() {
@@ -1758,16 +1820,38 @@ fn scan_annotation_properties(sources: &[(String, String)]) -> AnnotationScan {
                     }
                     match crate::mu_calculus::parser::parse(body) {
                         Ok(_) => {
+                            // mununu#550 — an author-given name becomes the LABEL, which
+                            // `--expect` already matches (mununu#544). The positional `name` is
+                            // kept either way, so an existing index pin does not break.
+                            //
+                            // A DUPLICATE name is refused rather than resolved: the expectation
+                            // lookup is a `find()`, so two properties answering to one pin would
+                            // silently scope the expectation to whichever came first — the exact
+                            // failure this issue exists to remove, one level up.
+                            //
+                            // This is deliberately STRICTER than SVA labels, which may legally
+                            // repeat: two asserts inside one labelled `begin…end` inherit the same
+                            // label, so refusing those would reject valid SystemVerilog. An
+                            // annotation name is author-chosen, one per annotation, and has no such
+                            // excuse. The asymmetry has a reason; it is not an oversight.
+                            if let Some(n) = ann.name.as_deref()
+                                && let Some(prev) = scan
+                                    .guarantees
+                                    .iter()
+                                    .find(|g| g.label.as_deref() == Some(n))
+                            {
+                                scan.skipped.push(format!(
+                                    "@mununu_guarantee({n}) \u{2014} duplicate name, already used \
+                                     by `{}`. A name is a PIN: two properties answering to one \
+                                     would make `--expect {n}` silently match only the first. \
+                                     Rename one of them.",
+                                    prev.name
+                                ));
+                                continue;
+                            }
                             scan.guarantees.push(TranslatedAssertion {
-                                // mununu#544 — RESIDUAL GAP, stated rather than papered over.
-                                // `@mununu_guarantee` properties are positional too
-                                // (`ann_guarantee_<idx>`), and carry no label because
-                                // `MununuAnnotation` has no name field — only `tag`, `value` and
-                                // `source_line`. So an insertion mid-file re-points these exactly
-                                // as it used to re-point SVA names. Giving the annotation an
-                                // optional name is a separate surface change.
                                 name: format!("ann_guarantee_{idx}"),
-                                label: None,
+                                label: ann.name.clone(),
                                 kind: SvaKind::Assert,
                                 formula: body.to_string(),
                                 recoverability_companion: None,
@@ -4085,6 +4169,9 @@ pub(crate) fn verify_auto_impl(
     // established. Runs as a post-pass, after the rescue/escalation ladder, so it catches every
     // path that can produce one rather than nine push sites.
     downgrade_violated_on_unestablished_init(&mut report, &btor2);
+    // mununu#579 — last of the verdict post-passes: everything above may still CHANGE a verdict, and
+    // a self-contradiction must be judged on the verdicts the report actually ships.
+    flag_self_contradictory_verdicts(&mut report);
     report.notes = build_notes(
         &report,
         opts.must_edge_inference,
@@ -4540,6 +4627,21 @@ pub enum BottomReason {
         gated_resets: Vec<String>,
     },
     /// The property was **never attempted** — filtered out before any engine ran.
+    /// mununu#579 — this report contradicts **itself**: two properties of the same model came back
+    /// with definite verdicts that cannot both be right.
+    ///
+    /// Distinct from [`Self::EngineContradiction`], which compares two ENGINES on one property. This
+    /// is one run disagreeing with itself across properties, which is how mununu#577 reached a
+    /// consumer — and nothing looked.
+    ///
+    /// Both properties are forced to `⊥`. **Never pick a winner**: the natural reading of mununu#577
+    /// (*"the engine is right at 0 and 1 and wrong at the boundary"*) blamed the half that was
+    /// correct, and adjudicating would have shipped the wrong answer with more confidence. A
+    /// contradiction says one of them is broken, not which.
+    ReportSelfContradiction {
+        /// Which property it contradicts, and on which atoms.
+        detail: String,
+    },
     NotAttempted,
 }
 
@@ -4619,6 +4721,7 @@ impl BottomReason {
             | Self::NoStateModelNonSafety
             | Self::EngineContradiction { .. }
             | Self::UnestablishedInitialState { .. }
+            | Self::ReportSelfContradiction { .. }
             | Self::NotAttempted => BottomDeterminism::Reproducible,
         }
     }
@@ -4635,6 +4738,7 @@ impl BottomReason {
             Self::BudgetExpired => "budget-expired",
             Self::MemoryCeilingExceeded => "memory-ceiling-exceeded",
             Self::UnestablishedInitialState { .. } => "unestablished-initial-state",
+            Self::ReportSelfContradiction { .. } => "report-self-contradiction",
             Self::NotAttempted => "not-attempted",
         }
     }
@@ -4682,6 +4786,13 @@ impl BottomReason {
                  (`next = ite(rst, d, q)`). Supply an `init` for it via a sidecar to decide this \
                  property; a `--cutpoint` is deliberately free and is NOT counted here.",
                 gated_resets.join(", ")
+            ),
+            Self::ReportSelfContradiction { detail } => format!(
+                "🔴 SOUNDNESS ALARM — this report contradicts ITSELF: {detail}. The two verdicts \
+                 cannot both be right, so BOTH are withheld. Retrying is actively wrong, and so is \
+                 believing whichever one looks more plausible: mununu#577 taught that expensively, \
+                 where the half that looked broken was the correct one. Escalate this rather than \
+                 re-running it."
             ),
             Self::NotAttempted => {
                 "never attempted — filtered out before any engine ran".to_string()
@@ -6609,6 +6720,195 @@ mod tests {
              disable it: {:?}",
             by("over_real_reg").outcome
         );
+    }
+
+    /// mununu#579 audit — pin the cube path's init-less convention so the three-way divergence
+    /// cannot drift again in silence.
+    ///
+    /// `state_cell_init_values` defaults an init-less cell to **0**; `initial_state_bdd` (exact,
+    /// since mununu#498) and the reachability portfolio leave it **FREE**. Those are opposite
+    /// soundness postures on cycle 0 inside one portfolio run — the cube's 0 removes start states
+    /// (unsound for HOLDS), the others add them (unsound for VIOLATED).
+    ///
+    /// This asserts the CURRENT behaviour rather than the desired one. Converging them is a
+    /// measured behaviour change tracked on mununu#579; until then the value of this test is that
+    /// the convention is written down somewhere that fails when it moves. Three comments claimed
+    /// the old convention for a year after mununu#498 changed it, and one of them was cited as
+    /// evidence.
+    #[test]
+    fn the_cube_defaults_an_initless_cell_to_zero_while_the_other_paths_leave_it_free() {
+        // `pinned` carries an init; `loose` does not.
+        let btor2 = "1 sort bitvec 4\n                     2 state 1 pinned\n                     3 constd 1 5\n                     4 init 1 2 3\n                     5 state 1 loose\n";
+        let file = crate::adapter::btor2::parser::parse(btor2).expect("fixture parses");
+        let vals = state_cell_init_values(&file);
+
+        assert_eq!(
+            vals.get("pinned").copied(),
+            Some(5),
+            "an explicit init is read through"
+        );
+        assert_eq!(
+            vals.get("loose").copied(),
+            Some(0),
+            "the CUBE defaults an init-less cell to 0 — the exact engine and the reachability \
+             portfolio leave the same cell FREE. If this assertion moves, the divergence has been \
+             converged and mununu#579's audit table must move with it"
+        );
+    }
+
+    /// mununu#550 — an author-given annotation name becomes the property's LABEL, so a pin survives
+    /// an insertion above it.
+    ///
+    /// The positional `ann_guarantee_<idx>` is kept as well: an existing index pin must not break
+    /// just because a neighbour gained a name.
+    #[test]
+    fn an_annotation_name_becomes_the_label_and_the_index_still_works() {
+        let src = "// @mununu_guarantee(tier3_recover) nu Y.((mu X.((st_q == 0) || <> X)) && [] Y)\n\
+                   // @mununu_guarantee nu X. ((cnt <= 1) && [] X)\n\
+                   module m; endmodule\n";
+        let scan = scan_annotation_properties(&[("m.sv".to_string(), src.to_string())]);
+
+        assert_eq!(
+            scan.guarantees.len(),
+            2,
+            "both annotations translate: {scan:?}"
+        );
+        assert_eq!(scan.guarantees[0].name, "ann_guarantee_0");
+        assert_eq!(
+            scan.guarantees[0].label.as_deref(),
+            Some("tier3_recover"),
+            "the author's name becomes the label `--expect` matches"
+        );
+        assert_eq!(
+            scan.guarantees[1].label, None,
+            "an unnamed annotation stays unnamed — the name is optional, never inferred"
+        );
+    }
+
+    /// A duplicate name is REFUSED, because the expectation lookup is a `find()`.
+    ///
+    /// Two properties answering to one pin would make `--expect dup` silently match only the first —
+    /// the same silent re-pointing mununu#550 exists to remove, one level up. Stricter than SVA
+    /// labels on purpose: those may legally repeat (two asserts in one labelled `begin…end`), an
+    /// annotation name has no such excuse.
+    #[test]
+    fn a_duplicate_annotation_name_is_refused_with_a_reason() {
+        let src = "// @mununu_guarantee(dup) nu X. ((cnt <= 1) && [] X)\n\
+                   // @mununu_guarantee(dup) nu X. ((other <= 1) && [] X)\n\
+                   module m; endmodule\n";
+        let scan = scan_annotation_properties(&[("m.sv".to_string(), src.to_string())]);
+
+        assert_eq!(
+            scan.guarantees.len(),
+            1,
+            "the second `dup` must not become a second property answering to one pin: {scan:?}"
+        );
+        assert!(
+            scan.skipped
+                .iter()
+                .any(|m| m.contains("duplicate name") && m.contains("dup")),
+            "and the refusal must SAY so rather than dropping it silently: {:?}",
+            scan.skipped
+        );
+    }
+
+    /// mununu#579 — a report whose own verdicts are unsatisfiable together forces BOTH to ⊥.
+    ///
+    /// `AG(cnt <= 1)` VIOLATED says some reachable state has `cnt > 1`; `EF(cnt > 1)` VIOLATED says
+    /// no reachable state does. Exactly negated, so one of them is broken — and the check must not
+    /// say which.
+    #[test]
+    fn a_report_that_contradicts_itself_withholds_both_verdicts() {
+        let mk = |name: &str, formula: &str| PropertyVerdict {
+            name: name.into(),
+            label: None,
+            kind: SvaKind::Assert,
+            formula: formula.into(),
+            outcome: VerifyOutcome::Violated { false_cells: 1 },
+            seeded_predicates: Vec::new(),
+            counterexample: None,
+            bottom_reason: None,
+            decided_by: None,
+        };
+        let mut report = AutoVerifyReport {
+            properties: vec![
+                mk("bound", "nu X. ((cnt <= 1) && [] X)"),
+                mk("witness", "mu Z. ((cnt > 1) || <> Z)"),
+                // An unrelated violation must survive: the alarm is per-pair, not per-report.
+                mk("unrelated", "nu X. ((other == 0) && [] X)"),
+            ],
+            ..Default::default()
+        };
+
+        flag_self_contradictory_verdicts(&mut report);
+
+        let by = |n: &str| report.properties.iter().find(|p| p.name == n).unwrap();
+        for n in ["bound", "witness"] {
+            assert!(
+                matches!(by(n).outcome, VerifyOutcome::Unknown { .. }),
+                "{n} must be withheld, not adjudicated: {:?}",
+                by(n).outcome
+            );
+            match &by(n).bottom_reason {
+                Some(BottomReason::ReportSelfContradiction { detail }) => {
+                    assert!(
+                        detail.contains("bound") && detail.contains("witness"),
+                        "the alarm must name BOTH properties so neither looks like the winner: {detail}"
+                    );
+                }
+                other => panic!("expected the self-contradiction alarm on {n}, got {other:?}"),
+            }
+        }
+        assert!(
+            matches!(by("unrelated").outcome, VerifyOutcome::Violated { .. }),
+            "an unrelated violation is untouched: {:?}",
+            by("unrelated").outcome
+        );
+    }
+
+    /// ⚠️ mununu#579's own worked example must NOT fire, and this is the control that proves it.
+    ///
+    /// The issue asserted that `AG(drop_q <= 1)` VIOLATED beside `EF(drop_q == 2)` VIOLATED "cannot
+    /// all hold". They can: a model reaching 7 and never 2 satisfies both. Flagging them would force
+    /// two verdicts to ⊥ on evidence that permits both — a false soundness alarm destroys sound
+    /// results, which is worse than the gap it would be closing.
+    #[test]
+    fn the_577_trio_is_not_treated_as_a_contradiction() {
+        let mk = |name: &str, formula: &str| PropertyVerdict {
+            name: name.into(),
+            label: None,
+            kind: SvaKind::Assert,
+            formula: formula.into(),
+            outcome: VerifyOutcome::Violated { false_cells: 1 },
+            seeded_predicates: Vec::new(),
+            counterexample: None,
+            bottom_reason: None,
+            decided_by: None,
+        };
+        let mut report = AutoVerifyReport {
+            properties: vec![
+                mk("ag", "nu X. ((drop_q <= 1) && [] X)"),
+                mk("ef2", "mu Z. ((drop_q == 2) || <> Z)"),
+                mk("ef3", "mu Z. ((drop_q == 3) || <> Z)"),
+            ],
+            ..Default::default()
+        };
+
+        flag_self_contradictory_verdicts(&mut report);
+
+        for p in &report.properties {
+            assert!(
+                matches!(p.outcome, VerifyOutcome::Violated { .. }),
+                "{} must be left alone — a single value > K refutes nothing: {:?}",
+                p.name,
+                p.outcome
+            );
+            assert!(
+                p.bottom_reason.is_none(),
+                "{} gained a spurious alarm",
+                p.name
+            );
+        }
     }
 
     /// mununu#577 — the guard must NOT fire when no reset was pinned: then the free initial value
