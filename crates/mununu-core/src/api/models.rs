@@ -2009,6 +2009,7 @@ impl From<&crate::adapter::slang::verify_auto::AutoVerifyReport> for SvVerifyAut
                     summary: n.summary.clone(),
                     detail: n.detail.clone(),
                     items: n.items.clone(),
+                    property: n.property.clone(),
                 })
                 .collect(),
         }
@@ -2029,6 +2030,17 @@ pub struct VerificationNoteView {
     pub detail: String,
     /// Structured operands (e.g. `["cfg_detect_timer_i=7"]`).
     pub items: Vec<String>,
+    /// mununu#548 O-2 — the property this note is ABOUT, when it is about one.
+    ///
+    /// Absent for a model-level note (reset-gating, control-slice, parameter overrides): those
+    /// describe the lift, not a property.
+    ///
+    /// **Group notes by this, not by parsing `summary`.** The name used to appear only as a
+    /// `"<name>: "` prefix inside the prose, so a consumer joining on it inherited two bugs: a
+    /// property whose name prefixes another's (`sva_1` vs `sva_10`) matched the wrong note, and any
+    /// rewording of the note's opening silently broke the join.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub property: Option<String>,
 }
 
 /// Model-level lift diagnostics (mirrors

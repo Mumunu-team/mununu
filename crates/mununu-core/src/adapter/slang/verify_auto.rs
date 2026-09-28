@@ -410,6 +410,21 @@ pub struct VerificationNote {
     /// Structured operands, where relevant (e.g. `["cfg_detect_timer_i=7"]`,
     /// `["prim_sparse_fsm_flop"]`). Empty when the note has no operands.
     pub items: Vec<String>,
+    /// mununu#548 O-2 — the property this note is ABOUT, when it is about one.
+    ///
+    /// `None` for a model-level note (reset-gating, control-slice, parameter overrides): those
+    /// describe the lift, not a property, and giving them a property would be a lie a consumer
+    /// would then group by.
+    ///
+    /// **Why a field.** Until now the only link was a `"<name>: "` prefix inside `summary`, and the
+    /// join was `summary.starts_with(&format!("{name}: "))`. That is a parse of prose, so it broke
+    /// in both directions: a property whose name is a prefix of another's (`sva_1` vs `sva_10`)
+    /// matched the wrong note, and any note that reworded its opening stopped matching at all —
+    /// silently, because a join that finds nothing looks exactly like a note that was not there.
+    /// `drop_stale_bottom_reasons` is the load-bearing consumer: it removes ⊥ explanations for
+    /// properties another engine went on to decide, and a missed match leaves a report saying a
+    /// property is ⊥ while also reporting it HOLDS — which is the mununu#548 defect itself.
+    pub property: Option<String>,
 }
 
 /// Result of an automated SVA verification run.
@@ -585,6 +600,7 @@ fn coverage_summary_note(report: &AutoVerifyReport) -> VerificationNote {
                  abstraction is too coarse to decide — an honest 'don't know', not a violation."
             .into(),
         items: Vec::new(),
+        property: None,
     }
 }
 
@@ -855,9 +871,35 @@ fn drop_stale_bottom_reasons(report: &mut AutoVerifyReport) {
     if decided.is_empty() {
         return;
     }
-    let stale: Vec<String> = decided.iter().map(|n| format!("{n}: ")).collect();
+    // mununu#548 O-2 — join on the FIELD, not on a prefix of the prose.
+    //
+    // 🔴 THE OLD JOIN NEVER FIRED. It built its pattern as `format!("{name}: ")` and tested
+    // `summary.starts_with(..)`, but every summary `bottom_reason_note` actually produces begins
+    // with a BACKTICK — `` `{name}`: `` — so `"`p`: residual ⊥ …".starts_with("p: ")` is false for
+    // every real note. This pass has been a no-op since it was written.
+    //
+    // It looked fine because its test invented the summary as `"p: ⊥ — …"`, without the backticks
+    // the production builder emits. That is CLAUDE.md §14's own warning arriving in our own code: a
+    // contract test is only as good as the fidelity of its mock, and a fabricated one tests the
+    // assumption rather than the system.
+    //
+    // The consequence is the mununu#548 defect, unfixed: a merged portfolio report could still
+    // carry a ⊥ explanation for a property it goes on to report as HOLDS, because nothing removed
+    // it. The field is what makes this pass work at all — not merely what makes it tidier.
+    //
+    // The prefix stays as a FALLBACK only for a `bottom-reason` note carrying no property. It is
+    // not load-bearing (nothing in-tree produces such a note today) and it is deliberately not
+    // relied upon.
     report.notes.retain(|n| {
-        n.kind != "bottom-reason" || !stale.iter().any(|pre| n.summary.starts_with(pre))
+        if n.kind != "bottom-reason" {
+            return true;
+        }
+        match n.property.as_deref() {
+            Some(prop) => !decided.contains(prop),
+            None => !decided
+                .iter()
+                .any(|d| n.summary.starts_with(&format!("{d}: "))),
+        }
     });
 }
 
@@ -937,6 +979,7 @@ fn build_notes(
             summary,
             detail,
             items: Vec::new(),
+            property: None,
         });
     }
 
@@ -959,6 +1002,7 @@ fn build_notes(
                 .iter()
                 .map(|(sig, v)| format!("{sig}={v}"))
                 .collect(),
+            property: None,
         });
     }
 
@@ -983,6 +1027,7 @@ fn build_notes(
                 .iter()
                 .map(|(lhs, v)| format!("{lhs}={v}"))
                 .collect(),
+            property: None,
         });
     }
 
@@ -1032,6 +1077,7 @@ fn build_notes(
                  without the cut."
             ),
             items: cutpoint_signals.to_vec(),
+            property: None,
         });
     }
 
@@ -1057,6 +1103,7 @@ fn build_notes(
                      from --counter-bound / counter_bounds."
                 .into(),
             items: counter_bounds.to_vec(),
+            property: None,
         });
     }
 
@@ -1072,6 +1119,7 @@ fn build_notes(
                      property is left ⊥ (the predicate abstraction that would produce ⊥ is not used)."
                 .into(),
             items: Vec::new(),
+            property: None,
         }),
         NotePosture::Cube => {
             notes.push(VerificationNote {
@@ -1087,6 +1135,7 @@ fn build_notes(
                     must_edge_inference_label(must_edge_inference),
                 ),
                 items: Vec::new(),
+                property: None,
             });
         }
     }
@@ -1102,6 +1151,7 @@ fn build_notes(
                      standard formal reset discipline)."
                 .into(),
             items: d.gated_resets.clone(),
+            property: None,
         });
     }
 
@@ -1119,6 +1169,7 @@ fn build_notes(
                      the lift (no soundness loss — the stub is functionally identical)."
                 .into(),
             items: d.auto_provided_stubs.clone(),
+            property: None,
         });
     }
 
@@ -1136,6 +1187,7 @@ fn build_notes(
                      source(s) to model that state."
                 .into(),
             items: d.blackboxed_modules.clone(),
+            property: None,
         });
     }
 
@@ -1986,6 +2038,7 @@ fn annotation_note(scan: &AnnotationScan) -> Option<VerificationNote> {
                  directly."
                 .into(),
         items,
+        property: None,
     })
 }
 
@@ -2531,6 +2584,7 @@ pub(crate) fn merge_portfolio_reports(
             engines_ran.join(", ")
         ),
         items,
+        property: None,
     });
     // mununu#536 — every verdict is final now, so recompute the one note that counts them. The
     // clone above carried the BASE engine's coverage summary, which the merge has just made
@@ -2557,6 +2611,7 @@ pub(crate) fn merge_portfolio_reports(
                 contradictions.join("; ")
             ),
             items: contradictions,
+            property: None,
         });
     }
     Ok(merged)
@@ -3698,6 +3753,11 @@ pub(crate) fn verify_auto_impl(
                                      absent rather than negative."
                                 .to_string(),
                             items: vec![format!("property:{}", t.name)],
+                            // mununu#548 O-2 — the property is a FIELD now. `items` keeps its
+                            // `property:<name>` entry for one release so a consumer already
+                            // reading it does not break on the same commit that gives them the
+                            // better route.
+                            property: Some(t.name.clone()),
                         });
                     }
                     report.properties.push(PropertyVerdict {
@@ -3799,6 +3859,7 @@ pub(crate) fn verify_auto_impl(
                          cell if the design exposes one."
                         .into(),
                 items: vec![mem.clone()],
+                property: Some(t.name.clone()),
             });
         }
 
@@ -4215,6 +4276,7 @@ pub(crate) fn verify_auto_impl(
                      headroom for allocator overhead + non-mununu memory."
                 .into(),
             items: Vec::new(),
+            property: None,
         });
     }
     // mununu#504 — the TIME sibling of the memory note above. The memory note's text is
@@ -4237,6 +4299,7 @@ pub(crate) fn verify_auto_impl(
                 crate::adapter::run_budget::RUN_BUDGET_ENV,
             ),
             items: Vec::new(),
+            property: None,
         });
     }
     report.notes.extend(rescue_notes);
@@ -4339,6 +4402,7 @@ pub(crate) fn escalate_bottom(
                                      will not help either one."
                                 .into(),
                             items: Vec::new(),
+                            property: Some(prop.name.clone()),
                         });
                         None
                     }
@@ -4936,6 +5000,11 @@ fn bottom_reason_note(name: &str, reason: BottomReason) -> VerificationNote {
         summary,
         detail,
         items: Vec::new(),
+        // mununu#548 O-2 — `bottom-reason` is THE per-property note, and the one whose join
+        // matters: `drop_stale_bottom_reasons` removes it when another engine went on to decide the
+        // property, and a missed match leaves a report saying `p` is ⊥ while also reporting it
+        // HOLDS. That is the mununu#548 defect, so this is the site that must not rely on prose.
+        property: Some(name.to_string()),
     }
 }
 
@@ -5034,6 +5103,7 @@ fn exact_skip_rescue_note(name: &str, verdict: &str) -> VerificationNote {
                  only on a definite Holds/Violated."
             .into(),
         items: Vec::new(),
+        property: None,
     }
 }
 
@@ -5067,6 +5137,7 @@ fn rescue_note(name: &str, verdict: &str, engines: &[&str]) -> VerificationNote 
                  contradiction alarm rather than a verdict."
             .into(),
         items: Vec::new(),
+        property: None,
     }
 }
 
@@ -5088,6 +5159,7 @@ fn recoverability_rescue_note(name: &str, verdict: &str) -> VerificationNote {
                  Shoham–Grumberg); box-AF liveness and safety take their own reductions."
             .into(),
         items: Vec::new(),
+        property: None,
     }
 }
 
@@ -5124,6 +5196,7 @@ fn recoverability_bot_reason_note(
                  additional predicates."
             .into(),
         items,
+        property: None,
     }
 }
 
@@ -5174,6 +5247,7 @@ fn fair_cycle_rescue_note(
                  request forever ungranted."
             .into(),
         items: Vec::new(),
+        property: None,
     }
 }
 
@@ -5198,6 +5272,7 @@ fn liveness_rescue_note(name: &str, verdict: &str, engines: &[&str]) -> Verifica
                  box-AF shape; the diamond-EF recoverability response is not reduced here."
             .into(),
         items: Vec::new(),
+        property: None,
     }
 }
 
@@ -5362,6 +5437,7 @@ mod tests {
                     .into(),
                 detail: "the predicate abstraction that would produce ⊥ is not used".into(),
                 items: Vec::new(),
+                property: None,
             });
             r
         };
@@ -5437,6 +5513,7 @@ mod tests {
                 summary: "p: ⊥ — safety-shape-not-reducible".into(),
                 detail: "the rescue could not reduce this shape".into(),
                 items: Vec::new(),
+                property: None,
             });
             r
         };
@@ -6809,6 +6886,114 @@ mod tests {
                 .any(|m| m.contains("duplicate name") && m.contains("dup")),
             "and the refusal must SAY so rather than dropping it silently: {:?}",
             scan.skipped
+        );
+    }
+
+    /// mununu#548 O-2 — the old note→property join could never match a real note.
+    ///
+    /// `drop_stale_bottom_reasons` removes a ⊥ explanation for a property another engine went on to
+    /// decide. It built its pattern as `format!("{name}: ")`, but every summary
+    /// [`bottom_reason_note`] produces starts with a BACKTICK — `` `name`: `` — so the match failed
+    /// for every note the code actually emits. **The pass was a no-op from the day it was written**,
+    /// and its own test passed because that test invented the summary without the backticks.
+    ///
+    /// So this test does two things: it pins the real production format against the old pattern, and
+    /// it checks the field-based join now does the job. The mock comes from the real builder, not
+    /// from a string typed here — which is the whole lesson (CLAUDE.md §14).
+    #[test]
+    fn the_stale_bottom_reason_pass_now_actually_fires_on_a_real_note() {
+        let real = bottom_reason_note("p", BottomReason::SafetyShapeNotReducible);
+        assert!(
+            !real.summary.starts_with("p: "),
+            "PREMISE: the old join's pattern cannot match the real summary, which is why the pass \
+             never fired. Got: {:?}",
+            &real.summary[..real.summary.len().min(40)]
+        );
+        assert!(
+            real.summary.starts_with("`p`: "),
+            "the real format is backtick-quoted: {:?}",
+            &real.summary[..real.summary.len().min(40)]
+        );
+
+        let mut report = AutoVerifyReport {
+            properties: vec![PropertyVerdict {
+                name: "p".into(),
+                label: None,
+                kind: SvaKind::Assert,
+                formula: "nu X. (q && [] X)".into(),
+                // Another engine DECIDED it, so the ⊥ explanation is stale.
+                outcome: VerifyOutcome::Holds,
+                seeded_predicates: Vec::new(),
+                counterexample: None,
+                bottom_reason: None,
+                decided_by: Some("reach-portfolio".into()),
+            }],
+            notes: vec![real],
+            ..Default::default()
+        };
+
+        drop_stale_bottom_reasons(&mut report);
+
+        assert!(
+            report.notes.is_empty(),
+            "a ⊥ explanation for a property the report declares HOLDS must be removed — this is \
+             mununu#548's defect, and it survived until the join stopped parsing prose: {:?}",
+            report.notes.iter().map(|n| &n.summary).collect::<Vec<_>>()
+        );
+    }
+
+    /// mununu#548 O-2 — a note whose PROSE names a property must also carry the field.
+    ///
+    /// The convention is that a per-property summary opens `` `<name>`: ``. This asserts the two
+    /// stay in step for every note builder that is a callable pure function, so a reworded summary
+    /// cannot drift away from the field the way the old join drifted away from the prose.
+    ///
+    /// **Honest limit:** three per-property notes are built as inline literals inside
+    /// `verify_auto` (`engine-isolation`, `array-atom-unsupported`, `safety-rescue-declined`) and
+    /// are not reachable from here, so they are not guarded by this test — they were set by hand and
+    /// verified by reading. Making the invariant unavoidable would mean a private field and
+    /// constructors across 32 sites; that is worth doing and is not this change.
+    #[test]
+    fn a_note_whose_prose_names_a_property_also_carries_the_field() {
+        let builders: Vec<VerificationNote> = vec![
+            bottom_reason_note("sva_2", BottomReason::SafetyShapeNotReducible),
+            bottom_reason_note("sva_2", BottomReason::NoStateModelNonSafety),
+            bottom_reason_note("sva_2", BottomReason::UnclassifiedBottom),
+            crate::planner::diameter_bound_skip_note_for_test("sva_2", 5),
+            crate::planner::bitblast_oom_skip_note_for_test("sva_2", Some(40)),
+        ];
+        for n in &builders {
+            let names_a_property = n.summary.starts_with("`sva_2`:");
+            assert!(
+                names_a_property,
+                "premise: these builders use the backtick-name convention; got {:?}",
+                &n.summary[..n.summary.len().min(30)]
+            );
+            assert_eq!(
+                n.property.as_deref(),
+                Some("sva_2"),
+                "kind `{}` names a property in its prose but does not carry the field — the two \
+                 must not drift, which is exactly how the stale-note join came to match nothing",
+                n.kind
+            );
+        }
+    }
+
+    /// A per-property note must carry its property, and a model-level note must not invent one.
+    #[test]
+    fn a_bottom_reason_note_carries_its_property_and_a_model_note_does_not() {
+        let n = bottom_reason_note("sva_7", BottomReason::SafetyShapeNotReducible);
+        assert_eq!(
+            n.property.as_deref(),
+            Some("sva_7"),
+            "the ⊥ explanation is about one property and must say which"
+        );
+        // The coverage summary describes the run, not a property.
+        let report = AutoVerifyReport::default();
+        let cov = coverage_summary_note(&report);
+        assert_eq!(
+            cov.property, None,
+            "a model-level note must not claim a property — a consumer would group by it"
         );
     }
 

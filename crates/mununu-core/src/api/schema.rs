@@ -270,6 +270,9 @@ mod tests {
                 summary: "4 assertion(s)".into(),
                 detail: "d".into(),
                 items: vec!["i".into()],
+                // A model-level note carries no property — the schema fixture keeps that case so
+                // the field's OPTIONALITY is exercised, not just its presence.
+                property: None,
             }],
         };
 
