@@ -374,6 +374,13 @@
           "description": "`\"info\"` | `\"scope-caveat\"` | `\"soundness-caveat\"`.",
           "type": "string"
         },
+        "property": {
+          "description": "mununu#548 O-2 — the property this note is ABOUT, when it is about one.\n\nAbsent for a model-level note (reset-gating, control-slice, parameter overrides): those describe the lift, not a property.\n\n**Group notes by this, not by parsing `summary`.** The name used to appear only as a `\"<name>: \"` prefix inside the prose, so a consumer joining on it inherited two bugs: a property whose name prefixes another's (`sva_1` vs `sva_10`) matched the wrong note, and any rewording of the note's opening silently broke the join.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "summary": {
           "description": "One-line human summary.",
           "type": "string"

@@ -499,6 +499,7 @@ fn skip_over_cap_notes(report: &AutoVerifyReport, design_btor2: &str) -> Vec<Ver
             ),
             detail,
             items,
+            property: None,
         });
     }
     notes
@@ -509,6 +510,23 @@ fn skip_over_cap_notes(report: &AutoVerifyReport, design_btor2: &str) -> Vec<Ver
 /// abstention was the ITERATION budget (the reachable DIAMETER), not the bit cap — the sound lever
 /// here is a well-founded RANKING certificate (a `verify-recoverability` escalation / the
 /// recoverability rescue), not register reduction. Advisory only (a note, never a verdict change).
+/// Test-only re-exports so the note-invariant test in `adapter::slang::verify_auto` can assert
+/// across BOTH modules that emit per-property notes (mununu#548 O-2). Keeping the builders private
+/// otherwise is deliberate — they are planner internals.
+#[cfg(test)]
+pub(crate) fn diameter_bound_skip_note_for_test(name: &str, counter_log2: u32) -> VerificationNote {
+    diameter_bound_skip_note(name, counter_log2)
+}
+
+/// See [`diameter_bound_skip_note_for_test`].
+#[cfg(test)]
+pub(crate) fn bitblast_oom_skip_note_for_test(
+    name: &str,
+    cone_bits: Option<u32>,
+) -> VerificationNote {
+    bitblast_oom_skip_note(name, cone_bits)
+}
+
 fn diameter_bound_skip_note(name: &str, counter_log2: u32) -> VerificationNote {
     VerificationNote {
         kind: "skip-diameter-bound".into(),
@@ -528,6 +546,7 @@ fn diameter_bound_skip_note(name: &str, counter_log2: u32) -> VerificationNote {
                  property is a genuine diameter wall (an honest ⊥)."
             .into(),
         items: Vec::new(),
+        property: Some(name.to_string()),
     }
 }
 
@@ -564,6 +583,7 @@ fn bitblast_oom_skip_note(name: &str, cone_bits: Option<u32>) -> VerificationNot
                  property abstained — the rest of the run is unaffected."
             .into(),
         items: Vec::new(),
+        property: Some(name.to_string()),
     }
 }
 
@@ -755,6 +775,7 @@ fn routing_rationale_note(r: &RoutingRationale) -> VerificationNote {
             r.predicted_engine
         ),
         items: Vec::new(),
+        property: Some(r.property.clone()),
     }
 }
 
@@ -839,6 +860,7 @@ fn plan_accuracy_note(
                 .to_string()
         },
         items: divergences,
+        property: None,
     })
 }
 
