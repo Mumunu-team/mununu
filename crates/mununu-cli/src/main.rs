@@ -7363,7 +7363,135 @@ fn context_eval(args: ContextEvalArgs) -> Result<(), String> {
 /// translate it to the adapter IR, run the sound GR(1) synthesizer, print the
 /// verdict, and optionally write the controller SystemVerilog (`--emit-sv`).
 /// Currently supports TLSF sources (LTL assume/guarantee specs).
+/// Flags the `--controller-mode gr1` path cannot honour, each with what to do instead.
+///
+/// mununu#541 — the gr1 path reads `context`, `adapter` and `emit_sv`, and previously IGNORED every
+/// other flag of its own subcommand **silently**, exiting 0. rosf measured that as
+/// `--dump-json <FILE>` accepted, exit 0, and no file written. That is the accepted-and-ignored class
+/// mununu#499 and rosf#37 both landed on.
+///
+/// This table is the guard, and it is the durable half of the fix: adding a flag to
+/// `ContextSynthesizeArgs` without deciding whether gr1 honours it now fails
+/// `every_context_synth_flag_is_honoured_or_refused_on_the_gr1_path`, rather than silently joining
+/// the ignored set. A refusal is a better answer than a no-op, because a no-op that exits 0 is
+/// indistinguishable from success.
+const GR1_UNSUPPORTED_FLAGS: &[(&str, &str)] = &[
+    (
+        "--sidecar",
+        "gr1 synthesises from the TLSF spec's own assumptions and guarantees; there is no CLTS for a sidecar to annotate",
+    ),
+    (
+        "--mode",
+        "adapter mode selection applies to the projection path's realize step",
+    ),
+    ("--preprocessor", "the TLSF path has no preprocessor stage"),
+    (
+        "--formula",
+        "gr1 takes the STRUCTURED spec (assumptions + guarantees + signal directions), not a single mu-calculus formula",
+    ),
+    (
+        "--template",
+        "gr1 takes the structured spec, not a property template; a template names ONE formula to realize",
+    ),
+    (
+        "--template-arg",
+        "only meaningful with --template, which this path does not accept",
+    ),
+    (
+        "--no-partitions",
+        "partition refinement belongs to the projection path",
+    ),
+    (
+        "--minimize",
+        "no structural minimisation pass is implemented for the emitted Mealy module",
+    ),
+    (
+        "--counterexample",
+        "gr1 reports realizability; an unrealizability WITNESS is `btor2 game --objective recurrence`'s stall lasso, not this verb",
+    ),
+    (
+        "--deadlock-traces",
+        "the game has no deadlock notion — an env-blocked state is unrealizability",
+    ),
+    (
+        "--max-counter-traces",
+        "bounds a counterexample-trace count this path never produces; unrealizability is a verdict here, not a trace set",
+    ),
+    (
+        "--no-proof-obligations",
+        "proof obligations are emitted by the projection path",
+    ),
+    (
+        "--emit-dsl",
+        "gr1 emits a SystemVerilog Mealy controller, not CTXDSL; use --emit-sv",
+    ),
+    (
+        "--dump-diagnostics",
+        "the projection path's diagnostics record; gr1's are in --dump-json",
+    ),
+    ("--print-structure", "projection-path structure dump"),
+    (
+        "--print-ctxdsl",
+        "gr1 emits a SystemVerilog Mealy controller; there is no CTXDSL rendering of a game strategy to print",
+    ),
+    (
+        "--output-format",
+        "gr1's machine-readable output is --dump-json",
+    ),
+    ("--emit-native", "projection-path artifact"),
+    (
+        "--soundness-report",
+        "the projection path's abstraction-soundness record; gr1's soundness is the Piterman fixpoint itself",
+    ),
+];
+
+/// Which of [`GR1_UNSUPPORTED_FLAGS`] the user actually passed.
+///
+/// Only NON-DEFAULT values count, so a user who never mentions a flag is never told about it.
+fn gr1_rejected_flags(args: &ContextSynthesizeArgs) -> Vec<&'static (&'static str, &'static str)> {
+    let set: &[(&str, bool)] = &[
+        ("--sidecar", !args.sidecars.is_empty()),
+        ("--mode", args.mode.is_some()),
+        ("--preprocessor", args.preprocessor.is_some()),
+        ("--formula", args.formula.is_some()),
+        ("--template", args.template.is_some()),
+        ("--template-arg", !args.template_args.is_empty()),
+        ("--no-partitions", args.no_partitions),
+        ("--minimize", args.minimize),
+        ("--counterexample", args.counterexample),
+        ("--deadlock-traces", args.deadlock_traces),
+        ("--max-counter-traces", args.max_counter_traces.is_some()),
+        ("--no-proof-obligations", args.no_proof_obligations),
+        ("--emit-dsl", args.emit_dsl.is_some()),
+        ("--dump-diagnostics", args.dump_diagnostics.is_some()),
+        ("--print-structure", args.print_structure.is_some()),
+        ("--print-ctxdsl", args.print_ctxdsl.is_some()),
+        ("--output-format", args.output_format.is_some()),
+        ("--emit-native", args.emit_native.is_some()),
+        ("--soundness-report", args.soundness_report),
+    ];
+    set.iter()
+        .filter(|(_, passed)| *passed)
+        .filter_map(|(name, _)| GR1_UNSUPPORTED_FLAGS.iter().find(|(n, _)| n == name))
+        .collect()
+}
+
 fn context_synthesize_gr1(args: &ContextSynthesizeArgs) -> Result<(), String> {
+    // mununu#541 — refuse what this path cannot do, rather than accepting it and exiting 0.
+    let rejected = gr1_rejected_flags(args);
+    if !rejected.is_empty() {
+        let mut msg = String::from(
+            "--controller-mode gr1 cannot honour the following flag(s). They were previously \
+             accepted and silently ignored, which is why this is now an error:\n",
+        );
+        for (name, why) in &rejected {
+            msg.push_str(&format!("  {name} — {why}\n"));
+        }
+        return Err(msg);
+    }
+    // `--automaton` is the one exception, and it is structural rather than a decision: clap makes it
+    // REQUIRED for this subcommand, so refusing it would reject the documented invocation (rosf's
+    // own repro passes `--automaton placeholder`). It is warned about instead of refused.
     let source = std::fs::read_to_string(&args.context)
         .map_err(|e| format!("failed to read '{}': {e}", args.context.display()))?;
     if let Some(a) = args.adapter.as_deref()
@@ -7382,6 +7510,16 @@ fn context_synthesize_gr1(args: &ContextSynthesizeArgs) -> Result<(), String> {
     let synth = mununu_core::adapter::gr1_synth::synthesise_gr1_from_ir(&ir, "gr1_controller")?;
 
     println!("GR(1) controller synthesis ({}):", args.context.display());
+    if !args.automaton.is_empty() {
+        // Visible rather than silent, and a warning rather than an error, because clap REQUIRES the
+        // flag for this subcommand — see the note above `read_to_string`.
+        println!(
+            "  note: --automaton '{}' is ignored on the gr1 path (the game comes from the TLSF \
+             spec, not a named automaton); it is required by the subcommand, so it is warned about \
+             rather than refused",
+            args.automaton
+        );
+    }
     println!(
         "  Realizable: {}",
         if synth.realizable { "yes" } else { "no" }
@@ -7406,6 +7544,32 @@ fn context_synthesize_gr1(args: &ContextSynthesizeArgs) -> Result<(), String> {
         }
     } else if synth.realizable {
         println!("  (no controller emitted — see notes)");
+    }
+    // mununu#541 — the machine-readable contract rosf consumes. Written LAST so a write failure
+    // cannot mask a synthesis error, and reported so the file's absence is never silent: the defect
+    // this closes was `--dump-json` accepted, exit 0, and no file on disk.
+    if let Some(path) = args.dump_json.as_ref() {
+        let doc = serde_json::json!({
+            "verb": "context-synth",
+            "controller_mode": "gr1",
+            "source": args.context.display().to_string(),
+            "realizable": synth.realizable,
+            "game": {
+                "states": synth.n_game_states,
+                "monitor_bits": synth.n_monitor_bits,
+            },
+            "controller": {
+                "emitted": synth.controller_sv.is_some(),
+                "sv_lines": synth.controller_sv.as_ref().map(|sv| sv.lines().count()),
+                "written_to": args.emit_sv.as_ref().map(|p| p.display().to_string()),
+            },
+            "notes": synth.notes,
+        });
+        let text = serde_json::to_string_pretty(&doc)
+            .map_err(|e| format!("failed to serialise the synthesis report: {e}"))?;
+        std::fs::write(path, text)
+            .map_err(|e| format!("failed to write '{}': {e}", path.display()))?;
+        println!("  JSON report written to {}", path.display());
     }
     Ok(())
 }
@@ -8582,6 +8746,173 @@ mod controller_ctxdsl_tests {
         assert!(dsl.contains("transition "), "{dsl}");
         // The emitted controller CTXDSL is valid, re-loadable syntax.
         parse(&dsl).expect("emitted controller ctxdsl parses");
+    }
+}
+
+#[cfg(test)]
+mod gr1_flag_guard_tests {
+    use super::*;
+
+    /// mununu#541 — the guard that makes the accepted-and-ignored class fail loudly.
+    ///
+    /// The gr1 path reads `context`, `adapter` and `emit_sv`. Every OTHER flag of the subcommand must
+    /// be one of: honoured (`--dump-json`), refused by name (`GR1_UNSUPPORTED_FLAGS`), or the one
+    /// documented structural exception (`--automaton`, which clap requires). A flag in none of those
+    /// sets is silently ignored, which is the defect — `--dump-json <FILE>` accepted, exit 0, no file.
+    ///
+    /// **This list is deliberately hand-written rather than derived**, because deriving it from the
+    /// struct is what a reflective test would do and there is no reflection here: the point is that a
+    /// HUMAN adding a field has to come here and choose. If this test fails after you add a flag, the
+    /// fix is to decide — honour it or refuse it — not to add it to this list and move on.
+    #[test]
+    fn every_context_synth_flag_is_honoured_or_refused_on_the_gr1_path() {
+        // Every long flag `context synth` accepts, as of this commit.
+        const ALL_FLAGS: &[&str] = &[
+            "--sidecar",
+            "--adapter",
+            "--mode",
+            "--preprocessor",
+            "--formula",
+            "--template",
+            "--template-arg",
+            "--automaton",
+            "--no-partitions",
+            "--minimize",
+            "--extract-strategy",
+            "--controller-mode",
+            "--counterexample",
+            "--deadlock-traces",
+            "--max-counter-traces",
+            "--no-proof-obligations",
+            "--dump-json",
+            "--emit-dsl",
+            "--emit-sv",
+            "--dump-diagnostics",
+            "--print-structure",
+            "--print-ctxdsl",
+            "--output-format",
+            "--emit-native",
+            "--soundness-report",
+        ];
+        // Read and acted upon by the gr1 path.
+        const HONOURED: &[&str] = &["--adapter", "--controller-mode", "--emit-sv", "--dump-json"];
+        // Required by clap, so warned about rather than refused. See `context_synthesize_gr1`.
+        const STRUCTURAL: &[&str] = &["--automaton"];
+        // `--extract-strategy` is a legacy alias consumed by `parse_cli_controller_mode` BEFORE the
+        // gr1 dispatch, so it can never reach this path unset-but-meaningful.
+        const CONSUMED_BEFORE_DISPATCH: &[&str] = &["--extract-strategy"];
+
+        let refused: Vec<&str> = GR1_UNSUPPORTED_FLAGS.iter().map(|(n, _)| *n).collect();
+        let undecided: Vec<&&str> = ALL_FLAGS
+            .iter()
+            .filter(|f| {
+                !HONOURED.contains(f)
+                    && !STRUCTURAL.contains(f)
+                    && !CONSUMED_BEFORE_DISPATCH.contains(f)
+                    && !refused.contains(*f)
+            })
+            .collect();
+        assert!(
+            undecided.is_empty(),
+            "these `context synth` flags are neither honoured nor refused on the gr1 path, so they \
+             are SILENTLY IGNORED — decide for each one: {undecided:?}"
+        );
+
+        // And every refusal must carry a reason, because "unsupported" alone sends the reader back
+        // to the source to find out what to use instead.
+        for (name, why) in GR1_UNSUPPORTED_FLAGS {
+            assert!(
+                why.len() > 20,
+                "{name}'s refusal must say what to do instead, got {why:?}"
+            );
+        }
+    }
+
+    /// A flag the path cannot honour is an ERROR, not a no-op that exits 0.
+    #[test]
+    fn a_flag_the_gr1_path_cannot_honour_is_refused_by_name() {
+        let args = ContextSynthesizeArgs {
+            context: std::path::PathBuf::from("/nonexistent.tlsf"),
+            sidecars: Vec::new(),
+            adapter: Some("tlsf".into()),
+            mode: None,
+            preprocessor: None,
+            formula: None,
+            template: None,
+            template_args: Vec::new(),
+            automaton: "placeholder".into(),
+            no_partitions: false,
+            minimize: false,
+            extract_strategy: false,
+            controller_mode: Some("gr1".into()),
+            counterexample: false,
+            deadlock_traces: false,
+            max_counter_traces: None,
+            no_proof_obligations: false,
+            dump_json: None,
+            emit_dsl: Some(std::path::PathBuf::from("/tmp/x.ctxdsl")),
+            emit_sv: None,
+            dump_diagnostics: None,
+            print_structure: None,
+            print_ctxdsl: None,
+            output_format: None,
+            emit_native: None,
+            soundness_report: false,
+        };
+        let err = context_synthesize_gr1(&args).expect_err("--emit-dsl must be refused");
+        assert!(
+            err.contains("--emit-dsl") && err.contains("--emit-sv"),
+            "the refusal must name the flag AND what to use instead: {err}"
+        );
+        // It must fail on the flag, BEFORE trying to read the (nonexistent) source — otherwise the
+        // user sees an unrelated IO error and never learns the flag was the problem.
+        assert!(
+            !err.contains("nonexistent"),
+            "the flag check must precede the file read: {err}"
+        );
+    }
+
+    /// A run that passes only supported flags is not refused.
+    #[test]
+    fn the_guard_does_not_fire_on_a_clean_invocation() {
+        let args = ContextSynthesizeArgs {
+            context: std::path::PathBuf::from("/nonexistent.tlsf"),
+            sidecars: Vec::new(),
+            adapter: Some("tlsf".into()),
+            mode: None,
+            preprocessor: None,
+            formula: None,
+            template: None,
+            template_args: Vec::new(),
+            automaton: "placeholder".into(),
+            no_partitions: false,
+            minimize: false,
+            extract_strategy: false,
+            controller_mode: Some("gr1".into()),
+            counterexample: false,
+            deadlock_traces: false,
+            max_counter_traces: None,
+            no_proof_obligations: false,
+            dump_json: Some(std::path::PathBuf::from("/tmp/ok.json")),
+            emit_dsl: None,
+            emit_sv: None,
+            dump_diagnostics: None,
+            print_structure: None,
+            print_ctxdsl: None,
+            output_format: None,
+            emit_native: None,
+            soundness_report: false,
+        };
+        assert!(
+            gr1_rejected_flags(&args).is_empty(),
+            "nothing to refuse here"
+        );
+        // It then fails on the missing FILE, which is the honest next error.
+        let err = context_synthesize_gr1(&args).expect_err("the source does not exist");
+        assert!(
+            err.contains("nonexistent"),
+            "expected the file error, got {err}"
+        );
     }
 }
 
