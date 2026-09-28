@@ -112,6 +112,16 @@ pub struct MununuAnnotation {
     /// elsewhere into the enclosing module's source line).
     #[serde(default)]
     pub source_line: Option<u32>,
+    /// mununu#550 — an OPTIONAL author-given name, from the parenthesised form
+    /// `@mununu_guarantee(my_name) <body>`.
+    ///
+    /// **Never inferred.** The consumer who asked for this asked for it to be optional rather than
+    /// derived, and they were right: a name guessed from the formula text, the source line or the
+    /// enclosing module would change under edits that do not change the property, which is the
+    /// index-fragility this exists to remove wearing a different hat. Unnamed stays unnamed, and the
+    /// property keeps its positional `ann_<tag>_<index>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 impl MununuAnnotation {
@@ -120,11 +130,18 @@ impl MununuAnnotation {
             tag,
             value: value.into(),
             source_line: None,
+            name: None,
         }
     }
 
     pub fn with_line(mut self, line: u32) -> Self {
         self.source_line = Some(line);
+        self
+    }
+
+    /// Attach an author-given name (mununu#550).
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
         self
     }
 }
@@ -353,15 +370,53 @@ fn parse_line_comment_body(body: &str) -> Option<MununuAnnotation> {
     let trimmed = body.trim_start();
     let rest = trimmed.strip_prefix("@mununu_")?;
     // Either `<tag>` alone, or `<tag> <value>`.
-    let (tag_name, value) = match rest.find(|c: char| c.is_whitespace()) {
+    let (tag_token, value) = match rest.find(|c: char| c.is_whitespace()) {
         None => (rest.trim_end(), String::new()),
         Some(idx) => {
-            let tag_name = &rest[..idx];
+            let tag_token = &rest[..idx];
             let raw_value = rest[idx..].trim();
-            (tag_name, unquote(raw_value).to_string())
+            (tag_token, unquote(raw_value).to_string())
         }
     };
-    MununuTag::from_name(tag_name).map(|tag| MununuAnnotation::new(tag, value))
+    // mununu#550 — `<tag>(<name>)` carries an optional author-given name.
+    //
+    // The name is taken off the TAG token, not out of the value. A separator inside the value (a
+    // leading `name:`, say) would collide with the body: a mu-calculus formula can legitimately
+    // contain a colon since mununu#565 admitted bit-slice atoms (`wdata[7:0] == 8'hA5`), so any
+    // split rule over the value has a real ambiguity. The parentheses have none.
+    let (tag_name, name) = split_tag_name(tag_token);
+    let ann = MununuTag::from_name(tag_name).map(|tag| MununuAnnotation::new(tag, value))?;
+    Some(match name {
+        Some(n) => ann.with_name(n),
+        None => ann,
+    })
+}
+
+/// Split `guarantee(p_foo)` into `("guarantee", Some("p_foo"))`; `guarantee` into
+/// `("guarantee", None)`.
+///
+/// A malformed or empty parenthesis group leaves the token intact, so it fails `from_name` and the
+/// annotation is skipped with the same diagnostic as any other unrecognised tag — rather than being
+/// silently accepted under a truncated name. Before mununu#550 the whole `guarantee(p_foo)` token was
+/// handed to `from_name`, which returned `None`, and the annotation vanished with no message at all.
+fn split_tag_name(token: &str) -> (&str, Option<&str>) {
+    let Some(open) = token.find('(') else {
+        return (token, None);
+    };
+    if !token.ends_with(')') {
+        return (token, None);
+    }
+    let name = token[open + 1..token.len() - 1].trim();
+    // A name must be a plain identifier: it becomes a pin a consumer types on a command line.
+    let ok = !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-');
+    if ok {
+        (&token[..open], Some(name))
+    } else {
+        (token, None)
+    }
 }
 
 /// Strip surrounding double quotes from a string, if present.
@@ -411,6 +466,78 @@ pub fn extract_from_yosys_attributes(attrs: &serde_json::Value) -> Vec<MununuAnn
 
 #[cfg(test)]
 mod tests {
+    /// mununu#550 — the parenthesised name parses, and an unnamed annotation is unchanged.
+    #[test]
+    fn a_parenthesised_name_is_taken_off_the_tag() {
+        let named =
+            parse_line_comment_body("@mununu_guarantee(budget_bound) nu X. ((c <= 1) && [] X)")
+                .expect("named guarantee parses");
+        assert_eq!(named.tag, MununuTag::Guarantee);
+        assert_eq!(named.name.as_deref(), Some("budget_bound"));
+        assert_eq!(
+            named.value, "nu X. ((c <= 1) && [] X)",
+            "the name must not be left in the body"
+        );
+
+        let plain = parse_line_comment_body("@mununu_guarantee nu X. ((c <= 1) && [] X)")
+            .expect("unnamed guarantee still parses");
+        assert_eq!(plain.name, None, "unnamed stays unnamed — never inferred");
+        assert_eq!(plain.value, "nu X. ((c <= 1) && [] X)");
+    }
+
+    /// A formula containing a bit-slice must survive, which is why the name rides on the TAG.
+    ///
+    /// mununu#565 admitted slice atoms, so a body can legitimately contain `:` — any rule that split
+    /// a name out of the VALUE on a separator would have a real ambiguity with `wdata[7:0]`. This
+    /// test is the reason the parentheses were chosen over a `name:` prefix.
+    #[test]
+    fn a_bit_slice_in_the_body_is_not_mistaken_for_a_name() {
+        let a = parse_line_comment_body("@mununu_guarantee nu X. ((wdata[7:0] == 165) && [] X)")
+            .expect("slice body parses");
+        assert_eq!(a.name, None);
+        assert_eq!(a.value, "nu X. ((wdata[7:0] == 165) && [] X)");
+
+        let b = parse_line_comment_body(
+            "@mununu_guarantee(slice_hold) nu X. ((wdata[7:0] == 165) && [] X)",
+        )
+        .expect("named slice body parses");
+        assert_eq!(b.name.as_deref(), Some("slice_hold"));
+        assert_eq!(b.value, "nu X. ((wdata[7:0] == 165) && [] X)");
+    }
+
+    /// A malformed name group must NOT be silently accepted under a truncated tag.
+    ///
+    /// Before mununu#550 the whole `guarantee(x)` token went to `from_name`, returned `None`, and the
+    /// annotation vanished with no message. Leaving the token intact keeps that failure VISIBLE —
+    /// it is skipped with the normal unrecognised-tag path rather than half-accepted.
+    #[test]
+    fn a_malformed_name_leaves_the_tag_unrecognised_rather_than_guessing() {
+        for bad in [
+            "@mununu_guarantee() nu X. (p && [] X)",    // empty
+            "@mununu_guarantee(a b) nu X. (p && [] X)", // not an identifier
+            "@mununu_guarantee(oops nu X. (p && [] X)", // unclosed
+        ] {
+            assert!(
+                parse_line_comment_body(bad).is_none(),
+                "a malformed name must not produce an annotation: {bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_name_accepts_the_characters_a_pin_needs() {
+        for n in ["p_foo", "tier3.bound", "budget-bound", "P0"] {
+            let src = format!("@mununu_guarantee({n}) nu X. (p && [] X)");
+            assert_eq!(
+                parse_line_comment_body(&src)
+                    .and_then(|a| a.name)
+                    .as_deref(),
+                Some(n),
+                "{n} is a usable pin name"
+            );
+        }
+    }
+
     use super::*;
     use serde_json::json;
 

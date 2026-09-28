@@ -27,6 +27,7 @@ use crate::adapter::{AdapterError, AdapterErrorKind};
 pub mod expectations;
 pub mod extract;
 pub mod prim_stubs;
+pub(crate) mod report_consistency;
 pub mod translate;
 pub mod verify_auto;
 

@@ -192,10 +192,11 @@ pub fn augment_with_past_shadows(
                 // Free would be the more faithful reading of SVA, where `$past` is
                 // undefined before the first clock edges. It is not a choice this
                 // adapter can make: an init-less state cell means different things
-                // to different engines. The cube and exact engines default it to 0
-                // (`state_cell_init_values` / `initial_state_bdd`, per the
-                // `setundef -zero` power-up); the reachability portfolio leaves it
-                // FREE, per BTOR2's nondeterministic-init semantics. That is
+                // to different engines. The predicate cube defaults it to 0
+                // (`state_cell_init_values`); the exact engine (`initial_state_bdd`,
+                // since mununu#498) and the reachability portfolio both leave it
+                // FREE, per BTOR2's nondeterministic-init semantics — opposite
+                // soundness postures on cycle 0, audited for mununu#579. That is
                 // exactly the verdict DISAGREEMENT `reset_init::inject_zero_init`
                 // exists to close — and it cannot close this one, because it runs
                 // on the pre-augmentation BTOR2, before this appends the shadow. A

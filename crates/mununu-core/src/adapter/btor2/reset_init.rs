@@ -5,11 +5,23 @@
 //! to a next-state mux `next(q) = ite(rst, ResetValue, d)` with **no `init`
 //! line**: the *reset*, not a power-on value, establishes the start state.
 //! verify-auto then PINS the reset input to its inactive level (the "verified
-//! out of reset" discipline), so the mux never selects `ResetValue`, and both
-//! verify-auto engines default the init-less register to 0
-//! ([`crate::adapter::btor2::symbolic_bitblast`]'s `initial_state_bdd` and the
-//! predicate-cube path's `state_cell_init_values`, per the `setundef -zero`
-//! convention).
+//! out of reset" discipline), so the mux never selects `ResetValue`.
+//!
+//! ⚠️ **What the engines then assume about that register is NOT uniform.** Audited for mununu#579;
+//! this comment used to claim both default it to 0, which stopped being true at mununu#498:
+//!
+//! | path | init-less state cell | direction |
+//! |---|---|---|
+//! | predicate cube — `state_cell_init_values` | **0** | fewer start states ⇒ under-approx |
+//! | exact — `symbolic_bitblast::initial_state_bdd` | **free**, since mununu#498 | more ⇒ over-approx |
+//! | reachability portfolio (native BMC / SPACER / btormc / Pono) | **free** (BTOR2 semantics) | over-approx |
+//!
+//! Those are opposite soundness postures on cycle 0 within one portfolio run: the cube's 0 is
+//! unsound for `HOLDS`, the other two are unsound for `VIOLATED`. It is the leading hypothesis for
+//! mununu#577's pair of mutually-wrong verdicts, and converging them is tracked on mununu#579 —
+//! a behaviour change that needs its own measurement, not a comment fix. What this pass does is
+//! shrink the window: a register whose reset value is recoverable no longer reaches any of the three
+//! without an `init`.
 //!
 //! For a design whose valid initial state is established BY reset — e.g. an
 //! OpenTitan sparse-FSM whose `ResetValue` is a non-zero sparse encoding
@@ -325,11 +337,12 @@ fn reset_init_from_mux_arms(
 /// Complete the BTOR2 init to the `setundef -zero` power-on: append an `init … 0`
 /// line for every BITVEC state cell that carries no `init` line.
 ///
-/// **Why.** The cube and exact engines already default an init-less state cell to
-/// 0 (`state_cell_init_values` / `initial_state_bdd`, per the `setundef -zero`
-/// power-up). The reachability portfolio (native BMC / spacer / Boolector),
-/// however, leaves an init-less cell FREE — BTOR2's nondeterministic-init
-/// semantics. On a reset-less design with a *partial* `initial` (a Xilinx-style
+/// **Why.** The three evaluation paths do NOT agree about an init-less state cell (audited for
+/// mununu#579, and see this module's header): the predicate cube defaults it to 0
+/// (`state_cell_init_values`), while the exact engine (`initial_state_bdd`, since mununu#498) and
+/// the reachability portfolio (native BMC / spacer / Boolector) both leave it **FREE**, per BTOR2's
+/// nondeterministic-init semantics. Writing the 0 into the model makes all three agree, which is
+/// the point of this pass — it removes the disagreement rather than relying on any engine's default. On a reset-less design with a *partial* `initial` (a Xilinx-style
 /// wrapper: `initial state = IDLE` but an init-less status flop), that mismatch
 /// hands the portfolio a power-up counterexample the exact engine never sees — a
 /// verdict DISAGREEMENT (portfolio `VIOLATED` at 0 cells vs exact `HOLDS`).

@@ -127,6 +127,40 @@ endmodule
 mununu sv verify-auto wb_mem_client.sv
 ```
 
+### Naming an annotation property: `@mununu_guarantee(<name>)` (mununu#550)
+
+> Source of truth: [`split_tag_name`](../crates/mununu-core/src/mununu_annotations/mod.rs) + [`scan_annotation_properties`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) — surface: (CLI+API)
+
+An annotation property is named `ann_guarantee_<index>` by position, so inserting one mid-file
+re-points every pin below it. mununu#544 fixed that for SVA assertions by giving them a `label`;
+this gives annotations the same thing, **optionally**:
+
+```systemverilog
+// @mununu_guarantee(tier3_recover) nu Y.((mu X.((st_q == 0) || <> X)) && [] Y)
+// @mununu_guarantee               nu X. ((drop_q <= 1) && [] X)
+```
+
+The name becomes the property's **label**, which `--expect` already matches either way, and the
+positional `ann_guarantee_<index>` is kept — so an existing index pin does not break when a
+neighbour gains a name.
+
+**Optional, never inferred.** An unnamed annotation stays unnamed. A name derived from the formula
+text, the source line, or the enclosing module would change under edits that do not change the
+property — which is the index-fragility this removes, wearing a different hat.
+
+**Why the name rides on the tag and not the body.** A mu-calculus body can legitimately contain a
+colon since bit-slice atoms were admitted (`wdata[7:0] == 8'hA5`), so a `name:` prefix inside the
+value would have a real ambiguity. The parentheses have none. A name may contain
+`[A-Za-z0-9_.-]`; a malformed group (empty, containing a space, unclosed) leaves the tag
+unrecognised and the annotation is skipped with a message, rather than being half-accepted under a
+truncated name.
+
+**A duplicate name is refused**, with the other property named in the message. The expectation
+lookup is a `find()`, so two properties answering to one pin would make `--expect <name>` silently
+match only the first. This is deliberately stricter than SVA labels, which may legally repeat — two
+asserts inside one labelled `begin…end` inherit the same label, so refusing those would reject valid
+SystemVerilog. An annotation name is author-chosen, one per annotation, and has no such excuse.
+
 ## No-sidecar SystemVerilog verification: `sv verify-auto`
 
 > Source of truth: [`verify_auto`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L1537) — surface: (CLI+API+UI)
