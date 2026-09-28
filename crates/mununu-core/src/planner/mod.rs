@@ -596,8 +596,31 @@ pub struct RoutingRationale {
     pub why: String,
 }
 
-/// The DECISION TABLE — the measured engine-routing classification, made explicit. Pure function of
-/// the facts; returns `(predicted_engine, why)`. `"⊥"` means no engine is predicted to decide it.
+/// The DECISION TABLE — the engine-ROUTING classification, made explicit. Pure function of the
+/// facts; returns `(routed_engine, why)`. `"⊥"` means no engine is routed to it at all.
+///
+/// # ⚠️ This routes; it does not predict decidability (mununu#548 cause (b))
+///
+/// `fits` answers *"may the exact engine be admitted at all"*, *not* *"will it converge"*. Two
+/// reasons it cannot answer the second, and the rationale strings below say "admissible" rather
+/// than "decides" because of them:
+///
+/// 1. **With no `MUNUNU_BDD_MAX_BITS`, the comparison is a tautology over the whole default band.**
+///    The cap is [`effective_bitblast_cap`](crate::adapter::btor2::symbolic_bitblast)'s
+///    `max(40, min(cone, 192))`, so for every cone between 40 and 192 bits **`cap == cone_bits` by
+///    construction** and `fits` is unconditionally true. `fits` is really `cone_bits <= 192`.
+///    monono's reported case — a 127-bit cone against a "127-bit cap", predicted decidable, outcome
+///    ⊥ — is the norm across that band, not a boundary case.
+/// 2. **Width does not predict convergence, and this is measured.** `AUTO_CAP_CEILING`'s own doc
+///    records `twocount32`: a 65-bit cone, smaller than i2c's decidable 173, whose `EF` fixpoint
+///    grinds ~1M preimages for ≈132 minutes. It concludes *"the cap can NOT be the tractability
+///    gate — the `ExactModel::deadline` wall-clock backstop is"* — and that backstop has been **off
+///    by default since mununu#553**, because a wall clock makes the verdict host-dependent. So the
+///    gate its own source names as the real one no longer runs unless asked.
+///
+/// What actually bounds convergence is `MUNUNU_BDD_ITER_BUDGET` and `MUNUNU_BDD_FIXPOINT_NODES`,
+/// neither of which is a function of cone width — deciders and non-deciders overlap 6.2× in node
+/// count. Treat every string below as *"this is the engine we try first"*.
 fn predict_engine(
     class: crate::mu_calculus::PropertyClass,
     cone_bits: u32,
@@ -605,6 +628,7 @@ fn predict_engine(
     diameter_log2: Option<u32>,
 ) -> (&'static str, String) {
     use crate::mu_calculus::PropertyClass;
+    // Admissibility, not tractability — see this function's doc.
     let fits = cone_bits <= cap;
     match class {
         PropertyClass::Safety | PropertyClass::Reachability => {
@@ -612,8 +636,9 @@ fn predict_engine(
                 (
                     "exact-symbolic",
                     format!(
-                        "safety/reachability, cone {cone_bits}b ≤ {cap}b cap → exact decides \
-                         `bad`-reachability definitely"
+                        "safety/reachability, cone {cone_bits}b ≤ {cap}b cap → exact is \
+                         ADMISSIBLE for `bad`-reachability; convergence is set by the iteration / \
+                         node budgets, which the width does not predict"
                     ),
                 )
             } else {
@@ -631,7 +656,8 @@ fn predict_engine(
                 "exact-symbolic",
                 format!(
                     "recoverability/liveness, small control cone {cone_bits}b ≤ {cap}b cap, no wide \
-                     counter → exact decides the branching fixpoint"
+                     counter → exact is ADMISSIBLE for the branching fixpoint (no counter-shaped \
+                     diameter found; convergence still rests on the iteration budget)"
                 ),
             ),
             (true, Some(w)) => (
@@ -653,7 +679,10 @@ fn predict_engine(
         },
         PropertyClass::Mixed | PropertyClass::Propositional => (
             "exact-symbolic",
-            format!("{class:?} property, cone {cone_bits}b → exact-symbolic decides directly"),
+            format!(
+                "{class:?} property, cone {cone_bits}b → routed to exact-symbolic (admissible; \
+                 convergence is a budget question, not a width one)"
+            ),
         ),
     }
 }
@@ -729,10 +758,15 @@ fn routing_rationale_note(r: &RoutingRationale) -> VerificationNote {
     }
 }
 
-/// P2.2d self-check — compare each property's PREDICTED decidability to its ACTUAL outcome (a
-/// property with per-property engine provenance is not recorded, so the check is predicted-decidable
-/// vs actually-decided: `Holds`/`Violated` = decided; `Unknown`/`Skipped` = not). A telemetry
-/// signal (and a regression guard against decision-table drift), never an error.
+/// P2.2d self-check — tally each property's ROUTING against its ACTUAL outcome
+/// (`Holds`/`Violated` = decided; `Unknown`/`Skipped` = not). A telemetry signal, and a regression
+/// guard against decision-table drift, never an error.
+///
+/// ⚠️ **Not a scored prediction** (mununu#548 cause (b)). It once reported "predicted … (decidable)",
+/// which let a run contradict itself: a consumer read `predicted exact-symbolic (decidable),
+/// outcome ⊥` with no way to tell whether the note or the verdict was wrong. Neither was — the
+/// routing is admissibility on cone width, and width does not bound convergence. See
+/// [`predict_engine`]'s doc for the measurements.
 fn plan_accuracy_note(
     rationales: &[RoutingRationale],
     report: &AutoVerifyReport,
@@ -748,22 +782,27 @@ fn plan_accuracy_note(
             continue;
         };
         total += 1;
-        let predicted_decidable = r.predicted_engine != "⊥";
+        // mununu#548 cause (b) — `routed` is NOT a decidability prediction. It used to be reported
+        // as "(decidable)", which made a run contradict itself: a consumer read
+        // `predicted exact-symbolic (decidable), outcome ⊥` and could not tell whether the note or
+        // the verdict was wrong. Neither was: the routing was admissibility, and it was being
+        // printed as a forecast. See `predict_engine`'s doc for why width cannot forecast this.
+        let routed_to_an_engine = r.predicted_engine != "⊥";
         let actually_decided = matches!(
             prop.outcome,
             VerifyOutcome::Holds | VerifyOutcome::Violated { .. }
         );
-        if predicted_decidable == actually_decided {
+        if routed_to_an_engine == actually_decided {
             matched += 1;
         } else {
             divergences.push(format!(
-                "{}: predicted `{}` ({}), outcome {}",
+                "{}: routed to `{}` ({}), outcome {}",
                 r.property,
                 r.predicted_engine,
-                if predicted_decidable {
-                    "decidable"
+                if routed_to_an_engine {
+                    "admissible — not a forecast"
                 } else {
-                    "⊥"
+                    "no engine routed"
                 },
                 match &prop.outcome {
                     VerifyOutcome::Holds => "HOLDS".to_string(),
@@ -781,16 +820,22 @@ fn plan_accuracy_note(
         kind: "plan-accuracy".into(),
         level: NoteLevel::Info,
         summary: format!(
-            "planner cost prediction: {matched}/{total} properties matched (predicted-decidable vs \
-             actually-decided)"
+            "planner routing vs outcome: {matched}/{total} properties were decided by a routed \
+             engine (routing is ADMISSIBILITY, not a decidability forecast)"
         ),
         detail: if divergences.is_empty() {
-            "Every property's predicted routing matched its outcome — the cost model's decision \
-             table agrees with the engines on this design."
+            "Every property routed to an engine was decided by one. Note this is a routing-vs-\
+             outcome tally, NOT a scored prediction: a cone within the bit cap means the exact \
+             engine may be ADMITTED, never that it converges — convergence is bounded by \
+             MUNUNU_BDD_ITER_BUDGET and MUNUNU_BDD_FIXPOINT_NODES, and deciders and non-deciders \
+             overlap 6.2x in node count."
                 .to_string()
         } else {
-            "Divergences below (a telemetry signal, not an error — the prediction is a hint the \
-             engines are free to beat)."
+            "Divergences below — telemetry, never an error. A property routed to an engine that \
+             returned ⊥ is NOT a failed prediction, because no decidability was predicted: the \
+             routing says the engine was admissible on cone width, and width does not bound \
+             convergence (a 65-bit free counter grinds ~1M preimages while a 173-bit control cone \
+             decides). Read the property's own `bottom_reason` for why it did not converge."
                 .to_string()
         },
         items: divergences,
@@ -1187,9 +1232,11 @@ mod tests {
         assert!(note.summary.contains("in-cone counter") && note.summary.contains("ranking"));
     }
 
+    /// A property routed to an engine that did not decide it is recorded as a divergence — and the
+    /// wording must NOT call it a failed decidability prediction (mununu#548 cause (b)).
     #[test]
-    fn plan_accuracy_flags_a_predicted_decidable_that_did_not_decide() {
-        // Predicted decidable (exact) but the property came back Skipped ⇒ a 0/1 divergence — a
+    fn plan_accuracy_records_a_routed_property_that_did_not_decide() {
+        // Routed to exact (admissible) but the property came back Skipped ⇒ a 0/1 divergence — a
         // telemetry signal, never an error.
         let rationales = vec![RoutingRationale {
             property: "p_drain".into(),
@@ -1205,5 +1252,39 @@ mod tests {
         assert_eq!(note.kind, "plan-accuracy");
         assert!(note.summary.contains("0/1"), "summary: {}", note.summary);
         assert_eq!(note.items.len(), 1, "one divergence recorded");
+        assert!(
+            !note.items[0].contains("decidable)"),
+            "a routed property must not be reported as a decidability FORECAST — that phrasing is \
+             what made a run contradict itself for monono: {}",
+            note.items[0]
+        );
+        assert!(
+            note.items[0].contains("admissible"),
+            "it should say what the routing actually claimed: {}",
+            note.items[0]
+        );
+    }
+
+    /// mununu#548 cause (b) — the in-cap rationale must not promise that exact DECIDES.
+    ///
+    /// With no `MUNUNU_BDD_MAX_BITS` the cap is `max(40, min(cone, 192))`, so for any cone in
+    /// 40..=192 the cap EQUALS the cone and `cone <= cap` is true by construction. The old wording
+    /// turned that tautology into "exact decides `bad`-reachability definitely" — a confident
+    /// forecast derived from a comparison that cannot fail.
+    #[test]
+    fn an_in_cap_cone_is_called_admissible_not_decidable() {
+        use crate::mu_calculus::PropertyClass;
+        // monono's reported shape: a 127-bit cone whose auto-cap is itself 127.
+        let (engine, why) = predict_engine(PropertyClass::Safety, 127, 127, None);
+        assert_eq!(engine, "exact-symbolic", "routing is unchanged");
+        assert!(
+            why.contains("ADMISSIBLE"),
+            "the rationale must claim admissibility: {why}"
+        );
+        assert!(
+            !why.contains("definitely"),
+            "and must NOT claim the engine decides definitely — the comparison it rests on is \
+             `127 <= 127`, true by construction: {why}"
+        );
     }
 }
