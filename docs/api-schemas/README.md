@@ -21,6 +21,23 @@ Each `*.schema.json` file is a JSON Schema (Draft-07) derived directly from the 
 | [`sv-verify-auto-request.schema.json`](sv-verify-auto-request.schema.json) | `POST /api/v1/sv/verify-auto` | Request body |
 | [`sv-verify-auto-response.schema.json`](sv-verify-auto-response.schema.json) | `POST /api/v1/sv/verify-auto` | Response body |
 
+### `sv` property verbs — CLI reports (mununu#541)
+
+These pin **stdout**, not an HTTP body. rosf drives mununu as a subprocess, so the document it parses
+is what the CLI prints under `--json`; publishing the shape here puts it under the same drift
+detector as the wire types. Before mununu#541 these were inline `serde_json::json!` literals with no
+type behind them — a schema-less document is the transcript in a different font.
+
+| File | Command | Direction |
+|------|---------|-----------|
+| [`sv-verify-recoverability-report.schema.json`](sv-verify-recoverability-report.schema.json) | `mununu sv verify-recoverability --json` | stdout |
+| [`sv-verify-liveness-report.schema.json`](sv-verify-liveness-report.schema.json) | `mununu sv verify-liveness --json` | stdout |
+| [`sv-verify-liveness-all-report.schema.json`](sv-verify-liveness-all-report.schema.json) | `mununu sv verify-liveness-all --json` | stdout |
+
+⚠️ An **error** is also a JSON document under `--json` (`{verb, file, error}`) and is deliberately
+not schema-pinned: it is a failure envelope, not a report, and pinning it would invite a consumer to
+branch on its shape instead of on the exit code.
+
 ### BTOR2-direct property verbs
 
 | File | Endpoint | Direction |

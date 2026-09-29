@@ -32,8 +32,9 @@ use super::models::{
     Btor2VerifyLivenessRequest, Btor2VerifyLivenessResponse,
     Btor2VerifyLivenessUnderFairnessRequest, Btor2VerifyRecoverabilityRequest,
     Btor2VerifyRecoverabilityResponse, Btor2VerifyRequest, Btor2VerifyResponse, SvCheckFsmRequest,
-    SvVerifyAutoRequest, SvVerifyAutoResponse, SvVerifyLivenessAllRequest, SvVerifyLivenessRequest,
-    SvVerifyRecoverabilityRequest, SvVerifyRequest,
+    SvVerifyAutoRequest, SvVerifyAutoResponse, SvVerifyLivenessAllReport,
+    SvVerifyLivenessAllRequest, SvVerifyLivenessReport, SvVerifyLivenessRequest,
+    SvVerifyRecoverabilityReport, SvVerifyRecoverabilityRequest, SvVerifyRequest,
 };
 
 /// JSON Schema (Draft 2019-09) for `POST /api/v1/sv/verify-auto` request bodies.
@@ -46,6 +47,28 @@ pub fn sv_verify_auto_request_schema() -> serde_json::Value {
 pub fn sv_verify_auto_response_schema() -> serde_json::Value {
     serde_json::to_value(schema_for!(SvVerifyAutoResponse))
         .expect("SvVerifyAutoResponse schema must serialise as JSON")
+}
+
+/// mununu#541 — JSON Schema for the `sv verify-recoverability` CLI report (`--json`).
+///
+/// CLI-shaped rather than an HTTP body: rosf drives mununu as a SUBPROCESS, so the document it
+/// parses is stdout. Publishing it here puts it under the same drift detector as the HTTP wire
+/// types, which is the point — an ad-hoc `json!` literal is exactly what it replaces.
+pub fn sv_verify_recoverability_report_schema() -> serde_json::Value {
+    serde_json::to_value(schema_for!(SvVerifyRecoverabilityReport))
+        .expect("SvVerifyRecoverabilityReport schema must serialise as JSON")
+}
+
+/// mununu#541 — JSON Schema for the `sv verify-liveness` CLI report (`--json`).
+pub fn sv_verify_liveness_report_schema() -> serde_json::Value {
+    serde_json::to_value(schema_for!(SvVerifyLivenessReport))
+        .expect("SvVerifyLivenessReport schema must serialise as JSON")
+}
+
+/// mununu#541 — JSON Schema for the `sv verify-liveness-all` CLI report (`--json`).
+pub fn sv_verify_liveness_all_report_schema() -> serde_json::Value {
+    serde_json::to_value(schema_for!(SvVerifyLivenessAllReport))
+        .expect("SvVerifyLivenessAllReport schema must serialise as JSON")
 }
 
 /// JSON Schema for `POST /api/v1/btor2/verify` request bodies.
@@ -458,6 +481,30 @@ mod tests {
         drift_check(
             "docs/api-schemas/sv-verify-auto-response.schema.json",
             &sv_verify_auto_response_schema(),
+        );
+    }
+
+    #[test]
+    fn api_schema_drift_sv_verify_recoverability_report() {
+        drift_check(
+            "docs/api-schemas/sv-verify-recoverability-report.schema.json",
+            &sv_verify_recoverability_report_schema(),
+        );
+    }
+
+    #[test]
+    fn api_schema_drift_sv_verify_liveness_report() {
+        drift_check(
+            "docs/api-schemas/sv-verify-liveness-report.schema.json",
+            &sv_verify_liveness_report_schema(),
+        );
+    }
+
+    #[test]
+    fn api_schema_drift_sv_verify_liveness_all_report() {
+        drift_check(
+            "docs/api-schemas/sv-verify-liveness-all-report.schema.json",
+            &sv_verify_liveness_all_report_schema(),
         );
     }
 

@@ -1,0 +1,56 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "SvLivenessResponseView": {
+      "description": "One response of a `verify-liveness-all` conjunction (mununu#541).",
+      "properties": {
+        "decided_by": {
+          "description": "Which engines reached a conclusion for this conjunct.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "response": {
+          "description": "The response as written on the command line (`\"req == 1 => ack == 1\"`).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "decided_by",
+        "response"
+      ],
+      "type": "object"
+    }
+  },
+  "description": "mununu#541 — the `sv verify-liveness-all` CLI report, schema-pinned.",
+  "properties": {
+    "file": {
+      "description": "The design file as given on the command line.",
+      "type": "string"
+    },
+    "property": {
+      "description": "The conjunction, rendered as one property string.",
+      "type": "string"
+    },
+    "responses": {
+      "description": "Per-response provenance, so a failing conjunct is identifiable rather than being hidden behind one aggregate verdict.",
+      "items": {
+        "$ref": "#/definitions/SvLivenessResponseView"
+      },
+      "type": "array"
+    },
+    "verdict": {
+      "description": "The verdict over the WHOLE conjunction — `holds` only if every response does.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "file",
+    "property",
+    "responses",
+    "verdict"
+  ],
+  "title": "SvVerifyLivenessAllReport",
+  "type": "object"
+}
