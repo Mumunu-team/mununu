@@ -3540,16 +3540,18 @@ fn btor2_verify_liveness_under_fairness(
 fn per_response_decided_by(
     responses: &[String],
     outcomes: &[mununu_core::adapter::reach_portfolio::ReachOutcome],
-) -> Vec<serde_json::Value> {
+) -> Vec<mununu_core::api::models::SvLivenessResponseView> {
     responses
         .iter()
         .zip(outcomes.iter())
-        .map(|(r, o)| {
-            serde_json::json!({
-                "response": r.trim(),
-                "decided_by": o.reachable_by.iter().chain(o.unreachable_by.iter())
-                    .collect::<Vec<_>>(),
-            })
+        .map(|(r, o)| mununu_core::api::models::SvLivenessResponseView {
+            response: r.trim().to_string(),
+            decided_by: o
+                .reachable_by
+                .iter()
+                .chain(o.unreachable_by.iter())
+                .map(|e| e.to_string())
+                .collect(),
         })
         .collect()
 }
@@ -6110,14 +6112,18 @@ fn sv_verify_liveness_impl(args: SvVerifyLivenessArgs) -> Result<(), String> {
     let file = args.lift.primary_display();
     let (verdict, outcome) =
         core_sv_verify_liveness(&read_sv_lift(&args.lift)?, &args.request, &args.grant)?;
-    let summary = serde_json::json!({
-        "file": file,
-        "property": format!("AG(({}) -> AF ({}))", args.request, args.grant),
-        "verdict": PropertyVerdict::from(verdict).as_str(),
-        "decided_by": outcome.reachable_by.iter().chain(outcome.unreachable_by.iter())
-            .collect::<Vec<_>>(),
-    });
-    print_json_summary(&summary)?;
+    let report = mununu_core::api::models::SvVerifyLivenessReport {
+        file,
+        property: format!("AG(({}) -> AF ({}))", args.request, args.grant),
+        verdict: PropertyVerdict::from(verdict).as_str().to_string(),
+        decided_by: outcome
+            .reachable_by
+            .iter()
+            .chain(outcome.unreachable_by.iter())
+            .map(|e| e.to_string())
+            .collect(),
+    };
+    print_typed_report(&report)?;
     ci_gate_exit(PropertyVerdict::from(verdict).as_str(), args.ci.fail_on);
     Ok(())
 }
@@ -6148,13 +6154,13 @@ fn sv_verify_liveness_all_impl(args: SvVerifyLivenessAllArgs) -> Result<(), Stri
     let file = args.lift.primary_display();
     let (verdict, outcomes) =
         core_sv_verify_liveness_all(&read_sv_lift(&args.lift)?, &args.responses)?;
-    let summary = serde_json::json!({
-        "file": file,
-        "property": response_conjunction_property(&args.responses),
-        "verdict": PropertyVerdict::from(verdict).as_str(),
-        "responses": per_response_decided_by(&args.responses, &outcomes),
-    });
-    print_json_summary(&summary)?;
+    let report = mununu_core::api::models::SvVerifyLivenessAllReport {
+        file,
+        property: response_conjunction_property(&args.responses),
+        verdict: PropertyVerdict::from(verdict).as_str().to_string(),
+        responses: per_response_decided_by(&args.responses, &outcomes),
+    };
+    print_typed_report(&report)?;
     ci_gate_exit(PropertyVerdict::from(verdict).as_str(), args.ci.fail_on);
     Ok(())
 }
@@ -6192,10 +6198,15 @@ fn sv_verify_recoverability_impl(args: SvVerifyRecoverabilityArgs) -> Result<(),
     let config_specs = parse_config_value_specs(&args.config_values)?;
     let lift = read_sv_lift(&args.lift)?;
 
-    let mut summary = serde_json::json!({
-        "file": file,
-        "property": recoverability_property_str(&args.target),
-    });
+    // mununu#541 — build the TYPED report, not an inline literal. The struct is what `schemars`
+    // derives the published schema from, so the document a consumer parses and the schema they
+    // validate against cannot drift apart.
+    let mut report = mununu_core::api::models::SvVerifyRecoverabilityReport {
+        file: file.clone(),
+        property: recoverability_property_str(&args.target),
+        verdict: String::new(),
+        refinement: None,
+    };
     let verdict = if args.refine || !config_specs.is_empty() || args.discover_assumptions {
         let (verdict, refinement) = sv_verify_recoverability_refined(
             &lift,
@@ -6204,15 +6215,16 @@ fn sv_verify_recoverability_impl(args: SvVerifyRecoverabilityArgs) -> Result<(),
             &config_specs,
             args.discover_assumptions,
         )?;
-        summary["refinement"] =
-            serde_json::to_value(&refinement).map_err(|e| format!("serialize refinement: {e}"))?;
+        report.refinement = Some(
+            serde_json::to_value(&refinement).map_err(|e| format!("serialize refinement: {e}"))?,
+        );
         verdict
     } else {
         sv_verify_recoverability_with_predicates(&lift, &args.target, &extra)?
     };
-    summary["verdict"] = serde_json::Value::String(verdict.as_str().to_string());
+    report.verdict = verdict.as_str().to_string();
 
-    print_json_summary(&summary)?;
+    print_typed_report(&report)?;
     ci_gate_exit(verdict.as_str(), args.ci.fail_on);
     Ok(())
 }
@@ -6429,6 +6441,19 @@ fn sv_mutate(args: SvMutateArgs) -> Result<(), String> {
 }
 
 /// Pretty-print a JSON summary to stdout.
+/// mununu#541 — print a SCHEMA-PINNED report.
+///
+/// Peer of [`print_json_summary`], which takes a `serde_json::Value` and therefore accepts whatever
+/// an inline literal happened to build. This one takes a type, so the document a consumer parses is
+/// the same shape `schemars` publishes under `docs/api-schemas/` and the drift detector guards.
+fn print_typed_report<T: serde::Serialize>(report: &T) -> Result<(), String> {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(report).map_err(|e| format!("serialize report: {e}"))?
+    );
+    Ok(())
+}
+
 fn print_json_summary(summary: &serde_json::Value) -> Result<(), String> {
     println!(
         "{}",

@@ -2016,6 +2016,72 @@ impl From<&crate::adapter::slang::verify_auto::AutoVerifyReport> for SvVerifyAut
     }
 }
 
+/// mununu#541 — the `sv verify-recoverability` CLI report, schema-pinned.
+///
+/// # Why these exist as types
+///
+/// All three `sv` property verbs printed JSON before this — built inline with `serde_json::json!`,
+/// so the field set was whatever the format string happened to say that week. rosf consumes mununu
+/// as a subprocess and asked for *"the schema-pinned document, never the transcript"*; a document
+/// with no type behind it is the transcript in a different font.
+///
+/// Typed here rather than in the CLI so the **same** shape is what `schemars` derives, what
+/// `docs/api-schemas/` publishes, and what the drift detector guards — the arrangement
+/// `SvVerifyAutoResponse` already has. A field added to the struct without regenerating the schema
+/// fails CI.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct SvVerifyRecoverabilityReport {
+    /// The design file as given on the command line.
+    pub file: String,
+    /// The property, rendered — e.g. `"AG EF (state == 0)"`.
+    pub property: String,
+    /// `holds` | `violated` | `unknown` | `skipped`, the same vocabulary `sv verify-auto` uses.
+    pub verdict: String,
+    /// Present only under `--refine` / `--config-values` / `--discover-assumptions`: the
+    /// refinement record. Free-form because `VerdictRefinement` is its own evolving surface —
+    /// pinning its internals here would couple two schemas that change for different reasons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refinement: Option<serde_json::Value>,
+}
+
+/// mununu#541 — the `sv verify-liveness` CLI report, schema-pinned. See
+/// [`SvVerifyRecoverabilityReport`] for why these are types.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct SvVerifyLivenessReport {
+    /// The design file as given on the command line.
+    pub file: String,
+    /// The property, rendered — e.g. `"AG((req == 1) -> AF (ack == 1))"`.
+    pub property: String,
+    /// `holds` | `violated` | `unknown` | `skipped`.
+    pub verdict: String,
+    /// Which portfolio engines reached a conclusion. Empty when none did, which is not the same as
+    /// the property being undecided for a modelling reason — read `verdict` for that.
+    pub decided_by: Vec<String>,
+}
+
+/// mununu#541 — the `sv verify-liveness-all` CLI report, schema-pinned.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct SvVerifyLivenessAllReport {
+    /// The design file as given on the command line.
+    pub file: String,
+    /// The conjunction, rendered as one property string.
+    pub property: String,
+    /// The verdict over the WHOLE conjunction — `holds` only if every response does.
+    pub verdict: String,
+    /// Per-response provenance, so a failing conjunct is identifiable rather than being hidden
+    /// behind one aggregate verdict.
+    pub responses: Vec<SvLivenessResponseView>,
+}
+
+/// One response of a `verify-liveness-all` conjunction (mununu#541).
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct SvLivenessResponseView {
+    /// The response as written on the command line (`"req == 1 => ack == 1"`).
+    pub response: String,
+    /// Which engines reached a conclusion for this conjunct.
+    pub decided_by: Vec<String>,
+}
+
 /// One provenance note (mirrors
 /// [`crate::adapter::slang::verify_auto::VerificationNote`]).
 #[derive(Debug, Serialize, schemars::JsonSchema)]

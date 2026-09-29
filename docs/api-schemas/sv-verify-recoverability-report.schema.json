@@ -1,0 +1,28 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "mununu#541 — the `sv verify-recoverability` CLI report, schema-pinned.\n\n# Why these exist as types\n\nAll three `sv` property verbs printed JSON before this — built inline with `serde_json::json!`, so the field set was whatever the format string happened to say that week. rosf consumes mununu as a subprocess and asked for *\"the schema-pinned document, never the transcript\"*; a document with no type behind it is the transcript in a different font.\n\nTyped here rather than in the CLI so the **same** shape is what `schemars` derives, what `docs/api-schemas/` publishes, and what the drift detector guards — the arrangement `SvVerifyAutoResponse` already has. A field added to the struct without regenerating the schema fails CI.",
+  "properties": {
+    "file": {
+      "description": "The design file as given on the command line.",
+      "type": "string"
+    },
+    "property": {
+      "description": "The property, rendered — e.g. `\"AG EF (state == 0)\"`.",
+      "type": "string"
+    },
+    "refinement": {
+      "description": "Present only under `--refine` / `--config-values` / `--discover-assumptions`: the refinement record. Free-form because `VerdictRefinement` is its own evolving surface — pinning its internals here would couple two schemas that change for different reasons."
+    },
+    "verdict": {
+      "description": "`holds` | `violated` | `unknown` | `skipped`, the same vocabulary `sv verify-auto` uses.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "file",
+    "property",
+    "verdict"
+  ],
+  "title": "SvVerifyRecoverabilityReport",
+  "type": "object"
+}

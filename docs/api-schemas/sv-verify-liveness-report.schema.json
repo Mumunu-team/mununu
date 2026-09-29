@@ -1,0 +1,33 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "mununu#541 — the `sv verify-liveness` CLI report, schema-pinned. See [`SvVerifyRecoverabilityReport`] for why these are types.",
+  "properties": {
+    "decided_by": {
+      "description": "Which portfolio engines reached a conclusion. Empty when none did, which is not the same as the property being undecided for a modelling reason — read `verdict` for that.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "file": {
+      "description": "The design file as given on the command line.",
+      "type": "string"
+    },
+    "property": {
+      "description": "The property, rendered — e.g. `\"AG((req == 1) -> AF (ack == 1))\"`.",
+      "type": "string"
+    },
+    "verdict": {
+      "description": "`holds` | `violated` | `unknown` | `skipped`.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "decided_by",
+    "file",
+    "property",
+    "verdict"
+  ],
+  "title": "SvVerifyLivenessReport",
+  "type": "object"
+}
