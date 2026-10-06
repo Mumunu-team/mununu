@@ -2341,12 +2341,9 @@ struct EvalCtx {
 }
 
 impl EvalCtx {
-    fn new(f: &Formula) -> Self {
+    fn new(f: &Formula, reuse: bool) -> Self {
         use crate::mu_calculus::NodeId;
         let n = f.nodes().len();
-        let reuse = std::env::var("MUNUNU_BDD_FIXPOINT_REUSE")
-            .map(|v| v != "0")
-            .unwrap_or(true);
         // Free fixpoint variables per node, bottom-up through the arena.
         let mut free: Vec<Option<std::collections::HashSet<FormulaVarId>>> = vec![None; n];
         fn free_of(
@@ -2468,6 +2465,10 @@ pub struct ExactModel {
     /// Running total of fixpoint iterations. Interior-mutable because `evaluate` / `fixpoint`
     /// take `&self`; the exact eval is single-threaded per call.
     iters: std::cell::Cell<usize>,
+    /// M2 — closed-subformula memo + restart rule; `MUNUNU_BDD_FIXPOINT_REUSE=0` turns it off
+    /// for a whole process, [`Self::with_fixpoint_reuse`] per model (what the tests use, since an
+    /// environment variable is process-global and the test runner is parallel).
+    fixpoint_reuse: bool,
     /// WORK counter — the number of BDD operations this model has issued to OxiDD (substitute,
     /// quantification, binary apply, negation), across the whole `evaluate`. Host-independent and
     /// deterministic for a fixed design + property + configuration, unlike wall clock, and never
@@ -2930,6 +2931,9 @@ impl BddBitBlaster {
             iter_budget: fixpoint_iter_budget(),
             iters: std::cell::Cell::new(0),
             work: std::cell::Cell::new(0),
+            fixpoint_reuse: std::env::var("MUNUNU_BDD_FIXPOINT_REUSE")
+                .map(|v| v != "0")
+                .unwrap_or(true),
             manager: self._manager.clone(),
             arena_safety_budget: self.arena_nodes * 8 / 10,
             node_soft: fixpoint_node_budget().min(self.arena_nodes * 8 / 10),
@@ -3055,6 +3059,12 @@ impl ExactModel {
                 oom(phi.substitute(subst))
             }
         }
+    }
+
+    /// M2 switch per model: memo + restart rule on (default) or the legacy evaluation.
+    pub fn with_fixpoint_reuse(mut self, on: bool) -> Self {
+        self.fixpoint_reuse = on;
+        self
     }
 
     /// Count `n` BDD operations issued to OxiDD (see [`Self::work_count`]).
@@ -3249,7 +3259,7 @@ impl ExactModel {
         atoms: &HashMap<&str, BDDFunction>,
     ) -> Result<BDDFunction, String> {
         let mut bindings: HashMap<FormulaVarId, BDDFunction> = HashMap::new();
-        let mut ctx = EvalCtx::new(formula);
+        let mut ctx = EvalCtx::new(formula, self.fixpoint_reuse);
         let r = self.eval_node(formula, formula.root(), atoms, &mut bindings, &mut ctx);
         // mununu#553 INSTRUMENT — the PEAK live-node count this evaluation reached. This is the
         // measurement that has to size any node-based budget: our own corpus spans 82 k (fixtures)
@@ -3336,7 +3346,7 @@ impl ExactModel {
         atoms: &HashMap<&str, BDDFunction>,
     ) -> Result<BDDFunction, String> {
         let mut bindings: HashMap<FormulaVarId, BDDFunction> = HashMap::new();
-        let mut ctx = EvalCtx::new(formula);
+        let mut ctx = EvalCtx::new(formula, self.fixpoint_reuse);
         self.eval_node(formula, id, atoms, &mut bindings, &mut ctx)
     }
 
@@ -6633,15 +6643,6 @@ mod tests {
         "mu W. (nu Z. (mu Y. (b1 || (<> Y && [] Z) || <> W)))", // μνμ
     ];
 
-    fn with_reuse<T>(on: bool, f: impl FnOnce() -> T) -> T {
-        // SAFETY: tests in this module run single-threaded per test; the variable is read once per
-        // `evaluate`, and restored before returning.
-        unsafe { std::env::set_var("MUNUNU_BDD_FIXPOINT_REUSE", if on { "1" } else { "0" }) };
-        let r = f();
-        unsafe { std::env::remove_var("MUNUNU_BDD_FIXPOINT_REUSE") };
-        r
-    }
-
     /// M2 — a closed inner fixpoint is computed once per evaluation. The case that pays: an outer
     /// ν that ITERATES. On `AG EF good` where every state recovers, `EF good = ⊤` and the outer
     /// converges in one step, so legacy also ran the inner once; on a counter with a TRAP state
@@ -6657,7 +6658,7 @@ mod tests {
             crate::mu_calculus::parser::parse("nu Y. ((mu X. ((cnt == 62) || <> X)) && [] Y)")
                 .expect("AG EF parses");
         let run = |reuse: bool| {
-            with_reuse(reuse, || {
+            {
                 let bb = BddBitBlaster::build(&file).expect("build");
                 let good = bb
                     .predicate_bdd(&PredicateExpr::Cmp {
@@ -6668,7 +6669,7 @@ mod tests {
                     .expect("atom");
                 let mut atoms: HashMap<&str, BDDFunction> = HashMap::new();
                 atoms.insert("cnt == 62", good);
-                let model = bb.exact_model();
+                let model = bb.exact_model().with_fixpoint_reuse(reuse);
                 let set = model.evaluate(&formula, &atoms).expect("evaluate");
                 // Two runs build two managers, so the sets are compared by verdict at the initial
                 // state and by size, not by edge identity.
@@ -6680,7 +6681,7 @@ mod tests {
                     model.work_count(),
                     (holds_at_init, size),
                 )
-            })
+            }
         };
         let (it_legacy, w_legacy, set_legacy) = run(false);
         let (it_m2, w_m2, set_m2) = run(true);
@@ -6707,11 +6708,16 @@ mod tests {
         let (bb, atoms) = m2_fixture();
         for fs in M2_FORMULAS {
             let formula = crate::mu_calculus::parser::parse(fs).expect("formula parses");
-            let legacy = with_reuse(false, || {
-                bb.exact_model().evaluate(&formula, &atoms).expect("legacy")
-            });
-            let model = bb.exact_model();
-            let m2 = with_reuse(true, || model.evaluate(&formula, &atoms).expect("m2"));
+            let legacy = bb
+                .exact_model()
+                .with_fixpoint_reuse(false)
+                .evaluate(&formula, &atoms)
+                .expect("legacy");
+            let m2 = bb
+                .exact_model()
+                .with_fixpoint_reuse(true)
+                .evaluate(&formula, &atoms)
+                .expect("m2");
             assert!(legacy == m2, "M2 evaluation differs from legacy on `{fs}`");
         }
     }
@@ -6724,11 +6730,9 @@ mod tests {
         let (bb, atoms) = m2_fixture();
         let count = |fs: &str, reuse: bool| {
             let formula = crate::mu_calculus::parser::parse(fs).expect("formula parses");
-            with_reuse(reuse, || {
-                let model = bb.exact_model();
-                model.evaluate(&formula, &atoms).expect("evaluate");
-                model.iteration_count()
-            })
+            let model = bb.exact_model().with_fixpoint_reuse(reuse);
+            model.evaluate(&formula, &atoms).expect("evaluate");
+            model.iteration_count()
         };
         let same = "nu Z. (b1 && nu X. (Z && [] X))";
         assert!(
