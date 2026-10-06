@@ -180,6 +180,10 @@ harness = false
 name = "lazy_lift"
 harness = false
 
+[[bench]]
+name = "exact_symbolic"
+harness = false
+
 # Optimization-programme isolated benches. Each requires the test_support
 # feature for deterministic CLTS generators (rand_chacha::ChaCha20Rng).
 # Run with:

@@ -2357,6 +2357,14 @@ pub struct ExactModel {
     /// Running total of fixpoint iterations. Interior-mutable because `evaluate` / `fixpoint`
     /// take `&self`; the exact eval is single-threaded per call.
     iters: std::cell::Cell<usize>,
+    /// WORK counter — the number of BDD operations this model has issued to OxiDD (substitute,
+    /// quantification, binary apply, negation), across the whole `evaluate`. Host-independent and
+    /// deterministic for a fixed design + property + configuration, unlike wall clock, and never
+    /// reset, unlike OxiDD's own read-and-reset statistics. It is the currency the engine-performance
+    /// roadmap compares optimisations in: an iteration-bound cone shows it as calls per iteration, a
+    /// representation-bound cone as calls per apply. Reported on the `MUNUNU_BDD_REPORT_PEAK` line
+    /// and through [`Self::work_count`].
+    work: std::cell::Cell<u64>,
     /// mununu#553 INSTRUMENT — the exact engine's own BDD MANAGER, so [`Self::fixpoint`] can read
     /// the live node count. [`BddBitBlaster::check_node_budget`] guards the BIT-BLASTING ops but is
     /// a `BddBitBlaster` method: the μ-fixpoint has no view of the manager at all, so it cannot see
@@ -2806,6 +2814,7 @@ impl BddBitBlaster {
             ff: self.ff.clone(),
             iter_budget: fixpoint_iter_budget(),
             iters: std::cell::Cell::new(0),
+            work: std::cell::Cell::new(0),
             manager: self._manager.clone(),
             arena_safety_budget: self.arena_nodes * 8 / 10,
             node_soft: fixpoint_node_budget().min(self.arena_nodes * 8 / 10),
@@ -2927,8 +2936,27 @@ impl ExactModel {
         if self.sub_vars.is_empty() {
             Ok(phi.clone())
         } else {
+            self.tick(1);
             oom(phi.substitute(&Subst::new(self.sub_vars.clone(), self.sub_repl.clone())))
         }
+    }
+
+    /// Count `n` BDD operations issued to OxiDD (see [`Self::work_count`]).
+    #[inline]
+    fn tick(&self, n: u64) {
+        self.work.set(self.work.get() + n);
+    }
+
+    /// The BDD operations issued so far by this model — the host-independent work measure
+    /// (see the `work` field). Read it after [`Self::evaluate`].
+    pub fn work_count(&self) -> u64 {
+        self.work.get()
+    }
+
+    /// The fixpoint iterations run so far by this model, across every nested fixpoint of the
+    /// evaluations it has performed.
+    pub fn iteration_count(&self) -> usize {
+        self.iters.get()
     }
 
     /// The states where the `constraint` is satisfiable by *some* input:
@@ -2946,6 +2974,7 @@ impl ExactModel {
     /// this the plain `∃i. to_next(φ)`, so an unconstrained design is unchanged.
     pub fn diamond_pre(&self, phi: &BDDFunction) -> Result<BDDFunction, String> {
         use oxidd::BooleanFunctionQuant;
+        self.tick(2);
         oom(oom(self.to_next(phi)?.and(&self.constraint))?.exists(&self.input_cube))
     }
 
@@ -2955,6 +2984,7 @@ impl ExactModel {
     /// `∀i. to_next(φ)`.
     pub fn box_pre(&self, phi: &BDDFunction) -> Result<BDDFunction, String> {
         use oxidd::BooleanFunctionQuant;
+        self.tick(3);
         let not_c = oom(self.constraint.not())?;
         let implies = oom(not_c.or(&self.to_next(phi)?))?;
         oom(implies.forall(&self.input_cube))
@@ -2974,6 +3004,7 @@ impl ExactModel {
     /// exact engine is differentially validated against.
     pub fn cpre_controllable(&self, phi: &BDDFunction) -> Result<BDDFunction, String> {
         use oxidd::BooleanFunctionQuant;
+        self.tick(3);
         // ∃ctrl: a constraint-respecting transition into φ (per state + environment move).
         let step = oom(self.to_next(phi)?.and(&self.constraint))?;
         let reachable = oom(step.exists(&self.ctrl_cube))?;
@@ -2987,6 +3018,7 @@ impl ExactModel {
     /// side of the game (e.g. extracting the counterstrategy region when the controller loses).
     pub fn cpre_environment(&self, phi: &BDDFunction) -> Result<BDDFunction, String> {
         use oxidd::BooleanFunctionQuant;
+        self.tick(4);
         // ∀ctrl: every controllable response leads (constraint-respecting) into φ.
         let not_c = oom(self.constraint.not())?;
         let implies = oom(not_c.or(&self.to_next(phi)?))?;
@@ -3167,10 +3199,11 @@ impl ExactModel {
                  collection — an UPPER BOUND on the cone, not a measurement of it); {live} live \
                  AFTER the fixpoint (this is the RESIDUAL — relation + persistent structures, NOT \
                  this property's cone, whose working set is already collected); in {} \
-                 iteration(s), budget {}",
+                 iteration(s), budget {}; work {} BDD ops",
                 self.peak_nodes.get(),
                 self.iters.get(),
-                self.node_soft
+                self.node_soft,
+                self.work.get()
             );
         }
         r
@@ -3207,15 +3240,20 @@ impl ExactModel {
                 .get(v)
                 .cloned()
                 .ok_or_else(|| format!("unbound fixpoint variable {v:?}"))?,
-            MuNode::Not(n) => self.eval_node(f, *n, atoms, bindings)?.not().unwrap(),
+            MuNode::Not(n) => {
+                self.tick(1);
+                self.eval_node(f, *n, atoms, bindings)?.not().unwrap()
+            }
             MuNode::And(a, b) => {
                 let av = self.eval_node(f, *a, atoms, bindings)?;
                 let bv = self.eval_node(f, *b, atoms, bindings)?;
+                self.tick(1);
                 av.and(&bv).unwrap()
             }
             MuNode::Or(a, b) => {
                 let av = self.eval_node(f, *a, atoms, bindings)?;
                 let bv = self.eval_node(f, *b, atoms, bindings)?;
+                self.tick(1);
                 av.or(&bv).unwrap()
             }
             MuNode::Modal {
@@ -6360,6 +6398,52 @@ mod tests {
     /// A validator that never fires is indistinguishable from one that cannot fire, so this pairs
     /// with the negative direction below: the walk must actually reach inner nodes and compare
     /// levels, not bail at the root.
+    /// The work counter is the roadmap's host-independent currency: it counts the BDD operations
+    /// the model issues, it is deterministic for a fixed design + property, and a run that does
+    /// more fixpoint iterations does more work.
+    #[test]
+    fn work_counter_is_deterministic_and_grows_with_the_fixpoint() {
+        // Width = bits(m), so the register's whole value space is the wrap cycle and the backward
+        // reach to `cnt == 0` is exactly `m - 1` deep (an 8-bit register would wrap every unused value
+        // through overflow and make the depth 255 for every m).
+        let wrap = |m: u64| {
+            let w = (m - 1).max(1).ilog2() + 1;
+            format!(
+                "1 sort bitvec 1\n2 sort bitvec {w}\n3 state 2 cnt\n4 zero 2\n5 init 2 3 4\n6 constd 2 {}\n\
+                 7 eq 1 3 6\n8 one 2\n9 add 2 3 8\n10 ite 2 7 4 9\n11 next 2 3 10\n",
+                m - 1
+            )
+        };
+        let formula =
+            crate::mu_calculus::parser::parse("nu Y. ((mu X. ((cnt == 0) || <> X)) && [] Y)")
+                .expect("AG EF parses");
+        let run = |m: u64| {
+            let file = parser::parse(&wrap(m)).expect("parse");
+            let bb = BddBitBlaster::build(&file).expect("build");
+            let good = bb
+                .predicate_bdd(&PredicateExpr::Cmp {
+                    register: "cnt".into(),
+                    op: CmpOp::Eq,
+                    value: 0,
+                })
+                .expect("atom");
+            let mut atoms: HashMap<&str, BDDFunction> = HashMap::new();
+            atoms.insert("cnt == 0", good);
+            let model = bb.exact_model();
+            model.evaluate(&formula, &atoms).expect("evaluate");
+            (model.work_count(), model.iteration_count())
+        };
+        let (w16a, i16) = run(16);
+        let (w16b, _) = run(16);
+        let (w64, i64_) = run(64);
+        assert!(w16a > 0, "the fixpoint issues BDD operations");
+        assert_eq!(w16a, w16b, "same design + property ⇒ same work count");
+        assert!(
+            i64_ > i16 && w64 > w16a,
+            "a deeper fixpoint ({i64_} > {i16} iterations) does more work"
+        );
+    }
+
     #[test]
     fn level_validation_accepts_a_well_formed_diagram() {
         // Two variables, so `x ∧ y` has an inner node with an inner child — the walk has

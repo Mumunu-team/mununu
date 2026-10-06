@@ -69,6 +69,26 @@ codegen-units = 1
 # guard in mununu-core's crate root enforces this.
 panic = "unwind"
 
+# Profiling build: the release binary (LTO, one codegen unit, unwind panics) plus line-table
+# debug info so samply / perf / callgrind can attribute samples to functions and lines, and no
+# symbol stripping. Same optimisation level as release, so measurements transfer. Output lands
+# in target/profiling/. Driver: scripts/profile_cases.py.
+[profile.profiling]
+inherits = "release"
+debug = "line-tables-only"
+strip = "none"
+
+# Heat-check build: release optimisation WITHOUT fat LTO, so it builds in minutes instead of ten and
+# attributes samples to the functions as written (less cross-crate inlining). Used by
+# scripts/heat_check.py to ask "did the hot spots move?" before and after every optimisation step;
+# wall-clock claims still use `profiling`. Output: target/heat/.
+[profile.heat]
+inherits = "release"
+lto = false
+codegen-units = 16
+debug = "line-tables-only"
+strip = "none"
+
 [profile.dev]
 debug = true
 opt-level = 0
