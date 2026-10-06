@@ -458,6 +458,9 @@ def _symtab(binary: str) -> tuple[list[int], list[str]]:
         except ValueError:
             continue
         name = re.sub(r"::h[0-9a-f]{16}$", "", parts[2].strip())
+        # LLVM's per-build suffixes (`(.llvm.NNN)`, `.llvm.NNN`) differ between binaries and would
+        # make the same function look like two in a before/after comparison.
+        name = re.sub(r"\s*\(\.llvm\.\d+\)|\.llvm\.\d+", "", name)
         for a_, b_ in (("$LT$", "<"), ("$GT$", ">"), ("$C$", ","), ("$u20$", " "), ("$u27$", "'"), ("$u5b$", "["), ("$u5d$", "]"), ("$RF$", "&"), ("..", "::")):
             name = name.replace(a_, b_)
         addrs.append(a); names.append(name)

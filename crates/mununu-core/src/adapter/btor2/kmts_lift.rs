@@ -2836,6 +2836,12 @@ fn compute_all_may_edges_smt_postimage(
         }
         let mut out: std::collections::HashMap<usize, Vec<usize>> =
             std::collections::HashMap::new();
+        // One FRESH solver per cube, the transition re-asserted each time. Measured 2026-10-06
+        // (M5 of the engine-performance roadmap): one solver per relation with the transition
+        // asserted once and `push`/`pop` around each cube's literals and blocking clauses gave
+        // a byte-identical relation and NO measurable change on the real i2c lift (|P| = 8:
+        // 14.5 s → 14.0 s; |P| = 10: 77.8 s → 78.0 s). The cost is the all-SAT solving and the
+        // model construction per query, not Z3's re-internalisation of the transition.
         for cube in 0..(1usize << n) {
             // mununu#504 — the outer poll. This loop is the measured hang: up to 2^|P| cubes,
             // x17 CEGAR rounds, x N properties, previously with only a per-QUERY timeout and no
