@@ -118,7 +118,22 @@ def short(f: str) -> str:
     return f[:72]
 
 
+def _norm_record(rec: dict) -> dict:
+    """Strip LLVM per-build suffixes from function names (records made before the summariser did)."""
+    import re
+    pat = re.compile(r"\s*\(\.llvm\.\d+\)?|\.llvm\.\d+")
+    for case in rec.get("cases", {}).values():
+        for kind in ("self", "incl"):
+            merged: dict[str, float] = {}
+            for f, v in case.get(kind, {}).items():
+                k = pat.sub("", f)
+                merged[k] = merged.get(k, 0.0) + v
+            case[kind] = dict(sorted(merged.items(), key=lambda kv: -kv[1]))
+    return rec
+
+
 def compare(a: dict, b: dict, watch: list[str], threshold: float) -> bool:
+    a, b = _norm_record(a), _norm_record(b)
     print(f"\nheat check: A = {a['label']} ({a.get('commit')})   B = {b['label']} ({b.get('commit')})   threshold {threshold} points")
     moved_any = False
     for case, ra in a["cases"].items():

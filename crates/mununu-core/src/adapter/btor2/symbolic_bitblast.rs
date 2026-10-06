@@ -496,6 +496,10 @@ impl BddBitBlaster {
         } else {
             arena_nodes * 8 / 10
         };
+        // Apply cache at arena/4. Measured 2026-10-06 (M3 of the engine-performance roadmap):
+        // arena/2 left the And / Ite / Substitute hit rates unchanged to the third decimal on the
+        // iteration-bound, deep, representation-bound and forward shapes — the misses are
+        // compulsory, not capacity misses — at +340 MB RSS. So the size stays.
         let manager = bdd::new_manager(arena_nodes, arena_nodes / 4, 1);
         let (all_vars, var_base, tt, ff, built_vars, built_levels) = manager
             .with_manager_exclusive(|m| {
@@ -2322,13 +2326,117 @@ impl BvTermBackend for BddBitBlaster {
 /// abstraction the verdict is 2-valued and definite (no `⊥`); the cost is bounded
 /// by BDD size, not by the `2^|Registers|` explicit-state cap. Reuses the exact
 /// same substitution [`BddBitBlaster::abstract_relation`] builds, applied to the
+/// Per-`evaluate` state for the M2 fixpoint optimisations of [`ExactModel`]: which formula nodes
+/// are CLOSED (no free fixpoint variable, so their value is binding-independent and memoised), the
+/// memo itself, the last approximant of every non-closed fixpoint node (the Long et al. 1997
+/// restart rule), and for each fixpoint node the nested fixpoint nodes to forget when it produces
+/// a new approximant (those on the far side of a polarity alternation).
+struct EvalCtx {
+    closed: Vec<bool>,
+    memo: HashMap<crate::mu_calculus::NodeId, BDDFunction>,
+    approx: HashMap<crate::mu_calculus::NodeId, BDDFunction>,
+    reset_sets: HashMap<crate::mu_calculus::NodeId, Vec<crate::mu_calculus::NodeId>>,
+    /// `MUNUNU_BDD_FIXPOINT_REUSE=0` restores the legacy evaluation (no memo, no restart rule).
+    reuse: bool,
+}
+
+impl EvalCtx {
+    fn new(f: &Formula, reuse: bool) -> Self {
+        use crate::mu_calculus::NodeId;
+        let n = f.nodes().len();
+        // Free fixpoint variables per node, bottom-up through the arena.
+        let mut free: Vec<Option<std::collections::HashSet<FormulaVarId>>> = vec![None; n];
+        fn free_of(
+            f: &Formula,
+            id: NodeId,
+            free: &mut Vec<Option<std::collections::HashSet<FormulaVarId>>>,
+        ) -> std::collections::HashSet<FormulaVarId> {
+            if let Some(s) = &free[id.0] {
+                return s.clone();
+            }
+            let set = match f.node(id) {
+                MuNode::True | MuNode::False | MuNode::Predicate(_) => Default::default(),
+                MuNode::Variable(v) => std::iter::once(*v).collect(),
+                MuNode::Not(a) | MuNode::Modal { target: a, .. } => free_of(f, *a, free),
+                MuNode::And(a, b) | MuNode::Or(a, b) => {
+                    let mut s = free_of(f, *a, free);
+                    s.extend(free_of(f, *b, free));
+                    s
+                }
+                MuNode::Mu { var, body } | MuNode::Nu { var, body } => {
+                    let mut s = free_of(f, *body, free);
+                    s.remove(var);
+                    s
+                }
+            };
+            free[id.0] = Some(set.clone());
+            set
+        }
+        let closed: Vec<bool> = (0..n)
+            .map(|i| free_of(f, NodeId(i), &mut free).is_empty())
+            .collect();
+        // Reset sets: for fixpoint node N of polarity p, the nested fixpoint nodes reached through
+        // a fixpoint of polarity ≠ p (that node included). Nested same-polarity chains keep their
+        // approximants; closed nodes never need one (they are memoised whole).
+        let mut reset_sets = HashMap::new();
+        fn collect(
+            f: &Formula,
+            id: NodeId,
+            outer_greatest: bool,
+            crossed: bool,
+            out: &mut Vec<NodeId>,
+        ) {
+            match f.node(id) {
+                MuNode::True | MuNode::False | MuNode::Predicate(_) | MuNode::Variable(_) => {}
+                MuNode::Not(a) | MuNode::Modal { target: a, .. } => {
+                    collect(f, *a, outer_greatest, crossed, out)
+                }
+                MuNode::And(a, b) | MuNode::Or(a, b) => {
+                    collect(f, *a, outer_greatest, crossed, out);
+                    collect(f, *b, outer_greatest, crossed, out);
+                }
+                MuNode::Mu { body, .. } | MuNode::Nu { body, .. } => {
+                    let greatest = matches!(f.node(id), MuNode::Nu { .. });
+                    let crossed = crossed || greatest != outer_greatest;
+                    if crossed {
+                        out.push(id);
+                    }
+                    collect(f, *body, outer_greatest, crossed, out);
+                }
+            }
+        }
+        for i in 0..n {
+            if let MuNode::Mu { body, .. } | MuNode::Nu { body, .. } = f.node(NodeId(i)) {
+                let greatest = matches!(f.node(NodeId(i)), MuNode::Nu { .. });
+                let mut out = Vec::new();
+                collect(f, *body, greatest, false, &mut out);
+                if !out.is_empty() {
+                    reset_sets.insert(NodeId(i), out);
+                }
+            }
+        }
+        EvalCtx {
+            closed,
+            memo: HashMap::new(),
+            approx: HashMap::new(),
+            reset_sets,
+            reuse,
+        }
+    }
+}
+
 /// formula BDD directly rather than to predicate vars.
 pub struct ExactModel {
-    /// State-bit varno → its next-state function. Held registers (no `Next` line)
-    /// are omitted (identity ⇒ held value); inputs are never state, never
-    /// substituted (they remain free to be quantified).
-    sub_vars: Vec<VarNo>,
-    sub_repl: Vec<BDDFunction>,
+    /// The substitution (state-bit varno ↦ its next-state function), built ONCE. Held registers
+    /// (no `Next` line) are omitted (identity ⇒ held value); inputs are never state, never
+    /// substituted (they remain free to be quantified). OxiDD keys its substitute apply-cache
+    /// entries on the `Subst`'s id (`oxidd_core::util::Subst::new` draws a fresh global id per
+    /// call, `oxidd_rules_bdd::simple::apply_rec::substitute` looks the cache up with it), so a
+    /// `Subst` rebuilt per pre-image — what `to_next` did until M1 of the engine-performance
+    /// roadmap — could never hit an entry written by the previous iteration, although the
+    /// substitution is the same and consecutive reach sets share most of their structure.
+    /// `None` when there is nothing to substitute (no state bit has a next-state function).
+    subst: Option<Subst<BDDFunction>>,
     /// The cube of input-bit vars, quantified in the single-agent (`Control::All`) modal pre-image.
     input_cube: BDDFunction,
     /// P2.5-F — the two-player input partition. `ctrl_cube` is the cube of the CONTROLLABLE input
@@ -2357,6 +2465,10 @@ pub struct ExactModel {
     /// Running total of fixpoint iterations. Interior-mutable because `evaluate` / `fixpoint`
     /// take `&self`; the exact eval is single-threaded per call.
     iters: std::cell::Cell<usize>,
+    /// M2 — closed-subformula memo + restart rule; `MUNUNU_BDD_FIXPOINT_REUSE=0` turns it off
+    /// for a whole process, [`Self::with_fixpoint_reuse`] per model (what the tests use, since an
+    /// environment variable is process-global and the test runner is parallel).
+    fixpoint_reuse: bool,
     /// WORK counter — the number of BDD operations this model has issued to OxiDD (substitute,
     /// quantification, binary apply, negation), across the whole `evaluate`. Host-independent and
     /// deterministic for a fixed design + property + configuration, unlike wall clock, and never
@@ -2803,9 +2915,13 @@ impl BddBitBlaster {
                 }
             }
         }
+        let subst = if sub_vars.is_empty() {
+            None
+        } else {
+            Some(Subst::new(sub_vars, sub_repl))
+        };
         ExactModel {
-            sub_vars,
-            sub_repl,
+            subst,
             input_cube,
             ctrl_cube,
             env_cube,
@@ -2815,6 +2931,9 @@ impl BddBitBlaster {
             iter_budget: fixpoint_iter_budget(),
             iters: std::cell::Cell::new(0),
             work: std::cell::Cell::new(0),
+            fixpoint_reuse: std::env::var("MUNUNU_BDD_FIXPOINT_REUSE")
+                .map(|v| v != "0")
+                .unwrap_or(true),
             manager: self._manager.clone(),
             arena_safety_budget: self.arena_nodes * 8 / 10,
             node_soft: fixpoint_node_budget().min(self.arena_nodes * 8 / 10),
@@ -2933,12 +3052,19 @@ impl ExactModel {
     /// "could not finish". A panic while the manager is exhausted aborts on the unwind instead,
     /// taking every other property in the process with it.
     pub fn to_next(&self, phi: &BDDFunction) -> Result<BDDFunction, String> {
-        if self.sub_vars.is_empty() {
-            Ok(phi.clone())
-        } else {
-            self.tick(1);
-            oom(phi.substitute(&Subst::new(self.sub_vars.clone(), self.sub_repl.clone())))
+        match &self.subst {
+            None => Ok(phi.clone()),
+            Some(subst) => {
+                self.tick(1);
+                oom(phi.substitute(subst))
+            }
         }
+    }
+
+    /// M2 switch per model: memo + restart rule on (default) or the legacy evaluation.
+    pub fn with_fixpoint_reuse(mut self, on: bool) -> Self {
+        self.fixpoint_reuse = on;
+        self
     }
 
     /// Count `n` BDD operations issued to OxiDD (see [`Self::work_count`]).
@@ -3133,7 +3259,8 @@ impl ExactModel {
         atoms: &HashMap<&str, BDDFunction>,
     ) -> Result<BDDFunction, String> {
         let mut bindings: HashMap<FormulaVarId, BDDFunction> = HashMap::new();
-        let r = self.eval_node(formula, formula.root(), atoms, &mut bindings);
+        let mut ctx = EvalCtx::new(formula, self.fixpoint_reuse);
+        let r = self.eval_node(formula, formula.root(), atoms, &mut bindings, &mut ctx);
         // mununu#553 INSTRUMENT — the PEAK live-node count this evaluation reached. This is the
         // measurement that has to size any node-based budget: our own corpus spans 82 k (fixtures)
         // to 590 k (a real `uart_msg_handler` lift), and a default calibrated on the fixtures alone
@@ -3219,7 +3346,8 @@ impl ExactModel {
         atoms: &HashMap<&str, BDDFunction>,
     ) -> Result<BDDFunction, String> {
         let mut bindings: HashMap<FormulaVarId, BDDFunction> = HashMap::new();
-        self.eval_node(formula, id, atoms, &mut bindings)
+        let mut ctx = EvalCtx::new(formula, self.fixpoint_reuse);
+        self.eval_node(formula, id, atoms, &mut bindings, &mut ctx)
     }
 
     fn eval_node(
@@ -3228,6 +3356,30 @@ impl ExactModel {
         id: crate::mu_calculus::NodeId,
         atoms: &HashMap<&str, BDDFunction>,
         bindings: &mut HashMap<FormulaVarId, BDDFunction>,
+        ctx: &mut EvalCtx,
+    ) -> Result<BDDFunction, String> {
+        // M2 — a CLOSED subformula (no free fixpoint variable) has one value regardless of the
+        // bindings in force, so it is computed once per `evaluate`. The case this exists for: the
+        // inner `EF good` of `AG EF good` used to be re-run from ⊥ on EVERY outer iteration,
+        // making the shared iteration budget pay the product of the two diameters, not their sum.
+        let memoise = ctx.reuse && ctx.closed[id.0];
+        if memoise && let Some(v) = ctx.memo.get(&id) {
+            return Ok(v.clone());
+        }
+        let v = self.eval_node_uncached(f, id, atoms, bindings, ctx)?;
+        if memoise {
+            ctx.memo.insert(id, v.clone());
+        }
+        Ok(v)
+    }
+
+    fn eval_node_uncached(
+        &self,
+        f: &Formula,
+        id: crate::mu_calculus::NodeId,
+        atoms: &HashMap<&str, BDDFunction>,
+        bindings: &mut HashMap<FormulaVarId, BDDFunction>,
+        ctx: &mut EvalCtx,
     ) -> Result<BDDFunction, String> {
         Ok(match f.node(id) {
             MuNode::True => self.tt.clone(),
@@ -3242,17 +3394,17 @@ impl ExactModel {
                 .ok_or_else(|| format!("unbound fixpoint variable {v:?}"))?,
             MuNode::Not(n) => {
                 self.tick(1);
-                self.eval_node(f, *n, atoms, bindings)?.not().unwrap()
+                self.eval_node(f, *n, atoms, bindings, ctx)?.not().unwrap()
             }
             MuNode::And(a, b) => {
-                let av = self.eval_node(f, *a, atoms, bindings)?;
-                let bv = self.eval_node(f, *b, atoms, bindings)?;
+                let av = self.eval_node(f, *a, atoms, bindings, ctx)?;
+                let bv = self.eval_node(f, *b, atoms, bindings, ctx)?;
                 self.tick(1);
                 av.and(&bv).unwrap()
             }
             MuNode::Or(a, b) => {
-                let av = self.eval_node(f, *a, atoms, bindings)?;
-                let bv = self.eval_node(f, *b, atoms, bindings)?;
+                let av = self.eval_node(f, *a, atoms, bindings, ctx)?;
+                let bv = self.eval_node(f, *b, atoms, bindings, ctx)?;
                 self.tick(1);
                 av.or(&bv).unwrap()
             }
@@ -3277,7 +3429,7 @@ impl ExactModel {
                             .into(),
                     );
                 }
-                let phi = self.eval_node(f, *target, atoms, bindings)?;
+                let phi = self.eval_node(f, *target, atoms, bindings, ctx)?;
                 match guard.control {
                     // Single-agent: box = ∀input, diamond = ∃input.
                     Control::All => match kind {
@@ -3290,8 +3442,12 @@ impl ExactModel {
                     Control::Environment => self.cpre_environment(&phi)?,
                 }
             }
-            MuNode::Mu { var, body } => self.fixpoint(f, *var, *body, atoms, bindings, false)?,
-            MuNode::Nu { var, body } => self.fixpoint(f, *var, *body, atoms, bindings, true)?,
+            MuNode::Mu { var, body } => {
+                self.fixpoint(f, id, *var, *body, atoms, bindings, ctx, false)?
+            }
+            MuNode::Nu { var, body } => {
+                self.fixpoint(f, id, *var, *body, atoms, bindings, ctx, true)?
+            }
         })
     }
 
@@ -3299,19 +3455,35 @@ impl ExactModel {
     /// (`greatest=true`, from `⊤`) fixpoint. Convergence is exact set equality —
     /// ROBDDs are canonical, so `==` is the fixpoint test, and over a finite state
     /// space it converges in ≤ |states| steps (the iteration *is* the ranking).
+    #[allow(clippy::too_many_arguments)]
     fn fixpoint(
         &self,
         f: &Formula,
+        node: crate::mu_calculus::NodeId,
         var: FormulaVarId,
         body: crate::mu_calculus::NodeId,
         atoms: &HashMap<&str, BDDFunction>,
         bindings: &mut HashMap<FormulaVarId, BDDFunction>,
+        ctx: &mut EvalCtx,
         greatest: bool,
     ) -> Result<BDDFunction, String> {
-        let mut x = if greatest {
+        // M2 — the restart rule (Long, Browne, Clarke, Jha, Marrero 1997). A nested fixpoint that
+        // mentions an outer variable is re-evaluated each time that variable moves. When the outer
+        // and inner fixpoints have the SAME polarity the inner's previous value is a valid start:
+        // the outer moves monotonically (ν descends, μ ascends), so the inner's function changes in
+        // the same direction and its old fixpoint is a pre-fixpoint (ν) / post-fixpoint (μ) of the
+        // new one, from which Kleene iteration converges to the new fixpoint. When the polarities
+        // ALTERNATE the old value lies on the wrong side and the inner restarts from its seed;
+        // `EvalCtx::reset_sets` names, per fixpoint node, the nested nodes to forget whenever it
+        // produces a new approximant. Opt out with `MUNUNU_BDD_FIXPOINT_REUSE=0` (legacy evaluation).
+        let seed = if greatest {
             self.tt.clone()
         } else {
             self.ff.clone()
+        };
+        let mut x = match ctx.approx.get(&node) {
+            Some(prev) if ctx.reuse => prev.clone(),
+            _ => seed,
         };
         loop {
             // Iteration budget — bail deterministically before a wide-counter diameter (`2^W`)
@@ -3393,12 +3565,24 @@ impl ExactModel {
                 ));
             }
             bindings.insert(var, x.clone());
-            let next = self.eval_node(f, body, atoms, bindings)?;
+            let next = self.eval_node(f, body, atoms, bindings, ctx)?;
             if next == x {
                 bindings.remove(&var);
+                if ctx.reuse {
+                    ctx.approx.insert(node, next.clone());
+                }
                 return Ok(next);
             }
             x = next;
+            // A new approximant of THIS fixpoint: every nested fixpoint on the far side of an
+            // alternation is now starting from a value on the wrong side — forget it.
+            if ctx.reuse
+                && let Some(reset) = ctx.reset_sets.get(&node)
+            {
+                for m in reset {
+                    ctx.approx.remove(m);
+                }
+            }
         }
     }
 
@@ -5334,19 +5518,22 @@ impl BddBitBlaster {
         let mut s = self.pick_state_assignment(&bad);
         let mut prefix: Vec<BTreeMap<String, u128>> = Vec::new();
         let mut inputs: Vec<BTreeMap<String, u128>> = Vec::new();
+        // M8 — nested layers, descending index: tracked and lowered, never rescanned (see
+        // `exact_reachable_trap_path`); one minterm per step.
+        let in_layer = |m: &BDDFunction, k: usize| m.and(&layers[k]).unwrap() != self.ff;
+        let m0 = self.state_minterm(&s);
+        let mut k = (1..layers.len()).find(|&k| in_layer(&m0, k)).unwrap_or(1);
         for _ in 0..1_000_000 {
-            if self.state_minterm(&s).and(&stall).unwrap() != self.ff {
+            let m = self.state_minterm(&s);
+            if m.and(&stall).unwrap() != self.ff {
                 break; // reached the stall
             }
             prefix.push(s.clone());
             // s ∈ L_k \ L_{k-1} (k minimal) ⇒ s ∈ ◇L_{k-1}: a successor lands in L_{k-1}.
-            let k = (1..layers.len())
-                .find(|&k| self.state_minterm(&s).and(&layers[k]).unwrap() != self.ff)
-                .unwrap_or(1);
-            let good = self
-                .state_minterm(&s)
-                .and(&exact.to_next(&layers[k - 1]).ok()?)
-                .unwrap();
+            while k > 1 && in_layer(&m, k - 1) {
+                k -= 1;
+            }
+            let good = m.and(&exact.to_next(&layers[k - 1]).ok()?).unwrap();
             if good == self.ff {
                 return Some(StallLasso {
                     prefix,
@@ -5404,11 +5591,23 @@ impl BddBitBlaster {
             return None; // the trap is unreachable ⇒ AG EF p holds
         }
         // Reach phase: descend one layer per step until inside the trap, recording the prefix.
+        //
+        // M8 (engine-performance roadmap) — the layers are NESTED (`L_{k-1} ⊆ L_k`) and the
+        // successor is chosen inside `L_{k-1}`, so the current state's layer index only ever
+        // DECREASES: it is found once and then lowered while the state sits in a deeper layer,
+        // amortised O(L) over the whole descent. The previous form rescanned the layers from 1 on
+        // every step and rebuilt `state_minterm(s)` inside the scan — O(L²) minterm constructions,
+        // 170 s for a 16k-step path on a 14-bit trap counter, against a sub-second fixpoint. The
+        // minterm is also built once per step instead of three times.
         let mut s = self.pick_state_assignment(&bad);
         let mut prefix: Vec<BTreeMap<String, u128>> = Vec::new();
         let mut inputs: Vec<BTreeMap<String, u128>> = Vec::new();
+        let in_layer = |m: &BDDFunction, k: usize| m.and(&layers[k]).unwrap() != self.ff;
+        let m0 = self.state_minterm(&s);
+        let mut k = (1..layers.len()).find(|&k| in_layer(&m0, k)).unwrap_or(1);
         for _ in 0..1_000_000 {
-            if self.state_minterm(&s).and(&trap).unwrap() != self.ff {
+            let m = self.state_minterm(&s);
+            if m.and(&trap).unwrap() != self.ff {
                 // Reached the trap: `s` witnesses `¬EF p`; it is absorbing (a 1-state cycle).
                 return Some(StallLasso {
                     prefix,
@@ -5417,13 +5616,11 @@ impl BddBitBlaster {
                 });
             }
             prefix.push(s.clone());
-            let k = (1..layers.len())
-                .find(|&k| self.state_minterm(&s).and(&layers[k]).unwrap() != self.ff)
-                .unwrap_or(1);
-            let good = self
-                .state_minterm(&s)
-                .and(&exact.to_next(&layers[k - 1]).ok()?)
-                .unwrap();
+            // The minimal layer of `s`: never above the previous step's `k - 1`, possibly deeper.
+            while k > 1 && in_layer(&m, k - 1) {
+                k -= 1;
+            }
+            let good = m.and(&exact.to_next(&layers[k - 1]).ok()?).unwrap();
             if good == self.ff {
                 return Some(StallLasso {
                     prefix,
@@ -5473,8 +5670,13 @@ impl BddBitBlaster {
         let mut s = self.pick_state_assignment(&reachable);
         let mut prefix: Vec<BTreeMap<String, u128>> = Vec::new();
         let mut inputs: Vec<BTreeMap<String, u128>> = Vec::new();
+        let m0 = self.state_minterm(&s);
+        let mut k = (1..layers.len())
+            .find(|&k| m0.and(&layers[k]).unwrap() != self.ff)
+            .unwrap_or(1);
         for _ in 0..1_000_000 {
-            if self.state_minterm(&s).and(p).unwrap() != self.ff {
+            let m = self.state_minterm(&s);
+            if m.and(p).unwrap() != self.ff {
                 return Some(StallLasso {
                     prefix,
                     cycle: vec![s],
@@ -5483,13 +5685,11 @@ impl BddBitBlaster {
             }
             prefix.push(s.clone());
             // Current attractor rank `k`; pick an input stepping into layer `k-1` (rank strictly down).
-            let k = (1..layers.len())
-                .find(|&k| self.state_minterm(&s).and(&layers[k]).unwrap() != self.ff)
-                .unwrap_or(1);
-            let step = self
-                .state_minterm(&s)
-                .and(&exact.to_next(&layers[k - 1]).ok()?)
-                .unwrap();
+            // M8 — the rank only decreases along the play: lowered from the previous value, not rescanned.
+            while k > 1 && m.and(&layers[k - 1]).unwrap() != self.ff {
+                k -= 1;
+            }
+            let step = m.and(&exact.to_next(&layers[k - 1]).ok()?).unwrap();
             if step == self.ff {
                 return None; // no rank-decreasing move (should not happen inside the attractor)
             }
@@ -5706,15 +5906,20 @@ impl BddBitBlaster {
         let mut s = self.pick_state_assignment(&bad);
         let mut prefix: Vec<BTreeMap<String, u128>> = Vec::new();
         let mut inputs: Vec<BTreeMap<String, u128>> = Vec::new();
+        // M8 — tracked, descending layer index (see `exact_reachable_trap_path`).
+        let in_layer = |m: &BDDFunction, k: usize| m.and(&layers[k]).unwrap() != self.ff;
+        let m0 = self.state_minterm(&s);
+        let mut k = (1..layers.len()).find(|&k| in_layer(&m0, k)).unwrap_or(1);
         for _ in 0..1_000_000 {
-            if self.state_minterm(&s).and(&stall).unwrap() != self.ff {
+            let m = self.state_minterm(&s);
+            if m.and(&stall).unwrap() != self.ff {
                 break; // reached the stall
             }
             prefix.push(s.clone());
             // s ∈ L_k \ L_{k-1} (k minimal) ⇒ s ∈ CPre_env(L_{k-1}): the env can force a successor there.
-            let k = (1..layers.len())
-                .find(|&k| self.state_minterm(&s).and(&layers[k]).unwrap() != self.ff)
-                .unwrap_or(1);
+            while k > 1 && in_layer(&m, k - 1) {
+                k -= 1;
+            }
             match env_step(&s, &layers[k - 1]) {
                 Some((inp, ns)) => {
                     inputs.push(inp);
@@ -6398,6 +6603,150 @@ mod tests {
     /// A validator that never fires is indistinguishable from one that cannot fire, so this pairs
     /// with the negative direction below: the walk must actually reach inner nodes and compare
     /// levels, not bail at the root.
+    /// A 2-register fixture with a free input for the M2 nesting tests: `a` counts up modulo 8 on
+    /// `go`, `b` toggles when `a == 7`; predicates `a == 0` and `b == 1`.
+    fn m2_fixture() -> (BddBitBlaster, HashMap<&'static str, BDDFunction>) {
+        let src = "1 sort bitvec 1\n2 sort bitvec 3\n3 input 1 go\n4 state 2 a\n5 state 1 b\n6 zero 2\n\
+                   7 zero 1\n8 init 2 4 6\n9 init 1 5 7\n10 one 2\n11 add 2 4 10\n12 ite 2 3 11 4\n\
+                   13 next 2 4 12\n14 constd 2 7\n15 eq 1 4 14\n16 not 1 5\n17 ite 1 15 16 5\n18 next 1 5 17\n";
+        let file = parser::parse(src).expect("parse");
+        let bb = BddBitBlaster::build(&file).expect("build");
+        let a0 = bb
+            .predicate_bdd(&PredicateExpr::Cmp {
+                register: "a".into(),
+                op: CmpOp::Eq,
+                value: 0,
+            })
+            .expect("a0");
+        let b1 = bb
+            .predicate_bdd(&PredicateExpr::Cmp {
+                register: "b".into(),
+                op: CmpOp::Eq,
+                value: 1,
+            })
+            .expect("b1");
+        let mut atoms = HashMap::new();
+        atoms.insert("a0", a0);
+        atoms.insert("b1", b1);
+        (bb, atoms)
+    }
+
+    /// Nested formulas, closed and open, same- and alternating-polarity, including the GR(1)
+    /// response shape; the M2 evaluation must agree with the legacy one on every set.
+    const M2_FORMULAS: &[&str] = &[
+        "nu Y. ((mu X. (a0 || <> X)) && [] Y)", // AG EF — closed inner μ
+        "nu Y. ((b1 || (mu X. (a0 || [] X))) && [] Y)", // AG (b → AF a) — closed inner μ
+        "nu Z. (mu Y. (a0 || (<> Y && <> Z)))", // alternating, inner mentions Z
+        "nu Z. (b1 && nu X. (Z && [] X))",      // same polarity, inner mentions Z
+        "mu Z. (a0 || mu X. (<> Z || <> X))",   // same polarity μμ, inner mentions Z
+        "nu Z. (mu Y. (nu X. ((a0 && [] Z) || (<> Y && [] X))))", // three-deep νμν, Z inside
+        "mu W. (nu Z. (mu Y. (b1 || (<> Y && [] Z) || <> W)))", // μνμ
+    ];
+
+    /// M2 — a closed inner fixpoint is computed once per evaluation. The case that pays: an outer
+    /// ν that ITERATES. On `AG EF good` where every state recovers, `EF good = ⊤` and the outer
+    /// converges in one step, so legacy also ran the inner once; on a counter with a TRAP state
+    /// (`cnt == 63` holds forever) and `good = (cnt == 62)`, the outer ν peels one state per
+    /// iteration and legacy re-ran the 63-step inner fixpoint on every one of them — the product
+    /// of the two diameters. M2 runs it once: the sum.
+    #[test]
+    fn closed_inner_fixpoint_is_computed_once() {
+        let trap = "1 sort bitvec 1\n2 sort bitvec 6\n3 state 2 cnt\n4 zero 2\n5 init 2 3 4\n6 constd 2 63\n\
+                    7 eq 1 3 6\n8 one 2\n9 add 2 3 8\n10 ite 2 7 3 9\n11 next 2 3 10\n";
+        let file = parser::parse(trap).expect("parse");
+        let formula =
+            crate::mu_calculus::parser::parse("nu Y. ((mu X. ((cnt == 62) || <> X)) && [] Y)")
+                .expect("AG EF parses");
+        let run = |reuse: bool| {
+            {
+                let bb = BddBitBlaster::build(&file).expect("build");
+                let good = bb
+                    .predicate_bdd(&PredicateExpr::Cmp {
+                        register: "cnt".into(),
+                        op: CmpOp::Eq,
+                        value: 62,
+                    })
+                    .expect("atom");
+                let mut atoms: HashMap<&str, BDDFunction> = HashMap::new();
+                atoms.insert("cnt == 62", good);
+                let model = bb.exact_model().with_fixpoint_reuse(reuse);
+                let set = model.evaluate(&formula, &atoms).expect("evaluate");
+                // Two runs build two managers, so the sets are compared by verdict at the initial
+                // state and by size, not by edge identity.
+                let init = bb.initial_state_bdd(&file).expect("init");
+                let holds_at_init = init.and(&set).unwrap() != bb.ff;
+                let (size, _) = bdd_nodes_height(&set);
+                (
+                    model.iteration_count(),
+                    model.work_count(),
+                    (holds_at_init, size),
+                )
+            }
+        };
+        let (it_legacy, w_legacy, set_legacy) = run(false);
+        let (it_m2, w_m2, set_m2) = run(true);
+        assert_eq!(set_legacy, set_m2, "same verdict and set size either way");
+        assert!(
+            !set_legacy.0,
+            "the trap makes AG EF (cnt == 62) VIOLATED at reset"
+        );
+        assert!(
+            it_legacy > 1000,
+            "legacy pays inner × outer: {it_legacy} iterations"
+        );
+        assert!(it_m2 < 200, "M2 pays inner + outer: {it_m2} iterations");
+        assert!(
+            w_m2 < w_legacy / 4,
+            "and far fewer BDD ops ({w_m2} vs {w_legacy})"
+        );
+    }
+
+    /// M2 — the memo + restart-rule evaluation computes the SAME set as the legacy evaluation on
+    /// closed, open, same-polarity, alternating and three-deep nestings.
+    #[test]
+    fn fixpoint_reuse_matches_legacy_evaluation_on_nested_formulas() {
+        let (bb, atoms) = m2_fixture();
+        for fs in M2_FORMULAS {
+            let formula = crate::mu_calculus::parser::parse(fs).expect("formula parses");
+            let legacy = bb
+                .exact_model()
+                .with_fixpoint_reuse(false)
+                .evaluate(&formula, &atoms)
+                .expect("legacy");
+            let m2 = bb
+                .exact_model()
+                .with_fixpoint_reuse(true)
+                .evaluate(&formula, &atoms)
+                .expect("m2");
+            assert!(legacy == m2, "M2 evaluation differs from legacy on `{fs}`");
+        }
+    }
+
+    /// M2 — on a same-polarity nesting whose inner mentions the outer variable, the inner restarts
+    /// from its previous approximant and the whole evaluation takes fewer iterations; on an
+    /// alternating nesting it restarts from the seed, and the count is never higher than legacy.
+    #[test]
+    fn same_polarity_nesting_reuses_previous_approximant_and_alternation_restarts() {
+        let (bb, atoms) = m2_fixture();
+        let count = |fs: &str, reuse: bool| {
+            let formula = crate::mu_calculus::parser::parse(fs).expect("formula parses");
+            let model = bb.exact_model().with_fixpoint_reuse(reuse);
+            model.evaluate(&formula, &atoms).expect("evaluate");
+            model.iteration_count()
+        };
+        let same = "nu Z. (b1 && nu X. (Z && [] X))";
+        assert!(
+            count(same, true) < count(same, false),
+            "same-polarity reuse saves iterations"
+        );
+        for fs in M2_FORMULAS {
+            assert!(
+                count(fs, true) <= count(fs, false),
+                "`{fs}`: reuse never costs iterations"
+            );
+        }
+    }
+
     /// The work counter is the roadmap's host-independent currency: it counts the BDD operations
     /// the model issues, it is deterministic for a fixed design + property, and a run that does
     /// more fixpoint iterations does more work.
