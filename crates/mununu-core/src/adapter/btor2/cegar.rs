@@ -639,12 +639,17 @@ fn build_counterexample_trace(
 
     let is_false = |idx: usize| verdict.verdict_at(idx) == Trit::False;
     // Start at an initial cell that is definite-False (else the property is not
-    // violated at start and there is nothing to trace).
+    // violated at start and there is nothing to trace). The LOWEST such cell: the initial
+    // set is a `HashSet`, whose iteration order changes per process, and with several initial
+    // cells (config values) `find` picked a different start on every run — the same verdict,
+    // a different counterexample in the JSON (measured 2026-10-07: cube 0 / 6 / 2 / 0 on four
+    // runs of one command).
     let start: StateId<crate::clts::DefaultStateIdx> = clts
         .initial_states()
         .iter()
         .copied()
-        .find(|s| is_false(s.index()))?;
+        .filter(|s| is_false(s.index()))
+        .min_by_key(|s| s.index())?;
 
     // A trap is a False cell whose every outgoing edge stays in the False region
     // (a cell with no successors counts — the failure cannot be left).

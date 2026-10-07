@@ -8549,6 +8549,46 @@ mod tests {
         }
     }
 
+    /// B3 feasibility spike (engine-performance roadmap, step 17) — what does creating an OxiDD
+    /// manager cost at the engine's sizes, and how much of it is the apply cache? Prints the wall
+    /// of `new_manager(arena, cache, 1)` + one variable for the engine's two tiers and for
+    /// smaller caches.
+    #[test]
+    #[ignore = "B3 spike: manager creation cost by arena and apply-cache size; run with --ignored --nocapture"]
+    fn probe_b3_manager_creation_cost() {
+        use oxidd::bdd;
+        for (arena, cache) in [
+            (1usize << 24, 1usize << 22),
+            (1 << 24, 1 << 20),
+            (1 << 24, 1 << 18),
+            (1 << 26, 1 << 24),
+            (1 << 26, 1 << 20),
+            (1 << 22, 1 << 20),
+            (1 << 22, 1 << 18),
+            (1 << 20, 1 << 18),
+        ] {
+            let mut best = u128::MAX;
+            for _ in 0..3 {
+                let t0 = std::time::Instant::now();
+                let m = bdd::new_manager(arena, cache, 1);
+                let v = m.with_manager_exclusive(|m| {
+                    let r = m.add_vars(1);
+                    BDDFunction::var(m, r.start).unwrap()
+                });
+                let _ = v.satisfiable();
+                drop(v);
+                drop(m);
+                best = best.min(t0.elapsed().as_micros());
+            }
+            eprintln!(
+                "new_manager(arena 2^{}, cache 2^{}): {:.1} ms (best of 3, incl. drop)",
+                arena.ilog2(),
+                cache.ilog2(),
+                best as f64 / 1000.0
+            );
+        }
+    }
+
     #[test]
     #[ignore = "probe: mununu#553 discriminating shape; run with --ignored --nocapture"]
     fn probe_553_raster_wrap_is_deep_and_wide() {

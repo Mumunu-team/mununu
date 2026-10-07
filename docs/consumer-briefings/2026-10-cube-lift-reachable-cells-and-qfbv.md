@@ -10,10 +10,13 @@ Same verdict at the initial states, 6× faster lift, and the CEGAR verb's whole-
 
 | `btor2 cegar --engine explicit`, i2c lift, 8 control predicates, 256 cells | before | after |
 |---|---|---|
-| wall | 15.0 s | 2.3 s |
-| `verdict` | `{true 0, false 256, unknown 0}` | `{true 0, false 72, unknown 0, unlifted 184}` |
-| `outcome` | "PROPERTY VIOLATED — 256 cell(s) falsify the formula" | "PROPERTY VIOLATED — 72 cell(s) falsify the formula" |
+| wall, reset pinned (`--config-values` on the predicate registers) | 15.0 s | **2.9 s** |
+| `verdict`, reset pinned | `{true 0, false 256, unknown 0}` | `{true 0, false 92, unknown 0, unlifted 164}` |
+| `outcome`, reset pinned | "PROPERTY VIOLATED — 256 cell(s) falsify the formula" | "PROPERTY VIOLATED — 92 cell(s) falsify the formula" |
+| wall, reset free (the raw yosys lift: no `init` lines, no config values) | 15.0 s | 8.9 s (A3 only — every cell is initial, nothing is unreached) |
 | counterexample, `terminated_with`, iteration count | unchanged | unchanged |
+
+**Correction (2026-10-07, after merge).** The first version of this briefing and PR #610 reported "72 of 256 cells reachable, 8.9 → 2.3 s" on the *raw* i2c lift. That was measured on the A4 branch before #603 merged; #603 made a register with no `init` line **free at reset** (the sound reading), and the raw yosys lift has no `init` lines — so under the merged semantics every cell is initial, the roots are the whole cube, and A4 lifts all 256 cells there (correct, and no faster than A3). A4's saving appears when the reset is pinned — `init` lines, or `--config-values` / the sidecar on the predicate registers, which is what `verify-auto`'s reset detection supplies — and is then 92 of 256 cells on this lift. The numbers above are the merged behaviour.
 
 ## What changed
 
@@ -30,7 +33,7 @@ The post-image loop used to compute post-images for all 2^|P| source cubes. The 
 
 Unreached cells exist as states with no outgoing edge. The loop already masks edgeless cells to ⊥ and excludes them from convergence (the unsatisfiable-cell rule), so they ride that path — but they are **not** reported as ⊥: `CegarTrace::unlifted_cells` names them, `tally_cells` excludes them, and the Track I.1 `violating_cells` / `undecided_cells` samples skip them.
 
-Measured: 72 of 256 cells reachable on the i2c lift; 8.9 → 2.3 s.
+Measured with the reset pinned: 92 of 256 cells reachable on the i2c lift; 10.9 → 2.9 s. With a free reset every cell is a root and nothing is skipped (see the correction above).
 
 ## What to update, per consumer
 
