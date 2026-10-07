@@ -411,6 +411,28 @@ impl BddBitBlaster {
         keep: Option<&std::collections::HashSet<Nid>>,
         interleave: bool,
     ) -> Result<Self, String> {
+        // M4 instrument (engine-performance roadmap): one debug line per build — kept bits,
+        // kept leaves, elapsed — so `RUST_LOG=mununu_core::adapter::btor2::symbolic_bitblast=debug`
+        // splits a property's cost into bit-blast versus fixpoint (the fixpoint's own line is
+        // printed by `ExactModel::evaluate`). What a build cache across properties would save.
+        let t0 = std::time::Instant::now();
+        let built = Self::build_passes(file, keep, interleave);
+        if let Ok(bb) = &built {
+            tracing::debug!(
+                kept_bits = bb.declared_vars.load(std::sync::atomic::Ordering::Relaxed),
+                kept_leaves = bb.cells.iter().filter(|c| !c.vars.is_empty()).count(),
+                elapsed_ms = t0.elapsed().as_millis() as u64,
+                "exact bit-blast build"
+            );
+        }
+        built
+    }
+
+    fn build_passes(
+        file: &Btor2File,
+        keep: Option<&std::collections::HashSet<Nid>>,
+        interleave: bool,
+    ) -> Result<Self, String> {
         // AR-S1 / D1.4 — the ONE canonical leaf enumeration + naming lives on the
         // STS-IR seam (`BtorSts::leaf_cells`). It resolves each state/input to its
         // user-visible name via `collect_symbols` (walking Yosys's `uext _ NID 0 NAME`
@@ -3260,7 +3282,16 @@ impl ExactModel {
     ) -> Result<BDDFunction, String> {
         let mut bindings: HashMap<FormulaVarId, BDDFunction> = HashMap::new();
         let mut ctx = EvalCtx::new(formula, self.fixpoint_reuse);
+        let t_eval = std::time::Instant::now();
         let r = self.eval_node(formula, formula.root(), atoms, &mut bindings, &mut ctx);
+        // M4 instrument (engine-performance roadmap) — the fixpoint half of a property's cost,
+        // next to the bit-blast half printed by `BddBitBlaster::build_inner`.
+        tracing::debug!(
+            iterations = self.iters.get(),
+            work = self.work.get(),
+            elapsed_ms = t_eval.elapsed().as_millis() as u64,
+            "exact fixpoint evaluate"
+        );
         // mununu#553 INSTRUMENT — the PEAK live-node count this evaluation reached. This is the
         // measurement that has to size any node-based budget: our own corpus spans 82 k (fixtures)
         // to 590 k (a real `uart_msg_handler` lift), and a default calibrated on the fixtures alone
