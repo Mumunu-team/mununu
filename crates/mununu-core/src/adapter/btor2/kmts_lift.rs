@@ -2939,6 +2939,13 @@ fn postimage_solver(bv_only: bool) -> z3::Solver {
 /// cube indices are lifted (a worklist BFS: each lifted cell's post-image targets are queued
 /// once); the returned map then has an entry for every reached source and none for the rest.
 /// `None` lifts all `2^|P|` cells, the pre-A4 behaviour.
+///
+/// S3 (engine-performance roadmap, category 4): the source cubes are lifted by
+/// [`postimage_workers`] threads. Every worker opens its own `with_z3_config` scope — z3's
+/// context is thread-local — and encodes the design once; the main thread runs the BFS in
+/// waves, dealing each wave's cubes to the workers over channels and collecting their target
+/// lists. A source's targets depend on nothing but the source, so the map is identical whatever
+/// the dealing order or the worker count; one worker is the pre-S3 loop on another thread.
 fn compute_all_may_edges_smt_postimage(
     file: &crate::adapter::btor2::ast::Btor2File,
     predicates: &[PredicateSpec],
@@ -2949,15 +2956,177 @@ fn compute_all_may_edges_smt_postimage(
     rlimit: Option<u32>,
     roots: Option<&[usize]>,
 ) -> MayPostimage {
-    use crate::adapter::btor2::predicate_expr::{CmpOp, PredicateExpr};
+    use std::sync::mpsc;
     let n = predicates.len();
     if n == 0 || n > 20 {
         return MayPostimage::NotApplicable; // outside the cube-space bound; eager path handles it
     }
     uncompressed_models();
+    let all_cells = 1usize << n;
+    let bv_only = crate::adapter::btor2::bit_blast::detect_btor2_memories(file).is_empty();
+    let workers = postimage_workers().max(1);
+    let job = PostimageJob {
+        file,
+        predicates,
+        compound_exprs,
+        rlimit,
+        bv_only,
+        budget: crate::adapter::run_budget::current(),
+    };
+    let job = &job;
+
+    // The source cells to lift: every cell, or (A4) a worklist seeded with the roots that grows
+    // by each lifted cell's targets. `queued` marks a cell once so it is lifted once.
+    let mut queued: Vec<bool> = vec![roots.is_none(); all_cells];
+    let mut wave: Vec<usize> = match roots {
+        None => (0..all_cells).collect(),
+        Some(r) => {
+            let mut q = Vec::new();
+            for &c in r {
+                if c < all_cells && !queued[c] {
+                    queued[c] = true;
+                    q.push(c);
+                }
+            }
+            q
+        }
+    };
+
+    let outcome: Result<std::collections::HashMap<usize, Vec<usize>>, MayPostimage> =
+        std::thread::scope(|scope| {
+            // One channel per worker for its cubes; one shared channel back for the results.
+            let (result_tx, result_rx) = mpsc::channel::<CubeResult>();
+            let mut feeds: Vec<mpsc::Sender<usize>> = Vec::with_capacity(workers);
+            for _ in 0..workers {
+                let (tx, rx) = mpsc::channel::<usize>();
+                feeds.push(tx);
+                let result_tx = result_tx.clone();
+                scope.spawn(move || postimage_worker(job, rx, result_tx));
+            }
+            drop(result_tx);
+
+            let mut out: std::collections::HashMap<usize, Vec<usize>> =
+                std::collections::HashMap::new();
+            let mut next_feed = 0usize;
+            while !wave.is_empty() {
+                // mununu#504 — the outer poll. This loop is the measured hang: up to 2^|P| cubes,
+                // x17 CEGAR rounds, x N properties, previously with only a per-QUERY timeout and no
+                // aggregate bound. Bailing here is signalled to the caller as `BudgetExceeded`, NOT
+                // as a partial map: a truncated may-relation is an under-approximation (see the
+                // saturation note in `enumerate_successors`).
+                if crate::adapter::run_budget::expired() {
+                    return Err(MayPostimage::BudgetExceeded);
+                }
+                let dealt = wave.len();
+                for &cube in &wave {
+                    // A worker that has gone away (its encoding failed) makes the whole post-image
+                    // not applicable, exactly as the single-threaded encode failure did.
+                    if feeds[next_feed % workers].send(cube).is_err() {
+                        return Err(MayPostimage::NotApplicable);
+                    }
+                    next_feed += 1;
+                }
+                let mut next_wave: Vec<usize> = Vec::new();
+                for _ in 0..dealt {
+                    match result_rx.recv() {
+                        Ok(CubeResult::Done { cube, targets }) => {
+                            if roots.is_some() {
+                                for &t in &targets {
+                                    if !queued[t] {
+                                        queued[t] = true;
+                                        next_wave.push(t);
+                                    }
+                                }
+                            }
+                            out.insert(cube, targets);
+                        }
+                        Ok(CubeResult::BudgetExpired) => return Err(MayPostimage::BudgetExceeded),
+                        Ok(CubeResult::NotApplicable) | Err(_) => {
+                            return Err(MayPostimage::NotApplicable);
+                        }
+                    }
+                }
+                next_wave.sort_unstable();
+                wave = next_wave;
+            }
+            drop(feeds);
+            Ok(out)
+        });
+    match outcome {
+        Ok(map) => MayPostimage::Complete(map),
+        Err(why) => why,
+    }
+}
+
+/// S3 — one worker's answer for one source cube.
+enum CubeResult {
+    Done { cube: usize, targets: Vec<usize> },
+    BudgetExpired,
+    NotApplicable,
+}
+
+/// S3 — how many post-image workers to run: `MUNUNU_CUBE_POSTIMAGE_THREADS` when set (`1` is
+/// the pre-S3 single loop), else the host's parallelism capped at 8 — each worker holds its own
+/// z3 context and encoding of the design, so the cap bounds memory, not just threads.
+fn postimage_workers() -> usize {
+    std::env::var("MUNUNU_CUBE_POSTIMAGE_THREADS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&t| t >= 1)
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|p| p.get().min(8))
+                .unwrap_or(1)
+        })
+}
+
+/// S3 — what every post-image worker needs to encode the design and run its cubes: the lift's
+/// inputs plus the caller's run budget (thread-local, so it must be carried over).
+struct PostimageJob<'a> {
+    file: &'a crate::adapter::btor2::ast::Btor2File,
+    predicates: &'a [PredicateSpec],
+    compound_exprs:
+        &'a std::collections::HashMap<String, crate::adapter::btor2::predicate_expr::PredicateExpr>,
+    rlimit: Option<u32>,
+    bv_only: bool,
+    budget: crate::adapter::run_budget::Budget,
+}
+
+/// S3 — a post-image worker: its own z3 context and encoding, then one
+/// [`enumerate_successors`] per cube received until the feed closes. An encoding that fails
+/// (an unresolvable register) reports `NotApplicable` once and returns.
+fn postimage_worker(
+    job: &PostimageJob<'_>,
+    feed: std::sync::mpsc::Receiver<usize>,
+    results: std::sync::mpsc::Sender<CubeResult>,
+) {
+    use crate::adapter::btor2::predicate_expr::{CmpOp, PredicateExpr};
+    let PostimageJob {
+        file,
+        predicates,
+        compound_exprs,
+        rlimit,
+        bv_only,
+        budget,
+    } = job;
+    let (rlimit, bv_only) = (*rlimit, *bv_only);
+    // `with_z3_config` takes a `Sync` closure; a channel receiver is not, a mutex around it is.
+    let feed = std::sync::Mutex::new(feed);
+    let results = std::sync::Mutex::new(results);
+    let send = |r: CubeResult| results.lock().map(|tx| tx.send(r).is_ok()).unwrap_or(false);
+    // The run budget is thread-local (`run_budget::CURRENT`): a worker must carry the caller's,
+    // or a budgeted run could neither stop it nor clamp its queries.
+    let _budget = crate::adapter::run_budget::enter(budget);
     let cfg = z3::Config::new();
-    let res = z3::with_z3_config(&cfg, || {
-        let view = encode_design_for_lift(file).ok()?;
+    z3::with_z3_config(&cfg, || {
+        let view = match encode_design_for_lift(file) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::debug!(error = ?e, "post-image worker: encoding failed");
+                send(CubeResult::NotApplicable);
+                return;
+            }
+        };
         let nid_map = crate::adapter::btor2::smt_must_edge::build_register_nid_map(&view);
         // Effective constraint per predicate: a compound (by name) or the simple `reg == value`.
         let exprs: Vec<PredicateExpr> = predicates
@@ -2985,16 +3154,21 @@ fn compute_all_may_edges_smt_postimage(
                 .and_then(|nid| view.next_state(*nid))
                 .cloned()
         };
-        let curr_c: Vec<z3::ast::Bool> = exprs
-            .iter()
-            .map(|e| e.build_constraint(&curr))
-            .collect::<Option<Vec<_>>>()?;
-        let next_c: Vec<z3::ast::Bool> = exprs
-            .iter()
-            .map(|e| e.build_constraint(&next))
-            .collect::<Option<Vec<_>>>()?;
-
-        let mut budget_expired = false;
+        let built = (
+            exprs
+                .iter()
+                .map(|e| e.build_constraint(&curr))
+                .collect::<Option<Vec<_>>>(),
+            exprs
+                .iter()
+                .map(|e| e.build_constraint(&next))
+                .collect::<Option<Vec<_>>>(),
+        );
+        let (Some(curr_c), Some(next_c)) = built else {
+            tracing::debug!("post-image worker: a predicate does not resolve against the encoding");
+            send(CubeResult::NotApplicable);
+            return;
+        };
         let mut params = z3::Params::new();
         // mununu#504 — clamp the per-query timeout to the time actually left, so the LAST query
         // cannot overshoot the deadline by its own full 5 s.
@@ -3003,150 +3177,126 @@ fn compute_all_may_edges_smt_postimage(
         // `smt_must_edge` already applies. It was missing HERE, on the post-image path, which is
         // the measured hang suspect (`for cube in 0..2^n` around an all-SAT loop, x17 CEGAR
         // rounds x N properties). Unset by default ⇒ no behaviour change; set, it turns a grind
-        // into a fast, deterministic result. Safe to apply only because the `Unknown` arm below
-        // now saturates instead of silently truncating — see that comment.
+        // into a fast, deterministic result. Safe to apply only because the `Unknown` arm in
+        // `enumerate_successors` saturates instead of silently truncating — see that comment.
         if let Some(rl) = rlimit {
             params.set_u32("rlimit", rl);
         }
-        let mut out: std::collections::HashMap<usize, Vec<usize>> =
-            std::collections::HashMap::new();
-        // One FRESH solver per cube, the transition re-asserted each time. Measured 2026-10-06
-        // (M5 of the engine-performance roadmap): one solver per relation with the transition
-        // asserted once and `push`/`pop` around each cube's literals and blocking clauses gave
-        // a byte-identical relation and NO measurable change on the real i2c lift (|P| = 8:
-        // 14.5 s → 14.0 s; |P| = 10: 77.8 s → 78.0 s). The cost is the all-SAT solving and the
-        // model construction per query, not Z3's re-internalisation of the transition.
-        let bv_only = crate::adapter::btor2::bit_blast::detect_btor2_memories(file).is_empty();
-        // The source cells to lift: every cell, or (A4) a worklist seeded with the roots that
-        // grows by each lifted cell's targets. `queued` marks a cell once so it is lifted once.
-        let all_cells = 1usize << n;
-        let mut queued: Vec<bool> = vec![roots.is_none(); all_cells];
-        let mut worklist: std::collections::VecDeque<usize> = match roots {
-            None => (0..all_cells).collect(),
-            Some(r) => {
-                let mut q = std::collections::VecDeque::new();
-                for &c in r {
-                    if c < all_cells && !queued[c] {
-                        queued[c] = true;
-                        q.push_back(c);
-                    }
-                }
-                q
+        loop {
+            let Ok(cube) = feed
+                .lock()
+                .map(|rx| rx.recv())
+                .unwrap_or(Err(std::sync::mpsc::RecvError))
+            else {
+                return; // the feed closed: the BFS is done
+            };
+            let result = match enumerate_successors(&view, &curr_c, &next_c, &params, bv_only, cube)
+            {
+                Some(targets) => CubeResult::Done { cube, targets },
+                None => CubeResult::BudgetExpired,
+            };
+            if !send(result) {
+                return;
             }
-        };
-        while let Some(cube) = worklist.pop_front() {
-            // mununu#504 — the outer poll. This loop is the measured hang: up to 2^|P| cubes,
-            // x17 CEGAR rounds, x N properties, previously with only a per-QUERY timeout and no
-            // aggregate bound. Bailing here is signalled to the caller as `BudgetExceeded`, NOT
-            // as a partial map: a truncated may-relation is an under-approximation (see the
-            // saturation note in the all-SAT loop below).
-            if crate::adapter::run_budget::expired() {
-                budget_expired = true;
+        }
+    });
+}
+
+/// The all-SAT of one source cube: project `cube_curr ∧ T` onto the next-state predicate
+/// valuation, one fresh solver (measured 2026-10-06, M5 of the engine-performance roadmap: one
+/// solver per relation with `push`/`pop` around each cube's literals gave a byte-identical
+/// relation and no measurable change — the cost is the all-SAT solving and the model
+/// construction per query, not Z3's re-internalisation of the transition). Returns the sorted
+/// target cubes, or `None` when the run budget expired mid-enumeration (a partial enumeration
+/// must not be trusted — see below).
+///
+/// SOUNDNESS (mununu#504, 2026-09-07) — `may` OVER-approximates: soundness requires
+/// may ⊇ concrete. This loop used to be `while matches!(solver.check(), Sat)`, so an
+/// `Unknown` (a z3 timeout, or an rlimit hit) exited the loop and stored the PARTIAL
+/// enumeration as if it were complete — a TRUNCATED may-relation, i.e. an
+/// UNDER-approximation. That is unsound in the definite direction: `[]φ` is True when
+/// all may-successors satisfy φ, so dropping may-edges can manufacture a spurious
+/// definite True. It was already reachable with the 5 s per-query timeout on a wide
+/// cone; adding an rlimit (which exists precisely to make queries return `Unknown`)
+/// would have made it routine.
+///
+/// On a non-`Sat` INCONCLUSIVE result we therefore SATURATE this cube — every target
+/// is a may-successor — which is the sound direction (denser may ⇒ more ⊥, never a
+/// wrong verdict). `Unsat` is different: it is a real proof that no further next-state
+/// valuation exists, so it ends the enumeration normally.
+fn enumerate_successors(
+    view: &crate::adapter::sidecar::predicate_image::btor2_encode::Btor2SmtView,
+    curr_c: &[z3::ast::Bool],
+    next_c: &[z3::ast::Bool],
+    params: &z3::Params,
+    bv_only: bool,
+    cube: usize,
+) -> Option<Vec<usize>> {
+    let n = next_c.len();
+    let solver = postimage_solver(bv_only);
+    solver.set_params(params);
+    solver.assert(&view.transition);
+    for (i, cc) in curr_c.iter().enumerate() {
+        if (cube >> i) & 1 == 1 {
+            solver.assert(cc);
+        } else {
+            let neg = cc.not();
+            solver.assert(&neg);
+        }
+    }
+    let mut targets: Vec<usize> = Vec::new();
+    let mut inconclusive = false;
+    loop {
+        // mununu#504 — the inner poll. One z3 query is the interruptible unit, so the
+        // worst-case overshoot past the deadline is a single query (and `clamp_query_ms`
+        // bounds even that).
+        if crate::adapter::run_budget::expired() {
+            return None; // do not trust a partial enumeration
+        }
+        match solver.check() {
+            z3::SatResult::Sat => {}
+            z3::SatResult::Unsat => break, // enumeration provably complete
+            z3::SatResult::Unknown => {
+                inconclusive = true;
                 break;
             }
-            let solver = postimage_solver(bv_only);
-            solver.set_params(&params);
-            solver.assert(&view.transition);
-            for (i, cc) in curr_c.iter().enumerate() {
-                if (cube >> i) & 1 == 1 {
-                    solver.assert(cc);
-                } else {
-                    let neg = cc.not();
-                    solver.assert(&neg);
-                }
-            }
-            // All-SAT: project `cube_curr ∧ T` onto the next-state predicate valuation.
-            //
-            // SOUNDNESS (mununu#504, 2026-09-07) — `may` OVER-approximates: soundness requires
-            // may ⊇ concrete. This loop used to be `while matches!(solver.check(), Sat)`, so an
-            // `Unknown` (a z3 timeout, or an rlimit hit) exited the loop and stored the PARTIAL
-            // enumeration as if it were complete — a TRUNCATED may-relation, i.e. an
-            // UNDER-approximation. That is unsound in the definite direction: `[]φ` is True when
-            // all may-successors satisfy φ, so dropping may-edges can manufacture a spurious
-            // definite True. It was already reachable with the 5 s per-query timeout on a wide
-            // cone; adding an rlimit (which exists precisely to make queries return `Unknown`)
-            // would have made it routine.
-            //
-            // On a non-`Sat` INCONCLUSIVE result we therefore SATURATE this cube — every target
-            // is a may-successor — which is the sound direction (denser may ⇒ more ⊥, never a
-            // wrong verdict). `Unsat` is different: it is a real proof that no further next-state
-            // valuation exists, so it ends the enumeration normally.
-            let mut targets: Vec<usize> = Vec::new();
-            let mut inconclusive = false;
-            loop {
-                // mununu#504 — the inner poll. One z3 query is the interruptible unit, so the
-                // worst-case overshoot past the deadline is a single query (and `clamp_query_ms`
-                // below bounds even that).
-                if crate::adapter::run_budget::expired() {
-                    budget_expired = true;
-                    inconclusive = true; // do not trust a partial enumeration
-                    break;
-                }
-                match solver.check() {
-                    z3::SatResult::Sat => {}
-                    z3::SatResult::Unsat => break, // enumeration provably complete
-                    z3::SatResult::Unknown => {
-                        inconclusive = true;
-                        break;
-                    }
-                }
-                let Some(model) = solver.get_model() else {
-                    // `Sat` with no retrievable model: we cannot block this valuation, so we
-                    // cannot trust the enumeration to terminate correctly either.
-                    inconclusive = true;
-                    break;
-                };
-                let mut tgt = 0usize;
-                let mut block: Vec<z3::ast::Bool> = Vec::with_capacity(n);
-                for (i, nc) in next_c.iter().enumerate() {
-                    let holds = model
-                        .eval(nc, true)
-                        .and_then(|b| b.as_bool())
-                        .unwrap_or(false);
-                    if holds {
-                        tgt |= 1 << i;
-                        block.push(nc.clone());
-                    } else {
-                        block.push(nc.not());
-                    }
-                }
-                targets.push(tgt);
-                // Block this exact next valuation: ¬(⋀ block).
-                let refs: Vec<&z3::ast::Bool> = block.iter().collect();
-                let bar = z3::ast::Bool::and(&refs).not();
-                solver.assert(&bar);
-                if targets.len() > (1usize << n) {
-                    break; // safety: at most 2^n distinct next cubes
-                }
-            }
-            if inconclusive {
-                // Sound fallback for this cube only: every cube is a may-successor.
-                targets = (0..(1usize << n)).collect();
-            }
-            targets.sort_unstable();
-            targets.dedup();
-            if roots.is_some() {
-                for &t in &targets {
-                    if !queued[t] {
-                        queued[t] = true;
-                        worklist.push_back(t);
-                    }
-                }
-            }
-            out.insert(cube, targets);
         }
-        if budget_expired {
-            return Some(Err(())); // budget expiry, distinct from "not applicable"
+        let Some(model) = solver.get_model() else {
+            // `Sat` with no retrievable model: we cannot block this valuation, so we
+            // cannot trust the enumeration to terminate correctly either.
+            inconclusive = true;
+            break;
+        };
+        let mut tgt = 0usize;
+        let mut block: Vec<z3::ast::Bool> = Vec::with_capacity(n);
+        for (i, nc) in next_c.iter().enumerate() {
+            let holds = model
+                .eval(nc, true)
+                .and_then(|b| b.as_bool())
+                .unwrap_or(false);
+            if holds {
+                tgt |= 1 << i;
+                block.push(nc.clone());
+            } else {
+                block.push(nc.not());
+            }
         }
-        Some(Ok(out))
-    });
-    // Three-way at the boundary: `None` = not applicable (fall back), `Some(Err)` = budget
-    // expiry (abort, never fall back — the fallback is SLOWER), `Some(Ok)` = complete.
-    match res {
-        None => MayPostimage::NotApplicable,
-        Some(Err(())) => MayPostimage::BudgetExceeded,
-        Some(Ok(map)) => MayPostimage::Complete(map),
+        targets.push(tgt);
+        // Block this exact next valuation: ¬(⋀ block).
+        let refs: Vec<&z3::ast::Bool> = block.iter().collect();
+        let bar = z3::ast::Bool::and(&refs).not();
+        solver.assert(&bar);
+        if targets.len() > (1usize << n) {
+            break; // safety: at most 2^n distinct next cubes
+        }
     }
+    if inconclusive {
+        // Sound fallback for this cube only: every cube is a may-successor.
+        targets = (0..(1usize << n)).collect();
+    }
+    targets.sort_unstable();
+    targets.dedup();
+    Some(targets)
 }
 
 /// P1 (scalable-KMTS) increment 2 — the compound-aware MUST-edge pass for the post-image lazy path.
