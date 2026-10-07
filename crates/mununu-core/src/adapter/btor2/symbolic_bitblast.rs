@@ -2835,6 +2835,16 @@ impl BddBitBlaster {
     }
 
     fn check_node_budget(&self) -> Result<(), String> {
+        // ORDERING HAZARD (found 2026-10-06, B2 of the engine-performance roadmap). `live` below
+        // is `approx_num_inner_nodes`: ALLOCATED nodes, dead ones included, and OxiDD collects on
+        // its own only at 95% of the arena. So a blaster op that runs AFTER a fixpoint judges the
+        // fixpoint's garbage against ITS budget: `exact_bad_reachable` built the initial-state BDD
+        // after `evaluate` and abstained with "2,752,513 of 2,097,152" while the arena was a
+        // sixth full — in production, on `main`; it decided only when `MUNUNU_BDD_REPORT_PEAK`
+        // was set, because that report's end-of-evaluation `gc()` happened to run first. The
+        // guard keeps its allocation-volume semantics (collecting here turns a fast abstention
+        // on a wide build into minutes of per-bit collections, measured); the rule is that every
+        // blaster-side BDD a verdict needs is built BEFORE the fixpoint runs.
         // mununu#543 — read the LEVEL count alongside the node count. `add_bits` calls this once
         // per bit, so this runs inside the operation sequence that was measured overflowing, and
         // it is the cheapest place to catch variables appearing after build.
@@ -3061,6 +3071,12 @@ impl ExactModel {
         }
     }
 
+    /// The ITERATION budget per model (tests; production reads `MUNUNU_BDD_ITER_BUDGET`).
+    pub fn with_iteration_budget(mut self, n: usize) -> Self {
+        self.iter_budget = n;
+        self
+    }
+
     /// M2 switch per model: memo + restart rule on (default) or the legacy evaluation.
     pub fn with_fixpoint_reuse(mut self, on: bool) -> Self {
         self.fixpoint_reuse = on;
@@ -3190,6 +3206,7 @@ impl ExactModel {
     pub fn ef_region(&self, good: &BDDFunction) -> Result<BDDFunction, String> {
         let mut ef = self.ff.clone();
         loop {
+            self.charge_iteration()?;
             let next = oom(good.or(&self.diamond_pre(&ef)?))?;
             if next == ef {
                 return Ok(ef);
@@ -3205,6 +3222,7 @@ impl ExactModel {
     pub fn env_maintain_region(&self, r: &BDDFunction) -> Result<BDDFunction, String> {
         let mut s = self.tt.clone();
         loop {
+            self.charge_iteration()?;
             let next = oom(r.and(&self.diamond_pre(&s)?))?;
             if next == s {
                 return Ok(s);
@@ -3233,6 +3251,7 @@ impl ExactModel {
         let seed = oom(target.and(region))?;
         let mut ef = seed.clone();
         loop {
+            self.charge_iteration()?;
             let step = oom(region.and(&self.diamond_pre(&ef)?))?;
             let next = oom(seed.or(&step))?;
             if next == ef {
@@ -3327,6 +3346,19 @@ impl ExactModel {
                  AFTER the fixpoint (this is the RESIDUAL — relation + persistent structures, NOT \
                  this property's cone, whose working set is already collected); in {} \
                  iteration(s), budget {}; work {} BDD ops",
+                self.peak_nodes.get(),
+                self.iters.get(),
+                self.node_soft,
+                self.work.get()
+            );
+        } else if std::env::var_os("MUNUNU_BDD_REPORT_WORK").is_some() {
+            // B2 (engine-performance roadmap) — the same counters WITHOUT the collection the peak
+            // report runs to measure the residual. That `gc()` sweeps the whole arena table once
+            // per evaluation; on the heat-check corpus it read as 16–25% of self time and
+            // coloured every map. This line is what the measurement scripts turn on.
+            eprintln!(
+                "[mununu#553] exact fixpoint: peak {} ALLOCATED BDD nodes (no collection ran for \
+                 this report — MUNUNU_BDD_REPORT_WORK); in {} iteration(s), budget {}; work {} BDD ops",
                 self.peak_nodes.get(),
                 self.iters.get(),
                 self.node_soft,
@@ -3455,37 +3487,14 @@ impl ExactModel {
     /// (`greatest=true`, from `⊤`) fixpoint. Convergence is exact set equality —
     /// ROBDDs are canonical, so `==` is the fixpoint test, and over a finite state
     /// space it converges in ≤ |states| steps (the iteration *is* the ranking).
-    #[allow(clippy::too_many_arguments)]
-    fn fixpoint(
-        &self,
-        f: &Formula,
-        node: crate::mu_calculus::NodeId,
-        var: FormulaVarId,
-        body: crate::mu_calculus::NodeId,
-        atoms: &HashMap<&str, BDDFunction>,
-        bindings: &mut HashMap<FormulaVarId, BDDFunction>,
-        ctx: &mut EvalCtx,
-        greatest: bool,
-    ) -> Result<BDDFunction, String> {
-        // M2 — the restart rule (Long, Browne, Clarke, Jha, Marrero 1997). A nested fixpoint that
-        // mentions an outer variable is re-evaluated each time that variable moves. When the outer
-        // and inner fixpoints have the SAME polarity the inner's previous value is a valid start:
-        // the outer moves monotonically (ν descends, μ ascends), so the inner's function changes in
-        // the same direction and its old fixpoint is a pre-fixpoint (ν) / post-fixpoint (μ) of the
-        // new one, from which Kleene iteration converges to the new fixpoint. When the polarities
-        // ALTERNATE the old value lies on the wrong side and the inner restarts from its seed;
-        // `EvalCtx::reset_sets` names, per fixpoint node, the nested nodes to forget whenever it
-        // produces a new approximant. Opt out with `MUNUNU_BDD_FIXPOINT_REUSE=0` (legacy evaluation).
-        let seed = if greatest {
-            self.tt.clone()
-        } else {
-            self.ff.clone()
-        };
-        let mut x = match ctx.approx.get(&node) {
-            Some(prev) if ctx.reuse => prev.clone(),
-            _ => seed,
-        };
-        loop {
+    /// B1 (engine-performance roadmap) — ONE iteration of ANY reachability loop on this model:
+    /// count it and apply every guard — the deterministic ITERATION budget, the ARENA-SAFETY net,
+    /// the LATENCY bound, the opt-in wall clock — with the same messages whichever loop charges it.
+    /// Until B1 only [`Self::fixpoint`] was guarded; `ef_region`, `env_maintain_region`,
+    /// `ef_within`, the `not_ef_p` / `eg_not_p` witness regions and the four witness reach-layer
+    /// loops iterated with no budget at all.
+    fn charge_iteration(&self) -> Result<(), String> {
+        {
             // Iteration budget — bail deterministically before a wide-counter diameter (`2^W`)
             // fixpoint hangs. Counted across ALL fixpoints in this `evaluate` (nested νμ share
             // the running total), so a bounded total work regardless of nesting.
@@ -3564,6 +3573,50 @@ impl ExactModel {
                      fixpoint NODE budget instead, or use `--engine explicit`"
                 ));
             }
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn fixpoint(
+        &self,
+        f: &Formula,
+        node: crate::mu_calculus::NodeId,
+        var: FormulaVarId,
+        body: crate::mu_calculus::NodeId,
+        atoms: &HashMap<&str, BDDFunction>,
+        bindings: &mut HashMap<FormulaVarId, BDDFunction>,
+        ctx: &mut EvalCtx,
+        greatest: bool,
+    ) -> Result<BDDFunction, String> {
+        // M2 — the restart rule (Long, Browne, Clarke, Jha, Marrero 1997). A nested fixpoint that
+        // mentions an outer variable is re-evaluated each time that variable moves. When the outer
+        // and inner fixpoints have the SAME polarity the inner's previous value is a valid start:
+        // the outer moves monotonically (ν descends, μ ascends), so the inner's function changes in
+        // the same direction and its old fixpoint is a pre-fixpoint (ν) / post-fixpoint (μ) of the
+        // new one, from which Kleene iteration converges to the new fixpoint. When the polarities
+        // ALTERNATE the old value lies on the wrong side and the inner restarts from its seed;
+        // `EvalCtx::reset_sets` names, per fixpoint node, the nested nodes to forget whenever it
+        // produces a new approximant. Opt out with `MUNUNU_BDD_FIXPOINT_REUSE=0` (legacy evaluation).
+        let seed = if greatest {
+            self.tt.clone()
+        } else {
+            self.ff.clone()
+        };
+        let mut x = match ctx.approx.get(&node) {
+            Some(prev) if ctx.reuse => prev.clone(),
+            _ => seed,
+        };
+        // NOT a frontier iteration — measured and reverted 2026-10-06 (A1 of the engine-performance
+        // roadmap). `μX.(φ ∨ ◇X)` can be iterated as `X ∪ ◇(X_k \ X_{k-1})` and `νX.(φ ∧ □X)` as
+        // `X \ ◇(X_{k-1} \ X_k)`, same sets, same iteration count — but AFTER M1 (one `Subst`, so
+        // OxiDD's substitute cache serves the shared subgraphs of the full set) the frontier's premise
+        // is gone, and computing the delta costs two full-set operations per step: raster 800 lines
+        // 3.27 M → 4.91 M BDD ops and 5.4 → 6.3 s, twocount 2^17 4.4 → 6.5 s, forward 2^16
+        // 2.5 → 2.8 s; the heat moved from `apply_ite` to the delta's `apply_bin`. Re-measure
+        // before trying it again; the equivalence tests it needs are in the roadmap document.
+        loop {
+            self.charge_iteration()?;
             bindings.insert(var, x.clone());
             let next = self.eval_node(f, body, atoms, bindings, ctx)?;
             if next == x {
@@ -3808,8 +3861,9 @@ pub fn exact_bad_reachable(btor2_content: &str) -> Result<bool, String> {
     let formula = mu_parser::parse("mu Y. (BAD or <> Y)").expect("EF(bad) formula parses");
     let mut atoms: HashMap<&str, BDDFunction> = HashMap::new();
     atoms.insert("BAD", bad);
-    let reach = model.evaluate(&formula, &atoms)?;
+    // Built BEFORE the fixpoint: see the ordering hazard on `check_node_budget`.
     let init = bb.initial_state_bdd(&file)?;
+    let reach = model.evaluate(&formula, &atoms)?;
     let reachable = init.and(&reach).unwrap() != bb.ff;
 
     // BOTH directions are sound since mununu#498's sibling fix: `initial_state_bdd`
@@ -4158,8 +4212,8 @@ pub fn kmts_two_player_verdict(
     let ctrl: std::collections::HashSet<String> =
         controllable.iter().map(|s| s.to_string()).collect();
     let rel = bb.abstract_game(&exprs, must_semantics, &ctrl)?;
+    let init = bb.initial_state_bdd(&file)?; // before the fixpoint (ordering hazard, `check_node_budget`)
     let verdict = rel.evaluate(formula, &names)?;
-    let init = bb.initial_state_bdd(&file)?;
     Ok(rel.verdict_at_init(&verdict, &init))
 }
 
@@ -4576,8 +4630,8 @@ fn exact_symbolic_verdict_with_witness_inner(
         .map(|(n, b)| (n.as_str(), b.clone()))
         .collect();
 
+    let init = bb.initial_state_bdd(&file)?; // before the fixpoint (ordering hazard, `check_node_budget`)
     let sat = exact.evaluate(formula, &atoms)?;
-    let init = bb.initial_state_bdd(&file)?;
     // Holds iff init ⊆ sat, i.e. no initial state violates φ.
     let violating = init.and(&sat.not().unwrap()).unwrap();
     if violating == *exact.ff() {
@@ -5501,6 +5555,7 @@ impl BddBitBlaster {
         let mut layers = vec![stall.clone()];
         loop {
             let prev = layers.last().unwrap();
+            exact.charge_iteration().ok()?;
             let next = prev.or(&exact.diamond_pre(prev).ok()?).unwrap();
             if &next == prev {
                 break;
@@ -5579,6 +5634,7 @@ impl BddBitBlaster {
         let mut layers = vec![trap.clone()];
         loop {
             let prev = layers.last().unwrap();
+            exact.charge_iteration().ok()?;
             let next = prev.or(&exact.diamond_pre(prev).ok()?).unwrap();
             if &next == prev {
                 break;
@@ -5656,6 +5712,7 @@ impl BddBitBlaster {
         let mut layers = vec![p.clone()];
         loop {
             let prev = layers.last().unwrap();
+            exact.charge_iteration().ok()?;
             let next = prev.or(&exact.diamond_pre(prev).ok()?).unwrap();
             if &next == prev {
                 break;
@@ -5718,6 +5775,7 @@ impl BddBitBlaster {
         let mut layers = vec![good.clone()];
         loop {
             let prev = layers.last().unwrap();
+            exact.charge_iteration().ok()?;
             let next = prev.or(&exact.diamond_pre(prev).ok()?).unwrap();
             if &next == prev {
                 break;
@@ -5867,6 +5925,7 @@ impl BddBitBlaster {
         let mut layers = vec![stall.clone()];
         loop {
             let prev = layers.last().unwrap();
+            exact.charge_iteration().ok()?;
             let next = prev.or(&exact.cpre_environment(prev).ok()?).unwrap();
             if &next == prev {
                 break;
@@ -6215,6 +6274,7 @@ impl BddBitBlaster {
         let mut layers = vec![recur];
         loop {
             let prev = layers.last().unwrap();
+            exact.charge_iteration().ok()?;
             let next = prev.or(&exact.cpre_controllable(prev).ok()?).unwrap();
             if &next == prev {
                 break;
@@ -6265,6 +6325,7 @@ impl BddBitBlaster {
         let mut layers = vec![good.clone()];
         loop {
             let prev = layers.last().unwrap();
+            exact.charge_iteration().ok()?;
             let next = prev.or(&exact.cpre_controllable(prev).ok()?).unwrap();
             if &next == prev {
                 break;
@@ -6416,6 +6477,7 @@ impl BddBitBlaster {
     fn not_ef_p(&self, exact: &ExactModel, p: &BDDFunction) -> Result<BDDFunction, String> {
         let mut ef = self.ff.clone();
         loop {
+            exact.charge_iteration()?;
             let next = oom(p.or(&exact.diamond_pre(&ef)?))?;
             if next == ef {
                 break;
@@ -6431,6 +6493,7 @@ impl BddBitBlaster {
         let not_p = oom(p.not())?;
         let mut stall = self.tt.clone();
         loop {
+            exact.charge_iteration()?;
             let next = oom(not_p.and(&exact.diamond_pre(&stall)?))?;
             if next == stall {
                 break;
@@ -6745,6 +6808,94 @@ mod tests {
                 "`{fs}`: reuse never costs iterations"
             );
         }
+    }
+
+    /// B1 — every reachability loop on the model charges the same guard: under a tiny iteration
+    /// budget each one abstains with the ITERATION-budget message instead of iterating on. The
+    /// witness reach-layer loops build their own model from the environment and are covered by
+    /// the same helper (code), not by this test.
+    #[test]
+    fn every_reachability_loop_honours_the_iteration_budget() {
+        let wrap = "1 sort bitvec 1\n2 sort bitvec 6\n3 state 2 cnt\n4 zero 2\n5 init 2 3 4\n6 constd 2 63\n\
+                    7 eq 1 3 6\n8 one 2\n9 add 2 3 8\n10 ite 2 7 4 9\n11 next 2 3 10\n";
+        let file = parser::parse(wrap).expect("parse");
+        let bb = BddBitBlaster::build(&file).expect("build");
+        let good = bb
+            .predicate_bdd(&PredicateExpr::Cmp {
+                register: "cnt".into(),
+                op: CmpOp::Eq,
+                value: 0,
+            })
+            .expect("atom");
+        let tiny = || bb.exact_model().with_iteration_budget(3);
+        let is_budget =
+            |r: Result<BDDFunction, String>| matches!(&r, Err(e) if e.contains("ITERATION budget"));
+        let exact = tiny();
+        assert!(is_budget(exact.ef_region(&good)), "ef_region");
+        // `cnt ≠ 63` is maintainable only from states that never reach 63: the ν peels one state
+        // per step (63 steps), so a 3-iteration budget trips here.
+        let not63 = bb
+            .predicate_bdd(&PredicateExpr::Cmp {
+                register: "cnt".into(),
+                op: CmpOp::Eq,
+                value: 63,
+            })
+            .expect("atom")
+            .not()
+            .unwrap();
+        let exact = tiny();
+        assert!(
+            is_budget(exact.env_maintain_region(&not63)),
+            "env_maintain_region"
+        );
+        let exact = tiny();
+        assert!(is_budget(exact.ef_within(&bb.tt, &good)), "ef_within");
+        let exact = tiny();
+        assert!(is_budget(bb.not_ef_p(&exact, &good)), "not_ef_p");
+        let exact = tiny();
+        assert!(is_budget(bb.eg_not_p(&exact, &good)), "eg_not_p");
+        // and the μ/ν evaluator itself, through the same helper
+        let formula = crate::mu_calculus::parser::parse("mu X. ((cnt == 0) || <> X)").expect("EF");
+        let mut atoms: HashMap<&str, BDDFunction> = HashMap::new();
+        atoms.insert("cnt == 0", good.clone());
+        let exact = tiny();
+        assert!(is_budget(exact.evaluate(&formula, &atoms)), "fixpoint");
+    }
+
+    /// A blaster op that runs AFTER a fixpoint (the initial-state BDD in `exact_bad_reachable`)
+    /// must not abstain on the fixpoint's garbage. Two 16-bit counters advancing alternately on a
+    /// free input, `bad` at (m-1, m-1): the forward reach allocates ~2.75 M nodes against the
+    /// small tier's 2 M op budget. On the parent commit this returned `Err(NODE budget)` unless
+    /// `MUNUNU_BDD_REPORT_PEAK` was set; the verdict is VIOLATED (reachable).
+    #[test]
+    fn exact_bad_reachable_is_not_cut_by_the_fixpoints_garbage() {
+        let m: u64 = 1 << 16;
+        let src = format!(
+            "1 sort bitvec 1\n2 sort bitvec 16\n3 input 1 turn\n4 zero 2\n5 state 2 a\n6 state 2 b\n\
+             7 init 2 5 4\n8 init 2 6 4\n9 one 2\n10 add 2 5 9\n11 add 2 6 9\n12 ite 2 3 5 10\n\
+             13 ite 2 -3 6 11\n14 next 2 5 12\n15 next 2 6 13\n16 constd 2 {}\n17 eq 1 5 16\n\
+             18 eq 1 6 16\n19 and 1 17 18\n20 bad 19\n",
+            m - 1
+        );
+        assert_eq!(super::exact_bad_reachable(&src), Ok(true));
+    }
+
+    /// PROBE — what `exact_bad_reachable` returns on a file, INCLUDING the `Err` that the owned
+    /// portfolio's `run_exact` drops with `.ok()`. `MUNUNU_PROBE_BTOR2=<file>`.
+    #[test]
+    #[ignore = "probe: set MUNUNU_PROBE_BTOR2 to a BTOR2 file; prints the exact member's verdict or error"]
+    fn probe_exact_bad_reachable_verbatim() {
+        let Ok(path) = std::env::var("MUNUNU_PROBE_BTOR2") else {
+            eprintln!("[probe] MUNUNU_PROBE_BTOR2 unset — skipping");
+            return;
+        };
+        let src = std::fs::read_to_string(&path).expect("read the probe file");
+        let t0 = std::time::Instant::now();
+        let r = super::exact_bad_reachable(&src);
+        eprintln!(
+            "[probe] exact_bad_reachable({path}) = {r:?} in {:?}",
+            t0.elapsed()
+        );
     }
 
     /// The work counter is the roadmap's host-independent currency: it counts the BDD operations

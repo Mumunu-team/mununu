@@ -273,7 +273,7 @@ def command(case: str, size: int, binary: Path) -> tuple[list[str], dict, str]:
 
 
 def run_timed(cmd: list[str], env: dict, cap_s: float) -> dict:
-    full_env = {**os.environ, "MUNUNU_BDD_REPORT_PEAK": "1", **env}
+    full_env = {**os.environ, "MUNUNU_BDD_REPORT_WORK": "1", **env}
     r0 = resource.getrusage(resource.RUSAGE_CHILDREN)
     t0 = time.perf_counter()
     timed_out = False
@@ -391,7 +391,7 @@ def profile(case: str, size: int, tool: str, binary: Path, toggle: str | None, i
         out = stem.with_suffix(".samply.json.gz")
         full = ["samply", "record", "--save-only", "-o", str(out), "--", *cmd]
         print("   " + shlex.join(full))
-        rc = subprocess.run(full, env={**os.environ, "MUNUNU_BDD_REPORT_PEAK": "1", **env}).returncode
+        rc = subprocess.run(full, env={**os.environ, "MUNUNU_BDD_REPORT_WORK": "1", **env}).returncode
         print(f"   → {out}\n   open with:  samply load {out}   (serves the Firefox Profiler on localhost; "
               f"use the Call Tree → 'Invert call stack' for the callee view, or the Flame Graph tab)")
         if rc == 0 or out.exists():
@@ -406,7 +406,7 @@ def profile(case: str, size: int, tool: str, binary: Path, toggle: str | None, i
         vg = ["valgrind", "--tool=callgrind", f"--callgrind-out-file={out}", "--dump-instr=no", "--collect-jumps=no"]
         if toggle:
             vg += ["--collect-atstart=no", f"--toggle-collect={toggle}"]
-        envflags = [f"-e{k}={v}" for k, v in {"MUNUNU_BDD_REPORT_PEAK": "1", **env}.items()]
+        envflags = [f"-e{k}={v}" for k, v in {"MUNUNU_BDD_REPORT_WORK": "1", **env}.items()]
         dock = ["docker", "run", "--rm", "-v", f"{REPO}:/work", "-v", "mununu-target:/ct", "-w", "/work", *envflags, image]
         full = [*dock, *vg, *in_cmd]
         print("   " + shlex.join(full))

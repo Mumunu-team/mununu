@@ -93,7 +93,7 @@ def record_case(case: str, size: int, marker: str, binary: Path, outdir: Path) -
     prof = outdir / f"{case}-{size}.samply.json.gz"
     t0 = time.perf_counter()
     proc = subprocess.run(["samply", "record", "--save-only", "-o", str(prof), "--", *cmd],
-                          capture_output=True, text=True, env={**os.environ, "MUNUNU_BDD_REPORT_PEAK": "1", **env})
+                          capture_output=True, text=True, env={**os.environ, "MUNUNU_BDD_REPORT_WORK": "1", **env})
     wall = time.perf_counter() - t0
     work = sum(int(m.group(1)) for m in pc.WORK_RE.finditer(proc.stderr))
     iters = sum(int(m.group(2)) for m in pc.PEAK_RE.finditer(proc.stderr))
