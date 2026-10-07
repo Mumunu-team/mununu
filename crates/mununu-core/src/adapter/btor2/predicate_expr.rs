@@ -968,21 +968,21 @@ mod tests {
         z3::with_z3_config(&cfg, || {
             let q = z3::ast::BV::new_const("q", 1);
             let solver = z3::Solver::new();
-            solver.assert(&literal_cmp(&q, CmpOp::Eq, 2));
+            solver.assert(literal_cmp(&q, CmpOp::Eq, 2));
             assert_eq!(
                 solver.check(),
                 z3::SatResult::Unsat,
                 "a 1-bit register is never 2"
             );
             let solver = z3::Solver::new();
-            solver.assert(&literal_cmp(&q, CmpOp::Lt, 2).not());
+            solver.assert(literal_cmp(&q, CmpOp::Lt, 2).not());
             assert_eq!(
                 solver.check(),
                 z3::SatResult::Unsat,
                 "a 1-bit register is always < 2"
             );
             let solver = z3::Solver::new();
-            solver.assert(&literal_cmp(&q, CmpOp::Eq, 1));
+            solver.assert(literal_cmp(&q, CmpOp::Eq, 1));
             assert_eq!(
                 solver.check(),
                 z3::SatResult::Sat,
