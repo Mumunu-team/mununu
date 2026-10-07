@@ -2412,7 +2412,7 @@ pub fn predicate_cube_lift(
                     &file,
                 )
             });
-            match compute_all_may_edges_smt_postimage(
+            match compute_all_may_edges_postimage(
                 &file,
                 &predicates,
                 &lift_opts.compound_exprs,
@@ -3066,6 +3066,251 @@ enum CubeResult {
     NotApplicable,
 }
 
+/// The effective constraint per lift predicate: a compound expression (by name) or the simple
+/// `reg == value` the spec spells. Shared by the SMT workers and the BDD backend so both lower
+/// the SAME predicates — the identity between the two backends rests on it.
+fn lift_predicate_exprs(
+    predicates: &[PredicateSpec],
+    compound_exprs: &std::collections::HashMap<
+        String,
+        crate::adapter::btor2::predicate_expr::PredicateExpr,
+    >,
+) -> Vec<crate::adapter::btor2::predicate_expr::PredicateExpr> {
+    use crate::adapter::btor2::predicate_expr::{CmpOp, PredicateExpr};
+    predicates
+        .iter()
+        .map(|s| {
+            compound_exprs
+                .get(&s.name)
+                .cloned()
+                .unwrap_or(PredicateExpr::Cmp {
+                    register: s.register.clone(),
+                    op: CmpOp::Eq,
+                    value: s.value,
+                })
+        })
+        .collect()
+}
+
+/// Roadmap 2, step 5 — which backend computes the post-image may-relation.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PostimageBackend {
+    /// The all-SAT loop over z3 (`compute_all_may_edges_smt_postimage`): one solver per source
+    /// cube, `#successors + 1` checks each. Works on any cone the SMT encoder accepts.
+    Smt,
+    /// The exact engine's abstract relation (`BddBitBlaster::abstract_may_relation`): the whole
+    /// `R_may(p, p')` in one relational product, then an output-sensitive split per source. Only
+    /// for cones the bit-blaster accepts (the bit cap, no memories); falls back to `Smt`.
+    Bdd,
+    /// Both, as a cross-check: the BDD backend's map is compared cell for cell with the SMT
+    /// loop's and every difference is logged at `warn`; the SMT map is the answer. The
+    /// differential-oracle mode for a cone where the two are suspected to disagree.
+    Check,
+}
+
+/// `MUNUNU_CUBE_POSTIMAGE_BACKEND` = `smt` | `bdd`; anything else is the default.
+fn postimage_backend() -> PostimageBackend {
+    parse_postimage_backend(
+        std::env::var("MUNUNU_CUBE_POSTIMAGE_BACKEND")
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// The knob's parse, separated from the env read so it is testable without touching the
+/// process environment.
+fn parse_postimage_backend(raw: Option<&str>) -> PostimageBackend {
+    match raw.map(str::trim) {
+        Some("smt") => PostimageBackend::Smt,
+        Some("bdd") => PostimageBackend::Bdd,
+        Some("check") => PostimageBackend::Check,
+        _ => POSTIMAGE_BACKEND_DEFAULT,
+    }
+}
+
+/// Step 5's default: the BDD backend, by measurement on the i2c lift (same binary,
+/// env-toggled, interleaved; lift JSON byte-identical in every arm):
+///
+/// ```text
+/// arm                       SMT loop   BDD      wall     CPU
+/// |P| = 8,  1 worker        8.58 s     1.73 s   −80 %    −81 %
+/// |P| = 8,  8 workers       5.22 s     1.84 s   −65 %    −88 %
+/// |P| = 10, 1 worker        50.42 s    7.64 s   −85 %    −85 %
+/// |P| = 10, 8 workers       35.11 s    7.48 s   −79 %    −91 %
+/// ```
+///
+/// At |P| = 10 the backend spends 0.56 s building the relation and 0.13 s reading 1,024 cells
+/// off it; what remains of the lift (~6.9 s) is the hyper-must pass, which is the wall now. A
+/// cone the bit-blaster refuses (the cap, a memory) takes the SMT loop as before.
+const POSTIMAGE_BACKEND_DEFAULT: PostimageBackend = PostimageBackend::Bdd;
+
+/// The post-image may-relation by the configured backend. The BDD backend answers only when it
+/// can (a `None` is "not for this cone", never a verdict); the SMT path decides the rest and is
+/// the one that can report `BudgetExceeded`.
+fn compute_all_may_edges_postimage(
+    file: &crate::adapter::btor2::ast::Btor2File,
+    predicates: &[PredicateSpec],
+    compound_exprs: &std::collections::HashMap<
+        String,
+        crate::adapter::btor2::predicate_expr::PredicateExpr,
+    >,
+    rlimit: Option<u32>,
+    roots: Option<&[usize]>,
+) -> MayPostimage {
+    match postimage_backend() {
+        PostimageBackend::Smt => {}
+        PostimageBackend::Bdd => {
+            if let Some(map) = compute_all_may_edges_bdd(file, predicates, compound_exprs, roots) {
+                return MayPostimage::Complete(map);
+            }
+        }
+        PostimageBackend::Check => {
+            let bdd = compute_all_may_edges_bdd(file, predicates, compound_exprs, roots);
+            let smt = compute_all_may_edges_smt_postimage(
+                file,
+                predicates,
+                compound_exprs,
+                rlimit,
+                roots,
+            );
+            if let (Some(bdd), MayPostimage::Complete(smt)) = (&bdd, &smt) {
+                let mut differing = 0usize;
+                for cube in 0..(1usize << predicates.len()) {
+                    let (b, s) = (bdd.get(&cube), smt.get(&cube));
+                    if b != s {
+                        differing += 1;
+                        tracing::warn!(cube, bdd = ?b, smt = ?s, "post-image backends DIFFER");
+                    }
+                }
+                tracing::info!(
+                    differing,
+                    cells = smt.len(),
+                    "post-image backend cross-check (bdd vs smt)"
+                );
+            } else {
+                tracing::info!(
+                    bdd_answered = bdd.is_some(),
+                    "post-image backend cross-check: the BDD backend declined this cone"
+                );
+            }
+            return smt;
+        }
+    }
+    compute_all_may_edges_smt_postimage(file, predicates, compound_exprs, rlimit, roots)
+}
+
+/// Roadmap 2, step 5 — the post-image may-relation from the exact engine's abstract relation.
+///
+/// The same object the SMT loop enumerates — `c → c'` iff some concrete state in `c` steps, under
+/// some input, to a state in `c'` — computed as ONE BDD `R_may(p, p') = ∃(x ∪ i). A ∧ A'` over
+/// `2|P|` predicate variables (the `symbolic` engine's relation, validated against brute force in
+/// `assert_may_relation_matches_bruteforce`), then read off per source with
+/// [`AbstractRelation::may_targets`]. The cone is the predicates' (`cone_leaf_nids` on the
+/// predicate registers, as the exact engine's own cube path does), so the bit cap counts only
+/// what the predicates can see.
+///
+/// `None` when the backend cannot answer — a predicate on something that is not a `state`
+/// (the SMT path refuses those too), a cone the bit-blaster refuses (the cap, a memory, a node
+/// budget), or a relation the arena cannot hold — and the SMT path takes over. Neither path
+/// models `constraint` in the may-relation, so the two agree on `constraint` designs as well.
+///
+/// `roots` has the SMT path's meaning (A4): the cells forward-reachable from them, or every cell.
+fn compute_all_may_edges_bdd(
+    file: &crate::adapter::btor2::ast::Btor2File,
+    predicates: &[PredicateSpec],
+    compound_exprs: &std::collections::HashMap<
+        String,
+        crate::adapter::btor2::predicate_expr::PredicateExpr,
+    >,
+    roots: Option<&[usize]>,
+) -> Option<std::collections::HashMap<usize, Vec<usize>>> {
+    use crate::adapter::btor2::ast::Node;
+    use crate::adapter::btor2::symbolic_bitblast::{BddBitBlaster, collect_predicate_registers};
+    let n = predicates.len();
+    if n == 0 || n > 20 {
+        return None;
+    }
+    let exprs = lift_predicate_exprs(predicates, compound_exprs);
+    let mut seed: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for e in &exprs {
+        collect_predicate_registers(e, &mut seed);
+    }
+    // Every predicate register must name a BTOR2 `state` cell: the SMT path resolves predicates
+    // through the state map and refuses anything else, and an input-observing predicate would
+    // give the abstract relation a meaning the SMT loop never had. The names are the lift's
+    // canonical ones (`resolve_predicate_registers`), i.e. `collect_symbols`' — a state-line
+    // symbol or the width-matched alias `flatten` left on a `uext` — keyed by the state's NID.
+    let states: std::collections::HashSet<String> =
+        crate::adapter::btor2::parser::collect_symbols(file)
+            .into_iter()
+            .filter(|(nid, _)| {
+                file.lookup(*nid)
+                    .is_some_and(|l| matches!(l.node, Node::State { .. }))
+            })
+            .map(|(_, name)| name)
+            .collect();
+    if seed.is_empty() || seed.iter().any(|r| !states.contains(r)) {
+        tracing::debug!("bdd post-image: a predicate is not over a `state`; SMT");
+        return None;
+    }
+    let seed_atoms: Vec<String> = seed.into_iter().collect();
+    let keep = crate::adapter::btor2::dep_graph::cone_leaf_nids(file, &seed_atoms);
+    let t0 = Instant::now();
+    let bb = match BddBitBlaster::build_with_keep(file, Some(&keep)) {
+        Ok(bb) => bb,
+        Err(e) => {
+            tracing::debug!(error = %e, "bdd post-image: the bit-blaster refused the cone; SMT");
+            return None;
+        }
+    };
+    let rel = match bb.abstract_may_relation(&exprs) {
+        Ok(rel) => rel,
+        Err(e) => {
+            tracing::debug!(error = %e, "bdd post-image: the abstract relation failed; SMT");
+            return None;
+        }
+    };
+    let built_ms = t0.elapsed().as_millis();
+    let all_cells = 1usize << n;
+    let mut queued: Vec<bool> = vec![roots.is_none(); all_cells];
+    let mut wave: Vec<usize> = match roots {
+        None => (0..all_cells).collect(),
+        Some(r) => {
+            let mut q = Vec::new();
+            for &c in r {
+                if c < all_cells && !queued[c] {
+                    queued[c] = true;
+                    q.push(c);
+                }
+            }
+            q
+        }
+    };
+    let mut out: std::collections::HashMap<usize, Vec<usize>> = std::collections::HashMap::new();
+    while let Some(cube) = wave.pop() {
+        if crate::adapter::run_budget::expired() {
+            return None; // the SMT path reports the budget, as before
+        }
+        let targets = rel.may_targets(cube);
+        if roots.is_some() {
+            for &t in &targets {
+                if !queued[t] {
+                    queued[t] = true;
+                    wave.push(t);
+                }
+            }
+        }
+        out.insert(cube, targets);
+    }
+    tracing::debug!(
+        cells = out.len(),
+        built_ms,
+        elapsed_ms = t0.elapsed().as_millis(),
+        "bdd post-image"
+    );
+    Some(out)
+}
+
 /// S3 — how many post-image workers to run: `MUNUNU_CUBE_POSTIMAGE_THREADS` when set (`1` is
 /// the pre-S3 single loop), else the host's parallelism capped at 8 — each worker holds its own
 /// z3 context and encoding of the design, so the cap bounds memory, not just threads.
@@ -3101,7 +3346,7 @@ fn postimage_worker(
     feed: std::sync::mpsc::Receiver<usize>,
     results: std::sync::mpsc::Sender<CubeResult>,
 ) {
-    use crate::adapter::btor2::predicate_expr::{CmpOp, PredicateExpr};
+    use crate::adapter::btor2::predicate_expr::PredicateExpr;
     let PostimageJob {
         file,
         predicates,
@@ -3129,20 +3374,7 @@ fn postimage_worker(
             }
         };
         let nid_map = crate::adapter::btor2::smt_must_edge::build_register_nid_map(&view);
-        // Effective constraint per predicate: a compound (by name) or the simple `reg == value`.
-        let exprs: Vec<PredicateExpr> = predicates
-            .iter()
-            .map(|s| {
-                compound_exprs
-                    .get(&s.name)
-                    .cloned()
-                    .unwrap_or(PredicateExpr::Cmp {
-                        register: s.register.clone(),
-                        op: CmpOp::Eq,
-                        value: s.value,
-                    })
-            })
-            .collect();
+        let exprs: Vec<PredicateExpr> = lift_predicate_exprs(predicates, compound_exprs);
         let curr = |name: &str| {
             nid_map
                 .get(name)
@@ -3567,6 +3799,112 @@ mod tests {
             "the universal cube of a TOTAL design must have a self-loop; an edgeless cell is \
              indistinguishable from an unsatisfiable one and gets masked to ⊥"
         );
+    }
+
+    /// Roadmap 2, step 5 — the BDD backend's may-relation IS the SMT post-image's, source for
+    /// source, on every fixture the bit-blaster accepts: a relational design with compound
+    /// predicates, a held-register/free-input design, and the i2c wall-class lift at |P| = 6
+    /// (64 cells over a 154-bit cone) — the register-dominated RTL class the backend is for.
+    /// Checked both for the full map and for the A4 reachable-only map from the lift's roots,
+    /// so the two backends agree on `unreached_cells` as well as on the edges.
+    #[test]
+    fn r2_step5_bdd_postimage_matches_the_smt_postimage_cell_for_cell() {
+        use std::collections::{BTreeMap, HashMap};
+        const I2C: &str = include_str!("../../../tests/fixtures/wall_classes/i2c_scl_padoen.btor");
+        const HELD_AND_FREE: &str = "1 sort bitvec 1\n2 state 1 reg_a\n3 state 1 reg_b\n4 zero 1\n\
+                                     5 init 1 2 4\n6 init 1 3 4\n7 next 1 2 4\n8 input 1 in\n\
+                                     9 next 1 3 8\n";
+        let spec = |name: &str, register: &str, value: u64| PredicateSpec {
+            name: name.into(),
+            register: register.into(),
+            value,
+        };
+        let (rel_btor2, rel_preds, rel_compound) = p1_rel_design();
+        let i2c_preds: Vec<PredicateSpec> = [
+            ("byte_controller.bit_controller.c_state", 1),
+            ("byte_controller.c_state", 0),
+            ("byte_controller.bit_controller.cmd", 0),
+            ("tip", 1),
+            ("byte_controller.bit_controller.clk_en", 1),
+            ("byte_controller.go", 1),
+        ]
+        .iter()
+        .map(|(r, v)| spec(&format!("{r} == {v}"), r, *v))
+        .collect();
+        let cases: Vec<(&str, &str, Vec<PredicateSpec>, HashMap<String, _>)> = vec![
+            ("relational + compound", rel_btor2, rel_preds, rel_compound),
+            (
+                "held register + free input",
+                HELD_AND_FREE,
+                vec![spec("a", "reg_a", 1), spec("b", "reg_b", 1)],
+                HashMap::new(),
+            ),
+            ("i2c |P|=6", I2C, i2c_preds, HashMap::new()),
+            // An out-of-range literal: `reg_b == 2` on a 1-bit register is an always-false atom.
+            // The SMT lowering used to MASK the literal to the width (`reg_b == 0`, a different
+            // atom) while the BDD backend, the simulator and the exact engine never did; this row
+            // failed until `literal_cmp` gave the SMT side the same reading.
+            (
+                "1-bit register, out-of-range literal",
+                HELD_AND_FREE,
+                vec![spec("a0", "reg_a", 0), spec("b2", "reg_b", 2)],
+                HashMap::new(),
+            ),
+        ];
+        let sorted = |m: HashMap<usize, Vec<usize>>| -> BTreeMap<usize, Vec<usize>> {
+            m.into_iter().collect()
+        };
+        for (label, btor2, mut preds, compound) in cases {
+            let file = crate::adapter::btor2::parser::parse(btor2).expect("parse");
+            // As the lift does before either backend runs: an alias (a name `flatten` left
+            // only on a `uext`/output node) is rewritten to its canonical state-cell symbol.
+            resolve_predicate_registers(&file, &mut preds).expect("predicates resolve");
+            for roots in [
+                None,
+                Some(reachable_lift_roots(
+                    &preds,
+                    &compound,
+                    &HashMap::new(),
+                    &file,
+                )),
+            ] {
+                let smt = match compute_all_may_edges_smt_postimage(
+                    &file,
+                    &preds,
+                    &compound,
+                    None,
+                    roots.as_deref(),
+                ) {
+                    MayPostimage::Complete(m) => m,
+                    other => panic!("{label}: the SMT post-image did not complete: {other:?}"),
+                };
+                let bdd = compute_all_may_edges_bdd(&file, &preds, &compound, roots.as_deref())
+                    .unwrap_or_else(|| panic!("{label}: the BDD backend must answer on this cone"));
+                assert_eq!(
+                    sorted(bdd),
+                    sorted(smt),
+                    "{label} (roots: {}): the BDD backend's may-relation differs from the SMT post-image's",
+                    if roots.is_some() {
+                        "reachable-only"
+                    } else {
+                        "all cells"
+                    }
+                );
+            }
+        }
+    }
+
+    /// Roadmap 2, step 5 — the backend knob's contract: `smt` and `bdd` are honoured, anything
+    /// else (unset, garbage) is the measured default, the BDD backend.
+    #[test]
+    fn postimage_backend_knob_defaults_to_bdd_and_honours_both_spellings() {
+        assert_eq!(parse_postimage_backend(None), PostimageBackend::Bdd);
+        assert_eq!(parse_postimage_backend(Some("smt")), PostimageBackend::Smt);
+        assert_eq!(
+            parse_postimage_backend(Some(" bdd ")),
+            PostimageBackend::Bdd
+        );
+        assert_eq!(parse_postimage_backend(Some("z3")), PostimageBackend::Bdd);
     }
 
     #[test]

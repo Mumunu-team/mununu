@@ -477,24 +477,40 @@ fn match_widths(a: &z3::ast::BV, b: &z3::ast::BV) -> (z3::ast::BV, z3::ast::BV) 
     }
 }
 
-/// Build the Z3 `Bool` for one `register <op> value` atom over `bv`. Masks the
-/// value to the BV width (matching
-/// `smt_must_edge::build_predicate_constraint`).
+/// Build the Z3 `Bool` for one `register <op> value` atom over `bv`.
 fn cmp_constraint(bv: &z3::ast::BV, op: CmpOp, value: u64) -> z3::ast::Bool {
+    literal_cmp(bv, op, value)
+}
+
+/// The ONE SMT lowering of `register <op> literal`, shared by the may side (`build_constraint`)
+/// and the must side (`smt_must_edge::build_predicate_constraint`): the comparison is made at
+/// `max(register width, 64)` bits with the register zero-extended, so a literal the register
+/// cannot hold compares as what it is — `reg == 2` on a 1-bit `reg` is `false`, `reg < 2` is
+/// `true`. This is the semantics of [`PredicateExpr::eval`] (an unmasked `u128` comparison), of
+/// `match_widths` for register-vs-register atoms, and of the exact engine's `predicate_bdd`.
+///
+/// It used to MASK the literal to the register's width instead, which silently turned `reg == 2`
+/// on a 1-bit register into `reg == 0` — a different atom, true on half the states. The two
+/// readings coexisted (the SMT may/must relations masked; the simulator, the reset cube and the
+/// exact engine did not) until the BDD post-image backend lifted a may-relation the SMT must
+/// pass disagreed with, and the auto-seeded `ctrl == 2` of a 1-bit `ctrl` (the 48-bit addend
+/// constant from its cone) turned a `Holds` into `⊥`. One reading everywhere closes that.
+pub(crate) fn literal_cmp(bv: &z3::ast::BV, op: CmpOp, value: u64) -> z3::ast::Bool {
     let width = bv.get_size();
-    let mask: u64 = if width >= 64 {
-        u64::MAX
+    let w = width.max(64);
+    let lhs = if width < w {
+        bv.zero_ext(w - width)
     } else {
-        (1u64 << width) - 1
+        bv.clone()
     };
-    let val_bv = z3::ast::BV::from_u64(value & mask, width);
+    let rhs = z3::ast::BV::from_u64(value, w);
     match op {
-        CmpOp::Eq => bv.eq(&val_bv),
-        CmpOp::Ne => bv.eq(&val_bv).not(),
-        CmpOp::Lt => bv.bvult(&val_bv),
-        CmpOp::Le => bv.bvule(&val_bv),
-        CmpOp::Gt => bv.bvugt(&val_bv),
-        CmpOp::Ge => bv.bvuge(&val_bv),
+        CmpOp::Eq => lhs.eq(&rhs),
+        CmpOp::Ne => lhs.eq(&rhs).not(),
+        CmpOp::Lt => lhs.bvult(&rhs),
+        CmpOp::Le => lhs.bvule(&rhs),
+        CmpOp::Gt => lhs.bvugt(&rhs),
+        CmpOp::Ge => lhs.bvuge(&rhs),
     }
 }
 
@@ -942,6 +958,38 @@ mod tests {
     }
 
     use super::*;
+
+    /// `literal_cmp` reads a literal the register cannot hold as what it is, not masked into a
+    /// different atom: on a 1-bit `q`, `q == 2` is unsatisfiable and `q < 2` is valid. (It used
+    /// to mask `2` to `0`, making `q == 2` the atom `q == 0`.)
+    #[test]
+    fn literal_cmp_does_not_mask_an_out_of_range_literal_into_another_atom() {
+        let cfg = z3::Config::new();
+        z3::with_z3_config(&cfg, || {
+            let q = z3::ast::BV::new_const("q", 1);
+            let solver = z3::Solver::new();
+            solver.assert(literal_cmp(&q, CmpOp::Eq, 2));
+            assert_eq!(
+                solver.check(),
+                z3::SatResult::Unsat,
+                "a 1-bit register is never 2"
+            );
+            let solver = z3::Solver::new();
+            solver.assert(literal_cmp(&q, CmpOp::Lt, 2).not());
+            assert_eq!(
+                solver.check(),
+                z3::SatResult::Unsat,
+                "a 1-bit register is always < 2"
+            );
+            let solver = z3::Solver::new();
+            solver.assert(literal_cmp(&q, CmpOp::Eq, 1));
+            assert_eq!(
+                solver.check(),
+                z3::SatResult::Sat,
+                "an in-range literal is unchanged"
+            );
+        });
+    }
     use std::collections::HashMap;
 
     fn regs(pairs: &[(&str, u128)]) -> HashMap<String, u128> {

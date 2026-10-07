@@ -1588,6 +1588,38 @@ impl AbstractRelation {
         self.holds(&self.r_may, present_cube, next_cube)
     }
 
+    /// Roadmap 2, step 5 — the may-successor cubes of `present_cube`, ascending: every `c'`
+    /// with `present_cube → c'` in `R_may`. Output-sensitive: `R_may` is restricted to the
+    /// present cube's minterm, then the next predicate variables are split one at a time and a
+    /// branch ends the moment nothing lies under it — `O(k · #targets)` applies on a BDD over
+    /// `2k` variables, against the `2^k` point checks of [`Self::may_holds`] per source.
+    pub fn may_targets(&self, present_cube: usize) -> Vec<usize> {
+        let restricted = self
+            .cube_minterm(present_cube, &self.present)
+            .and(&self.r_may)
+            .unwrap();
+        let mut out = Vec::new();
+        self.split_next(&restricted, 0, 0, &mut out);
+        out.sort_unstable();
+        out
+    }
+
+    /// The split behind [`Self::may_targets`]: `f` is `R_may` restricted to one present cube
+    /// and to the first `i` next literals of `acc`; a non-`⊥` `f` with all `k` next literals
+    /// fixed is one target cube.
+    fn split_next(&self, f: &BDDFunction, i: usize, acc: usize, out: &mut Vec<usize>) {
+        if *f == self.ff {
+            return;
+        }
+        if i == self.num_predicates {
+            out.push(acc);
+            return;
+        }
+        let v = &self.next[i];
+        self.split_next(&f.and(v).unwrap(), i + 1, acc | (1 << i), out);
+        self.split_next(&f.and(&v.not().unwrap()).unwrap(), i + 1, acc, out);
+    }
+
     /// Is `present_cube → next_cube` a must-edge? Panics if no [`MustSemantics`]
     /// was requested when the relation was built.
     pub fn must_holds(&self, present_cube: usize, next_cube: usize) -> bool {

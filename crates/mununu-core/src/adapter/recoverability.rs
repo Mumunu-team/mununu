@@ -721,6 +721,18 @@ fn good_register_coi(
 /// none of those predicates can change the verdict. Restricting to the good register's own cone keeps
 /// the control-state seeding property-directed. An EMPTY result (good register absent / no `next`) means
 /// "no cone info" so the caller falls back to `{0,1} ∪ global constants`.
+/// The bit-width of the `state` cell `name` (by its symbol-table name), or `None` if absent.
+fn register_width(file: &crate::adapter::btor2::ast::Btor2File, name: &str) -> Option<u32> {
+    use crate::adapter::btor2::ast::Node;
+    let symbols = crate::adapter::btor2::parser::collect_symbols(file);
+    file.lines.iter().find_map(|l| match &l.node {
+        Node::State { sort, .. } if symbols.get(&l.nid).is_some_and(|s| s == name) => {
+            crate::adapter::btor2::parser::bv_width(file, *sort)
+        }
+        _ => None,
+    })
+}
+
 fn good_next_cone_constants(
     file: &crate::adapter::btor2::ast::Btor2File,
     good_register: &str,
@@ -2605,9 +2617,18 @@ pub fn verify_recoverability_scalable_with_source(
         } else {
             cone_constants
         };
+        // A constant the register cannot hold is not a discriminator: `ctrl == 2` on a 1-bit
+        // `ctrl` is an always-false atom (the cone's constants include the datapath's — the
+        // 48-bit addend `2` of `data == target + 2` reached a 1-bit control register this way).
+        // Under the SMT lowering's former masking it was worse than useless: it aliased
+        // `ctrl == 0` and the lift carried a second spelling of the same atom.
+        let fits = |v: u64| match register_width(&file, gr) {
+            Some(w) if w < 64 => v < (1u64 << w),
+            _ => true,
+        };
         let mut candidate_values: Vec<u64> = vec![0, 1];
         for v in const_pool {
-            if !candidate_values.contains(&v) {
+            if fits(v) && !candidate_values.contains(&v) {
                 candidate_values.push(v);
             }
         }
