@@ -2767,6 +2767,36 @@ impl MayPostimage {
 /// environment so the `Unknown`-saturation path (mununu#504) is testable without mutating
 /// process-global state — the same pure-helper idiom `memory_budget.rs` uses. Production passes
 /// `smt_must_edge::cube_smt_rlimit()`; a test passes `Some(1)` to force every query `Unknown`.
+/// A3 (engine-performance roadmap, category 2) — z3 builds a FULL model after every `Sat` of the
+/// all-SAT loop below, and then compresses it (`model::compress`: an occurrence walk, a
+/// dependency top-sort and a clean-up rewrite of every definition). The profile of the i2c lift
+/// at |P| = 8 put `get_model` at 26 % of the lift, a quarter of which was that compression —
+/// work spent tidying a model this loop reads exactly |P| Booleans from and drops. Compression
+/// only matters to code that walks a model's structure; every z3 model consumer in mununu
+/// evaluates terms against the model (`Model::eval`) instead, so it is switched off
+/// process-wide, once. Measured on `cube-rtl-i2c 8`: 15.0 s → 13.0 s, lift byte-identical.
+fn uncompressed_models() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| z3::set_global_param("model.compact", "false"));
+}
+
+/// A3 — the solver for one source cube of the all-SAT post-image. On a memory-free design the
+/// queries are pure QF_BV, and z3's logic-specific solver for it (the `qfbv` tactic: simplify,
+/// bit-blast, SAT core) is what the generic `Solver::new()` is not — the profile showed the
+/// generic solver routing every query through the `smt` core (`smt::context::search`), whose
+/// own bit-vector bit-blasting is several times slower than the standalone SAT core on these
+/// shapes. The blocking clauses are plain assertions between checks, which the logic solver
+/// accepts (z3 falls back to its incremental core only across `push`/`pop`). With memories the
+/// theory is BvUfArray and the generic solver stays. Measured on `cube-rtl-i2c 8`: 15.0 s →
+/// 10.1 s alone, 8.9 s with [`uncompressed_models`], lift byte-identical in every arm.
+fn postimage_solver(bv_only: bool) -> z3::Solver {
+    if bv_only {
+        z3::Solver::new_for_logic("QF_BV").unwrap_or_default()
+    } else {
+        z3::Solver::new()
+    }
+}
+
 fn compute_all_may_edges_smt_postimage(
     file: &crate::adapter::btor2::ast::Btor2File,
     predicates: &[PredicateSpec],
@@ -2781,6 +2811,7 @@ fn compute_all_may_edges_smt_postimage(
     if n == 0 || n > 20 {
         return MayPostimage::NotApplicable; // outside the cube-space bound; eager path handles it
     }
+    uncompressed_models();
     let cfg = z3::Config::new();
     let res = z3::with_z3_config(&cfg, || {
         let view = encode_design_for_lift(file).ok()?;
@@ -2842,6 +2873,7 @@ fn compute_all_may_edges_smt_postimage(
         // a byte-identical relation and NO measurable change on the real i2c lift (|P| = 8:
         // 14.5 s → 14.0 s; |P| = 10: 77.8 s → 78.0 s). The cost is the all-SAT solving and the
         // model construction per query, not Z3's re-internalisation of the transition.
+        let bv_only = crate::adapter::btor2::bit_blast::detect_btor2_memories(file).is_empty();
         for cube in 0..(1usize << n) {
             // mununu#504 — the outer poll. This loop is the measured hang: up to 2^|P| cubes,
             // x17 CEGAR rounds, x N properties, previously with only a per-QUERY timeout and no
@@ -2852,7 +2884,7 @@ fn compute_all_may_edges_smt_postimage(
                 budget_expired = true;
                 break;
             }
-            let solver = z3::Solver::new();
+            let solver = postimage_solver(bv_only);
             solver.set_params(&params);
             solver.assert(&view.transition);
             for (i, cc) in curr_c.iter().enumerate() {
