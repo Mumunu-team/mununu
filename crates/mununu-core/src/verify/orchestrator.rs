@@ -1230,6 +1230,7 @@ fn dispatch_sv_predicate_cube(
         compound_exprs: std::collections::HashMap::new(),
         derived_predicates: Vec::new(),
         may_postimage: false,
+        reachable_only: false,
     };
     // U.4 — route the verify-path lift through the single gated entry
     // (always Eager for this non-CEGAR path; the entry runs the compound

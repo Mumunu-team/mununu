@@ -338,6 +338,12 @@ pub struct CegarIteration {
     /// Iteration number (0-indexed; iteration 0 is the initial
     /// evaluation before any refinement).
     pub iteration: usize,
+    /// The cube cells this iteration's lift gave NO outgoing may-edge — unsatisfiable cells
+    /// (see [`downgrade_unsatisfiable_cells`]) and, since A4 of the engine-performance roadmap,
+    /// cells not forward-reachable from the initial cubes, which the reachable-only post-image
+    /// does not lift. Masked to ⊥ in `verdict` and excluded from convergence; a tally must
+    /// exclude them too ([`tally_cells`]) — they are not cells the property was decided on.
+    pub unlifted_cells: Vec<usize>,
     /// Predicate set in use at the start of this iteration.
     pub predicates_at_start: Vec<PredicateSpec>,
     /// Game evaluator's verdict at the start of this iteration.
@@ -425,6 +431,9 @@ pub struct CegarTrace {
     pub iterations: Vec<CegarIteration>,
     /// Verdict at the end of the loop (either converged or capped).
     pub final_verdict: TritSet,
+    /// The final iteration's unlifted cells (see [`CegarIteration::unlifted_cells`]): ⊥ in
+    /// `final_verdict` by construction, never a verdict. [`tally_cells`] excludes them.
+    pub unlifted_cells: Vec<usize>,
     /// Predicate set at termination. Includes the initial set plus
     /// every predicate the source added across all iterations.
     pub final_predicates: Vec<PredicateSpec>,
@@ -543,11 +552,13 @@ fn decode_cube_valuation(index: usize, predicates: &[PredicateSpec]) -> Vec<(Str
 impl CegarTrace {
     fn witness_cells_for(&self, want: Trit, max: usize) -> Vec<WitnessCell> {
         let mut out = Vec::new();
+        let unlifted: std::collections::HashSet<usize> =
+            self.unlifted_cells.iter().copied().collect();
         for i in 0..self.final_verdict.len() {
             if out.len() >= max {
                 break;
             }
-            if self.final_verdict.verdict_at(i) == want {
+            if !unlifted.contains(&i) && self.final_verdict.verdict_at(i) == want {
                 out.push(WitnessCell {
                     cube_index: i,
                     valuation: decode_cube_valuation(i, &self.final_predicates),
@@ -570,6 +581,27 @@ impl CegarTrace {
     pub fn undecided_cells(&self, max: usize) -> Vec<WitnessCell> {
         self.witness_cells_for(Trit::Unknown, max)
     }
+}
+
+/// The T / F / ⊥ cell counts of a cube verdict over the cells the lift DECIDED — every cell
+/// except `unlifted` (unsatisfiable or, under the reachable-only post-image, unreached), which
+/// are ⊥ by construction and would otherwise read as "needs refinement". The CLI and the API
+/// summarise through this one function so their counts agree. Returns
+/// `(true, false, unknown, unlifted)`.
+pub fn tally_cells(verdict: &TritSet, unlifted: &[usize]) -> (usize, usize, usize, usize) {
+    let skip: std::collections::HashSet<usize> = unlifted.iter().copied().collect();
+    let (mut t, mut f, mut b) = (0usize, 0usize, 0usize);
+    for i in 0..verdict.len() {
+        if skip.contains(&i) {
+            continue;
+        }
+        match verdict.verdict_at(i) {
+            Trit::True => t += 1,
+            Trit::False => f += 1,
+            Trit::Unknown => b += 1,
+        }
+    }
+    (t, f, b, skip.len())
 }
 
 /// Track I.1 (trace slice, 2026-06-24) — a concrete reachability *countertrace*
@@ -983,6 +1015,9 @@ pub fn cegar_refine_loop(
         // `p1_postimage_lift_matches_all_pairs_lift`); only the cost differs. This is the P0-wall fix
         // for every cube verification (recoverability, safety). Consulted only on the SmtAllPairs path.
         may_postimage: true,
+        // A4 — the verdict path: lift only the cells the initial cubes reach. The verdict at
+        // the initial states is identical; unreached cells are reported, not counted.
+        reachable_only: true,
     };
 
     for iteration in 0..=cegar_opts.max_iterations {
@@ -1003,6 +1038,7 @@ pub fn cegar_refine_loop(
             // panic. Return the last completed iteration's verdict instead.
             return Ok(CegarTrace {
                 final_verdict: last.verdict.clone(),
+                unlifted_cells: last.unlifted_cells.clone(),
                 final_predicates: current_predicates.clone(),
                 terminated_with: CegarTermination::BudgetExpired,
                 lazy_lift_pending: true,
@@ -1283,6 +1319,17 @@ pub fn cegar_refine_loop(
         let (masked_verdicts, unsat_cells) =
             downgrade_unsatisfiable_cells(&lift_result.clts, game_eval.verdicts.clone());
         game_eval.verdicts = masked_verdicts;
+        // A4 — the edgeless set is also every cell the reachable-only post-image did not lift
+        // (`lift_result.unreached_cells`), so one sorted list serves both reasons.
+        let mut unlifted_cells: Vec<usize> = unsat_cells.iter().copied().collect();
+        unlifted_cells.sort_unstable();
+        debug_assert!(
+            lift_result
+                .unreached_cells
+                .iter()
+                .all(|c| unsat_cells.contains(c)),
+            "an unreached cell has an outgoing edge"
+        );
 
         let approximants_at_end: Option<HashMap<usize, StoredApproximant>> = captured.map(|h| {
             // B.6.a invariant: by this point `eval_opts` has been
@@ -1325,6 +1372,7 @@ pub fn cegar_refine_loop(
             // Converged. Record final iteration + return.
             iterations.push(CegarIteration {
                 iteration,
+                unlifted_cells: unlifted_cells.clone(),
                 predicates_at_start: current_predicates.clone(),
                 verdict: game_eval.verdicts.clone(),
                 failure_subgame: None,
@@ -1342,6 +1390,7 @@ pub fn cegar_refine_loop(
             return Ok(CegarTrace {
                 iterations,
                 final_verdict: game_eval.verdicts,
+                unlifted_cells,
                 final_predicates: current_predicates,
                 terminated_with: CegarTermination::Converged,
                 lazy_lift_pending: true,
@@ -1361,6 +1410,7 @@ pub fn cegar_refine_loop(
         if iteration == effective_max_iterations {
             iterations.push(CegarIteration {
                 iteration,
+                unlifted_cells: unlifted_cells.clone(),
                 predicates_at_start: current_predicates.clone(),
                 verdict: game_eval.verdicts.clone(),
                 failure_subgame: game_eval.failure_subgame,
@@ -1377,6 +1427,7 @@ pub fn cegar_refine_loop(
             return Ok(CegarTrace {
                 iterations,
                 final_verdict: game_eval.verdicts,
+                unlifted_cells,
                 final_predicates: current_predicates,
                 terminated_with: CegarTermination::BoundedIterationsReached,
                 lazy_lift_pending: true,
@@ -1468,6 +1519,7 @@ pub fn cegar_refine_loop(
         let added_count = new_predicates.len();
         iterations.push(CegarIteration {
             iteration,
+            unlifted_cells: unlifted_cells.clone(),
             predicates_at_start: current_predicates.clone(),
             verdict: game_eval.verdicts.clone(),
             failure_subgame: game_eval.failure_subgame,
@@ -1485,6 +1537,7 @@ pub fn cegar_refine_loop(
             );
             return Ok(CegarTrace {
                 final_verdict: iterations.last().unwrap().verdict.clone(),
+                unlifted_cells: iterations.last().unwrap().unlifted_cells.clone(),
                 final_predicates: current_predicates,
                 terminated_with: CegarTermination::PredicateSourceExhausted,
                 iterations,
@@ -2143,6 +2196,7 @@ mod tests {
         let trace = CegarTrace {
             iterations: Vec::new(),
             final_verdict: crate::mu_calculus::trit::TritSet::from_parts(must, may),
+            unlifted_cells: Vec::new(),
             final_predicates: vec![
                 PredicateSpec {
                     name: "idle".into(),
@@ -2434,6 +2488,98 @@ mod tests {
             Some(Trit::True),
             "with the reset free, the error cube flips to definite-TRUE via the real reset-recovery path"
         );
+    }
+
+    /// A4 — the CEGAR loop lifts reachable cells only: the unreached cells land in
+    /// `unlifted_cells` (never in the T/F/⊥ tally, never listed as undecided) and the verdict at
+    /// the initial state is the one the FULL lift gives. `SMALL_BTOR2` holds both registers at
+    /// 0, so from cube_0 (the real reset cell here) only cube_0 is reachable and the three other
+    /// cells are unreached.
+    #[test]
+    fn a4_cegar_tally_excludes_unlifted_cells_and_keeps_the_initial_verdict() {
+        use crate::adapter::btor2::kmts_lift::{
+            MayEdgeInference, MustEdgeInference, PredicateCubeLiftOptions, predicate_cube_lift,
+        };
+        use crate::mu_calculus::parity_game_3v::evaluate_3v_game;
+        let preds = vec![
+            PredicateSpec {
+                name: "a".into(),
+                register: "reg_a".into(),
+                value: 1,
+            },
+            PredicateSpec {
+                name: "b".into(),
+                register: "reg_b".into(),
+                value: 1,
+            },
+        ];
+        let formula = parser::parse("nu Z. ((<> true) && [] Z)").expect("formula parses");
+        let env = Environment::new(4);
+        let cb = std::sync::Arc::new(
+            |_subgame: &FailureSubgame, _preds: &[PredicateSpec]| -> Vec<PredicateSpec> {
+                Vec::new()
+            },
+        );
+        let cegar_opts = CegarOptions {
+            max_iterations: 2,
+            predicate_source: PredicateSource::Manual(cb),
+            max_cube_count: 1024,
+            capture_approximants: false,
+            enable_approximant_reuse: false,
+            smart_uf_cap: false,
+            lift_strategy: LiftStrategy::Eager,
+            must_edge_inference: MustEdgeInference::SmtHyperMust,
+            may_edge_inference: MayEdgeInference::SmtAllPairs,
+            emit_ctxdsl: false,
+        };
+        let trace = cegar_refine_loop(
+            &formula,
+            SMALL_BTOR2,
+            preds.clone(),
+            &env,
+            &AdapterOptions::default(),
+            &cegar_opts,
+        )
+        .expect("cegar succeeds");
+
+        // The full lift and its evaluation at the initial state: the oracle.
+        let full_opts = PredicateCubeLiftOptions {
+            may_edge_inference: MayEdgeInference::SmtAllPairs,
+            must_edge_inference: MustEdgeInference::SmtHyperMust,
+            may_postimage: true,
+            ..Default::default()
+        };
+        let full = predicate_cube_lift(preds, SMALL_BTOR2, &AdapterOptions::default(), &full_opts)
+            .expect("full lift");
+        let oracle = evaluate_3v_game(&formula, &full.clts, &env).expect("evaluate");
+        for init in full.clts.initial_states() {
+            assert_eq!(
+                trace.final_verdict.verdict_at(init.index()),
+                oracle.verdicts.verdict_at(init.index()),
+                "verdict at the initial cell {} must not move",
+                init.index()
+            );
+            assert_eq!(trace.final_verdict.verdict_at(init.index()), Trit::True);
+        }
+        assert_eq!(
+            trace.unlifted_cells,
+            vec![1, 2, 3],
+            "both registers hold 0: only cube_0 is reachable"
+        );
+        let (t, f, b, u) = tally_cells(&trace.final_verdict, &trace.unlifted_cells);
+        assert_eq!((t, f, b, u), (1, 0, 0, 3));
+        for c in &trace.unlifted_cells {
+            assert_eq!(
+                trace.final_verdict.verdict_at(*c),
+                Trit::Unknown,
+                "unlifted cells are ⊥"
+            );
+        }
+        assert!(
+            trace.undecided_cells(usize::MAX).is_empty(),
+            "an unlifted cell is never listed as undecided"
+        );
+        assert_eq!(trace.terminated_with, CegarTermination::Converged);
     }
 
     #[test]

@@ -4685,15 +4685,13 @@ fn run_cegar_cli(
     // CLI). The verdict is over the lifted KMTS's cube cells: `false`
     // cells falsify the formula (e.g. a reachable unmatched encoding),
     // `unknown` cells are still indefinite, `true` cells satisfy it.
-    use mununu_core::mu_calculus::trit::Trit;
-    let (mut t_cells, mut f_cells, mut bot_cells) = (0usize, 0usize, 0usize);
-    for i in 0..trace.final_verdict.len() {
-        match trace.final_verdict.verdict_at(i) {
-            Trit::True => t_cells += 1,
-            Trit::False => f_cells += 1,
-            Trit::Unknown => bot_cells += 1,
-        }
-    }
+    // A4 — unlifted cells (unsatisfiable, or not reachable from the initial cubes) are ⊥ by
+    // construction and are reported as their own count, never as "needs refinement".
+    let (t_cells, f_cells, bot_cells, unlifted_cells) =
+        mununu_core::adapter::btor2::cegar::tally_cells(
+            &trace.final_verdict,
+            &trace.unlifted_cells,
+        );
     let outcome = if bot_cells > 0 {
         format!("INDEFINITE — {bot_cells} cell(s) need further refinement")
     } else if f_cells > 0 {
@@ -4722,6 +4720,7 @@ fn run_cegar_cli(
                 "true_cells": t_cells,
                 "false_cells": f_cells,
                 "unknown_cells": bot_cells,
+                "unlifted_cells": unlifted_cells,
             },
             "outcome": outcome,
             "violating_cells": cegar_cells_json(&violating_cells),

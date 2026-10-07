@@ -606,6 +606,7 @@ fn run_controllability_aware_lift(
         compound_exprs: std::collections::HashMap::new(),
         derived_predicates: Vec::new(),
         may_postimage: false,
+        reachable_only: false,
     };
 
     let lift_result =
@@ -1972,6 +1973,7 @@ fn run_symbolic_cegar_response(
                 true_cells: it.definite_true,
                 false_cells: it.definite_false,
                 unknown_cells: it.bottom,
+                unlifted_cells: 0,
             },
         })
         .collect();
@@ -2000,6 +2002,7 @@ fn run_symbolic_cegar_response(
             true_cells: v.definite_true,
             false_cells: v.definite_false,
             unknown_cells: v.bottom,
+            unlifted_cells: 0,
         },
         lazy_lift_pending: false,
         approximant_reuse_enabled: false,
@@ -2027,7 +2030,7 @@ fn run_cegar_build_response(params: CegarRunParams<'_>) -> Result<Btor2CegarResp
         config_values_to_sidecar_json,
     };
     use crate::adapter::btor2::kmts_lift::{MayEdgeInference, MustEdgeInference, PredicateSpec};
-    use crate::mu_calculus::trit::{Trit, TritSet};
+    use crate::mu_calculus::trit::TritSet;
     use crate::mu_calculus::{Environment, parser as mu_parser};
 
     let predicates: Vec<PredicateSpec> = params
@@ -2120,20 +2123,17 @@ fn run_cegar_build_response(params: CegarRunParams<'_>) -> Result<Btor2CegarResp
         details: None,
     })?;
 
-    let summarize = |v: &TritSet| -> CegarVerdictSummary {
-        let mut s = CegarVerdictSummary {
-            true_cells: 0,
-            false_cells: 0,
-            unknown_cells: 0,
-        };
-        for i in 0..v.len() {
-            match v.verdict_at(i) {
-                Trit::True => s.true_cells += 1,
-                Trit::False => s.false_cells += 1,
-                Trit::Unknown => s.unknown_cells += 1,
-            }
+    // A4 — the same tally as the CLI: unlifted cells (unsatisfiable, or not reachable from
+    // the initial cubes) are ⊥ by construction and counted on their own.
+    let summarize = |v: &TritSet, unlifted: &[usize]| -> CegarVerdictSummary {
+        let (true_cells, false_cells, unknown_cells, unlifted_cells) =
+            crate::adapter::btor2::cegar::tally_cells(v, unlifted);
+        CegarVerdictSummary {
+            true_cells,
+            false_cells,
+            unknown_cells,
+            unlifted_cells,
         }
-        s
     };
     let pred_view = |p: &PredicateSpec| PredicateView {
         name: p.name.clone(),
@@ -2186,7 +2186,7 @@ fn run_cegar_build_response(params: CegarRunParams<'_>) -> Result<Btor2CegarResp
             had_failure_subgame: it.failure_subgame.is_some(),
             predicates_added: it.predicates_added.iter().map(&pred_view).collect(),
             game_position_evaluations: it.game_position_evaluations,
-            verdict: summarize(&it.verdict),
+            verdict: summarize(&it.verdict, &it.unlifted_cells),
         })
         .collect();
 
@@ -2205,7 +2205,7 @@ fn run_cegar_build_response(params: CegarRunParams<'_>) -> Result<Btor2CegarResp
             CegarTermination::BudgetExpired => "budget-expired",
         }
         .to_string(),
-        verdict: summarize(&trace.final_verdict),
+        verdict: summarize(&trace.final_verdict, &trace.unlifted_cells),
         lazy_lift_pending: trace.lazy_lift_pending,
         approximant_reuse_enabled: trace.approximant_reuse_enabled,
         warnings: trace.warnings.iter().map(|w| w.message.clone()).collect(),
