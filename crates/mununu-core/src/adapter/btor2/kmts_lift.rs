@@ -456,6 +456,18 @@ pub struct PredicateCubeLiftOptions {
     /// differs (`O(2^|P| · #succ)` post-image vs `O(2^{2|P|})` all-pairs). Sound for compounds. Only
     /// consulted on the `SmtAllPairs` may path; `false` preserves the all-pairs behaviour exactly.
     pub may_postimage: bool,
+    /// A4 (engine-performance roadmap, 2026-10-07) — compute post-images only for the cube cells
+    /// FORWARD-REACHABLE over may-edges from the initial cubes, found by a worklist BFS inside
+    /// [`compute_all_may_edges_smt_postimage`], instead of for all `2^|P|` cells. The verdict at the
+    /// initial states depends only on that sub-KMTS — every modality reads successors, must ⊆ may —
+    /// so it is IDENTICAL; what changes is that an unreached cell has no outgoing edge (it is
+    /// reported in [`PredicateCubeLiftResult::unreached_cells`] and never counted as a verdict).
+    /// Measured on the i2c lift at |P| = 8: 72 of 256 cells reachable, the post-image loop being
+    /// 90 % of the lift. Only consulted on the post-image path (`may_postimage`, |P| ≥ 2); the
+    /// all-pairs seam and the lazy lift still lift every cell. Off by default so a caller that
+    /// wants the whole abstraction (the KMTS-exploration API, the CTXDSL emit) keeps it; the
+    /// verdict paths (CEGAR) opt in.
+    pub reachable_only: bool,
 }
 
 impl Default for PredicateCubeLiftOptions {
@@ -469,7 +481,93 @@ impl Default for PredicateCubeLiftOptions {
             compound_exprs: std::collections::HashMap::new(),
             derived_predicates: Vec::new(),
             may_postimage: false,
+            reachable_only: false,
         }
+    }
+}
+
+/// A4 — the cube cells a reachable-only lift must start from: the KMTS's declared initial
+/// cubes ([`initial_cube_indices`]) PLUS every cube consistent with the design's own `init`
+/// lines. The second set exists because the declared initial state is a placeholder without
+/// config values (cube_0 — mununu#609) while a consumer may read the verdict at the design's
+/// real reset cube (the recoverability ladder evaluates the final predicates at the reset
+/// valuation and reads `final_verdict` there); a BFS from cube_0 alone could leave that cell
+/// unlifted. Including the init-consistent cubes keeps every such read inside the lifted
+/// region without changing which states the KMTS declares initial. Per predicate bit: a
+/// simple atom over a register with a constant `init` has one reset truth; an atom over a
+/// free-init register, a compound whose registers are not all pinned, or one with an array
+/// `Select` admits both; a user `config_values` constraint on the register wins over its
+/// `init` (the sidecar's parameter concretization is what the init line is not).
+fn reachable_lift_roots(
+    predicates: &[PredicateSpec],
+    compound_exprs: &std::collections::HashMap<
+        String,
+        crate::adapter::btor2::predicate_expr::PredicateExpr,
+    >,
+    config_values: &std::collections::HashMap<String, Vec<u64>>,
+    file: &crate::adapter::btor2::ast::Btor2File,
+) -> Vec<usize> {
+    let init: std::collections::HashMap<String, u128> =
+        crate::adapter::btor2::concrete_oracle::init_valuation(file)
+            .into_iter()
+            .collect();
+    // Reset truth set per bit: `Some(t)` = exactly `t`, `None` = both admissible.
+    let truth: Vec<Option<bool>> = predicates
+        .iter()
+        .map(|spec| match compound_exprs.get(&spec.name) {
+            Some(expr) if expr.has_select() => None,
+            Some(expr) => {
+                let regs = expr.registers();
+                let all_pinned = regs
+                    .iter()
+                    .all(|r| init.contains_key(r) && !config_values.contains_key(r));
+                all_pinned.then(|| expr.eval(&init))
+            }
+            None => match config_values.get(&spec.register) {
+                Some(values) => {
+                    let has = values.contains(&spec.value);
+                    let other = values.iter().any(|v| *v != spec.value);
+                    match (has, other) {
+                        (true, false) => Some(true),
+                        (false, true) => Some(false),
+                        _ => None,
+                    }
+                }
+                None => init
+                    .get(&spec.register)
+                    .map(|v| *v == u128::from(spec.value)),
+            },
+        })
+        .collect();
+    let mut roots = initial_cube_indices(predicates, config_values);
+    for cube in 0..(1usize << predicates.len()) {
+        let consistent = truth
+            .iter()
+            .enumerate()
+            .all(|(i, t)| t.is_none_or(|t| ((cube >> i) & 1 == 1) == t));
+        if consistent && !roots.contains(&cube) {
+            roots.push(cube);
+        }
+    }
+    roots
+}
+
+/// The lift's initial cube indices — the R-Y7 rule in one place, shared by the state assembly
+/// and the reachable-only post-image (A4): the R-S8 admissible cubes when `config_values` pins
+/// registers, else `cube_0` (see mununu#609 for why that is a placeholder, not the reset cube).
+fn initial_cube_indices(
+    predicates: &[PredicateSpec],
+    config_values: &std::collections::HashMap<String, Vec<u64>>,
+) -> Vec<usize> {
+    if config_values.is_empty() {
+        return vec![0];
+    }
+    let admissible =
+        crate::adapter::btor2::r_s8_encoder::hyper_must_initial_cubes(predicates, config_values);
+    if admissible.is_empty() {
+        vec![0]
+    } else {
+        admissible
     }
 }
 
@@ -1325,6 +1423,31 @@ fn apply_sampled_must_inference(
 /// of the emitted may-relation. Left unchecked it panics `TritBdd::from_parts` in
 /// debug and silently computes a wrong verdict in release. This runs once per lift
 /// (O(edges), SMT-free) and turns that into an honest `IrConsistencyError`.
+/// A4 instrument (engine-performance roadmap) — how much of the cube space the verdict at the
+/// initial states can see. A BFS over may-edges (must ⊆ may) from the initial states counts
+/// the forward-reachable cells; the lift computed post-images for ALL `2^|P|` source cubes.
+/// One debug line per lift under `RUST_LOG=mununu_core::adapter::btor2::kmts_lift=debug`;
+/// the ratio is what a reachable-cells-only lift would save.
+fn log_reachable_cells(clts: &Clts<DefaultStateIdx, DefaultLabelIdx>, cube_count: usize) {
+    let mut seen: std::collections::HashSet<crate::clts::StateId<DefaultStateIdx>> =
+        clts.initial_states().iter().copied().collect();
+    let mut queue: std::collections::VecDeque<crate::clts::StateId<DefaultStateIdx>> =
+        seen.iter().copied().collect();
+    while let Some(s) = queue.pop_front() {
+        for t in clts.outgoing(s) {
+            if seen.insert(t.target()) {
+                queue.push_back(t.target());
+            }
+        }
+    }
+    tracing::debug!(
+        reachable_cells = seen.len(),
+        cube_count,
+        initial_states = clts.initial_states().len(),
+        "predicate-cube lift reachability"
+    );
+}
+
 fn assert_must_subset_may(
     clts: &Clts<DefaultStateIdx, DefaultLabelIdx>,
 ) -> Result<(), AdapterError> {
@@ -1468,11 +1591,13 @@ pub fn materialize_clts_from_lazy(
 
     // Fix C — enforce R_must ⊆ R_may before the KMTS reaches any evaluator.
     assert_must_subset_may(&clts)?;
+    log_reachable_cells(&clts, cube_count);
 
     Ok(PredicateCubeLiftResult {
         clts,
         predicates,
         cube_count,
+        unreached_cells: Vec::new(),
         source_info: SourceInfo {
             format: btor2_source_info_format,
             title: None,
@@ -1750,6 +1875,11 @@ pub struct PredicateCubeLiftResult {
     /// Total number of cubes the lifter materialized (`2^predicates.len()`
     /// at the MVP; future iterations may prune via SMT-satisfiability).
     pub cube_count: usize,
+    /// A4 — the cube indices the reachable-only post-image did NOT lift (not forward-reachable
+    /// over may-edges from the initial cubes). They exist as states with no outgoing edge; a
+    /// verdict over them is vacuous and must not be reported as one. Empty when every cell was
+    /// lifted (`reachable_only` off, the all-pairs seam, the lazy lift).
+    pub unreached_cells: Vec<usize>,
     /// Source-info metadata mirroring `AdapterOutput.source_info` for
     /// downstream consumers (e.g. CLI summary).
     pub source_info: SourceInfo,
@@ -1991,6 +2121,8 @@ pub fn predicate_cube_lift(
     lift_opts: &PredicateCubeLiftOptions,
 ) -> Result<PredicateCubeLiftResult, AdapterError> {
     let start = Instant::now();
+    // A4 — filled by the reachable-only post-image; empty on every other path.
+    let mut unreached_cells: Vec<usize> = Vec::new();
 
     // 1. Parse the BTOR2 source to validate predicate register names
     //    against the symbol table. Bypasses bit_blast.
@@ -2109,26 +2241,14 @@ pub fn predicate_cube_lift(
     // - Otherwise (pre-R-Y7 default): single initial cube
     //   (cube_0, all-predicates-false). A future iteration can
     //   pick the cube matching the BTOR2 `init` values.
-    if !lift_opts.config_values.is_empty() {
-        let admissible_cubes = crate::adapter::btor2::r_s8_encoder::hyper_must_initial_cubes(
-            &predicates,
-            &lift_opts.config_values,
-        );
-        for cube_idx in &admissible_cubes {
-            if let Some(state_id) = state_ids.get(*cube_idx) {
-                builder.initial_state_id(*state_id);
-            }
+    // (`initial_cube_indices` is the one implementation of this rule: admissible cubes, else
+    // cube_0 — also the defensive fallback when no cube is admissible, so the Clts never has
+    // zero initial states, which would error at evaluator time.)
+    let initial_cubes = initial_cube_indices(&predicates, &lift_opts.config_values);
+    for cube_idx in &initial_cubes {
+        if let Some(state_id) = state_ids.get(*cube_idx) {
+            builder.initial_state_id(*state_id);
         }
-        if admissible_cubes.is_empty()
-            && let Some(initial) = state_ids.first()
-        {
-            // Defensive: if no cube is admissible, fall back to
-            // cube_0 to avoid producing a Clts with no initial
-            // states (which would error at evaluator time).
-            builder.initial_state_id(*initial);
-        }
-    } else if let Some(initial) = state_ids.first() {
-        builder.initial_state_id(*initial);
     }
 
     // Populate state_3valued_predicates per cube *on the builder*.
@@ -2282,13 +2402,29 @@ pub fn predicate_cube_lift(
             // exists to prevent. `NotApplicable` falls back to the all-pairs seam;
             // `BudgetExceeded` must NOT, because that seam is O(2^2|P|) — strictly slower than
             // the post-image we just abandoned for lack of time.
+            // A4 — reachable-only: the worklist BFS lifts the cells the initial cubes reach;
+            // the map's missing sources are the unreached cells, recorded on the result.
+            let roots = lift_opts.reachable_only.then(|| {
+                reachable_lift_roots(
+                    &predicates,
+                    &lift_opts.compound_exprs,
+                    &lift_opts.config_values,
+                    &file,
+                )
+            });
             match compute_all_may_edges_smt_postimage(
                 &file,
                 &predicates,
                 &lift_opts.compound_exprs,
                 crate::adapter::btor2::smt_must_edge::cube_smt_rlimit(),
+                roots.as_deref(),
             ) {
                 MayPostimage::Complete(map) => {
+                    if roots.is_some() {
+                        unreached_cells = (0..(1usize << predicates.len()))
+                            .filter(|c| !map.contains_key(c))
+                            .collect();
+                    }
                     let mut pairs: Vec<(usize, usize)> = map
                         .into_iter()
                         .flat_map(|(src, tgts)| tgts.into_iter().map(move |t| (src, t)))
@@ -2652,6 +2788,7 @@ pub fn predicate_cube_lift(
 
     // Fix C — enforce R_must ⊆ R_may before the KMTS reaches any evaluator.
     assert_must_subset_may(&clts)?;
+    log_reachable_cells(&clts, cube_count);
 
     let elapsed = start.elapsed();
 
@@ -2659,6 +2796,7 @@ pub fn predicate_cube_lift(
         clts,
         predicates,
         cube_count,
+        unreached_cells,
         source_info: SourceInfo {
             format: SourceFormat::Btor2,
             title: None,
@@ -2767,6 +2905,40 @@ impl MayPostimage {
 /// environment so the `Unknown`-saturation path (mununu#504) is testable without mutating
 /// process-global state — the same pure-helper idiom `memory_budget.rs` uses. Production passes
 /// `smt_must_edge::cube_smt_rlimit()`; a test passes `Some(1)` to force every query `Unknown`.
+/// A3 (engine-performance roadmap, category 2) — z3 builds a FULL model after every `Sat` of the
+/// all-SAT loop below, and then compresses it (`model::compress`: an occurrence walk, a
+/// dependency top-sort and a clean-up rewrite of every definition). The profile of the i2c lift
+/// at |P| = 8 put `get_model` at 26 % of the lift, a quarter of which was that compression —
+/// work spent tidying a model this loop reads exactly |P| Booleans from and drops. Compression
+/// only matters to code that walks a model's structure; every z3 model consumer in mununu
+/// evaluates terms against the model (`Model::eval`) instead, so it is switched off
+/// process-wide, once. Measured on `cube-rtl-i2c 8`: 15.0 s → 13.0 s, lift byte-identical.
+fn uncompressed_models() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| z3::set_global_param("model.compact", "false"));
+}
+
+/// A3 — the solver for one source cube of the all-SAT post-image. On a memory-free design the
+/// queries are pure QF_BV, and z3's logic-specific solver for it (the `qfbv` tactic: simplify,
+/// bit-blast, SAT core) is what the generic `Solver::new()` is not — the profile showed the
+/// generic solver routing every query through the `smt` core (`smt::context::search`), whose
+/// own bit-vector bit-blasting is several times slower than the standalone SAT core on these
+/// shapes. The blocking clauses are plain assertions between checks, which the logic solver
+/// accepts (z3 falls back to its incremental core only across `push`/`pop`). With memories the
+/// theory is BvUfArray and the generic solver stays. Measured on `cube-rtl-i2c 8`: 15.0 s →
+/// 10.1 s alone, 8.9 s with [`uncompressed_models`], lift byte-identical in every arm.
+fn postimage_solver(bv_only: bool) -> z3::Solver {
+    if bv_only {
+        z3::Solver::new_for_logic("QF_BV").unwrap_or_default()
+    } else {
+        z3::Solver::new()
+    }
+}
+
+/// `roots` — A4: when given, only the cells forward-reachable over may-edges from these
+/// cube indices are lifted (a worklist BFS: each lifted cell's post-image targets are queued
+/// once); the returned map then has an entry for every reached source and none for the rest.
+/// `None` lifts all `2^|P|` cells, the pre-A4 behaviour.
 fn compute_all_may_edges_smt_postimage(
     file: &crate::adapter::btor2::ast::Btor2File,
     predicates: &[PredicateSpec],
@@ -2775,12 +2947,14 @@ fn compute_all_may_edges_smt_postimage(
         crate::adapter::btor2::predicate_expr::PredicateExpr,
     >,
     rlimit: Option<u32>,
+    roots: Option<&[usize]>,
 ) -> MayPostimage {
     use crate::adapter::btor2::predicate_expr::{CmpOp, PredicateExpr};
     let n = predicates.len();
     if n == 0 || n > 20 {
         return MayPostimage::NotApplicable; // outside the cube-space bound; eager path handles it
     }
+    uncompressed_models();
     let cfg = z3::Config::new();
     let res = z3::with_z3_config(&cfg, || {
         let view = encode_design_for_lift(file).ok()?;
@@ -2842,7 +3016,25 @@ fn compute_all_may_edges_smt_postimage(
         // a byte-identical relation and NO measurable change on the real i2c lift (|P| = 8:
         // 14.5 s → 14.0 s; |P| = 10: 77.8 s → 78.0 s). The cost is the all-SAT solving and the
         // model construction per query, not Z3's re-internalisation of the transition.
-        for cube in 0..(1usize << n) {
+        let bv_only = crate::adapter::btor2::bit_blast::detect_btor2_memories(file).is_empty();
+        // The source cells to lift: every cell, or (A4) a worklist seeded with the roots that
+        // grows by each lifted cell's targets. `queued` marks a cell once so it is lifted once.
+        let all_cells = 1usize << n;
+        let mut queued: Vec<bool> = vec![roots.is_none(); all_cells];
+        let mut worklist: std::collections::VecDeque<usize> = match roots {
+            None => (0..all_cells).collect(),
+            Some(r) => {
+                let mut q = std::collections::VecDeque::new();
+                for &c in r {
+                    if c < all_cells && !queued[c] {
+                        queued[c] = true;
+                        q.push_back(c);
+                    }
+                }
+                q
+            }
+        };
+        while let Some(cube) = worklist.pop_front() {
             // mununu#504 — the outer poll. This loop is the measured hang: up to 2^|P| cubes,
             // x17 CEGAR rounds, x N properties, previously with only a per-QUERY timeout and no
             // aggregate bound. Bailing here is signalled to the caller as `BudgetExceeded`, NOT
@@ -2852,7 +3044,7 @@ fn compute_all_may_edges_smt_postimage(
                 budget_expired = true;
                 break;
             }
-            let solver = z3::Solver::new();
+            let solver = postimage_solver(bv_only);
             solver.set_params(&params);
             solver.assert(&view.transition);
             for (i, cc) in curr_c.iter().enumerate() {
@@ -2933,6 +3125,14 @@ fn compute_all_may_edges_smt_postimage(
             }
             targets.sort_unstable();
             targets.dedup();
+            if roots.is_some() {
+                for &t in &targets {
+                    if !queued[t] {
+                        queued[t] = true;
+                        worklist.push_back(t);
+                    }
+                }
+            }
             out.insert(cube, targets);
         }
         if budget_expired {
@@ -3074,7 +3274,7 @@ mod tests {
         let t0 = std::time::Instant::now();
         let out = {
             let _g = enter(&Budget::with_ms(0));
-            compute_all_may_edges_smt_postimage(&file, &preds, &compound, None)
+            compute_all_may_edges_smt_postimage(&file, &preds, &compound, None, None)
         };
         assert!(
             matches!(out, MayPostimage::BudgetExceeded),
@@ -3088,14 +3288,14 @@ mod tests {
 
         // Control: unbounded ⇒ the real relation, so the assertion above is about the BUDGET and
         // not about this fixture being unusable.
-        let ok = compute_all_may_edges_smt_postimage(&file, &preds, &compound, None);
+        let ok = compute_all_may_edges_smt_postimage(&file, &preds, &compound, None, None);
         assert!(
             matches!(ok, MayPostimage::Complete(_)),
             "with no budget the same call completes; got {ok:?}"
         );
 
         // And `NotApplicable` remains reachable for its own reason (|P| = 0), unchanged.
-        let na = compute_all_may_edges_smt_postimage(&file, &[], &compound, None);
+        let na = compute_all_may_edges_smt_postimage(&file, &[], &compound, None, None);
         assert!(
             matches!(na, MayPostimage::NotApplicable),
             "the out-of-range case still says NotApplicable; got {na:?}"
@@ -3135,7 +3335,7 @@ mod tests {
         let compound = std::collections::HashMap::new();
 
         let t0 = std::time::Instant::now();
-        let starved = compute_all_may_edges_smt_postimage(&file, &preds, &compound, Some(1))
+        let starved = compute_all_may_edges_smt_postimage(&file, &preds, &compound, Some(1), None)
             .expect("post-image still returns a map");
         assert!(
             t0.elapsed() < std::time::Duration::from_secs(5),
@@ -3157,7 +3357,7 @@ mod tests {
 
         // Control: with no rlimit the same call computes the REAL (sparser) relation, so the
         // assertion above is testing saturation and not merely a degenerate design.
-        let exact = compute_all_may_edges_smt_postimage(&file, &preds, &compound, None)
+        let exact = compute_all_may_edges_smt_postimage(&file, &preds, &compound, None, None)
             .expect("post-image");
         assert!(
             exact.values().any(|t| t.len() < 2),
@@ -3249,6 +3449,128 @@ mod tests {
         );
     }
 
+    /// A4 (engine-performance roadmap) — the reachable-only post-image lifts exactly the cells a
+    /// BFS over the full lift's may-edges reaches from the lift's roots (the declared initial
+    /// states plus the cubes consistent with the design's `init` lines — `reachable_lift_roots`);
+    /// those cells keep their edges (may + must modalities, identical), the rest have none and
+    /// are reported in `unreached_cells`. `reg_a` is held at 0 and `reg_b` follows a free input,
+    /// so from the reset cube (both 0) the two `reg_a == 1` cells can never be entered; the
+    /// `reg_b` bit gives the reached cells a may-only split with a hyper-must set.
+    #[test]
+    fn a4_reachable_only_lift_keeps_the_reached_cells_edges_and_reports_the_rest() {
+        use crate::clts::{StateId, TransitionModality};
+        use std::collections::BTreeSet;
+        const HELD_AND_FREE: &str = "1 sort bitvec 1\n2 state 1 reg_a\n3 state 1 reg_b\n4 zero 1\n\
+                                     5 init 1 2 4\n6 init 1 3 4\n7 next 1 2 4\n8 input 1 in\n\
+                                     9 next 1 3 8\n";
+        let preds = vec![
+            PredicateSpec {
+                name: "a".into(),
+                register: "reg_a".into(),
+                value: 1,
+            },
+            PredicateSpec {
+                name: "b".into(),
+                register: "reg_b".into(),
+                value: 1,
+            },
+        ];
+        let base = PredicateCubeLiftOptions {
+            may_edge_inference: MayEdgeInference::SmtAllPairs,
+            must_edge_inference: MustEdgeInference::SmtHyperMust,
+            may_postimage: true,
+            ..Default::default()
+        };
+        let full = predicate_cube_lift(
+            preds.clone(),
+            HELD_AND_FREE,
+            &AdapterOptions::default(),
+            &base,
+        )
+        .expect("full lift");
+        let mut ro = base.clone();
+        ro.reachable_only = true;
+        let reach = predicate_cube_lift(
+            preds.clone(),
+            HELD_AND_FREE,
+            &AdapterOptions::default(),
+            &ro,
+        )
+        .expect("reachable-only lift");
+        assert!(
+            full.unreached_cells.is_empty(),
+            "the full lift lifts every cell"
+        );
+        assert_eq!(full.clts.initial_states(), reach.clts.initial_states());
+
+        // The roots: cube_0 is both the declared initial state and the reset-consistent cube.
+        let file = crate::adapter::btor2::parser::parse(HELD_AND_FREE).expect("parse");
+        let roots = reachable_lift_roots(&preds, &ro.compound_exprs, &ro.config_values, &file);
+        assert_eq!(roots, vec![0]);
+        // The reached set, by BFS over the FULL lift (the oracle for what the roots can see).
+        let mut reached: BTreeSet<usize> = roots.iter().copied().collect();
+        let mut queue: Vec<usize> = reached.iter().copied().collect();
+        while let Some(i) = queue.pop() {
+            let sid = StateId::<DefaultStateIdx>::from_index(i).expect("state id");
+            for t in full.clts.outgoing(sid) {
+                if reached.insert(t.target().index()) {
+                    queue.push(t.target().index());
+                }
+            }
+        }
+        assert_eq!(
+            reached,
+            BTreeSet::from([0, 2]),
+            "reg_b toggles, reg_a never leaves 0"
+        );
+        let unreached: BTreeSet<usize> = (0..full.cube_count)
+            .filter(|c| !reached.contains(c))
+            .collect();
+        assert_eq!(
+            reach
+                .unreached_cells
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>(),
+            unreached,
+            "unreached_cells is exactly the complement of the BFS reach"
+        );
+
+        let edges_of = |r: &PredicateCubeLiftResult, i: usize| -> BTreeSet<(usize, u8)> {
+            let sid = StateId::<DefaultStateIdx>::from_index(i).expect("state id");
+            r.clts
+                .outgoing(sid)
+                .iter()
+                .map(|t| {
+                    let tag = match t.modality() {
+                        TransitionModality::MayOnly => 0u8,
+                        TransitionModality::Sharp => 1,
+                        TransitionModality::MustHyperOnly(_) => 2,
+                    };
+                    (t.target().index(), tag)
+                })
+                .collect()
+        };
+        for i in 0..full.cube_count {
+            if reached.contains(&i) {
+                assert_eq!(edges_of(&full, i), edges_of(&reach, i), "cell {i} differs");
+                assert!(
+                    !edges_of(&reach, i).is_empty(),
+                    "a reached cell has its edges"
+                );
+            } else {
+                assert!(
+                    edges_of(&reach, i).is_empty(),
+                    "unreached cell {i} must be edgeless"
+                );
+                assert!(
+                    !edges_of(&full, i).is_empty(),
+                    "the full lift did lift cell {i}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn p1_postimage_may_and_must_match_eager_lift() {
         // P1 increment 2 — the post-image path (may via `compute_all_may_edges_smt_postimage`, Sharp
@@ -3287,7 +3609,8 @@ mod tests {
         }
 
         // Post-image path.
-        let may = compute_all_may_edges_smt_postimage(&file, &preds, &compound, None).expect("may");
+        let may =
+            compute_all_may_edges_smt_postimage(&file, &preds, &compound, None, None).expect("may");
         let sharp = postimage_sharp_edges(&file, &preds, &compound, &may).expect("sharp");
 
         for i in 0..4usize {
@@ -3380,7 +3703,7 @@ mod tests {
                     .insert(cube_of(nxt["x"], nxt["y"]));
             }
         }
-        let got = compute_all_may_edges_smt_postimage(&file, &preds, &compound, None)
+        let got = compute_all_may_edges_smt_postimage(&file, &preds, &compound, None, None)
             .expect("post-image");
         for cube in 0..4usize {
             let mine: std::collections::BTreeSet<usize> = got
@@ -3630,6 +3953,7 @@ mod tests {
             compound_exprs: std::collections::HashMap::new(),
             derived_predicates: Vec::new(),
             may_postimage: false,
+            reachable_only: false,
         };
         let result = predicate_cube_lift(preds, SMALL_BTOR2, &AdapterOptions::default(), &opts);
         assert!(result.is_err());
@@ -4199,6 +4523,7 @@ mod tests {
             compound_exprs: std::collections::HashMap::new(),
             derived_predicates: Vec::new(),
             may_postimage: false,
+            reachable_only: false,
         };
 
         // Baseline: SmtAllPairs may, no must → MayOnly only, zero promotions.
@@ -4264,6 +4589,7 @@ mod tests {
             compound_exprs: std::collections::HashMap::new(),
             derived_predicates: Vec::new(),
             may_postimage: false,
+            reachable_only: false,
         };
         let lifted = predicate_cube_lift(preds, toggle, &AdapterOptions::default(), &opts)
             .expect("SmtAllPairs + SmtHyperMust lift");
@@ -4324,6 +4650,7 @@ mod tests {
             compound_exprs,
             derived_predicates: Vec::new(),
             may_postimage: false,
+            reachable_only: false,
         };
         let preds = vec![PredicateSpec {
             name: "idle".into(),
@@ -4404,6 +4731,7 @@ mod tests {
             compound_exprs,
             derived_predicates: Vec::new(),
             may_postimage: false,
+            reachable_only: false,
         };
         let preds = vec![PredicateSpec {
             name: "stable".into(),
@@ -4553,6 +4881,7 @@ mod tests {
                     compound_exprs: std::collections::HashMap::new(),
                     derived_predicates: Vec::new(),
                     may_postimage: false,
+                    reachable_only: false,
                 };
                 let eager = predicate_cube_lift(
                     preds.clone(),
@@ -4612,6 +4941,7 @@ mod tests {
             compound_exprs: std::collections::HashMap::new(),
             derived_predicates: Vec::new(),
             may_postimage: false,
+            reachable_only: false,
         };
         let eager = lift_predicate_cube(
             preds.clone(),
@@ -4697,6 +5027,7 @@ mod tests {
             compound_exprs: std::collections::HashMap::new(),
             derived_predicates: Vec::new(),
             may_postimage: false,
+            reachable_only: false,
         };
         let result = predicate_cube_lift(preds, COUNTER_BTOR2, &AdapterOptions::default(), &opts)
             .expect("ok");
@@ -4769,6 +5100,7 @@ mod tests {
             compound_exprs: std::collections::HashMap::new(),
             derived_predicates: Vec::new(),
             may_postimage: false,
+            reachable_only: false,
         };
         let result = predicate_cube_lift(preds, COUNTER_BTOR2, &AdapterOptions::default(), &opts)
             .expect("predicate_cube_lift succeeds");
@@ -4829,6 +5161,7 @@ mod tests {
             compound_exprs: std::collections::HashMap::new(),
             derived_predicates: Vec::new(),
             may_postimage: false,
+            reachable_only: false,
         };
         let result = predicate_cube_lift(preds, COUNTER_BTOR2, &AdapterOptions::default(), &opts)
             .expect("predicate_cube_lift succeeds");
@@ -4862,6 +5195,7 @@ mod tests {
             compound_exprs: std::collections::HashMap::new(),
             derived_predicates: Vec::new(),
             may_postimage: false,
+            reachable_only: false,
         };
         let mut lazy =
             LazyLift::from_btor2(preds, COUNTER_BTOR2, &AdapterOptions::default(), &opts)
@@ -4923,6 +5257,7 @@ mod tests {
             compound_exprs: std::collections::HashMap::new(),
             derived_predicates: Vec::new(),
             may_postimage: false,
+            reachable_only: false,
         };
         let result = predicate_cube_lift(
             preds.clone(),
@@ -4961,6 +5296,7 @@ mod tests {
             compound_exprs: std::collections::HashMap::new(),
             derived_predicates: Vec::new(),
             may_postimage: false,
+            reachable_only: false,
         };
         let mvp_result =
             predicate_cube_lift(preds, COUNTER_BTOR2, &AdapterOptions::default(), &mvp_opts)
@@ -5003,6 +5339,7 @@ mod tests {
             compound_exprs: std::collections::HashMap::new(),
             derived_predicates: Vec::new(),
             may_postimage: false,
+            reachable_only: false,
         };
         let result = predicate_cube_lift(preds, COUNTER_BTOR2, &AdapterOptions::default(), &opts)
             .expect("lift succeeds");
@@ -5043,6 +5380,7 @@ mod tests {
                 compound_exprs: std::collections::HashMap::new(),
                 derived_predicates: Vec::new(),
                 may_postimage: false,
+                reachable_only: false,
             };
             let result = predicate_cube_lift(
                 preds.clone(),
@@ -5085,6 +5423,7 @@ mod tests {
                 compound_exprs: std::collections::HashMap::new(),
                 derived_predicates: Vec::new(),
                 may_postimage: false,
+                reachable_only: false,
             };
             let mut lazy = LazyLift::from_btor2(
                 preds.clone(),
@@ -5241,6 +5580,7 @@ mod tests {
             compound_exprs: std::collections::HashMap::new(),
             derived_predicates: Vec::new(),
             may_postimage: false,
+            reachable_only: false,
         };
         let result = predicate_cube_lift(preds, COUNTER_BTOR2, &adapter_opts, &lift_opts)
             .expect("lift succeeds");
@@ -5334,6 +5674,7 @@ mod tests {
             compound_exprs: std::collections::HashMap::new(),
             derived_predicates: Vec::new(),
             may_postimage: false,
+            reachable_only: false,
         };
         let mut lazy =
             LazyLift::from_btor2(preds, COUNTER_BTOR2, &AdapterOptions::default(), &opts)
@@ -5423,6 +5764,7 @@ mod tests {
             compound_exprs: std::collections::HashMap::new(),
             derived_predicates: Vec::new(),
             may_postimage: false,
+            reachable_only: false,
         };
         let result = predicate_cube_lift(preds, COUNTER_BTOR2, &AdapterOptions::default(), &opts)
             .expect("predicate_cube_lift succeeds");
@@ -5460,6 +5802,7 @@ mod tests {
             compound_exprs: std::collections::HashMap::new(),
             derived_predicates: Vec::new(),
             may_postimage: false,
+            reachable_only: false,
         };
         let result = predicate_cube_lift(preds, COUNTER_BTOR2, &AdapterOptions::default(), &opts)
             .expect("predicate_cube_lift succeeds");

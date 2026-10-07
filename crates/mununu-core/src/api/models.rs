@@ -2418,6 +2418,12 @@ pub struct CegarVerdictSummary {
     pub false_cells: usize,
     /// KleeneBot (unknown — needs refinement) cells.
     pub unknown_cells: usize,
+    /// A4 (engine-performance roadmap, 2026-10-07) — cells the lift did not decide: unsatisfiable
+    /// cells and, under the explicit engine's reachable-only post-image, cells not reachable from
+    /// the initial cubes. They are ⊥ by construction and are NOT in `unknown_cells`; the three
+    /// counts above are over the remaining cells. Always 0 on the symbolic engine's summaries.
+    #[serde(default)]
+    pub unlifted_cells: usize,
 }
 
 /// A predicate spec, response-shaped.

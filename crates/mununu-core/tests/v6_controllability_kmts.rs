@@ -90,6 +90,7 @@ fn v6_amba_arbiter_lifts_with_controllability_aware_dual_labels() {
         compound_exprs: std::collections::HashMap::new(),
         derived_predicates: Vec::new(),
         may_postimage: false,
+        reachable_only: false,
     };
 
     let result = predicate_cube_lift(predicates, AMBA_ARBITER_BTOR2, &adapter_options, &lift_opts)
@@ -167,6 +168,7 @@ fn v6_amba_arbiter_lifts_with_mayonly_transitions_present() {
         compound_exprs: std::collections::HashMap::new(),
         derived_predicates: Vec::new(),
         may_postimage: false,
+        reachable_only: false,
     };
 
     let result = predicate_cube_lift(predicates, AMBA_ARBITER_BTOR2, &adapter_options, &lift_opts)
@@ -253,6 +255,7 @@ fn v6_amba_arbiter_controllability_aware_skips_smt_post_pass() {
         compound_exprs: std::collections::HashMap::new(),
         derived_predicates: Vec::new(),
         may_postimage: false,
+        reachable_only: false,
     };
 
     let result = predicate_cube_lift(predicates, AMBA_ARBITER_BTOR2, &adapter_options, &lift_opts)
