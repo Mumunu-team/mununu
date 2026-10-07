@@ -522,7 +522,7 @@ impl BddBitBlaster {
         // arena/2 left the And / Ite / Substitute hit rates unchanged to the third decimal on the
         // iteration-bound, deep, representation-bound and forward shapes — the misses are
         // compulsory, not capacity misses — at +340 MB RSS. So the size stays.
-        let manager = bdd::new_manager(arena_nodes, arena_nodes / 4, 1);
+        let manager = bdd::new_manager(arena_nodes, arena_nodes / 4, bdd_threads());
         let (all_vars, var_base, tt, ff, built_vars, built_levels) = manager
             .with_manager_exclusive(|m| {
                 let range = m.add_vars(total_bits as VarNo);
@@ -2755,7 +2755,7 @@ impl Squarer {
         let mut inputs: Vec<VarNo> = model.input_varnos.clone();
         inputs.sort_by_key(|v| levels[v]);
 
-        let manager = bdd::new_manager(SQUARING_ARENA, SQUARING_ARENA / 4, 1);
+        let manager = bdd::new_manager(SQUARING_ARENA, SQUARING_ARENA / 4, bdd_threads());
         let vars: Vec<BDDFunction> = manager.with_manager_exclusive(|m| {
             let r = m.add_vars((3 * n + inputs.len()) as VarNo);
             (0..3 * n + inputs.len())
@@ -2951,6 +2951,44 @@ impl Squarer {
         oom(p.or(&reach_engine))
     }
 }
+
+/// Roadmap 2, step 1 — the OxiDD worker threads each manager is created with (`new_manager`'s
+/// third argument). With OxiDD's default `multi-threading` feature, `BDDFunction` is the
+/// `BDDFunctionMT` type and every apply above a split depth of `log2(4096 · threads)` forks on a
+/// rayon pool of that size; at `1` the split depth is 0 and the recursion runs on the calling
+/// thread. `MUNUNU_BDD_THREADS` overrides the default.
+///
+/// **The default stays 1, measured.** Four threads bought 19 % of wall on the multiplier case
+/// (mult-12, 1.22 → 0.98 s, p < 0.01) for 1.67× the CPU; 5 % on the representation-bound
+/// relational case (not significant) for 3.2× the CPU; and cost 19 % on the raster case
+/// (small sets per iteration — the forks are overhead). Under the reach portfolio the exact
+/// member shares the host with five other members, so a 2–3× CPU multiplier for ≤ 19 % of
+/// wall is a net loss there; the knob is for a dedicated host on a multiplier-shaped cone.
+/// Verdicts and the engine's work counter are independent of it (ROBDDs are canonical; all
+/// three cases reported identical BDD-op and iteration counts at 1 and 4).
+///
+/// ⚠️ Two instruments read lower under workers. `approx_num_inner_nodes` — the number behind
+/// `MUNUNU_BDD_REPORT_PEAK`/`REPORT_WORK`'s `peak`, the bit-blast node guard and the fixpoint
+/// node budget — is OxiDD's SHARED allocation counter, and each thread flushes its own count
+/// into it only when it takes a new 64 Ki-node chunk (that is why a one-thread peak reads
+/// exactly 65537 on a small cone). Under `t` workers the reading lags by up to `t × 64 Ki`
+/// nodes, so the budgets fire that much late and a peak reading is that much low. Small
+/// against the 10 M+ budgets, but it is why the budget bail point is not promised to be
+/// identical across thread counts.
+fn bdd_threads() -> u32 {
+    parse_bdd_threads(std::env::var("MUNUNU_BDD_THREADS").ok().as_deref())
+}
+
+/// The knob's parse, separated from the env read so it can be tested without touching the
+/// process environment: a positive integer, anything else (unset, `0`, garbage) is the default.
+fn parse_bdd_threads(raw: Option<&str>) -> u32 {
+    raw.and_then(|v| v.trim().parse::<u32>().ok())
+        .filter(|&t| t >= 1)
+        .unwrap_or(BDD_THREADS_DEFAULT)
+}
+
+/// Step 1's default, kept at the pre-roadmap-2 value by the measurement above.
+const BDD_THREADS_DEFAULT: u32 = 1;
 
 fn fixpoint_iter_budget() -> usize {
     // ~1M iterations; a counter's steps are cheap (small BDD) so this is fast to reach.
@@ -7734,6 +7772,18 @@ mod tests {
     }
 
     use super::*;
+
+    /// Roadmap 2, step 1 — the thread knob's contract: unset, zero and garbage are the default
+    /// (one thread, the measured choice); a positive count is honoured.
+    #[test]
+    fn bdd_threads_knob_defaults_to_one_and_honours_a_positive_count() {
+        assert_eq!(parse_bdd_threads(None), 1);
+        assert_eq!(parse_bdd_threads(Some("0")), 1);
+        assert_eq!(parse_bdd_threads(Some("many")), 1);
+        assert_eq!(parse_bdd_threads(Some("")), 1);
+        assert_eq!(parse_bdd_threads(Some("4")), 4);
+        assert_eq!(parse_bdd_threads(Some(" 8 ")), 8);
+    }
     use crate::adapter::btor2::bit_blast::simulate_one_step;
     use crate::adapter::btor2::parser;
 
