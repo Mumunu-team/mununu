@@ -23,13 +23,11 @@
 //! ([`native_interp`], owned McMillan-style forward reachability with an
 //! interpolation k-schedule). It synthesises inductive invariants that neither
 //! k-induction nor even z3-SPACER reach at their budgets (measured *unique* HWMCC
-//! decides `gen12`/`gen14`/`gen39`). In the **parallel** driver it runs
-//! *concurrently* with the other five but polls a shared cancellation flag and
-//! bails the instant any faster engine reaches a definite verdict — so it costs
-//! ~nothing on the common (fast-decided) path yet still spends its full budget on
-//! the designs where it is the unique decider. In the **sequential** driver it is
-//! gated as a last resort, computed only once the other five have abstained. It
-//! needs cvc5 (a subprocess) and abstains when absent.
+//! decides `gen12`/`gen14`/`gen39`). It runs *concurrently* with the other five
+//! but polls a shared cancellation flag and bails the instant any faster engine
+//! reaches a definite verdict — so it costs ~nothing on the common (fast-decided)
+//! path yet still spends its full budget on the designs where it is the unique
+//! decider. It needs cvc5 (a subprocess) and abstains when absent.
 //!
 //! Running them together decides strictly more than any one, and — crucially —
 //! every engine's verdict is **sound**, so:
@@ -44,16 +42,22 @@
 //!   other member exhibits a concrete witness. A sole-decider spacer-reachable is
 //!   therefore dropped to a sound `Unknown` rather than emitted (see [`collect`]).
 //!
-//! Both a **sequential** ([`decide_reach_portfolio`]) and a **parallel**
-//! ([`decide_reach_portfolio_parallel`]) driver are provided. They merge
-//! identically — the parallel variant overlaps every member (the two subprocess
-//! engines, the in-process exact/native/spacer engines, and the cancellable
-//! interpolation member) in wall-clock, which matters once a per-engine timeout is
-//! in play: a slow member no longer serialises in front of a fast one. Every
-//! member carries a **wall-clock timeout** (Pono's IC3 has no native bound and can
-//! run unbounded on a hard instance); a member that errors, times out, or is
-//! undecided simply abstains — a timeout is a sound [`ReachVerdict::Unknown`],
-//! never a wrong verdict.
+//! One driver, [`decide_reach_portfolio`] (and its explicit-budget form
+//! [`decide_reach_portfolio_parallel_with_timeout`]): every member — the two
+//! subprocess engines, the isolated SPACER child, the in-process exact/native
+//! engines and the interpolation member — runs concurrently, and the moment one of
+//! them reaches a trusted definite verdict the subprocess members are cancelled
+//! after a short grace, so a call's wall is the first decider's time, not the
+//! slowest member's budget (S1, engine-performance roadmap). Until S1 the rescue
+//! verbs (`verify-liveness`, `check-fsm`, the vacuity probe and non-vacuity gate,
+//! verify-auto's ⊥ re-plan) ran a *sequential* driver that executed all six
+//! members one after another whatever the first had decided — measured on the i2c
+//! liveness monitor: native decided at 93 ms and SPACER then ran another 184 ms;
+//! with btormc and Pono installed, their 60 s budgets each. Every member carries a
+//! **wall-clock timeout** (Pono's IC3 has no native bound and can run unbounded on
+//! a hard instance); a member that errors, times out, is cancelled or is undecided
+//! simply abstains — a timeout is a sound [`ReachVerdict::Unknown`], never a wrong
+//! verdict.
 
 use crate::adapter::btor2::ast::Btor2File;
 use crate::adapter::btor2::emit::emit_btor2;
@@ -113,10 +117,27 @@ impl ReachOutcome {
     }
 }
 
+/// Per-member wall attribution (category 4 of the engine-performance roadmap). One
+/// `tracing::debug!` line per member — its name, elapsed milliseconds and verdict — so
+/// `RUST_LOG=mununu_core::adapter::reach_portfolio=debug` shows WHICH member set a
+/// portfolio call's wall and how long the others ran after the first decision. The
+/// instrument behind the scheduling measurements; it never changes a verdict.
+fn timed<T: std::fmt::Debug>(member: &'static str, run: impl FnOnce() -> T) -> T {
+    let t0 = std::time::Instant::now();
+    let v = run();
+    tracing::debug!(
+        member,
+        elapsed_ms = t0.elapsed().as_millis() as u64,
+        verdict = ?v,
+        "reach portfolio member"
+    );
+    v
+}
+
 /// The exact engine's optional verdict: `Some(true)` reachable, `Some(false)`
 /// unreachable, `None` abstained (over-cap / free-init / error).
 fn run_exact(content: &str) -> Option<bool> {
-    exact_bad_reachable(content).ok()
+    timed("exact", || exact_bad_reachable(content).ok())
 }
 
 /// The in-house **native engine** (BMC + k-induction on the Z3 seam) verdict:
@@ -124,16 +145,20 @@ fn run_exact(content: &str) -> Option<bool> {
 /// k-inductive safety proof), `None` abstained (Unknown / timeout / encode error).
 /// Unlike the exact BDD engine it has no 40-bit cone cap, and unlike btormc/Pono
 /// it needs no subprocess — mununu's own scalable safety member.
-fn run_native(file: &Btor2File) -> Option<bool> {
-    match native_bmc::decide_bad_safety(
-        file,
-        native_bmc::DEFAULT_MAX_K,
-        Some(native_bmc::DEFAULT_TIMEOUT_MS),
-    ) {
-        Ok(SafetyVerdict::Violated { .. }) => Some(true),
-        Ok(SafetyVerdict::Safe { .. }) => Some(false),
-        Ok(SafetyVerdict::Unknown { .. }) | Err(_) => None,
-    }
+fn run_native(file: &Btor2File, cancel: Option<&std::sync::atomic::AtomicBool>) -> Option<bool> {
+    timed(
+        "native",
+        || match native_bmc::decide_bad_safety_cancellable(
+            file,
+            native_bmc::DEFAULT_MAX_K,
+            Some(native_bmc::DEFAULT_TIMEOUT_MS),
+            cancel,
+        ) {
+            Ok(SafetyVerdict::Violated { .. }) => Some(true),
+            Ok(SafetyVerdict::Safe { .. }) => Some(false),
+            Ok(SafetyVerdict::Unknown { .. }) | Err(_) => None,
+        },
+    )
 }
 
 /// The in-house **SPACER engine** (IC3/PDR + interpolation via Z3's Fixedpoint)
@@ -142,7 +167,7 @@ fn run_native(file: &Btor2File) -> Option<bool> {
 /// invariant discovery decides *safe* designs whose invariant native k-induction
 /// cannot reach by simple induction below a large depth — also in-process, no
 /// subprocess.
-fn run_spacer(file: &Btor2File) -> Option<bool> {
+fn run_spacer(file: &Btor2File, cancel: Option<&std::sync::atomic::AtomicBool>) -> Option<bool> {
     // z3's Fixedpoint (SPACER) has a demonstrated FLAKY SIGSEGV on some CHC encodings
     // (e.g. `vis_arrays_bufferAlloc`) — a z3-internal abort, uncatchable in-process and
     // independent of concurrency (it segfaults even run alone). When the CLI / server
@@ -151,14 +176,17 @@ fn run_spacer(file: &Btor2File) -> Option<bool> {
     // child exit we read as ABSTAIN rather than a crash of the whole verify. Without that
     // env var (unit tests, or an embedding without the CLI binary) fall back to the
     // in-process engine — those paths never exercise a crash-triggering design.
-    match std::env::var_os("MUNUNU_SELF_EXE") {
+    timed("spacer", || match std::env::var_os("MUNUNU_SELF_EXE") {
         Some(exe) => run_spacer_isolated(
             std::path::Path::new(&exe),
             file,
             native_spacer::DEFAULT_TIMEOUT_MS,
+            cancel,
         ),
+        // The in-process engine has no cancellation point (z3's Fixedpoint runs to its own
+        // timeout); it is the test-only fallback, so the flag is simply not honoured here.
         None => run_spacer_in_process(file, native_spacer::DEFAULT_TIMEOUT_MS),
-    }
+    })
 }
 
 /// In-process SPACER — the direct engine call. Used as the fallback when no isolated
@@ -176,7 +204,12 @@ fn run_spacer_in_process(file: &Btor2File, timeout_ms: u32) -> Option<bool> {
 /// a non-success exit ⇒ `None` (abstain); a timeout ⇒ `None`; a clean verdict maps like
 /// the in-process engine. This contains the crash to a throwaway process — the verify
 /// itself never dies.
-fn run_spacer_isolated(exe: &std::path::Path, file: &Btor2File, timeout_ms: u32) -> Option<bool> {
+fn run_spacer_isolated(
+    exe: &std::path::Path,
+    file: &Btor2File,
+    timeout_ms: u32,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> Option<bool> {
     let content = emit_btor2(file);
     let mut cmd = std::process::Command::new(exe);
     // `--quiet` keeps the child's tracing off stdout; we still scan for the verdict
@@ -186,8 +219,13 @@ fn run_spacer_isolated(exe: &std::path::Path, file: &Btor2File, timeout_ms: u32)
     // Wall headroom over the child's own z3 timeout so we read its verdict rather than
     // killing it; a hung or segfaulting child is bounded either way.
     let wall = std::time::Duration::from_millis(u64::from(timeout_ms) + 5_000);
-    let (status, stdout, _stderr) =
-        crate::adapter::run_with_timeout(&mut cmd, Some(content.as_bytes()), wall).ok()??;
+    let (status, stdout, _stderr) = crate::adapter::run_with_timeout_cancellable(
+        &mut cmd,
+        Some(content.as_bytes()),
+        wall,
+        cancel,
+    )
+    .ok()??;
     if !status.success() {
         return None; // SIGSEGV / error exit — the isolation payoff: abstain, don't crash.
     }
@@ -225,18 +263,21 @@ const INTERP_OVERALL_TIMEOUT_MS: u64 = 25_000;
 /// which the whole rest of the portfolio leaves `Unknown`). cvc5 (a subprocess) is
 /// required; when it is absent the engine abstains.
 fn run_interp(file: &Btor2File, cancel: &std::sync::atomic::AtomicBool) -> Option<bool> {
-    match native_interp::verify_safety_interp_cancellable(
-        file,
-        INTERP_MAX_SUFFIX,
-        INTERP_MAX_ITERS,
-        INTERP_QUERY_TIMEOUT_MS,
-        INTERP_OVERALL_TIMEOUT_MS,
-        cancel,
-    ) {
-        InterpSafetyVerdict::Unsafe { .. } => Some(true),
-        InterpSafetyVerdict::Safe { .. } => Some(false),
-        InterpSafetyVerdict::Undecided { .. } => None,
-    }
+    timed(
+        "interp",
+        || match native_interp::verify_safety_interp_cancellable(
+            file,
+            INTERP_MAX_SUFFIX,
+            INTERP_MAX_ITERS,
+            INTERP_QUERY_TIMEOUT_MS,
+            INTERP_OVERALL_TIMEOUT_MS,
+            cancel,
+        ) {
+            InterpSafetyVerdict::Unsafe { .. } => Some(true),
+            InterpSafetyVerdict::Safe { .. } => Some(false),
+            InterpSafetyVerdict::Undecided { .. } => None,
+        },
+    )
 }
 
 /// Merge the members' verdicts into a [`ReachOutcome`], in the fixed engine order
@@ -298,61 +339,20 @@ fn collect(
     ReachOutcome::from_sets(reachable_by, unreachable_by)
 }
 
-/// Decide `bad`-reachability of `file` across all five engines — the exact BDD
-/// engine, the in-house native (BMC + k-induction) and SPACER engines, and the
-/// btormc and Pono subprocess members — merged under the differential-oracle
-/// discipline.
+/// Decide `bad`-reachability of `file` across all six engines — the exact BDD
+/// engine, the in-house native (BMC + k-induction), SPACER and interpolation
+/// engines, and the btormc and Pono subprocess members — merged under the
+/// differential-oracle discipline, with the subprocess members' default budget
+/// ([`btormc::DEFAULT_TIMEOUT`]).
 ///
 /// Each member abstains gracefully: the exact engine on an over-cap / free-init
 /// design (`Err`), the in-house engines on `Unknown` / timeout / encode error, a
 /// subprocess member when its binary is absent (`Err`), it is inconclusive
-/// (`Unknown`), or it hits its wall-clock timeout. The emitted BTOR2 (from
-/// [`emit_btor2`]) is the shared input, so a *reduced / transformed* model is decided
-/// consistently across all members.
-///
-/// This is the **sequential** driver — members run one after another. Use
-/// [`decide_reach_portfolio_parallel`] to overlap them in wall-clock.
+/// (`Unknown`), it hits its wall-clock timeout, or it is cancelled because another
+/// member decided first. The emitted BTOR2 (from [`emit_btor2`]) is the shared
+/// input, so a *reduced / transformed* model is decided consistently across all
+/// members.
 pub fn decide_reach_portfolio(file: &Btor2File) -> ReachOutcome {
-    let content = emit_btor2(file);
-    // Exact BDD engine — sound both ways (REACHABLE is always sound; an
-    // UNREACHABLE verdict is refused on free-init state), within the bit cap.
-    let exact = run_exact(&content);
-    // Native engine — in-house BMC + k-induction on the Z3 seam, no bit cap.
-    let native = run_native(file);
-    // SPACER (via Z3's Fixedpoint) — external algorithm, in-process invariant discovery.
-    let spacer = run_spacer(file);
-    // btormc — BMC (CEX) + k-induction (proof).
-    let btormc_v =
-        btormc::decide_via_btormc(file, btormc::DEFAULT_KMAX, btormc::DEFAULT_TIMEOUT).ok();
-    // Pono — IC3/PDR (proof + shallow CEX).
-    let pono_v = pono::decide_via_pono(file, pono::DEFAULT_ENGINE, pono::DEFAULT_TIMEOUT).ok();
-    // Owned interpolation member: in the SEQUENTIAL driver it runs after the others, so
-    // keep it last-resort (only when nothing else decided) to keep its cost off the
-    // common path — the flag is set iff a definite verdict already exists.
-    let interp = if collect(exact, native, spacer, None, btormc_v, pono_v).verdict
-        == ReachVerdict::Unknown
-    {
-        run_interp(file, &std::sync::atomic::AtomicBool::new(false))
-    } else {
-        None
-    };
-    collect(exact, native, spacer, interp, btormc_v, pono_v)
-}
-
-/// The **parallel** driver: run the exact engine (in-process) and the two
-/// subprocess members concurrently, then merge identically to
-/// [`decide_reach_portfolio`]. Scoped threads borrow `file` directly — the scope
-/// guarantees the borrows end before this returns, so no clone / `Arc` is needed.
-///
-/// The merge is unchanged, so the merged *verdict* is identical to the sequential
-/// driver (all members are sound, so they cannot disagree on a definite answer);
-/// only the wall-clock differs (≈ the slowest single member instead of the sum).
-/// This matters once per-engine timeouts are in play — a member that burns its full
-/// budget no longer serialises in front of a fast one. One benign detail difference:
-/// because the interpolation member runs concurrently here (rather than only as a
-/// sequential last resort), a design it decides in time will additionally list
-/// `interp` in `reachable_by` / `unreachable_by`, giving the owned engine its credit.
-pub fn decide_reach_portfolio_parallel(file: &Btor2File) -> ReachOutcome {
     decide_reach_portfolio_parallel_with_timeout(file, btormc::DEFAULT_TIMEOUT)
 }
 
@@ -365,7 +365,7 @@ pub fn decide_reach_portfolio_parallel(file: &Btor2File) -> ReachOutcome {
 /// proof / the wall timeout, never pre-paying for the higher cap.
 const DEEP_BUDGET_KMAX: u32 = 1000;
 
-/// [`decide_reach_portfolio_parallel`] with the **subprocess** members' (btormc / Pono)
+/// [`decide_reach_portfolio`] with the **subprocess** members' (btormc / Pono)
 /// wall budget set to `subprocess_timeout` instead of the 60 s default. When the budget is
 /// raised above the default, btormc's depth cap is also lifted to [`DEEP_BUDGET_KMAX`] (a
 /// longer budget is pointless if the unrolling stays capped at 40 — see that constant).
@@ -373,6 +373,11 @@ const DEEP_BUDGET_KMAX: u32 = 1000;
 /// `violated`); `vis_arrays_buf_bug`'s is found in ~1 s either way. The in-process members
 /// (exact / native / SPACER / interp) keep their own budgets. Surfaced via `btor2 verify
 /// --timeout-ms`.
+///
+/// Scoped threads borrow `file` directly — the scope guarantees the borrows end before
+/// this returns, so no clone / `Arc` is needed. The merge ([`collect`]) runs on the joined
+/// results in the fixed engine order, so the outcome is deterministic whatever the
+/// members' finishing order.
 pub fn decide_reach_portfolio_parallel_with_timeout(
     file: &Btor2File,
     subprocess_timeout: std::time::Duration,
@@ -385,23 +390,44 @@ pub fn decide_reach_portfolio_parallel_with_timeout(
     } else {
         btormc::DEFAULT_KMAX
     };
-    // A definite verdict from ANY faster member sets this; the owned interpolation
+    // A TRUSTED definite verdict from any member sets this. The owned interpolation
     // member polls it and abandons its (possibly slow) cvc5 interpolation search early
     // (#1 — run interpolation as a concurrent member, not last-resort, so its unique
     // decides get owned credit, without its pathological query dominating wall-clock on
-    // instances another engine already decided).
+    // instances another engine already decided), and since S1 (engine-performance
+    // roadmap, category 4) the three CHILD members — btormc, Pono and the isolated
+    // SPACER — kill their subprocess after a short grace instead of running out their
+    // 60 s / 15 s budgets: the portfolio's wall is the first decider plus the grace, not
+    // the slowest member's timeout. A member still running when the flag is set is not
+    // cross-checked, exactly as in the owned-only driver; every member is individually
+    // sound, so the decision itself is.
+    //
+    // "Trusted" excludes a lone SPACER `reachable`: `collect` drops that verdict as
+    // uncorroborated (see its soundness guard), so it must not cancel the members whose
+    // corroboration it needs — a spacer-reachable that cancelled everything else would
+    // always end `Unknown`.
     let decided = AtomicBool::new(false);
     let decided = &decided;
     std::thread::scope(|scope| {
         let btormc_h = scope.spawn(|| {
-            let v = btormc::decide_via_btormc(file, btormc_kmax, subprocess_timeout).ok();
+            let v = timed("btormc", || {
+                btormc::decide_via_btormc(file, btormc_kmax, subprocess_timeout, Some(decided)).ok()
+            });
             if matches!(v, Some(McVerdict::Violated) | Some(McVerdict::Safe)) {
                 decided.store(true, Relaxed);
             }
             v
         });
         let pono_h = scope.spawn(|| {
-            let v = pono::decide_via_pono(file, pono::DEFAULT_ENGINE, subprocess_timeout).ok();
+            let v = timed("pono", || {
+                pono::decide_via_pono(
+                    file,
+                    pono::DEFAULT_ENGINE,
+                    subprocess_timeout,
+                    Some(decided),
+                )
+                .ok()
+            });
             if matches!(v, Some(McVerdict::Violated) | Some(McVerdict::Safe)) {
                 decided.store(true, Relaxed);
             }
@@ -411,15 +437,15 @@ pub fn decide_reach_portfolio_parallel_with_timeout(
         // thread so it overlaps the exact engine + the subprocess members rather than
         // serialising.
         let native_h = scope.spawn(|| {
-            let v = run_native(file);
+            let v = run_native(file, Some(decided));
             if v.is_some() {
                 decided.store(true, Relaxed);
             }
             v
         });
         let spacer_h = scope.spawn(|| {
-            let v = run_spacer(file);
-            if v.is_some() {
+            let v = run_spacer(file, Some(decided));
+            if v == Some(false) {
                 decided.store(true, Relaxed);
             }
             v
@@ -487,11 +513,11 @@ pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcom
     // members keep running in the background; a CLI reaps them on process exit, and no
     // caller is ever blocked on them.
     //
-    // Trade vs the full parallel portfolio: early-return means a member still running when
-    // we return is not cross-checked, so the inter-engine `Contradiction` alarm here only
-    // covers members that finished by return time (the full `decide_reach_portfolio_parallel`
-    // keeps the complete cross-check). Every member is individually sound, so the first
-    // definite verdict is itself sound.
+    // Early-return means a member still running when we return is not cross-checked, so the
+    // inter-engine `Contradiction` alarm here only covers members that finished by return
+    // time. Since S1 the full portfolio makes the same trade (its cancellable members stop
+    // after the grace); every member is individually sound, so the first definite verdict
+    // is itself sound.
     let file = Arc::new(file.clone());
     let content = Arc::new(emit_btor2(&file));
     let decided = Arc::new(AtomicBool::new(false));
@@ -502,15 +528,19 @@ pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcom
     {
         let (file, decided, tx) = (Arc::clone(&file), Arc::clone(&decided), tx.clone());
         std::thread::spawn(move || {
-            let v = match native_bmc::decide_bad_safety(
-                &file,
-                native_bmc::DEFAULT_MAX_K,
-                Some(timeout_ms),
-            ) {
-                Ok(SafetyVerdict::Violated { .. }) => Some(true),
-                Ok(SafetyVerdict::Safe { .. }) => Some(false),
-                Ok(SafetyVerdict::Unknown { .. }) | Err(_) => None,
-            };
+            let v = timed(
+                "native",
+                || match native_bmc::decide_bad_safety_cancellable(
+                    &file,
+                    native_bmc::DEFAULT_MAX_K,
+                    Some(timeout_ms),
+                    Some(&decided),
+                ) {
+                    Ok(SafetyVerdict::Violated { .. }) => Some(true),
+                    Ok(SafetyVerdict::Safe { .. }) => Some(false),
+                    Ok(SafetyVerdict::Unknown { .. }) | Err(_) => None,
+                },
+            );
             if v.is_some() {
                 decided.store(true, Relaxed);
             }
@@ -521,18 +551,21 @@ pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcom
     {
         let (file, decided, tx) = (Arc::clone(&file), Arc::clone(&decided), tx.clone());
         std::thread::spawn(move || {
-            let v = match native_interp::verify_safety_interp_cancellable(
-                &file,
-                INTERP_MAX_SUFFIX,
-                64,
-                INTERP_QUERY_TIMEOUT_MS,
-                u64::from(timeout_ms),
-                &decided,
-            ) {
-                InterpSafetyVerdict::Unsafe { .. } => Some(true),
-                InterpSafetyVerdict::Safe { .. } => Some(false),
-                InterpSafetyVerdict::Undecided { .. } => None,
-            };
+            let v = timed(
+                "interp",
+                || match native_interp::verify_safety_interp_cancellable(
+                    &file,
+                    INTERP_MAX_SUFFIX,
+                    64,
+                    INTERP_QUERY_TIMEOUT_MS,
+                    u64::from(timeout_ms),
+                    &decided,
+                ) {
+                    InterpSafetyVerdict::Unsafe { .. } => Some(true),
+                    InterpSafetyVerdict::Safe { .. } => Some(false),
+                    InterpSafetyVerdict::Undecided { .. } => None,
+                },
+            );
             if v.is_some() {
                 decided.store(true, Relaxed);
             }
@@ -546,12 +579,14 @@ pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcom
     {
         let (file, decided, tx) = (Arc::clone(&file), Arc::clone(&decided), tx.clone());
         std::thread::spawn(move || {
-            let v = crate::adapter::btor2::native_boolector::decide_reachable_boolector(
-                &file,
-                OWNED_DEEP_CEX_MAX_K,
-                deadline,
-                &decided,
-            );
+            let v = timed("boolector", || {
+                crate::adapter::btor2::native_boolector::decide_reachable_boolector(
+                    &file,
+                    OWNED_DEEP_CEX_MAX_K,
+                    deadline,
+                    &decided,
+                )
+            });
             if v == Some(true) {
                 decided.store(true, Relaxed);
             }
@@ -562,14 +597,16 @@ pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcom
     {
         let (file, decided, tx) = (Arc::clone(&file), Arc::clone(&decided), tx.clone());
         std::thread::spawn(move || {
-            let hit = native_bmc::bmc_cex_until(
-                &file,
-                OWNED_DEEP_CEX_MAX_K,
-                OWNED_CEX_QUERY_MS,
-                deadline,
-                &decided,
-            )
-            .is_some();
+            let hit = timed("cex", || {
+                native_bmc::bmc_cex_until(
+                    &file,
+                    OWNED_DEEP_CEX_MAX_K,
+                    OWNED_CEX_QUERY_MS,
+                    deadline,
+                    &decided,
+                )
+                .is_some()
+            });
             if hit {
                 decided.store(true, Relaxed);
             }
@@ -811,19 +848,22 @@ mod tests {
     }
 
     #[test]
-    fn parallel_driver_agrees_with_sequential() {
-        // The parallel driver must return the *identical* outcome to the
-        // sequential one — it only overlaps members in wall-clock, never changes
-        // the merge. With no subprocess members on PATH both reduce to the
-        // exact-only verdict; the point is they agree byte-for-byte.
+    fn default_driver_is_the_explicit_budget_driver_at_the_default_budget() {
+        // S1 retired the sequential driver: `decide_reach_portfolio` IS the parallel,
+        // cancelling driver at the default subprocess budget. With no subprocess
+        // members on PATH both reduce to the exact-only verdict; the point is they
+        // agree byte-for-byte.
         const COUNTER: &str = "1 sort bitvec 3\n2 zero 1\n3 state 1\n4 init 1 3 2\n5 one 1\n\
                                6 add 1 3 5\n7 next 1 3 6\n8 ones 1\n9 sort bitvec 1\n\
                                10 eq 9 3 8\n11 bad 10\n";
         let file = parser::parse(COUNTER).expect("parse");
-        let seq = decide_reach_portfolio(&file);
-        let par = decide_reach_portfolio_parallel(&file);
-        assert_eq!(seq, par, "parallel and sequential drivers must agree");
-        assert_eq!(par.verdict, ReachVerdict::Reachable);
+        let default = decide_reach_portfolio(&file);
+        let explicit = decide_reach_portfolio_parallel_with_timeout(&file, btormc::DEFAULT_TIMEOUT);
+        assert_eq!(
+            default, explicit,
+            "the default driver is the explicit-budget one"
+        );
+        assert_eq!(default.verdict, ReachVerdict::Reachable);
     }
 
     #[test]
@@ -835,7 +875,7 @@ mod tests {
                                6 add 1 3 5\n7 next 1 3 6\n8 ones 1\n9 sort bitvec 1\n\
                                10 eq 9 3 8\n11 bad 10\n";
         let file = parser::parse(COUNTER).expect("parse");
-        let default = decide_reach_portfolio_parallel(&file);
+        let default = decide_reach_portfolio(&file);
         let custom = decide_reach_portfolio_parallel_with_timeout(
             &file,
             std::time::Duration::from_secs(120),

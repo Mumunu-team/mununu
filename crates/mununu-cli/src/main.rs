@@ -3592,7 +3592,7 @@ fn btor2_spacer_check(args: Btor2SpacerCheckArgs) -> Result<(), String> {
 
 fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
     use mununu_core::adapter::reach_portfolio::{
-        decide_reach_owned_only, decide_reach_portfolio_parallel,
+        decide_reach_owned_only, decide_reach_portfolio,
         decide_reach_portfolio_parallel_with_timeout,
     };
     use mununu_core::verdict::PropertyVerdict;
@@ -3640,7 +3640,7 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
     } else if let Some(ms) = args.timeout_ms {
         decide_reach_portfolio_parallel_with_timeout(&file, std::time::Duration::from_millis(ms))
     } else {
-        decide_reach_portfolio_parallel(&file)
+        decide_reach_portfolio(&file)
     };
 
     // `--witness`: on a `violated` (Reachable) verdict, re-derive the shallowest

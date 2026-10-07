@@ -183,10 +183,29 @@ pub fn run_btormc(
     kmax: u32,
     timeout: Duration,
 ) -> Result<McVerdict, AdapterError> {
+    run_btormc_cancellable(bin, btor2, kmax, timeout, None)
+}
+
+/// [`run_btormc`] with the reach portfolio's cooperative **cancel** flag: once another
+/// member has decided, the child is killed after a short grace and the run reads as
+/// [`McVerdict::Unknown`] — exactly like a timeout. See
+/// [`crate::adapter::run_with_timeout_cancellable`].
+pub fn run_btormc_cancellable(
+    bin: &BtormcBin,
+    btor2: &str,
+    kmax: u32,
+    timeout: Duration,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<McVerdict, AdapterError> {
     let mut command = Command::new(&bin.path);
     command.arg("--kind").arg("-kmax").arg(kmax.to_string());
-    let outcome = crate::adapter::run_with_timeout(&mut command, Some(btor2.as_bytes()), timeout)
-        .map_err(|e| AdapterError {
+    let outcome = crate::adapter::run_with_timeout_cancellable(
+        &mut command,
+        Some(btor2.as_bytes()),
+        timeout,
+        cancel,
+    )
+    .map_err(|e| AdapterError {
         kind: AdapterErrorKind::UnsupportedConstruct,
         message: format!(
             "adapter/btormc: failed to run `{}`: {e}",
@@ -248,10 +267,11 @@ pub fn decide_via_btormc(
     file: &crate::adapter::btor2::ast::Btor2File,
     kmax: u32,
     timeout: Duration,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<McVerdict, AdapterError> {
     let btor2 = crate::adapter::btor2::emit::emit_btor2(file);
     let bin = locate_btormc()?;
-    run_btormc(&bin, &btor2, kmax, timeout)
+    run_btormc_cancellable(&bin, &btor2, kmax, timeout, cancel)
 }
 
 #[cfg(test)]
@@ -377,13 +397,13 @@ mod tests {
         // the emit hand-off end-to-end (the emitted text is btormc's input).
         let reach = crate::adapter::btor2::parser::parse(REACH_BTOR2).expect("parse reach");
         assert_eq!(
-            decide_via_btormc(&reach, DEFAULT_KMAX, DEFAULT_TIMEOUT).unwrap(),
+            decide_via_btormc(&reach, DEFAULT_KMAX, DEFAULT_TIMEOUT, None).unwrap(),
             McVerdict::Violated,
             "emit→btormc must decide the reachable-bad model as Violated"
         );
         let safe = crate::adapter::btor2::parser::parse(SAFE_BTOR2).expect("parse safe");
         assert_eq!(
-            decide_via_btormc(&safe, DEFAULT_KMAX, DEFAULT_TIMEOUT).unwrap(),
+            decide_via_btormc(&safe, DEFAULT_KMAX, DEFAULT_TIMEOUT, None).unwrap(),
             McVerdict::Safe,
             "emit→btormc must decide the safe model as Safe"
         );

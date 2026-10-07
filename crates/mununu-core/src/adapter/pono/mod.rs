@@ -111,6 +111,20 @@ pub fn run_pono(
     engine: &str,
     timeout: Duration,
 ) -> Result<McVerdict, AdapterError> {
+    run_pono_cancellable(bin, btor2, engine, timeout, None)
+}
+
+/// [`run_pono`] with the reach portfolio's cooperative **cancel** flag: once another member
+/// has decided, the child is killed after a short grace and the run reads as
+/// [`McVerdict::Unknown`] — exactly like a timeout. See
+/// [`crate::adapter::run_with_timeout_cancellable`].
+pub fn run_pono_cancellable(
+    bin: &PonoBin,
+    btor2: &str,
+    engine: &str,
+    timeout: Duration,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<McVerdict, AdapterError> {
     use std::sync::atomic::{AtomicU64, Ordering};
     // Pono reads a file (not stdin). Write to a uniquely-named temp file — the
     // codebase's `std::env::temp_dir` convention (as in the verilator wrapper),
@@ -133,7 +147,7 @@ pub fn run_pono(
     // hard instance abstains (Unknown) rather than hanging the portfolio.
     let mut command = Command::new(&bin.path);
     command.arg("-e").arg(engine).arg(&tmp_path);
-    let result = crate::adapter::run_with_timeout(&mut command, None, timeout);
+    let result = crate::adapter::run_with_timeout_cancellable(&mut command, None, timeout, cancel);
     let _ = std::fs::remove_file(&tmp_path);
     let outcome =
         result.map_err(|e| err(format!("failed to run `{}`: {e}", bin.path.display())))?;
@@ -171,10 +185,11 @@ pub fn decide_via_pono(
     file: &crate::adapter::btor2::ast::Btor2File,
     engine: &str,
     timeout: Duration,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<McVerdict, AdapterError> {
     let btor2 = crate::adapter::btor2::emit::emit_btor2(file);
     let bin = locate_pono()?;
-    run_pono(&bin, &btor2, engine, timeout)
+    run_pono_cancellable(&bin, &btor2, engine, timeout, cancel)
 }
 
 fn err(message: String) -> AdapterError {
@@ -218,12 +233,12 @@ mod tests {
         // a reachable-bad model is Violated, a safe one is Safe.
         let reach = parser::parse(REACH).expect("parse reach");
         assert_eq!(
-            decide_via_pono(&reach, DEFAULT_ENGINE, DEFAULT_TIMEOUT).unwrap(),
+            decide_via_pono(&reach, DEFAULT_ENGINE, DEFAULT_TIMEOUT, None).unwrap(),
             McVerdict::Violated
         );
         let safe = parser::parse(SAFE).expect("parse safe");
         assert_eq!(
-            decide_via_pono(&safe, DEFAULT_ENGINE, DEFAULT_TIMEOUT).unwrap(),
+            decide_via_pono(&safe, DEFAULT_ENGINE, DEFAULT_TIMEOUT, None).unwrap(),
             McVerdict::Safe
         );
     }

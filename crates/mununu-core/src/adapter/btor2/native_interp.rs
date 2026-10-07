@@ -619,7 +619,13 @@ pub(crate) fn verify_safety_interp_cancellable(
                 a_terms.extend(constr1.clone());
                 let a = Bool::and(&a_terms.iter().collect::<Vec<_>>());
 
-                match interpolate_bool(&a, &safe_suffix, &f.state[1], timeout_ms) {
+                match interpolate_bool_cancellable(
+                    &a,
+                    &safe_suffix,
+                    &f.state[1],
+                    timeout_ms,
+                    Some(cancel),
+                ) {
                     InterpStep::Interpolant(i_f1) => {
                         let i_f0 = i_f1.substitute(&f1_to_f0);
                         if implies(&i_f0, &r) {
@@ -691,6 +697,19 @@ enum InterpStep {
 /// z3 `Bool` over `shared` — the interpolation interface variables (the shared
 /// vocabulary; frame 1's state cells).
 fn interpolate_bool(a: &Bool, b: &Bool, shared: &BTreeMap<Nid, BV>, timeout_ms: u32) -> InterpStep {
+    interpolate_bool_cancellable(a, b, shared, timeout_ms, None)
+}
+
+/// [`interpolate_bool`] whose cvc5 child honours the portfolio's cancel flag (S1): once a
+/// peer member has decided, the query is killed after the member grace and reads as
+/// `Unavailable` — a sound abstain, exactly like a timed-out query.
+fn interpolate_bool_cancellable(
+    a: &Bool,
+    b: &Bool,
+    shared: &BTreeMap<Nid, BV>,
+    timeout_ms: u32,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> InterpStep {
     let (a_decls, a_body) = match serialize_term(a) {
         Some(x) => x,
         None => return InterpStep::Unavailable("failed to serialize A".into()),
@@ -716,7 +735,7 @@ fn interpolate_bool(a: &Bool, b: &Bool, shared: &BTreeMap<Nid, BV>, timeout_ms: 
     query.push_str(&format!("(get-interpolant I {b_body})\n"));
     query.push_str("(exit)\n");
 
-    let stdout = match run_cvc5_raw(&query, timeout_ms) {
+    let stdout = match run_cvc5_raw_cancellable(&query, timeout_ms, cancel) {
         Ok(s) => s,
         Err(e) => return InterpStep::Unavailable(e),
     };
@@ -745,6 +764,19 @@ fn interpolate_bool(a: &Bool, b: &Bool, shared: &BTreeMap<Nid, BV>, timeout_ms: 
 
 /// Run cvc5 on an interpolation query, returning raw stdout.
 pub(crate) fn run_cvc5_raw(query: &str, timeout_ms: u32) -> Result<String, String> {
+    run_cvc5_raw_cancellable(query, timeout_ms, None)
+}
+
+/// [`run_cvc5_raw`] with the portfolio's cancel flag (S1): polled with the wall deadline;
+/// once set, cvc5 is killed after [`crate::adapter::MEMBER_CANCEL_GRACE`] and the query
+/// reads as `Err` — the same sound abstain as a timed-out one. Measured before this: the
+/// interpolation member bailed 350 ms after the first decision on a small liveness monitor,
+/// because the in-flight cvc5 query ran to completion before the flag was checked.
+pub(crate) fn run_cvc5_raw_cancellable(
+    query: &str,
+    timeout_ms: u32,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<String, String> {
     use std::io::{Read, Write};
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
@@ -771,15 +803,24 @@ pub(crate) fn run_cvc5_raw(query: &str, timeout_ms: u32) -> Result<String, Strin
         .write_all(query.as_bytes())
         .map_err(|e| format!("write cvc5 stdin: {e}"))?;
     let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64 + 2_000);
-    let mut killed = false;
+    let mut cancel_seen: Option<Instant> = None;
+    let mut killed = None;
     loop {
         match child.try_wait() {
             Ok(Some(_)) => break,
             Ok(None) => {
-                if Instant::now() > deadline {
+                let cancelled = cancel
+                    .is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+                    && cancel_seen.get_or_insert_with(Instant::now).elapsed()
+                        >= crate::adapter::MEMBER_CANCEL_GRACE;
+                if cancelled || Instant::now() > deadline {
                     let _ = child.kill();
                     let _ = child.wait();
-                    killed = true;
+                    killed = Some(if cancelled {
+                        "cvc5 cancelled — another portfolio member decided first".to_string()
+                    } else {
+                        format!("cvc5 exceeded {timeout_ms}ms")
+                    });
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(25));
@@ -787,8 +828,8 @@ pub(crate) fn run_cvc5_raw(query: &str, timeout_ms: u32) -> Result<String, Strin
             Err(e) => return Err(format!("wait cvc5: {e}")),
         }
     }
-    if killed {
-        return Err(format!("cvc5 exceeded {timeout_ms}ms"));
+    if let Some(why) = killed {
+        return Err(why);
     }
     let mut buf = Vec::new();
     if let Some(mut so) = child.stdout.take() {
@@ -947,6 +988,46 @@ fn reparse_over_shared(raw: &str, shared: &BTreeMap<Nid, BV>) -> Option<Bool> {
 mod tests {
     use super::*;
     use crate::adapter::btor2::parser;
+
+    /// S1 (engine-performance roadmap) — the cvc5 runner honours the portfolio's cancel flag:
+    /// a query cvc5 cannot finish quickly (a 64-bit multiplication interpolant under a 30 s
+    /// budget) is killed after the member grace once the flag is set, and the runner reports
+    /// the cancellation rather than waiting for the budget.
+    #[test]
+    fn cvc5_runner_kills_the_query_after_the_grace_when_cancelled() {
+        use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+        if crate::adapter::cvc5::locate_cvc5().is_err() {
+            eprintln!("SKIP: cvc5 unavailable");
+            return;
+        }
+        const HARD: &str = "(set-logic QF_BV)\n(declare-const a (_ BitVec 64))\n\
+            (declare-const b (_ BitVec 64))\n(declare-const c (_ BitVec 64))\n\
+            (assert (= c (bvmul a b)))\n(assert (= c #x0000000100000001))\n\
+            (get-interpolant I (not (and (= a #x0000000000000001) (= b #x0000000100000001))))\n";
+        let cancel = AtomicBool::new(false);
+        let t0 = std::time::Instant::now();
+        let out = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                cancel.store(true, Relaxed);
+            });
+            run_cvc5_raw_cancellable(HARD, 30_000, Some(&cancel))
+        });
+        let took = t0.elapsed();
+        match out {
+            Err(why) => assert!(why.contains("cancelled"), "reason names the cancel: {why}"),
+            // cvc5 finished the query inside the grace — then nothing was cancelled, and the
+            // test cannot say more on this host; it is not a failure of the mechanism.
+            Ok(_) => assert!(
+                took < crate::adapter::MEMBER_CANCEL_GRACE * 2,
+                "finished: {took:?}"
+            ),
+        }
+        assert!(
+            took < std::time::Duration::from_secs(10),
+            "the 30 s budget was not what ended the query: {took:?}"
+        );
+    }
 
     /// Round-trip machinery smoke test: a 4-bit `+2` counter whose `bad = (x==5)`
     /// is unreachable (x stays even) but **not** 1-inductive (x=3 → 5). cvc5 must

@@ -403,6 +403,23 @@ pub fn decide_bad_safety(
     max_k: u32,
     timeout_ms: Option<u32>,
 ) -> Result<SafetyVerdict, BmcError> {
+    decide_bad_safety_cancellable(file, max_k, timeout_ms, None)
+}
+
+/// [`decide_bad_safety`] with the reach portfolio's cooperative **cancel** flag (S1 of the
+/// engine-performance roadmap): checked before each depth, like [`bmc_cex_until`], so once a
+/// peer member has decided the engine abstains at the first depth boundary past the
+/// [`crate::adapter::MEMBER_CANCEL_GRACE`] instead of running the remaining
+/// `(max_k - k) × 2` queries at up to `timeout_ms` each. The grace keeps a run that is about
+/// to finish in the portfolio's attribution; a cancelled run is [`SafetyVerdict::Unknown`]
+/// at the depth it stopped — never a wrong verdict. The latency of a cancellation is bounded
+/// by the grace plus the query in flight (≤ `timeout_ms`).
+pub fn decide_bad_safety_cancellable(
+    file: &Btor2File,
+    max_k: u32,
+    timeout_ms: Option<u32>,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<SafetyVerdict, BmcError> {
     let (bad_ops, init_pairs, constraint_ops) = extract_props(file);
     if bad_ops.is_empty() {
         return Err(BmcError::NoBadProperty);
@@ -431,7 +448,16 @@ pub fn decide_bad_safety(
             step.assert(&c);
         }
 
+        let mut cancel_seen: Option<std::time::Instant> = None;
         for k in 0..=n {
+            if cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+                && cancel_seen
+                    .get_or_insert_with(std::time::Instant::now)
+                    .elapsed()
+                    >= crate::adapter::MEMBER_CANCEL_GRACE
+            {
+                return Ok(SafetyVerdict::Unknown { k: k as u32 });
+            }
             // Base — reachable counterexample? Violated ONLY on a definite Sat.
             base.push();
             base.assert(u.bad_at(k));
@@ -584,6 +610,46 @@ mod tests {
         assert_eq!(bmc_cex_until(&reach, 64, 5_000, far, &cancelled), None);
         let past = far - std::time::Duration::from_secs(120);
         assert_eq!(bmc_cex_until(&reach, 64, 5_000, past, &never), None);
+    }
+
+    /// S1 (engine-performance roadmap) — the safety engine's cancel flag is checked before
+    /// each depth, with the member grace: a run that finishes inside the grace still lands
+    /// (the flag is set from the start here and the depth-1 counterexample is still found,
+    /// identical to the uncancelled run), while a long unrolling abstains at the first depth
+    /// past the grace with `Unknown`, never a verdict and never its full `max_k` of queries.
+    #[test]
+    fn decide_bad_safety_cancel_lands_inside_the_grace_and_abstains_past_it() {
+        use std::sync::atomic::AtomicBool;
+        let cancelled = AtomicBool::new(true);
+        let reach = parser::parse(REACH).expect("parse");
+        assert_eq!(
+            decide_bad_safety_cancellable(&reach, 5, None, Some(&cancelled)).expect("k-ind ok"),
+            decide_bad_safety(&reach, 5, None).expect("k-ind ok")
+        );
+        assert!(matches!(
+            decide_bad_safety(&reach, 5, None).expect("k-ind ok"),
+            SafetyVerdict::Violated { depth: 1 }
+        ));
+        // A 64-bit free counter whose `bad` (all ones) is 2^64 - 1 steps away and not
+        // k-inductive at any small k: 401 depths of base + step queries is well past the
+        // grace, so the cancelled run stops early with the depth it reached.
+        const LONG: &str = "1 sort bitvec 64\n2 zero 1\n3 state 1 cnt\n4 init 1 3 2\n5 one 1\n\
+                            6 add 1 3 5\n7 next 1 3 6\n8 ones 1\n9 sort bitvec 1\n\
+                            10 eq 9 3 8\n11 bad 10\n";
+        let long = parser::parse(LONG).expect("parse");
+        let t0 = std::time::Instant::now();
+        let v =
+            decide_bad_safety_cancellable(&long, 400, None, Some(&cancelled)).expect("k-ind ok");
+        let took = t0.elapsed();
+        assert!(
+            matches!(v, SafetyVerdict::Unknown { k } if k < 400),
+            "a cancelled long run abstains before its depth cap: {v:?}"
+        );
+        assert!(
+            took >= crate::adapter::MEMBER_CANCEL_GRACE
+                && took < std::time::Duration::from_secs(60),
+            "stops at the first depth past the grace, took {took:?}"
+        );
     }
 
     #[test]
