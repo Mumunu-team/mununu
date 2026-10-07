@@ -95,17 +95,11 @@ fn parse_cube_smt_rlimit(v: Option<String>) -> Option<u32> {
 }
 
 fn build_predicate_constraint(bv: &z3::ast::BV, value: u64, polarity: bool) -> z3::ast::Bool {
-    let width = bv.get_size();
-    // R.2.5b session 2 — mask the unsigned value to the BV width.
-    // Widths < 64 truncate; width == 64 passes through.
-    let mask: u64 = if width >= 64 {
-        u64::MAX
-    } else {
-        (1u64 << width) - 1
-    };
-    let bits = value & mask;
-    let val_bv = z3::ast::BV::from_u64(bits, width);
-    let eq = bv.eq(&val_bv);
+    let eq = crate::adapter::btor2::predicate_expr::literal_cmp(
+        bv,
+        crate::adapter::btor2::predicate_expr::CmpOp::Eq,
+        value,
+    );
     if polarity { eq } else { eq.not() }
 }
 
