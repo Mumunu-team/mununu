@@ -4,7 +4,7 @@
 //! An external tool (e.g. an agent writing RTL) can hand raw SV plus a target atom
 //! and get a verdict, with no manual `sv emit-btor2-per-module` → `btor2 verify-*`
 //! round-trip. Each function is a thin bridge: [`sv_to_btor2`] then the matching
-//! BTOR2 verb core ([`decide_reach_portfolio_parallel`],
+//! BTOR2 verb core ([`decide_reach_portfolio`],
 //! [`response_liveness_rescue_atoms`], [`verify_recoverability`]). The SV → BTOR2
 //! lift requires sv2v + Yosys on the host (see [`docs/verifying-rtl.md`]); a missing
 //! tool returns a structured error.
@@ -24,7 +24,7 @@ use crate::adapter::liveness_rescue::{
     Atom, LivenessVerdict, parse_response_atom, parse_response_pairs,
     response_liveness_rescue_atoms, response_liveness_rescue_conjunction,
 };
-use crate::adapter::reach_portfolio::{ReachOutcome, decide_reach_portfolio_parallel};
+use crate::adapter::reach_portfolio::{ReachOutcome, decide_reach_portfolio};
 use crate::adapter::recoverability::verify_recoverability_with_predicates;
 use crate::adapter::yosys::{SvFrontend, YosysOptions, sv_to_btor2};
 use crate::verdict::PropertyVerdict;
@@ -72,7 +72,7 @@ pub fn sv_verify_safety(lift: &SvLift) -> Result<ReachOutcome, String> {
     let btor2 = lift.lift()?;
     let file =
         parser::parse(&btor2).map_err(|e| format!("parsing the lifted BTOR2: {}", e.message))?;
-    Ok(decide_reach_portfolio_parallel(&file))
+    Ok(decide_reach_portfolio(&file))
 }
 
 /// `sv verify-liveness` — lift SV and decide `AG(request → AF grant)` via the l2s

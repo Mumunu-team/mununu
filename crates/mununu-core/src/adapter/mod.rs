@@ -694,8 +694,35 @@ pub(crate) fn run_with_timeout(
     stdin_data: Option<&[u8]>,
     timeout: std::time::Duration,
 ) -> std::io::Result<Option<(std::process::ExitStatus, String, String)>> {
+    run_with_timeout_cancellable(command, stdin_data, timeout, None)
+}
+
+/// How long a cancelled portfolio member keeps running after it first observes the `cancel`
+/// flag. The reach portfolio sets the flag the moment one member decides; a member that is
+/// about to finish still lands — so it is listed in `reachable_by` / `unreachable_by` and
+/// still reaches the inter-engine contradiction alarm — if it finishes inside this window
+/// (the owned-only driver's straggler grace, applied to every cancellable member: the
+/// btormc / Pono / isolated-SPACER children and native k-induction's depth loop). Short on
+/// purpose: past it the member's remaining budget — up to a 60 s btormc / Pono timeout, a
+/// 10 s SPACER one, 40 depths × 2 queries × 5 s for native — is pure wall-clock the caller
+/// would otherwise wait for. On a design every member decides in milliseconds, nothing is
+/// cancelled and the attribution is the same as before S1.
+pub(crate) const MEMBER_CANCEL_GRACE: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// [`run_with_timeout`] with a cooperative **cancel** flag (S1 of the engine-performance
+/// roadmap, category 4). Polled on the same 20 ms cadence as the timeout; once the flag is
+/// set the child gets [`MEMBER_CANCEL_GRACE`] and is then killed and reaped, which the
+/// caller reads exactly like a timeout — `Ok(None)`, a sound abstention. `None` for the flag
+/// recovers the plain timeout behaviour.
+pub(crate) fn run_with_timeout_cancellable(
+    command: &mut std::process::Command,
+    stdin_data: Option<&[u8]>,
+    timeout: std::time::Duration,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> std::io::Result<Option<(std::process::ExitStatus, String, String)>> {
     use std::io::{Read, Write};
     use std::process::Stdio;
+    use std::sync::atomic::Ordering::Relaxed;
     let mut child = command
         .stdin(if stdin_data.is_some() {
             Stdio::piped()
@@ -728,11 +755,17 @@ pub(crate) fn run_with_timeout(
         s
     });
     let start = std::time::Instant::now();
+    let mut cancel_seen: Option<std::time::Instant> = None;
     let status = loop {
         if let Some(st) = child.try_wait()? {
             break Some(st);
         }
-        if start.elapsed() >= timeout {
+        let cancelled = cancel.is_some_and(|c| c.load(Relaxed))
+            && cancel_seen
+                .get_or_insert_with(std::time::Instant::now)
+                .elapsed()
+                >= MEMBER_CANCEL_GRACE;
+        if cancelled || start.elapsed() >= timeout {
             let _ = child.kill();
             let _ = child.wait(); // reap; closing the pipes unblocks the readers
             break None;
@@ -830,6 +863,50 @@ pub fn auto_translate(
 
 #[cfg(test)]
 mod tests {
+    /// S1 (engine-performance roadmap, category 4) — a child whose portfolio `cancel` flag
+    /// flips is killed after the grace, long before its own timeout, and reads as a timeout
+    /// (`None`). A flag that never flips leaves the timeout behaviour untouched.
+    #[test]
+    fn a_cancelled_child_is_killed_after_the_grace_not_at_its_timeout() {
+        use super::{MEMBER_CANCEL_GRACE, run_with_timeout_cancellable};
+        use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+        use std::time::{Duration, Instant};
+
+        let cancel = AtomicBool::new(false);
+        let t0 = Instant::now();
+        let outcome = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(100));
+                cancel.store(true, Relaxed);
+            });
+            let mut cmd = std::process::Command::new("sleep");
+            cmd.arg("30");
+            run_with_timeout_cancellable(&mut cmd, None, Duration::from_secs(30), Some(&cancel))
+                .expect("spawn ok")
+        });
+        let took = t0.elapsed();
+        assert!(
+            outcome.is_none(),
+            "a cancelled child reports exactly like a timeout"
+        );
+        assert!(
+            took >= MEMBER_CANCEL_GRACE,
+            "the grace is honoured before the kill, took {took:?}"
+        );
+        assert!(
+            took < Duration::from_secs(5),
+            "killed within the grace plus the poll cadence, not at the 30 s timeout: {took:?}"
+        );
+
+        // Control: an unset flag changes nothing — the child still runs to completion.
+        let never = AtomicBool::new(false);
+        let mut cmd = std::process::Command::new("true");
+        let outcome =
+            run_with_timeout_cancellable(&mut cmd, None, Duration::from_secs(30), Some(&never))
+                .expect("spawn ok");
+        assert!(outcome.is_some_and(|(st, _, _)| st.success()));
+    }
+
     /// mununu#542 — an engine BUDGET abstention must be classified `ResourceBudgetExceeded`, so
     /// `verify_auto` maps it to `Unknown`.
     ///

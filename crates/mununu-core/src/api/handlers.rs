@@ -724,7 +724,7 @@ pub async fn btor2_verify_handler(
 }
 
 fn btor2_verify_handler_impl(request: Btor2VerifyRequest) -> ApiResult<Json<Btor2VerifyResponse>> {
-    use crate::adapter::reach_portfolio::{ReachVerdict, decide_reach_portfolio_parallel};
+    use crate::adapter::reach_portfolio::{ReachVerdict, decide_reach_portfolio};
 
     let file = crate::adapter::btor2::parser::parse(&request.content).map_err(|e| {
         ApiError::BadRequest {
@@ -733,7 +733,7 @@ fn btor2_verify_handler_impl(request: Btor2VerifyRequest) -> ApiResult<Json<Btor
         }
     })?;
 
-    let outcome = decide_reach_portfolio_parallel(&file);
+    let outcome = decide_reach_portfolio(&file);
     Ok(Json(Btor2VerifyResponse {
         verdict: crate::verdict::PropertyVerdict::from(outcome.verdict)
             .as_str()
