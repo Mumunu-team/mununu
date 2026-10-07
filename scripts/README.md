@@ -167,3 +167,51 @@ Records land in `target/heat/<label>.json` with the profiles under `target/heat/
 verdict is `HEAT UNCHANGED` or `HEAT MOVED`; the work counter (`work N BDD ops` on the engine's
 `MUNUNU_BDD_REPORT_WORK` line, which the script sets — no collection runs for it, so the map shows
 engine time only) and the iteration count ride along per case.
+
+When the map says the heat is inside OxiDD (`apply_rec`, `substitute`, `quant`, the apply cache,
+`gc`) rather than in mununu, the callee map has nothing more to say — the next instrument is
+OxiDD's own counters, below.
+
+## OxiDD's per-operation counters — when the heat is inside the library
+
+> Source of truth: [`crates/mununu-core/Cargo.toml`](../crates/mununu-core/Cargo.toml) (`oxidd-statistics = ["oxidd/statistics"]`) + `MUNUNU_BDD_STATS` in [`symbolic_bitblast.rs`](../crates/mununu-core/src/adapter/btor2/symbolic_bitblast.rs) — surface: CLI-only — a diagnostic build for engine work, never a shipped one.
+
+The exact engine's time is in OxiDD's apply recursion, and a callee map cannot tell *why* a
+recursion is expensive: whether the apply cache stopped hitting, whether the recursion is reaching
+the terminals, or whether the diagram is simply large. OxiDD's `statistics` feature counts, per
+operator (`And`, `Or`, `Xor`, `Ite`, `Subst`, `Exists`, …): the calls, the cache queries (calls
+minus terminal cases), the cache hits, and the nodes created after reduction. mununu exposes it as
+the `oxidd-statistics` cargo feature; `MUNUNU_BDD_STATS=1` prints the table to stderr once per
+evaluation. It is a separate build on purpose: the counters are relaxed atomics on the hot path and
+perturb the timings they exist to explain, so a statistics binary is never the one you time.
+
+```bash
+cargo build --profile profiling -p mununu-cli --features mununu-core/oxidd-statistics
+cp target/profiling/mununu target/profiles/mununu-stats
+MUNUNU_BDD_STATS=1 MUNUNU_BDD_REPORT_WORK=1 target/profiles/mununu-stats --quiet \
+    btor2 verify-recoverability target/profiles/cases/exact-relational-11.btor2 --target 'done == 1' \
+    2>&1 >/dev/null | grep -E '^  [A-Za-z]+: calls|work '
+```
+
+Each line reads `Op: calls: C, cache queries: Q (T % terminal cases), cache hits: H (R %),
+reduced: N`. The counters are read-and-reset — the table shows the work since the previous print,
+and `work N BDD ops` on the same stderr is the engine's own counter of the operations it issued,
+so `calls / work` is the recursion's amplification per issued operation. What the counters have
+settled so far, and the reading to take from each:
+
+- **Calls are the cost.** The variable-order study measured 9.7× more `And` calls where the
+  interleaved order lost (`sdram_burst`) and 77× fewer where it won (the barrel shifter), while the
+  hit rate moved *opposite* to performance in both — better-but-slower, worse-but-faster. The
+  apply-cache hypothesis was refuted by the counters, not confirmed; see
+  [`docs/design/bdd-variable-ordering.md`](../docs/design/bdd-variable-ordering.md). So compare
+  `calls` between two configurations before the hit rate, and treat a hit-rate change as a
+  consequence of the recursion's shape, not its cause.
+- **A bigger cache that does not move the hit rate is not a lever.** The apply-cache sizing
+  experiment (M3, arena/4 → arena/2) left every hit rate unchanged and cost 340 MB; it was measured
+  and not built. The counters are the cheap way to retire that class of candidate again.
+- **Reproducible where the clock is not.** The call counts reproduced byte-identically across a
+  3× load range on the consumer blocks, which is why they — not wall time — are the primary metric
+  in the variable-order briefing.
+
+The counters are per process, not per manager: the squarer's arena (`MUNUNU_BDD_SQUARING`) and the
+engine's share one table, so read a squaring run with the rescue off first.
