@@ -97,15 +97,17 @@ Criterion covers `cargo bench` targets. `ab_time.py` covers everything you time 
 verb, an `#[ignore]`d probe, a test filter. It repeats the command, keeps every sample, reports
 mean ± standard deviation, median and coefficient of variation, and decides whether two records
 differ by more than noise (Welch t-test, Mann–Whitney cross-check, a change threshold). It also
-parses the exact engine's `peak … in K iteration(s)` line so the host-independent iteration
-count is compared before the wall clock.
+parses the exact engine's `peak … in K iteration(s) … work W BDD ops` line so the host-independent
+iteration count and BDD-op count are compared before the wall clock. Turn that line on with
+`MUNUNU_BDD_REPORT_WORK=1`, not `MUNUNU_BDD_REPORT_PEAK=1`: the peak report runs a collection to
+read the residual, and that sweep is 16–25% of self time on the corpus — it would be timed too.
 
 ```bash
 scripts/ab_time.py preflight                       # load, heavy apps, power, thermal, running builds
-MUNUNU_BDD_REPORT_PEAK=1 scripts/ab_time.py run before -n 10 --caffeinate -- \
+MUNUNU_BDD_REPORT_WORK=1 scripts/ab_time.py run before -n 10 --caffeinate -- \
     target/release/mununu --quiet btor2 verify-recoverability d.btor2 --target "s == 0"
 # change, rebuild, then:
-MUNUNU_BDD_REPORT_PEAK=1 scripts/ab_time.py run after  -n 10 --caffeinate -- <same command>
+MUNUNU_BDD_REPORT_WORK=1 scripts/ab_time.py run after  -n 10 --caffeinate -- <same command>
 scripts/ab_time.py compare target/ab_time/before.json target/ab_time/after.json
 # strongest form, two binaries interleaved A B A B … so drift hits both equally:
 scripts/ab_time.py ab -n 10 --a '/tmp/mununu-before …' --b '/tmp/mununu-after …'
@@ -163,4 +165,5 @@ scripts/heat_check.py compare base m1 --threshold 10
 
 Records land in `target/heat/<label>.json` with the profiles under `target/heat/<label>/`. The
 verdict is `HEAT UNCHANGED` or `HEAT MOVED`; the work counter (`work N BDD ops` on the engine's
-`MUNUNU_BDD_REPORT_PEAK` line) and the iteration count ride along per case.
+`MUNUNU_BDD_REPORT_WORK` line, which the script sets — no collection runs for it, so the map shows
+engine time only) and the iteration count ride along per case.
