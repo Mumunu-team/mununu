@@ -2449,6 +2449,18 @@ impl EvalCtx {
 
 /// formula BDD directly rather than to predicate vars.
 pub struct ExactModel {
+    /// A2 — the state bits (engine variable numbers) and their next-state functions, the
+    /// inputs quantified by the single-agent pre-image, in the order `subst` pairs them. What
+    /// [`Squarer::build`] transfers into its own manager.
+    state_varnos: Vec<VarNo>,
+    next_fns: Vec<BDDFunction>,
+    input_varnos: Vec<VarNo>,
+    /// A2 — built on the first pure-reachability fixpoint that outlives
+    /// [`SQUARING_AFTER_ITERS`] iterations; `Some(Err)` records a refusal (budget) so the
+    /// attempt is not repeated for every later fixpoint of the same model.
+    squarer: std::cell::RefCell<Option<Result<Squarer, String>>>,
+    squaring: bool,
+    squaring_after_iters: usize,
     /// The substitution (state-bit varno ↦ its next-state function), built ONCE. Held registers
     /// (no `Next` line) are omitted (identity ⇒ held value); inputs are never state, never
     /// substituted (they remain free to be quantified). OxiDD keys its substitute apply-cache
@@ -2628,6 +2640,318 @@ fn resolve_budget(raw: Option<&str>, default: usize) -> (usize, Option<String>) 
 
 /// The exact-engine fixpoint iteration budget: `MUNUNU_BDD_ITER_BUDGET` or a default sized to
 /// catch a wide-counter diameter (`2^W`) while admitting any control fixpoint (small diameter).
+/// A2 — iterations a pure-reachability fixpoint runs before the squaring rescue is tried.
+/// Below it the chain is short and iteration is cheap; at it the iteration has already spent
+/// more than a closure costs on the shapes the rescue is for (the raster's relation is ~150
+/// nodes and closes in ~25 squarings). Measured 2026-10-07: the engine abstained on the 2^20
+/// iteration budget at 800×8000, 1280×720 and 1920×1080 after ~3 s each; the closure decided
+/// each in 6–11 ms.
+const SQUARING_AFTER_ITERS: usize = 4096;
+/// A2 — the squarer's own OxiDD arena, separate from the engine's (the engine's manager cannot
+/// grow variables: mununu#543). The closure of an arbitrary relation can be large; 80 % of this
+/// is the refusal point, after which the iteration resumes.
+const SQUARING_ARENA: usize = 1 << 22;
+/// A2 — squarings before giving up: a diameter past 2^48 is not a chain the rescue is for.
+const SQUARING_MAX_STEPS: usize = 48;
+
+/// A2 — is `body` the body of a pure reachability fixpoint over `var`: `p ∨ ◇X` (least) or
+/// `p ∧ □X` (greatest) with a bare single-agent modality on exactly `X = var` and `p` CLOSED
+/// (no fixpoint variable free — `EvalCtx::closed`, the M2 memo's own classification)? Returns
+/// `p`'s node and which polarity the shape is. Anything else — game modalities, guards, nested
+/// bodies, `p` mentioning an outer variable — keeps iterating.
+fn pure_reach_shape(
+    f: &Formula,
+    body: crate::mu_calculus::NodeId,
+    var: FormulaVarId,
+    ctx: &EvalCtx,
+) -> Option<(crate::mu_calculus::NodeId, bool)> {
+    use crate::mu_calculus::{Guard, ModalKind, Node as MuNode};
+    let is_step = |n: crate::mu_calculus::NodeId, kind: ModalKind| -> bool {
+        matches!(
+            f.node(n),
+            MuNode::Modal { kind: k, guard, target }
+                if *k == kind
+                    && *guard == Guard::default()
+                    && matches!(f.node(*target), MuNode::Variable(v) if *v == var)
+        )
+    };
+    let closed = |n: crate::mu_calculus::NodeId| ctx.closed.get(n.0).copied().unwrap_or(false);
+    match f.node(body) {
+        MuNode::Or(a, b) => {
+            if is_step(*b, ModalKind::Diamond) && closed(*a) {
+                Some((*a, false))
+            } else if is_step(*a, ModalKind::Diamond) && closed(*b) {
+                Some((*b, false))
+            } else {
+                None
+            }
+        }
+        MuNode::And(a, b) => {
+            if is_step(*b, ModalKind::Box) && closed(*a) {
+                Some((*a, true))
+            } else if is_step(*a, ModalKind::Box) && closed(*b) {
+                Some((*b, true))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// A2 (engine-performance roadmap, step 14) — the transition RELATION of an [`ExactModel`] in
+/// its own manager, closed by iterative squaring.
+///
+/// The engine represents the transition functionally — `to_next` substitutes next-state
+/// functions, there are no primed variables — which is why its `EF` walks the diameter one
+/// pre-image per iteration. The closure needs a relation: three copies of the state bits
+/// (`s`, `s'`, `s''`, interleaved per bit in the engine's own level order) and the inputs
+/// after them. `R(s, s') = ∃i. constraint(s, i) ∧ ⋀ⱼ s'ⱼ ↔ fⱼ(s, i)` is built by transferring
+/// the engine's next-state BDDs ([`Self::transfer`]); then `T₀ = R`,
+/// `Tₖ₊₁ = Tₖ ∪ ∃s'. Tₖ(s, s') ∧ Tₖ(s', s'')` until `Tₖ₊₁ = Tₖ` — the transitive closure
+/// `R⁺` in ⌈log₂ diameter⌉ steps — and `EF p = p ∨ ∃s'. R⁺(s, s') ∧ p(s')`, the exact least
+/// fixpoint the iteration computes (`◇` is the same `∃i. constraint ∧ next`).
+///
+/// Measured on the raster (two counters, the iteration-bound wall class): the relation is
+/// 119–152 nodes, the closure never exceeds 300, and 800×8000 / 1280×720 / 1920×1080 — all
+/// abstentions on the 2^20 iteration budget — decide in 6–11 ms. On a relation whose closure
+/// does not compress the arena budget refuses and the iteration resumes.
+struct Squarer {
+    _manager: BDDManagerRef,
+    tt: BDDFunction,
+    /// Engine varno → index `j` of the state bit, and the three copies per `j`.
+    index_of: HashMap<VarNo, usize>,
+    s1: Vec<BDDFunction>,
+    /// Engine varno of state bit `j` (to transfer results back).
+    engine_varno: Vec<VarNo>,
+    rel: BDDFunction,
+    shift: Subst<BDDFunction>,
+    back: Subst<BDDFunction>,
+    cube_s1: BDDFunction,
+    closure: std::cell::RefCell<Option<Result<BDDFunction, String>>>,
+    steps: std::cell::Cell<usize>,
+    budget: usize,
+}
+
+impl Squarer {
+    fn build(model: &ExactModel) -> Result<Self, String> {
+        use oxidd::BooleanFunctionQuant;
+        if model.state_varnos.is_empty() {
+            return Err("squaring: no next-state functions".into());
+        }
+        // State bits in the engine's level order, so the relation's variable order is the one the
+        // engine already measured as good (interleaved by bit position).
+        let levels: HashMap<VarNo, u32> = model.manager.with_manager_shared(|m| {
+            model
+                .state_varnos
+                .iter()
+                .chain(model.input_varnos.iter())
+                .map(|&v| (v, m.var_to_level(v)))
+                .collect()
+        });
+        let mut order: Vec<usize> = (0..model.state_varnos.len()).collect();
+        order.sort_by_key(|&j| levels[&model.state_varnos[j]]);
+        let n = order.len();
+        let mut inputs: Vec<VarNo> = model.input_varnos.clone();
+        inputs.sort_by_key(|v| levels[v]);
+
+        let manager = bdd::new_manager(SQUARING_ARENA, SQUARING_ARENA / 4, 1);
+        let vars: Vec<BDDFunction> = manager.with_manager_exclusive(|m| {
+            let r = m.add_vars((3 * n + inputs.len()) as VarNo);
+            (0..3 * n + inputs.len())
+                .map(|i| BDDFunction::var(m, r.start + i as VarNo).unwrap())
+                .collect()
+        });
+        let tt = manager.with_manager_shared(|m| BDDFunction::t(m));
+        let budget = SQUARING_ARENA * 8 / 10;
+        // Engine varno → the `s` copy (for transferring next-state functions and `p`).
+        let mut to_s0: HashMap<VarNo, BDDFunction> = HashMap::new();
+        let mut index_of: HashMap<VarNo, usize> = HashMap::new();
+        let mut engine_varno: Vec<VarNo> = vec![0; n];
+        for (j, &k) in order.iter().enumerate() {
+            let v = model.state_varnos[k];
+            to_s0.insert(v, vars[3 * j].clone());
+            index_of.insert(v, j);
+            engine_varno[j] = v;
+        }
+        for (i, &v) in inputs.iter().enumerate() {
+            to_s0.insert(v, vars[3 * n + i].clone());
+        }
+        let s1: Vec<BDDFunction> = (0..n).map(|j| vars[3 * j + 1].clone()).collect();
+        let s2: Vec<BDDFunction> = (0..n).map(|j| vars[3 * j + 2].clone()).collect();
+
+        // R(s, s') = ∃i. constraint ∧ ⋀ s'ⱼ ↔ fⱼ(s, i).
+        let mut memo: HashMap<usize, BDDFunction> = HashMap::new();
+        let mut rel = Self::transfer(&model.constraint, &model.manager, &to_s0, &tt, &mut memo)?;
+        for (j, &k) in order.iter().enumerate() {
+            let f = Self::transfer(&model.next_fns[k], &model.manager, &to_s0, &tt, &mut memo)?;
+            rel = oom(rel.and(&oom(s1[j].equiv(&f))?))?;
+            Self::check(&manager, budget, "building the relation")?;
+        }
+        let input_cube = inputs
+            .iter()
+            .fold(tt.clone(), |acc, v| acc.and(&to_s0[v]).unwrap());
+        let rel = oom(rel.exists(&input_cube))?;
+        let shift = Subst::new(
+            (0..n)
+                .flat_map(|j| [3 * j as VarNo, 3 * j as VarNo + 1])
+                .collect::<Vec<_>>(),
+            (0..n)
+                .flat_map(|j| [s1[j].clone(), s2[j].clone()])
+                .collect::<Vec<_>>(),
+        );
+        let back = Subst::new(
+            (0..n).map(|j| 3 * j as VarNo + 2).collect::<Vec<_>>(),
+            s1.clone(),
+        );
+        let cube_s1 = s1.iter().fold(tt.clone(), |acc, v| acc.and(v).unwrap());
+        Ok(Squarer {
+            _manager: manager,
+            tt,
+            index_of,
+            s1,
+            engine_varno,
+            rel,
+            shift,
+            back,
+            cube_s1,
+            closure: std::cell::RefCell::new(None),
+            steps: std::cell::Cell::new(0),
+            budget,
+        })
+    }
+
+    /// Rebuild `f` (a BDD of `src`) in this manager with every variable mapped through `vars`
+    /// (engine varno → this manager's variable). A recursive cofactor walk, memoised per node;
+    /// the cost is the size of `f`, which for a next-state function is bounded by the bit-blast.
+    fn transfer(
+        f: &BDDFunction,
+        src: &BDDManagerRef,
+        vars: &HashMap<VarNo, BDDFunction>,
+        tt: &BDDFunction,
+        memo: &mut HashMap<usize, BDDFunction>,
+    ) -> Result<BDDFunction, String> {
+        use oxidd::{Edge, Function, HasLevel, Node};
+        // Memo key: the edge's node id — the function's identity in `src` (these BDD edges carry
+        // no complement tag, so the node is the function; a `BDDFunction` key would trip clippy's
+        // `mutable_key_type`).
+        let (key, top): (usize, Option<VarNo>) = src.with_manager_shared(|m| {
+            let e = f.as_edge(m);
+            let top = match m.get_node(e) {
+                Node::Inner(node) => Some(m.level_to_var(node.level())),
+                Node::Terminal(_) => None,
+            };
+            (e.node_id(), top)
+        });
+        if let Some(done) = memo.get(&key) {
+            return Ok(done.clone());
+        }
+        let out = match top {
+            None => {
+                if f.satisfiable() {
+                    tt.clone()
+                } else {
+                    oom(tt.not())?
+                }
+            }
+            Some(v) => {
+                let (hi, lo) = f
+                    .cofactors()
+                    .ok_or("squaring: cofactors of an inner node")?;
+                let var = vars
+                    .get(&v)
+                    .ok_or_else(|| format!("squaring: engine variable {v} has no copy"))?
+                    .clone();
+                let hi_t = Self::transfer(&hi, src, vars, tt, memo)?;
+                let lo_t = Self::transfer(&lo, src, vars, tt, memo)?;
+                oom(var.ite(&hi_t, &lo_t))?
+            }
+        };
+        memo.insert(key, out.clone());
+        Ok(out)
+    }
+
+    fn check(manager: &BDDManagerRef, budget: usize, what: &str) -> Result<(), String> {
+        let live = manager.with_manager_shared(|m| m.approx_num_inner_nodes());
+        if live > budget {
+            return Err(format!(
+                "squaring: refused while {what} — {live} nodes past the {budget} budget; the \
+                 relation does not compress"
+            ));
+        }
+        Ok(())
+    }
+
+    /// The transitive closure `R⁺`, computed once and kept (a refusal is kept too). The handle
+    /// returned is a clone: an OxiDD function is a reference-counted edge.
+    fn closure(&self) -> Result<BDDFunction, String> {
+        use oxidd::{BooleanFunctionQuant, BooleanOperator};
+        if self.closure.borrow().is_none() {
+            let result = (|| -> Result<BDDFunction, String> {
+                let mut t = self.rel.clone();
+                for step in 1..=SQUARING_MAX_STEPS {
+                    let shifted = oom(t.substitute(&self.shift))?;
+                    let composed =
+                        oom(
+                            oom(t.apply_exists(BooleanOperator::And, &shifted, &self.cube_s1))?
+                                .substitute(&self.back),
+                        )?;
+                    let next = oom(t.or(&composed))?;
+                    self.steps.set(step);
+                    Self::check(&self._manager, self.budget, "squaring")?;
+                    if next == t {
+                        return Ok(t);
+                    }
+                    t = next;
+                }
+                Err(format!(
+                    "squaring: no fixpoint after {SQUARING_MAX_STEPS} squarings"
+                ))
+            })();
+            *self.closure.borrow_mut() = Some(result);
+        }
+        self.closure.borrow().as_ref().unwrap().clone()
+    }
+
+    /// `p ∨ ∃s'. R⁺(s, s') ∧ p(s')`, with `p` (an engine BDD over the state bits) transferred
+    /// onto the `s'` copy and the result transferred back onto the engine's variables.
+    fn reach_from(
+        &self,
+        closure: &BDDFunction,
+        p: &BDDFunction,
+        model: &ExactModel,
+    ) -> Result<BDDFunction, String> {
+        use oxidd::{BooleanFunctionQuant, BooleanOperator};
+        // `p` over the s' copy for the product; the `p ∨` term uses the engine's own `p`.
+        let to_s1: HashMap<VarNo, BDDFunction> = self
+            .index_of
+            .iter()
+            .map(|(&v, &j)| (v, self.s1[j].clone()))
+            .collect();
+        let mut memo: HashMap<usize, BDDFunction> = HashMap::new();
+        let p_s1 = Self::transfer(p, &model.manager, &to_s1, &self.tt, &mut memo)?;
+        let reach = oom(closure.apply_exists(BooleanOperator::And, &p_s1, &self.cube_s1))?;
+        Self::check(&self._manager, self.budget, "reading EF off the closure")?;
+        // Back to the engine: `reach` is over the `s` copy (vars 3j); map 3j → engine varno j.
+        let engine_vars: HashMap<VarNo, BDDFunction> = model.manager.with_manager_shared(|m| {
+            self.engine_varno
+                .iter()
+                .enumerate()
+                .map(|(j, &v)| (3 * j as VarNo, BDDFunction::var(m, v).unwrap()))
+                .collect()
+        });
+        let mut memo_back: HashMap<usize, BDDFunction> = HashMap::new();
+        let reach_engine = Self::transfer(
+            &reach,
+            &self._manager,
+            &engine_vars,
+            &model.tt,
+            &mut memo_back,
+        )?;
+        oom(p.or(&reach_engine))
+    }
+}
+
 fn fixpoint_iter_budget() -> usize {
     // ~1M iterations; a counter's steps are cheap (small BDD) so this is fast to reach.
     // `0` = DISABLED since B-1; it used to mean ZERO iterations, i.e. abstain immediately.
@@ -2934,9 +3258,11 @@ impl BddBitBlaster {
         let mut input_cube = self.tt.clone();
         let mut ctrl_cube = self.tt.clone();
         let mut env_cube = self.tt.clone();
+        let mut input_varnos: Vec<VarNo> = Vec::new();
         for cell in &self.cells {
             if !cell.is_state {
                 let is_ctrl = controllable.contains(&cell.symbol);
+                input_varnos.extend(cell.varnos.iter().copied());
                 for v in &cell.vars {
                     input_cube = input_cube.and(v).unwrap();
                     if is_ctrl {
@@ -2950,10 +3276,18 @@ impl BddBitBlaster {
         let subst = if sub_vars.is_empty() {
             None
         } else {
-            Some(Subst::new(sub_vars, sub_repl))
+            Some(Subst::new(sub_vars.clone(), sub_repl.clone()))
         };
         ExactModel {
             subst,
+            state_varnos: sub_vars,
+            next_fns: sub_repl,
+            input_varnos,
+            squarer: std::cell::RefCell::new(None),
+            squaring: std::env::var("MUNUNU_BDD_SQUARING")
+                .map(|v| v != "0")
+                .unwrap_or(true),
+            squaring_after_iters: SQUARING_AFTER_ITERS,
             input_cube,
             ctrl_cube,
             env_cube,
@@ -3102,6 +3436,19 @@ impl ExactModel {
     /// M2 switch per model: memo + restart rule on (default) or the legacy evaluation.
     pub fn with_fixpoint_reuse(mut self, on: bool) -> Self {
         self.fixpoint_reuse = on;
+        self
+    }
+
+    /// A2 switch per model: the squaring rescue on (default) or pure iteration.
+    pub fn with_squaring(mut self, on: bool) -> Self {
+        self.squaring = on;
+        self
+    }
+
+    /// A2 — the iteration count a pure-reachability fixpoint must reach before the squaring
+    /// rescue is tried (default [`SQUARING_AFTER_ITERS`]); `0` tries it first.
+    pub fn with_squaring_after_iters(mut self, n: usize) -> Self {
+        self.squaring_after_iters = n;
         self
     }
 
@@ -3646,8 +3993,35 @@ impl ExactModel {
         // 3.27 M → 4.91 M BDD ops and 5.4 → 6.3 s, twocount 2^17 4.4 → 6.5 s, forward 2^16
         // 2.5 → 2.8 s; the heat moved from `apply_ite` to the delta's `apply_bin`. Re-measure
         // before trying it again; the equivalence tests it needs are in the roadmap document.
+        let mut local_iters = 0usize;
+        let mut squaring_tried = false;
         loop {
             self.charge_iteration()?;
+            // A2 — the squaring rescue. A pure-reachability fixpoint (`μX. p ∨ ◇X`, `νX. p ∧ □X`,
+            // `p` closed) that is still iterating past the threshold is traversing a long chain
+            // one step per iteration; its value is a transitive closure, which iterative squaring
+            // reaches in O(log diameter) relational products. Tried once per fixpoint, under its
+            // own budget; a refusal leaves the iteration exactly where it was.
+            local_iters += 1;
+            if self.squaring
+                && !squaring_tried
+                && local_iters > self.squaring_after_iters
+                && let Some((p_node, greatest_shape)) = pure_reach_shape(f, body, var, ctx)
+                && greatest_shape == greatest
+            {
+                squaring_tried = true;
+                let p = self.eval_node(f, p_node, atoms, bindings, ctx)?;
+                match self.squared_reach(&p, greatest) {
+                    Ok(closed) => {
+                        bindings.remove(&var);
+                        if ctx.reuse {
+                            ctx.approx.insert(node, closed.clone());
+                        }
+                        return Ok(closed);
+                    }
+                    Err(why) => tracing::debug!(why, "squaring rescue declined; iterating on"),
+                }
+            }
             bindings.insert(var, x.clone());
             let next = self.eval_node(f, body, atoms, bindings, ctx)?;
             if next == x {
@@ -3667,6 +4041,28 @@ impl ExactModel {
                     ctx.approx.remove(m);
                 }
             }
+        }
+    }
+
+    /// A2 — `EF p` (`greatest = false`) or `AG p` (`greatest = true`) by iterative squaring of the
+    /// transition relation, in the [`Squarer`]'s own manager. `AG p = ¬EF ¬p` under the same
+    /// constrained diamond the iteration uses, so both come from one closure. `Err` is a refusal
+    /// (the relation or its closure outgrew [`SQUARING_ARENA`]'s budget, or there is nothing to
+    /// square); the caller iterates on. The first refusal is remembered on the model.
+    fn squared_reach(&self, p: &BDDFunction, greatest: bool) -> Result<BDDFunction, String> {
+        let mut slot = self.squarer.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(Squarer::build(self));
+        }
+        let sq = slot.as_ref().unwrap().as_ref().map_err(|e| e.clone())?;
+        let closure = sq.closure()?;
+        self.tick(sq.steps.get() as u64);
+        if greatest {
+            let not_p = oom(p.not())?;
+            let ef = sq.reach_from(&closure, &not_p, self)?;
+            oom(ef.not())
+        } else {
+            sq.reach_from(&closure, p, self)
         }
     }
 
@@ -6725,6 +7121,184 @@ mod tests {
         (bb, atoms)
     }
 
+    /// A2 — the raster, where the engine's `EF` walks ~1.3·h·v pre-images: the squaring rescue
+    /// (tried after the threshold) and pure iteration compute the same `EF p` and the same
+    /// `AG EF p`, and the rescued run iterates ~50× less.
+    #[test]
+    fn squaring_rescue_equals_iteration_on_the_raster() {
+        use crate::mu_calculus::parser as mu_parser;
+        let (h, v) = (800u64, 200u64);
+        let src = format!(
+            "1 sort bitvec 1\n2 sort bitvec 10\n3 sort bitvec 8\n4 state 2 hcount\n5 state 3 vcount\n\
+             6 zero 2\n7 zero 3\n8 init 2 4 6\n9 init 3 5 7\n10 constd 2 {}\n11 constd 3 {}\n\
+             12 eq 1 4 10\n13 eq 1 5 11\n14 one 2\n15 one 3\n16 add 2 4 14\n17 add 3 5 15\n\
+             18 ite 2 12 6 16\n19 next 2 4 18\n20 ite 3 13 7 17\n21 ite 3 12 20 5\n22 next 3 5 21\n",
+            h - 1,
+            v - 1
+        );
+        let file = parser::parse(&src).expect("parse raster");
+        let bb = BddBitBlaster::build(&file).expect("build raster");
+        let p = bb
+            .predicate_bdd(&PredicateExpr::Cmp {
+                register: "vcount".into(),
+                op: CmpOp::Eq,
+                value: v - 1,
+            })
+            .expect("p");
+        let mut atoms: HashMap<&str, BDDFunction> = HashMap::new();
+        atoms.insert("p", p);
+        for fs in ["mu X. (p || <> X)", "nu Y. ((mu X. (p || <> X)) && [] Y)"] {
+            let formula = mu_parser::parse(fs).expect("parse");
+            let plain = bb.exact_model().with_squaring(false);
+            let by_iteration = plain.evaluate(&formula, &atoms).expect("iteration");
+            let rescued = bb.exact_model();
+            let by_squaring = rescued.evaluate(&formula, &atoms).expect("squaring");
+            assert!(
+                by_iteration == by_squaring,
+                "`{fs}`: squaring differs from iteration"
+            );
+            assert!(
+                plain.iteration_count() > 200_000,
+                "the iteration walks the frame: {}",
+                plain.iteration_count()
+            );
+            assert!(
+                rescued.iteration_count() < 5_000,
+                "the rescue replaces the walk: {} iterations",
+                rescued.iteration_count()
+            );
+        }
+    }
+
+    /// A2 — the shape the rescue exists for: a raster whose `EF` needs more than the 2^20
+    /// iteration budget. Iteration abstains; the rescue decides, in well under a second.
+    #[test]
+    fn squaring_rescue_decides_what_the_iteration_budget_refuses() {
+        use crate::mu_calculus::parser as mu_parser;
+        let (h, v) = (800u64, 8000u64);
+        let src = format!(
+            "1 sort bitvec 1\n2 sort bitvec 10\n3 sort bitvec 13\n4 state 2 hcount\n5 state 3 vcount\n\
+             6 zero 2\n7 zero 3\n8 init 2 4 6\n9 init 3 5 7\n10 constd 2 {}\n11 constd 3 {}\n\
+             12 eq 1 4 10\n13 eq 1 5 11\n14 one 2\n15 one 3\n16 add 2 4 14\n17 add 3 5 15\n\
+             18 ite 2 12 6 16\n19 next 2 4 18\n20 ite 3 13 7 17\n21 ite 3 12 20 5\n22 next 3 5 21\n",
+            h - 1,
+            v - 1
+        );
+        let file = parser::parse(&src).expect("parse raster");
+        let bb = BddBitBlaster::build(&file).expect("build raster");
+        let p = bb
+            .predicate_bdd(&PredicateExpr::Cmp {
+                register: "vcount".into(),
+                op: CmpOp::Eq,
+                value: v - 1,
+            })
+            .expect("p");
+        let mut atoms: HashMap<&str, BDDFunction> = HashMap::new();
+        atoms.insert("p", p);
+        let formula = mu_parser::parse("nu Y. ((mu X. (p || <> X)) && [] Y)").expect("parse");
+        let plain = bb
+            .exact_model()
+            .with_squaring(false)
+            .with_iteration_budget(1 << 16);
+        let refused = plain.evaluate(&formula, &atoms).err();
+        assert!(
+            refused
+                .as_ref()
+                .is_some_and(|e| e.contains("ITERATION budget")),
+            "iteration must abstain on the budget here: {refused:?}"
+        );
+        let t0 = std::time::Instant::now();
+        let rescued = bb.exact_model().with_iteration_budget(1 << 16);
+        let decided = rescued
+            .evaluate(&formula, &atoms)
+            .expect("the rescue decides");
+        assert!(
+            decided == bb.tt,
+            "every raster state recovers to the frame end"
+        );
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(5),
+            "decided in {:?}",
+            t0.elapsed()
+        );
+    }
+
+    /// A2 — forced on every pure-reachability fixpoint (threshold 0), the rescue agrees with
+    /// pure iteration on the whole M2 battery: closed and open, same- and alternating-polarity,
+    /// νμν and μνμ. Only the closed `p ∨ ◇X` / `p ∧ □X` bodies are squared; a body that mentions
+    /// an outer variable is iterated, and the two paths must meet on every formula.
+    #[test]
+    fn squaring_forced_matches_iteration_on_nested_formulas() {
+        use crate::mu_calculus::parser as mu_parser;
+        let (bb, atoms) = m2_fixture();
+        for fs in M2_FORMULAS {
+            let formula = mu_parser::parse(fs).expect("parse");
+            let by_iteration = bb
+                .exact_model()
+                .with_squaring(false)
+                .evaluate(&formula, &atoms)
+                .expect("iteration");
+            let by_squaring = bb
+                .exact_model()
+                .with_squaring_after_iters(0)
+                .evaluate(&formula, &atoms)
+                .expect("squaring");
+            assert!(
+                by_iteration == by_squaring,
+                "`{fs}`: forced squaring differs from iteration"
+            );
+        }
+    }
+
+    /// A2 — a `constraint` line restricts the transitions the closure may use, exactly as it
+    /// restricts the iteration's diamond: a counter that may only advance while `go` holds and a
+    /// constraint `go == 1` make every state reach the top; dropping the constraint keeps the
+    /// `go == 0` stalls, which the closure must not read as progress either. Forced squaring and
+    /// iteration agree on both.
+    #[test]
+    fn squaring_honours_the_constraint_like_the_iteration() {
+        use crate::mu_calculus::parser as mu_parser;
+        for constrained in [true, false] {
+            let src = format!(
+                "1 sort bitvec 1\n2 sort bitvec 4\n3 input 1 go\n4 state 2 c\n5 zero 2\n6 init 2 4 5\n\
+                 7 one 2\n8 add 2 4 7\n9 ite 2 3 8 4\n10 next 2 4 9\n{}",
+                if constrained { "11 constraint 3\n" } else { "" }
+            );
+            let file = parser::parse(&src).expect("parse");
+            let bb = BddBitBlaster::build(&file).expect("build");
+            let top = bb
+                .predicate_bdd(&PredicateExpr::Cmp {
+                    register: "c".into(),
+                    op: CmpOp::Eq,
+                    value: 15,
+                })
+                .expect("top");
+            let mut atoms: HashMap<&str, BDDFunction> = HashMap::new();
+            atoms.insert("top", top);
+            for fs in [
+                "mu X. (top || <> X)",
+                "nu X. (top || [] X)",
+                "nu Y. ((mu X. (top || <> X)) && [] Y)",
+            ] {
+                let formula = mu_parser::parse(fs).expect("parse");
+                let a = bb
+                    .exact_model()
+                    .with_squaring(false)
+                    .evaluate(&formula, &atoms)
+                    .expect("iteration");
+                let b = bb
+                    .exact_model()
+                    .with_squaring_after_iters(0)
+                    .evaluate(&formula, &atoms)
+                    .expect("squaring");
+                assert!(
+                    a == b,
+                    "constrained={constrained} `{fs}`: squaring differs from iteration"
+                );
+            }
+        }
+    }
+
     /// Nested formulas, closed and open, same- and alternating-polarity, including the GR(1)
     /// response shape; the M2 evaluation must agree with the legacy one on every set.
     const M2_FORMULAS: &[&str] = &[
@@ -7796,6 +8370,185 @@ mod tests {
     ///
     /// engine: `exact-symbolic` (full-state ROBDD, OxiDD) — `reach_diameter_to`'s bounded
     /// `EF(target)` fixpoint, no budgets. Role: measurement.
+    /// A2 feasibility spike (engine-performance roadmap, step 14) — iterative squaring on the
+    /// raster: build the transition RELATION `R(s, s')` in a manager with three interleaved copies
+    /// of the state variables, close it by squaring (`T ∪ ∃s'. T(s,s') ∧ T(s',s'')`), and read
+    /// `EF p` off the closure, against the engine's iterative `EF` on the same design. Prints the
+    /// relation's node count, each squaring step's size and time, and both walls.
+    /// `MUNUNU_PROBE_RASTER=h,v` picks the shape (default 800,200).
+    #[test]
+    #[ignore = "A2 spike: relation size and squaring cost on the raster; run with --ignored --nocapture"]
+    fn probe_a2_iterative_squaring_on_the_raster() {
+        use crate::adapter::btor2::predicate_expr::parse_predicate_expr;
+        use crate::mu_calculus::parser as mu_parser;
+        use oxidd::bdd::{self, BDDFunction};
+        use oxidd::{
+            BooleanFunction, BooleanFunctionQuant, BooleanOperator, FunctionSubst, Manager,
+            ManagerRef, Subst, VarNo,
+        };
+        let (h, v): (u64, u64) = std::env::var("MUNUNU_PROBE_RASTER")
+            .ok()
+            .and_then(|s| {
+                let (a, b) = s.split_once(',')?;
+                Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
+            })
+            .unwrap_or((800, 200));
+        let bits = |m: u64| (m - 1).max(1).ilog2() + 1;
+        let (hb, vb) = (bits(h) as usize, bits(v) as usize);
+        let n = hb + vb;
+
+        // ---- the engine's iterative EF on the same design (baseline) ----
+        let src = format!(
+            "1 sort bitvec 1\n2 sort bitvec {hb}\n3 sort bitvec {vb}\n4 state 2 hcount\n5 state 3 vcount\n\
+             6 zero 2\n7 zero 3\n8 init 2 4 6\n9 init 3 5 7\n10 constd 2 {}\n11 constd 3 {}\n\
+             12 eq 1 4 10\n13 eq 1 5 11\n14 one 2\n15 one 3\n16 add 2 4 14\n17 add 3 5 15\n\
+             18 ite 2 12 6 16\n19 next 2 4 18\n20 ite 3 13 7 17\n21 ite 3 12 20 5\n22 next 3 5 21\n",
+            h - 1,
+            v - 1
+        );
+        let formula =
+            mu_parser::parse(&format!("mu X. ((vcount == {}) || <> X)", v - 1)).expect("EF");
+        let t0 = std::time::Instant::now();
+        let file = parser::parse(&src).expect("parse raster");
+        let bb = BddBitBlaster::build(&file).expect("build raster");
+        let exact = bb.exact_model();
+        let p_engine = bb
+            .predicate_bdd(&parse_predicate_expr(&format!("vcount == {}", v - 1)).expect("pred"))
+            .expect("predicate");
+        let mut atoms: HashMap<&str, BDDFunction> = HashMap::new();
+        let name = format!("vcount == {}", v - 1);
+        atoms.insert(name.as_str(), p_engine.clone());
+        let engine = exact.evaluate(&formula, &atoms);
+        let engine_ms = t0.elapsed().as_millis();
+        let engine_iters = exact.iteration_count();
+        let engine_all = engine.as_ref().ok().map(|ef| *ef == bb.tt);
+        let abstained = engine
+            .as_ref()
+            .err()
+            .map(|e| format!(" — ABSTAINED: {}", &e[..e.len().min(70)]))
+            .unwrap_or_default();
+        eprintln!(
+            "\n===== A2 spike: raster {h} x {v} ({n} state bits) =====\nengine EF: {engine_iters} iterations, {engine_ms} ms, EF == all states: {engine_all:?}{abstained}"
+        );
+
+        // ---- the relation in a 3n-variable manager: bit j -> (s=3j, s'=3j+1, s''=3j+2) ----
+        let manager = bdd::new_manager(1 << 24, 1 << 22, 1);
+        let vars: Vec<BDDFunction> = manager.with_manager_exclusive(|m| {
+            let r = m.add_vars((3 * n) as VarNo);
+            (0..3 * n)
+                .map(|i| BDDFunction::var(m, r.start + i as VarNo).unwrap())
+                .collect()
+        });
+        let (tt, ff) = manager.with_manager_shared(|m| (BDDFunction::t(m), BDDFunction::f(m)));
+        let s0 = |j: usize| vars[3 * j].clone();
+        let s1 = |j: usize| vars[3 * j + 1].clone();
+        let s2 = |j: usize| vars[3 * j + 2].clone();
+        // next-state logic over the s copy: hcount = bits 0..hb (LSB first), vcount = bits hb..n.
+        let eq_const = |b: &[BDDFunction], k: u64| -> BDDFunction {
+            b.iter().enumerate().fold(tt.clone(), |acc, (i, x)| {
+                let lit = if (k >> i) & 1 == 1 {
+                    x.clone()
+                } else {
+                    x.not().unwrap()
+                };
+                acc.and(&lit).unwrap()
+            })
+        };
+        let inc = |b: &[BDDFunction]| -> Vec<BDDFunction> {
+            let mut carry = tt.clone();
+            b.iter()
+                .map(|x| {
+                    let sum = x.xor(&carry).unwrap();
+                    carry = x.and(&carry).unwrap();
+                    sum
+                })
+                .collect()
+        };
+        let ite = |c: &BDDFunction, a: &[BDDFunction], b: &[BDDFunction]| -> Vec<BDDFunction> {
+            a.iter().zip(b).map(|(x, y)| c.ite(x, y).unwrap()).collect()
+        };
+        let hs: Vec<BDDFunction> = (0..hb).map(s0).collect();
+        let vs: Vec<BDDFunction> = (hb..n).map(s0).collect();
+        let h_wrap = eq_const(&hs, h - 1);
+        let v_wrap = eq_const(&vs, v - 1);
+        let zeros_h: Vec<BDDFunction> = vec![ff.clone(); hb];
+        let zeros_v: Vec<BDDFunction> = vec![ff.clone(); vb];
+        let h_next = ite(&h_wrap, &zeros_h, &inc(&hs));
+        let v_next = ite(&h_wrap, &ite(&v_wrap, &zeros_v, &inc(&vs)), &vs);
+        let next: Vec<BDDFunction> = h_next.into_iter().chain(v_next).collect();
+        let t1 = std::time::Instant::now();
+        let mut rel = tt.clone();
+        for (j, f) in next.iter().enumerate() {
+            rel = rel.and(&s1(j).equiv(f).unwrap()).unwrap();
+        }
+        let (rel_nodes, _) = bdd_nodes_height(&rel);
+        eprintln!(
+            "relation R(s,s'): {rel_nodes} nodes, built in {} ms",
+            t1.elapsed().as_millis()
+        );
+
+        // Renamings: shift (s->s', s'->s'') and back (s''->s').
+        let shift = Subst::new(
+            (0..n)
+                .flat_map(|j| [3 * j as VarNo, 3 * j as VarNo + 1])
+                .collect::<Vec<_>>(),
+            (0..n).flat_map(|j| [s1(j), s2(j)]).collect::<Vec<_>>(),
+        );
+        let back = Subst::new(
+            (0..n).map(|j| 3 * j as VarNo + 2).collect::<Vec<_>>(),
+            (0..n).map(s1).collect::<Vec<_>>(),
+        );
+        let cube_s1 = (0..n).fold(tt.clone(), |acc, j| acc.and(&s1(j)).unwrap());
+
+        // Closure by squaring: T_{k+1} = T_k ∪ (T_k ∘ T_k).
+        let t2 = std::time::Instant::now();
+        let mut closure = rel.clone();
+        let mut steps = 0usize;
+        loop {
+            let shifted = closure.substitute(&shift).unwrap();
+            let composed = closure
+                .apply_exists(BooleanOperator::And, &shifted, &cube_s1)
+                .unwrap()
+                .substitute(&back)
+                .unwrap();
+            let next_closure = closure.or(&composed).unwrap();
+            steps += 1;
+            let (nodes, _) = bdd_nodes_height(&next_closure);
+            eprintln!(
+                "  squaring step {steps}: closure {nodes} nodes, {} ms cumulative",
+                t2.elapsed().as_millis()
+            );
+            if next_closure == closure {
+                break;
+            }
+            closure = next_closure;
+            if steps > 64 {
+                eprintln!("  (bail: 64 squarings)");
+                break;
+            }
+        }
+        // EF p = p(s) ∨ ∃s'. T*(s,s') ∧ p(s').
+        let vs1: Vec<BDDFunction> = (hb..n).map(s1).collect();
+        let p_s1 = eq_const(&vs1, v - 1);
+        let p_s0 = eq_const(&vs, v - 1);
+        let ef_sq = p_s0
+            .or(&closure
+                .apply_exists(BooleanOperator::And, &p_s1, &cube_s1)
+                .unwrap())
+            .unwrap();
+        let sq_ms = t2.elapsed().as_millis();
+        let sq_all = ef_sq == tt;
+        eprintln!(
+            "squaring EF: {steps} squarings, {sq_ms} ms, EF == all states: {sq_all}\nengine {engine_ms} ms / squaring {sq_ms} ms"
+        );
+        if let Some(engine_all) = engine_all {
+            assert_eq!(
+                engine_all, sq_all,
+                "both must agree on EF p over the raster"
+            );
+        }
+    }
+
     /// B3 feasibility spike (engine-performance roadmap, step 17) — what does creating an OxiDD
     /// manager cost at the engine's sizes, and how much of it is the apply cache? Prints the wall
     /// of `new_manager(arena, cache, 1)` + one variable for the engine's two tiers and for

@@ -5529,18 +5529,30 @@ mod tests {
     /// through b2, which collapses the counter and decides Holds.
     #[test]
     fn b2_decides_wide_counter_gated_recoverability() {
-        use crate::adapter::btor2::symbolic_bitblast::exact_symbolic_verdict;
+        use crate::adapter::btor2::symbolic_bitblast::{ExactVerdict, exact_symbolic_verdict};
         let wide = fsm_gated_counter(40, true);
         let f = mu_parser::parse("nu Y. ((mu X. ((fsm == 2) || <> X)) && [] Y)").unwrap();
-        // Guard: the wide counter genuinely exceeds the exact cap (else the test is vacuous).
-        assert!(
-            exact_symbolic_verdict(&wide, &f).is_err(),
-            "the 40-bit counter must exceed the exact bit-cap"
-        );
-        // The escalating public entry (exact → scalable → b2) decides Holds.
+        // Until A2 of the engine-performance roadmap this guarded that the 40-bit counter's
+        // 2^40-step diameter exceeded the exact engine (its iteration budget; the bit cap is
+        // 192), so the escalation to b2 was what decided. The squaring rescue now closes that
+        // chain in ~40 relational products, so the exact engine decides the wide design itself —
+        // and becomes the oracle b2's answer is checked against.
         assert_eq!(
-            verify_recoverability(&wide, "fsm == 2").expect("b2 decides the wide design"),
+            exact_symbolic_verdict(&wide, &f).expect("the exact engine decides via squaring"),
+            ExactVerdict::Holds,
+            "exact oracle on the 40-bit gated counter"
+        );
+        // The escalating public entry decides Holds — now by the exact engine first.
+        assert_eq!(
+            verify_recoverability(&wide, "fsm == 2").expect("the wide design decides"),
             PropertyVerdict::Holds,
+        );
+        // b2 on its own still agrees with the oracle (the escalation it used to provide).
+        let file = crate::adapter::btor2::parser::parse(&wide).unwrap();
+        assert_eq!(
+            verify_recoverability_counter_abstracted(&file, "fsm == 2", &["fsm".to_string()]),
+            Some(PropertyVerdict::Holds),
+            "b2 must agree with the exact oracle"
         );
     }
 
