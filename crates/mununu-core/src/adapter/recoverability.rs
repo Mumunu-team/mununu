@@ -1069,8 +1069,18 @@ pub fn verify_recoverability_with_predicates(
         // cube + `smt-hyper-must` path so the property still decides at scale
         // (slice-5b safety-⊥ escalation mirror). The scalable path itself abstains
         // (Unknown) if it cannot decide, so this is never less sound than the old
-        // `Err(_) => Unknown` abstention.
-        Err(_) => verify_recoverability_scalable(btor2_content, good, extra_predicates),
+        // `Err(_) => Unknown` abstention. The reason is logged, not dropped: an
+        // OxiDD arena exhaustion looked exactly like a cone over the cap from the
+        // outside, and the ladder's verdict then carried no trace of which engine
+        // produced it (2026-10-06).
+        Err(reason) => {
+            tracing::warn!(
+                target: "mununu::recoverability",
+                %reason,
+                "exact engine abstained on `AG EF {good}`; escalating to the scalable ladder"
+            );
+            verify_recoverability_scalable(btor2_content, good, extra_predicates)
+        }
     }
 }
 
@@ -2944,92 +2954,108 @@ pub fn verify_recoverability_scalable_with_source(
         Err(_) => return Ok(PropertyVerdict::Unknown),
     };
 
-    // SOUNDNESS: the reset cube is well-defined only if EVERY final predicate's register
-    // has a known reset value (is a pinned state cell). WeakestPrecondition refinement can
-    // append a predicate over a free INPUT — e.g. `WP(st==0)` through `st' = ite(go,1,0)`
-    // is `go==0` — whose reset truth is not fixed (the input is free at cycle 0). Reading a
-    // single init-cube bit for such a predicate would silently pick one input flavour and
-    // could return a wrong DEFINITE verdict, and at scale the exact engine abstains so
-    // there is no cross-check to catch it. Rather than under-read (unsound) we ABSTAIN
-    // (sound). Fully enumerating free-input initial flavours conjunctively (à la
-    // verify_auto's `free_input_init_cubes`) is a completeness follow-up.
-    if !trace.final_predicates.iter().all(|spec| {
-        // A relational (compound) predicate is well-defined at reset iff EVERY register it references
-        // has a reset value; a simple atom needs only its one register pinned.
-        match compound_map.get(&spec.name) {
-            Some(expr) => expr.registers().iter().all(|r| init_values.contains_key(r)),
-            None => init_values.contains_key(&spec.register),
-        }
-    }) {
-        return Ok(PropertyVerdict::Unknown);
-    }
-
-    // The design's initial cube: evaluate every FINAL predicate at the reset valuation,
-    // in the lift's cube-bit order (`final_predicates[i]` ↔ bit `i`). Every final predicate
-    // is now a pinned `register == value` state atom (guarded above), so its reset truth is
-    // `init_values[register] == value` and the reset cube is input-independent.
-    // A relational (compound) predicate's reset truth is the EXPR evaluated at the reset valuation
-    // (e.g. `data == target`), NOT `register == value` — its `spec.register`/`spec.value` are only
-    // placeholders. `eval` wants a `HashMap`, so build one view of the reset valuation.
+    // The design's initial cube(s): evaluate every FINAL predicate at the reset valuation, in the
+    // lift's cube-bit order (`final_predicates[i]` ↔ bit `i`). Three kinds of bit:
+    //   - PINNED: every register the predicate reads has an `init` line → one fixed truth value.
+    //   - FREE-INIT: some register it reads has NO `init` line (free at cycle 0 — BTOR2 semantics,
+    //     mununu#505), or is an input WeakestPrecondition refinement pulled in (free at cycle 0 too).
+    //     EVERY value of such a register is a REAL initial state, so the bit is enumerated over both
+    //     truth values and every flavour is trusted in BOTH directions (a `False` flavour is a real
+    //     violated initial state; `Holds` needs every flavour `True`). Pinning it to 0 — what the
+    //     defaulted valuation did until 2026-10-06 — fabricated a definite HOLDS on a held-register
+    //     relational design whose exact verdict is VIOLATED.
+    //   - SEL: a Select's reset truth (`mem[key] == K` at cycle 0) depends on the array's reset
+    //     CONTENT, which `init_values` (BV-only) does not model. The array is FREE at reset but that
+    //     over-APPROXIMATES the initial set, so only a UNANIMOUS `True` is trusted (never `Violated`).
     let init_map: std::collections::HashMap<String, u128> =
         init_values.iter().map(|(k, v)| (k.clone(), *v)).collect();
     let mut init_cube = 0usize;
-    // SEL — a Select's reset truth (`mem[key] == K` at cycle 0) depends on the array's reset
-    // CONTENT, which `init_values` (BV-only) does not model. Rather than read one arbitrary
-    // content (unsound) or abstain outright, treat the array as FREE at reset: the initial
-    // state ranges over ALL array contents, so this bit is enumerated over both truth values
-    // (`free_select_bits`) below. The index register IS pinned (guarded above), so only the
-    // content is free.
+    let mut free_init_bits: Vec<usize> = Vec::new();
     let mut free_select_bits: Vec<usize> = Vec::new();
     for (i, spec) in trace.final_predicates.iter().enumerate() {
         match compound_map.get(&spec.name) {
             Some(expr) if expr.has_select() => free_select_bits.push(i),
             Some(expr) => {
-                if expr.eval(&init_map) {
+                if !expr.registers().iter().all(|r| init_values.contains_key(r)) {
+                    free_init_bits.push(i);
+                } else if expr.eval(&init_map) {
                     init_cube |= 1 << i;
                 }
             }
-            None => {
-                if init_values.get(&spec.register).copied() == Some(spec.value as u128) {
-                    init_cube |= 1 << i;
-                }
-            }
+            None => match init_values.get(&spec.register) {
+                None => free_init_bits.push(i),
+                Some(v) if *v == spec.value as u128 => init_cube |= 1 << i,
+                Some(_) => {}
+            },
         }
     }
+    Ok(reset_cube_verdict(
+        |cube| trace.final_verdict.verdict_at(cube),
+        init_cube,
+        &free_init_bits,
+        &free_select_bits,
+    ))
+}
 
-    if free_select_bits.is_empty() {
-        // Pinned reset cube — the exact-input-independent verdict (all three values trusted).
-        return Ok(match trace.final_verdict.verdict_at(init_cube) {
-            Trit::False => PropertyVerdict::Violated,
-            Trit::Unknown => PropertyVerdict::Unknown,
-            Trit::True => PropertyVerdict::Holds,
-        });
+/// The verdict at the design's initial cube(s), enumerating the bits whose reset truth is not pinned.
+///
+/// `free_init_bits` are predicate bits over a register with no `init` (or an input): every flavour
+/// is a REAL initial state, so a `False` flavour is a sound `Violated` and `Holds` needs all `True`.
+/// `free_select_bits` are array-content bits: the free content OVER-approximates the initial set, so
+/// across those flavours only a unanimous `True` is trusted — a `False` there may be an initial
+/// array content the design never has, and is read as `Unknown`. Bounded: more than
+/// `MAX_FREE_RESET_BITS` free bits abstain (the 2^k enumeration stays small).
+fn reset_cube_verdict(
+    verdict_at: impl Fn(usize) -> Trit,
+    init_cube: usize,
+    free_init_bits: &[usize],
+    free_select_bits: &[usize],
+) -> PropertyVerdict {
+    const MAX_FREE_RESET_BITS: usize = 4;
+    if free_init_bits.len() + free_select_bits.len() > MAX_FREE_RESET_BITS {
+        return PropertyVerdict::Unknown;
     }
-    // Free array content at reset over-APPROXIMATES the initial set (a superset of the real
-    // reachable initial states). `AG EF good` holding over the superset implies it over the
-    // real set, so a UNANIMOUS `True` across every flavour is a sound `Holds`. A `False` /
-    // `Unknown` flavour could correspond to an initial array content the concrete design
-    // never has (a spurious violation from an unreachable init), so we do NOT emit `Violated`
-    // here — we abstain (the recoverability path's "trust only Holds from an over-approx"
-    // posture). Bounded to keep the 2^f enumeration small; a wider free set abstains.
-    const MAX_FREE_SELECT_BITS: usize = 4;
-    if free_select_bits.len() > MAX_FREE_SELECT_BITS {
-        return Ok(PropertyVerdict::Unknown);
-    }
-    let all_true = (0..(1usize << free_select_bits.len())).all(|mask| {
-        let mut cube = init_cube;
-        for (b, &bit) in free_select_bits.iter().enumerate() {
+    let with_bits = |base: usize, bits: &[usize], mask: usize| -> usize {
+        let mut cube = base;
+        for (b, &bit) in bits.iter().enumerate() {
             if (mask >> b) & 1 == 1 {
                 cube |= 1 << bit;
             }
         }
-        matches!(trace.final_verdict.verdict_at(cube), Trit::True)
-    });
-    Ok(if all_true {
+        cube
+    };
+    let mut all_true = true;
+    let mut any_false = false;
+    for imask in 0..(1usize << free_init_bits.len()) {
+        let base = with_bits(init_cube, free_init_bits, imask);
+        // Over the select flavours this init flavour is: True only if unanimously True; False only
+        // if there are NO select bits (no over-approximation in play); otherwise Unknown.
+        let mut sel_all_true = true;
+        let mut sel_any_false = false;
+        for smask in 0..(1usize << free_select_bits.len()) {
+            match verdict_at(with_bits(base, free_select_bits, smask)) {
+                Trit::True => {}
+                Trit::False => {
+                    sel_all_true = false;
+                    sel_any_false = true;
+                }
+                Trit::Unknown => sel_all_true = false,
+            }
+        }
+        if !sel_all_true {
+            all_true = false;
+        }
+        if sel_any_false && free_select_bits.is_empty() {
+            any_false = true;
+        }
+    }
+    if all_true {
         PropertyVerdict::Holds
+    } else if any_false {
+        PropertyVerdict::Violated
     } else {
         PropertyVerdict::Unknown
-    })
+    }
 }
 
 /// Parse an extra-abstraction-predicate triple `NAME:REGISTER=VALUE` (the surface
@@ -3348,34 +3374,36 @@ pub fn verify_safety_scalable(btor2_content: &str) -> Result<PropertyVerdict, St
         Err(_) => return Ok(PropertyVerdict::Unknown),
     };
 
-    // Reset-cube verdict — abstain if any final predicate's register lacks a pinned reset value.
-    if !trace
-        .final_predicates
-        .iter()
-        .all(|spec| match compound_map.get(&spec.name) {
-            Some(expr) => expr.registers().iter().all(|r| init_values.contains_key(r)),
-            None => init_values.contains_key(&spec.register),
-        })
-    {
-        return Ok(PropertyVerdict::Unknown);
-    }
+    // Reset-cube verdict. A predicate over a register with no `init` line (free at cycle 0) is
+    // enumerated over both truth values — every flavour is a real initial state — rather than
+    // pinned to 0, which would claim `AG ¬bad` from ONE initial state (unsound `Holds`). See
+    // `reset_cube_verdict`.
     let init_map: std::collections::HashMap<String, u128> =
         init_values.iter().map(|(k, v)| (k.clone(), *v)).collect();
     let mut init_cube = 0usize;
+    let mut free_init_bits: Vec<usize> = Vec::new();
     for (i, spec) in trace.final_predicates.iter().enumerate() {
-        let holds = match compound_map.get(&spec.name) {
-            Some(expr) => expr.eval(&init_map),
-            None => init_values.get(&spec.register).copied() == Some(spec.value as u128),
-        };
-        if holds {
-            init_cube |= 1 << i;
+        match compound_map.get(&spec.name) {
+            Some(expr) => {
+                if !expr.registers().iter().all(|r| init_values.contains_key(r)) {
+                    free_init_bits.push(i);
+                } else if expr.eval(&init_map) {
+                    init_cube |= 1 << i;
+                }
+            }
+            None => match init_values.get(&spec.register) {
+                None => free_init_bits.push(i),
+                Some(v) if *v == spec.value as u128 => init_cube |= 1 << i,
+                Some(_) => {}
+            },
         }
     }
-    let verdict = match trace.final_verdict.verdict_at(init_cube) {
-        Trit::False => PropertyVerdict::Violated,
-        Trit::Unknown => PropertyVerdict::Unknown,
-        Trit::True => PropertyVerdict::Holds,
-    };
+    let verdict = reset_cube_verdict(
+        |cube| trace.final_verdict.verdict_at(cube),
+        init_cube,
+        &free_init_bits,
+        &[],
+    );
     // SOUNDNESS: with `constraint` lines the cube's must-path may violate an assumption, so a
     // `Violated` is not trustworthy — downgrade to `Unknown`. `Holds` stays (over-approx is sound).
     if has_constraints && verdict == PropertyVerdict::Violated {
@@ -3755,6 +3783,128 @@ mod tests {
             Ok(v) => PropertyVerdict::from(v),
             Err(_) => PropertyVerdict::Unknown,
         }
+    }
+
+    /// Two held `n`-bit registers `a`, `b` and a 1-bit `done` latched on `a == b`. With `init`
+    /// = `None` the registers have NO `init` line — free at cycle 0 (BTOR2; mununu#505) — so
+    /// `AG EF (done == 1)` is VIOLATED (an initial `a ≠ b` never sets `done`). With explicit
+    /// inits the verdict is pinned: `a ≠ b` → VIOLATED, `a == b` → HOLDS.
+    fn held_pair_done_latch(n: u32, init: Option<(u64, u64)>) -> String {
+        let mut src = format!(
+            "1 sort bitvec 1\n2 sort bitvec {n}\n3 state 2 a\n4 state 2 b\n5 next 2 3 3\n6 next 2 4 4\n\
+             7 eq 1 3 4\n8 state 1 done\n9 zero 1\n10 init 1 8 9\n11 or 1 8 7\n12 next 1 8 11\n"
+        );
+        if let Some((a0, b0)) = init {
+            src.push_str(&format!(
+                "13 constd 2 {a0}\n14 constd 2 {b0}\n15 init 2 3 13\n16 init 2 4 14\n"
+            ));
+        }
+        src
+    }
+
+    /// 2026-10-06 — a register with no `init` line is FREE at cycle 0, and the cube path's reset
+    /// cube used to pin it to 0 (`init_valuation`'s `unwrap_or(0)`), fabricating a definite HOLDS
+    /// that the exact engine refutes. Found while calibrating profiling cases: the exact engine
+    /// abstained on an OxiDD arena exhaustion, the escalation took over, and the run printed
+    /// `holds`. The ladder must agree with the exact oracle on its own.
+    #[test]
+    fn free_init_registers_are_enumerated_not_pinned_in_the_recoverability_reset_cube() {
+        let free = held_pair_done_latch(6, None);
+        assert_eq!(
+            exact_verdict(&free, "done == 1"),
+            PropertyVerdict::Violated,
+            "exact oracle"
+        );
+        let ladder = verify_recoverability_scalable(&free, "done == 1", &[]).expect("ladder runs");
+        assert_ne!(
+            ladder,
+            PropertyVerdict::Holds,
+            "the scalable ladder claimed HOLDS from a reset cube that pinned free registers to 0"
+        );
+        assert_eq!(
+            ladder,
+            PropertyVerdict::Violated,
+            "every value of a free-init register is a real initial state, so the `a ≠ b` flavour is a sound VIOLATED"
+        );
+        // Explicit inits: the pinned reset cube decides both ways, unchanged.
+        assert_eq!(
+            verify_recoverability_scalable(
+                &held_pair_done_latch(6, Some((0, 1))),
+                "done == 1",
+                &[]
+            )
+            .unwrap(),
+            PropertyVerdict::Violated
+        );
+        assert_eq!(
+            verify_recoverability_scalable(
+                &held_pair_done_latch(6, Some((0, 0))),
+                "done == 1",
+                &[]
+            )
+            .unwrap(),
+            PropertyVerdict::Holds
+        );
+    }
+
+    /// The safety cube path had the same hole: `AG ¬bad` claimed from the single pinned-to-0 initial
+    /// state. A 2-bit held register with no `init` and `bad = (x == 3)`: `x = 3` IS an initial state.
+    #[test]
+    fn free_init_register_is_enumerated_in_the_safety_reset_cube() {
+        let src = "1 sort bitvec 1\n2 sort bitvec 2\n3 state 2 x\n4 next 2 3 3\n5 constd 2 3\n6 eq 1 3 5\n7 bad 6\n";
+        let v = verify_safety_scalable(src).expect("safety cube runs");
+        assert_ne!(
+            v,
+            PropertyVerdict::Holds,
+            "a free-init register pinned to 0 hid the reachable bad state"
+        );
+        assert_eq!(v, PropertyVerdict::Violated);
+        // With `init x = 0` the bad state is unreachable: the pinned verdict is HOLDS.
+        let pinned = "1 sort bitvec 1\n2 sort bitvec 2\n3 state 2 x\n4 next 2 3 3\n5 constd 2 3\n6 eq 1 3 5\n7 bad 6\n8 zero 2\n9 init 2 3 8\n";
+        assert_eq!(
+            verify_safety_scalable(pinned).unwrap(),
+            PropertyVerdict::Holds
+        );
+    }
+
+    #[test]
+    fn reset_cube_verdict_trusts_free_init_flavours_both_ways_and_select_flavours_holds_only() {
+        use crate::mu_calculus::Trit;
+        // bit 0 pinned true; bit 1 free-init; bit 2 free-select. verdict_at reads the cube index.
+        let table = |cube: usize| -> Trit {
+            match cube {
+                0b001 | 0b011 => Trit::True,
+                0b101 => Trit::False,
+                _ => Trit::Unknown,
+            }
+        };
+        // free-init bit 1 only: flavours 0b001 (True) and 0b011 (True) → Holds.
+        assert_eq!(
+            reset_cube_verdict(table, 0b001, &[1], &[]),
+            PropertyVerdict::Holds
+        );
+        // free-init over a table with a False flavour → Violated (a real initial state violates).
+        let t2 = |cube: usize| {
+            if cube == 0b011 {
+                Trit::False
+            } else {
+                Trit::True
+            }
+        };
+        assert_eq!(
+            reset_cube_verdict(t2, 0b001, &[1], &[]),
+            PropertyVerdict::Violated
+        );
+        // select bit 2 only: 0b001 True, 0b101 False → NOT Violated (over-approx), Unknown.
+        assert_eq!(
+            reset_cube_verdict(table, 0b001, &[], &[2]),
+            PropertyVerdict::Unknown
+        );
+        // too many free bits → abstain.
+        assert_eq!(
+            reset_cube_verdict(table, 0, &[0, 1, 2], &[3, 4]),
+            PropertyVerdict::Unknown
+        );
     }
 
     // === P2 Slice 1 — the MANDATORY differential soundness gate ==================

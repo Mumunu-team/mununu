@@ -58,11 +58,20 @@ pub enum AgOracle {
     Inconclusive,
 }
 
-/// Init value of each state cell (from BTOR2 `init` lines, default 0 — the
-/// `setundef -zero` power-up).
+/// Init value of each state cell that HAS a BTOR2 `init` line with a constant value.
 ///
-/// `pub(crate)` (P2 Slice 1): the recoverability cube path reuses it to build the
-/// initial-cube pin (`config_values`) so the lift's initial cube is the reset state.
+/// A state with no `init` line is **free at cycle 0** — every value is a real initial state
+/// (the BTOR2 format; mununu#505 fixed the exact engine's reading of it). It is therefore
+/// ABSENT from this map, never defaulted. Defaulting it to 0 pinned the cube paths'
+/// "reset cube" to one of many initial states, which fabricated a definite `Holds` on
+/// `AG EF (done == 1)` over two held registers with free initial values (found
+/// 2026-10-06 while calibrating profiling cases: the exact engine said VIOLATED, the
+/// cube escalation said HOLDS). See [`init_valuation_defaulted`] for the simulation
+/// seed that still needs a full valuation.
+///
+/// `pub(crate)` (P2 Slice 1): the recoverability and safety cube paths read it to build
+/// the initial cube; a predicate over a register absent here is enumerated over both
+/// truth values there, not pinned.
 pub(crate) fn init_valuation(file: &Btor2File) -> BTreeMap<String, u128> {
     let symbols = parser::collect_symbols(file);
     let mut init_of: HashMap<crate::adapter::btor2::ast::Nid, u128> = HashMap::new();
@@ -78,11 +87,39 @@ pub(crate) fn init_valuation(file: &Btor2File) -> BTreeMap<String, u128> {
     for line in &file.lines {
         if matches!(line.node, Node::State { .. })
             && let Some(name) = symbols.get(&line.nid)
+            && let Some(v) = init_of.get(&line.nid)
         {
-            out.insert(name.clone(), init_of.get(&line.nid).copied().unwrap_or(0));
+            out.insert(name.clone(), *v);
         }
     }
     out
+}
+
+/// Every state cell with a value: the `init`-line value where there is one, 0 otherwise —
+/// the `setundef -zero` power-up — plus whether any cell was defaulted. ONLY for seeding a
+/// concrete simulation that needs a total valuation; a caller that gets `defaulted == true`
+/// explored ONE of the design's initial states and must not claim anything about all of them.
+pub(crate) fn init_valuation_defaulted(file: &Btor2File) -> (BTreeMap<String, u128>, bool) {
+    let symbols = parser::collect_symbols(file);
+    let pinned = init_valuation(file);
+    let mut out = BTreeMap::new();
+    let mut defaulted = false;
+    for line in &file.lines {
+        if matches!(line.node, Node::State { .. })
+            && let Some(name) = symbols.get(&line.nid)
+        {
+            match pinned.get(name) {
+                Some(v) => {
+                    out.insert(name.clone(), *v);
+                }
+                None => {
+                    defaulted = true;
+                    out.insert(name.clone(), 0);
+                }
+            }
+        }
+    }
+    (out, defaulted)
 }
 
 fn const_to_u128(file: &Btor2File, sort: crate::adapter::btor2::ast::Nid, cv: &ConstValue) -> u128 {
@@ -137,7 +174,12 @@ pub fn reachable_register_states(
     let mut bounded = has_wide || bool_ins.len() > max_input_bits;
     let n_combos: usize = 1usize << n_in;
 
-    let init = init_valuation(file);
+    // A free-init register is explored from ONE of its values, so the enumeration is
+    // bounded (incomplete) by construction: `Holds` must not be claimed from it.
+    let (init, defaulted) = init_valuation_defaulted(file);
+    if defaulted {
+        bounded = true;
+    }
     let mut seen: HashSet<Vec<(String, u128)>> = HashSet::new();
     // `order` doubles as the BFS queue (walked by `head`) and the result list.
     let mut order: Vec<BTreeMap<String, u128>> = Vec::new();
@@ -380,6 +422,28 @@ mod tests {
 10 next 2 3 9
 11 init 2 3 4
 ";
+
+    /// A state with no `init` line is free at cycle 0: absent from the pinned valuation, defaulted
+    /// (and flagged) only in the simulation seed, and a BFS from that seed is `bounded`.
+    #[test]
+    fn free_init_state_is_absent_from_the_pinned_valuation_and_bounds_the_reach() {
+        let src = "1 sort bitvec 1\n2 sort bitvec 2\n3 state 2 x\n4 next 2 3 3\n5 state 1 y\n6 zero 1\n7 init 1 5 6\n8 next 1 5 5\n";
+        let file = parser::parse(src).expect("parse");
+        let pinned = init_valuation(&file);
+        assert_eq!(pinned.get("y"), Some(&0));
+        assert!(
+            !pinned.contains_key("x"),
+            "x has no init line and must not be defaulted to 0"
+        );
+        let (seed, defaulted) = init_valuation_defaulted(&file);
+        assert_eq!(seed.get("x"), Some(&0));
+        assert!(defaulted);
+        let r = reachable_register_states(&file, 64, 8).expect("reach");
+        assert!(
+            r.bounded,
+            "a reach from a defaulted free-init seed explores one initial state of many"
+        );
+    }
 
     #[test]
     fn reachability_enumerates_the_cycle() {
