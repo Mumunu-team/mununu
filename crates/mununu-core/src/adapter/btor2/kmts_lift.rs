@@ -2923,10 +2923,11 @@ fn uncompressed_models() {
 /// bit-blast, SAT core) is what the generic `Solver::new()` is not — the profile showed the
 /// generic solver routing every query through the `smt` core (`smt::context::search`), whose
 /// own bit-vector bit-blasting is several times slower than the standalone SAT core on these
-/// shapes. The blocking clauses are plain assertions between checks, which the logic solver
-/// accepts (z3 falls back to its incremental core only across `push`/`pop`). With memories the
-/// theory is BvUfArray and the generic solver stays. Measured on `cube-rtl-i2c 8`: 15.0 s →
-/// 10.1 s alone, 8.9 s with [`uncompressed_models`], lift byte-identical in every arm.
+/// shapes. With memories the theory is BvUfArray and the generic solver stays. Measured on
+/// `cube-rtl-i2c 8`: 15.0 s → 10.1 s alone, 8.9 s with [`uncompressed_models`], lift
+/// byte-identical in every arm. (Roadmap 2, step 4: [`enumerate_successors`] now `push`es once
+/// after the fixed part, so the blocking clauses are served by z3's incremental core rather than
+/// by a fresh run of the tactic per `check`.)
 fn postimage_solver(bv_only: bool) -> z3::Solver {
     if bv_only {
         z3::Solver::new_for_logic("QF_BV").unwrap_or_default()
@@ -3244,6 +3245,21 @@ fn enumerate_successors(
             solver.assert(&neg);
         }
     }
+    // Roadmap 2, step 4 — one `push` here puts z3's combined solver into INCREMENTAL mode for
+    // the rest of the enumeration. Without it every `check` after a new blocking clause is a
+    // fresh run of the QF_BV tactic (simplify, bit-blast, SAT) over the whole transition; with
+    // it the QF_BV logic is served by z3's incremental bit-blasting SAT core, which keeps its
+    // clause database and learned clauses across the blocking clauses. The scope is never
+    // popped — the solver is dropped with the cube.
+    //
+    // Measured on the i2c lift (same binary, env-toggled, interleaved), lift JSON byte-identical
+    // in every arm: |P| = 8 one worker 8.93 → 8.56 s (−4.2 % wall, −4.3 % CPU); |P| = 10 one
+    // worker 52.15 → 50.78 s (−2.6 %, p = 0.002); |P| = 8 at the default 8 workers wall
+    // unchanged (+1.2 %, n.s.), CPU −2.8 % (p < 0.001). Under the roadmap's 5 % claim
+    // threshold, kept because it is one line, verdict-identical and CPU-positive in every arm.
+    // (M5-lite measured push/pop at 3 % on the old `smt`-core solver, before A3 moved the loop
+    // to the QF_BV solver, and was not built: solver REUSE needed plumbing; this does not.)
+    solver.push();
     let mut targets: Vec<usize> = Vec::new();
     let mut inconclusive = false;
     loop {
