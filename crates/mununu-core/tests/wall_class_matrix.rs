@@ -209,6 +209,44 @@ const CLASS2_DATADEP: &str = "\
 22 next 3 7 7
 ";
 
+// The ITERATION-BOUND class (A2 of the engine-performance roadmap, 2026-10-07): a 1920×1080
+// raster — `hcount` wraps at 1920, `vcount` advances on that wrap and wraps at 1080 — with the
+// recovery target "the last line". 22 state bits, so the exact engine takes it within the cap,
+// but its `EF` walks the frame one pre-image per iteration (`iters ≈ 1.95·h·v` ≈ 4.0 M).
+// Oracle HOLDS: every state reaches the frame end. Measured 2026-10-07, with and without the
+// squaring rescue (`MUNUNU_BDD_SQUARING=0`): every column reads HOLDS either way — without the
+// rescue the exact member abstains on the 2^20 ITERATION budget after ~3 s and the ladder's
+// cube escalation decides; with it the exact member decides in milliseconds (23 relational
+// products). So on THIS set the lever's reach is cost and decider, not verdict; its
+// unknown → verdict reach is on the reach portfolio (`btor2 verify`, no cube escalation:
+// forward 2^32 `unknown` → `violated`). The class is represented here so that stays measured.
+// Synthetic; the RTL representative is a video timing generator (a consumer's 640×480
+// raster-wrap property is the instance behind the `MUNUNU_BDD_ITER_BUDGET` note in CLAUDE.md).
+const RASTER_1080P: &str = "\
+1 sort bitvec 1
+2 sort bitvec 11
+3 sort bitvec 11
+4 state 2 hcount
+5 state 3 vcount
+6 zero 2
+7 zero 3
+8 init 2 4 6
+9 init 3 5 7
+10 constd 2 1919
+11 constd 3 1079
+12 eq 1 4 10
+13 eq 1 5 11
+14 one 2
+15 one 3
+16 add 2 4 14
+17 add 3 5 15
+18 ite 2 12 6 16
+19 next 2 4 18
+20 ite 3 13 7 17
+21 ite 3 12 20 5
+22 next 3 5 21
+";
+
 // The Craig-DISCRIMINATING case: exact decides it (small), but the CUBE path needs the emergent
 // relational invariant `data == target` that only Craig discovers — cube-wp ⊥, cube-craig HOLDS.
 const CRAIG_EMERGENT: &str = "\
@@ -431,6 +469,15 @@ fn cases() -> Vec<Case> {
             class: "invariant-class/HOLDS",
             btor2: CRAIG_EMERGENT,
             target: "busy == 0",
+            oracle: Oracle::Holds,
+            source: "synthetic",
+            pin: NO_PIN,
+        },
+        Case {
+            name: "raster_1080p",
+            class: "iteration-bound/HOLDS",
+            btor2: RASTER_1080P,
+            target: "vcount == 1079",
             oracle: Oracle::Holds,
             source: "synthetic",
             pin: NO_PIN,
