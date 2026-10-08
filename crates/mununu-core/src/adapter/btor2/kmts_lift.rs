@@ -507,12 +507,49 @@ fn reachable_lift_roots(
     config_values: &std::collections::HashMap<String, Vec<u64>>,
     file: &crate::adapter::btor2::ast::Btor2File,
 ) -> Vec<usize> {
+    let truth = reset_truth_per_bit(predicates, compound_exprs, config_values, file);
+    let mut roots = initial_cube_indices(predicates, compound_exprs, config_values, file);
+    for cube in cubes_consistent_with(&truth, predicates.len()) {
+        if !roots.contains(&cube) {
+            roots.push(cube);
+        }
+    }
+    roots
+}
+
+/// The cubes whose every bit agrees with `truth` (`None` admits both polarities), ascending.
+/// Bounded by the cube space (`2^|P|`, which the lift enumerates anyway) — never a product over
+/// concrete free bits.
+fn cubes_consistent_with(truth: &[Option<bool>], predicate_count: usize) -> Vec<usize> {
+    (0..(1usize << predicate_count))
+        .filter(|cube| {
+            truth
+                .iter()
+                .enumerate()
+                .all(|(i, t)| t.is_none_or(|t| ((cube >> i) & 1 == 1) == t))
+        })
+        .collect()
+}
+
+/// The reset truth of every predicate bit: `Some(t)` = exactly `t` at cycle 0, `None` = both
+/// admissible. A simple atom over a register with a constant `init` has one reset truth; an
+/// atom over a free-init register, a compound whose registers are not all pinned, or one with
+/// an array `Select` admits both; a user `config_values` constraint on the register wins over
+/// its `init` (the sidecar's parameter concretization is what the init line is not).
+fn reset_truth_per_bit(
+    predicates: &[PredicateSpec],
+    compound_exprs: &std::collections::HashMap<
+        String,
+        crate::adapter::btor2::predicate_expr::PredicateExpr,
+    >,
+    config_values: &std::collections::HashMap<String, Vec<u64>>,
+    file: &crate::adapter::btor2::ast::Btor2File,
+) -> Vec<Option<bool>> {
     let init: std::collections::HashMap<String, u128> =
         crate::adapter::btor2::concrete_oracle::init_valuation(file)
             .into_iter()
             .collect();
-    // Reset truth set per bit: `Some(t)` = exactly `t`, `None` = both admissible.
-    let truth: Vec<Option<bool>> = predicates
+    predicates
         .iter()
         .map(|spec| match compound_exprs.get(&spec.name) {
             Some(expr) if expr.has_select() => None,
@@ -538,37 +575,42 @@ fn reachable_lift_roots(
                     .map(|v| *v == u128::from(spec.value)),
             },
         })
-        .collect();
-    let mut roots = initial_cube_indices(predicates, config_values);
-    for cube in 0..(1usize << predicates.len()) {
-        let consistent = truth
-            .iter()
-            .enumerate()
-            .all(|(i, t)| t.is_none_or(|t| ((cube >> i) & 1 == 1) == t));
-        if consistent && !roots.contains(&cube) {
-            roots.push(cube);
-        }
-    }
-    roots
+        .collect()
 }
 
-/// The lift's initial cube indices — the R-Y7 rule in one place, shared by the state assembly
-/// and the reachable-only post-image (A4): the R-S8 admissible cubes when `config_values` pins
-/// registers, else `cube_0` (see mununu#609 for why that is a placeholder, not the reset cube).
+/// The lift's initial cube indices — the R-Y7 rule in one place, shared by the state assembly,
+/// the lazy materialisation and the reachable-only post-image (A4):
+///
+/// - the R-S8 admissible cubes when `config_values` pins registers (the sidecar's parameter
+///   concretization wins over the design's `init` lines);
+/// - otherwise (mununu#609) the cubes consistent with the design's own `init` lines, through
+///   [`reset_truth_per_bit`]: a predicate over a register with a constant `init` is pinned to its
+///   reset truth, a predicate over a free-init register (no `init` line) admits both polarities
+///   — the FREE cycle-0 reading the exact engine (`initial_state_bdd`) and the reachability
+///   portfolio give the same cell (mununu#579) — and so does a compound not fully pinned or
+///   carrying an array `Select`. Bounded by the cube space, never by a product over concrete
+///   free bits. Until this the set was `cube_0` (every predicate false), which on the i2c lift
+///   is a cell no concrete reset state inhabits, so every `btor2 cegar` verdict without
+///   `--config-value` pins was a verdict at a fictitious initial state.
+///
+/// `cube_0` remains the defensive fallback when neither rule yields a cube, so the Clts never
+/// has zero initial states (an evaluator-time error).
 fn initial_cube_indices(
     predicates: &[PredicateSpec],
+    compound_exprs: &std::collections::HashMap<
+        String,
+        crate::adapter::btor2::predicate_expr::PredicateExpr,
+    >,
     config_values: &std::collections::HashMap<String, Vec<u64>>,
+    file: &crate::adapter::btor2::ast::Btor2File,
 ) -> Vec<usize> {
-    if config_values.is_empty() {
-        return vec![0];
-    }
-    let admissible =
-        crate::adapter::btor2::r_s8_encoder::hyper_must_initial_cubes(predicates, config_values);
-    if admissible.is_empty() {
-        vec![0]
+    let cubes = if config_values.is_empty() {
+        let truth = reset_truth_per_bit(predicates, compound_exprs, config_values, file);
+        cubes_consistent_with(&truth, predicates.len())
     } else {
-        admissible
-    }
+        crate::adapter::btor2::r_s8_encoder::hyper_must_initial_cubes(predicates, config_values)
+    };
+    if cubes.is_empty() { vec![0] } else { cubes }
 }
 
 /// R.2.5b (2026-06-06) — Policy for inferring `must`-side
@@ -910,6 +952,9 @@ struct LazyLiftContext {
     label_name: String,
     predicates: Vec<PredicateSpec>,
     cube_count: usize,
+    /// mununu#609 — the sidecar's config values, for the initial cube set the materialisation
+    /// declares (`initial_cube_indices`).
+    config_values: std::collections::HashMap<String, Vec<u64>>,
 }
 
 /// R.5 lazy KMTS sub-item 2.3 (2026-06-04) — truly-lazy
@@ -1025,6 +1070,7 @@ impl LazyLift {
                 label_name: "step".to_string(),
                 predicates,
                 cube_count,
+                config_values: lift_opts.config_values.clone(),
             },
             cache: std::collections::HashMap::new(),
         })
@@ -1541,8 +1587,17 @@ pub fn materialize_clts_from_lazy(
             })?;
         state_ids.push(id);
     }
-    if let Some(initial) = state_ids.first() {
-        builder.initial_state_id(*initial);
+    // mununu#609 — the initial cube set from the design's `init` lines (or the sidecar's
+    // config values), not `cube_0`. The lazy lift admits no compounds (the U.4 backstop).
+    for cube_idx in initial_cube_indices(
+        &predicates,
+        &std::collections::HashMap::new(),
+        &lazy.ctx.config_values,
+        &lazy.ctx.file,
+    ) {
+        if let Some(state_id) = state_ids.get(cube_idx) {
+            builder.initial_state_id(*state_id);
+        }
     }
 
     // Populate state_3valued_predicates per cube (same bit-pattern
@@ -2295,19 +2350,16 @@ pub fn predicate_cube_lift(
             })?;
         state_ids.push(id);
     }
-    // R-Y7 (2026-06-07) — initial-state set selection:
-    // - When `lift_opts.config_values` is non-empty, expand the
-    //   initial-state set to all cubes admissible under the
-    //   R-S8 encoder. Each cube whose predicate evaluation is
-    //   consistent with some valid value for every constrained
-    //   register becomes an initial state.
-    // - Otherwise (pre-R-Y7 default): single initial cube
-    //   (cube_0, all-predicates-false). A future iteration can
-    //   pick the cube matching the BTOR2 `init` values.
-    // (`initial_cube_indices` is the one implementation of this rule: admissible cubes, else
-    // cube_0 — also the defensive fallback when no cube is admissible, so the Clts never has
-    // zero initial states, which would error at evaluator time.)
-    let initial_cubes = initial_cube_indices(&predicates, &lift_opts.config_values);
+    // R-Y7 (2026-06-07) / mununu#609 — initial-state set selection, in `initial_cube_indices`:
+    // the R-S8 admissible cubes when `lift_opts.config_values` pins registers, else the cubes
+    // consistent with the design's `init` lines (free-init registers admit both polarities);
+    // `cube_0` only as the defensive fallback so the Clts never has zero initial states.
+    let initial_cubes = initial_cube_indices(
+        &predicates,
+        &lift_opts.compound_exprs,
+        &lift_opts.config_values,
+        &file,
+    );
     for cube_idx in &initial_cubes {
         if let Some(state_id) = state_ids.get(*cube_idx) {
             builder.initial_state_id(*state_id);
@@ -6449,27 +6501,55 @@ mod tests {
         );
     }
 
-    /// R-Y7 (2026-06-07) — Default `config_values` (empty) → the
-    /// lifted Clts has a single initial state (cube_0), matching
-    /// pre-R-Y7 behaviour exactly.
+    /// mununu#609 — with no `config_values`, the lift's initial cubes come from the design's
+    /// `init` lines, not `cube_0`. `COUNTER_BTOR2` gives `cnt` no `init`, so `cnt == 0` is free
+    /// at cycle 0 and BOTH cubes are initial (the exact engine's and the portfolio's reading of
+    /// an init-less cell — mununu#579). With `init cnt = 1` the only initial cube is the one
+    /// where `cnt == 0` is FALSE — `cube_0` by coincidence of the bit — and with `init cnt = 0`
+    /// it is cube 1, which the old rule never declared. (Until this the set was `cube_0` in
+    /// every case: on the i2c lift a cell no concrete reset state inhabits.)
     #[test]
-    fn r_y7_empty_config_values_preserves_legacy_single_initial_state() {
-        let preds = vec![PredicateSpec {
-            name: "cnt_is_0".into(),
-            register: "cnt".into(),
-            value: 0,
-        }];
-        let result = predicate_cube_lift(
-            preds,
-            COUNTER_BTOR2,
-            &AdapterOptions::default(),
-            &PredicateCubeLiftOptions::default(),
-        )
-        .expect("predicate_cube_lift succeeds");
+    fn x609_initial_cubes_come_from_the_init_lines_not_cube_0() {
+        let preds = || {
+            vec![PredicateSpec {
+                name: "cnt_is_0".into(),
+                register: "cnt".into(),
+                value: 0,
+            }]
+        };
+        let initial = |btor2: &str| -> Vec<usize> {
+            let result = predicate_cube_lift(
+                preds(),
+                btor2,
+                &AdapterOptions::default(),
+                &PredicateCubeLiftOptions::default(),
+            )
+            .expect("predicate_cube_lift succeeds");
+            let mut v: Vec<usize> = result
+                .clts
+                .initial_states()
+                .iter()
+                .map(|s| s.index())
+                .collect();
+            v.sort_unstable();
+            v
+        };
         assert_eq!(
-            result.clts.initial_states().len(),
-            1,
-            "pre-R-Y7 default: single initial state"
+            initial(COUNTER_BTOR2),
+            vec![0, 1],
+            "no `init` for cnt: cnt == 0 is free at cycle 0, both cubes are initial"
+        );
+        let init_one = format!("{COUNTER_BTOR2}10 one 2\n11 init 2 6 10\n");
+        assert_eq!(
+            initial(&init_one),
+            vec![0],
+            "init cnt = 1: only the cube where `cnt == 0` is false"
+        );
+        let init_zero = format!("{COUNTER_BTOR2}10 init 2 6 3\n");
+        assert_eq!(
+            initial(&init_zero),
+            vec![1],
+            "init cnt = 0: only the cube where `cnt == 0` is TRUE — not cube_0"
         );
     }
 

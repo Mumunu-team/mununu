@@ -489,6 +489,31 @@ the coverage summary is what governs a violation under a cut.
 
 The remedy is to supply an `init` via a sidecar. Retrying is never the answer.
 
+### An init-less register is free at cycle 0 on every path: `unestablished-initial-cubes` (mununu#579, #609)
+
+> Source of truth: [`BottomReason::UnestablishedInitialCubes`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) + [`kmts_lift::initial_cube_indices`](../crates/mununu-core/src/adapter/btor2/kmts_lift.rs) — surface: (CLI+API)
+
+**One convention, asserted by a test.** A state cell with no BTOR2 `init` line is **free at cycle 0**
+on the predicate-cube path, the explicit lift, the exact engine and the reachability portfolio alike
+— the table in [`reset_init.rs`](../crates/mununu-core/src/adapter/btor2/reset_init.rs)'s header is
+the record. It was not always one: until mununu#579 the cube path silently pinned such a cell to 0
+while the other engines left it free — one portfolio run, two initial states, which is the mechanism
+behind mununu#577's pair of mutually-wrong verdicts — and until mununu#609 the explicit lift started
+from `cube_0` (every predicate false) whenever no `--config-value` was given, a cell no concrete
+reset state need inhabit. Now the cube path treats a predicate over an init-less register as a **free
+initial dimension** (the same mechanism as a free input), and the explicit lift's initial set is
+every cube consistent with the `init` lines (config pins still take precedence).
+
+**The bound.** The initial cube set is the product of the free dimensions, and the cube path
+enumerates it only up to **16**; past that the property abstains with
+`bottom_reason.kind == "unestablished-initial-cubes"` — `free_dimensions`, `cap`, and `registers`
+(how many init-less registers contribute, i.e. the size of the remedy). `determinism` is
+`reproducible`; no budget is named because none applies. Unlike `unestablished-initial-state` above,
+**nothing was decided and then withheld** — the start set was never read.
+
+The remedy is the same: establish the value — keep reset-gating on (the reset's values are injected
+as `init`), add an `init` through a sidecar, or pin the register with `--config-value`.
+
 ### Process-wide memory ceiling: `MUNUNU_MAX_PROCESS_MEMORY_BYTES` (mununu#490, default revised in #504)
 
 > Source of truth: [`adapter::memory_budget::check_process_memory_budget`](../crates/mununu-core/src/adapter/memory_budget.rs) — surface: (CLI+API+UI, env var — process-global)

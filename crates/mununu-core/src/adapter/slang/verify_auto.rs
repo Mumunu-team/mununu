@@ -2237,9 +2237,16 @@ fn abstained(
     }
 }
 
-/// Init value of every state cell, keyed by symbol — from the BTOR2 `init`
-/// lines, defaulting to 0 (the `setundef -zero` power-up). Used to pin the cube
-/// lift's initial cube to the design's reset state.
+/// Init value of every state cell that HAS a BTOR2 `init` line, keyed by symbol. Used to pin
+/// the cube lift's initial cube to the design's reset state.
+///
+/// mununu#579 — a state cell with no `init` line is ABSENT, not 0. It used to default to 0
+/// (read as the `setundef -zero` power-up), which made "init 0" and "no init" indistinguishable
+/// one line after the only place that could tell them apart, and pinned the cube path's cycle-0
+/// state where the exact engine (`initial_state_bdd`, since mununu#498) and the reachability
+/// portfolio leave it FREE — opposite soundness postures inside one portfolio run, the cube's
+/// being the one that makes `HOLDS` unsound. An absent cell is now a free initial dimension of
+/// the cube (`free_init_dimensions`), bounded, so the three paths read cycle 0 the same way.
 fn state_cell_init_values(
     file: &crate::adapter::btor2::ast::Btor2File,
 ) -> std::collections::HashMap<String, u64> {
@@ -2259,14 +2266,77 @@ fn state_cell_init_values(
     for line in &file.lines {
         if matches!(line.node, Node::State { .. })
             && let Some(name) = symbols.get(&line.nid)
+            && let Some(v) = init_of_state.get(&line.nid)
         {
-            out.insert(
-                name.clone(),
-                init_of_state.get(&line.nid).copied().unwrap_or(0),
-            );
+            out.insert(name.clone(), *v);
         }
     }
     out
+}
+
+/// mununu#579 — the most free initial dimensions the cube path enumerates before it abstains.
+/// A free dimension is a predicate bit with no established cycle-0 truth: a free input (H.B),
+/// or a predicate over a register with no `init` line. The initial cube set is their product,
+/// and an unbounded product is how the first convergence attempt overflowed the stack on real
+/// RTL (`1 << free_bits.len()` with every init-less register freed). Past this cap the property
+/// abstains with [`BottomReason::UnestablishedInitialCubes`] — a named ⊥, never a silent pin to
+/// zero and never `2^n`.
+const MAX_FREE_INIT_DIMENSIONS: usize = 16;
+
+/// mununu#579 — what a predicate's register is at cycle 0, for a name that is not a state-cell
+/// symbol of `state_cell_init_values` and not a primary input.
+#[derive(Debug, PartialEq, Eq)]
+enum CycleZero {
+    /// A value-identical alias of a state cell that has an `init` line, at that value.
+    Established(u64),
+    /// An alias of an init-less state cell, or a combinational signal whose cone reaches an
+    /// init-less state cell or a primary input: no single cycle-0 value.
+    Unestablished,
+    /// A combinational function of established state cells only: its cycle-0 value is what the
+    /// reset state computes (observed by the caller).
+    Combinational,
+}
+
+/// See [`CycleZero`]. `reset_pinned` is whether the strict resolver may follow the async-reset
+/// register mux — the same flag the seeder binds with.
+fn cycle_zero_class(
+    file: &crate::adapter::btor2::ast::Btor2File,
+    name: &str,
+    reset_pinned: bool,
+) -> CycleZero {
+    use crate::adapter::btor2::ast::Node;
+    let init_of_state = |nid: crate::adapter::btor2::ast::Nid| -> Option<u64> {
+        file.lines.iter().find_map(|l| match &l.node {
+            Node::Init { state, value, .. } if *state == nid => {
+                let cl = file.lookup(value.nid())?;
+                match &cl.node {
+                    Node::Const { sort, value: cv } => Some(const_to_u64(file, *sort, cv)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        })
+    };
+    if let Some(nid) = crate::adapter::btor2::parser::resolve_state_alias(file, name, reset_pinned)
+    {
+        return match init_of_state(nid) {
+            Some(v) => CycleZero::Established(v),
+            None => CycleZero::Unestablished,
+        };
+    }
+    let leaves = crate::adapter::btor2::dep_graph::cone_leaf_nids(file, &[name.to_string()]);
+    let free_leaf = leaves
+        .iter()
+        .any(|nid| match file.lookup(*nid).map(|l| &l.node) {
+            Some(Node::Input { .. }) => true,
+            Some(Node::State { .. }) => init_of_state(*nid).is_none(),
+            _ => false,
+        });
+    if free_leaf {
+        CycleZero::Unestablished
+    } else {
+        CycleZero::Combinational
+    }
 }
 
 /// A BTOR2 constant value → `u64` (all-ones needs the sort width).
@@ -3999,39 +4069,73 @@ pub(crate) fn verify_auto_impl(
         // polarities (the product of every free-input bit), then combined
         // conjunctively: the property holds at reset iff it holds under every
         // initial environment input.
-        let init_val_u128: std::collections::HashMap<String, u128> = init_values
-            .iter()
-            .map(|(k, v)| (k.clone(), *v as u128))
-            .collect();
-        // H.U.2 — a combinational-of-state spec's register is neither a state cell
-        // (present in `init_values`) nor a free input, so its reset-cube value is
-        // not in `init_values`. OBSERVE the signal's value at the reset register
-        // state (combinational-of-state has no input dependence → empty inputs)
-        // and augment a local map, so the init-cube bit below is correct.
+        // mununu#579 — ONE classification of every register the property's predicates name:
+        // ESTABLISHED (a cycle-0 value, in `init_for_cube`) or UNESTABLISHED (free at cycle 0,
+        // in `unestablished_registers`). A free input is neither — it is H.B's own free
+        // dimension, handled below.
+        //
+        // The name a predicate uses is not always the name `collect_symbols` gave the state
+        // cell: its loose alias pass names a cell after the FIRST symbol-bearing node whose
+        // cone reaches it, so a counter's cell can be named `cnt_d` (its next-value function)
+        // while the predicates say `cnt_q`. That is why the lookup goes through the strict
+        // resolver the seeder itself binds with (`resolve_state_alias`, a value-identical
+        // alias — `uext`-0, the pinned reset mux): the cell's `init` is then read by NID, not
+        // by whichever name it happened to get. (Measured: the saturating-counter e2e read
+        // `cnt_q` as unestablished — and VIOLATED at cycle 0 — because of exactly that
+        // naming, after the old `unwrap_or(0)` had hidden it.)
+        //
+        // A name that is neither a state cell nor a strict alias is combinational-of-state
+        // (H.U.2): its cycle-0 value is OBSERVED at the reset state — but only when every
+        // state cell in its cone has an `init` and no primary input feeds it. A cone with an
+        // init-less cell or an input in it has no single cycle-0 value, and observing it with
+        // those defaulted to 0 would be the pin this change removes, one node downstream.
         let mut init_for_cube = init_values.clone();
-        let comb_names: Vec<String> = seeded
-            .specs
-            .iter()
-            .filter(|s| {
-                !init_for_cube.contains_key(&s.register)
-                    && !seeded.input_registers.contains(&s.register)
-            })
-            .map(|s| s.register.clone())
-            .collect();
-        if !comb_names.is_empty()
-            && let Ok(outcome) = crate::adapter::btor2::bit_blast::simulate_one_step_observe(
-                &file,
-                &init_val_u128,
-                &std::collections::HashMap::new(),
-                &comb_names,
-            )
+        // mununu#579 — the registers whose predicate bits are free at cycle 0.
+        let mut unestablished_registers: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
         {
-            for n in &comb_names {
-                if let Some(&v) = outcome.observed.get(n) {
-                    init_for_cube.insert(n.clone(), v as u64);
+            let mentioned: std::collections::BTreeSet<String> = seeded
+                .specs
+                .iter()
+                .map(|s| s.register.clone())
+                .chain(seeded.compounds.iter().flat_map(|(_, e)| e.registers()))
+                .filter(|r| !init_for_cube.contains_key(r) && !seeded.input_registers.contains(r))
+                .collect();
+            let mut comb_names: Vec<String> = Vec::new();
+            for r in mentioned {
+                match cycle_zero_class(&file, &r, reset_pinned) {
+                    CycleZero::Established(v) => {
+                        init_for_cube.insert(r, v);
+                    }
+                    CycleZero::Unestablished => {
+                        unestablished_registers.insert(r);
+                    }
+                    CycleZero::Combinational => comb_names.push(r),
+                }
+            }
+            if !comb_names.is_empty() {
+                let established: std::collections::HashMap<String, u128> = init_for_cube
+                    .iter()
+                    .map(|(k, v)| (k.clone(), *v as u128))
+                    .collect();
+                if let Ok(outcome) = crate::adapter::btor2::bit_blast::simulate_one_step_observe(
+                    &file,
+                    &established,
+                    &std::collections::HashMap::new(),
+                    &comb_names,
+                ) {
+                    for n in &comb_names {
+                        if let Some(&v) = outcome.observed.get(n) {
+                            init_for_cube.insert(n.clone(), v as u64);
+                        }
+                    }
                 }
             }
         }
+        let init_for_cube_u128: std::collections::HashMap<String, u128> = init_for_cube
+            .iter()
+            .map(|(k, v)| (k.clone(), *v as u128))
+            .collect();
         let mut base_init_cube = 0usize;
         let mut free_input_bits: Vec<u32> = Vec::new();
         // mununu#503 — carry each free dimension's `(register, value)` so mutually exclusive
@@ -4043,19 +4147,57 @@ pub(crate) fn verify_auto_impl(
                 // Free input dimension — left unset in the base; enumerated below.
                 free_input_bits.push(bit);
                 free_input_dims.push((s.register.clone(), s.value));
-            } else if init_for_cube.get(&s.register).copied().unwrap_or(0) == s.value {
-                base_init_cube |= 1 << bit;
+            } else if let Some(v) = init_for_cube.get(&s.register) {
+                if *v == s.value {
+                    base_init_cube |= 1 << bit;
+                }
+            } else {
+                // mununu#579 — no cycle-0 value to pin: the bit is FREE, like an input's, so
+                // the verdict is read over both polarities (the exact engine's and the
+                // portfolio's reading of the same cell).
+                free_input_bits.push(bit);
+                free_input_dims.push((s.register.clone(), s.value));
             }
             bit += 1;
         }
-        for (_, expr) in &seeded.compounds {
-            if expr.eval(&init_val_u128) {
-                base_init_cube |= 1 << bit;
+        for (name, expr) in &seeded.compounds {
+            let free = expr.registers().into_iter().any(|r| {
+                seeded.input_registers.contains(&r) || unestablished_registers.contains(&r)
+            });
+            if !free {
+                if expr.eval(&init_for_cube_u128) {
+                    base_init_cube |= 1 << bit;
+                }
+            } else {
+                // A compound over a free register: free at cycle 0, keyed by its own name
+                // (no other dimension shares it, so the exclusivity filter is a no-op).
+                free_input_bits.push(bit);
+                free_input_dims.push((name.clone(), 1));
             }
             bit += 1;
         }
-        // All initial cubes = base ⊗ every combination of the free-input bits.
-        // No free inputs ⇒ a single cube, identical to the pre-H.B single-read.
+        // mununu#579 — bounded. The initial cube set is the product of the free dimensions;
+        // past the cap the property abstains by name rather than enumerating `2^n`.
+        if free_input_bits.len() > MAX_FREE_INIT_DIMENSIONS {
+            report.properties.push(PropertyVerdict {
+                name: t.name.clone(),
+                label: t.label.clone(),
+                kind: t.kind,
+                formula: formula_str.clone(),
+                outcome: VerifyOutcome::Unknown { unknown_cells: 0 },
+                seeded_predicates: seeded_names,
+                counterexample: None,
+                bottom_reason: Some(BottomReason::UnestablishedInitialCubes {
+                    free_dimensions: free_input_bits.len(),
+                    cap: MAX_FREE_INIT_DIMENSIONS,
+                    registers: unestablished_registers.len(),
+                }),
+                decided_by: None,
+            });
+            continue;
+        }
+        // All initial cubes = base ⊗ every combination of the free bits (inputs and
+        // init-less registers). No free bits ⇒ a single cube, the pre-H.B single read.
         let init_cubes =
             free_input_init_cubes_feasible(base_init_cube, &free_input_bits, &free_input_dims);
 
@@ -4690,6 +4832,21 @@ pub enum BottomReason {
         /// The resets pinned inactive, which is what removed the reset path.
         gated_resets: Vec<String>,
     },
+    /// mununu#579 — the cube path's initial cube set could not be read. Every predicate bit with
+    /// no established cycle-0 truth (a free input, or a predicate over a register with no `init`
+    /// line) is a free initial dimension and the initial cube set is their product; past
+    /// `cap` dimensions the property abstains here rather than enumerating `2^n` (which is how
+    /// the first convergence attempt overflowed the stack on real RTL). Not a withheld verdict:
+    /// nothing was decided. Reproducible — a property of the model.
+    UnestablishedInitialCubes {
+        /// How many free initial dimensions the property's predicates have.
+        free_dimensions: usize,
+        /// The cap they exceeded.
+        cap: usize,
+        /// How many init-less registers contribute to them (the remedy's size: an `init` for
+        /// each, via a sidecar or reset-gating).
+        registers: usize,
+    },
     /// The property was **never attempted** — filtered out before any engine ran.
     /// mununu#579 — this report contradicts **itself**: two properties of the same model came back
     /// with definite verdicts that cannot both be right.
@@ -4785,6 +4942,7 @@ impl BottomReason {
             | Self::NoStateModelNonSafety
             | Self::EngineContradiction { .. }
             | Self::UnestablishedInitialState { .. }
+            | Self::UnestablishedInitialCubes { .. }
             | Self::ReportSelfContradiction { .. }
             | Self::NotAttempted => BottomDeterminism::Reproducible,
         }
@@ -4802,6 +4960,7 @@ impl BottomReason {
             Self::BudgetExpired => "budget-expired",
             Self::MemoryCeilingExceeded => "memory-ceiling-exceeded",
             Self::UnestablishedInitialState { .. } => "unestablished-initial-state",
+            Self::UnestablishedInitialCubes { .. } => "unestablished-initial-cubes",
             Self::ReportSelfContradiction { .. } => "report-self-contradiction",
             Self::NotAttempted => "not-attempted",
         }
@@ -4850,6 +5009,18 @@ impl BottomReason {
                  (`next = ite(rst, d, q)`). Supply an `init` for it via a sidecar to decide this \
                  property; a `--cutpoint` is deliberately free and is NOT counted here.",
                 gated_resets.join(", ")
+            ),
+            Self::UnestablishedInitialCubes {
+                free_dimensions,
+                cap,
+                registers,
+            } => format!(
+                "the property's predicates have {free_dimensions} FREE initial dimensions (free \
+                 inputs, and predicates over {registers} register(s) with no `init` line), past \
+                 the {cap} the cube path enumerates — so its initial cube set was not read and \
+                 nothing was decided. An init-less register is FREE at cycle 0 on every engine \
+                 (mununu#579); supply an `init` for those registers via a sidecar, or let \
+                 reset-gating establish them, to decide this property."
             ),
             Self::ReportSelfContradiction { detail } => format!(
                 "🔴 SOUNDNESS ALARM — this report contradicts ITSELF: {detail}. The two verdicts \
@@ -6799,26 +6970,21 @@ mod tests {
         );
     }
 
-    /// mununu#579 audit — pin the cube path's init-less convention so the three-way divergence
-    /// cannot drift again in silence.
-    ///
-    /// `state_cell_init_values` defaults an init-less cell to **0**; `initial_state_bdd` (exact,
-    /// since mununu#498) and the reachability portfolio leave it **FREE**. Those are opposite
-    /// soundness postures on cycle 0 inside one portfolio run — the cube's 0 removes start states
-    /// (unsound for HOLDS), the others add them (unsound for VIOLATED).
-    ///
-    /// This asserts the CURRENT behaviour rather than the desired one. Converging them is a
-    /// measured behaviour change tracked on mununu#579; until then the value of this test is that
-    /// the convention is written down somewhere that fails when it moves. Three comments claimed
-    /// the old convention for a year after mununu#498 changed it, and one of them was cited as
-    /// evidence.
+    /// mununu#579 — the three evaluation paths now read an init-less state cell the same way at
+    /// cycle 0: FREE. `state_cell_init_values` returns only cells with an `init` line, so an
+    /// init-less cell has no pin (it used to default to 0 — "init 0" and "no init" were
+    /// indistinguishable one line after the only place that could tell them apart), and the
+    /// cube path treats a predicate over it as a free initial dimension, bounded by
+    /// `MAX_FREE_INIT_DIMENSIONS`. The exact engine (`initial_state_bdd`, since mununu#498) and
+    /// the reachability portfolio already left it free. This pins the CONVERGED convention so
+    /// the next drift fails a build instead of a consumer's gate.
     #[test]
-    fn the_cube_defaults_an_initless_cell_to_zero_while_the_other_paths_leave_it_free() {
+    fn an_initless_cell_is_free_at_cycle_zero_on_the_cube_path_like_the_other_paths() {
         // `pinned` carries an init; `loose` does not.
-        let btor2 = "1 sort bitvec 4\n                     2 state 1 pinned\n                     3 constd 1 5\n                     4 init 1 2 3\n                     5 state 1 loose\n";
+        let btor2 =
+            "1 sort bitvec 4\n2 state 1 pinned\n3 constd 1 5\n4 init 1 2 3\n5 state 1 loose\n";
         let file = crate::adapter::btor2::parser::parse(btor2).expect("fixture parses");
         let vals = state_cell_init_values(&file);
-
         assert_eq!(
             vals.get("pinned").copied(),
             Some(5),
@@ -6826,10 +6992,97 @@ mod tests {
         );
         assert_eq!(
             vals.get("loose").copied(),
-            Some(0),
-            "the CUBE defaults an init-less cell to 0 — the exact engine and the reachability \
-             portfolio leave the same cell FREE. If this assertion moves, the divergence has been \
-             converged and mununu#579's audit table must move with it"
+            None,
+            "an init-less cell has NO pin — it is a free initial dimension of the cube, as it \
+             is a free cycle-0 value on the exact engine and the portfolio (mununu#579)"
+        );
+    }
+
+    /// mununu#579 — a predicate's register is looked up by the STRICT alias, not by the name
+    /// `collect_symbols` gave the cell.
+    ///
+    /// The fixture is the saturating counter's real lift (`MUNUNU_SHADOW_BTOR2_DUMP`, trimmed):
+    /// the state cell `6` has no symbol of its own, `cnt_d` (its next-value function, line 14)
+    /// comes first in the file and the loose alias pass names the cell after it, while the
+    /// predicates say `cnt_q` (line 15, the `uext`-0 of the pinned reset mux). Looked up by name,
+    /// `cnt_q` is absent and reads as unestablished — the e2e went VIOLATED at cycle 0 on that.
+    /// Resolved by the strict alias it is the cell with `init 0`.
+    #[test]
+    fn x579_a_register_named_by_a_loose_alias_is_still_established_through_the_strict_one() {
+        let btor2 = "1 sort bitvec 1\n2 input 1 clk\n3 one 1 rst_ni\n4 sort bitvec 5\n5 const 4 00000\n\
+                     6 state 4\n7 ite 4 3 6 5\n8 const 1 1\n9 uext 4 8 4\n10 add 4 7 9\n\
+                     11 const 4 00111\n12 eq 1 7 11\n13 ite 4 12 11 10\n14 uext 4 13 0 cnt_d\n\
+                     15 uext 4 7 0 cnt_q\n16 ite 4 3 13 5\n17 next 4 6 16\n18 constd 4 0\n\
+                     19 init 4 6 18\n20 input 4 din\n21 add 4 7 20\n22 uext 4 21 0 sum\n\
+                     23 state 4 loose\n24 next 4 23 23\n25 uext 4 23 0 loose_q\n";
+        let file = crate::adapter::btor2::parser::parse(btor2).expect("fixture parses");
+        let names = state_cell_init_values(&file);
+        assert_eq!(
+            names.get("cnt_d"),
+            Some(&0),
+            "the loose pass names the cell `cnt_d` — the trap this test pins"
+        );
+        assert!(!names.contains_key("cnt_q"));
+        assert_eq!(
+            cycle_zero_class(&file, "cnt_q", true),
+            CycleZero::Established(0),
+            "through the pinned reset mux `cnt_q` IS the cell, at its `init`"
+        );
+        assert_eq!(
+            cycle_zero_class(&file, "cnt_q", false),
+            CycleZero::Combinational,
+            "not followed as an alias, the mux over the PINNED (`one`) reset is a function of \
+             an established cell alone — observed at reset, not free"
+        );
+        // The un-gated lift: the reset is a primary INPUT. Not an alias (the mux is not
+        // value-identical with the reset free), and its cone has an input ⇒ free at cycle 0.
+        let ungated = btor2.replace("3 one 1 rst_ni", "3 input 1 rst_ni");
+        let file_ungated = crate::adapter::btor2::parser::parse(&ungated).expect("parses");
+        assert_eq!(
+            cycle_zero_class(&file_ungated, "cnt_q", false),
+            CycleZero::Unestablished,
+            "with the reset free, `cnt_q`'s cycle-0 value depends on an input"
+        );
+        assert_eq!(
+            cycle_zero_class(&file, "cnt_d", true),
+            CycleZero::Combinational,
+            "`cnt_d` as a SIGNAL is the next-value function of an established cell — what the \
+             loose pass named the cell is read from `state_cell_init_values` before this"
+        );
+        assert_eq!(
+            cycle_zero_class(&file, "sum", true),
+            CycleZero::Unestablished,
+            "a combinational signal fed by a primary input has no single cycle-0 value"
+        );
+        assert_eq!(
+            cycle_zero_class(&file, "loose_q", true),
+            CycleZero::Unestablished,
+            "an alias of an init-less cell is free at cycle 0"
+        );
+        assert_eq!(
+            cycle_zero_class(&file, "cnt_q__bits", true),
+            CycleZero::Combinational,
+            "an unknown name has an empty cone: nothing free in it, left to the observer"
+        );
+    }
+
+    /// mununu#579 — the bound: the initial cube set is the product of the free dimensions and
+    /// is enumerated only up to `MAX_FREE_INIT_DIMENSIONS`; the reason past it names itself and
+    /// is reproducible (a property of the model).
+    #[test]
+    fn the_free_initial_dimension_cap_abstains_by_name() {
+        let r = BottomReason::UnestablishedInitialCubes {
+            free_dimensions: MAX_FREE_INIT_DIMENSIONS + 1,
+            cap: MAX_FREE_INIT_DIMENSIONS,
+            registers: 3,
+        };
+        assert_eq!(r.tag(), "unestablished-initial-cubes");
+        assert_eq!(r.determinism(), BottomDeterminism::Reproducible);
+        assert!(r.one_line().contains("3 register(s) with no `init` line"));
+        assert!(
+            free_input_init_cubes_feasible(0, &[0, 1], &[("a".into(), 1), ("a".into(), 2)]).len()
+                == 3,
+            "two values of one register never co-occur (mununu#503): 4 combos minus the pair"
         );
     }
 
@@ -9233,21 +9486,34 @@ module uart_tx(); endmodule"#;
         // assertion `disable iff (!rst_n) state != 3`. Two SOUND paths to a
         // verdict, exercised here:
         //
-        //   * Reset-gating ON (default) — the `disable iff` guard is dropped and
-        //     rst_n is pinned inactive, so the body `state != 3` is a pure
-        //     state-cell property → HOLDS. (`gated_resets = ["rst_n=1"]`.)
+        //   * Reset-gating ON (default) — the `disable iff` guard is dropped,
+        //     rst_n is pinned inactive and `inject_reset_init` establishes
+        //     `init state = 0` (the post-reset value), so the body `state != 3`
+        //     is a pure state-cell property over an established start → HOLDS.
+        //     (`gated_resets = ["rst_n=1"]`.)
         //   * Reset-gating OFF — the guard is KEPT, so the formula carries the
         //     `!rst_n` vacuity disjunct, and (H.B) rst_n — a primary input — is
-        //     admitted as a FREE cube dimension. The verdict is read across both
-        //     reset flavours: rst_n low ⇒ the disjunct is vacuously true; rst_n
-        //     high ⇒ `state != 3` (the FSM never reaches 3) → HOLDS, soundly,
-        //     with no reset assumption. (`gated_resets` empty.)
+        //     admitted as a FREE cube dimension. No reset is applied and the
+        //     lift carries no `init` line for `state`, so — since mununu#579
+        //     converged the cube path on the convention the exact engine
+        //     (`initial_state_bdd`, mununu#498) and the reachability portfolio
+        //     already used — `state` is FREE at cycle 0 too. `state == 3` with
+        //     `rst_n` high is then an admissible first cycle, and the property
+        //     is VIOLATED on that model, with a real cycle-0 witness.
+        //     (`gated_resets` empty.)
+        //
+        // The old un-gated expectation was HOLDS, and it rested on the cube
+        // path's zero pin for an init-less cell: "the FSM never reaches 3" is
+        // true only from 0. The pin was the mununu#577 / #579 divergence — one
+        // report, two initial states — and it is gone. This is the standard
+        // formal reading too: a register nothing initialises and no reset
+        // sequence establishes is unconstrained at cycle 0, and the remedy is
+        // to apply the reset (gating ON), not to assume a value.
         //
         // Pre-H.B the un-gated `!rst_n` atom was unbindable → SKIPPED; H.B's
         // free-input admission subsumes that skip with a sound verdict. Both
-        // paths are sound for this property; they differ only in mechanism (pin
-        // the reset vs. treat it as a free environment input), visible in the
-        // diagnostics.
+        // paths are sound; they differ in what they assume about cycle 0 (the
+        // reset applied vs. nothing), visible in the diagnostics.
         let sv = "module fsm (input logic clk, input logic rst_n);\n\
                   logic [1:0] state;\n\
                   always_ff @(posedge clk) begin\n\
@@ -9279,9 +9545,12 @@ module uart_tx(); endmodule"#;
         );
 
         // Reset-gating OFF: the `!rst_n` atom is a primary input, admitted by
-        // H.B as a free cube dimension. The kept `disable iff` disjunct makes
-        // reset cycles vacuous, so the property is verified across all reset
-        // sequences → still HOLDS, soundly, with no reset assumption.
+        // H.B as a free cube dimension, and `state` — no `init`, no reset
+        // applied — is free at cycle 0. The kept `disable iff` disjunct makes
+        // reset cycles vacuous, but a first cycle with `rst_n` high and
+        // `state == 3` is admissible → VIOLATED, and not withheld: the
+        // mununu#578 downgrade fires only when a reset was PINNED (that pin is
+        // what removes a reset path), and nothing was pinned here.
         let ungated = verify_auto(
             &sources,
             &yopts,
@@ -9292,10 +9561,13 @@ module uart_tx(); endmodule"#;
         )
         .expect("verify_auto runs without reset-gating");
         assert!(
-            matches!(ungated.properties[0].outcome, VerifyOutcome::Holds),
-            "H.B admits the reset as a free input; the un-gated property still \
-             HOLDS soundly (the `!rst_n` disjunct keeps reset cycles vacuous); \
-             got {:?}",
+            matches!(
+                ungated.properties[0].outcome,
+                VerifyOutcome::Violated { .. }
+            ),
+            "un-gated, `state` has no `init` and no reset is applied, so it is free \
+             at cycle 0 on the cube path like on every other engine (mununu#579); \
+             `state == 3 && rst_n` is an admissible first cycle → VIOLATED; got {:?}",
             ungated.properties[0].outcome
         );
         assert!(
