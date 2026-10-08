@@ -3974,6 +3974,7 @@ pub(crate) fn verify_auto_impl(
             };
             let exact_opts = ExactSymbolicOptions {
                 antecedent_shadow_enabled: opts.antecedent_shadow,
+                ..Default::default()
             };
 
             // mununu#543 W3 — opt-in ISOLATION. `oxidd`'s `apply_bin` can recurse unboundedly on a
@@ -5434,6 +5435,7 @@ pub(crate) fn rescue_skipped_via_exact(
     }
     let exact_opts = ExactSymbolicOptions {
         antecedent_shadow_enabled: opts.antecedent_shadow,
+        ..Default::default()
     };
     for prop in report.properties.iter_mut() {
         // mununu#504 — this is the THIRD full pass over the property list, and until now it had

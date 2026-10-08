@@ -1939,6 +1939,439 @@ pub(crate) struct DownCounterMeta {
     pub threshold: u64,
 }
 
+/// mununu#602 — narrow every leaf cell (`state` / `input`) whose [`super::dep_graph::bit_cone`]
+/// mask is PARTIAL to its kept bits, so the exact engine bit-blasts a 32-bit field of a 736-bit
+/// crossed vector as 32 variables, not 736.
+///
+/// For a leaf `L` of width `W` with kept bits `K` (`0 < |K| < W`), the rewrite keeps `L`'s NID
+/// and symbol on a **narrow** leaf of width `|K|` (so `init` / `next` lines, the symbol-keyed
+/// next-state table and a two-player `controllable` match stay valid), appends right after it a
+/// **reconstruction** `R` of width `W` — the kept bits in their original positions, zero
+/// everywhere else — and redirects every reader of `L` to `R`. `next L` becomes the kept bits of
+/// the old next value (one `slice` per run, `concat`ed high-to-low); a constant `init` is
+/// narrowed the same way; a non-constant `init` keeps the leaf whole.
+///
+/// **Soundness.** The bit cone is closed under `next` bit by bit and over-approximates every
+/// operator, so no kept bit's next value and no property atom reads a dropped bit; reading the
+/// dropped bits as `0` through `R` therefore changes nothing observable — it is exactly what the
+/// bit-blaster already does to a whole out-of-cone leaf, one bit at a time. A leaf with NO kept
+/// bit is left in place and excluded from the returned keep-set (the blaster pins it whole);
+/// a leaf with every bit kept is untouched.
+///
+/// Returns the rewritten file and the keep-set to hand to `BddBitBlaster::build_with_keep`.
+pub(crate) fn narrow_leaves(
+    file: &Btor2File,
+    cone: &std::collections::HashMap<Nid, Vec<bool>>,
+) -> (Btor2File, std::collections::HashSet<Nid>) {
+    use crate::adapter::btor2::ast::{ConstValue, Op, Sort};
+    let mut keep: std::collections::HashSet<Nid> = std::collections::HashSet::new();
+    let init_value: std::collections::HashMap<Nid, Operand> = file
+        .lines
+        .iter()
+        .filter_map(|l| match &l.node {
+            Node::Init { state, value, .. } => Some((*state, *value)),
+            _ => None,
+        })
+        .collect();
+    // Which leaves narrow, with their kept masks.
+    let mut partial: std::collections::HashMap<Nid, Vec<bool>> = std::collections::HashMap::new();
+    for line in &file.lines {
+        if !matches!(line.node, Node::State { .. } | Node::Input { .. }) {
+            continue;
+        }
+        let Some(mask) = cone.get(&line.nid) else {
+            continue; // no kept bit: pinned whole by the blaster
+        };
+        let kept = mask.iter().filter(|b| **b).count();
+        if kept == 0 {
+            continue;
+        }
+        keep.insert(line.nid);
+        if kept == mask.len() {
+            continue;
+        }
+        // A non-constant init cannot be narrowed by this rewrite: keep the leaf whole.
+        if let Some(v) = init_value.get(&line.nid)
+            && !matches!(
+                file.lookup(v.nid()).map(|l| &l.node),
+                Some(Node::Const { .. })
+            )
+        {
+            continue;
+        }
+        partial.insert(line.nid, mask.clone());
+    }
+    if partial.is_empty() {
+        return (file.clone(), keep);
+    }
+
+    /// The line emitter: fresh NIDs, sorts by width (declared in a prelude), the output.
+    struct Emit {
+        next_nid: Nid,
+        sorts: std::collections::HashMap<u32, Nid>,
+        prelude: Vec<Line>,
+        out: Vec<Line>,
+    }
+    impl Emit {
+        fn line(nid: Nid, node: Node, immediates: Vec<u32>) -> Line {
+            Line {
+                nid,
+                node,
+                immediates,
+                source_line: 0,
+            }
+        }
+        fn fresh(&mut self) -> Nid {
+            let n = self.next_nid;
+            self.next_nid += 1;
+            n
+        }
+        fn sort_for(&mut self, w: u32) -> Nid {
+            if let Some(n) = self.sorts.get(&w) {
+                return *n;
+            }
+            let n = self.fresh();
+            self.prelude.push(Self::line(
+                n,
+                Node::Sort {
+                    sort: Sort::BitVec { width: w },
+                },
+                Vec::new(),
+            ));
+            self.sorts.insert(w, n);
+            n
+        }
+        fn op(&mut self, op: Op, w: u32, args: Vec<Operand>, immediates: Vec<u32>) -> Nid {
+            let s = self.sort_for(w);
+            let n = self.fresh();
+            self.out.push(Self::line(
+                n,
+                Node::Op {
+                    op,
+                    sort: s,
+                    args,
+                    symbol: None,
+                },
+                immediates,
+            ));
+            n
+        }
+        fn zero(&mut self, w: u32) -> Nid {
+            let s = self.sort_for(w);
+            let n = self.fresh();
+            self.out.push(Self::line(
+                n,
+                Node::Const {
+                    sort: s,
+                    value: ConstValue::Zero,
+                },
+                Vec::new(),
+            ));
+            n
+        }
+        /// `concat` a high piece onto an accumulated low value.
+        fn stack(&mut self, acc: Option<(Nid, u32)>, piece: Nid, w: u32) -> Option<(Nid, u32)> {
+            Some(match acc {
+                None => (piece, w),
+                Some((lo, lo_w)) => (
+                    self.op(
+                        Op::Concat,
+                        lo_w + w,
+                        vec![Operand(piece), Operand(lo)],
+                        Vec::new(),
+                    ),
+                    lo_w + w,
+                ),
+            })
+        }
+        /// The slices of `src` at `runs`, concatenated high-to-low; the source itself when one
+        /// run covers it.
+        fn gather(&mut self, src: Nid, w_src: u32, runs: &[(u32, u32)]) -> Nid {
+            let mut acc: Option<(Nid, u32)> = None;
+            for (lo, hi) in runs {
+                let w = hi - lo + 1;
+                let piece = if w == w_src {
+                    src
+                } else {
+                    self.op(Op::Slice, w, vec![Operand(src)], vec![*hi, *lo])
+                };
+                acc = self.stack(acc, piece, w);
+            }
+            acc.map_or(src, |(n, _)| n)
+        }
+    }
+    let mut e = Emit {
+        next_nid: file.lines.iter().map(|l| l.nid).max().unwrap_or(0) + 1,
+        sorts: file
+            .lines
+            .iter()
+            .filter_map(|l| match &l.node {
+                Node::Sort {
+                    sort: Sort::BitVec { width },
+                } => Some((*width, l.nid)),
+                _ => None,
+            })
+            .collect(),
+        prelude: Vec::new(),
+        out: Vec::with_capacity(file.lines.len() + 4 * partial.len()),
+    };
+    // The kept bits as maximal runs `(lo, hi)`, low to high.
+    fn runs(mask: &[bool]) -> Vec<(u32, u32)> {
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < mask.len() {
+            if mask[i] {
+                let lo = i;
+                while i + 1 < mask.len() && mask[i + 1] {
+                    i += 1;
+                }
+                out.push((lo as u32, i as u32));
+            }
+            i += 1;
+        }
+        out
+    }
+    fn narrow_width(rs: &[(u32, u32)]) -> u32 {
+        rs.iter().map(|(lo, hi)| hi - lo + 1).sum()
+    }
+    // The width-`w` constant's bits, low first; `None` when the spelling cannot carry `w` bits.
+    fn const_bits(v: &ConstValue, w: usize) -> Option<Vec<bool>> {
+        let mut bits = vec![false; w];
+        match v {
+            ConstValue::Zero => {}
+            ConstValue::One => {
+                if w > 0 {
+                    bits[0] = true;
+                }
+            }
+            ConstValue::Ones => bits.iter_mut().for_each(|b| *b = true),
+            ConstValue::Dec(d) => {
+                if w > 127 && *d != 0 {
+                    return None;
+                }
+                for (i, b) in bits.iter_mut().enumerate() {
+                    *b = i < 127 && (*d >> i) & 1 == 1;
+                }
+            }
+            ConstValue::Bin(s) => {
+                for (i, ch) in s.chars().rev().enumerate() {
+                    if i < w {
+                        bits[i] = ch == '1';
+                    }
+                }
+            }
+            ConstValue::Hex(s) => {
+                for (k, ch) in s.trim_start_matches("0x").chars().rev().enumerate() {
+                    let d = ch.to_digit(16)?;
+                    for j in 0..4 {
+                        let i = k * 4 + j;
+                        if i < w {
+                            bits[i] = (d >> j) & 1 == 1;
+                        }
+                    }
+                }
+            }
+        }
+        Some(bits)
+    }
+
+    // Per narrowed leaf: its reconstruction NID (readers are redirected to it).
+    let mut recon: std::collections::HashMap<Nid, Nid> = std::collections::HashMap::new();
+    let redirect = |o: &Operand, recon: &std::collections::HashMap<Nid, Nid>| -> Operand {
+        match recon.get(&o.nid()) {
+            Some(r) => Operand(if o.is_negated() { -*r } else { *r }),
+            None => *o,
+        }
+    };
+
+    for line in &file.lines {
+        let nid = line.nid;
+        match &line.node {
+            Node::State { symbol, .. } | Node::Input { symbol, .. }
+                if partial.contains_key(&nid) =>
+            {
+                let mask = &partial[&nid];
+                let w_full = mask.len() as u32;
+                let rs = runs(mask);
+                let w_narrow = narrow_width(&rs);
+                let ns = e.sort_for(w_narrow);
+                let node = if matches!(line.node, Node::State { .. }) {
+                    Node::State {
+                        sort: ns,
+                        symbol: symbol.clone(),
+                    }
+                } else {
+                    Node::Input {
+                        sort: ns,
+                        symbol: symbol.clone(),
+                    }
+                };
+                e.out.push(Emit::line(nid, node, Vec::new()));
+                // Reconstruction: zeros between the runs, the narrow leaf's slices inside them.
+                let mut pos = 0u32;
+                let mut off = 0u32;
+                let mut acc: Option<(Nid, u32)> = None;
+                for (lo, hi) in &rs {
+                    if *lo > pos {
+                        let z = e.zero(lo - pos);
+                        acc = e.stack(acc, z, lo - pos);
+                    }
+                    let w = hi - lo + 1;
+                    let piece = if w == w_narrow {
+                        nid
+                    } else {
+                        e.op(Op::Slice, w, vec![Operand(nid)], vec![off + w - 1, off])
+                    };
+                    acc = e.stack(acc, piece, w);
+                    off += w;
+                    pos = hi + 1;
+                }
+                if pos < w_full {
+                    let z = e.zero(w_full - pos);
+                    acc = e.stack(acc, z, w_full - pos);
+                }
+                let (r, _) = acc.expect("a partial mask has at least one run");
+                recon.insert(nid, r);
+            }
+            Node::Init { state, value, .. } if partial.contains_key(state) => {
+                let mask = &partial[state];
+                let rs = runs(mask);
+                let w_narrow = narrow_width(&rs);
+                let ns = e.sort_for(w_narrow);
+                let Some(Node::Const { value: cv, .. }) = file.lookup(value.nid()).map(|l| &l.node)
+                else {
+                    unreachable!("a non-constant init keeps the leaf whole");
+                };
+                let v = match const_bits(cv, mask.len()) {
+                    Some(bits) => {
+                        let narrow: String = mask
+                            .iter()
+                            .zip(bits.iter())
+                            .filter(|(k, _)| **k)
+                            .map(|(_, b)| if *b { '1' } else { '0' })
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                            .rev()
+                            .collect();
+                        let c = e.fresh();
+                        e.out.push(Emit::line(
+                            c,
+                            Node::Const {
+                                sort: ns,
+                                value: ConstValue::Bin(narrow),
+                            },
+                            Vec::new(),
+                        ));
+                        c
+                    }
+                    // Cannot spell the constant's bits: gather them from the constant itself.
+                    None => e.gather(value.nid(), mask.len() as u32, &rs),
+                };
+                e.out.push(Emit::line(
+                    nid,
+                    Node::Init {
+                        sort: ns,
+                        state: *state,
+                        value: Operand(v),
+                    },
+                    Vec::new(),
+                ));
+            }
+            Node::Next { state, value, .. } if partial.contains_key(state) => {
+                let mask = &partial[state];
+                let rs = runs(mask);
+                let ns = e.sort_for(narrow_width(&rs));
+                let v = redirect(value, &recon);
+                let g = e.gather(v.nid(), mask.len() as u32, &rs);
+                e.out.push(Emit::line(
+                    nid,
+                    Node::Next {
+                        sort: ns,
+                        state: *state,
+                        value: Operand(if v.is_negated() { -g } else { g }),
+                    },
+                    Vec::new(),
+                ));
+            }
+            Node::Op {
+                op,
+                sort,
+                args,
+                symbol,
+            } => e.out.push(Emit::line(
+                nid,
+                Node::Op {
+                    op: *op,
+                    sort: *sort,
+                    args: args.iter().map(|a| redirect(a, &recon)).collect(),
+                    symbol: symbol.clone(),
+                },
+                line.immediates.clone(),
+            )),
+            Node::Init { sort, state, value } => e.out.push(Emit::line(
+                nid,
+                Node::Init {
+                    sort: *sort,
+                    state: *state,
+                    value: redirect(value, &recon),
+                },
+                Vec::new(),
+            )),
+            Node::Next { sort, state, value } => e.out.push(Emit::line(
+                nid,
+                Node::Next {
+                    sort: *sort,
+                    state: *state,
+                    value: redirect(value, &recon),
+                },
+                Vec::new(),
+            )),
+            Node::Bad { signal } => e.out.push(Emit::line(
+                nid,
+                Node::Bad {
+                    signal: redirect(signal, &recon),
+                },
+                Vec::new(),
+            )),
+            Node::Constraint { signal } => e.out.push(Emit::line(
+                nid,
+                Node::Constraint {
+                    signal: redirect(signal, &recon),
+                },
+                Vec::new(),
+            )),
+            Node::Fair { signal } => e.out.push(Emit::line(
+                nid,
+                Node::Fair {
+                    signal: redirect(signal, &recon),
+                },
+                Vec::new(),
+            )),
+            Node::Output { signal, symbol } => e.out.push(Emit::line(
+                nid,
+                Node::Output {
+                    signal: redirect(signal, &recon),
+                    symbol: symbol.clone(),
+                },
+                Vec::new(),
+            )),
+            Node::Justice { signals } => e.out.push(Emit::line(
+                nid,
+                Node::Justice {
+                    signals: signals.iter().map(|s| redirect(s, &recon)).collect(),
+                },
+                Vec::new(),
+            )),
+            _ => e.out.push(line.clone()),
+        }
+    }
+    let Emit { prelude, out, .. } = e;
+    let mut lines = prelude;
+    lines.extend(out);
+    let by_nid = lines.iter().enumerate().map(|(i, l)| (l.nid, i)).collect();
+    (Btor2File { lines, by_nid }, keep)
+}
+
 /// Every NID used as an operand anywhere (Op args, next/init state+value, bad/output/
 /// constraint/fair/justice signals). A NID absent from this set is DEAD — no node reads
 /// it and it drives no property — so it cannot affect any verdict (the cone-of-influence
@@ -7363,6 +7796,114 @@ mod tests {
         assert_eq!(oh[0].nid, 3);
         assert_eq!(oh[0].width, 4);
         assert_eq!(oh[0].values, vec![1, 2], "the reachable values 0001, 0010");
+    }
+
+    /// mununu#602 — the differential switch as an OPTION, not an env var: tests run in parallel
+    /// threads and a process-global `MUNUNU_COI` would leak into every other test's cone.
+    const SIGNAL_LEVEL: crate::adapter::btor2::symbolic_bitblast::ExactSymbolicOptions =
+        crate::adapter::btor2::symbolic_bitblast::ExactSymbolicOptions {
+            antecedent_shadow_enabled: true,
+            signal_level_coi: true,
+        };
+
+    /// mununu#602 — `narrow_leaves` keeps a partially-read register's NID and symbol on a
+    /// narrow leaf, reconstructs the full width with zeros, re-targets `next` / `init` to the
+    /// kept bits, and leaves whole-kept / un-kept leaves alone. The verdict on a slice property
+    /// is identical with and without the rewrite (the signal-level cone is the oracle).
+    #[test]
+    fn x602_narrow_leaves_rewrites_a_partial_register_and_preserves_the_verdict() {
+        use crate::adapter::btor2::dep_graph::{bit_cone, bit_cone_bits};
+        use crate::adapter::btor2::symbolic_bitblast::{
+            ExactVerdict, exact_symbolic_verdict, exact_symbolic_verdict_with_options,
+        };
+        // A 16-bit counter whose upper byte is read: `hi = cnt[15:8]`; `cnt` counts by 256 from
+        // 0, so `hi` runs 0,1,2,…; the lower byte never leaves 0 and is out of the cone — but
+        // the carry chain into bit 8 makes bits [7:0] of the ADDEND matter: `cnt + 256` reads
+        // bits ≤ i for bit i, so the cone keeps cnt[15:0] through `add`. Use a shift-free
+        // design instead: two registers, one read through a slice.
+        let btor = "1 sort bitvec 16\n2 sort bitvec 8\n3 sort bitvec 1\n\
+                    4 input 1 din\n5 state 1 words\n6 zero 1\n7 init 1 5 6\n8 next 1 5 4\n\
+                    9 state 1 words_sync\n10 init 1 9 6\n11 next 1 9 5\n\
+                    12 slice 2 9 15 8 hi\n13 constd 2 7\n14 ult 3 12 13\n15 uext 3 14 0 hi_small\n";
+        let file = parser::parse(btor).unwrap();
+        let cone = bit_cone(&file, &["hi".to_string()]).unwrap();
+        assert_eq!(bit_cone_bits(&cone), 24, "din/words/words_sync × [15:8]");
+        let (narrowed, keep) = narrow_leaves(&file, &cone);
+        assert_eq!(keep, [4, 5, 9].into_iter().collect());
+        // The leaves are 8 bits wide now, under their own NIDs and names.
+        let width_of = |f: &Btor2File, nid: Nid| -> u32 {
+            match &f.lookup(nid).unwrap().node {
+                Node::State { sort, .. } | Node::Input { sort, .. } => {
+                    parser::bv_width(f, *sort).unwrap()
+                }
+                other => panic!("{other:?}"),
+            }
+        };
+        for nid in [4, 5, 9] {
+            assert_eq!(width_of(&narrowed, nid), 8, "nid {nid}");
+        }
+        assert_eq!(
+            parser::collect_symbols(&narrowed)
+                .get(&9)
+                .map(String::as_str),
+            Some("words_sync")
+        );
+        // The slice now reads a reconstruction (a concat of the narrow leaf and zeros), not
+        // the leaf itself; the reconstruction is 16 bits wide.
+        let slice = narrowed.lookup(12).unwrap();
+        let Node::Op { args, .. } = &slice.node else {
+            panic!()
+        };
+        assert_ne!(args[0].nid(), 9);
+        let Node::Op {
+            op: Op::Concat,
+            sort,
+            ..
+        } = &narrowed.lookup(args[0].nid()).unwrap().node
+        else {
+            panic!("the reader was redirected to the reconstruction")
+        };
+        assert_eq!(parser::bv_width(&narrowed, *sort), Some(16));
+        // The narrowed file is a valid BTOR2 the exact engine decides, and the verdict matches
+        // the un-narrowed (signal-level) run — on a property over the slice.
+        let f = crate::mu_calculus::parser::parse("nu X. ((hi_small != 0) && [] X)").unwrap();
+        let bit = exact_symbolic_verdict(btor, &f).expect("bit-level decides");
+        let signal = exact_symbolic_verdict_with_options(btor, &f, &SIGNAL_LEVEL);
+        assert_eq!(bit, signal.expect("signal-level decides"));
+        assert_eq!(
+            bit,
+            ExactVerdict::Violated,
+            "`din` is free, so `hi` reaches 7 and `hi_small` drops to 0"
+        );
+        // And a HOLDS: `hi_small == 1` at the (zero) initial state, reachable.
+        let f = crate::mu_calculus::parser::parse("mu X. ((hi_small == 1) || <> X)").unwrap();
+        assert_eq!(
+            exact_symbolic_verdict(btor, &f).unwrap(),
+            ExactVerdict::Holds
+        );
+    }
+
+    /// mununu#602 — the consumer's shape: a 23-word (736-bit) packed vector crossed twice, a
+    /// 32-bit field read through a constant part-select. At signal granularity the cone is
+    /// 3 × 736 = 2,208 bits and the exact engine abstains on the bit cap; at bit granularity
+    /// it is 96 bits and decides. The wall-class representative for the issue.
+    #[test]
+    fn x602_a_field_of_a_crossed_vector_decides_at_bit_granularity() {
+        use crate::adapter::btor2::symbolic_bitblast::{
+            ExactVerdict, exact_symbolic_verdict, exact_symbolic_verdict_with_options,
+        };
+        let btor = "1 sort bitvec 736\n2 input 1 rd_words\n3 state 1 words\n4 next 1 3 2\n\
+                    5 state 1 words_sync\n6 next 1 5 3\n7 sort bitvec 32\n8 sort bitvec 1\n\
+                    9 slice 7 5 159 128 word4\n10 slice 8 9 0 0 flag\n11 uext 8 10 0 flag_o\n";
+        // `AG(flag_o == 0)` is violated (din is free), `EF(flag_o == 1)` holds: both decided.
+        let f = crate::mu_calculus::parser::parse("nu X. ((flag_o == 0) && [] X)").unwrap();
+        assert_eq!(
+            exact_symbolic_verdict(btor, &f).expect("96-bit cone fits"),
+            ExactVerdict::Violated
+        );
+        let signal = exact_symbolic_verdict_with_options(btor, &f, &SIGNAL_LEVEL);
+        let err = signal.expect_err("2,208 register+input bits abstain on the cap");
+        assert!(err.contains("BIT CAP"), "{err}");
     }
 
     #[test]
