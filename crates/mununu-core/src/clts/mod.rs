@@ -1925,6 +1925,10 @@ pub struct CltsBuilder<S: IdStorage = DefaultStateIdx, L: IdStorage = DefaultLab
     // Explicit controllability classification for labels, set via `set_label_controllability`.
     /// If not set, controllability is inferred from transition kinds during build.
     label_controllability: HashMap<LabelId<L>, LabelControllability>,
+    /// mununu#592 — labels DECLARED part of the alphabet whether or not a transition uses them
+    /// (a CTXDSL `controllable { label x; }` with no `x` edge). See
+    /// [`CltsBuilder::declare_in_alphabet`].
+    declared_labels: HashSet<LabelId<L>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2315,6 +2319,18 @@ impl<S: IdStorage, L: IdStorage> CltsBuilder<S, L> {
         self
     }
 
+    /// mununu#592 — declare `label` part of this CLTS's alphabet whether or not a transition
+    /// uses it. The alphabet sets are otherwise built from the transitions, so a label an
+    /// automaton DECLARES (a CTXDSL `controllable { label x; }`) but never offers would vanish —
+    /// and under composition a partner would fire it freely, where an alphabet-based parallel
+    /// composition BLOCKS an action a member's alphabet holds and the member does not offer.
+    /// Its classification comes from [`Self::set_label_controllability`] (controllable by
+    /// default, like any other label).
+    pub fn declare_in_alphabet(&mut self, label: LabelId<L>) -> &mut Self {
+        self.declared_labels.insert(label);
+        self
+    }
+
     /// Finalises the CLTS, returning an error if the configuration is invalid.
     ///
     /// This method constructs the final CLTS instance from the builder's internal
@@ -2403,13 +2419,15 @@ impl<S: IdStorage, L: IdStorage> CltsBuilder<S, L> {
             self.label_controllability.clone();
 
         // Step 2: Build alphabet sets based on label controllability classifications
-        // Collect all labels used in transitions
+        // Collect all labels used in transitions, plus (mununu#592) the labels DECLARED in the
+        // alphabet without a transition (`declare_in_alphabet`).
         let mut all_labels: HashSet<LabelId<L>> = HashSet::new();
         for spec in &self.transitions {
             for &label_id in &spec.labels {
                 all_labels.insert(label_id);
             }
         }
+        all_labels.extend(self.declared_labels.iter().copied());
 
         let mut uncontrollable_alphabet: HashSet<LabelId<L>> = HashSet::new();
         let mut controllable_alphabet: HashSet<LabelId<L>> = HashSet::new();
@@ -2513,6 +2531,7 @@ impl<S: IdStorage, L: IdStorage> Default for CltsBuilder<S, L> {
             state_valuations: Vec::with_capacity(DEFAULT_STATE_RESERVE),
             state_3valued_predicates: None,
             label_controllability: HashMap::new(),
+            declared_labels: HashSet::new(),
         }
     }
 }

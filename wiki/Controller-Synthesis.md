@@ -21,7 +21,7 @@ The key invariant: **the controller can only restrict controllable actions.** Un
 
 ### Declaring Controllable Actions
 
-Inside an automaton block, the `controllable` section lists labels under the controller's authority. All other labels in the alphabet are implicitly uncontrollable:
+Inside an automaton block, the `controllable` section lists labels under the controller's authority. All other labels in the alphabet are implicitly uncontrollable. Two things about controllability **under composition** are load-bearing for a realizability verdict and are easy to miss (mununu#592): a label controllable here but *used* by another member of the composition composes as uncontrollable (the composition warns: `[mununu#592] …`), so keep a controllable decision and its effect in one automaton or hand the effect to the partner through a follow-up uncontrollable label; and a label declared here but used by no transition is still in this automaton's alphabet, so a partner cannot fire it on its own. Details and the worked case in [Composition — Key Gotchas](Composition#key-gotchas).
 
 ```
 automaton RobotArm {

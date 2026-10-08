@@ -1256,6 +1256,13 @@ struct VerifyArgs {
     /// declared properties; a no-op for other adapters.
     #[arg(long = "cluster-coi-floor", value_name = "FLOAT")]
     cluster_coi_floor: Option<f64>,
+    /// mununu#594 — the counterexample witness's step cap. Overrides any
+    /// `counterexample_max_steps` set in the `verify.toml`; omitted → 20.
+    /// On the safety shape `nu X. (phi && [] X)` the witness is a shortest
+    /// path to a `!phi` state and rarely needs more; elsewhere it bounds
+    /// the forward walk, and `(length-limit (truncated))` says it hit.
+    #[arg(long = "counterexample-max-steps", value_name = "N")]
+    counterexample_max_steps: Option<usize>,
 }
 
 #[derive(Args, Debug)]
@@ -2830,6 +2837,10 @@ fn handle_verify(args: VerifyArgs) -> Result<(), String> {
     if args.cluster_coi_floor.is_some() {
         config.cluster_similarity_floor = args.cluster_coi_floor;
     }
+    // mununu#594 — likewise for the counterexample step cap.
+    if args.counterexample_max_steps.is_some() {
+        config.counterexample_max_steps = args.counterexample_max_steps;
+    }
 
     let base_dir = args.base_dir.clone().unwrap_or_else(|| {
         args.config
@@ -2957,10 +2968,24 @@ fn handle_verify(args: VerifyArgs) -> Result<(), String> {
                         format!("cycle back to step {return_to_step}")
                     }
                     mununu_core::verify::report::TraceTermination::LengthLimit => {
-                        "length-limit (truncated)".to_string()
+                        format!(
+                            "length-limit (truncated at {} steps; raise with \
+                             --counterexample-max-steps)",
+                            report.counterexample_max_steps
+                        )
                     }
                 };
-                println!("        ({term})");
+                // mununu#594 — on the safety shape the witness names the `!phi` state its
+                // shortest path leads to, so a truncated trace still says where it was going.
+                match &witness.violating_state {
+                    Some(target) if witness.steps.len() < report.counterexample_max_steps => {
+                        println!("        ({term}; violating state: {target})");
+                    }
+                    Some(target) => {
+                        println!("        ({term}; leads to violating state: {target})");
+                    }
+                    None => println!("        ({term})"),
+                }
             }
         }
         if !report.safety_cube_results.is_empty() {

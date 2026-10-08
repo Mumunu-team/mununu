@@ -206,7 +206,9 @@ impl Translator {
     }
 
     fn translate_eventually(&mut self, inner: &LtlFormula) -> Result<NodeId, TranslationError> {
-        // F φ = μ X. (φ ∨ [] X)
+        // F φ = μ X. (φ ∨ <> X) — the DIAMOND (see `translate_eventually_internal`; the box
+        // form `μ X. (φ ∨ [] X)` is inevitability along every path, which `ltl F` is not —
+        // mununu#593). The LTL page documents the same.
         let inner_id = self.translate_formula(inner)?;
         self.translate_eventually_internal(inner_id)
     }
