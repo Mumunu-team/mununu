@@ -4468,14 +4468,23 @@ pub struct ExactSymbolicOptions {
     /// caller can differentially verify the shadow-synth verdict against the
     /// refusal path or reproduce pre-mununu#476 behaviour.
     pub antecedent_shadow_enabled: bool,
+    /// mununu#602 — use the whole-register (signal-level) cone of influence instead of the
+    /// bit-level default. The differential switch; the default reads `MUNUNU_COI=signal`.
+    pub signal_level_coi: bool,
 }
 
 impl Default for ExactSymbolicOptions {
     fn default() -> Self {
         Self {
             antecedent_shadow_enabled: true,
+            signal_level_coi: signal_level_coi_from_env(),
         }
     }
+}
+
+/// mununu#602 — `MUNUNU_COI=signal` selects the whole-register cone (the pre-#602 granularity).
+pub(crate) fn signal_level_coi_from_env() -> bool {
+    std::env::var("MUNUNU_COI").is_ok_and(|v| v.eq_ignore_ascii_case("signal"))
 }
 
 /// Opts-accepting variant of [`exact_symbolic_verdict`]. Same semantics; the
@@ -4863,6 +4872,15 @@ fn verdict_with_witness_catching(
     })
 }
 
+/// mununu#602 — the signal-level keep-set, recomputed on a (possibly rewritten) file.
+fn keep_set_signal_level(
+    file: &crate::adapter::btor2::ast::Btor2File,
+    seed_atoms: &[String],
+) -> Option<std::collections::HashSet<Nid>> {
+    (!seed_atoms.is_empty())
+        .then(|| crate::adapter::btor2::dep_graph::cone_leaf_nids(file, seed_atoms))
+}
+
 fn exact_symbolic_verdict_with_witness_inner(
     btor2_content: &str,
     formula: &Formula,
@@ -5156,6 +5174,32 @@ fn exact_symbolic_verdict_with_witness_inner(
         }
     }
 
+    // mununu#602 — the cone at BIT granularity. Where the signal-level cone keeps a whole
+    // register because one slice of it is read, the bit cone keeps the slice; `narrow_leaves`
+    // rewrites every partially-kept leaf to its kept bits (NID- and symbol-preserving, so the
+    // atoms, the init lines and a `controllable` match are untouched) and the keep-set becomes
+    // the leaves with at least one kept bit. Sound by the bit cone's closure under `next`
+    // (`dep_graph::bit_cone`); `MUNUNU_COI=signal` keeps the old granularity for a differential
+    // run. A cone that reaches an array stays signal-level (the memory havoc above applies).
+    let (file, keep_set) = match (opts.signal_level_coi, keep_set) {
+        (false, Some(_)) => match crate::adapter::btor2::dep_graph::bit_cone(&file, &seed_atoms) {
+            Some(cone) => {
+                let (narrowed, keep) =
+                    crate::adapter::btor2::bit_blast::narrow_leaves(&file, &cone);
+                tracing::debug!(
+                    signal_bits = crate::adapter::btor2::dep_graph::bit_cone_bits(&cone),
+                    kept_leaves = keep.len(),
+                    "exact MC: bit-level cone"
+                );
+                (narrowed, Some(keep))
+            }
+            None => {
+                let keep = keep_set_signal_level(&file, &seed_atoms);
+                (file, keep)
+            }
+        },
+        (_, keep) => (file, keep),
+    };
     let bb = BddBitBlaster::build_with_keep(&file, keep_set.as_ref())?;
     let exact = if controllable.is_empty() {
         bb.exact_model()
@@ -11329,6 +11373,7 @@ mod tests {
             &formula,
             &ExactSymbolicOptions {
                 antecedent_shadow_enabled: false,
+                ..Default::default()
             },
         )
         .expect_err("opt-out must revert to the Phase A transitive-fan-in refusal");

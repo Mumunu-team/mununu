@@ -100,6 +100,15 @@ impl<'m> ModelFacts<'m> {
         if seed_atoms.is_empty() {
             return self.total_bits();
         }
+        // mununu#602 — the engine's cone is BIT-level where it can be (a slice of a register
+        // keeps the slice); the diagnostic must count what the engine bit-blasts, or it would
+        // tell a consumer a property is over the cap that the engine just decided. Signal
+        // granularity remains for a cone that reaches an array, as in the engine.
+        if !crate::adapter::btor2::symbolic_bitblast::signal_level_coi_from_env()
+            && let Some(cone) = crate::adapter::btor2::dep_graph::bit_cone(self.model, seed_atoms)
+        {
+            return Some(crate::adapter::btor2::dep_graph::bit_cone_bits(&cone));
+        }
         let cone = cone_leaf_nids(self.model, seed_atoms);
         Some(
             self.leaf_cells()?
@@ -348,10 +357,31 @@ mod tests {
             "an unanalysable model must report UNKNOWN width, never 0 — a 0 reads as \
              \"fits every cap\" to every downstream check"
         );
+        // mununu#602 — a cone that provably never reaches the array HAS a width: the bit cone
+        // of `cnt` is its 4 bits, which is a measured width, not the fabricated 0 this test
+        // guards against. A cone that reads the array still has none.
         assert_eq!(
-            facts.cone_vs_cap(&["cnt".to_string()]),
+            facts.cone_vs_cap(&["cnt".to_string()]).map(|(w, _)| w),
+            Some(4),
+            "the bit cone of `cnt` excludes the memory, so its width is known"
+        );
+        const READS_MEMORY: &str = "\
+1 sort bitvec 4
+2 sort bitvec 8
+3 sort array 1 2
+4 state 1 cnt
+5 one 1
+6 add 1 4 5
+7 next 1 4 6
+8 state 3 mem
+9 read 2 8 4 val
+";
+        let file = crate::adapter::btor2::parser::parse(READS_MEMORY).expect("parses");
+        let facts = ModelFacts::new(&file);
+        assert_eq!(
+            facts.cone_vs_cap(&["val".to_string()]),
             None,
-            "and no cap comparison may be offered for a width that was never established"
+            "no cap comparison may be offered for a width that was never established"
         );
     }
 
