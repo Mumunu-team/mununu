@@ -149,6 +149,18 @@ pub struct PropertyVerdict {
     /// for the trace shape.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub counterexample: Option<TraceWitness>,
+    /// mununu#595 — the `[[assumptions]]` this verdict is CONDITIONAL on (by name). Empty for
+    /// an unconditional property. A non-empty list means `satisfied` reads "holds under these
+    /// assumptions", never a bare "holds".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assumptions: Vec<String>,
+    /// mununu#595 — the non-vacuity gate for a conditional verdict: does a fair path (one
+    /// satisfying every assumption infinitely often) exist from EVERY initial state?
+    /// `Some(false)` means the assumptions are unsatisfiable on this model and the property is
+    /// VACUOUS — `satisfied` is then true for no reason, and the CLI / UI say so instead of
+    /// SATISFIED. `None` for an unconditional property.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fair_path_exists: Option<bool>,
 }
 
 /// A short witness path from a violating initial state to either a

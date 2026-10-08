@@ -145,7 +145,43 @@ over = "System"
 name = "init_reachable"
 formula = "mu X. (Init || <> X)"
 over = "System"
+
+# mununu#595 — an environment assumption, and a property verified UNDER it
+[[assumptions]]
+name = "periph_acks"
+kind = "edge"            # "state" | "edge" | "edges" | "weak"
+atom = "ack"             # a label (edge / weak) or a state predicate (state); `labels = [...]` for edges
+
+[[properties]]
+name = "tx_completes"
+template = "fair_response"
+args = { TRIGGER = "fw.Transmitting", RESPONSE = "fw.Idle" }
+assumptions = ["periph_acks"]
 ```
+
+### Environment assumptions — fairness on the verify path (mununu#595)
+
+> **Source of truth:** [`verify::config::AssumptionSection`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/verify/config.rs) + [`verify::fairness`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/verify/fairness.rs) — surface: CLI+API+UI.
+
+A liveness property on a hand-written composition is almost always violated trivially: an environment that may stay silent, fault, or crash forever violates every `AF`. `[[assumptions]]` declares what the environment is assumed to do **infinitely often**, and a property verified `under` them is checked on the **fair paths** only — the ones that satisfy every listed assumption — with the classic fair-`EG` encoding (Emerson–Lei; Clarke–Grumberg–Peled §6.4) generated for you:
+
+| `kind` | field | means | encoding conjunct `C(Z, q)` |
+|---|---|---|---|
+| `state` | `atom = "P"` | `GF P` — the predicate holds infinitely often | `<> mu Y. ((Z && P) \|\| (q && <> Y))` |
+| `edge` | `atom = "l"` | `GF <l>` — a transition on `l` is taken infinitely often | `mu Y. (<labels={l}> Z \|\| <> (q && Y))` |
+| `edges` | `labels = [...]` | any one of the labels, infinitely often | `mu Y. (<labels={l₁}> Z \|\| … \|\| <> (q && Y))` |
+| `weak` | `atom = "l"` | weak fairness of `l`: taken infinitely often **or** disabled infinitely often | `mu Y. (<labels={l}> Z \|\| <> (Z && !<labels={l}> true) \|\| <> (q && Y))` |
+
+with `E_C G q = nu Z. (q && ⋀ C(Z, q))`, `A_C F p = !E_C G !p`, and the two templates that take assumptions:
+
+| template | args | formula |
+|---|---|---|
+| `fair_response` | `TRIGGER`, `RESPONSE` | `AG(TRIGGER -> A_C F RESPONSE)` — every trigger is followed by the response on every fair path |
+| `fair_always_eventually` | `TARGET` | `AG(A_C F TARGET)` — from every reachable state, every fair path reaches the target |
+
+**Conditional verdicts, never a bare `holds`.** A property with `assumptions` reports `assumptions` (the names) and `fair_path_exists`, the **non-vacuity gate** `E_C G true` evaluated at the initial states: an assumption no path can satisfy (an edge that fires at most once, say) makes `A_C F p` true for nothing. The CLI prints `SATISFIED under {…}` / `VIOLATED under {…}`, or **`VACUOUS under {…}`** when the gate fails — and `--strict` fails on a vacuous verdict too.
+
+**Rules.** Only `fair_response` and `fair_always_eventually` take `assumptions`, and they require at least one (with none they are `response` / `always_eventually`; the validator says so). An inline `formula` encodes its own fairness — the conjuncts above are plain mu-calculus. Note the quantifier: `always_eventually` is `AG EF` (the existential reading this tool uses for `F`, see [LTL Properties](LTL-Properties.md)), while `fair_always_eventually` is `AG A_C F` — universal over the fair paths — which is what "under a fair environment the system keeps recovering" means.
 
 ### Safety-cube pass (`[project] safety_cube`)
 
@@ -210,6 +246,8 @@ pub struct PropertyVerdict {
     pub refinement_trace: Option<RefinementTrace>, // populated when CEGAR ran (post-R.5)
     pub counterexample: Option<TraceWitness>,  // for a violated property: initial state, steps, termination,
                                                // and on the safety shape the `violating_state` it leads to
+    pub assumptions: Vec<String>,              // mununu#595 — the [[assumptions]] this verdict is conditional on (empty = unconditional)
+    pub fair_path_exists: Option<bool>,        // mununu#595 — the non-vacuity gate; Some(false) = VACUOUS (assumptions admit no fair path)
 }
 
 pub enum KleeneVerdict { KleeneT, KleeneF, KleeneBot }

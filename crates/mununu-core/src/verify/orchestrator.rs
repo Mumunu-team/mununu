@@ -244,8 +244,15 @@ pub fn verify_project(config: &VerifyConfig, base_dir: &Path) -> Result<VerifyRe
     let mut resolved_properties: Vec<ResolvedProperty> =
         Vec::with_capacity(config.properties.len());
     let mut property_formula_sources: Vec<PropertyFormulaSource> = Vec::new();
+    // mununu#595 — a conditional property (a fairness template under `assumptions`) is
+    // evaluated together with its NON-VACUITY GATE, `E_C G true` over the same target: an
+    // assumption no path can satisfy makes every guarantee hold for nothing. The gate rides
+    // along as one more assembled formula (named after the property, never reported on its
+    // own) and is folded into the property's verdict as `fair_path_exists`.
+    let mut gate_probes: Vec<ResolvedProperty> = Vec::new();
+    let mut property_assumptions: Vec<Vec<String>> = Vec::new();
     for p in &config.properties {
-        let (formula_text, source) = resolve_property_formula(p, &template_registry)?;
+        let (formula_text, source) = resolve_property_formula(p, &template_registry, config)?;
         // R46-3 — when per-cluster verification fired (R46-2), route this
         // property to its cluster's reduced automaton; otherwise fall back
         // to the manifest's `over` (or the composition default).
@@ -253,6 +260,15 @@ pub fn verify_project(config: &VerifyConfig, base_dir: &Path) -> Result<VerifyRe
             .get(&p.name)
             .cloned()
             .unwrap_or_else(|| config.resolve_over(p));
+        if !p.assumptions.is_empty() {
+            let assumptions = assumptions_for(p, config);
+            gate_probes.push(ResolvedProperty {
+                name: fair_gate_name(&p.name),
+                formula: crate::verify::fairness::fair_path_exists(&assumptions),
+                over: over.clone(),
+            });
+        }
+        property_assumptions.push(p.assumptions.clone());
         resolved_properties.push(ResolvedProperty {
             name: p.name.clone(),
             formula: formula_text,
@@ -260,13 +276,18 @@ pub fn verify_project(config: &VerifyConfig, base_dir: &Path) -> Result<VerifyRe
         });
         property_formula_sources.push(source);
     }
+    let assembled_properties: Vec<ResolvedProperty> = resolved_properties
+        .iter()
+        .cloned()
+        .chain(gate_probes.iter().cloned())
+        .collect();
 
     // 6. Assemble the unified CTXDSL document.
     let assembled = assemble_unified_ctxdsl(
         &config.project.name,
         &source_ctxdsls,
         &composition,
-        &resolved_properties,
+        &assembled_properties,
         &AutomatonDiscovery::FirstAutomaton,
     )
     .map_err(VerifyError::Assemble)?;
@@ -329,7 +350,7 @@ pub fn verify_project(config: &VerifyConfig, base_dir: &Path) -> Result<VerifyRe
     let max_steps = counterexample_max_steps(config);
     let mut property_verdicts: Vec<PropertyVerdict> = Vec::with_capacity(resolved_properties.len());
     for (idx, p) in resolved_properties.iter().enumerate() {
-        let verdict = evaluate_one_property(
+        let mut verdict = evaluate_one_property(
             &realized,
             &p.name,
             &p.over,
@@ -337,6 +358,24 @@ pub fn verify_project(config: &VerifyConfig, base_dir: &Path) -> Result<VerifyRe
             &p.formula,
             max_steps,
         )?;
+        // mununu#595 — a conditional verdict carries its assumptions and its gate.
+        if !property_assumptions[idx].is_empty() {
+            let gate_name = fair_gate_name(&p.name);
+            let gate = gate_probes
+                .iter()
+                .find(|g| g.name == gate_name)
+                .expect("a conditional property has its gate probe");
+            let gate_verdict = evaluate_one_property(
+                &realized,
+                &gate.name,
+                &gate.over,
+                PropertyFormulaSource::Inline,
+                &gate.formula,
+                0,
+            )?;
+            verdict.assumptions = property_assumptions[idx].clone();
+            verdict.fair_path_exists = Some(gate_verdict.satisfied);
+        }
         property_verdicts.push(verdict);
     }
 
@@ -1463,7 +1502,7 @@ fn harvest_property_seeds(config: &VerifyConfig) -> Vec<(String, Vec<String>)> {
         .properties
         .iter()
         .filter_map(|p| {
-            let (formula_text, _src) = resolve_property_formula(p, &registry).ok()?;
+            let (formula_text, _src) = resolve_property_formula(p, &registry, config).ok()?;
             let formula = crate::mu_calculus::parser::parse(&formula_text).ok()?;
             let atoms = crate::adapter::partition::coi::property_seed_atoms(&formula);
             Some((p.name.clone(), atoms.into_iter().collect()))
@@ -1471,10 +1510,64 @@ fn harvest_property_seeds(config: &VerifyConfig) -> Vec<(String, Vec<String>)> {
         .collect()
 }
 
+/// mununu#595 — the assembled name of a conditional property's non-vacuity gate.
+fn fair_gate_name(property: &str) -> String {
+    format!("{property}__fair_path")
+}
+
+/// mununu#595 — the encoder's view of a property's declared assumptions, in declaration order.
+/// The validator has already checked every name resolves and every entry is well-formed.
+fn assumptions_for(
+    p: &PropertySection,
+    config: &VerifyConfig,
+) -> Vec<crate::verify::fairness::Assumption> {
+    p.assumptions
+        .iter()
+        .filter_map(|name| {
+            config
+                .assumptions
+                .iter()
+                .find(|a| &a.name == name)
+                .and_then(|a| a.to_assumption())
+        })
+        .collect()
+}
+
 fn resolve_property_formula(
     p: &PropertySection,
     registry: &TemplateRegistry,
+    config: &VerifyConfig,
 ) -> Result<(String, PropertyFormulaSource), VerifyError> {
+    // mununu#595 — the fairness templates are expanded HERE, not by the registry: their body
+    // depends on how many assumptions the property declares (one conjunct each), which a
+    // `${PARAM}` pattern cannot express. The catalogue entry documents the zero-assumption
+    // instance; the validator refuses that spelling on this path.
+    if let Some(template_id) = p.template.as_deref()
+        && crate::verify::config::FAIR_TEMPLATES.contains(&template_id)
+    {
+        use crate::verify::fairness::{fair_always_eventually, fair_response};
+        let assumptions = assumptions_for(p, config);
+        let arg = |k: &str| -> Result<String, VerifyError> {
+            p.args
+                .get(k)
+                .cloned()
+                .ok_or_else(|| VerifyError::TemplateInstantiationFailed {
+                    property: p.name.clone(),
+                    message: format!("template `{template_id}` requires argument `{k}`"),
+                })
+        };
+        let formula = match template_id {
+            "fair_response" => fair_response(&arg("TRIGGER")?, &arg("RESPONSE")?, &assumptions),
+            _ => fair_always_eventually(&arg("TARGET")?, &assumptions),
+        };
+        return Ok((
+            formula,
+            PropertyFormulaSource::Template {
+                id: template_id.to_string(),
+                args: p.args.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            },
+        ));
+    }
     if let Some(template_id) = &p.template {
         let tref = TemplateRef {
             template: template_id.clone(),
@@ -1670,6 +1763,8 @@ fn evaluate_one_property(
         initial_satisfying,
         initial_verdict_summary,
         counterexample,
+        assumptions: Vec::new(),
+        fair_path_exists: None,
     })
 }
 
@@ -2429,6 +2524,114 @@ over = "Sys"
         );
         assert!(w.steps.last().unwrap().successor_state.contains("Bad"));
         assert!(matches!(w.termination, TraceTermination::Sink));
+    }
+
+    /// mununu#595 — environment assumptions on the verify path. The issue's sanity model as a
+    /// source: `M` may idle forever (`wait`), cycle `S0-b-S1-c-S0`, or `go` to `Goal`. Without an
+    /// assumption `AF Goal` is trivially violated; under the declared ones the verdict is
+    /// CONDITIONAL and comes with its non-vacuity gate, which catches the assumption no path can
+    /// satisfy (`GF go`: `go` fires at most once).
+    #[test]
+    fn x595_a_property_under_assumptions_is_conditional_and_gated() {
+        const M: &str = "context Fair { automata { automaton M { controllable { } states { state S0 initial; state S1; state Goal; } transitions { transition S0 -> S0 on label wait; transition S0 -> Goal on label go; transition S0 -> S1 on label b; transition S1 -> S0 on label c; transition Goal -> Goal on label g; } } } }";
+        let temp = tempdir().unwrap();
+        let _ = write_ctxdsl_source(temp.path(), "m.ctxdsl", M);
+        let toml_src = r#"
+[project]
+name = "Fair"
+[[sources]]
+id = "m"
+adapter = "ctxdsl"
+files = ["m.ctxdsl"]
+[alphabet]
+strategy = "direct"
+[composition]
+semantics = "asynchronous"
+members = ["m"]
+name = "Sys"
+[[assumptions]]
+name = "env_takes_go"
+kind = "edge"
+atom = "go"
+[[assumptions]]
+name = "env_takes_b"
+kind = "edge"
+atom = "b"
+[[assumptions]]
+name = "go_weakly_fair"
+kind = "weak"
+atom = "go"
+[[properties]]
+name = "plain"
+template = "always_eventually"
+args = { TARGET = "Goal" }
+[[properties]]
+name = "under_go"
+template = "fair_always_eventually"
+args = { TARGET = "Goal" }
+assumptions = ["env_takes_go"]
+[[properties]]
+name = "under_b"
+template = "fair_always_eventually"
+args = { TARGET = "Goal" }
+assumptions = ["env_takes_b"]
+[[properties]]
+name = "resp_under_weak_go"
+template = "fair_response"
+args = { TRIGGER = "S0", RESPONSE = "Goal" }
+assumptions = ["go_weakly_fair"]
+"#;
+        let config = VerifyConfig::from_toml(toml_src).unwrap();
+        assert!(config.validate().is_empty(), "{:?}", config.validate());
+        let report = verify_project(&config, temp.path()).expect("verify runs");
+        let by = |n: &str| {
+            report
+                .property_verdicts
+                .iter()
+                .find(|v| v.name == n)
+                .unwrap_or_else(|| panic!("{n} in {:?}", report.property_verdicts))
+        };
+        // No gate probe leaks into the report as a property of its own.
+        assert_eq!(report.property_verdicts.len(), 4);
+        assert!(
+            !report
+                .property_verdicts
+                .iter()
+                .any(|v| v.name.ends_with("__fair_path")),
+            "the gate is folded into its property, not reported"
+        );
+        // Unconditional: `always_eventually` is AG EF, and Goal IS reachable from everywhere but
+        // Goal is a sink, so … it holds; the point of the fixture is the conditional ones.
+        let plain = by("plain");
+        assert!(plain.assumptions.is_empty() && plain.fair_path_exists.is_none());
+        // `GF go` is unsatisfiable: the property holds for nothing, and the gate says so.
+        let under_go = by("under_go");
+        assert_eq!(under_go.assumptions, vec!["env_takes_go".to_string()]);
+        assert!(under_go.satisfied, "A_C F Goal is vacuously true");
+        assert_eq!(
+            under_go.fair_path_exists,
+            Some(false),
+            "no fair path — VACUOUS"
+        );
+        assert!(
+            under_go.formula.contains("labels = { go }"),
+            "the body is the fair-EG encoding: {}",
+            under_go.formula
+        );
+        // `GF b` is satisfiable and the fair cycle avoids Goal: a GENUINE violation.
+        let under_b = by("under_b");
+        assert!(!under_b.satisfied);
+        assert_eq!(under_b.fair_path_exists, Some(true));
+        // Weak fairness of `go` on M: the cycle disables `go` at S1 infinitely often, so a weakly
+        // fair path avoids Goal — violated, non-vacuously.
+        let resp = by("resp_under_weak_go");
+        assert!(!resp.satisfied);
+        assert_eq!(resp.fair_path_exists, Some(true));
+        assert!(
+            matches!(&resp.formula_source, PropertyFormulaSource::Template { id, .. } if id == "fair_response"),
+            "sourced from the fair template: {:?}",
+            resp.formula_source
+        );
     }
 
     /// mununu#591 — a parameterised automaton as a `verify` source. The composition's members
