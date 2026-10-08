@@ -1350,8 +1350,15 @@ fn apply_sampled_must_inference(
                 .filter(|(src, _)| !infeasible_sources.contains(src))
                 .flat_map(|(src, targets)| targets.iter().map(move |&t| (src, t)))
                 .collect();
+            let t_singletons = Instant::now();
             let singleton_musts = sts.must_edges_over(predicates, &singleton_candidates, 5_000);
             let sharp = singleton_musts.len();
+            tracing::debug!(
+                candidates = singleton_candidates.len(),
+                promoted = sharp,
+                elapsed_ms = t_singletons.elapsed().as_millis(),
+                "must pass: ∀∃ singletons"
+            );
             let mut promoted_srcs: std::collections::HashSet<usize> =
                 std::collections::HashSet::new();
             for &(src_idx, tgt_idx) in &singleton_musts {
@@ -1377,8 +1384,20 @@ fn apply_sampled_must_inference(
                 })
                 .flat_map(|(src, targets)| targets.iter().map(move |&t| (src, t)))
                 .collect();
+            let t_hyper = Instant::now();
             let hyper_edges = sts.hyper_must_edges(predicates, &hyper_may, 5_000);
             let hyper = hyper_edges.len();
+            tracing::debug!(
+                sources = hyper_may
+                    .iter()
+                    .map(|(s, _)| *s)
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len(),
+                may_edges = hyper_may.len(),
+                emitted = hyper,
+                elapsed_ms = t_hyper.elapsed().as_millis(),
+                "must pass: full-set hyper"
+            );
             for (src_idx, targets) in &hyper_edges {
                 let target_ids: smallvec::SmallVec<[crate::clts::StateId<DefaultStateIdx>; 4]> =
                     targets.iter().map(|&i| state_ids[i]).collect();
@@ -2391,66 +2410,80 @@ pub fn predicate_cube_lift(
             lift_opts.must_edge_inference,
             MustEdgeInference::SmtHyperMust
         ) && (!lift_opts.may_postimage || predicates.len() < 2);
-        let (may_edges, precomputed_hyper): (
-            Vec<(usize, usize)>,
-            Option<crate::adapter::sts_ir::HyperMustEdges>,
-        ) = if use_session_may_hyper {
-            let (may, hyper) = sts.may_and_hyper_must_edges(&cube_preds, 5_000);
-            (may, Some(hyper))
-        } else if lift_opts.may_postimage && predicates.len() >= 2 {
-            // mununu#504 — THREE outcomes, and conflating two of them is the trap `MayPostimage`
-            // exists to prevent. `NotApplicable` falls back to the all-pairs seam;
-            // `BudgetExceeded` must NOT, because that seam is O(2^2|P|) — strictly slower than
-            // the post-image we just abandoned for lack of time.
-            // A4 — reachable-only: the worklist BFS lifts the cells the initial cubes reach;
-            // the map's missing sources are the unreached cells, recorded on the result.
-            let roots = lift_opts.reachable_only.then(|| {
-                reachable_lift_roots(
+        // `precomputed_hyper` carries the hyper-must edges and where they came from (the
+        // text the composition's warning reports): z3 in the session scope, or the exact
+        // post-image may-map.
+        let (may_edges, precomputed_hyper): (Vec<(usize, usize)>, Option<PrecomputedHyper>) =
+            if use_session_may_hyper {
+                let (may, hyper) = sts.may_and_hyper_must_edges(&cube_preds, 5_000);
+                (may, Some((hyper, "Z3-proved ∀∃ hyper-must")))
+            } else if lift_opts.may_postimage && predicates.len() >= 2 {
+                // mununu#504 — THREE outcomes, and conflating two of them is the trap `MayPostimage`
+                // exists to prevent. `NotApplicable` falls back to the all-pairs seam;
+                // `BudgetExceeded` must NOT, because that seam is O(2^2|P|) — strictly slower than
+                // the post-image we just abandoned for lack of time.
+                // A4 — reachable-only: the worklist BFS lifts the cells the initial cubes reach;
+                // the map's missing sources are the unreached cells, recorded on the result.
+                let roots = lift_opts.reachable_only.then(|| {
+                    reachable_lift_roots(
+                        &predicates,
+                        &lift_opts.compound_exprs,
+                        &lift_opts.config_values,
+                        &file,
+                    )
+                });
+                match compute_all_may_edges_postimage(
+                    &file,
                     &predicates,
                     &lift_opts.compound_exprs,
-                    &lift_opts.config_values,
-                    &file,
-                )
-            });
-            match compute_all_may_edges_postimage(
-                &file,
-                &predicates,
-                &lift_opts.compound_exprs,
-                crate::adapter::btor2::smt_must_edge::cube_smt_rlimit(),
-                roots.as_deref(),
-            ) {
-                MayPostimage::Complete(map) => {
-                    if roots.is_some() {
-                        unreached_cells = (0..(1usize << predicates.len()))
-                            .filter(|c| !map.contains_key(c))
+                    crate::adapter::btor2::smt_must_edge::cube_smt_rlimit(),
+                    roots.as_deref(),
+                ) {
+                    MayPostimage::Complete(map) => {
+                        if roots.is_some() {
+                            unreached_cells = (0..(1usize << predicates.len()))
+                                .filter(|c| !map.contains_key(c))
+                                .collect();
+                        }
+                        // The hyper-must over an EXACT may-successor set is a theorem (see
+                        // `hyper_must_from_exact_may`), so the must arm below takes it from
+                        // here instead of asking z3 to prove it once per cube.
+                        let hyper = matches!(
+                        lift_opts.must_edge_inference,
+                        MustEdgeInference::SmtHyperMust
+                    )
+                    .then(|| {
+                        (
+                            hyper_must_from_exact_may(&map),
+                            "∀∃ hyper-must by totality on the exact post-image may-successor set, no solver",
+                        )
+                    });
+                        let mut pairs: Vec<(usize, usize)> = map
+                            .into_iter()
+                            .flat_map(|(src, tgts)| tgts.into_iter().map(move |t| (src, t)))
                             .collect();
+                        pairs.sort_unstable();
+                        (pairs, hyper)
                     }
-                    let mut pairs: Vec<(usize, usize)> = map
-                        .into_iter()
-                        .flat_map(|(src, tgts)| tgts.into_iter().map(move |t| (src, t)))
-                        .collect();
-                    pairs.sort_unstable();
-                    (pairs, None)
-                }
-                MayPostimage::NotApplicable => (sts.may_edges(&cube_preds, 5_000), None),
-                MayPostimage::BudgetExceeded => {
-                    return Err(AdapterError {
-                        kind: crate::adapter::AdapterErrorKind::ResourceBudgetExceeded,
-                        location: None,
-                        message: format!(
-                            "adapter/btor2/predicate_cube_lift: the wall-clock budget expired \
+                    MayPostimage::NotApplicable => (sts.may_edges(&cube_preds, 5_000), None),
+                    MayPostimage::BudgetExceeded => {
+                        return Err(AdapterError {
+                            kind: crate::adapter::AdapterErrorKind::ResourceBudgetExceeded,
+                            location: None,
+                            message: format!(
+                                "adapter/btor2/predicate_cube_lift: the wall-clock budget expired \
                              while computing the may-relation over {} cubes. Raise or clear {} / \
                              {}, or narrow the property's cone.",
-                            1usize << predicates.len(),
-                            crate::adapter::run_budget::PROPERTY_BUDGET_ENV,
-                            crate::adapter::run_budget::RUN_BUDGET_ENV,
-                        ),
-                    });
+                                1usize << predicates.len(),
+                                crate::adapter::run_budget::PROPERTY_BUDGET_ENV,
+                                crate::adapter::run_budget::RUN_BUDGET_ENV,
+                            ),
+                        });
+                    }
                 }
-            }
-        } else {
-            (sts.may_edges(&cube_preds, 5_000), None)
-        };
+            } else {
+                (sts.may_edges(&cube_preds, 5_000), None)
+            };
         // Emit MayOnly edges. Keep `may_edges` (borrow) — the SmtHyperMust
         // branch below reuses it as the per-source candidate target set.
         for &(i, j) in &may_edges {
@@ -2499,9 +2532,15 @@ pub fn predicate_cube_lift(
                     // proves `∀ s ⊨ src. ∃ input ∃ t ∈ T. reach(t)` and emits
                     // a `MustHyperOnly(T)` edge only on a definite Must.
                     // Phase 0.c — reuse the hyper-must computed in the same z3 scope as
-                    // `may` when the session path was taken; else compute it standalone.
-                    let hyper = precomputed_hyper
-                        .unwrap_or_else(|| sts.hyper_must_edges(&cube_preds, &may_edges, 5_000));
+                    // `may` when the session path was taken, or the one read off the exact
+                    // post-image may-map (`hyper_must_from_exact_may`); z3 proves it only on
+                    // the all-pairs fallback, whose may-set can be incomplete.
+                    let (hyper, how) = precomputed_hyper.unwrap_or_else(|| {
+                        (
+                            sts.hyper_must_edges(&cube_preds, &may_edges, 5_000),
+                            "Z3-proved ∀∃ hyper-must",
+                        )
+                    });
                     let emitted = hyper.len();
                     for (src, targets) in hyper {
                         let target_ids: smallvec::SmallVec<
@@ -2521,7 +2560,7 @@ pub fn predicate_cube_lift(
                         warnings.push(crate::adapter::AdapterWarning {
                             kind: crate::adapter::WarningKind::ApproximateTranslation,
                             message: format!(
-                                "[B.2 may+hyper-must] predicate_cube_lift: SmtAllPairs may + SmtHyperMust composition emitted {emitted} MustHyperOnly edge(s) over per-source may-successor sets (Z3-proved ∀∃ hyper-must; monotone under refinement per Shoham–Grumberg LMCS 2007). Compound/νμ verdicts over this KMTS are clean-sound (no standard-KMTS non-monotonicity tag). Hyper-must targets = full may-successor set (MVP doesn't minimize T)."
+                                "[B.2 may+hyper-must] predicate_cube_lift: SmtAllPairs may + SmtHyperMust composition emitted {emitted} MustHyperOnly edge(s) over per-source may-successor sets ({how}; monotone under refinement per Shoham–Grumberg LMCS 2007). Compound/νμ verdicts over this KMTS are clean-sound (no standard-KMTS non-monotonicity tag). Hyper-must targets = full may-successor set (MVP doesn't minimize T)."
                             ),
                             location: None,
                         });
@@ -3143,6 +3182,48 @@ fn parse_postimage_backend(raw: Option<&str>) -> PostimageBackend {
 /// off it; what remains of the lift (~6.9 s) is the hyper-must pass, which is the wall now. A
 /// cone the bit-blaster refuses (the cap, a memory) takes the SMT loop as before.
 const POSTIMAGE_BACKEND_DEFAULT: PostimageBackend = PostimageBackend::Bdd;
+
+/// Hyper-must edges computed ahead of the must arm, with where they came from (the text the
+/// composition's warning reports).
+type PrecomputedHyper = (crate::adapter::sts_ir::HyperMustEdges, &'static str);
+
+/// The full-set hyper-must edges of an EXACT post-image may-map, without a solver.
+///
+/// The `SmtHyperMust` composition emits, per source cube `c`, one `MustHyperOnly(T)` edge with
+/// `T` = the may-successor set of `c`, after z3 proves `∀x∈c ∃i. next(x,i) ∈ ∪T`
+/// (`smt_hyper_must_check_uniform`: `c(x) ∧ ∀i. ¬⋁_{t∈T} t(next(x,i))` unsatisfiable). When `T`
+/// is the EXACT set of successor cubes — every cube some `next(x,i)` with `x ∈ c` lands in —
+/// that formula is unsatisfiable by construction: `next` is total (a BTOR2 next function, no
+/// `constraint` on either side of this relation), so every `next(x,i)` lands in some cube, and
+/// that cube is in `T` by the definition of "may". The query is a theorem per cube, and z3's
+/// only non-`Must` answer to it is a timeout.
+///
+/// The post-image map is exact in both backends: the BDD relation by construction, and the SMT
+/// all-SAT loop because an inconclusive enumeration SATURATES its targets to every cube (which
+/// only widens `∪T`). A cube with no entry (unreached under A4) or no targets (infeasible) gets
+/// no edge, exactly as the solver path gave it none (`target_bits_set.is_empty()` → not must).
+/// The all-pairs fallback (`sts.may_edges`, per-pair checks that can miss an edge on a timeout)
+/// and the sampling path keep the solver: their `T` can be a strict subset, and then the
+/// question is real.
+///
+/// Measured on the i2c lift at |P| = 10: the solver pass was ~6.9 s of a 7.6 s lift, proving
+/// 160 theorems; this is a map traversal.
+fn hyper_must_from_exact_may(
+    map: &std::collections::HashMap<usize, Vec<usize>>,
+) -> crate::adapter::sts_ir::HyperMustEdges {
+    let mut edges: Vec<(usize, Vec<usize>)> = map
+        .iter()
+        .filter(|(_, targets)| !targets.is_empty())
+        .map(|(&src, targets)| {
+            let mut t = targets.clone();
+            t.sort_unstable();
+            t.dedup();
+            (src, t)
+        })
+        .collect();
+    edges.sort_unstable();
+    edges
+}
 
 /// The post-image may-relation by the configured backend. The BDD backend answers only when it
 /// can (a `None` is "not for this cone", never a verdict); the SMT path decides the rest and is
@@ -3884,6 +3965,89 @@ mod tests {
                     sorted(bdd),
                     sorted(smt),
                     "{label} (roots: {}): the BDD backend's may-relation differs from the SMT post-image's",
+                    if roots.is_some() {
+                        "reachable-only"
+                    } else {
+                        "all cells"
+                    }
+                );
+            }
+        }
+    }
+
+    /// The hyper-must read off an exact may-map IS what z3 proves on it, source for source and
+    /// set for set, on the same fixtures as the backend identity test — the seam between the
+    /// post-image and the must arm. (Where z3 would time out the solver path emits fewer edges;
+    /// none of these fixtures makes it.)
+    #[test]
+    fn hyper_must_from_the_exact_may_map_equals_the_solver_proved_hyper_must() {
+        use crate::adapter::sts_ir::{BtorSts, SmtEncode};
+        use std::collections::HashMap;
+        const I2C: &str = include_str!("../../../tests/fixtures/wall_classes/i2c_scl_padoen.btor");
+        const HELD_AND_FREE: &str = "1 sort bitvec 1\n2 state 1 reg_a\n3 state 1 reg_b\n4 zero 1\n\
+                                     5 init 1 2 4\n6 init 1 3 4\n7 next 1 2 4\n8 input 1 in\n\
+                                     9 next 1 3 8\n";
+        let spec = |name: &str, register: &str, value: u64| PredicateSpec {
+            name: name.into(),
+            register: register.into(),
+            value,
+        };
+        let (rel_btor2, rel_preds, rel_compound) = p1_rel_design();
+        let i2c_preds: Vec<PredicateSpec> = [
+            ("byte_controller.bit_controller.c_state", 1),
+            ("byte_controller.c_state", 0),
+            ("byte_controller.bit_controller.cmd", 0),
+            ("tip", 1),
+            ("byte_controller.bit_controller.clk_en", 1),
+            ("byte_controller.go", 1),
+        ]
+        .iter()
+        .map(|(r, v)| spec(&format!("{r} == {v}"), r, *v))
+        .collect();
+        let cases: Vec<(&str, &str, Vec<PredicateSpec>, HashMap<String, _>)> = vec![
+            ("relational + compound", rel_btor2, rel_preds, rel_compound),
+            (
+                "held register + free input",
+                HELD_AND_FREE,
+                vec![spec("a", "reg_a", 1), spec("b", "reg_b", 1)],
+                HashMap::new(),
+            ),
+            ("i2c |P|=6", I2C, i2c_preds, HashMap::new()),
+        ];
+        for (label, btor2, mut preds, compound) in cases {
+            let file = crate::adapter::btor2::parser::parse(btor2).expect("parse");
+            resolve_predicate_registers(&file, &mut preds).expect("predicates resolve");
+            for roots in [
+                None,
+                Some(reachable_lift_roots(
+                    &preds,
+                    &compound,
+                    &HashMap::new(),
+                    &file,
+                )),
+            ] {
+                let map = match compute_all_may_edges_postimage(
+                    &file,
+                    &preds,
+                    &compound,
+                    None,
+                    roots.as_deref(),
+                ) {
+                    MayPostimage::Complete(m) => m,
+                    other => panic!("{label}: the post-image did not complete: {other:?}"),
+                };
+                let mut may_edges: Vec<(usize, usize)> = map
+                    .iter()
+                    .flat_map(|(&s, ts)| ts.iter().map(move |&t| (s, t)))
+                    .collect();
+                may_edges.sort_unstable();
+                let cube_preds = cube_predicates(&preds, &compound);
+                let proved = BtorSts::new(&file).hyper_must_edges(&cube_preds, &may_edges, 5_000);
+                assert_eq!(
+                    hyper_must_from_exact_may(&map),
+                    proved,
+                    "{label} (roots: {}): the hyper-must read off the exact may-map differs from \
+                     the solver-proved one",
                     if roots.is_some() {
                         "reachable-only"
                     } else {
