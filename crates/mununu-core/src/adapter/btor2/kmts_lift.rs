@@ -965,8 +965,9 @@ impl LazyLift {
         // P1 #1 (IR-unification track) — resolve predicate register
         // aliases to canonical state-cell names *before* the context
         // stores them, so the lazy per-cube `compute_cube_outgoing_edges`
-        // path binds correctly (same fix as the eager `predicate_cube_lift`).
-        resolve_predicate_registers(&file, &mut predicates)?;
+        // path binds correctly (same fix as the eager `predicate_cube_lift`). The lazy lift has
+        // no warnings channel; an out-of-range literal is logged by the resolution.
+        let _logged = resolve_predicate_registers(&file, &mut predicates)?;
         // U.4 — compound-predicate backstop. The lazy per-cube body samples
         // simple register==value atoms only and never consults
         // `compound_exprs`, so compounds on the Lazy strategy are rejected
@@ -1954,10 +1955,17 @@ pub struct PredicateCubeLiftResult {
 /// Both the eager [`predicate_cube_lift`] and the lazy
 /// [`LazyLift::from_btor2`] call this so the resolution is shared across
 /// the two lift strategies CEGAR routes between.
+///
+/// Returns the WARNINGS the resolution raised: one per predicate whose literal the register
+/// cannot hold (Roadmap 3, item 4). `reg == 2` on a 1-bit `reg` is an always-false atom — a
+/// cell no state inhabits — and `!=` / `<` always true; the lift accepts it, since every path
+/// reads it the same way now (`literal_cmp`), but a config error must be loud precisely
+/// because the fallback is sensible: before #616 the SMT paths silently read it as `reg == 0`.
+/// The eager path reports them on the lift; both paths log them.
 fn resolve_predicate_registers(
     file: &crate::adapter::btor2::ast::Btor2File,
     predicates: &mut [PredicateSpec],
-) -> Result<(), AdapterError> {
+) -> Result<Vec<crate::adapter::AdapterWarning>, AdapterError> {
     use crate::adapter::sts_ir::SymbolicTransitionSystem;
     let symbols = crate::adapter::btor2::parser::collect_symbols(file);
     let known: std::collections::HashSet<&String> = symbols.values().collect();
@@ -1990,7 +1998,43 @@ fn resolve_predicate_registers(
             }
         }
     }
-    Ok(())
+    // The width check, on the canonical names: a state's width by its NID's symbol.
+    let widths: std::collections::HashMap<&String, u32> = file
+        .states()
+        .filter_map(|l| match &l.node {
+            crate::adapter::btor2::ast::Node::State { sort, .. } => Some((
+                symbols.get(&l.nid)?,
+                crate::adapter::btor2::parser::bv_width(file, *sort)?,
+            )),
+            _ => None,
+        })
+        .collect();
+    let mut warnings = Vec::new();
+    for pred in predicates.iter() {
+        let Some(&width) = widths.get(&pred.register) else {
+            continue;
+        };
+        if width < 64 && pred.value >= (1u64 << width) {
+            let message = format!(
+                "predicate `{}`: the literal {} does not fit register `{}` ({} bit(s), at most {}) \
+                 — the atom `== {}` is always false (a cell no state inhabits) and `!=` always \
+                 true; check the value or the register",
+                pred.name,
+                pred.value,
+                pred.register,
+                width,
+                (1u64 << width) - 1,
+                pred.value
+            );
+            tracing::warn!("{message}");
+            warnings.push(crate::adapter::AdapterWarning {
+                kind: crate::adapter::WarningKind::BoundOverflow,
+                message,
+                location: None,
+            });
+        }
+    }
+    Ok(warnings)
 }
 
 /// U.4 (lift-unification, 2026-06-26) — the compound-predicate soundness
@@ -2190,7 +2234,7 @@ pub fn predicate_cube_lift(
     // `bit_cnt_d` case, the DR1 #1 blocker) binds to the real register
     // everywhere downstream. Direct hits are kept; aliases are rewritten;
     // unresolvable names still error.
-    resolve_predicate_registers(&file, &mut predicates)?;
+    warnings.extend(resolve_predicate_registers(&file, &mut predicates)?);
 
     // B.1 (increment 3b) / U.4 — compound-predicate soundness gate.
     // Defensive call to the shared [`ensure_compound_lift_supported`] for
@@ -3939,7 +3983,7 @@ mod tests {
             let file = crate::adapter::btor2::parser::parse(btor2).expect("parse");
             // As the lift does before either backend runs: an alias (a name `flatten` left
             // only on a `uext`/output node) is rewritten to its canonical state-cell symbol.
-            resolve_predicate_registers(&file, &mut preds).expect("predicates resolve");
+            let _ = resolve_predicate_registers(&file, &mut preds).expect("predicates resolve");
             for roots in [
                 None,
                 Some(reachable_lift_roots(
@@ -4016,7 +4060,7 @@ mod tests {
         ];
         for (label, btor2, mut preds, compound) in cases {
             let file = crate::adapter::btor2::parser::parse(btor2).expect("parse");
-            resolve_predicate_registers(&file, &mut preds).expect("predicates resolve");
+            let _ = resolve_predicate_registers(&file, &mut preds).expect("predicates resolve");
             for roots in [
                 None,
                 Some(reachable_lift_roots(
@@ -4056,6 +4100,40 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Roadmap 3, item 4 — a literal the register cannot hold is accepted (an always-false atom)
+    /// and WARNED about; an in-range literal and a width-64 register raise nothing.
+    #[test]
+    fn an_out_of_range_predicate_literal_is_warned_about_not_silently_accepted() {
+        const B: &str = "1 sort bitvec 1\n2 sort bitvec 64\n3 state 1 q\n4 state 2 wide\n5 zero 1\n\
+                         6 init 1 3 5\n7 next 1 3 3\n8 next 2 4 4\n";
+        let file = crate::adapter::btor2::parser::parse(B).expect("parse");
+        let spec = |name: &str, register: &str, value: u64| PredicateSpec {
+            name: name.into(),
+            register: register.into(),
+            value,
+        };
+        let mut preds = vec![
+            spec("q1", "q", 1),
+            spec("q2", "q", 2),
+            spec("w", "wide", u64::MAX),
+        ];
+        let warnings = resolve_predicate_registers(&file, &mut preds).expect("resolves");
+        assert_eq!(
+            warnings.len(),
+            1,
+            "exactly the out-of-range atom warns: {warnings:?}"
+        );
+        assert_eq!(warnings[0].kind, crate::adapter::WarningKind::BoundOverflow);
+        assert!(
+            warnings[0].message.contains("`q2`")
+                && warnings[0]
+                    .message
+                    .contains("does not fit register `q` (1 bit(s), at most 1)"),
+            "the warning names the predicate, the register and its width: {}",
+            warnings[0].message
+        );
     }
 
     /// Roadmap 2, step 5 — the backend knob's contract: `smt` and `bdd` are honoured, anything
