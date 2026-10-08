@@ -696,6 +696,36 @@ where
     evaluate_with_options_and_automaton(formula, clts, env, options)
 }
 
+/// mununu#590 — a modality guard that names a label NO transition of the model carries is the
+/// vacuity trap: `[labels = {restat}] φ` (a typo) or `[labels = {a, c}] φ` on a model whose
+/// edges carry neither is true everywhere, and `<labels = {…}> φ` false everywhere, and nothing
+/// says so. Warned once per missing label per evaluation, before the fixpoint runs; the verdict
+/// is unchanged (the formula means what it says — this names the label the model does not
+/// have). Three properties in a real project were vacuously true this way until a mutant table
+/// exposed them.
+fn warn_guard_labels_absent_from_model<S, L>(formula: &Formula, clts: &Clts<S, L>)
+where
+    S: IdStorage,
+    L: IdStorage,
+{
+    let alphabet: std::collections::HashSet<String> = clts.alphabet().into_iter().collect();
+    let mut warned: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    for node in formula.nodes() {
+        if let Node::Modal { guard, .. } = node {
+            for label in &guard.labels {
+                if !alphabet.contains(label) && warned.insert(label.as_str()) {
+                    tracing::warn!(
+                        "[mununu#590] modality guard names label `{label}`, which no transition \
+                         of the model carries: a `[labels = {{…}}]` over it is vacuously TRUE and \
+                         a `<labels = {{…}}>` vacuously FALSE. A label set is any-of — check the \
+                         spelling, or that the label is in this automaton's alphabet."
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// Evaluates `formula` using the supplied evaluation options and automaton name.
 /// The automaton name is used to resolve guard predicate names.
 pub fn evaluate_with_options_and_automaton<S, L>(
@@ -713,6 +743,7 @@ where
         env.state_count(),
         "environment state count does not match CLTS"
     );
+    warn_guard_labels_absent_from_model(formula, clts);
 
     let oob_bits = compute_oob_bits(clts);
     let not_oob_bits = !oob_bits.clone();
@@ -818,6 +849,7 @@ where
         "environment state count does not match CLTS"
     );
 
+    warn_guard_labels_absent_from_model(formula, clts);
     let oob_bits = compute_oob_bits(clts);
     let not_oob_bits = !oob_bits.clone();
     let mut ctx = EvalContext {
@@ -3492,6 +3524,60 @@ mod tests {
         builder.transition_ids(s1, &[sync], s2);
 
         builder.build().expect("fixture CLTS builds")
+    }
+
+    /// mununu#590 — a label SET in a modality guard is any-of, as the Mu-Calculus Reference
+    /// documents: `[labels = {a, c}] φ` ranges over every edge carrying `a` OR `c`. The issue's
+    /// model: `S0` has a `{a, b}` vector edge, an `a` edge and a `c` edge. Under the old all-of
+    /// (vector-match) reading `<labels = {a, c}> true` held in 0 states and
+    /// `[labels = {a, c}] false` in all 4 — vacuous both ways.
+    #[test]
+    fn x590_a_guard_label_set_is_any_of_not_a_vector_match() -> TestResult {
+        let mut builder = Clts::builder();
+        for st in ["S0", "S1", "S2", "S3"] {
+            builder.state(st);
+        }
+        builder.initial("S0");
+        let ab = builder.labels().intern(["a", "b"]).unwrap();
+        let a = builder.labels().intern(["a"]).unwrap();
+        let c = builder.labels().intern(["c"]).unwrap();
+        let s1 = builder.labels().intern(["s1"]).unwrap();
+        let s2 = builder.labels().intern(["s2"]).unwrap();
+        let s3 = builder.labels().intern(["s3"]).unwrap();
+        let (st0, st1, st2, st3) = (
+            builder.state_id_or_insert("S0").unwrap(),
+            builder.state_id_or_insert("S1").unwrap(),
+            builder.state_id_or_insert("S2").unwrap(),
+            builder.state_id_or_insert("S3").unwrap(),
+        );
+        builder.transition_ids(st0, &[ab], st1);
+        builder.transition_ids(st0, &[a], st2);
+        builder.transition_ids(st0, &[c], st3);
+        builder.transition_ids(st1, &[s1], st1);
+        builder.transition_ids(st2, &[s2], st2);
+        builder.transition_ids(st3, &[s3], st3);
+        let clts = builder.build()?;
+        let env = Environment::new(clts.state_count());
+        let count = |src: &str| -> Result<usize, Box<dyn std::error::Error>> {
+            Ok(evaluate(&parser::parse(src)?, &clts, &env)?.count_ones())
+        };
+        assert_eq!(count("< labels = { a } > true")?, 1, "S0 has an a-edge");
+        assert_eq!(
+            count("< labels = { a, b } > true")?,
+            1,
+            "S0 has edges carrying a or b"
+        );
+        assert_eq!(
+            count("< labels = { a, c } > true")?,
+            1,
+            "S0 has an a-edge AND a c-edge: any-of matches (all-of matched no single edge)"
+        );
+        assert_eq!(
+            count("[ labels = { a, c } ] false")?,
+            3,
+            "the box over a-or-c edges is false exactly at S0 (all-of made it vacuously true at all 4)"
+        );
+        Ok(())
     }
 
     #[test]

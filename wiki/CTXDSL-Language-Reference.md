@@ -44,7 +44,7 @@ alphabet {
 }
 ```
 
-Labels that appear only inside an automaton's `transitions` or `controllable` block are implicitly added to the alphabet -- you do not need to list them in `alphabet` unless you want to set a display name or make dependencies explicit.
+Labels that appear only inside an automaton's `transitions` or `controllable` block are implicitly added to the alphabet -- you do not need to list them in `alphabet` unless you want to set a display name or make dependencies explicit. A label listed in `controllable { }` but used by no transition is still in the automaton's alphabet, including for composition: a partner that carries it is blocked, since this automaton never offers it (mununu#592).
 
 ## Constants and Ranges
 

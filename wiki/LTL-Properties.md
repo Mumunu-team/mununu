@@ -11,9 +11,9 @@ Linear Temporal Logic (LTL) is a specification language for describing propertie
 | Operator | Name | Syntax | Meaning |
 |----------|------|--------|---------|
 | `G` | Globally / Always | `G phi` or `G(phi)` | `phi` holds in every state along every path |
-| `F` | Eventually / Finally | `F phi` or `F(phi)` | `phi` holds in some future state along every path |
+| `F` | Eventually / Finally | `F phi` or `F(phi)` | `phi` is reachable: some path leads to a state where `phi` holds (the Skolem reading — see below; this is **not** "along every path") |
 | `X` | Next | `X phi` or `X(phi)` | `phi` holds in the immediate next state |
-| `U` | Until | `phi U psi` | `phi` holds continuously until `psi` becomes true (and `psi` must eventually hold) |
+| `U` | Until | `phi U psi` | some path keeps `phi` until it reaches `psi` (the same existential reading as `F`) |
 | `W` | Weak Until | `phi W psi` | `phi` holds until `psi` becomes true, or `phi` holds forever |
 | `R` | Release | `phi R psi` | `psi` holds until `phi` releases it (dual of Until) |
 | `->` | Implies | `phi -> psi` | If `phi` then `psi` |
@@ -57,7 +57,7 @@ The pattern `G safe` asserts that `safe` is an invariant -- it holds at every st
 
 ### Liveness (Response): "Every request is eventually granted"
 
-A liveness property asserts that something good eventually happens. The response pattern `G(p -> F(q))` guarantees that whenever trigger `p` holds, response `q` will eventually follow.
+A liveness property asserts that something good eventually happens. The response pattern `G(p -> F(q))` says that whenever trigger `p` holds, response `q` **can still be reached** — `F` is the diamond fixpoint in this front-end (see [LTL to Mu-Calculus Equivalence](#ltl-to-mu-calculus-equivalence)), so this is `AG(p -> EF q)`, the Skolem reading. For "`q` is inevitable on every path" write the box form given there.
 
 ```
 formula ltl_liveness {
@@ -66,7 +66,7 @@ formula ltl_liveness {
 }
 ```
 
-This says: whenever the tank is `Filling`, it will eventually reach `Full`.
+This says: whenever the tank is `Filling`, `Full` stays reachable from there (a controller can always still get the tank to `Full`).
 
 ### GR(1) Fairness Response: "Repeated stimulus yields repeated response"
 
@@ -79,7 +79,7 @@ formula ltl_response {
 }
 ```
 
-This says: every time the tank reaches `Full`, it will eventually return to `Empty` -- the system cycles fairly.
+This says: every time the tank reaches `Full`, `Empty` stays reachable -- the system can always cycle back.
 
 ### Persistence: "Eventually stable forever"
 
@@ -109,17 +109,27 @@ When Mununu compiles an LTL formula, it produces an equivalent mu-calculus fixpo
 
 | LTL | Mu-Calculus | Fixpoint Type |
 |-----|-------------|---------------|
-| `G phi` | `nu X. (phi && [] X)` | Greatest fixpoint (nu) |
-| `F phi` | `mu X. (phi \|\| [] X)` | Least fixpoint (mu) |
+| `G phi` | `nu X. (phi && [] X)` | Greatest fixpoint (nu), **box** — every path |
+| `F phi` | `mu X. (phi \|\| <> X)` | Least fixpoint (mu), **diamond** — some path |
 | `X phi` | `[] phi` | Box modality (one step) |
-| `phi U psi` | `mu X. (psi \|\| (phi && [] X))` | Least fixpoint (mu) |
+| `phi U psi` | `mu X. (psi \|\| (phi && <> X))` | Least fixpoint (mu), diamond |
 | `phi W psi` | `(phi U psi) \|\| G phi` | Mu + Nu combined |
 | `phi R psi` | `!((!phi) U (!psi))` | Negated least fixpoint |
-| `G F phi` | `nu Y. (mu X. (phi \|\| [] X) && [] Y)` | Nested nu-mu |
-| `F G phi` | `mu Y. (nu X. (phi && [] X) \|\| [] Y)` | Nested mu-nu |
-| `G(p -> F(q))` | `nu X. ((!p \|\| mu Y. (q \|\| [] Y)) && [] X)` | Nested nu-mu |
+| `G F phi` | `nu Y. (mu X. (phi \|\| <> X) && [] Y)` | Nested nu-mu — `AG EF phi` |
+| `F G phi` | `mu Y. (nu X. (phi && [] X) \|\| <> Y)` | Nested mu-nu |
+| `G(p -> F(q))` | `nu X. ((!p \|\| mu Y. (q \|\| <> Y)) && [] X)` | Nested nu-mu — `AG(p -> EF q)` |
 
-Key insight: `G` (safety, invariance) maps to **nu** (greatest fixpoint -- start with everything, shrink). `F` (liveness, reachability) maps to **mu** (least fixpoint -- start with nothing, grow). The alternation depth of nested fixpoints determines the complexity class of the property.
+> Source of truth: [`ltl/translator.rs`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/ltl/translator.rs) (`translate_eventually_internal`, `translate_until_internal`) — surface: CLI+API+UI.
+
+**`F` and `U` are existential — the Skolem reading, and it is deliberate (mununu#593).** `G` and `X` quantify over every successor (`[]`); `F` and `U` quantify over *some* successor (`<>`). So `ltl F Goal` is `EF Goal` — "the controller can find a path to `Goal`" — and `ltl G(p -> F q)` is `AG(p -> EF q)`: the response **stays reachable**, which is strictly weaker than "the response is inevitable". On a model where the environment may go to `Goal` or to a `Stuck` loop, `ltl F Goal` holds and the box form does not. This is the reading a synthesis tool wants: under the Skolem paradigm the controller picks the successor, so reachability on the model is realizability for the controller. Verification wants inevitability along every path, which LTL semantics over traces means — and the mu-calculus spells it directly:
+
+| you mean | write |
+|---|---|
+| `phi` is inevitable on every path (CTL `AF phi`) | `mu X. (phi \|\| [] X)` — and note a deadlocked state satisfies it vacuously (`[] X` over no successors is true); add `<> true` to require a successor |
+| every `p` is inevitably followed by `q` (CTL `AG(p -> AF q)`) | `nu X. ((!p \|\| mu Y. (q \|\| [] Y)) && [] X)` |
+| `phi` stays reachable (what `ltl F` / `ltl G(p -> F q)` give you) | `ltl F phi` / `ltl G(p -> F q)`, or the diamond forms above |
+
+Key insight: `G` (safety, invariance) maps to **nu** (greatest fixpoint -- start with everything, shrink). `F` (liveness, reachability) maps to **mu** (least fixpoint -- start with nothing, grow). The alternation depth of nested fixpoints determines the complexity class of the property. A path implication such as `(GF a) -> (GF b)` is NOT a fairness assumption under this translation either — it is the Boolean implication of two state-set formulas; see mununu#595 for environment assumptions.
 
 ## When to Use LTL vs. Mu-Calculus
 
