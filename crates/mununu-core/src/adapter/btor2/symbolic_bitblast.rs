@@ -518,11 +518,12 @@ impl BddBitBlaster {
         } else {
             arena_nodes * 8 / 10
         };
-        // Apply cache at arena/4. Measured 2026-10-06 (M3 of the engine-performance roadmap):
-        // arena/2 left the And / Ite / Substitute hit rates unchanged to the third decimal on the
-        // iteration-bound, deep, representation-bound and forward shapes — the misses are
-        // compulsory, not capacity misses — at +340 MB RSS. So the size stays.
-        let manager = bdd::new_manager(arena_nodes, arena_nodes / 4, bdd_threads());
+        // Apply cache at arena/4 (`MUNUNU_BDD_CACHE_DIV`). Measured 2026-10-06 (M3): arena/2 left
+        // the And / Ite / Substitute hit rates unchanged to the third decimal — the misses are
+        // compulsory — at +340 MB RSS. Measured 2026-10-08 (Roadmap 3, item 2): SMALLER is
+        // shape-dependent in BOTH directions, and no automatic choice survived measurement; see
+        // `bdd_cache_div` for the numbers and why the size is a knob and not a policy.
+        let manager = bdd::new_manager(arena_nodes, arena_nodes / bdd_cache_div(), bdd_threads());
         let (all_vars, var_base, tt, ff, built_vars, built_levels) = manager
             .with_manager_exclusive(|m| {
                 let range = m.add_vars(total_bits as VarNo);
@@ -3021,6 +3022,52 @@ fn parse_bdd_threads(raw: Option<&str>) -> u32 {
 
 /// Step 1's default, kept at the pre-roadmap-2 value by the measurement above.
 const BDD_THREADS_DEFAULT: u32 = 1;
+
+/// Roadmap 3, item 2 — the apply cache's size as a fraction of the arena (`arena / div`);
+/// `MUNUNU_BDD_CACHE_DIV` overrides the default of 4.
+///
+/// The cache is what a manager costs to CREATE: OxiDD allocates and initialises every entry up
+/// front, and at the wide tier's `arena / 4` that is 2^24 entries — 156 ms per manager
+/// (measured; 9.8 ms at 2^20) — which was 80 % of the i2c RTL exact verdict (0.21 s) and 65 %
+/// of the cube lift's self time after #617. Measured at `arena / 64` against `/ 4`, same binary:
+///
+/// ```text
+/// raster-8000 (6.5 M iterations, tiny sets)   20.2 → 19.0 s   −6 %
+/// mult-12 (multiplier bit-blast)                2.0 → 1.6 s    −21 %
+/// twocount 2^21                                0.77 → 0.56 s   −27 %
+/// i2c RTL, exact verdict, default arena        0.21 → 0.04 s   −80 %
+/// cube lift, i2c |P| = 8                       0.29 → 0.11 s   −62 %
+/// relational-11, cell-major (representation)   11.2 → 43.9 s   +291 %   (/16: +86 %, /8: +4 % n.s.)
+/// ```
+///
+/// A smaller cache wins everywhere the diagram is small and loses 2–4× where one apply's
+/// working set is large — the representation-bound class the consumer blocks (`sdram_burst`,
+/// `sprite_render`) fall in. **No automatic policy survived measurement**: the need is not
+/// predictable from the cone (the variable-order lesson), and a staged start on a small cache
+/// with a restart on a node-count signal was built and measured in three forms — on the
+/// allocated total (restarts the raster, +9 %), on the live set after a collection (never
+/// restarts relational-11, whose residual is 12 k nodes), on one step's allocation (restarts
+/// relational-11 only after its first wide op has run under the small cache: +141 %). A
+/// between-op trigger cannot bound the cost of ONE slow apply, and the shape that needs the
+/// full cache is the one whose cost sits inside one op; a wall-clock trigger has the same hole,
+/// and a small ARENA first is not an option (exhaustion inside an apply is the uncatchable
+/// abort). So the size is a knob: a lane whose properties are shallow (small FSMs, cube lifts)
+/// can set `/64` and take the 60–80 %; the default stays at the size that never loses.
+fn bdd_cache_div() -> usize {
+    parse_bdd_cache_div(std::env::var("MUNUNU_BDD_CACHE_DIV").ok().as_deref())
+}
+
+/// The knob's parse, separated from the env read so it is testable without the process
+/// environment: a positive integer, anything else is the default.
+fn parse_bdd_cache_div(raw: Option<&str>) -> usize {
+    raw.and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&d| d >= 1)
+        .unwrap_or(BDD_CACHE_DIV_DEFAULT)
+}
+
+/// `4`: the size M3 measured as sufficient (a bigger cache changed no hit rate) and item 2
+/// measured as necessary on representation-bound cones.
+const BDD_CACHE_DIV_DEFAULT: usize = 4;
 
 fn fixpoint_iter_budget() -> usize {
     // ~1M iterations; a counter's steps are cheap (small BDD) so this is fast to reach.
@@ -7804,6 +7851,16 @@ mod tests {
     }
 
     use super::*;
+
+    /// Roadmap 3, item 2 — the cache knob's contract: unset, zero and garbage are the default
+    /// (`arena / 4`); a positive divisor is honoured.
+    #[test]
+    fn bdd_cache_div_knob_defaults_to_four_and_honours_a_positive_divisor() {
+        assert_eq!(parse_bdd_cache_div(None), 4);
+        assert_eq!(parse_bdd_cache_div(Some("0")), 4);
+        assert_eq!(parse_bdd_cache_div(Some("many")), 4);
+        assert_eq!(parse_bdd_cache_div(Some(" 64 ")), 64);
+    }
 
     /// Roadmap 2, step 1 — the thread knob's contract: unset, zero and garbage are the default
     /// (one thread, the measured choice); a positive count is honoured.
