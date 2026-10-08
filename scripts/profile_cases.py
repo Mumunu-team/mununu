@@ -133,9 +133,12 @@ def gen_exact_relational(n: int):
     cliff: seconds, then an arena abstention — the calibrator reports whichever it finds."""
     src = (f"1 sort bitvec 1\n2 sort bitvec {n}\n3 state 2 a\n4 state 2 b\n5 next 2 3 3\n6 next 2 4 4\n"
            "7 eq 1 3 4\n8 state 1 done\n9 zero 1\n10 init 1 8 9\n11 or 1 8 7\n12 next 1 8 11\n")
-    # ⚠ 2026-10-06: at n=11 under the DEFAULT 2^24 arena the exact engine returned a WRONG definite
-    # HOLDS (5 iterations, 83% arena occupancy); at 2^23 or 2^26 it returns the correct VIOLATED in 8.
-    # Reproducer: target/profiles/repro-arena-holds/. The family pins the 2^26 arena until that is fixed.
+    # 2026-10-06: at n=11 under the DEFAULT 2^24 arena this returned a definite HOLDS where 2^23 and
+    # 2^26 returned VIOLATED. Diagnosed and fixed the same week (#603: the cube paths pinned a
+    # free-init register to zero in their reset cube; the exact engine's arena abstention handed the
+    # case to that path — docs/consumer-briefings/2026-10-free-init-reset-cube.md). The 2^26 pin is
+    # KEPT for a different reason: it keeps the case on the exact engine at every n of the sweep, so
+    # the family measures the representation-bound fixpoint and not the hand-off.
     env = {"MUNUNU_BDD_VAR_ORDER": "cell-major", "MUNUNU_BDD_ARENA_NODES": str(1 << 26)}
     return src, ["--target", "done == 1"], env, f"relational a==b, n={n} bits, cell-major order, arena 2^26"
 
@@ -205,9 +208,14 @@ def gen_cube_rtl_i2c_preds(k: int):
 
 
 def gen_cube_rtl_i2c_cegar(iters: int, k: int = 8):
-    """Same lift with |P|=8 seeded, then `iters` CEGAR refinement iterations (WP source): each
-    iteration re-lifts from scratch with the added predicates — the no-lemma-cache cost
-    (cegar.rs:48) the roadmap's stage C3 targets."""
+    """Same lift with |P|=8 seeded and `--max-iterations iters`. ⚠ The knob is INERT on this
+    design (found 2026-10-08, Roadmap 3 item 3): the verdict is a definite VIOLATED at the first
+    lift, so no refinement ever runs and the 1/2/3-iteration calibration rows (20.5 / 18.6 /
+    18.6 s at fed081c) were one lift each, not a re-lift cost. `cube-synth-cells` does not refine
+    either (its WP source is exhausted at iteration 1). The no-lemma-cache cost (cegar.rs:48)
+    the roadmap's stage C3 targets has NO case in this catalogue; it needs a design whose first
+    lift lands on ⊥ with a refinable predicate source — the prerequisite before C3 is measured.
+    Its upper bound is (rounds − 1) × one lift, which after #616/#617 is 0.1–0.7 s on this cone."""
     src, args, env, _ = gen_cube_rtl_i2c_preds(k)
     return src, args, env, f"i2c lift, |P|={k} + {iters} CEGAR iteration(s)"
 
