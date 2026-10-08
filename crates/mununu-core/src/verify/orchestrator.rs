@@ -211,6 +211,7 @@ pub fn verify_project(config: &VerifyConfig, base_dir: &Path) -> Result<VerifyRe
                 members: Vec::new(),
             },
             property_verdicts: Vec::new(),
+            counterexample_max_steps: counterexample_max_steps(config),
             safety_cube_results,
         });
     }
@@ -326,6 +327,7 @@ pub fn verify_project(config: &VerifyConfig, base_dir: &Path) -> Result<VerifyRe
     })?;
 
     // 8. Evaluate each property.
+    let max_steps = counterexample_max_steps(config);
     let mut property_verdicts: Vec<PropertyVerdict> = Vec::with_capacity(resolved_properties.len());
     for (idx, p) in resolved_properties.iter().enumerate() {
         let verdict = evaluate_one_property(
@@ -334,6 +336,7 @@ pub fn verify_project(config: &VerifyConfig, base_dir: &Path) -> Result<VerifyRe
             &p.over,
             property_formula_sources[idx].clone(),
             &p.formula,
+            max_steps,
         )?;
         property_verdicts.push(verdict);
     }
@@ -351,8 +354,18 @@ pub fn verify_project(config: &VerifyConfig, base_dir: &Path) -> Result<VerifyRe
         sources: source_summaries,
         composition: composition_info,
         property_verdicts,
+        counterexample_max_steps: max_steps,
         safety_cube_results,
     })
+}
+
+/// mununu#594 — the counterexample witness's step cap for this run: the config's (set in
+/// `verify.toml`, or by the CLI flag / API field that override it), else the default.
+fn counterexample_max_steps(config: &VerifyConfig) -> usize {
+    config
+        .counterexample_max_steps
+        .unwrap_or(crate::verify::report::DEFAULT_COUNTEREXAMPLE_MAX_STEPS)
+        .max(1)
 }
 
 /// The opt-in `safety_cube` pass — run the KMTS 3-valued safety cube (`AG ¬bad`) on every
@@ -1503,6 +1516,7 @@ fn evaluate_one_property(
     over: &str,
     formula_source: PropertyFormulaSource,
     formula_text: &str,
+    counterexample_max_steps: usize,
 ) -> Result<PropertyVerdict, VerifyError> {
     // The property name in the assembled context isn't necessarily
     // unique relative to predicates/controllers — but our assembler
@@ -1625,7 +1639,14 @@ fn evaluate_one_property(
                 unknown_cells: 0,
             };
             let counterexample = if !satisfied {
-                build_counterexample_witness(clts, &result, TRACE_WITNESS_STEP_CAP)
+                build_counterexample_witness(
+                    clts,
+                    &result,
+                    &formula.formula,
+                    &env,
+                    &options,
+                    counterexample_max_steps,
+                )
             } else {
                 None
             };
@@ -1653,27 +1674,30 @@ fn evaluate_one_property(
     })
 }
 
-/// Maximum number of steps recorded by [`build_counterexample_witness`].
-/// 20 steps is enough to surface the typical violation in shipped
-/// fixtures (the chaotic codesign trace from `Idle` to `Sending` is
-/// ~6 steps in the worst case) without producing a wall of state
-/// names in the verify report.
-const TRACE_WITNESS_STEP_CAP: usize = 20;
-
-/// Construct a forward-walk witness from a violating initial state.
+/// Construct a counterexample witness from a violating initial state.
 ///
-/// Picks the first initial state that does not satisfy `result`,
-/// then walks outgoing transitions for up to `max_steps`, preferring
-/// successors that also violate the property. Falls back to any
-/// unvisited successor when no violating successor is available.
+/// Two strategies (mununu#594):
 ///
-/// Returns `None` when:
-/// - every initial state satisfies the property (caller should not
-///   invoke this), or
-/// - the composition has no initial states.
+/// 1. **The safety shape, by shortest path.** When the formula is `nu X. (phi && [] X)` with
+///    `X` not in `phi` — `AG phi`, which `never` and most `verify` properties are — a violation
+///    is a path to a `!phi` state, and that is what the reader wants to see. `phi` is evaluated
+///    on its own and a BFS from the violating initial state over every transition finds the
+///    nearest `!phi` state; every state on that path can reach `!phi`, so the whole path is
+///    violating. A 25-step chain shows its `Bad`; a product of unrelated components does not
+///    spend the cap on their self-cycles.
+/// 2. **The walk, otherwise.** Picks the first initial state that does not satisfy `result`,
+///    then walks outgoing transitions for up to `max_steps`, preferring successors that also
+///    violate the property, falling back to any unvisited successor. The cap is the config's
+///    `counterexample_max_steps` (CLI `--counterexample-max-steps`), 20 by default.
+///
+/// Returns `None` when every initial state satisfies the property (the caller does not invoke
+/// this then) or the composition has no initial states.
 fn build_counterexample_witness<S, L>(
     clts: &crate::clts::Clts<S, L>,
     satisfaction: &bitvec::vec::BitVec<usize, bitvec::order::Lsb0>,
+    formula: &crate::mu_calculus::Formula,
+    env: &crate::mu_calculus::Environment,
+    options: &EvaluationOptions,
     max_steps: usize,
 ) -> Option<TraceWitness>
 where
@@ -1689,6 +1713,13 @@ where
         .find(|sid| !satisfaction.get(sid.index()).map(|b| *b).unwrap_or(false))?;
 
     let initial_state = clts.state_name(violating_initial)?.to_string();
+
+    if let Some(bad) = safety_body_violations(formula, clts, env, options)
+        && let Some(witness) =
+            shortest_path_witness(clts, violating_initial, &initial_state, &bad, max_steps)
+    {
+        return Some(witness);
+    }
 
     let mut steps: Vec<TraceStep> = Vec::new();
     let mut visited: HashSet<usize> = HashSet::new();
@@ -1762,6 +1793,149 @@ where
         initial_state,
         steps,
         termination,
+        violating_state: None,
+    })
+}
+
+/// mununu#594 — for the safety shape `nu X. (phi && [] X)` (`X` not free in `phi`), the states
+/// where `phi` is FALSE — the ones a violation is a path to. `None` for any other shape.
+fn safety_body_violations<S, L>(
+    formula: &crate::mu_calculus::Formula,
+    clts: &crate::clts::Clts<S, L>,
+    env: &crate::mu_calculus::Environment,
+    options: &EvaluationOptions,
+) -> Option<bitvec::vec::BitVec<usize, bitvec::order::Lsb0>>
+where
+    S: IdStorage,
+    L: IdStorage,
+{
+    use crate::mu_calculus::{ModalKind, Node};
+    let Node::Nu { var, body } = formula.node(formula.root()) else {
+        return None;
+    };
+    let Node::And(lhs, rhs) = formula.node(*body) else {
+        return None;
+    };
+    // `phi && [] X` in either order.
+    let phi = [(lhs, rhs), (rhs, lhs)]
+        .into_iter()
+        .find_map(|(cand, modal)| match formula.node(*modal) {
+            Node::Modal {
+                kind: ModalKind::Box,
+                guard,
+                target,
+            } if guard.labels.is_empty()
+                && matches!(formula.node(*target), Node::Variable(v) if v == var) =>
+            {
+                Some(*cand)
+            }
+            _ => None,
+        })?;
+    if mentions_variable(formula, phi, *var) {
+        return None;
+    }
+    // `phi` as a formula of its own: the same node arena, re-rooted.
+    let phi_formula =
+        crate::mu_calculus::Formula::new(phi, formula.nodes().to_vec(), formula.vars().to_vec());
+    let holds = evaluate_with_options(&phi_formula, clts, env, options).ok()?;
+    Some(!holds)
+}
+
+/// Does the subformula at `node` mention fixpoint variable `var`?
+fn mentions_variable(
+    formula: &crate::mu_calculus::Formula,
+    node: crate::mu_calculus::NodeId,
+    var: crate::mu_calculus::FormulaVarId,
+) -> bool {
+    use crate::mu_calculus::Node;
+    match formula.node(node) {
+        Node::True | Node::False | Node::Predicate(_) => false,
+        Node::Variable(v) => *v == var,
+        Node::Not(a) => mentions_variable(formula, *a, var),
+        Node::And(a, b) | Node::Or(a, b) => {
+            mentions_variable(formula, *a, var) || mentions_variable(formula, *b, var)
+        }
+        Node::Modal { target, .. } => mentions_variable(formula, *target, var),
+        Node::Mu { body, .. } | Node::Nu { body, .. } => mentions_variable(formula, *body, var),
+    }
+}
+
+/// mununu#594 — the shortest path (BFS over every transition, unbounded — the product is finite
+/// and the search is cheap) from `start` to a state in `targets`, as a witness; `None` if none
+/// is reachable (then the walk takes over). The printed steps are cut at `max_steps` with a
+/// `LengthLimit` termination, but the witness names the state the path leads to either way.
+/// The initial state itself in `targets` is a zero-step witness.
+fn shortest_path_witness<S, L>(
+    clts: &crate::clts::Clts<S, L>,
+    start: crate::clts::StateId<S>,
+    initial_state: &str,
+    targets: &bitvec::vec::BitVec<usize, bitvec::order::Lsb0>,
+    max_steps: usize,
+) -> Option<TraceWitness>
+where
+    S: IdStorage,
+    L: IdStorage,
+{
+    use std::collections::{HashMap, VecDeque};
+    let is_target =
+        |s: crate::clts::StateId<S>| targets.get(s.index()).map(|b| *b).unwrap_or(false);
+    // predecessor map: state index → (previous state, the transition's label text)
+    let mut prev: HashMap<usize, (crate::clts::StateId<S>, String)> = HashMap::new();
+    let mut depth: HashMap<usize, usize> = HashMap::new();
+    let mut queue = VecDeque::new();
+    depth.insert(start.index(), 0);
+    queue.push_back(start);
+    let mut found = if is_target(start) { Some(start) } else { None };
+    while found.is_none() {
+        let Some(cur) = queue.pop_front() else {
+            break;
+        };
+        let d = depth[&cur.index()];
+        for t in clts.outgoing(cur).iter() {
+            let succ = t.target();
+            if depth.contains_key(&succ.index()) {
+                continue;
+            }
+            depth.insert(succ.index(), d + 1);
+            prev.insert(succ.index(), (cur, format_transition_label(clts, t)));
+            if is_target(succ) {
+                found = Some(succ);
+                break;
+            }
+            queue.push_back(succ);
+        }
+    }
+    let end = found?;
+    // Rebuild the path end → start.
+    let mut rev: Vec<TraceStep> = Vec::new();
+    let mut cur = end;
+    while cur != start {
+        let (p, label) = prev.get(&cur.index())?.clone();
+        rev.push(TraceStep {
+            label,
+            successor_state: clts
+                .state_name(cur)
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("state_{}", cur.index())),
+        });
+        cur = p;
+    }
+    rev.reverse();
+    let violating_state = clts
+        .state_name(end)
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("state_{}", end.index()));
+    let termination = if rev.len() > max_steps {
+        rev.truncate(max_steps);
+        TraceTermination::LengthLimit
+    } else {
+        TraceTermination::Sink
+    };
+    Some(TraceWitness {
+        initial_state: initial_state.to_string(),
+        steps: rev,
+        termination,
+        violating_state: Some(violating_state),
     })
 }
 
@@ -2155,6 +2329,102 @@ name = "System"
             results.is_empty(),
             "a btor2 source with no `bad` obligation is skipped"
         );
+    }
+
+    /// mununu#594 — the counterexample for a safety property is a SHORTEST PATH to a `!phi`
+    /// state, the cap is configurable, and a truncated trace still names where it was going.
+    /// The issue's 25-step chain ending in `Bad` under `never(Bad)`: at the default cap (20)
+    /// the printed steps are cut but `violating_state` is `Bad`; at a raised cap the whole
+    /// 26-step path is printed and ends in `Bad`. A second component with a free self-loop does
+    /// not divert the path (the old walk spent its cap on such cycles).
+    #[test]
+    fn x594_safety_counterexample_is_a_shortest_path_with_a_configurable_cap() {
+        let mut chain = String::from(
+            "context Chain { automata { automaton C { controllable { } states { state S0 initial; ",
+        );
+        for i in 1..=25 {
+            chain.push_str(&format!("state S{i}; "));
+        }
+        chain.push_str("state Bad; } transitions { ");
+        for i in 0..25 {
+            chain.push_str(&format!("transition S{i} -> S{} on label step; ", i + 1));
+        }
+        chain.push_str(
+            "transition S25 -> Bad on label boom; transition Bad -> Bad on label stay; } } } }",
+        );
+        const NOISE: &str = "context Noise { automata { automaton N { controllable { } states { state N0 initial; state N1; } transitions { transition N0 -> N1 on label n_a; transition N1 -> N0 on label n_b; } } } }";
+        let run = |max_steps: Option<usize>| {
+            let temp = tempdir().unwrap();
+            let _ = write_ctxdsl_source(temp.path(), "chain.ctxdsl", &chain);
+            let _ = write_ctxdsl_source(temp.path(), "noise.ctxdsl", NOISE);
+            let cap_line = max_steps
+                .map(|n| format!("counterexample_max_steps = {n}\n"))
+                .unwrap_or_default();
+            let toml_src = format!(
+                r#"
+{cap_line}[project]
+name = "Chain"
+[[sources]]
+id = "c"
+adapter = "ctxdsl"
+files = ["chain.ctxdsl"]
+[[sources]]
+id = "n"
+adapter = "ctxdsl"
+files = ["noise.ctxdsl"]
+[alphabet]
+strategy = "direct"
+[composition]
+semantics = "asynchronous"
+members = ["c", "n"]
+name = "Sys"
+[[properties]]
+name = "never_bad"
+template = "never"
+args = {{ BAD = "Bad" }}
+over = "Sys"
+"#
+            );
+            let config = VerifyConfig::from_toml(&toml_src).unwrap();
+            verify_project(&config, temp.path()).expect("verify_project succeeds")
+        };
+
+        let report = run(None);
+        assert_eq!(
+            report.counterexample_max_steps, 20,
+            "the default cap rides the report"
+        );
+        let v = &report.property_verdicts[0];
+        assert!(!v.satisfied, "Bad is reachable");
+        let w = v.counterexample.as_ref().expect("a witness");
+        assert_eq!(w.steps.len(), 20, "cut at the default cap");
+        assert!(matches!(w.termination, TraceTermination::LengthLimit));
+        assert!(
+            w.violating_state
+                .as_deref()
+                .is_some_and(|s| s.contains("Bad")),
+            "a truncated trace still names the violating state: {:?}",
+            w.violating_state
+        );
+        assert!(
+            w.steps.iter().all(|s| s.label == "step"),
+            "the shortest path never spends a step on the noise component: {:?}",
+            w.steps.iter().map(|s| s.label.as_str()).collect::<Vec<_>>()
+        );
+
+        let report = run(Some(40));
+        assert_eq!(report.counterexample_max_steps, 40);
+        let w = report.property_verdicts[0]
+            .counterexample
+            .as_ref()
+            .expect("a witness");
+        assert_eq!(
+            w.steps.len(),
+            26,
+            "25 steps + boom: the whole shortest path"
+        );
+        assert!(w.steps.last().unwrap().successor_state.contains("Bad"));
+        assert!(matches!(w.termination, TraceTermination::Sink));
     }
 
     #[test]

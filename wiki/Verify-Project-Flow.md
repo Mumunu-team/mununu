@@ -184,6 +184,7 @@ pub struct VerifyReport {
     pub sources: Vec<SourceSummary>,           // id, adapter, resolved automaton
     pub composition: CompositionInfo,          // semantics, name, resolved members
     pub property_verdicts: Vec<PropertyVerdict>,
+    pub counterexample_max_steps: usize,       // the witness cap this run used (mununu#594; 20 by default)
     pub safety_cube_results: Vec<SafetyCubeResult>, // opt-in `[project] safety_cube`; empty otherwise
 }
 
@@ -207,10 +208,14 @@ pub struct PropertyVerdict {
     pub initial_states: Vec<String>,
     pub initial_satisfying: Vec<String>,
     pub refinement_trace: Option<RefinementTrace>, // populated when CEGAR ran (post-R.5)
+    pub counterexample: Option<TraceWitness>,  // for a violated property: initial state, steps, termination,
+                                               // and on the safety shape the `violating_state` it leads to
 }
 
 pub enum KleeneVerdict { KleeneT, KleeneF, KleeneBot }
 ```
+
+**Counterexamples (mununu#594).** `mununu verify --print-counterexample` prints each violated property's witness. For the safety shape `nu X. (phi && [] X)` — what the `never` template and most hand-written invariants are — the witness is the **shortest path** (a BFS over the product) from a violating initial state to a `!phi` state, so a 25-step chain shows its `Bad` and a product of unrelated components does not spend the trace on their self-cycles; the `!phi` state is named in `violating_state` even when the printed steps are cut. Other shapes keep the forward walk. The cap is `counterexample_max_steps` in `verify.toml`, overridden by `--counterexample-max-steps <N>` on the CLI or `counterexample_max_steps` on the API request; the report carries the cap it used, and a `LengthLimit` termination is relative to it. (Source of truth: `build_counterexample_witness` in `verify/orchestrator.rs`.)
 
 For `BoolDom` (legacy adapters, Sharp-everywhere KMTSes), `verdict` is always `KleeneT` or `KleeneF` and `bot_states` is always `0`. For `KleeneDom` (KMTS lifter output with `MayOnly` transitions), `KleeneBot` is possible; when CEGAR refinement closes it, `refinement_trace` is `Some(_)` with per-round predicate / UF additions.
 

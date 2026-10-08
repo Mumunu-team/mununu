@@ -10,6 +10,14 @@ use serde::{Deserialize, Serialize};
 // Report
 // ---------------------------------------------------------------------------
 
+/// mununu#594 — the historical witness cap: enough for the shipped fixtures' violations without
+/// a wall of state names, and the floor a `LengthLimit` is read against.
+pub const DEFAULT_COUNTEREXAMPLE_MAX_STEPS: usize = 20;
+
+fn default_counterexample_max_steps() -> usize {
+    DEFAULT_COUNTEREXAMPLE_MAX_STEPS
+}
+
 /// Top-level result of [`crate::verify::orchestrator::verify_project`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerifyReport {
@@ -21,6 +29,11 @@ pub struct VerifyReport {
     pub composition: CompositionInfo,
     /// One verdict per `[[properties]]` entry.
     pub property_verdicts: Vec<PropertyVerdict>,
+    /// mununu#594 — the step cap every counterexample witness in this report was built under
+    /// (`counterexample_max_steps` in the config, the CLI flag or the API field; 20 by
+    /// default). A `LengthLimit` termination is relative to it.
+    #[serde(default = "default_counterexample_max_steps")]
+    pub counterexample_max_steps: usize,
     /// Per-source KMTS safety-cube (`AG ¬bad`) verdicts — populated only when
     /// `[project].safety_cube = true` (or the config field `safety_cube`). Empty
     /// otherwise. See [`crate::verify::config::ProjectSection::safety_cube`].
@@ -155,6 +168,12 @@ pub struct TraceWitness {
     pub steps: Vec<TraceStep>,
     /// Why the trace stopped.
     pub termination: TraceTermination,
+    /// mununu#594 — on the safety shape `nu X. (phi && [] X)`, the `!phi` state this witness
+    /// leads to (the shortest path's end), named even when the printed steps were cut at the
+    /// cap, so a truncated trace still says where it was going. `None` on the other shapes,
+    /// where the walk has no target to name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub violating_state: Option<String>,
 }
 
 /// One transition in a [`TraceWitness`].
@@ -178,8 +197,8 @@ pub enum TraceTermination {
     /// `return_to_step` index is the step where the cycle joins
     /// back. `0` means the cycle closes onto the initial state.
     Cycle { return_to_step: usize },
-    /// The orchestrator's length cap (currently 20 steps) was
-    /// reached before any other terminator fired.
+    /// The orchestrator's length cap (`VerifyReport::counterexample_max_steps`, 20 by
+    /// default) was reached before any other terminator fired.
     LengthLimit,
 }
 

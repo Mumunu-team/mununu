@@ -3711,6 +3711,12 @@ pub struct VerifyProjectRequest {
     /// response field needed).
     #[serde(default)]
     pub cluster_similarity_floor: Option<f64>,
+    /// mununu#594 — the counterexample witness's step cap. Overrides any
+    /// `counterexample_max_steps` in the supplied config / config_toml;
+    /// `None` → 20. The cap used rides the response's
+    /// `VerifyReport::counterexample_max_steps`.
+    #[serde(default)]
+    pub counterexample_max_steps: Option<usize>,
 }
 
 /// HTTP handler for the general verify pipeline. Mirrors
@@ -3754,6 +3760,10 @@ fn verify_project_handler_impl(
     // default → 0.5 at the bit-blast layer) in place.
     if request.cluster_similarity_floor.is_some() {
         config.cluster_similarity_floor = request.cluster_similarity_floor;
+    }
+    // mununu#594 — likewise for the counterexample step cap.
+    if request.counterexample_max_steps.is_some() {
+        config.counterexample_max_steps = request.counterexample_max_steps;
     }
     let base_dir = std::path::PathBuf::from(&request.base_dir);
     crate::verify::verify_project(&config, &base_dir)
@@ -4223,6 +4233,8 @@ over = "Sys"
             config_toml: Some(toml.to_string()),
             base_dir: tmp.path().to_string_lossy().to_string(),
             cluster_similarity_floor: None,
+
+            counterexample_max_steps: None,
         };
         let Json(report) = verify_project_handler(Json(request))
             .await
@@ -4253,6 +4265,8 @@ members = ["x"]
             config_toml: Some("[project]\nname = \"Y\"\n".to_string()),
             base_dir: ".".to_string(),
             cluster_similarity_floor: None,
+
+            counterexample_max_steps: None,
         };
         let err = verify_project_handler(Json(request)).await.unwrap_err();
         match err {
@@ -4831,6 +4845,8 @@ endmodule
             config_toml: None,
             base_dir: ".".to_string(),
             cluster_similarity_floor: None,
+
+            counterexample_max_steps: None,
         };
         let err = verify_project_handler(Json(request)).await.unwrap_err();
         match err {
