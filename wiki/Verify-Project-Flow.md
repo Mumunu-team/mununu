@@ -19,7 +19,7 @@ A verification project is the tuple `(Sources, AlphabetBinding, Composition, Pro
   - **`renamings`** — explicit `{ from = "source_id.local_label", to = "canonical_label" }` map.
   - **`register_map`** — derives renamings from a register-map JSON sidecar via [`coupling::rendezvous_label_name`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/codesign/coupling.rs); SV-rtl sources get an automatic post-process pass via [`verify::register_map_rewriter::derive_sv_renamings_from_register_map`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/verify/register_map_rewriter.rs).
 
-- **Composition** — `{ semantics: synchronous | asynchronous | superset, members: [...], name }`. Drives the existing `composition::compose` primitive.
+- **Composition** — `{ semantics: synchronous | asynchronous | superset, members: [...], name }`. Drives the existing `composition::compose` primitive. A member is a source id (`"w"`: the source's first automaton) or a wildcard (`"w.*"`: every automaton the source emits). Names are the ones the source **realizes** to: a parameterised automaton (`parameters { param i in R; }`) is present only as its instances (`Worker_0`, `Worker_1`), so `"w.*"` lists every instance and bare `"w"` lists every instance of the first declared automaton — never one of them (mununu#591; `realized_automaton_groups` in `verify/assemble.rs`).
 
 - **Properties** — `[{ name, (template | formula), args, over }]`. Resolved via the builtin [`TemplateRegistry`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/adapter/templates/builtin_templates.json) when a template id is given.
 

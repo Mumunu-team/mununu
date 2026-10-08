@@ -185,19 +185,22 @@ pub fn assemble_unified_ctxdsl(
     // Pull each source's inner body, plus the first-automaton hint
     // and the full list of automata-per-source for the `<src>.*`
     // wildcard syntax.
+    // mununu#591 — names are the ones each source REALIZES to (a parameterised automaton's
+    // instances, not its declaration), grouped by declaration: "the first automaton" of a
+    // source whose first declaration is a template is every instance of that template.
     let mut bodies: Vec<&str> = Vec::with_capacity(sources.len());
-    let mut first_automaton_by_source: BTreeMap<&str, &str> = BTreeMap::new();
-    let mut all_automata_by_source: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    let mut first_automaton_by_source: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    let mut all_automata_by_source: BTreeMap<&str, Vec<String>> = BTreeMap::new();
     for s in sources {
         let body =
             extract_context_body(&s.ctxdsl).ok_or_else(|| AssembleError::NoContextBlock {
                 source_id: s.source_id.clone(),
             })?;
-        let all = all_automaton_names(body);
-        if let Some(name) = all.first() {
-            first_automaton_by_source.insert(s.source_id.as_str(), name);
+        let groups = realized_automaton_groups(&s.ctxdsl).unwrap_or_default();
+        if let Some(first) = groups.first() {
+            first_automaton_by_source.insert(s.source_id.as_str(), first.clone());
         }
-        all_automata_by_source.insert(s.source_id.as_str(), all);
+        all_automata_by_source.insert(s.source_id.as_str(), groups.into_iter().flatten().collect());
         bodies.push(body);
     }
 
@@ -222,31 +225,30 @@ pub fn assemble_unified_ctxdsl(
                     source_id: src_id.to_string(),
                 });
             }
-            for n in names {
-                resolved_members.push(n.to_string());
-            }
+            resolved_members.extend(names);
             continue;
         }
         // Source must exist.
         if !sources.iter().any(|s| s.source_id == *m) {
             return Err(AssembleError::UnknownMember { id: m.clone() });
         }
-        let name = match discovery {
-            AutomatonDiscovery::SourceId => m.clone(),
+        let names: Vec<String> = match discovery {
+            AutomatonDiscovery::SourceId => vec![m.clone()],
             AutomatonDiscovery::FirstAutomaton => first_automaton_by_source
                 .get(m.as_str())
-                .map(|s| (*s).to_string())
+                .cloned()
                 .ok_or_else(|| AssembleError::NoAutomatonFound {
                     source_id: m.clone(),
                 })?,
-            AutomatonDiscovery::Explicit(map) => map.get(m).cloned().unwrap_or_else(|| {
-                first_automaton_by_source
+            AutomatonDiscovery::Explicit(map) => match map.get(m) {
+                Some(name) => vec![name.clone()],
+                None => first_automaton_by_source
                     .get(m.as_str())
-                    .map(|s| (*s).to_string())
-                    .unwrap_or_else(|| m.clone())
-            }),
+                    .cloned()
+                    .unwrap_or_else(|| vec![m.clone()]),
+            },
         };
-        resolved_members.push(name);
+        resolved_members.extend(names);
     }
 
     // ---- Emit the main context ----------------------------------
@@ -365,6 +367,24 @@ fn matching_close_brace(text: &str, open_at: usize) -> Option<usize> {
 /// identifier. Does not look inside string literals or comments — the
 /// CTXDSL grammar's lexical rules make this safe in practice; if a
 /// false positive ever bites we'll tighten the scan.
+/// mununu#591 — the automaton names a source REALIZES to, grouped by declaration: a plain
+/// automaton is one name; a parameterised one (`parameters { param i in R; }`) is every instance
+/// name its range expands to (`Worker_0`, `Worker_1`), which is what the composition must
+/// reference — the declared `Worker` does not exist after expansion. Parses the source; a source
+/// that does not parse here falls back to the textual scan of declared names
+/// ([`all_automaton_names`]), one name per group, and realization reports whatever is wrong.
+pub(crate) fn realized_automaton_groups(ctxdsl: &str) -> Option<Vec<Vec<String>>> {
+    match crate::context_dsl::parse(ctxdsl) {
+        Ok(doc) => Some(crate::context_dsl::realized_automaton_names(&doc)),
+        Err(_) => extract_context_body(ctxdsl).map(|body| {
+            all_automaton_names(body)
+                .into_iter()
+                .map(|n| vec![n.to_string()])
+                .collect()
+        }),
+    }
+}
+
 pub(crate) fn all_automaton_names(body: &str) -> Vec<&str> {
     let mut out = Vec::new();
     let mut cursor = 0usize;

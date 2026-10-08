@@ -857,6 +857,47 @@ fn resolve_enum_variants(automaton: &Automaton, registry: &EnumRegistry) -> Auto
     }
 }
 
+/// mununu#591 — the automaton names a document REALIZES to, in declaration order: a plain
+/// automaton by its name, a parameterised one by every instance name its range expands to
+/// (`Worker` with `param i in 0 ..= 1` → `Worker_0`, `Worker_1`), exactly as
+/// [`expand_parameterized_automata`] names them. A composition member must be one of these; the
+/// `verify` orchestrator resolves `[composition].members` through this rather than a scan of the
+/// declared names, which the expansion does not keep. A range that does not resolve leaves the
+/// declared name (the realization then reports it). Grouped by declaration, in declaration
+/// order, so a caller that wants "the first automaton" gets every instance of a template.
+pub fn realized_automaton_names(doc: &ContextDoc) -> Vec<Vec<String>> {
+    let constants: HashMap<String, i64> = doc
+        .constants
+        .iter()
+        .map(|c| (c.name.name.clone(), c.value))
+        .collect();
+    let empty = HashMap::new();
+    let ranges: HashMap<String, (i64, i64)> = doc
+        .ranges
+        .iter()
+        .filter_map(|r| {
+            let lo = eval_const_expr(&r.lower, &constants, &empty).ok()?;
+            let hi = eval_const_expr(&r.upper, &constants, &empty).ok()?;
+            Some((r.name.name.clone(), (lo, hi)))
+        })
+        .collect();
+    let mut out = Vec::new();
+    for automaton in &doc.automata {
+        match automaton.parameters.first() {
+            None => out.push(vec![automaton.name.name.clone()]),
+            Some(param) => match resolve_param_range(&param.spec, &constants, &ranges) {
+                Ok((lo, hi)) => out.push(
+                    (lo..=hi)
+                        .map(|val| format!("{}_{}", automaton.name.name, val))
+                        .collect(),
+                ),
+                Err(_) => out.push(vec![automaton.name.name.clone()]),
+            },
+        }
+    }
+    out
+}
+
 /// Expands parameterized automata into concrete instances.
 /// For example, `automaton Client { parameters { param i in 0..=1; } ... }`
 /// produces `Client_0` and `Client_1`. Non-parameterized automata pass through unchanged.
