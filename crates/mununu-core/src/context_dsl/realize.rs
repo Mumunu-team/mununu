@@ -857,6 +857,47 @@ fn resolve_enum_variants(automaton: &Automaton, registry: &EnumRegistry) -> Auto
     }
 }
 
+/// mununu#591 — the automaton names a document REALIZES to, in declaration order: a plain
+/// automaton by its name, a parameterised one by every instance name its range expands to
+/// (`Worker` with `param i in 0 ..= 1` → `Worker_0`, `Worker_1`), exactly as
+/// [`expand_parameterized_automata`] names them. A composition member must be one of these; the
+/// `verify` orchestrator resolves `[composition].members` through this rather than a scan of the
+/// declared names, which the expansion does not keep. A range that does not resolve leaves the
+/// declared name (the realization then reports it). Grouped by declaration, in declaration
+/// order, so a caller that wants "the first automaton" gets every instance of a template.
+pub fn realized_automaton_names(doc: &ContextDoc) -> Vec<Vec<String>> {
+    let constants: HashMap<String, i64> = doc
+        .constants
+        .iter()
+        .map(|c| (c.name.name.clone(), c.value))
+        .collect();
+    let empty = HashMap::new();
+    let ranges: HashMap<String, (i64, i64)> = doc
+        .ranges
+        .iter()
+        .filter_map(|r| {
+            let lo = eval_const_expr(&r.lower, &constants, &empty).ok()?;
+            let hi = eval_const_expr(&r.upper, &constants, &empty).ok()?;
+            Some((r.name.name.clone(), (lo, hi)))
+        })
+        .collect();
+    let mut out = Vec::new();
+    for automaton in &doc.automata {
+        match automaton.parameters.first() {
+            None => out.push(vec![automaton.name.name.clone()]),
+            Some(param) => match resolve_param_range(&param.spec, &constants, &ranges) {
+                Ok((lo, hi)) => out.push(
+                    (lo..=hi)
+                        .map(|val| format!("{}_{}", automaton.name.name, val))
+                        .collect(),
+                ),
+                Err(_) => out.push(vec![automaton.name.name.clone()]),
+            },
+        }
+    }
+    out
+}
+
 /// Expands parameterized automata into concrete instances.
 /// For example, `automaton Client { parameters { param i in 0..=1; } ... }`
 /// produces `Client_0` and `Client_1`. Non-parameterized automata pass through unchanged.
@@ -1375,7 +1416,23 @@ fn compose_and_register(
             CompositionKind::Asynchronous => CompositionSemantics::Asynchronous,
             CompositionKind::Superset => CompositionSemantics::Superset,
         };
-        let options = CompositionOptions::new(semantics);
+        // mununu#589 — the composition's synchronisation vectors, over EVERY member, go into the
+        // options before the fold: a vector whose labels sit on two partner automata can only
+        // fire if those partners get their joint step before the owner is folded in, and the
+        // pairwise fold cannot know that from the two sides it sees. Collected here so the
+        // result does not depend on the members' order (or, on the `verify` path, their names).
+        let mut sync_vectors: std::collections::BTreeSet<std::collections::BTreeSet<String>> =
+            std::collections::BTreeSet::new();
+        for member_name in &member_names {
+            if let Some(member) = context
+                .clts(member_name)
+                .or_else(|| realized.get(member_name.as_str()))
+            {
+                sync_vectors.extend(crate::composition::synchronisation_vectors(member));
+            }
+        }
+        let options = CompositionOptions::new(semantics)
+            .with_sync_vectors(sync_vectors.into_iter().collect());
 
         // Compose members left-associatively.
         // Members can be base automata (from context) or previously realized compositions.
@@ -3626,6 +3683,109 @@ context simple {
         assert!(realized.context.clts("Machine").is_some());
         assert!(realized.formulas.contains_key("stay"));
         assert!(realized.controllers.contains_key("trivial"));
+    }
+
+    /// mununu#589 — a synchronisation vector whose two labels sit on two DIFFERENT partner
+    /// automata fires whatever the members' fold order: the owner first (the case #570 fixed) and
+    /// the owner LAST, where the pairwise fold had no joint `{a, b}` step to pair with and the
+    /// vector's target state silently vanished from the product. The three automata are the
+    /// issue's reproducer; `S1` is the vector's target.
+    #[test]
+    fn x589_a_vector_split_across_two_partners_fires_whatever_the_fold_order() {
+        let partners = r#"
+        automaton J {
+            controllable { }
+            states { state J0 initial; state J0b; state J1; }
+            transitions {
+                transition J0 -> J0b on label pre;
+                transition J0b -> J1 on label a;
+                transition J1 -> J1 on label j_sink;
+            }
+        }
+        automaton L {
+            controllable { }
+            states { state L0 initial; }
+            transitions { transition L0 -> L0 on label b; }
+        }
+"#;
+        let owner = |name: &str| {
+            format!(
+                r#"
+        automaton {name} {{
+            controllable {{ }}
+            states {{ state S0 initial; state S0b; state S1; }}
+            transitions {{
+                transition S0 -> S0b on label pre;
+                transition S0b -> S1 on {{label a, label b}};
+                transition S1 -> S1 on label a_sink;
+            }}
+        }}
+"#
+            )
+        };
+        let reaches_s1 = |owner_name: &str, members: &str| -> bool {
+            let src = format!(
+                "context V {{ automata {{ {} {} }} composition {{ asynchronous P {{ members [{members}]; }} }} }}",
+                owner(owner_name),
+                partners
+            );
+            let doc = parse(&src).expect("parses");
+            let realized = realize(&doc, &[]).expect("realizes");
+            let p = realized.context.clts("P").expect("the product");
+            // S1 is reached iff some product state's name carries the owner's `S1`.
+            p.states()
+                .any(|s| p.state_name(s).map(|n| n.contains("S1")).unwrap_or(false))
+        };
+        // The owner first in the fold — the pairwise rule alone handles it.
+        assert!(reaches_s1("A", "A, J, L"), "owner first: the vector fires");
+        // The owner LAST: J and L are folded first and must take their joint `{a, b}` step
+        // as partners of the vector A carries, or A never finds anything to pair with.
+        assert!(reaches_s1("A", "J, L, A"), "owner last: the vector fires");
+        assert!(
+            reaches_s1("Z", "J, L, Z"),
+            "owner last, named to sort last: the vector fires"
+        );
+    }
+
+    /// mununu#589, the control: two automata with NO vector anywhere in the composition never
+    /// get a joint step — the rendezvous rule only completes a vector some member carries.
+    #[test]
+    fn x589_partners_without_an_owner_do_not_synchronise_on_their_own() {
+        let src = r#"
+context V {
+    automata {
+        automaton J {
+            controllable { }
+            states { state J0 initial; state J1; }
+            transitions { transition J0 -> J1 on label a; }
+        }
+        automaton L {
+            controllable { }
+            states { state L0 initial; state L1; }
+            transitions { transition L0 -> L1 on label b; }
+        }
+    }
+    composition { asynchronous P { members [J, L]; } }
+}
+"#;
+        let doc = parse(src).expect("parses");
+        let realized = realize(&doc, &[]).expect("realizes");
+        let p = realized.context.clts("P").expect("the product");
+        let joint = p.states().any(|s| {
+            p.outgoing(s).iter().any(|t| {
+                let labels: Vec<String> = t
+                    .labels()
+                    .iter()
+                    .filter_map(|id| p.label_payload(*id))
+                    .flat_map(|l| l.iter().cloned())
+                    .collect();
+                labels.len() >= 2
+            })
+        });
+        assert!(
+            !joint,
+            "no member carries a vector, so J and L only interleave"
+        );
     }
 
     #[test]
