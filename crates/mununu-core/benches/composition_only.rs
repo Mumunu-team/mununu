@@ -23,9 +23,7 @@ fn bench_chain_sync(c: &mut Criterion) {
             let result = compose(
                 &chain_a,
                 &chain_b,
-                &CompositionOptions {
-                    semantics: CompositionSemantics::Synchronous,
-                },
+                &CompositionOptions::new(CompositionSemantics::Synchronous),
             );
             let _ = black_box(result);
         });
@@ -44,9 +42,7 @@ fn bench_grid_async(c: &mut Criterion) {
             let result = compose(
                 &grid_a,
                 &grid_b,
-                &CompositionOptions {
-                    semantics: CompositionSemantics::Asynchronous,
-                },
+                &CompositionOptions::new(CompositionSemantics::Asynchronous),
             );
             let _ = black_box(result);
         });
@@ -67,7 +63,7 @@ fn bench_modes_compare(c: &mut Criterion) {
     ] {
         group.bench_function(BenchmarkId::from_parameter(label), |b| {
             b.iter(|| {
-                let r = compose(&small, &other, &CompositionOptions { semantics: sem });
+                let r = compose(&small, &other, &CompositionOptions::new(sem));
                 let _ = black_box(r);
             });
         });
