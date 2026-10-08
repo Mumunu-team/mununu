@@ -94,6 +94,13 @@ pub struct VerifyConfig {
     /// collapse toward joint COI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cluster_similarity_floor: Option<f64>,
+    /// mununu#594 — the counterexample witness's step cap (`counterexample_max_steps = 50`
+    /// in `verify.toml`), overridden by `mununu verify --counterexample-max-steps <N>` or the
+    /// API verify request's `counterexample_max_steps`. `None` → 20, the historical default.
+    /// The cap bounds the WALK; on the safety shape `nu X. (phi && [] X)` the witness is a
+    /// shortest path to a `!phi` state and rarely needs it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub counterexample_max_steps: Option<usize>,
 }
 
 /// `[project]` block.
