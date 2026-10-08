@@ -1951,7 +1951,8 @@ impl From<&crate::adapter::slang::verify_auto::AutoVerifyReport> for SvVerifyAut
                                 .and_then(|b| b.knob())
                                 .map(str::to_string),
                             registers: match r {
-                                BottomReason::UnestablishedInitialState { registers, .. } => {
+                                BottomReason::UnestablishedInitialState { registers, .. }
+                                | BottomReason::UnestablishedInitialCubes { registers, .. } => {
                                     Some(*registers)
                                 }
                                 _ => None,
@@ -2170,6 +2171,7 @@ pub struct BottomReasonView {
     /// | `report-self-contradiction` | 🔴 **SOUNDNESS ALARM (mununu#579).** Two properties of the SAME model came back with definite verdicts that cannot both be right — one engine disagreeing with itself across properties, where `engine-contradiction` compares engines on one property. **Both** are withheld, deliberately: a contradiction says one verdict is broken, not which. **Retrying is actively wrong**, and so is believing whichever looks more plausible. Escalate |
     /// | `engine-crashed` | the engine process died. Not an abstention; report it |
     /// | `unestablished-initial-state` | 🔴 **the withheld VIOLATED.** The property's cone touches `registers` register(s) with no established cycle-0 value. A free start set over-approximates reachability, which licenses a definite `HOLDS` but never a definite `VIOLATED` — so the violation is withheld. **Retrying cannot help.** Since mununu#578 recoverable reset values are established automatically, so a register still free here has none to recover: it holds through reset, or it is a `--cutpoint` / blackboxed output (free at every cycle by construction). Supply an `init` via a sidecar, or drop the cutpoint |
+    /// | `unestablished-initial-cubes` | **nothing decided (mununu#579).** The property's predicates have `registers` register(s) with no `init` line (plus any free inputs), and the cube path's initial cube set — the product of those free dimensions — is past the 16 it enumerates. An init-less register is free at cycle 0 on every engine; supply an `init` via a sidecar (or let reset-gating establish it) and re-run. **Retrying cannot help.** |
     /// | `safety-shape-not-reducible` | the property's SHAPE is outside the rescue lane — a bigger budget **cannot** help. Reshape, or add a reducer |
     /// | `no-state-model-non-safety` | zero state registers; a modelling issue, not an engine cap |
     /// | `not-attempted` | filtered out before any engine ran |
@@ -2215,7 +2217,7 @@ pub struct BottomReasonView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget_knob: Option<String>,
     /// mununu#577 — how many registers in THIS property's cone have no established cycle-0 value,
-    /// for `unestablished-initial-state` only.
+    /// for `unestablished-initial-state` and `unestablished-initial-cubes` only.
     ///
     /// Per-property, from the property's own cone — not a whole-design count — so it is the number
     /// that sizes the remedy. It is a field for the same reason `budget` is: the count is otherwise
