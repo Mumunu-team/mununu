@@ -1516,6 +1516,14 @@ pub struct VerifyAutoOptions {
     /// `MUNUNU_NO_ANTECEDENT_SHADOW=1` env var is the third channel; either
     /// channel disabling shadow-synth wins.
     pub antecedent_shadow: bool,
+    /// mununu#629 — antecedent constant propagation on the exact-symbolic engine. `true`
+    /// (default): a same-cycle implication `sig == K |-> C` has `K` propagated through `C`'s
+    /// cone (a read mux folds to the selected arm), so a property about one field of a wide
+    /// record decides instead of skipping on the bit cap. `false` leaves the formula as lifted
+    /// — the differential-oracle / debug knob, mirrored on the CLI as
+    /// `--no-antecedent-propagate`, on the API as `no_antecedent_propagate: true`, and by the
+    /// process-global `MUNUNU_NO_ANTECEDENT_PROPAGATE=1`; either channel disabling it wins.
+    pub antecedent_propagate: bool,
 }
 
 /// PORTFOLIO scheduling mode — the budget knob for the multi-engine default.
@@ -1575,6 +1583,7 @@ impl Default for VerifyAutoOptions {
             rescue_bottom_recoverability: true,
             mutation: None,
             antecedent_shadow: true,
+            antecedent_propagate: true,
         }
     }
 }
@@ -3974,6 +3983,7 @@ pub(crate) fn verify_auto_impl(
             };
             let exact_opts = ExactSymbolicOptions {
                 antecedent_shadow_enabled: opts.antecedent_shadow,
+                antecedent_propagate_enabled: opts.antecedent_propagate,
                 ..Default::default()
             };
 
@@ -5435,6 +5445,7 @@ pub(crate) fn rescue_skipped_via_exact(
     }
     let exact_opts = ExactSymbolicOptions {
         antecedent_shadow_enabled: opts.antecedent_shadow,
+        antecedent_propagate_enabled: opts.antecedent_propagate,
         ..Default::default()
     };
     for prop in report.properties.iter_mut() {
