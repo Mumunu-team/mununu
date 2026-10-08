@@ -97,6 +97,14 @@ All successors reachable via `ack_assert` or `ack_deassert` transitions must sat
 
 There exists a successor reachable via a `req_assert` transition that satisfies `phi`.
 
+### A label set is any-of
+
+> Source of truth: [`guard_matches_labels_and_vars`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/mu_calculus/mod.rs) — surface: CLI+API+UI.
+
+`labels = { a, c }` ranges over every transition that carries `a` **or** `c` — the textbook reading of a labelled modality `[K] phi`, and what the two examples above say. A transition carrying a synchronisation vector `{a, b}` matches `labels = { a }`, `labels = { b }` and `labels = { a, b }` alike, since it carries each. (Until mununu#590 the set was matched all-of — only an edge carrying *every* listed label, i.e. the vector itself — so `[ labels = { a, c } ] phi` was vacuously true wherever no single edge carried both; three properties in a real project passed that way.) There is no guard that means "exactly the vector `{a, b}` and nothing else"; that is a property of a transition, not of a modality, and the any-of reading is what "after an `a` or a `c` event" needs.
+
+A guard that names a label **no transition of the model carries** — a typo, or a label from another automaton — makes `[ labels = {…} ] phi` vacuously true and `< labels = {…} > phi` vacuously false. The evaluator warns once per such label (`[mununu#590] modality guard names label …`); the verdict stands, since the formula means what it says.
+
 ## Controllability-Aware Modalities
 
 These operators encode a two-player game between the controller and the environment. They are the key ingredient for controller synthesis.

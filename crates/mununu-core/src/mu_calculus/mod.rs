@@ -600,8 +600,14 @@ impl FormulaBuilder {
 ///   upfront, then delegates here for the label and variable filters).
 ///
 /// Checks performed (in order):
-/// 1. **Label-name filter**: every name in `guard.labels` must appear in at
-///    least one of the transition's label bitsets.
+/// 1. **Label-name filter**: the transition must carry AT LEAST ONE of the names in
+///    `guard.labels` — a label set is any-of, the textbook reading of a labelled modality
+///    `[K] φ` and what the Mu-Calculus Reference documents. (Until mununu#590 it was all-of,
+///    a synchronisation-vector match, by accident of the loop: `[labels = {a, c}] φ` was
+///    vacuously true wherever no single edge carried both `a` and `c`.) A guard that wants
+///    exactly a vector `{a, b}` is the conjunction of its single-label guards on the same
+///    edge, which no guard can express; "this exact vector is enabled" is a transition
+///    property, not a modality.
 /// 2. **Current-state variable filter**: `guard.current.required` names must
 ///    all be present in the source state's variable set; `guard.current.forbidden`
 ///    names must all be absent.
@@ -619,17 +625,17 @@ where
     S: IdStorage,
     L: IdStorage,
 {
-    // 1. Label-name filter: every required label must appear in at least one
-    //    of the transition's label bitsets.
+    // 1. Label-name filter: the transition carries at least one of the guard's labels
+    //    (any-of; mununu#590).
     if !guard.labels.is_empty() {
-        for required in &guard.labels {
-            let found = transition.labels().iter().any(|label_id| {
+        let found = guard.labels.iter().any(|wanted| {
+            transition.labels().iter().any(|label_id| {
                 clts.label_bitset(*label_id)
-                    .is_some_and(|bitset| bitset.test(required.as_str()))
-            });
-            if !found {
-                return false;
-            }
+                    .is_some_and(|bitset| bitset.test(wanted.as_str()))
+            })
+        });
+        if !found {
+            return false;
         }
     }
 

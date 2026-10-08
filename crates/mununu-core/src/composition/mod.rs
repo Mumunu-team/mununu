@@ -597,6 +597,36 @@ pub fn compose(
         .cloned()
         .collect();
 
+    // mununu#592 — a label declared controllable in one member and merely USED by the other
+    // composes as UNCONTROLLABLE: the composed step carries the partner's uncontrollable reading
+    // (`composed_has_uncontrollable_labels`), so a controller that could decline `go` in the
+    // member alone cannot in the product, and a realizability verdict flips with no message.
+    // That is the sound reading (the partner's step is not the controller's to withhold), but
+    // it must be loud; the modelling consequence is to keep a controllable decision and its
+    // effect in one automaton, or to expose the effect through a follow-up uncontrollable label.
+    for (this, other, this_side, other_side) in [
+        (left, right, "left", "right"),
+        (right, left, "right", "left"),
+    ] {
+        let this_ctrl =
+            ControllabilityChecker::collect_label_names(this, this.controllable_alphabet());
+        let other_alphabet = collect_alphabet(other);
+        let mut demoted: Vec<&String> = this_ctrl
+            .iter()
+            .filter(|l| other_alphabet.contains(*l))
+            .collect();
+        demoted.sort();
+        for label in demoted {
+            tracing::warn!(
+                "[mununu#592] label `{label}` is controllable in the {this_side} member but the \
+                 {other_side} member carries it too, so in the composition it is UNCONTROLLABLE: \
+                 a controller cannot withhold a step the partner takes. Keep a controllable \
+                 decision and its effect in one automaton, or expose the effect through a \
+                 follow-up uncontrollable label."
+            );
+        }
+    }
+
     // mununu#570 — a compound action no partner transition can match can NEVER fire, and its
     // automaton is frozen at that state. Warn at composition time; this is a static check over
     // the two label sets, with no state-space exploration.

@@ -2778,6 +2778,32 @@ fn build_automaton(
         Ok::<(), RealizationError>(())
     })?;
 
+    // mununu#592 — a label declared in `controllable { }` but used by no transition is still
+    // part of this automaton's alphabet (the CTXDSL reference says so, and it is what a declared
+    // alphabet means in any alphabet-based parallel composition): under composition a partner's
+    // step on it needs this automaton's participation, which it never offers, so the label is
+    // BLOCKED. Until now the label was not interned at all, so it vanished from the alphabet and
+    // partners fired it freely — deleting an automaton's only edge on a shared label FREED its
+    // partners instead of blocking them, the opposite of the reference. Interned here with its
+    // declared controllability; `Clts::alphabet()` reads the controllability sets, so composition
+    // sees it.
+    for declared in &automaton.controllable {
+        let label_name = &declared.name.name;
+        if label_cache.contains_key(label_name) {
+            continue;
+        }
+        let id = builder
+            .labels()
+            .intern(labels.payload(label_name))
+            .map_err(|error| RealizationError::AutomatonBuild {
+                name: name.to_owned(),
+                error,
+            })?;
+        label_cache.insert(label_name.clone(), id);
+        builder.set_label_controllability(id, LabelControllability::Controllable);
+        builder.declare_in_alphabet(id);
+    }
+
     builder
         .build()
         .map_err(|error| RealizationError::AutomatonBuild {
@@ -3626,6 +3652,87 @@ context simple {
         assert!(realized.context.clts("Machine").is_some());
         assert!(realized.formulas.contains_key("stay"));
         assert!(realized.controllers.contains_key("trivial"));
+    }
+
+    /// mununu#592 (2) — a label declared in `controllable { }` but used by no transition is in
+    /// the automaton's alphabet, so a partner that carries it is BLOCKED under composition (`A`
+    /// never offers `x`, so `B` cannot take it). Before, the label vanished from the alphabet and
+    /// `B` moved on `x` freely. `y` is declared and used, and `t` is `B`'s own — both unaffected.
+    #[test]
+    fn x592_a_declared_only_controllable_label_is_in_the_alphabet_and_blocks_partners() {
+        let src = r#"
+context C {
+    automata {
+        automaton A {
+            controllable { label x; label y; }
+            states { state S0 initial; state S1; }
+            transitions { transition S0 -> S1 on label y; transition S1 -> S1 on label s; }
+        }
+        automaton B {
+            controllable { }
+            states { state T0 initial; state T1; }
+            transitions { transition T0 -> T1 on label x; transition T1 -> T1 on label t; }
+        }
+    }
+    composition { asynchronous P { members [A, B]; } }
+}
+"#;
+        let doc = parse(src).expect("parses");
+        let realized = realize(&doc, &[]).expect("realizes");
+        let a = realized.context.clts("A").expect("A");
+        assert!(
+            a.alphabet().iter().any(|l| l == "x"),
+            "a declared-only controllable label is in A's alphabet: {:?}",
+            a.alphabet()
+        );
+        let p = realized.context.clts("P").expect("the product");
+        let t1_reached = p
+            .states()
+            .any(|s| p.state_name(s).map(|n| n.contains("T1")).unwrap_or(false));
+        assert!(
+            !t1_reached,
+            "B's `x` step is shared with A, which never offers it, so T1 is unreachable in P"
+        );
+    }
+
+    /// mununu#592 (1) — a label controllable in one member and merely used by another composes
+    /// as UNCONTROLLABLE, which is why a realizability verdict over the composition differs from
+    /// one over the controller alone. The composition-time warning names it; this pins the
+    /// behaviour it warns about.
+    #[test]
+    fn x592_a_shared_controllable_label_composes_as_uncontrollable() {
+        let src = r#"
+context C {
+    automata {
+        automaton Ctl {
+            controllable { label go; label wait; }
+            states { state C0 initial; state C1; }
+            transitions { transition C0 -> C1 on label go; transition C0 -> C0 on label wait; transition C1 -> C1 on label wait; }
+        }
+        automaton Plant {
+            controllable { }
+            states { state P0 initial; state Bad; }
+            transitions { transition P0 -> Bad on label go; transition P0 -> P0 on label tick; transition Bad -> Bad on label tick; }
+        }
+    }
+    composition { asynchronous Sys { members [Ctl, Plant]; } }
+}
+"#;
+        let doc = parse(src).expect("parses");
+        let realized = realize(&doc, &[]).expect("realizes");
+        let sys = realized.context.clts("Sys").expect("the product");
+        let go_controllable = sys.states().any(|s| {
+            sys.outgoing(s).iter().any(|t| {
+                t.labels().iter().any(|id| {
+                    sys.label_payload(*id)
+                        .is_some_and(|p| p.iter().any(|l| l == "go"))
+                }) && t.is_controllable(sys)
+            })
+        });
+        assert!(
+            !go_controllable,
+            "`go` is controllable in Ctl alone but Plant carries it: in Sys it is uncontrollable"
+        );
     }
 
     #[test]
