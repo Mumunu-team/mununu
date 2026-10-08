@@ -1716,15 +1716,6 @@ pub struct SvVerifyAutoRequest {
     /// thread-safe (unlike the env var, which is process-global).
     #[serde(default)]
     pub no_antecedent_shadow: Option<bool>,
-    /// mununu#629 — disable antecedent constant propagation on the exact-symbolic engine
-    /// (default `false` ⇒ enabled). With it enabled, a same-cycle implication `sig == K |-> C`
-    /// has `K` propagated through `C`'s cone — a read mux folds to the selected arm — so a
-    /// property about one field of a wide packed record decides instead of skipping on the bit
-    /// cap. Set `true` to leave the formula as lifted (the differential-oracle / debug knob),
-    /// mirrored on the CLI as `--no-antecedent-propagate` and by the process-global
-    /// `MUNUNU_NO_ANTECEDENT_PROPAGATE=1`.
-    #[serde(default)]
-    pub no_antecedent_propagate: Option<bool>,
     /// mununu#537 — assert that this run produces the verdicts the caller claims. Omitted ⇒ no
     /// claim, and the response carries no `expectations` block.
     ///

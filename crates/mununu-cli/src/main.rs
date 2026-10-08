@@ -373,9 +373,6 @@ struct InternalEngineEvalArgs {
     /// Mirror of `sv verify-auto --no-antecedent-shadow`, so the child matches the parent's posture.
     #[arg(long = "no-antecedent-shadow")]
     no_antecedent_shadow: bool,
-    /// Mirror of `sv verify-auto --no-antecedent-propagate` (mununu#629).
-    #[arg(long = "no-antecedent-propagate")]
-    no_antecedent_propagate: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -2068,15 +2065,6 @@ struct SvVerifyAutoArgs {
     /// thread-safe; the env var is not).
     #[arg(long = "no-antecedent-shadow")]
     no_antecedent_shadow: bool,
-    /// mununu#629 — disable antecedent constant propagation on the exact-symbolic
-    /// engine. By default a same-cycle implication `sig == K |-> C` has `K`
-    /// propagated through `C`'s cone (a read mux folds to the selected arm), so a
-    /// property about one field of a wide packed record decides instead of
-    /// skipping on the bit cap. Pass this to leave the formula as lifted —
-    /// differential-oracle / debug use. Mirrored on the API as
-    /// `no_antecedent_propagate: true` and by `MUNUNU_NO_ANTECEDENT_PROPAGATE=1`.
-    #[arg(long = "no-antecedent-propagate")]
-    no_antecedent_propagate: bool,
     /// H.J.b — config concretization: pin a wide config input to a constant so
     /// comparisons against it become decidable (e.g. a timer threshold).
     /// Repeatable; format `SIGNAL=VALUE` (e.g. `--config-value
@@ -4126,8 +4114,6 @@ fn sv_verify_auto(args: SvVerifyAutoArgs) -> Result<(), String> {
         mutation: None,
         // mununu#476 item 4 — --no-antecedent-shadow reverts to the Phase A refusal.
         antecedent_shadow: !args.no_antecedent_shadow,
-        // mununu#629 — --no-antecedent-propagate leaves the formula as lifted.
-        antecedent_propagate: !args.no_antecedent_propagate,
     };
 
     let report = verify_auto(&sources, &yopts, &opts)
@@ -9411,7 +9397,6 @@ fn internal_engine_eval(args: InternalEngineEvalArgs) -> Result<(), String> {
         .map_err(|e| format!("internal-engine-eval: cannot parse the formula: {e:?}"))?;
     let opts = ExactSymbolicOptions {
         antecedent_shadow_enabled: !args.no_antecedent_shadow,
-        antecedent_propagate_enabled: !args.no_antecedent_propagate,
         ..Default::default()
     };
 
