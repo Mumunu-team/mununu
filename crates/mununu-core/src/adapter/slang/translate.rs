@@ -238,7 +238,20 @@ pub fn translate_ast_json_with_options(
     // so `state_q == MainSmError` reads as signal-vs-signal. Map every enum
     // member to its integer value so the pre-pass can rewrite those references
     // to integer literals (enum-typed FSMs are ubiquitous in real RTL).
-    let enum_values = collect_enum_values(&root);
+    //
+    // mununu#632 — the same for `parameter` / `localparam` constants: slang keeps
+    // `retry_cnt_q == MAX_RETRIES` as a `NamedValue` of the parameter while its
+    // `Parameter` node already carries the ELABORATED value (`"3"`, `"3'b10"`; an
+    // overridden `-G` parameter carries the override). Left unfolded, the engine
+    // reported "unknown register/signal `MAX_RETRIES`" and SKIPPED the property —
+    // on the design that found this, one of the four skipped properties was
+    // VIOLATED. `localparam` state encodings are the dominant hand-written and
+    // LLM-written FSM style, so this removed most FSM transition properties from
+    // the no-sidecar path. An enum member wins over a parameter of the same name.
+    let mut enum_values = collect_enum_values(&root);
+    for (name, value) in collect_parameter_values(&root) {
+        enum_values.entry(name).or_insert(value);
+    }
 
     let mut report = TranslationReport::default();
     for (idx, (module, label, node)) in found.iter().enumerate() {
@@ -433,9 +446,46 @@ fn collect_enum_values(node: &Value) -> std::collections::HashMap<String, i64> {
     out
 }
 
+/// mununu#632 — collect every `parameter` / `localparam` with an elaborated
+/// integer `value` (`name → value`) from the `--ast-json` `Parameter` nodes. The
+/// value is an SV literal (`"4"`, `"3'b10"`); a parameter whose value is not a
+/// literal (a string, a type, an unpacked value) is skipped, and a reference to
+/// it stays a `NamedValue` the engine reports as unknown — the pre-#632 outcome,
+/// now only for the shapes that genuinely cannot fold. First declaration wins.
+fn collect_parameter_values(node: &Value) -> std::collections::HashMap<String, i64> {
+    fn walk(n: &Value, out: &mut std::collections::HashMap<String, i64>) {
+        match n {
+            Value::Object(m) => {
+                if m.get("kind").and_then(Value::as_str) == Some("Parameter")
+                    && let Some(name) = m.get("name").and_then(Value::as_str)
+                    && !name.is_empty()
+                    && let Some(v) = m
+                        .get("value")
+                        .and_then(Value::as_str)
+                        .and_then(parse_sv_literal)
+                {
+                    out.entry(name.to_string()).or_insert(v);
+                }
+                for v in m.values() {
+                    walk(v, out);
+                }
+            }
+            Value::Array(a) => {
+                for v in a {
+                    walk(v, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = std::collections::HashMap::new();
+    walk(node, &mut out);
+    out
+}
+
 /// XL.6b follow-up — deep-clone an expression tree, replacing every `NamedValue`
-/// referencing an enum member (by name, in `enums`) with an `IntegerLiteral` of
-/// its value. A signal *of* an enum type (e.g. `state_q`) is not an enum-member
+/// referencing an enum member (by name, in `enums`) — or, since mununu#632, a
+/// `parameter` / `localparam` constant — with an `IntegerLiteral` of its value. A signal *of* an enum type (e.g. `state_q`) is not an enum-member
 /// name, so it is left untouched — only the constants fold.
 fn resolve_enum_refs(node: &Value, enums: &std::collections::HashMap<String, i64>) -> Value {
     match node {
@@ -2962,6 +3012,76 @@ mod tests {
                 },
             ],
             "required_shadows must dedup by base + carry width + depth"
+        );
+    }
+
+    /// mununu#632 — a `localparam` / `parameter` reference in an atom folds to the
+    /// elaborated value slang carries on the `Parameter` node, the way an enum member
+    /// does; a parameter whose value is not a literal stays unresolved. The fixture
+    /// mirrors `examples/verify/v12_link_ctrl_llm_fsm/link_ctrl.sv`'s
+    /// `a_err_implies_retry_limit` (`err_q |-> retry_cnt_q == MAX_RETRIES`).
+    #[test]
+    fn x632_parameter_reference_resolves_to_its_elaborated_value() {
+        let doc = serde_json::json!({
+            "members": [
+                {"kind": "Parameter", "name": "MAX_RETRIES", "type": "int", "value": "3", "isLocal": true},
+                {"kind": "Parameter", "name": "S_XFER", "type": "logic[2:0]", "value": "3'b10", "isLocal": true},
+                {"kind": "Parameter", "name": "NAME", "type": "string", "value": "\"link\"", "isLocal": true}
+            ],
+            "body": [
+                {
+                    "kind": "ConcurrentAssertion", "assertionKind": "Assert",
+                    "propertySpec": { "kind": "Simple", "expr": {
+                        "kind": "BinaryOp", "op": "Equality",
+                        "left":  {"kind": "NamedValue", "symbol": "1 retry_cnt_q", "type": "logic[1:0]"},
+                        "right": {"kind": "NamedValue", "symbol": "2 MAX_RETRIES", "type": "int"}
+                    }}
+                },
+                {
+                    "kind": "ConcurrentAssertion", "assertionKind": "Assert",
+                    "propertySpec": { "kind": "Simple", "expr": {
+                        "kind": "BinaryOp", "op": "Equality",
+                        "left":  {"kind": "NamedValue", "symbol": "3 state_q", "type": "logic[2:0]"},
+                        "right": {"kind": "NamedValue", "symbol": "4 S_XFER", "type": "logic[2:0]"}
+                    }}
+                },
+                {
+                    "kind": "ConcurrentAssertion", "assertionKind": "Assert",
+                    "propertySpec": { "kind": "Simple", "expr": {
+                        "kind": "BinaryOp", "op": "Equality",
+                        "left":  {"kind": "NamedValue", "symbol": "5 tag_q", "type": "string"},
+                        "right": {"kind": "NamedValue", "symbol": "6 NAME", "type": "string"}
+                    }}
+                }
+            ]
+        });
+        let report = translate_ast_json(&doc.to_string()).expect("valid");
+        let formulas: Vec<&str> = report
+            .translated
+            .iter()
+            .map(|t| t.formula.as_str())
+            .collect();
+        assert!(
+            formulas.iter().any(|f| f.contains("retry_cnt_q == 3")),
+            "`MAX_RETRIES` folds to 3: {formulas:?}"
+        );
+        assert!(
+            formulas.iter().any(|f| f.contains("state_q == 2")),
+            "`S_XFER` (3'b10) folds to 2: {formulas:?}"
+        );
+        // The string parameter cannot fold: its reference stays a name (the engine's
+        // "unknown register/signal" skip, as before), never a wrong literal.
+        let all: String = formulas.join(" ")
+            + &report
+                .unsupported
+                .iter()
+                .map(|u| u.reason.clone())
+                .collect::<Vec<_>>()
+                .join(" ");
+        assert!(
+            !all.contains("tag_q == 0") && (all.contains("NAME") || !all.contains("tag_q")),
+            "a non-literal parameter must not fold to a number: {formulas:?} / {:?}",
+            report.unsupported
         );
     }
 

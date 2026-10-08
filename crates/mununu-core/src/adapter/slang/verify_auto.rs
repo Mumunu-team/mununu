@@ -9982,6 +9982,98 @@ module uart_tx(); endmodule"#;
         );
     }
 
+    /// mununu#632 — an LLM-written FSM whose SVA compare registers against `localparam`
+    /// constants (`state_q == S_XFER`, `retry_cnt_q == MAX_RETRIES`). The translator used to
+    /// keep the parameter NAME in the atom and the engine skipped the property as "unknown
+    /// register/signal"; the names now fold to slang's elaborated values. Four of the eight
+    /// properties moved skipped → decided (measured in the image, 2026-10-08), and one of them —
+    /// `a_retry_limit`, `!(retry_cnt_q == 2'd3 && state_q == S_RETRY)` — is VIOLATED on the
+    /// design: the third `nack` in `S_REQ` sees `retry_cnt_q == 2`, increments it to 3 and
+    /// enters `S_RETRY`, so the counter sits at its limit IN the retry state. The other three
+    /// HOLD. The issue measured the same with the literals spelled by hand.
+    #[test]
+    #[ignore = "requires slang + sv2v + Yosys + z3 (use the mununu-sva docker image); run with --ignored"]
+    fn e2e_632_localparam_atoms_decide_on_link_ctrl() {
+        use crate::adapter::yosys::SvFrontend;
+        use std::path::PathBuf;
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/verify/v12_link_ctrl_llm_fsm/link_ctrl.sv");
+        let sv = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let sources = vec![("link_ctrl.sv".to_string(), sv)];
+        let yopts = YosysOptions {
+            top: Some("link_ctrl".to_string()),
+            use_sv2v: true,
+            frontend: SvFrontend::Slang,
+            ..Default::default()
+        };
+        let report = verify_auto(&sources, &yopts, &VerifyAutoOptions::default())
+            .expect("verify_auto runs on link_ctrl");
+        for p in &report.properties {
+            eprintln!(
+                "  [{:?}] {} ({:?}): {:?}",
+                p.kind, p.name, p.label, p.outcome
+            );
+            eprintln!("      formula: {}", p.formula);
+        }
+        let by_label = |l: &str| {
+            report
+                .properties
+                .iter()
+                .find(|p| p.label.as_deref() == Some(l))
+                .unwrap_or_else(|| panic!("property labelled `{l}` in {:?}", report.properties))
+        };
+        // The four localparam-referencing properties: none skipped for an unknown signal.
+        for l in [
+            "a_err_implies_retry_limit",
+            "a_retry_limit",
+            "a_no_beats_outside_xfer",
+            "a_idle_quiet",
+        ] {
+            let p = by_label(l);
+            assert!(
+                !matches!(&p.outcome, VerifyOutcome::Skipped { reason } if reason.contains("unknown register/signal")),
+                "{l} must not skip on an unresolved parameter name: {:?} / {}",
+                p.outcome,
+                p.formula
+            );
+            assert!(
+                !p.formula.contains("MAX_RETRIES") && !p.formula.contains("S_"),
+                "{l}'s atoms fold to literals: {}",
+                p.formula
+            );
+        }
+        // The verdicts the issue measured by spelling the literals by hand.
+        assert!(
+            matches!(
+                by_label("a_retry_limit").outcome,
+                VerifyOutcome::Violated { .. }
+            ),
+            "a_retry_limit is VIOLATED on the design (the counter reaches 3 in S_RETRY): {:?}",
+            by_label("a_retry_limit").outcome
+        );
+        for l in [
+            "a_err_implies_retry_limit",
+            "a_no_beats_outside_xfer",
+            "a_idle_quiet",
+        ] {
+            assert!(
+                matches!(by_label(l).outcome, VerifyOutcome::Holds),
+                "{l} HOLDS: {:?}",
+                by_label(l).outcome
+            );
+        }
+        assert_eq!(
+            report
+                .properties
+                .iter()
+                .filter(|p| matches!(p.outcome, VerifyOutcome::Skipped { .. }))
+                .count(),
+            0,
+            "every property of the suite decides"
+        );
+    }
+
     #[test]
     #[ignore = "requires slang + sv2v + Yosys + z3 (use the mununu-sva docker image); run with --ignored"]
     fn e2e_csrng_real_sva_verdict_breakdown() {
