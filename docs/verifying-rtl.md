@@ -340,36 +340,14 @@ bit and over-approximates every operator — a pure re-map (`slice`, `concat`, e
 maps exactly, a carry chain makes bit `i` depend on bits `≤ i`, a comparison / reduction /
 multiplication / symbolic shift on every bit. The over-cap diagnostic counts the same bits.
 
-**A read through an address mux — antecedent constant propagation (mununu#629).** A read
-through a mux (`rdata = addr == k ? word_k : …`) reaches every word structurally — bit `i` of the
-output depends on bit `i` of every arm — so no cone computed from the netlist sees that `addr == 4`
-selects one (measured: 2,213 bits on the same vector). What the netlist cannot say the formula
-does: for a **same-cycle** implication the antecedent fixes the signal wherever the consequent is
-evaluated, `AG(sig == K -> C(sig)) ≡ AG(sig == K -> C[sig := K])`. So before the cone is
-computed, every implication `sig == K |-> C` of positive polarity has, for each register of a
-consequent atom whose cone reaches `sig`, a copy of that cone minted with `sig` replaced by the
-constant and constant-folded — the `eq`/`ite` chain of the mux collapses to the selected arm — and
-the atom renamed to read it (`rdata__addr_eq_4 == status_word`). When `sig` is a primary **input**
-the antecedent is dropped with it (the universal reading over inputs *is* the substitution),
-provided no `constraint` / `fair` / `justice` reads the input and no atom of the formula still
-does; a **state** antecedent stays as a state atom. Equivalence-preserving per implication, so no
-verdict moves; a rewrite the pass cannot make sound (a `Select` atom, a constrained input) is
-declined and the formula left as lifted. Measured on the consumer's shape: the correct design
-decides HOLDS, the "merge omitted" contrast twin (the field served as it crossed) decides VIOLATED
-— a 2-valued refutation of a defect the abstracting engines left ⊥ — where as lifted the exact
-engine refused the input atom. The "flags swapped" twin is rewritten the same way but its
-refutation is an equality between **misaligned** bits of one register, which is exponential under
-the fixed interleaved variable order (the arena exhausts): the ordering wall of
-[`docs/design/bdd-variable-ordering.md`](design/bdd-variable-ordering.md), not a cone question.
-`--no-antecedent-propagate` / `no_antecedent_propagate: true` / `MUNUNU_NO_ANTECEDENT_PROPAGATE=1`
-disable the pass for a differential run; the wall-class matrix is identical with it on and off.
-
-> Source of truth: [`antecedent_propagation::propagate`](../crates/mununu-core/src/adapter/btor2/antecedent_propagation.rs) — surface: (CLI+API)
-
-A cone that reaches an array stays signal-level (the memory havoc applies). `MUNUNU_COI=signal`
-restores the signal-level cone for a differential run; the verdict is identical wherever both
-decide (the wall-class matrix is identical at both granularities, and the `crossed_vector_field`
-class decides only at bit level).
+**What it does not do.** A read through an address **mux** (`rdata = addr == k ? word_k : …`)
+reaches every word structurally — bit `i` of the output depends on bit `i` of every arm — so a
+property phrased on the muxed output stays over the cap (measured: 2,213 bits on the same
+vector). That shape needs the antecedent's constant propagated through the mux, a different
+lever, tracked separately. A cone that reaches an array stays signal-level (the memory havoc
+applies). `MUNUNU_COI=signal` restores the signal-level cone for a differential run; the verdict
+is identical wherever both decide (the wall-class matrix is identical at both granularities, and
+the new `crossed_vector_field` class decides only at bit level).
 
 ### Compound-atom safety escalation + `bottom-reason` diagnostic (mununu#492)
 

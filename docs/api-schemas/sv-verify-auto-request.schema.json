@@ -142,14 +142,6 @@
         "null"
       ]
     },
-    "no_antecedent_propagate": {
-      "default": null,
-      "description": "mununu#629 — disable antecedent constant propagation on the exact-symbolic engine (default `false` ⇒ enabled). With it enabled, a same-cycle implication `sig == K |-> C` has `K` propagated through `C`'s cone — a read mux folds to the selected arm — so a property about one field of a wide packed record decides instead of skipping on the bit cap. Set `true` to leave the formula as lifted (the differential-oracle / debug knob), mirrored on the CLI as `--no-antecedent-propagate` and by the process-global `MUNUNU_NO_ANTECEDENT_PROPAGATE=1`.",
-      "type": [
-        "boolean",
-        "null"
-      ]
-    },
     "no_antecedent_shadow": {
       "default": null,
       "description": "mununu#476 item 4 — disable antecedent shadow-register synthesis for the exact-symbolic engine (default `false` ⇒ shadow-synth enabled, the shipped behaviour). Set `true` to force the Phase A refusal for SVA `|=>` properties whose antecedent combinationally reaches primary inputs — the differential-oracle / debug knob mirrored on the CLI as `--no-antecedent-shadow` and via the process-global `MUNUNU_NO_ANTECEDENT_SHADOW=1` env var. Per-request opt-out is thread-safe (unlike the env var, which is process-global).",

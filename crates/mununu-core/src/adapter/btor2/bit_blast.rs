@@ -7804,7 +7804,6 @@ mod tests {
         crate::adapter::btor2::symbolic_bitblast::ExactSymbolicOptions {
             antecedent_shadow_enabled: true,
             signal_level_coi: true,
-            antecedent_propagate_enabled: true,
         };
 
     /// mununu#602 — `narrow_leaves` keeps a partially-read register's NID and symbol on a
