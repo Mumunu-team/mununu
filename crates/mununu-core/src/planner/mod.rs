@@ -997,6 +997,7 @@ mod tests {
                 counterexample: None,
                 bottom_reason: None,
                 decided_by: None,
+                vacuity: None,
             }],
             unsupported: Vec::new(),
             diagnostics: Default::default(),
@@ -1106,6 +1107,7 @@ mod tests {
                     counterexample: None,
                     bottom_reason: None,
                     decided_by: None,
+                    vacuity: None,
                 },
                 PropertyVerdict {
                     name: "p_ok".into(),
@@ -1117,6 +1119,7 @@ mod tests {
                     counterexample: None,
                     bottom_reason: None,
                     decided_by: None,
+                    vacuity: None,
                 },
             ],
             unsupported: Vec::new(),

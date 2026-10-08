@@ -4243,6 +4243,17 @@ fn render_verify_auto_text(report: &mununu_core::adapter::slang::verify_auto::Au
                 r.one_line()
             );
         }
+        // mununu#599 — what the rest of the report says about a recoverability guarantee's
+        // vacuity, on the guarantee's own lines: a HOLDS whose target is invariant, or whose
+        // same-register witness is refuted, must not read like any other HOLDS.
+        if let Some(v) = &p.vacuity {
+            println!(
+                "        vacuity [{}] witness={}: {}",
+                v.kind.tag(),
+                v.witness,
+                v.detail
+            );
+        }
         if !p.seeded_predicates.is_empty() {
             println!("        predicates: {}", p.seeded_predicates.join(", "));
         }

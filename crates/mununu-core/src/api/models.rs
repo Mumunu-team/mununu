@@ -1914,6 +1914,11 @@ impl From<&crate::adapter::slang::verify_auto::AutoVerifyReport> for SvVerifyAut
                     unknown_cells,
                     skip_reason,
                     decided_by: p.decided_by.clone(),
+                    vacuity: p.vacuity.as_ref().map(|v| VacuityView {
+                        kind: v.kind.tag().to_string(),
+                        witness: v.witness.clone(),
+                        detail: v.detail.clone(),
+                    }),
                     // A `⊥` ALWAYS carries a reason, with `unclassified-bottom` as the floor.
                     //
                     // `skip_serializing_if = "Option::is_none"` omits the key entirely, so `None`
@@ -2292,6 +2297,32 @@ pub struct PropertyVerdictView {
     /// bare `AF p` decided by the exact engine (`engine: "exact-symbolic"`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub counterexample: Option<CounterexampleView>,
+    /// mununu#599 — a recoverability guarantee (`AG EF(P)`) that HOLDS, judged against the other
+    /// verdicts in the same report. Present only on such a guarantee, and only when another
+    /// property speaks to it; see [`VacuityView`].
+    ///
+    /// **Read this next to `outcome == "holds"`.** `AG EF good: HOLDS` beside its non-vacuity
+    /// witness `EF good': VIOLATED` is the vacuous pass a two-sided gate exists to prevent; it used
+    /// to be visible only to a reader who checked witnesses by habit. The verdict does not change
+    /// — a vacuous HOLDS is a true HOLDS on the model — the field says what it is worth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vacuity: Option<VacuityView>,
+}
+
+/// mununu#599 — how a recoverability guarantee that HOLDS stands against the rest of its report.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct VacuityView {
+    /// Machine-stable tag:
+    ///
+    /// | `kind` | meaning |
+    /// |---|---|
+    /// | `invariant-target` | **vacuous.** The target is invariant in this report — `EF(¬P)` VIOLATED or `AG(P)` HOLDS beside `AG EF(P)` HOLDS — so the design never leaves `P` and no recovery is ever exercised. Consistent; the HOLDS stands and says nothing about recovery. |
+    /// | `witness-refuted` | **not shown non-vacuous.** A reachability over the guarantee's register at another value (`EF(st_q == S_WAIT)`) is VIOLATED in the same report. It does not make the guarantee false; if that property is the guarantee's non-vacuity witness, the pair is a failed gate, not a pass. |
+    pub kind: String,
+    /// The property (`name`) whose verdict establishes it.
+    pub witness: String,
+    /// One line of prose. **Do not string-match it**; read `kind` and `witness`.
+    pub detail: String,
 }
 
 /// D1.8b — a stall-lasso counterexample for the API (mirrors `ExactCounterexample`):
@@ -2455,6 +2486,7 @@ mod bottom_reason_view_tests {
             counterexample: None,
             bottom_reason: reason,
             decided_by: None,
+            vacuity: None,
         }
     }
 

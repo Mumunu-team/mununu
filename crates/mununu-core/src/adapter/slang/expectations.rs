@@ -297,6 +297,7 @@ mod tests {
                     counterexample: None,
                     bottom_reason: None,
                     decided_by: None,
+                    vacuity: None,
                 })
                 .collect(),
             ..Default::default()
@@ -318,6 +319,7 @@ mod tests {
                     counterexample: None,
                     bottom_reason: None,
                     decided_by: None,
+                    vacuity: None,
                 })
                 .collect(),
             ..Default::default()

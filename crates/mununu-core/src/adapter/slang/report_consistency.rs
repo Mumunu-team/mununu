@@ -44,6 +44,33 @@
 //! incomplete: implementing it would force two verdicts to `⊥` on evidence that permits both. That
 //! mununu#577's own pair is outside the sound fragment is the finding, not a gap — what was wrong
 //! there was a verdict, not a pair of verdicts, and no report-internal check could have seen it.
+//!
+//! # mununu#599 — the HOLDS side, and a guarantee judged against its own witness
+//!
+//! The `Violated`-`Violated` pair above has a mirror on the `Holds` side, and the recoverability
+//! shape `AG EF(P)` (`nu Y. ((mu X. (P || <> X)) && [] Y)`) joins the table. With `P'` the same
+//! atom and `Q ≡ ¬P`, every row is unsatisfiable over one model with a non-empty initial set:
+//!
+//! | a | b | why they cannot both be right |
+//! |---|---|---|
+//! | `EF(P)` HOLDS | `AG(Q)` HOLDS | `∃s. P(s)` against `∀s. ¬P(s)` |
+//! | `AG EF(P)` HOLDS | `EF(P')` VIOLATED | the initial state is reachable, so `EF P` holds there |
+//! | `AG EF(P)` HOLDS | `AG(Q)` HOLDS | `EF P` at the initial state against `P` nowhere |
+//! | `AG EF(P)` VIOLATED | `AG(P')` HOLDS | `P` invariant makes `EF P` true everywhere |
+//! | `AG EF(P)` VIOLATED | `EF(Q)` VIOLATED | `¬P` unreachable is `AG P`, the row above |
+//!
+//! A definite verdict transfers to the concrete model whatever engine produced it (CLAUDE.md
+//! §Soundness Guarantees), so two definite verdicts that cannot share a model expose a broken one
+//! — and, as before, not which. Both are withheld.
+//!
+//! **Vacuity is a different relation and does not touch the verdict.** `AG EF(P)` HOLDS beside
+//! `EF(¬P)` VIOLATED (or `AG(P)` HOLDS) is *consistent*: the design never leaves `P`, so "always
+//! recoverable to `P`" is true and says nothing about recovery. That is the vacuous pass the
+//! two-sided gate exists to prevent, and mununu#599's ask is that it be said **at the guarantee**
+//! rather than left for a reader who checks witnesses by habit. [`vacuity_of_guarantee`] is that
+//! relation; it also names the weaker case the issue actually met — a same-register reachability
+//! (`EF(st_q == S_WAIT)` beside `AG EF(st_q == S_IDLE)`) refuted in the same report — which proves
+//! nothing about the guarantee's truth but does mean this report has not shown it non-vacuous.
 
 use crate::mu_calculus::{Formula, ModalKind, Node};
 
@@ -54,6 +81,25 @@ pub(crate) enum Shape {
     Universal(String),
     /// `mu Z. (Q || <> Z)` — `EF(Q)`. VIOLATED means no reachable state satisfies `Q`.
     Existential(String),
+    /// `nu Y. ((mu X. (P || <> X)) && [] Y)` — `AG EF(P)`, recoverability. HOLDS means every
+    /// reachable state can reach `P`; VIOLATED means some reachable state cannot.
+    Recoverability(String),
+}
+
+impl Shape {
+    /// The single comparison atom the shape is over.
+    pub(crate) fn atom(&self) -> &str {
+        match self {
+            Shape::Universal(a) | Shape::Existential(a) | Shape::Recoverability(a) => a,
+        }
+    }
+}
+
+/// A definite verdict, as the pair relations below read it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Definite {
+    Holds,
+    Violated,
 }
 
 /// Recognise `AG(atom)` / `EF(atom)` over a **single** atom, or `None`.
@@ -73,17 +119,40 @@ pub(crate) fn classify_shape(f: &Formula) -> Option<Shape> {
                 if *kind == want && matches!(f.node(*target), Node::Variable(_))
         )
     };
-    match f.node(f.root()) {
-        Node::Nu { body, .. } => match f.node(*body) {
-            // `P && [] X`, either association.
-            Node::And(l, r) => {
-                if is_self_modal(*r, ModalKind::Box) {
-                    atom_of(*l).map(Shape::Universal)
-                } else if is_self_modal(*l, ModalKind::Box) {
-                    atom_of(*r).map(Shape::Universal)
+    // `mu X. (P || <> X)` with a single atom `P` → that atom. The inner shape of `AG EF`.
+    let reach_atom = |id| match f.node(id) {
+        Node::Mu { body, .. } => match f.node(*body) {
+            Node::Or(l, r) => {
+                if is_self_modal(*r, ModalKind::Diamond) {
+                    atom_of(*l)
+                } else if is_self_modal(*l, ModalKind::Diamond) {
+                    atom_of(*r)
                 } else {
                     None
                 }
+            }
+            _ => None,
+        },
+        _ => None,
+    };
+    match f.node(f.root()) {
+        Node::Nu { body, .. } => match f.node(*body) {
+            // `P && [] X` (universal) or `(mu X. (P || <> X)) && [] Y` (recoverability), either
+            // association.
+            Node::And(l, r) => {
+                let (inner, modal) = if is_self_modal(*r, ModalKind::Box) {
+                    (*l, true)
+                } else if is_self_modal(*l, ModalKind::Box) {
+                    (*r, true)
+                } else {
+                    (*l, false)
+                };
+                if !modal {
+                    return None;
+                }
+                atom_of(inner)
+                    .map(Shape::Universal)
+                    .or_else(|| reach_atom(inner).map(Shape::Recoverability))
             }
             _ => None,
         },
@@ -162,17 +231,76 @@ pub(crate) fn is_negation_pair(a: &str, b: &str) -> bool {
     complement(x.op) == y.op
 }
 
-/// Do these two shapes-plus-`Violated` verdicts contradict each other?
+/// Are `a` and `b` single comparisons over the SAME register (whatever the operator or value)?
+pub(crate) fn same_register(a: &str, b: &str) -> bool {
+    matches!((parse_cmp(a), parse_cmp(b)), (Some(x), Some(y)) if x.reg == y.reg)
+}
+
+/// Do these two shapes, with these definite verdicts, contradict each other? Order-insensitive.
 ///
-/// Both properties must have come back `Violated`; the caller checks that. Order-insensitive.
-pub(crate) fn violated_pair_contradicts(a: &Shape, b: &Shape) -> bool {
-    match (a, b) {
-        (Shape::Universal(p), Shape::Existential(q))
-        | (Shape::Existential(q), Shape::Universal(p)) => is_negation_pair(p, q),
-        // Two universals, or two existentials, cannot contradict on their own: `AG(P)` and `AG(¬P)`
-        // both VIOLATED just says the model reaches both `¬P` and `P`, and two unreachable targets
-        // are jointly satisfiable in an empty-ish model.
-        _ => false,
+/// The admitted rows are the table in the module doc; everything else is `false`, including every
+/// same-direction pair (`AG(P)` and `AG(¬P)` both VIOLATED just says the model reaches both sides;
+/// two unreachable targets are jointly satisfiable) and every pair whose atoms are not exactly the
+/// same or exactly negated.
+pub(crate) fn definite_pair_contradicts(a: &Shape, va: Definite, b: &Shape, vb: Definite) -> bool {
+    use Definite::{Holds, Violated};
+    use Shape::{Existential, Recoverability, Universal};
+    let row = |a: &Shape, va: Definite, b: &Shape, vb: Definite| -> bool {
+        match (a, va, b, vb) {
+            // ∃s.¬P against ∀s.¬¬P (mununu#579).
+            (Universal(p), Violated, Existential(q), Violated) => is_negation_pair(p, q),
+            // ∃s.P against ∀s.¬P.
+            (Existential(p), Holds, Universal(q), Holds) => is_negation_pair(p, q),
+            // `EF P` holds at the (reachable) initial state against `EF P` false there.
+            (Recoverability(p), Holds, Existential(q), Violated) => p == q,
+            // `EF P` at the initial state against `P` nowhere.
+            (Recoverability(p), Holds, Universal(q), Holds) => is_negation_pair(p, q),
+            // Some reachable state cannot reach `P` against `P` invariant.
+            (Recoverability(p), Violated, Universal(q), Holds) => p == q,
+            // … and the same invariant spelled as `¬P` unreachable.
+            (Recoverability(p), Violated, Existential(q), Violated) => is_negation_pair(p, q),
+            _ => false,
+        }
+    };
+    row(a, va, b, vb) || row(b, vb, a, va)
+}
+
+/// mununu#599 — how a recoverability guarantee that HOLDS stands against another property in the
+/// same report. `None` when the other property says nothing about it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Vacuity {
+    /// The target is INVARIANT in this report — `EF(¬P)` VIOLATED or `AG(P)` HOLDS beside
+    /// `AG EF(P)` HOLDS. Consistent, and vacuous: the design never leaves `P`, so the guarantee
+    /// holds without any recovery ever being exercised.
+    InvariantTarget,
+    /// A reachability over the guarantee's REGISTER — a different value, not the negation — is
+    /// VIOLATED in this report. It proves nothing about the guarantee's truth (`P` may be left and
+    /// re-entered without ever visiting that value), but the property an author lists next to a
+    /// recoverability guarantee as its non-vacuity witness has this shape, and a refuted witness
+    /// means this report has not shown the guarantee non-vacuous.
+    WitnessRefuted,
+}
+
+/// mununu#599 — judge a `guarantee` of shape [`Shape::Recoverability`] that HOLDS against one
+/// `other` property with its definite verdict. The caller supplies only guarantees that HOLD and
+/// only partners with a definite verdict.
+pub(crate) fn vacuity_of_guarantee(
+    guarantee: &Shape,
+    other: &Shape,
+    vo: Definite,
+) -> Option<Vacuity> {
+    let Shape::Recoverability(p) = guarantee else {
+        return None;
+    };
+    match (other, vo) {
+        (Shape::Existential(q), Definite::Violated) if is_negation_pair(p, q) => {
+            Some(Vacuity::InvariantTarget)
+        }
+        (Shape::Universal(q), Definite::Holds) if p == q => Some(Vacuity::InvariantTarget),
+        (Shape::Existential(q), Definite::Violated) if same_register(p, q) => {
+            Some(Vacuity::WitnessRefuted)
+        }
+        _ => None,
     }
 }
 
@@ -204,9 +332,11 @@ mod tests {
             classify_shape(&f("nu X. (((drop_q <= 1) && (count_q >= 256)) && [] X)")),
             None
         );
+        // A nested fixpoint is not a universal over its inner atom — since mununu#599 it is the
+        // recoverability shape, judged by its own rows; a universal over a compound stays `None`.
         assert_eq!(
             classify_shape(&f("nu Y.((mu X.((st_q == 0) || <> X)) && [] Y)")),
-            None
+            Some(Shape::Recoverability("st_q == 0".into()))
         );
     }
 
@@ -231,10 +361,14 @@ mod tests {
     /// The pair that would be flagged: `AG(P)` violated beside `EF(¬P)` violated.
     #[test]
     fn a_universal_beside_the_refutation_of_its_own_negation_contradicts() {
+        use Definite::Violated;
         let ag = classify_shape(&f("nu X. ((cnt <= 1) && [] X)")).unwrap();
         let ef = classify_shape(&f("mu Z. ((cnt > 1) || <> Z)")).unwrap();
-        assert!(violated_pair_contradicts(&ag, &ef));
-        assert!(violated_pair_contradicts(&ef, &ag), "order-insensitive");
+        assert!(definite_pair_contradicts(&ag, Violated, &ef, Violated));
+        assert!(
+            definite_pair_contradicts(&ef, Violated, &ag, Violated),
+            "order-insensitive"
+        );
     }
 
     /// ⚠️ mununu#579's OWN example is not a contradiction, and this test is the record of that.
@@ -252,10 +386,124 @@ mod tests {
         ] {
             let ef = classify_shape(&f(witness)).unwrap();
             assert!(
-                !violated_pair_contradicts(&ag, &ef),
+                !definite_pair_contradicts(&ag, Definite::Violated, &ef, Definite::Violated),
                 "a single value > K refutes nothing about a 10-bit register: {witness}"
             );
         }
+    }
+
+    /// mununu#599 — the recoverability shape, either association of both connectives.
+    #[test]
+    fn recognises_the_recoverability_shape() {
+        assert_eq!(
+            classify_shape(&f("nu Y.((mu X.((st_q == 0) || <> X)) && [] Y)")),
+            Some(Shape::Recoverability("st_q == 0".into()))
+        );
+        assert_eq!(
+            classify_shape(&f("nu Y.([] Y && (mu X.(<> X || (st_q == 0))))")),
+            Some(Shape::Recoverability("st_q == 0".into()))
+        );
+        // `AG AF` is not recoverability, and a compound target is refused like everywhere else.
+        assert_eq!(
+            classify_shape(&f("nu Y.((mu X.((st_q == 0) || [] X)) && [] Y)")),
+            None
+        );
+        assert_eq!(
+            classify_shape(&f(
+                "nu Y.((mu X.(((st_q == 0) && (en == 1)) || <> X)) && [] Y)"
+            )),
+            None
+        );
+    }
+
+    /// mununu#599 — every row of the module-doc table, both orders; and the rows that look like
+    /// contradictions but are not.
+    #[test]
+    fn the_definite_pair_table_is_exact() {
+        use Definite::{Holds, Violated};
+        let sh = |s: &str| classify_shape(&f(s)).unwrap();
+        let ef_p = sh("mu Z. ((cnt == 2) || <> Z)");
+        let ef_not_p = sh("mu Z. ((cnt != 2) || <> Z)");
+        let ag_p = sh("nu X. ((cnt == 2) && [] X)");
+        let ag_not_p = sh("nu X. ((cnt != 2) && [] X)");
+        let agef_p = sh("nu Y.((mu X.((cnt == 2) || <> X)) && [] Y)");
+        let rows: [(&Shape, Definite, &Shape, Definite); 6] = [
+            (&ag_p, Violated, &ef_not_p, Violated),
+            (&ef_p, Holds, &ag_not_p, Holds),
+            (&agef_p, Holds, &ef_p, Violated),
+            (&agef_p, Holds, &ag_not_p, Holds),
+            (&agef_p, Violated, &ag_p, Holds),
+            (&agef_p, Violated, &ef_not_p, Violated),
+        ];
+        for (a, va, b, vb) in rows {
+            assert!(
+                definite_pair_contradicts(a, va, b, vb),
+                "{a:?} {va:?} vs {b:?} {vb:?}"
+            );
+            assert!(definite_pair_contradicts(b, vb, a, va), "order-insensitive");
+        }
+        // Consistent pairs that a looser rule would flag.
+        let fine: [(&Shape, Definite, &Shape, Definite); 5] = [
+            // the vacuity relation, not a contradiction
+            (&agef_p, Holds, &ef_not_p, Violated),
+            (&agef_p, Holds, &ag_p, Holds),
+            // a DIFFERENT value of the register says nothing
+            (&agef_p, Holds, &sh("mu Z. ((cnt == 3) || <> Z)"), Violated),
+            // same direction
+            (&ag_p, Violated, &ag_not_p, Violated),
+            // `EF P` HOLDS beside `AG EF P` VIOLATED: reachable from the start, lost later — fine
+            (&ef_p, Holds, &agef_p, Violated),
+        ];
+        for (a, va, b, vb) in fine {
+            assert!(
+                !definite_pair_contradicts(a, va, b, vb),
+                "{a:?} {va:?} vs {b:?} {vb:?}"
+            );
+        }
+    }
+
+    /// mununu#599 — vacuity: the invariant target (both spellings), the refuted same-register
+    /// witness, and the pairs that say nothing.
+    #[test]
+    fn a_guarantee_is_judged_against_its_witness() {
+        use Definite::{Holds, Violated};
+        let sh = |s: &str| classify_shape(&f(s)).unwrap();
+        let g = sh("nu Y.((mu X.((st_q == 0) || <> X)) && [] Y)");
+        assert_eq!(
+            vacuity_of_guarantee(&g, &sh("mu Z. ((st_q != 0) || <> Z)"), Violated),
+            Some(Vacuity::InvariantTarget)
+        );
+        assert_eq!(
+            vacuity_of_guarantee(&g, &sh("nu X. ((st_q == 0) && [] X)"), Holds),
+            Some(Vacuity::InvariantTarget)
+        );
+        // mununu#599's own pair: `EF(st_q == S_WAIT)` VIOLATED beside `AG EF(st_q == S_IDLE)`.
+        assert_eq!(
+            vacuity_of_guarantee(&g, &sh("mu Z. ((st_q == 3) || <> Z)"), Violated),
+            Some(Vacuity::WitnessRefuted)
+        );
+        // Says nothing: a witness that HOLDS, another register, a universal that is not the
+        // target, a guarantee that is not recoverability.
+        assert_eq!(
+            vacuity_of_guarantee(&g, &sh("mu Z. ((st_q == 3) || <> Z)"), Holds),
+            None
+        );
+        assert_eq!(
+            vacuity_of_guarantee(&g, &sh("mu Z. ((other == 3) || <> Z)"), Violated),
+            None
+        );
+        assert_eq!(
+            vacuity_of_guarantee(&g, &sh("nu X. ((st_q != 7) && [] X)"), Holds),
+            None
+        );
+        assert_eq!(
+            vacuity_of_guarantee(
+                &sh("nu X. ((st_q == 0) && [] X)"),
+                &sh("mu Z. ((st_q != 0) || <> Z)"),
+                Violated
+            ),
+            None
+        );
     }
 
     #[test]
@@ -263,7 +511,7 @@ mod tests {
         let a = classify_shape(&f("nu X. ((cnt <= 1) && [] X)")).unwrap();
         let b = classify_shape(&f("nu X. ((cnt > 1) && [] X)")).unwrap();
         assert!(
-            !violated_pair_contradicts(&a, &b),
+            !definite_pair_contradicts(&a, Definite::Violated, &b, Definite::Violated),
             "both violated just means the model reaches both sides"
         );
     }
