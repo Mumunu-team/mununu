@@ -3419,9 +3419,7 @@ context test {
         let context = Context::builder().finish();
 
         // Should return error for unknown CLTS
-        let options = CompositionOptions {
-            semantics: CompositionSemantics::Synchronous,
-        };
+        let options = CompositionOptions::new(CompositionSemantics::Synchronous);
         let result = context.compose_named("nonexistent", "also_nonexistent", &options);
         assert!(result.is_err());
         match result {

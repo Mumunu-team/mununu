@@ -554,14 +554,60 @@ pub enum CompositionSemantics {
 #[derive(Debug, Clone)]
 pub struct CompositionOptions {
     pub semantics: CompositionSemantics,
+    /// mununu#589 — the synchronisation vectors of the WHOLE composition (every multi-label
+    /// transition on any member), so a pairwise fold can give two partners of one vector their
+    /// joint step before the vector's owner is folded in. See [`synchronisation_vectors`] and
+    /// the rendezvous rule in [`compose`].
+    pub sync_vectors: Vec<BTreeSet<String>>,
 }
 
 impl CompositionOptions {
     /// Creates a new set of composition options bound to the requested
     /// semantics.
     pub fn new(semantics: CompositionSemantics) -> Self {
-        Self { semantics }
+        Self {
+            semantics,
+            sync_vectors: Vec::new(),
+        }
     }
+
+    /// mununu#589 — the composition's synchronisation vectors, collected over every member it
+    /// will fold (see [`synchronisation_vectors`]).
+    pub fn with_sync_vectors(mut self, vectors: Vec<BTreeSet<String>>) -> Self {
+        self.sync_vectors = vectors;
+        self
+    }
+}
+
+/// mununu#589 — the synchronisation vectors a CLTS carries: the label SET of every transition
+/// with two or more labels. A composition collects these over all its members before folding
+/// them pairwise, so [`compose`] can let two partners of a vector take their joint step even
+/// when the vector's owner comes later in the fold.
+pub fn synchronisation_vectors(
+    clts: &Clts<DefaultStateIdx, DefaultLabelIdx>,
+) -> BTreeSet<BTreeSet<String>> {
+    let mut out = BTreeSet::new();
+    for s in clts.states() {
+        for t in clts.outgoing(s).iter() {
+            let labels: BTreeSet<String> = t
+                .labels()
+                .iter()
+                .filter_map(|id| clts.label_payload(*id))
+                .flat_map(|p| p.iter().cloned())
+                .collect();
+            if labels.len() >= 2 {
+                out.insert(labels);
+            }
+        }
+    }
+    out
+}
+
+/// mununu#589 — is `union` (two edges' labels, no label in common) a piece of one of the
+/// composition's synchronisation vectors? Then the two edges are partners of that vector and get
+/// a joint step in the product, besides their interleavings.
+fn completes_a_vector_piece(vectors: &[BTreeSet<String>], union: &[String]) -> bool {
+    vectors.iter().any(|v| union.iter().all(|l| v.contains(l)))
 }
 
 /// Compose two CLTS instances according to the requested semantics.
@@ -792,6 +838,47 @@ pub fn compose(
                     }
                     CompositionSemantics::Asynchronous => {
                         if shared_actual_empty {
+                            // mununu#589 — the n-ary rendezvous. Two edges with no label in
+                            // common interleave; but if together they are a piece of a
+                            // synchronisation vector the composition carries, they are two
+                            // PARTNERS of that vector and may also step JOINTLY — the step the
+                            // vector's owner will synchronise with when it is folded in later.
+                            // Without this, an owner folded after its partners finds no joint
+                            // `{a, b}` step to pair with and the vector never fires; whether a
+                            // joint action could happen then depended on the members' fold
+                            // order (their names, on the `verify` path). The joint step carries
+                            // labels the owner shares, so it can only survive the owner's fold
+                            // synchronised with the owner's vector; the interleavings below are
+                            // kept, as before, for the owner's single-label edges.
+                            if !options.sync_vectors.is_empty()
+                                && completes_a_vector_piece(
+                                    &options.sync_vectors,
+                                    union_labels_set.as_slice(),
+                                )
+                            {
+                                let joint_target = enqueue_state(
+                                    &mut product_builder,
+                                    &arena,
+                                    &mut builder,
+                                    left,
+                                    right,
+                                    lt.target(),
+                                    rt.target(),
+                                    &mut queue,
+                                    &mut discovered,
+                                );
+                                let has_uncontrollable =
+                                    ControllabilityChecker::composed_has_uncontrollable_labels(
+                                        lt, rt, left, right,
+                                    );
+                                pending_transitions.insert(TransitionKeyBuilder::create_key(
+                                    composed_id,
+                                    joint_target,
+                                    Rc::clone(&union_labels_set),
+                                    has_uncontrollable,
+                                    sync_modality.clone(),
+                                ));
+                            }
                             let left_target = left_perm_state.unwrap_or_else(|| {
                                 let name = enqueue_state(
                                     &mut product_builder,
@@ -1332,9 +1419,7 @@ mod tests {
         right.state("t0").initial("t0");
         let right_clts = right.build()?;
 
-        let options = CompositionOptions {
-            semantics: CompositionSemantics::Synchronous,
-        };
+        let options = CompositionOptions::new(CompositionSemantics::Synchronous);
 
         let composed = compose(&left_clts, &right_clts, &options)?;
         // Should return empty CLTS when one side has no initial states
@@ -1374,9 +1459,7 @@ mod tests {
         right.transition("t0", &[label_c], "t1");
         let right_clts = right.build()?;
 
-        let options = CompositionOptions {
-            semantics: CompositionSemantics::Superset,
-        };
+        let options = CompositionOptions::new(CompositionSemantics::Superset);
 
         let composed = compose(&left_clts, &right_clts, &options)?;
         // Superset composition should include all label combinations
@@ -1404,9 +1487,7 @@ mod tests {
         right.state("t1"); // Unreachable from t0
         let right_clts = right.build()?;
 
-        let options = CompositionOptions {
-            semantics: CompositionSemantics::Synchronous,
-        };
+        let options = CompositionOptions::new(CompositionSemantics::Synchronous);
 
         let composed = compose(&left_clts, &right_clts, &options)?;
         // Should only include reachable states (s0|t0)

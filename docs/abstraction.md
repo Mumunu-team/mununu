@@ -189,6 +189,18 @@ Skolem/Mealy game encoding) and a handshake where two parties must move together
 (`examples/verify/v10_mem_fabric_client_mux`, `on label grant, label refuse`) both mean *and*, and
 both would be silently wrong as parallel edges.
 
+**A vector's partners may sit on different automata (mununu#589).** `{a, b}` on `A` with `a`
+carried by `J` and `b` by `L` is a three-party rendezvous. The product is built by folding members
+pairwise, and a pair of partners folded before the owner (`J` then `L` then `A`) has no joint
+`{a, b}` step for the owner to pair with — so until mununu#589 the vector fired only if the owner
+was folded first, which on the `verify` path meant: only if its automaton's name sorted first. Now
+the composition collects every vector its members carry before the fold
+(`CompositionOptions::sync_vectors`), and two edges with no label in common whose union is a piece
+of such a vector take their joint step as well as their interleavings. That joint step carries
+labels the owner shares, so it survives the owner's fold only synchronised with the owner's
+vector; where no member carries the vector, partners only ever interleave. Whether a joint action
+can happen no longer depends on how its participants are named or ordered.
+
 ### Variants scheduled for removal in S.0 / S.1
 
 The KMTS pivot's simplification phase removes the SV-specific synthesis-tuned variants. They are listed here to signal "do not start new use cases" for these primitives; the migration table above maps each to its KMTS replacement.

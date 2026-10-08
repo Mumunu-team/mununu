@@ -61,9 +61,7 @@ proptest! {
             .with_uncontrollable_prefix(3)
             .build();
 
-        let opts = CompositionOptions {
-            semantics: CompositionSemantics::Synchronous,
-        };
+        let opts = CompositionOptions::new(CompositionSemantics::Synchronous);
         let ab = compose(&a, &b, &opts).expect("compose ab");
         let ba = compose(&b, &a, &opts).expect("compose ba");
 
