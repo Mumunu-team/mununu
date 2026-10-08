@@ -843,24 +843,48 @@ mod tests {
     #[test]
     #[ignore = "requires btormc + pono (mununu-sva); run with --ignored"]
     fn e2e_rescue_decides_beyond_exact_cap() {
-        // An 80-bit invariant the exact BDD engine cannot touch (over its auto-cap
-        // ceiling of 64) — proving the subprocess members extend reach past the cap. The
-        // exact member must ABSTAIN; a subprocess member must carry the verdict.
+        // A 300-bit invariant the exact BDD engine cannot touch (over its auto-cap ceiling) —
+        // proving the subprocess members extend reach past the cap. The exact member must
+        // ABSTAIN, and the portfolio must decide HOLDS.
+        //
+        // mununu#625 — which member CARRIES the portfolio's verdict is a race since #607
+        // (the first trusted decider cancels the rest after a short grace): on a fast host
+        // `native` and `spacer` decide this trivial model inside the grace and the subprocess
+        // members are cancelled before they answer, so asserting on `unreachable_by` encoded
+        // "who was first", not the claim. The claim — btormc and pono DECIDE beyond the cap —
+        // is checked by running each directly on the same monitored model.
         let f = parse("nu X. ((big == 0) && [] X)");
         let (verdict, outcome) =
             reach_portfolio_rescue(WIDE_STATE, &f, false).expect("reducible + monitor builds");
         assert_eq!(verdict, RescueVerdict::Holds, "outcome: {outcome:?}");
         assert!(
             !outcome.unreachable_by.contains(&"exact"),
-            "the exact engine must abstain on the 80-bit (over-cap) design; got {outcome:?}"
+            "the exact engine must abstain on the 300-bit (over-cap) design; got {outcome:?}"
         );
+        let inv = reduce_ag_invariant(&f).expect("single-atom invariant");
+        let monitored =
+            emit_ag_state_atom_monitor(WIDE_STATE, &inv.signal, inv.op, inv.value, false)
+                .expect("monitor builds");
+        let file = parser::parse(&monitored).expect("monitored model parses");
+        use crate::adapter::btormc::{self, McVerdict};
+        use crate::adapter::pono;
+        let by_btormc =
+            btormc::decide_via_btormc(&file, btormc::DEFAULT_KMAX, btormc::DEFAULT_TIMEOUT, None)
+                .expect("btormc runs");
+        let by_pono =
+            pono::decide_via_pono(&file, pono::DEFAULT_ENGINE, pono::DEFAULT_TIMEOUT, None)
+                .expect("pono runs");
+        eprintln!("beyond-cap subprocess verdicts: btormc={by_btormc:?} pono={by_pono:?}");
+        // The claim is "a subprocess member decides beyond the cap", as the portfolio needs:
+        // btormc's plain k-induction returns Unknown here (the monitor's flag register is not
+        // 1-inductive without strengthening — measured), pono's IC3 proves it.
         assert!(
-            outcome
-                .unreachable_by
-                .iter()
-                .any(|e| *e == "btormc" || *e == "pono"),
-            "a subprocess member must carry the beyond-cap verdict; got {outcome:?}"
+            by_btormc == McVerdict::Safe || by_pono == McVerdict::Safe,
+            "neither btormc nor pono proves the 300-bit invariant beyond the exact cap: \
+             btormc={by_btormc:?} pono={by_pono:?}"
         );
+        assert_ne!(by_btormc, McVerdict::Violated);
+        assert_ne!(by_pono, McVerdict::Violated);
     }
 
     // `q` toggles every cycle (q' = !q), so a high `q` is ALWAYS followed by a low one.
