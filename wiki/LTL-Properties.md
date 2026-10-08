@@ -81,6 +81,8 @@ formula ltl_response {
 
 This says: every time the tank reaches `Full`, `Empty` stays reachable -- the system can always cycle back.
 
+**`(GF a) -> (GF b)` is not the path implication here (mununu#595).** The translator is state-wise: `ltl (GF a) -> (GF b)` becomes `!(nu..mu..) || (nu..mu..)` — "a does not recur from here, or b does" — evaluated at a state, not "on every path where `a` recurs, `b` recurs". To verify a liveness property **under an environment assumption**, declare the assumption and use the fairness templates on the `verify` path: `[[assumptions]]` (`kind = "state" | "edge" | "edges" | "weak"`) with `fair_response` / `fair_always_eventually`, which expand to the fair-`EG` encoding and report a conditional verdict with a non-vacuity gate — see [Verify Project Flow](Verify-Project-Flow.md#environment-assumptions--fairness-on-the-verify-path-mununu595). In a hand-written formula, the same encoding is plain mu-calculus (`verify::fairness`).
+
 ### Persistence: "Eventually stable forever"
 
 The persistence pattern `F G phi` asserts that `phi` eventually becomes true and remains true for all subsequent states. Useful for convergence properties.

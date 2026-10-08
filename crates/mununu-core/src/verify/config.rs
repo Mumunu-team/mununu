@@ -83,6 +83,11 @@ pub struct VerifyConfig {
     /// `[[properties]]` array.
     #[serde(default)]
     pub properties: Vec<PropertySection>,
+    /// mununu#595 — `[[assumptions]]` array: named environment assumptions (fairness
+    /// constraints) a property may be verified UNDER. Declared once here, referenced by name
+    /// from `[[properties]].assumptions`. See [`AssumptionSection`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assumptions: Vec<AssumptionSection>,
     /// R4W-3 (R.4 clustered-COI wiring) — optional Jaccard similarity
     /// floor for the clustered-COI comparison the BTOR2 bit-blaster
     /// reports on each source's `PartitionSummary.cluster_coi`. `None`
@@ -319,7 +324,60 @@ pub struct PropertySection {
     /// `[composition].name` (or the implicit default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub over: Option<String>,
+    /// mununu#595 — names of `[[assumptions]]` this property is verified UNDER. Only the
+    /// fairness templates (`fair_response`, `fair_always_eventually`) take assumptions, and
+    /// they require at least one — with none they are their unconditional cousins, and the
+    /// validator refuses that spelling so a bare `holds` cannot pass for a conditional one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assumptions: Vec<String>,
 }
+
+/// mununu#595 — one `[[assumptions]]` entry: a named environment assumption, i.e. an
+/// unconditional fairness constraint every considered path must satisfy infinitely often.
+///
+/// ```toml
+/// [[assumptions]]
+/// name = "env_progress"
+/// kind = "edge"          # "state" | "edge" | "edges" | "weak"
+/// atom = "go"            # state: a state predicate; edge / weak: a label
+/// # labels = ["a", "b"]  # edges: any one of these labels, infinitely often
+/// ```
+///
+/// The encoding each kind expands to is in [`super::fairness`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssumptionSection {
+    /// Unique name, referenced from `[[properties]].assumptions`.
+    pub name: String,
+    /// `"state"` (`GF P`), `"edge"` (`GF ⟨l⟩`), `"edges"` (`GF ⟨l₁⟩ ∨ … ∨ ⟨lₙ⟩`) or `"weak"`
+    /// (weak fairness of `l`: taken infinitely often or disabled infinitely often).
+    pub kind: String,
+    /// The state predicate (`state`) or the label (`edge`, `weak`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub atom: Option<String>,
+    /// The labels (`edges`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
+}
+
+impl AssumptionSection {
+    /// The encoder's view of this entry, or `None` when it is malformed (the validator reports
+    /// the malformation; the orchestrator never sees one).
+    pub fn to_assumption(&self) -> Option<super::fairness::Assumption> {
+        use super::fairness::Assumption;
+        match self.kind.as_str() {
+            "state" => self.atom.clone().map(|atom| Assumption::State { atom }),
+            "edge" => self.atom.clone().map(|label| Assumption::Edge { label }),
+            "weak" => self.atom.clone().map(|label| Assumption::Weak { label }),
+            "edges" if !self.labels.is_empty() => Some(Assumption::Edges {
+                labels: self.labels.clone(),
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// mununu#595 — the template ids that take assumptions.
+pub const FAIR_TEMPLATES: &[&str] = &["fair_response", "fair_always_eventually"];
 
 fn default_strategy() -> String {
     "direct".to_string()
@@ -401,6 +459,21 @@ pub enum ConfigIssue {
     EmptyPropertyName,
     /// Two `[[properties]]` entries share the same `name`.
     DuplicatePropertyName(String),
+    /// mununu#595 — `[[assumptions]]` entry had an empty `name`.
+    EmptyAssumptionName,
+    /// mununu#595 — two `[[assumptions]]` entries share the same `name`.
+    DuplicateAssumptionName(String),
+    /// mununu#595 — an `[[assumptions]]` entry's `kind` / `atom` / `labels` do not fit together.
+    MalformedAssumption { name: String, kind: String },
+    /// mununu#595 — a property references an assumption no `[[assumptions]]` entry declares.
+    PropertyUnknownAssumption {
+        property: String,
+        assumption: String,
+    },
+    /// mununu#595 — a property lists assumptions but is not a fairness template.
+    PropertyAssumptionsNotApplicable { property: String },
+    /// mununu#595 — a fairness template with no assumptions (its unconditional cousin exists).
+    FairTemplateWithoutAssumptions { property: String, template: String },
 }
 
 impl fmt::Display for ConfigIssue {
@@ -504,6 +577,35 @@ impl fmt::Display for ConfigIssue {
             ConfigIssue::DuplicatePropertyName(n) => {
                 write!(f, "[[properties]]: duplicate property name `{n}`")
             }
+            ConfigIssue::EmptyAssumptionName => {
+                write!(f, "[[assumptions]] entry has empty `name`")
+            }
+            ConfigIssue::DuplicateAssumptionName(n) => {
+                write!(f, "[[assumptions]]: duplicate assumption name `{n}`")
+            }
+            ConfigIssue::MalformedAssumption { name, kind } => write!(
+                f,
+                "[[assumptions]] `{name}`: kind = \"{kind}\" needs `atom` (state / edge / weak) or a \
+                 non-empty `labels` (edges); valid kinds: \"state\", \"edge\", \"edges\", \"weak\""
+            ),
+            ConfigIssue::PropertyUnknownAssumption {
+                property,
+                assumption,
+            } => write!(
+                f,
+                "[[properties]] `{property}`: unknown assumption `{assumption}` (declare it under [[assumptions]])"
+            ),
+            ConfigIssue::PropertyAssumptionsNotApplicable { property } => write!(
+                f,
+                "[[properties]] `{property}`: `assumptions` apply only to the fairness templates \
+                 (`fair_response`, `fair_always_eventually`); an inline `formula` encodes its own \
+                 fairness (see `verify::fairness`)"
+            ),
+            ConfigIssue::FairTemplateWithoutAssumptions { property, template } => write!(
+                f,
+                "[[properties]] `{property}`: template `{template}` needs `assumptions = [...]` — with \
+                 none it is its unconditional cousin (`response` / `always_eventually`), use that"
+            ),
         }
     }
 }
@@ -681,6 +783,46 @@ impl VerifyConfig {
             }
             if !p.name.is_empty() && !seen_property_names.insert(p.name.clone()) {
                 issues.push(ConfigIssue::DuplicatePropertyName(p.name.clone()));
+            }
+            // mununu#595 — assumptions: declared, and only where they mean something.
+            let is_fair_template = p
+                .template
+                .as_deref()
+                .is_some_and(|t| FAIR_TEMPLATES.contains(&t));
+            for a in &p.assumptions {
+                if !self.assumptions.iter().any(|d| &d.name == a) {
+                    issues.push(ConfigIssue::PropertyUnknownAssumption {
+                        property: p.name.clone(),
+                        assumption: a.clone(),
+                    });
+                }
+            }
+            if !p.assumptions.is_empty() && !is_fair_template {
+                issues.push(ConfigIssue::PropertyAssumptionsNotApplicable {
+                    property: p.name.clone(),
+                });
+            }
+            if is_fair_template && p.assumptions.is_empty() {
+                issues.push(ConfigIssue::FairTemplateWithoutAssumptions {
+                    property: p.name.clone(),
+                    template: p.template.clone().unwrap_or_default(),
+                });
+            }
+        }
+
+        // mununu#595 — [[assumptions]]: named, unique, well-formed.
+        let mut seen_assumption_names: HashSet<String> = HashSet::new();
+        for a in &self.assumptions {
+            if a.name.is_empty() {
+                issues.push(ConfigIssue::EmptyAssumptionName);
+            } else if !seen_assumption_names.insert(a.name.clone()) {
+                issues.push(ConfigIssue::DuplicateAssumptionName(a.name.clone()));
+            }
+            if a.to_assumption().is_none() {
+                issues.push(ConfigIssue::MalformedAssumption {
+                    name: a.name.clone(),
+                    kind: a.kind.clone(),
+                });
             }
         }
 
@@ -1284,6 +1426,7 @@ template = "reachable"
             formula: None,
             args: BTreeMap::new(),
             over: Some("Custom".to_string()),
+            assumptions: Vec::new(),
         };
         assert_eq!(cfg.resolve_over(&p), "Custom");
         // Missing `over` falls back to composition.name (set in VALID_DIRECT).
@@ -1480,5 +1623,107 @@ name = "Solo"
         // Serde round-trip preserves it.
         let reparsed = VerifyConfig::from_toml(&toml::to_string(&cfg).unwrap()).unwrap();
         assert_eq!(reparsed.cluster_similarity_floor, Some(0.7));
+    }
+
+    /// mununu#595 — `[[assumptions]]` and `[[properties]].assumptions`: every malformation the
+    /// orchestrator must never see, each named, plus a well-formed config that round-trips.
+    #[test]
+    fn x595_assumptions_are_validated_by_name_kind_and_applicability() {
+        let base = VALID_DIRECT.replace(
+            "[[properties]]\nname = \"no_deadlock\"\ntemplate = \"no_deadlock\"\n",
+            "",
+        );
+        let cfg = VerifyConfig::from_toml(&format!(
+            r#"{base}
+[[assumptions]]
+name = "fair_go"
+kind = "edge"
+atom = "go"
+[[assumptions]]
+name = "fair_go"
+kind = "state"
+[[assumptions]]
+name = ""
+kind = "edges"
+labels = ["a", "b"]
+[[assumptions]]
+name = "odd"
+kind = "strong"
+atom = "x"
+[[properties]]
+name = "ok"
+template = "fair_response"
+args = {{ TRIGGER = "Req", RESPONSE = "Ack" }}
+assumptions = ["fair_go"]
+[[properties]]
+name = "unknown_ref"
+template = "fair_always_eventually"
+args = {{ TARGET = "Idle" }}
+assumptions = ["nobody"]
+[[properties]]
+name = "not_applicable"
+template = "response"
+args = {{ TRIGGER = "Req", RESPONSE = "Ack" }}
+assumptions = ["fair_go"]
+[[properties]]
+name = "bare_fair"
+template = "fair_always_eventually"
+args = {{ TARGET = "Idle" }}
+"#
+        ))
+        .unwrap();
+        let issues = cfg.validate();
+        let has = |want: &ConfigIssue| issues.iter().any(|i| i == want);
+        assert!(has(&ConfigIssue::DuplicateAssumptionName("fair_go".into())));
+        assert!(
+            has(&ConfigIssue::MalformedAssumption {
+                name: "fair_go".into(),
+                kind: "state".into()
+            }),
+            "a `state` entry needs `atom`"
+        );
+        assert!(has(&ConfigIssue::EmptyAssumptionName));
+        assert!(has(&ConfigIssue::MalformedAssumption {
+            name: "odd".into(),
+            kind: "strong".into()
+        }));
+        assert!(has(&ConfigIssue::PropertyUnknownAssumption {
+            property: "unknown_ref".into(),
+            assumption: "nobody".into()
+        }));
+        assert!(has(&ConfigIssue::PropertyAssumptionsNotApplicable {
+            property: "not_applicable".into()
+        }));
+        assert!(has(&ConfigIssue::FairTemplateWithoutAssumptions {
+            property: "bare_fair".into(),
+            template: "fair_always_eventually".into()
+        }));
+        // `ok` raises nothing of its own.
+        assert!(
+            !issues.iter().any(|i| format!("{i}").contains("`ok`")),
+            "{issues:?}"
+        );
+        // Every issue renders.
+        for i in &issues {
+            assert!(!i.to_string().is_empty());
+        }
+        // The encoder's view of each well-formed kind, and the round-trip.
+        let a = &cfg.assumptions[0];
+        assert_eq!(
+            a.to_assumption(),
+            Some(super::super::fairness::Assumption::Edge { label: "go".into() })
+        );
+        assert_eq!(
+            cfg.assumptions[2].to_assumption(),
+            Some(super::super::fairness::Assumption::Edges {
+                labels: vec!["a".into(), "b".into()]
+            })
+        );
+        let reparsed = VerifyConfig::from_toml(&toml::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(reparsed.assumptions, cfg.assumptions);
+        assert_eq!(
+            reparsed.properties[0].assumptions,
+            vec!["fair_go".to_string()]
+        );
     }
 }

@@ -130,6 +130,8 @@ pub fn codesign_to_verify(codesign: &CodesignProjectConfig) -> VerifyConfig {
             formula: p.formula.clone(),
             args: p.args.clone(),
             over: p.over.clone(),
+            // mununu#595 — the codesign shorthand declares no assumptions.
+            assumptions: Vec::new(),
         })
         .collect();
 
@@ -142,6 +144,7 @@ pub fn codesign_to_verify(codesign: &CodesignProjectConfig) -> VerifyConfig {
         // R4W-3 — codesign shorthand does not tune clustered-COI; the
         // verify path uses the recommended 0.5 default.
         cluster_similarity_floor: None,
+        assumptions: Vec::new(),
 
         counterexample_max_steps: None,
     }

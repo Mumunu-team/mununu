@@ -144,6 +144,56 @@
       "tags": ["liveness", "response", "handshake"]
     },
     {
+      "id": "fair_response",
+      "display_name": "Fair Response (under assumptions)",
+      "description": "Every trigger is eventually followed by a response on every FAIR path — a path satisfying the property's declared `assumptions` (mununu#595). On the `verify` path the body is expanded from the `[[assumptions]]` the property lists (one fair-EG conjunct each; see `verify::fairness`) and the verdict is reported as conditional (`holds under …`) together with a non-vacuity gate. Shown here is the zero-assumption instance, AG(TRIGGER -> AF RESPONSE); `verify` refuses that spelling — use `response`.",
+      "kind": "liveness",
+      "role": "guarantee",
+      "domains": ["universal"],
+      "params": [
+        {
+          "name": "TRIGGER",
+          "description": "Request/trigger predicate",
+          "param_type": { "type": "predicate" },
+          "required": true
+        },
+        {
+          "name": "RESPONSE",
+          "description": "Expected response predicate",
+          "param_type": { "type": "predicate" },
+          "required": true
+        }
+      ],
+      "formula_pattern": "(nu W. ((!(${TRIGGER}) || !(nu Z. ((!(${RESPONSE})) && < > Z))) && [] W))",
+      "domain_hints": {
+        "rtl": { "TRIGGER": "e.g., req_active", "RESPONSE": "e.g., ack_active" },
+        "agentic": { "TRIGGER": "e.g., RequestReceived", "RESPONSE": "e.g., ResponseSent" }
+      },
+      "tags": ["liveness", "response", "fairness", "assumptions"]
+    },
+    {
+      "id": "fair_always_eventually",
+      "display_name": "Fair Always Eventually (under assumptions)",
+      "description": "From every reachable state, every FAIR path eventually reaches the target — a path satisfying the property's declared `assumptions` (mununu#595). On the `verify` path the body is expanded from the `[[assumptions]]` the property lists and the verdict is conditional (`holds under …`) with a non-vacuity gate. Shown here is the zero-assumption instance, AG AF TARGET; `verify` refuses that spelling — use `always_eventually` (note: that template is AG EF, the existential reading).",
+      "kind": "liveness",
+      "role": "guarantee",
+      "domains": ["universal"],
+      "params": [
+        {
+          "name": "TARGET",
+          "description": "Predicate every fair path must keep reaching",
+          "param_type": { "type": "predicate" },
+          "required": true
+        }
+      ],
+      "formula_pattern": "(nu W. (!(nu Z. ((!(${TARGET})) && < > Z)) && [] W))",
+      "domain_hints": {
+        "rtl": { "TARGET": "e.g., state_IDLE (reset recovery under a fair environment)" },
+        "agentic": { "TARGET": "e.g., Ready (session cleanup under a responsive peer)" }
+      },
+      "tags": ["liveness", "recurrence", "fairness", "assumptions"]
+    },
+    {
       "id": "mutual_exclusion",
       "display_name": "Mutual Exclusion",
       "description": "Two predicates never hold simultaneously",

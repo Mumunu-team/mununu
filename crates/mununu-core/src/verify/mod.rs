@@ -37,6 +37,7 @@ pub mod assemble;
 pub mod binding;
 pub mod codesign_shorthand;
 pub mod config;
+pub mod fairness;
 pub mod memory_check;
 pub mod orchestrator;
 pub mod register_map_rewriter;

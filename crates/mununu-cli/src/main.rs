@@ -2938,7 +2938,20 @@ fn handle_verify(args: VerifyArgs) -> Result<(), String> {
                 PropertyFormulaSource::Inline => "inline".to_string(),
                 PropertyFormulaSource::Template { id, .. } => format!("template `{id}`"),
             };
-            let verdict = if v.satisfied { "SATISFIED" } else { "VIOLATED" };
+            // mununu#595 — a conditional verdict is never a bare SATISFIED: it says what it
+            // holds UNDER, and when the assumptions admit no path at all it says VACUOUS
+            // instead, because the formula is then true for nothing.
+            let verdict = match (v.satisfied, v.fair_path_exists) {
+                (true, Some(false)) => format!(
+                    "VACUOUS under {{{}}} — the assumptions admit no fair path from the initial \
+                     state(s); the formula is trivially true",
+                    v.assumptions.join(", ")
+                ),
+                (true, Some(true)) => format!("SATISFIED under {{{}}}", v.assumptions.join(", ")),
+                (false, Some(_)) => format!("VIOLATED under {{{}}}", v.assumptions.join(", ")),
+                (true, None) => "SATISFIED".to_string(),
+                (false, None) => "VIOLATED".to_string(),
+            };
             println!(
                 "    {name}: {verdict} ({sat}/{total} states, {init_sat}/{init} initial) [{source}, over = {over}]",
                 name = v.name,
@@ -3009,6 +3022,19 @@ fn handle_verify(args: VerifyArgs) -> Result<(), String> {
 
     if args.strict && report.property_verdicts.iter().any(|v| !v.satisfied) {
         return Err("one or more properties violated (--strict)".to_string());
+    }
+    // mununu#595 — a vacuous conditional verdict is not a pass either.
+    if args.strict
+        && report
+            .property_verdicts
+            .iter()
+            .any(|v| v.fair_path_exists == Some(false))
+    {
+        return Err(
+            "one or more conditional properties are VACUOUS — their assumptions admit no fair \
+             path (--strict)"
+                .to_string(),
+        );
     }
     Ok(())
 }
