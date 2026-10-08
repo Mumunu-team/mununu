@@ -57,7 +57,6 @@ use crate::clts::IdStorage;
 use crate::mu_calculus::{EvaluationOptions, evaluate_tri_with_options, evaluate_with_options};
 use crate::verify::assemble::{
     AutomatonDiscovery, CompositionSpec, ResolvedProperty, SourceCtxdsl, assemble_unified_ctxdsl,
-    extract_context_body,
 };
 use crate::verify::binding::{AlphabetBinding, apply_renamings_to_ctxdsl};
 use crate::verify::config::{PropertySection, VerifyConfig};
@@ -1865,22 +1864,27 @@ fn derive_resolved_member_names(
         let Some(src) = sources.iter().find(|s| s.source_id == src_id) else {
             continue;
         };
-        let Some(body) = extract_context_body(&src.ctxdsl) else {
+        // mununu#591 — the names a source REALIZES to, not the names it declares: a
+        // parameterised automaton (`parameters { param i in R; }`) exists after realization only
+        // as its instances (`Worker_0`, `Worker_1`), and a composition member must name one of
+        // those. The parsed document gives the expansion; the textual scan of declared names is
+        // the fallback for a source that does not parse here (the realization reports it).
+        // Grouped by declaration: `w.*` is every instance of every automaton; bare `w` is "the
+        // first automaton", which for a template means ALL of its instances (`Worker_0`,
+        // `Worker_1`) — dropping all but one of a template's instances would be a silent and
+        // surprising reading of "the first automaton".
+        let Some(groups) = crate::verify::assemble::realized_automaton_groups(&src.ctxdsl) else {
             continue;
         };
-        let names: Vec<String> = crate::verify::assemble::all_automaton_names(body)
-            .into_iter()
-            .map(String::from)
-            .collect();
+        let names: Vec<String> = if expand_all {
+            groups.into_iter().flatten().collect()
+        } else {
+            groups.into_iter().next().unwrap_or_default()
+        };
         if names.is_empty() {
             continue;
         }
-        let value = if expand_all {
-            names
-        } else {
-            vec![names.into_iter().next().unwrap()]
-        };
-        out.insert(mid.clone(), value);
+        out.insert(mid.clone(), names);
     }
     out
 }
@@ -2155,6 +2159,73 @@ name = "System"
             results.is_empty(),
             "a btor2 source with no `bad` obligation is skipped"
         );
+    }
+
+    /// mununu#591 — a parameterised automaton as a `verify` source. The composition's members
+    /// are resolved to the names the source REALIZES to: `w.*` is every instance (`Worker_0`,
+    /// `Worker_1`), and bare `w` — "the first automaton" — is every instance of that template,
+    /// never one of them. Before, both resolved to the declared `Worker`, which the expansion
+    /// does not keep, and realization failed with `unknown member 'Worker'`.
+    #[test]
+    fn x591_a_parameterised_automaton_is_a_verify_source_by_its_instances() {
+        const WORKERS: &str = r#"
+context Workers {
+    ranges { range Ws = 0 ..= 1; }
+    automata {
+        automaton Worker {
+            parameters { param i in Ws; }
+            controllable { }
+            states { state Idle initial; state Busy; }
+            transitions {
+                transition Idle -> Busy on label start[i];
+                transition Busy -> Idle on label done[i];
+            }
+        }
+    }
+}
+"#;
+        for members in ["[\"w.*\"]", "[\"w\"]"] {
+            let temp = tempdir().unwrap();
+            let _ = write_ctxdsl_source(temp.path(), "workers.ctxdsl", WORKERS);
+            let toml_src = format!(
+                r#"
+[project]
+name = "ParamWorkers"
+[[sources]]
+id = "w"
+adapter = "ctxdsl"
+files = ["workers.ctxdsl"]
+[alphabet]
+strategy = "direct"
+[composition]
+semantics = "asynchronous"
+members = {members}
+name = "Pool"
+[[properties]]
+name = "busy_reachable"
+template = "reachable"
+args = {{ TARGET = "Busy" }}
+over = "Pool"
+"#
+            );
+            let config = VerifyConfig::from_toml(&toml_src).unwrap();
+            let report = verify_project(&config, temp.path())
+                .unwrap_or_else(|e| panic!("members = {members}: verify_project fails: {e}"));
+            assert_eq!(
+                report.composition.members,
+                vec!["Worker_0".to_string(), "Worker_1".to_string()],
+                "members = {members}: both instances compose"
+            );
+            let v = report
+                .property_verdicts
+                .iter()
+                .find(|v| v.name == "busy_reachable")
+                .expect("the property is evaluated");
+            assert!(
+                v.satisfied,
+                "members = {members}: Busy is reachable in the pool"
+            );
+        }
     }
 
     #[test]
