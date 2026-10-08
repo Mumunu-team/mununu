@@ -323,6 +323,32 @@ trial-and-error.
 
 > Source of truth: [`bitblast_oom_skip_note`](../crates/mununu-core/src/planner/mod.rs) — surface: (CLI+API+UI)
 
+### The cone of influence is bit-level (mununu#602)
+
+> Source of truth: [`dep_graph::bit_cone`](../crates/mununu-core/src/adapter/btor2/dep_graph.rs) + [`bit_blast::narrow_leaves`](../crates/mununu-core/src/adapter/btor2/bit_blast.rs) — surface: (CLI+API+UI)
+
+What the exact engine counts against the bit cap is the property's **cone of influence**, and
+since mununu#602 that cone is computed **per bit**: a register read through a constant part-select
+brings the slice into the cone, not its width. The consumer's shape — a 32-bit field of a 23-word
+(736-bit) packed vector crossed twice through a `bundle_cdc` — was a 2,208-bit cone at signal
+granularity (every property about one field of the record over the cap) and is a 96-bit cone at
+bit granularity, which decides. Every partially-read leaf is narrowed to its kept bits before the
+bit-blast (NID- and name-preserving, so atoms, `init` lines and a `controllable` declaration are
+untouched); the dropped bits read as `0` through a reconstruction, which is what the engine already
+did to a whole out-of-cone register. Sound because the per-bit cone is closed under `next` bit by
+bit and over-approximates every operator — a pure re-map (`slice`, `concat`, extension, bitwise)
+maps exactly, a carry chain makes bit `i` depend on bits `≤ i`, a comparison / reduction /
+multiplication / symbolic shift on every bit. The over-cap diagnostic counts the same bits.
+
+**What it does not do.** A read through an address **mux** (`rdata = addr == k ? word_k : …`)
+reaches every word structurally — bit `i` of the output depends on bit `i` of every arm — so a
+property phrased on the muxed output stays over the cap (measured: 2,213 bits on the same
+vector). That shape needs the antecedent's constant propagated through the mux, a different
+lever, tracked separately. A cone that reaches an array stays signal-level (the memory havoc
+applies). `MUNUNU_COI=signal` restores the signal-level cone for a differential run; the verdict
+is identical wherever both decide (the wall-class matrix is identical at both granularities, and
+the new `crossed_vector_field` class decides only at bit level).
+
 ### Compound-atom safety escalation + `bottom-reason` diagnostic (mununu#492)
 
 > Source of truth: [`reduce_ag_boolean_body`](../crates/mununu-core/src/adapter/reach_rescue.rs) + [`emit_ag_boolean_invariant_monitor`](../crates/mununu-core/src/adapter/btor2/bad_monitor.rs) — surface: (CLI+API+UI)

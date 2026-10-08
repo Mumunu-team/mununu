@@ -9397,6 +9397,7 @@ fn internal_engine_eval(args: InternalEngineEvalArgs) -> Result<(), String> {
         .map_err(|e| format!("internal-engine-eval: cannot parse the formula: {e:?}"))?;
     let opts = ExactSymbolicOptions {
         antecedent_shadow_enabled: !args.no_antecedent_shadow,
+        ..Default::default()
     };
 
     match exact_symbolic_verdict_with_witness_and_options(&btor2, &formula, &opts) {

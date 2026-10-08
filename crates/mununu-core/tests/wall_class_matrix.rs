@@ -160,6 +160,22 @@ const TRAP_UF_W48: &str = "\
 22 next 3 7 31
 ";
 
+/// mununu#602 — the crossed-vector field (see the case). `flag_o` is bit 128 of the
+/// second copy, i.e. bit 128 of the free input two cycles back: always recoverable.
+const CROSSED_VECTOR_FIELD: &str = "\
+1 sort bitvec 736
+2 input 1 rd_words
+3 state 1 words
+4 next 1 3 2
+5 state 1 words_sync
+6 next 1 5 3
+7 sort bitvec 32
+8 sort bitvec 1
+9 slice 7 5 159 128 word4
+10 slice 8 9 0 0 flag
+11 uext 8 10 0 flag_o
+";
+
 const POS_W48: &str = "\
 1 sort bitvec 2
 2 sort bitvec 1
@@ -501,6 +517,19 @@ fn cases() -> Vec<Case> {
             btor2: ARRAY_CONTENT_INDEP,
             target: "busy == 0",
             oracle: Oracle::HardUnknown,
+            source: "synthetic",
+            pin: NO_PIN,
+        },
+        // mununu#602 — a 32-bit field of a 23-word (736-bit) packed vector crossed twice, read
+        // through a constant part-select. The signal-level cone is 3 × 736 = 2,208 bits (exact
+        // abstains on the cap); the bit-level cone is 96 and exact decides. The consumer's
+        // `bundle_cdc` shape; synthetic until that design lifts here.
+        Case {
+            name: "crossed_vector_field",
+            class: "wide-vector-slice/HOLDS",
+            btor2: CROSSED_VECTOR_FIELD,
+            target: "flag_o == 1",
+            oracle: Oracle::Holds,
             source: "synthetic",
             pin: NO_PIN,
         },

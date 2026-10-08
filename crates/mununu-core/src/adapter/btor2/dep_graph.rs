@@ -480,6 +480,333 @@ pub fn extract_property_seeds(file: &Btor2File) -> HashSet<String> {
     seeds
 }
 
+// ---------------------------------------------------------------------------
+// mununu#602 — the cone of influence at BIT granularity
+// ---------------------------------------------------------------------------
+
+/// mununu#602 — the property's cone of influence at **bit** granularity: for every leaf cell
+/// (`state` / `input`) the set of its bits the property can depend on, closed under the
+/// temporal `state → next` edge bit by bit.
+///
+/// [`cone_leaf_nids`] answers "which cells"; a 2-bit question over a 736-bit crossed vector
+/// then inherits the whole vector twice (the consumer's `bundle_cdc`: 1,476 register bits) and
+/// the exact engine skips it on the bit cap. This answers "which bits", so that a register read
+/// through a constant part-select brings its slice into the cone, not its width.
+///
+/// **Soundness.** Every rule over-approximates the true per-bit dependency of the bit-blasted
+/// semantics (`symbolic_bitblast::eval_op`): a pure re-map (`slice`, `concat`, `uext`, `sext`,
+/// bitwise, `not`) maps exactly; a carry chain (`add`, `sub`, `inc`, `dec`, `neg`) makes bit `i`
+/// depend on every bit at or below `i`; a comparison, reduction, multiplication, division, shift
+/// by a symbolic amount, overflow predicate — and anything unrecognised — depend on EVERY bit of
+/// both operands; a shift or rotate by a CONSTANT amount is re-mapped by that amount; `ite`
+/// makes every output bit depend on the whole condition. An out-of-cone bit therefore cannot
+/// influence any in-cone bit's next value nor the property's atoms, which is what lets
+/// [`super::bit_blast::narrow_leaves`] pin it to a constant without moving a verdict. `init`
+/// values that are not constants and the `constraint` / `fair` / `justice` lines are pulled in
+/// the same way the signal-level cone pulls them ([`cone_reachable_leaves`]).
+///
+/// Returns `None` when the cone reaches an array-sorted node (a `read` / `write`, or an array
+/// `state`): arrays are not bit-vectors, and the signal-level cone's memory havoc is the path for
+/// those. Also `None` when `atoms` is empty (no cone to speak of).
+pub fn bit_cone(file: &Btor2File, atoms: &[String]) -> Option<HashMap<Nid, Vec<bool>>> {
+    use super::ast::{ConstValue, Op, Sort};
+    if atoms.is_empty() {
+        return None;
+    }
+    // Widths of the bit-vector sorts; an array sort is absent, which is how arrays are detected.
+    let widths: HashMap<Nid, usize> = file
+        .lines
+        .iter()
+        .filter_map(|l| match &l.node {
+            Node::Sort {
+                sort: Sort::BitVec { width },
+            } => Some((l.nid, *width as usize)),
+            _ => None,
+        })
+        .collect();
+    // Per-bit support of every node: the leaf bits it depends on. BTOR2 is topologically sorted,
+    // so one pass in declaration order sees every operand before its use.
+    type Support = Vec<HashSet<(Nid, usize)>>;
+    let mut support: HashMap<Nid, Support> = HashMap::new();
+    let mut consts: HashMap<Nid, u128> = HashMap::new();
+    let mut array_nids: HashSet<Nid> = HashSet::new();
+    let const_u128 = |v: &ConstValue, w: usize| -> u128 {
+        match v {
+            ConstValue::Zero => 0,
+            ConstValue::One => 1,
+            ConstValue::Ones => {
+                if w == 0 || w >= 128 {
+                    u128::MAX
+                } else {
+                    (1u128 << w) - 1
+                }
+            }
+            ConstValue::Dec(d) => *d as u128,
+            ConstValue::Bin(b) => u128::from_str_radix(b, 2).unwrap_or(0),
+            ConstValue::Hex(h) => u128::from_str_radix(h, 16).unwrap_or(0),
+        }
+    };
+    for line in &file.lines {
+        match &line.node {
+            Node::State { sort, .. } | Node::Input { sort, .. } => {
+                let Some(&w) = widths.get(sort) else {
+                    array_nids.insert(line.nid);
+                    continue;
+                };
+                support.insert(
+                    line.nid,
+                    (0..w).map(|i| HashSet::from([(line.nid, i)])).collect(),
+                );
+            }
+            Node::Const { sort, value } => {
+                let w = widths.get(sort).copied().unwrap_or(0);
+                consts.insert(line.nid, const_u128(value, w));
+                support.insert(line.nid, vec![HashSet::new(); w]);
+            }
+            Node::Op { op, sort, args, .. } => {
+                let Some(&w) = widths.get(sort) else {
+                    array_nids.insert(line.nid);
+                    continue;
+                };
+                if args.iter().any(|a| array_nids.contains(&a.nid())) {
+                    array_nids.insert(line.nid);
+                    continue;
+                }
+                let sup = |k: usize| -> Support {
+                    args.get(k)
+                        .and_then(|o| support.get(&o.nid()))
+                        .cloned()
+                        .unwrap_or_default()
+                };
+                let (sa, sb) = (sup(0), sup(1));
+                let bit = |s: &Support, i: usize| s.get(i).cloned().unwrap_or_default();
+                let all = |s: &Support| -> HashSet<(Nid, usize)> {
+                    s.iter().flatten().copied().collect()
+                };
+                let dense = |sa: &Support, sb: &Support| -> Support {
+                    let mut u = all(sa);
+                    u.extend(all(sb));
+                    vec![u; w]
+                };
+                let out: Support = match op {
+                    Op::And
+                    | Op::Or
+                    | Op::Xor
+                    | Op::Nand
+                    | Op::Nor
+                    | Op::Xnor
+                    | Op::Iff
+                    | Op::Implies => (0..w)
+                        .map(|i| {
+                            let mut u = bit(&sa, i);
+                            u.extend(bit(&sb, i));
+                            u
+                        })
+                        .collect(),
+                    Op::Not => (0..w).map(|i| bit(&sa, i)).collect(),
+                    Op::Add | Op::Sub | Op::Inc | Op::Dec | Op::Neg => (0..w)
+                        .map(|i| {
+                            let mut u = HashSet::new();
+                            for j in 0..=i {
+                                u.extend(bit(&sa, j));
+                                u.extend(bit(&sb, j));
+                            }
+                            u
+                        })
+                        .collect(),
+                    Op::Uext => (0..w)
+                        .map(|i| {
+                            if i < sa.len() {
+                                bit(&sa, i)
+                            } else {
+                                HashSet::new()
+                            }
+                        })
+                        .collect(),
+                    Op::Sext => (0..w)
+                        .map(|i| {
+                            if i < sa.len() {
+                                bit(&sa, i)
+                            } else {
+                                bit(&sa, sa.len().saturating_sub(1))
+                            }
+                        })
+                        .collect(),
+                    Op::Concat => {
+                        let lo_w = sb.len();
+                        (0..w)
+                            .map(|i| {
+                                if i < lo_w {
+                                    bit(&sb, i)
+                                } else {
+                                    bit(&sa, i - lo_w)
+                                }
+                            })
+                            .collect()
+                    }
+                    Op::Slice => {
+                        let lower = line.immediates.get(1).copied().unwrap_or(0) as usize;
+                        (0..w).map(|i| bit(&sa, i + lower)).collect()
+                    }
+                    Op::Ite => {
+                        let cond = all(&sa);
+                        let (st, sf) = (sup(1), sup(2));
+                        (0..w)
+                            .map(|i| {
+                                let mut u = cond.clone();
+                                u.extend(bit(&st, i));
+                                u.extend(bit(&sf, i));
+                                u
+                            })
+                            .collect()
+                    }
+                    Op::Sll | Op::Srl | Op::Sra | Op::Rol | Op::Ror => {
+                        match args.get(1).and_then(|o| consts.get(&o.nid())) {
+                            // A constant amount is a re-map (sra fills from the sign bit; rotates
+                            // wrap). Over-approximated where the exact source is out of range.
+                            Some(&k) => {
+                                let n = sa.len().max(1);
+                                let k = (k as usize) % n.max(1);
+                                (0..w)
+                                    .map(|i| match op {
+                                        Op::Sll => {
+                                            if i >= k {
+                                                bit(&sa, i - k)
+                                            } else {
+                                                HashSet::new()
+                                            }
+                                        }
+                                        Op::Srl => bit(&sa, i + k),
+                                        Op::Sra => bit(&sa, (i + k).min(n - 1)),
+                                        Op::Rol => bit(&sa, (i + n - k) % n),
+                                        _ => bit(&sa, (i + k) % n),
+                                    })
+                                    .collect()
+                            }
+                            None => dense(&sa, &sb),
+                        }
+                    }
+                    // Comparisons, reductions, multiplication / division, overflow predicates:
+                    // every output bit depends on every operand bit.
+                    _ => dense(&sa, &sb),
+                };
+                support.insert(line.nid, out);
+            }
+            _ => {}
+        }
+    }
+
+    // Seeds: every bit of each atom's binding node(s).
+    let symbols = parser::collect_symbols(file);
+    let mut seed_nids: Vec<Nid> = Vec::new();
+    for atom in atoms {
+        seed_binding_nids(file, &symbols, atom, &mut seed_nids);
+    }
+    if seed_nids.iter().any(|n| array_nids.contains(n)) {
+        return None;
+    }
+    let mut cone: HashSet<(Nid, usize)> = HashSet::new();
+    let mut work: Vec<(Nid, usize)> = Vec::new();
+    for n in &seed_nids {
+        if let Some(s) = support.get(n) {
+            for b in s.iter().flatten() {
+                work.push(*b);
+            }
+        }
+    }
+    // Closure under `next` (and a non-constant `init`), bit by bit.
+    let mut next_val: HashMap<Nid, Nid> = HashMap::new();
+    let mut init_val: HashMap<Nid, Nid> = HashMap::new();
+    for line in &file.lines {
+        match &line.node {
+            Node::Next { state, value, .. } => {
+                next_val.insert(*state, value.nid());
+            }
+            Node::Init { state, value, .. } if !consts.contains_key(&value.nid()) => {
+                init_val.insert(*state, value.nid());
+            }
+            _ => {}
+        }
+    }
+    let drain = |work: &mut Vec<(Nid, usize)>, cone: &mut HashSet<(Nid, usize)>| -> bool {
+        while let Some((nid, i)) = work.pop() {
+            if !cone.insert((nid, i)) {
+                continue;
+            }
+            for src in [next_val.get(&nid), init_val.get(&nid)]
+                .into_iter()
+                .flatten()
+            {
+                if array_nids.contains(src) {
+                    return false;
+                }
+                if let Some(s) = support.get(src)
+                    && let Some(bits) = s.get(i)
+                {
+                    work.extend(bits.iter().copied());
+                }
+            }
+        }
+        true
+    };
+    if !drain(&mut work, &mut cone) {
+        return None;
+    }
+    // Selective `constraint` / `fair` / `justice` pullback, as the signal-level cone does: a
+    // side condition that shares a leaf BIT with the cone restricts it and joins whole.
+    let mut pulled: HashSet<Nid> = HashSet::new();
+    loop {
+        let mut grew = false;
+        for line in &file.lines {
+            let sigs: Vec<Nid> = match &line.node {
+                Node::Constraint { signal } | Node::Fair { signal } => vec![signal.nid()],
+                Node::Justice { signals } => signals.iter().map(|s| s.nid()).collect(),
+                _ => continue,
+            };
+            for sig in sigs {
+                if pulled.contains(&sig) {
+                    continue;
+                }
+                if array_nids.contains(&sig) {
+                    return None;
+                }
+                let Some(s) = support.get(&sig) else {
+                    continue;
+                };
+                let bits: Vec<(Nid, usize)> = s.iter().flatten().copied().collect();
+                if bits.iter().any(|b| cone.contains(b)) {
+                    pulled.insert(sig);
+                    work.extend(bits);
+                    grew = true;
+                }
+            }
+        }
+        if !grew {
+            break;
+        }
+        if !drain(&mut work, &mut cone) {
+            return None;
+        }
+    }
+    // Per leaf: a mask over its width.
+    let mut out: HashMap<Nid, Vec<bool>> = HashMap::new();
+    for (nid, i) in cone {
+        let w = support.get(&nid).map_or(0, Vec::len);
+        let mask = out.entry(nid).or_insert_with(|| vec![false; w]);
+        if i < mask.len() {
+            mask[i] = true;
+        }
+    }
+    Some(out)
+}
+
+/// mununu#602 — the bit count of a [`bit_cone`]: the sum of kept bits over its leaves.
+pub fn bit_cone_bits(cone: &HashMap<Nid, Vec<bool>>) -> u32 {
+    cone.values()
+        .map(|m| m.iter().filter(|b| **b).count() as u32)
+        .sum()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -781,5 +1108,159 @@ mod tests {
 "#;
         let file = parser::parse(src).expect("parse");
         assert!(resolve_atom_to_terminals(&file, "nonexistent").is_none());
+    }
+}
+
+#[cfg(test)]
+mod bit_cone_tests {
+    use super::*;
+
+    fn cone_of(btor2: &str, atoms: &[&str]) -> HashMap<Nid, Vec<bool>> {
+        let file = parser::parse(btor2).expect("fixture parses");
+        let atoms: Vec<String> = atoms.iter().map(|s| s.to_string()).collect();
+        bit_cone(&file, &atoms).expect("a bit-vector design has a bit cone")
+    }
+    fn kept(c: &HashMap<Nid, Vec<bool>>, nid: Nid) -> Vec<usize> {
+        c.get(&nid)
+            .map(|m| {
+                m.iter()
+                    .enumerate()
+                    .filter(|(_, b)| **b)
+                    .map(|(i, _)| i)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// mununu#602 — a 64-bit register read through a constant part-select brings the slice
+    /// into the cone, not the width; the slice's bits close under `next` bit by bit (a hold
+    /// register keeps only those bits), and the untouched bits of the same register stay out.
+    #[test]
+    fn x602_a_constant_part_select_keeps_the_slice_not_the_register() {
+        let btor2 = "1 sort bitvec 64\n2 sort bitvec 8\n3 input 1 din\n4 state 1 words\n\
+                     5 next 1 4 3\n6 state 1 words_sync\n7 next 1 6 4\n\
+                     8 slice 2 6 15 8 field\n9 sort bitvec 1\n10 constd 2 3\n11 eq 9 8 10 is3\n";
+        let c = cone_of(btor2, &["field"]);
+        assert_eq!(kept(&c, 6), (8..16).collect::<Vec<_>>(), "words_sync[15:8]");
+        assert_eq!(
+            kept(&c, 4),
+            (8..16).collect::<Vec<_>>(),
+            "closed under next: words[15:8]"
+        );
+        assert_eq!(kept(&c, 3), (8..16).collect::<Vec<_>>(), "… and din[15:8]");
+        assert_eq!(bit_cone_bits(&c), 24, "3 × 8 bits, not 3 × 64");
+        // A comparison atom over the whole register reads every bit.
+        let c = cone_of(btor2, &["words_sync"]);
+        assert_eq!(bit_cone_bits(&c), 192);
+    }
+
+    /// Every arithmetic / comparison / shift rule is an over-approximation of the bit-blast:
+    /// the carry chain, the dense comparison, the constant-amount re-map, the symbolic amount.
+    #[test]
+    fn x602_the_per_bit_rules_over_approximate_the_bit_blast() {
+        // add: bit i depends on bits ≤ i of both operands.
+        let add = "1 sort bitvec 4\n2 input 1 a\n3 input 1 b\n4 add 1 2 3\n5 slice 6 4 1 1 s1\n6 sort bitvec 1\n";
+        // (sort 6 is declared after its use by `slice`; reorder for a valid file)
+        let add = add.replace(
+            "4 add 1 2 3\n5 slice 6 4 1 1 s1\n6 sort bitvec 1\n",
+            "4 add 1 2 3\n6 sort bitvec 1\n7 slice 6 4 1 1 s1\n",
+        );
+        let c = cone_of(&add, &["s1"]);
+        assert_eq!(kept(&c, 2), vec![0, 1]);
+        assert_eq!(kept(&c, 3), vec![0, 1]);
+        // eq: the one result bit depends on everything.
+        let eq = "1 sort bitvec 4\n2 input 1 a\n3 input 1 b\n4 sort bitvec 1\n5 eq 4 2 3 same\n";
+        let c = cone_of(eq, &["same"]);
+        assert_eq!(kept(&c, 2), vec![0, 1, 2, 3]);
+        assert_eq!(kept(&c, 3), vec![0, 1, 2, 3]);
+        // sll by a CONSTANT 2: bit 3 of the result is bit 1 of the data; bit 0 is nothing.
+        let sll = "1 sort bitvec 4\n2 input 1 a\n3 constd 1 2\n4 sll 1 2 3\n5 sort bitvec 1\n6 slice 5 4 3 3 top\n7 slice 5 4 0 0 bot\n";
+        let c = cone_of(sll, &["top"]);
+        assert_eq!(kept(&c, 2), vec![1]);
+        let c = cone_of(sll, &["bot"]);
+        assert_eq!(kept(&c, 2), Vec::<usize>::new());
+        // sll by a SYMBOLIC amount: every data bit and every amount bit.
+        let sll_sym = "1 sort bitvec 4\n2 input 1 a\n3 input 1 k\n4 sll 1 2 3\n5 sort bitvec 1\n6 slice 5 4 0 0 bot\n";
+        let c = cone_of(sll_sym, &["bot"]);
+        assert_eq!(kept(&c, 2), vec![0, 1, 2, 3]);
+        assert_eq!(kept(&c, 3), vec![0, 1, 2, 3]);
+        // ite: the whole condition meets every output bit; the arms are per-bit.
+        let ite = "1 sort bitvec 4\n2 input 1 c\n3 input 1 t\n4 input 1 f\n5 sort bitvec 1\n6 redor 5 2\n7 ite 1 6 3 4\n8 slice 5 7 2 2 m2\n";
+        let c = cone_of(ite, &["m2"]);
+        assert_eq!(kept(&c, 2), vec![0, 1, 2, 3], "condition");
+        assert_eq!(kept(&c, 3), vec![2]);
+        assert_eq!(kept(&c, 4), vec![2]);
+        // concat: low operand first.
+        let cat = "1 sort bitvec 4\n2 input 1 hi\n3 input 1 lo\n4 sort bitvec 8\n5 concat 4 2 3\n6 sort bitvec 1\n7 slice 6 5 5 5 b5\n";
+        let c = cone_of(cat, &["b5"]);
+        assert_eq!(kept(&c, 2), vec![1]);
+        assert_eq!(kept(&c, 3), Vec::<usize>::new());
+    }
+
+    /// A `constraint` that shares a bit with the cone joins it whole; one that does not stays
+    /// out. An array in the cone gives `None` (the signal-level path's memory havoc applies).
+    #[test]
+    fn x602_side_conditions_and_arrays() {
+        let btor2 = "1 sort bitvec 8\n2 input 1 a\n3 input 1 b\n4 sort bitvec 1\n\
+                     5 slice 4 2 0 0 a0\n6 slice 4 2 7 7 a7\n7 slice 4 3 0 0 b0\n\
+                     8 and 4 6 7\n9 constraint 8\n";
+        // Atom reads a[0]; the constraint is over a[7] and b[0] — disjoint, stays out.
+        let c = cone_of(btor2, &["a0"]);
+        assert_eq!(bit_cone_bits(&c), 1);
+        // Atom reads a[7]; the constraint shares it and pulls b[0] in.
+        let c = cone_of(btor2, &["a7"]);
+        assert_eq!(kept(&c, 2), vec![7]);
+        assert_eq!(kept(&c, 3), vec![0]);
+        let arr = "1 sort bitvec 2\n2 sort bitvec 8\n3 sort array 1 2\n4 state 3 mem\n5 input 1 idx\n6 read 2 4 5 val\n";
+        let file = parser::parse(arr).unwrap();
+        assert!(bit_cone(&file, &["val".to_string()]).is_none());
+    }
+
+    /// mununu#602 — the consumer's shape, in two readings. A 23-word (736-bit) packed vector
+    /// crossed twice (`words` ← input, `words_sync` ← `words`) and a 32-bit field read
+    /// (a) through a CONSTANT part-select, (b) through a 23-arm address mux. The bit cone
+    /// decides (a) at slice width; (b) structurally reaches every word through the mux, which
+    /// is the issue's remaining distance — a constant-propagated address, not a cone question.
+    #[test]
+    fn x602_the_crossed_vector_measured_both_ways() {
+        let mut b = String::from(
+            "1 sort bitvec 736\n2 input 1 rd_words\n3 state 1 words\n4 next 1 3 2\n5 state 1 words_sync\n6 next 1 5 3\n7 sort bitvec 32\n8 sort bitvec 1\n9 sort bitvec 5\n10 input 9 addr\n",
+        );
+        let mut nid = 11;
+        // (a) one constant slice: word 4 = bits [159:128].
+        b.push_str(&format!("{nid} slice 7 5 159 128 word4\n"));
+        nid += 1;
+        // (b) the mux: rdata = addr==k ? word_k : … over all 23 words.
+        let mut slices = Vec::new();
+        for k in 0..23 {
+            b.push_str(&format!("{nid} slice 7 5 {} {}\n", k * 32 + 31, k * 32));
+            slices.push(nid);
+            nid += 1;
+        }
+        let mut acc = slices[0];
+        for (k, sl) in slices.iter().enumerate().skip(1) {
+            b.push_str(&format!("{nid} constd 9 {k}\n"));
+            let kc = nid;
+            nid += 1;
+            b.push_str(&format!("{nid} eq 8 10 {kc}\n"));
+            let is_k = nid;
+            nid += 1;
+            b.push_str(&format!("{nid} ite 7 {is_k} {sl} {acc}\n"));
+            acc = nid;
+            nid += 1;
+        }
+        b.push_str(&format!("{nid} uext 7 {acc} 0 rdata\n"));
+        let a = cone_of(&b, &["word4"]);
+        assert_eq!(
+            bit_cone_bits(&a),
+            3 * 32,
+            "(a) the slice: 32 bits × the two copies + the input"
+        );
+        let m = cone_of(&b, &["rdata"]);
+        assert_eq!(
+            bit_cone_bits(&m),
+            3 * 736 + 5,
+            "(b) the mux reaches every word structurally — the whole vector, plus addr"
+        );
     }
 }
