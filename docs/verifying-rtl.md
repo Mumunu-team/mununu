@@ -887,6 +887,18 @@ consumer spent two SVA rewrites on it. A comparison operand may be:
 | a 1-bit boolean / reduction | `!a == b`, `\|vec == 1'b1` | both sides must be 1 bit |
 | `signal + literal` | `cnt == $past(cnt) + 1` | the sole arithmetic form |
 
+**Which comparison CONSTANTS fold** (mununu#632). An enum member (`state_q == MainSmError`) has
+folded to its value since XL.6b; a `parameter` / `localparam` reference (`state_q == S_XFER`,
+`retry_cnt_q == MAX_RETRIES`) folds the same way since mununu#632, to the value slang elaborated
+(an overridden `--param` carries the override). Until then the translator kept the parameter's
+NAME in the atom and the engine skipped the property as "unknown register/signal" — on the design
+that found it, one of the four skipped properties was VIOLATED, and `localparam` state encodings
+are the dominant hand-written and LLM-written FSM style. A parameter whose value is not an integer
+literal (a string, a type) still does not fold, and its reference still skips by name. Fixture:
+`examples/verify/v12_link_ctrl_llm_fsm/` (`e2e_632_localparam_atoms_decide_on_link_ctrl`).
+
+> Source of truth: [`collect_parameter_values`](../crates/mununu-core/src/adapter/slang/translate.rs) — surface: (CLI+API)
+
 > Source of truth: [`compare`](../crates/mununu-core/src/adapter/slang/translate.rs) + [`augment_with_slices`](../crates/mununu-core/src/adapter/btor2/shadow.rs) — surface: (CLI+API)
 
 A bit-slice becomes a **named derived signal** in the lifted model (`wdata[7:0]` → `wdata__bits7_0`),
