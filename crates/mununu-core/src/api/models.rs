@@ -1400,9 +1400,12 @@ pub struct SvMutateRequest {
     /// Force the slang RTL front-end (`read_slang`). Default `false`.
     #[serde(default)]
     pub use_slang: bool,
-    /// The mutation to apply: `"stick:<reg>"` (freeze a register) or
-    /// `"drop-reset:<reg>"` (remove a register's reset arm). Required unless
-    /// `list` is true.
+    /// The mutation to apply, one of four kinds (mununu#635): `"stick:<reg>"`
+    /// (freeze a register), `"drop-reset:<reg>"` (remove a register's reset arm),
+    /// `"off-by-one:<reg>[@<const_nid>][:±1]"` (shift a constant the register is
+    /// compared against), `"invert-cond:<sig>"` (negate a 1-bit signal). The `_`
+    /// spellings the `list` response uses as keys are accepted as aliases.
+    /// Required unless `list` is true.
     #[serde(default)]
     pub mutation: Option<String>,
     /// When true, ignore `mutation` and return the available mutation TARGETS

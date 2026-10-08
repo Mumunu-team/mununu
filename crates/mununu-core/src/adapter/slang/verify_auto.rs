@@ -9982,6 +9982,90 @@ module uart_tx(); endmodule"#;
         );
     }
 
+    /// mununu#635 — the two mutation kinds `--list` advertised and `--help` did not APPLY through
+    /// `verify_auto` to the `link_ctrl` fixture (`invert-cond:violation` used to error with "no
+    /// use sites": the name sits on a `uext 0` alias the logic never reads). What they measure is
+    /// the SPEC's adequacy, never the design: a flip means the property caught the planted fault,
+    /// a non-flip means no property pins that behaviour (claims integrity).
+    ///
+    /// MEASURED (2026-10-08, in the image): the suite catches NEITHER fault — `off-by-one` on the
+    /// retry limit flips nothing (`a_err_implies_retry_limit` is one-directional and vacuous when
+    /// `err_q` never rises; `a_retry_limit` is already violated), and inverting `violation` flips
+    /// nothing (no property says fatal is entered ONLY on a violation). A property that caught
+    /// either would change the count below — that is the finding this test records.
+    #[test]
+    #[ignore = "requires slang + sv2v + Yosys + z3 (use the mununu-sva docker image); run with --ignored"]
+    fn e2e_635_advertised_mutation_kinds_apply_and_the_link_ctrl_suite_catches_neither() {
+        use crate::adapter::btor2::mutate::Mutation;
+        use crate::adapter::yosys::SvFrontend;
+        use std::path::PathBuf;
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/verify/v12_link_ctrl_llm_fsm/link_ctrl.sv");
+        let sv = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let sources = vec![("link_ctrl.sv".to_string(), sv)];
+        let yopts = YosysOptions {
+            top: Some("link_ctrl".to_string()),
+            use_sv2v: true,
+            frontend: SvFrontend::Slang,
+            ..Default::default()
+        };
+        let run = |mutation: Option<&str>| {
+            let report = verify_auto(
+                &sources,
+                &yopts,
+                &VerifyAutoOptions {
+                    mutation: mutation.map(|m| Mutation::parse(m).expect("parses")),
+                    ..Default::default()
+                },
+            )
+            .unwrap_or_else(|e| panic!("verify_auto ({mutation:?}): {}", e.message));
+            report
+                .properties
+                .iter()
+                .map(|p| {
+                    (
+                        p.label.clone().unwrap_or_else(|| p.name.clone()),
+                        format!("{:?}", p.outcome),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let base = run(None);
+        assert_eq!(base.len(), 8, "the fixture's eight assertions: {base:?}");
+        let flips = |m: &str| -> Vec<String> {
+            // Applying is the #635 fix; the mutated run must produce the same property set.
+            let mutated = run(Some(m));
+            assert_eq!(mutated.len(), base.len(), "{m}: same property set");
+            let f: Vec<String> = base
+                .iter()
+                .zip(mutated.iter())
+                .filter(|(b, m)| b.1 != m.1)
+                .map(|(b, m)| format!("{} {} -> {}", b.0, b.1, m.1))
+                .collect();
+            eprintln!("=== {m}: {} flip(s)\n  {}", f.len(), f.join("\n  "));
+            f
+        };
+        let obo = flips("off-by-one:retry_cnt_q");
+        let inv = flips("invert-cond:violation");
+        // Both spellings reach the same mutation.
+        assert_eq!(
+            flips("off_by_one:retry_cnt_q"),
+            obo,
+            "the `_` alias is the same mutation"
+        );
+        assert!(
+            obo.is_empty(),
+            "the link_ctrl suite was measured NOT to catch an off-by-one on the retry limit; it \
+             does now — record the property that does: {obo:?}"
+        );
+        assert!(
+            inv.is_empty(),
+            "the link_ctrl suite was measured NOT to catch an inverted `violation`; it does now — \
+             record the property that does: {inv:?}"
+        );
+    }
+
     #[test]
     #[ignore = "requires slang + sv2v + Yosys + z3 (use the mununu-sva docker image); run with --ignored"]
     fn e2e_csrng_real_sva_verdict_breakdown() {
