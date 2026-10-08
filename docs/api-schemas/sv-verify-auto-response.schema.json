@@ -319,6 +319,17 @@
             "integer",
             "null"
           ]
+        },
+        "vacuity": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/VacuityView"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "mununu#599 — a recoverability guarantee (`AG EF(P)`) that HOLDS, judged against the other verdicts in the same report. Present only on such a guarantee, and only when another property speaks to it; see [`VacuityView`].\n\n**Read this next to `outcome == \"holds\"`.** `AG EF good: HOLDS` beside its non-vacuity witness `EF good': VIOLATED` is the vacuous pass a two-sided gate exists to prevent; it used to be visible only to a reader who checked witnesses by habit. The verdict does not change — a vacuous HOLDS is a true HOLDS on the model — the field says what it is worth."
         }
       },
       "required": [
@@ -349,6 +360,29 @@
       "required": [
         "name",
         "reason"
+      ],
+      "type": "object"
+    },
+    "VacuityView": {
+      "description": "mununu#599 — how a recoverability guarantee that HOLDS stands against the rest of its report.",
+      "properties": {
+        "detail": {
+          "description": "One line of prose. **Do not string-match it**; read `kind` and `witness`.",
+          "type": "string"
+        },
+        "kind": {
+          "description": "Machine-stable tag:\n\n| `kind` | meaning | |---|---| | `invariant-target` | **vacuous.** The target is invariant in this report — `EF(¬P)` VIOLATED or `AG(P)` HOLDS beside `AG EF(P)` HOLDS — so the design never leaves `P` and no recovery is ever exercised. Consistent; the HOLDS stands and says nothing about recovery. | | `witness-refuted` | **not shown non-vacuous.** A reachability over the guarantee's register at another value (`EF(st_q == S_WAIT)`) is VIOLATED in the same report. It does not make the guarantee false; if that property is the guarantee's non-vacuity witness, the pair is a failed gate, not a pass. |",
+          "type": "string"
+        },
+        "witness": {
+          "description": "The property (`name`) whose verdict establishes it.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "detail",
+        "kind",
+        "witness"
       ],
       "type": "object"
     },

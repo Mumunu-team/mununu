@@ -514,6 +514,39 @@ enumerates it only up to **16**; past that the property abstains with
 The remedy is the same: establish the value — keep reset-gating on (the reset's values are injected
 as `init`), add an `init` through a sidecar, or pin the register with `--config-value`.
 
+### A guarantee judged against its witness: `vacuity` (mununu#599) and the report self-check (mununu#579)
+
+> Source of truth: [`PropertyVerdict::vacuity`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) + [`report_consistency::vacuity_of_guarantee`](../crates/mununu-core/src/adapter/slang/report_consistency.rs) + [`report_consistency::definite_pair_contradicts`](../crates/mununu-core/src/adapter/slang/report_consistency.rs) — surface: (CLI+API)
+
+A recoverability guarantee `AG EF(P)` that **HOLDS** is read against the other verdicts of the same
+report, and what they say about it is written **on the guarantee's own property** — `vacuity` on
+the API (`kind`, `witness`, `detail`), the `vacuity [kind] witness=…` line on the CLI, and a
+`vacuous-guarantee` note carrying `property` for readers of the notes stream. The verdict is never
+changed: a vacuous HOLDS is a true HOLDS on the model; the field says what it is worth.
+
+| `vacuity.kind` | established by | meaning |
+|---|---|---|
+| `invariant-target` | `EF(¬P)` VIOLATED, or `AG(P)` HOLDS | **vacuous.** The design never leaves `P`, so no recovery is ever exercised. |
+| `witness-refuted` | `EF(Q)` VIOLATED with `Q` over `P`'s register at another value | **not shown non-vacuous.** It does not make the guarantee false (`P` may be left and re-entered by another route); if that property is the guarantee's non-vacuity witness, read the pair as a failed gate. This is the shape mununu#599 met: `EF(st_q == S_WAIT)` VIOLATED beside `AG EF(st_q == S_IDLE)` HOLDS under one cut. |
+
+Absent on every other property, and on a guarantee no other property speaks to. A gate that
+pins `outcome == "holds"` on a recoverability guarantee should read this field next to it.
+
+**The self-check grew its HOLDS side.** `report-self-contradiction` (mununu#579) withheld
+`AG(P)` VIOLATED beside `EF(¬P)` VIOLATED. The full table of definite pairs that cannot share
+one model is now admitted — `EF(P)` HOLDS beside `AG(¬P)` HOLDS; `AG EF(P)` HOLDS beside
+`EF(P)` VIOLATED or `AG(¬P)` HOLDS; `AG EF(P)` VIOLATED beside `AG(P)` HOLDS or `EF(¬P)`
+VIOLATED — over the same or exactly negated single-comparison atom, nothing weaker. Both
+verdicts are withheld and no winner is picked, as before. The check also runs on the **merged
+portfolio report** now, where verdicts from different engines meet; until this change each
+engine's report was checked against itself and the merge was not.
+
+```bash
+mununu --quiet sv verify-auto design.sv --json \
+  | jq '[.properties[] | select(.vacuity != null)
+         | {property: .name, outcome, kind: .vacuity.kind, witness: .vacuity.witness}]'
+```
+
 ### Process-wide memory ceiling: `MUNUNU_MAX_PROCESS_MEMORY_BYTES` (mununu#490, default revised in #504)
 
 > Source of truth: [`adapter::memory_budget::check_process_memory_budget`](../crates/mununu-core/src/adapter/memory_budget.rs) — surface: (CLI+API+UI, env var — process-global)

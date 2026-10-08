@@ -229,6 +229,51 @@ pub struct PropertyVerdict {
     /// transcript showed 7 properties decided by `exact-symbolic` and one by something else,
     /// reported together.
     pub decided_by: Option<String>,
+    /// mununu#599 — a recoverability guarantee (`AG EF(P)`) that HOLDS, judged against the other
+    /// verdicts in the same report. `None` for every other property, and for a guarantee no other
+    /// property in the report speaks to.
+    ///
+    /// **Why a field, at the property.** `AG EF good: HOLDS` beside its non-vacuity witness
+    /// `EF good': VIOLATED` is exactly the vacuous pass a two-sided gate exists to prevent, and a
+    /// reader who does not check witnesses by habit was handed it with a generic run-level
+    /// caveat. A consumer gate that reads `outcome == "holds"` must be able to read this next to
+    /// it; a note can be filtered out, a field cannot.
+    pub vacuity: Option<VacuityFinding>,
+}
+
+/// mununu#599 — how a recoverability guarantee that HOLDS stands against another property of the
+/// same report. See [`super::report_consistency::vacuity_of_guarantee`] for the relation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VacuityFinding {
+    pub kind: VacuityKind,
+    /// The property (by `name`) whose verdict establishes it.
+    pub witness: String,
+    /// One line, for the property's own lines and the note.
+    pub detail: String,
+}
+
+/// The two strengths of [`VacuityFinding`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VacuityKind {
+    /// The target is invariant in this report (`EF(¬P)` VIOLATED or `AG(P)` HOLDS beside
+    /// `AG EF(P)` HOLDS): consistent, and vacuous — the design never leaves `P`, so no recovery is
+    /// ever exercised. A HOLDS that stays HOLDS, and says nothing.
+    InvariantTarget,
+    /// A reachability over the guarantee's register, at a value other than the target, is
+    /// VIOLATED in this report. It does not make the guarantee false; it means this report has not
+    /// shown it non-vacuous — the shape mununu#599 met (`EF(st_q == S_WAIT)` VIOLATED beside
+    /// `AG EF(st_q == S_IDLE)` HOLDS under the same cut points).
+    WitnessRefuted,
+}
+
+impl VacuityKind {
+    /// Machine-stable tag, kebab-case.
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::InvariantTarget => "invariant-target",
+            Self::WitnessRefuted => "witness-refuted",
+        }
+    }
 }
 
 /// D1.8b — a concrete stall-lasso counterexample for a `Violated` liveness property
@@ -728,39 +773,36 @@ fn attach_engine_failure_reason(report: &mut AutoVerifyReport, failures: &[(&str
 /// A property already carrying a `bottom_reason` is left alone — an existing cause is more specific
 /// than "something in this report disagrees".
 fn flag_self_contradictory_verdicts(report: &mut AutoVerifyReport) {
-    use super::report_consistency::{Shape, classify_shape, violated_pair_contradicts};
+    use super::report_consistency::definite_pair_contradicts;
 
-    // (index, shape) for every property with a definite VIOLATED and a recognised shape.
-    let violated: Vec<(usize, Shape)> = report
-        .properties
-        .iter()
-        .enumerate()
-        .filter(|(_, p)| {
-            matches!(p.outcome, VerifyOutcome::Violated { .. }) && p.bottom_reason.is_none()
-        })
-        .filter_map(|(i, p)| {
-            let formula = crate::mu_calculus::parser::parse(&p.formula).ok()?;
-            classify_shape(&formula).map(|sh| (i, sh))
-        })
-        .collect();
-    if violated.len() < 2 {
+    // mununu#599 — every DEFINITE verdict with a recognised shape, not only the VIOLATED ones:
+    // the HOLDS side has its own unsatisfiable pairs (the table in `report_consistency`).
+    let definite = definite_shaped_properties(report);
+    if definite.len() < 2 {
         return;
     }
 
     // Collect first, mutate second: a property may contradict more than one partner, and the
     // detail should name the partner rather than whichever happened to be visited last.
     let mut hits: Vec<(usize, String)> = Vec::new();
-    for (ai, (i, a)) in violated.iter().enumerate() {
-        for (j, b) in violated.iter().skip(ai + 1) {
-            if !violated_pair_contradicts(a, b) {
+    for (ai, (i, a, va)) in definite.iter().enumerate() {
+        for (j, b, vb) in definite.iter().skip(ai + 1) {
+            if !definite_pair_contradicts(a, *va, b, *vb) {
                 continue;
             }
             let (na, nb) = (
                 report.properties[*i].name.clone(),
                 report.properties[*j].name.clone(),
             );
-            hits.push((*i, format!("`{na}` VIOLATED is unsatisfiable together with `{nb}` VIOLATED over exactly negated atoms")));
-            hits.push((*j, format!("`{nb}` VIOLATED is unsatisfiable together with `{na}` VIOLATED over exactly negated atoms")));
+            let (wa, wb) = (definite_word(*va), definite_word(*vb));
+            hits.push((
+                *i,
+                format!("`{na}` {wa} is unsatisfiable together with `{nb}` {wb} over the same or exactly negated atom"),
+            ));
+            hits.push((
+                *j,
+                format!("`{nb}` {wb} is unsatisfiable together with `{na}` {wa} over the same or exactly negated atom"),
+            ));
         }
     }
     for (i, detail) in hits {
@@ -771,8 +813,152 @@ fn flag_self_contradictory_verdicts(report: &mut AutoVerifyReport) {
         }
         p.outcome = VerifyOutcome::Unknown { unknown_cells: 0 };
         p.counterexample = None;
+        p.vacuity = None;
         p.bottom_reason = Some(BottomReason::ReportSelfContradiction { detail });
     }
+}
+
+/// `(index, shape, verdict)` for every property with a definite verdict, no `bottom_reason`, and
+/// a shape [`super::report_consistency::classify_shape`] recognises.
+fn definite_shaped_properties(
+    report: &AutoVerifyReport,
+) -> Vec<(
+    usize,
+    super::report_consistency::Shape,
+    super::report_consistency::Definite,
+)> {
+    use super::report_consistency::{Definite, classify_shape};
+    report
+        .properties
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.bottom_reason.is_none())
+        .filter_map(|(i, p)| {
+            let v = match p.outcome {
+                VerifyOutcome::Holds => Definite::Holds,
+                VerifyOutcome::Violated { .. } => Definite::Violated,
+                _ => return None,
+            };
+            let formula = crate::mu_calculus::parser::parse(&p.formula).ok()?;
+            classify_shape(&formula).map(|sh| (i, sh, v))
+        })
+        .collect()
+}
+
+fn definite_word(v: super::report_consistency::Definite) -> &'static str {
+    match v {
+        super::report_consistency::Definite::Holds => "HOLDS",
+        super::report_consistency::Definite::Violated => "VIOLATED",
+    }
+}
+
+/// mununu#599 — judge every recoverability guarantee that HOLDS against the other verdicts in the
+/// report, and say so AT the guarantee (`PropertyVerdict::vacuity`).
+///
+/// A pure post-pass over the shipped verdicts, after [`flag_self_contradictory_verdicts`]: a pair
+/// that is a contradiction has already been withheld and is not a vacuity. The verdict is never
+/// changed here — a vacuous HOLDS is a true HOLDS on the model; what it lacks is meaning, and the
+/// field says so. The strongest finding wins: an invariant target (proven vacuous) over a refuted
+/// same-register witness (not shown non-vacuous).
+fn flag_vacuous_guarantees(report: &mut AutoVerifyReport) {
+    use super::report_consistency::{Shape, Vacuity, vacuity_of_guarantee};
+
+    let definite = definite_shaped_properties(report);
+    let mut findings: Vec<(usize, VacuityFinding)> = Vec::new();
+    for (i, g, vg) in &definite {
+        if !matches!(g, Shape::Recoverability(_))
+            || *vg != super::report_consistency::Definite::Holds
+        {
+            continue;
+        }
+        let mut best: Option<(Vacuity, usize)> = None;
+        for (j, other, vo) in &definite {
+            if j == i {
+                continue;
+            }
+            let Some(v) = vacuity_of_guarantee(g, other, *vo) else {
+                continue;
+            };
+            let stronger = match best {
+                None => true,
+                Some((Vacuity::WitnessRefuted, _)) => v == Vacuity::InvariantTarget,
+                Some((Vacuity::InvariantTarget, _)) => false,
+            };
+            if stronger {
+                best = Some((v, *j));
+            }
+        }
+        let Some((v, j)) = best else {
+            continue;
+        };
+        let target = g.atom().to_string();
+        let witness = report.properties[j].name.clone();
+        let witness_formula = report.properties[j].formula.clone();
+        let (kind, detail) = match v {
+            Vacuity::InvariantTarget => (
+                VacuityKind::InvariantTarget,
+                format!(
+                    "VACUOUS — `{target}` is invariant in this report (`{witness}`: `{witness_formula}` \
+                     says the design never leaves it), so \"always recoverable to `{target}`\" holds \
+                     without any recovery ever being exercised. The verdict stands; it says nothing \
+                     about recovery."
+                ),
+            ),
+            Vacuity::WitnessRefuted => (
+                VacuityKind::WitnessRefuted,
+                format!(
+                    "NOT SHOWN NON-VACUOUS — `{witness}` (`{witness_formula}`), a reachability over \
+                     this guarantee's register, is VIOLATED in the same report. That does not make \
+                     the guarantee false; it means this run has not demonstrated that the design \
+                     ever leaves `{target}` by that route. If `{witness}` is the non-vacuity witness \
+                     for this guarantee, treat the pair as a failed gate, not a pass."
+                ),
+            ),
+        };
+        findings.push((
+            *i,
+            VacuityFinding {
+                kind,
+                witness,
+                detail,
+            },
+        ));
+    }
+    for (i, f) in findings {
+        report.properties[i].vacuity = Some(f);
+    }
+}
+
+/// mununu#599 — the note form of [`PropertyVerdict::vacuity`], for readers of the notes stream;
+/// the field is the one a gate reads. Re-derived from the fields so a merge cannot leave a stale
+/// one behind (the mununu#548 lesson).
+fn refresh_vacuity_notes(report: &mut AutoVerifyReport) {
+    report.notes.retain(|n| n.kind != "vacuous-guarantee");
+    let fresh: Vec<VerificationNote> = report
+        .properties
+        .iter()
+        .filter_map(|p| {
+            let v = p.vacuity.as_ref()?;
+            Some(VerificationNote {
+                kind: "vacuous-guarantee".into(),
+                level: NoteLevel::ScopeCaveat,
+                summary: format!(
+                    "`{}`: HOLDS, but {} (witness `{}`).",
+                    p.name,
+                    match v.kind {
+                        VacuityKind::InvariantTarget => "its target is invariant here — vacuous",
+                        VacuityKind::WitnessRefuted =>
+                            "a same-register reachability is refuted — not shown non-vacuous",
+                    },
+                    v.witness
+                ),
+                detail: v.detail.clone(),
+                items: vec![v.witness.clone()],
+                property: Some(p.name.clone()),
+            })
+        })
+        .collect();
+    report.notes.extend(fresh);
 }
 
 fn downgrade_violated_on_unestablished_init(report: &mut AutoVerifyReport, model_btor2: &str) {
@@ -1189,6 +1375,16 @@ fn build_notes(
             items: d.blackboxed_modules.clone(),
             property: None,
         });
+    }
+
+    // mununu#599 — the note form of each `vacuity` field, derived from the field.
+    {
+        let mut carrier = AutoVerifyReport {
+            properties: report.properties.clone(),
+            ..Default::default()
+        };
+        refresh_vacuity_notes(&mut carrier);
+        notes.extend(carrier.notes);
     }
 
     notes
@@ -2234,6 +2430,7 @@ fn abstained(
         seeded_predicates: Vec::new(),
         counterexample: None,
         decided_by: None,
+        vacuity: None,
     }
 }
 
@@ -2669,6 +2866,12 @@ pub(crate) fn merge_portfolio_reports(
     // monono ask 26 — and the reason a ⊥ was previously unattributable: the failing engine's own
     // abstention string, which names the budget it hit, was discarded here. Attach it now.
     attach_engine_failure_reason(&mut merged, &engine_failures);
+    // mununu#599 — the merged report pairs verdicts from DIFFERENT engines, which is where
+    // mununu#577's pair came from; each engine's own report was checked against itself, the merge
+    // has not been until now. Judged on the verdicts that ship, and the notes re-derived.
+    flag_self_contradictory_verdicts(&mut merged);
+    flag_vacuous_guarantees(&mut merged);
+    refresh_vacuity_notes(&mut merged);
     if !contradictions.is_empty() {
         merged.notes.push(VerificationNote {
             kind: "portfolio-soundness-alarm".to_string(),
@@ -3656,6 +3859,7 @@ pub(crate) fn verify_auto_impl(
                     counterexample: None,
                     bottom_reason: None,
                     decided_by: None,
+                    vacuity: None,
                 });
                 continue;
             }
@@ -3747,6 +3951,7 @@ pub(crate) fn verify_auto_impl(
                 counterexample: None,
                 bottom_reason: None,
                 decided_by: None,
+                vacuity: None,
             });
             continue;
         }
@@ -3851,6 +4056,7 @@ pub(crate) fn verify_auto_impl(
                         seeded_predicates: Vec::new(),
                         counterexample: None,
                         decided_by: None,
+                        vacuity: None,
                     });
                     continue;
                 }
@@ -3902,6 +4108,7 @@ pub(crate) fn verify_auto_impl(
                 counterexample,
                 bottom_reason: None,
                 decided_by: None,
+                vacuity: None,
             });
             continue;
         }
@@ -3968,6 +4175,7 @@ pub(crate) fn verify_auto_impl(
                 counterexample: None,
                 bottom_reason: None,
                 decided_by: None,
+                vacuity: None,
             });
             continue;
         }
@@ -3987,6 +4195,7 @@ pub(crate) fn verify_auto_impl(
                 counterexample: None,
                 bottom_reason: None,
                 decided_by: None,
+                vacuity: None,
             });
             continue;
         }
@@ -4193,6 +4402,7 @@ pub(crate) fn verify_auto_impl(
                     registers: unestablished_registers.len(),
                 }),
                 decided_by: None,
+                vacuity: None,
             });
             continue;
         }
@@ -4291,6 +4501,7 @@ pub(crate) fn verify_auto_impl(
             counterexample: None,
             bottom_reason: None,
             decided_by: None,
+            vacuity: None,
         });
     }
 
@@ -4375,6 +4586,9 @@ pub(crate) fn verify_auto_impl(
     // mununu#579 — last of the verdict post-passes: everything above may still CHANGE a verdict, and
     // a self-contradiction must be judged on the verdicts the report actually ships.
     flag_self_contradictory_verdicts(&mut report);
+    // mununu#599 — and, on the verdicts that survive, say at each recoverability guarantee what
+    // the rest of the report says about its vacuity.
+    flag_vacuous_guarantees(&mut report);
     report.notes = build_notes(
         &report,
         opts.must_edge_inference,
@@ -5574,6 +5788,7 @@ mod tests {
                     counterexample: cx.clone(),
                     bottom_reason: None,
                     decided_by: None,
+                    vacuity: None,
                 })
                 .collect(),
             ..Default::default()
@@ -5750,6 +5965,7 @@ mod tests {
             counterexample: None,
             bottom_reason: None,
             decided_by: None,
+            vacuity: None,
         };
         let build = |report: &AutoVerifyReport| {
             build_notes(
@@ -5816,6 +6032,7 @@ mod tests {
                 counterexample: None,
                 bottom_reason: None,
                 decided_by: None,
+                vacuity: None,
             }],
             ..Default::default()
         };
@@ -5858,6 +6075,7 @@ mod tests {
                 counterexample: None,
                 bottom_reason: None,
                 decided_by: None,
+                vacuity: None,
             }],
             ..Default::default()
         };
@@ -5999,6 +6217,7 @@ mod tests {
                 counterexample: None,
                 bottom_reason: None,
                 decided_by: None,
+                vacuity: None,
             }],
             ..Default::default()
         };
@@ -6039,6 +6258,7 @@ mod tests {
                 counterexample: None,
                 bottom_reason: None,
                 decided_by: None,
+                vacuity: None,
             }],
             ..Default::default()
         };
@@ -6079,6 +6299,7 @@ mod tests {
                 counterexample: None,
                 bottom_reason: None,
                 decided_by: None,
+                vacuity: None,
             }],
             ..Default::default()
         };
@@ -6144,6 +6365,7 @@ mod tests {
                 counterexample: None,
                 bottom_reason: None,
                 decided_by: None,
+                vacuity: None,
             }],
             ..Default::default()
         };
@@ -6200,6 +6422,7 @@ mod tests {
                 counterexample: None,
                 bottom_reason: None,
                 decided_by: None,
+                vacuity: None,
             }],
             ..Default::default()
         };
@@ -6239,6 +6462,7 @@ mod tests {
                 counterexample: None,
                 bottom_reason: None,
                 decided_by: None,
+                vacuity: None,
             }],
             ..Default::default()
         };
@@ -6291,6 +6515,7 @@ mod tests {
                 counterexample: None,
                 bottom_reason: None,
                 decided_by: None,
+                vacuity: None,
             }],
             ..Default::default()
         };
@@ -6329,6 +6554,7 @@ mod tests {
                 counterexample: None,
                 bottom_reason: None,
                 decided_by: None,
+                vacuity: None,
             }],
             ..Default::default()
         };
@@ -6373,6 +6599,7 @@ mod tests {
                 counterexample: None,
                 bottom_reason: None,
                 decided_by: None,
+                vacuity: None,
             }],
             ..Default::default()
         };
@@ -6419,6 +6646,7 @@ mod tests {
                 counterexample: None,
                 bottom_reason: None,
                 decided_by: None,
+                vacuity: None,
             }],
             ..Default::default()
         };
@@ -6467,6 +6695,7 @@ mod tests {
                 counterexample: None,
                 bottom_reason: None,
                 decided_by: None,
+                vacuity: None,
             }],
             ..Default::default()
         };
@@ -6514,6 +6743,7 @@ mod tests {
                 counterexample: None,
                 bottom_reason: None,
                 decided_by: None,
+                vacuity: None,
             }],
             ..Default::default()
         };
@@ -6555,6 +6785,7 @@ mod tests {
                 counterexample: None,
                 bottom_reason: None,
                 decided_by: None,
+                vacuity: None,
             }],
             ..Default::default()
         };
@@ -6862,6 +7093,7 @@ mod tests {
             counterexample: None,
             bottom_reason: None,
             decided_by: None,
+            vacuity: None,
         };
         let mut report = AutoVerifyReport {
             properties: vec![
@@ -6944,6 +7176,7 @@ mod tests {
             counterexample: None,
             bottom_reason: None,
             decided_by: None,
+            vacuity: None,
         };
         let mut report = AutoVerifyReport {
             properties: vec![
@@ -7180,6 +7413,7 @@ mod tests {
                 counterexample: None,
                 bottom_reason: None,
                 decided_by: Some("reach-portfolio".into()),
+                vacuity: None,
             }],
             notes: vec![real],
             ..Default::default()
@@ -7250,6 +7484,168 @@ mod tests {
         );
     }
 
+    /// A property verdict for the post-pass fixtures below.
+    fn pv(name: &str, formula: &str, outcome: VerifyOutcome) -> PropertyVerdict {
+        PropertyVerdict {
+            name: name.into(),
+            label: None,
+            kind: SvaKind::Assert,
+            formula: formula.into(),
+            outcome,
+            seeded_predicates: Vec::new(),
+            counterexample: None,
+            bottom_reason: None,
+            decided_by: None,
+            vacuity: None,
+        }
+    }
+
+    /// mununu#599 — the issue's own pair, under one abstraction: `AG EF(st_q == 0)` HOLDS beside
+    /// `EF(st_q == 3)` VIOLATED. Not a contradiction (the design may leave 0 and come back without
+    /// ever visiting 3), so the HOLDS stands — and the guarantee now SAYS, on its own property,
+    /// that a same-register witness is refuted here. The unrelated HOLDS carries nothing.
+    #[test]
+    fn x599_a_guarantee_names_its_refuted_witness_at_the_property() {
+        let mut report = AutoVerifyReport {
+            properties: vec![
+                pv(
+                    "ann_guarantee_0",
+                    "nu Y.((mu X.((st_q == 0) || <> X)) && [] Y)",
+                    VerifyOutcome::Holds,
+                ),
+                pv(
+                    "ann_guarantee_1",
+                    "mu Z.((st_q == 3) || <> Z)",
+                    VerifyOutcome::Violated { false_cells: 4 },
+                ),
+                pv("other", "nu X.((en == 1) && [] X)", VerifyOutcome::Holds),
+            ],
+            ..Default::default()
+        };
+        flag_self_contradictory_verdicts(&mut report);
+        flag_vacuous_guarantees(&mut report);
+        refresh_vacuity_notes(&mut report);
+
+        let g = &report.properties[0];
+        assert!(
+            matches!(g.outcome, VerifyOutcome::Holds),
+            "the verdict is not changed"
+        );
+        let v = g
+            .vacuity
+            .as_ref()
+            .expect("the guarantee carries the finding");
+        assert_eq!(v.kind, VacuityKind::WitnessRefuted);
+        assert_eq!(v.witness, "ann_guarantee_1");
+        assert!(
+            v.detail.contains("ann_guarantee_1") && v.detail.contains("st_q == 0"),
+            "the detail names the witness and the target: {}",
+            v.detail
+        );
+        assert!(
+            report.properties[1].vacuity.is_none(),
+            "the witness itself carries nothing"
+        );
+        assert!(report.properties[2].vacuity.is_none());
+        // The note form joins on the FIELD (mununu#548), not on prose.
+        let note = report
+            .notes
+            .iter()
+            .find(|n| n.kind == "vacuous-guarantee")
+            .expect("one note per finding");
+        assert_eq!(note.property.as_deref(), Some("ann_guarantee_0"));
+        assert_eq!(note.items, vec!["ann_guarantee_1".to_string()]);
+        assert_eq!(note.level, NoteLevel::ScopeCaveat);
+        // Re-deriving is idempotent: a second refresh does not duplicate the note.
+        refresh_vacuity_notes(&mut report);
+        assert_eq!(
+            report
+                .notes
+                .iter()
+                .filter(|n| n.kind == "vacuous-guarantee")
+                .count(),
+            1
+        );
+    }
+
+    /// mununu#599 — the proven case: `EF(st_q != 0)` VIOLATED says the design never leaves 0, so
+    /// `AG EF(st_q == 0)` HOLDS vacuously. The stronger finding wins over a refuted witness in the
+    /// same report.
+    #[test]
+    fn x599_an_invariant_target_is_the_stronger_finding() {
+        let mut report = AutoVerifyReport {
+            properties: vec![
+                pv(
+                    "g",
+                    "nu Y.((mu X.((st_q == 0) || <> X)) && [] Y)",
+                    VerifyOutcome::Holds,
+                ),
+                pv(
+                    "w_other_value",
+                    "mu Z.((st_q == 3) || <> Z)",
+                    VerifyOutcome::Violated { false_cells: 1 },
+                ),
+                pv(
+                    "w_dual",
+                    "mu Z.((st_q != 0) || <> Z)",
+                    VerifyOutcome::Violated { false_cells: 1 },
+                ),
+            ],
+            ..Default::default()
+        };
+        flag_self_contradictory_verdicts(&mut report);
+        flag_vacuous_guarantees(&mut report);
+        let v = report.properties[0].vacuity.as_ref().unwrap();
+        assert_eq!(v.kind, VacuityKind::InvariantTarget);
+        assert_eq!(v.witness, "w_dual");
+        assert!(matches!(report.properties[0].outcome, VerifyOutcome::Holds));
+    }
+
+    /// mununu#599 — the HOLDS side of the self-contradiction table: `AG EF(p)` HOLDS beside `EF(p)`
+    /// VIOLATED cannot share a model (the initial state is reachable). Both withheld, neither
+    /// adjudicated, and no vacuity finding rides on a withheld verdict.
+    #[test]
+    fn x599_a_guarantee_beside_its_own_refuted_target_is_a_contradiction_not_a_vacuity() {
+        let mut report = AutoVerifyReport {
+            properties: vec![
+                pv(
+                    "g",
+                    "nu Y.((mu X.((st_q == 0) || <> X)) && [] Y)",
+                    VerifyOutcome::Holds,
+                ),
+                pv(
+                    "target_unreachable",
+                    "mu Z.((st_q == 0) || <> Z)",
+                    VerifyOutcome::Violated { false_cells: 1 },
+                ),
+                // The HOLDS–HOLDS twin of the mununu#579 pair.
+                pv("ef", "mu Z.((cnt == 2) || <> Z)", VerifyOutcome::Holds),
+                pv("ag_not", "nu X.((cnt != 2) && [] X)", VerifyOutcome::Holds),
+            ],
+            ..Default::default()
+        };
+        flag_self_contradictory_verdicts(&mut report);
+        flag_vacuous_guarantees(&mut report);
+        for p in &report.properties {
+            assert!(
+                matches!(p.outcome, VerifyOutcome::Unknown { .. }),
+                "{} must be withheld: {:?}",
+                p.name,
+                p.outcome
+            );
+            assert!(
+                matches!(
+                    p.bottom_reason,
+                    Some(BottomReason::ReportSelfContradiction { .. })
+                ),
+                "{}: {:?}",
+                p.name,
+                p.bottom_reason
+            );
+            assert!(p.vacuity.is_none());
+        }
+    }
+
     /// mununu#579 — a report whose own verdicts are unsatisfiable together forces BOTH to ⊥.
     ///
     /// `AG(cnt <= 1)` VIOLATED says some reachable state has `cnt > 1`; `EF(cnt > 1)` VIOLATED says
@@ -7267,6 +7663,7 @@ mod tests {
             counterexample: None,
             bottom_reason: None,
             decided_by: None,
+            vacuity: None,
         };
         let mut report = AutoVerifyReport {
             properties: vec![
@@ -7322,6 +7719,7 @@ mod tests {
             counterexample: None,
             bottom_reason: None,
             decided_by: None,
+            vacuity: None,
         };
         let mut report = AutoVerifyReport {
             properties: vec![
@@ -7366,6 +7764,7 @@ mod tests {
                 counterexample: None,
                 bottom_reason: None,
                 decided_by: None,
+                vacuity: None,
             }],
             ..Default::default()
         };
@@ -7660,6 +8059,7 @@ mod tests {
                 counterexample: None,
                 bottom_reason: None,
                 decided_by: None,
+                vacuity: None,
             }],
             ..Default::default()
         };
@@ -8352,6 +8752,7 @@ module uart_tx(); endmodule"#;
                     counterexample: None,
                     bottom_reason: None,
                     decided_by: None,
+                    vacuity: None,
                 },
                 PropertyVerdict {
                     name: "p_unknown".into(),
@@ -8363,6 +8764,7 @@ module uart_tx(); endmodule"#;
                     counterexample: None,
                     bottom_reason: None,
                     decided_by: None,
+                    vacuity: None,
                 },
             ],
             unsupported: vec![("u".into(), "reason".into())],
@@ -8587,6 +8989,7 @@ module uart_tx(); endmodule"#;
                 counterexample: None,
                 bottom_reason: None,
                 decided_by: None,
+                vacuity: None,
             }],
             unsupported: Vec::new(),
             diagnostics: ModelDiagnostics {
@@ -8642,6 +9045,7 @@ module uart_tx(); endmodule"#;
                 counterexample: None,
                 bottom_reason: None,
                 decided_by: None,
+                vacuity: None,
             }],
             unsupported: Vec::new(),
             diagnostics: ModelDiagnostics {
