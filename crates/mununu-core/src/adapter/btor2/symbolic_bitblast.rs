@@ -4471,6 +4471,12 @@ pub struct ExactSymbolicOptions {
     /// mununu#602 — use the whole-register (signal-level) cone of influence instead of the
     /// bit-level default. The differential switch; the default reads `MUNUNU_COI=signal`.
     pub signal_level_coi: bool,
+    /// mununu#629 — propagate a same-cycle antecedent's constant through the consequent's cone
+    /// (`AG(sig == K -> C(sig))` ≡ `AG(sig == K -> C[sig := K])`), so a field read through an
+    /// address mux is bit-blasted as the selected arm. Default `true`; `false` (or the
+    /// process-global `MUNUNU_NO_ANTECEDENT_PROPAGATE=1`) leaves the formula as lifted — the
+    /// differential switch. See [`crate::adapter::btor2::antecedent_propagation`].
+    pub antecedent_propagate_enabled: bool,
 }
 
 impl Default for ExactSymbolicOptions {
@@ -4478,6 +4484,7 @@ impl Default for ExactSymbolicOptions {
         Self {
             antecedent_shadow_enabled: true,
             signal_level_coi: signal_level_coi_from_env(),
+            antecedent_propagate_enabled: true,
         }
     }
 }
@@ -4932,6 +4939,33 @@ fn exact_symbolic_verdict_with_witness_inner(
         }
     };
     let formula: &Formula = rewritten_formula.as_ref().unwrap_or(formula);
+
+    // mununu#629 — propagate a same-cycle antecedent's constant through the consequent's cone:
+    // `AG(sig == K -> C(sig))` is `AG(sig == K -> C[sig := K])`, and the substituted copy of a
+    // read mux folds to the selected arm, so the bit cone below sees one field, not the record.
+    // An input antecedent is dropped with it when nothing else reads the input (the ∀ over
+    // inputs then IS the substitution). Equivalence-preserving per implication; see the module.
+    let propagated = {
+        let opt_out = !opts.antecedent_propagate_enabled
+            || std::env::var("MUNUNU_NO_ANTECEDENT_PROPAGATE").is_ok();
+        if opt_out {
+            None
+        } else {
+            crate::adapter::btor2::antecedent_propagation::propagate(&file, formula)
+        }
+    };
+    let (file, propagated_formula) = match propagated {
+        Some(p) => {
+            tracing::info!(
+                rewrites = ?p.rewrites,
+                "antecedent constant propagation: rewrote {} implication(s)",
+                p.rewrites.len()
+            );
+            (p.file, Some(p.formula))
+        }
+        None => (file, None),
+    };
+    let formula: &Formula = propagated_formula.as_ref().unwrap_or(formula);
 
     // Register-name resolution: a user-visible name (`bit_cnt_q`) maps to the
     // canonical state-cell name the bit-blast binds against (`bit_cnt_d` after
