@@ -13033,4 +13033,98 @@ endmodule
             "AG EF idle must HOLD under the assumption G !local_escalate_i; got {assumed:?}"
         );
     }
+
+    /// mununu#638 — monono's `video_timing` raster twin (vendored at
+    /// `examples/verify/v13_video_timing_raster_twin/`, Apache-2.0): two 10-bit counters whose
+    /// frame wraps one row early, so `a_frame_wraps_at_total` (`sva_1`) and
+    /// `a_row_advances_only_at_line_end` (`sva_2`) must be VIOLATED; the whole 800×525 frame is
+    /// the diameter, so the exact engine's squaring rescue decides them. On oxidd 0.11 a
+    /// **release** binary aborted here with `thread 'main' has overflowed its stack`: the rescue
+    /// is the one place the engine uses two OxiDD managers alternately on one thread, and
+    /// OxiDD's thread-local node-store state kept a stale owner address across that switch
+    /// (upstream 9fd1ed0, in 0.13), so the diagram was corrupted and `apply` descended 74,548
+    /// frames on a 20-variable cone. The debug profile decides the same command, which is why
+    /// this test exists in the RELEASE profile — on the parent of the fix the test PROCESS
+    /// aborts; on the fix it decides 8/8:
+    ///
+    /// ```text
+    /// cargo test --release -p mununu-core --lib --all-features -- --ignored e2e_638_
+    /// ```
+    #[test]
+    #[ignore = "requires slang + sv2v + Yosys + z3 (mununu-sva image) AND the release profile (`cargo test --release`): the defect it reproduces is optimization-dependent"]
+    fn e2e_638_the_raster_twin_decides_in_release_without_overflowing() {
+        use crate::adapter::yosys::SvFrontend;
+        use std::path::PathBuf;
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/verify/v13_video_timing_raster_twin");
+        let read = |f: &str| {
+            std::fs::read_to_string(dir.join(f))
+                .unwrap_or_else(|e| panic!("read {}: {e}", dir.join(f).display()))
+        };
+        let sources = vec![
+            (
+                "video_timing_early_row.sv".to_string(),
+                read("video_timing_early_row.sv"),
+            ),
+            (
+                "video_timing_sva.sv".to_string(),
+                read("video_timing_sva.sv"),
+            ),
+        ];
+        let yopts = YosysOptions {
+            top: Some("video_timing".to_string()),
+            frontend: SvFrontend::Slang,
+            ..Default::default()
+        };
+        // The CLI's default engine: `portfolio-sequential`, the exact engine first — the path
+        // the consumer's command takes (the library default is the explicit cube, which does
+        // not run the rescue and so never showed the abort).
+        let report = verify_auto(
+            &sources,
+            &yopts,
+            &VerifyAutoOptions {
+                config_values: std::collections::HashMap::from([("rst_n".to_string(), 1u64)]),
+                portfolio: Some(PortfolioMode::Sequential),
+                ..Default::default()
+            },
+        )
+        .expect("verify_auto runs on the raster twin");
+        for p in &report.properties {
+            eprintln!("  {} ({:?}): {:?}", p.name, p.label, p.outcome);
+        }
+        assert!(
+            report.properties.len() >= 5,
+            "the five tier-1 SVA (plus any harvested guarantees): {:?}",
+            report.properties
+        );
+        let by = |suffix: &str| {
+            report
+                .properties
+                .iter()
+                .find(|p| p.name.ends_with(suffix))
+                .unwrap_or_else(|| panic!("property `*{suffix}` in {:?}", report.properties))
+        };
+        for violated in ["sva_1", "sva_2"] {
+            assert!(
+                matches!(by(violated).outcome, VerifyOutcome::Violated { .. }),
+                "{violated} is the twin's early row: {:?}",
+                by(violated).outcome
+            );
+        }
+        for holds in ["sva_0", "sva_3", "sva_4"] {
+            assert!(
+                matches!(by(holds).outcome, VerifyOutcome::Holds),
+                "{holds}: {:?}",
+                by(holds).outcome
+            );
+        }
+        assert!(
+            report.properties.iter().all(|p| !matches!(
+                p.outcome,
+                VerifyOutcome::Unknown { .. } | VerifyOutcome::Skipped { .. }
+            )),
+            "every property decides once the rescue can run: {:?}",
+            report.properties
+        );
+    }
 }

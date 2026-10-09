@@ -2864,7 +2864,7 @@ impl Squarer {
         tt: &BDDFunction,
         memo: &mut HashMap<usize, BDDFunction>,
     ) -> Result<BDDFunction, String> {
-        use oxidd::{Edge, Function, HasLevel, Node};
+        use oxidd::{Function, HasLevel, Node};
         // Memo key: the edge's node id — the function's identity in `src` (these BDD edges carry
         // no complement tag, so the node is the function; a `BDDFunction` key would trip clippy's
         // `mutable_key_type`).
@@ -3237,7 +3237,7 @@ impl BddBitBlaster {
         what: &str,
         violates: impl Fn(oxidd::LevelNo, oxidd::LevelNo) -> bool,
     ) -> Result<(), String> {
-        use oxidd::{Edge, Function, HasLevel, InnerNode, Manager, Node};
+        use oxidd::{Function, HasLevel, InnerNode, Manager, Node};
         // mununu#543 — oxidd's OWN node count for this diagram, taken BEFORE the shared borrow
         // below (`node_count` acquires the manager lock itself, so calling it inside would
         // re-enter). Compared against what the walk actually visits, to close the one assumption
@@ -3256,17 +3256,17 @@ impl BddBitBlaster {
                 std::collections::HashSet::new();
             // The explicit worklist that keeps this validator safe on a malformed diagram.
             let mut work: Vec<(oxidd::LevelNo, _)> = Vec::new();
-            work.push((0, root.borrowed()));
+            work.push((0, root));
             while let Some((_, edge)) = work.pop() {
                 if !seen.insert(edge.node_id()) {
                     continue;
                 }
-                let Node::Inner(node) = m.get_node(&edge) else {
+                let Node::Inner(node) = m.get_node(edge) else {
                     continue; // a terminal ends the descent, but it is COUNTED above
                 };
                 let level = node.level();
                 for child in node.children() {
-                    let Node::Inner(cn) = m.get_node(&child) else {
+                    let Node::Inner(cn) = m.get_node(child) else {
                         // A terminal child still has to be counted, or the exhaustiveness
                         // comparison below would under-count against `node_count`.
                         seen.insert(child.node_id());

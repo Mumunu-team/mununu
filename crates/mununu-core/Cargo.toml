@@ -34,7 +34,7 @@ num-traits = "0.2"
 # O(2^2|P|) SMT edge computation. Pure-Rust (no new C build), permissive
 # (MIT OR Apache-2.0), `Send + Sync` manager. Not feature-gated — the symbolic path
 # is a first-class engine (R-F5).
-oxidd = "0.11"
+oxidd = "0.13"
 
 # CMSIS-SVD / IP-XACT importer for register-map sidecars (Document C
 # task C6). Small, zero-dep DOM parser well-suited to one-shot config
