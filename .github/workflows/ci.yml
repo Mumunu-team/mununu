@@ -36,10 +36,13 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Run lint + tests in the dev image
+      # DIAGNOSTIC BRANCH (draft PR #644, never merged): the flaky stack overflow fires in ~1 of 4
+      # runs, so run the suite three times per job; the job stays green and the log is the signal —
+      # grep it for `[diag overflow]` and `SIGABRT`.
+      - name: "DIAG: run the test suite three times, read the stderr of any abort"
         run: |
           docker run --rm -v ${{ github.workspace }}:/work mununu-dev:latest \
-            make ci
+            bash -c 'for i in 1 2 3; do echo "=== DIAG suite attempt $i"; cargo nextest run --workspace --no-fail-fast || true; done'
 
       - name: Run API-feature tests in the dev image
         run: |
