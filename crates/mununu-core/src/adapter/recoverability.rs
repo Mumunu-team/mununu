@@ -1091,6 +1091,9 @@ pub fn verify_recoverability_with_predicates(
                 %reason,
                 "exact engine abstained on `AG EF {good}`; escalating to the scalable ladder"
             );
+            // DIAG (never merge): the CI-only stack overflow sits on this path; the runner's
+            // captured stderr is the only place the abstention REASON can be read.
+            eprintln!("[diag overflow] exact engine abstained on `AG EF {good}`: {reason}");
             verify_recoverability_scalable(btor2_content, good, extra_predicates)
         }
     }
@@ -2960,6 +2963,13 @@ pub fn verify_recoverability_scalable_with_source(
     // The cube space includes the compound (relational) predicates the CEGAR loop adds as dimensions.
     let env = Environment::new(1usize << (specs.len() + compound_seeds.len()));
 
+    // DIAG (never merge): breadcrumbs around the ladder's long phase, so the last line before the
+    // CI-only abort says which phase it died in.
+    eprintln!(
+        "[diag overflow] ladder on `AG EF {good}`: {} specs + {} compound seeds; entering cegar_refine_loop",
+        specs.len(),
+        compound_seeds.len()
+    );
     let trace = match cegar_refine_loop(
         &formula,
         btor2_content,
@@ -2974,6 +2984,7 @@ pub fn verify_recoverability_scalable_with_source(
         // abstain-on-error posture.
         Err(_) => return Ok(PropertyVerdict::Unknown),
     };
+    eprintln!("[diag overflow] ladder on `AG EF {good}`: cegar_refine_loop returned");
 
     // The design's initial cube(s): evaluate every FINAL predicate at the reset valuation, in the
     // lift's cube-bit order (`final_predicates[i]` ↔ bit `i`). Three kinds of bit:
