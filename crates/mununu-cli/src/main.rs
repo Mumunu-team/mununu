@@ -2314,12 +2314,23 @@ struct SvLintArgs {
 struct SvMutateArgs {
     #[command(flatten)]
     lift: SvLiftArgs,
-    /// The mutation to apply: `stick:<reg>` (freeze a register) or
-    /// `drop-reset:<reg>` (remove a register's reset arm). Required unless `--list`.
-    #[arg(long, value_name = "stick:REG|drop-reset:REG")]
+    /// The mutation to apply, one of four kinds (mununu#635 — all four have been
+    /// applicable since #468; the help listed two): `stick:<reg>` (freeze a
+    /// register), `drop-reset:<reg>` (remove a register's reset arm),
+    /// `off-by-one:<reg>[@<const_nid>][:±1]` (shift a constant the register is
+    /// compared against — the boundary fault), `invert-cond:<sig>` (negate a 1-bit
+    /// signal). The `_` spellings `--list` prints as JSON keys (`off_by_one:…`) are
+    /// accepted as aliases. Required unless `--list`.
+    #[arg(
+        long,
+        value_name = "stick:REG|drop-reset:REG|off-by-one:REG[@NID][:±1]|invert-cond:SIG"
+    )]
     mutation: Option<String>,
-    /// Instead of mutating, list the available mutation TARGETS of the design
-    /// (every register → `stick`; every reset-mux register → `drop-reset`).
+    /// Instead of mutating, list the available mutation TARGETS of the design, per
+    /// kind: `stick` (every register), `drop_reset` (every reset-mux register),
+    /// `off_by_one` (every register compared against a constant), `invert_cond`
+    /// (every 1-bit signal). The keys are the kinds with `_`; `--mutation` takes
+    /// either spelling.
     #[arg(long)]
     list: bool,
     /// Verification engine for the baseline + mutant runs (as `sv verify-auto`).

@@ -67,6 +67,17 @@ impl Mutation {
     /// Parse a `stick:<reg>` / `drop-reset:<reg>` /
     /// `off-by-one:<reg>[@<const_nid>][:±1]` / `invert-cond:<sig>` selector.
     pub fn parse(spec: &str) -> Result<Mutation, String> {
+        // mununu#635 — `--list` spells the kinds as JSON keys (`drop_reset`, `off_by_one`,
+        // `invert_cond`) while the selector uses hyphens; a user copying a key from `--list`
+        // got "unknown mutation" and concluded the kind was not applicable. Both spellings
+        // are accepted; the canonical one (and the one `--help` shows) is hyphenated.
+        let spec: std::borrow::Cow<'_, str> = match spec.split_once(':') {
+            Some((kind, rest)) if kind.contains('_') => {
+                format!("{}:{rest}", kind.replace('_', "-")).into()
+            }
+            _ => spec.into(),
+        };
+        let spec = spec.as_ref();
         if let Some(reg) = spec.strip_prefix("stick:") {
             reg_nonempty(reg).map(|r| Mutation::Stick(r.to_string()))
         } else if let Some(reg) = spec.strip_prefix("drop-reset:") {
@@ -503,12 +514,54 @@ fn apply_invert_cond(file: &mut Btor2File, sig: &str) -> Result<(), String> {
              (a wider `-N` is a bitwise-not, not a boolean flip)"
         ));
     }
+    // mununu#635 — the NAME usually sits on a `uext … 0` alias yosys mints for a wire
+    // (`uext 1 <and> 0 violation`), while the logic reads the underlying node directly; the
+    // alias itself has no readers. Invert every reader of the whole value-identical set — the
+    // node the alias chain bottoms out at and every alias of it — so `invert-cond:violation`
+    // flips the condition where the design consumes it, not only where it is labelled.
+    // (Measured on `link_ctrl`: "no use sites to invert" on a target `--list` had advertised.)
+    let mut set: std::collections::HashSet<Nid> = std::collections::HashSet::from([sig_nid]);
+    let mut cur = sig_nid;
+    while let Some(Node::Op {
+        op: Op::Uext | Op::Sext,
+        args,
+        ..
+    }) = file.lookup(cur).map(|l| &l.node)
+        && args.len() == 1
+        && file.lookup(cur).map(|l| l.immediates.first() == Some(&0)) == Some(true)
+    {
+        cur = args[0].nid();
+        set.insert(cur);
+    }
+    let mut grew = true;
+    while grew {
+        grew = false;
+        for l in &file.lines {
+            if set.contains(&l.nid) {
+                continue;
+            }
+            if let Node::Op {
+                op: Op::Uext | Op::Sext,
+                args,
+                ..
+            } = &l.node
+                && args.len() == 1
+                && l.immediates.first() == Some(&0)
+                && set.contains(&args[0].nid())
+            {
+                set.insert(l.nid);
+                grew = true;
+            }
+        }
+    }
     let mut flipped = 0usize;
     for l in file.lines.iter_mut() {
-        if l.nid == sig_nid {
-            continue; // never flip the signal's own inputs — only its consumers
+        if set.contains(&l.nid) {
+            continue; // never flip the signal's own inputs or its aliases — only its consumers
         }
-        flip_operands_to(&mut l.node, sig_nid, &mut flipped);
+        for target in &set {
+            flip_operands_to(&mut l.node, *target, &mut flipped);
+        }
     }
     if flipped == 0 {
         return Err(format!(
@@ -595,6 +648,48 @@ mod tests {
         assert_eq!(next_value_of(&out, 9), 3);
         // `q` untouched.
         assert_eq!(next_value_of(&out, 4), 5);
+    }
+
+    /// mununu#635 — a condition named through a `uext 0` alias (how yosys labels a wire) is
+    /// inverted where the logic READS it (the underlying node), not only at the alias, which has
+    /// no readers of its own. Measured on `link_ctrl`: `invert-cond:violation` reported "no use
+    /// sites" on a target `--list` had advertised.
+    #[test]
+    fn x635_invert_cond_follows_the_alias_to_the_readers() {
+        let btor2 = "1 sort bitvec 1\n2 input 1 ack\n3 input 1 nack\n4 and 1 2 3\n\
+                     5 uext 1 4 0 violation\n6 state 1 fatal\n7 ite 1 4 2 6\n8 next 1 6 7\n";
+        let out = apply_mutation(btor2, &Mutation::parse("invert-cond:violation").unwrap())
+            .expect("the alias resolves to the and-node's readers");
+        assert!(
+            out.lines().any(|l| l.starts_with("7 ite 1 -4 ")),
+            "the ite's condition is the negated and-node: {out}"
+        );
+        assert!(
+            out.lines().any(|l| l.starts_with("5 uext 1 4 0")),
+            "the alias itself is not flipped: {out}"
+        );
+    }
+
+    /// mununu#635 — the `_` spelling `--list` prints as JSON keys parses to the same mutation as
+    /// the hyphenated selector; the hyphenated form is canonical and the error names it.
+    #[test]
+    fn x635_underscore_kind_spellings_are_accepted_aliases() {
+        for (a, b) in [
+            ("drop_reset:r", "drop-reset:r"),
+            ("off_by_one:cnt", "off-by-one:cnt"),
+            ("off_by_one:cnt@7:-1", "off-by-one:cnt@7:-1"),
+            ("invert_cond:sig", "invert-cond:sig"),
+        ] {
+            assert_eq!(
+                Mutation::parse(a).unwrap(),
+                Mutation::parse(b).unwrap(),
+                "{a}"
+            );
+        }
+        let err = Mutation::parse("flip_bit:r").unwrap_err();
+        assert!(
+            err.contains("drop-reset") && err.contains("off-by-one") && err.contains("invert-cond")
+        );
     }
 
     #[test]
