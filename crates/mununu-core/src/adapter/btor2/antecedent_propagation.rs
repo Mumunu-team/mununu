@@ -179,6 +179,18 @@ pub fn propagate(file: &Btor2File, formula: &Formula) -> Option<Propagated> {
             if w < 64 && value >> w != 0 {
                 continue; // `K` does not fit: the antecedent is never true, nothing to do
             }
+            // SAME-CYCLE ONLY. The identity `AG(sig == K → C(sig)) ≡ AG(sig == K → C[sig := K])`
+            // holds because `sig` IS `K` in the cycle the consequent is read. A consequent under
+            // a modality (`A |=> C` lowers to `Or(Not(A), Box C)`) or a fixpoint is read in
+            // ANOTHER cycle, where `sig` is free again — substituting `K` there, and dropping an
+            // input antecedent on the strength of it, asserts `C[sig := K]` at every cycle. On
+            // monono's `pulse_cdc`, `pulse_in == 0 |=> tog_q == $past(tog_q)` was rewritten that
+            // way and the exact engine refuted a property that holds (the regression of the
+            // re-land, found 2026-10-09). `collect_boolean_atoms` walks past such nodes
+            // silently, so the shape is checked here, not there.
+            if !is_boolean_formula(formula, cons) {
+                continue;
+            }
             let mut atoms = Vec::new();
             collect_boolean_atoms(formula, cons, &mut atoms);
             impls.push(Impl {
@@ -426,6 +438,19 @@ fn reachable_predicates(
 
 /// `Predicate` ids reachable from `id` through `And` / `Or` / `Not` only — the atoms evaluated
 /// in the same state as the antecedent.
+/// Is the subtree at `id` a Boolean combination of atoms — no modality, no fixpoint, no
+/// fixpoint variable? Only such a consequent is read in the antecedent's own cycle.
+fn is_boolean_formula(f: &Formula, id: NodeId) -> bool {
+    match f.node(id) {
+        MuNode::Predicate(_) => true,
+        MuNode::Not(x) => is_boolean_formula(f, *x),
+        MuNode::And(a, b) | MuNode::Or(a, b) => {
+            is_boolean_formula(f, *a) && is_boolean_formula(f, *b)
+        }
+        _ => false,
+    }
+}
+
 fn collect_boolean_atoms(f: &Formula, id: NodeId, out: &mut Vec<NodeId>) {
     match f.node(id) {
         MuNode::Predicate(_) => out.push(id),
@@ -948,6 +973,37 @@ mod tests {
         ] {
             let f = crate::mu_calculus::parser::parse(s).unwrap();
             assert!(propagate(&file, &f).is_none(), "{s}");
+        }
+    }
+
+    /// The regression of the re-land (2026-10-09, monono's `pulse_cdc`): a consequent under a
+    /// modality is read in the NEXT cycle, where the antecedent's signal is free again, so the
+    /// same-cycle identity does not apply and the implication must be left alone — with an
+    /// input antecedent (`|=>`, the shape that was rewritten and refuted) and with a state one.
+    #[test]
+    fn x646_a_next_cycle_consequent_is_declined() {
+        for addr_is_state in [false, true] {
+            let file = parser::parse(&fixture(false, addr_is_state, false)).unwrap();
+            for s in [
+                "nu X. ((!(addr == 4) || [] (rdata == status_word)) && [] X)",
+                "nu X. ((!(addr == 4) || <> (rdata == status_word)) && [] X)",
+                "nu X. ((!(addr == 4) || (mu Y. ((rdata == status_word) || <> Y))) && [] X)",
+            ] {
+                let f = crate::mu_calculus::parser::parse(s).unwrap();
+                assert!(
+                    propagate(&file, &f).is_none(),
+                    "addr_is_state={addr_is_state}: {s}"
+                );
+            }
+            // The same-cycle shape still rewrites: the guard is about the consequent's cycle.
+            let same = crate::mu_calculus::parser::parse(
+                "nu X. ((!(addr == 4) || (rdata == status_word)) && [] X)",
+            )
+            .unwrap();
+            assert!(
+                propagate(&file, &same).is_some(),
+                "addr_is_state={addr_is_state}"
+            );
         }
     }
 
