@@ -891,6 +891,72 @@ pub fn resolve_to_canonical_name(
     collect_symbols(file).get(&nid).cloned()
 }
 
+/// mununu#633 — the name each state cell is REPORTED and ADDRESSED under by the
+/// register-facing verbs (`check-fsm`, `sv mutate --list` / `--mutation`), strict-preferred:
+///
+/// 1. the `state` line's own user-visible symbol (not a `$`-prefixed synthetic one);
+/// 2. else the first (file order) `Op` symbol, then the first `Output` symbol, that is a
+///    **value-identical** alias of the cell ([`resolve_state_alias`] with the async-reset
+///    mux allowed — the `uext … 0 NAME` rename yosys emits for a register's current
+///    value, or the port that passes it through);
+/// 3. else the loose cone-tracing name [`collect_symbols`] attaches, for a cell nothing
+///    names exactly (a hand-written lift whose only symbol sits on a derived op).
+///
+/// Why not [`collect_symbols`] alone: its pass 2 attaches the FIRST symbol-bearing op
+/// whose cone reaches a cell, and a next-state value `beat_cnt_d` reaches the *state*
+/// register's cell (the `case (state_q)` it is computed under) before its own — so
+/// `check-fsm` reported the state register as `beat_cnt_d` and `--list` advertised a
+/// combinational wire as a register. A value-identical alias cannot name the wrong cell.
+/// `collect_symbols` itself is unchanged: the sidecar / lint resolvers that want the
+/// loose cone name keep it.
+pub fn canonical_register_names(file: &Btor2File) -> HashMap<Nid, String> {
+    let is_synthetic = |s: &str| s.starts_with('$');
+    let mut out: HashMap<Nid, String> = HashMap::new();
+    for line in &file.lines {
+        if let Node::State {
+            symbol: Some(s), ..
+        } = &line.node
+            && !is_synthetic(s)
+        {
+            out.insert(line.nid, s.clone());
+        }
+    }
+    // Op aliases before output ports: `state_q` over the port that mirrors it, when
+    // both are value-identical to the cell.
+    for want_output in [false, true] {
+        for line in &file.lines {
+            let name = match (&line.node, want_output) {
+                (
+                    Node::Op {
+                        symbol: Some(s), ..
+                    },
+                    false,
+                )
+                | (
+                    Node::Output {
+                        symbol: Some(s), ..
+                    },
+                    true,
+                ) => s,
+                _ => continue,
+            };
+            if is_synthetic(name) {
+                continue;
+            }
+            let mut visited = std::collections::HashSet::new();
+            if let Some(cell) = follow_state_alias(file, line.nid, true, &mut visited) {
+                out.entry(cell).or_insert_with(|| name.clone());
+            }
+        }
+    }
+    for (nid, name) in collect_symbols(file) {
+        if matches!(file.lookup(nid).map(|l| &l.node), Some(Node::State { .. })) {
+            out.entry(nid).or_insert(name);
+        }
+    }
+    out
+}
+
 /// True when `nid` is a constant, or a `uext`/`sext`-by-0 passthrough of one
 /// (the shape `async2sync` gives a reset value).
 fn resolves_to_const(file: &Btor2File, nid: Nid) -> bool {
@@ -1174,6 +1240,39 @@ mod tests {
         assert_eq!(resolve_state_alias(&file, "bit_cnt_q", true), Some(5));
         // Reset-mux following off: the `ite` is not a pure passthrough → None.
         assert_eq!(resolve_state_alias(&file, "bit_cnt_q", false), None);
+    }
+
+    #[test]
+    fn x633_canonical_register_names_prefer_a_value_identical_alias_over_the_loose_cone_name() {
+        // Cell 4 carries no symbol. Its next-value op (9, `cnt_d` = ite(go, cnt+1, cnt))
+        // comes FIRST in file order and reaches the cell in the loose cone trace, so
+        // `collect_symbols` names the cell `cnt_d`; the `uext 0` alias `cnt_q` (11) is
+        // the value-identical name and must win. Cell 12 has a direct symbol `mode`
+        // that an alias (14, `mode_o`) must not override; cell 15 is named only by an
+        // output port (17); cell 18 is named by nothing exact and keeps the loose name.
+        let src = "1 sort bitvec 1\n2 sort bitvec 2\n3 input 1 go\n\
+                   4 state 2\n5 zero 2\n6 init 2 4 5\n7 one 2\n8 add 2 4 7\n\
+                   9 ite 2 3 8 4 cnt_d\n10 next 2 4 9\n11 uext 2 4 0 cnt_q\n\
+                   12 state 2 mode\n13 next 2 12 12\n14 uext 2 12 0 mode_o\n\
+                   15 state 2\n16 next 2 15 15\n17 output 15 port_q\n\
+                   18 state 2\n19 next 2 18 18\n20 add 2 18 7 sum_d\n";
+        let file = parse(src).expect("parse");
+        let loose = collect_symbols(&file);
+        assert_eq!(
+            loose.get(&4).map(String::as_str),
+            Some("cnt_d"),
+            "the loose trap"
+        );
+        let names = canonical_register_names(&file);
+        assert_eq!(names.get(&4).map(String::as_str), Some("cnt_q"));
+        assert_eq!(names.get(&12).map(String::as_str), Some("mode"));
+        assert_eq!(names.get(&15).map(String::as_str), Some("port_q"));
+        assert_eq!(
+            names.get(&18).map(String::as_str),
+            Some("sum_d"),
+            "a cell nothing names exactly keeps the loose cone name"
+        );
+        assert_eq!(names.len(), 4);
     }
 
     #[test]

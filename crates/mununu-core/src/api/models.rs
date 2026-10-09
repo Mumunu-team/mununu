@@ -1086,12 +1086,19 @@ fn default_fsm_max_width() -> u32 {
 /// One state register's illegal-encoding result in a [`Btor2CheckFsmResponse`].
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct FsmRegisterFinding {
-    /// The state register's symbol.
+    /// The state register's symbol — the cell's own, or a value-identical alias of it
+    /// (`state_q`, the port that mirrors it); never a next-value wire (#633).
     pub register: String,
-    /// The legal encodings the register's own logic recognizes (sorted).
+    /// `"fsm"` — an enumeration-valued register, checked; `"counter"` — a register its
+    /// own next-state logic steps by ±1, set aside with no legal set and no verdict
+    /// (its values are a range, not an enumeration; #633).
+    pub kind: String,
+    /// The legal encodings the register's own logic recognizes (sorted); empty for a
+    /// `"counter"`.
     pub legal_encodings: Vec<u64>,
     /// Canonical verdict — `"holds"` (stays within its encoding) | `"violated"` (an
-    /// illegal encoding is reachable) | `"unknown"` (the portfolio could not decide).
+    /// illegal encoding is reachable) | `"unknown"` (the portfolio could not decide) |
+    /// `"skipped"` (a `"counter"`, not checked).
     pub verdict: String,
     /// `true` when an illegal encoding is reachable (a finding).
     pub illegal_encoding_reachable: bool,
@@ -1100,7 +1107,8 @@ pub struct FsmRegisterFinding {
 /// Response for `POST /api/v1/btor2/check-fsm`.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct Btor2CheckFsmResponse {
-    /// Number of FSM-like state registers scanned.
+    /// Number of `"fsm"`-kind registers scanned (a `"counter"` entry in `registers` is
+    /// listed, not counted).
     pub fsm_registers_checked: usize,
     /// Number of registers with a reachable illegal encoding (`verdict == "violated"`).
     pub illegal_encodings_found: usize,

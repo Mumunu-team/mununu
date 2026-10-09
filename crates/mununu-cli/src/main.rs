@@ -3232,6 +3232,7 @@ fn btor2_check_fsm(args: Btor2CheckFsmArgs) -> Result<(), String> {
         .map(|f| {
             serde_json::json!({
                 "register": f.register,
+                "kind": f.kind.as_str(),
                 "legal_encodings": f.legal_encodings,
                 "verdict": f.verdict.as_str(),
                 "illegal_encoding_reachable": f.is_finding(),
@@ -3240,7 +3241,7 @@ fn btor2_check_fsm(args: Btor2CheckFsmArgs) -> Result<(), String> {
         .collect();
     let summary = serde_json::json!({
         "file": args.file.display().to_string(),
-        "fsm_registers_checked": findings.len(),
+        "fsm_registers_checked": findings.iter().filter(|f| f.is_checked()).count(),
         "illegal_encodings_found": findings.iter().filter(|f| f.is_finding()).count(),
         "registers": registers,
     });
@@ -6304,6 +6305,7 @@ fn sv_check_fsm(args: SvCheckFsmArgs) -> Result<(), String> {
         .map(|f| {
             serde_json::json!({
                 "register": f.register,
+                "kind": f.kind.as_str(),
                 "legal_encodings": f.legal_encodings,
                 "verdict": f.verdict.as_str(),
                 "illegal_encoding_reachable": f.is_finding(),
@@ -6312,7 +6314,7 @@ fn sv_check_fsm(args: SvCheckFsmArgs) -> Result<(), String> {
         .collect();
     let summary = serde_json::json!({
         "file": file,
-        "fsm_registers_checked": findings.len(),
+        "fsm_registers_checked": findings.iter().filter(|f| f.is_checked()).count(),
         "illegal_encodings_found": findings.iter().filter(|f| f.is_finding()).count(),
         "registers": registers,
     });
