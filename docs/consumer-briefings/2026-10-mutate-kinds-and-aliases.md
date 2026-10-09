@@ -4,7 +4,7 @@
 >
 > **Related:** closes [mununu#635](https://github.com/Mumunu-team/mununu/issues/635). Fixture: [`examples/verify/v12_link_ctrl_llm_fsm/`](../../examples/verify/v12_link_ctrl_llm_fsm/). Policy: [`docs/policies/cross-repo-impact.md`](../policies/cross-repo-impact.md).
 >
-> **TL;DR:** **CLI/API documentation + a mutation-application fix; no wire-shape change.** `--mutation` has accepted four kinds since #468 — `stick:`, `drop-reset:`, `off-by-one:`, `invert-cond:` — but `--help` and the API doc listed two, and `--list` spells the kinds as JSON keys with `_` (`off_by_one`), which the selector rejected; both spellings are accepted now and the help names all four. Separately, `invert-cond:<sig>` on a signal that yosys labels through a `uext 0` alias (`violation`, any `assign`ed wire) errored with *"no use sites to invert"* — the logic reads the underlying node, not the alias; it now inverts every reader of the value-identical set. Measured on the demo fixture: both advertised kinds apply, and the LLM-written suite catches **neither** planted fault — a finding about the properties, recorded as such.
+> **TL;DR:** **CLI/API documentation + a mutation-application fix; no wire-shape change.** `--mutation` has accepted four kinds since #468 — `stick:`, `drop-reset:`, `off-by-one:`, `invert-cond:` — but `--help` and the API doc listed two, and `--list` spells the kinds as JSON keys with `_` (`off_by_one`), which the selector rejected; both spellings are accepted now and the help names all four. Separately, `invert-cond:<sig>` on a signal that yosys labels through a `uext 0` alias (`violation`, any `assign`ed wire) errored with *"no use sites to invert"* — the logic reads the underlying node, not the alias; it now inverts every reader of the value-identical set. Measured on the demo fixture: both advertised kinds apply; the LLM-written suite **kills the off-by-one** (once #639 lets the `localparam` properties decide) and **does not kill the inverted `violation`** — findings about the properties, recorded as such.
 
 ## What changed
 
@@ -12,15 +12,15 @@
 - `sv mutate --mutation` help, its `value_name`, and the API request's `mutation` doc list all four kinds with their syntax (`off-by-one:<reg>[@<const_nid>][:±1]`, `invert-cond:<sig>`).
 - `apply_invert_cond` follows the name's `uext`/`sext`-by-0 alias chain to the node the logic reads and flips every reader of that node and of every alias of it (never the signal's own inputs). Before, a target `--list` advertised could fail to apply.
 
-## Measured — `link_ctrl.sv` (eight SVA; `e2e_635_advertised_mutation_kinds_apply_and_the_link_ctrl_suite_catches_neither`)
+## Measured — `link_ctrl.sv` (eight SVA; `e2e_635_advertised_mutation_kinds_apply_and_the_link_ctrl_suite_kills_the_off_by_one_only`)
 
-| mutation | before | after | verdict flips |
+| mutation | before | after | verdict flips (on `main` with #639, so the `localparam` properties decide) |
 |---|---|---|---|
-| `off-by-one:retry_cnt_q` (shift the retry-limit constant) | applied | applied | **0 of 8** — `a_err_implies_retry_limit` is one-directional (vacuous when `err_q` never rises), `a_retry_limit` is already violated; nothing pins the limit's boundary |
-| `invert-cond:violation` (negate `ack & nack`) | *"no use sites to invert"* | applied | **0 of 8** — no property says fatal is entered only on a violation |
+| `off-by-one:retry_cnt_q` (shift the retry-limit constant) | applied | applied | **2 of 8 — killed**: `a_err_implies_retry_limit` holds → **violated** (`err` rises at the shifted limit, no longer `MAX_RETRIES`); `a_retry_limit` violated → holds (the design's own violation sat at the limit the mutation moved) |
+| `invert-cond:violation` (negate `ack & nack`) | *"no use sites to invert"* | applied | **1 of 8, not a kill**: only the already-violated `a_retry_limit` moves to holds (every request now goes to FATAL before a retry); **no holding property is violated** — nothing says fatal is entered *only* on a violation |
 | `off_by_one:retry_cnt_q` (the `--list` spelling) | *"unknown mutation"* | same mutation as above | — |
 
-Per claims integrity: a flip measures the **spec's** adequacy, a non-flip is a vacuous property — never a bug in the design. The two zeros are the demo suite's measured holes; a property that caught either changes the count and the test says which.
+Per claims integrity: a flip measures the **spec's** adequacy, a non-flip is a vacuous property — never a bug in the design. Two lessons the measurement carries: the inverted-`violation` hole is the demo suite's to close (a "fatal only on violation" property changes the row and the test says which); and **a spec's measured adequacy depends on which of its properties decide** — before #639 the same suite flipped 0 and 0, because the four properties that catch the off-by-one were the skipped ones. Re-measure adequacy after any change that moves properties out of `skipped`.
 
 ## What to update, per consumer
 

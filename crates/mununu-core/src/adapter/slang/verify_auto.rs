@@ -9988,14 +9988,20 @@ module uart_tx(); endmodule"#;
     /// the SPEC's adequacy, never the design: a flip means the property caught the planted fault,
     /// a non-flip means no property pins that behaviour (claims integrity).
     ///
-    /// MEASURED (2026-10-08, in the image): the suite catches NEITHER fault — `off-by-one` on the
-    /// retry limit flips nothing (`a_err_implies_retry_limit` is one-directional and vacuous when
-    /// `err_q` never rises; `a_retry_limit` is already violated), and inverting `violation` flips
-    /// nothing (no property says fatal is entered ONLY on a violation). A property that caught
-    /// either would change the count below — that is the finding this test records.
+    /// MEASURED (2026-10-08, in the image, on a lift where #639 folds the `localparam` atoms so
+    /// the four properties that read them decide): `off-by-one` on the retry limit is KILLED —
+    /// `a_err_implies_retry_limit` Holds → Violated (`err` rises at the shifted limit, which is
+    /// no longer `MAX_RETRIES`) — and `a_retry_limit`, violated on the design, moves to Holds
+    /// (its violation sat exactly at the limit the mutation moved). Inverting `violation` moves
+    /// only that already-violated `a_retry_limit` to Holds (the inverted gate sends every
+    /// request to FATAL before any retry); NO holding property is violated, because none says
+    /// fatal is entered ONLY on a violation — that hole is the finding this test records. Before
+    /// #639 both mutations flipped nothing, on the same suite: the properties that catch the
+    /// off-by-one were the skipped ones. A spec's measured adequacy is a property of which of
+    /// its properties DECIDE, not of its text.
     #[test]
     #[ignore = "requires slang + sv2v + Yosys + z3 (use the mununu-sva docker image); run with --ignored"]
-    fn e2e_635_advertised_mutation_kinds_apply_and_the_link_ctrl_suite_catches_neither() {
+    fn e2e_635_advertised_mutation_kinds_apply_and_the_link_ctrl_suite_kills_the_off_by_one_only() {
         use crate::adapter::btor2::mutate::Mutation;
         use crate::adapter::yosys::SvFrontend;
         use std::path::PathBuf;
@@ -10024,26 +10030,30 @@ module uart_tx(); endmodule"#;
                 .properties
                 .iter()
                 .map(|p| {
-                    (
-                        p.label.clone().unwrap_or_else(|| p.name.clone()),
-                        format!("{:?}", p.outcome),
-                    )
+                    let class = match &p.outcome {
+                        VerifyOutcome::Holds => "holds",
+                        VerifyOutcome::Violated { .. } => "violated",
+                        VerifyOutcome::Skipped { .. } => "skipped",
+                        _ => "unknown",
+                    };
+                    (p.label.clone().unwrap_or_else(|| p.name.clone()), class)
                 })
                 .collect::<Vec<_>>()
         };
         let base = run(None);
         assert_eq!(base.len(), 8, "the fixture's eight assertions: {base:?}");
-        let flips = |m: &str| -> Vec<String> {
+        // (label, before, after) per property whose verdict the mutation moved, in file order.
+        let flips = |m: &str| -> Vec<(String, &'static str, &'static str)> {
             // Applying is the #635 fix; the mutated run must produce the same property set.
             let mutated = run(Some(m));
             assert_eq!(mutated.len(), base.len(), "{m}: same property set");
-            let f: Vec<String> = base
+            let f: Vec<_> = base
                 .iter()
                 .zip(mutated.iter())
                 .filter(|(b, m)| b.1 != m.1)
-                .map(|(b, m)| format!("{} {} -> {}", b.0, b.1, m.1))
+                .map(|(b, m)| (b.0.clone(), b.1, m.1))
                 .collect();
-            eprintln!("=== {m}: {} flip(s)\n  {}", f.len(), f.join("\n  "));
+            eprintln!("=== {m}: {} flip(s) {f:?}", f.len());
             f
         };
         let obo = flips("off-by-one:retry_cnt_q");
@@ -10054,15 +10064,24 @@ module uart_tx(); endmodule"#;
             obo,
             "the `_` alias is the same mutation"
         );
-        assert!(
-            obo.is_empty(),
-            "the link_ctrl suite was measured NOT to catch an off-by-one on the retry limit; it \
-             does now — record the property that does: {obo:?}"
+        assert_eq!(
+            obo,
+            vec![
+                ("a_err_implies_retry_limit".to_string(), "holds", "violated"),
+                ("a_retry_limit".to_string(), "violated", "holds"),
+            ],
+            "the off-by-one on the retry limit is killed by `a_err_implies_retry_limit`, and \
+             moves the design's own `a_retry_limit` violation; a changed set is a changed spec"
+        );
+        assert_eq!(
+            inv,
+            vec![("a_retry_limit".to_string(), "violated", "holds")],
+            "inverting `violation` moves only the already-violated `a_retry_limit`"
         );
         assert!(
-            inv.is_empty(),
-            "the link_ctrl suite was measured NOT to catch an inverted `violation`; it does now — \
-             record the property that does: {inv:?}"
+            inv.iter().all(|(_, before, _)| *before != "holds"),
+            "no HOLDING property is violated by a fatal entered without a violation — the \
+             suite's measured hole; a property that kills it changes this: {inv:?}"
         );
     }
 
