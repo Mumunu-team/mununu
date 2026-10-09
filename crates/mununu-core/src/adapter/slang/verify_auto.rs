@@ -4421,6 +4421,31 @@ pub(crate) fn verify_auto_impl(
         // init-less registers). No free bits ⇒ a single cube, the pre-H.B single read.
         let init_cubes =
             free_input_init_cubes_feasible(base_init_cube, &free_input_bits, &free_input_dims);
+        // mununu#637 — the product above admits a cell no cycle-0 state inhabits once a
+        // dimension is a FUNCTION of others (an output over state cells, a compound over the
+        // atoms' registers): such a cell is edgeless, `downgrade_unsatisfiable_cells` masks it
+        // to ⊥, and the whole property would read ⊥ at it. Keep the cubes a concrete reset
+        // state inhabits, under the cycle-0 pins established above (bit order as the lift's:
+        // simple specs, then compounds).
+        let init_cubes = {
+            let mut dims: Vec<PredicateSpec> = seeded.specs.clone();
+            let mut exprs = std::collections::HashMap::new();
+            for (name, expr) in &seeded.compounds {
+                dims.push(PredicateSpec {
+                    name: name.clone(),
+                    register: expr.registers().into_iter().next().unwrap_or_default(),
+                    value: 0,
+                });
+                exprs.insert(name.clone(), expr.clone());
+            }
+            let pins: std::collections::HashMap<String, Vec<u64>> = init_for_cube
+                .iter()
+                .map(|(k, v)| (k.clone(), vec![*v]))
+                .collect();
+            crate::adapter::btor2::kmts_lift::cycle_zero_feasible_cubes(
+                &file, &dims, &exprs, init_cubes, &pins,
+            )
+        };
 
         // R-F5.5d — the final 3-valued verdict over the cube space, from the
         // selected engine. The explicit path runs `cegar_refine_loop`; the
@@ -13191,6 +13216,61 @@ endmodule
             matches!(by("sva_0").outcome, VerifyOutcome::Holds),
             "the same-cycle tautology holds under exact: {:?}",
             by("sva_0").outcome
+        );
+    }
+
+    /// mununu#637 — the EXPLICIT engine on `pulse_cdc`'s `a_out_is_the_edge`, a tautology over
+    /// registered state (`pulse_out == 1 |-> sync_q != sync_d_q`, with `pulse_out = sync_q ^
+    /// sync_d_q`). The cube lift's seeding bound the combinational output to the nearest state
+    /// cell by the loose resolver (`pulse_out == 1` became `sync_q == 1`) and the inconsistent
+    /// cell refuted it — an engine-contradiction against exact-symbolic in the portfolio. With
+    /// value-preserving resolution the output is its own dimension and the cube holds it.
+    #[test]
+    #[ignore = "requires slang + sv2v + Yosys + z3 (mununu-sva docker image); run with --ignored"]
+    fn e2e_637_the_explicit_engine_holds_the_tautology_over_registered_state() {
+        use crate::adapter::yosys::SvFrontend;
+        use std::path::PathBuf;
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/verify/v14_pulse_cdc_sync");
+        let read = |f: &str| {
+            std::fs::read_to_string(dir.join(f))
+                .unwrap_or_else(|e| panic!("read {}: {e}", dir.join(f).display()))
+        };
+        let sources = vec![
+            ("pulse_cdc.sv".to_string(), read("pulse_cdc.sv")),
+            ("pulse_cdc_sva.sv".to_string(), read("pulse_cdc_sva.sv")),
+        ];
+        let yopts = YosysOptions {
+            top: Some("pulse_cdc".to_string()),
+            frontend: SvFrontend::Slang,
+            ..Default::default()
+        };
+        // The library default IS the explicit cube engine (`--engine explicit`).
+        let report = verify_auto(
+            &sources,
+            &yopts,
+            &VerifyAutoOptions {
+                config_values: std::collections::HashMap::from([
+                    ("rst_src_n".to_string(), 1u64),
+                    ("rst_dst_n".to_string(), 1u64),
+                ]),
+                ..Default::default()
+            },
+        )
+        .expect("verify_auto runs on pulse_cdc");
+        for p in &report.properties {
+            eprintln!("  {} ({:?}): {:?}", p.name, p.label, p.outcome);
+        }
+        let tautology = report
+            .properties
+            .iter()
+            .find(|p| p.name.ends_with("sva_0"))
+            .unwrap_or_else(|| panic!("sva_0 in {:?}", report.properties));
+        assert!(
+            matches!(tautology.outcome, VerifyOutcome::Holds),
+            "`pulse_out == 1 |-> sync_q != sync_d_q` is a tautology over registered state; the \
+             explicit engine must hold it: {:?}",
+            tautology.outcome
         );
     }
 }

@@ -288,6 +288,93 @@ where
     matches!(solver.check(), z3::SatResult::Sat)
 }
 
+/// mununu#637 — does a concrete CYCLE-0 state inhabit the cube? `Sat` when Z3 finds a state
+/// satisfying every predicate at its cube polarity — by the uniform source rule
+/// ([`term_source_bv`]), so a combinational dimension reads its real term over `(s, i)` rather
+/// than a register name — AND each pinned register at one of its admissible values. `Unsat`
+/// proves the cube empty at cycle 0; `Unknown` (a timeout, or a predicate name the view cannot
+/// resolve) proves nothing, and the caller keeps the cube. A pin whose name the view cannot
+/// resolve is dropped: fewer constraints admit more cubes, which is the conservative direction
+/// here — dropping an initial state is what could hide a violation.
+///
+/// **Caller must hold a [`z3::with_z3_config`] scope.**
+pub(crate) fn smt_cube_feasible_at_cycle_zero<P: PredicateLike>(
+    view: &Btor2SmtView,
+    cube_bits: u64,
+    predicates: &[P],
+    nid_map: &HashMap<String, Nid>,
+    pins: &HashMap<String, Vec<u64>>,
+    timeout_ms: u32,
+) -> z3::SatResult {
+    let mut constraints: Vec<z3::ast::Bool> = Vec::new();
+    for (i, pred) in predicates.iter().enumerate() {
+        let polarity = (cube_bits >> i) & 1 == 1;
+        let Some(c) = build_pred_constraint_source(view, nid_map, pred, polarity) else {
+            return z3::SatResult::Unknown;
+        };
+        constraints.push(c);
+    }
+    for (name, values) in pins {
+        let Some(bv) = nid_map.get(name).and_then(|nid| term_source_bv(view, *nid)) else {
+            continue;
+        };
+        let any: Vec<z3::ast::Bool> = values
+            .iter()
+            .map(|v| {
+                crate::adapter::btor2::predicate_expr::literal_cmp(
+                    bv,
+                    crate::adapter::btor2::predicate_expr::CmpOp::Eq,
+                    *v,
+                )
+            })
+            .collect();
+        let refs: Vec<&z3::ast::Bool> = any.iter().collect();
+        constraints.push(z3::ast::Bool::or(&refs));
+    }
+    let solver = z3::Solver::new();
+    let mut params = z3::Params::new();
+    params.set_u32("timeout", timeout_ms);
+    if let Some(rl) = cube_smt_rlimit() {
+        params.set_u32("rlimit", rl);
+    }
+    solver.set_params(&params);
+    for c in &constraints {
+        solver.assert(c);
+    }
+    solver.check()
+}
+
+/// The source half of [`build_pred_constraint_uniform`] — one predicate's constraint over the
+/// current cycle `(s, i)` alone, no primed environment: a simple atom reads its term by the
+/// uniform rule ([`term_source_bv`] — a state cell, an input, or a combinational node), a
+/// compound reads its leaves the same way (an array through the current-cycle handle).
+fn build_pred_constraint_source<P: PredicateLike>(
+    view: &Btor2SmtView,
+    nid_map: &HashMap<String, Nid>,
+    pred: &P,
+    polarity: bool,
+) -> Option<z3::ast::Bool> {
+    match pred.expr() {
+        None => {
+            let nid = *nid_map.get(pred.register())?;
+            let bv = term_source_bv(view, nid)?;
+            Some(build_predicate_constraint(bv, pred.value(), polarity))
+        }
+        Some(e) => {
+            let term_bv = |reg: &str| -> Option<z3::ast::BV> {
+                let nid = *nid_map.get(reg)?;
+                term_source_bv(view, nid).cloned()
+            };
+            let arr_lookup = |arr: &str| -> Option<z3::ast::Array> {
+                let nid = *view.array_name_nid.get(arr)?;
+                view.state_curr_arr.get(&nid).cloned()
+            };
+            let raw = e.build_constraint_arr(&term_bv, &arr_lookup)?;
+            Some(if polarity { raw } else { raw.not() })
+        }
+    }
+}
+
 /// Tiny trait surface so the must-edge check can consume either
 /// `PredicateSpec` (from `kmts_lift`) or test-local predicate types
 /// without taking on a kmts_lift dependency here.

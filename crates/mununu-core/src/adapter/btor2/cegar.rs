@@ -836,8 +836,22 @@ pub fn cegar_refine_loop(
     // (F.1), which can DISCOVER a compound relational/bound invariant mid-loop and install
     // it into `lift_opts.compound_exprs`; the compound-aware lift must already be selected
     // when that first compound lands, so we force it from the start for the Craig source.
+    // mununu#637 — a dimension over a COMBINATIONAL signal (a state-only combinational atom the
+    // seeder routes as a dimension, kept by the lift under its own name) is evaluated by the
+    // uniform predicate-image only: the sampler reads registers by name and refuses such a
+    // dimension. Force the SMT seam for it as for compounds, so a lone output atom decides.
+    let has_combinational_dimension = crate::adapter::btor2::parser::parse(btor2_content)
+        .ok()
+        .map(|file| {
+            let symbols = crate::adapter::btor2::parser::collect_symbols(&file);
+            current_predicates
+                .iter()
+                .any(|p| !symbols.values().any(|s| s == &p.register))
+        })
+        .unwrap_or(false);
     let smt_seam_required = !compound_exprs.is_empty()
         || !derived_predicates.is_empty()
+        || has_combinational_dimension
         || matches!(
             cegar_opts.predicate_source,
             PredicateSource::CraigInterpolation
