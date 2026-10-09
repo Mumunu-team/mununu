@@ -13127,4 +13127,70 @@ endmodule
             report.properties
         );
     }
+
+    /// The regression of the #629 re-land (#646), on monono's `pulse_cdc` (vendored at
+    /// `examples/verify/v14_pulse_cdc_sync/`, Apache-2.0): `pulse_in == 0 |=> tog_q ==
+    /// $past(tog_q)` — an INPUT antecedent whose consequent is read in the NEXT cycle. The
+    /// antecedent-propagation pass rewrote it as a same-cycle implication, dropped the antecedent,
+    /// and the exact engine refuted a property that holds; before the pass the exact engine
+    /// SKIPPED it ("atom references primary input") and the explicit engine held it. With the
+    /// same-cycle guard the pass declines and the exact engine's answer is what it was. The
+    /// same-cycle sibling `a_out_is_the_edge` still HOLDS under exact (its explicit-engine
+    /// refutation is mununu#637, a different defect).
+    #[test]
+    #[ignore = "requires slang + sv2v + Yosys + z3 (mununu-sva docker image); run with --ignored"]
+    fn e2e_646_an_input_antecedent_under_a_next_cycle_consequent_is_not_refuted() {
+        use crate::adapter::yosys::SvFrontend;
+        use std::path::PathBuf;
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/verify/v14_pulse_cdc_sync");
+        let read = |f: &str| {
+            std::fs::read_to_string(dir.join(f))
+                .unwrap_or_else(|e| panic!("read {}: {e}", dir.join(f).display()))
+        };
+        let sources = vec![
+            ("pulse_cdc.sv".to_string(), read("pulse_cdc.sv")),
+            ("pulse_cdc_sva.sv".to_string(), read("pulse_cdc_sva.sv")),
+        ];
+        let yopts = YosysOptions {
+            top: Some("pulse_cdc".to_string()),
+            frontend: SvFrontend::Slang,
+            ..Default::default()
+        };
+        let report = verify_auto(
+            &sources,
+            &yopts,
+            &VerifyAutoOptions {
+                config_values: std::collections::HashMap::from([
+                    ("rst_src_n".to_string(), 1u64),
+                    ("rst_dst_n".to_string(), 1u64),
+                ]),
+                exact_symbolic: true,
+                ..Default::default()
+            },
+        )
+        .expect("verify_auto runs on pulse_cdc");
+        for p in &report.properties {
+            eprintln!("  {} ({:?}): {:?}", p.name, p.label, p.outcome);
+        }
+        let by = |suffix: &str| {
+            report
+                .properties
+                .iter()
+                .find(|p| p.name.ends_with(suffix))
+                .unwrap_or_else(|| panic!("property `*{suffix}` in {:?}", report.properties))
+        };
+        let next_cycle = by("sva_1");
+        assert!(
+            !matches!(next_cycle.outcome, VerifyOutcome::Violated { .. }),
+            "`pulse_in == 0 |=> tog_q == $past(tog_q)` holds on the design; the exact engine \
+             must skip or hold it, never refute it: {:?}",
+            next_cycle.outcome
+        );
+        assert!(
+            matches!(by("sva_0").outcome, VerifyOutcome::Holds),
+            "the same-cycle tautology holds under exact: {:?}",
+            by("sva_0").outcome
+        );
+    }
 }
