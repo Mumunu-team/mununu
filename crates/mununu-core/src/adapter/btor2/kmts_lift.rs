@@ -570,12 +570,72 @@ fn reset_truth_per_bit(
                         _ => None,
                     }
                 }
-                None => init
-                    .get(&spec.register)
-                    .map(|v| *v == u128::from(spec.value)),
+                None => match init.get(&spec.register) {
+                    Some(v) => Some(*v == u128::from(spec.value)),
+                    // mununu#637 — a dimension over a COMBINATIONAL signal (kept by
+                    // `resolve_predicate_registers`) has no `init` line of its own; its reset
+                    // truth is the signal observed at the init valuation when every leaf of its
+                    // cone is a register with an `init` (a free-init leaf or an input leaves it
+                    // free, as a free-init register does). Reading it as "both admissible" here
+                    // would re-admit, at cycle 0, exactly the inconsistent cell the strict
+                    // resolution keeps out of the post-image.
+                    None => combinational_reset_truth(file, &init, spec),
+                },
             },
         })
         .collect()
+}
+
+/// The reset truth of a combinational-signal dimension (see [`reset_truth_per_bit`]): `Some`
+/// only when the signal's cone bottoms out in `init`-pinned registers, observed by one
+/// concrete step of the bit-level simulator at the init valuation.
+fn combinational_reset_truth(
+    file: &crate::adapter::btor2::ast::Btor2File,
+    init: &std::collections::HashMap<String, u128>,
+    spec: &PredicateSpec,
+) -> Option<bool> {
+    use crate::adapter::btor2::ast::Node;
+    let is_signal = file.lines.iter().any(|l| match &l.node {
+        Node::Op {
+            symbol: Some(s), ..
+        }
+        | Node::Output {
+            symbol: Some(s), ..
+        } => s == &spec.register,
+        _ => false,
+    });
+    if !is_signal {
+        return None;
+    }
+    // `cone_leaf_nids` seeds from the NAME (a state, input, op or output symbol), not an atom.
+    let leaves = crate::adapter::btor2::dep_graph::cone_leaf_nids(
+        file,
+        std::slice::from_ref(&spec.register),
+    );
+    let symbols = crate::adapter::btor2::parser::collect_symbols(file);
+    for nid in &leaves {
+        match file.lookup(*nid).map(|l| &l.node) {
+            Some(Node::State { .. }) => {
+                let pinned = symbols.get(nid).is_some_and(|s| init.contains_key(s));
+                if !pinned {
+                    return None;
+                }
+            }
+            _ => return None, // an input (or an unresolvable leaf): free at cycle 0
+        }
+    }
+    let registers: std::collections::HashMap<String, u128> =
+        init.iter().map(|(k, v)| (k.clone(), *v)).collect();
+    let step = crate::adapter::btor2::bit_blast::simulate_one_step_observe(
+        file,
+        &registers,
+        &std::collections::HashMap::new(),
+        std::slice::from_ref(&spec.register),
+    )
+    .ok()?;
+    step.observed
+        .get(&spec.register)
+        .map(|v| *v == u128::from(spec.value))
 }
 
 /// The lift's initial cube indices — the R-Y7 rule in one place, shared by the state assembly,
@@ -604,13 +664,123 @@ fn initial_cube_indices(
     config_values: &std::collections::HashMap<String, Vec<u64>>,
     file: &crate::adapter::btor2::ast::Btor2File,
 ) -> Vec<usize> {
-    let cubes = if config_values.is_empty() {
+    let (cubes, pins) = if config_values.is_empty() {
         let truth = reset_truth_per_bit(predicates, compound_exprs, config_values, file);
-        cubes_consistent_with(&truth, predicates.len())
+        let init: std::collections::HashMap<String, Vec<u64>> =
+            crate::adapter::btor2::concrete_oracle::init_valuation(file)
+                .into_iter()
+                .filter_map(|(name, v)| u64::try_from(v).ok().map(|v| (name, vec![v])))
+                .collect();
+        (cubes_consistent_with(&truth, predicates.len()), init)
     } else {
-        crate::adapter::btor2::r_s8_encoder::hyper_must_initial_cubes(predicates, config_values)
+        (
+            crate::adapter::btor2::r_s8_encoder::hyper_must_initial_cubes(
+                predicates,
+                config_values,
+            ),
+            config_values.clone(),
+        )
     };
+    let cubes = cycle_zero_feasible_cubes(file, predicates, compound_exprs, cubes, &pins);
     if cubes.is_empty() { vec![0] } else { cubes }
+}
+
+/// mununu#637 — the candidate initial cubes a concrete cycle-0 state inhabits.
+///
+/// The candidates come from a PRODUCT over the dimensions ([`cubes_consistent_with`], the R-S8
+/// admissible set), which is exact only while the dimensions are independent. A dimension over
+/// a combinational signal is a function of the state dimensions in its cone — `pulse_out == 1`
+/// with `pulse_out = sync_q ^ sync_d_q` — and a compound shares its registers with the atoms, so
+/// the product also admits cells no state inhabits: `{pulse_out == 0, sync_q != sync_d_q}` was
+/// initial on monono's `pulse_cdc` (its `sync_q` has no reset, so that bit is free), it has no
+/// outgoing edge, `downgrade_unsatisfiable_cells` masked it to ⊥, and a tautology read ⊥.
+///
+/// Only when the dimensions are coupled ([`cube_dimensions_are_coupled`]) is Z3 asked, one
+/// quantifier-free query per candidate ([`smt_cube_feasible_at_cycle_zero`]): a cube is dropped
+/// on a PROVEN `Unsat` only; `Unknown` keeps it, an encoder failure keeps them all, and a filter
+/// that would drop every candidate keeps them all (an empty initial set reads as a vacuous Holds
+/// in every consumer). `pins` are each register's admissible cycle-0 values — the `init` lines,
+/// or the sidecar's config values where those win.
+pub(crate) fn cycle_zero_feasible_cubes(
+    file: &crate::adapter::btor2::ast::Btor2File,
+    predicates: &[PredicateSpec],
+    compound_exprs: &std::collections::HashMap<
+        String,
+        crate::adapter::btor2::predicate_expr::PredicateExpr,
+    >,
+    candidates: Vec<usize>,
+    pins: &std::collections::HashMap<String, Vec<u64>>,
+) -> Vec<usize> {
+    use crate::adapter::btor2::smt_must_edge::{
+        build_register_nid_map_with_inputs, smt_cube_feasible_at_cycle_zero,
+    };
+    if candidates.is_empty() || !cube_dimensions_are_coupled(file, predicates, compound_exprs) {
+        return candidates;
+    }
+    let cfg = z3::Config::new();
+    let kept = z3::with_z3_config(&cfg, || -> Vec<usize> {
+        let Ok(view) = encode_design_for_lift(file) else {
+            return candidates.clone();
+        };
+        let nid_map = build_register_nid_map_with_inputs(&view);
+        let preds = cube_predicates(predicates, compound_exprs);
+        let timeout_ms = crate::adapter::run_budget::clamp_query_ms(5_000);
+        candidates
+            .iter()
+            .copied()
+            .filter(|&cube| {
+                !matches!(
+                    smt_cube_feasible_at_cycle_zero(
+                        &view,
+                        cube as u64,
+                        &preds,
+                        &nid_map,
+                        pins,
+                        timeout_ms
+                    ),
+                    z3::SatResult::Unsat
+                )
+            })
+            .collect()
+    });
+    if kept.is_empty() {
+        tracing::debug!(
+            candidates = candidates.len(),
+            "every candidate initial cube proved empty at cycle 0; keeping the product"
+        );
+        return candidates;
+    }
+    if kept.len() != candidates.len() {
+        tracing::debug!(
+            dropped = candidates.len() - kept.len(),
+            kept = kept.len(),
+            "initial cubes no cycle-0 state inhabits dropped"
+        );
+    }
+    kept
+}
+
+/// mununu#637 — whether the product over the dimensions can admit a cell no state inhabits: a
+/// compound, two atoms over one register, or an atom over a name that is not a state cell's or
+/// an input's (a combinational signal — a function of the other dimensions' registers).
+/// Independent atoms over distinct state cells and free inputs make the product exact, so that
+/// common shape pays for no query.
+fn cube_dimensions_are_coupled(
+    file: &crate::adapter::btor2::ast::Btor2File,
+    predicates: &[PredicateSpec],
+    compound_exprs: &std::collections::HashMap<
+        String,
+        crate::adapter::btor2::predicate_expr::PredicateExpr,
+    >,
+) -> bool {
+    if !compound_exprs.is_empty() {
+        return true;
+    }
+    let symbols = crate::adapter::btor2::parser::collect_symbols(file);
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    predicates
+        .iter()
+        .any(|p| !seen.insert(p.register.as_str()) || !symbols.values().any(|s| s == &p.register))
 }
 
 /// R.2.5b (2026-06-06) — Policy for inferring `must`-side
@@ -2021,15 +2191,43 @@ fn resolve_predicate_registers(
     file: &crate::adapter::btor2::ast::Btor2File,
     predicates: &mut [PredicateSpec],
 ) -> Result<Vec<crate::adapter::AdapterWarning>, AdapterError> {
-    use crate::adapter::sts_ir::SymbolicTransitionSystem;
     let symbols = crate::adapter::btor2::parser::collect_symbols(file);
     let known: std::collections::HashSet<&String> = symbols.values().collect();
-    let sts = crate::adapter::sts_ir::BtorSts::new(file);
+    // mununu#637 — a name that is not a state (or a state's name) resolves in exactly two
+    // ways, both VALUE-PRESERVING, and never by the loose "nearest state in the cone" walk:
+    //   1. a value-identical alias of a state cell (`uext … 0 NAME`, the async-reset mux, the
+    //      port that mirrors it) → the cell's canonical symbol;
+    //   2. a combinational signal's own symbol (an `Op`/`Output` line) → KEPT, so the dimension
+    //      is the signal (the uniform predicate-image resolves it through the signal cache).
+    // The loose walk bound monono's `pulse_out = sync_q ^ sync_d_q` to `sync_q`, so the atom
+    // `pulse_out == 1` became `sync_q == 1` — a different predicate — and the cell
+    // `{sync_q == 1, sync_q == sync_d_q}` refuted a tautology (the csrng `main_sm_err_o`
+    // soundness case, now in the lift's own seeding).
+    let combinational: std::collections::HashSet<&String> = file
+        .lines
+        .iter()
+        .filter_map(|l| match &l.node {
+            crate::adapter::btor2::ast::Node::Op {
+                symbol: Some(s), ..
+            }
+            | crate::adapter::btor2::ast::Node::Output {
+                symbol: Some(s), ..
+            } => Some(s),
+            _ => None,
+        })
+        .collect();
     for pred in predicates.iter_mut() {
         if known.contains(&pred.register) {
             continue;
         }
-        match sts.resolve_register(&pred.register) {
+        let strict = crate::adapter::btor2::parser::resolve_to_canonical_name(
+            file,
+            &pred.register,
+            crate::adapter::btor2::parser::ResolveStrictness::Strict {
+                allow_reset_mux: true,
+            },
+        );
+        match strict {
             Some(canonical) => {
                 tracing::debug!(
                     predicate = %pred.name,
@@ -2038,6 +2236,13 @@ fn resolve_predicate_registers(
                     "predicate_cube_lift: resolved alias register name to canonical state cell"
                 );
                 pred.register = canonical;
+            }
+            None if combinational.contains(&pred.register) => {
+                tracing::debug!(
+                    predicate = %pred.name,
+                    signal = %pred.register,
+                    "predicate_cube_lift: a combinational signal is kept as the dimension's source (not bound to a state cell)"
+                );
             }
             None => {
                 return Err(AdapterError {
@@ -2709,6 +2914,25 @@ pub fn predicate_cube_lift(
     if !matches!(lift_opts.may_edge_inference, MayEdgeInference::SmtAllPairs)
         && lift_opts.max_input_bits > 0
     {
+        // mununu#637 — the sampler builds its representative and reads its successors from a
+        // REGISTER map by name; a combinational dimension (kept by `resolve_predicate_registers`)
+        // is not in that map and would read as 0 on every step, a silent wrong edge set. The
+        // uniform SMT image is the path that evaluates a signal; say so instead of guessing.
+        if let Some(comb) = predicates
+            .iter()
+            .find(|p| !symbols.values().any(|s| s == &p.register))
+        {
+            return Err(AdapterError {
+                kind: crate::adapter::AdapterErrorKind::UnsupportedConstruct,
+                location: None,
+                message: format!(
+                    "adapter/btor2/predicate_cube_lift: predicate `{}` is over the combinational \
+                     signal `{}`, which the sampling may-inference cannot evaluate; use \
+                     may_edge_inference = SmtAllPairs (the uniform predicate-image)",
+                    comb.name, comb.register
+                ),
+            });
+        }
         let mut sampled_targets_per_source: Vec<std::collections::BTreeSet<usize>> =
             vec![std::collections::BTreeSet::new(); state_ids.len()];
         let boolean_inputs: Vec<String> = collect_boolean_input_symbols(&file, &symbols);
@@ -5030,6 +5254,169 @@ mod tests {
     // transition relation binds correctly.
     const ALIASED_TOGGLE_BTOR2: &str = "1 sort bitvec 1\n2 zero 1\n3 state 1 cnt_d\n4 init 1 3 2\n5 not 1 3\n6 next 1 3 5\n7 uext 1 3 0 cnt_q\n";
 
+    // mununu#637 — monono's `pulse_cdc` shape in six lines: an OUTPUT `out = a ^ b` over two
+    // registers (the second symbol-less, named only by its `uext 0` alias `b_q`), both reset to
+    // 0, stepping `a ← a ^ b`, `b ← !b` on `go`. Every state (a, b) is reachable; the cells
+    // `{out == 1, a == b}` are inhabited by no state at all.
+    const OUTPUT_XOR_BTOR2: &str = "1 sort bitvec 1\n2 input 1 go\n3 state 1 a\n4 state 1\n\
+5 uext 1 4 0 b_q\n6 xor 1 3 4\n7 output 6 out\n8 zero 1\n9 init 1 3 8\n10 init 1 4 8\n\
+11 ite 1 2 6 3\n12 next 1 3 11\n13 not 1 4\n14 ite 1 2 13 4\n15 next 1 4 14\n";
+
+    fn output_xor_predicates() -> Vec<PredicateSpec> {
+        vec![
+            PredicateSpec {
+                name: "out_is_1".into(),
+                register: "out".into(),
+                value: 1,
+            },
+            PredicateSpec {
+                name: "a_is_1".into(),
+                register: "a".into(),
+                value: 1,
+            },
+            PredicateSpec {
+                name: "b_is_1".into(),
+                register: "b_q".into(),
+                value: 1,
+            },
+        ]
+    }
+
+    /// mununu#637 — the loose "nearest state in the cone" walk bound `out` to `a`, so the atom
+    /// `out == 1` became `a == 1` — a different predicate — and the inconsistent cell
+    /// `{out == 1, a == b}` entered the abstraction. The output must stay the dimension's own
+    /// source; the alias of the symbol-less cell must resolve to that cell; the init cube must
+    /// read the output as it is at reset (0); and no edge may reach an inconsistent cell.
+    #[test]
+    fn x637_a_combinational_output_is_the_dimension_itself_not_the_nearest_state() {
+        let result = predicate_cube_lift(
+            output_xor_predicates(),
+            OUTPUT_XOR_BTOR2,
+            &AdapterOptions::default(),
+            &PredicateCubeLiftOptions {
+                may_edge_inference: MayEdgeInference::SmtAllPairs,
+                ..Default::default()
+            },
+        )
+        .expect("a combinational dimension lifts on the uniform image");
+        let regs: Vec<&str> = result
+            .predicates
+            .iter()
+            .map(|p| p.register.as_str())
+            .collect();
+        assert_eq!(
+            regs,
+            vec!["out", "a", "b_q"],
+            "the output is kept, the alias resolves to its (symbol-less) cell: {regs:?}"
+        );
+        // Bit 0 = `out == 1`, bit 1 = `a == 1`, bit 2 = `b_q == 1`: the inconsistent cells
+        // are 0b001 (out, a=0, b=0) and 0b111 (out, a=1, b=1).
+        for s in result.clts.initial_states() {
+            assert_eq!(
+                s.index() & 1,
+                0,
+                "at reset a = b = 0, so `out == 1` is false: initial cube {}",
+                s.index()
+            );
+        }
+        let edges = collect_cube_edges(&result.clts);
+        assert!(
+            !edges.iter().any(|&(_, t)| t == 0b001 || t == 0b111),
+            "no edge reaches a cell no state inhabits: {edges:?}"
+        );
+        // (a, b) = (0,0) → (0,1): out = 1 there, so the cell is 0b101; → (1,0): 0b011.
+        assert!(
+            edges.contains(&(0b000, 0b101)) && edges.contains(&(0b101, 0b011)),
+            "the real steps are there — (0,0) → (0,1) → (1,0): {edges:?}"
+        );
+    }
+
+    /// mununu#637 — the sampler reads registers by name; a combinational dimension is not a
+    /// register, so sampling it would read 0 on every step. It refuses by name instead.
+    #[test]
+    fn x637_the_sampling_inference_refuses_a_combinational_dimension() {
+        let err = predicate_cube_lift(
+            output_xor_predicates(),
+            OUTPUT_XOR_BTOR2,
+            &AdapterOptions::default(),
+            &PredicateCubeLiftOptions {
+                may_edge_inference: MayEdgeInference::Off,
+                ..Default::default()
+            },
+        )
+        .expect_err("the sampler cannot evaluate a combinational signal");
+        assert!(
+            err.message.contains("`out`") && err.message.contains("SmtAllPairs"),
+            "names the signal and the path that can: {}",
+            err.message
+        );
+    }
+
+    // mununu#637 — `OUTPUT_XOR_BTOR2` with `a` FREE at reset (no `init` line), the `pulse_cdc`
+    // synchroniser shape: `b` resets to 0, `a` is whatever it powers up as, `out = a ^ b`.
+    const OUTPUT_XOR_FREE_A_BTOR2: &str = "1 sort bitvec 1\n2 input 1 go\n3 state 1 a\n\
+4 state 1\n5 uext 1 4 0 b_q\n6 xor 1 3 4\n7 output 6 out\n8 zero 1\n10 init 1 4 8\n\
+11 ite 1 2 6 3\n12 next 1 3 11\n13 not 1 4\n14 ite 1 2 13 4\n15 next 1 4 14\n";
+
+    /// mununu#637 — the initial cube set is a PRODUCT over the dimensions, and `out` is a
+    /// function of `a` and `b`: with `a` free at reset the product admits `{out == 1, a == 0,
+    /// b == 0}` and `{out == 0, a == 1, b == 0}`, cells no state inhabits. Such a cell is
+    /// edgeless, `downgrade_unsatisfiable_cells` masks it to ⊥, and a property read at it is ⊥
+    /// — monono's `pulse_cdc` tautology came back `Unknown { unknown_cells: 2 }` this way once
+    /// the loose binding was gone. The initial set must be the cells a reset state inhabits.
+    #[test]
+    fn x637_an_initial_cell_no_reset_state_inhabits_is_not_initial() {
+        let result = predicate_cube_lift(
+            output_xor_predicates(),
+            OUTPUT_XOR_FREE_A_BTOR2,
+            &AdapterOptions::default(),
+            &PredicateCubeLiftOptions {
+                may_edge_inference: MayEdgeInference::SmtAllPairs,
+                ..Default::default()
+            },
+        )
+        .expect("lifts");
+        let mut initial: Vec<usize> = result
+            .clts
+            .initial_states()
+            .iter()
+            .map(|s| s.index())
+            .collect();
+        initial.sort_unstable();
+        // Bit 0 = `out == 1`, bit 1 = `a == 1`, bit 2 = `b_q == 1`. At reset b = 0 and a is
+        // free, so out = a: the inhabited cells are 0b000 and 0b011 — never 0b001 / 0b010.
+        assert_eq!(
+            initial,
+            vec![0b000, 0b011],
+            "the reset states are (a, b) ∈ {{(0,0), (1,0)}} with out = a; got {initial:?}"
+        );
+    }
+
+    /// mununu#637 — the pure filter: without pins every cell where `out == a ^ b` survives;
+    /// with `b` pinned to its reset value only the two cells a reset state inhabits do. A pin
+    /// spelled by the register's alias (`b_q`, the `uext 0` of the symbol-less cell) binds.
+    #[test]
+    fn x637_the_cycle_zero_filter_keeps_the_inhabited_cubes_only() {
+        let file = crate::adapter::btor2::parser::parse(OUTPUT_XOR_FREE_A_BTOR2).expect("parses");
+        let preds = output_xor_predicates();
+        let none = std::collections::HashMap::new();
+        let all: Vec<usize> = (0..8).collect();
+        let consistent =
+            cycle_zero_feasible_cubes(&file, &preds, &none, all.clone(), &HashMap::new());
+        assert_eq!(
+            consistent,
+            vec![0b000, 0b011, 0b101, 0b110],
+            "exactly the cells with out = a ^ b"
+        );
+        let pins = HashMap::from([("b_q".to_string(), vec![0u64])]);
+        let at_reset = cycle_zero_feasible_cubes(&file, &preds, &none, all, &pins);
+        assert_eq!(
+            at_reset,
+            vec![0b000, 0b011],
+            "b = 0 at reset, a free, out = a"
+        );
+    }
+
     /// Collect every `(src_cube, tgt_cube)` edge of a lifted Clts.
     fn collect_cube_edges(
         clts: &Clts<DefaultStateIdx, DefaultLabelIdx>,
@@ -6557,15 +6944,18 @@ mod tests {
     /// set per the R-S8 encoder. For a register with multiple
     /// valid values, multiple cubes become admissible initial
     /// states.
+    ///
+    /// mununu#637 — and no further: R-S8's per-dimension admissibility also let in cube 0
+    /// (`cnt ∉ {0, 1}`, which the pin itself forbids) and cube 3 (`cnt == 0 ∧ cnt == 1`, inhabited
+    /// by nothing). Two atoms over one register are coupled dimensions, so the cycle-0
+    /// feasibility filter proves both empty and the initial set is exactly the two cubes a
+    /// pinned reset state inhabits.
     #[test]
     fn r_y7_config_values_expands_initial_state_set() {
         // 2 predicates over the counter: cnt == 0 and cnt == 1.
         // config_values: cnt is in {0, 1} → both predicate-true
         // cubes are admissible (cube 1 = pred_0 true; cube 2 =
-        // pred_1 true). The over-approximation in R-S8 also
-        // admits cube 0 (both predicates false; could be other
-        // valid value) and cube 3 (both predicates true;
-        // inconsistent but not filtered).
+        // pred_1 true), and only those (mununu#637).
         let preds = vec![
             PredicateSpec {
                 name: "cnt_is_0".into(),
@@ -6594,14 +6984,18 @@ mod tests {
         };
         let result = predicate_cube_lift(preds, COUNTER_BTOR2, &AdapterOptions::default(), &opts)
             .expect("predicate_cube_lift succeeds");
-        let initial_count = result.clts.initial_states().len();
-        assert!(
-            initial_count > 1,
-            "R-Y7: config_values must expand initial-state set beyond singleton; got {initial_count}"
-        );
+        let mut initial: Vec<usize> = result
+            .clts
+            .initial_states()
+            .iter()
+            .map(|s| s.index())
+            .collect();
+        initial.sort_unstable();
         assert_eq!(
-            initial_count, 4,
-            "R-Y7: with both predicate values valid + over-approximation, all 4 cubes admissible"
+            initial,
+            vec![1, 2],
+            "R-Y7: both predicate values valid ⇒ both predicate-true cubes initial; mununu#637: the \
+             uninhabited `cnt == 0 ∧ cnt == 1` and the pin-contradicting `cnt ∉ {{0, 1}}` are not"
         );
     }
 
