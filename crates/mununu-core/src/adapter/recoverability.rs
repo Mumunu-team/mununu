@@ -1118,7 +1118,8 @@ pub fn verify_recoverability_refined(
     // When the caller NAMES config inputs (`--config-values`), partition over their values; otherwise
     // (bare `--refine`) AUTO-identify the config axis (the detected reset). Either way it is a concrete
     // decide per config, so it composes with any canonical verdict (it can even reveal a config that
-    // breaks a HOLDS). `None` ⇒ config-independent, no reset detected, or over the enumeration cap.
+    // breaks a HOLDS). Named inputs are reported as asked, one cell included (#634); the auto axis
+    // reports only a config-DEPENDENT partition. `None` ⇒ no reset detected, or over the cap.
     let part = if config_specs.is_empty() {
         auto_config_partition(btor2_content, good)
     } else {
@@ -1959,10 +1960,14 @@ fn discover_game_env_conjunction(
 /// recovery rides on. For each config valuation (the cross-product of each `(input, candidate values)`
 /// spec) PIN those inputs to constants and decide the CONCRETE pinned model with the exact engine —
 /// which is 2-valued SOUND per cell (a pinned config is a constant, so the νµ is over a concrete
-/// design). Returns a [`ConfigPartition`] ONLY when the property genuinely DEPENDS on config (≥2
-/// non-empty verdict cells) — turning a flat verdict into "holds for configs {A}, violated for {B}".
-/// `None` when config-independent, when `config_specs` is empty, or when the cross-product exceeds the
-/// enumeration cap (a wide/free config needs the symbolic `∃config`, deferred).
+/// design). Returns the [`ConfigPartition`] the caller asked for — every enumerated cell, including a
+/// ONE-cell partition (mununu#634: `--config-values rst_n=1` is a scoped verdict, "under this pin the
+/// property is violated", and it is what `--discover-assumptions` keys off; collapsing it to `None`
+/// hid exactly the cell the user named). Whether the property genuinely DEPENDS on config is
+/// [`depends_on_config`]; the AUTO reset axis ([`auto_config_partition`]) applies it, because there
+/// the user named nothing and a config-independent partition would only repeat the bare verdict.
+/// `None` when `config_specs` is empty or the cross-product exceeds the enumeration cap (a wide/free
+/// config needs the symbolic `∃config`, deferred).
 ///
 /// **Engine (§16):** `exact-symbolic` full-state ROBDD (OxiDD) over each `pin_inputs_to_constants`
 /// concrete model — no external tool, sidecar-free. The partition is sound OVER THE ENUMERATED config
@@ -2015,13 +2020,18 @@ pub fn config_partition(
         }
     }
 
-    // Report ONLY when the property genuinely DEPENDS on config — ≥2 non-empty verdict cells. A single
-    // non-empty cell (all-holds / all-violated) is config-INDEPENDENT: the bare verdict already says it.
-    let nonempty = [&part.holds, &part.violated, &part.unknown, &part.vacuous]
+    Some(part)
+}
+
+/// Does the verdict genuinely DEPEND on the config — ≥2 non-empty verdict cells? A single non-empty
+/// cell (all-holds / all-violated) is config-INDEPENDENT: the bare verdict already says it. The AUTO
+/// axis reports only a dependent partition; an EXPLICIT spec is reported as asked (mununu#634).
+fn depends_on_config(part: &ConfigPartition) -> bool {
+    [&part.holds, &part.violated, &part.unknown, &part.vacuous]
         .iter()
         .filter(|c| !c.is_empty())
-        .count();
-    (nonempty >= 2).then_some(part)
+        .count()
+        >= 2
 }
 
 /// Capability A, slice 2b — AUTO config-atom identification. When the caller does not name config
@@ -2053,7 +2063,7 @@ fn auto_config_partition(btor2_content: &str, good: &str) -> Option<ConfigPartit
     // property may hold at one and be violated/vacuous at the other — that IS the branching pair to
     // surface). `config_partition` reports only when the cells genuinely differ.
     let specs: Vec<(String, Vec<u64>)> = resets.into_iter().map(|(n, _)| (n, vec![0, 1])).collect();
-    config_partition(btor2_content, good, &specs)
+    config_partition(btor2_content, good, &specs).filter(depends_on_config)
 }
 
 /// The cross-product of the per-input candidate value lists → every config valuation.
@@ -4633,10 +4643,12 @@ mod tests {
         assert!(part.unknown.is_empty() && part.vacuous.is_empty());
     }
 
-    /// Config-partition — a design whose recovery does NOT depend on `mode` (`busy` always recovers)
-    /// yields NO partition: config-independent, the bare verdict already says it.
+    /// Config-partition — a design whose recovery does NOT depend on `mode` (`busy` always recovers):
+    /// an EXPLICIT spec is still reported as asked (every named value holds — the scoped answer), and
+    /// [`depends_on_config`] is what says the partition carries nothing the bare verdict did not
+    /// (the auto axis collapses on it; mununu#634 stopped the explicit path from doing the same).
     #[test]
-    fn config_partition_none_when_config_independent() {
+    fn config_partition_reports_an_explicit_config_independent_spec_as_all_holds() {
         const INDEP: &str = "\
 1 sort bitvec 1
 2 sort bitvec 2
@@ -4649,15 +4661,49 @@ mod tests {
 9 and 1 3 8
 10 next 1 5 9
 ";
+        let part = config_partition(
+            INDEP,
+            "busy == 0",
+            &[("mode".to_string(), vec![0, 1, 2, 3])],
+        )
+        .expect("an explicit spec is reported as asked");
+        assert_eq!(part.holds.len(), 4, "{part:?}");
+        assert!(part.violated.is_empty() && part.unknown.is_empty());
         assert!(
-            config_partition(
-                INDEP,
-                "busy == 0",
-                &[("mode".to_string(), vec![0, 1, 2, 3])]
-            )
-            .is_none(),
-            "recovery independent of `mode` ⇒ no ConfigDependent partition"
+            !depends_on_config(&part),
+            "recovery independent of `mode`: one non-empty cell"
         );
+    }
+
+    /// mununu#634 — `--config-values mode=3`, ONE value: the scoped verdict the user asked for ("under
+    /// this pin the property is violated"), reported as a one-cell partition. It used to collapse to
+    /// `None` as "config-independent", so the pinned run showed an empty refinement and nothing for
+    /// `--discover-assumptions` to key off.
+    #[test]
+    fn x634_an_explicit_single_value_pin_is_reported_as_a_one_cell_partition() {
+        let part = config_partition(MODE_DEP, "busy == 0", &[("mode".to_string(), vec![3])])
+            .expect("a one-value explicit spec is a scoped verdict, not config-independence");
+        assert_eq!(
+            part.violated,
+            vec![vec![("mode".to_string(), 3)]],
+            "mode == 3 traps: {part:?}"
+        );
+        assert!(part.holds.is_empty() && part.unknown.is_empty() && part.vacuous.is_empty());
+        assert!(!part.exhaustive, "one of four values enumerated");
+        assert!(!depends_on_config(&part));
+        // The refined verb composes it: the canonical verdict is unchanged and the one cell rides along.
+        let (verdict, refinement) = verify_recoverability_refined(
+            MODE_DEP,
+            "busy == 0",
+            &[],
+            &[("mode".to_string(), vec![3])],
+            false,
+        );
+        assert_ne!(verdict, PropertyVerdict::Skipped);
+        let part = refinement
+            .config_partition
+            .expect("the refinement carries the pinned cell");
+        assert_eq!(part.violated, vec![vec![("mode".to_string(), 3)]]);
     }
 
     // `busy` sets on `start` and TRAPS at 1 (operational logic `busy | (start & !busy)` never clears);

@@ -1037,7 +1037,8 @@ pub struct Btor2VerifyRecoverabilityRequest {
     #[serde(default)]
     pub refine: bool,
     /// Config-partition (capability A): config inputs to split the verdict over, each
-    /// `"NAME=v1,v2,..."`. The refinement then carries a `config_partition` decided exactly per config.
+    /// `"NAME=v1,v2,..."`. The refinement then carries a `config_partition` decided exactly per config,
+    /// every named value included — a single value is a scoped pin, reported as its one cell (#634).
     /// Implies the refined output. Mirrors the CLI `--config-values`.
     #[serde(default)]
     pub config_values: Vec<String>,
