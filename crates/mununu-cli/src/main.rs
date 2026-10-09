@@ -1045,8 +1045,10 @@ struct Btor2VerifyRecoverabilityArgs {
     discover_assumptions: bool,
     /// Config-partition (refined-verdicts capability A): name config INPUTS to split the verdict over,
     /// each `NAME=v1,v2,...` (repeatable). The refinement then reports a `config_partition` — "holds
-    /// for configs {A}, violated for {B}" — decided exactly per config (sound per cell). Implies the
-    /// refined output. Best for a NARROW / few-value config (the cross-product is capped).
+    /// for configs {A}, violated for {B}" — decided exactly per config (sound per cell), every named
+    /// value included: a single value (`rst_n=1`) is a scoped pin, reported as its one cell, and a
+    /// violated cell is what `--discover-assumptions` searches under. Implies the refined output.
+    /// Best for a NARROW / few-value config (the cross-product is capped).
     #[arg(long = "config-values", value_name = "NAME=v1,v2,...")]
     config_values: Vec<String>,
     #[command(flatten)]

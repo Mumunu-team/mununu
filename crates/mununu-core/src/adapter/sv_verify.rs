@@ -1670,4 +1670,73 @@ endmodule
             targets.stick
         );
     }
+
+    /// mununu#634 — the issue's two runs on `link_ctrl.sv`, target `state_q == 0` (idle). The
+    /// canonical verdict HOLDS because reset is a free input (it escapes every trap). Run A, the
+    /// explicit two-value spec `rst_n=0,1`, partitions it: held-in-reset recovers, operational
+    /// (`rst_n=1`) traps in `S_FATAL`. Run B, the single-value pin `rst_n=1`, used to come back with
+    /// an empty refinement — the one cell collapsed as "config-independent"; it is the scoped verdict
+    /// the user asked for and is reported as its one violated cell.
+    #[test]
+    #[ignore = "requires slang + sv2v + Yosys + z3 (mununu-sva docker image); run with --ignored"]
+    fn e2e_634_an_explicit_single_value_reset_pin_reports_its_violated_cell() {
+        use crate::verdict::PropertyVerdict;
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/verify/v12_link_ctrl_llm_fsm/link_ctrl.sv");
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let lift = SvLift {
+            source,
+            additional_sources: Vec::new(),
+            top: Some("link_ctrl".into()),
+            use_sv2v: true,
+            include_dirs: Vec::new(),
+            frontend: SvFrontend::Slang,
+        };
+        let cell = |v: u64| vec![("rst_n".to_string(), v)];
+        // Run A — the two-value spec: the branching pair.
+        let (verdict, refinement) = sv_verify_recoverability_refined(
+            &lift,
+            "state_q == 0",
+            &[],
+            &[("rst_n".to_string(), vec![0, 1])],
+            false,
+        )
+        .expect("verify-recoverability runs");
+        assert_eq!(
+            verdict,
+            PropertyVerdict::Holds,
+            "reset is free ⇒ idle always recoverable"
+        );
+        let part = refinement
+            .config_partition
+            .expect("the two-value spec partitions the verdict");
+        assert_eq!(part.holds, vec![cell(0)], "{part:?}");
+        assert_eq!(
+            part.violated,
+            vec![cell(1)],
+            "operational: S_FATAL has no exit but reset"
+        );
+        assert!(part.exhaustive);
+        // Run B — the single-value pin: the same violated cell, scoped.
+        let (verdict, refinement) = sv_verify_recoverability_refined(
+            &lift,
+            "state_q == 0",
+            &[],
+            &[("rst_n".to_string(), vec![1])],
+            false,
+        )
+        .expect("verify-recoverability runs");
+        assert_eq!(
+            verdict,
+            PropertyVerdict::Holds,
+            "the canonical verdict is unchanged"
+        );
+        let part = refinement
+            .config_partition
+            .expect("a single-value pin is a scoped verdict, reported as its one cell (#634)");
+        assert_eq!(part.violated, vec![cell(1)], "{part:?}");
+        assert!(part.holds.is_empty() && part.unknown.is_empty());
+        assert!(!part.exhaustive, "one of the two reset levels");
+    }
 }

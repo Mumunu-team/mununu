@@ -119,7 +119,7 @@ Decides `AG EF good` — "from every reachable state, can the design get back to
 - `property` — the checked formula echoed for provenance.
 - `refinement` — present only when the request set `refine`, `config_values`, or `discover_assumptions`. Structured detail:
   - `vacuous` — the recovery target `good` was never reachable from the initial state. Bare `AG EF good` is degenerate then; the plain verdict is misleading.
-  - `config_partition` — per-config decided verdicts when `config_values` was requested. Each row is `[(name, u64)]`. `exhaustive: true` means the enumerated cells cover the entire reachable config space.
+  - `config_partition` — per-config decided verdicts when `config_values` was requested, every named value included: a single value (`"rst_n=1"`) is a scoped pin, reported as its one cell (mununu#634). Each row is `[(name, u64)]`. `exhaustive: true` means the enumerated cells cover the entire reachable config space. The bare `refine` auto-partitions over the detected reset and reports only a partition the verdict genuinely depends on (two or more non-empty cells).
   - `holds_under` — CONDITIONAL results: the property holds under environment assumption `φ`. `kind` names the shape (`InputHold`, `InputConjunction`, `InputFairness`, …). `non_vacuous: true` means the non-vacuity gate passed — `good` is actually reached under `φ`, not just trivially satisfied.
   - `bot_diagnosis` — best-effort structural "why ⊥" hint. `uncertified_counters` names counters gating recovery without a ranking certificate; `wide_influences` names wide state/inputs the predicate cube cannot enumerate.
 
