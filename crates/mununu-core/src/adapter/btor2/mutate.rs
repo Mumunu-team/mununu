@@ -15,7 +15,7 @@
 
 use super::ast::{Btor2File, ConstValue, Nid, Node, Op, Operand, Sort};
 use super::bit_blast::resolve_btor2_constant;
-use super::parser::{self, collect_symbols};
+use super::parser;
 
 /// A named structural fault applied to a lifted BTOR2 design.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -174,7 +174,9 @@ pub fn apply_mutation(btor2: &str, m: &Mutation) -> Result<String, String> {
 /// Enumerate the mutation targets in a lifted design (`sv mutate --list`).
 pub fn list_targets(btor2: &str) -> Result<MutationTargets, String> {
     let file = parser::parse(btor2).map_err(|e| format!("BTOR2 parse: {}", e.message))?;
-    let symbols = collect_symbols(&file);
+    // Each register under its strict-preferred name (its own symbol or a value-identical
+    // alias) — the loose cone name advertised a next-value wire as a register (#633).
+    let names = parser::canonical_register_names(&file);
     let mut stick: Vec<String> = Vec::new();
     let mut drop_reset: Vec<String> = Vec::new();
     let mut off_by_one: Vec<String> = Vec::new();
@@ -184,7 +186,7 @@ pub fn list_targets(btor2: &str) -> Result<MutationTargets, String> {
         }
         // Only NAMED registers are addressable targets (an anonymous split
         // sub-cell has no stable handle).
-        let Some(name) = symbols.get(&line.nid) else {
+        let Some(name) = names.get(&line.nid) else {
             continue;
         };
         stick.push(name.clone());
@@ -234,18 +236,19 @@ pub fn list_targets(btor2: &str) -> Result<MutationTargets, String> {
     })
 }
 
-/// Resolve a user register NAME to its `state` line nid — directly (the symbol is
-/// on the `state` line) or via a `uext … 0 NAME` alias (`collect_symbols` attaches
-/// the alias name to the underlying state nid). `None` if no state cell carries it.
+/// Resolve a user register NAME to its `state` line nid: any **value-identical**
+/// spelling (the symbol on the `state` line, a `uext … 0 NAME` alias, the port that
+/// mirrors it — [`parser::resolve_state_alias`]), else the name `--list` advertises it
+/// under ([`parser::canonical_register_names`], the loose fallback for a cell nothing
+/// names exactly). `None` if no state cell carries it — a next-value wire such as
+/// `cnt_d` is not a register (#633).
 fn resolve_state_nid(file: &Btor2File, name: &str) -> Option<Nid> {
-    let symbols = collect_symbols(file);
-    symbols.iter().find_map(|(nid, sym)| {
-        if sym == name && matches!(file.lookup(*nid)?.node, Node::State { .. }) {
-            Some(*nid)
-        } else {
-            None
-        }
-    })
+    if let Some(nid) = parser::resolve_state_alias(file, name, true) {
+        return Some(nid);
+    }
+    parser::canonical_register_names(file)
+        .into_iter()
+        .find_map(|(nid, sym)| (sym == name).then_some(nid))
 }
 
 /// Freeze a register: point its `next` at its own state nid (identity → frozen).
@@ -701,6 +704,34 @@ mod tests {
             vec!["r".to_string()],
             "only the reset-mux register `r` is a drop-reset target; `q` toggles"
         );
+    }
+
+    // #633 — the cell (4) carries no symbol; the next-value op `cnt_d` (9) comes first
+    // and reaches the cell in the loose cone trace, the `uext 0` alias `cnt_q` (11) is
+    // value-identical. `--list` used to advertise `cnt_d` as the register.
+    const ALIASED_COUNTER: &str = "1 sort bitvec 1\n2 sort bitvec 2\n3 input 1 go\n\
+4 state 2\n5 zero 2\n6 init 2 4 5\n7 one 2\n8 add 2 4 7\n\
+9 ite 2 3 8 4 cnt_d\n10 next 2 4 9\n11 uext 2 4 0 cnt_q\n";
+
+    #[test]
+    fn x633_list_targets_names_a_register_by_its_value_identical_alias() {
+        let t = list_targets(ALIASED_COUNTER).expect("list");
+        assert_eq!(
+            t.stick,
+            vec!["cnt_q".to_string()],
+            "not the next-value wire `cnt_d`"
+        );
+        let file = parser::parse(ALIASED_COUNTER).expect("parse");
+        assert_eq!(resolve_state_nid(&file, "cnt_q"), Some(4));
+        assert_eq!(
+            resolve_state_nid(&file, "cnt_d"),
+            None,
+            "a next-value wire is not a register"
+        );
+        // The listed name applies.
+        let out =
+            apply_mutation(ALIASED_COUNTER, &Mutation::Stick("cnt_q".into())).expect("stick cnt_q");
+        assert_eq!(next_value_of(&out, 4), 4);
     }
 
     #[test]

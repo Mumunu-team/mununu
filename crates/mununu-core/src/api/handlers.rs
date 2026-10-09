@@ -1001,6 +1001,7 @@ fn btor2_check_fsm_handler_impl(
         .iter()
         .map(|f| FsmRegisterFinding {
             register: f.register.clone(),
+            kind: f.kind.as_str().to_string(),
             legal_encodings: f.legal_encodings.clone(),
             verdict: f.verdict.as_str().to_string(),
             illegal_encoding_reachable: f.is_finding(),
@@ -1008,7 +1009,7 @@ fn btor2_check_fsm_handler_impl(
         .collect();
 
     Ok(Json(Btor2CheckFsmResponse {
-        fsm_registers_checked: findings.len(),
+        fsm_registers_checked: findings.iter().filter(|f| f.is_checked()).count(),
         illegal_encodings_found,
         registers,
     }))
@@ -1395,6 +1396,7 @@ fn sv_check_fsm_handler_impl(request: SvCheckFsmRequest) -> ApiResult<Json<Btor2
         .iter()
         .map(|f| FsmRegisterFinding {
             register: f.register.clone(),
+            kind: f.kind.as_str().to_string(),
             legal_encodings: f.legal_encodings.clone(),
             verdict: f.verdict.as_str().to_string(),
             illegal_encoding_reachable: f.is_finding(),
@@ -1402,7 +1404,7 @@ fn sv_check_fsm_handler_impl(request: SvCheckFsmRequest) -> ApiResult<Json<Btor2
         .collect();
 
     Ok(Json(Btor2CheckFsmResponse {
-        fsm_registers_checked: findings.len(),
+        fsm_registers_checked: findings.iter().filter(|f| f.is_checked()).count(),
         illegal_encodings_found,
         registers,
     }))

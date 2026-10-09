@@ -133,21 +133,31 @@ Auto-discovers the design's FSM-like state registers (state registers narrower t
 
 ```json
 {
-  "fsm_registers_checked": 3,
+  "fsm_registers_checked": 1,
   "illegal_encodings_found": 1,
   "registers": [
     {
       "register": "ctrl_state",
+      "kind": "fsm",
       "legal_encodings": [0, 1, 2, 3],
       "verdict": "violated",
       "illegal_encoding_reachable": true
+    },
+    {
+      "register": "retry_cnt_q",
+      "kind": "counter",
+      "legal_encodings": [],
+      "verdict": "skipped",
+      "illegal_encoding_reachable": false
     }
   ]
 }
 ```
 
 - `verdict` per register is the same canonical vocabulary. `illegal_encoding_reachable` is a convenience alias for `verdict == "violated"`.
-- Wider registers are treated as datapath / counters and skipped (see `default_fsm_max_width` in the source).
+- `register` is the cell's own symbol or a **value-identical** alias of it (`state_q`, the port that mirrors it) — never a next-value wire such as `beat_cnt_d` ([`parser::canonical_register_names`](../../crates/mununu-core/src/adapter/btor2/parser.rs); mununu#633).
+- `kind` (mununu#633): `"fsm"` is an enumeration-valued register the scan checked; `"counter"` is a register its own next-state logic steps by ±1 (`cnt + 1`, `cnt - 1`) — its values are a range, not an enumeration, so it is listed with no `legal_encodings` and `"skipped"`, and does not count toward `fsm_registers_checked`. Arithmetic by any other step (`st + 3`) stays `"fsm"`: a computed out-of-enum value is the bug class the scan exists for.
+- Wider registers are treated as datapath and skipped (see `default_fsm_max_width` in the source).
 
 ## The SV request shapes
 

@@ -1591,4 +1591,83 @@ endmodule
 
     // The full lift → verdict path needs sv2v + Yosys; covered by the e2e suite in
     // the mununu-sva image, not make-ci.
+
+    /// mununu#633 — `sv check-fsm` on the LLM-written `link_ctrl.sv`: the one state
+    /// register (`state_q`, localparam encodings 0..5) is scanned under its own name and
+    /// HOLDS; the two counters (`retry_cnt_q` 2-bit, `beat_cnt_q` 3-bit) are set aside as
+    /// counters with no verdict instead of being reported VIOLATED on their in-between
+    /// values; no next-value wire (`beat_cnt_d`, which the loose cone trace used to pin
+    /// on the state cell) is listed as a register. The same lift's `sv mutate --list`
+    /// names the registers the same way.
+    #[test]
+    #[ignore = "requires slang + sv2v + Yosys + z3 (mununu-sva docker image); run with --ignored"]
+    fn e2e_633_check_fsm_scans_the_state_register_and_sets_the_counters_aside() {
+        use crate::adapter::fsm_scan::{DEFAULT_FSM_MAX_WIDTH, RegisterKind};
+        use crate::verdict::PropertyVerdict;
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/verify/v12_link_ctrl_llm_fsm/link_ctrl.sv");
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let lift = SvLift {
+            source,
+            additional_sources: Vec::new(),
+            top: Some("link_ctrl".into()),
+            use_sv2v: true,
+            include_dirs: Vec::new(),
+            frontend: SvFrontend::Slang,
+        };
+        let findings = sv_check_fsm(&lift, DEFAULT_FSM_MAX_WIDTH).expect("sv check-fsm runs");
+        for f in &findings {
+            eprintln!(
+                "  {} [{}] legal={:?} {:?}",
+                f.register,
+                f.kind.as_str(),
+                f.legal_encodings,
+                f.verdict
+            );
+        }
+        let by = |name: &str| {
+            findings
+                .iter()
+                .find(|f| f.register == name)
+                .unwrap_or_else(|| panic!("`{name}` in {findings:?}"))
+        };
+        let state = by("state_q");
+        assert_eq!(state.kind, RegisterKind::Fsm);
+        assert_eq!(state.legal_encodings, vec![0, 1, 2, 3, 4, 5]);
+        assert_eq!(
+            state.verdict,
+            PropertyVerdict::Holds,
+            "the `default` arm keeps state_q in its enum"
+        );
+        for c in ["retry_cnt_q", "beat_cnt_q"] {
+            let f = by(c);
+            assert_eq!(f.kind, RegisterKind::Counter, "{c}");
+            assert_eq!(f.verdict, PropertyVerdict::Skipped, "{c}");
+            assert!(f.legal_encodings.is_empty(), "{c}");
+        }
+        assert!(
+            findings.iter().all(|f| !f.register.ends_with("_d")),
+            "a next-value wire is not a register: {findings:?}"
+        );
+        assert_eq!(findings.iter().filter(|f| f.is_finding()).count(), 0);
+        assert_eq!(
+            findings.iter().filter(|f| f.is_checked()).count(),
+            1,
+            "{findings:?}"
+        );
+        // The same naming on the mutation surface.
+        let btor2 = lift.lift().expect("lift");
+        let targets = crate::adapter::btor2::mutate::list_targets(&btor2).expect("list");
+        assert!(
+            targets.stick.contains(&"state_q".to_string()),
+            "{:?}",
+            targets.stick
+        );
+        assert!(
+            targets.stick.iter().all(|n| !n.ends_with("_d")),
+            "{:?}",
+            targets.stick
+        );
+    }
 }

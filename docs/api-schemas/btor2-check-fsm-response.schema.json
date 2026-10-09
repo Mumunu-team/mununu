@@ -8,8 +8,12 @@
           "description": "`true` when an illegal encoding is reachable (a finding).",
           "type": "boolean"
         },
+        "kind": {
+          "description": "`\"fsm\"` — an enumeration-valued register, checked; `\"counter\"` — a register its own next-state logic steps by ±1, set aside with no legal set and no verdict (its values are a range, not an enumeration; #633).",
+          "type": "string"
+        },
         "legal_encodings": {
-          "description": "The legal encodings the register's own logic recognizes (sorted).",
+          "description": "The legal encodings the register's own logic recognizes (sorted); empty for a `\"counter\"`.",
           "items": {
             "format": "uint64",
             "minimum": 0.0,
@@ -18,16 +22,17 @@
           "type": "array"
         },
         "register": {
-          "description": "The state register's symbol.",
+          "description": "The state register's symbol — the cell's own, or a value-identical alias of it (`state_q`, the port that mirrors it); never a next-value wire (#633).",
           "type": "string"
         },
         "verdict": {
-          "description": "Canonical verdict — `\"holds\"` (stays within its encoding) | `\"violated\"` (an illegal encoding is reachable) | `\"unknown\"` (the portfolio could not decide).",
+          "description": "Canonical verdict — `\"holds\"` (stays within its encoding) | `\"violated\"` (an illegal encoding is reachable) | `\"unknown\"` (the portfolio could not decide) | `\"skipped\"` (a `\"counter\"`, not checked).",
           "type": "string"
         }
       },
       "required": [
         "illegal_encoding_reachable",
+        "kind",
         "legal_encodings",
         "register",
         "verdict"
@@ -38,7 +43,7 @@
   "description": "Response for `POST /api/v1/btor2/check-fsm`.",
   "properties": {
     "fsm_registers_checked": {
-      "description": "Number of FSM-like state registers scanned.",
+      "description": "Number of `\"fsm\"`-kind registers scanned (a `\"counter\"` entry in `registers` is listed, not counted).",
       "format": "uint",
       "minimum": 0.0,
       "type": "integer"

@@ -32,9 +32,19 @@
 //!
 //! # Scope
 //!
-//! - **Named, FSM-width state.** A register is scanned if a symbol names it (directly or
-//!   via a `uext`/reset-mux alias, [`parser::resolve_state_alias`]) and it is at most
-//!   `max_width` bits wide. A wider register is a datapath / counter, skipped.
+//! - **Named, FSM-width state.** A register is scanned if a symbol names it — reported
+//!   under its [`parser::canonical_register_names`] name: the cell's own symbol, else a
+//!   **value-identical** alias (`uext … 0 state_q`, the port that mirrors it), never a
+//!   derived op's loose cone name (mununu#633: `beat_cnt_d` was reported as a register,
+//!   for the *state* cell its `case (state_q)` reads) — and it is at most `max_width`
+//!   bits wide. A wider register is a datapath / counter, skipped.
+//! - **A counter is set aside, with no verdict** (mununu#633). A register whose next-state
+//!   logic steps it by ±1 (`cnt + 1`, `cnt - 1`, `inc`/`dec`) takes a *range* of values,
+//!   not an enumeration: its "legal set" — the constants it is compared against, `{0,
+//!   limit}` — misses every value in between, and the scan would report each as a
+//!   reachable illegal encoding. It is listed as [`RegisterKind::Counter`] with
+//!   `Skipped`. Arithmetic by any other step (`st + 3`) is NOT a counter: a computed
+//!   out-of-enum value is exactly the bug class the scan exists for.
 //! - **Non-trivial enum only.** A register whose legal set has fewer than 2 values, or
 //!   already covers every value of its width (`|L| ≥ 2^width`), has no illegal encoding
 //!   to reach and is skipped.
@@ -55,16 +65,39 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 /// a datapath / counter and skipped (256 encodings is a generous enum ceiling).
 pub const DEFAULT_FSM_MAX_WIDTH: u32 = 8;
 
+/// What kind of register a scanned cell is (mununu#633).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegisterKind {
+    /// An enumeration-valued state register: its legal set is checked.
+    Fsm,
+    /// A register its own next-state logic steps by ±1: its values are a range, not an
+    /// enumeration, so it carries no legal set and no verdict.
+    Counter,
+}
+
+impl RegisterKind {
+    /// The wire spelling (`"fsm"` / `"counter"`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Fsm => "fsm",
+            Self::Counter => "counter",
+        }
+    }
+}
+
 /// One register's illegal-encoding result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FsmFinding {
-    /// The state register's symbol.
+    /// The state register's symbol ([`parser::canonical_register_names`]).
     pub register: String,
-    /// The legal encodings the register's own logic recognizes (sorted).
+    /// [`RegisterKind::Fsm`] (checked) or [`RegisterKind::Counter`] (set aside).
+    pub kind: RegisterKind,
+    /// The legal encodings the register's own logic recognizes (sorted); empty for a
+    /// counter.
     pub legal_encodings: Vec<u64>,
     /// `Holds` = the register provably stays within its legal encodings; `Violated` =
     /// an illegal encoding is **reachable** (a finding); `Unknown` = the portfolio
-    /// could not decide.
+    /// could not decide; `Skipped` = a counter, not checked.
     pub verdict: PropertyVerdict,
 }
 
@@ -72,6 +105,12 @@ impl FsmFinding {
     /// A `Violated` verdict is a real finding (a reachable illegal encoding).
     pub fn is_finding(&self) -> bool {
         self.verdict == PropertyVerdict::Violated
+    }
+
+    /// An enumeration-valued register the scan checked (counts toward
+    /// `fsm_registers_checked`).
+    pub fn is_checked(&self) -> bool {
+        self.kind == RegisterKind::Fsm
     }
 }
 
@@ -91,12 +130,11 @@ pub fn fsm_encoding_scan(btor2: &str, max_width: u32) -> Result<Vec<FsmFinding>,
     let (pinned, _) = pin_inputs_to_constants(&seeded, &resets);
     seeded = pinned;
 
-    // The FSM-like state registers: `collect_symbols` already traces each user name
-    // (incl. Yosys `uext _ _ 0 NAME` aliases) back to its state cell, so an entry whose
-    // nid IS a state cell names that register — no re-resolution (a combinational alias
-    // like `state_d` can shadow the register's name and would fail to re-resolve).
-    // Deterministic order by cell nid.
-    let mut registers: Vec<(Nid, Nid, &String)> = symbols
+    // The FSM-like state registers, each under its strict-preferred name (the cell's
+    // own symbol or a value-identical alias; the loose cone name only when nothing
+    // exact names it — mununu#633). Deterministic order by cell nid.
+    let names = parser::canonical_register_names(&file);
+    let mut registers: Vec<(Nid, Nid, &String)> = names
         .iter()
         .filter_map(|(&nid, name)| match file.lookup(nid).map(|l| &l.node) {
             Some(Node::State { sort, .. }) => Some((nid, *sort, name)),
@@ -111,6 +149,17 @@ pub fn fsm_encoding_scan(btor2: &str, max_width: u32) -> Result<Vec<FsmFinding>,
             continue;
         };
         if width == 0 || width > max_width {
+            continue;
+        }
+
+        // A counter's values are a range, not an enumeration: set it aside, unchecked.
+        if is_counter(&file, cell_nid) {
+            out.push(FsmFinding {
+                register: name.clone(),
+                kind: RegisterKind::Counter,
+                legal_encodings: Vec::new(),
+                verdict: PropertyVerdict::Skipped,
+            });
             continue;
         }
 
@@ -142,11 +191,148 @@ pub fn fsm_encoding_scan(btor2: &str, max_width: u32) -> Result<Vec<FsmFinding>,
 
         out.push(FsmFinding {
             register: name.clone(),
+            kind: RegisterKind::Fsm,
             legal_encodings: legal_vec,
             verdict: PropertyVerdict::from(outcome.verdict),
         });
     }
     Ok(out)
+}
+
+/// mununu#633 — does the register's own next-state logic step it by ±1? Walks the
+/// value positions of its `next` cone (`ite` branches, `uext`/`sext`/`slice`
+/// width-adjusts) and answers yes at an `inc`/`dec` of the cell, or an `add`/`sub` of
+/// the cell and the constant `1` or `-1` (`2^w − 1` at the op's width — how a
+/// decrement is spelled). The cell is recognised through its value aliases and through
+/// any width extension (an `int`-context `cnt_q + 1` is a wide `add` over `uext
+/// cnt_q`, sliced back). Any other arithmetic — `st + 3`, a multiply — is NOT a
+/// counter step: that computed value is the illegal encoding the scan hunts.
+///
+/// The walk carries the BIT RANGE of the value that feeds the register, because yosys
+/// packs every `always_comb` output into ONE `concat` and `slice`s each register's bits
+/// back out (`next cnt = ite(rst, slice(concat(…, cnt_d, …), 4, 3), 0)` on the #633
+/// fixture): a `slice` narrows the range, a `concat` descends into the operand that
+/// holds it. A `concat` reached as a whole value is a computed word, not a counter.
+fn is_counter(file: &Btor2File, state_nid: Nid) -> bool {
+    let Some(next_val) = file.lines.iter().find_map(|l| match &l.node {
+        Node::Next { state, value, .. } if *state == state_nid => Some(*value),
+        _ => None,
+    }) else {
+        return false;
+    };
+    let Some(width) = node_width(file, state_nid).filter(|&w| w > 0) else {
+        return false;
+    };
+    let aliases = value_alias_nids(file, state_nid);
+    let mut visited = HashSet::new();
+    steps_by_one(file, next_val.nid(), 0, width - 1, &aliases, &mut visited)
+}
+
+/// The bit width of the value `nid` carries, for the node kinds a next-state cone holds.
+fn node_width(file: &Btor2File, nid: Nid) -> Option<u32> {
+    match &file.lookup(nid)?.node {
+        Node::Op { sort, .. }
+        | Node::Const { sort, .. }
+        | Node::State { sort, .. }
+        | Node::Input { sort, .. } => parser::bv_width(file, *sort),
+        _ => None,
+    }
+}
+
+/// Is bit range `lo..=hi` of `nid`'s value a ±1 step of the register (see [`is_counter`])?
+fn steps_by_one(
+    file: &Btor2File,
+    nid: Nid,
+    lo: u32,
+    hi: u32,
+    aliases: &HashSet<Nid>,
+    visited: &mut HashSet<(Nid, u32, u32)>,
+) -> bool {
+    if lo > hi || !visited.insert((nid, lo, hi)) {
+        return false;
+    }
+    let Some(line) = file.lookup(nid) else {
+        return false;
+    };
+    let Node::Op { op, args, sort, .. } = &line.node else {
+        return false;
+    };
+    let reads_cell = |n: Nid| reaches_cell_through_width_adjust(file, n, aliases);
+    match op {
+        Op::Ite if args.len() == 3 => {
+            steps_by_one(file, args[1].nid(), lo, hi, aliases, visited)
+                || steps_by_one(file, args[2].nid(), lo, hi, aliases, visited)
+        }
+        // The inner value occupies bits `0..w_in`; above it are extension bits.
+        Op::Uext | Op::Sext if args.len() == 1 => {
+            let w_in = node_width(file, args[0].nid()).unwrap_or(0);
+            w_in > 0
+                && lo < w_in
+                && steps_by_one(file, args[0].nid(), lo, hi.min(w_in - 1), aliases, visited)
+        }
+        // `slice sig upper lower`: our range sits at `lower + lo ..= lower + hi` of `sig`.
+        Op::Slice if args.len() == 1 && line.immediates.len() == 2 => {
+            let (upper, lower) = (line.immediates[0], line.immediates[1]);
+            steps_by_one(
+                file,
+                args[0].nid(),
+                lower + lo,
+                (lower + hi).min(upper),
+                aliases,
+                visited,
+            )
+        }
+        // `concat high low`: `low` holds bits `0..w_low`, `high` the rest.
+        Op::Concat if args.len() == 2 => {
+            let w_low = node_width(file, args[1].nid()).unwrap_or(0);
+            w_low > 0
+                && ((lo < w_low
+                    && steps_by_one(file, args[1].nid(), lo, hi.min(w_low - 1), aliases, visited))
+                    || (hi >= w_low
+                        && steps_by_one(
+                            file,
+                            args[0].nid(),
+                            lo.saturating_sub(w_low),
+                            hi - w_low,
+                            aliases,
+                            visited,
+                        )))
+        }
+        Op::Inc | Op::Dec if args.len() == 1 => reads_cell(args[0].nid()),
+        Op::Add | Op::Sub if args.len() == 2 => {
+            let width = parser::bv_width(file, *sort).unwrap_or(0);
+            let minus_one = if width >= 64 {
+                u64::MAX
+            } else {
+                (1u64 << width).wrapping_sub(1)
+            };
+            let is_unit =
+                |n: Nid| resolve_btor2_constant(file, n).is_some_and(|c| c == 1 || c == minus_one);
+            let (a, b) = (args[0].nid(), args[1].nid());
+            (reads_cell(a) && is_unit(b)) || (*op == Op::Add && reads_cell(b) && is_unit(a))
+        }
+        _ => false,
+    }
+}
+
+/// `nid` is the register's value (one of its aliases), possibly widened / narrowed by
+/// `uext` / `sext` / `slice` on the way into an arithmetic op.
+fn reaches_cell_through_width_adjust(file: &Btor2File, nid: Nid, aliases: &HashSet<Nid>) -> bool {
+    let mut cur = nid;
+    for _ in 0..16 {
+        if aliases.contains(&cur) {
+            return true;
+        }
+        match file.lookup(cur).map(|l| &l.node) {
+            Some(Node::Op {
+                op: Op::Uext | Op::Sext | Op::Slice,
+                args,
+                ..
+            }) if !args.is_empty() => cur = args[0].nid(),
+            _ => return false,
+        }
+    }
+    false
 }
 
 /// The legal encodings of a state register — an over-approximation, so that only a
@@ -490,6 +676,155 @@ mod tests {
             "the bug computes st + 3 = 5, an illegal encoding"
         );
         assert!(st.is_finding(), "a reachable illegal encoding is a finding");
+        assert_eq!(
+            st.kind,
+            RegisterKind::Fsm,
+            "arithmetic by a step other than ±1 is a computed value, not a counter"
+        );
+    }
+
+    // mununu#633 — a 2-bit counter `cnt` (reset 0) that increments on `go` and is
+    // compared against its limit 3: the scan's legal set would be {0, 3}, and 1 and 2
+    // are reachable, so it used to be reported VIOLATED. Its cell carries no symbol;
+    // the next-value op `cnt_d` (file-first, the loose cone name) and the `uext 0`
+    // alias `cnt_q` (value-identical) both name it.
+    const COUNTER: &str = "\
+1 sort bitvec 2
+2 sort bitvec 1
+3 state 1
+4 zero 1
+5 init 1 3 4
+6 input 2 go
+7 one 1
+8 constd 1 3
+9 eq 2 3 8
+10 add 1 3 7
+11 ite 1 6 10 3 cnt_d
+12 next 1 3 11
+13 uext 1 3 0 cnt_q
+";
+
+    #[test]
+    fn x633_a_register_stepped_by_one_is_a_counter_set_aside_under_its_alias_name() {
+        let findings = fsm_encoding_scan(COUNTER, DEFAULT_FSM_MAX_WIDTH).expect("scan");
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        let cnt = &findings[0];
+        assert_eq!(
+            cnt.register, "cnt_q",
+            "named by its value-identical alias, not `cnt_d`"
+        );
+        assert_eq!(cnt.kind, RegisterKind::Counter);
+        assert_eq!(cnt.verdict, PropertyVerdict::Skipped);
+        assert!(cnt.legal_encodings.is_empty());
+        assert!(!cnt.is_finding() && !cnt.is_checked());
+    }
+
+    #[test]
+    fn x633_a_decrement_spelled_as_add_minus_one_or_sub_one_is_a_counter_too() {
+        // `cnt - 1` lowered as `add cnt 3` (2^2 − 1), and as `sub cnt 1`; an `int`-context
+        // `cnt + 1` lowered as a 32-bit add over `uext 30 cnt`, sliced back.
+        for (label, tail) in [
+            (
+                "add -1",
+                "10 add 1 3 8\n11 ite 1 6 10 3\n12 next 1 3 11\n13 uext 1 3 0 cnt_q\n",
+            ),
+            (
+                "sub 1",
+                "10 sub 1 3 7\n11 ite 1 6 10 3\n12 next 1 3 11\n13 uext 1 3 0 cnt_q\n",
+            ),
+            (
+                "wide add",
+                "10 sort bitvec 32\n11 uext 10 3 30\n12 one 10\n13 add 10 11 12\n\
+                 14 slice 1 13 1 0\n15 ite 1 6 14 3\n16 next 1 3 15\n17 uext 1 3 0 cnt_q\n",
+            ),
+        ] {
+            let src = format!(
+                "1 sort bitvec 2\n2 sort bitvec 1\n3 state 1\n4 zero 1\n5 init 1 3 4\n\
+                 6 input 2 go\n7 one 1\n8 constd 1 3\n9 eq 2 3 8\n{tail}"
+            );
+            let findings = fsm_encoding_scan(&src, DEFAULT_FSM_MAX_WIDTH).expect("scan");
+            assert_eq!(findings.len(), 1, "{label}: {findings:?}");
+            assert_eq!(findings[0].kind, RegisterKind::Counter, "{label}");
+            assert_eq!(findings[0].register, "cnt_q", "{label}");
+        }
+    }
+
+    // mununu#633 — the shape yosys actually emits for the fixture: every `always_comb`
+    // output packed into ONE `concat` (`[cnt_d : go]`, 3 bits) and each register's bits
+    // `slice`d back out, under the async-reset mux. `cnt_d = go ? cnt + 1 : cnt` sits in
+    // bits 2..1 of the pack; the register's `next` reads `slice(pack, 2, 1)`.
+    const PACKED_COUNTER: &str = "\
+1 sort bitvec 1
+2 sort bitvec 2
+3 input 1 rst_n
+4 input 1 go
+5 state 2
+6 const 2 00
+7 ite 2 3 5 6
+8 const 2 01
+9 add 2 7 8
+10 ite 2 4 9 7
+11 sort bitvec 3
+12 concat 11 10 4
+13 slice 2 12 2 1
+14 uext 2 13 0 cnt_d
+15 ite 2 3 13 6
+16 next 2 5 15
+17 uext 2 7 0 cnt_q
+18 const 2 11
+19 eq 1 7 18
+";
+
+    #[test]
+    fn x633_a_counter_packed_through_yosys_concat_and_slice_is_still_a_counter() {
+        let findings = fsm_encoding_scan(PACKED_COUNTER, DEFAULT_FSM_MAX_WIDTH).expect("scan");
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].register, "cnt_q");
+        assert_eq!(
+            findings[0].kind,
+            RegisterKind::Counter,
+            "the ±1 step is found through slice(concat(…)): {findings:?}"
+        );
+        // The slice that does NOT cover the counter's bits (bit 0 = `go`) is not a step.
+        let other = PACKED_COUNTER.replace("13 slice 2 12 2 1\n", "13 slice 1 12 0 0\n");
+        let file = parser::parse(&other).expect("parse");
+        assert!(
+            !is_counter(&file, 5),
+            "bit 0 of the pack is `go`, not `cnt + 1`"
+        );
+    }
+
+    #[test]
+    fn x633_the_state_register_is_reported_under_its_alias_not_the_next_value_name() {
+        // LEGAL_FSM with the cell's symbol moved off the `state` line: the next-value op
+        // (17) carries `st_d` and comes first — the loose cone trace names the cell by
+        // it — and a `uext 0` alias (19) carries `st_q`. The scan must say `st_q`, with
+        // the same legal set and verdict as the directly-named fixture.
+        let src = LEGAL_FSM
+            .replace("3 state 1 st\n", "3 state 1\n")
+            .replace("17 ite 1 10 14 16\n", "17 ite 1 10 14 16 st_d\n")
+            + "19 uext 1 3 0 st_q\n";
+        let loose = {
+            let file = parser::parse(&src).expect("parse");
+            parser::collect_symbols(&file).get(&3).cloned()
+        };
+        assert_eq!(
+            loose.as_deref(),
+            Some("st_d"),
+            "the loose trap the fix bypasses"
+        );
+        let findings = fsm_encoding_scan(&src, DEFAULT_FSM_MAX_WIDTH).expect("scan");
+        assert!(
+            findings.iter().all(|f| f.register != "st_d"),
+            "a next-value wire is not a register: {findings:?}"
+        );
+        let st = findings
+            .iter()
+            .find(|f| f.register == "st_q")
+            .unwrap_or_else(|| panic!("st_q scanned: {findings:?}"));
+        assert_eq!(st.kind, RegisterKind::Fsm);
+        assert_eq!(st.legal_encodings, vec![0, 1, 2]);
+        assert_eq!(st.verdict, PropertyVerdict::Holds);
     }
 
     #[test]
