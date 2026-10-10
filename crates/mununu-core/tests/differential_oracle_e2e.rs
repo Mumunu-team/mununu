@@ -893,7 +893,15 @@ const CORPUS: &[CorpusDesign] = &[
     CorpusDesign {
         name: "prim_arbiter_ppc",
         dir: "dc_opentitan_prim_arbiter_ppc",
-        files: &["prim_arbiter_ppc.sv", "prim_assert.sv", "prim_util_pkg.sv"],
+        // mununu#656 — `prim_leading_one_ppc` (the priority prefix) is vendored too; without it the
+        // lift black-boxes it and `gnt_o` reads its outputs as free inputs, so the property is
+        // (rightly) refused as a verdict over a chaotic stub.
+        files: &[
+            "prim_arbiter_ppc.sv",
+            "prim_assert.sv",
+            "prim_util_pkg.sv",
+            "prim_leading_one_ppc.sv",
+        ],
         top: "prim_arbiter_ppc",
         annotations: &["nu Y. ((mu X. ((gnt_o == 0) or <> X)) and [] Y)"],
         config: &[("rst_ni", 1)],
@@ -1042,6 +1050,11 @@ const CORPUS: &[CorpusDesign] = &[
             "prim_assert.sv",
             "prim_fifo_assert.svh",
             "prim_util_pkg.sv",
+            // mununu#656 — `prim_fifo_sync_cnt` and its own `prim_count` are vendored too; without
+            // them the lift black-boxes the pointer logic and `depth_o` reads a chaotic stub.
+            "prim_fifo_sync_cnt.sv",
+            "prim_count.sv",
+            "prim_count_pkg.sv",
         ],
         top: "prim_fifo_sync",
         annotations: &["nu Y. ((mu X. ((depth_o == 0) or <> X)) and [] Y)"],
