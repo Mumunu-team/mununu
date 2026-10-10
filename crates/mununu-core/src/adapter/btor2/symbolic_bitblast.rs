@@ -5181,15 +5181,25 @@ fn exact_symbolic_verdict_with_witness_inner(
             .map(|(nid, name)| (name, nid))
             .collect();
     for line in &file.lines {
-        if let crate::adapter::btor2::ast::Node::Output {
-            symbol: Some(s),
-            signal,
-        } = &line.node
-        {
-            // An Output symbol refers to the underlying signal, not to the Output line's
-            // own NID. Use it only if there isn't already an Input/State mapping for the
-            // same name (Input/State takes precedence for the same-name edge case).
-            name_to_nid.entry(s.clone()).or_insert(signal.nid());
+        match &line.node {
+            crate::adapter::btor2::ast::Node::Output {
+                symbol: Some(s),
+                signal,
+            } => {
+                // An Output symbol refers to the underlying signal, not to the Output line's
+                // own NID. Use it only if there isn't already an Input/State mapping for the
+                // same name (Input/State takes precedence for the same-name edge case).
+                name_to_nid.entry(s.clone()).or_insert(signal.nid());
+            }
+            // mununu#656 — an internal wire is an Op symbol (`uext … 0 active`), which
+            // `collect_symbols` does not record as a signal. Left out, an atom over such a wire
+            // was never checked here and read its inputs per step unrefused.
+            crate::adapter::btor2::ast::Node::Op {
+                symbol: Some(s), ..
+            } => {
+                name_to_nid.entry(s.clone()).or_insert(line.nid);
+            }
+            _ => {}
         }
     }
     for reg in &seed_regs {

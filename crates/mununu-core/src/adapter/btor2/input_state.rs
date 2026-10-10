@@ -66,12 +66,23 @@ pub fn atom_inputs(file: &Btor2File, atom_registers: &HashSet<String>) -> Vec<St
         .map(|(nid, name)| (name, nid))
         .collect();
     for line in &file.lines {
-        if let Node::Output {
-            symbol: Some(s),
-            signal,
-        } = &line.node
-        {
-            name_to_nid.entry(s.clone()).or_insert(signal.nid());
+        match &line.node {
+            Node::Output {
+                symbol: Some(s),
+                signal,
+            } => {
+                name_to_nid.entry(s.clone()).or_insert(signal.nid());
+            }
+            // An internal `assign` wire is an Op symbol (`uext … 0 active`); `collect_symbols`
+            // records those only as names for unsymbolled state cells. An atom over such a
+            // wire reads its inputs through the wire — leave it out and the lift misses them
+            // (t2's `active = (trig == 0)`: `en` lifted, `trig` not, a spurious VIOLATED).
+            Node::Op {
+                symbol: Some(s), ..
+            } => {
+                name_to_nid.entry(s.clone()).or_insert(line.nid);
+            }
+            _ => {}
         }
     }
     let mut out: BTreeSet<String> = BTreeSet::new();
@@ -360,5 +371,17 @@ mod tests {
             exact_symbolic_verdict(MEALY, &f("nu Y. ((req == 0) and [] Y)")).unwrap(),
             ExactVerdict::Violated
         );
+    }
+
+    /// An internal wire named by an Op symbol (`assign both = req & ready`), not an output:
+    /// `collect_symbols` does not record it, so the lift (and the engine's refusal) must read
+    /// Op symbols too — left out, `t3`'s `active = (trig == 0)` antecedent read a per-step
+    /// input unrefused and refuted a true property.
+    #[test]
+    fn x656_an_op_symbol_wire_atom_lifts_the_inputs_it_reads() {
+        let with_wire = format!("{MEALY}13 uext 1 8 0 both\n");
+        let file = parse(&with_wire).expect("parses");
+        let regs: HashSet<String> = ["both".to_string()].into_iter().collect();
+        assert_eq!(atom_inputs(&file, &regs), vec!["ready", "req"]);
     }
 }

@@ -12517,6 +12517,16 @@ endmodule
     /// path *runs end-to-end on real RTL*, completes, and yields definite
     /// verdicts. Prints the per-property explicit-vs-symbolic comparison + the
     /// wall-clock of each engine for inspection.
+    ///
+    /// mununu#656 / #658 — this test used to require at least one symbolic ABSTENTION
+    /// ("the graceful-degradation case"). Those abstentions were the exact rescue refusing
+    /// input-reading atoms after the symbolic cube erred; with inputs in the state the rescue
+    /// decides every one of the 16 (all HOLDS — they are OpenTitan's own assertions), so the
+    /// design no longer exercises degradation and the count is reported, not asserted. What
+    /// IS asserted is cross-engine AGREEMENT: a Holds/Violated disagreement between the two
+    /// runs is a soundness defect in one of them, never a precision difference. That check is
+    /// what caught #658 — the rescue, evaluating `trigger_active`'s input per step, refuted
+    /// `EnterDebounceSt_A` while the explicit cube held it.
     #[test]
     #[ignore = "requires slang + sv2v + Yosys + z3 (use the mununu-sva docker image); run with --ignored"]
     fn e2e_sysrst_symbolic_engine_runs_on_real_rtl() {
@@ -12615,6 +12625,20 @@ endmodule
                 "  {}: explicit={:?}  symbolic={:?}",
                 px.name, px.outcome, ps.outcome
             );
+            let definite = |o: &VerifyOutcome| match o {
+                VerifyOutcome::Holds => Some(true),
+                VerifyOutcome::Violated { .. } => Some(false),
+                _ => None,
+            };
+            if let (Some(a), Some(b)) = (definite(&px.outcome), definite(&ps.outcome)) {
+                assert_eq!(
+                    a, b,
+                    "{}: the explicit and the symbolic(+exact-rescue) engines CONTRADICT each \
+                     other — explicit={:?} symbolic={:?}. One of them is unsound (mununu#658 was \
+                     found by exactly this row).",
+                    px.name, px.outcome, ps.outcome
+                );
+            }
             if let VerifyOutcome::Skipped { reason } = &ps.outcome {
                 assert!(
                     !reason.trim().is_empty(),
@@ -12643,14 +12667,9 @@ endmodule
                 }
             }
         }
+        // Reported, not asserted (see the doc comment): since mununu#656 the exact rescue
+        // decides all 16 here, so a zero is the expected reading on this design.
         eprintln!("symbolic abstentions: {sym_abstained} (of which {named_budget} name a budget)");
-        assert!(
-            sym_abstained >= 1,
-            "sysrst is the graceful-degradation case: its 32-bit detect timer does not compress \
-             to a tractable BDD, so at least one property must ABSTAIN rather than panic or \
-             abort. Zero abstentions means this design no longer exercises the degradation path \
-             — pick a harder one rather than deleting the assertion"
-        );
     }
 
     /// D1.6 — the `--engine exact-symbolic` **surface route**, end-to-end through
