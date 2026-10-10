@@ -935,12 +935,9 @@ const CORPUS: &[CorpusDesign] = &[
     // prim_alert_sender — 7-state alert-sender FSM (Idle=0), the alert-path sibling of
     // prim_esc_sender. Instantiated prim_diff_decode / prim_sec_anchor_* submodules are
     // blackboxed (chaotic-stub), so the closure is DUT + pkg + the prim_assert shim.
-    // AG EF Idle recoverability is VIOLATED (unlike esc_sender, which HOLDS): with the
-    // blackboxed submodules a free alert/ping/sigint environment can drive the FSM into a
-    // reachable state with no path back to Idle — an in-model expected violation (an
-    // adversarial never-acking environment traps it out of Idle), analogous to the other
-    // corpus Violated designs. Non-spurious: reset is gated (rst_ni=1) and Idle=0 is the
-    // real idle state, not a vacuous atom.
+    // AG EF Idle recoverability HOLDS, as for esc_sender (see the mununu#651 note on the
+    // ledger row: the earlier VIOLATED reading was a two-player argument). Reset is gated
+    // (rst_ni=1) and Idle=0 is the real idle state, not a vacuous atom.
     CorpusDesign {
         name: "prim_alert_sender",
         dir: "dc_opentitan_prim_alert_sender",
@@ -952,7 +949,16 @@ const CORPUS: &[CorpusDesign] = &[
         top: "prim_alert_sender",
         annotations: &["nu Y. ((mu X. ((state_q == 0) or <> X)) and [] Y)"], // Idle = 0
         config: &[("rst_ni", 1)],
-        ledger: &[("(state_q == 0)", LedgerVerdict::False)], // VIOLATED (confirmed in docker)
+        // mununu#651 (2026-10-10) — CORRECTED False → True. The July row read VIOLATED; on the
+        // current lift two independent engines decide HOLDS on the same BTOR2 — the exact
+        // engine (full-state ROBDD, once the #651 refusal stopped skipping it) and the
+        // `btor2 verify-recoverability` cube ladder (explicit predicate-cube), which never went
+        // through that refusal — and the RTL agrees: every phase returns to Idle via
+        // Pause0 → Pause1, `sigint_detected` forces Idle, `default` is Idle (its own
+        // `InBandInitFsm_A`). `AG EF` quantifies the free stub outputs EXISTENTIALLY, so "an
+        // adversarial never-acking environment" (the old note's argument) is a two-player
+        // reading, not CTL's. The July VIOLATED could not be reproduced; its cause is unknown.
+        ledger: &[("(state_q == 0)", LedgerVerdict::True)],
     },
     // usbdev_linkstate — 6-state USB link FSM (LinkDisconnected=0). AG EF LinkDisconnected —
     // HOLDS via COI (the link is always disconnectable; the 12-bit timers are pruned).
