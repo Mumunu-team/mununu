@@ -1524,6 +1524,13 @@ pub struct VerifyAutoOptions {
     /// `--no-antecedent-propagate`, on the API as `no_antecedent_propagate: true`, and by the
     /// process-global `MUNUNU_NO_ANTECEDENT_PROPAGATE=1`; either channel disabling it wins.
     pub antecedent_propagate: bool,
+    /// mununu#656 — inputs in the state on the exact-symbolic engine. `true` (default): a
+    /// property that reads a primary input, or a signal combinationally driven by one, is
+    /// evaluated over the product of the registers with the input sampled in that cycle — a
+    /// state predicate, decided — instead of being skipped. `false` restores the refusal (the
+    /// differential switch): CLI `--no-input-state`, API `no_input_state: true`, process-global
+    /// `MUNUNU_NO_INPUT_STATE=1`; either channel disabling it wins.
+    pub input_state: bool,
 }
 
 /// PORTFOLIO scheduling mode — the budget knob for the multi-engine default.
@@ -1584,6 +1591,7 @@ impl Default for VerifyAutoOptions {
             mutation: None,
             antecedent_shadow: true,
             antecedent_propagate: true,
+            input_state: true,
         }
     }
 }
@@ -3984,6 +3992,7 @@ pub(crate) fn verify_auto_impl(
             let exact_opts = ExactSymbolicOptions {
                 antecedent_shadow_enabled: opts.antecedent_shadow,
                 antecedent_propagate_enabled: opts.antecedent_propagate,
+                input_state_enabled: opts.input_state,
                 ..Default::default()
             };
 
@@ -5471,6 +5480,7 @@ pub(crate) fn rescue_skipped_via_exact(
     let exact_opts = ExactSymbolicOptions {
         antecedent_shadow_enabled: opts.antecedent_shadow,
         antecedent_propagate_enabled: opts.antecedent_propagate,
+        input_state_enabled: opts.input_state,
         ..Default::default()
     };
     for prop in report.properties.iter_mut() {

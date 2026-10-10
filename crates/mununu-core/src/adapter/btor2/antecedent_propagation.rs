@@ -853,6 +853,7 @@ mod tests {
         antecedent_shadow_enabled: true,
         signal_level_coi: false,
         antecedent_propagate_enabled: false,
+        input_state_enabled: false, // mununu#656 — "as lifted" = every lever off
     };
 
     /// The mux folds to the selected arm and the input antecedent is dropped: the property
@@ -948,8 +949,12 @@ mod tests {
         assert!(err.contains("BIT CAP"), "{err}");
     }
 
-    /// A constrained input keeps its antecedent (dropping it would be unsound for VIOLATED), so
-    /// the engine's input-atom refusal stands.
+    /// A constrained input keeps its antecedent (dropping it would be unsound for VIOLATED). With
+    /// inputs in the state (mununu#656) the property then DECIDES: the constraint `addr != 4`
+    /// forbids the antecedent at every frame, frame 0 included — the sampled `addr` cell is
+    /// never 4 at a LEGAL initial state — so the implication HOLDS vacuously. (Read at every
+    /// initial state, legal or not, it was a spurious VIOLATED: the initial-frame filter is
+    /// what this test pins.) Under the opt-out the engine's input-atom refusal stands.
     #[test]
     fn x629_a_constrained_input_antecedent_is_not_dropped() {
         let f = crate::mu_calculus::parser::parse(PROP).unwrap();
@@ -957,8 +962,13 @@ mod tests {
         let file = parser::parse(&design).unwrap();
         let p = propagate(&file, &f).unwrap();
         assert_eq!(p.rewrites, vec![("addr".to_string(), 4, false)]);
-        let err =
-            exact_symbolic_verdict(&design, &f).expect_err("the antecedent still pins the input");
+        assert_eq!(
+            exact_symbolic_verdict(&design, &f).expect("decides on the product"),
+            ExactVerdict::Holds,
+            "the constraint forbids the antecedent at every legal frame"
+        );
+        let err = exact_symbolic_verdict_with_options(&design, &f, &AS_LIFTED)
+            .expect_err("as lifted: the antecedent still pins the input");
         assert!(err.contains("primary input"), "{err}");
     }
 

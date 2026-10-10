@@ -1872,6 +1872,8 @@ fn sv_verify_auto_handler_impl(
         antecedent_shadow: !request.no_antecedent_shadow.unwrap_or(false),
         // mununu#629 — per-request antecedent constant-propagation opt-out.
         antecedent_propagate: !request.no_antecedent_propagate.unwrap_or(false),
+        // mununu#656 — per-request inputs-in-the-state opt-out.
+        input_state: !request.no_input_state.unwrap_or(false),
     };
 
     let report = verify_auto(&sources, &yopts, &opts).map_err(|e| ApiError::BadRequest {

@@ -376,6 +376,9 @@ struct InternalEngineEvalArgs {
     /// Mirror of `sv verify-auto --no-antecedent-propagate` (mununu#629).
     #[arg(long = "no-antecedent-propagate")]
     no_antecedent_propagate: bool,
+    /// Mirror of `sv verify-auto --no-input-state` (mununu#656).
+    #[arg(long = "no-input-state")]
+    no_input_state: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -2079,6 +2082,14 @@ struct SvVerifyAutoArgs {
     /// `no_antecedent_propagate: true` and by `MUNUNU_NO_ANTECEDENT_PROPAGATE=1`.
     #[arg(long = "no-antecedent-propagate")]
     no_antecedent_propagate: bool,
+    /// mununu#656 — disable inputs-in-the-state on the exact-symbolic engine. By
+    /// default a property that reads a primary input, or a signal combinationally
+    /// driven by one (`gnt_o = req_i & sel & ready_i`), is decided over the registers
+    /// with that input sampled in the same cycle, instead of being skipped. Pass
+    /// this to restore the refusal — differential-oracle / debug use. Mirrored on
+    /// the API as `no_input_state: true` and by `MUNUNU_NO_INPUT_STATE=1`.
+    #[arg(long = "no-input-state")]
+    no_input_state: bool,
     /// H.J.b — config concretization: pin a wide config input to a constant so
     /// comparisons against it become decidable (e.g. a timer threshold).
     /// Repeatable; format `SIGNAL=VALUE` (e.g. `--config-value
@@ -4142,6 +4153,8 @@ fn sv_verify_auto(args: SvVerifyAutoArgs) -> Result<(), String> {
         antecedent_shadow: !args.no_antecedent_shadow,
         // mununu#629 — --no-antecedent-propagate leaves the formula as lifted.
         antecedent_propagate: !args.no_antecedent_propagate,
+        // mununu#656 — --no-input-state restores the input refusal.
+        input_state: !args.no_input_state,
     };
 
     let report = verify_auto(&sources, &yopts, &opts)
@@ -9427,6 +9440,7 @@ fn internal_engine_eval(args: InternalEngineEvalArgs) -> Result<(), String> {
     let opts = ExactSymbolicOptions {
         antecedent_shadow_enabled: !args.no_antecedent_shadow,
         antecedent_propagate_enabled: !args.no_antecedent_propagate,
+        input_state_enabled: !args.no_input_state,
         ..Default::default()
     };
 

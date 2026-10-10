@@ -158,6 +158,14 @@
         "null"
       ]
     },
+    "no_input_state": {
+      "default": null,
+      "description": "mununu#656 — disable inputs-in-the-state on the exact-symbolic engine (default `false` ⇒ enabled). Enabled, a property that reads a primary input or a signal combinationally driven by one is decided over the registers with that input sampled in the same cycle; `true` restores the engine's refusal of such atoms (the differential-oracle knob), mirrored on the CLI as `--no-input-state` and by `MUNUNU_NO_INPUT_STATE=1`.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
     "params": {
       "default": [],
       "description": "Module-parameter overrides applied via yosys `chparam -set` before the lift (mirrors the CLI `--param`). Each entry is `\"NAME=VALUE\"` (applied to the top module) or `\"MODULE.NAME=VALUE\"` (scoped to `MODULE`). Shrinks a parameterised timing interval so its counters get smaller — without a wrapper module (which would rename the SVA atoms). A parameter yosys cannot apply is an ERROR (never silently dropped); the verdicts are scoped to the applied values (surfaced as a `parameter-override` note). Default empty.",

@@ -2519,6 +2519,11 @@ pub struct ExactModel {
     /// when the design is unconstrained. Injected into `diamond_pre` / `box_pre`
     /// so the modal quantifier ranges only over constraint-respecting transitions.
     constraint: BDDFunction,
+    /// mununu#656 — `to_next(∃i. constraint(s, i))`: the successor is a LEGAL frame (some input is
+    /// admissible there). A frame no input can satisfy starts no valid BTOR2 trace and is not a
+    /// successor; `exact_bad_reachable` conjoins the same set into `bad`. Built lazily; `tt`
+    /// for an unconstrained design, so the plain modalities are unchanged there.
+    legal_next: std::cell::OnceCell<BDDFunction>,
     tt: BDDFunction,
     ff: BDDFunction,
     /// Fixpoint ITERATION budget — the total μ/ν fixpoint iterations across one
@@ -2813,9 +2818,12 @@ impl Squarer {
         let s1: Vec<BDDFunction> = (0..n).map(|j| vars[3 * j + 1].clone()).collect();
         let s2: Vec<BDDFunction> = (0..n).map(|j| vars[3 * j + 2].clone()).collect();
 
-        // R(s, s') = ∃i. constraint ∧ ⋀ s'ⱼ ↔ fⱼ(s, i).
+        // R(s, s') = ∃i. constraint ∧ legal(s') ∧ ⋀ s'ⱼ ↔ fⱼ(s, i) — `legal(s')` as the
+        // iteration's `◇` (mununu#656): a successor no input can satisfy is not a successor.
         let mut memo: HashMap<usize, BDDFunction> = HashMap::new();
         let mut rel = Self::transfer(&model.constraint, &model.manager, &to_s0, &tt, &mut memo)?;
+        let legal = Self::transfer(model.legal_next()?, &model.manager, &to_s0, &tt, &mut memo)?;
+        rel = oom(rel.and(&legal))?;
         for (j, &k) in order.iter().enumerate() {
             let f = Self::transfer(&model.next_fns[k], &model.manager, &to_s0, &tt, &mut memo)?;
             rel = oom(rel.and(&oom(s1[j].equiv(&f))?))?;
@@ -3409,6 +3417,7 @@ impl BddBitBlaster {
             ctrl_cube,
             env_cube,
             constraint: self.constraint_bdd.clone(),
+            legal_next: std::cell::OnceCell::new(),
             tt: self.tt.clone(),
             ff: self.ff.clone(),
             iter_budget: fixpoint_iter_budget(),
@@ -3603,7 +3612,24 @@ impl ExactModel {
     pub fn diamond_pre(&self, phi: &BDDFunction) -> Result<BDDFunction, String> {
         use oxidd::BooleanFunctionQuant;
         self.tick(2);
-        oom(oom(self.to_next(phi)?.and(&self.constraint))?.exists(&self.input_cube))
+        let target = oom(self.to_next(phi)?.and(self.legal_next()?))?;
+        oom(oom(target.and(&self.constraint))?.exists(&self.input_cube))
+    }
+
+    /// mununu#656 — the successor-frame legality `to_next(∃i. constraint)` (see the field). With
+    /// inputs in the state a `constraint` over an input is a predicate on the sampled cell, so
+    /// the step that picks the next input must land on a frame that admits it: `□φ` over
+    /// `(…, req = 1)` when `constraint !req` would otherwise read a frame the design forbids.
+    fn legal_next(&self) -> Result<&BDDFunction, String> {
+        if let Some(l) = self.legal_next.get() {
+            return Ok(l);
+        }
+        let l = if self.constraint == self.tt {
+            self.tt.clone()
+        } else {
+            self.to_next(&self.constraint_satisfiable())?
+        };
+        Ok(self.legal_next.get_or_init(|| l))
     }
 
     /// `[]φ` — **every constraint-respecting** successor satisfies `φ`:
@@ -3614,7 +3640,10 @@ impl ExactModel {
         use oxidd::BooleanFunctionQuant;
         self.tick(3);
         let not_c = oom(self.constraint.not())?;
-        let implies = oom(not_c.or(&self.to_next(phi)?))?;
+        // An illegal successor frame is not a successor: `¬legal(s') ∨ φ(s')`.
+        let not_legal_next = oom(self.legal_next()?.not())?;
+        let target = oom(not_legal_next.or(&self.to_next(phi)?))?;
+        let implies = oom(not_c.or(&target))?;
         oom(implies.forall(&self.input_cube))
     }
 
@@ -4477,6 +4506,13 @@ pub struct ExactSymbolicOptions {
     /// process-global `MUNUNU_NO_ANTECEDENT_PROPAGATE=1`) leaves the formula as lifted — the
     /// differential switch. See [`crate::adapter::btor2::antecedent_propagation`].
     pub antecedent_propagate_enabled: bool,
+    /// mununu#656 — inputs in the state: a property that reads a primary input (or a signal
+    /// combinationally driven by one) is evaluated over the product `(s, i)` — the registers with
+    /// the input sampled in that cycle — instead of being refused. `false` restores the refusal
+    /// (the differential switch; `--no-input-state`, `no_input_state: true`,
+    /// `MUNUNU_NO_INPUT_STATE=1`). Never applied on the two-player path, where a controllable
+    /// input folded into the state would be fixed before the controller moves.
+    pub input_state_enabled: bool,
 }
 
 impl Default for ExactSymbolicOptions {
@@ -4485,6 +4521,7 @@ impl Default for ExactSymbolicOptions {
             antecedent_shadow_enabled: true,
             signal_level_coi: signal_level_coi_from_env(),
             antecedent_propagate_enabled: true,
+            input_state_enabled: true,
         }
     }
 }
@@ -5028,6 +5065,28 @@ fn exact_symbolic_verdict_with_witness_inner(
     // so `leaf_cells` errors on its array sort → honest Skip rather than an unsound verdict.
     // `havoc_rewrite_memories` preserves every non-array NID (Reads become same-NID Inputs), so
     // the keep-set computed on the original file stays valid against the rewritten file.
+    // mununu#656 — inputs in the state (one-player only): the named primary inputs the atoms
+    // read become sampled state cells, so an atom over `gnt_o = f(mask_q, req_i, ready_i)` is a
+    // state predicate and the refusals below do not fire for it. Anonymous inputs stay refused.
+    let file = {
+        let opt_out = !controllable.is_empty()
+            || !opts.input_state_enabled
+            || std::env::var("MUNUNU_NO_INPUT_STATE").is_ok();
+        match (!opt_out)
+            .then(|| crate::adapter::btor2::input_state::lift_atom_inputs(&file, &seed_regs))
+            .flatten()
+        {
+            Some(lift) => {
+                tracing::info!(
+                    inputs = ?lift.lifted,
+                    "inputs in the state: {} primary input(s) the atoms read are sampled into state cells",
+                    lift.lifted.len()
+                );
+                lift.file
+            }
+            None => file,
+        }
+    };
     let seed_atoms: Vec<String> = seed_regs.iter().cloned().collect();
     let keep_set = (!seed_atoms.is_empty())
         .then(|| crate::adapter::btor2::dep_graph::cone_leaf_nids(&file, &seed_atoms));
@@ -5253,8 +5312,17 @@ fn exact_symbolic_verdict_with_witness_inner(
         .collect();
 
     let init = bb.initial_state_bdd(&file)?; // before the fixpoint (ordering hazard, `check_node_budget`)
+    // mununu#656 — only the LEGAL initial frames: BTOR2 requires every `constraint` to hold at
+    // frame 0 too, so an initial state with no admissible input (`¬∃i. c(s, i)`) starts no valid
+    // trace and is not read. With inputs in the state a constraint over an input is a state
+    // predicate (`constraint addr != 4` ⇒ the sampled `addr` cell is never 4 at frame 0), and
+    // reading the verdict at a frame the design forbids refuted a vacuously-true `AG(addr == 4
+    // → …)`. The same filter is right for the register-only model (`exact_bad_reachable`
+    // already conjoins it into `bad`); it was unobservable there because `∃i. c(s, i)` is
+    // almost always satisfiable at a register valuation.
+    let init = init.and(&exact.constraint_satisfiable()).unwrap();
     let sat = exact.evaluate(formula, &atoms)?;
-    // Holds iff init ⊆ sat, i.e. no initial state violates φ.
+    // Holds iff init ⊆ sat, i.e. no legal initial state violates φ.
     let violating = init.and(&sat.not().unwrap()).unwrap();
     if violating == *exact.ff() {
         return Ok((ExactVerdict::Holds, None));
@@ -11276,12 +11344,11 @@ mod tests {
         );
     }
 
-    /// Soundness guard: an atom that PINS a primary input is REFUSED (`Err`), never
-    /// decided. The exact-symbolic engine leaves inputs free/quantified, so a temporal
-    /// property with an input in an atom (the SVA `input |=> next-state` shape) decouples
-    /// the antecedent input from the transition input and would report an unsound verdict.
-    /// Contrast `predicate_binds_combinational_output`: an atom over a combinational
-    /// OUTPUT (derived from state) is fine — only *primary inputs* are refused.
+    /// An atom that PINS a primary input. Since mununu#656 the input is sampled into the state
+    /// (`adapter/btor2/input_state.rs`) and the property DECIDES over `(q, clr)`; the refusal —
+    /// the engine leaves inputs free/quantified, so a formula pinning one would decouple an
+    /// antecedent from its consequent — is the OPT-OUT's behaviour (`input_state_enabled:
+    /// false`, the differential switch), and still says which input.
     #[test]
     fn exact_symbolic_refuses_primary_input_atom() {
         // `q' = clr` (a 1-bit latch of the primary input `clr`); the formula's atom pins
@@ -11295,8 +11362,20 @@ mod tests {
 6 next 1 3 2
 "#;
         let formula = crate::mu_calculus::parser::parse("mu Y. (clr or <> Y)").expect("formula");
-        let err = exact_symbolic_verdict(INPUT_ATOM_BTOR2, &formula)
-            .expect_err("an atom pinning a primary input must be refused, not decided");
+        assert_eq!(
+            exact_symbolic_verdict(INPUT_ATOM_BTOR2, &formula).expect("decides on the product"),
+            ExactVerdict::Holds,
+            "`EF clr`: the environment can raise `clr` in the very next cycle"
+        );
+        let err = exact_symbolic_verdict_with_options(
+            INPUT_ATOM_BTOR2,
+            &formula,
+            &ExactSymbolicOptions {
+                input_state_enabled: false,
+                ..Default::default()
+            },
+        )
+        .expect_err("with inputs-in-the-state off, an atom pinning a primary input is refused");
         assert!(
             err.contains("primary input") && err.contains("clr"),
             "diagnostic should name the offending input `clr`: {err}"
@@ -11336,9 +11415,25 @@ mod tests {
 "#;
         let formula =
             crate::mu_calculus::parser::parse("mu Y. (mem_rvalid_mine or <> Y)").expect("formula");
-        let err = exact_symbolic_verdict(DERIVED_INPUT_BTOR2, &formula).expect_err(
-            "an atom over a combinational signal reaching primary inputs must be refused, \
-             not decided",
+        // mununu#656 — with inputs in the state the atom is a state predicate over
+        // `(q, mem_rvalid, got)` and `EF (mem_rvalid & got)` DECIDES: choose both inputs 1.
+        assert_eq!(
+            exact_symbolic_verdict(DERIVED_INPUT_BTOR2, &formula).expect("decides"),
+            ExactVerdict::Holds,
+            "some input makes the output true in the very next cycle"
+        );
+        // The refusal is the opt-out's behaviour (the differential switch), not the default's.
+        let err = exact_symbolic_verdict_with_options(
+            DERIVED_INPUT_BTOR2,
+            &formula,
+            &ExactSymbolicOptions {
+                input_state_enabled: false,
+                ..Default::default()
+            },
+        )
+        .expect_err(
+            "with inputs-in-the-state off, an atom over a combinational signal reaching primary \
+             inputs is refused, not decided",
         );
         assert!(
             err.contains("combinationally driven by primary input"),
@@ -11407,6 +11502,7 @@ mod tests {
             &formula,
             &ExactSymbolicOptions {
                 antecedent_shadow_enabled: false,
+                input_state_enabled: false, // mununu#656 — else the product model decides it
                 ..Default::default()
             },
         )

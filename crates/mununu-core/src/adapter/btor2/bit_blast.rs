@@ -7805,6 +7805,7 @@ mod tests {
             antecedent_shadow_enabled: true,
             signal_level_coi: true,
             antecedent_propagate_enabled: true,
+            input_state_enabled: true,
         };
 
     /// mununu#602 — `narrow_leaves` keeps a partially-read register's NID and symbol on a
