@@ -132,6 +132,29 @@ fn parse_sort(args: &[&str], source_line: usize) -> Result<Node, AdapterError> {
     }
 }
 
+/// mununu#650 — an arbitrary-length non-negative decimal string in hex (no prefix), by
+/// schoolbook long division; `None` for anything that is not all ASCII digits.
+fn decimal_to_hex(dec: &str) -> Option<String> {
+    if dec.is_empty() || !dec.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let mut digits: Vec<u32> = dec.bytes().map(|b| u32::from(b - b'0')).collect();
+    let mut hex = Vec::new();
+    while digits.iter().any(|d| *d != 0) {
+        let mut rem = 0u32;
+        for d in digits.iter_mut() {
+            let cur = rem * 10 + *d;
+            *d = cur / 16;
+            rem = cur % 16;
+        }
+        hex.push(std::char::from_digit(rem, 16)?);
+    }
+    if hex.is_empty() {
+        hex.push('0');
+    }
+    Some(hex.into_iter().rev().collect())
+}
+
 fn parse_const(kw: &str, args: &[&str], source_line: usize) -> Result<Node, AdapterError> {
     let sort = parse_nid(arg(args, 0, source_line, "const sort")?, source_line)?;
     let value = match kw {
@@ -141,10 +164,16 @@ fn parse_const(kw: &str, args: &[&str], source_line: usize) -> Result<Node, Adap
         "const" => ConstValue::Bin(arg(args, 1, source_line, "const bits")?.to_string()),
         "constd" => {
             let raw = arg(args, 1, source_line, "constd value")?;
-            let v: i128 = raw
-                .parse()
-                .map_err(|_| parse_err(source_line, format!("bad decimal literal '{raw}'")))?;
-            ConstValue::Dec(v)
+            match raw.parse::<i128>() {
+                Ok(v) => ConstValue::Dec(v),
+                // mununu#650 — a non-negative decimal past `i128::MAX` (a 128-bit-or-wider
+                // constant with its top bit set, e.g. yosys on OpenTitan `keymgr_ctrl`) is the
+                // same bit pattern spelled in hex, which every consumer already reads at the
+                // sort's width.
+                Err(_) => ConstValue::Hex(decimal_to_hex(raw).ok_or_else(|| {
+                    parse_err(source_line, format!("bad decimal literal '{raw}'"))
+                })?),
+            }
         }
         "consth" => ConstValue::Hex(arg(args, 1, source_line, "consth value")?.to_string()),
         _ => unreachable!("parse_const dispatched by keyword"),
@@ -1106,6 +1135,39 @@ pub fn array_widths(file: &Btor2File, sort_nid: Nid) -> Option<(u32, u32)> {
 
 #[cfg(test)]
 mod tests {
+    /// mununu#650 — `keymgr_ctrl`'s lift carries a 128-bit `constd` past `i128::MAX`; it used to
+    /// fail the whole parse. It is the same bits as the hex literal.
+    #[test]
+    fn x650_a_constd_past_i128_parses_as_its_hex_bits() {
+        let src = "1 sort bitvec 128\n2 constd 1 226854911280625642308916404954512140970\n";
+        let file = parse(src).expect("a wide unsigned constd parses");
+        let node = &file.lookup(2).expect("line 2").node;
+        match node {
+            Node::Const {
+                value: ConstValue::Hex(h),
+                ..
+            } => {
+                assert_eq!(
+                    u128::from_str_radix(h, 16).ok(),
+                    "226854911280625642308916404954512140970"
+                        .parse::<u128>()
+                        .ok()
+                );
+            }
+            other => panic!("expected a hex constant, got {other:?}"),
+        }
+        assert!(
+            parse("1 sort bitvec 8\n2 constd 1 -5\n").is_ok(),
+            "negatives still parse"
+        );
+        assert!(
+            parse("1 sort bitvec 8\n2 constd 1 12x\n").is_err(),
+            "garbage still refused"
+        );
+        assert_eq!(decimal_to_hex("255").as_deref(), Some("ff"));
+        assert_eq!(decimal_to_hex("0").as_deref(), Some("0"));
+    }
+
     use super::*;
 
     #[test]
