@@ -11793,7 +11793,7 @@ endmodule
         // through `resolve_state_alias` (the symbol survives sv2v + yosys) and
         // (b) gates the verdict on a real lift — incl. the `|=>` (AX) fragment.
         let sv = "module fsm (input logic clk, input logic rst_n, input logic go);\n\
-                  logic [1:0] state;\n\
+                  logic [1:0] state = 2'd0;\n\
                   always_ff @(posedge clk) begin\n\
                     if (!rst_n) state <= 2'd0;\n\
                     else state <= (state == 2'd2) ? 2'd0 : state + 2'd1;\n\
@@ -11809,6 +11809,11 @@ endmodule
             ..Default::default()
         };
 
+        // mununu#652 — `state` carries a declared power-up value. Without it the raw lift below
+        // has an init-less `state`, which is FREE at cycle 0 (acff567, #603), while `verify_auto`
+        // evaluates a model with a synthesised reset `init` and `rst_n` pinned — two different
+        // models, and the oracle (correctly) could not conclude `AG state != 3` on the free one.
+        // The initializer makes the oracle's model and verify_auto's agree at cycle 0.
         let report = verify_auto(&sources, &yopts, &VerifyAutoOptions::default())
             .expect("verify_auto runs end-to-end");
 
