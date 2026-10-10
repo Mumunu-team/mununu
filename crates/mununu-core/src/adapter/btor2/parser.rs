@@ -1436,7 +1436,6 @@ mod tests {
         assert!(!cone_reaches_input(&file, 5));
     }
 
-    #[test]
     /// mununu#651 — OpenTitan `prim_esc_receiver`'s lift: the state cell carries no symbol, the
     /// loose pass names it after the FIRST alias whose cone reaches it — `x_d`, the NEXT-VALUE
     /// function — and `x_d` is also that function's own `Op` symbol, whose cone reaches the
@@ -1465,6 +1464,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn signal_reaches_anonymous_input_via_alias_and_output() {
         // A register `q` whose name is carried by a `uext … 0 q` alias over a concat
         // that mixes an anonymous INPUT (the plain-vector partial-write shape) is
