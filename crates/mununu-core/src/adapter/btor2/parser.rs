@@ -682,6 +682,23 @@ pub fn cone_reaches_anonymous_input(file: &Btor2File, start: Nid) -> bool {
 /// flagged.
 pub fn signal_reaches_anonymous_input(file: &Btor2File, name: &str) -> bool {
     let symbols = collect_symbols(file);
+    // mununu#651 — a name `collect_symbols` gives a STATE CELL binds to that cell in the exact
+    // engine (its name table is `collect_symbols`), so judge that node alone. The loose pass can
+    // name an unsymbolled cell after its NEXT-VALUE function (`state_d`), whose own `Op` symbol
+    // is the same string; OR-ing that signal in refused a faithful register because its
+    // next-state logic reads an input.
+    let cells: Vec<Nid> = file
+        .lines
+        .iter()
+        .filter(|l| matches!(l.node, Node::State { .. }))
+        .filter(|l| symbols.get(&l.nid).map(String::as_str) == Some(name))
+        .map(|l| l.nid)
+        .collect();
+    if !cells.is_empty() {
+        return cells
+            .iter()
+            .any(|&nid| cone_reaches_anonymous_input(file, nid));
+    }
     file.lines.iter().any(|l| {
         let node = match &l.node {
             Node::State { .. } if symbols.get(&l.nid).map(String::as_str) == Some(name) => l.nid,
@@ -1479,6 +1496,34 @@ mod tests {
             "an anonymous-state split (no free input) is kept by the COI, not refused"
         );
         assert!(!cone_reaches_input(&file, 5));
+    }
+
+    /// mununu#651 — OpenTitan `prim_esc_receiver`'s lift: the state cell carries no symbol, the
+    /// loose pass names it after the FIRST alias whose cone reaches it — `x_d`, the NEXT-VALUE
+    /// function — and `x_d` is also that function's own `Op` symbol, whose cone reaches the
+    /// design's anonymous inputs. The exact engine binds the atom `x_d` to the STATE CELL (its
+    /// name table is `collect_symbols`), so the refusal must judge the same node: a faithful cell
+    /// is not "a signal with undriven bits". Refusing here skipped 7 of 18 corpus properties.
+    #[test]
+    fn x651_a_state_cell_named_after_its_next_value_function_is_not_refused() {
+        let src = "1 sort bitvec 1\n2 sort bitvec 3\n3 input 2\n4 state 2\n5 one 1\n\
+                   6 zero 2\n7 ite 2 5 4 6\n8 add 2 7 3\n9 uext 2 8 0 x_d\n\
+                   10 uext 2 7 0 x_q\n11 next 2 4 8\n12 init 2 4 6\n";
+        let file = parse(src).expect("parses");
+        let symbols = collect_symbols(&file);
+        assert_eq!(
+            symbols.get(&4).map(String::as_str),
+            Some("x_d"),
+            "precondition: the loose pass names the cell after its next-value function"
+        );
+        assert!(
+            !signal_reaches_anonymous_input(&file, "x_d"),
+            "`x_d` binds to the state cell, which reads no input"
+        );
+        assert!(
+            cone_reaches_anonymous_input(&file, 8),
+            "control: the next-value function itself does read the anonymous input"
+        );
     }
 
     #[test]
