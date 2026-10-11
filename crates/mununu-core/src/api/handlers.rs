@@ -755,6 +755,68 @@ fn btor2_verify_handler_impl(request: Btor2VerifyRequest) -> ApiResult<Json<Btor
 /// `bad`-reachability query (Biere–Artho–Schuppan liveness-to-safety) the portfolio
 /// decides, returning the canonical `"holds"` / `"violated"` / `"unknown"` verdict.
 /// A malformed atom or unparseable BTOR2 is a `BadRequest`.
+pub async fn btor2_verify_justice_handler(
+    Json(request): Json<crate::api::models::Btor2VerifyJusticeRequest>,
+) -> ApiResult<Json<crate::api::models::Btor2VerifyJusticeResponse>> {
+    blocking(move || btor2_verify_justice_handler_impl(request)).await
+}
+
+fn btor2_verify_justice_handler_impl(
+    request: crate::api::models::Btor2VerifyJusticeRequest,
+) -> ApiResult<Json<crate::api::models::Btor2VerifyJusticeResponse>> {
+    use crate::adapter::justice::{JusticeRung, verify_justice};
+    use crate::api::models::{Btor2JusticeEntry, Btor2VerifyJusticeResponse};
+    use crate::verdict::PropertyVerdict;
+    let bad_req = |message: String| ApiError::BadRequest {
+        message,
+        details: None,
+    };
+    let rung = JusticeRung::parse(request.rung.as_deref().unwrap_or("both")).map_err(bad_req)?;
+    let (btor2, converted) = if request.content.trim_start().starts_with("aag ") {
+        let circuit = crate::adapter::aiger::parser::parse(&request.content)
+            .map_err(|e| bad_req(format!("AIGER: {}", e.message)))?;
+        (
+            crate::adapter::aiger::to_btor2::circuit_to_btor2(&circuit),
+            true,
+        )
+    } else if request.content.starts_with("aig ") {
+        return Err(bad_req(
+            "binary AIGER cannot travel in a JSON string — convert with `mununu btor2 from-aiger` and send the BTOR2"
+                .to_string(),
+        ));
+    } else {
+        (request.content.clone(), false)
+    };
+    let results = verify_justice(&btor2, rung).map_err(bad_req)?;
+    let worst = if results
+        .iter()
+        .any(|r| r.verdict == PropertyVerdict::Violated)
+    {
+        "violated"
+    } else if results
+        .iter()
+        .any(|r| r.verdict == PropertyVerdict::Unknown)
+    {
+        "unknown"
+    } else {
+        "holds"
+    };
+    Ok(Json(Btor2VerifyJusticeResponse {
+        verdict: worst.to_string(),
+        converted_from_aiger: converted,
+        justice: results
+            .into_iter()
+            .map(|r| Btor2JusticeEntry {
+                index: r.index,
+                size: r.size,
+                verdict: r.verdict.as_str().to_string(),
+                decided_by: r.decided_by,
+                notes: r.notes,
+            })
+            .collect(),
+    }))
+}
+
 pub async fn btor2_verify_liveness_handler(
     Json(request): Json<Btor2VerifyLivenessRequest>,
 ) -> ApiResult<Json<Btor2VerifyLivenessResponse>> {

@@ -965,6 +965,45 @@ pub struct Btor2VerifyLivenessRequest {
     pub grant: String,
 }
 
+/// Request for `POST /api/v1/btor2/verify-justice` — the HTTP peer of `mununu btor2
+/// verify-justice`: every `justice` line of the design (BTOR2 text, or ASCII AIGER 1.9 — the
+/// binary `.aig` form must be converted with `btor2 from-aiger` first) decided by the exact
+/// fair-cycle fixpoint and/or liveness-to-safety + the reachability portfolio.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct Btor2VerifyJusticeRequest {
+    /// BTOR2 source content, or ASCII AIGER 1.9 (`aag …`).
+    pub content: String,
+    /// `"exact"`, `"l2s"` or `"both"` (default).
+    #[serde(default)]
+    pub rung: Option<String>,
+}
+
+/// One justice set's verdict in [`Btor2VerifyJusticeResponse`].
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct Btor2JusticeEntry {
+    /// Position among the design's `justice` lines (0-based).
+    pub index: usize,
+    /// Number of literals in the set.
+    pub size: usize,
+    /// `"holds"` (no fair infinite path — HWMCC `uns`), `"violated"` (one exists — `sat`),
+    /// `"unknown"`.
+    pub verdict: String,
+    /// The rung and engines that decided it.
+    pub decided_by: Vec<String>,
+    /// Abstention reasons, when a rung abstained.
+    pub notes: Vec<String>,
+}
+
+/// Response for `POST /api/v1/btor2/verify-justice`.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct Btor2VerifyJusticeResponse {
+    /// Worst verdict over the sets: `"violated"` if any, else `"unknown"` if any, else `"holds"`.
+    pub verdict: String,
+    /// Whether the content was ASCII AIGER lowered to BTOR2.
+    pub converted_from_aiger: bool,
+    pub justice: Vec<Btor2JusticeEntry>,
+}
+
 /// Response for `POST /api/v1/btor2/verify-liveness`. Mirrors
 /// [`crate::adapter::liveness_rescue::LivenessVerdict`].
 #[derive(Debug, Serialize, schemars::JsonSchema)]

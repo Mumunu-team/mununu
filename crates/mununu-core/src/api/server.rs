@@ -120,6 +120,12 @@ fn create_router() -> Router {
             "/api/v1/btor2/verify-liveness",
             post(handlers::btor2_verify_liveness_handler),
         )
+        // HWMCC-style justice (liveness) sets: the exact fair-cycle fixpoint + liveness-to-safety
+        // over the portfolio. Surface peer of the CLI `mununu btor2 verify-justice`.
+        .route(
+            "/api/v1/btor2/verify-justice",
+            post(handlers::btor2_verify_justice_handler),
+        )
         // Conjunctive response-liveness — ⋀ᵢ AG(aᵢ → AF bᵢ) via N liveness-to-safety
         // queries + the portfolio. Surface peer of `mununu btor2 verify-liveness-all`.
         .route(
