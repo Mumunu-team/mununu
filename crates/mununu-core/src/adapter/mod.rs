@@ -50,6 +50,7 @@ pub mod extraction;
 pub mod fsm_scan;
 pub mod gr1_synth;
 pub mod ir;
+pub mod justice;
 pub mod langgraph;
 pub mod liveness_rescue;
 pub mod memory_budget;

@@ -520,6 +520,13 @@ enum Btor2Command {
     /// prints the verdict (`holds` / `violated` / `unknown`). `--request`
     /// and `--grant` are single register-comparison atoms (`"st == 1"`).
     VerifyLiveness(Btor2VerifyLivenessArgs),
+    /// HWMCC-style justice (liveness) properties: decide every `justice` line of a BTOR2 — or of
+    /// an AIGER 1.9 file (`.aig` binary / `.aag`), converted first — with the exact fair-cycle
+    /// fixpoint and/or liveness-to-safety + the reachability portfolio.
+    VerifyJustice(Btor2VerifyJusticeArgs),
+    /// Convert an AIGER 1.9 file (`.aig` binary or `.aag` ASCII; bad / constraint / justice /
+    /// fairness) to BTOR2 text.
+    FromAiger(Btor2FromAigerArgs),
     /// Decide a conjunction of response-liveness properties `⋀ᵢ AG(aᵢ → AF bᵢ)`.
     ///
     /// The multi-guarantee peer of `verify-liveness`: pass a repeatable
@@ -974,6 +981,32 @@ struct Btor2VerifyArgs {
 
 /// Arguments for `mununu btor2 verify-liveness` — the response-liveness reduction.
 #[derive(Args, Debug)]
+struct Btor2VerifyJusticeArgs {
+    /// BTOR2 file, or an AIGER 1.9 file (`.aig` binary / `.aag`) converted on the fly.
+    #[arg(value_name = "FILE")]
+    file: PathBuf,
+    /// `exact` (ROBDD fair-cycle fixpoint), `l2s` (liveness-to-safety + the reachability
+    /// portfolio) or `both` (exact first, l2s when it abstains — the default).
+    #[arg(long, default_value = "both")]
+    rung: String,
+    /// Emit the per-justice-set report as JSON only.
+    #[arg(long)]
+    json: bool,
+    #[command(flatten)]
+    ci: CiArgs,
+}
+
+#[derive(Parser, Debug)]
+struct Btor2FromAigerArgs {
+    /// AIGER 1.9 input (`.aig` binary or `.aag` ASCII).
+    #[arg(value_name = "AIGER_FILE")]
+    file: PathBuf,
+    /// Output BTOR2 path (stdout when omitted).
+    #[arg(short, long, value_name = "PATH")]
+    output: Option<PathBuf>,
+}
+
+#[derive(Parser, Debug)]
 struct Btor2VerifyLivenessArgs {
     /// Path to the BTOR2 input file.
     #[arg(value_name = "BTOR2_FILE")]
@@ -3250,6 +3283,8 @@ fn handle_btor2(command: Btor2Command) -> Result<(), String> {
         Btor2Command::Verify(args) => btor2_verify(args),
         Btor2Command::SpacerCheck(args) => btor2_spacer_check(args),
         Btor2Command::VerifyLiveness(args) => btor2_verify_liveness(args),
+        Btor2Command::VerifyJustice(args) => btor2_verify_justice(args),
+        Btor2Command::FromAiger(args) => btor2_from_aiger(args),
         Btor2Command::VerifyLivenessAll(args) => btor2_verify_liveness_all(args),
         Btor2Command::VerifyLivenessUnderFairness(args) => {
             btor2_verify_liveness_under_fairness(args)
@@ -3503,6 +3538,93 @@ fn btor2_verify_safety(args: Btor2VerifySafetyArgs) -> Result<(), String> {
 /// verdict as JSON. Surface peer of the API `POST /api/v1/btor2/verify-liveness`;
 /// both share the canonical verdict label via
 /// [`mununu_core::verdict::PropertyVerdict`].
+/// Read a design that is BTOR2 text or AIGER (binary / ASCII); AIGER is lowered to BTOR2.
+fn read_btor2_or_aiger(path: &std::path::Path) -> Result<(String, bool), String> {
+    let bytes =
+        std::fs::read(path).map_err(|e| format!("Failed to read '{}': {e}", path.display()))?;
+    if bytes.starts_with(b"aig ") || bytes.starts_with(b"aag ") {
+        let circuit = mununu_core::adapter::aiger::parser::parse_bytes(&bytes)
+            .map_err(|e| format!("AIGER '{}': {}", path.display(), e.message))?;
+        Ok((
+            mununu_core::adapter::aiger::to_btor2::circuit_to_btor2(&circuit),
+            true,
+        ))
+    } else {
+        Ok((
+            String::from_utf8(bytes).map_err(|e| {
+                format!("'{}' is neither AIGER nor UTF-8 BTOR2: {e}", path.display())
+            })?,
+            false,
+        ))
+    }
+}
+
+fn btor2_from_aiger(args: Btor2FromAigerArgs) -> Result<(), String> {
+    let (btor2, was_aiger) = read_btor2_or_aiger(&args.file)?;
+    if !was_aiger {
+        return Err(format!(
+            "'{}' does not start with an `aig`/`aag` header",
+            args.file.display()
+        ));
+    }
+    match args.output {
+        Some(p) => std::fs::write(&p, btor2).map_err(|e| format!("write '{}': {e}", p.display())),
+        None => {
+            print!("{btor2}");
+            Ok(())
+        }
+    }
+}
+
+fn btor2_verify_justice(args: Btor2VerifyJusticeArgs) -> Result<(), String> {
+    use mununu_core::adapter::justice::{JusticeRung, verify_justice};
+    let rung = JusticeRung::parse(&args.rung)?;
+    let (btor2, converted) = read_btor2_or_aiger(&args.file)?;
+    let t0 = std::time::Instant::now();
+    let results = verify_justice(&btor2, rung)?;
+    let elapsed_ms = t0.elapsed().as_millis() as u64;
+    let worst = if results
+        .iter()
+        .any(|r| r.verdict == mununu_core::verdict::PropertyVerdict::Violated)
+    {
+        "violated"
+    } else if results
+        .iter()
+        .any(|r| r.verdict == mununu_core::verdict::PropertyVerdict::Unknown)
+    {
+        "unknown"
+    } else {
+        "holds"
+    };
+    let summary = serde_json::json!({
+        "file": args.file.display().to_string(),
+        "converted_from_aiger": converted,
+        "rung": args.rung,
+        "elapsed_ms": elapsed_ms,
+        "verdict": worst,
+        "justice": results.iter().map(|r| serde_json::json!({
+            "index": r.index,
+            "size": r.size,
+            "verdict": r.verdict.as_str(),
+            "decided_by": r.decided_by,
+            "notes": r.notes,
+        })).collect::<Vec<_>>(),
+    });
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string(&summary).map_err(|e| format!("serialize: {e}"))?
+        );
+    } else {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&summary).map_err(|e| format!("serialize: {e}"))?
+        );
+    }
+    ci_gate_exit(worst, args.ci.fail_on);
+    Ok(())
+}
+
 fn btor2_verify_liveness(args: Btor2VerifyLivenessArgs) -> Result<(), String> {
     use mununu_core::adapter::liveness_rescue::{
         parse_response_atom, response_liveness_rescue_atoms,

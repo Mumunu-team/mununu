@@ -15,6 +15,8 @@ pub struct Circuit {
     pub latches: Vec<Latch>,
     /// AND gates: (lhs_literal, rhs0_literal, rhs1_literal).
     pub gates: Vec<Gate>,
+    /// Plain output literals (`O` in the header), kept for the BTOR2 lowering (named `output`s).
+    pub outputs: Vec<Literal>,
     /// Bad-state output literals (safety properties: bad if literal is true).
     pub bad_outputs: Vec<Literal>,
     /// Constraint literals (environment assumptions: must be true).
@@ -38,7 +40,8 @@ pub struct Latch {
     pub current: Literal,
     /// Next state literal (can be any literal, including negated).
     pub next: Literal,
-    /// Initial value (0 or 1; default 0).
+    /// Initial value: 0 or 1 (default 0), or **2 = undefined** — AIGER 1.9 spells an
+    /// uninitialised latch as a third field equal to the latch's own literal.
     pub init: u8,
 }
 

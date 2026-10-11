@@ -15,7 +15,8 @@
 //! not listed are treated as uncontrollable (environment).
 
 pub mod ast;
-mod parser;
+pub mod parser;
+pub mod to_btor2;
 
 use super::ir::*;
 use super::{

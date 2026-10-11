@@ -104,6 +104,48 @@ path (validated on real OpenTitan `csrng` RTL — see `recoverability-vs-sva.md`
 
 ---
 
+### `btor2 verify-justice` — HWMCC-style justice (liveness) sets, and `btor2 from-aiger`
+
+> Source of truth: [`adapter::justice::verify_justice`](../crates/mununu-core/src/adapter/justice.rs) · [`adapter::aiger::to_btor2::circuit_to_btor2`](../crates/mununu-core/src/adapter/aiger/to_btor2.rs) · [`adapter::aiger::parser::parse_bytes`](../crates/mununu-core/src/adapter/aiger/parser.rs) — surface: CLI (`btor2 verify-justice`, `btor2 from-aiger`) + API (`POST /api/v1/btor2/verify-justice`)
+
+A BTOR2 `justice n l₁ … lₙ` (the AIGER 1.9 justice set HWMCC's liveness tracks use) is **violated**
+iff an infinite path exists that respects every `constraint` at every step and visits every `lₖ`
+and every `fair` literal infinitely often; it **holds** iff no such path exists. `verify-justice`
+decides every justice line of the design with two sound rungs — `--rung exact|l2s|both`
+(default `both`: exact first, l2s when it abstains):
+
+- **exact** — `exact-symbolic` (full-state ROBDD): the Emerson–Lei fair-`EG` fixpoint
+  `E_C G true = νZ. ⋀ₖ ◇ μY. ((Z ∧ lₖ) ∨ ◇Y)` is evaluated as `¬E_C G true`, universally over the
+  initial states; HOLDS ⇔ no initial state starts a fair path. Bounded by the bit cap
+  (`MUNUNU_BDD_MAX_BITS`); constraints restrict the modalities to legal frames.
+- **l2s** — liveness-to-safety: the response monitor with antecedent `true`, consequent `false`
+  and the literals as fairness atoms is exactly "a reachable cycle that visits every literal";
+  the reachability portfolio (native BMC/k-induction ⊕ spacer ⊕ btormc ⊕ Pono) decides the `bad`.
+
+Before either rung runs, the literals are exposed as `output`s (`mununu_j<i>_<k>`, `mununu_f<m>`,
+`mununu_true`, `mununu_false`) — observation only, the design is otherwise untouched.
+
+The input may be an **AIGER 1.9** file, binary (`.aig`) or ASCII (`.aag`), which is lowered to
+BTOR2 on the fly (`btor2 from-aiger` prints that lowering): `input`, `state` + `init`
+(an undefined AIGER init is a free state cell) + `next`, `and` / `not`, `output`, `bad`,
+`constraint`, `justice`, `fair`. The AIGER toolkit's `aigtobtor` cannot handle latches and yosys
+`read_aiger` rejects the binary 1.9 justice sections, which is why the lowering is in-house.
+
+```bash
+mununu btor2 verify-justice design.aig --json        # HWMCC sat = violated, uns = holds
+mununu btor2 verify-justice design.btor2 --rung l2s
+mununu btor2 from-aiger design.aig -o design.btor2
+```
+
+`scripts/hwmcc_live_study.sh` runs the verb over the HWMCC'17 LIVE set (download it; it is not
+vendored) and adjudicates every verdict against the competition's `live.csv`. First sweep
+(2026-10-11, ≤192-latch band, 129 instances, 300 s each in `mununu-sva`): 52 decided (13 HOLDS +
+39 VIOLATED) with 0 disagreements against the published verdicts; the exact rung decided 28 at a
+median of 0.10 s, the l2s rung 24 at a median of 58 s. The open rows are the exact rung's νμ
+iterates over the unreachable state space (arena bound) and long chains (iteration budget) — see
+[the consumer briefing](consumer-briefings/2026-10-btor2-verify-justice-from-aiger.md) for the
+per-instance evidence.
+
 ### `sv verify-auto` fair-cycle bridge — `// @mununu_assume GF <atom>` (mununu#477)
 
 > Source of truth: [`escalate_bottom`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) — surface: (CLI+API+UI)
