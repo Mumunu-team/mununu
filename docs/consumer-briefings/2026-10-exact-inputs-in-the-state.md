@@ -17,14 +17,17 @@
 
 | design · property | before | after |
 |---|---|---|
-| OpenTitan `prim_arbiter_tree` · `AG EF (gnt_o == 0)` (`gnt_o = req_i & sel(prio_mask_q) & ready_i`) | exact: skipped; cube (default `must_edge_inference = off`): ⊥, 4 cells | TODO-CENSUS |
-| OpenTitan `prim_arbiter_ppc` · `AG EF (gnt_o == 0)` | skipped (after #657 vendored its submodule) | TODO-CENSUS |
+| OpenTitan `prim_arbiter_tree` · `AG EF (gnt_o == 0)` (`gnt_o = req_i & sel(prio_mask_q) & ready_i`) | exact: skipped; cube (default `must_edge_inference = off`): ⊥, 4 cells | **HOLDS** (exact) |
+| OpenTitan `prim_arbiter_ppc` · `AG EF (gnt_o == 0)` | skipped (after #657 vendored its submodule) | **HOLDS** (exact) |
 | unit: one-register Mealy arbiter `gnt = req & ready & ~busy_q` — `AG EF (gnt == 0)` / `AG (gnt == 0)` / `AG (gnt → req)` / `AG (req → AX busy_q)` | all refused | HOLDS / VIOLATED / HOLDS / VIOLATED |
 | unit: the same with `constraint !req` — `AG (req == 0)` | refused | HOLDS (vacuous — the constraint forbids `req` at every legal frame) |
 | x629 fixture: `AG (addr == 4 → rdata == status_word)` with `constraint addr != 4`, `addr` an input | refused ("the antecedent still pins the input") | HOLDS (vacuous) |
-| OpenTitan corpus census (19 properties) | 16 decided, 3 ⊥ | TODO-CENSUS |
+| OpenTitan corpus census (19 properties, `differential_oracle_e2e`) | 16 decided, 3 ⊥ | **19 decided (11 HOLDS, 8 VIOLATED), 0 ⊥**; the strict monotone ledger passes |
+| OpenTitan `sysrst_ctrl_detect`, its own 16 SVA (exact engine) | 7 VIOLATED — spurious, mununu#658 — + 9 HOLDS; the symbolic run skipped 12 | **16 HOLDS**; the explicit and symbolic(+exact-rescue) runs agree on every row |
 
-Wall-class matrix and the full e2e sweep: TODO-RESULTS.
+Wall-class matrix: green (no lever contradicts an oracle verdict). Full e2e sweep (`scripts/e2e-sweep.sh`, one test per process): **46 passed, 0 failed, 0 crashed**.
+
+**Also fixed on the way — mununu#658, pre-existing on `main`.** An atom over an internal `assign` wire (an Op symbol, e.g. `trigger_active = (trigger_i == 0)`) was never refused: the refusal's name map had no Op symbols, so such an atom was evaluated with its input quantified per step — a spurious VIOLATED on seven of `sysrst_ctrl_detect`'s own assertions, masked whenever a bare input atom sat beside it. Both the refusal and the lift now resolve Op symbols.
 
 ## What to update, per consumer
 
