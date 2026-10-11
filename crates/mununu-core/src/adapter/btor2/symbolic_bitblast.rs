@@ -298,12 +298,24 @@ impl BddBitBlaster {
         file: &Btor2File,
         keep: Option<&std::collections::HashSet<Nid>>,
     ) -> Result<Self, String> {
+        Self::build_with_keep_and_bit_index(file, keep, None)
+    }
+
+    /// [`Self::build_with_keep`] with the ORIGINAL bit index of every narrowed leaf's kept bits
+    /// (mununu#642 — from `narrow_leaves`): the interleaved order places a narrowed cell's bit
+    /// `k` beside the other cells' bits of the same original index, not beside their bit `k`.
+    /// `None` = no narrowed leaves (every cell's bit `k` is its original bit `k`).
+    pub fn build_with_keep_and_bit_index(
+        file: &Btor2File,
+        keep: Option<&std::collections::HashSet<Nid>>,
+        bit_index: Option<&std::collections::HashMap<Nid, Vec<u32>>>,
+    ) -> Result<Self, String> {
         let (interleave, warning) =
             Self::resolve_var_order(&std::env::var("MUNUNU_BDD_VAR_ORDER").unwrap_or_default());
         if let Some(w) = warning {
             eprintln!("{w}");
         }
-        Self::build_with_keep_and_order(file, keep, interleave)
+        Self::build_inner(file, keep, interleave, bit_index)
     }
 
     /// Decide the BDD variable order from the raw `MUNUNU_BDD_VAR_ORDER` value.
@@ -403,20 +415,21 @@ impl BddBitBlaster {
         keep: Option<&std::collections::HashSet<Nid>>,
         interleave: bool,
     ) -> Result<Self, String> {
-        Self::build_inner(file, keep, interleave)
+        Self::build_inner(file, keep, interleave, None)
     }
 
     fn build_inner(
         file: &Btor2File,
         keep: Option<&std::collections::HashSet<Nid>>,
         interleave: bool,
+        bit_index: Option<&std::collections::HashMap<Nid, Vec<u32>>>,
     ) -> Result<Self, String> {
         // M4 instrument (engine-performance roadmap): one debug line per build — kept bits,
         // kept leaves, elapsed — so `RUST_LOG=mununu_core::adapter::btor2::symbolic_bitblast=debug`
         // splits a property's cost into bit-blast versus fixpoint (the fixpoint's own line is
         // printed by `ExactModel::evaluate`). What a build cache across properties would save.
         let t0 = std::time::Instant::now();
-        let built = Self::build_passes(file, keep, interleave);
+        let built = Self::build_passes(file, keep, interleave, bit_index);
         if let Ok(bb) = &built {
             tracing::debug!(
                 kept_bits = bb.declared_vars.load(std::sync::atomic::Ordering::Relaxed),
@@ -432,6 +445,7 @@ impl BddBitBlaster {
         file: &Btor2File,
         keep: Option<&std::collections::HashSet<Nid>>,
         interleave: bool,
+        bit_index: Option<&std::collections::HashMap<Nid, Vec<u32>>>,
     ) -> Result<Self, String> {
         // AR-S1 / D1.4 — the ONE canonical leaf enumeration + naming lives on the
         // STS-IR seam (`BtorSts::leaf_cells`). It resolves each state/input to its
@@ -588,23 +602,31 @@ impl BddBitBlaster {
         // single block where it genuinely split (17 cells into 15+1+1) it still regressed 9.6×.
         // `inputs-last` had no measured win in the form that does not break a coupled group. The
         // evidence and the reasoning are in the design note so neither is re-derived.
-        let kept_widths: Vec<usize> = leaf_specs
+        let kept_specs: Vec<(Nid, usize)> = leaf_specs
             .iter()
             .filter(|(nid, _, _, _)| is_kept(*nid))
-            .map(|(_, _, _, w)| *w as usize)
+            .map(|(nid, _, _, w)| (*nid, *w as usize))
             .collect();
+        let kept_widths: Vec<usize> = kept_specs.iter().map(|(_, w)| *w).collect();
+        // mununu#642 — the interleaving KEY of a cell's bit `k` is its ORIGINAL index: `k`
+        // itself, or `bit_index[nid][k]` for a leaf the bit-level cone narrowed (its kept bits
+        // were re-indexed from 0 by `narrow_leaves`). Before this, a slice kept at `[7:4]` had
+        // its bit 0 placed beside the other registers' bit 0 — the aligned `a_i — b_i` structure
+        // the interleaved order exploits (compares, shifts) was broken exactly for narrowed cells,
+        // which is how the bit-level cone (#602) made each BDD op ~6× slower on `sdram_burst`.
         let slots: Vec<Vec<usize>> = if interleave {
-            let maxw = kept_widths.iter().copied().max().unwrap_or(0);
-            let mut s: Vec<Vec<usize>> =
-                kept_widths.iter().map(|w| Vec::with_capacity(*w)).collect();
-            let mut p = 0usize;
-            for j in 0..maxw {
-                for (ci, w) in kept_widths.iter().enumerate() {
-                    if j < *w {
-                        s[ci].push(p);
-                        p += 1;
-                    }
+            let mut keyed: Vec<(u32, usize, usize)> = Vec::new(); // (key, cell, bit)
+            for (ci, (nid, w)) in kept_specs.iter().enumerate() {
+                let orig = bit_index.and_then(|m| m.get(nid));
+                for k in 0..*w {
+                    let key = orig.and_then(|v| v.get(k).copied()).unwrap_or(k as u32);
+                    keyed.push((key, ci, k));
                 }
+            }
+            keyed.sort_by_key(|(key, ci, k)| (*key, *ci, *k));
+            let mut s: Vec<Vec<usize>> = kept_widths.iter().map(|w| vec![0usize; *w]).collect();
+            for (p, (_, ci, k)) in keyed.into_iter().enumerate() {
+                s[ci][k] = p;
             }
             s
         } else {
@@ -618,6 +640,41 @@ impl BddBitBlaster {
                 })
                 .collect()
         };
+        // mununu#642 — `MUNUNU_BDD_ORDER_DEBUG`: the variable order as built, one line per kept
+        // cell (name, kind, width, the original indices of a narrowed cell's bits, the BDD
+        // positions), then the bit-interaction reading of the design. The instrument the #642
+        // root cause needed; the earlier documented knob of this name never existed.
+        if std::env::var_os("MUNUNU_BDD_ORDER_DEBUG").is_some() {
+            let mut ki = 0usize;
+            for (nid, symbol, is_state, width) in &leaf_specs {
+                if !is_kept(*nid) {
+                    continue;
+                }
+                let orig = match bit_index.and_then(|m| m.get(nid)) {
+                    Some(v) => format!("orig_bits={v:?}"),
+                    None => format!("orig_bits=0..{width}"),
+                };
+                eprintln!(
+                    "[mununu#642] order: cell `{symbol}` {} width={width} {orig} positions={:?}",
+                    if *is_state { "state" } else { "input" },
+                    slots[ki]
+                );
+                ki += 1;
+            }
+            let v = crate::adapter::btor2::bit_interaction::order_verdict(file);
+            eprintln!(
+                "[mununu#642] order: {} ({} bits, {} edges, mean_degree={:.2}, aligned={:.2}, \
+                 cross_cell={:.2}, selector={:.2}; {} kept cells)",
+                v.recommends(),
+                v.bits,
+                v.edges,
+                v.mean_degree,
+                v.aligned_fraction,
+                v.cross_cell_fraction,
+                v.selector_fraction,
+                kept_specs.len()
+            );
+        }
         let mut kept_ix = 0usize;
         for (nid, symbol, is_state, width) in leaf_specs {
             if is_kept(nid) {
@@ -5342,16 +5399,20 @@ fn exact_symbolic_verdict_with_witness_inner(
     // the leaves with at least one kept bit. Sound by the bit cone's closure under `next`
     // (`dep_graph::bit_cone`); `MUNUNU_COI=signal` keeps the old granularity for a differential
     // run. A cone that reaches an array stays signal-level (the memory havoc above applies).
+    let mut narrowed_bit_index: std::collections::HashMap<Nid, Vec<u32>> =
+        std::collections::HashMap::new();
     let (file, keep_set) = match (opts.signal_level_coi, keep_set) {
         (false, Some(_)) => match crate::adapter::btor2::dep_graph::bit_cone(&file, &seed_atoms) {
             Some(cone) => {
-                let (narrowed, keep) =
+                let (narrowed, keep, bit_index) =
                     crate::adapter::btor2::bit_blast::narrow_leaves(&file, &cone);
                 tracing::debug!(
                     signal_bits = crate::adapter::btor2::dep_graph::bit_cone_bits(&cone),
                     kept_leaves = keep.len(),
+                    narrowed_leaves = bit_index.len(),
                     "exact MC: bit-level cone"
                 );
+                narrowed_bit_index = bit_index;
                 (narrowed, Some(keep))
             }
             None => {
@@ -5361,7 +5422,12 @@ fn exact_symbolic_verdict_with_witness_inner(
         },
         (_, keep) => (file, keep),
     };
-    let bb = BddBitBlaster::build_with_keep(&file, keep_set.as_ref())?;
+    // mununu#642 — the narrowed leaves' original bit indices drive the interleaved order.
+    let bb = BddBitBlaster::build_with_keep_and_bit_index(
+        &file,
+        keep_set.as_ref(),
+        (!narrowed_bit_index.is_empty()).then_some(&narrowed_bit_index),
+    )?;
     let exact = if controllable.is_empty() {
         bb.exact_model()
     } else {
@@ -12970,6 +13036,61 @@ mod tests {
             err.contains("combinationally driven by primary input")
                 && err.contains("controllable input stays"),
             "{err}"
+        );
+    }
+
+    /// mununu#642 — a narrowed leaf's bits are interleaved at their ORIGINAL index. `a` is read
+    /// only through `a[7:4]` (narrowed to 4 bits by the bit-level cone), `b` whole; the
+    /// interleaved order must put `a`'s bit `k` (originally bit `4+k`) right beside `b`'s bit
+    /// `4+k`, not beside `b`'s bit `k` — the aligned structure the `hi_eq` compare rides on.
+    /// On the parent, `a`'s bit 0 sat beside `b`'s bit 0.
+    #[test]
+    fn x642_a_narrowed_slice_is_interleaved_at_its_original_bit_index() {
+        const TWO_REGS: &str = "1 sort bitvec 8\n2 sort bitvec 1\n3 sort bitvec 4\n4 state 1 a\n\
+                                5 state 1 b\n6 zero 1\n7 init 1 4 6\n8 init 1 5 6\n9 next 1 4 4\n\
+                                10 next 1 5 5\n11 slice 3 4 7 4\n12 slice 3 5 7 4\n\
+                                13 eq 2 11 12 hi_eq\n14 eq 2 5 6 b_zero\n";
+        let file = crate::adapter::btor2::parser::parse(TWO_REGS).expect("parse");
+        let atoms = ["hi_eq".to_string(), "b_zero".to_string()];
+        let cone = crate::adapter::btor2::dep_graph::bit_cone(&file, &atoms).expect("bit cone");
+        let (narrowed, keep, bit_index) =
+            crate::adapter::btor2::bit_blast::narrow_leaves(&file, &cone);
+        assert_eq!(
+            bit_index.get(&4).map(Vec::as_slice),
+            Some(&[4u32, 5, 6, 7][..]),
+            "a narrows to [7:4]"
+        );
+        assert!(!bit_index.contains_key(&5), "b is read whole");
+        let bb = BddBitBlaster::build_with_keep_and_order(&narrowed, Some(&keep), true)
+            .expect("build (parent order)");
+        let bb_fixed =
+            BddBitBlaster::build_with_keep_and_bit_index(&narrowed, Some(&keep), Some(&bit_index))
+                .expect("build (original-index order)");
+        let varnos = |bb: &BddBitBlaster, name: &str| -> Vec<VarNo> {
+            bb.cells
+                .iter()
+                .find(|c| c.symbol == name)
+                .expect(name)
+                .varnos
+                .clone()
+        };
+        let (a, b) = (varnos(&bb_fixed, "a"), varnos(&bb_fixed, "b"));
+        assert_eq!((a.len(), b.len()), (4, 8));
+        for k in 0..4 {
+            assert_eq!(
+                a[k] + 1,
+                b[4 + k],
+                "a's bit {k} (original bit {}) sits right before b's bit {}: a={a:?} b={b:?}",
+                4 + k,
+                4 + k
+            );
+        }
+        // The un-indexed build (what the parent did): a's bit 0 beside b's bit 0.
+        let (a0, b0) = (varnos(&bb, "a"), varnos(&bb, "b"));
+        assert_eq!(
+            a0[0] + 1,
+            b0[0],
+            "without the index the slice is misaligned: a={a0:?} b={b0:?}"
         );
     }
 }

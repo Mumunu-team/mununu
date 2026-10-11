@@ -86,7 +86,7 @@ closure merges everything — so it degenerates to full interleaving. And it can
 that matters for formula-driven verbs, because `BddBitBlaster::build` fixes the order **before any
 formula is known**. Seeding hyperedges from `bad`/`constraint`/outputs closed only ~8% of the
 suite gap. Closing it properly means passing the property's atoms into the ordering — an
-architectural change, not a constant. (The cluster structure quoted here was read from an instrumented build; no shipped knob prints it — `MUNUNU_BDD_ORDER_DEBUG` was documented alongside this note but never implemented.)
+architectural change, not a constant. (The cluster structure quoted here was read from an instrumented build. Since mununu#642 `MUNUNU_BDD_ORDER_DEBUG` prints the order as built — one line per kept cell with its width, the original indices of a narrowed cell's bits and its BDD positions, plus the `bit_interaction::order_verdict` reading; the knob of that name documented earlier had no code behind it.)
 
 **4. `inputs-last` is design-dependent in both directions, and conflicts with `deps`.**
 `diamond_pre` does `∃ inputs` and quantification is cheapest near the leaves, so inputs want to be
@@ -99,6 +99,16 @@ measured and REMOVED together with `deps` (there is no `MUNUNU_BDD_INPUTS_LAST` 
 **5. Ordering cannot help an ITERATION-bound cone.** The fixpoint depth is the reachability
 diameter, an invariant of the transition system — see `measure_bdd_actual_size`. A 640×480 raster
 wrap needs 818,626 iterations under any order.
+
+**6. A narrowed slice must keep its original bit index (mununu#642).** The bit-level cone (#602)
+re-emits a partially-kept leaf as a fresh cell of width = kept bits, re-indexed from 0. Interleaved
+by cell-local index, a slice kept at `[7:4]` had its bit 0 placed beside the other registers' bit 0
+— the aligned `a_i — b_i` structure this order exists to exploit was broken for exactly the
+narrowed cells, and `sdram_burst`'s 85-bit `AG EF` fixpoint went from 7 iterations / 20 BDD ops /
+~120 s to 13 / 44 / ~1,600 s while `MUNUNU_COI=signal` (no narrowing) stayed fast. The builder now
+keys every bit by its original index (`build_with_keep_and_bit_index`); with no narrowed leaf the
+order is unchanged bit for bit. Measured on the consumer's command: 7 / 20 / 114.7 s, wall 212 s
+(signal-level control 7 / 20 / 106.4 s, wall 185 s), verdicts identical.
 
 ## DECISION (2026-09-14): hold at cell-major
 

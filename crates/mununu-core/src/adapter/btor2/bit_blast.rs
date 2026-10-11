@@ -1962,7 +1962,11 @@ pub(crate) struct DownCounterMeta {
 pub(crate) fn narrow_leaves(
     file: &Btor2File,
     cone: &std::collections::HashMap<Nid, Vec<bool>>,
-) -> (Btor2File, std::collections::HashSet<Nid>) {
+) -> (
+    Btor2File,
+    std::collections::HashSet<Nid>,
+    std::collections::HashMap<Nid, Vec<u32>>,
+) {
     use crate::adapter::btor2::ast::{ConstValue, Op, Sort};
     let mut keep: std::collections::HashSet<Nid> = std::collections::HashSet::new();
     let init_value: std::collections::HashMap<Nid, Operand> = file
@@ -2001,8 +2005,25 @@ pub(crate) fn narrow_leaves(
         }
         partial.insert(line.nid, mask.clone());
     }
+    // mununu#642 — the ORIGINAL index of each kept bit of a narrowed leaf, low to high. The
+    // narrowed cell is re-indexed from 0, so the bit-blaster needs this to interleave its bits
+    // beside the other cells' bits of the same original index (a slice `[7:4]` next to the
+    // other registers' bits 4..7, not next to their bits 0..3).
+    let bit_index: std::collections::HashMap<Nid, Vec<u32>> = partial
+        .iter()
+        .map(|(nid, mask)| {
+            (
+                *nid,
+                mask.iter()
+                    .enumerate()
+                    .filter(|(_, b)| **b)
+                    .map(|(i, _)| i as u32)
+                    .collect(),
+            )
+        })
+        .collect();
     if partial.is_empty() {
-        return (file.clone(), keep);
+        return (file.clone(), keep, bit_index);
     }
 
     /// The line emitter: fresh NIDs, sorts by width (declared in a prelude), the output.
@@ -2369,7 +2390,7 @@ pub(crate) fn narrow_leaves(
     let mut lines = prelude;
     lines.extend(out);
     let by_nid = lines.iter().enumerate().map(|(i, l)| (l.nid, i)).collect();
-    (Btor2File { lines, by_nid }, keep)
+    (Btor2File { lines, by_nid }, keep, bit_index)
 }
 
 /// Every NID used as an operand anywhere (Op args, next/init state+value, bad/output/
@@ -7830,7 +7851,7 @@ mod tests {
         let file = parser::parse(btor).unwrap();
         let cone = bit_cone(&file, &["hi".to_string()]).unwrap();
         assert_eq!(bit_cone_bits(&cone), 24, "din/words/words_sync × [15:8]");
-        let (narrowed, keep) = narrow_leaves(&file, &cone);
+        let (narrowed, keep, _bit_index) = narrow_leaves(&file, &cone);
         assert_eq!(keep, [4, 5, 9].into_iter().collect());
         // The leaves are 8 bits wide now, under their own NIDs and names.
         let width_of = |f: &Btor2File, nid: Nid| -> u32 {
