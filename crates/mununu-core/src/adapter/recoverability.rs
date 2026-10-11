@@ -45,7 +45,9 @@ use crate::adapter::btor2::cegar::{
 };
 use crate::adapter::btor2::kmts_lift::{MayEdgeInference, MustEdgeInference, PredicateSpec};
 use crate::adapter::btor2::predicate_expr::{CmpOp, PredicateExpr, parse_predicate_expr};
-use crate::adapter::btor2::symbolic_bitblast::exact_symbolic_verdict;
+use crate::adapter::btor2::symbolic_bitblast::{
+    ExactSymbolicOptions, exact_symbolic_verdict_with_options,
+};
 use crate::mu_calculus::Environment;
 use crate::mu_calculus::parser as mu_parser;
 use crate::mu_calculus::trit::Trit;
@@ -1060,6 +1062,59 @@ pub fn verify_recoverability_with_predicates(
     good: &str,
     extra_predicates: &[PredicateSpec],
 ) -> Result<PropertyVerdict, String> {
+    verify_recoverability_with_options(
+        btor2_content,
+        good,
+        extra_predicates,
+        &ExactSymbolicOptions::default(),
+    )
+}
+
+/// [`verify_recoverability_with_predicates`] with the exact engine's per-request options
+/// (mununu#656 follow-up). The ladder's exact-first pass used to run on
+/// [`ExactSymbolicOptions::default()`] whatever the caller had asked for, so `sv verify-auto
+/// --no-input-state` (API `no_input_state: true`) still had its recoverability ⊥ rescued by the
+/// input-state product model — the differential switch did not switch the rescue. The cube
+/// ladder is unaffected by these options.
+pub fn verify_recoverability_with_options(
+    btor2_content: &str,
+    good: &str,
+    extra_predicates: &[PredicateSpec],
+    exact_opts: &ExactSymbolicOptions,
+) -> Result<PropertyVerdict, String> {
+    verify_recoverability_attributed(btor2_content, good, extra_predicates, exact_opts)
+        .map(|(v, _)| v)
+}
+
+/// Which rung of the recoverability ladder produced the verdict — provenance for
+/// `PropertyVerdict::decided_by` (mununu#656 follow-up: every rescued `AG EF` verdict used to
+/// report `decided_by: null`, and the rescue note named both rungs without saying which ran).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecoverabilityEngine {
+    /// The exact-symbolic ROBDD engine, first in the ladder (COI, and the input-state product
+    /// when the options enable it).
+    Exact,
+    /// The scalable predicate-cube ladder (cube + `smt-hyper-must`, ranking, guard atoms, Craig).
+    CubeLadder,
+}
+
+impl RecoverabilityEngine {
+    /// The `decided_by` label.
+    pub fn decided_by_label(self) -> &'static str {
+        match self {
+            Self::Exact => "exact-symbolic (recoverability rescue)",
+            Self::CubeLadder => "explicit cube + smt-hyper-must (recoverability rescue)",
+        }
+    }
+}
+
+/// [`verify_recoverability_with_options`] that also says WHICH rung decided.
+pub fn verify_recoverability_attributed(
+    btor2_content: &str,
+    good: &str,
+    extra_predicates: &[PredicateSpec],
+    exact_opts: &ExactSymbolicOptions,
+) -> Result<(PropertyVerdict, RecoverabilityEngine), String> {
     // Validate the atom up front for a target-specific error message (the µ-parser
     // would otherwise report it as a formula-syntax error).
     parse_predicate_expr(good).map_err(|e| {
@@ -1072,11 +1127,11 @@ pub fn verify_recoverability_with_predicates(
     let formula = mu_parser::parse(&formula_str)
         .map_err(|e| format!("building the AG EF formula for `{good}`: {e:?}"))?;
 
-    match exact_symbolic_verdict(btor2_content, &formula) {
+    match exact_symbolic_verdict_with_options(btor2_content, &formula, exact_opts) {
         // The exact engine decided (definite at every alternation depth per
         // Bruns–Godefroid) — return it unchanged; the exact-only behaviour is
         // preserved when the exact engine gives a definite verdict.
-        Ok(v) => Ok(PropertyVerdict::from(v)),
+        Ok(v) => Ok((PropertyVerdict::from(v), RecoverabilityEngine::Exact)),
         // Over the ~40-bit cone cap or an unsupported construct: escalate to the
         // cube + `smt-hyper-must` path so the property still decides at scale
         // (slice-5b safety-⊥ escalation mirror). The scalable path itself abstains
@@ -1092,6 +1147,7 @@ pub fn verify_recoverability_with_predicates(
                 "exact engine abstained on `AG EF {good}`; escalating to the scalable ladder"
             );
             verify_recoverability_scalable(btor2_content, good, extra_predicates)
+                .map(|v| (v, RecoverabilityEngine::CubeLadder))
         }
     }
 }
@@ -3446,6 +3502,7 @@ pub fn verify_safety_scalable(btor2_content: &str) -> Result<PropertyVerdict, St
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapter::btor2::symbolic_bitblast::exact_symbolic_verdict;
 
     // IC3ia I1 DE-RISK — relative-inductive (Houdini) conjunction discovery. The load-bearing question:
     // can we discover a CONJUNCTIVE invariant `P1 ∧ P2` where NEITHER `Pi` is inductive alone (so the
