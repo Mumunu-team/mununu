@@ -716,6 +716,18 @@ fn conj_bool(constraints: &[z3::ast::Bool]) -> z3::ast::Bool {
 /// only movement is `Unknown → Must`. When the view carries no recorded expressions
 /// (built without `transition`), the previous encoding is used unchanged rather than
 /// silently weakening the query.
+/// mununu#664 — the uniform checks read a COMBINATIONAL target dimension (`gnt_o`, kept as its own
+/// cube dimension since #649) through the primed cache, i.e. over the NEXT frame's inputs `i′`
+/// ([`PrimedEnv::inputs`]). [`must_inner_body_and_bounds`] binds only the step's inputs, so `i′`
+/// stayed free and was chosen at the OUTER level — adversarially, against the must edge: any
+/// target a single `i′` can falsify came back `NotMust`, and `AG EF (gnt_o == 0)` starved. The
+/// `∀∃` must edge is `∀ s ⊨ src. ∃ i, i′. tgt(δ(s, i), i′)`, so `i′` belongs INSIDE the `∀` of the
+/// negated body. Binding a variable the body does not mention changes nothing, so the
+/// state-only and free-input dimensions keep their per-kind-identical verdicts.
+fn bind_primed_inputs(bound_bvs: &mut Vec<z3::ast::BV>, primed: &PrimedEnv) {
+    bound_bvs.extend(primed.inputs.values().cloned());
+}
+
 fn must_inner_body_and_bounds(
     view: &Btor2SmtView,
     tgt_conj: &z3::ast::Bool,
@@ -1229,7 +1241,8 @@ where
     };
     let tgt_conj = conj_bool(&tgt_constraints);
     // mununu#512 — substitute the next state rather than quantify over it.
-    let (inner_body, bound_bvs, bound_arrs) = must_inner_body_and_bounds(view, &tgt_conj);
+    let (inner_body, mut bound_bvs, bound_arrs) = must_inner_body_and_bounds(view, &tgt_conj);
+    bind_primed_inputs(&mut bound_bvs, primed);
     let mut bound_refs: Vec<&dyn z3::ast::Ast> =
         bound_bvs.iter().map(|bv| bv as &dyn z3::ast::Ast).collect();
     bound_refs.extend(bound_arrs.iter().map(|a| a as &dyn z3::ast::Ast));
@@ -1291,7 +1304,8 @@ where
     let tgt_disjuncts_refs: Vec<&z3::ast::Bool> = tgt_disjuncts.iter().collect();
     let any_tgt = z3::ast::Bool::or(&tgt_disjuncts_refs);
     // mununu#512 — substitute the next state rather than quantify over it.
-    let (inner_body, bound_bvs, bound_arrs) = must_inner_body_and_bounds(view, &any_tgt);
+    let (inner_body, mut bound_bvs, bound_arrs) = must_inner_body_and_bounds(view, &any_tgt);
+    bind_primed_inputs(&mut bound_bvs, primed);
     let mut bound_refs: Vec<&dyn z3::ast::Ast> =
         bound_bvs.iter().map(|bv| bv as &dyn z3::ast::Ast).collect();
     bound_refs.extend(bound_arrs.iter().map(|a| a as &dyn z3::ast::Ast));
@@ -2502,6 +2516,79 @@ mod tests {
     // `reg` stuck at 0 (next = reg); `g = not(reg)` is a combinational-of-state
     // op named `g` (so g ≡ 1 forever). A second combinational `h = not(reg)`
     // carries NO own symbol but is named `h_out` on an `output` line.
+    /// mununu#664 — a combinational dimension over an INPUT in the target. `out = in` beside a
+    /// constant register: the cell `{q == 0, out == 0}` is a must-target from every state (choose
+    /// `in′ = 0`), `{q == 1, …}` never is (`q` is constant 0). Before the fix the hyper-must (and
+    /// the per-target uniform) check left `in′` free at the outer level, picked `in′ = 1`, and
+    /// answered NotMust — the arbiter's `AG EF (gnt_o == 0)` ⊥ under `smt-hyper-must`.
+    const PASSTHRU_FIXTURE: &str = "\
+1 sort bitvec 1
+2 input 1 in
+3 state 1 q
+4 zero 1
+5 init 1 3 4
+6 next 1 3 3
+7 uext 1 2 0 out
+";
+
+    #[test]
+    fn x664_a_combinational_target_over_the_next_input_is_a_must_target() {
+        let file = parse(PASSTHRU_FIXTURE).expect("parse");
+        let preds = vec![
+            PredicateSpec {
+                name: "q0".into(),
+                register: "q".into(),
+                value: 0,
+            },
+            PredicateSpec {
+                name: "out0".into(),
+                register: "out".into(),
+                value: 0,
+            },
+        ];
+        let cfg = z3::Config::new();
+        z3::with_z3_config(&cfg, || {
+            let view = encode_design(&file).expect("encode");
+            let primed = encode_primed(&file, &view).expect("primed");
+            let nid_map = build_register_nid_map_with_inputs(&view);
+            // bit 0 = q == 0, bit 1 = out == 0. From {q0, out≠0} (0b01) the cell {q0, out0}
+            // (0b11) is reached by choosing the next input 0.
+            assert_eq!(
+                smt_hyper_must_check_uniform(
+                    &view,
+                    &primed,
+                    0b01,
+                    &[0b11],
+                    &preds,
+                    &nid_map,
+                    5_000
+                ),
+                SmtMustVerdict::Must,
+                "some next input makes `out == 0`: a hyper-must edge"
+            );
+            assert_eq!(
+                smt_per_target_must_check_uniform(
+                    &view, &primed, 0b01, 0b11, &preds, &nid_map, 5_000
+                ),
+                SmtMustVerdict::Must,
+                "the per-target ∀∃ form agrees"
+            );
+            // Control: `q` is constant 0, so a target with `q != 0` is never a must-target.
+            assert_eq!(
+                smt_hyper_must_check_uniform(
+                    &view,
+                    &primed,
+                    0b01,
+                    &[0b10],
+                    &preds,
+                    &nid_map,
+                    5_000
+                ),
+                SmtMustVerdict::NotMust
+            );
+        });
+    }
+
     const COMB_FIXTURE: &str = "\
 1 sort bitvec 1
 2 state 1 reg
