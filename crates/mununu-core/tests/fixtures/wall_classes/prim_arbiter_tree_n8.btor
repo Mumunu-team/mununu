@@ -1,0 +1,351 @@
+; BTOR2 lift of OpenTitan prim_arbiter_tree (N=8) — examples/verify/dc_opentitan_prim_arbiter_tree (Apache-2.0, upstream commit in its UPSTREAM_COMMIT.txt), lifted 2026-10-11 by sv verify-auto (sv2v + yosys read_verilog) and dumped with MUNUNU_SHADOW_BTOR2_DUMP: reset pinned inactive, 1 `@mununu_guarantee` as a comment. mununu#663: the cube decides AG EF (gnt_o == 0) with smt-per-target-standard and leaves it ⊥ may-only.
+; mununu#552 — the BTOR2 the engine runs, dumped after model preparation.
+; INCLUDES: the SV lift, `$past` shadow registers, reset pinning,
+;           `--config-value` pins, and any `sv mutate` fault.
+; EXCLUDES: antecedent shadow synthesis (`_mununu_antshadow_*`), which runs
+;           LATER and PER-PROPERTY inside the engine. If you are reproducing
+;           an `A |=> C` with an input-derived antecedent, that rewrite is not
+;           in this file.
+;
+; Properties, as the engine parses them (post `--config-value` substitution).
+; Shadow atoms appear here as `<base>__past`; bit-slices as `<base>__bits<hi>_<lo>`.
+; ann_guarantee_0: nu Y. ((mu X. ((gnt_o == 0) or <> X)) and [] Y)
+;
+1 sort bitvec 1
+2 input 1 clk_i
+3 sort bitvec 256
+4 input 3 data_i
+5 input 1 ready_i
+6 input 1 req_chk_i
+7 sort bitvec 8
+8 input 7 req_i
+9 one 1 rst_ni
+10 sort bitvec 32
+11 slice 10 4 255 224
+12 slice 10 4 223 192
+13 slice 1 8 0 0
+14 not 1 13
+15 const 7 00000000
+16 state 7
+17 ite 7 9 16 15
+18 slice 1 17 0 0
+19 and 1 13 18
+20 not 1 19
+21 slice 1 8 1 1
+22 slice 1 17 1 1
+23 and 1 21 22
+24 and 1 20 23
+25 or 1 14 24
+26 ite 10 25 12 11
+27 slice 10 4 191 160
+28 slice 10 4 159 128
+29 slice 1 8 2 2
+30 not 1 29
+31 slice 1 17 2 2
+32 and 1 29 31
+33 not 1 32
+34 slice 1 8 3 3
+35 slice 1 17 3 3
+36 and 1 34 35
+37 and 1 33 36
+38 or 1 30 37
+39 ite 10 38 28 27
+40 or 1 13 21
+41 not 1 40
+42 or 1 23 19
+43 not 1 42
+44 or 1 36 32
+45 and 1 43 44
+46 or 1 41 45
+47 ite 10 46 39 26
+48 slice 10 4 127 96
+49 slice 10 4 95 64
+50 slice 1 8 4 4
+51 not 1 50
+52 slice 1 17 4 4
+53 and 1 50 52
+54 not 1 53
+55 slice 1 8 5 5
+56 slice 1 17 5 5
+57 and 1 55 56
+58 and 1 54 57
+59 or 1 51 58
+60 ite 10 59 49 48
+61 slice 10 4 63 32
+62 slice 10 4 31 0
+63 slice 1 8 6 6
+64 not 1 63
+65 slice 1 17 6 6
+66 and 1 63 65
+67 not 1 66
+68 slice 1 8 7 7
+69 slice 1 17 7 7
+70 and 1 68 69
+71 and 1 67 70
+72 or 1 64 71
+73 ite 10 72 62 61
+74 or 1 50 55
+75 not 1 74
+76 or 1 57 53
+77 not 1 76
+78 or 1 70 66
+79 and 1 77 78
+80 or 1 75 79
+81 ite 10 80 73 60
+82 or 1 29 34
+83 or 1 40 82
+84 not 1 83
+85 or 1 44 42
+86 not 1 85
+87 or 1 78 76
+88 and 1 86 87
+89 or 1 84 88
+90 ite 10 89 81 47
+91 output 90 data_o
+92 not 1 89
+93 not 1 46
+94 and 1 92 93
+95 not 1 25
+96 and 1 94 95
+97 and 1 13 96
+98 and 1 97 5
+99 and 1 94 25
+100 and 1 21 99
+101 and 1 100 5
+102 and 1 92 46
+103 not 1 38
+104 and 1 102 103
+105 and 1 29 104
+106 and 1 105 5
+107 and 1 102 38
+108 and 1 34 107
+109 and 1 108 5
+110 not 1 80
+111 and 1 89 110
+112 not 1 59
+113 and 1 111 112
+114 and 1 50 113
+115 and 1 114 5
+116 and 1 111 59
+117 and 1 55 116
+118 and 1 117 5
+119 and 1 89 80
+120 not 1 72
+121 and 1 119 120
+122 and 1 63 121
+123 and 1 122 5
+124 and 1 119 72
+125 and 1 68 124
+126 and 1 125 5
+127 sort bitvec 2
+128 concat 127 101 98
+129 sort bitvec 3
+130 concat 129 106 128
+131 sort bitvec 4
+132 concat 131 109 130
+133 sort bitvec 5
+134 concat 133 115 132
+135 sort bitvec 6
+136 concat 135 118 134
+137 sort bitvec 7
+138 concat 137 123 136
+139 concat 7 126 138
+140 output 139 gnt_o
+141 const 129 000
+142 const 129 001
+143 ite 129 25 142 141
+144 const 129 010
+145 const 129 011
+146 ite 129 38 145 144
+147 ite 129 46 146 143
+148 const 129 100
+149 const 129 101
+150 ite 129 59 149 148
+151 const 129 110
+152 const 129 111
+153 ite 129 72 152 151
+154 ite 129 80 153 150
+155 ite 129 89 154 147
+156 output 155 idx_o
+157 or 1 63 68
+158 or 1 74 157
+159 or 1 83 158
+160 output 159 valid_o
+161 sort bitvec 480
+162 sort bitvec 64
+163 concat 162 47 90
+164 sort bitvec 96
+165 concat 164 81 163
+166 sort bitvec 128
+167 concat 166 26 165
+168 sort bitvec 160
+169 concat 168 39 167
+170 sort bitvec 192
+171 concat 170 60 169
+172 sort bitvec 224
+173 concat 172 73 171
+174 slice 10 4 255 224
+175 concat 3 174 173
+176 slice 10 4 223 192
+177 sort bitvec 288
+178 concat 177 176 175
+179 slice 10 4 191 160
+180 sort bitvec 320
+181 concat 180 179 178
+182 slice 10 4 159 128
+183 sort bitvec 352
+184 concat 183 182 181
+185 slice 10 4 127 96
+186 sort bitvec 384
+187 concat 186 185 184
+188 slice 10 4 95 64
+189 sort bitvec 416
+190 concat 189 188 187
+191 slice 10 4 63 32
+192 sort bitvec 448
+193 concat 192 191 190
+194 slice 10 4 31 0
+195 concat 161 194 193
+196 uext 161 195 0 gen_normal_case.data_tree
+197 uext 1 89 0 gen_normal_case.gen_tree[0].gen_level[0].gen_nodes.sel
+198 uext 1 46 0 gen_normal_case.gen_tree[1].gen_level[0].gen_nodes.sel
+199 uext 1 80 0 gen_normal_case.gen_tree[1].gen_level[1].gen_nodes.sel
+200 uext 1 25 0 gen_normal_case.gen_tree[2].gen_level[0].gen_nodes.sel
+201 uext 1 38 0 gen_normal_case.gen_tree[2].gen_level[1].gen_nodes.sel
+202 uext 1 59 0 gen_normal_case.gen_tree[2].gen_level[2].gen_nodes.sel
+203 uext 1 72 0 gen_normal_case.gen_tree[2].gen_level[3].gen_nodes.sel
+204 sort bitvec 45
+205 sort bitvec 24
+206 const 205 111110101100011010001000
+207 concat 135 147 155
+208 sort bitvec 9
+209 concat 208 154 207
+210 sort bitvec 12
+211 concat 210 143 209
+212 sort bitvec 15
+213 concat 212 146 211
+214 sort bitvec 18
+215 concat 214 150 213
+216 sort bitvec 21
+217 concat 216 153 215
+218 concat 204 206 217
+219 uext 204 218 0 gen_normal_case.idx_tree
+220 const 127 00
+221 const 1 0
+222 or 1 92 111
+223 or 1 94 104
+224 or 1 92 113
+225 or 1 222 121
+226 concat 129 92 220
+227 concat 131 221 226
+228 concat 133 94 227
+229 concat 135 92 228
+230 concat 137 222 229
+231 concat 7 221 230
+232 concat 208 96 231
+233 sort bitvec 10
+234 concat 233 94 232
+235 sort bitvec 11
+236 concat 235 223 234
+237 concat 210 92 236
+238 sort bitvec 13
+239 concat 238 224 237
+240 sort bitvec 14
+241 concat 240 222 239
+242 concat 212 225 241
+243 uext 212 242 0 gen_normal_case.mask_tree
+244 not 1 5
+245 and 1 96 244
+246 redor 1 8
+247 ite 1 246 245 18
+248 not 1 5
+249 and 1 99 248
+250 or 1 96 249
+251 redor 1 8
+252 ite 1 251 250 22
+253 not 1 5
+254 and 1 104 253
+255 or 1 94 254
+256 redor 1 8
+257 ite 1 256 255 31
+258 not 1 5
+259 and 1 107 258
+260 or 1 223 259
+261 redor 1 8
+262 ite 1 261 260 35
+263 not 1 5
+264 and 1 113 263
+265 or 1 92 264
+266 redor 1 8
+267 ite 1 266 265 52
+268 not 1 5
+269 and 1 116 268
+270 or 1 224 269
+271 redor 1 8
+272 ite 1 271 270 56
+273 not 1 5
+274 and 1 121 273
+275 or 1 222 274
+276 redor 1 8
+277 ite 1 276 275 65
+278 not 1 5
+279 and 1 124 278
+280 or 1 225 279
+281 redor 1 8
+282 ite 1 281 280 69
+283 concat 127 252 247
+284 concat 129 257 283
+285 concat 131 262 284
+286 concat 133 267 285
+287 concat 135 272 286
+288 concat 137 277 287
+289 concat 7 282 288
+290 uext 7 289 0 gen_normal_case.prio_mask_d
+291 uext 7 17 0 gen_normal_case.prio_mask_q
+292 or 1 87 85
+293 concat 127 85 292
+294 concat 129 87 293
+295 concat 131 42 294
+296 concat 133 44 295
+297 concat 135 76 296
+298 concat 137 78 297
+299 concat 7 19 298
+300 concat 208 23 299
+301 concat 233 32 300
+302 concat 235 36 301
+303 concat 210 53 302
+304 concat 238 57 303
+305 concat 240 66 304
+306 concat 212 70 305
+307 uext 212 306 0 gen_normal_case.prio_tree
+308 concat 127 83 159
+309 concat 129 158 308
+310 concat 131 40 309
+311 concat 133 82 310
+312 concat 135 74 311
+313 concat 137 157 312
+314 concat 212 8 313
+315 uext 212 314 0 gen_normal_case.req_tree
+316 const 1 1
+317 concat 127 92 316
+318 concat 129 89 317
+319 concat 131 94 318
+320 concat 133 102 319
+321 concat 135 111 320
+322 concat 137 119 321
+323 concat 7 96 322
+324 concat 208 99 323
+325 concat 233 104 324
+326 concat 235 107 325
+327 concat 210 113 326
+328 concat 238 116 327
+329 concat 240 121 328
+330 concat 212 124 329
+331 uext 212 330 0 gen_normal_case.sel_tree
+332 uext 1 292 0 gen_normal_case.unused_prio_tree
+333 uext 1 6 0 unused_req_chk
+334 ite 7 9 289 15
+335 next 7 16 334
+; end of yosys output
+336 constd 7 0
+337 init 7 16 336
