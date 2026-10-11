@@ -1,6 +1,6 @@
 # BDD variable ordering in the exact-symbolic engine
 
-> Source of truth: [`BddBitBlaster::build`](../../crates/mununu-core/src/adapter/btor2/symbolic_bitblast.rs) (`MUNUNU_BDD_VAR_ORDER`, `MUNUNU_BDD_INPUTS_LAST`) — surface: CLI-only — an engine tuning knob consumed by CI lanes and diagnostics, not by a CTXDSL author.
+> Source of truth: [`BddBitBlaster::build`](../../crates/mununu-core/src/adapter/btor2/symbolic_bitblast.rs) (`MUNUNU_BDD_VAR_ORDER`) — surface: CLI-only — an engine tuning knob consumed by CI lanes and diagnostics, not by a CTXDSL author.
 
 **engine:** `exact-symbolic` (full-state ROBDD, OxiDD). Structure: full-state ROBDD over register+input bits. Technique: bit-blast μ-fixpoint with functional next-state substitution. Role: decider.
 
@@ -91,8 +91,10 @@ architectural change, not a constant. (The cluster structure quoted here was rea
 **4. `inputs-last` is design-dependent in both directions, and conflicts with `deps`.**
 `diamond_pre` does `∃ inputs` and quantification is cheapest near the leaves, so inputs want to be
 last. But a symbolic shift amount has no `next` line, so it is classified input-like — and moving
-it destroys the barrel-shifter coupling (1 → 65,537). The shipped version therefore never breaks a
-coupled group, which costs a measured 4× on `uart_msg_handler`. Neither composition dominates.
+it destroys the barrel-shifter coupling (1 → 65,537). The version that never broke a coupled group
+cost a measured 4× on `uart_msg_handler`. Neither composition dominates, so the mode was built,
+measured and REMOVED together with `deps` (there is no `MUNUNU_BDD_INPUTS_LAST` knob in the code;
+`build_passes` has the two orders only — interleaved by bit position, or cell-major).
 
 **5. Ordering cannot help an ITERATION-bound cone.** The fixpoint depth is the reachability
 diameter, an invariant of the transition system — see `measure_bdd_actual_size`. A 640×480 raster
