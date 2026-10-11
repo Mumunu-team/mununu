@@ -31,8 +31,11 @@
 //! stay quantified per step, so the bit cap moves by the lifted width (twice: the sampled
 //! cell and the fresh next input both enter the cone). Anonymous inputs (black-boxed
 //! submodule outputs, undriven nets) are NOT lifted: a verdict over them would read a chaotic
-//! stub, and that refusal stands. The two-player verbs do not use this rewrite: a controllable
-//! input folded into the state is fixed before the controller moves, which changes who wins.
+//! stub, and that refusal stands. On the two-player verbs (mununu#661) only the UNCONTROLLABLE
+//! inputs the atoms reach are lifted — the environment's choice for the next frame is exactly
+//! the free `name$next` the rewrite introduces, so the game is unchanged; a CONTROLLABLE input
+//! folded into the state would be fixed before the controller moves, which changes who wins,
+//! so an atom reaching one stays refused by name.
 //!
 //! engine: `exact-symbolic` (full-state ROBDD, bit-blast μ-fixpoint) over the input-extended
 //! state. Differential switch: `MUNUNU_NO_INPUT_STATE=1` / `--no-input-state` /
@@ -105,6 +108,28 @@ pub fn lift_atom_inputs(
     atom_registers: &HashSet<String>,
 ) -> Option<InputStateLift> {
     let lifted = atom_inputs(file, atom_registers);
+    if lifted.is_empty() {
+        return None;
+    }
+    Some(InputStateLift {
+        file: lift_inputs(file, &lifted),
+        lifted,
+    })
+}
+
+/// [`lift_atom_inputs`] minus an exclusion set (mununu#661 — the two-player verbs pass their
+/// controllable inputs): the atoms' inputs NOT in `exclude` are lifted; an excluded input the
+/// atoms reach is left as a per-step input, so the engine's input-atom refusal still names it.
+/// `None` when nothing is left to lift.
+pub fn lift_atom_inputs_excluding(
+    file: &Btor2File,
+    atom_registers: &HashSet<String>,
+    exclude: &HashSet<String>,
+) -> Option<InputStateLift> {
+    let lifted: Vec<String> = atom_inputs(file, atom_registers)
+        .into_iter()
+        .filter(|name| !exclude.contains(name))
+        .collect();
     if lifted.is_empty() {
         return None;
     }
@@ -383,5 +408,42 @@ mod tests {
         let file = parse(&with_wire).expect("parses");
         let regs: HashSet<String> = ["both".to_string()].into_iter().collect();
         assert_eq!(atom_inputs(&file, &regs), vec!["ready", "req"]);
+    }
+
+    /// mununu#661 — the exclusion set: a controllable input the atoms reach is NOT lifted (it
+    /// stays a per-step input, by name), the environment one is.
+    #[test]
+    fn x661_lift_atom_inputs_excluding_keeps_a_controllable_input_per_step() {
+        const ARBITER: &str = "1 sort bitvec 1\n2 input 1 grant\n3 input 1 req\n4 state 1 q\n\
+                               5 zero 1\n6 init 1 4 5\n7 next 1 4 2\n9 and 1 4 3 a\n\
+                               11 uext 1 2 0 g\n";
+        let file = crate::adapter::btor2::parser::parse(ARBITER).expect("parse");
+        let atoms: HashSet<String> = ["a".to_string(), "g".to_string()].into_iter().collect();
+        let ctrl: HashSet<String> = ["grant".to_string()].into_iter().collect();
+        let lift = lift_atom_inputs_excluding(&file, &atoms, &ctrl).expect("req is lifted");
+        assert_eq!(lift.lifted, vec!["req".to_string()]);
+        let names: Vec<String> = lift
+            .file
+            .inputs()
+            .filter_map(|l| match &l.node {
+                Node::Input {
+                    symbol: Some(s), ..
+                } => Some(s.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            names.contains(&"grant".to_string()),
+            "grant stays a per-step input: {names:?}"
+        );
+        assert!(
+            names.contains(&"req$next".to_string()),
+            "req became the next-frame choice: {names:?}"
+        );
+        assert!(
+            lift_atom_inputs_excluding(&file, &["g".to_string()].into_iter().collect(), &ctrl)
+                .is_none(),
+            "nothing to lift when the only input reached is controllable"
+        );
     }
 }

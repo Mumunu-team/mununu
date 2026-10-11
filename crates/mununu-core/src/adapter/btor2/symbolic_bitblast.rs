@@ -2515,6 +2515,14 @@ pub struct ExactModel {
     /// [`ExactModel::cpre_environment`] to solve the two-player game.
     ctrl_cube: BDDFunction,
     env_cube: BDDFunction,
+    /// mununu#661 — the cube of the LIFTED environment inputs' next-frame bits (`name$next`, the
+    /// free input the inputs-in-the-state rewrite leaves behind for an uncontrollable input the
+    /// atoms read). Quantified INSIDE the controller's move in the two-player pre-images —
+    /// `∀env ∃ctrl ∀env_next` — so the controller commits before the environment's next-frame
+    /// choice, as in the Mealy game; outside it would hand the controller a frame of
+    /// look-ahead (`EF (q == req)` would turn realizable). `tt` without a lift; the single-agent
+    /// `input_cube` still contains these bits.
+    env_next_cube: BDDFunction,
     /// BTOR2 `constraint` (assume) conjunction over the state + input vars — `tt`
     /// when the design is unconstrained. Injected into `diamond_pre` / `box_pre`
     /// so the modal quantifier ranges only over constraint-respecting transitions.
@@ -3364,6 +3372,17 @@ impl BddBitBlaster {
         &self,
         controllable: &std::collections::HashSet<String>,
     ) -> ExactModel {
+        self.exact_model_partitioned_with_lift(controllable, &std::collections::HashSet::new())
+    }
+
+    /// [`Self::exact_model_partitioned`] with the inputs-in-the-state lift's next-frame inputs
+    /// (mununu#661): an input cell named in `lifted_env_next` (`name$next`) goes to
+    /// [`ExactModel::env_next_cube`] instead of the per-step environment cube.
+    pub fn exact_model_partitioned_with_lift(
+        &self,
+        controllable: &std::collections::HashSet<String>,
+        lifted_env_next: &std::collections::HashSet<String>,
+    ) -> ExactModel {
         // State bit → next-state function (the same sub the abstract relation uses).
         let mut sub_vars: Vec<VarNo> = Vec::new();
         let mut sub_repl: Vec<BDDFunction> = Vec::new();
@@ -3383,15 +3402,19 @@ impl BddBitBlaster {
         let mut input_cube = self.tt.clone();
         let mut ctrl_cube = self.tt.clone();
         let mut env_cube = self.tt.clone();
+        let mut env_next_cube = self.tt.clone();
         let mut input_varnos: Vec<VarNo> = Vec::new();
         for cell in &self.cells {
             if !cell.is_state {
                 let is_ctrl = controllable.contains(&cell.symbol);
+                let is_env_next = !is_ctrl && lifted_env_next.contains(&cell.symbol);
                 input_varnos.extend(cell.varnos.iter().copied());
                 for v in &cell.vars {
                     input_cube = input_cube.and(v).unwrap();
                     if is_ctrl {
                         ctrl_cube = ctrl_cube.and(v).unwrap();
+                    } else if is_env_next {
+                        env_next_cube = env_next_cube.and(v).unwrap();
                     } else {
                         env_cube = env_cube.and(v).unwrap();
                     }
@@ -3416,6 +3439,7 @@ impl BddBitBlaster {
             input_cube,
             ctrl_cube,
             env_cube,
+            env_next_cube,
             constraint: self.constraint_bdd.clone(),
             legal_next: std::cell::OnceCell::new(),
             tt: self.tt.clone(),
@@ -3664,7 +3688,10 @@ impl ExactModel {
         self.tick(3);
         // ∃ctrl: a constraint-respecting transition into φ (per state + environment move).
         let step = oom(self.to_next(phi)?.and(&self.constraint))?;
-        let reachable = oom(step.exists(&self.ctrl_cube))?;
+        // mununu#661 — ∀env_next INSIDE ∃ctrl: the controller commits before the environment's
+        // next-frame choice for a lifted input (no look-ahead).
+        let committed = oom(step.forall(&self.env_next_cube))?;
+        let reachable = oom(committed.exists(&self.ctrl_cube))?;
         // ∀env: the controller has such a response to every environment move.
         oom(reachable.forall(&self.env_cube))
     }
@@ -3679,7 +3706,10 @@ impl ExactModel {
         // ∀ctrl: every controllable response leads (constraint-respecting) into φ.
         let not_c = oom(self.constraint.not())?;
         let implies = oom(not_c.or(&self.to_next(phi)?))?;
-        let forced = oom(implies.forall(&self.ctrl_cube))?;
+        // mununu#661 — the dual order: the environment picks a lifted input's next-frame value
+        // AFTER seeing the controller's move (`∃env ∀ctrl ∃env_next`).
+        let after_ctrl = oom(implies.exists(&self.env_next_cube))?;
+        let forced = oom(after_ctrl.forall(&self.ctrl_cube))?;
         // ∃env: some environment move imposes that.
         oom(forced.exists(&self.env_cube))
     }
@@ -3692,7 +3722,9 @@ impl ExactModel {
     pub fn ctrl_forcing_moves(&self, keep: &BDDFunction) -> Result<BDDFunction, String> {
         use oxidd::BooleanFunctionQuant;
         let step = oom(self.to_next(keep)?.and(&self.constraint))?;
-        oom(step.forall(&self.env_cube))
+        // mununu#661 — robust to the environment's next-frame choice for a lifted input too.
+        let committed = oom(step.forall(&self.env_next_cube))?;
+        oom(committed.forall(&self.env_cube))
     }
 
     /// Dual — the `(state, env-input)` pairs from which, WHATEVER the controller does, the successor is
@@ -3702,7 +3734,10 @@ impl ExactModel {
         use oxidd::BooleanFunctionQuant;
         let not_c = oom(self.constraint.not())?;
         let implies = oom(not_c.or(&self.to_next(keep)?))?;
-        oom(implies.forall(&self.ctrl_cube))
+        // mununu#661 — the environment's next-frame choice for a lifted input is made after the
+        // controller's move: `∀ctrl ∃env_next`.
+        let after_ctrl = oom(implies.exists(&self.env_next_cube))?;
+        oom(after_ctrl.forall(&self.ctrl_cube))
     }
 
     // ---- Phase 2b: symbolic environment-strategy synthesis ----------------------------------------
@@ -4510,8 +4545,11 @@ pub struct ExactSymbolicOptions {
     /// combinationally driven by one) is evaluated over the product `(s, i)` — the registers with
     /// the input sampled in that cycle — instead of being refused. `false` restores the refusal
     /// (the differential switch; `--no-input-state`, `no_input_state: true`,
-    /// `MUNUNU_NO_INPUT_STATE=1`). Never applied on the two-player path, where a controllable
-    /// input folded into the state would be fixed before the controller moves.
+    /// `MUNUNU_NO_INPUT_STATE=1`). On the two-player path (mununu#661) only the UNCONTROLLABLE
+    /// inputs the atoms reach are lifted, and their next-frame values are quantified AFTER the
+    /// controller's move (`∀env ∃ctrl ∀env_next`), so the controller gains no look-ahead; a
+    /// controllable input folded into the state would be fixed before the controller moves, so
+    /// an atom reaching one stays refused by name.
     pub input_state_enabled: bool,
 }
 
@@ -5065,15 +5103,25 @@ fn exact_symbolic_verdict_with_witness_inner(
     // so `leaf_cells` errors on its array sort → honest Skip rather than an unsound verdict.
     // `havoc_rewrite_memories` preserves every non-array NID (Reads become same-NID Inputs), so
     // the keep-set computed on the original file stays valid against the rewritten file.
-    // mununu#656 — inputs in the state (one-player only): the named primary inputs the atoms
-    // read become sampled state cells, so an atom over `gnt_o = f(mask_q, req_i, ready_i)` is a
-    // state predicate and the refusals below do not fire for it. Anonymous inputs stay refused.
+    // mununu#656 — inputs in the state: the named primary inputs the atoms read become sampled
+    // state cells, so an atom over `gnt_o = f(mask_q, req_i, ready_i)` is a state predicate and
+    // the refusals below do not fire for it. Anonymous inputs stay refused. mununu#661 — on the
+    // two-player path only the UNCONTROLLABLE inputs are lifted (the environment's next-frame
+    // choice is exactly the free `name$next` the rewrite introduces, so the game is unchanged);
+    // a controllable input folded into the state would be fixed before the controller moves,
+    // so an atom reaching one is left for the refusal below, which names it.
+    // mununu#661 — the lifted inputs' next-frame names, for the two-player cube partition.
+    let mut lifted_env_next: std::collections::HashSet<String> = std::collections::HashSet::new();
     let file = {
-        let opt_out = !controllable.is_empty()
-            || !opts.input_state_enabled
-            || std::env::var("MUNUNU_NO_INPUT_STATE").is_ok();
+        let opt_out = !opts.input_state_enabled || std::env::var("MUNUNU_NO_INPUT_STATE").is_ok();
         match (!opt_out)
-            .then(|| crate::adapter::btor2::input_state::lift_atom_inputs(&file, &seed_regs))
+            .then(|| {
+                crate::adapter::btor2::input_state::lift_atom_inputs_excluding(
+                    &file,
+                    &seed_regs,
+                    controllable,
+                )
+            })
             .flatten()
         {
             Some(lift) => {
@@ -5082,6 +5130,7 @@ fn exact_symbolic_verdict_with_witness_inner(
                     "inputs in the state: {} primary input(s) the atoms read are sampled into state cells",
                     lift.lifted.len()
                 );
+                lifted_env_next = lift.lifted.iter().map(|n| format!("{n}$next")).collect();
                 lift.file
             }
             None => file,
@@ -5217,12 +5266,21 @@ fn exact_symbolic_verdict_with_witness_inner(
                 .map(|n| format!("`{n}`"))
                 .collect::<Vec<_>>()
                 .join(", ");
+            // mununu#661 — on the two-player path the env inputs were lifted above, so what is
+            // left here is a CONTROLLABLE input (or an anonymous one): say so.
+            let ctrl_note = if derived_inputs.iter().any(|n| controllable.contains(n)) {
+                " A controllable input stays a per-step choice — folded into the state it would \
+                 be fixed before the controller moves, which changes who wins — so an atom over \
+                 it is refused on the game verbs."
+            } else {
+                ""
+            };
             return Err(format!(
                 "exact MC: atom `{reg}` is combinationally driven by primary input(s) {inputs}. \
                  The exact-symbolic engine leaves inputs free/quantified, so a temporal property \
                  whose antecedent depends on inputs decouples the antecedent from its consequent \
                  and would report an unsound verdict. Use the default `explicit` cube engine, or \
-                 lift the antecedent through a shadow register."
+                 lift the antecedent through a shadow register.{ctrl_note}"
             ));
         }
     }
@@ -5307,7 +5365,7 @@ fn exact_symbolic_verdict_with_witness_inner(
     let exact = if controllable.is_empty() {
         bb.exact_model()
     } else {
-        bb.exact_model_partitioned(controllable)
+        bb.exact_model_partitioned_with_lift(controllable, &lifted_env_next)
     };
 
     // Resolve each atom's full-state BDD against the (cone-restricted) bit-blaster.
@@ -12848,6 +12906,70 @@ mod tests {
         assert!(
             w.contains("2 of 4"),
             "must state WHY it was retired so a reader need not find the doc, got: {w}"
+        );
+    }
+
+    /// mununu#661 — the two-player path lifts the ENVIRONMENT input an atom reads (the one-player
+    /// lever of mununu#656, which the game verbs used to skip): `o = q ∨ req` is realizable (the
+    /// controller sets `grant`, `q′ = grant`, and `o` holds whatever `req` does), `a = q ∧ req` is
+    /// not (the environment starves it). On the parent both were refused ("combinationally
+    /// driven by primary input(s)").
+    #[test]
+    fn x661_the_game_verbs_lift_the_environment_input_an_atom_reads() {
+        const ARBITER: &str = "1 sort bitvec 1\n2 input 1 grant\n3 input 1 req\n4 state 1 q\n\
+                               5 zero 1\n6 init 1 4 5\n7 next 1 4 2\n8 or 1 4 3 o\n9 and 1 4 3 a\n\
+                               10 eq 1 4 3 m\n11 uext 1 2 0 g\n";
+        assert_eq!(
+            exact_two_player_reach_realizable(ARBITER, "o == 1", &["grant"]),
+            Ok(true),
+            "`q ∨ req`: the controller reaches it by itself"
+        );
+        assert_eq!(
+            exact_two_player_reach_realizable(ARBITER, "a == 1", &["grant"]),
+            Ok(false),
+            "`q ∧ req`: the environment holds `req` low forever"
+        );
+    }
+
+    /// mununu#661 — the lifted input's next-frame value is quantified AFTER the controller's move
+    /// (`∀env ∃ctrl ∀env_next`): `m = (q == req)` asks the controller to match the environment's
+    /// input in the same frame, which the Mealy game never allows — unrealizable. A naive lift
+    /// (`req$next` in the outer `∀env`) would let the controller read the next frame's `req` and
+    /// set `grant = req$next`: realizable, an unsound flip.
+    #[test]
+    fn x661_a_lifted_environment_input_gives_the_controller_no_look_ahead() {
+        const ARBITER: &str = "1 sort bitvec 1\n2 input 1 grant\n3 input 1 req\n4 state 1 q\n\
+                               5 zero 1\n6 init 1 4 5\n7 next 1 4 2\n8 or 1 4 3 o\n9 and 1 4 3 a\n\
+                               10 eq 1 4 3 m\n11 uext 1 2 0 g\n";
+        assert_eq!(
+            exact_two_player_reach_realizable(ARBITER, "m == 1", &["grant"]),
+            Ok(false),
+            "matching the environment's same-frame input is unrealizable; `true` here means the \
+             controller saw `req$next`"
+        );
+        // The dual reading: the environment can force `m == 0` from every state.
+        let f = crate::mu_calculus::parser::parse("mu X. ((m == 0) || <(ctrl = environment)> X)")
+            .expect("formula");
+        assert_eq!(
+            exact_two_player_verdict(ARBITER, &f, &["grant"]),
+            Ok(ExactVerdict::Holds),
+            "the environment reaches a mismatch against every controller"
+        );
+    }
+
+    /// mununu#661 — an atom over a CONTROLLABLE input stays refused on the game verbs, and the
+    /// refusal says why.
+    #[test]
+    fn x661_an_atom_over_a_controllable_input_stays_refused_on_the_game_verbs() {
+        const ARBITER: &str = "1 sort bitvec 1\n2 input 1 grant\n3 input 1 req\n4 state 1 q\n\
+                               5 zero 1\n6 init 1 4 5\n7 next 1 4 2\n8 or 1 4 3 o\n9 and 1 4 3 a\n\
+                               10 eq 1 4 3 m\n11 uext 1 2 0 g\n";
+        let err = exact_two_player_reach_realizable(ARBITER, "g == 1", &["grant"])
+            .expect_err("an atom over the controllable input is refused");
+        assert!(
+            err.contains("combinationally driven by primary input")
+                && err.contains("controllable input stays"),
+            "{err}"
         );
     }
 }

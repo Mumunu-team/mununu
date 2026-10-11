@@ -58,5 +58,5 @@ docker run --rm -v "$(pwd)":/work -w /work -v mununu-target:/cargo-target \
 ## Not covered here
 
 - The cube engine still returns ⊥ on `AG EF` over an input-driven atom under verify-auto's default `must_edge_inference = off` (an `EF` needs must-edges); `--must-edge-inference smt-per-target-standard` decides it, and `smt-hyper-must` does not pin a combinational target dimension — tracked separately.
-- The two-player path keeps the refusal; lifting only the *uncontrollable* inputs there is a follow-up with its own soundness argument.
+- The two-player path keeps the refusal; lifting only the *uncontrollable* inputs there is a follow-up with its own soundness argument — done as mununu#661 ([`2026-10-exact-two-player-env-inputs.md`](2026-10-exact-two-player-env-inputs.md): the lifted next-frame inputs are quantified after the controller's move).
 - The env-strategy (assumption discovery) path reads the verdict at every initial state, not only the legal ones; it does not use the lift.
