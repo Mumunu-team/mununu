@@ -1737,6 +1737,13 @@ pub struct SvVerifyAutoRequest {
     /// `MUNUNU_NO_ANTECEDENT_PROPAGATE=1`.
     #[serde(default)]
     pub no_antecedent_propagate: Option<bool>,
+    /// mununu#656 — disable inputs-in-the-state on the exact-symbolic engine (default `false` ⇒
+    /// enabled). Enabled, a property that reads a primary input or a signal combinationally
+    /// driven by one is decided over the registers with that input sampled in the same cycle;
+    /// `true` restores the engine's refusal of such atoms (the differential-oracle knob),
+    /// mirrored on the CLI as `--no-input-state` and by `MUNUNU_NO_INPUT_STATE=1`.
+    #[serde(default)]
+    pub no_input_state: Option<bool>,
     /// mununu#537 — assert that this run produces the verdicts the caller claims. Omitted ⇒ no
     /// claim, and the response carries no `expectations` block.
     ///
