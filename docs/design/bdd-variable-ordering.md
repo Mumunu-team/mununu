@@ -1,6 +1,6 @@
 # BDD variable ordering in the exact-symbolic engine
 
-> Source of truth: [`BddBitBlaster::build`](../../crates/mununu-core/src/adapter/btor2/symbolic_bitblast.rs) (`MUNUNU_BDD_VAR_ORDER`, `MUNUNU_BDD_INPUTS_LAST`, `MUNUNU_BDD_ORDER_DEBUG`) — surface: CLI-only — an engine tuning knob consumed by CI lanes and diagnostics, not by a CTXDSL author.
+> Source of truth: [`BddBitBlaster::build`](../../crates/mununu-core/src/adapter/btor2/symbolic_bitblast.rs) (`MUNUNU_BDD_VAR_ORDER`, `MUNUNU_BDD_INPUTS_LAST`) — surface: CLI-only — an engine tuning knob consumed by CI lanes and diagnostics, not by a CTXDSL author.
 
 **engine:** `exact-symbolic` (full-state ROBDD, OxiDD). Structure: full-state ROBDD over register+input bits. Technique: bit-blast μ-fixpoint with functional next-state substitution. Role: decider.
 
@@ -86,7 +86,7 @@ closure merges everything — so it degenerates to full interleaving. And it can
 that matters for formula-driven verbs, because `BddBitBlaster::build` fixes the order **before any
 formula is known**. Seeding hyperedges from `bad`/`constraint`/outputs closed only ~8% of the
 suite gap. Closing it properly means passing the property's atoms into the ordering — an
-architectural change, not a constant. `MUNUNU_BDD_ORDER_DEBUG=1` prints the cluster structure.
+architectural change, not a constant. (The cluster structure quoted here was read from an instrumented build; no shipped knob prints it — `MUNUNU_BDD_ORDER_DEBUG` was documented alongside this note but never implemented.)
 
 **4. `inputs-last` is design-dependent in both directions, and conflicts with `deps`.**
 `diamond_pre` does `∃ inputs` and quantification is cheapest near the leaves, so inputs want to be
@@ -150,7 +150,7 @@ block where it differs, it does not help. `deps` has now had its chance and shou
 unless a new argument appears for it.
 
 (The cell count is **17**, not the 26 that a `state` count in the BTOR2 suggests — the order
-operates on kept cone cells. The `MUNUNU_BDD_ORDER_DEBUG` line is authoritative.)
+operates on kept cone cells. The count comes from an instrumented build; no shipped knob prints it.)
 
 **What the evidence supports, stated precisely.** *"Interleave unless a block says otherwise, and
 here is the one that does"* — yes. *"Interleaving is better"* — no. *"It regresses on
@@ -545,7 +545,7 @@ failed predictors skipped. Until that runs, this is opt-in machinery with a mech
 no demonstrated win.
 
 ```
-MUNUNU_BDD_VAR_ORDER=auto MUNUNU_BDD_ORDER_DEBUG=1 mununu btor2 verify-recoverability ...
+MUNUNU_BDD_VAR_ORDER=auto mununu btor2 verify-recoverability ...   # historical: `auto` is retired; the probe's lines below came from an instrumented build
   # 24-bit cone -> "not probing: under the 64-bit gate"
   # 83-bit cone -> "cell-major kept (challenger abandoned)"
 ```
