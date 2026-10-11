@@ -5423,7 +5423,15 @@ pub fn exact_env_strategy(btor2_content: &str, good: &str) -> Result<EnvStrategy
         Ok(b) => b,
         Err(e) => return Ok(EnvStrategyOutcome::Inapplicable(e)),
     };
-    let init = bb.initial_state_bdd(&file)?;
+    // mununu#662 — the LEGAL initial frames only (`init ∧ ∃i. constraint(s, i)`), as the
+    // one-player verdict reads them since #659: a BTOR2 constraint holds at frame 0 too, so an
+    // initial state no input can satisfy starts no valid trace. Read unfiltered, such a state has
+    // no constraint-respecting successor, lies outside every maintained region, and "escapes" —
+    // a spurious NotMaintainable on a design the environment maintains from every legal start.
+    let init = bb
+        .initial_state_bdd(&file)?
+        .and(&exact.constraint_satisfiable())
+        .unwrap();
 
     let r = exact.ef_region(&good_bdd)?;
     let s = exact.env_maintain_region(&r)?;
@@ -12462,6 +12470,34 @@ mod tests {
         match exact_env_strategy(FORCED_TRAP, "st == 0").expect("synthesis runs") {
             EnvStrategyOutcome::NotMaintainable { .. } => {}
             other => panic!("expected NotMaintainable (forced trap, no strategy): {other:?}"),
+        }
+    }
+
+    /// mununu#662 — a `constraint` over a FREE-init register forbids some initial frames. `k` has
+    /// no `init` and holds; `constraint k == 0`; `st′ = x` is the environment's; the goal names
+    /// `k` so the constraint is in the cone (a constraint over an out-of-cone leaf is pruned with
+    /// it). Read at every initial state, the `k = 1` frames — forbidden, and never reaching the
+    /// goal since `k` holds — escape the maintained region: a spurious NotMaintainable. At the
+    /// LEGAL initial frames the environment maintains the goal (and can leave it: non-vacuous).
+    #[test]
+    fn x662_env_strategy_reads_the_legal_initial_frames_only() {
+        const FREE_INIT_UNDER_CONSTRAINT: &str = "\
+1 sort bitvec 1
+2 input 1 x
+3 state 1 st
+4 state 1 k
+5 zero 1
+6 init 1 3 5
+7 next 1 3 2
+8 next 1 4 4
+9 not 1 4
+10 constraint 9
+";
+        match exact_env_strategy(FREE_INIT_UNDER_CONSTRAINT, "st == 0 && k == 0")
+            .expect("synthesis runs")
+        {
+            EnvStrategyOutcome::Maintainable { .. } => {}
+            other => panic!("expected Maintainable from the legal initial frames: {other:?}"),
         }
     }
 
