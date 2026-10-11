@@ -1448,13 +1448,13 @@ fn diff_corpus_cegar_vs_symbolic_engine_parity() {
 ///      may-only edges, whose `◇` can never turn true), which still leaves the box form ⊥ and
 ///      PRINTS it. If even the may-only cube decides both, this fails loudly: the gap is gone
 ///      and the test must move to a design that still has one, not be weakened.
-///   1b. mununu#663 — the default engine (`auto`) decides both uart_tx properties by itself,
-///       matching the exact oracle (the gain that retired step 1's original premise; measured
-///       2026-10-11: box form VIOLATED, diamond form HOLDS at the cube's main pass).
-///   2. Both portfolio modes DECIDE both properties, matching the exact oracle (AG-AF=Violated,
-///      AG-EF=Holds) — the portfolio recovers what the default engine misses.
-///   3. Sequential and Parallel agree exactly (same engines, same merge).
-///   4. No `portfolio-soundness-alarm` note fired (the runtime guard stayed quiet) and a
+///   2. mununu#663 — the default engine (`auto`) decides both uart_tx properties by itself,
+///      matching the exact oracle (the gain that retired step 1's original premise; measured
+///      2026-10-11: box form VIOLATED, diamond form HOLDS at the cube's main pass).
+///   3. Both portfolio modes DECIDE both properties, matching the exact oracle (AG-AF=Violated,
+///      AG-EF=Holds) — the portfolio recovers what the may-only engine misses.
+///   4. Sequential and Parallel agree exactly (same engines, same merge).
+///   5. No `portfolio-soundness-alarm` note fired (the runtime guard stayed quiet) and a
 ///      `portfolio` provenance note is present.
 #[test]
 #[ignore = "requires slang + sv2v + yosys (mununu-sva image); run with --ignored"]
@@ -1485,8 +1485,8 @@ fn e2e_portfolio_decides_what_the_default_engine_misses() {
          {cegar:?}"
     );
 
-    // 1b. mununu#663 — the default engine (`auto`: per-target must on a μ under a ν) decides
-    //     both by itself and agrees with the exact oracle.
+    // 2. mununu#663 — the default engine (`auto`: per-target must on a μ under a ν) decides
+    //    both by itself and agrees with the exact oracle.
     let auto = run_corpus_verdicts(uart, Engine::Cegar);
     let auto_v: Vec<_> = auto.iter().map(|(n, v, _)| (*n, *v)).collect();
     for (needle, want) in [
@@ -1504,7 +1504,7 @@ fn e2e_portfolio_decides_what_the_default_engine_misses() {
         );
     }
 
-    // 2 + 3. Both portfolio modes decide both properties, and agree with each other.
+    // 3 + 4. Both portfolio modes decide both properties, and agree with each other.
     let seq = run_corpus_verdicts(uart, Engine::PortfolioSequential);
     let par = run_corpus_verdicts(uart, Engine::PortfolioParallel);
     let seq_v: Vec<_> = seq.iter().map(|(n, v, _)| (*n, *v)).collect();
