@@ -714,7 +714,7 @@ Run the CEGAR predicate-abstraction-refinement loop over a BTOR2 design and retu
 | `controllable_inputs` | `string[]` | No | R.6.6 controllability split — controller-driven input symbols. Mirrors `--controllable-input`. Defaults to `[]`. |
 | `predicate_source` | `string \| null` | No | Predicate-discovery source: `"wp"` (default) or `"craig"`. |
 | `max_iterations` | `number \| null` | No | Max CEGAR iterations. Defaults to `16`. |
-| `must_edge_inference` | `string \| null` | No | Must-edge inference policy (default `"off"`): `"sampling-confluence"`, `"smt-per-target"`, `"smt-per-target-standard"`, `"smt-hyper-must"`. |
+| `must_edge_inference` | `string \| null` | No | Must-edge inference policy (default `"off"`): `"smt-per-target"`, `"smt-per-target-standard"`, `"smt-hyper-must"`; `"auto"` is accepted and means `"off"` on this endpoint (it resolves per property only on `sv/verify-auto`, mununu#663). |
 | `may_edge_inference` | `string \| null` | No | May-edge inference policy (default `"off"`): `"smt-all-pairs"`. |
 | `config_values` | `string[]` | No | R-S8 symbolic-init values, one entry per register as `"REG=v1,v2,..."`. Seeds the predicate-cube initial states. Defaults to `[]`. |
 | `emit_ctxdsl` | `boolean` | No | When `true`, the response `ctxdsl` field carries the final refined cube model + checked formula as a self-contained CTXDSL document. Mirrors `--emit-ctxdsl`. Defaults to `false`. |

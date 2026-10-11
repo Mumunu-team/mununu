@@ -188,7 +188,8 @@ mununu sv verify-auto my_module.sv --preprocess-sv2v
 // POST /api/v1/sv/verify-auto
 { "source": "module m(...); ... assert property (...); endmodule",
   "use_sv2v": true,
-  "must_edge_inference": "smt-hyper-must" }   // sound νμ verdicts; all fields optional
+  "must_edge_inference": "smt-hyper-must" }   // all fields optional; absent = "auto" (mununu#663): per-target must for
+                                               // AG EF / AG AF-class properties, may-only for the rest
 // → { "properties": [ { "name": ..., "outcome": "holds" | "violated" | ... } ], "unsupported": [...] }
 ```
 

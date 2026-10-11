@@ -1576,8 +1576,11 @@ fn sv_mutate_handler_impl(request: SvMutateRequest) -> ApiResult<Json<SvMutateRe
     };
     let (engine_symbolic, engine_exact, engine_portfolio) =
         engine_selection(request.engine.as_deref());
+    // mununu#663 — absent / `"auto"` resolves the policy per property, as on `sv/verify-auto`.
+    let must_edge_auto = matches!(request.must_edge_inference.as_deref(), None | Some("auto"));
     let base_opts = VerifyAutoOptions {
         must_edge_inference,
+        must_edge_auto,
         gate_reset: request.gate_reset.unwrap_or(true),
         symbolic_engine: engine_symbolic,
         exact_symbolic: engine_exact,
@@ -1798,6 +1801,9 @@ fn sv_verify_auto_handler_impl(
         params,
         ..Default::default()
     };
+    // mununu#663 — absent / `"auto"` resolves the policy per property (per-target must for
+    // Liveness/Mixed-class formulas); an explicit `"off"` switches that resolution off.
+    let must_edge_auto = matches!(request.must_edge_inference.as_deref(), None | Some("auto"));
     let must_edge_inference = match request.must_edge_inference.as_deref() {
         Some("smt-per-target") => MustEdgeInference::SmtPerTarget,
         Some("smt-per-target-standard") => MustEdgeInference::SmtPerTargetStandard,
@@ -1849,6 +1855,7 @@ fn sv_verify_auto_handler_impl(
     let opts = VerifyAutoOptions {
         max_iterations: request.max_iterations.unwrap_or(16),
         must_edge_inference,
+        must_edge_auto,
         gate_reset: request.gate_reset.unwrap_or(true),
         auto_stub_flops: request.auto_stub_flops.unwrap_or(true),
         config_values,

@@ -715,9 +715,15 @@ impl From<SvFrontendArg> for mununu_core::adapter::yosys::SvFrontend {
 
 #[derive(Clone, Debug, Copy, clap::ValueEnum, Default)]
 enum MustEdgeInferenceArg {
-    /// Pre-R.2.5b behaviour (default). Only MayOnly edges emitted;
-    /// no must / hyper-must inference.
+    /// mununu#663 (default) — `sv verify-auto` resolves the policy PER PROPERTY:
+    /// a Liveness/Mixed-class formula (a μ under a ν — `AG EF`, `AG AF`, the
+    /// response shapes, whose 3-valued `◇` turns true only through MUST edges)
+    /// runs its cube member with `smt-per-target-standard`; safety / reachability /
+    /// propositional formulas stay may-only. On the other verbs `auto` is `off`.
     #[default]
+    Auto,
+    /// Pre-R.2.5b behaviour. Only MayOnly edges emitted; no must / hyper-must
+    /// inference — also switches the `auto` resolution OFF in `sv verify-auto`.
     Off,
     /// R.2.5b session 2 (2026-06-08). SMT-backed must-edge inference
     /// via Z3 BV theory using the **stronger ∀∀ form** (`∀ state.
@@ -2040,9 +2046,11 @@ struct SvVerifyAutoArgs {
     /// Max CEGAR iterations per property.
     #[arg(long, default_value_t = 16)]
     max_iterations: usize,
-    /// Must-edge inference policy per property. `smt-hyper-must` gives sound νμ
-    /// verdicts (the recoverability case); default `off`.
-    #[arg(long, value_enum, default_value_t = MustEdgeInferenceArg::Off)]
+    /// Must-edge inference policy per property. Default `auto` (mununu#663): a
+    /// Liveness/Mixed-class formula (`AG EF`, `AG AF` — a μ under a ν) runs its cube
+    /// member with `smt-per-target-standard`, the rest may-only. `off` = may-only everywhere;
+    /// `smt-hyper-must` gives sound νμ verdicts on every property.
+    #[arg(long, value_enum, default_value_t = MustEdgeInferenceArg::Auto)]
     must_edge_inference: MustEdgeInferenceArg,
     /// Disable reset-gating: keep `disable iff (reset)` guards in the formulas
     /// and leave the reset input free (by default the guard is dropped and the
@@ -2365,8 +2373,9 @@ struct SvMutateArgs {
     #[arg(long)]
     no_gate_reset: bool,
     /// Must-edge inference — `smt-hyper-must` gives sound νμ verdicts (needed for a
-    /// recoverability property to flip under `drop-reset`). Default `off`.
-    #[arg(long, value_enum, default_value_t = MustEdgeInferenceArg::Off)]
+    /// recoverability property to flip under `drop-reset`). Default `auto`
+    /// (mununu#663): per-target must for Liveness/Mixed-class properties, may-only for the rest.
+    #[arg(long, value_enum, default_value_t = MustEdgeInferenceArg::Auto)]
     must_edge_inference: MustEdgeInferenceArg,
     /// mununu#475 item 4 — override a module parameter BEFORE elaboration
     /// (parity with `sv verify-auto`'s `--param`). Format `NAME=VALUE`
@@ -4080,8 +4089,11 @@ fn sv_verify_auto(args: SvVerifyAutoArgs) -> Result<(), String> {
         params: params.clone(),
         ..Default::default()
     };
+    // mununu#663 — `auto` (the default) resolves the policy per property; an explicit `off`
+    // switches that resolution off and keeps the cube may-only.
+    let must_edge_auto = matches!(args.must_edge_inference, MustEdgeInferenceArg::Auto);
     let must_edge_inference = match args.must_edge_inference {
-        MustEdgeInferenceArg::Off => MustEdgeInference::Off,
+        MustEdgeInferenceArg::Auto | MustEdgeInferenceArg::Off => MustEdgeInference::Off,
         MustEdgeInferenceArg::SmtPerTarget => MustEdgeInference::SmtPerTarget,
         MustEdgeInferenceArg::SmtPerTargetStandard => MustEdgeInference::SmtPerTargetStandard,
         MustEdgeInferenceArg::SmtHyperMust => MustEdgeInference::SmtHyperMust,
@@ -4126,6 +4138,7 @@ fn sv_verify_auto(args: SvVerifyAutoArgs) -> Result<(), String> {
     let opts = VerifyAutoOptions {
         max_iterations: args.max_iterations,
         must_edge_inference,
+        must_edge_auto,
         gate_reset: !args.no_gate_reset,
         auto_stub_flops: !args.no_auto_stub_flops,
         config_values,
@@ -4657,7 +4670,9 @@ fn run_cegar_cli(
     // R.2.5b session-1 follow-up — map CLI MustEdgeInferenceArg to
     // the core MustEdgeInference enum.
     let must_edge_inference = match params.must_edge_inference {
-        MustEdgeInferenceArg::Off => mununu_core::adapter::btor2::kmts_lift::MustEdgeInference::Off,
+        MustEdgeInferenceArg::Auto | MustEdgeInferenceArg::Off => {
+            mununu_core::adapter::btor2::kmts_lift::MustEdgeInference::Off
+        }
         MustEdgeInferenceArg::SmtPerTarget => {
             mununu_core::adapter::btor2::kmts_lift::MustEdgeInference::SmtPerTarget
         }
@@ -6489,14 +6504,18 @@ fn sv_mutate(args: SvMutateArgs) -> Result<(), String> {
     })?;
     let mutation = Mutation::parse(spec)?;
 
+    // mununu#663 — `auto` (the default) resolves per property in verify-auto; an explicit `off`
+    // switches the resolution off.
+    let must_edge_auto = matches!(args.must_edge_inference, MustEdgeInferenceArg::Auto);
     let must_edge_inference = match args.must_edge_inference {
-        MustEdgeInferenceArg::Off => MustEdgeInference::Off,
+        MustEdgeInferenceArg::Auto | MustEdgeInferenceArg::Off => MustEdgeInference::Off,
         MustEdgeInferenceArg::SmtPerTarget => MustEdgeInference::SmtPerTarget,
         MustEdgeInferenceArg::SmtPerTargetStandard => MustEdgeInference::SmtPerTargetStandard,
         MustEdgeInferenceArg::SmtHyperMust => MustEdgeInference::SmtHyperMust,
     };
     let opts = VerifyAutoOptions {
         must_edge_inference,
+        must_edge_auto,
         gate_reset: !args.no_gate_reset,
         symbolic_engine: args.engine == EngineArg::Symbolic,
         exact_symbolic: args.engine == EngineArg::ExactSymbolic,

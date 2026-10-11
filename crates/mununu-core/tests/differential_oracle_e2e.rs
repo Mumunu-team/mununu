@@ -626,8 +626,14 @@ struct CorpusDesign {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Engine {
     /// Default predicate-abstraction CEGAR (SMT all-pairs `cegar_refine_loop`): the current
-    /// production default (`symbolic_engine=false, exact_symbolic=false`).
+    /// production default (`symbolic_engine=false, exact_symbolic=false`), with the mununu#663
+    /// `auto` must-edge policy (per-target ∀∃ must on a μ-under-ν formula).
     Cegar,
+    /// The same explicit engine with the pre-#663 posture — may-only edges on every property
+    /// (`must_edge_auto = false`, `must_edge_inference = Off`). On a μ under a ν its `◇` can
+    /// never turn true, so an `AG EF` / `AG AF` is structurally ⊥: the gap `auto` closes and the
+    /// portfolio used to close for it.
+    CegarMayOnly,
     /// Predicate-cube BDD CEGAR loop (`--engine symbolic`, `symbolic_engine=true`): the
     /// default-flip *candidate*. Same cube space + init-cube read as `Cegar`; differs only in
     /// the refinement loop (`symbolic_cegar_refine`).
@@ -645,7 +651,7 @@ impl Engine {
     /// Apply this engine's selection to a fresh option set.
     fn apply(self, opts: &mut VerifyAutoOptions) {
         let (sym, exact, portfolio) = match self {
-            Engine::Cegar => (false, false, None),
+            Engine::Cegar | Engine::CegarMayOnly => (false, false, None),
             Engine::SymbolicCube => (true, false, None),
             Engine::ExactSymbolic => (false, true, None),
             Engine::PortfolioSequential => (false, false, Some(PortfolioMode::Sequential)),
@@ -654,6 +660,9 @@ impl Engine {
         opts.symbolic_engine = sym;
         opts.exact_symbolic = exact;
         opts.portfolio = portfolio;
+        if matches!(self, Engine::CegarMayOnly) {
+            opts.must_edge_auto = false;
+        }
     }
 }
 
@@ -1433,13 +1442,19 @@ fn diff_corpus_cegar_vs_symbolic_engine_parity() {
 ///   1. `Cegar` alone leaves AT LEAST ONE of the two properties ⊥ — the gap the portfolio
 ///      closes. When this test was written it left both ⊥; by 2026-09 the engine decided the
 ///      diamond form (`mu X. ((bit_cnt_q == 0) or <> X)` → True) on its own and only the box
-///      form was still ⊥ (mununu#562), so the precondition is stated as the gap that is
-///      actually there and PRINTS it. If `Cegar` ever decides both, this fails loudly: the
-///      gap is gone and the test must move to a design that still has one, not be weakened.
-///   2. Both portfolio modes DECIDE both properties, matching the exact oracle (AG-AF=Violated,
-///      AG-EF=Holds) — the portfolio recovers what the default engine misses.
-///   3. Sequential and Parallel agree exactly (same engines, same merge).
-///   4. No `portfolio-soundness-alarm` note fired (the runtime guard stayed quiet) and a
+///      form was still ⊥ (mununu#562). On 2026-10-11 (mununu#663) the default engine decided
+///      BOTH — its `auto` policy runs per-target ∀∃ must edges on a μ-under-ν formula — so the
+///      gap this gate needs is now stated on the engine's PRE-#663 posture (`CegarMayOnly`:
+///      may-only edges, whose `◇` can never turn true), which still leaves the box form ⊥ and
+///      PRINTS it. If even the may-only cube decides both, this fails loudly: the gap is gone
+///      and the test must move to a design that still has one, not be weakened.
+///   2. mununu#663 — the default engine (`auto`) decides both uart_tx properties by itself,
+///      matching the exact oracle (the gain that retired step 1's original premise; measured
+///      2026-10-11: box form VIOLATED, diamond form HOLDS at the cube's main pass).
+///   3. Both portfolio modes DECIDE both properties, matching the exact oracle (AG-AF=Violated,
+///      AG-EF=Holds) — the portfolio recovers what the may-only engine misses.
+///   4. Sequential and Parallel agree exactly (same engines, same merge).
+///   5. No `portfolio-soundness-alarm` note fired (the runtime guard stayed quiet) and a
 ///      `portfolio` provenance note is present.
 #[test]
 #[ignore = "requires slang + sv2v + yosys (mununu-sva image); run with --ignored"]
@@ -1450,25 +1465,46 @@ fn e2e_portfolio_decides_what_the_default_engine_misses() {
         "expected uart_tx as the first corpus design"
     );
 
-    // 1. Baseline: the default Cegar engine leaves at least one uart_tx liveness prop ⊥.
-    let cegar = run_corpus_verdicts(uart, Engine::Cegar);
+    // 1. Baseline: the may-only explicit engine (the pre-#663 posture) leaves at least one
+    //    uart_tx liveness prop ⊥.
+    let cegar = run_corpus_verdicts(uart, Engine::CegarMayOnly);
     let still_bottom: Vec<&str> = cegar
         .iter()
         .filter(|(_, v, _)| *v == LedgerVerdict::Indefinite)
         .map(|(n, _, _)| *n)
         .collect();
     eprintln!(
-        "Cegar alone leaves ⊥ on uart_tx: {still_bottom:?} (of {} properties)",
+        "may-only Cegar alone leaves ⊥ on uart_tx: {still_bottom:?} (of {} properties)",
         cegar.len()
     );
     assert!(
         !still_bottom.is_empty(),
-        "precondition: Cegar must leave at least one uart_tx property ⊥ (the gap the portfolio \
-         closes) — if it decides both, this gate has no gap left to test on this design and \
-         must move to one that has; got {cegar:?}"
+        "precondition: the may-only Cegar must leave at least one uart_tx property ⊥ (the gap \
+         the portfolio — and since mununu#663 the `auto` policy — closes) — if it decides both, \
+         this gate has no gap left to test on this design and must move to one that has; got \
+         {cegar:?}"
     );
 
-    // 2 + 3. Both portfolio modes decide both properties, and agree with each other.
+    // 2. mununu#663 — the default engine (`auto`: per-target must on a μ under a ν) decides
+    //    both by itself and agrees with the exact oracle.
+    let auto = run_corpus_verdicts(uart, Engine::Cegar);
+    let auto_v: Vec<_> = auto.iter().map(|(n, v, _)| (*n, *v)).collect();
+    for (needle, want) in [
+        ("(mu Y. ((bit_cnt_q == 0) or [] Y))", LedgerVerdict::False),
+        ("(mu X. ((bit_cnt_q == 0) or <> X))", LedgerVerdict::True),
+    ] {
+        let got = auto_v
+            .iter()
+            .find(|(n, _)| *n == needle)
+            .unwrap_or_else(|| panic!("auto Cegar result missing `{needle}`: {auto_v:?}"));
+        assert_eq!(
+            got.1, want,
+            "mununu#663: the default engine's `auto` must-edge policy decides `{needle}` on its \
+             own and agrees with the exact oracle; got {auto_v:?}"
+        );
+    }
+
+    // 3 + 4. Both portfolio modes decide both properties, and agree with each other.
     let seq = run_corpus_verdicts(uart, Engine::PortfolioSequential);
     let par = run_corpus_verdicts(uart, Engine::PortfolioParallel);
     let seq_v: Vec<_> = seq.iter().map(|(n, v, _)| (*n, *v)).collect();

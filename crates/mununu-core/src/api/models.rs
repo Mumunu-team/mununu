@@ -1430,7 +1430,9 @@ pub struct SvMutateRequest {
     #[serde(default)]
     pub gate_reset: Option<bool>,
     /// Must-edge inference (`"smt-hyper-must"` gives sound νμ verdicts for a
-    /// recoverability property under `drop-reset`). Default off.
+    /// recoverability property under `drop-reset`). Default (absent or `"auto"`,
+    /// mununu#663): per-target must for Liveness/Mixed-class properties, may-only for the
+    /// rest; `"off"` = may-only everywhere.
     #[serde(default)]
     pub must_edge_inference: Option<String>,
     /// mununu#475 item 4 — parity with `POST /api/v1/sv/verify-auto`'s
@@ -1642,8 +1644,12 @@ pub struct SvVerifyAutoRequest {
     /// Max CEGAR iterations per property (default 16).
     #[serde(default)]
     pub max_iterations: Option<usize>,
-    /// Must-edge inference per property (default `"off"`; `"smt-hyper-must"`
-    /// gives sound νμ verdicts).
+    /// Must-edge inference per property. Default (absent or `"auto"`, mununu#663): a
+    /// Liveness/Mixed-class formula — a μ under a ν, `AG EF` / `AG AF` — runs its cube
+    /// member with `"smt-per-target-standard"` (its 3-valued `◇` turns true only through must edges;
+    /// may-only is structurally ⊥ there), the rest may-only. `"off"` switches that resolution
+    /// off; `"smt-per-target"`, `"smt-per-target-standard"`, `"smt-hyper-must"` apply to every
+    /// property.
     #[serde(default)]
     pub must_edge_inference: Option<String>,
     /// Reset-gating: drop recognized `disable iff (reset)` guards and pin the

@@ -515,6 +515,38 @@ fn unseedable_skip_reason(unseedable: &[String], diag: &ModelDiagnostics) -> Str
     }
 }
 
+/// mununu#663 — the must-edge policy a property's cube run actually gets. `Off` with
+/// [`VerifyAutoOptions::must_edge_auto`] resolves by the formula's class: Liveness / Mixed (a μ
+/// under a ν) → [`MustEdgeInference::SmtPerTargetStandard`] (Z3 ∀ state ∃ input per target —
+/// measured 2026-10-11 to decide `AG EF` rows at the cube level where `SmtHyperMust` leaves ⊥);
+/// everything else, and every explicit policy, unchanged.
+pub(crate) fn effective_must_edge_inference(
+    opts: &VerifyAutoOptions,
+    formula: &crate::mu_calculus::Formula,
+) -> MustEdgeInference {
+    use crate::mu_calculus::PropertyClass;
+    if opts.must_edge_inference != MustEdgeInference::Off || !opts.must_edge_auto {
+        return opts.must_edge_inference;
+    }
+    match formula.property_class() {
+        PropertyClass::Liveness | PropertyClass::Mixed => MustEdgeInference::SmtPerTargetStandard,
+        PropertyClass::Safety | PropertyClass::Reachability | PropertyClass::Propositional => {
+            MustEdgeInference::Off
+        }
+    }
+}
+
+/// The must-edge posture as the `abstraction-posture` note names it: the explicit policy's label,
+/// or — mununu#663 — the `auto` resolution, which names both of its outcomes.
+fn must_edge_posture_label(mode: MustEdgeInference, auto: bool) -> &'static str {
+    if auto && mode == MustEdgeInference::Off {
+        "auto — SMT ∀∃ per-target must (smt-per-target-standard) for Liveness/Mixed-class \
+         properties (a μ under a ν), may-only for the rest"
+    } else {
+        must_edge_inference_label(mode)
+    }
+}
+
 /// A short human label for the must-edge inference posture (used in the
 /// abstraction-posture note).
 fn must_edge_inference_label(mode: MustEdgeInference) -> &'static str {
@@ -1122,7 +1154,7 @@ fn refresh_abstraction_posture(report: &mut AutoVerifyReport, engines_ran: &[Str
 
 fn build_notes(
     report: &AutoVerifyReport,
-    must_edge_inference: MustEdgeInference,
+    must_edge_posture: &str,
     applied_config_values: &[(String, u64)],
     applied_params: &[(String, String)],
     counter_bounds: &[String],
@@ -1318,7 +1350,7 @@ fn build_notes(
                      a definite HOLDS transfers to the concrete RTL (safety + over-approximation = \
                      sound); a definite VIOLATED is a real reachable counterexample class. Must-edge \
                      inference: {}.",
-                    must_edge_inference_label(must_edge_inference),
+                    must_edge_posture,
                 ),
                 items: Vec::new(),
                 property: None,
@@ -1398,6 +1430,16 @@ pub struct VerifyAutoOptions {
     /// Must-edge inference policy passed to each property's CEGAR run. Default
     /// `Off`; `SmtHyperMust` gives sound νμ verdicts (the recoverability case).
     pub must_edge_inference: MustEdgeInference,
+    /// mununu#663 — `auto` (default `true`): with `must_edge_inference == Off`, a property whose
+    /// formula is of the Liveness or Mixed class (a μ under a ν — `AG EF`, `AG AF`, the response
+    /// shapes) runs its cube member with `SmtPerTargetStandard`, because the 3-valued `◇` turns true only
+    /// through MUST edges and a may-only cube is structurally ⊥ on that class — it could never
+    /// return HOLDS, and reached the ⊥ re-plan (a second lift) instead. Safety, Reachability and
+    /// Propositional formulas keep `Off`: their verdicts need no must edge, and the ∀∃ queries
+    /// cost. An explicit `must_edge_inference` other than `Off`, or `must_edge_auto = false`
+    /// (CLI `--must-edge-inference off`, API `"off"`), is honoured as given. See
+    /// [`effective_must_edge_inference`].
+    pub must_edge_auto: bool,
     /// When `true` (default), `disable iff (reset)` guards are dropped from the
     /// formulas and the recognized reset inputs are pinned inactive at the
     /// model level (so the body is verified only while not in reset, matching
@@ -1577,6 +1619,7 @@ impl Default for VerifyAutoOptions {
         Self {
             max_iterations: 16,
             must_edge_inference: MustEdgeInference::Off,
+            must_edge_auto: true,
             gate_reset: true,
             auto_stub_flops: true,
             config_values: std::collections::HashMap::new(),
@@ -3255,7 +3298,7 @@ pub(crate) fn prepare_model(
         };
         report.notes = build_notes(
             &report,
-            opts.must_edge_inference,
+            must_edge_posture_label(opts.must_edge_inference, opts.must_edge_auto),
             &[],
             &yosys_opts.params,
             &[],
@@ -4247,7 +4290,9 @@ pub(crate) fn verify_auto_impl(
             // (a `KleeneBot` label now yields `⊥`, so `¬⊥ = ⊥` and the safety
             // implication is `⊥`, never a spurious `False`). With the root fix the
             // must relation is sound for these properties too.
-            must_edge_inference: opts.must_edge_inference,
+            // mununu#663 — `auto`: a Liveness/Mixed-class formula gets per-target must here, so the
+            // cube member can HOLD an `AG EF` instead of leaving it ⊥ for the re-plan.
+            must_edge_inference: effective_must_edge_inference(opts, &formula),
             // AR-S2 — always the sound all-pairs SMT may-relation (the pure-state
             // sampling-may fallback + its A.4 ⊥-guard are retired).
             may_edge_inference: MayEdgeInference::SmtAllPairs,
@@ -4636,7 +4681,7 @@ pub(crate) fn verify_auto_impl(
     flag_vacuous_guarantees(&mut report);
     report.notes = build_notes(
         &report,
-        opts.must_edge_inference,
+        must_edge_posture_label(opts.must_edge_inference, opts.must_edge_auto),
         &applied_config_values,
         &yosys_opts.params,
         &counter_bound_items_vec,
@@ -6047,7 +6092,7 @@ mod tests {
         let build = |report: &AutoVerifyReport| {
             build_notes(
                 report,
-                MustEdgeInference::Off,
+                must_edge_posture_label(MustEdgeInference::Off, false),
                 &[],
                 &[],
                 &[],
@@ -8921,7 +8966,7 @@ module uart_tx(); endmodule"#;
         };
         let notes = build_notes(
             &report,
-            MustEdgeInference::SmtHyperMust,
+            must_edge_posture_label(MustEdgeInference::SmtHyperMust, false),
             &[("cfg_detect_timer_i".into(), 7)],
             &[],
             &["cnt_q <= 7 (config-inferred)".to_string()],
@@ -8978,7 +9023,7 @@ module uart_tx(); endmodule"#;
         );
         let notes_no_pins = build_notes(
             &report,
-            MustEdgeInference::Off,
+            must_edge_posture_label(MustEdgeInference::Off, false),
             &[],
             &[],
             &[],
@@ -9012,7 +9057,7 @@ module uart_tx(); endmodule"#;
         let note_of = |r: &AutoVerifyReport| {
             build_notes(
                 r,
-                MustEdgeInference::Off,
+                must_edge_posture_label(MustEdgeInference::Off, false),
                 &[],
                 &[],
                 &[],
@@ -9145,7 +9190,7 @@ module uart_tx(); endmodule"#;
         };
         let notes = build_notes(
             &report,
-            MustEdgeInference::SmtHyperMust,
+            must_edge_posture_label(MustEdgeInference::SmtHyperMust, false),
             &[],
             &[],
             &[],
@@ -9162,7 +9207,7 @@ module uart_tx(); endmodule"#;
         // No cut points ⇒ no control-slice note.
         let none = build_notes(
             &report,
-            MustEdgeInference::Off,
+            must_edge_posture_label(MustEdgeInference::Off, false),
             &[],
             &[],
             &[],
@@ -9202,7 +9247,7 @@ module uart_tx(); endmodule"#;
         let ap = |posture: &NotePosture| {
             build_notes(
                 &report,
-                MustEdgeInference::SmtHyperMust,
+                must_edge_posture_label(MustEdgeInference::SmtHyperMust, false),
                 &[],
                 &[],
                 &[],
@@ -13399,6 +13444,120 @@ endmodule
             "`pulse_out == 1 |-> sync_q != sync_d_q` is a tautology over registered state; the \
              explicit engine must hold it: {:?}",
             tautology.outcome
+        );
+    }
+
+    /// mununu#663 — the `auto` must-edge policy: a μ under a ν (the shapes whose `◇` turns true
+    /// only through must edges) gets hyper-must; safety, reachability and propositional shapes
+    /// keep `Off`; an explicit policy, or `auto` switched off, is honoured as given.
+    #[test]
+    fn x663_auto_must_edge_policy_resolves_by_formula_class() {
+        use crate::adapter::btor2::kmts_lift::MustEdgeInference;
+        let f = |s: &str| crate::mu_calculus::parser::parse(s).expect("formula");
+        let auto = VerifyAutoOptions::default();
+        assert_eq!(auto.must_edge_inference, MustEdgeInference::Off);
+        assert!(auto.must_edge_auto);
+        let ag_ef = f("nu X. ((mu Y. ((good == 1) || <> Y)) && [] X)");
+        let ag_af = f("nu X. ((mu Y. ((good == 1) || [] Y)) && [] X)");
+        let safety = f("nu X. ((!(bad == 1)) && [] X)");
+        let reach = f("mu Y. ((good == 1) || <> Y)");
+        let prop = f("(good == 1) || (bad == 0)");
+        assert_eq!(
+            effective_must_edge_inference(&auto, &ag_ef),
+            MustEdgeInference::SmtPerTargetStandard
+        );
+        assert_eq!(
+            effective_must_edge_inference(&auto, &ag_af),
+            MustEdgeInference::SmtPerTargetStandard
+        );
+        assert_eq!(
+            effective_must_edge_inference(&auto, &safety),
+            MustEdgeInference::Off
+        );
+        assert_eq!(
+            effective_must_edge_inference(&auto, &reach),
+            MustEdgeInference::Off
+        );
+        assert_eq!(
+            effective_must_edge_inference(&auto, &prop),
+            MustEdgeInference::Off
+        );
+        let explicit_off = VerifyAutoOptions {
+            must_edge_auto: false,
+            ..Default::default()
+        };
+        assert_eq!(
+            effective_must_edge_inference(&explicit_off, &ag_ef),
+            MustEdgeInference::Off
+        );
+        let explicit_std = VerifyAutoOptions {
+            must_edge_inference: MustEdgeInference::SmtHyperMust,
+            ..Default::default()
+        };
+        assert_eq!(
+            effective_must_edge_inference(&explicit_std, &safety),
+            MustEdgeInference::SmtHyperMust
+        );
+    }
+
+    /// mununu#663 — the measured row behind `auto`: the vendored lift of OpenTitan
+    /// `prim_arbiter_tree` (N=8; `gnt_o = req_i & sel(prio_mask_q) & ready_i`), `AG EF (gnt_o == 0)`
+    /// with the target as the only predicate. May-only leaves every cell ⊥ (no must edge, so the
+    /// inner μ never turns true); the per-target ∀∃ must check makes the cell-to-cell edges must
+    /// edges (some next input — `ready_i = 0` — makes `gnt_o == 0` true from every state) and the
+    /// cube decides HOLDS. The default was may-only, so the cube member left this row ⊥ for the
+    /// re-plan; `smt-hyper-must` still does (mununu#667).
+    #[test]
+    fn x663_the_cube_decides_the_arbiter_recoverability_with_per_target_must() {
+        use crate::adapter::AdapterOptions;
+        use crate::adapter::btor2::cegar::{CegarOptions, LiftStrategy, cegar_refine_loop};
+        use crate::adapter::btor2::kmts_lift::{
+            MayEdgeInference, MustEdgeInference, PredicateSpec,
+        };
+        use crate::mu_calculus::Environment;
+        use crate::mu_calculus::trit::Trit;
+        const ARBITER: &str =
+            include_str!("../../../tests/fixtures/wall_classes/prim_arbiter_tree_n8.btor");
+        let formula =
+            crate::mu_calculus::parser::parse("nu Y. ((mu X. ((gnt_o == 0) or <> X)) and [] Y)")
+                .expect("formula");
+        let run = |policy: MustEdgeInference| {
+            let cegar_opts = CegarOptions {
+                max_iterations: 1,
+                may_edge_inference: MayEdgeInference::SmtAllPairs,
+                must_edge_inference: policy,
+                lift_strategy: LiftStrategy::Eager,
+                ..CegarOptions::default()
+            };
+            let trace = cegar_refine_loop(
+                &formula,
+                ARBITER,
+                vec![PredicateSpec {
+                    name: "gnt_o == 0".into(),
+                    register: "gnt_o".into(),
+                    value: 0,
+                }],
+                &Environment::new(4),
+                &AdapterOptions::default(),
+                &cegar_opts,
+            )
+            .expect("cegar runs on the arbiter lift");
+            (0..trace.final_verdict.len())
+                .map(|i| trace.final_verdict.verdict_at(i))
+                .collect::<Vec<_>>()
+        };
+        let may_only = run(MustEdgeInference::Off);
+        assert!(
+            may_only.contains(&Trit::Unknown) && !may_only.contains(&Trit::False),
+            "may-only leaves the cube ⊥ and never VIOLATED — got {may_only:?}"
+        );
+        let per_target = run(effective_must_edge_inference(
+            &VerifyAutoOptions::default(),
+            &formula,
+        ));
+        assert!(
+            !per_target.is_empty() && per_target.iter().all(|t| *t == Trit::True),
+            "`auto` (per-target must) decides the arbiter recoverability HOLDS — got {per_target:?}"
         );
     }
 }

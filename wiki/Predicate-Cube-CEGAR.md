@@ -105,7 +105,7 @@ Key flags:
 | `--formula` | the mu-calculus property (see [Mu-Calculus Reference](Mu-Calculus-Reference)) |
 | `--predicate NAME:REG=VALUE` | one cube predicate (`REG == VALUE`); repeatable |
 | `--config-values 'REG=v1,v2,…'` | admit an under-constrained register's power-up values (R-Y7 symbolic init) |
-| `--must-edge-inference` | `off` (sampling) \| `smt-per-target` (∀∀, Z3-proved) \| `smt-per-target-standard` (∀∃) \| … |
+| `--must-edge-inference` | `off` (may-only) \| `smt-per-target` (∀∀, Z3-proved) \| `smt-per-target-standard` (∀∃) \| `smt-hyper-must` (∀∃ over a target set) \| `auto` (accepted; on this verb it means `off` — it is the `sv verify-auto` default, where it resolves per property, mununu#663) |
 | `--may-edge-inference` | `off` (sampling) \| `smt-all-pairs` (sound ∃ over-approximation) |
 | `--max-iterations` | CEGAR refinement cap (default 16) |
 | `--controllable-input` | mark an input as controller-chosen (synthesis / controllability-aware lift) |
