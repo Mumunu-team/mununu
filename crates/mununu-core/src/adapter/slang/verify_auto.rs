@@ -4787,7 +4787,9 @@ pub(crate) fn escalate_bottom(
         response_liveness_rescue_under_fairness,
     };
     use crate::adapter::reach_rescue::RescueVerdict;
-    use crate::adapter::recoverability::{verify_recoverability, verify_recoverability_scalable};
+    use crate::adapter::recoverability::{
+        RecoverabilityEngine, verify_recoverability_attributed, verify_recoverability_scalable,
+    };
     use crate::mu_calculus::{PropertyClass, parser as mu_parser};
     use crate::verdict::PropertyVerdict;
 
@@ -4963,26 +4965,44 @@ pub(crate) fn escalate_bottom(
                     // exact engine is sound only under reset-gating (A.6); with a free
                     // reset use the cube path, whose over-approximating may-relation
                     // soundly includes the reset edge.
+                    // mununu#656 follow-up — the exact-first pass runs on the REQUEST's exact
+                    // options: `--no-input-state` reaches the rescue too, so the differential
+                    // switch switches the whole run, not just the main pass.
                     let recov = if reset_pinned {
-                        verify_recoverability(design_btor2, &good_str)
+                        verify_recoverability_attributed(
+                            design_btor2,
+                            &good_str,
+                            &[],
+                            &crate::adapter::btor2::symbolic_bitblast::ExactSymbolicOptions {
+                                input_state_enabled: opts.input_state,
+                                ..Default::default()
+                            },
+                        )
                     } else {
                         verify_recoverability_scalable(design_btor2, &good_str, &[])
+                            .map(|v| (v, RecoverabilityEngine::CubeLadder))
                     };
-                    if let Ok(v) = recov {
+                    if let Ok((v, engine)) = recov {
                         match v {
                             PropertyVerdict::Holds => {
                                 prop.outcome = VerifyOutcome::Holds;
-                                notes.push(recoverability_rescue_note(&prop.name, "HOLDS"));
+                                prop.decided_by = Some(engine.decided_by_label().to_string());
+                                notes.push(recoverability_rescue_note(&prop.name, "HOLDS", engine));
                             }
                             PropertyVerdict::Violated => {
                                 prop.outcome = VerifyOutcome::Violated { false_cells: 0 };
-                                notes.push(recoverability_rescue_note(&prop.name, "VIOLATED"));
+                                prop.decided_by = Some(engine.decided_by_label().to_string());
+                                notes.push(recoverability_rescue_note(
+                                    &prop.name, "VIOLATED", engine,
+                                ));
                             }
                             PropertyVerdict::Unknown => {
                                 // Provenance: the recoverability rescue RAN but the cube +
                                 // smt-hyper-must abstained (sound — never a fabricated verdict).
                                 // Recorded so a ⊥ that reached the rescue is explained, not silent.
-                                notes.push(recoverability_rescue_note(&prop.name, "UNKNOWN"));
+                                notes.push(recoverability_rescue_note(
+                                    &prop.name, "UNKNOWN", engine,
+                                ));
                                 // Actionable-⊥: localize WHY it abstained (structural obstacles in
                                 // the recovery cone) so the ⊥ is actionable, not a bare "don't know".
                                 let diag =
@@ -5622,13 +5642,22 @@ fn rescue_note(name: &str, verdict: &str, engines: &[&str]) -> VerificationNote 
 /// A provenance note for a νμ recoverability property rescued from `⊥` — by the exact+COI
 /// engine (reset-gated) if its cone fits the bit cap, else the scalable cube + smt-hyper-must
 /// path.
-fn recoverability_rescue_note(name: &str, verdict: &str) -> VerificationNote {
+fn recoverability_rescue_note(
+    name: &str,
+    verdict: &str,
+    engine: crate::adapter::recoverability::RecoverabilityEngine,
+) -> VerificationNote {
+    use crate::adapter::recoverability::RecoverabilityEngine;
+    let rung = match engine {
+        RecoverabilityEngine::Exact => "exact+COI",
+        RecoverabilityEngine::CubeLadder => "the cube + smt-hyper-must ladder",
+    };
     VerificationNote {
         kind: "recoverability-rescue".into(),
         level: NoteLevel::Info,
         summary: format!(
             "`{name}`: the cube abstraction left ⊥; the νμ recoverability path (exact+COI \
-             first, then cube + smt-hyper-must) decided it {verdict}"
+             first, then cube + smt-hyper-must) decided it {verdict} — by {rung}"
         ),
         detail: "The AG EF (recoverability) ⊥ was escalated: exact+COI decides it directly when \
                  the property's cone fits the bit cap (a wishbone/status control signal whose \
@@ -6759,6 +6788,71 @@ mod tests {
         assert!(
             notes.iter().any(|n| n.kind == "recoverability-rescue"),
             "a recoverability-rescue provenance note should be recorded"
+        );
+    }
+
+    /// mununu#656 follow-up — the recoverability rescue runs its exact-first pass on the
+    /// REQUEST's exact options and names the rung that decided. `out` is combinationally driven
+    /// by the input `in`, so the exact engine decides `AG EF (out == 0)` only through the
+    /// input-state product: by default the rescue reads `decided_by = exact-symbolic (…)`; with
+    /// `input_state: false` the exact pass refuses and the cube ladder runs — the note says so.
+    /// On the parent, both runs decided through the product model (the opt-out never reached the
+    /// rescue) and `decided_by` stayed `None`.
+    #[test]
+    fn x656_the_recoverability_rescue_honours_the_input_state_opt_out_and_names_its_rung() {
+        const MEALY: &str = "1 sort bitvec 1\n2 input 1 in\n3 state 1 q\n4 zero 1\n5 init 1 3 4\n\
+                             6 next 1 3 2\n7 uext 1 2 0 out\n";
+        let fresh = || AutoVerifyReport {
+            properties: vec![PropertyVerdict {
+                name: "recover_out_low".to_string(),
+                label: None,
+                kind: crate::adapter::slang::translate::SvaKind::Assert,
+                formula: "nu Y.((mu X.(out == 0 || <> X)) && [] Y)".to_string(),
+                outcome: VerifyOutcome::Unknown { unknown_cells: 1 },
+                seeded_predicates: Vec::new(),
+                counterexample: None,
+                bottom_reason: None,
+                decided_by: None,
+                vacuity: None,
+            }],
+            ..Default::default()
+        };
+        let mut lifted = fresh();
+        let notes = escalate_bottom(&mut lifted, MEALY, true, &VerifyAutoOptions::default(), &[]);
+        assert!(
+            matches!(lifted.properties[0].outcome, VerifyOutcome::Holds),
+            "with the input-state product the exact rung decides it: {:?}",
+            lifted.properties[0].outcome
+        );
+        assert_eq!(
+            lifted.properties[0].decided_by.as_deref(),
+            Some("exact-symbolic (recoverability rescue)"),
+            "the rescued verdict carries its rung"
+        );
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.kind == "recoverability-rescue" && n.summary.contains("by exact+COI")),
+            "the rescue note names the exact rung: {:?}",
+            notes.iter().map(|n| &n.summary).collect::<Vec<_>>()
+        );
+
+        let mut opted_out = fresh();
+        let opts = VerifyAutoOptions {
+            input_state: false,
+            ..Default::default()
+        };
+        let notes = escalate_bottom(&mut opted_out, MEALY, true, &opts, &[]);
+        assert_ne!(
+            opted_out.properties[0].decided_by.as_deref(),
+            Some("exact-symbolic (recoverability rescue)"),
+            "`--no-input-state` must reach the rescue: the exact rung refuses an input-driven atom"
+        );
+        assert!(
+            notes.iter().any(|n| n.kind == "recoverability-rescue"
+                && n.summary.contains("by the cube + smt-hyper-must ladder")),
+            "the rescue note names the cube rung: {:?}",
+            notes.iter().map(|n| &n.summary).collect::<Vec<_>>()
         );
     }
 
