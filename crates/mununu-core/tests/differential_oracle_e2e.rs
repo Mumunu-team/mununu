@@ -1449,8 +1449,8 @@ fn diff_corpus_cegar_vs_symbolic_engine_parity() {
 ///      PRINTS it. If even the may-only cube decides both, this fails loudly: the gap is gone
 ///      and the test must move to a design that still has one, not be weakened.
 ///   1b. mununu#663 — the default engine (`auto`) decides both uart_tx properties by itself,
-///      matching the exact oracle (the gain that retired step 1's original premise; measured
-///      2026-10-11: box form VIOLATED, diamond form HOLDS at the cube's main pass).
+///       matching the exact oracle (the gain that retired step 1's original premise; measured
+///       2026-10-11: box form VIOLATED, diamond form HOLDS at the cube's main pass).
 ///   2. Both portfolio modes DECIDE both properties, matching the exact oracle (AG-AF=Violated,
 ///      AG-EF=Holds) — the portfolio recovers what the default engine misses.
 ///   3. Sequential and Parallel agree exactly (same engines, same merge).
