@@ -7827,6 +7827,9 @@ mod tests {
             signal_level_coi: true,
             antecedent_propagate_enabled: true,
             input_state_enabled: true,
+            reach_restrict: false,
+            early_exit: false,
+            time_budget_ms: None,
         };
 
     /// mununu#602 — `narrow_leaves` keeps a partially-read register's NID and symbol on a

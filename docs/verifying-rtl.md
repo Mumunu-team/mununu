@@ -146,6 +146,15 @@ iterates over the unreachable state space (arena bound) and long chains (iterati
 [the consumer briefing](consumer-briefings/2026-10-btor2-verify-justice-from-aiger.md) for the
 per-instance evidence.
 
+The levers that measurement pointed at ship as opt-in switches
+([`ExactSymbolicOptions`](../crates/mununu-core/src/adapter/btor2/symbolic_bitblast.rs):
+`MUNUNU_BDD_REACH_RESTRICT=1` evaluates the fixpoints on the reachable sub-structure with
+care-set-constrained transition functions, `MUNUNU_BDD_EARLY_EXIT=1` stops the root fixpoint once
+the initial states are decided, and `MUNUNU_JUSTICE_EXACT_BUDGET_MS` gives the exact rung a time
+slice under `--rung both`). Measured: `cucab09` (91 bits) from an arena abstention at 137 s to
+HOLDS in 2.6 s, `cuabq2mfro` from 105 s to 4.3 s, verdict-identical by gate — see
+[the levers briefing](consumer-briefings/2026-10-exact-reachable-restriction.md).
+
 ### `sv verify-auto` fair-cycle bridge — `// @mununu_assume GF <atom>` (mununu#477)
 
 > Source of truth: [`escalate_bottom`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) — surface: (CLI+API+UI)

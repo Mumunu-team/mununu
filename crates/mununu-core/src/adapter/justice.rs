@@ -27,7 +27,9 @@
 use crate::adapter::btor2::ast::{Btor2File, ConstValue, Nid, Node, Operand, Sort};
 use crate::adapter::btor2::parser;
 use crate::adapter::btor2::predicate_expr::CmpOp;
-use crate::adapter::btor2::symbolic_bitblast::{ExactVerdict, exact_symbolic_verdict};
+use crate::adapter::btor2::symbolic_bitblast::{
+    ExactSymbolicOptions, ExactVerdict, exact_symbolic_verdict_with_witness_and_options,
+};
 use crate::adapter::liveness_rescue::{
     Atom, LivenessVerdict, response_liveness_rescue_under_fairness,
 };
@@ -194,6 +196,20 @@ pub fn verify_justice(btor2: &str, rung: JusticeRung) -> Result<Vec<JusticeVerdi
         justice: justice_names,
         fairness: fair_names,
     } = name_justice_literals(btor2)?;
+    // The exact rung's time slice when l2s follows it (`MUNUNU_JUSTICE_EXACT_BUDGET_MS`): without
+    // one, a wide νμ that neither converges nor hits a budget consumes the whole run and the l2s
+    // rung never gets its turn — measured on the LIVE sweep (two l2s lassos lost to timeouts).
+    // The levers themselves come from the environment through `ExactSymbolicOptions::default()`.
+    let exact_opts = ExactSymbolicOptions {
+        time_budget_ms: if rung == JusticeRung::Both {
+            std::env::var("MUNUNU_JUSTICE_EXACT_BUDGET_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+        } else {
+            None
+        },
+        ..Default::default()
+    };
     let mut results = Vec::with_capacity(justice_names.len());
     for (index, names) in justice_names.iter().enumerate() {
         let lits: Vec<&String> = names.iter().chain(fair_names.iter()).collect();
@@ -211,7 +227,13 @@ pub fn verify_justice(btor2: &str, rung: JusticeRung) -> Result<Vec<JusticeVerdi
             let formula_str = format!("!({})", fair_eg("true", &assumptions));
             match crate::mu_calculus::parser::parse(&formula_str) {
                 Err(e) => notes.push(format!("exact: fair-EG formula did not parse: {e:?}")),
-                Ok(formula) => match exact_symbolic_verdict(&named, &formula) {
+                Ok(formula) => match exact_symbolic_verdict_with_witness_and_options(
+                    &named,
+                    &formula,
+                    &exact_opts,
+                )
+                .map(|(v, _)| v)
+                {
                     Ok(ExactVerdict::Holds) => {
                         verdict = PropertyVerdict::Holds;
                         decided_by.push("exact-symbolic".into());
@@ -323,5 +345,94 @@ mod tests {
     #[test]
     fn a_design_without_justice_is_an_error_not_a_vacuous_holds() {
         assert!(verify_justice("1 sort bitvec 1\n2 state 1 s\n", JusticeRung::Both).is_err());
+    }
+
+    /// `a` rises after reset and `b` never does: the states `01` / `11` are UNREACHABLE, and the
+    /// only fair cycles for `justice {b}` live there. Unrestricted, the fair-EG ν fixpoint is
+    /// non-empty (those states); restricted to `Reach` it is empty. The verdict is HOLDS either way.
+    const UNREACHABLE_CYCLE: &str = "1 sort bitvec 1\n2 zero 1\n3 one 1\n4 state 1 a\n5 state 1 b\n\
+                                     6 init 1 4 2\n7 init 1 5 2\n8 next 1 4 3\n9 next 1 5 5\n\
+                                     10 justice 1 5\n";
+
+    fn lever_opts(reach_restrict: bool, early_exit: bool) -> ExactSymbolicOptions {
+        ExactSymbolicOptions {
+            reach_restrict,
+            early_exit,
+            ..Default::default()
+        }
+    }
+
+    /// The verdict-identity gate for the HWMCC LIVE levers: the reachable-state restriction and
+    /// the root fixpoint's early exit may turn an abstention into a verdict, never flip one.
+    #[test]
+    fn the_levers_never_change_a_justice_verdict() {
+        for (name, design) in [
+            ("counter", COUNTER),
+            ("stuck", STUCK),
+            ("constrained", CONSTRAINED),
+            ("unreachable-cycle", UNREACHABLE_CYCLE),
+        ] {
+            let n = name_justice_literals(design).expect("named");
+            let assumptions: Vec<Assumption> = n.justice[0]
+                .iter()
+                .map(|l| Assumption::State {
+                    atom: format!("{l} == 1"),
+                })
+                .collect();
+            let formula =
+                crate::mu_calculus::parser::parse(&format!("!({})", fair_eg("true", &assumptions)))
+                    .expect("parses");
+            let run = |r: bool, e: bool| {
+                exact_symbolic_verdict_with_witness_and_options(
+                    &n.btor2,
+                    &formula,
+                    &lever_opts(r, e),
+                )
+                .map(|(v, _)| v)
+                .unwrap_or_else(|why| panic!("{name} reach={r} early={e}: {why}"))
+            };
+            let base = run(false, false);
+            for (r, e) in [(true, false), (false, true), (true, true)] {
+                assert_eq!(run(r, e), base, "{name}: reach_restrict={r} early_exit={e}");
+            }
+            if name == "unreachable-cycle" {
+                assert_eq!(base, ExactVerdict::Holds);
+            }
+        }
+    }
+
+    /// Lever A computes the FORWARD reachable set: on `UNREACHABLE_CYCLE` it is `{00, 10}`,
+    /// closed after two image steps, and excludes every `b = 1` state.
+    #[test]
+    fn the_reachable_restriction_is_the_forward_reachable_set() {
+        use crate::adapter::btor2::predicate_expr::parse_predicate_expr;
+        use crate::adapter::btor2::symbolic_bitblast::BddBitBlaster;
+        use oxidd::BooleanFunction;
+        let file = parser::parse(UNREACHABLE_CYCLE).expect("parses");
+        let bb = BddBitBlaster::build(&file).expect("bit-blasts");
+        let model = bb.exact_model();
+        let init = bb.initial_state_bdd(&file).expect("init");
+        let steps = model
+            .install_reachable_restriction(&init)
+            .expect("the restriction installs");
+        assert_eq!(steps, 2, "00 → {{00, 10}} → closed");
+        let reach = model.reachable_restriction().expect("installed");
+        let bdd = |s: &str| {
+            bb.predicate_bdd(&parse_predicate_expr(s).expect("expr"))
+                .expect("bdd")
+        };
+        // `BDDFunction` has no `Debug`, so plain asserts on canonical equality.
+        assert!(
+            reach.and(&bdd("b == 1")).unwrap() == *model.ff(),
+            "no reachable state has b = 1"
+        );
+        assert!(
+            reach.and(&bdd("a == 1")).unwrap() != *model.ff(),
+            "a = 1 is reached"
+        );
+        assert!(
+            reach.and(&bdd("a == 0")).unwrap() != *model.ff(),
+            "the initial state is in Reach"
+        );
     }
 }

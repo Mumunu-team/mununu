@@ -2450,6 +2450,8 @@ struct EvalCtx {
     reset_sets: HashMap<crate::mu_calculus::NodeId, Vec<crate::mu_calculus::NodeId>>,
     /// `MUNUNU_BDD_FIXPOINT_REUSE=0` restores the legacy evaluation (no memo, no restart rule).
     reuse: bool,
+    /// Lever B — the root fixpoint node (the root with its `Not`s stripped), if the root is one.
+    early_exit_node: Option<crate::mu_calculus::NodeId>,
 }
 
 impl EvalCtx {
@@ -2527,12 +2529,19 @@ impl EvalCtx {
                 }
             }
         }
+        let mut root = f.root();
+        while let MuNode::Not(inner) = f.node(root) {
+            root = *inner;
+        }
+        let early_exit_node =
+            matches!(f.node(root), MuNode::Mu { .. } | MuNode::Nu { .. }).then_some(root);
         EvalCtx {
             closed,
             memo: HashMap::new(),
             approx: HashMap::new(),
             reset_sets,
             reuse,
+            early_exit_node,
         }
     }
 }
@@ -2643,6 +2652,38 @@ pub struct ExactModel {
     /// dropped and aborts the process uncatchably. Rarely the one that fires — it is the net, not
     /// the guard.
     arena_safety_budget: usize,
+    /// Lever A (HWMCC LIVE, 2026-10-11) — the REACHABLE-STATE RESTRICTION, when installed
+    /// ([`Self::install_reachable_restriction`]): every set the evaluator forms is kept inside
+    /// the forward reachable set, so the fixpoint iterates never range over the unreachable part
+    /// of the space — where, measured on the LIVE band, the νμ iterates of a 41-bit `uns`
+    /// instance reached 53.8 M nodes while its reachable set closes in 13 frames. Sound at every
+    /// alternation depth: the reachable sub-structure is closed under successors, so a formula's
+    /// value at a reachable state is unchanged, and the verdict reads `init ⊆ Reach` only.
+    restriction: std::cell::RefCell<Option<BDDFunction>>,
+    /// Lever B — how many fixpoints exited early in this model's evaluations (the report line).
+    early_exits: std::cell::Cell<usize>,
+    /// Lever D — how many collections the arena-safety check ran before judging (the report line).
+    collections: std::cell::Cell<usize>,
+    /// Lever D (`MUNUNU_BDD_COLLECT_AT_BOUND=1`, OFF by default) — collect once before abstaining
+    /// on the arena-safety bound and judge the LIVE count. Measured: it decides what the allocated
+    /// count would have abstained on (`cuabq2mfro` restricted peak 3.4 M vs 15.7 M), and it lets a
+    /// fixpoint that used to abstain run on — `cucab09` went from a 137 s abstention to the 400 s
+    /// cap — so it is an experiment switch until it is paired with a rung deadline.
+    collect_at_bound: bool,
+    /// Lever B — the initial states, for the ROOT fixpoint's early exit ([`Self::fixpoint`]):
+    /// a ν whose iterate is already disjoint from `init`, or a μ whose iterate already contains
+    /// it, has its init-restricted value fixed by monotonicity, and the verdict reads nothing else.
+    init_hint: std::cell::RefCell<Option<BDDFunction>>,
+    /// Lever A — the arena the Squarer is built with when the restriction asks for it (the
+    /// forward reachable set of a 192-latch design can outgrow [`SQUARING_ARENA`]).
+    reach_arena: usize,
+    /// Lever A2 — the next-state substitution with every `fⱼ` CONSTRAINED to the care set
+    /// `Reach ∧ constraint` (Coudert–Madre generalised cofactor, [`Self::constrain`]): `fⱼ ↓ care`
+    /// agrees with `fⱼ` on every reachable frame and is chosen small off it, so a pre-image's
+    /// intermediate `φ[s := f(s, i)]` no longer ranges over the unreachable space. Measured
+    /// without it: `cucab09`'s RESTRICTED fixpoint still abstained at step 10 after 114 BDD ops
+    /// and 259 s — ten pre-images, each enormous. Used by [`Self::to_next`] when installed.
+    care_subst: std::cell::RefCell<Option<Subst<BDDFunction>>>,
     /// LATENCY bound, node half (`MUNUNU_BDD_FIXPOINT_NODES`). See [`fixpoint_node_budget`].
     node_soft: usize,
     /// LATENCY bound, iteration half (`MUNUNU_BDD_FIXPOINT_ITERS`). See [`fixpoint_node_budget`].
@@ -2663,7 +2704,7 @@ pub struct ExactModel {
     /// Kept rather than deleted, because a caller who genuinely wants a hard time ceiling can still
     /// ask for one, and because consumers already pass `MUNUNU_BDD_TIME_BUDGET_MS=0` for
     /// determinism — that setting keeps working and now simply names the default.
-    deadline: Option<std::time::Instant>,
+    deadline: std::cell::Cell<Option<std::time::Instant>>,
 }
 
 /// P2.2c #4 — the outcome of the SOUND diameter pre-pass ([`ExactModel::reach_diameter_to`]).
@@ -2827,18 +2868,34 @@ struct Squarer {
     s1: Vec<BDDFunction>,
     /// Engine varno of state bit `j` (to transfer results back).
     engine_varno: Vec<VarNo>,
-    rel: BDDFunction,
+    /// The MONOLITHIC relation `R(s, s') = ∃i. c ∧ legal ∧ ⋀ s'ⱼ ↔ fⱼ`, built LAZILY from the
+    /// partitions and only for the squaring closure (a refusal is kept). Measured on the LIVE
+    /// band: the monolithic relation of an 81-latch arbiter does not fit a 33 M-node arena.
+    rel: std::cell::OnceCell<Result<BDDFunction, String>>,
+    /// Lever A — the CONJUNCTIVELY PARTITIONED relation the forward image runs over: `base` is
+    /// `c ∧ legal(s')` over `s` / `i`, each part is one `s'ⱼ ↔ fⱼ(s, i)`, and the cube beside it
+    /// holds the `s` / `i` variables whose LAST occurrence is that part — eliminated right there
+    /// (early quantification), so the image never materialises `R`. `base_quantify` is the cube
+    /// eliminated right after `base` (the variables no part reads).
+    base: BDDFunction,
+    base_quantify: BDDFunction,
+    parts: Vec<(BDDFunction, BDDFunction)>,
+    input_cube: BDDFunction,
     shift: Subst<BDDFunction>,
     back: Subst<BDDFunction>,
     cube_s1: BDDFunction,
+    /// Lever A (HWMCC LIVE, 2026-10-11) — the `s` copy's variables and cube, and the `s' → s`
+    /// renaming: what the FORWARD image `(∃s. R(s) ∧ rel(s, s'))[s' := s]` needs.
+    s0: Vec<BDDFunction>,
+    cube_s0: BDDFunction,
+    s1_to_s0: Subst<BDDFunction>,
     closure: std::cell::RefCell<Option<Result<BDDFunction, String>>>,
     steps: std::cell::Cell<usize>,
     budget: usize,
 }
 
 impl Squarer {
-    fn build(model: &ExactModel) -> Result<Self, String> {
-        use oxidd::BooleanFunctionQuant;
+    fn build(model: &ExactModel, arena: usize) -> Result<Self, String> {
         if model.state_varnos.is_empty() {
             return Err("squaring: no next-state functions".into());
         }
@@ -2858,7 +2915,7 @@ impl Squarer {
         let mut inputs: Vec<VarNo> = model.input_varnos.clone();
         inputs.sort_by_key(|v| levels[v]);
 
-        let manager = bdd::new_manager(SQUARING_ARENA, SQUARING_ARENA / 4, bdd_threads());
+        let manager = bdd::new_manager(arena, arena / 4, bdd_threads());
         let vars: Vec<BDDFunction> = manager.with_manager_exclusive(|m| {
             let r = m.add_vars((3 * n + inputs.len()) as VarNo);
             (0..3 * n + inputs.len())
@@ -2866,7 +2923,7 @@ impl Squarer {
                 .collect()
         });
         let tt = manager.with_manager_shared(|m| BDDFunction::t(m));
-        let budget = SQUARING_ARENA * 8 / 10;
+        let budget = arena * 8 / 10;
         // Engine varno → the `s` copy (for transferring next-state functions and `p`).
         let mut to_s0: HashMap<VarNo, BDDFunction> = HashMap::new();
         let mut index_of: HashMap<VarNo, usize> = HashMap::new();
@@ -2880,24 +2937,57 @@ impl Squarer {
         for (i, &v) in inputs.iter().enumerate() {
             to_s0.insert(v, vars[3 * n + i].clone());
         }
+        let s0: Vec<BDDFunction> = (0..n).map(|j| vars[3 * j].clone()).collect();
         let s1: Vec<BDDFunction> = (0..n).map(|j| vars[3 * j + 1].clone()).collect();
         let s2: Vec<BDDFunction> = (0..n).map(|j| vars[3 * j + 2].clone()).collect();
 
         // R(s, s') = ∃i. constraint ∧ legal(s') ∧ ⋀ s'ⱼ ↔ fⱼ(s, i) — `legal(s')` as the
         // iteration's `◇` (mununu#656): a successor no input can satisfy is not a successor.
+        // Kept PARTITIONED: `base` and one part per state bit; the conjunction is formed only
+        // inside an image (with early quantification) or, lazily, for the squaring closure.
         let mut memo: HashMap<usize, BDDFunction> = HashMap::new();
-        let mut rel = Self::transfer(&model.constraint, &model.manager, &to_s0, &tt, &mut memo)?;
+        let c = Self::transfer(&model.constraint, &model.manager, &to_s0, &tt, &mut memo)?;
         let legal = Self::transfer(model.legal_next()?, &model.manager, &to_s0, &tt, &mut memo)?;
-        rel = oom(rel.and(&legal))?;
+        let base = oom(c.and(&legal))?;
+        let mut parts_raw: Vec<BDDFunction> = Vec::with_capacity(n);
         for (j, &k) in order.iter().enumerate() {
             let f = Self::transfer(&model.next_fns[k], &model.manager, &to_s0, &tt, &mut memo)?;
-            rel = oom(rel.and(&oom(s1[j].equiv(&f))?))?;
-            Self::check(&manager, budget, "building the relation")?;
+            parts_raw.push(oom(s1[j].equiv(&f))?);
+            Self::check(&manager, budget, "building the partitioned relation")?;
         }
         let input_cube = inputs
             .iter()
             .fold(tt.clone(), |acc, v| acc.and(&to_s0[v]).unwrap());
-        let rel = oom(rel.exists(&input_cube))?;
+        // Early-quantification schedule: a quantifiable variable (an `s` copy or an input) is
+        // eliminated right after the LAST part that reads it (index 0 = `base`, j + 1 = part j).
+        let quantifiable: std::collections::HashSet<VarNo> = (0..n)
+            .map(|j| 3 * j as VarNo)
+            .chain((0..inputs.len()).map(|i| (3 * n + i) as VarNo))
+            .collect();
+        let mut last_use: HashMap<VarNo, usize> = HashMap::new();
+        for v in Self::support(&base, &manager) {
+            if quantifiable.contains(&v) {
+                last_use.insert(v, 0);
+            }
+        }
+        for (j, part) in parts_raw.iter().enumerate() {
+            for v in Self::support(part, &manager) {
+                if quantifiable.contains(&v) {
+                    last_use.insert(v, j + 1);
+                }
+            }
+        }
+        let mut cubes: Vec<BDDFunction> = vec![tt.clone(); n + 1];
+        for &v in &quantifiable {
+            let idx = last_use.get(&v).copied().unwrap_or(0);
+            let var = manager.with_manager_shared(|m| BDDFunction::var(m, v).unwrap());
+            cubes[idx] = oom(cubes[idx].and(&var))?;
+        }
+        let base_quantify = cubes[0].clone();
+        let parts: Vec<(BDDFunction, BDDFunction)> = parts_raw
+            .into_iter()
+            .zip(cubes.into_iter().skip(1))
+            .collect();
         let shift = Subst::new(
             (0..n)
                 .flat_map(|j| [3 * j as VarNo, 3 * j as VarNo + 1])
@@ -2911,16 +3001,28 @@ impl Squarer {
             s1.clone(),
         );
         let cube_s1 = s1.iter().fold(tt.clone(), |acc, v| acc.and(v).unwrap());
+        let cube_s0 = s0.iter().fold(tt.clone(), |acc, v| acc.and(v).unwrap());
+        let s1_to_s0 = Subst::new(
+            (0..n).map(|j| 3 * j as VarNo + 1).collect::<Vec<_>>(),
+            s0.clone(),
+        );
         Ok(Squarer {
             _manager: manager,
             tt,
             index_of,
             s1,
             engine_varno,
-            rel,
+            rel: std::cell::OnceCell::new(),
+            base,
+            base_quantify,
+            parts,
+            input_cube,
             shift,
             back,
             cube_s1,
+            s0,
+            cube_s0,
+            s1_to_s0,
             closure: std::cell::RefCell::new(None),
             steps: std::cell::Cell::new(0),
             budget,
@@ -2977,8 +3079,79 @@ impl Squarer {
         Ok(out)
     }
 
+    /// The variables a BDD of this manager depends on — a memoised cofactor walk (OxiDD 0.13
+    /// has no support query).
+    fn support(f: &BDDFunction, mgr: &BDDManagerRef) -> std::collections::HashSet<VarNo> {
+        use oxidd::{Function, HasLevel, Node};
+        fn walk(
+            f: &BDDFunction,
+            mgr: &BDDManagerRef,
+            seen: &mut std::collections::HashSet<usize>,
+            out: &mut std::collections::HashSet<VarNo>,
+        ) {
+            let (key, top) = mgr.with_manager_shared(|m| {
+                let e = f.as_edge(m);
+                let top = match m.get_node(e) {
+                    Node::Inner(node) => Some(m.level_to_var(node.level())),
+                    Node::Terminal(_) => None,
+                };
+                (e.node_id(), top)
+            });
+            let Some(v) = top else { return };
+            if !seen.insert(key) {
+                return;
+            }
+            out.insert(v);
+            if let Some((hi, lo)) = f.cofactors() {
+                walk(&hi, mgr, seen, out);
+                walk(&lo, mgr, seen, out);
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        let mut out = std::collections::HashSet::new();
+        walk(f, mgr, &mut seen, &mut out);
+        out
+    }
+
+    /// Lever A — the forward image `∃s, i. R(s) ∧ c ∧ legal ∧ ⋀ s'ⱼ ↔ fⱼ(s, i)`, renamed onto
+    /// `s`, by the partitioned schedule: one conjunction and one early quantification per part.
+    fn image(&self, r: &BDDFunction) -> Result<BDDFunction, String> {
+        use oxidd::{BooleanFunctionQuant, BooleanOperator};
+        let mut t = oom(r.apply_exists(BooleanOperator::And, &self.base, &self.base_quantify))?;
+        for (part, quantify) in &self.parts {
+            t = oom(t.apply_exists(BooleanOperator::And, part, quantify))?;
+        }
+        oom(t.substitute(&self.s1_to_s0))
+    }
+
+    /// The monolithic relation for the squaring closure, conjoined from the partitions on first
+    /// use (the forward image never needs it); a refusal is kept.
+    fn rel(&self) -> Result<BDDFunction, String> {
+        self.rel
+            .get_or_init(|| {
+                use oxidd::BooleanFunctionQuant;
+                let mut rel = self.base.clone();
+                for (part, _) in &self.parts {
+                    rel = oom(rel.and(part))?;
+                    Self::check(&self._manager, self.budget, "building the relation")?;
+                }
+                oom(rel.exists(&self.input_cube))
+            })
+            .clone()
+    }
+
     fn check(manager: &BDDManagerRef, budget: usize, what: &str) -> Result<(), String> {
-        let live = manager.with_manager_shared(|m| m.approx_num_inner_nodes());
+        let mut live = manager.with_manager_shared(|m| m.approx_num_inner_nodes());
+        if live > budget {
+            // Allocated-including-dead; collect once before refusing. Every image step and every
+            // squaring step leaves its predecessor as garbage, so the count here is mostly dead:
+            // `cuhanoi10ro`'s forward reach was refused at 27.2 M allocated and installs in 50
+            // steps once collected. Bounded by construction (at most one collection per step).
+            live = manager.with_manager_shared(|m| {
+                m.gc();
+                m.num_inner_nodes()
+            });
+        }
         if live > budget {
             return Err(format!(
                 "squaring: refused while {what} — {live} nodes past the {budget} budget; the \
@@ -2994,7 +3167,7 @@ impl Squarer {
         use oxidd::{BooleanFunctionQuant, BooleanOperator};
         if self.closure.borrow().is_none() {
             let result = (|| -> Result<BDDFunction, String> {
-                let mut t = self.rel.clone();
+                let mut t = self.rel()?;
                 for step in 1..=SQUARING_MAX_STEPS {
                     let shifted = oom(t.substitute(&self.shift))?;
                     let composed =
@@ -3055,6 +3228,94 @@ impl Squarer {
             &mut memo_back,
         )?;
         oom(p.or(&reach_engine))
+    }
+
+    /// Lever A (HWMCC LIVE, 2026-10-11) — the FORWARD reachable set `μR. init ∨ Img(R)` with
+    /// `Img(R)(s') = ∃s. R(s) ∧ rel(s, s')`, in this manager; `init` is an engine BDD over the
+    /// state bits and the result is transferred back onto the engine's variables. The image is
+    /// `closure()`'s step applied to a SET instead of the relation (one `apply_exists`, one
+    /// renaming). A chain still open after `after_iters` steps tries the closure route —
+    /// `init ∨ ∃s. init(s) ∧ R⁺(s, s')`, one relational product — and iterates on when that is
+    /// refused, up to `max_steps`. Returns the set and the number of image steps it took.
+    fn forward_reach(
+        &self,
+        init: &BDDFunction,
+        model: &ExactModel,
+        after_iters: usize,
+        max_steps: usize,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<(BDDFunction, usize), String> {
+        use oxidd::{BooleanFunctionQuant, BooleanOperator};
+        let to_s0: HashMap<VarNo, BDDFunction> = self
+            .index_of
+            .iter()
+            .map(|(&v, &j)| (v, self.s0[j].clone()))
+            .collect();
+        let mut memo: HashMap<usize, BDDFunction> = HashMap::new();
+        let init_s0 = Self::transfer(init, &model.manager, &to_s0, &self.tt, &mut memo)?;
+        let mut r = init_s0.clone();
+        let mut steps = 0usize;
+        let mut closure_tried = false;
+        loop {
+            if steps >= max_steps {
+                return Err(format!(
+                    "reach: no fixpoint after {max_steps} forward image steps — the restriction is declined"
+                ));
+            }
+            // The reach phase has its own clock: on the LIVE DME ring it ran past 200 s without
+            // closing, overran the exact rung's whole time slice (only the fixpoint read the
+            // deadline) and starved the l2s rung — while the UNRESTRICTED fixpoint decided the same
+            // instance in 3 s. A decline here is the baseline behaviour, not an abstention.
+            if let Some(dl) = deadline
+                && std::time::Instant::now() > dl
+            {
+                return Err(format!(
+                    "reach: declined on its time budget after {steps} forward image steps — \
+                     evaluation proceeds unrestricted"
+                ));
+            }
+            if !closure_tried && steps >= after_iters {
+                closure_tried = true;
+                match self.closure() {
+                    Ok(closure) => {
+                        // `∃s. init(s) ∧ R⁺(s, s')` lands on the s' copy; rename it onto s.
+                        let hop = oom(init_s0.apply_exists(
+                            BooleanOperator::And,
+                            &closure,
+                            &self.cube_s0,
+                        ))?;
+                        let hop_s0 = oom(hop.substitute(&self.s1_to_s0))?;
+                        Self::check(&self._manager, self.budget, "reading Reach off the closure")?;
+                        r = oom(init_s0.or(&hop_s0))?;
+                        break;
+                    }
+                    Err(why) => tracing::debug!(why, "reach: closure route declined; iterating on"),
+                }
+            }
+            let img_s0 = self.image(&r)?;
+            let next = oom(r.or(&img_s0))?;
+            steps += 1;
+            Self::check(
+                &self._manager,
+                self.budget,
+                "computing the forward reachable set",
+            )?;
+            if next == r {
+                break;
+            }
+            r = next;
+        }
+        // Back to the engine: `r` is over the `s` copy (vars 3j); map 3j → engine varno j.
+        let engine_vars: HashMap<VarNo, BDDFunction> = model.manager.with_manager_shared(|m| {
+            self.engine_varno
+                .iter()
+                .enumerate()
+                .map(|(j, &v)| (3 * j as VarNo, BDDFunction::var(m, v).unwrap()))
+                .collect()
+        });
+        let mut memo_back: HashMap<usize, BDDFunction> = HashMap::new();
+        let reach = Self::transfer(&r, &self._manager, &engine_vars, &model.tt, &mut memo_back)?;
+        Ok((reach, steps))
     }
 }
 
@@ -3141,6 +3402,27 @@ fn parse_bdd_cache_div(raw: Option<&str>) -> usize {
 /// `4`: the size M3 measured as sufficient (a bigger cache changed no hit rate) and item 2
 /// measured as necessary on representation-bound cones.
 const BDD_CACHE_DIV_DEFAULT: usize = 4;
+
+/// Lever A — the Squarer arena when the reachable-state restriction is installed
+/// (`MUNUNU_BDD_REACH_ARENA`, default `1 << 25`; the squaring rescue alone keeps [`SQUARING_ARENA`]).
+/// Measured: the monolithic relation of the 41–91-bit LIVE arbiters refused at 14.7–16.2 M
+/// allocated nodes against the `1 << 24` arena's 13.4 M budget.
+fn reach_arena() -> usize {
+    std::env::var("MUNUNU_BDD_REACH_ARENA")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1 << 25)
+}
+
+/// Lever A — the forward-reach phase's wall-clock budget in ms (`MUNUNU_BDD_REACH_BUDGET_MS`,
+/// default 30 000). Past it the restriction is DECLINED and evaluation proceeds unrestricted (the
+/// baseline path), so the clock changes which path runs, never a verdict.
+fn reach_budget_ms() -> u64 {
+    std::env::var("MUNUNU_BDD_REACH_BUDGET_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30_000)
+}
 
 fn fixpoint_iter_budget() -> usize {
     // ~1M iterations; a counter's steps are cheap (small BDD) so this is fast to reach.
@@ -3512,7 +3794,16 @@ impl BddBitBlaster {
             node_soft: fixpoint_node_budget().min(self.arena_nodes * 8 / 10),
             iter_soft: fixpoint_iter_soft(),
             peak_nodes: std::cell::Cell::new(0),
-            deadline: exact_time_budget().map(|d| std::time::Instant::now() + d),
+            deadline: std::cell::Cell::new(
+                exact_time_budget().map(|d| std::time::Instant::now() + d),
+            ),
+            restriction: std::cell::RefCell::new(None),
+            early_exits: std::cell::Cell::new(0),
+            collections: std::cell::Cell::new(0),
+            collect_at_bound: env_flag("MUNUNU_BDD_COLLECT_AT_BOUND"),
+            init_hint: std::cell::RefCell::new(None),
+            reach_arena: reach_arena(),
+            care_subst: std::cell::RefCell::new(None),
         }
     }
 
@@ -3625,6 +3916,12 @@ impl ExactModel {
     /// "could not finish". A panic while the manager is exhausted aborts on the unwind instead,
     /// taking every other property in the process with it.
     pub fn to_next(&self, phi: &BDDFunction) -> Result<BDDFunction, String> {
+        // Lever A2 — under the reachable-state restriction the care-constrained functions give
+        // the same successor on every reachable frame with a far smaller intermediate.
+        if let Some(care) = self.care_subst.borrow().as_ref() {
+            self.tick(1);
+            return oom(phi.substitute(care));
+        }
         match &self.subst {
             None => Ok(phi.clone()),
             Some(subst) => {
@@ -3879,6 +4176,143 @@ impl ExactModel {
     /// showcase uses). Guarded / controllability / step-bounded modalities are an
     /// honest error — state-predicate guards over the exact relation are a D1.2b
     /// follow-up (they mirror [`AbstractRelation::guarded_relations`], 2-valued).
+    /// Lever A — compute the forward reachable set from `init` ([`Squarer::forward_reach`]) and
+    /// restrict every later [`Self::evaluate`] to it. `Err` is a refusal (no next-state functions,
+    /// the relation or the set outgrew the Squarer's arena, the chain did not close): nothing is
+    /// installed and evaluation proceeds unrestricted — the lever declines, it never guesses.
+    pub fn install_reachable_restriction(&self, init: &BDDFunction) -> Result<usize, String> {
+        let mut slot = self.squarer.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(Squarer::build(self, self.reach_arena.max(SQUARING_ARENA)));
+        }
+        let sq = slot.as_ref().unwrap().as_ref().map_err(|e| e.clone())?;
+        // The reach phase's clock: `MUNUNU_BDD_REACH_BUDGET_MS` (default 30 s), and never more
+        // than a quarter of what is left on the model's own deadline.
+        let now = std::time::Instant::now();
+        let mut reach_deadline = now + std::time::Duration::from_millis(reach_budget_ms());
+        if let Some(model_dl) = self.deadline.get() {
+            let quarter = now + model_dl.saturating_duration_since(now) / 4;
+            reach_deadline = reach_deadline.min(quarter);
+        }
+        let (reach, steps) = sq.forward_reach(
+            init,
+            self,
+            self.squaring_after_iters,
+            self.iter_budget,
+            Some(reach_deadline),
+        )?;
+        self.tick(steps as u64);
+        // Lever A2 — constrain every next-state function to the care set `Reach ∧ constraint`.
+        if !self.state_varnos.is_empty() {
+            let care = oom(reach.and(&self.constraint))?;
+            let mut memo: HashMap<(usize, usize), BDDFunction> = HashMap::new();
+            let mut constrained = Vec::with_capacity(self.next_fns.len());
+            for f in &self.next_fns {
+                constrained.push(self.constrain(f, &care, &mut memo)?);
+            }
+            *self.care_subst.borrow_mut() =
+                Some(Subst::new(self.state_varnos.clone(), constrained));
+        }
+        *self.restriction.borrow_mut() = Some(reach);
+        Ok(steps)
+    }
+
+    /// The node id and level of a BDD's top node (`None` for a terminal).
+    fn node_level(&self, f: &BDDFunction) -> (usize, Option<oxidd::LevelNo>) {
+        use oxidd::{Function, HasLevel, Node};
+        self.manager.with_manager_shared(|m| {
+            let e = f.as_edge(m);
+            match m.get_node(e) {
+                Node::Inner(node) => (e.node_id(), Some(node.level())),
+                Node::Terminal(_) => (e.node_id(), None),
+            }
+        })
+    }
+
+    /// Lever A2 — Coudert–Madre `constrain` (the generalised cofactor) `f ↓ c`: equal to `f`
+    /// wherever `c` holds, and off `c` the value of the nearest care point along the variable
+    /// order — the classic care-set simplification of a transition function. Memoised on the
+    /// (f, c) node pair; `c = ⊥` leaves `f` as it is (an empty care set constrains nothing).
+    fn constrain(
+        &self,
+        f: &BDDFunction,
+        c: &BDDFunction,
+        memo: &mut HashMap<(usize, usize), BDDFunction>,
+    ) -> Result<BDDFunction, String> {
+        if *c == self.tt || *c == self.ff {
+            return Ok(f.clone());
+        }
+        let (fk, f_lvl) = self.node_level(f);
+        let Some(f_lvl) = f_lvl else {
+            return Ok(f.clone());
+        };
+        let (ck, c_lvl) = self.node_level(c);
+        if let Some(done) = memo.get(&(fk, ck)) {
+            return Ok(done.clone());
+        }
+        let lvl = match c_lvl {
+            Some(l) => f_lvl.min(l),
+            None => f_lvl,
+        };
+        let split = |g: &BDDFunction,
+                     g_lvl: Option<oxidd::LevelNo>|
+         -> Result<(BDDFunction, BDDFunction), String> {
+            if g_lvl == Some(lvl) {
+                g.cofactors()
+                    .ok_or_else(|| "constrain: cofactors of an inner node".to_string())
+            } else {
+                Ok((g.clone(), g.clone()))
+            }
+        };
+        let (f1, f0) = split(f, Some(f_lvl))?;
+        let (c1, c0) = split(c, c_lvl)?;
+        let out = if c0 == self.ff {
+            self.constrain(&f1, &c1, memo)?
+        } else if c1 == self.ff {
+            self.constrain(&f0, &c0, memo)?
+        } else {
+            let hi = self.constrain(&f1, &c1, memo)?;
+            let lo = self.constrain(&f0, &c0, memo)?;
+            let x = self.manager.with_manager_shared(|m| {
+                let v = m.level_to_var(lvl);
+                BDDFunction::var(m, v).unwrap()
+            });
+            oom(x.ite(&hi, &lo))?
+        };
+        memo.insert((fk, ck), out.clone());
+        Ok(out)
+    }
+
+    /// Lever B — give the evaluator the initial states so the root fixpoint can exit early.
+    pub fn set_init_hint(&self, init: &BDDFunction) {
+        *self.init_hint.borrow_mut() = Some(init.clone());
+    }
+
+    /// A per-request wall-clock deadline for this model's fixpoints (the justice verb's exact-rung
+    /// time slice). Like `MUNUNU_BDD_TIME_BUDGET_MS`, it makes the ABSTENTION host-dependent; the
+    /// verdicts it does reach are exact.
+    pub fn set_deadline(&self, deadline: std::time::Instant) {
+        self.deadline.set(Some(deadline));
+    }
+
+    /// The installed restriction, if any (a cheap handle clone).
+    fn restriction(&self) -> Option<BDDFunction> {
+        self.restriction.borrow().clone()
+    }
+
+    /// Lever A — the installed restriction, for callers that inspect it (tests, reports).
+    pub fn reachable_restriction(&self) -> Option<BDDFunction> {
+        self.restriction()
+    }
+
+    /// `x ∧ Reach` when the restriction is installed, else `x`.
+    fn restrict(&self, x: BDDFunction) -> BDDFunction {
+        match self.restriction() {
+            Some(r) => x.and(&r).unwrap(),
+            None => x,
+        }
+    }
+
     pub fn evaluate(
         &self,
         formula: &Formula,
@@ -3974,11 +4408,15 @@ impl ExactModel {
             // coloured every map. This line is what the measurement scripts turn on.
             eprintln!(
                 "[mununu#553] exact fixpoint: peak {} ALLOCATED BDD nodes (no collection ran for \
-                 this report — MUNUNU_BDD_REPORT_WORK); in {} iteration(s), budget {}; work {} BDD ops",
+                 this report — MUNUNU_BDD_REPORT_WORK); in {} iteration(s), budget {}; work {} BDD ops; \
+                 reach-restricted {}; early exits {}; collections at the bound {}",
                 self.peak_nodes.get(),
                 self.iters.get(),
                 self.node_soft,
-                self.work.get()
+                self.work.get(),
+                self.restriction.borrow().is_some(),
+                self.early_exits.get(),
+                self.collections.get()
             );
         }
         r
@@ -4029,20 +4467,25 @@ impl ExactModel {
         bindings: &mut HashMap<FormulaVarId, BDDFunction>,
         ctx: &mut EvalCtx,
     ) -> Result<BDDFunction, String> {
+        // Lever A — with a restriction installed every set stays inside `Reach`: the leaves
+        // (`true`, atoms), the complement and the modal results are conjoined with it; `∧`, `∨`
+        // and the fixpoints are closed under `⊆ Reach` on their own.
         Ok(match f.node(id) {
-            MuNode::True => self.tt.clone(),
+            MuNode::True => self.restrict(self.tt.clone()),
             MuNode::False => self.ff.clone(),
-            MuNode::Predicate(name) => atoms
-                .get(name.as_str())
-                .cloned()
-                .unwrap_or_else(|| self.ff.clone()),
+            MuNode::Predicate(name) => self.restrict(
+                atoms
+                    .get(name.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| self.ff.clone()),
+            ),
             MuNode::Variable(v) => bindings
                 .get(v)
                 .cloned()
                 .ok_or_else(|| format!("unbound fixpoint variable {v:?}"))?,
             MuNode::Not(n) => {
                 self.tick(1);
-                self.eval_node(f, *n, atoms, bindings, ctx)?.not().unwrap()
+                self.restrict(self.eval_node(f, *n, atoms, bindings, ctx)?.not().unwrap())
             }
             MuNode::And(a, b) => {
                 let av = self.eval_node(f, *a, atoms, bindings, ctx)?;
@@ -4078,7 +4521,7 @@ impl ExactModel {
                     );
                 }
                 let phi = self.eval_node(f, *target, atoms, bindings, ctx)?;
-                match guard.control {
+                let pre = match guard.control {
                     // Single-agent: box = ∀input, diamond = ∃input.
                     Control::All => match kind {
                         ModalKind::Box => self.box_pre(&phi)?,
@@ -4088,7 +4531,8 @@ impl ExactModel {
                     // the explicit reference `evaluator.rs::modal_trit_core`).
                     Control::Controllable => self.cpre_controllable(&phi)?,
                     Control::Environment => self.cpre_environment(&phi)?,
-                }
+                };
+                self.restrict(pre)
             }
             MuNode::Mu { var, body } => {
                 self.fixpoint(f, id, *var, *body, atoms, bindings, ctx, false)?
@@ -4131,11 +4575,24 @@ impl ExactModel {
             // `approx_num_inner_nodes` is an O(1) read — the bit-blasting guard already calls it
             // twice per op — so unlike the clock it is sampled EVERY iteration, which also makes
             // the abstention point exact rather than stride-quantised.
-            let live = self
+            let mut live = self
                 .manager
                 .with_manager_shared(|m| m.approx_num_inner_nodes());
             if live > self.peak_nodes.get() {
                 self.peak_nodes.set(live);
+            }
+            // Lever D (HWMCC LIVE, 2026-10-11) — the count is ALLOCATED-INCLUDING-DEAD, so a run
+            // near the bound may be carrying garbage, not iterates: measured, `cuhanoi10ro`'s
+            // restricted fixpoint abstained at the SAME 15,736,332 as the unrestricted one. Between
+            // ops (here) a collection is safe — the report line already runs one — so collect ONCE
+            // before abstaining and judge the LIVE count. Rare by construction: it runs only when
+            // the allocated count has crossed the bound.
+            if self.collect_at_bound && live > self.arena_safety_budget {
+                live = self.manager.with_manager_shared(|m| {
+                    m.gc();
+                    m.num_inner_nodes()
+                });
+                self.collections.set(self.collections.get() + 1);
             }
             // HARD arena-safety net. Exceeding the arena is not a budget question but a crash.
             if live > self.arena_safety_budget {
@@ -4174,9 +4631,10 @@ impl ExactModel {
             // OPT-IN wall-clock backstop (`MUNUNU_BDD_TIME_BUDGET_MS`, default OFF since #553 — it
             // made the verdict host-dependent). Still sampled on a STRIDE rather than every
             // iteration, because `Instant::now()` is not free the way the node read is.
-            const TIME_CHECK_STRIDE: usize = 256;
-            if n.is_multiple_of(TIME_CHECK_STRIDE)
-                && let Some(dl) = self.deadline
+            // Checked EVERY iteration since the HWMCC LIVE levers: an iteration of a wide νμ takes
+            // seconds, so a 256-stride read the clock minutes late; `Instant::now()` is nothing
+            // next to a pre-image.
+            if let Some(dl) = self.deadline.get()
                 && std::time::Instant::now() > dl
             {
                 return Err(format!(
@@ -4214,10 +4672,20 @@ impl ExactModel {
         // ALTERNATE the old value lies on the wrong side and the inner restarts from its seed;
         // `EvalCtx::reset_sets` names, per fixpoint node, the nested nodes to forget whenever it
         // produces a new approximant. Opt out with `MUNUNU_BDD_FIXPOINT_REUSE=0` (legacy evaluation).
+        // Lever A — a ν starts from `Reach`, not `⊤`, when the restriction is installed.
         let seed = if greatest {
-            self.tt.clone()
+            self.restrict(self.tt.clone())
         } else {
             self.ff.clone()
+        };
+        // Lever B — the ROOT fixpoint (Nots stripped) may exit once its init-restricted value is
+        // fixed: a ν iterate disjoint from `init` only shrinks, a μ iterate containing `init` only
+        // grows, and the verdict reads `init ∧ ¬sat` alone. The approximant returned agrees with
+        // the fixpoint on `init`, which is all the caller looks at.
+        let early_exit_init = if ctx.early_exit_node == Some(node) {
+            self.init_hint.borrow().clone()
+        } else {
+            None
         };
         let mut x = match ctx.approx.get(&node) {
             Some(prev) if ctx.reuse => prev.clone(),
@@ -4249,7 +4717,7 @@ impl ExactModel {
             {
                 squaring_tried = true;
                 let p = self.eval_node(f, p_node, atoms, bindings, ctx)?;
-                match self.squared_reach(&p, greatest) {
+                match self.squared_reach(&p, greatest).map(|c| self.restrict(c)) {
                     Ok(closed) => {
                         bindings.remove(&var);
                         if ctx.reuse {
@@ -4268,6 +4736,19 @@ impl ExactModel {
                     ctx.approx.insert(node, next.clone());
                 }
                 return Ok(next);
+            }
+            if let Some(init) = &early_exit_init {
+                self.tick(1);
+                let fixed_on_init = if greatest {
+                    oom(next.and(init))? == self.ff
+                } else {
+                    oom(init.and(&oom(next.not())?))? == self.ff
+                };
+                if fixed_on_init {
+                    self.early_exits.set(self.early_exits.get() + 1);
+                    bindings.remove(&var);
+                    return Ok(next);
+                }
             }
             x = next;
             // A new approximant of THIS fixpoint: every nested fixpoint on the far side of an
@@ -4290,7 +4771,7 @@ impl ExactModel {
     fn squared_reach(&self, p: &BDDFunction, greatest: bool) -> Result<BDDFunction, String> {
         let mut slot = self.squarer.borrow_mut();
         if slot.is_none() {
-            *slot = Some(Squarer::build(self));
+            *slot = Some(Squarer::build(self, self.reach_arena.max(SQUARING_ARENA)));
         }
         let sq = slot.as_ref().unwrap().as_ref().map_err(|e| e.clone())?;
         let closure = sq.closure()?;
@@ -4608,6 +5089,17 @@ pub struct ExactSymbolicOptions {
     /// controllable input folded into the state would be fixed before the controller moves, so
     /// an atom reaching one stays refused by name.
     pub input_state_enabled: bool,
+    /// Lever A (HWMCC LIVE, 2026-10-11) — restrict the fixpoint evaluation to the forward
+    /// reachable set ([`ExactModel::install_reachable_restriction`]). Default from
+    /// `MUNUNU_BDD_REACH_RESTRICT=1`, off otherwise — an EXPERIMENT switch until measured.
+    pub reach_restrict: bool,
+    /// Lever B — let the root fixpoint exit once its init-restricted value is fixed
+    /// ([`ExactModel::set_init_hint`]). Default from `MUNUNU_BDD_EARLY_EXIT=1`, off otherwise.
+    pub early_exit: bool,
+    /// A wall-clock budget for THIS request's fixpoints ([`ExactModel::set_deadline`]); `None` =
+    /// only the process-wide `MUNUNU_BDD_TIME_BUDGET_MS`, if any. The justice verb's `--rung both`
+    /// uses it so the exact rung leaves the l2s rung its share.
+    pub time_budget_ms: Option<u64>,
 }
 
 impl Default for ExactSymbolicOptions {
@@ -4617,8 +5109,16 @@ impl Default for ExactSymbolicOptions {
             signal_level_coi: signal_level_coi_from_env(),
             antecedent_propagate_enabled: true,
             input_state_enabled: true,
+            reach_restrict: env_flag("MUNUNU_BDD_REACH_RESTRICT"),
+            early_exit: env_flag("MUNUNU_BDD_EARLY_EXIT"),
+            time_budget_ms: None,
         }
     }
+}
+
+/// `VAR=1` (anything but `0` / empty) — the experiment switches' spelling.
+fn env_flag(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|v| !v.is_empty() && v != "0")
 }
 
 /// mununu#602 — `MUNUNU_COI=signal` selects the whole-register cone (the pre-#602 granularity).
@@ -5455,6 +5955,25 @@ fn exact_symbolic_verdict_with_witness_inner(
     // already conjoins it into `bad`); it was unobservable there because `∃i. c(s, i)` is
     // almost always satisfiable at a register valuation.
     let init = init.and(&exact.constraint_satisfiable()).unwrap();
+    // Lever A / B (HWMCC LIVE experiment) — install the reachable-state restriction and the
+    // early-exit hint before the fixpoint. A declined restriction is logged, never guessed.
+    if opts.reach_restrict {
+        let t = std::time::Instant::now();
+        match exact.install_reachable_restriction(&init) {
+            Ok(steps) => tracing::debug!(
+                steps,
+                elapsed_ms = t.elapsed().as_millis() as u64,
+                "exact: reachable-state restriction installed"
+            ),
+            Err(why) => tracing::debug!(why, "exact: reachable-state restriction declined"),
+        }
+    }
+    if opts.early_exit {
+        exact.set_init_hint(&init);
+    }
+    if let Some(ms) = opts.time_budget_ms {
+        exact.set_deadline(std::time::Instant::now() + std::time::Duration::from_millis(ms));
+    }
     let sat = exact.evaluate(formula, &atoms)?;
     // Holds iff init ⊆ sat, i.e. no legal initial state violates φ.
     let violating = init.and(&sat.not().unwrap()).unwrap();
