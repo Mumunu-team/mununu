@@ -986,9 +986,17 @@ struct Btor2VerifyJusticeArgs {
     #[arg(value_name = "FILE")]
     file: PathBuf,
     /// `exact` (ROBDD fair-cycle fixpoint), `l2s` (liveness-to-safety + the reachability
-    /// portfolio) or `both` (exact first, l2s when it abstains — the default).
+    /// portfolio) or `both` (the default: the exact ladder for 30 s, then l2s, then the exact
+    /// ladder with the remainder).
     #[arg(long, default_value = "both")]
     rung: String,
+    /// Wall-clock budget per justice set in milliseconds (default: the engines' own budgets).
+    #[arg(long)]
+    budget_ms: Option<u64>,
+    /// Under `--rung both`, run the exact ladder and the l2s rung concurrently; the first
+    /// definite verdict wins and the other is cancelled.
+    #[arg(long)]
+    parallel_rungs: bool,
     /// Emit the per-justice-set report as JSON only.
     #[arg(long)]
     json: bool,
@@ -3577,11 +3585,18 @@ fn btor2_from_aiger(args: Btor2FromAigerArgs) -> Result<(), String> {
 }
 
 fn btor2_verify_justice(args: Btor2VerifyJusticeArgs) -> Result<(), String> {
-    use mununu_core::adapter::justice::{JusticeRung, verify_justice};
+    use mununu_core::adapter::justice::{JusticeOptions, JusticeRung, verify_justice_with};
     let rung = JusticeRung::parse(&args.rung)?;
     let (btor2, converted) = read_btor2_or_aiger(&args.file)?;
     let t0 = std::time::Instant::now();
-    let results = verify_justice(&btor2, rung)?;
+    let results = verify_justice_with(
+        &btor2,
+        &JusticeOptions {
+            rung,
+            budget_ms: args.budget_ms,
+            parallel_rungs: args.parallel_rungs,
+        },
+    )?;
     let elapsed_ms = t0.elapsed().as_millis() as u64;
     let worst = if results
         .iter()

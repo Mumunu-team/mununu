@@ -27,9 +27,7 @@
 use crate::adapter::btor2::ast::{Btor2File, ConstValue, Nid, Node, Operand, Sort};
 use crate::adapter::btor2::parser;
 use crate::adapter::btor2::predicate_expr::CmpOp;
-use crate::adapter::btor2::symbolic_bitblast::{
-    ExactSymbolicOptions, ExactVerdict, exact_symbolic_verdict_with_witness_and_options,
-};
+use crate::adapter::btor2::symbolic_bitblast::{ExactSymbolicOptions, ExactVerdict, exact_ladder};
 use crate::adapter::liveness_rescue::{
     Atom, LivenessVerdict, response_liveness_rescue_under_fairness,
 };
@@ -189,88 +187,215 @@ fn atom(name: &str) -> Atom {
     }
 }
 
-/// Decide every justice set of `btor2` (the design text, `justice` lines included).
+/// P3 — how the rungs are scheduled under [`JusticeRung::Both`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JusticeOptions {
+    pub rung: JusticeRung,
+    /// The whole run's wall-clock budget per justice set (`None` = the engines' own budgets).
+    pub budget_ms: Option<u64>,
+    /// Run the exact ladder and the l2s rung CONCURRENTLY, first definite verdict wins and the
+    /// other is cancelled; `false` = `exact ≤ EXACT_SLICE → l2s → exact with the remainder`.
+    pub parallel_rungs: bool,
+}
+
+/// The exact ladder's first slice under the sequential policy (30 s): every exact decision on
+/// the LIVE band came in ≤ 7 s; the l2s lassos that were lost to a longer slice needed 172–258 s.
+const EXACT_SLICE_MS: u64 = 30_000;
+
+/// Decide every justice set of `btor2` (the design text, `justice` lines included), sequential
+/// policy, no overall budget.
 pub fn verify_justice(btor2: &str, rung: JusticeRung) -> Result<Vec<JusticeVerdict>, String> {
+    verify_justice_with(
+        btor2,
+        &JusticeOptions {
+            rung,
+            budget_ms: None,
+            parallel_rungs: false,
+        },
+    )
+}
+
+/// The exact rung on one justice set: the fair-EG formula through [`exact_ladder`].
+fn exact_rung(
+    named: &str,
+    lits: &[String],
+    budget: Option<std::time::Duration>,
+    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) -> Result<(PropertyVerdict, &'static str, Vec<String>), String> {
+    let assumptions: Vec<Assumption> = lits
+        .iter()
+        .map(|n| Assumption::State {
+            atom: format!("{n} == 1"),
+        })
+        .collect();
+    // ¬E_C G true: holds at EVERY initial state ⇔ no fair path from any of them.
+    let formula_str = format!("!({})", fair_eg("true", &assumptions));
+    let formula = crate::mu_calculus::parser::parse(&formula_str)
+        .map_err(|e| format!("exact: fair-EG formula did not parse: {e:?}"))?;
+    let out = exact_ladder(
+        named,
+        &formula,
+        &std::collections::HashSet::new(),
+        &ExactSymbolicOptions::default(),
+        budget,
+        cancel,
+    );
+    match out.result {
+        Ok((ExactVerdict::Holds, _)) => Ok((PropertyVerdict::Holds, out.stage, out.notes)),
+        Ok((ExactVerdict::Violated, _)) => Ok((PropertyVerdict::Violated, out.stage, out.notes)),
+        Err(reason) => {
+            let mut notes = out.notes;
+            notes.push(format!("exact: abstained — {reason}"));
+            Err(notes.join(" | "))
+        }
+    }
+}
+
+/// The l2s rung on one justice set.
+fn l2s_rung(named: &str, lits: &[String]) -> (PropertyVerdict, Vec<String>, Vec<String>) {
+    let fair_atoms: Vec<Atom> = lits.iter().map(|n| atom(n)).collect();
+    match response_liveness_rescue_under_fairness(
+        named,
+        &atom("mununu_true"),
+        &atom("mununu_false"),
+        &fair_atoms,
+        false,
+    ) {
+        Some((LivenessVerdict::Holds, outcome)) => {
+            let mut by = vec!["l2s".to_string()];
+            by.extend(outcome.unreachable_by.iter().map(|s| s.to_string()));
+            (PropertyVerdict::Holds, by, Vec::new())
+        }
+        Some((LivenessVerdict::Violated, outcome)) => {
+            let mut by = vec!["l2s".to_string()];
+            by.extend(outcome.reachable_by.iter().map(|s| s.to_string()));
+            (PropertyVerdict::Violated, by, Vec::new())
+        }
+        Some((LivenessVerdict::Inconclusive, _)) => (
+            PropertyVerdict::Unknown,
+            Vec::new(),
+            vec!["l2s: the reachability portfolio left the fair-cycle monitor undecided".into()],
+        ),
+        None => (
+            PropertyVerdict::Unknown,
+            Vec::new(),
+            vec!["l2s: the fair-cycle monitor could not be built".into()],
+        ),
+    }
+}
+
+/// Decide every justice set of `btor2` under `opts` (see [`JusticeOptions`]).
+pub fn verify_justice_with(
+    btor2: &str,
+    opts: &JusticeOptions,
+) -> Result<Vec<JusticeVerdict>, String> {
+    use std::time::{Duration, Instant};
     let NamedLiterals {
         btor2: named,
         justice: justice_names,
         fairness: fair_names,
     } = name_justice_literals(btor2)?;
-    // The exact rung's time slice when l2s follows it (`MUNUNU_JUSTICE_EXACT_BUDGET_MS`): without
-    // one, a wide νμ that neither converges nor hits a budget consumes the whole run and the l2s
-    // rung never gets its turn — measured on the LIVE sweep (two l2s lassos lost to timeouts).
-    // The levers themselves come from the environment through `ExactSymbolicOptions::default()`.
-    let exact_opts = ExactSymbolicOptions {
-        time_budget_ms: if rung == JusticeRung::Both {
-            std::env::var("MUNUNU_JUSTICE_EXACT_BUDGET_MS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-        } else {
-            None
-        },
-        ..Default::default()
-    };
     let mut results = Vec::with_capacity(justice_names.len());
     for (index, names) in justice_names.iter().enumerate() {
-        let lits: Vec<&String> = names.iter().chain(fair_names.iter()).collect();
+        let lits: Vec<String> = names.iter().chain(fair_names.iter()).cloned().collect();
+        let start = Instant::now();
+        let total = opts.budget_ms.map(Duration::from_millis);
+        let remaining = |t: Option<Duration>| t.map(|t| t.saturating_sub(start.elapsed()));
         let mut decided_by: Vec<String> = Vec::new();
         let mut notes: Vec<String> = Vec::new();
         let mut verdict = PropertyVerdict::Unknown;
-        if matches!(rung, JusticeRung::Exact | JusticeRung::Both) {
-            let assumptions: Vec<Assumption> = lits
-                .iter()
-                .map(|n| Assumption::State {
-                    atom: format!("{n} == 1"),
-                })
-                .collect();
-            // ¬E_C G true: holds at EVERY initial state ⇔ no fair path from any of them.
-            let formula_str = format!("!({})", fair_eg("true", &assumptions));
-            match crate::mu_calculus::parser::parse(&formula_str) {
-                Err(e) => notes.push(format!("exact: fair-EG formula did not parse: {e:?}")),
-                Ok(formula) => match exact_symbolic_verdict_with_witness_and_options(
-                    &named,
-                    &formula,
-                    &exact_opts,
-                )
-                .map(|(v, _)| v)
-                {
-                    Ok(ExactVerdict::Holds) => {
-                        verdict = PropertyVerdict::Holds;
-                        decided_by.push("exact-symbolic".into());
-                    }
-                    Ok(ExactVerdict::Violated) => {
-                        verdict = PropertyVerdict::Violated;
-                        decided_by.push("exact-symbolic".into());
-                    }
-                    Err(reason) => notes.push(format!("exact: abstained — {reason}")),
-                },
+        match opts.rung {
+            JusticeRung::Exact => match exact_rung(&named, &lits, total, None) {
+                Ok((v, stage, mut n)) => {
+                    verdict = v;
+                    decided_by.push(stage.to_string());
+                    notes.append(&mut n);
+                }
+                Err(e) => notes.push(e),
+            },
+            JusticeRung::L2s => {
+                let (v, by, mut n) = l2s_rung(&named, &lits);
+                verdict = v;
+                decided_by = by;
+                notes.append(&mut n);
             }
-        }
-        if verdict == PropertyVerdict::Unknown
-            && matches!(rung, JusticeRung::L2s | JusticeRung::Both)
-        {
-            let fair_atoms: Vec<Atom> = lits.iter().map(|n| atom(n)).collect();
-            match response_liveness_rescue_under_fairness(
-                &named,
-                &atom("mununu_true"),
-                &atom("mununu_false"),
-                &fair_atoms,
-                false,
-            ) {
-                Some((LivenessVerdict::Holds, outcome)) => {
-                    verdict = PropertyVerdict::Holds;
-                    decided_by.push("l2s".into());
-                    decided_by.extend(outcome.unreachable_by.iter().map(|s| s.to_string()));
+            JusticeRung::Both if opts.parallel_rungs => {
+                // Both rungs at once; the first definite verdict wins and the exact ladder is
+                // cancelled (the l2s portfolio's members run out on their own timeouts).
+                let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let (tx, rx) = std::sync::mpsc::channel();
+                {
+                    let tx = tx.clone();
+                    let named = named.clone();
+                    let lits = lits.clone();
+                    let cancel = cancel.clone();
+                    std::thread::spawn(move || {
+                        let r = exact_rung(&named, &lits, total, Some(cancel));
+                        let _ = tx.send(("exact", r));
+                    });
                 }
-                Some((LivenessVerdict::Violated, outcome)) => {
-                    verdict = PropertyVerdict::Violated;
-                    decided_by.push("l2s".into());
-                    decided_by.extend(outcome.reachable_by.iter().map(|s| s.to_string()));
+                {
+                    let named = named.clone();
+                    let lits = lits.clone();
+                    std::thread::spawn(move || {
+                        let (v, by, n) = l2s_rung(&named, &lits);
+                        let r = if v == PropertyVerdict::Unknown {
+                            Err(n.join(" | "))
+                        } else {
+                            Ok((v, "l2s", by))
+                        };
+                        let _ = tx.send(("l2s", r));
+                    });
                 }
-                Some((LivenessVerdict::Inconclusive, _)) => notes.push(
-                    "l2s: the reachability portfolio left the fair-cycle monitor undecided".into(),
-                ),
-                None => notes.push("l2s: the fair-cycle monitor could not be built".into()),
+                let mut pending = 2;
+                while pending > 0 {
+                    let Ok((who, r)) = rx.recv() else { break };
+                    pending -= 1;
+                    match r {
+                        Ok((v, stage, mut by)) => {
+                            verdict = v;
+                            if who == "exact" {
+                                decided_by.push(stage.to_string());
+                            } else {
+                                decided_by.append(&mut by);
+                            }
+                            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                            break;
+                        }
+                        Err(e) => notes.push(format!("{who}: {e}")),
+                    }
+                }
+            }
+            JusticeRung::Both => {
+                // exact ≤ EXACT_SLICE → l2s → exact with the remainder.
+                let slice = Duration::from_millis(EXACT_SLICE_MS);
+                let first = remaining(total).map_or(slice, |r| r.min(slice));
+                match exact_rung(&named, &lits, Some(first), None) {
+                    Ok((v, stage, mut n)) => {
+                        verdict = v;
+                        decided_by.push(stage.to_string());
+                        notes.append(&mut n);
+                    }
+                    Err(e) => notes.push(e),
+                }
+                if verdict == PropertyVerdict::Unknown {
+                    let (v, by, mut n) = l2s_rung(&named, &lits);
+                    verdict = v;
+                    decided_by = by;
+                    notes.append(&mut n);
+                }
+                if verdict == PropertyVerdict::Unknown
+                    && !remaining(total).is_some_and(|r| r.is_zero())
+                {
+                    match exact_rung(&named, &lits, remaining(total), None) {
+                        Ok((v, stage, mut n)) => {
+                            verdict = v;
+                            decided_by.push(stage.to_string());
+                            notes.append(&mut n);
+                        }
+                        Err(e) => notes.push(format!("exact (remainder): {e}")),
+                    }
+                }
             }
         }
         results.push(JusticeVerdict {
@@ -287,6 +412,7 @@ pub fn verify_justice(btor2: &str, rung: JusticeRung) -> Result<Vec<JusticeVerdi
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapter::btor2::symbolic_bitblast::exact_symbolic_verdict_with_witness_and_options;
 
     /// A free-running 2-bit counter: `lo ∧ hi` recurs forever → a fair cycle exists → VIOLATED (sat).
     const COUNTER: &str = "1 sort bitvec 1\n2 zero 1\n3 one 1\n4 state 1 lo\n5 state 1 hi\n\
@@ -434,5 +560,64 @@ mod tests {
             reach.and(&bdd("a == 0")).unwrap() != *model.ff(),
             "the initial state is in Reach"
         );
+    }
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::*;
+    use crate::adapter::btor2::symbolic_bitblast::LADDER_STAGE_UNRESTRICTED;
+
+    /// A free-running 2-bit counter: `lo ∧ hi` recurs forever → VIOLATED.
+    const COUNTER: &str = "1 sort bitvec 1\n2 zero 1\n3 one 1\n4 state 1 lo\n5 state 1 hi\n\
+                           6 init 1 4 2\n7 init 1 5 2\n8 not 1 4\n9 next 1 4 8\n10 xor 1 4 5\n\
+                           11 next 1 5 10\n12 and 1 4 5\n13 justice 1 12\n";
+    /// `s` is 1 forever after reset; justice on `¬s` → HOLDS.
+    const STUCK: &str = "1 sort bitvec 1\n2 zero 1\n3 one 1\n4 state 1 s\n5 init 1 4 2\n\
+                         6 next 1 4 3\n7 not 1 4\n8 justice 1 7\n";
+
+    #[test]
+    fn the_sequential_policy_decides_on_the_exact_ladder_and_names_the_stage() {
+        let r = verify_justice_with(
+            COUNTER,
+            &JusticeOptions {
+                rung: JusticeRung::Both,
+                budget_ms: Some(60_000),
+                parallel_rungs: false,
+            },
+        )
+        .expect("runs");
+        assert_eq!(r[0].verdict, PropertyVerdict::Violated, "{:?}", r[0]);
+        assert_eq!(r[0].decided_by, vec![LADDER_STAGE_UNRESTRICTED.to_string()]);
+    }
+
+    #[test]
+    fn the_parallel_policy_decides_and_cancels_the_other_rung() {
+        let r = verify_justice_with(
+            STUCK,
+            &JusticeOptions {
+                rung: JusticeRung::Both,
+                budget_ms: Some(60_000),
+                parallel_rungs: true,
+            },
+        )
+        .expect("runs");
+        assert_eq!(r[0].verdict, PropertyVerdict::Holds, "{:?}", r[0]);
+        assert!(!r[0].decided_by.is_empty(), "{:?}", r[0]);
+    }
+
+    #[test]
+    fn a_zero_budget_is_an_abstention_not_an_error() {
+        let r = verify_justice_with(
+            COUNTER,
+            &JusticeOptions {
+                rung: JusticeRung::Exact,
+                budget_ms: Some(0),
+                parallel_rungs: false,
+            },
+        )
+        .expect("runs");
+        assert_eq!(r[0].verdict, PropertyVerdict::Unknown, "{:?}", r[0]);
+        assert!(!r[0].notes.is_empty());
     }
 }

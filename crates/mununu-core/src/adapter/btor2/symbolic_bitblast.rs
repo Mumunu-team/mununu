@@ -2664,12 +2664,12 @@ pub struct ExactModel {
     early_exits: std::cell::Cell<usize>,
     /// Lever D — how many collections the arena-safety check ran before judging (the report line).
     collections: std::cell::Cell<usize>,
-    /// Lever D (`MUNUNU_BDD_COLLECT_AT_BOUND=1`, OFF by default) — collect once before abstaining
-    /// on the arena-safety bound and judge the LIVE count. Measured: it decides what the allocated
-    /// count would have abstained on (`cuabq2mfro` restricted peak 3.4 M vs 15.7 M), and it lets a
-    /// fixpoint that used to abstain run on — `cucab09` went from a 137 s abstention to the 400 s
-    /// cap — so it is an experiment switch until it is paired with a rung deadline.
-    collect_at_bound: bool,
+    /// A cancellation flag the planner shares with a concurrent rung: checked each iteration,
+    /// an abstention `cancelled by the caller` ([`AbstentionKind::Cancelled`]).
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The process-wide `MUNUNU_BDD_TIME_BUDGET_MS` deadline, kept apart so a per-attempt
+    /// deadline ([`Self::set_deadline_opt`]) never loosens it.
+    env_deadline: Option<std::time::Instant>,
     /// Lever B — the initial states, for the ROOT fixpoint's early exit ([`Self::fixpoint`]):
     /// a ν whose iterate is already disjoint from `init`, or a μ whose iterate already contains
     /// it, has its init-restricted value fixed by monotonicity, and the verdict reads nothing else.
@@ -3797,10 +3797,11 @@ impl BddBitBlaster {
             deadline: std::cell::Cell::new(
                 exact_time_budget().map(|d| std::time::Instant::now() + d),
             ),
+            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            env_deadline: exact_time_budget().map(|d| std::time::Instant::now() + d),
             restriction: std::cell::RefCell::new(None),
             early_exits: std::cell::Cell::new(0),
             collections: std::cell::Cell::new(0),
-            collect_at_bound: env_flag("MUNUNU_BDD_COLLECT_AT_BOUND"),
             init_hint: std::cell::RefCell::new(None),
             reach_arena: reach_arena(),
             care_subst: std::cell::RefCell::new(None),
@@ -4181,6 +4182,28 @@ impl ExactModel {
     /// the relation or the set outgrew the Squarer's arena, the chain did not close): nothing is
     /// installed and evaluation proceeds unrestricted — the lever declines, it never guesses.
     pub fn install_reachable_restriction(&self, init: &BDDFunction) -> Result<usize, String> {
+        self.install_reachable_restriction_within(init, reach_budget_ms())
+    }
+
+    /// [`Self::install_reachable_restriction`] with an explicit wall-clock budget for the
+    /// forward-reach phase (a ladder's probe budget); the model's own deadline still caps it at a
+    /// quarter of what is left.
+    pub fn install_reachable_restriction_within(
+        &self,
+        init: &BDDFunction,
+        budget_ms: u64,
+    ) -> Result<usize, String> {
+        // P5 — the Squarer carries three copies of every state bit plus the inputs; give it the
+        // engine's ceiling rather than no cap at all.
+        let squarer_vars = 3 * self.state_varnos.len() + self.input_varnos.len();
+        if squarer_vars > 3 * HARD_BITBLAST_CEILING as usize + HARD_BITBLAST_CEILING as usize {
+            return Err(format!(
+                "reach: declined — the Squarer would need {squarer_vars} variables (3 copies of \
+                 {} state bits + {} inputs), past the engine's ceiling",
+                self.state_varnos.len(),
+                self.input_varnos.len()
+            ));
+        }
         let mut slot = self.squarer.borrow_mut();
         if slot.is_none() {
             *slot = Some(Squarer::build(self, self.reach_arena.max(SQUARING_ARENA)));
@@ -4189,7 +4212,7 @@ impl ExactModel {
         // The reach phase's clock: `MUNUNU_BDD_REACH_BUDGET_MS` (default 30 s), and never more
         // than a quarter of what is left on the model's own deadline.
         let now = std::time::Instant::now();
-        let mut reach_deadline = now + std::time::Duration::from_millis(reach_budget_ms());
+        let mut reach_deadline = now + std::time::Duration::from_millis(budget_ms);
         if let Some(model_dl) = self.deadline.get() {
             let quarter = now + model_dl.saturating_duration_since(now) / 4;
             reach_deadline = reach_deadline.min(quarter);
@@ -4293,6 +4316,44 @@ impl ExactModel {
     /// verdicts it does reach are exact.
     pub fn set_deadline(&self, deadline: std::time::Instant) {
         self.deadline.set(Some(deadline));
+    }
+
+    /// Set (or clear) the per-attempt deadline; the process-wide one, if any, stays as a floor.
+    pub fn set_deadline_opt(&self, deadline: Option<std::time::Instant>) {
+        self.deadline.set(match (deadline, self.env_deadline) {
+            (Some(a), Some(e)) => Some(a.min(e)),
+            (a, e) => a.or(e),
+        });
+    }
+
+    /// The cancellation handle for a concurrent rung ([`AbstentionKind::Cancelled`]).
+    pub fn cancel_handle(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        self.cancel.clone()
+    }
+
+    /// Share a cancellation flag with this model.
+    pub fn set_cancel(&mut self, flag: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        self.cancel = flag;
+    }
+
+    /// Lever A — drop an installed restriction (the next attempt runs unrestricted).
+    pub fn clear_restriction(&self) {
+        *self.restriction.borrow_mut() = None;
+        *self.care_subst.borrow_mut() = None;
+    }
+
+    /// Lever B — drop the early-exit hint (the next attempt converges the root fixpoint).
+    pub fn clear_init_hint(&self) {
+        *self.init_hint.borrow_mut() = None;
+    }
+
+    /// Start a fresh attempt on the same model: the iteration and work counters restart so the
+    /// budgets judge THIS attempt, not the sum of the ladder's stages.
+    pub fn reset_counters(&self) {
+        self.iters.set(0);
+        self.work.set(0);
+        self.early_exits.set(0);
+        self.collections.set(0);
     }
 
     /// The installed restriction, if any (a cheap handle clone).
@@ -4568,6 +4629,12 @@ impl ExactModel {
                     self.iter_budget
                 ));
             }
+            if self.cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(
+                    "symbolic bit-blaster: cancelled by the caller — another rung decided first"
+                        .into(),
+                );
+            }
             // mununu#553 — the DETERMINISTIC work guard, and the one that now actually fires. The
             // iteration budget above bounds DEPTH; this bounds the SIZE of the set being iterated,
             // which is what distinguishes a deep-but-tractable cone (~3 nodes/iteration, converges)
@@ -4587,7 +4654,8 @@ impl ExactModel {
             // ops (here) a collection is safe — the report line already runs one — so collect ONCE
             // before abstaining and judge the LIVE count. Rare by construction: it runs only when
             // the allocated count has crossed the bound.
-            if self.collect_at_bound && live > self.arena_safety_budget {
+            // Lever D — derived, not a switch: with a deadline the grind it can cause is bounded.
+            if self.deadline.get().is_some() && live > self.arena_safety_budget {
                 live = self.manager.with_manager_shared(|m| {
                     m.gc();
                     m.num_inner_nodes()
@@ -5089,12 +5157,15 @@ pub struct ExactSymbolicOptions {
     /// controllable input folded into the state would be fixed before the controller moves, so
     /// an atom reaching one stays refused by name.
     pub input_state_enabled: bool,
-    /// Lever A (HWMCC LIVE, 2026-10-11) — restrict the fixpoint evaluation to the forward
-    /// reachable set ([`ExactModel::install_reachable_restriction`]). Default from
-    /// `MUNUNU_BDD_REACH_RESTRICT=1`, off otherwise — an EXPERIMENT switch until measured.
+    /// Lever A (HWMCC LIVE) — restrict the fixpoint evaluation to the forward reachable set
+    /// ([`ExactModel::install_reachable_restriction`]) on the ONE attempt a one-shot call makes.
+    /// Default `false`: the planner applies it as a stage of [`exact_ladder`] (after a short
+    /// unrestricted attempt), never as a global, because its cost is per property and its payoff is
+    /// shape-dependent (measured: every instance it helped closed its reachable set in ≤ 3.3 s).
     pub reach_restrict: bool,
-    /// Lever B — let the root fixpoint exit once its init-restricted value is fixed
-    /// ([`ExactModel::set_init_hint`]). Default from `MUNUNU_BDD_EARLY_EXIT=1`, off otherwise.
+    /// Lever B — the root fixpoint exits once its init-restricted value is fixed
+    /// ([`ExactModel::set_init_hint`]). Default `true`: a verdict path reads `init ∧ ¬sat` only.
+    /// `false` for a caller that needs the CONVERGED set (a strategy extraction).
     pub early_exit: bool,
     /// A wall-clock budget for THIS request's fixpoints ([`ExactModel::set_deadline`]); `None` =
     /// only the process-wide `MUNUNU_BDD_TIME_BUDGET_MS`, if any. The justice verb's `--rung both`
@@ -5109,16 +5180,81 @@ impl Default for ExactSymbolicOptions {
             signal_level_coi: signal_level_coi_from_env(),
             antecedent_propagate_enabled: true,
             input_state_enabled: true,
-            reach_restrict: env_flag("MUNUNU_BDD_REACH_RESTRICT"),
-            early_exit: env_flag("MUNUNU_BDD_EARLY_EXIT"),
+            reach_restrict: false,
+            early_exit: true,
             time_budget_ms: None,
         }
     }
 }
 
-/// `VAR=1` (anything but `0` / empty) — the experiment switches' spelling.
-fn env_flag(name: &str) -> bool {
-    std::env::var(name).is_ok_and(|v| !v.is_empty() && v != "0")
+/// P0 — the typed reading of an exact-engine abstention / refusal message. The engine's
+/// messages are the user-facing record and stay as they are; this is the planner's key for a
+/// reactive operator (retry restricted, raise the cap, hand the property to another rung),
+/// so every abstention site is pinned to one variant by `every_abstention_message_classifies`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AbstentionKind {
+    /// The cone is wider than the bit cap — a prepare-time refusal; only a cap raise helps.
+    BitCap,
+    /// The fixpoint allocated past the arena-safety bound — the shape the reachable-state
+    /// restriction targets.
+    ArenaSafety,
+    /// The iteration budget — a long chain; the ranking engine or squaring, not the restriction.
+    IterationBudget,
+    /// The node-and-iteration latency bound.
+    Latency,
+    /// The wall clock (process-wide or per-request) — host-dependent; the attempt was cut, not refuted.
+    Deadline,
+    /// The caller cancelled (another rung decided first).
+    Cancelled,
+    /// An atom pins or reaches a primary input — a soundness refusal; another engine, not a retry.
+    RefusedInputAtom,
+    /// The reachable-state restriction declined (budget, arena, chain) — evaluation proceeds unrestricted.
+    ReachDeclined,
+    /// The arena overflowed while building (OxiDD out of memory) — the cone does not compress.
+    ArenaOverflow,
+    /// Anything else (a parse error, an unsupported construct).
+    Other,
+}
+
+/// P0 — classify an abstention message (see [`AbstentionKind`]).
+pub fn abstention_kind(message: &str) -> AbstentionKind {
+    let m = message;
+    if m.contains("abstained on the BIT CAP") {
+        AbstentionKind::BitCap
+    } else if m.contains("ARENA-SAFETY bound") {
+        AbstentionKind::ArenaSafety
+    } else if m.contains("abstained on the ITERATION budget") {
+        AbstentionKind::IterationBudget
+    } else if m.contains("fixpoint LATENCY bound") {
+        AbstentionKind::Latency
+    } else if m.contains("WALL-CLOCK budget") || m.contains("per-request deadline") {
+        AbstentionKind::Deadline
+    } else if m.contains("cancelled by the caller") {
+        AbstentionKind::Cancelled
+    } else if m.contains("combinationally driven by primary input")
+        || m.contains("references primary input")
+        || m.contains("unwritten bits the RTL front-end left undriven")
+    {
+        AbstentionKind::RefusedInputAtom
+    } else if m.starts_with("reach:") || m.starts_with("squaring:") {
+        AbstentionKind::ReachDeclined
+    } else if m.contains("arena overflow") || m.contains("OutOfMemory") || m.contains("NODE budget")
+    {
+        AbstentionKind::ArenaOverflow
+    } else {
+        AbstentionKind::Other
+    }
+}
+
+/// Whether a retry on the same session can still change the answer: a refusal and a cap are
+/// final for this model; a budget, the arena or a cut deadline are not.
+impl AbstentionKind {
+    pub fn is_retryable(self) -> bool {
+        !matches!(
+            self,
+            Self::BitCap | Self::RefusedInputAtom | Self::Cancelled | Self::Other
+        )
+    }
 }
 
 /// mununu#602 — `MUNUNU_COI=signal` selects the whole-register cone (the pre-#602 granularity).
@@ -5520,483 +5656,785 @@ fn keep_set_signal_level(
         .then(|| crate::adapter::btor2::dep_graph::cone_leaf_nids(file, seed_atoms))
 }
 
+/// P2 — the exact engine's per-property SESSION: everything up to the legal initial-state BDD
+/// (the shadow / propagation / input-state / enum / havoc rewrites, the cone, the bit-blast, the
+/// atoms) built ONCE, then evaluated as many times as the planner's ladder needs with per-attempt
+/// options and a deadline. The Squarer and an installed restriction persist across attempts, so
+/// three stages on one property pay one bit-blast. One-shot callers go through
+/// [`exact_symbolic_verdict_with_witness_and_options`], which is `prepare` + one `attempt`.
+pub struct ExactSession {
+    file: crate::adapter::btor2::ast::Btor2File,
+    formula: Formula,
+    bb: BddBitBlaster,
+    exact: ExactModel,
+    resolved: Vec<(String, BDDFunction)>,
+    init: BDDFunction,
+}
+
+/// P2 — what one attempt on an [`ExactSession`] does differently from the last.
+#[derive(Debug, Clone, Copy)]
+pub struct AttemptOptions {
+    /// Lever A — install (or keep) the reachable-state restriction for this attempt; `false`
+    /// clears an installed one.
+    pub reach_restrict: bool,
+    /// The forward-reach phase's wall-clock budget (the ladder's probe), else the engine default.
+    pub reach_budget_ms: Option<u64>,
+    /// Fail the attempt when the restriction declines instead of running unrestricted (a ladder
+    /// stage that exists only to try the restriction).
+    pub require_restriction: bool,
+    /// Lever B — early exit on the root fixpoint.
+    pub early_exit: bool,
+    /// The attempt's deadline (the process-wide `MUNUNU_BDD_TIME_BUDGET_MS` stays a floor).
+    pub deadline: Option<std::time::Instant>,
+}
+
+impl AttemptOptions {
+    /// The one attempt a one-shot call makes, from its [`ExactSymbolicOptions`].
+    pub fn from_options(opts: &ExactSymbolicOptions) -> Self {
+        Self {
+            reach_restrict: opts.reach_restrict,
+            reach_budget_ms: None,
+            require_restriction: false,
+            early_exit: opts.early_exit,
+            deadline: opts
+                .time_budget_ms
+                .map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms)),
+        }
+    }
+}
+
+impl ExactSession {
+    /// Build the session (see the type). `Err` is a refusal or a cap — final for this model.
+    pub fn prepare(
+        btor2_content: &str,
+        formula: &Formula,
+        controllable: &std::collections::HashSet<String>,
+        opts: &ExactSymbolicOptions,
+    ) -> Result<Self, String> {
+        let file = crate::adapter::btor2::parser::parse(btor2_content)
+            .map_err(|e| format!("adapter/btor2/exact MC: {}", e.message))?;
+
+        // mununu#476 — antecedent shadow-register synthesis. If the formula matches
+        // the canonical SVA `|=>` shape (Or(Not(Predicate(A)), Modal{Box, _})),
+        // synthesise a shadow state register for every antecedent atom `A` whose
+        // combinational cone reaches primary inputs. The augmented BTOR2 file +
+        // rewritten formula are then handed to the rest of this fn. Atoms that
+        // cannot be shadowed (see `RefusalReason`) fall through to the Phase A
+        // refusal below. See `docs/design/antecedent-shadow-synthesis.md` for the
+        // full design + soundness argument.
+        //
+        // Two orthogonal opt-out channels; EITHER disabling wins:
+        //   1. `opts.antecedent_shadow_enabled = false` — per-invocation opt-out
+        //      threaded from CLI (`--no-antecedent-shadow`) / API
+        //      (`no_antecedent_shadow: true`). Thread-safe, per-request.
+        //   2. `MUNUNU_NO_ANTECEDENT_SHADOW=1` env var — process-global escape
+        //      hatch for differential-oracle / debug use.
+        let (file, rewritten_formula) = {
+            let opt_out = !opts.antecedent_shadow_enabled
+                || std::env::var("MUNUNU_NO_ANTECEDENT_SHADOW").is_ok();
+            let antecedents = crate::mu_calculus::detect_pipeimplies_antecedent_atoms(formula);
+            if !opt_out && !antecedents.is_empty() {
+                let synth = crate::adapter::btor2::antecedent_shadow::synthesize_shadows(
+                    &file,
+                    &antecedents,
+                    crate::adapter::btor2::antecedent_shadow::ShadowSynthOpts::default(),
+                );
+                if synth.shadows.is_empty() {
+                    (file, None)
+                } else {
+                    let rewritten =
+                        crate::mu_calculus::substitute_predicates(formula, &synth.renames);
+                    tracing::info!(
+                        n_shadows = synth.shadows.len(),
+                        "antecedent shadow-synth: rewrote {} input-derived antecedent atom(s) into shadow registers ({} atoms fell through to fallback refusal)",
+                        synth.shadows.len(),
+                        synth.refused.len(),
+                    );
+                    (synth.augmented, Some(rewritten))
+                }
+            } else {
+                (file, None)
+            }
+        };
+        let formula: &Formula = rewritten_formula.as_ref().unwrap_or(formula);
+
+        // mununu#629 — propagate a same-cycle antecedent's constant through the consequent's cone:
+        // `AG(sig == K -> C(sig))` is `AG(sig == K -> C[sig := K])`, and the substituted copy of a
+        // read mux folds to the selected arm, so the bit cone below sees one field, not the record.
+        // An input antecedent is dropped with it when nothing else reads the input (the ∀ over
+        // inputs then IS the substitution). Equivalence-preserving per implication; see the module.
+        let propagated = {
+            let opt_out = !opts.antecedent_propagate_enabled
+                || std::env::var("MUNUNU_NO_ANTECEDENT_PROPAGATE").is_ok();
+            if opt_out {
+                None
+            } else {
+                crate::adapter::btor2::antecedent_propagation::propagate(&file, formula)
+            }
+        };
+        let (file, propagated_formula) = match propagated {
+            Some(p) => {
+                tracing::info!(
+                    rewrites = ?p.rewrites,
+                    "antecedent constant propagation: rewrote {} implication(s)",
+                    p.rewrites.len()
+                );
+                (p.file, Some(p.formula))
+            }
+            None => (file, None),
+        };
+        let formula: &Formula = propagated_formula.as_ref().unwrap_or(formula);
+
+        // Register-name resolution: a user-visible name (`bit_cnt_q`) maps to the
+        // canonical state-cell name the bit-blast binds against (`bit_cnt_d` after
+        // yosys async2sync/flatten aliasing). Use the SOUND (Strict) alias resolution,
+        // NOT the Loose "nearest state in the cone" BFS: Strict follows only pure
+        // aliases (`Output` / `Uext`-`Sext`-by-0 / reset-mux `Ite`) to a state cell, so
+        // a register alias still resolves, but a combinational-FUNCTION output
+        // (`done = (state == 2)`, a 1-bit signal over the 2-bit `state`) hits the `==`
+        // Op and resolves to `None` — the atom then KEEPS its own name and binds to the
+        // 1-bit combinational signal (`named_signals`) via `signal_bits`, NOT the
+        // wrong-width driving register. The Loose BFS rewrote `done` → `state`, so
+        // `done == K` was evaluated as `state == K` (`EF (done == 2)` spuriously
+        // `Holds`) — a soundness bug on ANY combinational-function output atom. The
+        // exact engine is the differential oracle and must use the sound resolution.
+        let resolve = |name: &str| -> String {
+            crate::adapter::btor2::parser::resolve_to_canonical_name(
+                &file,
+                name,
+                crate::adapter::btor2::parser::ResolveStrictness::Strict {
+                    allow_reset_mux: true,
+                },
+            )
+            .unwrap_or_else(|| name.to_string())
+        };
+
+        // R-F5.6 — resolve each distinct formula atom to a canonical [`PredicateExpr`] BEFORE
+        // building the bit-blaster, and collect the register names they reference. Those seed the
+        // cone-of-influence keep-set so the bit-blaster bit-blasts only the property's cone
+        // (out-of-cone registers/inputs pinned to constants) instead of the whole design — the
+        // R-F5.6 scaling fix. An atom-free formula (no seeds) keeps the full-design behaviour.
+        let mut exprs: Vec<(String, PredicateExpr)> = Vec::new();
+        let mut seed_regs: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for node in formula.nodes() {
+            if let MuNode::Predicate(name) = node {
+                if exprs.iter().any(|(n, _)| n == name) {
+                    continue;
+                }
+                // The exact engine reads mu-calculus atoms directly, so a bare-boolean
+                // atom (`sig`, no comparison) is admitted as `sig != 0` — the "signal is
+                // true" reading. (The seeder keeps the strict parser; see
+                // `parse_predicate_atom_bool`.)
+                let expr = parse_predicate_atom_bool(name)
+                    .map_err(|e| format!("exact MC: atom `{name}` is not a predicate: {e}"))?;
+                let expr = resolve_predicate_expr_registers(&expr, &resolve);
+                collect_predicate_registers(&expr, &mut seed_regs);
+                exprs.push((name.clone(), expr));
+            }
+        }
+
+        // R-F5.6 cone + array/$mem lift. Compute the property's cone-of-influence keep-set
+        // BEFORE enumerating leaf cells, then auto-havoc any memory whose reads are OUT of that
+        // cone so the exact bit-blaster (which cannot bit-blast an array sort) still decides an
+        // array-datapath design whose CONTROL cone is array-free — an S-box ROM, a register file
+        // the property never reads.
+        //
+        // SOUNDNESS: an out-of-cone memory does not feed the property, so replacing its reads with
+        // free inputs (pinned out-of-cone by the cone restriction) cannot change the verdict. We
+        // only havoc when EVERY detected memory is out of cone; an IN-cone memory is left in place
+        // (havoc over-approximates the read, which is unsound for liveness on the read contents),
+        // so `leaf_cells` errors on its array sort → honest Skip rather than an unsound verdict.
+        // `havoc_rewrite_memories` preserves every non-array NID (Reads become same-NID Inputs), so
+        // the keep-set computed on the original file stays valid against the rewritten file.
+        // mununu#656 — inputs in the state: the named primary inputs the atoms read become sampled
+        // state cells, so an atom over `gnt_o = f(mask_q, req_i, ready_i)` is a state predicate and
+        // the refusals below do not fire for it. Anonymous inputs stay refused. mununu#661 — on the
+        // two-player path only the UNCONTROLLABLE inputs are lifted (the environment's next-frame
+        // choice is exactly the free `name$next` the rewrite introduces, so the game is unchanged);
+        // a controllable input folded into the state would be fixed before the controller moves,
+        // so an atom reaching one is left for the refusal below, which names it.
+        // mununu#661 — the lifted inputs' next-frame names, for the two-player cube partition.
+        let mut lifted_env_next: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        let file = {
+            let opt_out =
+                !opts.input_state_enabled || std::env::var("MUNUNU_NO_INPUT_STATE").is_ok();
+            match (!opt_out)
+                .then(|| {
+                    crate::adapter::btor2::input_state::lift_atom_inputs_excluding(
+                        &file,
+                        &seed_regs,
+                        controllable,
+                    )
+                })
+                .flatten()
+            {
+                Some(lift) => {
+                    tracing::info!(
+                        inputs = ?lift.lifted,
+                        "inputs in the state: {} primary input(s) the atoms read are sampled into state cells",
+                        lift.lifted.len()
+                    );
+                    lifted_env_next = lift.lifted.iter().map(|n| format!("{n}$next")).collect();
+                    lift.file
+                }
+                None => file,
+            }
+        };
+        let seed_atoms: Vec<String> = seed_regs.iter().cloned().collect();
+        let keep_set = (!seed_atoms.is_empty())
+            .then(|| crate::adapter::btor2::dep_graph::cone_leaf_nids(&file, &seed_atoms));
+        // F1 — enum re-encode (before the array-havoc; both preserve NIDs, so the keep-set
+        // computed above stays valid). Compress a state register with a provably small set of
+        // reachable CONSTANT values (`W` bits → `⌈log₂K⌉`) so its `2^W`-wide bit-blast fits the
+        // `MAX_BITBLAST_BITS` cap; a BIJECTION on the reachable states ⇒ verdict-preserving.
+        // One-hot FSMs are the common case; binary-encoded FSMs (`{0, 3, 5}`) compress the same
+        // way. SKIP a register a property ATOM reads BY VALUE (`c_state == start_a`) —
+        // re-encoding changes its value semantics, which would silently break the atom; leaving
+        // that one uncompressed keeps the atom sound. `enum_reencode` additionally abstains on
+        // any unhandled use of the register.
+        let file = {
+            let syms = crate::adapter::btor2::parser::collect_symbols(&file);
+            let mut f = file;
+            for meta in crate::adapter::btor2::bit_blast::detect_enum_states(&f) {
+                if syms.get(&meta.nid).is_some_and(|s| seed_regs.contains(s)) {
+                    continue;
+                }
+                if let Some(reenc) = crate::adapter::btor2::bit_blast::enum_reencode(&f, &meta) {
+                    f = reenc;
+                }
+            }
+            f
+        };
+        let file = {
+            let memories = crate::adapter::btor2::bit_blast::detect_btor2_memories(&file);
+            let all_out_of_cone = !memories.is_empty()
+                && keep_set
+                    .as_ref()
+                    .is_some_and(|keep| memories.iter().all(|m| !keep.contains(&m.nid)));
+            if all_out_of_cone {
+                let havoc: std::collections::HashSet<Nid> =
+                    memories.iter().map(|m| m.nid).collect();
+                crate::adapter::btor2::bit_blast::havoc_rewrite_memories(&file, &havoc)
+                    .map_err(|e| format!("exact MC: out-of-cone memory havoc: {e:?}"))?
+            } else {
+                file
+            }
+        };
+        // STS-IR seam on the (possibly havoc'd) file — the single canonical leaf enumeration.
+        let sts = crate::adapter::sts_ir::BtorSts::new(&file);
+
+        // Input-atom soundness guard. This engine leaves primary inputs FREE (they are
+        // quantified out by the modalities — see the module header: "inputs stay free and
+        // are quantified out"). A formula atom that *pins* a primary input therefore cannot
+        // be evaluated as a state predicate: the input copy read by the atom is decoupled
+        // from the input copy driving the adjacent `[]`/`<>` transition. This is exactly the
+        // SVA `input |=> next-state` shape — the antecedent input and the transition input
+        // are the same physical signal in the same cycle, but the engine treats them as
+        // independent, yielding a spurious verdict. Refuse to decide rather than emit an
+        // unsound Holds/Violated. The default `explicit` cube engine handles input-antecedent
+        // properties correctly (it shadow-registers the antecedent). Proper fix in this
+        // engine = guarded modalities / an antecedent shadow register — deferred (deep).
+        let input_leaf_names: std::collections::HashSet<String> = sts
+            .leaf_cells()
+            .map_err(|e| format!("exact MC: {e}"))?
+            .into_iter()
+            .filter(|c| !c.is_state)
+            .map(|c| c.name)
+            .collect();
+        if let Some(bad) = seed_regs.iter().find(|r| input_leaf_names.contains(*r)) {
+            return Err(format!(
+                "exact MC: atom references primary input `{bad}`. The exact-symbolic engine \
+             leaves inputs free/quantified, so a temporal property that pins an input \
+             (e.g. an SVA `input |=> next-state` lift) decouples the antecedent from its \
+             consequent and would report an unsound verdict. Use the default `explicit` \
+             cube engine, or lift the antecedent through a shadow register."
+            ));
+        }
+
+        // mununu#476 — transitive combinational fan-in guard. When the atom name is NOT
+        // itself a primary input but its combinational cone REACHES primary inputs (stopping
+        // at register boundaries), pinning the atom's value pins a function of those inputs
+        // — the same decoupling problem as pinning an input directly. Without this, a
+        // combinational-of-input signal like `y = a && (b == K)` used in an SVA `|=>`
+        // antecedent yields a definite `Violated (1 cell)` on correct RTL (see monono's
+        // `wb_mem_client`: `mem_rvalid_mine = mem_rvalid && (mem_rid == CLIENT_ID)`).
+        // Reuses [`crate::adapter::btor2::parser::cone_inputs`], which walks the
+        // combinational cone and stops at `Node::State` — so a combinational-of-STATE
+        // signal (which the previous refusal comment explicitly permits) is NOT flagged.
+        //
+        // Name-to-NID resolution has to cover THREE symbol sources:
+        //   1. Input / State symbols (via `collect_symbols`, Pass 1)
+        //   2. Op-symbol aliases that `collect_symbols` attaches to their driving state
+        //      (Pass 2 — Yosys's `uext _ _ 0 NAME` alias pattern)
+        //   3. Output-node symbols pointing at a combinational signal — NOT covered by
+        //      `collect_symbols` because they carry no state-alias intent. This is exactly
+        //      the case the guard needs to catch (a combinational-of-input `Output`).
+        let mut name_to_nid: std::collections::HashMap<String, crate::adapter::btor2::ast::Nid> =
+            crate::adapter::btor2::parser::collect_symbols(&file)
+                .into_iter()
+                .map(|(nid, name)| (name, nid))
+                .collect();
+        for line in &file.lines {
+            match &line.node {
+                crate::adapter::btor2::ast::Node::Output {
+                    symbol: Some(s),
+                    signal,
+                } => {
+                    // An Output symbol refers to the underlying signal, not to the Output line's
+                    // own NID. Use it only if there isn't already an Input/State mapping for the
+                    // same name (Input/State takes precedence for the same-name edge case).
+                    name_to_nid.entry(s.clone()).or_insert(signal.nid());
+                }
+                // mununu#656 — an internal wire is an Op symbol (`uext … 0 active`), which
+                // `collect_symbols` does not record as a signal. Left out, an atom over such a wire
+                // was never checked here and read its inputs per step unrefused.
+                crate::adapter::btor2::ast::Node::Op {
+                    symbol: Some(s), ..
+                } => {
+                    name_to_nid.entry(s.clone()).or_insert(line.nid);
+                }
+                _ => {}
+            }
+        }
+        for reg in &seed_regs {
+            // Skip atoms already flagged by the exact-name refusal above.
+            if input_leaf_names.contains(reg) {
+                continue;
+            }
+            let Some(&nid) = name_to_nid.get(reg) else {
+                continue;
+            };
+            let derived_inputs = crate::adapter::btor2::parser::cone_inputs(&file, nid);
+            if !derived_inputs.is_empty() {
+                let inputs = derived_inputs
+                    .iter()
+                    .map(|n| format!("`{n}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                // mununu#661 — on the two-player path the env inputs were lifted above, so what is
+                // left here is a CONTROLLABLE input (or an anonymous one): say so.
+                let ctrl_note = if derived_inputs.iter().any(|n| controllable.contains(n)) {
+                    " A controllable input stays a per-step choice — folded into the state it would \
+                 be fixed before the controller moves, which changes who wins — so an atom over \
+                 it is refused on the game verbs."
+                } else {
+                    ""
+                };
+                return Err(format!(
+                    "exact MC: atom `{reg}` is combinationally driven by primary input(s) {inputs}. \
+                 The exact-symbolic engine leaves inputs free/quantified, so a temporal property \
+                 whose antecedent depends on inputs decouples the antecedent from its consequent \
+                 and would report an unsound verdict. Use the default `explicit` cube engine, or \
+                 lift the antecedent through a shadow register.{ctrl_note}"
+                ));
+            }
+        }
+
+        // monono#partsel — the same soundness posture for an atom that binds to a
+        // signal reaching an anonymous free INPUT (without being a bare input itself).
+        // The yosys-slang lift of a plain-vector partial register assignment
+        // (`q[hi:lo] <= d`) models `q`'s unwritten bits as free inputs (havoc) and
+        // aliases its name to the `concat` that mixes them; `q == 0` then reads those
+        // free inputs and the fixpoint mis-decides (a spurious `Holds` on a register
+        // that is reachably non-zero). Refuse rather than emit an unsound verdict — the
+        // verify-auto driver skips such a property up front, and this guards the exact
+        // engine's other callers (the differential oracle, `btor2 verify`). A faithful
+        // state cell (read_verilog / sv2v) and an anonymous split sub-register the
+        // NID-indexed COI keeps (packed-2-D `q[idx] <= d`) are both NOT flagged — the
+        // latter now decides.
+        if let Some(bad) = seed_regs
+            .iter()
+            .find(|r| crate::adapter::btor2::parser::signal_reaches_anonymous_input(&file, r))
+        {
+            return Err(format!(
+                "exact MC: atom `{bad}` binds to a signal whose unwritten bits the RTL front-end \
+             left undriven (modelled as free inputs) — the yosys-slang lift of a plain-vector \
+             partial assignment (`{bad}[hi:lo] <= …`). A state predicate over it reads those \
+             havoc inputs and would be unsound, so it is refused. Re-lift with the \
+             read_verilog / sv2v front-end, which models `{bad}` faithfully."
+            ));
+        }
+
+        // P2.5-F — validate the two-player partition. Every declared controllable input must be a real
+        // primary input of the design. A name matching nothing would otherwise fall back SILENTLY to the
+        // environment (a sound but pessimistic all-environment reading, and not the partition the caller
+        // asked for) — error instead. On a flattened design the BTOR2 inputs ARE the top module's primary
+        // inputs (Yosys `flatten` resolves declared module-to-module wires to internal signals), so a name
+        // that is not here is either a typo or an internal signal driven by another module — not a top input.
+        if !controllable.is_empty() {
+            let mut unknown: Vec<&str> = controllable
+                .iter()
+                .filter(|c| !input_leaf_names.contains(c.as_str()))
+                .map(String::as_str)
+                .collect();
+            if !unknown.is_empty() {
+                unknown.sort_unstable();
+                let mut inputs: Vec<&str> = input_leaf_names.iter().map(String::as_str).collect();
+                inputs.sort_unstable();
+                return Err(format!(
+                    "exact two-player MC: declared controllable input(s) {unknown:?} are not primary \
+                 inputs of the design (primary inputs: {inputs:?}). Declare a real top-level input; \
+                 for a multi-module design ensure it is a top input, not one driven by another \
+                 module's output (which flatten resolves to an internal signal, not a free input)."
+                ));
+            }
+        }
+
+        // mununu#602 — the cone at BIT granularity. Where the signal-level cone keeps a whole
+        // register because one slice of it is read, the bit cone keeps the slice; `narrow_leaves`
+        // rewrites every partially-kept leaf to its kept bits (NID- and symbol-preserving, so the
+        // atoms, the init lines and a `controllable` match are untouched) and the keep-set becomes
+        // the leaves with at least one kept bit. Sound by the bit cone's closure under `next`
+        // (`dep_graph::bit_cone`); `MUNUNU_COI=signal` keeps the old granularity for a differential
+        // run. A cone that reaches an array stays signal-level (the memory havoc above applies).
+        let mut narrowed_bit_index: std::collections::HashMap<Nid, Vec<u32>> =
+            std::collections::HashMap::new();
+        let (file, keep_set) = match (opts.signal_level_coi, keep_set) {
+            (false, Some(_)) => {
+                match crate::adapter::btor2::dep_graph::bit_cone(&file, &seed_atoms) {
+                    Some(cone) => {
+                        let (narrowed, keep, bit_index) =
+                            crate::adapter::btor2::bit_blast::narrow_leaves(&file, &cone);
+                        tracing::debug!(
+                            signal_bits = crate::adapter::btor2::dep_graph::bit_cone_bits(&cone),
+                            kept_leaves = keep.len(),
+                            narrowed_leaves = bit_index.len(),
+                            "exact MC: bit-level cone"
+                        );
+                        narrowed_bit_index = bit_index;
+                        (narrowed, Some(keep))
+                    }
+                    None => {
+                        let keep = keep_set_signal_level(&file, &seed_atoms);
+                        (file, keep)
+                    }
+                }
+            }
+            (_, keep) => (file, keep),
+        };
+        // mununu#642 — the narrowed leaves' original bit indices drive the interleaved order.
+        let bb = BddBitBlaster::build_with_keep_and_bit_index(
+            &file,
+            keep_set.as_ref(),
+            (!narrowed_bit_index.is_empty()).then_some(&narrowed_bit_index),
+        )?;
+        let exact = if controllable.is_empty() {
+            bb.exact_model()
+        } else {
+            bb.exact_model_partitioned_with_lift(controllable, &lifted_env_next)
+        };
+
+        // Resolve each atom's full-state BDD against the (cone-restricted) bit-blaster.
+        let mut resolved: Vec<(String, BDDFunction)> = Vec::new();
+        for (name, expr) in &exprs {
+            let bdd = bb.predicate_bdd(expr)?;
+            resolved.push((name.clone(), bdd));
+        }
+        let init = bb.initial_state_bdd(&file)?; // before the fixpoint (ordering hazard, `check_node_budget`)
+        // mununu#656 — only the LEGAL initial frames: BTOR2 requires every `constraint` to hold at
+        // frame 0 too, so an initial state with no admissible input (`¬∃i. c(s, i)`) starts no valid
+        // trace and is not read. With inputs in the state a constraint over an input is a state
+        // predicate (`constraint addr != 4` ⇒ the sampled `addr` cell is never 4 at frame 0), and
+        // reading the verdict at a frame the design forbids refuted a vacuously-true `AG(addr == 4
+        // → …)`. The same filter is right for the register-only model (`exact_bad_reachable`
+        // already conjoins it into `bad`); it was unobservable there because `∃i. c(s, i)` is
+        // almost always satisfiable at a register valuation.
+        let init = init.and(&exact.constraint_satisfiable()).unwrap();
+        Ok(ExactSession {
+            file,
+            formula: formula.clone(),
+            bb,
+            exact,
+            resolved,
+            init,
+        })
+    }
+
+    /// The model, for a caller that shares a cancellation flag or reads the report counters.
+    pub fn model_mut(&mut self) -> &mut ExactModel {
+        &mut self.exact
+    }
+
+    /// One attempt: install / clear the levers per `a`, evaluate, read the verdict at `init`,
+    /// and attach the liveness witness on a VIOLATED verdict.
+    pub fn attempt(
+        &self,
+        a: &AttemptOptions,
+    ) -> Result<(ExactVerdict, Option<StallLasso>), String> {
+        let exact = &self.exact;
+        let formula = &self.formula;
+        let atoms: HashMap<&str, BDDFunction> = self
+            .resolved
+            .iter()
+            .map(|(n, b)| (n.as_str(), b.clone()))
+            .collect();
+        exact.reset_counters();
+        // The attempt's deadline FIRST: the reach probe below caps itself at a quarter of what is
+        // left on the model's deadline, and the previous stage's expired one would decline it at
+        // step 0 (the ladder's fall-through test caught exactly that).
+        exact.set_deadline_opt(a.deadline);
+        // Lever A — install (once) or drop the reachable-state restriction. A declined
+        // restriction is logged and, unless the stage exists only to try it, never guessed.
+        if a.reach_restrict {
+            if exact.reachable_restriction().is_none() {
+                let t = std::time::Instant::now();
+                let budget = a.reach_budget_ms.unwrap_or_else(reach_budget_ms);
+                match exact.install_reachable_restriction_within(&self.init, budget) {
+                    Ok(steps) => tracing::debug!(
+                        steps,
+                        elapsed_ms = t.elapsed().as_millis() as u64,
+                        "exact: reachable-state restriction installed"
+                    ),
+                    Err(why) => {
+                        tracing::debug!(why, "exact: reachable-state restriction declined");
+                        if a.require_restriction {
+                            return Err(why);
+                        }
+                    }
+                }
+            }
+        } else {
+            exact.clear_restriction();
+        }
+        // Lever B — the root fixpoint may stop once `init` is decided.
+        if a.early_exit {
+            exact.set_init_hint(&self.init);
+        } else {
+            exact.clear_init_hint();
+        }
+        let sat = exact.evaluate(formula, &atoms)?;
+        // Holds iff init ⊆ sat, i.e. no legal initial state violates φ.
+        let violating = self.init.and(&sat.not().unwrap()).unwrap();
+        if violating == *exact.ff() {
+            return Ok((ExactVerdict::Holds, None));
+        }
+        // Violated — attach a stall lasso when the property is a liveness shape (bare `AF p` or
+        // `AG AF p`), else the `AG EF p` recoverability trap path. Best-effort: `None` if neither
+        // shape matches or the witness region is unreachable.
+        let witness = detect_af_target(formula)
+            .and_then(|p_id| exact.eval_at(formula, p_id, &atoms).ok())
+            .and_then(|p_bdd| self.bb.exact_reachable_stall_lasso(&self.file, &p_bdd))
+            .or_else(|| {
+                detect_ag_ef_target(formula)
+                    .and_then(|p_id| exact.eval_at(formula, p_id, &atoms).ok())
+                    .and_then(|p_bdd| self.bb.exact_reachable_trap_path(&self.file, &p_bdd))
+            });
+        Ok((ExactVerdict::Violated, witness))
+    }
+}
+
 fn exact_symbolic_verdict_with_witness_inner(
     btor2_content: &str,
     formula: &Formula,
     controllable: &std::collections::HashSet<String>,
     opts: &ExactSymbolicOptions,
 ) -> Result<(ExactVerdict, Option<StallLasso>), String> {
-    let file = crate::adapter::btor2::parser::parse(btor2_content)
-        .map_err(|e| format!("adapter/btor2/exact MC: {}", e.message))?;
+    let session = ExactSession::prepare(btor2_content, formula, controllable, opts)?;
+    session.attempt(&AttemptOptions::from_options(opts))
+}
 
-    // mununu#476 — antecedent shadow-register synthesis. If the formula matches
-    // the canonical SVA `|=>` shape (Or(Not(Predicate(A)), Modal{Box, _})),
-    // synthesise a shadow state register for every antecedent atom `A` whose
-    // combinational cone reaches primary inputs. The augmented BTOR2 file +
-    // rewritten formula are then handed to the rest of this fn. Atoms that
-    // cannot be shadowed (see `RefusalReason`) fall through to the Phase A
-    // refusal below. See `docs/design/antecedent-shadow-synthesis.md` for the
-    // full design + soundness argument.
-    //
-    // Two orthogonal opt-out channels; EITHER disabling wins:
-    //   1. `opts.antecedent_shadow_enabled = false` — per-invocation opt-out
-    //      threaded from CLI (`--no-antecedent-shadow`) / API
-    //      (`no_antecedent_shadow: true`). Thread-safe, per-request.
-    //   2. `MUNUNU_NO_ANTECEDENT_SHADOW=1` env var — process-global escape
-    //      hatch for differential-oracle / debug use.
-    let (file, rewritten_formula) = {
-        let opt_out =
-            !opts.antecedent_shadow_enabled || std::env::var("MUNUNU_NO_ANTECEDENT_SHADOW").is_ok();
-        let antecedents = crate::mu_calculus::detect_pipeimplies_antecedent_atoms(formula);
-        if !opt_out && !antecedents.is_empty() {
-            let synth = crate::adapter::btor2::antecedent_shadow::synthesize_shadows(
-                &file,
-                &antecedents,
-                crate::adapter::btor2::antecedent_shadow::ShadowSynthOpts::default(),
-            );
-            if synth.shadows.is_empty() {
-                (file, None)
-            } else {
-                let rewritten = crate::mu_calculus::substitute_predicates(formula, &synth.renames);
-                tracing::info!(
-                    n_shadows = synth.shadows.len(),
-                    "antecedent shadow-synth: rewrote {} input-derived antecedent atom(s) into shadow registers ({} atoms fell through to fallback refusal)",
-                    synth.shadows.len(),
-                    synth.refused.len(),
-                );
-                (synth.augmented, Some(rewritten))
-            }
-        } else {
-            (file, None)
-        }
-    };
-    let formula: &Formula = rewritten_formula.as_ref().unwrap_or(formula);
+/// The stage labels of [`exact_ladder`], also the `decided_by` suffixes.
+pub const LADDER_STAGE_UNRESTRICTED: &str = "exact-symbolic";
+pub const LADDER_STAGE_RESTRICTED: &str = "exact-symbolic (reach-restricted)";
 
-    // mununu#629 — propagate a same-cycle antecedent's constant through the consequent's cone:
-    // `AG(sig == K -> C(sig))` is `AG(sig == K -> C[sig := K])`, and the substituted copy of a
-    // read mux folds to the selected arm, so the bit cone below sees one field, not the record.
-    // An input antecedent is dropped with it when nothing else reads the input (the ∀ over
-    // inputs then IS the substitution). Equivalence-preserving per implication; see the module.
-    let propagated = {
-        let opt_out = !opts.antecedent_propagate_enabled
-            || std::env::var("MUNUNU_NO_ANTECEDENT_PROPAGATE").is_ok();
-        if opt_out {
-            None
-        } else {
-            crate::adapter::btor2::antecedent_propagation::propagate(&file, formula)
-        }
-    };
-    let (file, propagated_formula) = match propagated {
-        Some(p) => {
-            tracing::info!(
-                rewrites = ?p.rewrites,
-                "antecedent constant propagation: rewrote {} implication(s)",
-                p.rewrites.len()
-            );
-            (p.file, Some(p.formula))
-        }
-        None => (file, None),
-    };
-    let formula: &Formula = propagated_formula.as_ref().unwrap_or(formula);
+/// P3 — the outcome of [`exact_ladder`]: the verdict (or the LAST abstention), the stage that
+/// produced it, and every stage's abstention on the way.
+#[derive(Debug)]
+pub struct LadderOutcome {
+    pub result: Result<(ExactVerdict, Option<StallLasso>), String>,
+    pub stage: &'static str,
+    pub notes: Vec<String>,
+}
 
-    // Register-name resolution: a user-visible name (`bit_cnt_q`) maps to the
-    // canonical state-cell name the bit-blast binds against (`bit_cnt_d` after
-    // yosys async2sync/flatten aliasing). Use the SOUND (Strict) alias resolution,
-    // NOT the Loose "nearest state in the cone" BFS: Strict follows only pure
-    // aliases (`Output` / `Uext`-`Sext`-by-0 / reset-mux `Ite`) to a state cell, so
-    // a register alias still resolves, but a combinational-FUNCTION output
-    // (`done = (state == 2)`, a 1-bit signal over the 2-bit `state`) hits the `==`
-    // Op and resolves to `None` — the atom then KEEPS its own name and binds to the
-    // 1-bit combinational signal (`named_signals`) via `signal_bits`, NOT the
-    // wrong-width driving register. The Loose BFS rewrote `done` → `state`, so
-    // `done == K` was evaluated as `state == K` (`EF (done == 2)` spuriously
-    // `Holds`) — a soundness bug on ANY combinational-function output atom. The
-    // exact engine is the differential oracle and must use the sound resolution.
-    let resolve = |name: &str| -> String {
-        crate::adapter::btor2::parser::resolve_to_canonical_name(
-            &file,
-            name,
-            crate::adapter::btor2::parser::ResolveStrictness::Strict {
-                allow_reset_mux: true,
-            },
+/// The first stage's wall-clock budget (`MUNUNU_EXACT_LADDER_MS`, default 2 000 ms): the
+/// unrestricted attempt that decides the easy cases before any lever is paid for.
+fn ladder_stage1_ms() -> u64 {
+    std::env::var("MUNUNU_EXACT_LADDER_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2_000)
+}
+
+/// The reach probe's budget inside the ladder (5 s): every LIVE instance the restriction helped
+/// closed its reachable set within 3.3 s; every one it did not ran past 30 s.
+const LADDER_PROBE_MS: u64 = 5_000;
+
+/// P3 — the planner's exact-engine LADDER on one session: (1) unrestricted for a short slice —
+/// the easy cases decide here and pay for no lever; (2) on a retryable abstention, the
+/// reachable-state restriction with a probe budget, then the restricted fixpoint with what is
+/// left; (3) unrestricted again with the remainder (the baseline behaviour, when the restriction
+/// declined or did not converge). `budget` is the whole ladder's wall clock (`None` = the engine's
+/// own budgets only); `cancel` is shared with a concurrent rung. Verdict-identical to a one-shot
+/// call by construction (every stage reads `init ∧ ¬sat` on the same model).
+///
+/// engine: `exact-symbolic` ROBDD — stages 1 and 3 the Emerson–Lei / modal-μ fixpoints as
+/// shipped; stage 2 forward reachability + care-set constrain in the Squarer's arena, then the
+/// same fixpoints on the reachable sub-structure.
+pub fn exact_ladder(
+    btor2_content: &str,
+    formula: &Formula,
+    controllable: &std::collections::HashSet<String>,
+    opts: &ExactSymbolicOptions,
+    budget: Option<std::time::Duration>,
+    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) -> LadderOutcome {
+    exact_ladder_with(
+        btor2_content,
+        formula,
+        controllable,
+        opts,
+        budget,
+        cancel,
+        std::time::Duration::from_millis(ladder_stage1_ms()),
+    )
+}
+
+/// [`exact_ladder`] with the first stage's budget explicit (the tests force a stage).
+pub fn exact_ladder_with(
+    btor2_content: &str,
+    formula: &Formula,
+    controllable: &std::collections::HashSet<String>,
+    opts: &ExactSymbolicOptions,
+    budget: Option<std::time::Duration>,
+    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    stage1: std::time::Duration,
+) -> LadderOutcome {
+    use std::time::{Duration, Instant};
+    let start = Instant::now();
+    let remaining = |b: Option<Duration>| b.map(|b| b.saturating_sub(start.elapsed()));
+    let mut notes: Vec<String> = Vec::new();
+    let prepared = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ExactSession::prepare(btor2_content, formula, controllable, opts)
+    }))
+    .unwrap_or_else(|_| {
+        Err(
+            "symbolic bit-blaster: BDD arena overflow while building the transition relation \
+             — abstained on the NODE budget (the cone does not compress to a tractable BDD); \
+             raise MUNUNU_BDD_ARENA_NODES, or use `--engine explicit`"
+                .to_string(),
         )
-        .unwrap_or_else(|| name.to_string())
-    };
-
-    // R-F5.6 — resolve each distinct formula atom to a canonical [`PredicateExpr`] BEFORE
-    // building the bit-blaster, and collect the register names they reference. Those seed the
-    // cone-of-influence keep-set so the bit-blaster bit-blasts only the property's cone
-    // (out-of-cone registers/inputs pinned to constants) instead of the whole design — the
-    // R-F5.6 scaling fix. An atom-free formula (no seeds) keeps the full-design behaviour.
-    let mut exprs: Vec<(String, PredicateExpr)> = Vec::new();
-    let mut seed_regs: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for node in formula.nodes() {
-        if let MuNode::Predicate(name) = node {
-            if exprs.iter().any(|(n, _)| n == name) {
-                continue;
-            }
-            // The exact engine reads mu-calculus atoms directly, so a bare-boolean
-            // atom (`sig`, no comparison) is admitted as `sig != 0` — the "signal is
-            // true" reading. (The seeder keeps the strict parser; see
-            // `parse_predicate_atom_bool`.)
-            let expr = parse_predicate_atom_bool(name)
-                .map_err(|e| format!("exact MC: atom `{name}` is not a predicate: {e}"))?;
-            let expr = resolve_predicate_expr_registers(&expr, &resolve);
-            collect_predicate_registers(&expr, &mut seed_regs);
-            exprs.push((name.clone(), expr));
+    });
+    let mut session = match prepared {
+        Ok(s) => s,
+        Err(e) => {
+            return LadderOutcome {
+                result: Err(e),
+                stage: "prepare",
+                notes,
+            };
         }
+    };
+    if let Some(flag) = cancel {
+        session.model_mut().set_cancel(flag);
     }
-
-    // R-F5.6 cone + array/$mem lift. Compute the property's cone-of-influence keep-set
-    // BEFORE enumerating leaf cells, then auto-havoc any memory whose reads are OUT of that
-    // cone so the exact bit-blaster (which cannot bit-blast an array sort) still decides an
-    // array-datapath design whose CONTROL cone is array-free — an S-box ROM, a register file
-    // the property never reads.
-    //
-    // SOUNDNESS: an out-of-cone memory does not feed the property, so replacing its reads with
-    // free inputs (pinned out-of-cone by the cone restriction) cannot change the verdict. We
-    // only havoc when EVERY detected memory is out of cone; an IN-cone memory is left in place
-    // (havoc over-approximates the read, which is unsound for liveness on the read contents),
-    // so `leaf_cells` errors on its array sort → honest Skip rather than an unsound verdict.
-    // `havoc_rewrite_memories` preserves every non-array NID (Reads become same-NID Inputs), so
-    // the keep-set computed on the original file stays valid against the rewritten file.
-    // mununu#656 — inputs in the state: the named primary inputs the atoms read become sampled
-    // state cells, so an atom over `gnt_o = f(mask_q, req_i, ready_i)` is a state predicate and
-    // the refusals below do not fire for it. Anonymous inputs stay refused. mununu#661 — on the
-    // two-player path only the UNCONTROLLABLE inputs are lifted (the environment's next-frame
-    // choice is exactly the free `name$next` the rewrite introduces, so the game is unchanged);
-    // a controllable input folded into the state would be fixed before the controller moves,
-    // so an atom reaching one is left for the refusal below, which names it.
-    // mununu#661 — the lifted inputs' next-frame names, for the two-player cube partition.
-    let mut lifted_env_next: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let file = {
-        let opt_out = !opts.input_state_enabled || std::env::var("MUNUNU_NO_INPUT_STATE").is_ok();
-        match (!opt_out)
-            .then(|| {
-                crate::adapter::btor2::input_state::lift_atom_inputs_excluding(
-                    &file,
-                    &seed_regs,
-                    controllable,
+    let run = |session: &ExactSession, a: &AttemptOptions| {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| session.attempt(a)))
+            .unwrap_or_else(|_| {
+                Err(
+                    "symbolic bit-blaster: BDD arena overflow during the fixpoint — abstained \
+                     on the NODE budget; raise MUNUNU_BDD_ARENA_NODES"
+                        .to_string(),
                 )
             })
-            .flatten()
-        {
-            Some(lift) => {
-                tracing::info!(
-                    inputs = ?lift.lifted,
-                    "inputs in the state: {} primary input(s) the atoms read are sampled into state cells",
-                    lift.lifted.len()
-                );
-                lifted_env_next = lift.lifted.iter().map(|n| format!("{n}$next")).collect();
-                lift.file
-            }
-            None => file,
-        }
     };
-    let seed_atoms: Vec<String> = seed_regs.iter().cloned().collect();
-    let keep_set = (!seed_atoms.is_empty())
-        .then(|| crate::adapter::btor2::dep_graph::cone_leaf_nids(&file, &seed_atoms));
-    // F1 — enum re-encode (before the array-havoc; both preserve NIDs, so the keep-set
-    // computed above stays valid). Compress a state register with a provably small set of
-    // reachable CONSTANT values (`W` bits → `⌈log₂K⌉`) so its `2^W`-wide bit-blast fits the
-    // `MAX_BITBLAST_BITS` cap; a BIJECTION on the reachable states ⇒ verdict-preserving.
-    // One-hot FSMs are the common case; binary-encoded FSMs (`{0, 3, 5}`) compress the same
-    // way. SKIP a register a property ATOM reads BY VALUE (`c_state == start_a`) —
-    // re-encoding changes its value semantics, which would silently break the atom; leaving
-    // that one uncompressed keeps the atom sound. `enum_reencode` additionally abstains on
-    // any unhandled use of the register.
-    let file = {
-        let syms = crate::adapter::btor2::parser::collect_symbols(&file);
-        let mut f = file;
-        for meta in crate::adapter::btor2::bit_blast::detect_enum_states(&f) {
-            if syms.get(&meta.nid).is_some_and(|s| seed_regs.contains(s)) {
-                continue;
-            }
-            if let Some(reenc) = crate::adapter::btor2::bit_blast::enum_reencode(&f, &meta) {
-                f = reenc;
-            }
-        }
-        f
+    // Stage 1 — unrestricted, short.
+    let slice = remaining(budget).map_or(stage1, |r| r.min(stage1));
+    let a1 = AttemptOptions {
+        reach_restrict: false,
+        reach_budget_ms: None,
+        require_restriction: false,
+        early_exit: opts.early_exit,
+        deadline: Some(Instant::now() + slice),
     };
-    let file = {
-        let memories = crate::adapter::btor2::bit_blast::detect_btor2_memories(&file);
-        let all_out_of_cone = !memories.is_empty()
-            && keep_set
-                .as_ref()
-                .is_some_and(|keep| memories.iter().all(|m| !keep.contains(&m.nid)));
-        if all_out_of_cone {
-            let havoc: std::collections::HashSet<Nid> = memories.iter().map(|m| m.nid).collect();
-            crate::adapter::btor2::bit_blast::havoc_rewrite_memories(&file, &havoc)
-                .map_err(|e| format!("exact MC: out-of-cone memory havoc: {e:?}"))?
-        } else {
-            file
-        }
-    };
-    // STS-IR seam on the (possibly havoc'd) file — the single canonical leaf enumeration.
-    let sts = crate::adapter::sts_ir::BtorSts::new(&file);
-
-    // Input-atom soundness guard. This engine leaves primary inputs FREE (they are
-    // quantified out by the modalities — see the module header: "inputs stay free and
-    // are quantified out"). A formula atom that *pins* a primary input therefore cannot
-    // be evaluated as a state predicate: the input copy read by the atom is decoupled
-    // from the input copy driving the adjacent `[]`/`<>` transition. This is exactly the
-    // SVA `input |=> next-state` shape — the antecedent input and the transition input
-    // are the same physical signal in the same cycle, but the engine treats them as
-    // independent, yielding a spurious verdict. Refuse to decide rather than emit an
-    // unsound Holds/Violated. The default `explicit` cube engine handles input-antecedent
-    // properties correctly (it shadow-registers the antecedent). Proper fix in this
-    // engine = guarded modalities / an antecedent shadow register — deferred (deep).
-    let input_leaf_names: std::collections::HashSet<String> = sts
-        .leaf_cells()
-        .map_err(|e| format!("exact MC: {e}"))?
-        .into_iter()
-        .filter(|c| !c.is_state)
-        .map(|c| c.name)
-        .collect();
-    if let Some(bad) = seed_regs.iter().find(|r| input_leaf_names.contains(*r)) {
-        return Err(format!(
-            "exact MC: atom references primary input `{bad}`. The exact-symbolic engine \
-             leaves inputs free/quantified, so a temporal property that pins an input \
-             (e.g. an SVA `input |=> next-state` lift) decouples the antecedent from its \
-             consequent and would report an unsound verdict. Use the default `explicit` \
-             cube engine, or lift the antecedent through a shadow register."
-        ));
-    }
-
-    // mununu#476 — transitive combinational fan-in guard. When the atom name is NOT
-    // itself a primary input but its combinational cone REACHES primary inputs (stopping
-    // at register boundaries), pinning the atom's value pins a function of those inputs
-    // — the same decoupling problem as pinning an input directly. Without this, a
-    // combinational-of-input signal like `y = a && (b == K)` used in an SVA `|=>`
-    // antecedent yields a definite `Violated (1 cell)` on correct RTL (see monono's
-    // `wb_mem_client`: `mem_rvalid_mine = mem_rvalid && (mem_rid == CLIENT_ID)`).
-    // Reuses [`crate::adapter::btor2::parser::cone_inputs`], which walks the
-    // combinational cone and stops at `Node::State` — so a combinational-of-STATE
-    // signal (which the previous refusal comment explicitly permits) is NOT flagged.
-    //
-    // Name-to-NID resolution has to cover THREE symbol sources:
-    //   1. Input / State symbols (via `collect_symbols`, Pass 1)
-    //   2. Op-symbol aliases that `collect_symbols` attaches to their driving state
-    //      (Pass 2 — Yosys's `uext _ _ 0 NAME` alias pattern)
-    //   3. Output-node symbols pointing at a combinational signal — NOT covered by
-    //      `collect_symbols` because they carry no state-alias intent. This is exactly
-    //      the case the guard needs to catch (a combinational-of-input `Output`).
-    let mut name_to_nid: std::collections::HashMap<String, crate::adapter::btor2::ast::Nid> =
-        crate::adapter::btor2::parser::collect_symbols(&file)
-            .into_iter()
-            .map(|(nid, name)| (name, nid))
-            .collect();
-    for line in &file.lines {
-        match &line.node {
-            crate::adapter::btor2::ast::Node::Output {
-                symbol: Some(s),
-                signal,
-            } => {
-                // An Output symbol refers to the underlying signal, not to the Output line's
-                // own NID. Use it only if there isn't already an Input/State mapping for the
-                // same name (Input/State takes precedence for the same-name edge case).
-                name_to_nid.entry(s.clone()).or_insert(signal.nid());
-            }
-            // mununu#656 — an internal wire is an Op symbol (`uext … 0 active`), which
-            // `collect_symbols` does not record as a signal. Left out, an atom over such a wire
-            // was never checked here and read its inputs per step unrefused.
-            crate::adapter::btor2::ast::Node::Op {
-                symbol: Some(s), ..
-            } => {
-                name_to_nid.entry(s.clone()).or_insert(line.nid);
-            }
-            _ => {}
-        }
-    }
-    for reg in &seed_regs {
-        // Skip atoms already flagged by the exact-name refusal above.
-        if input_leaf_names.contains(reg) {
-            continue;
-        }
-        let Some(&nid) = name_to_nid.get(reg) else {
-            continue;
-        };
-        let derived_inputs = crate::adapter::btor2::parser::cone_inputs(&file, nid);
-        if !derived_inputs.is_empty() {
-            let inputs = derived_inputs
-                .iter()
-                .map(|n| format!("`{n}`"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            // mununu#661 — on the two-player path the env inputs were lifted above, so what is
-            // left here is a CONTROLLABLE input (or an anonymous one): say so.
-            let ctrl_note = if derived_inputs.iter().any(|n| controllable.contains(n)) {
-                " A controllable input stays a per-step choice — folded into the state it would \
-                 be fixed before the controller moves, which changes who wins — so an atom over \
-                 it is refused on the game verbs."
-            } else {
-                ""
+    let r1 = run(&session, &a1);
+    let last = match r1 {
+        Ok(v) => {
+            return LadderOutcome {
+                result: Ok(v),
+                stage: LADDER_STAGE_UNRESTRICTED,
+                notes,
             };
-            return Err(format!(
-                "exact MC: atom `{reg}` is combinationally driven by primary input(s) {inputs}. \
-                 The exact-symbolic engine leaves inputs free/quantified, so a temporal property \
-                 whose antecedent depends on inputs decouples the antecedent from its consequent \
-                 and would report an unsound verdict. Use the default `explicit` cube engine, or \
-                 lift the antecedent through a shadow register.{ctrl_note}"
-            ));
         }
-    }
-
-    // monono#partsel — the same soundness posture for an atom that binds to a
-    // signal reaching an anonymous free INPUT (without being a bare input itself).
-    // The yosys-slang lift of a plain-vector partial register assignment
-    // (`q[hi:lo] <= d`) models `q`'s unwritten bits as free inputs (havoc) and
-    // aliases its name to the `concat` that mixes them; `q == 0` then reads those
-    // free inputs and the fixpoint mis-decides (a spurious `Holds` on a register
-    // that is reachably non-zero). Refuse rather than emit an unsound verdict — the
-    // verify-auto driver skips such a property up front, and this guards the exact
-    // engine's other callers (the differential oracle, `btor2 verify`). A faithful
-    // state cell (read_verilog / sv2v) and an anonymous split sub-register the
-    // NID-indexed COI keeps (packed-2-D `q[idx] <= d`) are both NOT flagged — the
-    // latter now decides.
-    if let Some(bad) = seed_regs
-        .iter()
-        .find(|r| crate::adapter::btor2::parser::signal_reaches_anonymous_input(&file, r))
-    {
-        return Err(format!(
-            "exact MC: atom `{bad}` binds to a signal whose unwritten bits the RTL front-end \
-             left undriven (modelled as free inputs) — the yosys-slang lift of a plain-vector \
-             partial assignment (`{bad}[hi:lo] <= …`). A state predicate over it reads those \
-             havoc inputs and would be unsound, so it is refused. Re-lift with the \
-             read_verilog / sv2v front-end, which models `{bad}` faithfully."
-        ));
-    }
-
-    // P2.5-F — validate the two-player partition. Every declared controllable input must be a real
-    // primary input of the design. A name matching nothing would otherwise fall back SILENTLY to the
-    // environment (a sound but pessimistic all-environment reading, and not the partition the caller
-    // asked for) — error instead. On a flattened design the BTOR2 inputs ARE the top module's primary
-    // inputs (Yosys `flatten` resolves declared module-to-module wires to internal signals), so a name
-    // that is not here is either a typo or an internal signal driven by another module — not a top input.
-    if !controllable.is_empty() {
-        let mut unknown: Vec<&str> = controllable
-            .iter()
-            .filter(|c| !input_leaf_names.contains(c.as_str()))
-            .map(String::as_str)
-            .collect();
-        if !unknown.is_empty() {
-            unknown.sort_unstable();
-            let mut inputs: Vec<&str> = input_leaf_names.iter().map(String::as_str).collect();
-            inputs.sort_unstable();
-            return Err(format!(
-                "exact two-player MC: declared controllable input(s) {unknown:?} are not primary \
-                 inputs of the design (primary inputs: {inputs:?}). Declare a real top-level input; \
-                 for a multi-module design ensure it is a top input, not one driven by another \
-                 module's output (which flatten resolves to an internal signal, not a free input)."
+        Err(e) => {
+            let kind = abstention_kind(&e);
+            notes.push(format!(
+                "stage 1 (unrestricted, {} ms): {e}",
+                slice.as_millis()
             ));
+            if !kind.is_retryable() {
+                return LadderOutcome {
+                    result: Err(e),
+                    stage: LADDER_STAGE_UNRESTRICTED,
+                    notes,
+                };
+            }
+            e
         }
+    };
+    // Stage 2 — the restriction, probed, then the restricted fixpoint.
+    let left = remaining(budget);
+    if left.is_some_and(|l| l.is_zero()) {
+        return LadderOutcome {
+            result: Err(last),
+            stage: LADDER_STAGE_UNRESTRICTED,
+            notes,
+        };
     }
-
-    // mununu#602 — the cone at BIT granularity. Where the signal-level cone keeps a whole
-    // register because one slice of it is read, the bit cone keeps the slice; `narrow_leaves`
-    // rewrites every partially-kept leaf to its kept bits (NID- and symbol-preserving, so the
-    // atoms, the init lines and a `controllable` match are untouched) and the keep-set becomes
-    // the leaves with at least one kept bit. Sound by the bit cone's closure under `next`
-    // (`dep_graph::bit_cone`); `MUNUNU_COI=signal` keeps the old granularity for a differential
-    // run. A cone that reaches an array stays signal-level (the memory havoc above applies).
-    let mut narrowed_bit_index: std::collections::HashMap<Nid, Vec<u32>> =
-        std::collections::HashMap::new();
-    let (file, keep_set) = match (opts.signal_level_coi, keep_set) {
-        (false, Some(_)) => match crate::adapter::btor2::dep_graph::bit_cone(&file, &seed_atoms) {
-            Some(cone) => {
-                let (narrowed, keep, bit_index) =
-                    crate::adapter::btor2::bit_blast::narrow_leaves(&file, &cone);
-                tracing::debug!(
-                    signal_bits = crate::adapter::btor2::dep_graph::bit_cone_bits(&cone),
-                    kept_leaves = keep.len(),
-                    narrowed_leaves = bit_index.len(),
-                    "exact MC: bit-level cone"
-                );
-                narrowed_bit_index = bit_index;
-                (narrowed, Some(keep))
-            }
-            None => {
-                let keep = keep_set_signal_level(&file, &seed_atoms);
-                (file, keep)
-            }
+    let probe = left.map_or(LADDER_PROBE_MS, |l| {
+        (l.as_millis() as u64).min(LADDER_PROBE_MS)
+    });
+    let a2 = AttemptOptions {
+        reach_restrict: true,
+        reach_budget_ms: Some(probe),
+        require_restriction: true,
+        early_exit: opts.early_exit,
+        deadline: left.map(|l| Instant::now() + l),
+    };
+    let last = match run(&session, &a2) {
+        Ok(v) => {
+            return LadderOutcome {
+                result: Ok(v),
+                stage: LADDER_STAGE_RESTRICTED,
+                notes,
+            };
+        }
+        Err(e) => {
+            notes.push(format!("stage 2 (reach-restricted, probe {probe} ms): {e}"));
+            e
+        }
+    };
+    // Stage 3 — unrestricted with the remainder.
+    let left = remaining(budget);
+    if left.is_some_and(|l| l.is_zero()) {
+        return LadderOutcome {
+            result: Err(last),
+            stage: LADDER_STAGE_RESTRICTED,
+            notes,
+        };
+    }
+    let a3 = AttemptOptions {
+        reach_restrict: false,
+        reach_budget_ms: None,
+        require_restriction: false,
+        early_exit: opts.early_exit,
+        deadline: left.map(|l| Instant::now() + l),
+    };
+    match run(&session, &a3) {
+        Ok(v) => LadderOutcome {
+            result: Ok(v),
+            stage: LADDER_STAGE_UNRESTRICTED,
+            notes,
         },
-        (_, keep) => (file, keep),
-    };
-    // mununu#642 — the narrowed leaves' original bit indices drive the interleaved order.
-    let bb = BddBitBlaster::build_with_keep_and_bit_index(
-        &file,
-        keep_set.as_ref(),
-        (!narrowed_bit_index.is_empty()).then_some(&narrowed_bit_index),
-    )?;
-    let exact = if controllable.is_empty() {
-        bb.exact_model()
-    } else {
-        bb.exact_model_partitioned_with_lift(controllable, &lifted_env_next)
-    };
-
-    // Resolve each atom's full-state BDD against the (cone-restricted) bit-blaster.
-    let mut resolved: Vec<(String, BDDFunction)> = Vec::new();
-    for (name, expr) in &exprs {
-        let bdd = bb.predicate_bdd(expr)?;
-        resolved.push((name.clone(), bdd));
-    }
-    let atoms: HashMap<&str, BDDFunction> = resolved
-        .iter()
-        .map(|(n, b)| (n.as_str(), b.clone()))
-        .collect();
-
-    let init = bb.initial_state_bdd(&file)?; // before the fixpoint (ordering hazard, `check_node_budget`)
-    // mununu#656 — only the LEGAL initial frames: BTOR2 requires every `constraint` to hold at
-    // frame 0 too, so an initial state with no admissible input (`¬∃i. c(s, i)`) starts no valid
-    // trace and is not read. With inputs in the state a constraint over an input is a state
-    // predicate (`constraint addr != 4` ⇒ the sampled `addr` cell is never 4 at frame 0), and
-    // reading the verdict at a frame the design forbids refuted a vacuously-true `AG(addr == 4
-    // → …)`. The same filter is right for the register-only model (`exact_bad_reachable`
-    // already conjoins it into `bad`); it was unobservable there because `∃i. c(s, i)` is
-    // almost always satisfiable at a register valuation.
-    let init = init.and(&exact.constraint_satisfiable()).unwrap();
-    // Lever A / B (HWMCC LIVE experiment) — install the reachable-state restriction and the
-    // early-exit hint before the fixpoint. A declined restriction is logged, never guessed.
-    if opts.reach_restrict {
-        let t = std::time::Instant::now();
-        match exact.install_reachable_restriction(&init) {
-            Ok(steps) => tracing::debug!(
-                steps,
-                elapsed_ms = t.elapsed().as_millis() as u64,
-                "exact: reachable-state restriction installed"
-            ),
-            Err(why) => tracing::debug!(why, "exact: reachable-state restriction declined"),
+        Err(e) => {
+            notes.push(format!("stage 3 (unrestricted, remainder): {e}"));
+            LadderOutcome {
+                result: Err(e),
+                stage: LADDER_STAGE_UNRESTRICTED,
+                notes,
+            }
         }
     }
-    if opts.early_exit {
-        exact.set_init_hint(&init);
-    }
-    if let Some(ms) = opts.time_budget_ms {
-        exact.set_deadline(std::time::Instant::now() + std::time::Duration::from_millis(ms));
-    }
-    let sat = exact.evaluate(formula, &atoms)?;
-    // Holds iff init ⊆ sat, i.e. no legal initial state violates φ.
-    let violating = init.and(&sat.not().unwrap()).unwrap();
-    if violating == *exact.ff() {
-        return Ok((ExactVerdict::Holds, None));
-    }
-    // Violated — attach a stall lasso when the property is a liveness shape (bare
-    // `AF p` or `AG AF p`). The target `p` is evaluated from the same atom set;
-    // `exact_reachable_stall_lasso` finds a stall reachable from reset (subsuming the
-    // stall-at-reset case), so it covers both shapes. Best-effort: `None` if the shape
-    // isn't recognised or no stall is reachable.
-    // First the `AF`/`AG AF` stall lasso; failing that, the `AG EF p` recoverability trap path
-    // (a reachable state from which `p` is unreachable). Best-effort: `None` if neither shape
-    // matches or the witness region is unreachable.
-    let witness = detect_af_target(formula)
-        .and_then(|p_id| exact.eval_at(formula, p_id, &atoms).ok())
-        .and_then(|p_bdd| bb.exact_reachable_stall_lasso(&file, &p_bdd))
-        .or_else(|| {
-            detect_ag_ef_target(formula)
-                .and_then(|p_id| exact.eval_at(formula, p_id, &atoms).ok())
-                .and_then(|p_bdd| bb.exact_reachable_trap_path(&file, &p_bdd))
-        });
-    Ok((ExactVerdict::Violated, witness))
 }
 
 /// Phase 2b — the outcome of a symbolic environment-strategy synthesis for `AG EF good`.
@@ -13611,5 +14049,159 @@ mod tests {
             b0[0],
             "without the index the slice is misaligned: a={a0:?} b={b0:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod lever_gating_tests {
+    use super::*;
+
+    /// P0 — every abstention site's message classifies to one variant, pinned here so a new
+    /// site (or a reworded message) that falls to `Other` shows up red on the author's machine.
+    #[test]
+    fn every_abstention_message_classifies() {
+        let cases = [
+            (
+                "symbolic bit-blaster: cone of 300 register+input bits (> 192) after \
+                 cone-of-influence restriction (R-F5.6) — abstained on the BIT CAP",
+                AbstentionKind::BitCap,
+            ),
+            (
+                "symbolic bit-blaster: abstained on the ARENA-SAFETY bound (2 of 1 ALLOCATED BDD \
+                 nodes) at fixpoint step 3",
+                AbstentionKind::ArenaSafety,
+            ),
+            (
+                "symbolic bit-blaster: abstained on the ITERATION budget (1048577 > 1048576)",
+                AbstentionKind::IterationBudget,
+            ),
+            (
+                "symbolic bit-blaster: abstained on the fixpoint LATENCY bound (…)",
+                AbstentionKind::Latency,
+            ),
+            (
+                "symbolic bit-blaster: abstained on the OPT-IN WALL-CLOCK budget (fixpoint still \
+                 iterating at 5 steps)",
+                AbstentionKind::Deadline,
+            ),
+            (
+                "symbolic bit-blaster: cancelled by the caller — another rung decided first",
+                AbstentionKind::Cancelled,
+            ),
+            (
+                "exact MC: atom `x` is combinationally driven by primary input(s) `a`.",
+                AbstentionKind::RefusedInputAtom,
+            ),
+            (
+                "exact MC: atom references primary input `a`.",
+                AbstentionKind::RefusedInputAtom,
+            ),
+            (
+                "reach: declined on its time budget after 46 forward image steps",
+                AbstentionKind::ReachDeclined,
+            ),
+            (
+                "squaring: refused while computing the forward reachable set — 1 nodes past the \
+                 0 budget; the relation does not compress",
+                AbstentionKind::ReachDeclined,
+            ),
+            (
+                "symbolic bit-blaster: BDD arena overflow while building the transition relation",
+                AbstentionKind::ArenaOverflow,
+            ),
+            ("adapter/btor2/exact MC: parse error", AbstentionKind::Other),
+        ];
+        for (msg, want) in cases {
+            assert_eq!(abstention_kind(msg), want, "{msg}");
+        }
+        assert!(AbstentionKind::ArenaSafety.is_retryable());
+        assert!(AbstentionKind::Deadline.is_retryable());
+        assert!(!AbstentionKind::BitCap.is_retryable());
+        assert!(!AbstentionKind::RefusedInputAtom.is_retryable());
+        assert!(!AbstentionKind::Cancelled.is_retryable());
+    }
+
+    /// `a` rises after reset, `b` never does; `01` / `11` are unreachable.
+    const UNREACHABLE: &str = "1 sort bitvec 1\n2 zero 1\n3 one 1\n4 state 1 a\n5 state 1 b\n\
+                               6 init 1 4 2\n7 init 1 5 2\n8 next 1 4 3\n9 next 1 5 5\n";
+
+    fn ag_b_is_0() -> Formula {
+        crate::mu_calculus::parser::parse("nu X. ((b == 0) && [] X)").expect("parses")
+    }
+
+    #[test]
+    fn the_ladder_decides_the_easy_case_on_its_first_stage() {
+        let out = exact_ladder(
+            UNREACHABLE,
+            &ag_b_is_0(),
+            &std::collections::HashSet::new(),
+            &ExactSymbolicOptions::default(),
+            None,
+            None,
+        );
+        assert_eq!(
+            out.result.as_ref().map(|(v, _)| *v).ok(),
+            Some(ExactVerdict::Holds)
+        );
+        assert_eq!(out.stage, LADDER_STAGE_UNRESTRICTED);
+        assert!(out.notes.is_empty(), "{:?}", out.notes);
+    }
+
+    /// A zero first-stage slice forces the deadline abstention; the restriction then installs
+    /// (the reachable set closes in two steps) and the restricted fixpoint decides — the same
+    /// verdict as the unrestricted one, attributed to the restricted stage.
+    #[test]
+    fn the_ladder_falls_through_to_the_restricted_stage_and_keeps_the_verdict() {
+        let out = exact_ladder_with(
+            UNREACHABLE,
+            &ag_b_is_0(),
+            &std::collections::HashSet::new(),
+            &ExactSymbolicOptions::default(),
+            None,
+            None,
+            std::time::Duration::ZERO,
+        );
+        assert_eq!(
+            out.result.as_ref().map(|(v, _)| *v).ok(),
+            Some(ExactVerdict::Holds)
+        );
+        assert_eq!(out.stage, LADDER_STAGE_RESTRICTED, "{:?}", out.notes);
+        assert_eq!(out.notes.len(), 1, "{:?}", out.notes);
+        assert_eq!(abstention_kind(&out.notes[0]), AbstentionKind::Deadline);
+    }
+
+    #[test]
+    fn a_zero_budget_abstains_on_the_first_stage_without_trying_the_restriction() {
+        let out = exact_ladder_with(
+            UNREACHABLE,
+            &ag_b_is_0(),
+            &std::collections::HashSet::new(),
+            &ExactSymbolicOptions::default(),
+            Some(std::time::Duration::ZERO),
+            None,
+            std::time::Duration::ZERO,
+        );
+        assert!(out.result.is_err());
+        assert_eq!(out.stage, LADDER_STAGE_UNRESTRICTED);
+        assert_eq!(out.notes.len(), 1, "{:?}", out.notes);
+    }
+
+    #[test]
+    fn a_cancelled_session_abstains_with_the_cancelled_kind() {
+        let mut session = ExactSession::prepare(
+            UNREACHABLE,
+            &ag_b_is_0(),
+            &std::collections::HashSet::new(),
+            &ExactSymbolicOptions::default(),
+        )
+        .expect("prepares");
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        session.model_mut().set_cancel(flag);
+        let err = session
+            .attempt(&AttemptOptions::from_options(
+                &ExactSymbolicOptions::default(),
+            ))
+            .expect_err("cancelled");
+        assert_eq!(abstention_kind(&err), AbstentionKind::Cancelled);
     }
 }
