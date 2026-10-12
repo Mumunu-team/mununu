@@ -854,6 +854,9 @@ mod tests {
         signal_level_coi: false,
         antecedent_propagate_enabled: false,
         input_state_enabled: false, // mununu#656 — "as lifted" = every lever off
+        reach_restrict: false,
+        early_exit: false,
+        time_budget_ms: None,
     };
 
     /// The mux folds to the selected arm and the input antecedent is dropped: the property
