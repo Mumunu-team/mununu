@@ -146,14 +146,16 @@ iterates over the unreachable state space (arena bound) and long chains (iterati
 [the consumer briefing](consumer-briefings/2026-10-btor2-verify-justice-from-aiger.md) for the
 per-instance evidence.
 
-The levers that measurement pointed at ship as opt-in switches
-([`ExactSymbolicOptions`](../crates/mununu-core/src/adapter/btor2/symbolic_bitblast.rs):
-`MUNUNU_BDD_REACH_RESTRICT=1` evaluates the fixpoints on the reachable sub-structure with
-care-set-constrained transition functions, `MUNUNU_BDD_EARLY_EXIT=1` stops the root fixpoint once
-the initial states are decided, and `MUNUNU_JUSTICE_EXACT_BUDGET_MS` gives the exact rung a time
-slice under `--rung both`). Measured: `cucab09` (91 bits) from an arena abstention at 137 s to
-HOLDS in 2.6 s, `cuabq2mfro` from 105 s to 4.3 s, verdict-identical by gate — see
-[the levers briefing](consumer-briefings/2026-10-exact-reachable-restriction.md).
+The levers that measurement pointed at are applied by the exact engine's **ladder**
+([`exact_ladder`](../crates/mununu-core/src/adapter/btor2/symbolic_bitblast.rs)): one
+`ExactSession` per property (bit-blast once), then an unrestricted attempt for a short slice, the
+reachable-state restriction with a 5 s probe on a retryable abstention, and the unrestricted
+remainder. Under `--rung both` the verb runs the ladder for 30 s, then l2s, then the ladder with
+what `--budget-ms` leaves; `--parallel-rungs` runs both at once and cancels the loser. The root
+fixpoint's early exit is on for every verdict path. Measured: `cucab09` (91 bits) from an arena
+abstention at 137 s to HOLDS in 2.6 s, `cuabq2mfro` from 105 s to 4.3 s, verdict-identical by
+gate — see [the levers briefing](consumer-briefings/2026-10-exact-reachable-restriction.md) and
+[the gating briefing](consumer-briefings/2026-10-lever-gating-ladder.md).
 
 ### `sv verify-auto` fair-cycle bridge — `// @mununu_assume GF <atom>` (mununu#477)
 

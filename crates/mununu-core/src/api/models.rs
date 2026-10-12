@@ -976,6 +976,12 @@ pub struct Btor2VerifyJusticeRequest {
     /// `"exact"`, `"l2s"` or `"both"` (default).
     #[serde(default)]
     pub rung: Option<String>,
+    /// Wall-clock budget per justice set in milliseconds (default: the engines' own budgets).
+    #[serde(default)]
+    pub budget_ms: Option<u64>,
+    /// Under `both`, run the exact ladder and the l2s rung concurrently (first definite wins).
+    #[serde(default)]
+    pub parallel_rungs: Option<bool>,
 }
 
 /// One justice set's verdict in [`Btor2VerifyJusticeResponse`].

@@ -46,7 +46,7 @@ use crate::adapter::btor2::cegar::{
 use crate::adapter::btor2::kmts_lift::{MayEdgeInference, MustEdgeInference, PredicateSpec};
 use crate::adapter::btor2::predicate_expr::{CmpOp, PredicateExpr, parse_predicate_expr};
 use crate::adapter::btor2::symbolic_bitblast::{
-    ExactSymbolicOptions, exact_symbolic_verdict_with_options,
+    ExactSymbolicOptions, LADDER_STAGE_RESTRICTED, exact_ladder,
 };
 use crate::mu_calculus::Environment;
 use crate::mu_calculus::parser as mu_parser;
@@ -1094,6 +1094,8 @@ pub enum RecoverabilityEngine {
     /// The exact-symbolic ROBDD engine, first in the ladder (COI, and the input-state product
     /// when the options enable it).
     Exact,
+    /// P3 — the exact engine decided on the reach-restricted stage of its ladder.
+    ExactReachRestricted,
     /// The scalable predicate-cube ladder (cube + `smt-hyper-must`, ranking, guard atoms, Craig).
     CubeLadder,
 }
@@ -1103,6 +1105,9 @@ impl RecoverabilityEngine {
     pub fn decided_by_label(self) -> &'static str {
         match self {
             Self::Exact => "exact-symbolic (recoverability rescue)",
+            Self::ExactReachRestricted => {
+                "exact-symbolic, reach-restricted (recoverability rescue)"
+            }
             Self::CubeLadder => "explicit cube + smt-hyper-must (recoverability rescue)",
         }
     }
@@ -1127,11 +1132,30 @@ pub fn verify_recoverability_attributed(
     let formula = mu_parser::parse(&formula_str)
         .map_err(|e| format!("building the AG EF formula for `{good}`: {e:?}"))?;
 
-    match exact_symbolic_verdict_with_options(btor2_content, &formula, exact_opts) {
+    // P3 — the exact rung is the planner's LADDER (unrestricted short → reach-restricted →
+    // unrestricted remainder); the request's `time_budget_ms` is the ladder's whole clock.
+    let ladder = exact_ladder(
+        btor2_content,
+        &formula,
+        &std::collections::HashSet::new(),
+        exact_opts,
+        exact_opts
+            .time_budget_ms
+            .map(std::time::Duration::from_millis),
+        None,
+    );
+    match ladder.result.map(|(v, _)| v) {
         // The exact engine decided (definite at every alternation depth per
         // Bruns–Godefroid) — return it unchanged; the exact-only behaviour is
         // preserved when the exact engine gives a definite verdict.
-        Ok(v) => Ok((PropertyVerdict::from(v), RecoverabilityEngine::Exact)),
+        Ok(v) => Ok((
+            PropertyVerdict::from(v),
+            if ladder.stage == LADDER_STAGE_RESTRICTED {
+                RecoverabilityEngine::ExactReachRestricted
+            } else {
+                RecoverabilityEngine::Exact
+            },
+        )),
         // Over the ~40-bit cone cap or an unsupported construct: escalate to the
         // cube + `smt-hyper-must` path so the property still decides at scale
         // (slice-5b safety-⊥ escalation mirror). The scalable path itself abstains

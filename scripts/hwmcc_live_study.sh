@@ -35,7 +35,8 @@ for f in "$DIR"/*.aig; do
   read -r _ _M I L _O A _rest < <(head -c 200 "$f" | head -1)
   [ "$L" -ge "$MIN_LATCHES" ] && [ "$L" -le "$MAX_LATCHES" ] || continue
   t0=$(date +%s%3N 2>/dev/null || python3 -c 'import time;print(int(time.time()*1000))')
-  json=$(timeout "$BUDGET" "$BIN" btor2 verify-justice "$f" --rung "$RUNG" --json 2>/dev/null); rc=$?
+  # shellcheck disable=SC2086
+  json=$(timeout "$BUDGET" "$BIN" btor2 verify-justice "$f" --rung "$RUNG" --json ${EXTRA_ARGS:-} 2>/dev/null); rc=$?
   t1=$(date +%s%3N 2>/dev/null || python3 -c 'import time;print(int(time.time()*1000))')
   if [ $rc -eq 124 ]; then verdict=timeout; by=-; ms=$((BUDGET*1000))
   elif [ -z "$json" ]; then verdict=error; by=-; ms=$((t1-t0))

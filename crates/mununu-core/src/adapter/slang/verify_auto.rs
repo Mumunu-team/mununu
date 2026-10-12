@@ -5650,6 +5650,7 @@ fn recoverability_rescue_note(
     use crate::adapter::recoverability::RecoverabilityEngine;
     let rung = match engine {
         RecoverabilityEngine::Exact => "exact+COI",
+        RecoverabilityEngine::ExactReachRestricted => "exact+COI, reach-restricted",
         RecoverabilityEngine::CubeLadder => "the cube + smt-hyper-must ladder",
     };
     VerificationNote {

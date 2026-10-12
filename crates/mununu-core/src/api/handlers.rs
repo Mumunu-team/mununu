@@ -764,7 +764,7 @@ pub async fn btor2_verify_justice_handler(
 fn btor2_verify_justice_handler_impl(
     request: crate::api::models::Btor2VerifyJusticeRequest,
 ) -> ApiResult<Json<crate::api::models::Btor2VerifyJusticeResponse>> {
-    use crate::adapter::justice::{JusticeRung, verify_justice};
+    use crate::adapter::justice::{JusticeOptions, JusticeRung, verify_justice_with};
     use crate::api::models::{Btor2JusticeEntry, Btor2VerifyJusticeResponse};
     use crate::verdict::PropertyVerdict;
     let bad_req = |message: String| ApiError::BadRequest {
@@ -787,7 +787,15 @@ fn btor2_verify_justice_handler_impl(
     } else {
         (request.content.clone(), false)
     };
-    let results = verify_justice(&btor2, rung).map_err(bad_req)?;
+    let results = verify_justice_with(
+        &btor2,
+        &JusticeOptions {
+            rung,
+            budget_ms: request.budget_ms,
+            parallel_rungs: request.parallel_rungs.unwrap_or(false),
+        },
+    )
+    .map_err(bad_req)?;
     let worst = if results
         .iter()
         .any(|r| r.verdict == PropertyVerdict::Violated)
