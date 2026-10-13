@@ -117,7 +117,14 @@ decides every justice line of the design with two sound rungs — `--rung exact|
 - **exact** — `exact-symbolic` (full-state ROBDD): the Emerson–Lei fair-`EG` fixpoint
   `E_C G true = νZ. ⋀ₖ ◇ μY. ((Z ∧ lₖ) ∨ ◇Y)` is evaluated as `¬E_C G true`, universally over the
   initial states; HOLDS ⇔ no initial state starts a fair path. Bounded by the bit cap
-  (`MUNUNU_BDD_MAX_BITS`); constraints restrict the modalities to legal frames.
+  (`MUNUNU_BDD_MAX_BITS`); constraints restrict the modalities to legal frames. A ν that is still
+  iterating after 4,096 steps is peeling a long chain one value per iteration (a stalling counter
+  with the literal `cnt ≠ top`: the inner `EU` converges in two steps, the outer ν walks the
+  counter); the engine then reads the fair cycle off the transitive closure of the transition
+  relation — `Core(s) = ⋀ₖ ∃t. R⁺(s,t) ∧ R⁺(t,s) ∧ lₖ(t)`, `E_C G true = EF(Core)`
+  (Touati–Brayton–Kurshan), the same closure the `EF` squaring rescue builds, under the same budget
+  and refusal rule (`MUNUNU_BDD_SQUARING=0` disables both). The same set, exactly; a refusal
+  resumes the iteration where it was.
 - **l2s** — liveness-to-safety: the response monitor with antecedent `true`, consequent `false`
   and the literals as fairness atoms is exactly "a reachable cycle that visits every literal";
   the reachability portfolio (native BMC/k-induction ⊕ spacer ⊕ btormc ⊕ Pono) decides the `bad`.
@@ -155,7 +162,10 @@ what `--budget-ms` leaves; `--parallel-rungs` runs both at once and cancels the 
 fixpoint's early exit is on for every verdict path. Measured: `cucab09` (91 bits) from an arena
 abstention at 137 s to HOLDS in 2.6 s, `cuabq2mfro` from 105 s to 4.3 s, verdict-identical by
 gate — see [the levers briefing](consumer-briefings/2026-10-exact-reachable-restriction.md) and
-[the gating briefing](consumer-briefings/2026-10-lever-gating-ladder.md).
+[the gating briefing](consumer-briefings/2026-10-lever-gating-ladder.md). The l2s rung is
+decided by the reachability portfolio and never by the exact engine: the monitor doubles the
+design's state (a saved copy plus the loop flags), so its product is almost always over the bit
+cap — a rule, not an accident of sizes.
 
 ### `sv verify-auto` fair-cycle bridge — `// @mununu_assume GF <atom>` (mununu#477)
 

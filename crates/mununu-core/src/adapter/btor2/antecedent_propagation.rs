@@ -857,6 +857,8 @@ mod tests {
         reach_restrict: false,
         early_exit: false,
         time_budget_ms: None,
+        max_bits: None,
+        cap_ladder: false,
     };
 
     /// The mux folds to the selected arm and the input antecedent is dropped: the property

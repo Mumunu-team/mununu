@@ -1134,11 +1134,17 @@ pub fn verify_recoverability_attributed(
 
     // P3 — the exact rung is the planner's LADDER (unrestricted short → reach-restricted →
     // unrestricted remainder); the request's `time_budget_ms` is the ladder's whole clock.
+    // Plan P3 `CapLadder` — the rescue is a ⊥ re-plan: a cone over the default cap is retried
+    // once at the ceiling under its own budget.
+    let rescue_opts = ExactSymbolicOptions {
+        cap_ladder: true,
+        ..*exact_opts
+    };
     let ladder = exact_ladder(
         btor2_content,
         &formula,
         &std::collections::HashSet::new(),
-        exact_opts,
+        &rescue_opts,
         exact_opts
             .time_budget_ms
             .map(std::time::Duration::from_millis),
