@@ -171,6 +171,83 @@ const AUTO_CAP_CEILING: u32 = 192;
 const HARD_BITBLAST_CEILING: u32 = 1024;
 
 /// The default cap for a cone of `cone_bits` KEPT bits when no env override is present: the
+/// The BDD variable order the bit-blaster builds (`MUNUNU_BDD_VAR_ORDER`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VarOrder {
+    /// Bit-position-major (the default since 2026-09-15), cells in file order within a position.
+    Interleaved,
+    /// Every bit of one cell contiguous (the opt-out for a shift-dense cone).
+    CellMajor,
+    /// Plan P6 lever C — bit-position-major, cells by their DFS visit rank from the property
+    /// roots through the next-state functions ([`circuit_visit_rank`]). Opt-in for measurement.
+    Circuit,
+}
+
+/// Plan P6 lever C — the visit rank of every state / input leaf in a depth-first traversal
+/// from the property roots (every `justice`, `bad`, `constraint`, `fair` and `output` line, in
+/// file order) through the operands; a state cell, once visited, continues into its `next`
+/// function, so the traversal follows the logic the property observes. Leaves the roots never
+/// reach are absent (the caller orders them after, in file order).
+pub(crate) fn circuit_visit_rank(file: &Btor2File) -> HashMap<Nid, usize> {
+    use crate::adapter::btor2::ast::Node;
+    let mut next_of: HashMap<Nid, Nid> = HashMap::new();
+    let mut roots: Vec<Nid> = Vec::new();
+    for line in &file.lines {
+        match &line.node {
+            Node::Next { state, value, .. } => {
+                next_of.insert(*state, value.nid());
+            }
+            Node::Justice { signals } => roots.extend(signals.iter().map(|o| o.nid())),
+            Node::Bad { signal }
+            | Node::Constraint { signal }
+            | Node::Fair { signal }
+            | Node::Output { signal, .. } => roots.push(signal.nid()),
+            _ => {}
+        }
+    }
+    let mut rank: HashMap<Nid, usize> = HashMap::new();
+    let mut seen: std::collections::HashSet<Nid> = std::collections::HashSet::new();
+    let mut stack: Vec<Nid> = roots.into_iter().rev().collect();
+    while let Some(nid) = stack.pop() {
+        if !seen.insert(nid) {
+            continue;
+        }
+        let Some(line) = file.lookup(nid) else {
+            continue;
+        };
+        match &line.node {
+            Node::State { .. } => {
+                let r = rank.len();
+                rank.insert(nid, r);
+                if let Some(v) = next_of.get(&nid) {
+                    stack.push(*v);
+                }
+            }
+            Node::Input { .. } => {
+                let r = rank.len();
+                rank.insert(nid, r);
+            }
+            Node::Op { args, .. } => {
+                for a in args.iter().rev() {
+                    stack.push(a.nid());
+                }
+            }
+            Node::Init { value, .. } | Node::Next { value, .. } => stack.push(value.nid()),
+            Node::Bad { signal }
+            | Node::Constraint { signal }
+            | Node::Fair { signal }
+            | Node::Output { signal, .. } => stack.push(signal.nid()),
+            Node::Justice { signals } => {
+                for o in signals.iter().rev() {
+                    stack.push(o.nid());
+                }
+            }
+            Node::Sort { .. } | Node::Const { .. } => {}
+        }
+    }
+    rank
+}
+
 /// [`MAX_BITBLAST_BITS`] floor, auto-raised to fit the concrete cone up to [`AUTO_CAP_CEILING`]
 /// (never lowered below the floor). Pure — no env read — so the auto-raise thresholds are
 /// unit-testable without touching process-global state.
@@ -183,6 +260,15 @@ fn default_cap_for_cone(cone_bits: u32) -> u32 {
 /// asked for a specific limit, so we neither raise nor lower it. With NO override, the cap is
 /// [`default_cap_for_cone`]: the conservative default auto-raised to admit a modestly-wide
 /// concrete cone.
+/// [`effective_bitblast_cap`] with a per-request override (plan P3 `CapLadder`): an explicit cap
+/// wins over the auto-cap and the environment, clamped to [`HARD_BITBLAST_CEILING`].
+pub(crate) fn effective_bitblast_cap_with(cone_bits: u32, cap_override: Option<u32>) -> u32 {
+    match cap_override {
+        Some(v) => v.min(HARD_BITBLAST_CEILING),
+        None => effective_bitblast_cap(cone_bits),
+    }
+}
+
 pub(crate) fn effective_bitblast_cap(cone_bits: u32) -> u32 {
     match std::env::var("MUNUNU_BDD_MAX_BITS")
         .ok()
@@ -207,6 +293,11 @@ struct Cell {
     is_state: bool,
     vars: BitVec,
     varnos: Vec<VarNo>,
+    /// Lever plan P6 (2026-10-12) — the cell's visit rank in the DFS from the property roots
+    /// through the next-state functions ([`circuit_visit_rank`]), when it was computed: under
+    /// `MUNUNU_BDD_VAR_ORDER=circuit`, and for every design whose state cells are all 1 bit
+    /// wide (AIGER), where it orders the [`Squarer`]'s relation. `None` otherwise.
+    circuit_rank: Option<usize>,
 }
 
 /// A BDD bit-blaster over one BTOR2 file. Owns one OxiDD manager; every node's
@@ -310,12 +401,22 @@ impl BddBitBlaster {
         keep: Option<&std::collections::HashSet<Nid>>,
         bit_index: Option<&std::collections::HashMap<Nid, Vec<u32>>>,
     ) -> Result<Self, String> {
-        let (interleave, warning) =
+        Self::build_with_keep_bit_index_and_cap(file, keep, bit_index, None)
+    }
+
+    /// [`Self::build_with_keep_and_bit_index`] with a per-request bit cap (plan P3 `CapLadder`).
+    pub fn build_with_keep_bit_index_and_cap(
+        file: &Btor2File,
+        keep: Option<&std::collections::HashSet<Nid>>,
+        bit_index: Option<&std::collections::HashMap<Nid, Vec<u32>>>,
+        cap_override: Option<u32>,
+    ) -> Result<Self, String> {
+        let (order, warning) =
             Self::resolve_var_order(&std::env::var("MUNUNU_BDD_VAR_ORDER").unwrap_or_default());
         if let Some(w) = warning {
             eprintln!("{w}");
         }
-        Self::build_inner(file, keep, interleave, bit_index)
+        Self::build_inner(file, keep, order, bit_index, cap_override)
     }
 
     /// Decide the BDD variable order from the raw `MUNUNU_BDD_VAR_ORDER` value.
@@ -338,16 +439,23 @@ impl BddBitBlaster {
     /// evaluating vacuously TRUE: the input is invalid and the system does something reasonable
     /// instead of complaining. **A config error must be loud precisely BECAUSE the fallback is
     /// sensible.** (Articulation is monono-8d's, 2026-09-15.)
-    fn resolve_var_order(raw: &str) -> (bool, Option<String>) {
+    fn resolve_var_order(raw: &str) -> (VarOrder, Option<String>) {
         let v = raw.trim();
         if v.is_empty() || v.eq_ignore_ascii_case("interleaved") {
-            return (true, None);
+            return (VarOrder::Interleaved, None);
         }
         if v.eq_ignore_ascii_case("cell-major")
             || v.eq_ignore_ascii_case("cell_major")
             || v.eq_ignore_ascii_case("cellmajor")
         {
-            return (false, None);
+            return (VarOrder::CellMajor, None);
+        }
+        // Plan P6 lever C (2026-10-12) — opt-in for measurement: the interleaved scheme keyed by
+        // the cells' VISIT RANK in a DFS from the property roots (justice / bad / output lines)
+        // through the next-state functions, instead of by file order. On a 1-bit-latch design
+        // (AIGER) the two schemes differ only in that key, so this is the whole lever there.
+        if v.eq_ignore_ascii_case("circuit") {
+            return (VarOrder::Circuit, None);
         }
         // RETIRED 2026-09-15. A no-op rather than an error so existing consumer invocations keep
         // working. The chooser was 2 of 4 on the consumer sweep and its failure was ARCHITECTURAL,
@@ -358,7 +466,7 @@ impl BddBitBlaster {
         // identical runs.
         if v.eq_ignore_ascii_case("auto") {
             return (
-                true,
+                VarOrder::Interleaved,
                 Some(
                     "[mununu#553] MUNUNU_BDD_VAR_ORDER=auto was RETIRED on 2026-09-15 and is now a \
                      no-op — using the default (interleaved). It picked correctly on only 2 of 4 \
@@ -369,10 +477,11 @@ impl BddBitBlaster {
             );
         }
         (
-            true,
+            VarOrder::Interleaved,
             Some(format!(
                 "[mununu] MUNUNU_BDD_VAR_ORDER={v:?} is not a recognised variable order — using \
-                 the default (interleaved). Valid: `interleaved` (default) or `cell-major`. This \
+                 the default (interleaved). Valid: `interleaved` (default), `cell-major` or \
+                 `circuit`. This \
                  is a CONFIG ERROR, not a fallback: if you meant cell-major you are now running \
                  the order that is 15× slower on a shift-dense cone."
             )),
@@ -415,21 +524,27 @@ impl BddBitBlaster {
         keep: Option<&std::collections::HashSet<Nid>>,
         interleave: bool,
     ) -> Result<Self, String> {
-        Self::build_inner(file, keep, interleave, None)
+        let order = if interleave {
+            VarOrder::Interleaved
+        } else {
+            VarOrder::CellMajor
+        };
+        Self::build_inner(file, keep, order, None, None)
     }
 
     fn build_inner(
         file: &Btor2File,
         keep: Option<&std::collections::HashSet<Nid>>,
-        interleave: bool,
+        order: VarOrder,
         bit_index: Option<&std::collections::HashMap<Nid, Vec<u32>>>,
+        cap_override: Option<u32>,
     ) -> Result<Self, String> {
         // M4 instrument (engine-performance roadmap): one debug line per build — kept bits,
         // kept leaves, elapsed — so `RUST_LOG=mununu_core::adapter::btor2::symbolic_bitblast=debug`
         // splits a property's cost into bit-blast versus fixpoint (the fixpoint's own line is
         // printed by `ExactModel::evaluate`). What a build cache across properties would save.
         let t0 = std::time::Instant::now();
-        let built = Self::build_passes(file, keep, interleave, bit_index);
+        let built = Self::build_passes(file, keep, order, bit_index, cap_override);
         if let Ok(bb) = &built {
             tracing::debug!(
                 kept_bits = bb.declared_vars.load(std::sync::atomic::Ordering::Relaxed),
@@ -444,8 +559,9 @@ impl BddBitBlaster {
     fn build_passes(
         file: &Btor2File,
         keep: Option<&std::collections::HashSet<Nid>>,
-        interleave: bool,
+        order: VarOrder,
         bit_index: Option<&std::collections::HashMap<Nid, Vec<u32>>>,
+        cap_override: Option<u32>,
     ) -> Result<Self, String> {
         // AR-S1 / D1.4 — the ONE canonical leaf enumeration + naming lives on the
         // STS-IR seam (`BtorSts::leaf_cells`). It resolves each state/input to its
@@ -482,7 +598,7 @@ impl BddBitBlaster {
         // large arena for an absurdly wide cone. The cap is `MUNUNU_BDD_MAX_BITS` (clamped) or,
         // with no override, the default auto-raised to fit a modestly-wide concrete cone up to
         // `AUTO_CAP_CEILING` — see [`effective_bitblast_cap`].
-        let cap = effective_bitblast_cap(total_bits);
+        let cap = effective_bitblast_cap_with(total_bits, cap_override);
         if total_bits > cap {
             return Err(format!(
                 "symbolic bit-blaster: design has {total_bits} register+input bits \
@@ -614,18 +730,40 @@ impl BddBitBlaster {
         // its bit 0 placed beside the other registers' bit 0 — the aligned `a_i — b_i` structure
         // the interleaved order exploits (compares, shifts) was broken exactly for narrowed cells,
         // which is how the bit-level cone (#602) made each BDD op ~6× slower on `sdram_burst`.
-        let slots: Vec<Vec<usize>> = if interleave {
-            let mut keyed: Vec<(u32, usize, usize)> = Vec::new(); // (key, cell, bit)
+        // Plan P6 lever C — `circuit`: the secondary key is the cell's visit rank in a DFS from
+        // the property roots through the next-state functions, so cells that drive each other
+        // sit together whatever their file order.
+        // Lever plan P6 — the rank is also computed for an all-1-bit-state design (AIGER), where
+        // it orders the Squarer's relation: an AIG writer lays latches out in no significance
+        // order, and the squaring closure of a 128-bit counter read in that order grew to 16.8 M
+        // nodes by its 24th step while the same closure in carry-chain order stays under 0.4 M
+        // through all 128 (`cucnt128ro`, measured 2026-10-12). The engine's own order is not
+        // changed by this (lever C measured as a per-shape trade on the LIVE set).
+        let one_bit_states = leaf_specs
+            .iter()
+            .filter(|(nid, _, is_state, _)| *is_state && is_kept(*nid))
+            .all(|(_, _, _, w)| *w == 1);
+        let rank: HashMap<Nid, usize> = if order == VarOrder::Circuit || one_bit_states {
+            circuit_visit_rank(file)
+        } else {
+            HashMap::new()
+        };
+        let slots: Vec<Vec<usize>> = if order != VarOrder::CellMajor {
+            let mut keyed: Vec<(u32, usize, usize, usize)> = Vec::new(); // (key, rank, cell, bit)
             for (ci, (nid, w)) in kept_specs.iter().enumerate() {
                 let orig = bit_index.and_then(|m| m.get(nid));
+                let r = match order {
+                    VarOrder::Circuit => rank.get(nid).copied().unwrap_or(usize::MAX / 2 + ci),
+                    _ => ci,
+                };
                 for k in 0..*w {
                     let key = orig.and_then(|v| v.get(k).copied()).unwrap_or(k as u32);
-                    keyed.push((key, ci, k));
+                    keyed.push((key, r, ci, k));
                 }
             }
-            keyed.sort_by_key(|(key, ci, k)| (*key, *ci, *k));
+            keyed.sort_by_key(|(key, r, ci, k)| (*key, *r, *ci, *k));
             let mut s: Vec<Vec<usize>> = kept_widths.iter().map(|w| vec![0usize; *w]).collect();
-            for (p, (_, ci, k)) in keyed.into_iter().enumerate() {
+            for (p, (_, _, ci, k)) in keyed.into_iter().enumerate() {
                 s[ci][k] = p;
             }
             s
@@ -689,6 +827,7 @@ impl BddBitBlaster {
                     is_state,
                     vars,
                     varnos,
+                    circuit_rank: rank.get(&nid).copied(),
                 });
             } else {
                 // Pinned: constant 0, zero BDD variables. `walk_design` resolves the leaf to
@@ -2452,6 +2591,9 @@ struct EvalCtx {
     reuse: bool,
     /// Lever B — the root fixpoint node (the root with its `Not`s stripped), if the root is one.
     early_exit_node: Option<crate::mu_calculus::NodeId>,
+    /// Plan P6 (inner-EU squaring) — the free fixpoint variables of every node: a squaring seed
+    /// need not be closed, only free of the fixpoint's OWN variable.
+    free_vars: Vec<std::collections::HashSet<FormulaVarId>>,
 }
 
 impl EvalCtx {
@@ -2488,6 +2630,9 @@ impl EvalCtx {
         }
         let closed: Vec<bool> = (0..n)
             .map(|i| free_of(f, NodeId(i), &mut free).is_empty())
+            .collect();
+        let free_vars: Vec<std::collections::HashSet<FormulaVarId>> = (0..n)
+            .map(|i| free[i].clone().unwrap_or_default())
             .collect();
         // Reset sets: for fixpoint node N of polarity p, the nested fixpoint nodes reached through
         // a fixpoint of polarity ≠ p (that node included). Nested same-polarity chains keep their
@@ -2542,6 +2687,7 @@ impl EvalCtx {
             reset_sets,
             reuse,
             early_exit_node,
+            free_vars,
         }
     }
 }
@@ -2554,6 +2700,10 @@ pub struct ExactModel {
     state_varnos: Vec<VarNo>,
     next_fns: Vec<BDDFunction>,
     input_varnos: Vec<VarNo>,
+    /// Lever plan P6 — engine state varno → circuit visit rank, set when every state cell is 1
+    /// bit wide (AIGER): [`Squarer::build`] orders its state bits by it instead of the engine's
+    /// levels, so the relation reads a counter in carry-chain order whatever the latch layout.
+    squarer_rank: Option<HashMap<VarNo, usize>>,
     /// A2 — built on the first pure-reachability fixpoint that outlives
     /// [`SQUARING_AFTER_ITERS`] iterations; `Some(Err)` records a refusal (budget) so the
     /// attempt is not repeated for every later fixpoint of the same model.
@@ -2795,7 +2945,12 @@ const SQUARING_AFTER_ITERS: usize = 4096;
 /// grow variables: mununu#543). The closure of an arbitrary relation can be large; 80 % of this
 /// is the refusal point, after which the iteration resumes.
 const SQUARING_ARENA: usize = 1 << 22;
-/// A2 — squarings before giving up: a diameter past 2^48 is not a chain the rescue is for.
+/// A2 — squarings before giving up, the floor: `Squarer::closure` allows `max(48, state bits)`,
+/// because a relation over `n` state bits has diameter below `2^n` and closes within `n`
+/// squarings, each one relational product (the loop stops at the first fixed point, so a short
+/// chain never pays for the allowance). Lever plan P6 (2026-10-12): `cucnt128ro` — a 128-bit
+/// counter the fair-cycle rescue answers in 128 squarings — was refused at the 48th by this
+/// floor alone.
 const SQUARING_MAX_STEPS: usize = 48;
 
 /// A2 — is `body` the body of a pure reachability fixpoint over `var`: `p ∨ ◇X` (least) or
@@ -2819,21 +2974,26 @@ fn pure_reach_shape(
                     && matches!(f.node(*target), MuNode::Variable(v) if *v == var)
         )
     };
-    let closed = |n: crate::mu_calculus::NodeId| ctx.closed.get(n.0).copied().unwrap_or(false);
+    // Plan P6 (inner-EU squaring, 2026-10-12) — the seed need not be CLOSED, only free of this
+    // fixpoint's own variable: `μY. ((Z ∧ l) ∨ ◇Y)` inside the fair-EG ν is `E[true U (Z ∧ l)]`
+    // for the CURRENT `Z`, and the closure `R⁺` does not depend on the seed, so one relational
+    // product per outer iteration replaces a 2^W-step chain walk (the `cucnt32ro` class).
+    let seed_ok =
+        |n: crate::mu_calculus::NodeId| ctx.free_vars.get(n.0).is_none_or(|fv| !fv.contains(&var));
     match f.node(body) {
         MuNode::Or(a, b) => {
-            if is_step(*b, ModalKind::Diamond) && closed(*a) {
+            if is_step(*b, ModalKind::Diamond) && seed_ok(*a) {
                 Some((*a, false))
-            } else if is_step(*a, ModalKind::Diamond) && closed(*b) {
+            } else if is_step(*a, ModalKind::Diamond) && seed_ok(*b) {
                 Some((*b, false))
             } else {
                 None
             }
         }
         MuNode::And(a, b) => {
-            if is_step(*b, ModalKind::Box) && closed(*a) {
+            if is_step(*b, ModalKind::Box) && seed_ok(*a) {
                 Some((*a, true))
-            } else if is_step(*a, ModalKind::Box) && closed(*b) {
+            } else if is_step(*a, ModalKind::Box) && seed_ok(*b) {
                 Some((*b, true))
             } else {
                 None
@@ -2841,6 +3001,80 @@ fn pure_reach_shape(
         }
         _ => None,
     }
+}
+
+/// Lever plan P6 (2026-10-12) — the Emerson–Lei fair-EG shape at a ν, `νZ. ⋀ₖ ◇μYₖ.((Z ∧ lₖ) ∨
+/// ◇Yₖ)` as [`crate::verify::fairness::fair_eg`] spells `E_C G true` (a `true` conjunct is
+/// skipped), returning the literal nodes `lₖ` — each closed, so it is a state predicate.
+///
+/// This is the fixpoint that walks a counter: on the LIVE `cucnt*ro` class the inner EU converges
+/// in two steps and the OUTER ν peels one counter value per iteration (`cucnt10ro`: 3,069
+/// iterations ≈ 3 · 2^10), so squaring the inner EU cannot help, and the rescue reads the fair
+/// cycle off the closure instead ([`Squarer::fair_cycle`]). `E_C G q` with `q ≠ true` spells the
+/// step `(q ∧ ◇Y)` and is not this shape; it iterates.
+fn fair_eg_shape(
+    f: &Formula,
+    body: crate::mu_calculus::NodeId,
+    var: FormulaVarId,
+    ctx: &EvalCtx,
+) -> Option<Vec<crate::mu_calculus::NodeId>> {
+    use crate::mu_calculus::{Guard, ModalKind, Node as MuNode, NodeId};
+    let is_bare = |n: NodeId, kind: ModalKind| -> Option<NodeId> {
+        match f.node(n) {
+            MuNode::Modal {
+                kind: k,
+                guard,
+                target,
+            } if *k == kind && *guard == Guard::default() => Some(*target),
+            _ => None,
+        }
+    };
+    let is_var = |n: NodeId, v: FormulaVarId| matches!(f.node(n), MuNode::Variable(w) if *w == v);
+    // `(Z ∧ l)` either way round, `l` closed.
+    let seed_literal = |n: NodeId| -> Option<NodeId> {
+        let MuNode::And(a, b) = f.node(n) else {
+            return None;
+        };
+        let closed = |m: NodeId| ctx.closed.get(m.0).copied().unwrap_or(false);
+        if is_var(*a, var) && closed(*b) {
+            Some(*b)
+        } else if is_var(*b, var) && closed(*a) {
+            Some(*a)
+        } else {
+            None
+        }
+    };
+    // `◇ μY. ((Z ∧ l) ∨ ◇Y)` → `l`.
+    let conjunct_literal = |n: NodeId| -> Option<NodeId> {
+        let mu = is_bare(n, ModalKind::Diamond)?;
+        let MuNode::Mu { var: y, body: b } = f.node(mu) else {
+            return None;
+        };
+        let MuNode::Or(p, q) = f.node(*b) else {
+            return None;
+        };
+        let step = |m: NodeId| is_bare(m, ModalKind::Diamond).is_some_and(|t| is_var(t, *y));
+        if step(*q) {
+            seed_literal(*p)
+        } else if step(*p) {
+            seed_literal(*q)
+        } else {
+            None
+        }
+    };
+    let mut stack = vec![body];
+    let mut literals = Vec::new();
+    while let Some(n) = stack.pop() {
+        match f.node(n) {
+            MuNode::And(a, b) => {
+                stack.push(*b);
+                stack.push(*a);
+            }
+            MuNode::True => {}
+            _ => literals.push(conjunct_literal(n)?),
+        }
+    }
+    (!literals.is_empty()).then_some(literals)
 }
 
 /// A2 (engine-performance roadmap, step 14) — the transition RELATION of an [`ExactModel`] in
@@ -2909,8 +3143,22 @@ impl Squarer {
                 .map(|&v| (v, m.var_to_level(v)))
                 .collect()
         });
+        // Lever plan P6 — for an all-1-bit-state design the state bits follow the circuit visit
+        // rank (`ExactModel::squarer_rank`) rather than the engine's levels: the engine's default
+        // order is file order for 1-bit cells, which an AIG writer does not keep significance-
+        // monotone, and the closure's bounded-difference relations are linear only along the
+        // carry chain. Measured on `cucnt128ro`: 16.8 M nodes by the 24th squaring in file order,
+        // under 0.4 M through all 128 in rank order.
         let mut order: Vec<usize> = (0..model.state_varnos.len()).collect();
-        order.sort_by_key(|&j| levels[&model.state_varnos[j]]);
+        order.sort_by_key(|&j| {
+            let v = model.state_varnos[j];
+            let rank = model
+                .squarer_rank
+                .as_ref()
+                .and_then(|r| r.get(&v).copied())
+                .unwrap_or(usize::MAX);
+            (rank, levels[&v])
+        });
         let n = order.len();
         let mut inputs: Vec<VarNo> = model.input_varnos.clone();
         inputs.sort_by_key(|v| levels[v]);
@@ -3167,8 +3415,18 @@ impl Squarer {
         use oxidd::{BooleanFunctionQuant, BooleanOperator};
         if self.closure.borrow().is_none() {
             let result = (|| -> Result<BDDFunction, String> {
+                let t_rel = std::time::Instant::now();
                 let mut t = self.rel()?;
-                for step in 1..=SQUARING_MAX_STEPS {
+                tracing::debug!(
+                    state_bits = self.s0.len(),
+                    elapsed_ms = t_rel.elapsed().as_millis() as u64,
+                    "squaring: relation built"
+                );
+                // `n` state bits: diameter < 2^n, so `T_n` (paths of length ≤ 2^n) is the closure
+                // and the loop SEES the fixed point one step later, at `T_{n+1} == T_n`.
+                let max_steps = SQUARING_MAX_STEPS.max(self.s0.len() + 1);
+                for step in 1..=max_steps {
+                    let t_step = std::time::Instant::now();
                     let shifted = oom(t.substitute(&self.shift))?;
                     let composed =
                         oom(
@@ -3178,14 +3436,20 @@ impl Squarer {
                     let next = oom(t.or(&composed))?;
                     self.steps.set(step);
                     Self::check(&self._manager, self.budget, "squaring")?;
+                    tracing::debug!(
+                        step,
+                        nodes = self
+                            ._manager
+                            .with_manager_shared(|m| m.approx_num_inner_nodes()),
+                        elapsed_ms = t_step.elapsed().as_millis() as u64,
+                        "squaring step"
+                    );
                     if next == t {
                         return Ok(t);
                     }
                     t = next;
                 }
-                Err(format!(
-                    "squaring: no fixpoint after {SQUARING_MAX_STEPS} squarings"
-                ))
+                Err(format!("squaring: no fixpoint after {max_steps} squarings"))
             })();
             *self.closure.borrow_mut() = Some(result);
         }
@@ -3202,16 +3466,26 @@ impl Squarer {
     ) -> Result<BDDFunction, String> {
         use oxidd::{BooleanFunctionQuant, BooleanOperator};
         // `p` over the s' copy for the product; the `p ∨` term uses the engine's own `p`.
+        let p_s1 = self.onto_s1(p, model)?;
+        let reach = oom(closure.apply_exists(BooleanOperator::And, &p_s1, &self.cube_s1))?;
+        Self::check(&self._manager, self.budget, "reading EF off the closure")?;
+        let reach_engine = self.onto_engine(&reach, model)?;
+        oom(p.or(&reach_engine))
+    }
+
+    /// An engine BDD over the state bits, rebuilt on this manager's `s'` copy.
+    fn onto_s1(&self, p: &BDDFunction, model: &ExactModel) -> Result<BDDFunction, String> {
         let to_s1: HashMap<VarNo, BDDFunction> = self
             .index_of
             .iter()
             .map(|(&v, &j)| (v, self.s1[j].clone()))
             .collect();
         let mut memo: HashMap<usize, BDDFunction> = HashMap::new();
-        let p_s1 = Self::transfer(p, &model.manager, &to_s1, &self.tt, &mut memo)?;
-        let reach = oom(closure.apply_exists(BooleanOperator::And, &p_s1, &self.cube_s1))?;
-        Self::check(&self._manager, self.budget, "reading EF off the closure")?;
-        // Back to the engine: `reach` is over the `s` copy (vars 3j); map 3j → engine varno j.
+        Self::transfer(p, &model.manager, &to_s1, &self.tt, &mut memo)
+    }
+
+    /// A set over this manager's `s` copy (vars `3j`), rebuilt on the engine's variables.
+    fn onto_engine(&self, set: &BDDFunction, model: &ExactModel) -> Result<BDDFunction, String> {
         let engine_vars: HashMap<VarNo, BDDFunction> = model.manager.with_manager_shared(|m| {
             self.engine_varno
                 .iter()
@@ -3219,15 +3493,59 @@ impl Squarer {
                 .map(|(j, &v)| (3 * j as VarNo, BDDFunction::var(m, v).unwrap()))
                 .collect()
         });
-        let mut memo_back: HashMap<usize, BDDFunction> = HashMap::new();
-        let reach_engine = Self::transfer(
-            &reach,
-            &self._manager,
-            &engine_vars,
-            &model.tt,
-            &mut memo_back,
-        )?;
-        oom(p.or(&reach_engine))
+        let mut memo: HashMap<usize, BDDFunction> = HashMap::new();
+        Self::transfer(set, &self._manager, &engine_vars, &model.tt, &mut memo)
+    }
+
+    /// Lever plan P6 (2026-10-12) — the fair cycles off the closure, after Touati, Brayton and
+    /// Kurshan (CAV 1991, who closed the relation by iterative squaring for exactly this).
+    /// `Core(s) = ⋀ₖ ∃t. R⁺(s, t) ∧ R⁺(t, s) ∧ lₖ(t)`: `s` shares a cycle with a witness of
+    /// every literal — mutual reachability puts them in one SCC, and `R⁺` is the TRANSITIVE
+    /// closure, so `t = s` needs a real cycle — and `E_C G true = Core ∨ ∃s'. R⁺(s, s') ∧
+    /// Core(s')` off the same closure. A state has a path visiting every `lₖ` infinitely often
+    /// iff it reaches an SCC holding a witness of each, which is the set the Emerson–Lei ν
+    /// computes one peel per iteration. The literals are engine BDDs over the state bits; the
+    /// result is over the engine's variables.
+    fn fair_cycle(
+        &self,
+        closure: &BDDFunction,
+        literals: &[BDDFunction],
+        model: &ExactModel,
+    ) -> Result<BDDFunction, String> {
+        use oxidd::{BooleanFunctionQuant, BooleanOperator};
+        let n = self.s0.len();
+        // `R⁺ᵀ(s, s') = R⁺(s', s)`: the two copies swapped, simultaneously.
+        let swap = Subst::new(
+            (0..n)
+                .flat_map(|j| [3 * j as VarNo, 3 * j as VarNo + 1])
+                .collect::<Vec<_>>(),
+            (0..n)
+                .flat_map(|j| [self.s1[j].clone(), self.s0[j].clone()])
+                .collect::<Vec<_>>(),
+        );
+        let transposed = oom(closure.substitute(&swap))?;
+        let mutual = oom(closure.and(&transposed))?;
+        Self::check(&self._manager, self.budget, "transposing the closure")?;
+        let mut core = self.tt.clone();
+        for l in literals {
+            let l_s1 = self.onto_s1(l, model)?;
+            let hit = oom(mutual.apply_exists(BooleanOperator::And, &l_s1, &self.cube_s1))?;
+            core = oom(core.and(&hit))?;
+            Self::check(
+                &self._manager,
+                self.budget,
+                "reading the fair core off the closure",
+            )?;
+        }
+        let s0_to_s1 = Subst::new(
+            (0..n).map(|j| 3 * j as VarNo).collect::<Vec<_>>(),
+            self.s1.clone(),
+        );
+        let core_s1 = oom(core.substitute(&s0_to_s1))?;
+        let reach = oom(closure.apply_exists(BooleanOperator::And, &core_s1, &self.cube_s1))?;
+        let sat = oom(core.or(&reach))?;
+        Self::check(&self._manager, self.budget, "reading E_C G off the closure")?;
+        self.onto_engine(&sat, model)
     }
 
     /// Lever A (HWMCC LIVE, 2026-10-11) — the FORWARD reachable set `μR. init ∨ Img(R)` with
@@ -3765,11 +4083,27 @@ impl BddBitBlaster {
         } else {
             Some(Subst::new(sub_vars.clone(), sub_repl.clone()))
         };
+        // Lever plan P6 — the Squarer's order for an all-1-bit-state design (the rank exists
+        // for every state cell exactly then, or under the `circuit` engine order, which for 1-bit
+        // cells is the same order).
+        let state_cells = || self.cells.iter().filter(|c| c.is_state);
+        let squarer_rank = (state_cells().all(|c| c.vars.len() == 1 && c.circuit_rank.is_some())
+            && state_cells().next().is_some())
+        .then(|| {
+            state_cells()
+                .flat_map(|c| {
+                    c.varnos
+                        .iter()
+                        .map(move |&v| (v, c.circuit_rank.unwrap_or(0)))
+                })
+                .collect::<HashMap<VarNo, usize>>()
+        });
         ExactModel {
             subst,
             state_varnos: sub_vars,
             next_fns: sub_repl,
             input_varnos,
+            squarer_rank,
             squarer: std::cell::RefCell::new(None),
             squaring: std::env::var("MUNUNU_BDD_SQUARING")
                 .map(|v| v != "0")
@@ -4336,6 +4670,14 @@ impl ExactModel {
         self.cancel = flag;
     }
 
+    /// Collect the manager's garbage: the ladder's stages leave their iterates dead in the shared
+    /// arena, and a witness extraction after them starts with the headroom a one-shot call had.
+    pub fn collect_garbage(&self) {
+        self.manager.with_manager_shared(|m| {
+            m.gc();
+        });
+    }
+
     /// Lever A — drop an installed restriction (the next attempt runs unrestricted).
     pub fn clear_restriction(&self) {
         *self.restriction.borrow_mut() = None;
@@ -4796,6 +5138,44 @@ impl ExactModel {
                     Err(why) => tracing::debug!(why, "squaring rescue declined; iterating on"),
                 }
             }
+            // Lever plan P6 — the fair-EG ν past the threshold is peeling a counter one value per
+            // iteration (its inner EU converges in two steps); the fair cycle is read off the
+            // closure instead ([`Squarer::fair_cycle`]). Same budget and refusal rule as above.
+            if self.squaring
+                && !squaring_tried
+                && greatest
+                && local_iters > self.squaring_after_iters
+                && let Some(lits) = fair_eg_shape(f, body, var, ctx)
+            {
+                squaring_tried = true;
+                let literals = lits
+                    .iter()
+                    .map(|&l| self.eval_node(f, l, atoms, bindings, ctx))
+                    .collect::<Result<Vec<_>, _>>()?;
+                tracing::debug!(
+                    literals = literals.len(),
+                    iterations = local_iters,
+                    "fair-EG rescue: attempting the closure"
+                );
+                match self
+                    .fair_cycle_by_closure(&literals)
+                    .map(|c| self.restrict(c))
+                {
+                    Ok(sat) => {
+                        tracing::debug!(
+                            literals = literals.len(),
+                            iterations = local_iters,
+                            "fair-EG rescue: the fair cycle read off the closure"
+                        );
+                        bindings.remove(&var);
+                        if ctx.reuse {
+                            ctx.approx.insert(node, sat.clone());
+                        }
+                        return Ok(sat);
+                    }
+                    Err(why) => tracing::debug!(why, "fair-EG rescue declined; iterating on"),
+                }
+            }
             bindings.insert(var, x.clone());
             let next = self.eval_node(f, body, atoms, bindings, ctx)?;
             if next == x {
@@ -4851,6 +5231,19 @@ impl ExactModel {
         } else {
             sq.reach_from(&closure, p, self)
         }
+    }
+
+    /// Lever plan P6 — `E_C G true` for the literal BDDs by [`Squarer::fair_cycle`]. `Err` is a
+    /// refusal (as for [`Self::squared_reach`]); the caller iterates on.
+    fn fair_cycle_by_closure(&self, literals: &[BDDFunction]) -> Result<BDDFunction, String> {
+        let mut slot = self.squarer.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(Squarer::build(self, self.reach_arena.max(SQUARING_ARENA)));
+        }
+        let sq = slot.as_ref().unwrap().as_ref().map_err(|e| e.clone())?;
+        let closure = sq.closure()?;
+        self.tick(sq.steps.get() as u64);
+        sq.fair_cycle(&closure, literals, self)
     }
 
     /// P2.2c #4 — the SOUND diameter PRE-PASS. Iterate the `EF(target)` least fixpoint
@@ -5171,6 +5564,13 @@ pub struct ExactSymbolicOptions {
     /// only the process-wide `MUNUNU_BDD_TIME_BUDGET_MS`, if any. The justice verb's `--rung both`
     /// uses it so the exact rung leaves the l2s rung its share.
     pub time_budget_ms: Option<u64>,
+    /// Plan P3 `CapLadder` — an explicit bit cap for this request (clamped to the 1024-bit
+    /// ceiling), overriding the auto-cap and `MUNUNU_BDD_MAX_BITS`. `None` = the default cap.
+    pub max_bits: Option<u32>,
+    /// Plan P3 `CapLadder` — when `prepare` abstains on the BIT CAP, retry once at the 1024-bit
+    /// ceiling under a bounded budget ([`CAP_LADDER_MS`]). Off by default: a raised cone costs a
+    /// wide arena, so the retry is for the ⊥ re-plan's rescue passes, where the alternative is ⊥.
+    pub cap_ladder: bool,
 }
 
 impl Default for ExactSymbolicOptions {
@@ -5183,6 +5583,8 @@ impl Default for ExactSymbolicOptions {
             reach_restrict: false,
             early_exit: true,
             time_budget_ms: None,
+            max_bits: None,
+            cap_ladder: false,
         }
     }
 }
@@ -5669,6 +6071,9 @@ pub struct ExactSession {
     exact: ExactModel,
     resolved: Vec<(String, BDDFunction)>,
     init: BDDFunction,
+    /// Plan P5 — what `prepare` decided about the model (the inputs-in-the-state trade: which
+    /// inputs were lifted and the cone width that resulted).
+    notes: Vec<String>,
 }
 
 /// P2 — what one attempt on an [`ExactSession`] does differently from the last.
@@ -5856,6 +6261,7 @@ impl ExactSession {
         // mununu#661 — the lifted inputs' next-frame names, for the two-player cube partition.
         let mut lifted_env_next: std::collections::HashSet<String> =
             std::collections::HashSet::new();
+        let mut prepare_notes: Vec<String> = Vec::new();
         let file = {
             let opt_out =
                 !opts.input_state_enabled || std::env::var("MUNUNU_NO_INPUT_STATE").is_ok();
@@ -5876,6 +6282,13 @@ impl ExactSession {
                         lift.lifted.len()
                     );
                     lifted_env_next = lift.lifted.iter().map(|n| format!("{n}$next")).collect();
+                    prepare_notes.push(format!(
+                        "inputs in the state: {} primary input(s) the atoms read were sampled \
+                         into state cells ({:?}) — the cone is wider by twice their width; \
+                         `--no-input-state` refuses the atom instead",
+                        lift.lifted.len(),
+                        lift.lifted
+                    ));
                     lift.file
                 }
                 None => file,
@@ -6114,11 +6527,17 @@ impl ExactSession {
             (_, keep) => (file, keep),
         };
         // mununu#642 — the narrowed leaves' original bit indices drive the interleaved order.
-        let bb = BddBitBlaster::build_with_keep_and_bit_index(
+        let bb = BddBitBlaster::build_with_keep_bit_index_and_cap(
             &file,
             keep_set.as_ref(),
             (!narrowed_bit_index.is_empty()).then_some(&narrowed_bit_index),
+            opts.max_bits,
         )?;
+        prepare_notes.push(format!(
+            "exact cone: {} register+input bits over {} cells",
+            bb.cells.iter().map(|c| c.vars.len()).sum::<usize>(),
+            bb.cells.len()
+        ));
         let exact = if controllable.is_empty() {
             bb.exact_model()
         } else {
@@ -6148,7 +6567,13 @@ impl ExactSession {
             exact,
             resolved,
             init,
+            notes: prepare_notes,
         })
+    }
+
+    /// Plan P5 — what `prepare` decided about the model (see the field).
+    pub fn prepare_notes(&self) -> &[String] {
+        &self.notes
     }
 
     /// The model, for a caller that shares a cancellation flag or reads the report counters.
@@ -6211,15 +6636,31 @@ impl ExactSession {
         }
         // Violated — attach a stall lasso when the property is a liveness shape (bare `AF p` or
         // `AG AF p`), else the `AG EF p` recoverability trap path. Best-effort: `None` if neither
-        // shape matches or the witness region is unreachable.
-        let witness = detect_af_target(formula)
-            .and_then(|p_id| exact.eval_at(formula, p_id, &atoms).ok())
-            .and_then(|p_bdd| self.bb.exact_reachable_stall_lasso(&self.file, &p_bdd))
-            .or_else(|| {
-                detect_ag_ef_target(formula)
-                    .and_then(|p_id| exact.eval_at(formula, p_id, &atoms).ok())
-                    .and_then(|p_bdd| self.bb.exact_reachable_trap_path(&self.file, &p_bdd))
-            });
+        // shape matches or the witness region is unreachable. The extraction runs on the shared
+        // manager after the ladder's stages left their iterates dead in it: collect first, and a
+        // panic in it (an `unwrap` on an exhausted arena — the wall-class matrix hit one at
+        // `state_minterm` after three stages) costs the witness, never the verdict. The restricted
+        // stage's care-constrained copy of every next-state function and `Reach` are live here and
+        // the witness search needs neither — drop them first, then collect.
+        exact.clear_restriction();
+        exact.collect_garbage();
+        let witness = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            detect_af_target(formula)
+                .and_then(|p_id| exact.eval_at(formula, p_id, &atoms).ok())
+                .and_then(|p_bdd| self.bb.exact_reachable_stall_lasso(&self.file, &p_bdd))
+                .or_else(|| {
+                    detect_ag_ef_target(formula)
+                        .and_then(|p_id| exact.eval_at(formula, p_id, &atoms).ok())
+                        .and_then(|p_bdd| self.bb.exact_reachable_trap_path(&self.file, &p_bdd))
+                })
+        }))
+        .unwrap_or_else(|_| {
+            tracing::warn!(
+                "exact: the witness extraction panicked after the verdict — the verdict stands, \
+                 the counterexample is omitted"
+            );
+            None
+        });
         Ok((ExactVerdict::Violated, witness))
     }
 }
@@ -6259,6 +6700,15 @@ fn ladder_stage1_ms() -> u64 {
 /// The reach probe's budget inside the ladder (5 s): every LIVE instance the restriction helped
 /// closed its reachable set within 3.3 s; every one it did not ran past 30 s.
 const LADDER_PROBE_MS: u64 = 5_000;
+
+/// The restricted stage's own cap when the ladder has NO overall budget (30 s): the restricted
+/// decisions measured on LIVE took ≤ 12 s, and an unbudgeted first-pass member must not spend
+/// longer on a stage that may not help before the unrestricted baseline gets its turn.
+const LADDER_UNBUDGETED_STAGE2_MS: u64 = 30_000;
+
+/// Plan P3 `CapLadder` — the budget of a retry at the 1024-bit ceiling (60 s): a raised cone is
+/// an arena the planner would not allocate by default, so it never runs unbounded.
+pub const CAP_LADDER_MS: u64 = 60_000;
 
 /// P3 — the planner's exact-engine LADDER on one session: (1) unrestricted for a short slice —
 /// the easy cases decide here and pay for no lever; (2) on a retryable abstention, the
@@ -6304,19 +6754,49 @@ pub fn exact_ladder_with(
     let start = Instant::now();
     let remaining = |b: Option<Duration>| b.map(|b| b.saturating_sub(start.elapsed()));
     let mut notes: Vec<String> = Vec::new();
-    let prepared = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        ExactSession::prepare(btor2_content, formula, controllable, opts)
-    }))
-    .unwrap_or_else(|_| {
-        Err(
-            "symbolic bit-blaster: BDD arena overflow while building the transition relation \
-             — abstained on the NODE budget (the cone does not compress to a tractable BDD); \
-             raise MUNUNU_BDD_ARENA_NODES, or use `--engine explicit`"
-                .to_string(),
-        )
-    });
-    let mut session = match prepared {
+    let prepare =
+        |o: &ExactSymbolicOptions| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ExactSession::prepare(btor2_content, formula, controllable, o)
+        }))
+        .unwrap_or_else(|_| {
+            Err("symbolic bit-blaster: BDD arena overflow while building the transition relation \
+                 — abstained on the NODE budget (the cone does not compress to a tractable BDD); \
+                 raise MUNUNU_BDD_ARENA_NODES, or use `--engine explicit`"
+                .to_string())
+        })
+        };
+    let mut budget = budget;
+    let mut session = match prepare(opts) {
         Ok(s) => s,
+        // Plan P3 `CapLadder` — on a BIT CAP abstention, once, at the ceiling, under its own budget.
+        Err(e)
+            if opts.cap_ladder
+                && opts.max_bits.is_none()
+                && abstention_kind(&e) == AbstentionKind::BitCap =>
+        {
+            notes.push(format!(
+                "cap ladder: {e} — retried at the {HARD_BITBLAST_CEILING}-bit ceiling under \
+                 {CAP_LADDER_MS} ms"
+            ));
+            let raised = ExactSymbolicOptions {
+                max_bits: Some(HARD_BITBLAST_CEILING),
+                ..*opts
+            };
+            budget = Some(budget.map_or(Duration::from_millis(CAP_LADDER_MS), |b| {
+                b.min(Duration::from_millis(CAP_LADDER_MS))
+            }));
+            match prepare(&raised) {
+                Ok(s) => s,
+                Err(e2) => {
+                    return LadderOutcome {
+                        result: Err(e2),
+                        stage: "prepare",
+                        notes,
+                    };
+                }
+            }
+        }
         Err(e) => {
             return LadderOutcome {
                 result: Err(e),
@@ -6325,6 +6805,7 @@ pub fn exact_ladder_with(
             };
         }
     };
+    notes.extend(session.prepare_notes().iter().cloned());
     if let Some(flag) = cancel {
         session.model_mut().set_cancel(flag);
     }
@@ -6389,7 +6870,11 @@ pub fn exact_ladder_with(
         reach_budget_ms: Some(probe),
         require_restriction: true,
         early_exit: opts.early_exit,
-        deadline: left.map(|l| Instant::now() + l),
+        // Unbudgeted: the restricted stage still gets a cap, so a stage that does not help
+        // cannot delay the unrestricted baseline indefinitely.
+        deadline: Some(
+            Instant::now() + left.unwrap_or(Duration::from_millis(LADDER_UNBUDGETED_STAGE2_MS)),
+        ),
     };
     let last = match run(&session, &a2) {
         Ok(v) => {
@@ -7335,6 +7820,18 @@ impl BddBitBlaster {
         file: &Btor2File,
         p: &BDDFunction,
     ) -> Option<StallLasso> {
+        // The lasso / trap representation carries a cell's value as `u128`: a state cell wider than
+        // that (reachable since the cap ladder bit-blasts cones the 192-bit cap used to refuse)
+        // has no faithful witness here — `None`, never a wrapped shift into a wrong minterm.
+        if let Some(wide) = self.cells.iter().find(|c| c.is_state && c.vars.len() > 128) {
+            tracing::warn!(
+                cell = %wide.symbol,
+                width = wide.vars.len(),
+                "exact: no counterexample for a design with a state cell wider than 128 bits — \
+                 the verdict stands, the witness is omitted"
+            );
+            return None;
+        }
         let exact = self.exact_model();
         let stall = self.eg_not_p(&exact, p).ok()?;
         if stall == self.ff {
@@ -7414,6 +7911,18 @@ impl BddBitBlaster {
         file: &Btor2File,
         p: &BDDFunction,
     ) -> Option<StallLasso> {
+        // The lasso / trap representation carries a cell's value as `u128`: a state cell wider than
+        // that (reachable since the cap ladder bit-blasts cones the 192-bit cap used to refuse)
+        // has no faithful witness here — `None`, never a wrapped shift into a wrong minterm.
+        if let Some(wide) = self.cells.iter().find(|c| c.is_state && c.vars.len() > 128) {
+            tracing::warn!(
+                cell = %wide.symbol,
+                width = wide.vars.len(),
+                "exact: no counterexample for a design with a state cell wider than 128 bits — \
+                 the verdict stands, the witness is omitted"
+            );
+            return None;
+        }
         let exact = self.exact_model();
         let trap = self.not_ef_p(&exact, p).ok()?;
         if trap == self.ff {
@@ -8368,7 +8877,9 @@ impl BddBitBlaster {
             }
             let v = state.get(&cell.symbol).copied().unwrap_or(0);
             for (b, var) in cell.vars.iter().enumerate() {
-                let lit = if (v >> b) & 1 == 1 {
+                // `u128` carries 128 bits; the extractors refuse wider cells before this runs.
+                let bit = v.checked_shr(b as u32).map_or(0, |x| x & 1);
+                let lit = if bit == 1 {
                     var.clone()
                 } else {
                     var.not().unwrap()
@@ -13865,7 +14376,10 @@ mod tests {
     fn var_order_default_is_interleaved_and_cell_major_is_the_opt_out() {
         for unset in ["", "   ", "interleaved", "INTERLEAVED"] {
             let (interleave, warn) = BddBitBlaster::resolve_var_order(unset);
-            assert!(interleave, "{unset:?} must give interleaved (the default)");
+            assert!(
+                interleave == VarOrder::Interleaved,
+                "{unset:?} must give interleaved (the default)"
+            );
             assert!(warn.is_none(), "{unset:?} is valid and must not warn");
         }
         for cm in [
@@ -13876,7 +14390,10 @@ mod tests {
             " cell-major ",
         ] {
             let (interleave, warn) = BddBitBlaster::resolve_var_order(cm);
-            assert!(!interleave, "{cm:?} must give cell-major");
+            assert!(
+                interleave == VarOrder::CellMajor,
+                "{cm:?} must give cell-major"
+            );
             assert!(
                 warn.is_none(),
                 "{cm:?} is a valid spelling and must not warn"
@@ -13911,7 +14428,10 @@ mod tests {
                 w.contains("cell-major") && w.contains("interleaved"),
                 "{typo:?}'s warning must name BOTH valid spellings, got: {w}"
             );
-            assert!(interleave, "an invalid value still gets the default order");
+            assert!(
+                interleave == VarOrder::Interleaved,
+                "an invalid value still gets the default order"
+            );
         }
     }
 
@@ -13922,7 +14442,7 @@ mod tests {
         let (interleave, warn) = BddBitBlaster::resolve_var_order("auto");
         let w = warn.expect("`auto` must say it was retired rather than silently changing meaning");
         assert!(
-            interleave,
+            interleave == VarOrder::Interleaved,
             "retired `auto` falls back to the default (interleaved)"
         );
         assert!(w.contains("RETIRED"), "must state it is retired, got: {w}");
@@ -14144,7 +14664,12 @@ mod lever_gating_tests {
             Some(ExactVerdict::Holds)
         );
         assert_eq!(out.stage, LADDER_STAGE_UNRESTRICTED);
-        assert!(out.notes.is_empty(), "{:?}", out.notes);
+        // The session's prepare notes (the cone width) ride along; no STAGE abstained.
+        assert!(
+            !out.notes.iter().any(|n| n.starts_with("stage ")),
+            "{:?}",
+            out.notes
+        );
     }
 
     /// A zero first-stage slice forces the deadline abstention; the restriction then installs
@@ -14166,8 +14691,13 @@ mod lever_gating_tests {
             Some(ExactVerdict::Holds)
         );
         assert_eq!(out.stage, LADDER_STAGE_RESTRICTED, "{:?}", out.notes);
-        assert_eq!(out.notes.len(), 1, "{:?}", out.notes);
-        assert_eq!(abstention_kind(&out.notes[0]), AbstentionKind::Deadline);
+        let stages: Vec<&String> = out
+            .notes
+            .iter()
+            .filter(|n| n.starts_with("stage "))
+            .collect();
+        assert_eq!(stages.len(), 1, "{:?}", out.notes);
+        assert_eq!(abstention_kind(stages[0]), AbstentionKind::Deadline);
     }
 
     #[test]
@@ -14183,7 +14713,12 @@ mod lever_gating_tests {
         );
         assert!(out.result.is_err());
         assert_eq!(out.stage, LADDER_STAGE_UNRESTRICTED);
-        assert_eq!(out.notes.len(), 1, "{:?}", out.notes);
+        let stages: Vec<&String> = out
+            .notes
+            .iter()
+            .filter(|n| n.starts_with("stage "))
+            .collect();
+        assert_eq!(stages.len(), 1, "{:?}", out.notes);
     }
 
     #[test]
@@ -14203,5 +14738,492 @@ mod lever_gating_tests {
             ))
             .expect_err("cancelled");
         assert_eq!(abstention_kind(&err), AbstentionKind::Cancelled);
+    }
+}
+
+#[cfg(test)]
+mod open_items_tests {
+    use super::*;
+
+    /// A 200-bit register held at its init value 1: over the default cap (192), under the ceiling.
+    const WIDE_HELD: &str = "1 sort bitvec 200\n2 one 1\n3 state 1 x\n4 init 1 3 2\n5 next 1 3 3\n";
+
+    fn ag_x_nonzero() -> Formula {
+        crate::mu_calculus::parser::parse("nu X. ((x != 0) && [] X)").expect("parses")
+    }
+
+    #[test]
+    fn the_cap_ladder_retries_a_bit_cap_abstention_at_the_ceiling() {
+        let none = std::collections::HashSet::new();
+        let plain = exact_ladder(
+            WIDE_HELD,
+            &ag_x_nonzero(),
+            &none,
+            &ExactSymbolicOptions::default(),
+            None,
+            None,
+        );
+        let err = plain
+            .result
+            .as_ref()
+            .err()
+            .cloned()
+            .expect("over the default cap");
+        assert_eq!(abstention_kind(&err), AbstentionKind::BitCap, "{err}");
+        let opts = ExactSymbolicOptions {
+            cap_ladder: true,
+            ..Default::default()
+        };
+        let raised = exact_ladder(WIDE_HELD, &ag_x_nonzero(), &none, &opts, None, None);
+        assert_eq!(
+            raised.result.as_ref().map(|(v, _)| *v).ok(),
+            Some(ExactVerdict::Holds),
+            "{:?}",
+            raised.notes
+        );
+        assert!(
+            raised.notes.iter().any(|n| n.starts_with("cap ladder:")),
+            "{:?}",
+            raised.notes
+        );
+    }
+
+    /// A 200-bit register held at 1 under `AG (x == 0)`: VIOLATED through the cap ladder, and the
+    /// witness is omitted (a cell wider than `u128`) instead of a wrapped shift into a wrong
+    /// minterm — the wall-class matrix caught the overflow panic on the first run.
+    #[test]
+    fn a_cell_wider_than_u128_gets_a_verdict_and_no_witness() {
+        let f = crate::mu_calculus::parser::parse("nu X. ((x == 0) && [] X)").expect("parses");
+        let opts = ExactSymbolicOptions {
+            cap_ladder: true,
+            ..Default::default()
+        };
+        let out = exact_ladder(
+            WIDE_HELD,
+            &f,
+            &std::collections::HashSet::new(),
+            &opts,
+            None,
+            None,
+        );
+        let (v, witness) = out.result.expect("decides through the cap ladder");
+        assert_eq!(v, ExactVerdict::Violated);
+        assert!(witness.is_none(), "no u128 witness for a 200-bit cell");
+    }
+
+    /// `μY. ((Z ∧ q) ∨ ◇Y)` under `νZ`: the seed mentions the outer variable and is still a
+    /// squaring shape (free of `Y`), where the closed-only rule left it a chain walk.
+    #[test]
+    fn the_squaring_seed_may_mention_the_outer_fixpoint_variable() {
+        let f = crate::mu_calculus::parser::parse("nu Z. (p && <> (mu Y. ((Z && q) || <> Y)))")
+            .expect("parses");
+        let ctx = EvalCtx::new(&f, true);
+        let (var, body) = f
+            .nodes()
+            .iter()
+            .find_map(|n| match n {
+                MuNode::Mu { var, body } => Some((*var, *body)),
+                _ => None,
+            })
+            .expect("the inner mu");
+        let (seed, greatest) =
+            pure_reach_shape(&f, body, var, &ctx).expect("the inner EU is a squaring shape");
+        assert!(!greatest);
+        assert!(
+            matches!(f.node(seed), MuNode::And(_, _)),
+            "the seed is `Z && q`"
+        );
+    }
+
+    /// The justice verb's fair-EG inner `EU` (`verify::fairness::fair_eg` with a `State`
+    /// assumption and `q = true`) is a squaring shape: the LIVE counter class decides through the
+    /// closure only if this holds, and the encoder's `(true ∧ ◇Y)` spelling used to defeat it.
+    #[test]
+    fn the_fair_eg_inner_eu_is_a_squaring_shape() {
+        use crate::verify::fairness::{Assumption, fair_eg};
+        let text = format!(
+            "!({})",
+            fair_eg(
+                "true",
+                &[Assumption::State {
+                    atom: "l == 1".to_string()
+                }]
+            )
+        );
+        let f = crate::mu_calculus::parser::parse(&text).expect("parses");
+        let ctx = EvalCtx::new(&f, true);
+        let (var, body) = f
+            .nodes()
+            .iter()
+            .find_map(|n| match n {
+                MuNode::Mu { var, body } => Some((*var, *body)),
+                _ => None,
+            })
+            .expect("the inner mu");
+        let (seed, greatest) =
+            pure_reach_shape(&f, body, var, &ctx).expect("the fair-EG inner EU squares");
+        assert!(!greatest);
+        assert!(
+            matches!(f.node(seed), MuNode::And(_, _)),
+            "the seed is `Z && l`"
+        );
+    }
+
+    /// `circuit` resolves, ranks the root's leaf first, and gives the same verdict as the default.
+    #[test]
+    fn the_circuit_order_resolves_and_keeps_the_verdict() {
+        assert_eq!(
+            BddBitBlaster::resolve_var_order("circuit").0,
+            VarOrder::Circuit
+        );
+        let src = "1 sort bitvec 1\n2 zero 1\n3 one 1\n4 state 1 a\n5 state 1 b\n6 init 1 4 2\n\
+                   7 init 1 5 2\n8 next 1 4 3\n9 next 1 5 5\n10 output 5 b\n";
+        let file = crate::adapter::btor2::parser::parse(src).expect("parses");
+        let rank = circuit_visit_rank(&file);
+        assert_eq!(rank.get(&5), Some(&0), "b is the root's leaf: {rank:?}");
+        let f = crate::mu_calculus::parser::parse("nu X. (p && [] X)").expect("parses");
+        for order in [VarOrder::Interleaved, VarOrder::Circuit] {
+            let bb = BddBitBlaster::build_inner(&file, None, order, None, None).expect("builds");
+            let model = bb.exact_model();
+            let b_is_0 = bb
+                .predicate_bdd(
+                    &crate::adapter::btor2::predicate_expr::parse_predicate_expr("b == 0")
+                        .expect("expr"),
+                )
+                .expect("bdd");
+            let atoms: HashMap<&str, BDDFunction> = HashMap::from([("p", b_is_0)]);
+            let sat = model.evaluate(&f, &atoms).expect("evaluates");
+            let init = bb.initial_state_bdd(&file).expect("init");
+            assert!(
+                init.and(&sat.not().unwrap()).unwrap() == *model.ff(),
+                "{order:?}: AG (b == 0) holds from init"
+            );
+        }
+    }
+
+    /// A `bits`-wide counter: `stall` = count up and hold at the top (the LIVE `cucnt*ro` shape),
+    /// else wrap; `gated` adds an `en` input that holds the count when low, under the constraint
+    /// `cnt != 7` (so a path cannot pass 7).
+    fn counter_btor2(bits: u32, stall: bool, gated: bool) -> String {
+        let top = (1u64 << bits) - 1;
+        let mut s = format!(
+            "1 sort bitvec 1\n2 sort bitvec {bits}\n3 state 2 cnt\n4 zero 2\n5 init 2 3 4\n\
+             6 constd 2 {top}\n7 eq 1 3 6\n8 one 2\n9 add 2 3 8\n"
+        );
+        // 10: the stepped value (held at the top when `stall`).
+        s += if stall {
+            "10 ite 2 7 3 9\n"
+        } else {
+            "10 add 2 9 4\n"
+        };
+        if gated {
+            s += "11 input 1 en\n12 ite 2 11 10 3\n13 next 2 3 12\n14 constd 2 7\n15 eq 1 3 14\n\
+                  16 not 1 15\n17 constraint 16\n";
+        } else {
+            s += "11 next 2 3 10\n";
+        }
+        s
+    }
+
+    fn cnt_is(bb: &BddBitBlaster, value: u64) -> BDDFunction {
+        bb.predicate_bdd(&PredicateExpr::Cmp {
+            register: "cnt".into(),
+            op: CmpOp::Eq,
+            value,
+        })
+        .expect("atom")
+    }
+
+    /// The detector sees the verb's real spelling — `!(fair_eg("true", …))` with two state
+    /// assumptions — and not `E_C G q` for `q ≠ true`, whose step is `(q ∧ ◇Y)`.
+    #[test]
+    fn the_fair_eg_nu_is_the_fair_cycle_shape() {
+        use crate::verify::fairness::{Assumption, fair_eg};
+        let two = [
+            Assumption::State {
+                atom: "l0 == 1".to_string(),
+            },
+            Assumption::State {
+                atom: "l1 == 1".to_string(),
+            },
+        ];
+        let outer_nu = |f: &Formula| {
+            f.nodes()
+                .iter()
+                .find_map(|n| match n {
+                    MuNode::Nu { var, body } => Some((*var, *body)),
+                    _ => None,
+                })
+                .expect("the nu")
+        };
+        let f = crate::mu_calculus::parser::parse(&format!("!({})", fair_eg("true", &two)))
+            .expect("parses");
+        let ctx = EvalCtx::new(&f, true);
+        let (var, body) = outer_nu(&f);
+        let lits = fair_eg_shape(&f, body, var, &ctx).expect("the fair-EG shape");
+        assert_eq!(lits.len(), 2);
+        for l in lits {
+            assert!(ctx.closed[l.0], "a literal is a closed state predicate");
+        }
+        let g = crate::mu_calculus::parser::parse(&fair_eg("!(p == 1)", &two)).expect("parses");
+        let ctx = EvalCtx::new(&g, true);
+        let (var, body) = outer_nu(&g);
+        assert!(
+            fair_eg_shape(&g, body, var, &ctx).is_none(),
+            "`E_C G q` with `q ≠ true` is not the shape"
+        );
+    }
+
+    /// The fair cycle read off the closure is the set the Emerson–Lei iteration computes — on a
+    /// stalling counter (no cycle through any value but the top), a wrapping one (every value on
+    /// the one cycle), one and two literals, and a gated counter under a constraint whose fair
+    /// set is a proper subset of the states.
+    #[test]
+    fn the_fair_cycle_off_the_closure_equals_the_iteration() {
+        use crate::verify::fairness::{Assumption, fair_eg};
+        // (name, stall, gated, literals as (value, negated), a (no-fair-path, fair-path) pair)
+        type Case = (
+            &'static str,
+            bool,
+            bool,
+            &'static [(u64, bool)],
+            (Option<u64>, Option<u64>),
+        );
+        let cases: [Case; 7] = [
+            ("stall, top", true, false, &[(63, false)], (None, Some(0))),
+            // `cnt != 63` — the LIVE `cucnt*ro` literal: the ν peels one value per iteration.
+            (
+                "stall, not the top",
+                true,
+                false,
+                &[(63, true)],
+                (Some(0), None),
+            ),
+            (
+                "stall, below the top",
+                true,
+                false,
+                &[(5, false)],
+                (Some(0), None),
+            ),
+            (
+                "wrap, one value",
+                false,
+                false,
+                &[(0, false)],
+                (None, Some(9)),
+            ),
+            (
+                "wrap, two values",
+                false,
+                false,
+                &[(0, false), (5, false)],
+                (None, Some(9)),
+            ),
+            (
+                "stall, top and another",
+                true,
+                false,
+                &[(63, false), (1, false)],
+                (Some(0), None),
+            ),
+            // Gated under `cnt != 7`: from 3 the count cannot pass 7, so it never sees 15; from 9
+            // it can climb to 15 and hold there (`en` low) — a fair cycle.
+            (
+                "gated, top",
+                false,
+                true,
+                &[(15, false)],
+                (Some(3), Some(9)),
+            ),
+        ];
+        for (name, stall, gated, literals, witness) in cases {
+            let bits = if gated { 4 } else { 6 };
+            let file = crate::adapter::btor2::parser::parse(&counter_btor2(bits, stall, gated))
+                .expect("parses");
+            let bb = BddBitBlaster::build(&file).expect("builds");
+            let names: Vec<String> = (0..literals.len()).map(|k| format!("l{k}")).collect();
+            let mut atoms: HashMap<&str, BDDFunction> = HashMap::new();
+            for (k, &(v, _)) in literals.iter().enumerate() {
+                atoms.insert(names[k].as_str(), cnt_is(&bb, v));
+            }
+            let assumptions: Vec<Assumption> = names
+                .iter()
+                .zip(literals)
+                .map(|(n, &(_, negated))| Assumption::State {
+                    atom: if negated {
+                        format!("!({n})")
+                    } else {
+                        n.clone()
+                    },
+                })
+                .collect();
+            let formula =
+                crate::mu_calculus::parser::parse(&fair_eg("true", &assumptions)).expect("parses");
+            let plain = bb.exact_model().with_squaring(false);
+            let by_iteration = plain.evaluate(&formula, &atoms).expect("iteration");
+            let forced = bb.exact_model().with_squaring_after_iters(0);
+            let by_closure = forced.evaluate(&formula, &atoms).expect("closure");
+            assert!(
+                by_iteration == by_closure,
+                "{name}: the fair cycle off the closure differs from the iteration"
+            );
+            assert!(
+                forced.iteration_count() < plain.iteration_count() || plain.iteration_count() < 8,
+                "{name}: forced {} vs plain {} iterations",
+                forced.iteration_count(),
+                plain.iteration_count()
+            );
+            let (no, yes) = witness;
+            if let Some(no) = no {
+                assert!(
+                    cnt_is(&bb, no).and(&by_closure).unwrap() == *forced.ff(),
+                    "{name}: no fair path from {no}"
+                );
+            }
+            if let Some(yes) = yes {
+                assert!(
+                    cnt_is(&bb, yes).and(&by_closure.not().unwrap()).unwrap() == *forced.ff(),
+                    "{name}: a fair path from {yes}"
+                );
+            }
+        }
+    }
+
+    /// An `n`-bit stalling ripple counter out of 1-bit latches (the AIGER shape), the latches laid
+    /// out MSB-first in the file — the order an AIG writer may well emit, and the one under which
+    /// the closure's bounded-difference relations are not linear. Justice `!(all ones)`.
+    fn ripple_counter_btor2(n: usize) -> String {
+        let id = |j: usize| 4 + (n - 1 - j); // state b_j; file order is b_{n-1}, …, b_0
+        let mut s = String::from("1 sort bitvec 1\n2 zero 1\n3 one 1\n");
+        for j in (0..n).rev() {
+            s += &format!("{} state 1 b{j}\n", id(j));
+        }
+        let mut next_id = 4 + n;
+        for j in (0..n).rev() {
+            s += &format!("{next_id} init 1 {} 2\n", id(j));
+            next_id += 1;
+        }
+        // carry_j = b_0 ∧ … ∧ b_{j-1}; carry_0 = 1; all_ones = carry_{n-1} ∧ b_{n-1}.
+        let mut carry = vec![3usize];
+        for j in 0..n {
+            let prev = *carry.last().unwrap();
+            s += &format!("{next_id} and 1 {prev} {}\n", id(j));
+            carry.push(next_id);
+            next_id += 1;
+        }
+        let all_ones = *carry.last().unwrap();
+        let mut nexts = Vec::with_capacity(n);
+        for (j, &carry_j) in carry.iter().enumerate().take(n) {
+            s += &format!("{next_id} xor 1 {} {carry_j}\n", id(j));
+            let toggled = next_id;
+            next_id += 1;
+            s += &format!("{next_id} ite 1 {all_ones} {} {toggled}\n", id(j));
+            nexts.push(next_id);
+            next_id += 1;
+        }
+        for (j, &nx) in nexts.iter().enumerate() {
+            s += &format!("{next_id} next 1 {} {nx}\n", id(j));
+            next_id += 1;
+        }
+        s += &format!("{next_id} not 1 {all_ones}\n");
+        s += &format!("{} justice 1 {next_id}\n", next_id + 1);
+        s
+    }
+
+    /// For an all-1-bit-state design the Squarer orders its relation by the circuit rank
+    /// (`ExactModel::squarer_rank`), and the fair cycle it reads off the closure is the set the
+    /// iteration computes — on a ripple counter laid out MSB-first, where the engine's file order
+    /// is the significance-reversed one.
+    #[test]
+    fn the_squarer_takes_the_circuit_rank_on_one_bit_latches_and_keeps_the_set() {
+        use crate::verify::fairness::{Assumption, fair_eg};
+        let n = 10usize;
+        let file = crate::adapter::btor2::parser::parse(&ripple_counter_btor2(n)).expect("parses");
+        let bb = BddBitBlaster::build(&file).expect("builds");
+        let all_ones = (0..n).fold(bb.tt.clone(), |acc, j| {
+            acc.and(
+                &bb.predicate_bdd(&PredicateExpr::Cmp {
+                    register: format!("b{j}"),
+                    op: CmpOp::Eq,
+                    value: 1,
+                })
+                .expect("atom"),
+            )
+            .unwrap()
+        });
+        let atoms: HashMap<&str, BDDFunction> = HashMap::from([("l0", all_ones)]);
+        let formula = crate::mu_calculus::parser::parse(&fair_eg(
+            "true",
+            &[Assumption::State {
+                atom: "!(l0)".to_string(),
+            }],
+        ))
+        .expect("parses");
+        let plain = bb.exact_model().with_squaring(false);
+        let by_iteration = plain.evaluate(&formula, &atoms).expect("iteration");
+        let forced = bb.exact_model().with_squaring_after_iters(0);
+        assert!(
+            forced.squarer_rank.is_some(),
+            "every state cell is 1 bit: the Squarer is ranked by the circuit"
+        );
+        let ranks = forced.squarer_rank.as_ref().unwrap();
+        assert_eq!(ranks.len(), n);
+        let by_closure = forced.evaluate(&formula, &atoms).expect("closure");
+        assert!(by_iteration == by_closure, "same set");
+        assert!(
+            by_closure == *forced.ff(),
+            "no path leaves the top infinitely often"
+        );
+        assert!(
+            plain.iteration_count() > 2_000 && forced.iteration_count() < 100,
+            "iteration {} vs closure {}",
+            plain.iteration_count(),
+            forced.iteration_count()
+        );
+        // A multi-bit cell is ordered by the engine's levels, not the rank.
+        let wide =
+            crate::adapter::btor2::parser::parse(&counter_btor2(6, true, false)).expect("parses");
+        let bbw = BddBitBlaster::build(&wide).expect("builds");
+        assert!(bbw.exact_model().squarer_rank.is_none());
+    }
+
+    /// The default threshold: a 13-bit stalling counter with the LIVE literal `cnt != top` costs
+    /// the iteration ≈ 3 · 2^13 charged steps (one outer peel plus a two-step inner EU per
+    /// value); the rescue fires once the ν passes 4,096 iterations and the total stays near
+    /// 3 · 4,096.
+    #[test]
+    fn the_fair_eg_rescue_fires_at_the_default_threshold() {
+        use crate::verify::fairness::{Assumption, fair_eg};
+        let file =
+            crate::adapter::btor2::parser::parse(&counter_btor2(13, true, false)).expect("parses");
+        let bb = BddBitBlaster::build(&file).expect("builds");
+        let atoms: HashMap<&str, BDDFunction> = HashMap::from([("l0", cnt_is(&bb, 8191))]);
+        let formula = crate::mu_calculus::parser::parse(&fair_eg(
+            "true",
+            &[Assumption::State {
+                atom: "!(l0)".to_string(),
+            }],
+        ))
+        .expect("parses");
+        let plain = bb.exact_model().with_squaring(false);
+        let by_iteration = plain.evaluate(&formula, &atoms).expect("iteration");
+        let rescued = bb.exact_model();
+        let by_rescue = rescued.evaluate(&formula, &atoms).expect("rescue");
+        assert!(by_iteration == by_rescue);
+        assert!(
+            by_rescue == *rescued.ff(),
+            "no path leaves the top infinitely often"
+        );
+        assert!(
+            plain.iteration_count() > 24_000,
+            "the iteration peels the counter: {}",
+            plain.iteration_count()
+        );
+        assert!(
+            rescued.iteration_count() < 13_000,
+            "the rescue replaces the peel: {}",
+            rescued.iteration_count()
+        );
     }
 }

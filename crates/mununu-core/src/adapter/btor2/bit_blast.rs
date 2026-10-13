@@ -7830,6 +7830,8 @@ mod tests {
             reach_restrict: false,
             early_exit: false,
             time_budget_ms: None,
+            max_bits: None,
+            cap_ladder: false,
         };
 
     /// mununu#602 — `narrow_leaves` keeps a partially-read register's NID and symbol on a

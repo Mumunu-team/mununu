@@ -55,7 +55,15 @@ fn constraint(k: usize, a: &Assumption, z: &str, q: &str) -> String {
     let y = format!("Y{k}");
     match a {
         Assumption::State { atom } => {
-            format!("< > (mu {y}. ((({z}) && ({atom})) || (({q}) && < > {y})))")
+            // With `q = true` the step is a bare `< > Y`: the exact engine's squaring rescue
+            // recognises `μY. (seed ∨ ◇Y)` and not `μY. (seed ∨ (true ∧ ◇Y))` — on the LIVE
+            // counter class that spelling difference was the difference between a 2^32 chain walk
+            // and one relational product per outer iteration (lever plan P6, 2026-10-12).
+            if q == "true" {
+                format!("< > (mu {y}. ((({z}) && ({atom})) || < > {y}))")
+            } else {
+                format!("< > (mu {y}. ((({z}) && ({atom})) || (({q}) && < > {y})))")
+            }
         }
         Assumption::Edge { label } => {
             format!("(mu {y}. (< labels = {{ {label} }} > {z} || < > (({q}) && {y})))")

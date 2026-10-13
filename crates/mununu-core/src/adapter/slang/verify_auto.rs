@@ -4029,9 +4029,7 @@ pub(crate) fn verify_auto_impl(
         // property) where the cube path returns Unknown; bounded by BDD size
         // (build errors above the bit cap ⇒ Skipped).
         if opts.exact_symbolic {
-            use crate::adapter::btor2::symbolic_bitblast::{
-                ExactSymbolicOptions, ExactVerdict, exact_symbolic_verdict_with_witness_and_options,
-            };
+            use crate::adapter::btor2::symbolic_bitblast::{ExactSymbolicOptions, ExactVerdict};
             let exact_opts = ExactSymbolicOptions {
                 antecedent_shadow_enabled: opts.antecedent_shadow,
                 antecedent_propagate_enabled: opts.antecedent_propagate,
@@ -4125,12 +4123,24 @@ pub(crate) fn verify_auto_impl(
                 }
             }
 
-            let (outcome, counterexample) = match exact_symbolic_verdict_with_witness_and_options(
+            // Plan P3 / P4 — the first-pass exact member runs the LADDER (unrestricted ≤ 2 s,
+            // then reach-restricted with a 5 s probe and a 30 s cap, then unrestricted with the
+            // engine's own budgets). The easy cases decide on stage 1 and pay for no lever.
+            let ladder = crate::adapter::btor2::symbolic_bitblast::exact_ladder(
                 &btor2,
                 &formula,
+                &std::collections::HashSet::new(),
                 &exact_opts,
-            ) {
-                Ok((ExactVerdict::Holds, _)) => (VerifyOutcome::Holds, None),
+                None,
+                None,
+            );
+            let exact_stage = ladder.stage;
+            let mut by_ladder = false;
+            let (outcome, counterexample) = match ladder.result {
+                Ok((ExactVerdict::Holds, _)) => {
+                    by_ladder = true;
+                    (VerifyOutcome::Holds, None)
+                }
                 Ok((ExactVerdict::Violated, witness)) => {
                     // A definite full-state counterexample (not a cube tally). For a
                     // liveness/recoverability failure (`AF p` / `AG AF p` / `AG EF p`)
@@ -4138,6 +4148,7 @@ pub(crate) fn verify_auto_impl(
                     // Failing that, a bare `EF p` (reachability) violation carries the
                     // A.4 unreachable-target witness — no trace, because the target is
                     // simply never reached (sound under the over-approximating cut).
+                    by_ladder = true;
                     (
                         VerifyOutcome::Violated { false_cells: 1 },
                         witness
@@ -4170,7 +4181,7 @@ pub(crate) fn verify_auto_impl(
                 seeded_predicates: Vec::new(),
                 counterexample,
                 bottom_reason: None,
-                decided_by: None,
+                decided_by: by_ladder.then(|| exact_stage.to_string()),
                 vacuity: None,
             });
             continue;
@@ -5531,9 +5542,7 @@ pub(crate) fn rescue_skipped_via_exact(
     design_btor2: &str,
     opts: &VerifyAutoOptions,
 ) -> Vec<VerificationNote> {
-    use crate::adapter::btor2::symbolic_bitblast::{
-        ExactSymbolicOptions, ExactVerdict, exact_symbolic_verdict_with_witness_and_options,
-    };
+    use crate::adapter::btor2::symbolic_bitblast::{ExactSymbolicOptions, ExactVerdict};
     use crate::mu_calculus::parser as mu_parser;
 
     let mut notes = Vec::new();
@@ -5542,10 +5551,13 @@ pub(crate) fn rescue_skipped_via_exact(
     if !opts.gate_reset || opts.exact_symbolic {
         return notes;
     }
+    // Plan P3 — the skip rescue is a ⊥ re-plan pass: the ladder with the cap ladder on (a
+    // cone over the default cap is retried once at the ceiling under its own 60 s budget).
     let exact_opts = ExactSymbolicOptions {
         antecedent_shadow_enabled: opts.antecedent_shadow,
         antecedent_propagate_enabled: opts.antecedent_propagate,
         input_state_enabled: opts.input_state,
+        cap_ladder: true,
         ..Default::default()
     };
     for prop in report.properties.iter_mut() {
@@ -5564,10 +5576,20 @@ pub(crate) fn rescue_skipped_via_exact(
         let Ok(formula) = mu_parser::parse(&prop.formula) else {
             continue;
         };
-        match exact_symbolic_verdict_with_witness_and_options(design_btor2, &formula, &exact_opts) {
+        let ladder = crate::adapter::btor2::symbolic_bitblast::exact_ladder(
+            design_btor2,
+            &formula,
+            &std::collections::HashSet::new(),
+            &exact_opts,
+            None,
+            None,
+        );
+        let stage = ladder.stage;
+        match ladder.result {
             Ok((ExactVerdict::Holds, _)) => {
                 prop.outcome = VerifyOutcome::Holds;
                 prop.counterexample = None;
+                prop.decided_by = Some(stage.to_string());
                 notes.push(exact_skip_rescue_note(&prop.name, "HOLDS"));
             }
             Ok((ExactVerdict::Violated, witness)) => {
@@ -5575,6 +5597,7 @@ pub(crate) fn rescue_skipped_via_exact(
                 prop.counterexample = witness
                     .map(exact_counterexample_from_lasso)
                     .or_else(|| ef_unreachable_counterexample(&formula));
+                prop.decided_by = Some(stage.to_string());
                 notes.push(exact_skip_rescue_note(&prop.name, "VIOLATED"));
             }
             // Err (over cap / intractable design): leave the property Skipped.
