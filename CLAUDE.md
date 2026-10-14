@@ -1,8 +1,8 @@
-<!-- last reviewed: 2026-05-16 -->
+<!-- last reviewed: 2026-10-14 -->
 
 # CLAUDE.md — Project Instructions for Claude Code
 
-> **How to read this file.** This file is loaded into context for every Claude Code session in this repo. Sections tagged `[RULE]` are binding constraints, not suggestions — violating them blocks merge. Sections tagged `[REFERENCE]` and `[CONTEXT]` are background. When a task touches a subsystem documented under `docs/`, follow the link rather than guessing from prior knowledge.
+> **How to read this file.** It is loaded into every Claude Code session in this repo. Sections tagged `[RULE]` are binding — violating them blocks merge. `[REFERENCE]` and `[CONTEXT]` are background. Each rule is stated here in short form; the full text, with the incidents that produced it, lives under `docs/policies/` and is linked from the rule. When a task touches a subsystem documented under `docs/`, follow the link rather than guessing.
 
 ## Contents
 
@@ -15,24 +15,24 @@
 7. [Abstraction Guidelines](#abstraction-guidelines) `[RULE]`
 8. [Documentation Traceability](#documentation-traceability) `[RULE]`
 9. [Claims Integrity](#claims-integrity) `[RULE]`
-10. [Reproducers Before Fixes](#reproducers-before-fixes) `[RULE]`
-11. [Adapter / Emitter Capability Use](#adapter--emitter-capability-use) `[RULE]`
-12. [Git Operations & Destructive Commands](#git-operations--destructive-commands) `[RULE]`
-13. [Code Reuse, Dead Code, Performance, Security](#code-reuse-dead-code-performance-security) `[RULE]`
-14. [Test the Layer the Bug Lives In](#test-the-layer-the-bug-lives-in) `[RULE]`
-15. [Available Agents and Skills](#available-agents-and-skills) `[REFERENCE]`
-16. [Private Files Policy](#private-files-policy) `[RULE]`
-17. [Reasoning & Recommendation Honesty](#reasoning--recommendation-honesty) `[RULE]`
-18. [Engine Specificity in Proposals](#engine-specificity-in-proposals) `[RULE]`
-19. [Reference Docs Index](#reference-docs-index) `[REFERENCE]`
+10. [Cross-Repo Impact Reporting](#cross-repo-impact-reporting) `[RULE]`
+11. [Reproducers Before Fixes](#reproducers-before-fixes) `[RULE]`
+12. [Adapter / Emitter Capability Use](#adapter--emitter-capability-use) `[RULE]`
+13. [Git Operations & Destructive Commands](#git-operations--destructive-commands) `[RULE]`
+14. [Code Reuse, Dead Code, Performance, Security](#code-reuse-dead-code-performance-security) `[RULE]`
+15. [Test the Layer the Bug Lives In](#test-the-layer-the-bug-lives-in) `[RULE]`
+16. [Available Agents and Skills](#available-agents-and-skills) `[REFERENCE]`
+17. [Private Files Policy](#private-files-policy) `[RULE]`
+18. [Reasoning & Recommendation Honesty](#reasoning--recommendation-honesty) `[RULE]`
+19. [Engine Specificity in Proposals](#engine-specificity-in-proposals) `[RULE]`
+20. [Reference Docs Index](#reference-docs-index) `[REFERENCE]`
+21. [Environment Variables](#environment-variables) `[REFERENCE]`
 
 ---
 
 ## Project Overview
 
-Mununu is a formal verification tool for analyzing and synthesizing controllers for reactive systems modeled as Compositional Labeled Transition Systems (CLTS). It includes mu-calculus formula evaluation, controller synthesis, LTL pattern support, state variable abstraction, and a DSL (CTXDSL) for specifying concurrent systems.
-
-See `docs/architecture/` for the three-layer model (extraction → adaptation → verification).
+Mununu is a formal verification tool for analyzing and synthesizing controllers for reactive systems modeled as Compositional Labeled Transition Systems (CLTS). It includes mu-calculus formula evaluation, controller synthesis, LTL pattern support, state variable abstraction, and a DSL (CTXDSL) for specifying concurrent systems. The three-layer model (extraction → adaptation → verification) and the engine roster are in `docs/design/` — start with [`docs/design/engine-routing.md`](docs/design/engine-routing.md) and [`docs/design/sts-ir.md`](docs/design/sts-ir.md).
 
 ## Workspace Structure
 
@@ -45,616 +45,177 @@ crates/
 └── mununu-extract/   (bin: `mununu-extract` — tree-sitter AST extraction)
 ```
 
-Edition 2024. Toolchain pinned by `rust-toolchain.toml`; see [`docs/toolchain.md`](docs/toolchain.md) for the bump procedure and current clippy-lint compatibility notes.
+Edition 2024. Toolchain pinned by `rust-toolchain.toml`; see [`docs/toolchain.md`](docs/toolchain.md).
 
 ## CI Requirements
 
-The gate is `make ci` — the same command runs locally, in pre-commit hooks, and in GitHub Actions. If a contributor cannot reproduce a CI failure with `make ci`, the contract is broken.
+Full text and history: [`docs/policies/ci-and-hooks.md`](docs/policies/ci-and-hooks.md).
 
-```bash
-make ci    # = cargo fmt --check + cargo clippy -D warnings + cargo test --workspace
-```
-
-For CI-exact reproduction inside the pinned dev container, see [`docs/dev-container.md`](docs/dev-container.md). For finer-grained cargo invocations (per-crate, specific tests, benches, server, extractor), see [`docs/build-recipes.md`](docs/build-recipes.md). Install pre-commit hooks via `./scripts/setup-hooks.sh` — the hook runs `cargo fmt --check`, `cargo clippy`, and `cargo test`.
-
-The `security-audit` CI job runs `cargo audit`. The `dependency-check` job is non-blocking.
-
-### SVA-verification e2e validation (slang) `[REFERENCE]` (added 2026-06-27)
-
-The SVA front-end (`mununu sv extract-sva` / `mununu sv verify-auto`) shells out to **slang** (SystemVerilog elaboration), **sv2v**, and **yosys**. Per the subprocess-tools-are-not-bundled policy, these are NOT in `mununu-dev`, so the slang-gated end-to-end tests are `#[ignore]`d and do not run in `make ci`. Their mechanisms are covered by non-ignored unit tests; the `#[ignore]` tests validate the full chain when the tools are present.
-
-**Run them in the `mununu-sva` image** (`docker/Dockerfile.sva` — extends `mununu-dev` with ONE tag-pinned public oss-cad-suite release — yosys + the yosys-slang plugin, slang, Verilator, btormc, pono, cvc5 — plus sv2v. The pins are asserted against the binaries at build time and exposed as image labels; `docker/README.md` shows how to read them. The tag is the SAME one rosf and monono pin, so the lift, the synth-check and the bitstream come from one compiler):
-
-```bash
-docker build -f docker/Dockerfile.dev -t mununu-dev .     # once (or on toolchain bump)
-docker build -f docker/Dockerfile.sva -t mununu-sva .     # once
-docker volume create mununu-target                        # once (warm cargo cache)
-docker run --rm -v "$(pwd)":/work -v mununu-target:/cargo-target \
-  mununu-sva cargo test -p mununu-core --lib --all-features e2e_ -- --ignored --nocapture
-```
-
-**For the WHOLE sweep, use `make e2e`** (`scripts/e2e-sweep.sh`), which runs one test per
-process. A test that ABORTS rather than fails — a stack overflow, or a panic while unwinding
-an exhausted BDD arena — does not unwind, so in a single shared libtest process it kills the
-run: no summary line, no failure list, and every later test silently skipped. That is how the
-ignored set drifted to 19 unnoticed failures ([mununu#503](https://github.com/Mumunu-team/mununu/issues/503),
-found while triaging [mununu#504](https://github.com/Mumunu-team/mununu/issues/504)). Isolated, an
-abort becomes one `CRASH` row and the sweep still completes. The single-test command above stays
-the right tool for reproducing ONE test.
-
-**The CI nightly had NEVER worked before 2026-09-18, and was disabled 2026-09-09 → 2026-09-18.** `.github/workflows/e2e.yml` produced no verification signal from its addition (2026-07-06) on: every
-scheduled run failed at *"Build mununu-sva image"*, because `docker/Dockerfile.sva` did
-`COPY --from=hw-verif:latest` — an image built from the sibling `hw-verification-uba` repo and never
-published, so CI could not pull it. That is how the `#[ignore]`d set drifted to 19 failures unnoticed
-([mununu#503](https://github.com/Mumunu-team/mununu/issues/503)): not "nobody read the nightly", but
-nothing to read. **Restored 2026-09-18**: the Dockerfile downloads a tag-pinned public YosysHQ release,
-so the image builds on any runner and the schedule is back. Until the nightly has a run history you
-can read, **the LOCAL sweep in the image (commands above) remains the e2e signal you act on**; the
-workflow file carries the history. The same stale sibling is why this image ran yosys 0.60 while
-rosf/monono ran 0.68 — `hw-verif` had been built once, in June, from the 2025-12-31 suite. Not a pin,
-not a decision; the Dockerfile header now says so, so nobody re-derives it.
-
-**Host caveat.** slang ships prebuilts only for `linux-x86_64` and `macos-arm64`. On an Intel (x86_64) macOS host there is no native slang binary, and the workspace's `z3-sys` link also differs from the dev image — so the Linux `mununu-sva` image (which runs natively on x86_64 hosts) is the supported way to run these tests there. The `e2e_csrng_real_sva_verdict_breakdown` test reads only vendored fixtures (`examples/verify/m2_opentitan_csrng_main_sm` + the standard prim_assert macros from `examples/verify/m0_opentitan_prim_arbiter`), so it is fully reproducible.
-
-**[RULE] Validate any slang / SVA-touching change in the `mununu-sva` image — never on the bare host (added 2026-07-13).** The dev host commonly has `sv2v` + `yosys` but **not** `slang`. That combination is a trap, not a convenience:
-
-- `mununu sv verify-auto` / `sv extract-sva` (and the correct SVA→cube path) locate slang via `locate_slang()`; with slang absent they cannot run, so a "green" host run has simply *skipped* the real path.
-- The **sv2v-only lift is worse than useless for SVA**: `sv2v` (0.0.13) silently **drops** `assert property (@…)` during conversion (both concurrent and immediate forms), so `sv_to_btor2` yields a BTOR2 with **0 `bad` nodes**. The plain `mununu sv verify` verb (sv2v+yosys, no slang) then reports a **VACUOUS `holds`** — the property was never checked. (2026-07-13 incident: an sv-yosys "safety-cube" wiring looked like it produced no result / a spurious `holds`; the whole chain was the sv2v drop, invisible without slang. Root-caused via `MUNUNU_KEEP_YOSYS_TMP=1` — `preprocessed.sv` had 0 asserts.)
-
-**How to comply.** Any change that exercises `adapter/slang/**`, `sv extract-sva`, `sv verify-auto`, or an SV→BTOR2 path that must preserve assertions is validated by running the relevant `#[ignore]`d `e2e_` tests **in the `mununu-sva` image** (command above), not by a host `cargo test`. Pure-Rust / `btor2` / non-slang paths may still be validated on the host. When a host run of an SV path returns `holds` with no counterexample, treat it as *unverified* until reproduced under `mununu-sva` — a bare-host `holds` on SVA is presumed vacuous. slang honours `MUNUNU_SLANG_PATH`; the image provides a pinned build.
-
-### Pre-push workspace check (added 2026-06-08)
-
-**Rule.** Before `git push`, when a commit touches a field of a struct with multiple construction sites (`OriginalTransition`, `TransitionSpec`, `SignalAnnotation`, `CegarOptions`, `PredicateCubeLiftOptions`, `TransitionDecl`, etc.), run the CI-equivalent workspace check:
-
-```bash
-cargo check --workspace --all-features --tests
-cargo clippy --workspace --all-features --all-targets -- -D warnings
-cargo fmt --check
-cargo test --workspace --all-features --doc    # <-- doctests too (revised 2026-06-08)
-```
-
-**Why.** Per-crate `cargo check` (the typical hook-light pattern under [Pre-commit hook serialisation](#pre-commit-hook-serialisation)) does NOT compile:
-- the **legacy root-level bin** at `src/main.rs` (gated on `--features cli`, separate from the workspace `crates/mununu-cli/src/main.rs`).
-- crates that depend on the touched type through workspace edges.
-- test crates that construct the type in fixtures.
-- **doctests** inside `///` examples that construct the type literally. `cargo check --tests` does NOT compile doctests — they have a separate compilation phase that only `cargo test --doc` (or `make ci`) runs. Doctest gaps surface only at CI.
-
-Three recent incidents exposed the gap:
-- `3923822` (K.2b): added `modality` to `OriginalTransition`; the api-feature build at `crates/mununu-core/src/api/graph.rs` had a variable-name typo CI caught (fix `04beae6`).
-- `cfee81d` (K.1b-unrolled): added `additional_targets` to `OriginalTransition`; the legacy root bin's `src/main.rs:3738` site was missed; user surfaced the CI failure (fix `04f01f9`).
-- `cfee81d` (K.1b-unrolled, second-order): the doctests in `crates/mununu-core/src/abstraction/unrolling.rs:911,945` constructed `OriginalTransition` literals without the new field; `c3ecb38` + `04f01f9` + `832f552` all ran CI red because the pre-push check (revised at `c3ecb38`) did not include doctests (fix `4a07df7`).
-
-**Scope.** Trigger this check whenever the diff touches a `pub` field of any of the load-bearing struct types listed above. For commits that don't touch IR / sidecar / CegarOptions shape (e.g. parser-internal changes, doc edits), the lighter per-crate pattern in the next section is sufficient.
-
-**Hook compatibility.** The full workspace check is HEAVY per the hook-serialisation rule below — do NOT run it concurrent with another commit's hook. Run it as a pre-push step (no other heavy work in flight), not as a concurrent background task.
-
-### Pre-commit hook serialisation
-
-**Rule (revised 2026-06-03).** When a pre-commit hook is running, **never** launch a second heavy cargo workload that competes for the rustc compilation pool or the nextest thread pool. Lightweight per-crate cargo work is allowed.
-
-**Heavy** (FORBIDDEN to run concurrent with a hook):
-- `cargo nextest run --workspace` / `cargo test --workspace` / `make ci`
-- `cargo build --workspace` / `cargo check --workspace` / `cargo clippy --workspace`
-- A second `git commit` whose hook would fire (don't chain commits — the prior hook must complete first)
-- Any command that compiles or tests across the entire workspace at once
-
-**Lightweight** (ALLOWED to run concurrent with a hook's test phase):
-- `cargo check -p <one_crate>` (compile-only, much smaller resource footprint)
-- `cargo clippy -p <one_crate>` (single crate)
-- `cargo test -p <one_crate> --lib <specific_test_name>` (single test, single crate)
-- `cargo fmt` / `cargo fmt --check` (no compilation)
-
-**Always allowed** (no cargo invocation at all):
-- File edits in the working tree (including the source files the hook is validating — the hook reads the COMMITTED state, not the working tree)
-- Plan-doc edits in `.claude/plans/`
-- Drafting commit messages, reading source, git status / log / diff queries
-- Background CI status checks via `gh run view`
-
-**Why.** macOS schedules pre-commit hooks at lowered priority (`STAT=SN`) when launched in the background. Two **heavy** cargo workloads competing for the same compilation pool reproduce the 2026-05-27 R.2.5 incident where 36 / 1853 tests took 1h 32min wall-clock. Lightweight per-crate work uses a fraction of the cores and shares the pool without starvation. Test execution itself is sub-millisecond per area; the wall-clock cost is entirely scheduling — so the relaxation is safe as long as no second heavy workload competes.
-
-**How to comply.**
-
-- Before kicking off any commit that runs the pre-commit hook (any `git commit` without `--no-verify`), check that no other **heavy** cargo / make-ci process is running.
-- While a commit is in flight, you MAY draft + lightweight-validate the next commit's code in the working tree. You may NOT start a second hook or run a workspace-wide cargo invocation.
-- Do not chain commits back-to-back. Land commit N's hook (verify via `git log` showing the new HEAD, or the sentinel file exit code) before launching commit N+1's `git commit`.
-- Single-test validation runs (e.g. `cargo test -p mununu-core --lib <specific_test>`) are now permitted concurrent with a hook's test phase. Full per-crate test runs (`cargo test -p mununu-core --lib`, no test filter) are also permitted but use more resources — apply judgment based on what the hook is currently doing.
-- Skipping the hook with `--no-verify` requires explicit per-commit user authorisation, per [Git Operations & Destructive Commands](#git-operations--destructive-commands).
-
-**Propagation to subagents.** Any subagent that issues `git commit` or runs cargo inherits the heavy-vs-lightweight distinction. Subagents may freely run lightweight per-crate cargo work concurrent with another subagent's hook; they MUST NOT start a second hook or workspace-wide compile while another hook is in flight.
+- **The gate is `make ci`** (`cargo fmt --check` + `cargo clippy -D warnings` + `cargo test --workspace`) — the same command locally, in the pre-commit hook (`./scripts/setup-hooks.sh`) and in GitHub Actions. A CI failure `make ci` cannot reproduce means the contract is broken. Container-exact reproduction: [`docs/dev-container.md`](docs/dev-container.md); finer recipes: [`docs/build-recipes.md`](docs/build-recipes.md).
+- **The slang-gated `e2e_` tests are `#[ignore]`d** (slang / sv2v / yosys are not bundled) and run in the `mununu-sva` image; `make e2e` runs them one test per process, because an abort (stack overflow, arena exhaustion) in a shared libtest process silently skips every later test — that is how 19 failures went unnoticed (mununu#503). The image, not the nightly, is the e2e signal until the nightly has a readable history.
+- **Validate any slang / SVA-touching change in the image, never on the bare host.** The host usually lacks slang, and the sv2v-only lift silently drops `assert property`, so a host `holds` on SVA is presumed vacuous until reproduced under `mununu-sva`.
+- **Pre-push workspace check** when a commit touches a `pub` field of a struct with multiple construction sites (`OriginalTransition`, `TransitionSpec`, `SignalAnnotation`, `CegarOptions`, `PredicateCubeLiftOptions`, `ExactSymbolicOptions`, …): `cargo check --workspace --all-features --tests`, `cargo clippy --workspace --all-features --all-targets -- -D warnings`, `cargo fmt --check`, `cargo test --workspace --all-features --doc`. Per-crate checks miss the legacy root bin, workspace-edge crates, fixtures and doctests (three CI-red incidents).
+- **Hook serialisation.** While a pre-commit hook runs, never start a second heavy cargo workload (`--workspace` anything, `make ci`, another `git commit`); per-crate `cargo check|clippy|test -p … <one test>`, `cargo fmt`, file edits and git queries are fine. Two heavy workloads on this host turned 36 tests into 1 h 32 min. The same rule applies to a timing sweep: a test binary beside it stretched a 41 s module to 2,286 s. Do not chain commits; `--no-verify` needs explicit per-commit authorisation.
 
 ## Git Identity
 
-All commits in this repository must use:
-
-```
-Name:  Mariano Cerrutti
-Email: vscorza@gmail.com
-```
-
-Pass `--author="Mariano Cerrutti <vscorza@gmail.com>"` when committing, or set it via the commit environment. Do not use the machine's default hostname-based email.
+All commits use `Mariano Cerrutti <vscorza@gmail.com>` — pass `--author="Mariano Cerrutti <vscorza@gmail.com>"`. Never the machine's hostname-based email.
 
 ## Surface Parity
 
-**Every user-visible capability ships on CLI *and* HTTP API in the same PR. UI parity is required only for CTXDSL-related capabilities.** (Revised 2026-09-10; previously UI was mandatory for everything.)
+**Every user-visible capability ships on CLI *and* HTTP API in the same PR. UI parity is required only for CTXDSL-related capabilities** (revised 2026-09-10).
 
-- **CLI**: a clap subcommand or flag in `crates/mununu-cli/src/main.rs`.
-- **API**: a handler in `crates/mununu-core/src/api/handlers.rs` (route in `server.rs`, types in `models.rs`).
-- **UI** *(CTXDSL-related capabilities only)*: a typed client in `mununu-ui/src/api/endpoints.ts` or a hook/component that exercises the behavior.
-
-**What counts as CTXDSL-related.** A capability whose *subject* is a CTXDSL model — authoring, evaluating, composing, visualizing, synthesizing from, or importing into one. The UI is a CTXDSL workbench, and that is the work it exists to support.
-
-Everything else is **CLI + API**, and the absence of a UI affordance for it is **not drift**: RTL / SVA verification verbs (`sv verify-auto`, `sv lint`, `sv mutate`, the `btor2` verbs), contract / black-box tooling, and CI-gate ergonomics (exit codes, report formats, verdict expectations). These are consumed by CI lanes and orchestrators, not by someone at a canvas — a UI control for "assert this run produced exactly these verdicts" would be an affordance with no user.
-
-This does **not** ask anyone to remove existing UI. It removes the obligation to grow it for work that is not about CTXDSL, so that a CI-facing feature is not blocked on, or padded with, a panel nobody opens.
-
-The `/parity-check` skill verifies this automatically. PRs that drift **CLI ↔ API** are rejected. A capability that lands on only one of those two must declare itself inline using the Documentation Traceability surface tag format: `surface: CLI-only — <one-line justification>`. A non-CTXDSL capability with no UI needs no such tag — that is now the expected shape.
+- **CLI**: a clap subcommand or flag in `crates/mununu-cli/src/main.rs`. **API**: a handler in `crates/mununu-core/src/api/handlers.rs` (route in `server.rs`, types in `models.rs`). **UI** (CTXDSL only): a typed client in `mununu-ui/src/api/endpoints.ts` or a hook/component.
+- CTXDSL-related = the capability's *subject* is a CTXDSL model (authoring, evaluating, composing, visualising, synthesising from, importing into). RTL / SVA verbs, contract tooling and CI-gate ergonomics are CLI + API; the absence of a UI affordance for them is not drift.
+- `/parity-check` verifies this. A capability on only one of CLI / API declares itself with the traceability surface tag: `surface: CLI-only — <one-line justification>`.
 
 ## Soundness Guarantees
 
-Mununu is a model checker that exhaustively verifies finite-state models. Its verdicts are correct **for the model**. Whether they transfer to the real system depends on the abstraction *and* on the alternation structure of the property.
+Mununu exhaustively verifies finite-state models; its verdicts are correct **for the model**. Transfer to the real system depends on the abstraction *and* on the property's alternation structure.
 
-### 2-valued abstraction (legacy primitives, hand-written CTXDSL, XState, microcode, agentic, …)
+**2-valued abstraction** (legacy primitives, hand-written CTXDSL, XState, microcode, agentic, …) — only the lattice corners are sound: safety + over-approximation → SOUND; liveness + under-approximation → SOUND but weak; liveness + over-approximation and safety + under-approximation → UNSOUND. Properties with **alternating fixpoints** (νμ, GR(1) response, nested obligations) collapse under a single direction — the outer ν needs a may-style upper bound and the inner μ a must-style lower bound.
 
-When the abstract model carries no may/must distinction (every transition is treated as definite), only the corners of the lattice are sound:
+**KMTS + Kleene 3-valued** (canonical for SystemVerilog / BTOR2; available to adapters that opt in) — may and must edges tracked separately, the full modal μ-calculus over `KleeneT` / `KleeneF` / `KleeneBot`; Bruns–Godefroid (CONCUR 2000) gives definite verdicts that transfer at **every** alternation depth; `KleeneBot` triggers a CEGAR refinement. Use it whenever a μ sits inside a ν (or vice versa), or for a sound liveness verdict on an over-approximation. Theory and the per-adapter migration table: [`docs/abstraction.md`](docs/abstraction.md) §"The canonical recipe", [`docs/design/kmts-theory.md`](docs/design/kmts-theory.md).
 
-- **Safety + over-approximation → SOUND.** If the model says safe, the real system is safe (within the modeled scope). Extra behaviours can only add violations, not hide them.
-- **Liveness + over-approximation → UNSOUND.** The model may show spurious progress from noop loops, havoc branches, or async interleaving without fairness.
-- **Safety + under-approximation → UNSOUND.** The model may miss violations from behaviours it doesn't capture.
-- **Liveness + under-approximation → SOUND** but trivially weak (fewer paths only).
+**Discipline.** Document every `eval_expr → None` choice as over- or under-approximation with a `// SOUNDNESS:` comment (`/soundness-check` flags undeclared sites); never mix directions within one model without saying so; add a soundness regression test for every new abstraction decision; prefer the KMTS path (`Transition::modality`, `state_3valued_predicates`) when emitting a CLTS for an alternating property — legacy adapters produce `Sharp`-everywhere KMTSes that carry only the 2-valued guarantees.
 
-Properties with **alternating fixpoints** (νμ-style; GR(1) response patterns; nested obligations) collapse under plain over- or under-approximation — the outer ν needs a *may*-style upper bound while the inner μ needs a *must*-style lower bound, and a single direction cannot supply both. For these properties, use the KMTS path below.
-
-### KMTS + Kleene 3-valued domain (canonical recipe for SystemVerilog/BTOR2; available to other adapters that opt in)
-
-The KMTS pipeline tracks **may** and **must** edges separately and evaluates the full modal-mu calculus over a 3-valued (`KleeneT` / `KleeneF` / `KleeneBot`) domain. Bruns–Godefroid (CONCUR 2000) gives the soundness theorem: definite verdicts (`KleeneT`, `KleeneF`) transfer to the concrete system at **every alternation depth**, including νμ. A `KleeneBot` verdict triggers a CEGAR refinement step (R.5) that splits one abstract predicate and reruns.
-
-Use the KMTS path whenever the property has a μ inside a ν (or a ν inside a μ), or when you need a sound liveness verdict on an over-approximating abstraction. See [`docs/abstraction.md`](docs/abstraction.md) §"The canonical recipe — KMTS predicates" and [`docs/design/kmts-theory.md`](docs/design/kmts-theory.md) for the theory and the per-adapter migration table.
-
-### Discipline for contributors
-
-- Document every `eval_expr → None` choice as over-approx or under-approx using a `// SOUNDNESS:` comment; `/soundness-check` flags undeclared sites.
-- Never mix directions within a single model without documenting it.
-- Add a soundness regression test for any new abstraction decision.
-- When emitting a CLTS for a property with alternating fixpoints, prefer the KMTS path (`Transition::modality`, `state_3valued_predicates`) over the legacy primitives. Legacy adapters produce `Sharp`-everywhere KMTSes vacuously, which only carry the 2-valued guarantees above.
-
-Strategy extraction uses **signature-based selection** from iteration ranks. Both players have memoryless winning strategies (positional determinacy of parity games, Zielonka 1998); memoryless on the model-checking product = finite-memory on the plant. See [`docs/synthesis.md`](docs/synthesis.md) for `ControllerMode` options, lasso trace format, counterstrategy emission, and the Skolem-paradigm rules for nondeterminism vs. controllability.
-
-Contract-specific soundness (chaotic-stub default, cyclic-discharge handling, codesign rules) is in [`docs/design/black-box-modules.md`](docs/design/black-box-modules.md) and [`docs/design/hw-sw-codesign-extraction.md`](docs/design/hw-sw-codesign-extraction.md).
+Strategy extraction uses signature-based selection from iteration ranks; both players have memoryless winning strategies (positional determinacy, Zielonka 1998) — memoryless on the model-checking product = finite-memory on the plant. `ControllerMode`, lasso traces, counterstrategies and the Skolem-paradigm rules: [`docs/synthesis.md`](docs/synthesis.md).
 
 ## Abstraction Guidelines
 
-Every adapter, every CTXDSL source, every sidecar makes an abstraction decision — what to enumerate, what to bucket, what to drop. The Soundness Guarantees section above tells you the three directions (safety + over-approximation = sound, etc.); the **per-subsystem recipe** — which mununu primitive to reach for, when, and what each primitive preserves — lives in [`docs/abstraction.md`](docs/abstraction.md). Read it before authoring a new adapter, a new Kripke-builder rule, or a non-trivial CTXDSL source.
+Every adapter, CTXDSL source and sidecar makes an abstraction decision. The per-subsystem recipe — which primitive to reach for, when, and what it preserves — is [`docs/abstraction.md`](docs/abstraction.md); read it before authoring an adapter, a Kripke-builder rule or a non-trivial CTXDSL source.
 
-The load-bearing rules at a glance:
+- Pick the **minimum** abstraction that keeps the property decidable. Declare the posture explicitly (`AbstractionType::Symbols([…])`, a comment block, a `mem { x : shared }` tag). Annotate every information-dropping decision with `// SOUNDNESS:`. Automated extraction is viable when the shape is uniform and the source carries the structure; everything else gets a parameterised CTXDSL template, not an extractor. Add a regression test for every abstraction decision (the abstract case and one concrete case in the same class).
 
-- **Pick the *minimum* abstraction that keeps the property decidable.** Coarser is fine when safety is the only concern; finer is required when liveness or order-sensitive properties are in play.
-- **Declare the posture explicitly** — `AbstractionType::Symbols([…])` in a sidecar, a comment block at the top of a hand-authored CTXDSL, or a `mem { x : shared }`-style tag in the microcode discipline.
-- **Add a `// SOUNDNESS:` annotation** at every `eval_expr → None` choice and every adapter decision that drops information. State whether it is over- or under-approximation. `/soundness-check` is the audit skill.
-- **Automated extraction is viable when the abstraction shape is uniform across instances and the source format carries the structural information** (`c-codesign` + register-map; the planned `microcode` adapter; the planned chaotic-stub generator). Everything else — pipelines, caches, buses, PLICs, watchdogs — gets a **parameterised CTXDSL library template**, not an extractor.
-- **Add a regression test** for every abstraction decision that touches an adapter or the Kripke builder. The test must exercise the abstract case and at least one concrete case that maps into the same abstraction class.
+### Lever validation — the wall-class matrix `[RULE]` (2026-07-26)
 
-For benchmarks of state-space cost per abstraction choice, see `docs/abstraction.md`'s "What this doc deliberately does not do" — they are not yet shipped, and any claim about absolute state-space numbers must be measured per-model.
-
-### Lever validation — the wall-class matrix `[RULE]` (added 2026-07-26)
-
-**Rule.** A decidability lever or verification mechanism (a new engine, refinement source, abstraction pass, or re-plan operator, and any claim that one "decides / doesn't decide" a class of properties) is validated against the **fixed wall-class set** — `crates/mununu-core/tests/wall_class_matrix.rs` — **not** against whichever design happens to lift or be handy. Run it and record the `class × lever → verdict` matrix with the change:
+A decidability lever (a new engine, refinement source, abstraction pass or re-plan operator, and any claim that one decides a class) is validated against the **fixed wall-class set**, `crates/mununu-core/tests/wall_class_matrix.rs`, not against whichever design is handy:
 
 ```bash
-cargo test -p mununu-core --test wall_class_matrix -- --ignored --nocapture
-# in mununu-sva-pono with MUNUNU_MATHSAT_PATH set, the MathSAT/Craig column comes alive
+cargo test -p mununu-core --test wall_class_matrix -- --ignored --nocapture   # in mununu-sva
 ```
 
-**Why.** Convenience-biased testing conflates *the lever doesn't work* with *we tested it on the wrong class*. A lever that targets wall-class X must be judged on the cases classified X (plus a control of class ≠ X), or its true reach is never measured. (2026-07-26: the matrix showed Craig/emergent-K has **zero marginal reach** over the shipped guard-atom lever on the set — caught *before* integration, unlike `--include-dir` / auto-config-value / F2, which shipped-then-measured-0.)
+Add the lever's column (or run the existing ones), confirm the **soundness invariant** (no lever contradicts a case's oracle) and measure its **marginal reach**. A lever with no marginal reach on the set is not integrated without a recorded justification. A new wall class gets a class-representative case (RTL-lifted preferred). Convenience-biased testing conflates "the lever doesn't work" with "we tested the wrong class". Working notes: `.claude/plans/wall-class-lever-evaluation.md`.
 
-**How to comply.**
-- **New/changed lever:** add its column to the matrix (or run the existing columns), confirm the **soundness invariant** (no lever contradicts a case's oracle verdict) and measure its **marginal reach** (does it decide a case the shipped levers leave ⊥?). A lever with no marginal reach on the set is not integrated into the planner without an explicit, recorded justification.
-- **New wall class discovered:** add a class-representative case to the set (RTL-lifted preferred; synthetic fills the class until a real one lifts) so future levers are tested against it.
-- **Re-evaluating a dropped lever:** run it against the whole set — a lever that decides its target class was mis-rejected on convenience-biased evidence; one that decides nothing of any class has its drop confirmed on principled evidence.
+### Benchmark ledger & lever-fit catalog `[RULE]` (2026-08-04)
 
-The set is the RTL/synthetic union of the ledger's wall taxonomy (§A.3); its *class coverage* is the invariant, and RTL realism per class grows with the P1.1 harness-lift track. Working notes: `.claude/plans/wall-class-lever-evaluation.md`.
-
-### Benchmark ledger & lever-fit catalog `[RULE]` (added 2026-08-04)
-
-**Rule.** All benchmark/corpus verification work — measuring a design, hunting for RTL a lever fits, evaluating a lever's reach — flows through two private working artifacts, and every such change keeps them current:
-
-1. **The benchmark-property ledger** (`.claude/plans/benchmark-property-ledger.md`, gitignored) is the RTL-native validation record and the source of the §D actionable-⊥ % metric. Every corpus MEASUREMENT lands here as a row:
-   - **Measured-only.** A row is a *measured verdict*, never a merely matched candidate. Un-measured candidates go in the tiered **candidate backlog** with their lift-status named.
-   - **Non-vacuity-gated.** Every property row passes the mandatory non-vacuity gate (both directions of the target reachable — ship the `EF(target != v)` dual); a stuck/vacuous target is excluded.
-   - **RTL-native + reproducible.** Rows are lifted from source (recipe recorded), not hand-authored fixtures. Honest ∅ / ⊥ rows are recorded too — they *bound* a lever's reach (the FIFO-rate and csrng-persistence ∅ rows are as load-bearing as the spiCtrl rescue).
-   - Subject to [Claims Integrity]; license-aware (measured-and-recorded ≠ vendored as a CI fixture).
-
-2. **The lever-fit shape catalog** (`.claude/plans/lever-fit-shape-catalog.md`, gitignored) maps *design shape → lever → measurement recipe* for every shipped lever. A corpus hunt matches designs against it; a NEW lever adds its target shape to it (and, per the [wall-class matrix] rule above, a class representative to `wall_class_matrix.rs`).
-
-**Why.** §D's actionable-⊥ % is the number the verification-core track moves; the catalog makes "which RTL benefits from which lever" mechanical and repeatable. Drift between a measurement and the ledger — or an ad-hoc hunt that ignores the catalog — silently loses the corpus-validation signal. The three artifacts compose: the **catalog** finds candidates → the **ledger** records measured rows (and the lift-status of the rest) → the **wall-class matrix** gates whether a lever earns integration.
-
-**How to comply.** After any corpus measurement or lever hunt: add/update the ledger row(s) (measured + backlog), extend the catalog if a new lever/shape appeared, and — for a lever integration — run the wall-class matrix. The gating bottleneck is usually the **P1.1 harness-lift track** (sound cutpoints, submodule blackboxing, state naming — a constant tie that alters control semantics is *not* a sound abstraction), not lever-fit; a lift-blocked candidate is a **backlog row with its lift-wall named**, not a silent omission.
+All corpus work flows through two private, gitignored artifacts: the **benchmark-property ledger** (`.claude/plans/benchmark-property-ledger.md` — measured verdicts only, non-vacuity-gated (`EF(target != v)` dual reachable), RTL-native with the recipe recorded; honest ∅ / ⊥ rows included) and the **lever-fit shape catalog** (`.claude/plans/lever-fit-shape-catalog.md` — design shape → lever → recipe). After any corpus measurement or lever hunt, update the ledger rows (measured + backlog with its lift wall named) and extend the catalog; a lever integration also runs the matrix. The usual bottleneck is the P1.1 harness-lift track, not lever fit.
 
 ## Documentation Traceability
 
-**Rule.** Every documentation page or section that describes a feature, flag, endpoint, file format, syntax form, or behavior must be traceable to a *live* code artifact (Rust `struct` / `enum` / `fn`, clap arg, axum handler, TypeScript client, or a checked-in configuration file) that is reachable from at least one of mununu's three user-facing surfaces — **CLI**, **HTTP API**, or **UI**. Documentation that cannot point at such an artifact is either obsolete, aspirational, or unverifiable, and must be marked or removed.
+Full text: [`docs/policies/documentation-traceability.md`](docs/policies/documentation-traceability.md).
 
-**Why.** Doc rot is the single most common reason users distrust the tool. Anchoring docs to symbols lets reviewers grep for drift the moment code is renamed, removed, or made unreachable from any surface.
-
-**Where this applies.** `wiki/**`, `docs/**` (except `docs/architecture/` design notes and planning docs tagged `> Status: planning`), `README.md`, `examples/**/README.md`, and the `description:` / inline guidance inside `.claude/agents/**` and `.claude/skills/**`.
-
-**Anchor format.** Every H2 / H3 section that documents a concrete capability must carry a *Source of truth* line near the top:
+Every page or section under `wiki/**`, `docs/**`, `README.md`, `examples/**/README.md` and the `.claude/agents|skills` guidance that describes a feature, flag, endpoint, format, syntax or behaviour carries, near its top, an anchor to a *live* artifact reachable from CLI, API or UI:
 
 ```markdown
 > Source of truth: [`<symbol or path>`](<relative path>#L<line>) — surface: CLI | API | UI | (CLI+API+UI)
 ```
 
-The path must be a real file in this workspace. Line numbers are optional but recommended for items inside long files. The surface tag declares which of the three surfaces exposes the documented behavior; single-surface tagging requires inline justification (`surface: CLI-only — <reason>`).
-
-**Not covered.**
-
-- Pedagogical "concept" sections (what mu-calculus is, what a Kripke structure is). Tag them `> Concept: <one-line>` so `/docs-traceability` skips them.
-- Planning, vision, or future-work documents. Tag them `> Status: planning` at the top of the file.
-- Tutorial prose that walks through running an example — these anchor to the example file path itself.
-
-**Acceptable "alive".** The symbol is referenced (not just declared) by code reaching a user-facing surface; or the configuration file is consumed by a binary or test target that ships.
-
-**Unacceptable.** Anchors to `#[allow(dead_code)]` symbols, deleted-test references, non-default feature flags no surface enables, files outside the repo, closed-source dependencies, or `mununu-private/`.
-
-**Drift detection.** The `/docs-traceability` skill walks every Markdown file under covered paths, parses each `> Source of truth:` line, and verifies the anchor resolves, the symbol exists at the cited line, and the surface tag matches at least one reachable mention on that surface. Broken anchors fail the check. New sections without an anchor fail unless tagged `> Concept:` or `> Status: planning`.
-
-**Renames and removals.** The same commit that renames or removes a symbol must update every documentation anchor that points at it. `/parity-check` confirms a *feature* is wired across surfaces; `/docs-traceability` confirms a *doc page* still points at code that exists. Both must pass for a change to ship.
-
-### Documentation Cadence Guideline
-
-**Rule.** When more than **10 commits** have landed on `main` since the last commit touching `docs/`, `wiki/`, `README.md`, or `examples/`, the contributor's next commit should either:
-
-1. Include a `docs/` or `wiki/` delta capturing accumulated changes, OR
-2. Run `/docs-traceability` and record the verdict (no drift detected) in the commit message or a `.claude/reviews/docs-traceability/` note.
-
-**Why.** The per-commit discipline already documents inline changes (commit messages, module `//!` docs, `// SOUNDNESS:` annotations). But user-facing docs (`docs/abstraction.md`, the wiki, example READMEs) drift in batches — a stretch of feature commits without wiki touches accumulates surface that authors of CTXDSL / API / UI consumers can't discover. The cadence rule turns that drift into a visible signal.
-
-**How to check.**
-
-```bash
-make docs-audit                       # default threshold = 10 commits
-make docs-audit DOCS_THRESHOLD=20     # custom threshold
-```
-
-`scripts/docs-audit.sh` (the underlying script) reports:
-- The commit count since the last docs/wiki touch.
-- Whether the threshold has been exceeded.
-- A categorised breakdown of which code areas (CTXDSL syntax, API surface, CLI surface, composition, formula operators, adapters) saw recent commits — narrowing the search space for the actual wiki / docs update.
-- A cross-repo reminder when `api/models.rs` was touched (mununu-ui's `src/api/types.ts` may need a matching type update).
-
-**Cadence enforcement.** The check is **advisory**, not blocking — exit code 1 on threshold breach surfaces the warning but does not fail CI or hooks. The expectation is that contributors invoke `make docs-audit` periodically (e.g. before a multi-commit push, or at the close of a multi-session R-track sub-item arc).
-
-**Cross-repo doc sync (mununu ↔ mununu-ui).** When `api/models.rs` field shapes change, `mununu-ui/src/api/types.ts` typically needs a matching update. There is no automated typegen between the two repos today; the audit script flags this as a manual reminder. Future work: an OpenAPI-driven typegen pipeline would make this drift detectable mechanically.
-
-**Surface-of-truth anchors take precedence.** When the cadence rule fires, the contributor's first move is `/docs-traceability` (anchor-by-anchor verification of the existing docs) — that surfaces the most actionable drift. Adding new doc sections to cover new code is a secondary follow-up.
+Exempt: `> Concept: <one-line>` sections and files tagged `> Status: planning`. Dead code, deleted tests, non-default features, files outside the repo and `mununu-private/` are not acceptable anchors. `/docs-traceability` verifies every anchor; the commit that renames or removes a symbol updates its anchors. **Cadence (advisory):** after more than 10 commits on `main` without a docs touch, the next commit ships a docs delta or records a `/docs-traceability` verdict — `make docs-audit` reports the count and the areas that moved.
 
 ## Claims Integrity
 
-Every public claim about mununu's ability to find bugs, verify properties, or improve security of external systems must be backed by reproducible evidence against real implementations. This applies to README examples, wiki case studies, blog posts linked from the repo, conference papers, and any material that references real-world systems.
-
-The load-bearing rules at a glance:
-
-- **Models from source, not documentation.** Models written from API docs are "design pattern demonstrations," never findings about the real system.
-- **Planted bugs are demos, not findings.** Language must reflect this.
-- **Mutations are property-adequacy, not bug findings.** `sv mutate` injects a *deliberate* structural fault to test whether the properties catch it; a flip measures the **spec's** adequacy, a non-flip is a vacuous property — never frame a mutation result as a discovered bug in the design.
-- **Severity honesty.** Distinguish vulnerability vs. correctness issue vs. structural gap vs. design-pattern violation.
-- **Reproduction path required.** Either a real-system test case or an explicit "structural, not yet reproduced" disclosure.
-- **Verification-first workflow.** The CTXDSL model + `mununu context eval` is the oracle, not human code reading.
-- **RTL counterexamples** must be validated under Verilator in the sibling `hw-verif:latest` image; model-only traces are labeled as such.
-- **Hand-authored LLVM IR fixtures** demonstrate matcher behavior, not end-to-end clang handling. Real `.c` files are required for "the extractor handles `<idiom>`" claims.
-- **Editorial framing for publications**: lead with the example, not the feature.
-
-The full policy — with the abstraction-soundness procedure, the extraction-pipeline contract, the RTL evidence rules, the C-extractor unit-vs-end-to-end distinction, and the editorial framing rules for LinkedIn / Substack / talks — is at [`docs/policies/claims-integrity.md`](docs/policies/claims-integrity.md). Read it before publishing anything that references a real system.
+Every public claim about finding bugs, verifying properties or improving the security of external systems is backed by reproducible evidence against real implementations. Models from source, not documentation; planted bugs are demos; `sv mutate` results measure the **spec's** adequacy, never a bug in the design; severity honesty (vulnerability vs correctness vs structural gap vs pattern violation); a reproduction path or an explicit "structural, not yet reproduced"; the CTXDSL model + `mununu context eval` is the oracle, not human reading; RTL counterexamples are validated under Verilator in the `mununu-sva` image, model-only traces are labelled as such; hand-authored LLVM IR fixtures demonstrate matcher behaviour, not end-to-end clang handling; publications lead with the example, not the feature. Full policy: [`docs/policies/claims-integrity.md`](docs/policies/claims-integrity.md).
 
 ## Cross-Repo Impact Reporting
 
-Every PR that changes user-visible behaviour of a mununu surface consumed by a downstream repo (ROSF, monono, mununu-ui, or any future consumer) must ship a **consumer briefing** — a single markdown file under [`docs/consumer-briefings/`](docs/consumer-briefings/) — that names the consumers affected, explains what changed for them, and states which Docker images (if any) need rebuilding.
-
-The load-bearing rules at a glance:
-
-- **When it fires.** Verdict-value or verdict-message changes; JSON response-shape changes; CLI flag adds/removes/renames; HTTP route adds/removes; verdict-semantics changes (properties that used to `Skipped` now decide, `Holds` becomes `Violated` or vice versa — bugfixes count); subprocess-tool version bumps in `docker/Dockerfile*`; sidecar-schema changes.
-- **What the briefing contains.** Audience banner, TL;DR, per-consumer section (what to update, what to expect, report-parsing impact, Docker rebuild disposition, test-the-transition steps), a mandatory Docker-rebuild table (`Image | Impact | Rebuild required?` — no blanks, no "Maybe"), a shared footer, provenance (fix commit + issue + design doc + policy link), and a "not covered here" follow-ups list.
-- **Where it lives.** `docs/consumer-briefings/YYYY-MM-<slug>.md`. One file per PR that fires the policy; a multi-surface PR gets ONE briefing covering all changes so consumers read one document per adoption round.
-- **What is exempt.** Internal refactors that preserve every observable behaviour; test-only changes; doc changes that only clarify existing behaviour; changes to `REVIEW_LOG.md`, `ONBOARDING.md`, or `scratchpad/`.
-
-The full policy — trigger criteria, mandatory sections, standard Docker-rebuild verdict vocabulary, enforcement notes, and the historical context that motivated writing it down — is at [`docs/policies/cross-repo-impact.md`](docs/policies/cross-repo-impact.md). Read it before opening a PR that touches any mununu-consumer surface.
+Every PR that changes user-visible behaviour of a surface a downstream repo consumes (rosf, monono, mununu-ui, …) ships **one consumer briefing** under [`docs/consumer-briefings/`](docs/consumer-briefings/) (`YYYY-MM-<slug>.md`): audience banner, TL;DR, per-consumer section, a Docker-rebuild table with no blanks, provenance, "not covered here". It fires on verdict-value or verdict-message changes, JSON shape changes, CLI flag / HTTP route adds, removes or renames, verdict-semantics changes (bugfixes count), subprocess-tool bumps and sidecar-schema changes. Internal refactors, test-only and clarifying-doc changes are exempt. Full policy: [`docs/policies/cross-repo-impact.md`](docs/policies/cross-repo-impact.md).
 
 ## Reproducers Before Fixes
 
-**Rule.** A change that claims to fix a defect declares how the defect was reproduced, in a commit
-trailer, using exactly one of three values:
+Full text and incidents: [`docs/policies/reproducers-before-fixes.md`](docs/policies/reproducers-before-fixes.md).
 
-```
-Repro: in-repo <test or fixture name>
-Repro: consumer-only <who> — <why it cannot be reproduced here>
-Repro: none — containment only
-```
-
-**`Repro: none — containment only` may NOT accompany `closes #N` on a defect issue.** Containment is a
-legitimate, often urgent change — turning a crash into a verdict, a budget into an abstention — but it
-does not establish a cause, so it leaves the cause issue open.
-
-**Why a FIELD and not a paragraph.** The failure this prevents is not theorising — a mechanism is what
-makes an observation actionable. It is writing the mechanism at the **same confidence as the
-observation, in the same sentence, in a tracked file.** The observations survive because they are cheap
-to check and someone checked them; the mechanisms die because they are expensive to check and nobody
-did. Prose cannot hold that distinction under editing; a field can. (The articulation is monono's,
-after three retractions on mununu#543 — theirs, and ours.)
-
-**Why at all.** A fix for an unestablished cause is indistinguishable from a fix for a cause that does
-not exist, and we have shipped the latter. `crates/mununu-core/src/clts/mod.rs:1725` carries a custom
-`Drop for Clts` whose stated purpose is to avoid a stack overflow from `Vec<Vec<Transition>>`
-"recursively dropping deeply nested structures" — but dropping a `Vec` **iterates** its elements;
-2000 inner `Vec`s do not nest 2000 frames deep. The impl defends against a mechanism that does not
-exist, with a confident comment and no reproducer, and it has been load-bearing-looking ever since.
-
-Two more from the mununu#543 round, both caught only by measuring:
-
-- A consumer published a memory-pressure cause for an abort into four tracked files; their fifth run
-  refuted it. Their diagnosis of their own error is the rule worth importing: **before using a
-  measurement as evidence, ask what it would have shown if the hypothesis were false. If the answer is
-  "the same thing", it is not evidence — and its agreement with you is precisely why it is dangerous.**
-- Our own leading suspect for the same abort (`PredicateExpr`'s boxed recursion, whose depth is set by
-  a Craig interpolant's conjunct count rather than by the design) fit the reported clue exactly and was
-  killed by one afternoon's bisection: it needs ~32,000 nested conjuncts to overflow an 8 MB stack.
-
-**The two lanes, and why the distinction is the whole rule.**
-
-| | containment | cause fix |
-|---|---|---|
-| establishes a cause | no | yes |
-| reproducer required | no | **yes** |
-| may close the cause issue | **no** | yes |
-| must say so | `Repro: none — containment only` | `Repro: in-repo …` |
-
-Blurring them is the failure this rule exists to prevent: a containment that closes the issue retires
-the investigation while the defect is still there.
-
-**What counts as a reproducer.** A test or fixture that **fails on the parent commit and passes on
-this one**. A regression test that passes on the parent is decoration — it locks in behaviour, it does
-not demonstrate a defect.
-
-```bash
-make verify-repro TEST=<test name substring> [REF=HEAD~1]
-```
-
-**Advisory, with a reach limit worth stating** (measured 2026-09-13 against the two fixes that
-motivated the rule — mununu#542 and #544 — both of which came back `INCONCLUSIVE`). In Rust a unit
-test lives *inside* the production file it tests, so the script cannot separate the test from the fix
-by path: it copies the test-bearing file wholesale onto the parent, which copies the fix too. Three
-outcomes:
-
-| outcome | exit | meaning |
-|---|---|---|
-| `CONFIRMED` | 0 | the test builds at `REF` and **fails** — a genuine reproducer |
-| `FAIL — PASSES at REF` | 1 | **the case the rule most needs to catch.** Decoration, not a reproducer |
-| `INCONCLUSIVE` | 3 | the test needs API this commit introduced; **not a pass** — justify in the PR |
-
-So the script reliably catches *decoration* (whenever the test compiles against the parent) and
-reliably refuses to bless anything else. It does **not** mechanically confirm most API-introducing
-fixes, and pretending otherwise would make it the kind of green-while-checking-nothing gate this
-repo keeps finding in other people's CI. **The trailer and review are the enforcement; the script is
-an instrument.** A hunk-level version (applying only `mod tests` hunks) would raise the reach and is
-not yet written.
-
-**`consumer-only` is a real answer, not an escape hatch.** Some defects live in inputs we do not have
-(a consumer's proprietary RTL, a 1-2% timing-dependent abort). Naming the consumer and the obstacle is
-honest and useful; what it forbids is pretending. When a reproducer cannot come here, the fix's PR says
-what evidence *was* obtained and from whom, and — where a derived artifact would make the defect ours
-permanently (a generated BTOR2, a minimised netlist) — records whether that was requested.
-
-**Scope.** Defect fixes. A feature, a refactor that preserves behaviour, or a doc change needs no
-trailer. When in doubt, the question is whether the change asserts that something was *broken*.
+A change that claims to fix a defect declares, in a commit trailer, exactly one of `Repro: in-repo <test>` · `Repro: consumer-only <who> — <why not here>` · `Repro: none — containment only`. Containment may not `close` the cause issue. A reproducer is a test that **fails on the parent commit and passes on this one** — a regression test that passes on the parent is decoration. `make verify-repro TEST=<substring> [REF=HEAD~1]` says `CONFIRMED`, `FAIL — PASSES at REF`, or `INCONCLUSIVE` (the test needs API this commit introduced — not a pass; it also needs a commit to diff). Before using a measurement as evidence, ask what it would have shown if the hypothesis were false; if "the same thing", it is not evidence.
 
 ## Adapter / Emitter Capability Use
 
-The CLTS data model and CTXDSL grammar already express more than most adapters reach for. When writing or modifying an extractor, adapter, or emitter, prefer these primitives over re-encoding source-language features as state-name suffixes or parallel single-label edges.
+Prefer the CLTS / CTXDSL primitives over re-encoding source features as state-name suffixes or parallel single-label edges:
 
-- **Multi-label transitions — a SYNCHRONISATION VECTOR, not alternation (mununu#570).** A single CLTS edge carries a `SmallVec<[LabelId; 4]>` of labels — see `crates/mununu-core/src/clts/mod.rs:265`. CTXDSL: `transition s -> t on label a, label b;` (parser at `crates/mununu-core/src/context_dsl/parser.rs:733`, AST at `crates/mununu-core/src/context_dsl/ast.rs:156`). **The label SET is one compound action: the edge fires on `{a,b}` together, NOT on `a` and NOT on `b`.** Under composition it pairs only with a partner whose shared-alphabet projection is set-identical, so a compound action nobody can match makes the automaton *freeze* — a 7-automaton model collapsed to one reachable state this way, with a safety property holding vacuously. Reach for it when the source feature genuinely is one atomic joint action (a turn-based `{env_*, ctrl_*}` round; a two-party handshake). For "any one of these may happen", use the ALTERNATION spelling `on label a | label b` (mununu#570), which desugars to one single-label transition per alternative; and prefer `on {label a, label b}` when you do mean one joint action, because a bare comma reads like "or". A vector's partners may sit on different automata: the composition collects every member's vectors before its pairwise fold (`CompositionOptions::sync_vectors`, mununu#589), so a three-party rendezvous fires whatever the members' order or names. See [`docs/abstraction.md`](docs/abstraction.md) §"Multi-label transitions are synchronisation vectors".
-- **Per-state predicates.** Kripke-style state labeling via `state_variable_bitset` (`crates/mununu-core/src/clts/mod.rs:1173`) and `state_valuation` (`crates/mununu-core/src/clts/mod.rs:1178`). CTXDSL: `predicates { predicate foo = state S1; }` (parser at `crates/mununu-core/src/context_dsl/parser.rs:485`). Use these instead of encoding state attributes into state names.
-- **Per-state structured valuations.** Hand-write display-only metadata directly on a state: `state S1 { valuations { signal_a = 1; phase = idle; } };`. Realize merges these with adapter-side `ContextDoc.state_valuations` and registers them via `Clts::with_valuation_for_state`. The CTXDSL emitter round-trips them.
-- **Per-label controllability.** `LabelControllability { Controllable, Internal, Uncontrollable }` at `crates/mununu-core/src/clts/mod.rs:248`. Declare controllability in the automaton's `controllable { ... }` / `internal { ... }` blocks; do not fold it into label-name prefixes.
-- **Rich modal guards.** `Guard { labels, current, next, control, max_steps }` at `crates/mununu-core/src/mu_calculus/mod.rs:323`. A single `[...]` or `<...>` modality can constrain all five axes — labels, current-state predicates (`req_cur` / `forb_cur`), next-state predicates (`req_next` / `forb_next`), controllability class (`ctrl = controllable | environment | all`), and step bound (`steps`). Syntax: `[(labels = {a}, req_next = {active}, ctrl = controllable)] φ`. Reach for `req_next` / `forb_next` whenever a property is naturally phrased "after this transition the system must be in a state where …" — the most under-used primitive.
+- **Multi-label transitions are a SYNCHRONISATION VECTOR, not alternation** (mununu#570): `transition s -> t on label a, label b;` fires on `{a, b}` together (`crates/mununu-core/src/clts/mod.rs`, `SmallVec<[LabelId; 4]>`), and under composition pairs only with a set-identical partner — an unmatched compound action freezes the automaton (a 7-automaton model collapsed to one reachable state, a safety property holding vacuously). "Any one of these" is `on label a | label b`; prefer `on {label a, label b}` when you mean one joint action. A vector's partners may sit on different automata (`CompositionOptions::sync_vectors`, mununu#589). See [`docs/abstraction.md`](docs/abstraction.md) §"Multi-label transitions are synchronisation vectors".
+- **Per-state predicates** (`state_variable_bitset`, `state_valuation`; CTXDSL `predicates { predicate foo = state S1; }`) instead of attributes in state names. **Per-state valuations** (`state S1 { valuations { … } };`) round-trip through the emitter.
+- **Per-label controllability** (`LabelControllability::{Controllable, Internal, Uncontrollable}`) in the `controllable { … }` / `internal { … }` blocks, not in label-name prefixes.
+- **Rich modal guards** (`Guard { labels, current, next, control, max_steps }`): `[(labels = {a}, req_next = {active}, ctrl = controllable)] φ` — reach for `req_next` / `forb_next` whenever the property says "after this transition the system must be in a state where …".
 
-**Reference implementations.** Signal-state emit path with turn-aware `[(ctrl=Controllable)]` guards: `crates/mununu-core/src/adapter/emit.rs:587-872`. SystemVerilog Kripke valuations: `crates/mununu-core/src/adapter/systemverilog/kripke.rs:450`.
-
-**Anti-pattern.** Do not re-encode source features as state-name suffixes (e.g. `S1_req_high`). Do not use parallel single-label edges where the source feature is genuinely ONE joint action — that is what a multi-label edge is for. **The converse is equally a defect and is the easier mistake to make:** collapsing independent alternatives into one multi-label edge does not "tidy" them, it creates a compound action that may be unsatisfiable under composition (mununu#570). If the alternatives can occur separately, they are separate transitions.
-
-**Rule.** When adding or modifying an adapter or emitter, prefer these primitives. If a primitive is intentionally unused, leave a one-line comment explaining why (e.g. `// AIGER inputs are single-bit; multi-label has no semantic content here`). Reviewers and the `/soundness-check` skill flag silent under-use.
+Reference implementations: `crates/mununu-core/src/adapter/emit.rs` (turn-aware `[(ctrl=Controllable)]` guards), `crates/mununu-core/src/adapter/systemverilog/kripke.rs` (Kripke valuations). When a primitive is intentionally unused, leave a one-line comment saying why; `/soundness-check` flags silent under-use.
 
 ## Git Operations & Destructive Commands
 
-**Destructive git operations require explicit user instruction in the current session prompt.** This applies to:
+**Destructive git operations require explicit user instruction in the current session prompt:** `git reset --hard`, `git push --force` (any variant), `git checkout -- <paths>` / `git restore <paths>`, `git clean -f`, `git branch -D` of unmerged work, `git stash drop|clear`, interactive rebases that squash or drop unpushed work. Working-tree state is not in the reflog; a botched revert plus `--hard` reset once cost ~1,730 lines that no local-history snapshot recovered.
 
-- `git reset --hard` (discards working tree changes — irrecoverable from reflog)
-- `git push --force` / `git push -f` / `git push --force-with-lease` (overwrites remote history)
-- `git checkout -- <paths>` / `git restore <paths>` (discards working tree changes for paths)
-- `git clean -f` / `git clean -fd` (deletes untracked files)
-- `git branch -D <branch>` (force-deletes a branch with unmerged commits)
-- `git stash drop` / `git stash clear`
-- `git rebase --interactive` followed by squash/drop of unpushed-but-staged work
-
-**Why.** Working-tree state is not recoverable from `git reflog` — only commits are. A `--hard` reset on a working tree carrying hours of uncommitted work permanently loses that work unless an editor's local-history snapshot exists. (Incident: `.claude/plans/update-the-graph-endpoint-crystalline-frost.md` — a botched revert + `--hard` reset cost ~1730 lines of in-flight work that VSCode local history, Time Machine, and APFS snapshots could not recover.)
-
-**How to apply.**
-
-- Never run any of the above to "clean up" or "reset state" unless the user has typed an instruction containing the specific command.
-- If a botched `git revert` or merge-conflict resolution is in progress, prefer `git revert --abort`, `git merge --abort`, `git cherry-pick --abort`, or `git reset --soft` (preserves working tree).
-- If the working tree must be discarded for a routine operation (e.g. switching branches), first `git stash push -u -m "<reason>"` to preserve untracked files, and surface the stash to the user.
-- For pre-commit hook failures, *create a new commit* — never `--amend` and never `--no-verify` unless the user explicitly authorised it.
-- Before any operation that may modify the working tree of files the user has been actively editing, snapshot via a savepoint branch + push to remote (`git checkout -b recovery/savepoint-<date> && git add -A && git commit --no-verify -m "savepoint" && git push -u origin <branch>`).
-
-**Propagation.** Any subagent invocation that performs git operations on a real repo (not an `isolation: "worktree"` clone) inherits this restriction. Subagents may take destructive actions only inside `isolation: "worktree"` agents.
+Prefer `--abort` / `git reset --soft`; stash with `-u -m "<reason>"` before any routine operation that must discard a tree, and surface the stash; on a hook failure make a **new** commit — never `--amend`, never `--no-verify` without authorisation; before touching files the user is editing, push a savepoint branch. Subagents inherit this; destructive actions only inside `isolation: "worktree"` agents.
 
 ## Code Reuse, Dead Code, Performance, Security
 
-- **Before writing new utility code**, check if the functionality already exists. Prefer established libraries over hand-rolling for common tasks. Pin with ranges in `Cargo.toml`.
-- **Remove unused code and dependencies promptly.** Use `cargo clippy` and `cargo audit` to catch issues. No "just in case" packages.
-- **Test naming describes behavior, not implementation.** Prefer integration tests over excessive mocking — but for an interface between two internal layers, see [Test the Layer the Bug Lives In](#test-the-layer-the-bug-lives-in), which is about a different question and resolves the apparent tension. Pre-commit hook is the primary CI gate; GitHub Actions is secondary.
-- **API handler performance.** Every handler re-parses and re-realizes context from scratch — keep handler logic lightweight after realization. **Never run controller synthesis in summary endpoints.** Summarize reports declarations; synthesis belongs only in the synthesis endpoint. Add timing instrumentation (`tracing::info!` with `Instant`) to any new handler; log parse, realize, and work phases separately. The UI client has a 10-second default timeout and a 120-second extended timeout; design accordingly.
-- **Formula inversion (fixpoint duality).** When inverting mu-calculus formulas, do NOT negate fixpoint variable references inside the body — the dual fixpoint's changed starting point handles the semantics. Negating variables causes infinite oscillation between all-true and all-false.
-- **Wiki maintenance.** Wiki pages live in `wiki/` and push to the GitHub wiki repo. Update when DSL syntax, endpoints, UI flow, composition modes, or formula operators change. Every CTXDSL example in wiki pages must be tested against the binary before publishing. Every wiki page must comply with Documentation Traceability.
-- **Security (OWASP).** Never interpolate user input into commands or templates. Validate and constrain all external input. No sensitive data in logs.
+- Check for existing functionality before writing utility code; prefer established libraries, pinned with ranges. Remove unused code and dependencies promptly (`cargo clippy`, `cargo audit`); no "just in case" packages.
+- Test names describe behaviour, not implementation. Prefer integration tests over excessive mocking — except at an internal seam, where [Test the Layer the Bug Lives In](#test-the-layer-the-bug-lives-in) applies.
+- **API handlers** re-parse and re-realize from scratch — keep post-realization work light; never run controller synthesis in a summary endpoint; add `tracing::info!` timing per phase; the UI client times out at 10 s (120 s extended).
+- **Formula inversion**: do not negate fixpoint variable references inside the body — the dual fixpoint's changed starting point handles the semantics; negating them oscillates forever.
+- **Wiki** pages (`wiki/`) are updated when DSL syntax, endpoints, UI flow, composition modes or formula operators change; every CTXDSL example in them is tested against the binary before publishing.
+- **Security (OWASP)**: never interpolate user input into commands or templates; validate external input; no sensitive data in logs.
 
-## Test the Layer the Bug Lives In `[RULE]` (added 2026-09-27)
+## Test the Layer the Bug Lives In
 
-**Rule.** When a change teaches one layer to produce something new, add a test **at the seam** where
-the next layer consumes it — in the cheapest tier that can express the question. Reach for an
-end-to-end test to *detect* a class of defect, never as the *home* for one.
+When a change teaches one layer to produce something new, add a test **at the seam** where the next layer consumes it, in the cheapest tier that can express the question. An end-to-end test *detects* a class of defect; it is never the *home* of one. (mununu#565: a new translator atom shape passed eighteen unit tests and `make ci`, and only a ten-minute `#[ignore]`d e2e caught it — the defect was in a pure classifier the same file tested eight ways in 0.00 s; what was missing was a table from "the translator can emit shape X" to "the consumer accepts shape X".)
 
-**Why.** mununu#565 taught the SVA translator a new atom shape (a minted bit-slice signal). Eighteen
-unit tests passed. `make ci` passed. The feature was half-broken, and the only thing that caught it
-was an `#[ignore]`d e2e needing slang + yosys + z3 and **ten minutes in a container** — a tier
-neither `make ci` nor CI runs (see the e2e note under CI Requirements).
-
-The defect was never in the toolchain. It was in `seed_from_formula`, a **pure function over mocked
-closures that the same file already tested eight ways, in 0.00 s**. What was missing was not a
-cheaper e2e; it was a table connecting *"the translator can now emit shape X"* to *"the consumer
-accepts shape X"* — an interface contract between two layers that were each individually correct.
-
-**How to comply.**
-
-- **Find the pure function.** Most cross-layer defects land in one: a classifier, a lowering, a
-  normaliser. If it takes closures or `&str` and returns a decision, it is testable in
-  microseconds. `every_translator_atom_shape_has_a_known_seeding_classification`
-  (`adapter/slang/verify_auto.rs`) is the worked example — one row per producible shape, so adding
-  a producer arm without a consumer row shows up red on the author's own machine.
-- **Keep the e2e, and keep it honest about its job.** It is the detector that tells you a seam
-  exists and the cross-check that the cheap tier is faithful. It is a bad regression home: too slow
-  to run, and in this repo it does not run at all by default.
-- **⚠️ Derive the mock from the real call site; never invent it.** A contract test is only as good
-  as the fidelity of its inputs, and a fabricated mock tests your assumption rather than the
-  system. When the cheap tier and the e2e disagree, **that disagreement is a finding** — record it
-  and go measure, rather than asserting whichever answer you expected. (Both halves of this were
-  learned the hard way in the same session: the first version of the test above encoded a
-  fabricated expectation, and its measured value still contradicts the e2e. The row was left out
-  with the discrepancy documented, not resolved by preference.)
-
-**Relationship to the existing guidance.** "Prefer integration tests over excessive mocking" still
-holds for *behaviour*. This rule is about *interfaces between internal layers*, where the
-integration test is the expensive detector and the seam test is the cheap gate. They are not in
-tension: one asks "does the feature work", the other asks "can the next layer consume what this one
-now emits".
+- **Find the pure function** — a classifier, a lowering, a normaliser; `every_translator_atom_shape_has_a_known_seeding_classification` in `adapter/slang/verify_auto.rs` is the worked example.
+- **Keep the e2e** as the detector and the cross-check that the cheap tier is faithful.
+- **Derive the mock from the real call site; never invent it.** When the cheap tier and the e2e disagree, that disagreement is a finding — record it and measure, rather than asserting the answer you expected.
 
 ## Available Agents and Skills
 
-These live under `.claude/agents/**` and `.claude/skills/**`. Invoke them rather than reproducing their logic inline.
+Under `.claude/skills/**` (invoke as `/<name>`) and `.claude/agents/**` (spawn by name). Invoke them rather than reproducing their logic inline.
 
 | Name | When to invoke |
 |---|---|
-| `/quality-session` | Metric-driven refactoring session with before/after measurement. Not a point-in-time review. |
-| `/quality-inventory` | One-shot SLOC / pub-count / nesting / dead-code inventory over a scope. |
-| `/design-review` | Qualitative KISS / DRY / SOLID / YAGNI review of a target scope. |
-| `/parity-check` | Verifies a capability ships across CLI + API + UI. Run before claiming a feature is "done." |
-| `/docs-traceability` | Walks Markdown under covered paths and verifies every `Source of truth:` anchor. |
-| `/soundness-check` | Flags `eval_expr → None` choices that are undocumented or silent under-uses of CLTS / CTXDSL primitives. |
-| `/review-orchestrator` | Coordinates a full review across `/parity-check`, `/docs-traceability`, and the qualitative skills. |
-| `/domain-adequacy` | Checks that a domain profile (agentic, codesign) covers the controllability / composition / label conventions for its target. |
-| `target-executor` | RTL counterexample reproduction agent. See its Phase 3.5 for the Verilator-under-`hw-verif:latest` procedure and `.claude/reviews/prospector/staging/RTL-002/repro/` for the canonical pattern. |
+| `/parity-check` | Verifies a capability is wired across CLI + API (+ UI for CTXDSL). Run before calling a feature "done". |
+| `/docs-traceability` | Walks the covered Markdown and verifies every `Source of truth:` anchor. |
+| `/soundness-check` | Flags undocumented `eval_expr → None` choices and silent under-use of CLTS / CTXDSL primitives. |
+| `/design-principles` | KISS / DRY / SOLID / YAGNI review of a target scope. |
+| `/rust-best-practices` | Idiomatic-Rust review: ownership, error handling, API shape. |
+| `/security-audit` | Vulnerabilities, `unsafe`, input handling. |
+| `/test-coverage` | Coverage, test quality, missing scenarios. |
+| `/quality-inventory` | One-shot SLOC / pub-count / nesting / dead-code inventory. |
+| `quality-session` | Metric-driven refactoring session with before/after measurement (not a point-in-time review). |
+| `review-orchestrator` | Runs the review skills and produces one consolidated report. |
+| `domain-adequacy` | Checks a domain profile (agentic, codesign) covers its controllability / composition / label conventions. |
+| `sidecar-auditor` | Audits every sidecar implementation for redundancy and design; analysis and a phased plan, no edits. |
+| `verification-prospector` | Mines literature and corpora for verification targets; maintains the backlog. |
+| `target-executor` | Takes one backlog target end to end (spec / sidecar / CTXDSL, run, report); its Phase 3.5 is the Verilator-under-`mununu-sva` counterexample procedure. |
 
-When extending an agent or skill, follow Documentation Traceability for the `description:` and inline guidance.
+When extending one, its `description:` and inline guidance follow Documentation Traceability.
 
 ## Private Files Policy
 
-Sensitive or unpublished materials live in the sibling private repo, not here: `/Users/marianocerrutti/git_repo/mununu-private/`.
-
-| Goes in `mununu` (public) | Goes in `mununu-private` |
-|---|---|
-| Rust source code, adapters, CLI | Paper sources (LaTeX, BibTeX, figures) |
-| Adapter formats: TLSF, AIGER, Promela, XState, SystemVerilog, extraction | Benchmark scripts and expected outputs (`artifact/`) |
-| Extraction adapter (`src/adapter/extraction/`) | Extraction specs with CVE/vulnerability data (`tools/extraction_specs/`) |
-| JSON Schema for `.espec.json` (`tools/extraction_spec_schema.json`) | Protocol CTXDSL models (`examples/protocols/`) |
-| `mununu extraction validate` and `... check` subcommands | MCP extracted CTXDSL (`examples/agentic/mcp_extracted/`) |
-| Shared IR, emitter, format detection | Governance policy scripts (`tools/validate_governance.sh`) |
-| Unit and integration tests | Tutorial materials, slides, cheatsheets |
-| Public documentation (README, wiki) | Internal evaluation data, drafts, notes |
-
-**Extraction-framework boundary.** Tool capabilities (adapter code, validation logic, provenance checking, JSON schema) belong in `mununu`. Private content (actual specs referencing CVEs, generated CTXDSL containing vulnerability details, repo-specific CI policy) belongs in `mununu-private`.
-
-**Rule.** Before adding any file to `mununu/` that you would not want publicly visible, move it to `mununu-private/` instead. Add the path to `mununu/.gitignore` as a safety net. `.gitignore` already excludes `/paper/`, `/artifact/`, `/examples/syntcomp/`, `/examples/scalable/`, and `/tutorial/`. If you add a new sensitive directory, add it to `.gitignore` immediately.
+Sensitive or unpublished material lives in `/Users/marianocerrutti/git_repo/mununu-private/`, never here: paper sources, benchmark scripts and expected outputs, extraction specs with CVE data, protocol CTXDSL models, MCP-extracted CTXDSL, governance scripts, tutorials, evaluation data and drafts. Public: Rust source, adapters and their formats, the extraction framework's *capabilities* (adapter code, validation, schema), shared IR, tests, README and wiki. Before adding a file here you would not want public, move it to `mununu-private` and add the path to `.gitignore` (which already excludes `/paper/`, `/artifact/`, `/examples/syntcomp/`, `/examples/scalable/`, `/tutorial/`).
 
 ## Reasoning & Recommendation Honesty
 
-**Rule.** Never justify a decision, recommendation, or deferral with an argument that mimics human limitations the agent does not have. In particular, do **not** invoke "the session is long," "end of session," "to be safe after a marathon," "I'm running low on steam," or any fatigue/attention-erosion framing as a reason to stop, defer, or hedge. The agent does not tire; turn N is produced at the same capability as turn 1. There is no quality decay that accumulates with wall-clock or turn count.
-
-**Why.** Such framing is both false and load-bearing in the wrong direction: it dresses up a non-reason as a reason, which corrupts the actual cost/benefit the user is trying to weigh. (Incident 2026-06-29: a soundness-critical spike was deferred citing "rushing at the tail of a marathon" — a borrowed human failure mode. The genuine factors were intrinsic task difficulty and context-degradation, the latter of which actually argued for doing the work *while context was warm*, not deferring it.)
-
-**The genuine session-linked factors — name these instead, when they truly apply:**
-
-- **Context degradation** — long context gets summarized; earlier-established invariants (exact decisions, constraints, quantifier directions) can be lost or distorted. This argues for doing dependent work *while the relevant context is still fresh*, not for deferring it to a "fresh session" that must re-derive everything.
-- **Token / compute cost** — a longer session spends more. This is a real budget axis and is the **user's** to weigh; surface it as a cost, do not assume it as a stop condition.
-- **Intrinsic task difficulty / soundness-criticality** — some work (e.g. SMT quantifier placement) demands care *regardless of when it is done*. The correct response is procedural rigor (differential tests, oracles, validation), not postponement. "This is hard and must be validated" is a real reason; "this is hard and the session is long" is not.
-
-**How to apply.** When tempted to defer or hedge, state the *actual* reason. If the only reason is genuinely "the user should make this call," say exactly that — do not pad it with a fabricated fatigue rationale. Build/cache state (warm `target/`, warm docker volumes) typically *improves* over a session, so longer-running work is often cheaper to iterate, not riskier.
+Never justify a decision, recommendation or deferral with a limitation the agent does not have — "the session is long", "end of session", fatigue, attention erosion. Turn N is produced at the same capability as turn 1. The genuine session-linked factors, named when they apply: **context degradation** (earlier invariants can be summarised away — which argues for doing dependent work *while* the context is warm, not deferring it), **token / compute cost** (the user's axis to weigh — surface it, do not assume it as a stop), **intrinsic difficulty / soundness-criticality** (answered with procedural rigour — differential tests, oracles — not postponement). If the only reason is "the user should make this call", say exactly that. Warm build caches typically make longer-running work cheaper, not riskier.
 
 ## Engine Specificity in Proposals
 
-**Rule.** Whenever you propose a solution — an experiment, an approach, a design, or an implementation — state in **brief, explicit prose which engine(s) it uses and how**. Never write "the verifier decides it" or "the engine handles it": name the concrete engine and, for each, its structure, technique, and configuration.
-
-- **Name the engine.** `exact-symbolic` (full-state ROBDD, OxiDD) · `symbolic` / `explicit` (predicate-cube KMTS) · native BMC / k-induction · McMillan interpolation · SPACER · btormc / pono · ranking certificate.
-- **Structure** — the IR/abstraction it runs over: full-state ROBDD · predicate cube + may/must KMTS · QF_BV / QF_AUFBV relation · CHC.
-- **Technique** — bit-blast μ-fixpoint · 3-valued modal-μ + CEGAR · k-induction · CEG-prophecy (arrays) · well-founded ranking.
-- **Configuration** — bit cap (40→192→1024), theory (BvOnly / BvUfArray), must-edge inference (`SmtHyperMust`), timeout / rlimit / BDD deadline, owned vs subprocess.
-- **Role** — decider · differential oracle · cross-check.
-
-**Why.** mununu is a portfolio and "engine" spans three unrelated axes (reachability / μ-calculus / safety-abstraction). An unnamed engine makes a proposal unreviewable: the reader cannot judge **soundness** (which engine transfers for which property class — see [Soundness Guarantees](#soundness-guarantees)), **scale** (ROBDD bit-cap vs SMT), or even **applicability** (arrays go to the SMT predicate-cube, never to ROBDD). Naming the engine + config makes the soundness posture and the cost checkable at a glance, and ties the proposal to the engine roster (`docs/design/engine-routing.md`, `verification-execution-planner.md`).
-
-**How to apply.** One `engine:` line per step, kept succinct. Example: *"shot ②: `symbolic` predicate-cube KMTS — 3-valued may/must, `SmtHyperMust` (Z3 QF_AUFBV must-side), CEGAR-refined; `exact-symbolic` ROBDD is the differential oracle where the cone fits the cap."* Applies to plan docs under `.claude/plans/`, design notes, experiment writeups, and any recommendation you give the user.
+Every proposed experiment, approach, design or implementation states which engine(s) it uses and how — never "the verifier decides it". Name the engine (`exact-symbolic` ROBDD / OxiDD · `symbolic` / `explicit` predicate-cube KMTS · native BMC / k-induction · McMillan interpolation · SPACER · btormc / pono · ranking certificate), its structure (full-state ROBDD · predicate cube + may/must · QF_BV / QF_AUFBV · CHC), technique (bit-blast μ-fixpoint · 3-valued modal-μ + CEGAR · k-induction · CEG-prophecy · well-founded ranking), configuration (bit cap, theory, must-edge inference, budgets, owned vs subprocess) and role (decider · differential oracle · cross-check). One `engine:` line per step. It makes the soundness posture and cost checkable at a glance and ties the proposal to the roster in [`docs/design/engine-routing.md`](docs/design/engine-routing.md).
 
 ## Reference Docs Index
 
-Reference and how-to material — read when the task calls for it, not on every session.
-
-- [`docs/architecture/`](docs/architecture/) — three-layer model, internal data flow.
-- [`docs/dev-container.md`](docs/dev-container.md) — pinned Docker dev container.
-- [`docs/build-recipes.md`](docs/build-recipes.md) — finer-grained `cargo` invocations beyond `make ci`.
-- [`docs/toolchain.md`](docs/toolchain.md) — Rust version pinning and clippy compatibility notes.
-- [`docs/cli-cookbook.md`](docs/cli-cookbook.md) — common `mununu` CLI invocations.
-- [`docs/ctxdsl-modelling-guide.md`](docs/ctxdsl-modelling-guide.md) — hand-authoring CTXDSL: the one-comparison `guard` fragment (`&&` silently disables the transition), pre-state `effects`, where `var == value` atoms bind vs silently evaluate *true*, and the checklist for trusting a hand-authored model. Read before writing a model with `variables`.
-- [`docs/verifying-rtl.md`](docs/verifying-rtl.md) — the property verbs (`btor2 verify` / `verify-liveness` / `verify-recoverability`), no-sidecar `sv verify-auto`, and the agent-over-HTTP integration path (with the toolchain / embedded-SVA / fragment caveats).
-- [`docs/synthesis.md`](docs/synthesis.md) — `ControllerMode`, signature-based extraction, lasso traces, Skolem-paradigm rules.
-- [`docs/abstraction.md`](docs/abstraction.md) — Per-subsystem abstraction recipe: which mununu primitive to reach for, when, what each preserves, and where automated extraction is viable vs where parameterised templates are the right pattern.
-- [`docs/docker.md`](docs/docker.md) — Dockerfile best practices for Rust services in this project.
-- [`docs/adapters/agentic.md`](docs/adapters/agentic.md) — Agentic AI orchestration via native CTXDSL, XState, CrewAI, or LangGraph.
-- [`wiki/Verify-Project-Flow.md`](wiki/Verify-Project-Flow.md) — General N-source verify framework: `verify.toml` manifest, alphabet bindings, composition, the orchestrator pipeline, and the example fleet.
-- [`wiki/Agentic-Adapters.md`](wiki/Agentic-Adapters.md) — Native CrewAI + LangGraph adapter details: accepted JSON shapes, translation semantics, the three agentic property templates.
-- [`docs/adapters/extraction.md`](docs/adapters/extraction.md) — `.espec.json` extraction adapter, mode filtering, property templates.
-- [`docs/adapters/tlsf-aiger.md`](docs/adapters/tlsf-aiger.md) — Turn-based compound-label encoding for TLSF and AIGER.
-- [`docs/policies/claims-integrity.md`](docs/policies/claims-integrity.md) — Full claims-integrity policy (10 rules + editorial framing).
-- [`docs/policies/cross-repo-impact.md`](docs/policies/cross-repo-impact.md) — Cross-repo impact reporting: when a PR must ship a consumer briefing under `docs/consumer-briefings/`, mandatory sections, and the Docker-rebuild-disposition table format.
-- [`docs/api-schemas/`](docs/api-schemas/) — Stable JSON schema for the API wire types. Human-facing `verdict.md`, machine-readable `sv-verify-auto-{request,response}.schema.json` (JSON Schema Draft-07 derived from the Rust types via `schemars`), consumer-flow README. Drift-detector at `crates/mununu-core/src/api/schema.rs::tests::api_schema_drift_*` fails CI on any wire-format change without a schema update. Update via `MUNUNU_UPDATE_API_SCHEMAS=1 cargo test -p mununu-core --lib --features api api_schema_drift_ -- --test-threads=1`.
-- [`docs/design/bdd-variable-ordering.md`](docs/design/bdd-variable-ordering.md) — Exact-engine BDD **variable order**: why cell-major is the textbook bad order for relational structure, why a symbolic shift amount (barrel shifter) is the dominant measured cost and purely an ordering artefact, why the classic interleave-x-with-x′ rule does NOT apply here (we substitute functionally, there are no primed variables), why `deps` clustering does not pay off, and the GC-equilibrium limit on the peak instrument. Read before touching `MUNUNU_BDD_VAR_ORDER` or reasoning from a peak reading.
-- [`docs/design/antecedent-shadow-synthesis.md`](docs/design/antecedent-shadow-synthesis.md) — Antecedent shadow-register synthesis for SVA `|=>` with input-derived antecedents (mununu#476). **SUPERSEDED and removed (mununu#677, 2026-10-14):** the implementation kept the `[] C` after renaming the atom to its sampled register, so the consequent was checked one cycle late — a spurious VIOLATED on every one-shot consequent, masked until inputs-in-the-state (mununu#656) stopped routing those properties to the cube engine. The lift gives the antecedent its same-cycle value as a state predicate; `--no-antecedent-shadow` / `no_antecedent_shadow` / `MUNUNU_NO_ANTECEDENT_SHADOW` are accepted and ignored. Kept as history.
-- [`docs/design/black-box-modules.md`](docs/design/black-box-modules.md) — Document A (foundations of black-box contracts).
-- [`docs/design/rtl-frontend-unification.md`](docs/design/rtl-frontend-unification.md) — Document B (SV frontends).
-- [`docs/design/contract-corpus-and-config.md`](docs/design/contract-corpus-and-config.md) — Document D (corpus + annotations).
-- [`docs/design/hw-sw-codesign-extraction.md`](docs/design/hw-sw-codesign-extraction.md) — Document C (HW/SW codesign).
-- [`docs/design/c-extraction-correctness-scope.md`](docs/design/c-extraction-correctness-scope.md) — Honest scope statement for the C extractor.
+- [`docs/env-vars.md`](docs/env-vars.md) — every `MUNUNU_*` variable the code reads, one line each.
+- [`docs/policies/`](docs/policies/) — the full policies: `ci-and-hooks.md`, `reproducers-before-fixes.md`, `documentation-traceability.md`, `claims-integrity.md`, `cross-repo-impact.md`.
+- [`docs/dev-container.md`](docs/dev-container.md) · [`docs/build-recipes.md`](docs/build-recipes.md) · [`docs/toolchain.md`](docs/toolchain.md) · [`docs/docker.md`](docs/docker.md) — building and running.
+- [`docs/cli-cookbook.md`](docs/cli-cookbook.md) — common `mununu` invocations.
+- [`docs/ctxdsl-modelling-guide.md`](docs/ctxdsl-modelling-guide.md) — hand-authoring CTXDSL: the one-comparison `guard` fragment (`&&` silently disables the transition), pre-state `effects`, where `var == value` binds vs silently evaluates true. Read before writing a model with `variables`.
+- [`docs/verifying-rtl.md`](docs/verifying-rtl.md) — the property verbs (`btor2 verify` / `verify-liveness` / `verify-recoverability` / `verify-justice`), no-sidecar `sv verify-auto`, inputs-in-the-state, the diagnostics, and the agent-over-HTTP path.
+- [`docs/synthesis.md`](docs/synthesis.md) — `ControllerMode`, strategy extraction, lasso traces, Skolem-paradigm rules.
+- [`docs/abstraction.md`](docs/abstraction.md) — the per-subsystem abstraction recipe.
+- [`docs/adapters/agentic.md`](docs/adapters/agentic.md) · [`wiki/Agentic-Adapters.md`](wiki/Agentic-Adapters.md) · [`docs/adapters/extraction.md`](docs/adapters/extraction.md) · [`docs/adapters/tlsf-aiger.md`](docs/adapters/tlsf-aiger.md) · [`wiki/Verify-Project-Flow.md`](wiki/Verify-Project-Flow.md) — adapters and the N-source verify framework.
+- [`docs/api-schemas/`](docs/api-schemas/) — the stable JSON wire types; the drift test `api_schema_drift_*` fails CI on any shape change without a schema update (`MUNUNU_UPDATE_API_SCHEMAS=1` regenerates).
+- [`docs/design/`](docs/design/) — design notes: `kmts-theory.md`, `engine-routing.md`, `sts-ir.md`, `bdd-variable-ordering.md` (read before touching the exact engine's order or reading a peak), `combinational-input-atoms.md`, `past-shadow-soundness.md`, `predicate-image-soundness.md`, `antecedent-shadow-synthesis.md` (superseded 2026-10-14 by inputs-in-the-state, mununu#677 — kept as history), and the rest.
 
 ## Environment Variables
 
-| Variable | Purpose |
+The full table is [`docs/env-vars.md`](docs/env-vars.md). Three to know before reading a result:
+
+| variable | why it matters |
 |---|---|
-| `RUST_LOG=mununu=info` | Enable logging |
-| `MUNUNU_BDD_MAX_BITS` | Exact-symbolic engine **bit cap** — max register+input bits in the property cone before it abstains (`abstained on the BIT CAP`). Raise for a wider cone. |
-| `MUNUNU_BDD_ARENA_NODES` | Exact-symbolic engine **OxiDD arena size**, which scales both the bit-blasting node budget (`abstained on the NODE budget`) and the fixpoint budget below. **Honoured in BOTH tiers since mununu#553** — it used to be read only for cones >40 bits, so a ≤40-bit cone whose fixpoint outgrew the fixed arena had no escape hatch at all. Defaults raised in mununu#553: `1<<24` (≤40 bits) / `1<<26` (wider), from `1<<23`/`1<<25`, because real DECIDING consumer cones were measured at 31.0 M nodes against a 33.5 M arena — **92.5% occupancy**, where the headroom is what absorbs one wide op after the last between-op check, and exhaustion inside a single apply is the uncatchable SIGABRT path. Cost of the raise, measured: +160 MB baseline RSS on the wide tier (190→350 MB), +40 MB on the small (70→110 MB). |
-| `MUNUNU_BDD_ITER_BUDGET` | Exact-symbolic engine **fixpoint iteration budget** — the μ/ν pre-image step cap before it abstains (`abstained on the ITERATION budget`). Default `1<<20`. **This is the deterministic total-work bound, and the only budget that separates the measured hard cases correctly** (a real 640×480 raster-wrap property converges at 78% of it; a free two-counter design needs 4096× it). ⚠️ It is CLOSE for raster-shaped cones: measured law is `iters ≈ 1.95 × (h·v)` — the fixpoint traverses the FRAME, not the line — so 720p ≈ 230% and 1080p ≈ 460% of the default and both abstain. Raise it pre-emptively for video/raster designs. |
-| `MUNUNU_BDD_SQUARING` | A2 (engine-performance roadmap, 2026-10-07) — the exact engine's **squaring rescue**, on by default; `=0` disables it. A pure-reachability fixpoint (`μX. p ∨ ◇X`, `νX. p ∧ □X`, `p` closed — the `EF` / `AG` shapes) that is still iterating after 4,096 steps is traversing a long chain one pre-image per iteration; the rescue builds the transition RELATION in a second OxiDD arena (`SQUARING_ARENA`, 4 M nodes), closes it by iterative squaring in ⌈log₂ diameter⌉ relational products and reads `EF p` off the closure — the same least fixpoint, exact. A relation whose closure does not compress is refused at 80 % of that arena and the iteration resumes where it was. Measured: the 800×8000 / 1280×720 / 1920×1080 rasters, all abstentions on the 2^20 iteration budget (`iters ≈ 1.95·h·v`), decide in 6–11 ms; raster 800×200 818,627 → 4,098 iterations; the 40-bit FSM-gated counter (2^40 diameter) decides. The iteration budget above still bounds the iterations before the rescue. **Lever plan P6 (2026-10-12) — the same closure answers the fair-EG ν**: `νZ. ⋀ₖ ◇μY.((Z ∧ lₖ) ∨ ◇Y)` (`verify-justice`'s `E_C G true`) past the threshold is read off as `EF(Core)`, `Core(s) = ⋀ₖ ∃t. R⁺(s,t) ∧ R⁺(t,s) ∧ lₖ(t)` (Touati–Brayton–Kurshan, CAV 1991) — the LIVE `cucnt*ro` class, where the iteration PEELS the counter one value per OUTER iteration (`cucnt10ro`: 3,069 ≈ 3 · 2¹⁰ charged steps; the inner EU converges in two — squaring the inner EU, the first idea, had nothing to replace). `E_C G q` with `q ≠ true` and a literal reading a primary input still iterate. Measured (host release binary): `cucnt32ro` unknown at 83 s → **HOLDS in 0.12 s**, `cucnt128ro` 300 s timeout → **HOLDS in 0.67 s** (129 squarings, 0.84 M nodes peak), both agreeing with the HWMCC verdicts. Two walls stood between the first probe and that number, both read with the per-squaring-step debug line: the closure allowance (48, then `n`) refused a 2ⁿ diameter — the loop sees the fixed point at `T_{n+1} == T_n`, so it is `max(48, n + 1)` — and the Squarer's variable order: in file order (the engine's default for 1-bit cells; an AIG writer keeps no significance order) the steps grew to 16.8 M nodes and 3 s each by the 24th, in carry-chain order under 0.4 M through all 128, so for an all-1-bit-state design the Squarer sorts its state bits by `circuit_visit_rank` (`ExactModel::squarer_rank`; the engine's own order untouched). `cucab09`'s lever A reach over the re-ordered Squarer is unchanged (2.4 s). |
-| `MUNUNU_BDD_FIXPOINT_NODES` | mununu#553 — Exact-symbolic engine **fixpoint live-node budget**, the guard on the μ/ν fixpoint (`abstained on the fixpoint NODE budget`). Default **80% of `MUNUNU_BDD_ARENA_NODES`**; `0` = no explicit cap (the arena clamp still applies — exceeding the arena is a crash, not a budget question). It is a RESOURCE guard, **not a decidability predictor**: four hand-picked scalars (wall clock, iteration cap, node cap, 2-D nodes-and-iters) were each refuted by one consumer property, because deciders and non-deciders overlap 6.2× in node count. Distinct from the `MUNUNU_BDD_ARENA_NODES`-derived op budget, which guards bit-blasting, not the fixpoint. |
-| `MUNUNU_BDD_REPORT_PEAK` | mununu#553 — set (any value) to print the exact fixpoint's PEAK live-node count, one line per evaluation: `[mununu#553] exact fixpoint: peak <N> live BDD nodes in <K> iteration(s), budget <B>`. How to size `MUNUNU_BDD_FIXPOINT_NODES` for a cone that abstains. Reproducible across runs for a fixed design+property+config, but to ~0.01% rather than to the byte (a consumer measured 7,980,029 / 7,979,366 / 7,979,343 on one property while another was byte-identical; iteration counts were identical in all runs). `peak 1` means the set is a terminal node — the fixpoint saturated to ⊤. **⚠️ Only valid when the arena exceeds what the cone needs**: the counter is allocated-including-dead, so a too-small arena forces GC and the peak reads LOW (measured: one design read 801,404 / 526,547 / 1,245,185 at arenas of 1.05M / 1.31M / 1.64M, then stabilised at 1,638,401 from 2.10M up — not even monotonic). A peak at or near the arena is a LOWER BOUND; raise `MUNUNU_BDD_ARENA_NODES` until the reading stops moving before treating it as the cone size. |
-| `MUNUNU_BDD_REPORT_WORK` | engine-performance roadmap B2 — the measurement line **without a collection**: `[mununu#553] exact fixpoint: peak <N> ALLOCATED BDD nodes (no collection ran for this report — MUNUNU_BDD_REPORT_WORK); in <K> iteration(s), budget <B>; work <W> BDD ops`. `MUNUNU_BDD_REPORT_PEAK` runs a `gc()` to read the residual, and that sweep showed as 16–25% of self time on the heat-check corpus — an instrument artefact that coloured every callee map. `work` is the host-independent BDD-op counter (`ExactModel::work_count`); `scripts/profile_cases.py`, `scripts/heat_check.py` and the `ab_time.py` recipes set this one. `REPORT_PEAK` wins when both are set. |
-| `MUNUNU_BDD_THREADS` | Roadmap 2 step 1 (2026-10-07) — **OxiDD worker threads** for the exact engine's managers (the engine's and the squarer's). With OxiDD's default `multi-threading` feature every apply above a split depth of `log2(4096·t)` forks onto a rayon pool of `t` threads. **Default `1`, measured**: 4 threads bought 19 % of wall on the multiplier case (mult-12, p < 0.01) for 1.67× the CPU, 5 % (not significant) on the representation-bound relational case for 3.2× the CPU, and cost 19 % on the raster case — under the reach portfolio the exact member shares the host with five other members, so that CPU multiplier is a net loss; set it on a dedicated host for a multiplier-shaped cone. Verdicts, BDD-op and iteration counts are independent of it. ⚠️ `approx_num_inner_nodes` (the `peak` on the report lines, the bit-blast node guard, the fixpoint node budget) is OxiDD's shared allocation counter and each thread flushes into it per 64 Ki-node chunk, so under `t` workers it reads up to `t × 64 Ki` nodes LOW — the budgets fire that much late and a peak reading is that much short. |
-| `MUNUNU_CUBE_POSTIMAGE_BACKEND` | Roadmap 2 step 5 (2026-10-07) — which backend computes the explicit cube lift's **post-image may-relation**: `bdd` (**DEFAULT**) builds the exact engine's abstract relation `R_may(p,p') = ∃(x∪i). A ∧ A'` as one BDD over `2|P|` predicate variables (the `symbolic` engine's object, brute-force-validated) and reads each source's targets off it; `smt` is the z3 all-SAT loop, one solver per source cube; `check` runs both, logs every cell where they differ at `warn` and answers with `smt` — the differential-oracle mode (it is how the out-of-range-literal inconsistency below was localised). The BDD backend answers only for cones the bit-blaster accepts (the bit cap, no memories, predicates over `state` cells) and falls back to `smt` otherwise, so every cone keeps a path. Verdict-identical by construction and by gate (cell-for-cell identity test on three fixtures incl. i2c; md5-identical lift JSON in every measured arm). Measured on the i2c lift: |P|=8 8.58 → 1.73 s (1 worker) / 5.22 → 1.84 s (8 workers); |P|=10 50.4 → 7.6 s / 35.1 → 7.5 s — the relation builds in 0.56 s and 1,024 cells read in 0.13 s, so the lift's wall is now the hyper-must pass. `MUNUNU_CUBE_POSTIMAGE_THREADS` only matters on the `smt` path. Landing it fixed a latent inconsistency: the SMT may/must lowerings MASKED a literal to the register's width (`ctrl == 2` on a 1-bit `ctrl` silently became `ctrl == 0`) while the simulator, the reset cube and the exact engine zero-extend (never true); `literal_cmp` is now the one lowering, and the recoverability auto-seed no longer spells a constant the register cannot hold. |
-| `MUNUNU_BDD_CACHE_DIV` | Roadmap 3 item 2 (2026-10-08) — the exact engine's **apply-cache size** as `arena / div`, default `4`. OxiDD allocates and initialises the cache at manager creation: at the wide tier's `/4` that is 2^24 entries = **156 ms per manager** (9.8 ms at 2^20), measured as 80 % of the i2c RTL exact verdict (0.21 s) and 65 % of the cube lift's self time after #617. Smaller is shape-dependent in BOTH directions (same binary, `/64` vs `/4`): raster-8000 −6 %, mult-12 −21 %, twocount −27 %, i2c RTL exact 0.21 → 0.04 s, cube lift |P|=8 0.29 → 0.11 s — and relational-11 cell-major (the representation-bound class the consumer blocks `sdram_burst`/`sprite_render` fall in) **+291 %** (`/16` +86 %; `/8` +4 % on the clock but **+38 % `Ite` apply calls**, 74.0 M → 102.0 M, the counters that decide). **No automatic policy survived measurement**: a staged start on a small cache with a node-count restart was built in three forms (allocated total: restarts the raster, +9 %; live set after a collection: never restarts relational-11, residual 12 k nodes; one step's allocation: restarts relational-11 only after its first wide op ran small, +141 %) — a between-op trigger cannot bound the cost of ONE slow apply, a clock has the same hole, and a small arena first is the uncatchable-abort path. So it is a knob: a lane whose properties are shallow (small FSMs, cube lifts) sets `MUNUNU_BDD_CACHE_DIV=64` and takes the 60–80 %; the default never loses. The cube lift's BDD backend shares the engine's manager sizing. |
-| `MUNUNU_BDD_VAR_ORDER` | exact-engine **BDD variable order**: `interleaved` (bit-position-major) is the **DEFAULT since 2026-09-15**; `cell-major` is the opt-out. Order never changes a verdict (ROBDDs are canonical) — only size and time. **Flipped on the consumer sweep, measured in APPLY CALLS** (load- and host-independent: they reproduced byte-identically at load 1.7 and 4–6): interleaved cheaper by **63.6× / 94.9× / 3,653×** on three blocks, costlier by **13.4×** on one (`sdram_burst`, shift-dense — set `cell-major` there). Every synthetic shape and the lib suite (123.8 s → 48.2 s) agree, and cell-major's worst case on a real block is UNBOUNDED (`sprite_render` 195.4 s, then censored >1583 s at identical settings). `auto` was **RETIRED** — 2 of 4, and its failure was architectural; it is now a no-op that warns. `deps` was removed. See [`docs/design/bdd-variable-ordering.md`](docs/design/bdd-variable-ordering.md). **`circuit` (plan P6 lever C, 2026-10-12, opt-in for measurement):** the interleaved scheme keyed by the cells' VISIT RANK in a DFS from the property roots (`justice` / `bad` / `constraint` / `fair` / `output` lines) through the next-state functions (`circuit_visit_rank`) instead of file order — on a 1-bit-latch design (AIGER) that key is the whole order. Measured on the LIVE ≤192-latch band (129 rows, 300 s, `--rung both`): 62 decided vs 63 under the default order on the same tree, 0 verdict flips — +1 (`lmcs06srg5p0`, HOLDS by the exact rung in 11.5 s, which the default order never decided on that rung) and three `arbi*bugp03` timeouts that are a LOAD confound, not the order (`arbixs16bugp03` alone in the image under `circuit`: 90 s, l2s+btormc, as under the default; the sweep's timeouts fell while a 12-thread host test binary shared the machine), with a slower exact stage on that arbiter shape (12 iterations in 10 s); median 1.56× on the 49 co-decided rows (faster on 21), partly that load. A per-shape trade measured under a confound; it stays opt-in. **What the circuit rank does by default** (same change): for an all-1-bit-state design the SQUARER orders its relation by the circuit rank (`ExactModel::squarer_rank`) while the engine keeps its order — an AIG writer lays latches out in no significance order, and `cucnt128ro`'s squaring closure grew to 16.8 M nodes by its 24th step in file order against under 0.4 M through all 128 in rank order. |
-| `MUNUNU_COI` | mununu#602 — the exact engine's cone-of-influence granularity. Default **bit-level**: a register read through a constant part-select keeps the slice, not the width (`dep_graph::bit_cone` + `bit_blast::narrow_leaves`; the consumer's 2,208-bit crossed-vector cone is 96 bits). `=signal` restores the whole-register cone for a differential run. A read through an address mux still reaches every arm structurally — that shape needs constant propagation, a separate lever. **mununu#642:** a narrowed leaf's bits are interleaved at their ORIGINAL index (`narrow_leaves` re-indexes a slice from 0; the order builder keys each bit by `bit_index[nid][k]`), so `[7:4]` sits beside the other registers' bits 4..7 — before this the bit-level cone broke the aligned structure for exactly the narrowed cells, and `sdram_burst`'s 85-bit `AG EF` fixpoint ran 13 iterations / 44 BDD ops / ~1,600 s instead of 7 / 20 / ~115 s. |
-| `MUNUNU_BDD_ORDER_DEBUG` | mununu#642 — set (any value) to print the exact engine's **variable order as built**: one line per kept cell — name, `state`/`input`, width, `orig_bits` (the ORIGINAL indices of a narrowed cell's bits, or `0..W`), the BDD positions — then the `bit_interaction::order_verdict` reading (bits, edges, mean degree, aligned / cross-cell / selector fractions, its recommendation). This is the instrument the #642 root cause needed (the row of this name documented in #554 and removed in #660 never had code behind it). Diagnostic only; never changes a verdict. |
-| `MUNUNU_NO_ANTECEDENT_PROPAGATE` | mununu#629 — set (any value) to DISABLE the exact engine's antecedent constant propagation: a same-cycle implication `sig == K \|-> C` normally has `K` propagated through `C`'s cone before the cone is computed (`AG(sig==K → C(sig)) ≡ AG(sig==K → C[sig:=K])`; a read mux folds to its selected arm, an input antecedent is dropped when nothing else reads the input and no constraint does), which is what lets a property about one field of a wide record read through an address mux decide instead of skipping on the bit cap (`adapter/btor2/antecedent_propagation.rs`). Per-request: `--no-antecedent-propagate` / API `no_antecedent_propagate: true`. Equivalence-preserving; the differential switch. |
-| `MUNUNU_NO_INPUT_STATE` | mununu#656 — set (any value) to DISABLE the exact engine's **inputs in the state**: by default a property that reads a primary input, or a signal combinationally driven by one (`gnt_o = req_i & sel(mask_q) & ready_i`), is evaluated over the product `(s, i)` — the registers with that input sampled in the same cycle (a new state cell carries the input's symbol, the input line becomes the free next-cycle choice `name$next`, every reader is redirected) — so the atom is a state predicate and the property DECIDES instead of being skipped ("atom … is combinationally driven by primary input(s)"). Disabled, the refusal returns. Per-request: `--no-input-state` / API `no_input_state: true`. Only the inputs the atoms reach are lifted (the bit cap moves by twice their width); anonymous inputs (black-boxed submodule outputs) stay refused; the two-player path (mununu#661) lifts only the UNCONTROLLABLE inputs the atoms reach and quantifies their next-frame values after the controller's move (`∀env ∃ctrl ∀env_next` — no look-ahead for the controller); an atom reaching a controllable input stays refused by name. `adapter/btor2/input_state.rs`. |
-| `MUNUNU_BDD_TIME_BUDGET_MS` | Exact-symbolic engine **opt-in wall-clock budget** for the fixpoint. **Default `0` = OFF since mununu#553** (was `10000`), because a wall clock makes the VERDICT host-dependent — the same command decides on a fast machine and reports ⊥ on a slow one, and that ⊥ is indistinguishable from a real one. Set a positive value only when you want a hard time ceiling and accept a NON-REPRODUCIBLE abstention; the message says so. Since the HWMCC LIVE levers the clock is read EVERY iteration (a wide νμ iteration takes seconds; the old 256-stride read it minutes late), and a per-attempt deadline exists beside it (`ExactSymbolicOptions::time_budget_ms`, `AttemptOptions::deadline`, `ExactModel::set_deadline_opt` — the process-wide one stays a floor). **With any deadline set the arena-safety check collects garbage once and judges the LIVE count before abstaining** (the count it reads is allocated-including-dead; without a deadline that collection could turn a fast abstention into a grind, so it is derived from the deadline, not a switch). |
-| `MUNUNU_EXACT_LADDER_MS` | Lever gating plan P3 (2026-10-12) — the first stage's wall-clock slice of the exact engine's **ladder** (`symbolic_bitblast::exact_ladder`, default `2000` ms). The ladder is how the HWMCC LIVE levers are applied now that the switches are gone: (1) **unrestricted** for this slice — the easy cases decide here and pay for no lever; (2) on a retryable abstention (`AbstentionKind::is_retryable`: arena, latency, iteration budget, a cut deadline — never a bit cap or an input-atom refusal), the **reachable-state restriction** with a 5 s reach probe (`ExactModel::install_reachable_restriction_within`: the forward reachable set off the Squarer's conjunctively partitioned relation, every set the evaluator forms conjoined with `Reach`, every next-state function Coudert–Madre-constrained to `Reach ∧ constraint`), then the restricted fixpoint with what is left; (3) **unrestricted** with the remainder. One `ExactSession` (bit-blast once, evaluate per stage; the Squarer and the restriction persist). Verdict-identical to a one-shot call by construction and by the `lever_gating_tests` gate. Placed in `btor2 verify-justice`, in the ⊥ re-plan's recoverability rescue (`verify_recoverability_attributed`) and, since the plan's open-items round (2026-10-12), in `sv verify-auto`'s **first-pass exact member** and the cube-skip rescue (`decided_by` names the stage). With no overall budget the restricted stage is capped at 30 s (`LADDER_UNBUDGETED_STAGE2_MS`) so a stage that does not help cannot delay the unrestricted baseline. **`CapLadder`** (`ExactSymbolicOptions::cap_ladder`, on in the two rescue passes, off in the first pass): a `BitCap` abstention from `prepare` is retried once at the 1024-bit ceiling (`max_bits`) under `CAP_LADDER_MS` = 60 s. Measured with the ladder in the first pass: the `mununu-sva` e2e sweep (46 real-RTL `verify-auto` breakdowns) is verdict-identical, the heat-check work / iteration counters are unchanged on every case, and the wall-class matrix runs in 38 s. Measured on LIVE: `cucab09` (91 bits) 137 s abstention → HOLDS 2.6 s on stage 2; `cuabq2mfro` 105 s → 4.3 s; the whole `cucab` family 2.6–3.3 s. |
-| `MUNUNU_BDD_REACH_ARENA` | Lever A (a ladder stage, above) — the Squarer arena when the restriction is installed; the Squarer carries `3n + |I|` variables and is capped at the engine's ceiling (`3·1024 + 1024`, P5) (default `1 << 25`; the squaring rescue alone keeps its `1 << 22`). The Squarer collects once before refusing on its bound (every image / squaring step leaves its predecessor dead; `cuhanoi10ro`'s forward reach was refused at 27 M allocated and installs in 50 steps once collected). |
-| `MUNUNU_BDD_REACH_BUDGET_MS` | Lever A — the forward-reach phase's wall-clock budget outside the ladder (default `30000`; the ladder's stage 2 passes its own 5 s probe), and never more than a quarter of what is left on the model's own deadline. Past it the restriction is DECLINED and evaluation proceeds unrestricted — the baseline path — so the clock changes which path runs, never a verdict. Measured need: on the LIVE DME ring (`lmcs06dme2p2`) the reach phase ran past 200 s without closing, overran the exact rung's whole 150 s slice (only the fixpoint read the deadline) and starved the l2s rung, while the unrestricted fixpoint decides the same instance in 3 s. |
-| `MUNUNU_VERIFY_AUTO_PARTIAL_JSON` | mununu#504 C7 — path for a **SIGKILL-survivable breadcrumb**. `sv verify-auto` appends one NDJSON record per property (`index`, `property`, `outcome`, `phase`) and **flushes after every write**, so the file is correct-as-of-the-last-flush even when the process is killed from outside (kernel OOM killer, CI step timeout) and no Rust code gets to run. Complements `MUNUNU_MAX_PROCESS_MEMORY_BYTES`, which only helps when mununu can observe its own trouble. **⚠️ NOT AUTHORITATIVE FOR A PORTFOLIO RUN — corrected 2026-09-15.** The breadcrumb is written only inside `verify_auto_impl` (the cube pass, plus a `"phase":"escalated"` record from the ⊥ re-plan). **The planner's portfolio merge writes NOTHING**, so on the default portfolio path a property's LAST record can disagree with the final verdict. Measured by a consumer: three properties whose last record read `unknown` ended the same run `HOLDS`/`VIOLATED`, decided by portfolio engines that left no record. **So a `main`-phase `unknown` does NOT mean undecided, and the absence of an `escalated` record does NOT mean escalation never reached that property** — both readings were tried on 2026-09-15 and both are refuted by that run. Use it for what it was built for: what had been decided *at the moment of an external kill*. Do not use it to attribute a finished run. (The real fix — recording the merge's verdicts — is tracked; this is the honest limit until then.) Diagnostic only: every write failure is swallowed after one warning, and it carries verdicts but not counterexamples or notes. Default unset ⇒ no breadcrumb. |
-| `MUNUNU_SHADOW_BTOR2_DUMP` | mununu#552 — path for **the BTOR2 the engine actually runs**, written once per `sv verify-auto` run. Includes the lift, `$past` shadows, reset pinning, `--config-value` pins and any `sv mutate` fault; the per-property mu-formulas ride along as BTOR2 comments, so the file is a self-contained reproducer that still parses. **⚠️ EXCLUDES the inputs-in-the-state lift** (mununu#656: a sampled state cell per primary input the atoms reach, the input renamed `name$next`), which runs later and per-property inside the engine — the header says so. (Until mununu#677 the omitted rewrite was the antecedent shadow synthesis, since removed.) Diagnostic only: a write failure warns once and never changes a verdict. Not `MUNUNU_KEEP_*`: those are boolean keep-the-tempdir flags, this is a path (cf. `MUNUNU_INTERP_DUMP`). Default unset ⇒ no dump. |
-| `MUNUNU_MAX_PROCESS_MEMORY_BYTES` | mununu#490 **self-imposed process-RSS ceiling** in bytes. Polled between properties on `sv verify-auto` and at each `escalate_bottom` step. When exceeded, the current + remaining properties abstain (`unknown`) with a `memory-budget-exceeded` verification note, and prior verdicts are preserved — turns an OS-level `abort()` (exit 134) on allocator failure into a graceful degradation. **Default changed in mununu#504 C6: unset ⇒ AUTO**, not disabled — when a cgroup memory limit is detected (v2 `/sys/fs/cgroup/memory.max`, then v1), the ceiling is 80% of it; with no detected limit (an unconstrained host) it stays disabled, as before. Set `=0` to disable explicitly — that is the escape hatch. An explicit positive value still wins. Coarse granularity: does NOT catch an allocation that fails BETWEEN checkpoints. |
+| `MUNUNU_BDD_TIME_BUDGET_MS` | off by default (`0`): a wall clock makes the **verdict** host-dependent, and that ⊥ is indistinguishable from a real one. |
+| `MUNUNU_VERIFY_AUTO_PARTIAL_JSON` | a SIGKILL-survivable breadcrumb, **not** authoritative for a portfolio run — the planner's merge writes nothing, so a `main`-phase `unknown` can end the run decided. |
+| `MUNUNU_SHADOW_BTOR2_DUMP` | the BTOR2 the engine runs, **excluding** the inputs-in-the-state lift (per property, inside the engine); the header says so. |
