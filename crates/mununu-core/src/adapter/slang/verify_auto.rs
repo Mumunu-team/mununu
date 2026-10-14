@@ -13583,5 +13583,13 @@ endmodule
             !per_target.is_empty() && per_target.iter().all(|t| *t == Trit::True),
             "`auto` (per-target must) decides the arbiter recoverability HOLDS — got {per_target:?}"
         );
+        // mununu#667 — the hyper-must composition on this path emitted only the full-set edge
+        // `src →□ may_succ(src)` and left the row ⊥; it now promotes the ∀∃ singletons first,
+        // so it decides what the per-target form decides (the ladder and the ⊥ re-plan run it).
+        let hyper = run(MustEdgeInference::SmtHyperMust);
+        assert!(
+            !hyper.is_empty() && hyper.iter().all(|t| *t == Trit::True),
+            "hyper-must decides the arbiter recoverability HOLDS too — got {hyper:?}"
+        );
     }
 }
