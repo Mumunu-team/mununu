@@ -25,7 +25,6 @@ use crate::adapter::liveness_rescue::{
     response_liveness_rescue_atoms, response_liveness_rescue_conjunction,
 };
 use crate::adapter::reach_portfolio::{ReachOutcome, decide_reach_portfolio};
-use crate::adapter::recoverability::verify_recoverability_with_predicates;
 use crate::adapter::yosys::{SvFrontend, YosysOptions, sv_to_btor2};
 use crate::verdict::PropertyVerdict;
 
@@ -127,11 +126,32 @@ pub fn sv_verify_recoverability_with_predicates(
     target: &str,
     extra_predicates: &[PredicateSpec],
 ) -> Result<PropertyVerdict, String> {
+    sv_verify_recoverability_explained(lift, target, extra_predicates).map(|(v, _)| v)
+}
+
+/// [`sv_verify_recoverability_with_predicates`] that also returns who decided and why the exact
+/// engine stepped aside, when it did ([`RecoverabilityAttribution`]).
+pub fn sv_verify_recoverability_explained(
+    lift: &SvLift,
+    target: &str,
+    extra_predicates: &[PredicateSpec],
+) -> Result<
+    (
+        PropertyVerdict,
+        crate::adapter::recoverability::RecoverabilityAttribution,
+    ),
+    String,
+> {
     parse_predicate_expr(target).map_err(|e| {
         format!("recoverability target `{target}` is not a register-comparison atom: {e:?}")
     })?;
     let btor2 = lift.lift()?;
-    verify_recoverability_with_predicates(&btor2, target, extra_predicates)
+    crate::adapter::recoverability::verify_recoverability_explained(
+        &btor2,
+        target,
+        extra_predicates,
+        &crate::adapter::btor2::symbolic_bitblast::ExactSymbolicOptions::default(),
+    )
 }
 
 /// `sv verify-recoverability --refine` — lift SV and decide `AG EF target`, returning the canonical
@@ -146,12 +166,38 @@ pub fn sv_verify_recoverability_refined(
     config_specs: &[(String, Vec<u64>)],
     discover_assumptions: bool,
 ) -> Result<(PropertyVerdict, crate::verdict::VerdictRefinement), String> {
+    sv_verify_recoverability_refined_explained(
+        lift,
+        target,
+        extra_predicates,
+        config_specs,
+        discover_assumptions,
+    )
+    .map(|(v, r, _)| (v, r))
+}
+
+/// [`sv_verify_recoverability_refined`] that also returns the [`RecoverabilityAttribution`] of
+/// the canonical verdict (`None` only when the target atom did not parse).
+pub fn sv_verify_recoverability_refined_explained(
+    lift: &SvLift,
+    target: &str,
+    extra_predicates: &[PredicateSpec],
+    config_specs: &[(String, Vec<u64>)],
+    discover_assumptions: bool,
+) -> Result<
+    (
+        PropertyVerdict,
+        crate::verdict::VerdictRefinement,
+        Option<crate::adapter::recoverability::RecoverabilityAttribution>,
+    ),
+    String,
+> {
     parse_predicate_expr(target).map_err(|e| {
         format!("recoverability target `{target}` is not a register-comparison atom: {e:?}")
     })?;
     let btor2 = lift.lift()?;
     Ok(
-        crate::adapter::recoverability::verify_recoverability_refined(
+        crate::adapter::recoverability::verify_recoverability_refined_explained(
             &btor2,
             target,
             extra_predicates,
@@ -1340,7 +1386,7 @@ mod tests {
     // `AG EF (aes_cipher_ctrl_cs == 9)`, the branching νμ property SVA cannot express,
     // decides HOLDS end-to-end through the SV lift + the recoverability verb. NOTE: the
     // vendored design is the EXTRACTED control FSM (18 state bits — within the exact
-    // engine's ~40-bit cap, so the exact engine decides it); the OVER-CAP cube +
+    // engine's bit cap, so the exact engine decides it); the OVER-CAP cube +
     // smt-hyper-must scale path is proven separately by the wide-fixture differential
     // tests in `crate::adapter::recoverability` (an 80-bit design where the exact engine
     // abstains and the cube path decides both polarities).

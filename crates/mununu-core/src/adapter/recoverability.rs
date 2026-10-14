@@ -22,7 +22,8 @@
 //! the `AG EF good` formula and decides it with the **exact 3-valued symbolic
 //! engine** ([`crate::adapter::btor2::symbolic_bitblast::exact_symbolic_verdict`]) —
 //! sound at every alternation depth (Bruns–Godefroid), definite within the engine's
-//! 40-bit cone cap. Over the cap it abstains (`Unknown`).
+//! bit cap (40 bits by default, raised to fit the cone up to 192). Over the cap it
+//! abstains (`Unknown`).
 //!
 //! For designs wider than the exact cap, the **predicate-cube + `smt-hyper-must`**
 //! path (`mununu btor2 cegar --formula … --must-edge-inference smt-hyper-must`)
@@ -30,7 +31,7 @@
 //! recoverability showcase uses.
 //!
 //! P2 Slice 1 wires that path in **automatically**: [`verify_recoverability`] tries
-//! the exact engine first and, when it abstains (over the ~40-bit cone cap or an
+//! the exact engine first and, when it abstains (over the bit cap — 40 by default, auto-raised to 192 — or an
 //! unsupported construct), escalates to [`verify_recoverability_scalable`] — the
 //! predicate-cube `smt-hyper-must` reduction — so the νμ property decides beyond 40
 //! bits. The escalation mirrors the verify-auto safety-⊥ `reach_rescue` escalation.
@@ -46,7 +47,7 @@ use crate::adapter::btor2::cegar::{
 use crate::adapter::btor2::kmts_lift::{MayEdgeInference, MustEdgeInference, PredicateSpec};
 use crate::adapter::btor2::predicate_expr::{CmpOp, PredicateExpr, parse_predicate_expr};
 use crate::adapter::btor2::symbolic_bitblast::{
-    ExactSymbolicOptions, LADDER_STAGE_RESTRICTED, exact_ladder,
+    AbstentionKind, ExactSymbolicOptions, LADDER_STAGE_RESTRICTED, abstention_kind, exact_ladder,
 };
 use crate::mu_calculus::Environment;
 use crate::mu_calculus::parser as mu_parser;
@@ -1041,7 +1042,7 @@ fn ranking_certificate_holds(
 /// when `good` is not a parseable atom.
 ///
 /// P2 Slice 1 — the exact engine is tried first; on a definite verdict it is returned
-/// as before. When the exact engine abstains (over the ~40-bit cone cap or an
+/// as before. When the exact engine abstains (over the bit cap — 40 by default, auto-raised to 192 — or an
 /// unsupported construct), the property is **escalated** to
 /// [`verify_recoverability_scalable`] (the cube + `smt-hyper-must` reduction), so the
 /// νμ recoverability property decides beyond 40 bits. The public signature is
@@ -1101,6 +1102,15 @@ pub enum RecoverabilityEngine {
 }
 
 impl RecoverabilityEngine {
+    /// The short report label (`engine` on the recoverability verbs, both surfaces).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Exact => "exact",
+            Self::ExactReachRestricted => "exact-reach-restricted",
+            Self::CubeLadder => "cube-ladder",
+        }
+    }
+
     /// The `decided_by` label.
     pub fn decided_by_label(self) -> &'static str {
         match self {
@@ -1113,6 +1123,22 @@ impl RecoverabilityEngine {
     }
 }
 
+/// Who decided a recoverability verdict and, when the exact engine stepped aside first, why.
+/// The recoverability verbs used to drop both: the `RecoverabilityEngine` was computed and
+/// mapped away, and the exact engine's abstention reason went to a `warn!` that `--quiet`
+/// filters — so a cube-ladder `unknown` and an exact `unknown` printed the same document, and a
+/// run killed from outside could not be attributed at all (bit-cap frontier work, 2026-10-14).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecoverabilityAttribution {
+    /// The rung that produced the verdict.
+    pub engine: RecoverabilityEngine,
+    /// Set when the exact engine abstained before the cube ladder ran: the typed reading of
+    /// its message ([`AbstentionKind::label`] is the report form).
+    pub exact_abstention: Option<AbstentionKind>,
+    /// The exact engine's own abstention message, verbatim, when it abstained.
+    pub exact_abstention_reason: Option<String>,
+}
+
 /// [`verify_recoverability_with_options`] that also says WHICH rung decided.
 pub fn verify_recoverability_attributed(
     btor2_content: &str,
@@ -1120,6 +1146,18 @@ pub fn verify_recoverability_attributed(
     extra_predicates: &[PredicateSpec],
     exact_opts: &ExactSymbolicOptions,
 ) -> Result<(PropertyVerdict, RecoverabilityEngine), String> {
+    verify_recoverability_explained(btor2_content, good, extra_predicates, exact_opts)
+        .map(|(v, a)| (v, a.engine))
+}
+
+/// [`verify_recoverability_attributed`] with the full [`RecoverabilityAttribution`]: the rung,
+/// and the exact engine's abstention (kind + message) when the cube ladder was what decided.
+pub fn verify_recoverability_explained(
+    btor2_content: &str,
+    good: &str,
+    extra_predicates: &[PredicateSpec],
+    exact_opts: &ExactSymbolicOptions,
+) -> Result<(PropertyVerdict, RecoverabilityAttribution), String> {
     // Validate the atom up front for a target-specific error message (the µ-parser
     // would otherwise report it as a formula-syntax error).
     parse_predicate_expr(good).map_err(|e| {
@@ -1156,13 +1194,17 @@ pub fn verify_recoverability_attributed(
         // preserved when the exact engine gives a definite verdict.
         Ok(v) => Ok((
             PropertyVerdict::from(v),
-            if ladder.stage == LADDER_STAGE_RESTRICTED {
-                RecoverabilityEngine::ExactReachRestricted
-            } else {
-                RecoverabilityEngine::Exact
+            RecoverabilityAttribution {
+                engine: if ladder.stage == LADDER_STAGE_RESTRICTED {
+                    RecoverabilityEngine::ExactReachRestricted
+                } else {
+                    RecoverabilityEngine::Exact
+                },
+                exact_abstention: None,
+                exact_abstention_reason: None,
             },
         )),
-        // Over the ~40-bit cone cap or an unsupported construct: escalate to the
+        // Over the bit cap (40 by default, auto-raised to 192) or an unsupported construct: escalate to the
         // cube + `smt-hyper-must` path so the property still decides at scale
         // (slice-5b safety-⊥ escalation mirror). The scalable path itself abstains
         // (Unknown) if it cannot decide, so this is never less sound than the old
@@ -1176,8 +1218,17 @@ pub fn verify_recoverability_attributed(
                 %reason,
                 "exact engine abstained on `AG EF {good}`; escalating to the scalable ladder"
             );
-            verify_recoverability_scalable(btor2_content, good, extra_predicates)
-                .map(|v| (v, RecoverabilityEngine::CubeLadder))
+            let kind = abstention_kind(&reason);
+            verify_recoverability_scalable(btor2_content, good, extra_predicates).map(|v| {
+                (
+                    v,
+                    RecoverabilityAttribution {
+                        engine: RecoverabilityEngine::CubeLadder,
+                        exact_abstention: Some(kind),
+                        exact_abstention_reason: Some(reason),
+                    },
+                )
+            })
         }
     }
 }
@@ -1196,8 +1247,39 @@ pub fn verify_recoverability_refined(
     config_specs: &[(String, Vec<u64>)],
     discover_assumptions_flag: bool,
 ) -> (PropertyVerdict, VerdictRefinement) {
-    let verdict = verify_recoverability_with_predicates(btor2_content, good, extra_predicates)
-        .unwrap_or(PropertyVerdict::Unknown);
+    let (verdict, refinement, _) = verify_recoverability_refined_explained(
+        btor2_content,
+        good,
+        extra_predicates,
+        config_specs,
+        discover_assumptions_flag,
+    );
+    (verdict, refinement)
+}
+
+/// [`verify_recoverability_refined`] that also returns the [`RecoverabilityAttribution`] of the
+/// canonical verdict. `None` only when the target atom did not parse (the canonical verdict is
+/// then `Unknown`, as before, and no engine ran).
+pub fn verify_recoverability_refined_explained(
+    btor2_content: &str,
+    good: &str,
+    extra_predicates: &[PredicateSpec],
+    config_specs: &[(String, Vec<u64>)],
+    discover_assumptions_flag: bool,
+) -> (
+    PropertyVerdict,
+    VerdictRefinement,
+    Option<RecoverabilityAttribution>,
+) {
+    let (verdict, attribution) = match verify_recoverability_explained(
+        btor2_content,
+        good,
+        extra_predicates,
+        &ExactSymbolicOptions::default(),
+    ) {
+        Ok((v, a)) => (v, Some(a)),
+        Err(_) => (PropertyVerdict::Unknown, None),
+    };
     let mut refinement = VerdictRefinement::default();
 
     // Config-partition (capability A) — partition the verdict over the config the recovery rides on.
@@ -1267,7 +1349,7 @@ pub fn verify_recoverability_refined(
             }
         }
     }
-    (verdict, refinement)
+    (verdict, refinement, attribution)
 }
 
 /// Parse `--config-values`-style entries `"NAME=v1,v2,…"` into config-partition specs
@@ -2523,7 +2605,7 @@ pub fn diagnose_recoverability_bot(btor2_content: &str, good: &str) -> Recoverab
 
 /// P2 Slice 1 — decide recoverability `AG EF good` via the **predicate-cube +
 /// `smt-hyper-must`** path, so the νμ property decides beyond the exact engine's
-/// ~40-bit cone cap.
+/// bit cap (40 by default, auto-raised to 192).
 ///
 /// `good` is either a simple `REG == VALUE` equality atom OR a relational `REG == REG` atom (a
 /// relational recoverability target — e.g. a FIFO's `AG EF (wptr == rptr)`, decided by the compound-good

@@ -1072,7 +1072,7 @@ pub struct Btor2VerifyRecoverabilityRequest {
     pub target: String,
     /// Extra abstraction predicate(s) for the cube-path escalation, each
     /// `"NAME:REGISTER=VALUE"` (P2 Slice 1). Used only when the exact engine abstains
-    /// (over the ~40-bit cone cap); the escalation is automatic even with none.
+    /// (over the bit cap — 40 by default, auto-raised to 192); the escalation is automatic even with none.
     #[serde(default)]
     pub predicates: Vec<String>,
     /// Also compute a structured [`crate::verdict::VerdictRefinement`] alongside the verdict — a
@@ -1109,6 +1109,18 @@ pub struct Btor2VerifyRecoverabilityResponse {
     /// Diagnostic detail carried ALONGSIDE the verdict — never changes it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refinement: Option<crate::verdict::VerdictRefinement>,
+    /// Which rung of the recoverability ladder produced the canonical verdict: `"exact"` (the
+    /// exact-symbolic ROBDD engine), `"exact-reach-restricted"` (its reach-restricted stage) or
+    /// `"cube-ladder"` (the predicate-cube ladder, after the exact engine abstained). Absent only
+    /// when no engine ran (the target did not parse).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub engine: Option<String>,
+    /// When the exact engine abstained before the cube ladder decided: the typed reading of its
+    /// abstention — `bit-cap`, `arena-overflow`, `iteration-budget`, `latency`, `arena-safety`,
+    /// `deadline`, `cancelled`, `refused-input-atom`, `reach-declined` or `other`. Absent when the
+    /// exact engine decided.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exact_abstention: Option<String>,
 }
 
 /// Request for the auto FSM illegal-encoding scan
@@ -2125,6 +2137,14 @@ pub struct SvVerifyRecoverabilityReport {
     /// pinning its internals here would couple two schemas that change for different reasons.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refinement: Option<serde_json::Value>,
+    /// Which rung decided the canonical verdict — `exact` | `exact-reach-restricted` |
+    /// `cube-ladder` (see the API response of the same name). Absent only when no engine ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine: Option<String>,
+    /// The exact engine's typed abstention when the cube ladder was what decided (`bit-cap`,
+    /// `arena-overflow`, `iteration-budget`, …). Absent when the exact engine decided.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exact_abstention: Option<String>,
 }
 
 /// mununu#541 — the `sv verify-liveness` CLI report, schema-pinned. See

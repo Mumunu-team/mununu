@@ -993,9 +993,10 @@ pub async fn btor2_verify_recoverability_handler(
 fn btor2_verify_recoverability_handler_impl(
     request: Btor2VerifyRecoverabilityRequest,
 ) -> ApiResult<Json<Btor2VerifyRecoverabilityResponse>> {
+    use crate::adapter::btor2::symbolic_bitblast::ExactSymbolicOptions;
     use crate::adapter::recoverability::{
         parse_config_value_specs, parse_extra_predicate, recoverability_property_str,
-        verify_recoverability_refined, verify_recoverability_with_predicates,
+        verify_recoverability_explained, verify_recoverability_refined_explained,
     };
 
     let extra = request
@@ -1014,31 +1015,41 @@ fn btor2_verify_recoverability_handler_impl(
         }
     })?;
     // `refine`/`config_values`/`discover_assumptions` (refined-verdicts): canonical verdict PLUS a
-    // diagnostic-only refinement.
-    let (verdict, refinement) =
+    // diagnostic-only refinement. Either way the attribution rides along: who decided, and the
+    // exact engine's abstention when the cube ladder was what did.
+    let (verdict, refinement, attribution) =
         if request.refine || !config_specs.is_empty() || request.discover_assumptions {
-            let (v, r) = verify_recoverability_refined(
+            let (v, r, a) = verify_recoverability_refined_explained(
                 &request.content,
                 &request.target,
                 &extra,
                 &config_specs,
                 request.discover_assumptions,
             );
-            (v, Some(r))
+            (v, Some(r), a)
         } else {
-            let v =
-                verify_recoverability_with_predicates(&request.content, &request.target, &extra)
-                    .map_err(|message| ApiError::BadRequest {
-                        message,
-                        details: None,
-                    })?;
-            (v, None)
+            let (v, a) = verify_recoverability_explained(
+                &request.content,
+                &request.target,
+                &extra,
+                &ExactSymbolicOptions::default(),
+            )
+            .map_err(|message| ApiError::BadRequest {
+                message,
+                details: None,
+            })?;
+            (v, None, Some(a))
         };
 
     Ok(Json(Btor2VerifyRecoverabilityResponse {
         verdict: verdict.as_str().to_string(),
         property: recoverability_property_str(&request.target),
         refinement,
+        engine: attribution.as_ref().map(|a| a.engine.as_str().to_string()),
+        exact_abstention: attribution
+            .as_ref()
+            .and_then(|a| a.exact_abstention)
+            .map(|k| k.label().to_string()),
     }))
 }
 
@@ -1357,7 +1368,7 @@ fn sv_verify_recoverability_handler_impl(
         parse_config_value_specs, parse_extra_predicate, recoverability_property_str,
     };
     use crate::adapter::sv_verify::{
-        SvLift, sv_verify_recoverability_refined, sv_verify_recoverability_with_predicates,
+        SvLift, sv_verify_recoverability_explained, sv_verify_recoverability_refined_explained,
     };
 
     let property = recoverability_property_str(&request.target);
@@ -1395,9 +1406,9 @@ fn sv_verify_recoverability_handler_impl(
             crate::adapter::yosys::SvFrontend::Auto
         },
     };
-    let (verdict, refinement) =
+    let (verdict, refinement, attribution) =
         if request.refine || !config_specs.is_empty() || request.discover_assumptions {
-            let (v, r) = sv_verify_recoverability_refined(
+            let (v, r, a) = sv_verify_recoverability_refined_explained(
                 &lift,
                 &request.target,
                 &extra,
@@ -1408,19 +1419,24 @@ fn sv_verify_recoverability_handler_impl(
                 message,
                 details: None,
             })?;
-            (v, Some(r))
+            (v, Some(r), a)
         } else {
-            let v = sv_verify_recoverability_with_predicates(&lift, &request.target, &extra)
+            let (v, a) = sv_verify_recoverability_explained(&lift, &request.target, &extra)
                 .map_err(|message| ApiError::BadRequest {
                     message,
                     details: None,
                 })?;
-            (v, None)
+            (v, None, Some(a))
         };
     Ok(Json(Btor2VerifyRecoverabilityResponse {
         verdict: verdict.as_str().to_string(),
         property,
         refinement,
+        engine: attribution.as_ref().map(|a| a.engine.as_str().to_string()),
+        exact_abstention: attribution
+            .as_ref()
+            .and_then(|a| a.exact_abstention)
+            .map(|k| k.label().to_string()),
     }))
 }
 
@@ -5157,6 +5173,14 @@ members = ["x"]
         assert_eq!(out.verdict, "violated", "response: {out:?}");
         assert_eq!(out.property, "AG EF (st == 0)");
         assert!(out.refinement.is_none(), "no refinement without `refine`");
+        // The attribution rides along: a 2-bit trap is the exact engine's, on either ladder stage,
+        // and the exact engine did not abstain — so no `exact_abstention`.
+        let engine = out.engine.as_deref().expect("the verb names who decided");
+        assert!(
+            engine == "exact" || engine == "exact-reach-restricted",
+            "a 2-bit staller is the exact engine's: {engine}"
+        );
+        assert!(out.exact_abstention.is_none(), "response: {out:?}");
     }
 
     /// `refine: true` carries a structured refinement alongside the verdict (refined-verdicts

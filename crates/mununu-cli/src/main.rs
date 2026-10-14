@@ -554,7 +554,7 @@ enum Btor2Command {
     /// "From every reachable state, can the design still get back to a `good`
     /// state?" A `violated` verdict means a reachable state is a trap from which
     /// `good` is unreachable. Decided by the exact 3-valued engine (sound at every
-    /// alternation depth, definite within its 40-bit cap; `unknown` over the cap —
+    /// alternation depth, definite within its bit cap — 40 by default, auto-raised to 192; `unknown` over the cap —
     /// use `btor2 cegar … --must-edge-inference smt-hyper-must` for wider designs).
     /// `--target` is a single register-comparison atom (`"state_q == 3"`).
     VerifyRecoverability(Btor2VerifyRecoverabilityArgs),
@@ -1080,7 +1080,7 @@ struct Btor2VerifyRecoverabilityArgs {
     target: String,
     /// Extra abstraction predicate(s) for the cube-path escalation,
     /// `NAME:REGISTER=VALUE` (repeatable, like `btor2 cegar`). Used only when the exact
-    /// engine abstains (over the ~40-bit cone cap); the escalation is automatic even
+    /// engine abstains (over the bit cap — 40 by default, auto-raised to 192); the escalation is automatic even
     /// with none.
     #[arg(long = "predicate", value_name = "NAME:REG=VALUE")]
     predicate: Vec<String>,
@@ -3441,9 +3441,10 @@ fn btor2_game(args: Btor2GameArgs) -> Result<(), String> {
 /// 3-valued engine and print the canonical verdict as JSON. Surface peer of the API
 /// `POST /api/v1/btor2/verify-recoverability`.
 fn btor2_verify_recoverability(args: Btor2VerifyRecoverabilityArgs) -> Result<(), String> {
+    use mununu_core::adapter::btor2::symbolic_bitblast::ExactSymbolicOptions;
     use mununu_core::adapter::recoverability::{
         parse_config_value_specs, parse_extra_predicate, recoverability_property_str,
-        verify_recoverability_refined, verify_recoverability_with_predicates,
+        verify_recoverability_explained, verify_recoverability_refined_explained,
     };
 
     let content = std::fs::read_to_string(&args.file)
@@ -3462,21 +3463,36 @@ fn btor2_verify_recoverability(args: Btor2VerifyRecoverabilityArgs) -> Result<()
     // `--refine` / `--config-values` / `--discover-assumptions` (refined-verdicts): the canonical
     // verdict PLUS a structured, diagnostic-only refinement (Vacuous / bot-diagnosis / config-partition
     // / holds_under) — never changes the verdict. Without any, the plain verdict path.
-    let verdict = if args.refine || !config_specs.is_empty() || args.discover_assumptions {
-        let (verdict, refinement) = verify_recoverability_refined(
-            &content,
-            &args.target,
-            &extra,
-            &config_specs,
-            args.discover_assumptions,
-        );
-        summary["refinement"] =
-            serde_json::to_value(&refinement).map_err(|e| format!("serialize refinement: {e}"))?;
-        verdict
-    } else {
-        verify_recoverability_with_predicates(&content, &args.target, &extra)?
-    };
+    let (verdict, attribution) =
+        if args.refine || !config_specs.is_empty() || args.discover_assumptions {
+            let (verdict, refinement, attribution) = verify_recoverability_refined_explained(
+                &content,
+                &args.target,
+                &extra,
+                &config_specs,
+                args.discover_assumptions,
+            );
+            summary["refinement"] = serde_json::to_value(&refinement)
+                .map_err(|e| format!("serialize refinement: {e}"))?;
+            (verdict, attribution)
+        } else {
+            let (verdict, attribution) = verify_recoverability_explained(
+                &content,
+                &args.target,
+                &extra,
+                &ExactSymbolicOptions::default(),
+            )?;
+            (verdict, Some(attribution))
+        };
     summary["verdict"] = serde_json::Value::String(verdict.as_str().to_string());
+    // Who decided, and why the exact engine stepped aside when the cube ladder did — the same two
+    // keys the API response carries (`engine`, `exact_abstention`).
+    if let Some(a) = &attribution {
+        summary["engine"] = serde_json::Value::String(a.engine.as_str().to_string());
+        if let Some(kind) = a.exact_abstention {
+            summary["exact_abstention"] = serde_json::Value::String(kind.label().to_string());
+        }
+    }
 
     println!(
         "{}",
@@ -6439,7 +6455,7 @@ fn sv_verify_recoverability_impl(args: SvVerifyRecoverabilityArgs) -> Result<(),
         parse_config_value_specs, parse_extra_predicate, recoverability_property_str,
     };
     use mununu_core::adapter::sv_verify::{
-        sv_verify_recoverability_refined, sv_verify_recoverability_with_predicates,
+        sv_verify_recoverability_explained, sv_verify_recoverability_refined_explained,
     };
 
     let file = args.lift.primary_display();
@@ -6459,23 +6475,33 @@ fn sv_verify_recoverability_impl(args: SvVerifyRecoverabilityArgs) -> Result<(),
         property: recoverability_property_str(&args.target),
         verdict: String::new(),
         refinement: None,
+        engine: None,
+        exact_abstention: None,
     };
-    let verdict = if args.refine || !config_specs.is_empty() || args.discover_assumptions {
-        let (verdict, refinement) = sv_verify_recoverability_refined(
-            &lift,
-            &args.target,
-            &extra,
-            &config_specs,
-            args.discover_assumptions,
-        )?;
-        report.refinement = Some(
-            serde_json::to_value(&refinement).map_err(|e| format!("serialize refinement: {e}"))?,
-        );
-        verdict
-    } else {
-        sv_verify_recoverability_with_predicates(&lift, &args.target, &extra)?
-    };
+    let (verdict, attribution) =
+        if args.refine || !config_specs.is_empty() || args.discover_assumptions {
+            let (verdict, refinement, attribution) = sv_verify_recoverability_refined_explained(
+                &lift,
+                &args.target,
+                &extra,
+                &config_specs,
+                args.discover_assumptions,
+            )?;
+            report.refinement = Some(
+                serde_json::to_value(&refinement)
+                    .map_err(|e| format!("serialize refinement: {e}"))?,
+            );
+            (verdict, attribution)
+        } else {
+            let (verdict, attribution) =
+                sv_verify_recoverability_explained(&lift, &args.target, &extra)?;
+            (verdict, Some(attribution))
+        };
     report.verdict = verdict.as_str().to_string();
+    if let Some(a) = &attribution {
+        report.engine = Some(a.engine.as_str().to_string());
+        report.exact_abstention = a.exact_abstention.map(|k| k.label().to_string());
+    }
 
     print_typed_report(&report)?;
     ci_gate_exit(verdict.as_str(), args.ci.fail_on);
