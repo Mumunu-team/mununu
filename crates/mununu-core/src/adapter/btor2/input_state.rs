@@ -410,6 +410,44 @@ mod tests {
         assert_eq!(atom_inputs(&file, &regs), vec!["ready", "req"]);
     }
 
+    /// mununu#677 — a one-shot `|=>` whose antecedent is an input-derived WIRE. `r' = in`, and
+    /// `w` is `in` through a named wire, so `w |=> (r == 1)` HOLDS: the register one cycle after
+    /// `w` is exactly `w`'s input. The #476 shadow rewrite renamed `w` to a register sampling it
+    /// while keeping the `[]`, which checks the consequent one cycle late (`r` two cycles after
+    /// `w`, where `in` is free again) and refuted it; with the lift the atom reads the sampled
+    /// `in` and the property decides as stated. The same design under `nu X. ((!(in == 1) ||
+    /// [] (r == 1)) && [] X)` — the bare input, never shadowed — is the control.
+    #[test]
+    fn x677_a_one_shot_pipe_implication_on_an_input_derived_wire_holds() {
+        use crate::adapter::btor2::symbolic_bitblast::{ExactVerdict, exact_symbolic_verdict};
+        // `w` as an OUTPUT symbol (what yosys emits for a module port) and the atoms spelled
+        // BARE (`w`, not `w == 1`), as the SVA translator spells a 1-bit signal — the shadow
+        // synthesis resolves an atom by that string. `r' = in & acc` for the partial case.
+        const DELAY: &str = "1 sort bitvec 1\n2 input 1 in\n3 state 1 r\n4 zero 1\n5 init 1 3 4\n\
+                             7 uext 1 2 0\n8 output 7 w\n9 input 1 acc\n10 and 1 2 9\n\
+                             11 next 1 3 10\n";
+        let f = |s: &str| crate::mu_calculus::parser::parse(s).expect("formula");
+        assert_eq!(
+            exact_symbolic_verdict(DELAY, &f("nu X. ((!(in && acc) || [] r) && [] X)"))
+                .expect("decides"),
+            ExactVerdict::Holds,
+            "the bare-input antecedent (control: never shadowed, lifted)"
+        );
+        assert_eq!(
+            exact_symbolic_verdict(DELAY, &f("nu X. ((!(w && acc) || [] r) && [] X)"))
+                .expect("decides"),
+            ExactVerdict::Holds,
+            "the wire antecedent: r one cycle after (w && acc) is exactly w & acc"
+        );
+        // One-shot in the other direction: `(w && acc) |=> !r` is refutable, so no rewrite may
+        // turn it into HOLDS.
+        assert_eq!(
+            exact_symbolic_verdict(DELAY, &f("nu X. ((!(w && acc) || [] (!(r))) && [] X)"))
+                .expect("decides"),
+            ExactVerdict::Violated
+        );
+    }
+
     /// mununu#661 — the exclusion set: a controllable input the atoms reach is NOT lifted (it
     /// stays a per-step input, by name), the environment one is.
     #[test]

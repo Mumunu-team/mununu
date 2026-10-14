@@ -1,6 +1,8 @@
 # Antecedent shadow-register synthesis in the exact-symbolic engine
 
-> **Status:** design (2026-08-22). Supersedes the Phase A refusal for `sv verify-auto`. Refusal remains the fallback when a shadow cannot be synthesized soundly.
+> **Status: SUPERSEDED and removed (2026-10-14, mununu#677).** Inputs-in-the-state (mununu#656, `adapter/btor2/input_state.rs`) gives an input-derived antecedent its same-cycle value as a state predicate, which is the semantics this design approximated with a sampled register — and the implementation of this design was wrong by one cycle: the argument below is for `AG(S → C)`, the code renamed the atom and KEPT the `[] C`, so the engine checked the consequent one cycle late (`A@N → C@N+2`). Invisible on sticky consequents, refuted every one-shot one (monono `dram_preload` `waddr_q == 0 |=> waddr_q == 1`), and masked until #656 removed the refusal that had routed those properties to the cube engine. The module, its tests and the `prepare` step are gone; `--no-antecedent-shadow` / `no_antecedent_shadow` / `MUNUNU_NO_ANTECEDENT_SHADOW` are accepted and ignored. Kept as history.
+>
+> **Status (original):** design (2026-08-22). Supersedes the Phase A refusal for `sv verify-auto`. Refusal remains the fallback when a shadow cannot be synthesized soundly.
 > **Owner:** exact-symbolic engine (`crates/mununu-core/src/adapter/btor2/symbolic_bitblast.rs`) + SVA lift (`crates/mununu-core/src/adapter/slang/verify_auto.rs`).
 > **Fixes:** mununu#476 (the deeper form — the transitive refusal from Phase A becomes fallback-only).
 

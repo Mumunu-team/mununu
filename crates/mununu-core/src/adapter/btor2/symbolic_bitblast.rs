@@ -5518,18 +5518,15 @@ pub fn exact_symbolic_verdict_with_witness(
 }
 
 /// Options for the exact-symbolic engine — thread-safe per-invocation overrides
-/// for behaviours that were previously env-var-only. Introduced 2026-08 to
-/// support `--no-antecedent-shadow` (CLI) / `no_antecedent_shadow` (API) as
-/// proper per-request opt-outs; the env-var `MUNUNU_NO_ANTECEDENT_SHADOW=1`
-/// remains as a process-global escape hatch (differential-oracle / debug),
-/// and either channel disabling shadow-synth wins (`false && env-var`).
+/// for behaviours that were previously env-var-only (introduced 2026-08 for the
+/// antecedent shadow opt-out, which is gone; the shape stayed for the knobs since).
 #[derive(Debug, Clone, Copy)]
 pub struct ExactSymbolicOptions {
-    /// Whether antecedent shadow-register synthesis (mununu#476 fix) is
-    /// enabled. Defaults to `true`; set to `false` to force the Phase A
-    /// refusal for SVA `|=>` properties with input-derived antecedents, so a
-    /// caller can differentially verify the shadow-synth verdict against the
-    /// refusal path or reproduce pre-mununu#476 behaviour.
+    /// Read by nothing since mununu#677 — the mununu#476 antecedent shadow synthesis it
+    /// switched was removed (it checked a `|=>` consequent one cycle late; the
+    /// inputs-in-the-state lift, [`Self::input_state_enabled`], supersedes it). Kept so that
+    /// `--no-antecedent-shadow` / `no_antecedent_shadow` / `MUNUNU_NO_ANTECEDENT_SHADOW` are
+    /// still accepted; the refusal those used to restore is `input_state_enabled: false`.
     pub antecedent_shadow_enabled: bool,
     /// mununu#602 — use the whole-register (signal-level) cone of influence instead of the
     /// bit-level default. The differential switch; the default reads `MUNUNU_COI=signal`.
@@ -6119,49 +6116,17 @@ impl ExactSession {
         let file = crate::adapter::btor2::parser::parse(btor2_content)
             .map_err(|e| format!("adapter/btor2/exact MC: {}", e.message))?;
 
-        // mununu#476 — antecedent shadow-register synthesis. If the formula matches
-        // the canonical SVA `|=>` shape (Or(Not(Predicate(A)), Modal{Box, _})),
-        // synthesise a shadow state register for every antecedent atom `A` whose
-        // combinational cone reaches primary inputs. The augmented BTOR2 file +
-        // rewritten formula are then handed to the rest of this fn. Atoms that
-        // cannot be shadowed (see `RefusalReason`) fall through to the Phase A
-        // refusal below. See `docs/design/antecedent-shadow-synthesis.md` for the
-        // full design + soundness argument.
-        //
-        // Two orthogonal opt-out channels; EITHER disabling wins:
-        //   1. `opts.antecedent_shadow_enabled = false` — per-invocation opt-out
-        //      threaded from CLI (`--no-antecedent-shadow`) / API
-        //      (`no_antecedent_shadow: true`). Thread-safe, per-request.
-        //   2. `MUNUNU_NO_ANTECEDENT_SHADOW=1` env var — process-global escape
-        //      hatch for differential-oracle / debug use.
-        let (file, rewritten_formula) = {
-            let opt_out = !opts.antecedent_shadow_enabled
-                || std::env::var("MUNUNU_NO_ANTECEDENT_SHADOW").is_ok();
-            let antecedents = crate::mu_calculus::detect_pipeimplies_antecedent_atoms(formula);
-            if !opt_out && !antecedents.is_empty() {
-                let synth = crate::adapter::btor2::antecedent_shadow::synthesize_shadows(
-                    &file,
-                    &antecedents,
-                    crate::adapter::btor2::antecedent_shadow::ShadowSynthOpts::default(),
-                );
-                if synth.shadows.is_empty() {
-                    (file, None)
-                } else {
-                    let rewritten =
-                        crate::mu_calculus::substitute_predicates(formula, &synth.renames);
-                    tracing::info!(
-                        n_shadows = synth.shadows.len(),
-                        "antecedent shadow-synth: rewrote {} input-derived antecedent atom(s) into shadow registers ({} atoms fell through to fallback refusal)",
-                        synth.shadows.len(),
-                        synth.refused.len(),
-                    );
-                    (synth.augmented, Some(rewritten))
-                }
-            } else {
-                (file, None)
-            }
-        };
-        let formula: &Formula = rewritten_formula.as_ref().unwrap_or(formula);
+        // mununu#677 — the mununu#476 antecedent shadow synthesis used to run here: for an SVA
+        // `|=>` whose antecedent atom was combinational of primary inputs it minted a register
+        // sampling the atom and RENAMED the atom to it, keeping the `[] C` — which checks the
+        // consequent one cycle late (`A@N → C@N+2`; the design doc's argument is for
+        // `AG(S → C)`). Invisible on a sticky consequent, it refuted every one-shot one
+        // (monono `dram_preload`: `waddr_q == 0 |=> waddr_q == 1`), and was masked until the
+        // inputs-in-the-state lift below (mununu#656) removed the refusal that had routed those
+        // properties to the cube engine. The lift gives the same antecedent its same-cycle value
+        // as a state predicate, which is the semantics the shadow approximated; the shadow is
+        // gone, and `opts.antecedent_shadow_enabled` / `MUNUNU_NO_ANTECEDENT_SHADOW` are read
+        // by nothing.
 
         // mununu#629 — propagate a same-cycle antecedent's constant through the consequent's cone:
         // `AG(sig == K -> C(sig))` is `AG(sig == K -> C[sig := K])`, and the substituted copy of a
@@ -13059,26 +13024,19 @@ mod tests {
         );
     }
 
-    /// mununu#476 — Option C. The same monono `wb_mem_client` shape (an atom
-    /// combinationally driven by primary inputs) DECIDES when the surrounding
-    /// formula matches the canonical SVA `|=>` lift shape
-    /// `nu X. ((¬A ∨ □B) ∧ □X)`: the engine detects the shape, synthesises
-    /// a shadow state cell that samples `A` per cycle, rewrites the atom to
-    /// the shadow, and evaluates on the augmented model. This is the fix that
-    /// closes the coverage gap the Phase A refusal left open.
-    ///
-    /// The BTOR2 sets `q' = 0` unconditionally, so `[] (q == 0)` always Holds
-    /// and the whole property Holds after shadow-synth. Pre-Option C this
-    /// property would have been Skipped (via the Phase A refusal on
-    /// `mem_rvalid_mine`); post-Option C it Holds.
+    /// The monono `wb_mem_client` shapes the mununu#476 shadow synthesis was written for — an
+    /// SVA `|=>` whose antecedent atom is combinational of primary inputs, single and
+    /// multi-atom — decide by the inputs-in-the-state lift (mununu#656) alone since mununu#677
+    /// removed the shadow: the atoms read the sampled inputs, and `[] (q == 0)` with `q' = 0`
+    /// holds. With the lift disabled the Phase A refusal is the answer, by name; the removed
+    /// `antecedent_shadow_enabled` knob changes nothing either way. The one-shot consequent
+    /// the shadow got wrong is `input_state::tests::x677_…`.
     ///
     /// Contrast [`exact_symbolic_refuses_derived_input_atom`] (same atom, but a
     /// bare `mu Y. (a or <> Y)` — no `|=>` shape → refusal path still fires).
     #[test]
-    fn shadow_synth_flips_derived_input_antecedent_to_decided() {
-        // Same combinational-of-inputs shape as monono's `wb_mem_client`, plus
-        // a spare state `q` whose next is const 0 (so `q == 0` always holds).
-        const BTOR2: &str = r#"
+    fn x677_input_derived_pipe_antecedents_decide_by_the_lift_without_a_shadow() {
+        const SINGLE: &str = r#"
 1 sort bitvec 1
 2 input 1 mem_rvalid
 3 input 1 got
@@ -13089,63 +13047,7 @@ mod tests {
 8 output 7 mem_rvalid_mine
 9 next 1 4 5
 "#;
-        // Canonical SVA `mem_rvalid_mine |=> (q == 0)` lift shape.
-        let formula = crate::mu_calculus::parser::parse(
-            "nu X. ((not mem_rvalid_mine or [] (q == 0)) and [] X)",
-        )
-        .expect("formula");
-        let verdict = exact_symbolic_verdict(BTOR2, &formula)
-            .expect("shadow-synth on an SVA `|=>` shape should decide, not refuse");
-        assert_eq!(
-            verdict,
-            ExactVerdict::Holds,
-            "with shadow-synth, `mem_rvalid_mine |=> (q == 0)` where q'=0 always Holds",
-        );
-
-        // Opt-out via the thread-safe options channel (`--no-antecedent-shadow`
-        // CLI / `no_antecedent_shadow: true` API — mununu#476 item 4). Restores
-        // the Phase A refusal even for `|=>` shapes. Env-var opt-out
-        // (`MUNUNU_NO_ANTECEDENT_SHADOW=1`) is the equivalent process-global
-        // channel; either channel disabling shadow-synth wins.
-        let err = exact_symbolic_verdict_with_options(
-            BTOR2,
-            &formula,
-            &ExactSymbolicOptions {
-                antecedent_shadow_enabled: false,
-                input_state_enabled: false, // mununu#656 — else the product model decides it
-                ..Default::default()
-            },
-        )
-        .expect_err("opt-out must revert to the Phase A transitive-fan-in refusal");
-        assert!(
-            err.contains("combinationally driven by primary input"),
-            "opt-out refusal should still be the Phase A message: {err}"
-        );
-    }
-
-    /// mununu#475 follow-up (item 3 of the shadow-synth follow-up list) —
-    /// multi-atom `|=>` antecedent. `(valid_and_ready && valid_and_ack) |=> (q == 0)`
-    /// where both atoms are COMBINATIONAL-OF-INPUTS (the typical monono `wb_mem_client`
-    /// shape multiplied by two) and `q` is a spare state pinned to 0. The detector
-    /// now walks into the `And` under the antecedent-side `Not` and returns BOTH
-    /// atoms; shadow-synth synthesises TWO shadow registers
-    /// (`_mununu_antshadow_0`, `_mununu_antshadow_1`), one per atom; the rewritten
-    /// formula uses both shadows and the property decides. Pre-follow-up this
-    /// would have Skipped with the transitive refusal (multi-atom antecedent was
-    /// out-of-scope).
-    ///
-    /// **Bare-primary-input atoms in a multi-atom antecedent are still refused**
-    /// (per `RefusalReason::IsPrimaryInput`) — the author-confirmation case
-    /// remains a safety measure even at the leaf level; the caller can rewrite
-    /// `valid |=> C` as `valid_gated = valid` + `valid_gated |=> C` if that's
-    /// truly the intent.
-    #[test]
-    fn shadow_synth_flips_multi_atom_antecedent_to_decided() {
-        // `valid_and_ready = valid && ready` and `valid_and_ack = valid && ack`
-        // — both combinational-of-inputs Outputs (yosys-style Output form,
-        // matches the monono `mem_rvalid_mine` pattern). `q` is a spare state
-        // whose next is const 0 → `q == 0` always Holds.
-        const BTOR2: &str = r#"
+        const MULTI: &str = r#"
 1 sort bitvec 1
 2 input 1 valid
 3 input 1 ready
@@ -13159,18 +13061,43 @@ mod tests {
 11 output 10 valid_and_ack
 12 next 1 5 6
 "#;
-        let formula = crate::mu_calculus::parser::parse(
-            "nu X. ((not (valid_and_ready and valid_and_ack) or [] (q == 0)) and [] X)",
-        )
-        .expect("formula");
-        let verdict = exact_symbolic_verdict(BTOR2, &formula)
-            .expect("multi-atom shadow-synth on an SVA `|=>` shape should decide, not refuse");
-        assert_eq!(
-            verdict,
-            ExactVerdict::Holds,
-            "with shadow-synth on both leaves, `(valid_and_ready && valid_and_ack) |=> (q == 0)` \
-             where q'=0 always Holds",
-        );
+        let f = |s: &str| crate::mu_calculus::parser::parse(s).expect("formula");
+        for (btor2, formula) in [
+            (
+                SINGLE,
+                f("nu X. ((not mem_rvalid_mine or [] (q == 0)) and [] X)"),
+            ),
+            (
+                MULTI,
+                f("nu X. ((not (valid_and_ready and valid_and_ack) or [] (q == 0)) and [] X)"),
+            ),
+        ] {
+            for shadow_knob in [true, false] {
+                let verdict = exact_symbolic_verdict_with_options(
+                    btor2,
+                    &formula,
+                    &ExactSymbolicOptions {
+                        antecedent_shadow_enabled: shadow_knob,
+                        ..Default::default()
+                    },
+                )
+                .expect("the lift makes the antecedent a state predicate");
+                assert_eq!(verdict, ExactVerdict::Holds);
+            }
+            let err = exact_symbolic_verdict_with_options(
+                btor2,
+                &formula,
+                &ExactSymbolicOptions {
+                    input_state_enabled: false,
+                    ..Default::default()
+                },
+            )
+            .expect_err("without the lift the Phase A refusal is the answer");
+            assert!(
+                err.contains("combinationally driven by primary input"),
+                "the refusal names the mechanism: {err}"
+            );
+        }
     }
 
     /// P3 — the trap-path witness for a `Violated` `AG EF (st==0)` recoverability property.

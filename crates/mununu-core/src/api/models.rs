@@ -1769,14 +1769,12 @@ pub struct SvVerifyAutoRequest {
     /// shape.
     #[serde(default)]
     pub rescue_bottom_recoverability: Option<bool>,
-    /// mununu#476 item 4 — disable antecedent shadow-register synthesis for
-    /// the exact-symbolic engine (default `false` ⇒ shadow-synth enabled, the
-    /// shipped behaviour). Set `true` to force the Phase A refusal for SVA
-    /// `|=>` properties whose antecedent combinationally reaches primary
-    /// inputs — the differential-oracle / debug knob mirrored on the CLI as
-    /// `--no-antecedent-shadow` and via the process-global
-    /// `MUNUNU_NO_ANTECEDENT_SHADOW=1` env var. Per-request opt-out is
-    /// thread-safe (unlike the env var, which is process-global).
+    /// **Accepted and ignored since mununu#677.** The mununu#476 antecedent shadow synthesis
+    /// this switched off was removed: it checked an SVA `|=>` consequent one cycle late (a
+    /// spurious VIOLATED on every one-shot consequent). A `|=>` whose antecedent reaches
+    /// primary inputs decides by inputs-in-the-state (mununu#656); the refusal this used to
+    /// restore is `no_input_state: true`. Mirrored on the CLI as `--no-antecedent-shadow`
+    /// (also ignored).
     #[serde(default)]
     pub no_antecedent_shadow: Option<bool>,
     /// mununu#629 — disable antecedent constant propagation on the exact-symbolic engine
