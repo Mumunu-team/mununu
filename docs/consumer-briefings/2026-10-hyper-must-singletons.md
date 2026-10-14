@@ -18,6 +18,7 @@
 | vendored `prim_arbiter_tree_n8` lift, `AG EF (gnt_o == 0)`, one predicate, `cegar_refine_loop` (SmtAllPairs may, `LiftStrategy::Eager`) | `Off`: ⊥ · `smt-per-target-standard`: HOLDS · **`smt-hyper-must`: ⊥ → HOLDS** (`x663_the_cube_decides_the_arbiter_recoverability_with_per_target_must`, which now runs the hyper-must arm too) |
 | wall-class matrix (`mununu-sva`, the worktree) | **2 passed / 0 failed in 37 s**; every row's verdict as before — soundness invariant intact (no lever contradicts an oracle), no row moved (the set has no hyper-must-only row; the arbiter is the class representative pending an RTL-backed matrix row) |
 | `cargo clippy -D warnings` on `mununu-core` (`--features api`), `x663_` tests | clean; 2/2 |
+| **the ledger §3.15 rows re-measured on `main` at `11c8b3d`** (the merge), the cube member ALONE as the issue measured them — `sv verify-auto --engine explicit --preprocess-sv2v`, one prepended `@mununu_guarantee`, `MUNUNU_NO_INPUT_STATE=1`, the main-phase outcome from the `MUNUNU_VERIFY_AUTO_PARTIAL_JSON` breadcrumb, in `mununu-sva` | `prim_fifo_sync` `AG EF (depth_o == 0)`: **`smt-hyper-must` ⊥ → HOLDS** (2.2 s; `smt-per-target-standard` HOLDS 1.0 s) · `prim_arbiter_tree` `AG EF (gnt_o == 0)`: **`smt-hyper-must` ⊥ → HOLDS** (1.3 s; per-target 1.2 s) · `prim_packer_fifo` `AG EF (depth_o == 0)`: main pass ⊥ under both arms, decided HOLDS by the re-plan — unchanged. Both rows the issue reported now decide under hyper-must |
 
 ## What to update, per consumer
 
@@ -46,4 +47,4 @@ cargo test -p mununu-core --lib -- x663_the_cube_decides_the_arbiter_recoverabil
 ## Not covered here
 
 - The full-set hyper edge still uses the whole may-successor set as `T` (not minimised); a source whose singletons all fail and whose set edge needs a strict subset of `T` stays ⊥.
-- `prim_fifo_sync` `depth_o == 0` (the issue's second row) is not vendored as a fixture; it is expected to move by the same mechanism and is not re-measured here.
+- `prim_fifo_sync` `depth_o == 0` (the issue's second row) is not vendored as a wall-class fixture; it was re-measured on the merge from `examples/verify/dc_opentitan_prim_fifo_sync` (table above) and moves as expected. An RTL-backed matrix row for the class is still owed.
