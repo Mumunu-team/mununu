@@ -2836,14 +2836,42 @@ pub fn predicate_cube_lift(
                     // `may` when the session path was taken, or the one read off the exact
                     // post-image may-map (`hyper_must_from_exact_may`); z3 proves it only on
                     // the all-pairs fallback, whose may-set can be incomplete.
+                    // mununu#667 — the ∀∃ SINGLETONS first, as the sampling path's arm does
+                    // (`must pass: ∀∃ singletons`). This arm emitted only the full-set edge
+                    // `src →□ may_succ(src)`, which the inner μ of `AG EF good` can use only
+                    // once EVERY may-successor is already in its approximant — so a source
+                    // that reaches `good` under some input but may also stay never fed the
+                    // fixpoint: the per-target form decided `prim_arbiter_tree`
+                    // `AG EF (gnt_o == 0)` HOLDS in 123 ms while this arm left it ⊥. A
+                    // singleton `src →□ {t}` is a hyper-must edge with `|T| = 1`, a proved
+                    // obligation like any other, so adding it keeps the GKMTS sound; the
+                    // full-set edge is then emitted only for sources no singleton promoted
+                    // (where it is the only edge that can exist), as on the sampling path.
+                    let singleton_musts = sts.must_edges_over(&cube_preds, &may_edges, 5_000);
+                    let promoted = singleton_musts.len();
+                    let mut promoted_srcs: std::collections::HashSet<usize> =
+                        std::collections::HashSet::new();
+                    for (i, j) in singleton_musts {
+                        builder.transition_ids_with_modality(
+                            state_ids[i],
+                            &[step_label],
+                            state_ids[j],
+                            crate::clts::TransitionModality::Sharp,
+                        );
+                        promoted_srcs.insert(i);
+                    }
+                    sharp_edges_promoted += promoted;
                     let (hyper, how) = precomputed_hyper.unwrap_or_else(|| {
                         (
                             sts.hyper_must_edges(&cube_preds, &may_edges, 5_000),
                             "Z3-proved ∀∃ hyper-must",
                         )
                     });
-                    let emitted = hyper.len();
+                    let mut emitted = 0usize;
                     for (src, targets) in hyper {
+                        if promoted_srcs.contains(&src) || targets.len() < 2 {
+                            continue;
+                        }
                         let target_ids: smallvec::SmallVec<
                             [crate::clts::StateId<DefaultStateIdx>; 4],
                         > = targets.iter().map(|&t| state_ids[t]).collect();
@@ -2854,14 +2882,15 @@ pub fn predicate_cube_lift(
                                 first,
                                 crate::clts::TransitionModality::must_hyper(target_ids.clone()),
                             );
+                            emitted += 1;
                         }
                     }
                     hyper_must_edges_emitted += emitted;
-                    if emitted > 0 {
+                    if promoted > 0 || emitted > 0 {
                         warnings.push(crate::adapter::AdapterWarning {
                             kind: crate::adapter::WarningKind::ApproximateTranslation,
                             message: format!(
-                                "[B.2 may+hyper-must] predicate_cube_lift: SmtAllPairs may + SmtHyperMust composition emitted {emitted} MustHyperOnly edge(s) over per-source may-successor sets ({how}; monotone under refinement per Shoham–Grumberg LMCS 2007). Compound/νμ verdicts over this KMTS are clean-sound (no standard-KMTS non-monotonicity tag). Hyper-must targets = full may-successor set (MVP doesn't minimize T)."
+                                "[B.2 may+hyper-must] predicate_cube_lift: SmtAllPairs may + SmtHyperMust composition promoted {promoted} ∀∃ singleton edge(s) to Sharp and emitted {emitted} MustHyperOnly edge(s) over the un-promoted sources' may-successor sets ({how}; monotone under refinement per Shoham–Grumberg LMCS 2007). Compound/νμ verdicts over this KMTS are clean-sound. Hyper-must targets = full may-successor set (not minimized)."
                             ),
                             location: None,
                         });
@@ -5750,21 +5779,21 @@ mod tests {
         );
     }
 
+    /// B.2 (2026-06-26) / mununu#667 (2026-10-14) — on the SmtAllPairs path `SmtHyperMust`
+    /// promotes the ∀∃ SINGLETONS first and emits a GKMTS `MustHyperOnly` edge only for a
+    /// source no singleton promoted. Until #667 it emitted ONLY the full-set edge
+    /// `src →□ may_succ(src)`, which the inner μ of `AG EF` can use only once every
+    /// may-successor is already in its approximant — the arbiter row stayed ⊥ while the
+    /// per-target form decided it. Two shapes:
+    ///
+    /// - the deterministic toggle `q' = !q`: every source has ONE may-successor, the singleton
+    ///   is a must edge, so both edges are Sharp and no hyper edge is needed (a `|T| = 1`
+    ///   hyper edge would say the same thing);
+    /// - `q' = r`, `r` held, predicate on `q` alone: the cube `q = 0` holds `(0,0) → q' = 0`
+    ///   and `(0,1) → q' = 1`, so NO singleton is a must edge, while the set `{q=0, q=1}` is
+    ///   (totality) — the one edge only the hyper form can carry.
     #[test]
-    fn b2_smt_all_pairs_smt_hyper_must_emits_must_hyper_only() {
-        // B.2 (2026-06-26) — on the SmtAllPairs path, `SmtHyperMust` emits
-        // GKMTS `MustHyperOnly` edges (over each source's may-successor set)
-        // instead of the ∀∃ `Sharp` promotion. This is the monotone must
-        // form that makes compound/νμ verdicts clean-sound (no B.3.b
-        // soundness-tag). On the deterministic toggle q'=!q each source has a
-        // singleton may-successor set, so both states get a hyper-must edge.
-        let toggle =
-            "1 sort bitvec 1\n2 zero 1\n3 state 1 q\n4 init 1 3 2\n5 not 1 3\n6 next 1 3 5\n";
-        let preds = vec![PredicateSpec {
-            name: "q_is_1".into(),
-            register: "q".into(),
-            value: 1,
-        }];
+    fn b2_smt_all_pairs_smt_hyper_must_promotes_singletons_then_emits_hyper_only_where_needed() {
         let opts = PredicateCubeLiftOptions {
             max_cube_count: 1024,
             max_input_bits: 8,
@@ -5776,33 +5805,56 @@ mod tests {
             may_postimage: false,
             reachable_only: false,
         };
-        let lifted = predicate_cube_lift(preds, toggle, &AdapterOptions::default(), &opts)
+        let preds = || {
+            vec![PredicateSpec {
+                name: "q_is_1".into(),
+                register: "q".into(),
+                value: 1,
+            }]
+        };
+        let count = |lifted: &PredicateCubeLiftResult| {
+            let mut sharp = 0usize;
+            let mut hyper = 0usize;
+            for s in lifted.clts.states() {
+                for t in lifted.clts.outgoing(s) {
+                    match t.modality() {
+                        crate::clts::TransitionModality::Sharp => sharp += 1,
+                        crate::clts::TransitionModality::MustHyperOnly(_) => hyper += 1,
+                        _ => {}
+                    }
+                }
+            }
+            (sharp, hyper)
+        };
+
+        let toggle =
+            "1 sort bitvec 1\n2 zero 1\n3 state 1 q\n4 init 1 3 2\n5 not 1 3\n6 next 1 3 5\n";
+        let lifted = predicate_cube_lift(preds(), toggle, &AdapterOptions::default(), &opts)
             .expect("SmtAllPairs + SmtHyperMust lift");
-        assert!(
-            lifted.hyper_must_edges_emitted > 0,
-            "SmtAllPairs + SmtHyperMust must emit MustHyperOnly edges; got {}",
-            lifted.hyper_must_edges_emitted
+        assert_eq!(
+            lifted.sharp_edges_promoted, 2,
+            "the toggle's two singleton edges are ∀∃ must edges → Sharp"
         );
-        // The SmtHyperMust branch emits hyper-must, NOT the ∀∃ Sharp form.
+        assert_eq!(
+            lifted.hyper_must_edges_emitted, 0,
+            "a promoted source gets no full-set hyper edge"
+        );
+        assert_eq!(count(&lifted), (2, 0));
+
+        // `q' = r`, `r' = r` (held, free at init): the cube `q = 0` splits on `r`.
+        let split = "1 sort bitvec 1\n2 zero 1\n3 state 1 q\n4 state 1 r\n5 init 1 3 2\n\
+                     6 next 1 3 4\n7 next 1 4 4\n";
+        let lifted = predicate_cube_lift(preds(), split, &AdapterOptions::default(), &opts)
+            .expect("SmtAllPairs + SmtHyperMust lift");
         assert_eq!(
             lifted.sharp_edges_promoted, 0,
-            "the SmtHyperMust branch emits MustHyperOnly, not Sharp promotions"
+            "no singleton is a must edge out of a cube that splits on the held `r`"
         );
-        let hyper = lifted
-            .clts
-            .states()
-            .flat_map(|s| lifted.clts.outgoing(s))
-            .filter(|t| {
-                matches!(
-                    t.modality(),
-                    crate::clts::TransitionModality::MustHyperOnly(_)
-                )
-            })
-            .count();
-        assert!(
-            hyper > 0,
-            "the lifted CLTS must carry MustHyperOnly transitions; got {hyper}"
+        assert_eq!(
+            lifted.hyper_must_edges_emitted, 2,
+            "each cube's may-successor set {{q=0, q=1}} is a hyper-must edge by totality"
         );
+        assert_eq!(count(&lifted), (0, 2));
     }
 
     #[test]
