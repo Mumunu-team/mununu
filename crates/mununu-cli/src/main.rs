@@ -370,7 +370,8 @@ struct InternalEngineEvalArgs {
     /// The μ-calculus formula to evaluate, as the engine would receive it.
     #[arg(long = "formula", value_name = "MU")]
     formula: String,
-    /// Mirror of `sv verify-auto --no-antecedent-shadow`, so the child matches the parent's posture.
+    /// Mirror of `sv verify-auto --no-antecedent-shadow`. Accepted and ignored since mununu#677
+    /// (the shadow synthesis it switched was removed); kept so a parent's argv still parses.
     #[arg(long = "no-antecedent-shadow")]
     no_antecedent_shadow: bool,
     /// Mirror of `sv verify-auto --no-antecedent-propagate` (mununu#629).
@@ -2111,15 +2112,12 @@ struct SvVerifyAutoArgs {
     #[arg(long = "no-rescue")]
     no_rescue: bool,
     /// mununu#476 item 4 — disable antecedent shadow-register synthesis for
-    /// the exact-symbolic engine. By default (shipped as of mununu#478), an
-    /// SVA `|=>` property whose antecedent combinationally reaches primary
-    /// inputs gets an automatic shadow-register rewrite and DECIDES; pass
-    /// this to force the Phase A refusal instead (properties `Skipped` with
-    /// the "combinationally driven by primary input" message). Differential-
-    /// oracle / debug use — production runs should leave this unset. Mirrored
-    /// on the API as `no_antecedent_shadow: true` and via the process-global
-    /// `MUNUNU_NO_ANTECEDENT_SHADOW=1` env var (per-request opt-out here is
-    /// thread-safe; the env var is not).
+    /// the exact-symbolic engine. **Accepted and ignored since mununu#677:** the mununu#476
+    /// shadow synthesis it switched off was removed (it checked a `|=>` consequent one cycle
+    /// late — a spurious VIOLATED on every one-shot consequent). An SVA `|=>` whose
+    /// antecedent reaches primary inputs decides by inputs-in-the-state (mununu#656); the
+    /// refusal this flag used to restore is `--no-input-state`. Mirrored on the API as
+    /// `no_antecedent_shadow` (also ignored); `MUNUNU_NO_ANTECEDENT_SHADOW` is read by nothing.
     #[arg(long = "no-antecedent-shadow")]
     no_antecedent_shadow: bool,
     /// mununu#629 — disable antecedent constant propagation on the exact-symbolic
@@ -4299,7 +4297,8 @@ fn sv_verify_auto(args: SvVerifyAutoArgs) -> Result<(), String> {
         rescue_bottom_recoverability: !args.no_rescue,
         // `sv verify-auto` verifies the design as-lifted; mutation is the `sv mutate` verb's job.
         mutation: None,
-        // mununu#476 item 4 — --no-antecedent-shadow reverts to the Phase A refusal.
+        // mununu#677 — read by nothing; the shadow synthesis is gone. `--no-input-state` is
+        // the refusal switch.
         antecedent_shadow: !args.no_antecedent_shadow,
         // mununu#629 — --no-antecedent-propagate leaves the formula as lifted.
         antecedent_propagate: !args.no_antecedent_propagate,

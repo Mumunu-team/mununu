@@ -21,7 +21,6 @@
 
 pub mod abs_safety;
 pub mod antecedent_propagation;
-pub mod antecedent_shadow;
 pub mod array_prophecy;
 pub mod ast;
 pub mod bad_monitor;

@@ -238,7 +238,7 @@ const bad = report.properties.filter(p => p.outcome === "violated" || p.outcome 
 
 - [`docs/verifying-rtl.md`](../verifying-rtl.md) — user-facing prose on the verify surfaces.
 - [`docs/policies/cross-repo-impact.md`](../policies/cross-repo-impact.md) — when a wire-format change requires a consumer briefing.
-- [`docs/design/antecedent-shadow-synthesis.md`](../design/antecedent-shadow-synthesis.md) — how a `skipped` verdict can flip to a definite one after enabling shadow-synth (or vice versa on `--no-antecedent-shadow`).
+- [`docs/design/antecedent-shadow-synthesis.md`](../design/antecedent-shadow-synthesis.md) — history: the shadow synthesis was removed in mununu#677 (it checked a `|=>` consequent one cycle late); a `skipped` verdict on an input-reading atom flips to a definite one by inputs-in-the-state, and `no_input_state: true` restores the refusal. `no_antecedent_shadow` is accepted and ignored.
 - Consumer briefings that touched this surface:
   - [`../consumer-briefings/2026-08-antecedent-shadow-synth.md`](../consumer-briefings/2026-08-antecedent-shadow-synth.md)
   - [`../consumer-briefings/2026-08-multi-atom-antecedent-shadow.md`](../consumer-briefings/2026-08-multi-atom-antecedent-shadow.md)

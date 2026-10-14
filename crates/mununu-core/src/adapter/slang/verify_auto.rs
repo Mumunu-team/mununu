@@ -1547,16 +1547,11 @@ pub struct VerifyAutoOptions {
     /// [`crate::adapter::btor2::mutate`].
     pub mutation: Option<crate::adapter::btor2::mutate::Mutation>,
     /// mununu#476 item 4 — whether antecedent shadow-register synthesis is
-    /// enabled for the exact-symbolic engine. `true` (default) matches the
-    /// shipped shadow-synth behaviour: SVA `|=>` properties whose antecedent
-    /// combinationally reaches primary inputs get an automatic shadow-register
-    /// rewrite and DECIDE. `false` reverts to the Phase A transitive-fan-in
-    /// refusal (properties `Skipped` with the "combinationally driven by
-    /// primary input" message) — the differential-oracle / debug knob, mirrored
-    /// on the CLI as `--no-antecedent-shadow` and on the API as
-    /// `no_antecedent_shadow: true`. The process-global
-    /// `MUNUNU_NO_ANTECEDENT_SHADOW=1` env var is the third channel; either
-    /// channel disabling shadow-synth wins.
+    /// enabled for the exact-symbolic engine. **Read by nothing since mununu#677** — the
+    /// mununu#476 shadow synthesis was removed (it checked a `|=>` consequent one cycle late);
+    /// an SVA `|=>` whose antecedent reaches primary inputs decides by inputs-in-the-state
+    /// (`input_state`), and `false` here changes nothing. Still threaded from
+    /// `--no-antecedent-shadow` / `no_antecedent_shadow` so those keep parsing.
     pub antecedent_shadow: bool,
     /// mununu#629 — antecedent constant propagation on the exact-symbolic engine. `true`
     /// (default): a same-cycle implication `sig == K |-> C` has `K` propagated through `C`'s
@@ -3537,9 +3532,11 @@ const SHADOW_DUMP_ENV: &str = "MUNUNU_SHADOW_BTOR2_DUMP";
 /// formula, including the `<base>__past` shadow atom names. Both go in, the formulas as BTOR2
 /// comments, so the artifact is handed over as a single file and still parses as BTOR2.
 ///
-/// **It states what it does NOT contain.** Antecedent shadow synthesis (`_mununu_antshadow_<N>`)
+/// **It states what it does NOT contain.** The inputs-in-the-state lift (mununu#656: a sampled
+/// state cell per primary input the property's atoms reach, the input line renamed `name$next`)
 /// runs later, per-property, inside the engine, so it is not in this dump. A dump that silently
-/// omitted a rewrite would be the same trap this exists to close.
+/// omitted a rewrite would be the same trap this exists to close. (Until mununu#677 the
+/// omitted rewrite named here was the antecedent shadow synthesis, since removed.)
 ///
 /// Diagnostic only: every failure is swallowed after one warning, mirroring
 /// [`crate::adapter::partial_json`]. A dump must never be able to change a verdict.
@@ -3554,12 +3551,15 @@ fn dump_prepared_model(btor2: &str, properties: &[(String, String)]) {
     out.push_str("; mununu#552 — the BTOR2 the engine runs, dumped after model preparation.\n");
     out.push_str("; INCLUDES: the SV lift, `$past` shadow registers, reset pinning,\n");
     out.push_str(";           `--config-value` pins, and any `sv mutate` fault.\n");
-    out.push_str("; EXCLUDES: antecedent shadow synthesis (`_mununu_antshadow_*`), which runs\n");
-    out.push_str(";           LATER and PER-PROPERTY inside the engine. If you are reproducing\n");
     out.push_str(
-        ";           an `A |=> C` with an input-derived antecedent, that rewrite is not\n",
+        "; EXCLUDES: the inputs-in-the-state lift (mununu#656: a sampled state cell per\n",
     );
-    out.push_str(";           in this file.\n");
+    out.push_str(";           primary input the property's atoms reach, the input renamed\n");
+    out.push_str(
+        ";           `name$next`), which runs LATER and PER-PROPERTY inside the engine.\n",
+    );
+    out.push_str(";           If you are reproducing a property whose atoms read an input, that\n");
+    out.push_str(";           rewrite is not in this file.\n");
     out.push_str(";\n");
     out.push_str("; Properties, as the engine parses them (post `--config-value` substitution).\n");
     out.push_str(
@@ -8016,7 +8016,7 @@ mod tests {
         );
         // And it declares what it does NOT contain — the trap this issue exists to close.
         assert!(
-            got.contains("EXCLUDES") && got.contains("antshadow"),
+            got.contains("EXCLUDES") && got.contains("inputs-in-the-state"),
             "the dump must name the rewrite it omits: {got}"
         );
         let _ = std::fs::remove_dir_all(&dir);
