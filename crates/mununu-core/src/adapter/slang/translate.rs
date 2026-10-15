@@ -31,6 +31,8 @@
 //! | `sig[hi:lo] OP k`, `$past(sig[hi:lo])` | the minted slice signal `sig__bitsM_L` (`[hi:lo]` only); `M`/`L` are the BIT POSITIONS yosys gives the indices (`sv_index_to_bit`), so `x[11:8]` of `logic [15:8] x` is `x__bits3_0` | mununu#565, positions 2026-10-15 |
 //! | `sig[k]` constant bit-select (packed, one dimension, typedef / struct resolved) | the 1-bit slice `sig__bitsP_P`; bare in boolean position | 2026-10-15 |
 //! | `$rose` / `$fell` / `$stable` / `$changed` over `sig[k]` or `sig[hi:lo]` | the slice now against the same slice of `sig__past` | 2026-10-15 |
+//! | `e throughout S`, `S` bounded | `S` with `e` conjoined at every cycle of the match, gap cycles included (`throughout_consequent`) | 2026-10-15 |
+//! | `$countones(x) OP k`, `$countones(x[hi:lo])`, `$countones(x)` in boolean position | the minted combinational count `x__popcount` (`btor2::shadow::augment_with_popcounts`), ≤ 64 bits | 2026-10-15 |
 //! | `$isunknown(x)` | `false` — the model is 2-state; recorded per assertion (`two_state_folds` → a `two-state-fold` note) | 2026-10-15 |
 //! | `s_eventually b`, `a \|-> s_eventually b` | `AF b` = `mu Y. (b \|\| [] Y)`, the response shape the l2s rescue reduces | 2026-10-15 |
 //! | `##[m:$] b` (last gap, boolean operand), `strong(…)` of it | `[]ᵐ AF b`; an unmarked one is read strongly and recorded (`strong_readings`) | 2026-10-15 |
@@ -55,18 +57,18 @@
 //! | `nexttime [k]`, `always [m:n]`, `s_nexttime` with a range | ranged forms not captured |
 //! | `[->n]` goto, `[=n]` non-consecutive repetition | needs a sequence automaton — Tier-3b |
 //! | `[*m:n]` as a consequent, repetition inside a CONSEQUENT chain element, a nested sub-sequence in an antecedent, `[*0…]`, an antecedent past 64 alternatives | length composition / the size guard |
-//! | `e throughout S` | `Binary{Throughout}`: unsupported consequent |
+//! | `e throughout S` with `S` unbounded or a repetition inside its chain; a non-boolean `e` | needs a sequence automaton / length composition |
 //! | `sig[idx]` dynamic, `mem[i]` array content, `md[i]` of a multi-dimensional packed array, an enum- or otherwise opaque-typed base | distinct refusals (mununu#514; the index cannot be mapped to a bit) |
 //! | `x[i +: w]`, `x[i -: w]` | indexed part-select: slang gives base-and-WIDTH, declined rather than mis-sliced (mununu#565) |
-//! | `$countones`, other system calls | not in the Tier-1c/Tier-2 fragment |
+//! | `$countones` over more than 64 bits or a non-signal; other system calls | the count cap / not in the Tier-1c/Tier-2 fragment |
 //! | `^x` / `~^x` | parity is not a propositional atom |
 //! | `$rose` / `$fell` on a vector or a multi-bit slice, `$past(x, 0)`, `$stable(x, k)` | 1 bit only / depth ≥ 1 / single signal |
 //! | `reg * k`, `reg + reg`, other arithmetic | only the constant addend is carried |
 //!
 //! The first widening (2026-10-15) added the bit-select, the 2-state `$isunknown` fold and the
 //! liveness forms above; the second adds ranged antecedents (and repetition inside an antecedent
-//! chain) by NNF unrolling, and plans `throughout` on bounded consequents and a minted
-//! `$countones`. Goto / `[=n]` and unbounded antecedents stay out.
+//! chain) by NNF unrolling, `throughout` on bounded consequents and a minted `$countones`.
+//! Goto / `[=n]` and unbounded antecedents stay out.
 //!
 //! **Tier-2 shadow registers (XL.3).** `$past`/`$stable`/`$changed`/`$rose`/
 //! `$fell` read a signal's *previous-cycle* value, encoded as an atom over a
@@ -224,6 +226,9 @@ pub struct TranslationReport {
     /// as `s_eventually` and verify-auto says so per property (`strong-sequence-reading` note).
     /// An explicit `strong(…)` or `s_eventually` is not recorded: it already says what it means.
     pub strong_readings: Vec<TranslationCaveat>,
+    /// Bases of `$countones(base)` the translated formulas read (deduped; a base may be a minted
+    /// slice). The BTOR2 augmentation mints `<base>__popcount` per entry.
+    pub required_popcounts: Vec<String>,
 }
 
 /// A per-assertion caveat the translator recorded: a 2-state fold
@@ -353,6 +358,11 @@ pub fn translate_ast_json_with_options(
                 // (only for assertions that actually translated).
                 collect_shadow_signals(spec, &mut report.required_shadows);
                 collect_slice_signals(spec, &mut report.required_slices);
+                for base in collect_popcounts(spec) {
+                    if !report.required_popcounts.contains(&base) {
+                        report.required_popcounts.push(base);
+                    }
+                }
                 for construct in collect_two_state_folds(spec) {
                     report.two_state_folds.push(TranslationCaveat {
                         assertion: name.clone(),
@@ -771,6 +781,70 @@ fn uses_eventuality(node: &Value) -> bool {
     }
 }
 
+/// SVA-fragment widening (2026-10-15) — the minted atom name for `$countones(base)`. One naming
+/// contract with `btor2::shadow::popcount_signal_name`.
+fn popcount_atom_name(base: &str) -> String {
+    format!("{base}__popcount")
+}
+
+/// `$countones(x)` → the base its count is minted over (`x`, or a slice `x__bitsM_L`). `None` when
+/// `expr` is not a `$countones` call; `Some(Err)` for one the translator refuses, with the reason.
+fn countones_base(expr: &Value) -> Option<Result<String, String>> {
+    let expr = unwrap(expr);
+    if expr.get("kind").and_then(Value::as_str) != Some("Call")
+        || expr.get("subroutine").and_then(Value::as_str) != Some("$countones")
+    {
+        return None;
+    }
+    let args = expr.get("arguments").and_then(Value::as_array);
+    let Some([arg]) = args.map(Vec::as_slice) else {
+        return Some(Err("$countones takes exactly one argument".into()));
+    };
+    let arg = unwrap(arg);
+    let (base, width) = match slice_ref(arg) {
+        Some(Ok((b, msb, lsb))) => (slice_atom_name(&b, msb, lsb), msb - lsb + 1),
+        Some(Err(e)) => return Some(Err(e)),
+        None => match signal_name(arg) {
+            Ok(b) if !is_unpacked_array(arg) => (b.to_string(), signal_width(arg)),
+            _ => {
+                return Some(Err(
+                    "$countones over anything but a packed signal or a `[hi:lo]` slice is not \
+                     supported"
+                        .into(),
+                ));
+            }
+        },
+    };
+    if width > crate::adapter::btor2::shadow::MAX_POPCOUNT_WIDTH {
+        return Some(Err(format!(
+            "$countones over a {width}-bit operand — the minted count is capped at {} bits",
+            crate::adapter::btor2::shadow::MAX_POPCOUNT_WIDTH
+        )));
+    }
+    Some(Ok(base))
+}
+
+/// Every `$countones` base an assertion reads (deduped).
+fn collect_popcounts(node: &Value) -> Vec<String> {
+    fn walk(n: &Value, out: &mut Vec<String>) {
+        match n {
+            Value::Object(m) => {
+                if let Some(Ok(base)) = countones_base(n)
+                    && !out.contains(&base)
+                {
+                    out.push(base);
+                }
+                m.values().for_each(|v| walk(v, out));
+            }
+            Value::Array(a) => a.iter().for_each(|v| walk(v, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(node, &mut out);
+    out
+}
+
 /// `$stable` / `$changed` / `$rose` / `$fell` — the depth-1 history calls.
 fn is_edge_or_stability_call(expr: &Value) -> bool {
     let expr = unwrap(expr);
@@ -1065,6 +1139,18 @@ fn consequent_expr(spec: &Value) -> Result<String, String> {
         // `strong(S)` / `weak(S)`. Over a BOUNDED sequence the two readings coincide on infinite
         // traces. Over an unbounded one, `strong` is the eventuality; `weak` is satisfied by every
         // infinite trace, and lowering it to `true` would be exact but would read as a proof.
+        // `e throughout S` (2026-10-15): S matches AND `e` holds at every cycle of that match,
+        // gap cycles included. Over a BOUNDED S only (`throughout_consequent`).
+        Some("Binary") if spec.get("op").and_then(Value::as_str) == Some("Throughout") => {
+            let e_spec = child(spec, "left")?;
+            if e_spec.get("kind").and_then(Value::as_str) != Some("Simple")
+                || e_spec.get("repetition").is_some()
+            {
+                return Err("the left operand of `throughout` must be a boolean".into());
+            }
+            let e = bool_expr(child(e_spec, "expr")?)?;
+            throughout_consequent(child(spec, "right")?, &e)
+        }
         Some("StrongWeak") => {
             let inner = child(spec, "expr")?;
             let weak = spec.get("strength").and_then(Value::as_str) == Some("weak");
@@ -1161,6 +1247,87 @@ fn consequent_expr(spec: &Value) -> Result<String, String> {
              delayed boolean, a `b[*n]` repetition, or a `##` chain of booleans, got {other:?})"
         )),
     }
+}
+
+/// `e throughout S` as a consequent: `S` lowered as [`consequent_expr`] would, with `e` conjoined
+/// at EVERY cycle the match spans (IEEE 1800-2017 §16.9.9) — each leaf becomes `(e && b)`, a
+/// repetition `(e && b)[*n]`, and each delay window ([`delayed_with`]) requires `e` on the cycles
+/// it waits through. Unbounded sequences and nested sub-sequences are refused.
+fn throughout_consequent(spec: &Value, e: &str) -> Result<String, String> {
+    if uses_eventuality(spec) {
+        return Err(
+            "`throughout` over an unbounded sequence (`##[m:$]`, `[*n:$]`) needs a \
+                    sequence automaton — Tier-3b"
+                .into(),
+        );
+    }
+    let leaf = |seq: &Value| -> Result<String, String> {
+        if seq.get("kind").and_then(Value::as_str) != Some("Simple") {
+            return Err(
+                "a nested sub-sequence under `throughout` needs length composition — \
+                        Tier-3b"
+                    .into(),
+            );
+        }
+        let b = format!("({e} && {})", bool_expr(child(seq, "expr")?)?);
+        match seq.get("repetition") {
+            None => Ok(b),
+            Some(rep) => lower_repetition(&b, rep),
+        }
+    };
+    match spec.get("kind").and_then(Value::as_str) {
+        Some("Simple") => leaf(spec),
+        Some("SequenceConcat") => {
+            let elements = spec
+                .get("elements")
+                .and_then(Value::as_array)
+                .ok_or("SequenceConcat without an `elements` array")?;
+            if elements.is_empty() {
+                return Err("empty SequenceConcat".into());
+            }
+            let mut leaves = Vec::with_capacity(elements.len());
+            let mut delays = Vec::with_capacity(elements.len());
+            for el in elements {
+                let seq = el
+                    .get("sequence")
+                    .ok_or("sequence element without a `sequence`")?;
+                if elements.len() > 1 && seq.get("repetition").is_some() {
+                    return Err("a repetition inside a `##` chain under `throughout` needs \
+                                length composition — Tier-3b"
+                        .into());
+                }
+                leaves.push(leaf(seq)?);
+                delays.push(elem_delay(el)?);
+            }
+            let n = leaves.len();
+            let mut s = leaves[n - 1].clone();
+            for i in (1..n).rev() {
+                let (min, max) = delays[i];
+                s = format!("({} && {})", leaves[i - 1], delayed_with(&s, min, max, e));
+            }
+            let (min0, max0) = delays[0];
+            Ok(delayed_with(&s, min0, max0, e))
+        }
+        other => Err(format!(
+            "unsupported operand of `throughout` (expected a bounded sequence of booleans, got \
+             {other:?})"
+        )),
+    }
+}
+
+/// [`delayed`] with an invariant: `f` at some cycle in `[min, max]` from now, and `e` at every
+/// cycle waited through before it. `f` carries `e` at its own first cycle (its leaves are
+/// `(e && b)`). Offset k: `W(max) = f`; `W(k) = f || (e && [] W(k+1))` for `min ≤ k < max`;
+/// `W(k) = e && [] W(k+1)` for `k < min`.
+fn delayed_with(f: &str, min: u32, max: u32, e: &str) -> String {
+    let mut w = f.to_string();
+    for _ in min..max {
+        w = format!("({f} || ({e} && [] {w}))");
+    }
+    for _ in 0..min {
+        w = format!("({e} && [] {w})");
+    }
+    w
 }
 
 /// `μ Y. (f ∨ [] Y)` — `AF f`, "f on every path, eventually". The box recursion is the
@@ -1732,6 +1899,12 @@ fn bool_expr(expr: &Value) -> Result<String, String> {
                 // trivially and says nothing about X-propagation in the RTL, which needs a 4-state
                 // simulator or an X-aware formal tool.
                 "$isunknown" => Ok("false".to_string()),
+                // `$countones(x)` in boolean position: "some bit is set".
+                "$countones" => match countones_base(expr) {
+                    Some(Ok(base)) => Ok(format!("({} != 0)", popcount_atom_name(&base))),
+                    Some(Err(e)) => Err(e),
+                    None => unreachable!("guarded by the subroutine match"),
+                },
                 other => Err(format!(
                     "system/subroutine call `{other}` (e.g. `$countones`) \
                      is not in the Tier-1c/Tier-2 fragment"
@@ -1818,6 +1991,9 @@ fn compare(expr: &Value, op: &str) -> Result<String, String> {
     // soundness bug, not a narrower reach, so it declines loudly.
     for side in [left, right] {
         if let Some(Err(reason)) = slice_ref(side) {
+            return Err(reason);
+        }
+        if let Some(Err(reason)) = countones_base(side) {
             return Err(reason);
         }
     }
@@ -2151,6 +2327,10 @@ fn cmp_signal_atom(expr: &Value) -> Option<String> {
         return past_call_arg(expr)
             .ok()
             .map(|(sig, _, depth)| past_shadow_name(sig, depth));
+    }
+    // `$countones(x)` (2026-10-15) — its minted count signal.
+    if let Some(Ok(base)) = countones_base(expr) {
+        return Some(popcount_atom_name(&base));
     }
     // mununu#565 — a bare `sig[hi:lo]` operand becomes its minted derived signal.
     if let Some(Ok((base, msb, lsb))) = slice_ref(expr) {
@@ -2920,6 +3100,193 @@ mod tests {
         assert!(
             holds_seen > 20 && violated_seen > 20,
             "both verdicts exercised: {holds_seen} / {violated_seen}"
+        );
+    }
+
+    /// `a |-> (c throughout (b ##[1:2] b))` — `c` at the start, through the waited cycle(s), and
+    /// at each `b`; the window is `b` at +1 or +2.
+    #[test]
+    fn throughout_conjoins_the_invariant_at_every_cycle_of_the_match() {
+        let spec = serde_json::json!({"kind": "Binary", "op": "OverlappedImplication",
+            "left": {"kind": "Simple", "expr": {"kind": "NamedValue", "symbol": "1 a"}},
+            "right": {"kind": "Binary", "op": "Throughout",
+                "left": {"kind": "Simple", "expr": {"kind": "NamedValue", "symbol": "3 c"}},
+                "right": {"kind": "SequenceConcat", "elements": [
+                    ante_el("b", 0, 0, None), ante_el("b", 1, 2, None)]}}});
+        let f = property_body(&spec, &TranslateOptions::default(), &mut Vec::new()).unwrap();
+        assert_eq!(
+            f,
+            "(!(a) || ((c && b) && (c && [] ((c && b) || (c && [] (c && b))))))"
+        );
+        crate::mu_calculus::parser::parse(&format!("nu X. ({f} && [] X)")).expect("parses");
+    }
+
+    /// Unbounded and nested operands of `throughout` stay refused, as does a non-boolean
+    /// invariant.
+    #[test]
+    fn throughout_over_an_unbounded_or_nested_sequence_is_refused() {
+        let thr = |left: Value, right: Value| {
+            serde_json::json!({"kind": "Binary", "op": "OverlappedImplication",
+                "left": {"kind": "Simple", "expr": {"kind": "NamedValue", "symbol": "1 a"}},
+                "right": {"kind": "Binary", "op": "Throughout", "left": left, "right": right}})
+        };
+        let c =
+            serde_json::json!({"kind": "Simple", "expr": {"kind": "NamedValue", "symbol": "3 c"}});
+        let unb = serde_json::json!({"kind": "SequenceConcat", "elements": [
+            {"sequence": {"kind": "Simple", "expr": {"kind": "NamedValue", "symbol": "2 b"}}, "min": 1, "max": "$"}]});
+        let err = property_body(
+            &thr(c.clone(), unb),
+            &TranslateOptions::default(),
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert!(err.contains("unbounded"), "{err}");
+        let rep_e = serde_json::json!({"kind": "Simple", "expr": {"kind": "NamedValue", "symbol": "3 c"},
+            "repetition": {"kind": "Consecutive", "min": 2, "max": 2}});
+        let b =
+            serde_json::json!({"kind": "Simple", "expr": {"kind": "NamedValue", "symbol": "2 b"}});
+        let err = property_body(
+            &thr(rep_e, b),
+            &TranslateOptions::default(),
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert!(err.contains("must be a boolean"), "{err}");
+    }
+
+    /// SEMANTIC differential for `throughout` (2026-10-15), the consequent counterpart of
+    /// `ranged_antecedent_lowering_agrees_with_a_brute_force_matcher`: `a |-> (c throughout S)`
+    /// over random periodic waveforms, the exact engine on the lowered formula vs a brute-force
+    /// check that, wherever `a` holds, SOME match of `S` starts there with `c` at every cycle of it.
+    #[test]
+    fn throughout_lowering_agrees_with_a_brute_force_matcher() {
+        use crate::adapter::btor2::symbolic_bitblast::{ExactVerdict, exact_symbolic_verdict};
+        // S = elements over `b`: (gap lo, gap hi, repetition n).
+        type El = (u32, u32, u32);
+        let shapes: Vec<Vec<El>> = vec![
+            vec![(0, 0, 1), (1, 1, 1)], // b ##1 b
+            vec![(1, 2, 1)],            // ##[1:2] b
+            vec![(0, 0, 2)],            // b[*2]
+            vec![(1, 1, 1), (0, 2, 1)], // ##1 b ##[0:2] b
+        ];
+        let mut seed: u32 = 0x0715_2026;
+        let mut rnd = || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed >> 16) as u8
+        };
+        let mut disagreements = Vec::new();
+        let (mut holds_seen, mut violated_seen) = (0, 0);
+        for shape in &shapes {
+            let elements: Vec<Value> = shape
+                .iter()
+                .map(|&(lo, hi, n)| {
+                    ante_el(
+                        "b",
+                        lo.into(),
+                        hi.into(),
+                        (n != 1).then_some((n.into(), n.into())),
+                    )
+                })
+                .collect();
+            let spec = serde_json::json!({"kind": "Binary", "op": "OverlappedImplication",
+                "left": {"kind": "Simple", "expr": {"kind": "NamedValue", "symbol": "1 a", "type": "logic"}},
+                "right": {"kind": "Binary", "op": "Throughout",
+                    "left": {"kind": "Simple", "expr": {"kind": "NamedValue", "symbol": "3 c", "type": "logic"}},
+                    "right": {"kind": "SequenceConcat", "elements": elements}}});
+            let f = translate_one(
+                &spec,
+                SvaKind::Assert,
+                &TranslateOptions::default(),
+                &mut Vec::new(),
+            )
+            .expect("translates");
+            let formula = crate::mu_calculus::parser::parse(&f).expect("parses");
+            for _ in 0..40 {
+                let masks = [rnd(), rnd() | rnd(), rnd() | rnd() | rnd()];
+                let sig = |s: usize, t: usize| masks[s] >> (t % 8) & 1 == 1;
+                // Does a match of S start at `t` with c on every cycle t..=end?
+                fn matches(
+                    shape: &[(u32, u32, u32)],
+                    i: usize,
+                    cur: usize,
+                    start: usize,
+                    sig: &dyn Fn(usize, usize) -> bool,
+                ) -> bool {
+                    let (lo, hi, n) = shape[i];
+                    (lo..=hi).any(|d| {
+                        let s0 = cur + d as usize;
+                        let end = s0 + n as usize - 1;
+                        (s0..=end).all(|k| sig(1, k))
+                            && (start..=end).all(|k| sig(2, k))
+                            && (i + 1 == shape.len() || matches(shape, i + 1, end, start, sig))
+                    })
+                }
+                let holds = (0..8).all(|t| !sig(0, t) || matches(shape, 0, t, t, &sig));
+                let btor2 = periodic_design(&masks);
+                let exact = exact_symbolic_verdict(&btor2, &formula).expect("exact decides");
+                let want = if holds {
+                    ExactVerdict::Holds
+                } else {
+                    ExactVerdict::Violated
+                };
+                if holds {
+                    holds_seen += 1
+                } else {
+                    violated_seen += 1
+                }
+                if exact != want {
+                    disagreements.push((f.clone(), masks, exact, want));
+                }
+            }
+        }
+        assert!(
+            disagreements.is_empty(),
+            "lowering ≠ SVA semantics: {disagreements:#?}"
+        );
+        assert!(
+            holds_seen > 10 && violated_seen > 10,
+            "both verdicts exercised: {holds_seen} / {violated_seen}"
+        );
+    }
+
+    /// `$countones` reads the minted `<base>__popcount`, over a signal or a slice (whose minted
+    /// name is the base); the collector records each base once.
+    #[test]
+    fn xl7_countones_mints_popcount_atom_and_records_its_base_once() {
+        let lit = |v: &str| serde_json::json!({"kind": "IntegerLiteral", "type": "int", "value": v, "constant": v});
+        let cnt = |arg: Value| serde_json::json!({"kind": "Call", "subroutine": "$countones", "arguments": [arg]});
+        let gnt =
+            serde_json::json!({"kind": "NamedValue", "symbol": "1 gnt", "type": "logic[7:0]"});
+        let sl = serde_json::json!({"kind": "RangeSelect", "selectionKind": "Simple",
+            "value": {"kind": "NamedValue", "symbol": "2 w", "type": "logic[15:0]"},
+            "left": lit("7"), "right": lit("0")});
+        let ge = serde_json::json!({"kind": "BinaryOp", "op": "GreaterThanEqual",
+            "left": cnt(gnt.clone()), "right": lit("2")});
+        assert_eq!(bool_expr(&ge).unwrap(), "(gnt__popcount >= 2)");
+        let eq = serde_json::json!({"kind": "BinaryOp", "op": "Equality",
+            "left": cnt(sl.clone()), "right": cnt(gnt.clone())});
+        assert_eq!(
+            bool_expr(&eq).unwrap(),
+            "(w__bits7_0__popcount == gnt__popcount)"
+        );
+        let both =
+            serde_json::json!({"kind": "BinaryOp", "op": "LogicalAnd", "left": ge, "right": eq});
+        assert_eq!(
+            collect_popcounts(&both),
+            vec!["gnt".to_string(), "w__bits7_0".to_string()]
+        );
+        // The slice the count reads is itself collected, so it is minted first.
+        let mut slices = Vec::new();
+        collect_slice_signals(&both, &mut slices);
+        assert!(
+            slices
+                .iter()
+                .any(|s| s.base == "w" && (s.msb, s.lsb) == (7, 0))
+        );
+        // The naming contract with the BTOR2 side.
+        assert_eq!(
+            popcount_atom_name("x"),
+            crate::adapter::btor2::popcount_signal_name("x")
         );
     }
 
@@ -3703,7 +4070,7 @@ mod tests {
     }
 
     #[test]
-    fn onehot_expands_countones_still_rejected() {
+    fn onehot_expands_and_countones_mints_a_count() {
         // `$onehot0` / `$onehot` now expand to a value-set predicate; other system
         // calls (`$isunknown`, `$countones`, …) stay rejected.
         let oh0 = serde_json::json!({
@@ -3734,8 +4101,8 @@ mod tests {
             "kind": "Call", "subroutine": "$countones",
             "arguments": [{"kind": "NamedValue", "symbol": "1 gnt", "type": "logic[7:0]"}]
         });
-        let err = bool_expr(&cnt).expect_err("$countones must reject");
-        assert!(err.contains("$countones"), "got: {err}");
+        // `$countones(x)` in boolean position (2026-10-15): "some bit is set".
+        assert_eq!(bool_expr(&cnt).unwrap(), "(gnt__popcount != 0)");
     }
 
     #[test]
@@ -4300,8 +4667,7 @@ mod tests {
     ///
     /// `Translates(needle)`: the lowering contains `needle` and parses. `Rejected(needle)`: the
     /// reason contains `needle` — a rejection is a contract too (claims-integrity: named, never
-    /// dropped). `RejectedWithReason`: rejected with some non-empty reason, where the exact text is
-    /// not part of the contract.
+    /// dropped).
     ///
     /// The JSON shapes are the ones slang 11.0.448 emits (`--ast-json`, captured 2026-10-14 in the
     /// `mununu-sva` image from `testdata/sva_fragment_forms.sv`): `s_eventually` / `eventually` /
@@ -4313,7 +4679,6 @@ mod tests {
         enum Want {
             Translates(&'static str),
             Rejected(&'static str),
-            RejectedWithReason,
         }
         use Want::*;
         let sig = |n: &str| serde_json::json!({"kind": "NamedValue", "symbol": format!("1 {n}"), "type": "logic"});
@@ -4557,7 +4922,7 @@ mod tests {
                 Translates("(!(a) || [] b)"),
             ),
             (
-                "a |-> (c throughout (b ##1 b))",
+                "a |-> (c throughout (b ##1 b)) — c at every cycle of the match (2026-10-15)",
                 imp(
                     ov,
                     simple(sig("a")),
@@ -4565,7 +4930,7 @@ mod tests {
                 "left": simple(sig("c")),
                 "right": concat(vec![(simple(sig("b")), n(0), n(0)), (simple(sig("b")), n(1), n(1))])}),
                 ),
-                Rejected("unsupported implication consequent"),
+                Translates("((c && b) && (c && [] (c && b)))"),
             ),
             (
                 "always b",
@@ -4653,6 +5018,15 @@ mod tests {
                 Translates("vec__bits3_3"),
             ),
             (
+                "$countones(v) <= 2 — the minted count (2026-10-15)",
+                cmp(
+                    "LessThanEqual",
+                    call("$countones", vec![vec8("v")]),
+                    lit("2"),
+                ),
+                Translates("(v__popcount <= 2)"),
+            ),
+            (
                 "$isunknown(v) — folded to false in the 2-state model (2026-10-15)",
                 call("$isunknown", vec![vec8("v")]),
                 Translates("false"),
@@ -4716,13 +5090,13 @@ mod tests {
                 Rejected("IndexedDown"),
             ),
             (
-                "$countones(v) <= 2",
-                cmp(
-                    "LessThanEqual",
-                    call("$countones", vec![vec8("v")]),
-                    lit("2"),
+                "$countones over a 65-bit vector — past the minted-count cap",
+                call(
+                    "$countones",
+                    vec![serde_json::json!({"kind": "NamedValue",
+                    "symbol": "1 wide", "type": "logic[64:0]"})],
                 ),
-                RejectedWithReason,
+                Rejected("capped"),
             ),
             (
                 "^x — parity",
@@ -4772,10 +5146,7 @@ mod tests {
                         "{what}: expected the reason to name `{needle}`, got: {e}"
                     );
                 }
-                (RejectedWithReason, Err(e)) => {
-                    assert!(!e.trim().is_empty(), "{what}: rejected without a reason")
-                }
-                (Rejected(_) | RejectedWithReason, Ok(f)) => {
+                (Rejected(_), Ok(f)) => {
                     panic!(
                         "{what}: expected a rejection, but it translated to `{f}` — update the module-doc table"
                     )

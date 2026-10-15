@@ -62,7 +62,10 @@ pub use kmts_lift::{
     PredicateSpec, lift_btor2_to_kmts, lift_predicate_cube, materialize_clts_from_lazy,
     predicate_cube_lift,
 };
-pub use shadow::{augment_with_past_shadows, augment_with_slices, can_shadow};
+pub use shadow::{
+    augment_with_past_shadows, augment_with_popcounts, augment_with_slices, can_shadow,
+    popcount_signal_name,
+};
 
 use super::{AdapterError, AdapterOptions, AdapterOutput, FormatAdapter};
 
