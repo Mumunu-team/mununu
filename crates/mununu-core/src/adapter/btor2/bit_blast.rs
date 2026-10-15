@@ -6576,10 +6576,22 @@ fn eval_op(
     let read = |i: usize| -> Result<Bv, String> {
         read_operand(env, args[i]).ok_or_else(|| format!("operand {} unevaluated", args[i].nid()))
     };
-    // Shift amount, matching the pre-Bv semantics exactly: Sll/Srl/Sra mask the
-    // amount to `& (width-1).max(1)`; Rol/Ror take it `% width`. `a` supplies
-    // the width, `b` the raw amount (low bits).
-    let shl_amount = |a: &Bv, b: &Bv| (b.low128() as u32) & (a.width().saturating_sub(1).max(1));
+    // Shift amount (2026-10-15): the FULL amount, saturated at the width — BTOR2's semantics, and
+    // what `Bv::shl/shr/sra` already implement for `n >= width` (fill with 0, or the sign for
+    // `sra`). The pre-Bv `& (width-1)` mask was wrong twice: a shift by >= width wrapped to a small
+    // shift, and for a non-power-of-two width it dropped bits of an in-range amount (`3 & 4 == 0`
+    // on a 5-bit operand) — the simulator disagreed with the exact engine's `barrel_shift`.
+    // Rol/Ror take the amount `% width`.
+    let shl_amount = |a: &Bv, b: &Bv| -> u32 {
+        let w = a.width();
+        if b.width() <= 128 {
+            b.low128().min(u128::from(w)) as u32
+        } else if b.ugte(&Bv::from_u128(u128::from(w), b.width())).is_zero() {
+            b.low128() as u32
+        } else {
+            w
+        }
+    };
     let rot_amount = |a: &Bv, b: &Bv| (b.low128() as u32) % a.width().max(1);
 
     match op {
@@ -11728,6 +11740,38 @@ mod tests {
             warn.message.contains("mined"),
             "warning must mention the mining summary; got: {}",
             warn.message
+        );
+    }
+    /// REPRODUCER (2026-10-15) — the concrete simulator masked shift amounts with `& (width-1)`, so
+    /// a shift by 3 on a 5-bit value was a shift by 0 (`3 & 4 == 0`) and a shift by the full width
+    /// wrapped instead of filling; the exact engine (`barrel_shift`) follows BTOR2. Fails on the
+    /// parent commit.
+    #[test]
+    fn simulator_shifts_follow_btor2_semantics() {
+        let step = |src: &str| {
+            let f = parser::parse(src).expect("parses");
+            let regs: std::collections::HashMap<String, u128> =
+                [("x".to_string(), 1u128)].into_iter().collect();
+            simulate_one_step(&f, &regs, &std::collections::HashMap::new()).expect("steps")["x"]
+        };
+        // 5-bit: 1 << 3 == 8 (was 1).
+        assert_eq!(
+            step("1 sort bitvec 5\n2 state 1 x\n3 constd 1 3\n4 sll 1 2 3\n5 next 1 2 4\n"),
+            8
+        );
+        // 8-bit: 1 << 8 == 0 (fills; was 1 << 0 == 1).
+        assert_eq!(
+            step("1 sort bitvec 8\n2 state 1 x\n3 constd 1 8\n4 sll 1 2 3\n5 next 1 2 4\n"),
+            0
+        );
+        // 8-bit: 1 >> 9 == 0, and sra of a positive value by >= width is 0.
+        assert_eq!(
+            step("1 sort bitvec 8\n2 state 1 x\n3 constd 1 9\n4 srl 1 2 3\n5 next 1 2 4\n"),
+            0
+        );
+        assert_eq!(
+            step("1 sort bitvec 8\n2 state 1 x\n3 constd 1 200\n4 sra 1 2 3\n5 next 1 2 4\n"),
+            0
         );
     }
 }

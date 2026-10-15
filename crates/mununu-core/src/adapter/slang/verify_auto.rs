@@ -10074,6 +10074,67 @@ module uart_tx(); endmodule"#;
         assert_eq!(err.kind, AdapterErrorKind::ParseError);
     }
 
+    /// REPRODUCER (2026-10-15) — a relational comparison on a SIGNED signal was decided UNSIGNED.
+    ///
+    /// slang converts both operands of `x >= 0` (`logic signed [3:0] x`) to `logic signed[31:0]`, so
+    /// the comparison is signed; `translate.rs::unwrap` stripped those conversions and emitted the
+    /// 4-bit atom `(x >= 0)`, which every engine evaluates unsigned. Here `x` is always -1 or -2, so
+    /// `x >= 0` is FALSE in SV and `x < 0` TRUE — the unsigned reading inverts both. The mixed
+    /// signed/unsigned `x < u` is converted to unsigned by slang and must keep translating.
+    #[test]
+    #[ignore = "requires slang + sv2v + Yosys + z3 (use the mununu-sva docker image); run with --ignored"]
+    fn e2e_signed_relational_comparison_is_not_decided_unsigned() {
+        let design = "module sg_dut (input logic clk, input logic rst_n,\n\
+                      output logic signed [3:0] x, output logic [3:0] u);\n\
+                        always_ff @(posedge clk or negedge rst_n) begin\n\
+                          if (!rst_n) begin x <= -4'sd1; u <= 4'd15; end\n\
+                          else begin x <= -4'sd2; u <= 4'd14; end\n\
+                        end\n\
+                        a_lt0: assert property (@(posedge clk) disable iff (!rst_n) x < 0);\n\
+                        a_ge0: assert property (@(posedge clk) disable iff (!rst_n) x >= 0);\n\
+                        a_xu: assert property (@(posedge clk) disable iff (!rst_n) x < u);\n\
+                      endmodule\n";
+        let sources = vec![("sg_dut.sv".to_string(), design.to_string())];
+        let yopts = YosysOptions {
+            top: Some("sg_dut".to_string()),
+            use_sv2v: true,
+            frontend: crate::adapter::yosys::SvFrontend::Slang,
+            ..Default::default()
+        };
+        let opts = VerifyAutoOptions {
+            portfolio: Some(PortfolioMode::Sequential),
+            ..Default::default()
+        };
+        let report = verify_auto(&sources, &yopts, &opts).expect("verify_auto runs");
+        for p in &report.properties {
+            eprintln!(
+                "  {} ({:?}): {:?}\n      {}",
+                p.name, p.label, p.outcome, p.formula
+            );
+        }
+        eprintln!("  unsupported: {:?}", report.unsupported);
+        let outcome = |l: &str| {
+            report
+                .properties
+                .iter()
+                .find(|p| p.label.as_deref() == Some(l))
+                .map(|p| p.outcome.clone())
+        };
+        // Never the inverted verdicts: `x >= 0` must not HOLD, `x < 0` must not be VIOLATED.
+        assert!(
+            !matches!(outcome("a_ge0"), Some(VerifyOutcome::Holds)),
+            "x >= 0 on an always-negative signed x reported HOLDS: {:?}",
+            outcome("a_ge0")
+        );
+        assert!(
+            !matches!(outcome("a_lt0"), Some(VerifyOutcome::Violated { .. })),
+            "x < 0 on an always-negative signed x reported VIOLATED: {:?}",
+            outcome("a_lt0")
+        );
+        // The unsigned mixed comparison still decides (x reads 14 or 15 unsigned; u is 15 then 14).
+        assert!(outcome("a_xu").is_some(), "x < u still translates");
+    }
+
     /// `throughout` and `$countones` (2026-10-15) decide end to end under the shipped default, with
     /// twins. `st`: IDLE 0 -req-> WAIT 1; WAIT -ack-> DONE 2; DONE -> IDLE. `gnt` is one-hot of
     /// `st`; `pair` is the two free inputs.

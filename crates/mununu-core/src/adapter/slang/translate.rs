@@ -1920,6 +1920,15 @@ fn bool_expr(expr: &Value) -> Result<String, String> {
         // in real + LLM-generated SVA); a member that is itself a complex expression, or
         // a non-simple (`$`/dist) range, is rejected honestly rather than mis-translated.
         "Inside" => {
+            // SOUNDNESS — `inside` ranges lower to `>=` / `<=` atoms, which are unsigned; a signed
+            // left operand would invert them (see `signed_comparison_guard`).
+            if typed_signed(child(expr, "left")?) || typed_signed(unwrap(child(expr, "left")?)) {
+                return Err(
+                    "`inside` over a signed operand: its ranges would be compared \
+                            unsigned; not supported yet"
+                        .to_string(),
+                );
+            }
             let atom = |e: &Value| -> Option<String> {
                 cmp_signal_atom(e).or_else(|| sv_integer(e).map(|n| n.to_string()))
             };
@@ -1983,6 +1992,7 @@ fn bool_expr(expr: &Value) -> Result<String, String> {
 /// 2. `literal OP signal` → `(sig OP' lit)` with the operator flipped;
 /// 3. `bool-expr ==/!= 0`  → `!bexpr` / `bexpr` (exact, since `bool != 0 ≡ bool`).
 fn compare(expr: &Value, op: &str) -> Result<String, String> {
+    signed_comparison_guard(child(expr, "left")?, child(expr, "right")?, op)?;
     let left = unwrap(child(expr, "left")?);
     let right = unwrap(child(expr, "right")?);
 
@@ -2509,6 +2519,55 @@ fn signal_width(expr: &Value) -> u32 {
         }
         _ => 1,
     }
+}
+
+/// Does slang type this node (as the comparison sees it — the `Conversion` target, before
+/// `unwrap` strips it) as signed?
+fn typed_signed(node: &Value) -> bool {
+    node.get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|t| t.contains("signed") && !t.contains("unsigned"))
+}
+
+/// SOUNDNESS (2026-10-15) — a comparison slang evaluates SIGNED must not reach an atom, because
+/// every atom compares unsigned (`bad_monitor::btor2_cmp_keyword`: `<` → `ult`). slang converts
+/// both operands of a signed comparison to a signed type (`x >= 0` with `logic signed [3:0] x`
+/// becomes `logic signed[31:0]` on both sides); `unwrap` used to strip that and emit `(x >= 0)`,
+/// which the engines decided unsigned — a false HOLDS on an always-negative `x`
+/// (`e2e_signed_relational_comparison_is_not_decided_unsigned`). Until signed comparisons are
+/// minted (the expression compiler), refuse:
+/// - a relational `< <= > >=` on signed operands;
+/// - an equality on signed operands whose literal lies outside the signal's signed range — there
+///   sign extension makes SV's answer differ from the bit-pattern atom (`x == 15` on a 4-bit signed
+///   `x` is never true in SV, but `x == 15` as an atom matches `-1`).
+///
+/// A mixed signed/unsigned comparison is converted to UNSIGNED by slang, so it is unaffected.
+fn signed_comparison_guard(left: &Value, right: &Value, op: &str) -> Result<(), String> {
+    if !(typed_signed(left) || typed_signed(right)) {
+        return Ok(());
+    }
+    if matches!(op, "<" | "<=" | ">" | ">=") {
+        return Err(format!(
+            "signed relational comparison `{op}`: the operands are signed, and mununu's comparison \
+             atoms are unsigned — deciding it would invert the answer for negative values; not \
+             supported yet"
+        ));
+    }
+    for (sig, lit) in [(left, right), (right, left)] {
+        let (Some(name), Some(v)) = (cmp_signal_atom(sig), sv_integer(lit)) else {
+            continue;
+        };
+        let w = signal_width(unwrap(sig));
+        let half = 1i64.checked_shl(w.saturating_sub(1)).unwrap_or(i64::MAX);
+        if w < 63 && (v >= half || v < -half) {
+            return Err(format!(
+                "signed equality `{name} {op} {v}`: {v} is outside the signed range of the \
+                 {w}-bit `{name}`, where sign extension makes SV's answer differ from the bit \
+                 pattern; not supported yet"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Flip a comparison operator (for the `literal OP signal` normalisation).
@@ -4658,6 +4717,54 @@ mod tests {
         )
         .expect_err("a cover of an eventuality is refused");
         assert!(err.contains("cover"), "{err}");
+    }
+
+    /// REPRODUCER (2026-10-15) — a comparison slang evaluates SIGNED was emitted as an unsigned atom.
+    /// JSON captured from slang 11.0.448 for `logic signed [3:0] x; logic [3:0] u;`. On the parent
+    /// commit `x >= 0` translated to `(x >= 0)`, which the engines decide unsigned — a false HOLDS on
+    /// an always-negative `x` (`e2e_signed_relational_comparison_is_not_decided_unsigned`).
+    #[test]
+    fn signed_relational_comparison_is_refused_not_decided_unsigned() {
+        let conv = |ty: &str, operand: Value| serde_json::json!({"kind": "Conversion", "type": ty, "operand": operand});
+        let x =
+            serde_json::json!({"kind": "NamedValue", "type": "logic signed[3:0]", "symbol": "1 x"});
+        let u = serde_json::json!({"kind": "NamedValue", "type": "logic[3:0]", "symbol": "2 u"});
+        let int = |v: &str| serde_json::json!({"kind": "IntegerLiteral", "type": "int", "value": v, "constant": v});
+        let cmp = |op: &str, l: Value, r: Value| serde_json::json!({"kind": "BinaryOp", "type": "logic", "op": op, "left": l, "right": r});
+        // `x >= 0` and `x < 0` — both operands converted to `logic signed[31:0]`.
+        for op in ["GreaterThanEqual", "LessThan"] {
+            let e = cmp(
+                op,
+                conv("logic signed[31:0]", x.clone()),
+                conv("logic signed[31:0]", int("0")),
+            );
+            let err =
+                bool_expr(&e).expect_err("a signed relational must not become an unsigned atom");
+            assert!(err.contains("signed"), "{err}");
+        }
+        // Signed equality: in range decides as the bit pattern; out of range is refused.
+        let eq3 = cmp(
+            "Equality",
+            conv("logic signed[31:0]", x.clone()),
+            conv("logic signed[31:0]", int("3")),
+        );
+        assert_eq!(bool_expr(&eq3).unwrap(), "(x == 3)");
+        let eq15 = cmp(
+            "Equality",
+            conv("logic signed[31:0]", x.clone()),
+            conv("logic signed[31:0]", int("15")),
+        );
+        assert!(bool_expr(&eq15).unwrap_err().contains("signed range"));
+        // Mixed signed/unsigned: slang converts to UNSIGNED, so it translates.
+        let xu = cmp("LessThan", conv("logic[3:0]", x.clone()), u.clone());
+        assert_eq!(bool_expr(&xu).unwrap(), "(x < u)");
+        // Plain unsigned comparison unaffected.
+        let u13 = cmp(
+            "GreaterThan",
+            conv("logic[31:0]", u),
+            conv("logic[31:0]", int("13")),
+        );
+        assert_eq!(bool_expr(&u13).unwrap(), "(u > 13)");
     }
 
     /// The shipped fragment as an EXECUTABLE table (SVA-extraction-gaps plan, step 0, 2026-10-14):
