@@ -85,7 +85,7 @@ docker run --rm -v "$(pwd)":/work -v mununu-target:/cargo-target -w /work mununu
 
 ## Provenance
 
-PR: (filled in once opened). `Repro: in-repo` for #705. The unit reproducer fails on main `42c4292`, which produces the first-cycle-only form; this was checked by hand in a worktree.
+PR: [707](https://github.com/Mumunu-team/mununu/pull/707). `Repro: in-repo` for #705. The unit reproducer fails on main `42c4292`, which produces the first-cycle-only form; this was checked by hand in a worktree.
 
 ## Not covered here
 
