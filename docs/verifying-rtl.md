@@ -968,6 +968,8 @@ repo, so the lists below cannot drift from the code without a red test.
 | `disable iff (r)` | the reset is recognised and pinned inactive (or the body gated) | XL.1c |
 | constant bit-select `sig[k]` (packed vector, typedef or packed struct) | the 1-bit slice, bare in boolean position; `$rose` / `$fell` / `$stable` / `$changed` over a bit or a slice | 2026-10-15 |
 | `$isunknown(x)` | `false` — the model is 2-state; the property carries a **`two-state-fold`** note | 2026-10-15 |
+| `e throughout S` (`S` bounded) | `S` with `e` at every cycle of its match, gap cycles and the match end included | 2026-10-15 |
+| `$countones(x) op k` (x a signal, output port or `[hi:lo]` slice, ≤ 64 bits) | a minted combinational count `x__popcount` (one slice, zero-extension and adder per bit) | 2026-10-15 |
 | `s_eventually b`, `a \|-> s_eventually b` | `AG AF b`, `AG(a → AF b)` — liveness; the exact engine decides it, the liveness-to-safety rescue carries it past the exact engine's reach | 2026-10-15 |
 | `a \|-> ##[m:$] b`, `strong(##[m:$] b)` | `AG(a → AXᵐ AF b)`; an unmarked one carries a **`strong-sequence-reading`** note | 2026-10-15 |
 | `a \|-> b[*n:$]` (the whole consequent, n ≥ 1) | `b[*n]` — its first match, exact | 2026-10-15 |
@@ -1007,10 +1009,11 @@ many match ends), goto `[->n]` / non-consecutive `[=n]` (a sequence automaton); 
 sub-sequence inside an antecedent, an antecedent past 64 alternatives, and `[*m:n]` as a consequent
 or inside a consequent chain; `s_eventually` or `##[m:$]` over a sequence; a `cover` of an
 eventuality; ranged `nexttime [k]` / `always [m:n]`; `weak()` of an unbounded sequence;
-`throughout`; dynamic `sig[idx]`, array content `mem[i]` and an element of a multi-dimensional
-packed array; indexed part-selects `x[i +: w]` (#565); `$countones`; `^x` parity; `$rose` / `$fell`
-on more than one bit; non-linear arithmetic. Still planned: `throughout` on bounded consequents and
-a minted `$countones`; goto / `[=n]` / unbounded antecedents / PSL stay out.
+`throughout` over an unbounded sequence; dynamic `sig[idx]`, array content `mem[i]` and an element of a multi-dimensional
+packed array; indexed part-selects `x[i +: w]` (#565); `$countones` past 64 bits; `^x` parity; `$rose` / `$fell`
+on more than one bit; non-linear arithmetic. Goto / `[=n]` / unbounded antecedents / PSL stay out.
+A slice or a `$countones` of an **output port** resolves to the port's driver (fixed 2026-10-15: a
+slice of an output was never minted and its property skipped).
 
 **The liveness rescue's reach.** Every liveness shape the translator emits reduces to the
 liveness-to-safety monitor, so it decides past the exact engine's reach and past a primary-input

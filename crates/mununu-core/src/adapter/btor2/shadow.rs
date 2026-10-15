@@ -321,7 +321,13 @@ pub fn augment_with_slices(
         if !seen.insert(symbol.clone()) || by_symbol.contains_key(symbol.as_str()) {
             continue;
         }
-        let Some(&base_nid) = by_symbol.get(base) else {
+        // A named output port resolves to its DRIVER node: the standard lift keeps port names
+        // but not the driving net's, so `gnt` / `q_o` surface only as `output` lines. Without
+        // this a slice or count of an output port was never minted and its property skipped
+        // (2026-10-15).
+        let Some(base_nid) = by_symbol.get(base).copied().or_else(|| {
+            crate::adapter::btor2::bad_monitor::output_nid_and_sort(&file, base).map(|(n, _)| n)
+        }) else {
             continue;
         };
         let base_width = file
@@ -351,6 +357,130 @@ pub fn augment_with_slices(
         next_nid += 1;
     }
 
+    if appended.is_empty() {
+        return Ok(content.to_string());
+    }
+    let mut out = content.trim_end().to_string();
+    out.push('\n');
+    for line in appended {
+        out.push_str(&line);
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+/// SVA-fragment widening (2026-10-15) — the minted name of `$countones(base)`. One naming contract
+/// with the translator's `popcount_atom_name`, as `slice_signal_name` pairs with `slice_atom_name`.
+pub fn popcount_signal_name(base: &str) -> String {
+    format!("{base}__popcount")
+}
+
+/// The widest vector `$countones` is minted over.
+pub const MAX_POPCOUNT_WIDTH: u32 = 64;
+
+/// Mint a named combinational `<base>__popcount` node per base — the number of 1 bits of `base`,
+/// for SVA's `$countones(base)`: each bit is a 1-bit `slice`, zero-extended to the result width
+/// ⌈log₂(w+1)⌉ and summed, the symbol on the last node. A base may be a state cell, an input, an
+/// output or a previously minted node (a slice). Exact (pure combinational arithmetic, no state);
+/// a base that does not resolve or is wider than [`MAX_POPCOUNT_WIDTH`] is skipped, so its atom
+/// stays unbound and the property is skipped with that reason rather than mis-decided.
+pub fn augment_with_popcounts(content: &str, bases: &[&str]) -> Result<String, AdapterError> {
+    if bases.is_empty() {
+        return Ok(content.to_string());
+    }
+    let file = parser::parse(content).map_err(|mut e| {
+        e.message = format!("adapter/btor2/shadow: {}", e.message);
+        e
+    })?;
+    let symbols = parser::collect_symbols(&file);
+    let mut by_symbol: std::collections::HashMap<&str, Nid> =
+        symbols.iter().map(|(nid, s)| (s.as_str(), *nid)).collect();
+    for l in &file.lines {
+        if let Node::Op {
+            symbol: Some(sym), ..
+        } = &l.node
+        {
+            by_symbol.entry(sym.as_str()).or_insert(l.nid);
+        }
+    }
+    let mut sort_of_width: std::collections::HashMap<u32, Nid> = file
+        .lines
+        .iter()
+        .filter_map(|l| match &l.node {
+            Node::Sort {
+                sort: crate::adapter::btor2::ast::Sort::BitVec { width },
+            } => Some((*width, l.nid)),
+            _ => None,
+        })
+        .collect();
+    let mut next_nid: Nid = file.lines.iter().map(|l| l.nid).max().unwrap_or(0) + 1;
+    let mut appended: Vec<String> = Vec::new();
+    let mut sort = |width: u32, next_nid: &mut Nid, appended: &mut Vec<String>| -> Nid {
+        *sort_of_width.entry(width).or_insert_with(|| {
+            let n = *next_nid;
+            *next_nid += 1;
+            appended.push(format!("{n} sort bitvec {width}"));
+            n
+        })
+    };
+    let mut seen = std::collections::HashSet::new();
+    for &base in bases {
+        let symbol = popcount_signal_name(base);
+        if !seen.insert(symbol.clone()) || by_symbol.contains_key(symbol.as_str()) {
+            continue;
+        }
+        // A named output port resolves to its DRIVER node: the standard lift keeps port names
+        // but not the driving net's, so `gnt` / `q_o` surface only as `output` lines. Without
+        // this a slice or count of an output port was never minted and its property skipped
+        // (2026-10-15).
+        let Some(base_nid) = by_symbol.get(base).copied().or_else(|| {
+            crate::adapter::btor2::bad_monitor::output_nid_and_sort(&file, base).map(|(n, _)| n)
+        }) else {
+            continue;
+        };
+        let w = file
+            .lines
+            .iter()
+            .find(|l| l.nid == base_nid)
+            .and_then(|l| sort_nid_of(&l.node))
+            .and_then(|sn| parser::bv_width(&file, sn))
+            .unwrap_or(0);
+        if w == 0 || w > MAX_POPCOUNT_WIDTH {
+            continue;
+        }
+        let k = 32 - w.leading_zeros(); // bits to hold w
+        let s1 = sort(1, &mut next_nid, &mut appended);
+        let sk = sort(k, &mut next_nid, &mut appended);
+        let mut acc: Option<Nid> = None;
+        for i in 0..w {
+            let bit = next_nid;
+            next_nid += 1;
+            appended.push(format!("{bit} slice {s1} {base_nid} {i} {i}"));
+            let ext = next_nid;
+            next_nid += 1;
+            let last = i + 1 == w;
+            let name = if last && acc.is_none() {
+                format!(" {symbol}")
+            } else {
+                String::new()
+            };
+            appended.push(format!("{ext} uext {sk} {bit} {}{name}", k - 1));
+            acc = Some(match acc {
+                None => ext,
+                Some(a) => {
+                    let n = next_nid;
+                    next_nid += 1;
+                    let name = if last {
+                        format!(" {symbol}")
+                    } else {
+                        String::new()
+                    };
+                    appended.push(format!("{n} add {sk} {a} {ext}{name}"));
+                    n
+                }
+            });
+        }
+    }
     if appended.is_empty() {
         return Ok(content.to_string());
     }
@@ -929,5 +1059,56 @@ mod tests {
             Bin(b) => u128::from_str_radix(b, 2).unwrap_or(0),
             Hex(h) => u128::from_str_radix(h, 16).unwrap_or(0),
         }
+    }
+    #[test]
+    fn augment_with_popcounts_emits_slices_uext_adds_and_symbol() {
+        let src = "1 sort bitvec 8\n2 state 1 v\n3 sort bitvec 1\n4 state 3 f\n";
+        let out = augment_with_popcounts(src, &["v", "f", "v", "missing"]).expect("augments");
+        let file = parser::parse(&out).expect("re-parses");
+        // v: 8 slices, 8 uext to 4 bits, 7 adds, the last named; f: one uext named.
+        assert_eq!(out.matches(" slice ").count(), 9);
+        assert_eq!(out.matches(" uext ").count(), 9);
+        assert_eq!(out.matches(" add ").count(), 7);
+        assert!(
+            out.lines()
+                .any(|l| l.contains(" add ") && l.ends_with(" v__popcount"))
+        );
+        assert!(
+            out.lines()
+                .any(|l| l.contains(" uext ") && l.ends_with(" f__popcount"))
+        );
+        assert!(
+            out.contains("sort bitvec 4"),
+            "the 8-bit count is 4 bits wide"
+        );
+        // Idempotent: a second pass mints nothing.
+        assert_eq!(augment_with_popcounts(&out, &["v"]).unwrap(), out);
+        let _ = file;
+    }
+    /// REPRODUCER (2026-10-15) — a slice of a named OUTPUT port was never minted: the lift keeps
+    /// port names only on `output` lines, which the symbol map did not read, so `gnt[1:0]` of an
+    /// output `gnt` left its atom unbound and the property skipped. Fails on the parent commit.
+    #[test]
+    fn a_slice_of_an_output_port_is_minted_from_its_driver() {
+        let src = "1 sort bitvec 2\n2 state 1 st\n3 sort bitvec 4\n4 uext 3 2 2\n5 output 4 gnt\n";
+        let out = augment_with_slices(src, &[("gnt", 1, 0)]).expect("augments");
+        assert!(
+            out.lines()
+                .any(|l| l.ends_with(" slice 1 4 1 0 gnt__bits1_0")),
+            "the slice reads the output's driver (nid 4): {out}"
+        );
+        parser::parse(&out).expect("re-parses");
+    }
+
+    #[test]
+    fn a_count_of_an_output_port_is_minted_from_its_driver() {
+        let src = "1 sort bitvec 2\n2 state 1 st\n3 sort bitvec 4\n4 uext 3 2 2\n5 output 4 gnt\n";
+        let out = augment_with_popcounts(src, &["gnt"]).expect("augments");
+        assert!(out.lines().any(|l| l.ends_with(" gnt__popcount")), "{out}");
+        assert!(
+            out.contains(" slice 1 4 0 0") || out.contains("slice"),
+            "{out}"
+        );
+        parser::parse(&out).expect("re-parses");
     }
 }

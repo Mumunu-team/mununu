@@ -3443,6 +3443,15 @@ pub(crate) fn prepare_model(
         .map(|s| (s.base.as_str(), s.msb, s.lsb))
         .collect();
     let btor2 = crate::adapter::btor2::augment_with_slices(&btor2, &slice_refs)?;
+    // SVA-fragment widening (2026-10-15) — `$countones(x)` reads a minted `x__popcount`, AFTER the
+    // slice pass so a count over a slice finds its base. Combinational; a design with no
+    // `$countones` is returned unchanged.
+    let popcount_refs: Vec<&str> = extraction
+        .required_popcounts
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let btor2 = crate::adapter::btor2::augment_with_popcounts(&btor2, &popcount_refs)?;
 
     // mununu#459 — snapshot the model's real primary-input names BEFORE any pinning
     // rewrites them to constants, so a user `--config-value` can be validated
@@ -9397,16 +9406,19 @@ module uart_tx(); endmodule"#;
                 |n| {
                     // The minted signals: a slice of an input is input-dependent; a slice of a
                     // (shadow) state cell is state-only.
-                    if n == "wdata__bits7_0" || n == "wdata__bits3_3" {
+                    if n == "wdata__bits7_0" || n == "wdata__bits3_3" || n == "wdata__popcount" {
                         Some(CombKind::InputDependent)
-                    } else if n == "wdata__past__bits7_0" || n == "st__bits1_1" {
+                    } else if n == "wdata__past__bits7_0"
+                        || n == "st__bits1_1"
+                        || n == "q__popcount"
+                    {
                         Some(CombKind::StateOnly)
                     } else {
                         None
                     }
                 },
                 |n| {
-                    if n == "wdata__bits7_0" || n == "wdata__bits3_3" {
+                    if n == "wdata__bits7_0" || n == "wdata__bits3_3" || n == "wdata__popcount" {
                         vec!["wdata".to_string()]
                     } else {
                         Vec::new()
@@ -9423,7 +9435,10 @@ module uart_tx(); endmodule"#;
                 Class::Compound
             } else {
                 assert!(
-                    !has_atoms || !s.specs.is_empty() || !s.derived.is_empty(),
+                    !has_atoms
+                        || !s.specs.is_empty()
+                        || !s.derived.is_empty()
+                        || !s.derived_relational.is_empty(),
                     "{formula}: atoms present but nothing seeded"
                 );
                 Class::Simple
@@ -9448,6 +9463,12 @@ module uart_tx(); endmodule"#;
             ("nu X. ((st__bits1_1 == 1) && [] X)", Class::Simple),
             // Ranged antecedents (2026-10-15) add NO atom shape — they only nest the existing
             // boolean atoms under boxes — so they add no row here.
+            // `$countones(x) OP k` (2026-10-15) reads the minted `x__popcount` — combinational, a
+            // function of `x`: input-dependent over an input, state-only over a state cell.
+            ("nu X. ((wdata__popcount == 3) && [] X)", Class::Simple),
+            // A non-equality comparison over a combinational signal is a derived per-cube
+            // relational label (H.F), not a dimension.
+            ("nu X. ((q__popcount <= 1) && [] X)", Class::Simple),
             // `!$isunknown(x)` folds to `false` in the 2-state model: no atom at all.
             ("nu X. ((!(false)) && [] X)", Class::Simple),
         ];
@@ -10051,6 +10072,89 @@ module uart_tx(); endmodule"#;
         let err = verify_auto(&[], &YosysOptions::default(), &VerifyAutoOptions::default())
             .expect_err("no sources");
         assert_eq!(err.kind, AdapterErrorKind::ParseError);
+    }
+
+    /// `throughout` and `$countones` (2026-10-15) decide end to end under the shipped default, with
+    /// twins. `st`: IDLE 0 -req-> WAIT 1; WAIT -ack-> DONE 2; DONE -> IDLE. `gnt` is one-hot of
+    /// `st`; `pair` is the two free inputs.
+    ///
+    /// - `a_thr`: `(WAIT && ack) |-> ((st != IDLE) throughout ##1 DONE)` holds; `a_thr_twin` with
+    ///   `(st == WAIT)` as the invariant is VIOLATED — the invariant must hold at the match END too.
+    /// - `a_cnt`: `$countones(gnt) == 1` holds; `a_cnt_slice`: `$countones(gnt[1:0]) <= 1` holds;
+    ///   `a_cnt_twin`: `$countones(pair) <= 1` is VIOLATED (both inputs high).
+    #[test]
+    #[ignore = "requires slang + sv2v + Yosys + z3 (use the mununu-sva docker image); run with --ignored"]
+    fn e2e_throughout_and_countones_decide_with_twins() {
+        let design = "module tc_dut (input logic clk, input logic rst_n, input logic req,\n\
+                      input logic ack, output logic [1:0] st, output logic [3:0] gnt,\n\
+                      output logic [1:0] pair);\n\
+                        always_ff @(posedge clk or negedge rst_n) begin\n\
+                          if (!rst_n) st <= 2'd0;\n\
+                          else case (st)\n\
+                            2'd0: st <= req ? 2'd1 : 2'd0;\n\
+                            2'd1: st <= ack ? 2'd2 : 2'd1;\n\
+                            default: st <= 2'd0;\n\
+                          endcase\n\
+                        end\n\
+                        assign gnt = 4'b0001 << st;\n\
+                        assign pair = {req, ack};\n\
+                        a_thr: assert property (@(posedge clk) disable iff (!rst_n)\n\
+                          ((st == 2'd1) && ack) |-> ((st != 2'd0) throughout (##1 (st == 2'd2))));\n\
+                        a_thr_twin: assert property (@(posedge clk) disable iff (!rst_n)\n\
+                          ((st == 2'd1) && ack) |-> ((st == 2'd1) throughout (##1 (st == 2'd2))));\n\
+                        a_cnt: assert property (@(posedge clk) disable iff (!rst_n)\n\
+                          $countones(gnt) == 1);\n\
+                        a_cnt_slice: assert property (@(posedge clk) disable iff (!rst_n)\n\
+                          $countones(gnt[1:0]) <= 1);\n\
+                        a_cnt_twin: assert property (@(posedge clk) disable iff (!rst_n)\n\
+                          $countones(pair) <= 1);\n\
+                      endmodule\n";
+        let sources = vec![("tc_dut.sv".to_string(), design.to_string())];
+        let yopts = YosysOptions {
+            top: Some("tc_dut".to_string()),
+            use_sv2v: true,
+            frontend: crate::adapter::yosys::SvFrontend::Slang,
+            ..Default::default()
+        };
+        let opts = VerifyAutoOptions {
+            portfolio: Some(PortfolioMode::Sequential),
+            ..Default::default()
+        };
+        let report = verify_auto(&sources, &yopts, &opts).expect("verify_auto runs");
+        for p in &report.properties {
+            eprintln!(
+                "  {} ({:?}): {:?} [{:?}]\n      {}",
+                p.name, p.label, p.outcome, p.decided_by, p.formula
+            );
+        }
+        assert!(
+            report.unsupported.is_empty(),
+            "all five translate: {:?}",
+            report.unsupported
+        );
+        let outcome = |l: &str| {
+            report
+                .properties
+                .iter()
+                .find(|p| p.label.as_deref() == Some(l))
+                .unwrap_or_else(|| panic!("`{l}` missing: {:?}", report.properties))
+                .outcome
+                .clone()
+        };
+        for l in ["a_thr", "a_cnt", "a_cnt_slice"] {
+            assert!(
+                matches!(outcome(l), VerifyOutcome::Holds),
+                "{l} must HOLD: {:?}",
+                outcome(l)
+            );
+        }
+        for l in ["a_thr_twin", "a_cnt_twin"] {
+            assert!(
+                matches!(outcome(l), VerifyOutcome::Violated { .. }),
+                "{l} must be VIOLATED: {:?}",
+                outcome(l)
+            );
+        }
     }
 
     /// Ranged antecedents (2026-10-15) decide end to end, with twins. `st`: IDLE 0 -req-> WAIT 1;
