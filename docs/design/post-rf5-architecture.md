@@ -4,6 +4,11 @@
 > `Source of truth:` anchor rule per CLAUDE.md §Documentation Traceability. Every
 > named symbol below is a real, greppable artifact.
 >
+> Dated 2026-07-05 — the cap figures below ("the 40-bit blast cap") are of that date. Since mununu#402
+> the exact engine's cap auto-raises to fit the cone up to 192 bits (40 is the floor) and the
+> recoverability verb retries once at 1024; the measured per-shape frontier is in
+> [`docs/verifying-rtl.md`](../verifying-rtl.md) → "What decides at what width" (EXP-0031, 2026-10-14).
+>
 > Status (as-built, 2026-07-05): the R-F5 symbolic track has **shipped** — R-F5.0 (the
 > OxiDD spike, `mu_calculus/symbolic.rs`) through R-F5.5 (symbolic CEGAR loop, `--engine
 > symbolic`, guarded modalities), and **R-F5.6 cone-of-influence is now shipped on BOTH the

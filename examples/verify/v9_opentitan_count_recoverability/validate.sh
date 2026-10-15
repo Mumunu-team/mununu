@@ -97,7 +97,7 @@ echo -n "  ascent  AG EF (cnt == ${MAX8}):   "; "${MUNUNU}" btor2 verify-recover
 S_DN="$("${MUNUNU}" btor2 verify-recoverability "${OUT}/w8.btor2" --target 'cnt == 0'       2>/dev/null | grep -oiE 'holds|violated|unknown' | head -1)"
 S_UP="$("${MUNUNU}" btor2 verify-recoverability "${OUT}/w8.btor2" --target "cnt == ${MAX8}" 2>/dev/null | grep -oiE 'holds|violated|unknown' | head -1)"
 echo
-echo "--- wide counter (Width=48, > exact cap) — expect HOLDS both directions via the ranking certificate ---"
+echo "--- wide counter (Width=48) — expect HOLDS both directions (the JSON's engine field says which engine decided) ---"
 lift 48 "${OUT}/w48.btor2"
 echo -n "  descent AG EF (cnt == 0):                  "; "${MUNUNU}" btor2 verify-recoverability "${OUT}/w48.btor2" --target 'cnt == 0'         2>/dev/null | grep -oiE '"verdict": "[a-z]+"'
 echo -n "  ascent  AG EF (cnt == ${MAX48}):   "; "${MUNUNU}" btor2 verify-recoverability "${OUT}/w48.btor2" --target "cnt == ${MAX48}" 2>/dev/null | grep -oiE '"verdict": "[a-z]+"'
@@ -111,8 +111,8 @@ ok=1
 [[ "${W_DN}" != "holds" ]] && { echo "FAIL: wide descent expected holds (ranking certificate), got ${W_DN}" >&2; ok=0; }
 [[ "${W_UP}" != "holds" ]] && { echo "FAIL: wide ascent expected holds (ranking certificate), got ${W_UP}" >&2; ok=0; }
 if [[ "${ok}" == "1" ]]; then
-  echo "PASS — prim_count recoverability DECIDES HOLDS in BOTH directions at Width=48 (ranking certificate,"
-  echo "       δ=cnt for the descent, δ=MAX−cnt for the ascent), where exact BDD walls and the cube abstains."
+  echo "PASS — prim_count recoverability DECIDES HOLDS in BOTH directions at Width=48 (engine field: exact since the 192-bit auto-cap; past it the ranking certificate,"
+  echo "       δ=cnt for the descent, δ=MAX−cnt for the ascent, where the cube abstains)."
 else
   echo "FAILED"; exit 1
 fi

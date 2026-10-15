@@ -12,7 +12,7 @@ branching (νμ) properties can only go through the 3-valued engines.
 
 | Engine | Decides | Soundness | Scale ceiling |
 |---|---|---|---|
-| **exact-symbolic** (BDD bit-blast) | full modal-μ incl. νμ, at the *initial state* | definite (exact, no abstraction) | ~40-bit cone (enumeration) |
+| **exact-symbolic** (BDD bit-blast) | full modal-μ incl. νμ, at the *initial state* | definite (exact, no abstraction) | cone ≤ 192 bits by auto-cap (40 by default; 1024 on the recoverability cap ladder); within it the ceiling is the cone's *shape* — a multiplier leaves the exact engine at 9 bits per operand under the default arena (the cube ladder decides it to 32), FSM + timer control logic decides at every width to the 1024-bit ceiling ([measured frontier](../verifying-rtl.md#what-decides-at-what-width--the-measured-frontier)) |
 | **cube CEGAR** (+ `smt-hyper-must`) | full modal-μ incl. νμ, over a **predicate abstraction** | Bruns–Godefroid 3-valued (definite verdicts transfer; ⊥ ⇒ refine) | predicate-count bound; needs the right predicates |
 | **reach portfolio** (exact ⊕ native BMC/k-induction ⊕ SPACER ⊕ btormc ⊕ Pono ⊕ *last-resort* interpolation) | **`bad`-reachability only** (safety) | each member sound; first-definite wins; disagreement ⇒ contradiction alarm | word-level, **no bit cap** (native/SPACER/btormc/Pono/interp) |
 
@@ -51,7 +51,7 @@ no bound (historical behaviour).
 
 **The predicate-avoidance rule (P0.2), confirmed by the 2026-07-08 csrng spike:**
 
-1. `verify-auto`'s default (`portfolio-sequential`) tries **exact-symbolic first** — which needs **no predicates** and, on a real OpenTitan FSM, decides recoverability directly (the FSM cone fits under the 40-bit cap).
+1. `verify-auto`'s default (`portfolio-sequential`) tries **exact-symbolic first** — which needs **no predicates** and, on a real OpenTitan FSM, decides recoverability directly (the FSM cone fits under the auto-cap).
 2. Only when exact-symbolic is **over-cap** does it fall to the cube legs, which **auto-seed** predicates from the formula's atoms (`seed_from_formula`) — still no hand-written predicates.
 3. Hand-written predicates / `config_values` / `counter_bounds` are the **residual** — needed only for the cube's ⊥ ceiling (combinational-input FSM control signals whose cone explodes). That residual is the target of P0.2's follow-up (auto-derive the missing concretizations).
 

@@ -197,7 +197,7 @@ flowchart TD
   C -->|"νμ diamond → Recoverability<br/>(AG EF good) — SVA/LTL can't state"| CUBE["KMTS 3-valued branching cube"]
 
   SAFE --> PORT["exact BDD · native BMC/k-induction · native interp (cvc5) ·<br/>Z3 SPACER (CHC)* · btormc* · Pono*  →  differential-oracle merge"]
-  CUBE --> BR["exact 3-valued BDD (≤40b) →<br/>predicate-cube + SMT hyper-must →<br/>Podelski–Rybalchenko ranking cert"]
+  CUBE --> BR["exact 3-valued BDD (cone ≤192b by auto-cap) →<br/>predicate-cube + SMT hyper-must →<br/>Podelski–Rybalchenko ranking cert"]
 
   PORT --> V["True / False / ⊥"]
   L2S --> V
@@ -221,7 +221,7 @@ search (whether linked in-process, like Z3's SPACER, or a subprocess, like btorm
 
 | Engine | Algorithm owner | Method |
 |---|---|---|
-| Exact BDD reachability | **mununu** (OxiDD, in-process) | ≤40-bit exact; refuses an unsound "safe" on free init |
+| Exact BDD reachability | **mununu** (OxiDD, in-process) | exact up to the 192-bit auto-cap (40 by default), shape-bound within it; refuses an unsound "safe" on free init |
 | Native BMC + k-induction | **mununu** (drives the unroll; z3 answers per-depth SAT) | word-level counterexample + inductive proof |
 | Native McMillan interpolation | **mununu** (drives the forward-reach k-schedule; cvc5 answers per-interpolant queries) | last-resort; uniquely decides HWMCC `gen12/14/39` |
 | SPACER (IC3/PDR) via CHC | **external algorithm — Z3's SPACER** (in-process); mununu owns only the btor2→CHC *encoding* | Z3 solves the Horn-clause problem end-to-end |
@@ -238,7 +238,8 @@ algorithm; the rest are Z3 SPACER, btormc, or Pono.)
 μ-calculus that SVA and LTL **cannot state**, most notably recoverability `AG EF good`
 ("from every reachable state, a good state is still reachable") and `AG AF`. Every engine
 here is mununu-owned. Definite verdicts are sound at *every* alternation depth
-(Bruns–Godefroid). An exact 3-valued BDD / enumeration path (≤40-bit) escalates, over wide
+(Bruns–Godefroid). An exact 3-valued BDD / enumeration path (cones up to 192 bits by auto-cap — 40 by default — the
+deciding width is shape-bound, see [the measured frontier](docs/verifying-rtl.md#what-decides-at-what-width--the-measured-frontier)) escalates, over wide
 datapaths, to a predicate-cube + SMT hyper-must abstraction and a Podelski–Rybalchenko
 **ranking certificate** (single-register, ∃-input, and lexicographic) that decides
 well-founded-descent cases no bounded cube captures.

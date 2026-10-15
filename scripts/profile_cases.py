@@ -62,6 +62,20 @@ WORK_RE = re.compile(r"work (\d+) BDD ops")
 VERDICT_STR_RE = re.compile(r'"verdict":\s*"([a-z_]+)"')
 CELLS_RE = re.compile(r'"(true|false|unknown)_cells":\s*(\d+)')
 TERM_RE = re.compile(r'"terminated_with":\s*"([A-Za-z]+)"')
+# Recoverability attribution (both verbs carry it since the engine-attribution change, 2026-10-14):
+# who decided, and the exact engine's typed abstention when the cube ladder did.
+ENGINE_RE = re.compile(r'"engine":\s*"([a-z\-]+)"')
+EXACT_ABST_RE = re.compile(r'"exact_abstention":\s*"([a-z\-]+)"')
+# The engine's own count of kept register+input bits (one debug line per bit-blast build; needs
+# RUST_LOG=mununu_core::adapter::btor2::symbolic_bitblast=debug) — the cross-check for a
+# generator's cone formula.
+KEPT_BITS_RE = re.compile(r"kept_bits=(\d+)")
+# tracing colours its field names (`\x1b[3mkept_bits\x1b[0m\x1b[2m=\x1b[0m65`), so every stderr regex runs
+# on the ANSI-stripped text.
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+# The escalation line the recoverability verb logs at `warn` when the exact engine abstains and
+# the cube ladder takes over — the only attribution a probe killed from outside leaves behind.
+ESCALATE_RE = re.compile(r"exact engine abstained on `AG EF [^`]*`; escalating")
 
 
 def bits(m: int) -> int:
@@ -156,6 +170,128 @@ def gen_exact_mult(n: int):
     return src, ["--target", "done == 1"], {}, f"multiplier a*b==k, n={n} bits per operand (abstain path)"
 
 
+class _Btor:
+    """A tiny BTOR2 emitter for the control-logic shapes below: sequential node ids, so a generator
+    reads as the circuit it builds instead of as a hand-numbered listing."""
+
+    def __init__(self):
+        self.lines: list[str] = []
+
+    def n(self, text: str) -> int:
+        self.lines.append(f"{len(self.lines) + 1} {text}")
+        return len(self.lines)
+
+    def text(self) -> str:
+        return "\n".join(self.lines) + "\n"
+
+
+def _fsm_timeout_circuit(b: "_Btor", w: int, s1: int, s3: int, sw: int, *, name: str, start: int, ack: int,
+                         clr: int, limit: int, stuck: bool, go_states: tuple[int, int], ack_is_level: bool) -> tuple[int, int]:
+    """One 6-state FSM (IDLE 0 / REQ 1 / WAIT 2 / ACTIVE 3 / DONE 4 / ERROR 5) with a w-bit timer that
+    counts in WAIT while `ack` is low and sends the machine to ERROR when it reaches `limit`; ERROR
+    clears on `clr` (never, when `stuck`). Returns (state node, timer node). `go_states` are the
+    encodings whose "request" output the pair shape reads; `ack_is_level` selects whether ACTIVE
+    waits for `ack` to drop (the pair's USE state) or advances unconditionally."""
+    zero3 = b.n(f"zero {s3}"); zerow = b.n(f"zero {sw}"); onew = b.n(f"one {sw}")
+    st = b.n(f"state {s3} {name}_st"); b.n(f"init {s3} {st} {zero3}")
+    tmr = b.n(f"state {sw} {name}_tmr"); b.n(f"init {sw} {tmr} {zerow}")
+    k = {v: b.n(f"constd {s3} {v}") for v in range(6)}
+    is_ = {v: b.n(f"eq {s1} {st} {k[v]}") for v in range(6)}
+    at_limit = b.n(f"eq {s1} {tmr} {limit}")
+    not_ack = b.n(f"not {s1} {ack}")
+    # next state, innermost first
+    err_next = k[5] if stuck else b.n(f"ite {s3} {clr} {k[0]} {k[5]}")
+    wait_timeout = b.n(f"ite {s3} {at_limit} {k[5]} {k[2]}")
+    wait_next = b.n(f"ite {s3} {ack} {k[3]} {wait_timeout}")
+    active_next = b.n(f"ite {s3} {ack} {k[3]} {k[4]}") if ack_is_level else k[4]
+    idle_next = b.n(f"ite {s3} {start} {k[1]} {k[0]}")
+    nxt = k[0]                                           # illegal 6/7 → IDLE
+    nxt = b.n(f"ite {s3} {is_[5]} {err_next} {nxt}")
+    nxt = b.n(f"ite {s3} {is_[4]} {k[0]} {nxt}")
+    nxt = b.n(f"ite {s3} {is_[3]} {active_next} {nxt}")
+    nxt = b.n(f"ite {s3} {is_[2]} {wait_next} {nxt}")
+    nxt = b.n(f"ite {s3} {is_[1]} {k[2]} {nxt}")
+    nxt = b.n(f"ite {s3} {is_[0]} {idle_next} {nxt}")
+    b.n(f"next {s3} {st} {nxt}")
+    # timer: counts while waiting without an ack, else 0
+    counting = b.n(f"and {s1} {is_[2]} {not_ack}")
+    tmr_inc = b.n(f"add {sw} {tmr} {onew}")
+    tmr_next = b.n(f"ite {sw} {counting} {tmr_inc} {zerow}")
+    b.n(f"next {sw} {tmr} {tmr_next}")
+    return st, tmr
+
+
+def gen_exact_fsm_timeout(w: int, stuck: bool = False):
+    """CONTROL shape (bit-cap frontier, 2026-10-14): a 6-state FSM (IDLE/REQ/WAIT/ACTIVE/DONE/ERROR)
+    with a w-bit timeout counter and a w-bit free-init `limit` (a CSR-programmed timeout); WAIT
+    times out to ERROR, ERROR clears on `clr`. Target `st == 0`: HOLDS at every width (the BDDs of an
+    increment and an equality are linear); `stuck=True` makes ERROR absorbing → VIOLATED. Cone =
+    2w+6 kept bits (3 state + w timer + w limit + 3 inputs); 192 bits at w=93. The stuck twin never
+    reads `clr`, so the bit-level cone of influence drops it: 2w+5."""
+    b = _Btor()
+    s1 = b.n("sort bitvec 1"); s3 = b.n("sort bitvec 3"); sw = b.n(f"sort bitvec {w}")
+    start = b.n(f"input {s1} start"); ack = b.n(f"input {s1} ack"); clr = b.n(f"input {s1} clr")
+    limit = b.n(f"state {sw} limit"); b.n(f"next {sw} {limit} {limit}")      # free init, held
+    _fsm_timeout_circuit(b, w, s1, s3, sw, name="fsm", start=start, ack=ack, clr=clr, limit=limit,
+                         stuck=stuck, go_states=(1, 2), ack_is_level=False)
+    kind = "stuck ERROR (VIOLATED)" if stuck else "clearable ERROR (HOLDS)"
+    return b.text(), ["--target", "fsm_st == 0"], {}, f"fsm-timeout w={w}, cone {2 * w + 6} bits, {kind}"
+
+
+def gen_exact_fsm_timeout_stuck(w: int):
+    return gen_exact_fsm_timeout(w, stuck=True)
+
+
+def gen_exact_fsm_pair(w: int):
+    """CONTROL shape (bit-cap frontier, 2026-10-14): a requester FSM (IDLE/REQ/WAIT/USE/REL/ERR) and
+    a granter FSM (IDLE/ARB/GRANT/BUSY/RELEASE/ERR) coupled by a request/grant handshake, each with
+    a w-bit timer against one shared free-init `limit`. `req` is the requester being in REQ or WAIT;
+    `gnt` is the granter being in GRANT or BUSY. Target `req_st == 0`: HOLDS at every width. Cone =
+    3w+9 kept bits (2×3 state + 2w timers + w limit + 3 inputs); 192 bits at w=61."""
+    b = _Btor()
+    s1 = b.n("sort bitvec 1"); s3 = b.n("sort bitvec 3"); sw = b.n(f"sort bitvec {w}")
+    start = b.n(f"input {s1} start"); done = b.n(f"input {s1} done"); clr = b.n(f"input {s1} clr")
+    limit = b.n(f"state {sw} limit"); b.n(f"next {sw} {limit} {limit}")
+    # The two machines read each other's CURRENT state, so declare both states first.
+    zero3 = b.n(f"zero {s3}"); zerow = b.n(f"zero {sw}"); onew = b.n(f"one {sw}")
+    st_r = b.n(f"state {s3} req_st"); b.n(f"init {s3} {st_r} {zero3}")
+    st_g = b.n(f"state {s3} gnt_st"); b.n(f"init {s3} {st_g} {zero3}")
+    tmr_r = b.n(f"state {sw} req_tmr"); b.n(f"init {sw} {tmr_r} {zerow}")
+    tmr_g = b.n(f"state {sw} gnt_tmr"); b.n(f"init {sw} {tmr_g} {zerow}")
+    k = {v: b.n(f"constd {s3} {v}") for v in range(6)}
+    r = {v: b.n(f"eq {s1} {st_r} {k[v]}") for v in range(6)}
+    g = {v: b.n(f"eq {s1} {st_g} {k[v]}") for v in range(6)}
+    req = b.n(f"or {s1} {r[1]} {r[2]}")
+    gnt = b.n(f"or {s1} {g[2]} {g[3]}")
+    not_req = b.n(f"not {s1} {req}"); not_gnt = b.n(f"not {s1} {gnt}")
+    r_at_limit = b.n(f"eq {s1} {tmr_r} {limit}"); g_at_limit = b.n(f"eq {s1} {tmr_g} {limit}")
+    # requester: IDLE start→REQ; REQ→WAIT; WAIT gnt→USE else timeout→ERR; USE done→REL; REL→IDLE; ERR clr→IDLE
+    r_err = b.n(f"ite {s3} {clr} {k[0]} {k[5]}")
+    r_wait = b.n(f"ite {s3} {gnt} {k[3]} {b.n(f'ite {s3} {r_at_limit} {k[5]} {k[2]}')}")
+    r_use = b.n(f"ite {s3} {done} {k[4]} {k[3]}")
+    r_idle = b.n(f"ite {s3} {start} {k[1]} {k[0]}")
+    nr = k[0]
+    nr = b.n(f"ite {s3} {r[5]} {r_err} {nr}"); nr = b.n(f"ite {s3} {r[4]} {k[0]} {nr}")
+    nr = b.n(f"ite {s3} {r[3]} {r_use} {nr}"); nr = b.n(f"ite {s3} {r[2]} {r_wait} {nr}")
+    nr = b.n(f"ite {s3} {r[1]} {k[2]} {nr}"); nr = b.n(f"ite {s3} {r[0]} {r_idle} {nr}")
+    b.n(f"next {s3} {st_r} {nr}")
+    # granter: IDLE req→ARB; ARB→GRANT; GRANT→BUSY; BUSY !req→RELEASE else timeout→ERR; RELEASE→IDLE; ERR clr→IDLE
+    g_err = b.n(f"ite {s3} {clr} {k[0]} {k[5]}")
+    g_busy = b.n(f"ite {s3} {not_req} {k[4]} {b.n(f'ite {s3} {g_at_limit} {k[5]} {k[3]}')}")
+    g_idle = b.n(f"ite {s3} {req} {k[1]} {k[0]}")
+    ng = k[0]
+    ng = b.n(f"ite {s3} {g[5]} {g_err} {ng}"); ng = b.n(f"ite {s3} {g[4]} {k[0]} {ng}")
+    ng = b.n(f"ite {s3} {g[3]} {g_busy} {ng}"); ng = b.n(f"ite {s3} {g[2]} {k[3]} {ng}")
+    ng = b.n(f"ite {s3} {g[1]} {k[2]} {ng}"); ng = b.n(f"ite {s3} {g[0]} {g_idle} {ng}")
+    b.n(f"next {s3} {st_g} {ng}")
+    # timers: the requester counts in WAIT without a grant, the granter in BUSY while the request stands
+    r_cnt = b.n(f"and {s1} {r[2]} {not_gnt}"); r_inc = b.n(f"add {sw} {tmr_r} {onew}")
+    b.n(f"next {sw} {tmr_r} {b.n(f'ite {sw} {r_cnt} {r_inc} {zerow}')}")
+    g_cnt = b.n(f"and {s1} {g[3]} {req}"); g_inc = b.n(f"add {sw} {tmr_g} {onew}")
+    b.n(f"next {sw} {tmr_g} {b.n(f'ite {sw} {g_cnt} {g_inc} {zerow}')}")
+    return b.text(), ["--target", "req_st == 0"], {}, f"fsm-pair w={w}, cone {3 * w + 9} bits (HOLDS expected)"
+
+
 def gen_cube_synth_cells(n: int, w: int = 32):
     """SYNTHETIC CONTROL: `ctrl` returns to 0 when a width-w datapath (barrel-shifted by a free
     input) hits any of n constants; predicates = ctrl==0 plus the n equalities → 2^(n+1) cells. On
@@ -248,6 +384,18 @@ CASES: dict[str, dict] = {
                              seeds=[1, 2, 3, 4], cls="RTL, refinement loop re-lift cost", engine="explicit predicate-cube"),
     "cube-synth-cells": dict(gen=gen_cube_synth_cells, verb="cegar", knob="n (predicates, 2^(n+1) cells, ≤9)",
                              seeds=[6, 8, 9], cls="synthetic control: cheap by construction", engine="explicit predicate-cube"),
+    # Bit-cap frontier shapes (2026-10-14): control logic the FPGA audience recognises. `window=False`
+    # keeps them out of `all-calibrate` (they decide in milliseconds at every width; there is no CPU
+    # window to land in) — `scripts/bitcap_frontier.py` is their driver.
+    "exact-fsm-timeout": dict(gen=gen_exact_fsm_timeout, verb="verify-recoverability", knob="w (timer + limit width; cone 2w+6)",
+                              seeds=[8, 16, 32, 64, 93, 94], cls="control: 6-state FSM + w-bit timeout, clearable ERROR (HOLDS)",
+                              engine="exact-symbolic", window=False),
+    "exact-fsm-timeout-stuck": dict(gen=gen_exact_fsm_timeout_stuck, verb="verify-recoverability", knob="w (cone 2w+6)",
+                                    seeds=[8, 16, 32, 64, 93, 94], cls="control: the same FSM with an absorbing ERROR (VIOLATED)",
+                                    engine="exact-symbolic", window=False),
+    "exact-fsm-pair": dict(gen=gen_exact_fsm_pair, verb="verify-recoverability", knob="w (timer + limit width; cone 3w+9)",
+                           seeds=[8, 16, 32, 61, 62], cls="control: requester/granter handshake FSMs + timers (HOLDS)",
+                           engine="exact-symbolic", window=False),
 }
 
 CUBE_FLAGS = ["--engine", "explicit", "--must-edge-inference", "smt-hyper-must", "--json"]
@@ -280,8 +428,24 @@ def command(case: str, size: int, binary: Path) -> tuple[list[str], dict, str]:
     return cmd, env, note
 
 
-def run_timed(cmd: list[str], env: dict, cap_s: float) -> dict:
-    full_env = {**os.environ, "MUNUNU_BDD_REPORT_WORK": "1", **env}
+# The RUST_LOG a default-budget probe runs under: errors only, plus the recoverability verb's
+# escalation line (attribution for a probe that is killed later) and the bit-blast build line
+# (`kept_bits`, the engine's own cone count).
+DEFAULTS_RUST_LOG = "error,mununu::recoverability=warn,mununu_core::adapter::btor2::symbolic_bitblast=debug"
+
+
+def run_timed(cmd: list[str], env: dict, cap_s: float, *, defaults: bool = False,
+              extra_env: dict | None = None) -> dict:
+    """Run one probe. `defaults=True` is the bit-cap frontier's mode: every `MUNUNU_*` variable in
+    the caller's shell is scrubbed and the case's own env is IGNORED, so the engine runs under its
+    shipped budgets; only `extra_env` (a sweep's labelled toggle) is applied on top. The default
+    mode merges the caller's shell and the case env as before (the profiling families turn the
+    soft bounds OFF on purpose)."""
+    if defaults:
+        base = {k: v for k, v in os.environ.items() if not k.startswith("MUNUNU_")}
+        full_env = {**base, "MUNUNU_BDD_REPORT_WORK": "1", "RUST_LOG": DEFAULTS_RUST_LOG, **(extra_env or {})}
+    else:
+        full_env = {**os.environ, "MUNUNU_BDD_REPORT_WORK": "1", **env, **(extra_env or {})}
     r0 = resource.getrusage(resource.RUSAGE_CHILDREN)
     t0 = time.perf_counter()
     timed_out = False
@@ -312,10 +476,21 @@ def run_timed(cmd: list[str], env: dict, cap_s: float) -> dict:
             verdict = f"cells T{cells.get('true', 0)}/F{cells.get('false', 0)}/U{cells.get('unknown', 0)}" + (f" {term.group(1)}" if term else "")
         else:
             verdict = f"exit {code}"
+    err = ANSI_RE.sub("", err)
     abstain = re.search(r"abstained on the ([A-Z\- ]+?) (bound|budget|CAP)", err)
+    engine = ENGINE_RE.search(out); exact_abst = EXACT_ABST_RE.search(out)
+    kept = [int(m.group(1)) for m in KEPT_BITS_RE.finditer(err)]
+    escalated = bool(ESCALATE_RE.search(err))
+    # ru_maxrss is the largest child so far (bytes on macOS, KiB on Linux) — recorded raw with the
+    # platform so a reader can convert; the delta is meaningless, the max is what a ladder row needs.
     return {"cpu_s": cpu, "wall_s": wall, "exit": code, "timed_out": timed_out, "verdict": verdict,
             "iterations": iters or None, "peak_nodes": peak or None, "work": work or None,
             "abstained_on": abstain.group(0) if abstain else None,
+            "engine": engine.group(1) if engine else None,
+            "exact_abstention": exact_abst.group(1) if exact_abst else None,
+            "escalated": escalated,
+            "kept_bits": max(kept) if kept else None,
+            "ru_maxrss": r1.ru_maxrss, "ru_maxrss_unit": "bytes" if sys.platform == "darwin" else "KiB",
             "stderr_tail": err[-600:]}
 
 
@@ -324,6 +499,9 @@ def fmt_run(size, r: dict) -> str:
     extra += f"  peak={r['peak_nodes']:,}" if r["peak_nodes"] else ""
     extra += f"  work={r['work']:,}" if r.get("work") else ""
     extra += f"  [{r['abstained_on']}]" if r["abstained_on"] else ""
+    extra += f"  engine={r['engine']}" if r.get("engine") else ""
+    extra += f"  exact_abstention={r['exact_abstention']}" if r.get("exact_abstention") else ""
+    extra += f"  kept={r['kept_bits']}b" if r.get("kept_bits") else ""
     return f"size={size:<12} cpu={r['cpu_s']:8.1f}s  wall={r['wall_s']:8.1f}s  verdict={r['verdict']}{extra}"
 
 
@@ -606,7 +784,7 @@ def main(argv: list[str]) -> int:
         calibrate(args.case, binary, args.min, args.max, args.cap, seeds)
         return 0
     if args.sub == "all-calibrate":
-        names = args.only.split(",") if args.only else list(CASES)
+        names = args.only.split(",") if args.only else [k for k, v in CASES.items() if v.get("window", True)]
         for k in names:
             calibrate(k, binary, args.min, args.max, args.cap, CASES[k]["seeds"])
         return 0

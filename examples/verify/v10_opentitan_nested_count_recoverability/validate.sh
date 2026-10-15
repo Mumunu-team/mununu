@@ -77,7 +77,7 @@ lift 8 4 6 40 "${OUT}/small.btor2"
 "${MUNUNU}" btor2 verify-recoverability "${OUT}/small.btor2" --target 'outer == 0' 2>/dev/null | grep -iE '"verdict"'
 SMALL="$("${MUNUNU}" btor2 verify-recoverability "${OUT}/small.btor2" --target 'outer == 0' 2>/dev/null | grep -oiE 'holds|violated|unknown' | head -1)"
 echo
-echo "--- wide (OW=48, > exact cap) — expect HOLDS via the LEXICOGRAPHIC ranking ---"
+echo "--- wide (OW=48) — expect HOLDS (the JSON's engine field says which engine decided) ---"
 lift 48 8 100 1099511627776 "${OUT}/wide.btor2"
 "${MUNUNU}" btor2 verify-recoverability "${OUT}/wide.btor2" --target 'outer == 0' 2>/dev/null | grep -iE '"verdict"'
 WIDE="$("${MUNUNU}" btor2 verify-recoverability "${OUT}/wide.btor2" --target 'outer == 0' 2>/dev/null | grep -oiE 'holds|violated|unknown' | head -1)"
@@ -87,7 +87,7 @@ ok=1
 [[ "${SMALL}" != "holds" ]] && { echo "FAIL: small expected holds, got ${SMALL}" >&2; ok=0; }
 [[ "${WIDE}"  != "holds" ]] && { echo "FAIL: wide expected holds (lexicographic ranking), got ${WIDE}" >&2; ok=0; }
 if [[ "${ok}" == "1" ]]; then
-  echo "PASS — nested-counter recoverability DECIDES HOLDS on real prim_count at OW=48 via the LEXICOGRAPHIC ranking, where a single-register ranking + the cube + exact BDD all give out."
+  echo "PASS — nested-counter recoverability DECIDES HOLDS on real prim_count at OW=48 (engine field: exact since the 192-bit auto-cap; past it the LEXICOGRAPHIC ranking, where a single-register ranking and the cube give out)."
 else
   echo "FAILED"; exit 1
 fi

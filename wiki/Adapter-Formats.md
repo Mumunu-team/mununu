@@ -168,12 +168,12 @@ Four CLTS-aligned transformations applied at read time (per [`adapter::btor2::bi
 
 ### Yosys SVA support
 
-Yosys 0.59's `read_verilog -formal -sv` is a synthesis frontend, not a full SystemVerilog assertion frontend. It accepts:
+**Scope: this is the yosys `read_verilog` lift** (`btor2 from-sv`, plain `sv verify`), not mununu's SVA front end. Temporal SVA — `assert property`, `|->` / `|=>`, `##k`, `$past`, `$stable`, … — is verified by `sv verify-auto`, which elaborates the design with slang and translates the assertions itself; its supported fragment is listed in [`docs/verifying-rtl.md` §3](https://github.com/Mumunu-team/mununu/blob/main/docs/verifying-rtl.md#3-coverage-is-a-fragment-and-verdicts-are-honest). Yosys's `read_verilog -formal -sv` is a synthesis frontend, not a full SystemVerilog assertion frontend. It accepts:
 
 - Immediate assertions inside `always @(posedge clk)`: `assert (boolean_expr);`
 - Immediate assumes / covers: `assume (...)`, `cover (...)`
 
-It does **not** accept temporal SVA: `assert property (...)`, `|->`, `|=>`, `##N`, `s_eventually`, `$stable`, `$rose`, `$past`, `nexttime`, `default clocking`, PSL/FL syntax. The full SVA story arrives in **Phase 2** of the [RTL roadmap](RTL-Verification-Pipeline) (`adapter/sva/`), independent of the Yosys frontend. Until then, properties needing temporal operators are encoded with **shadow-register patterns** — a pre-cycle latch tracks the antecedent, an immediate Boolean assertion tests the consequent. This mirrors how every working OSS Yosys SVA example is actually written. See `examples/btor2/` in the repo for a corpus.
+It does **not** accept temporal SVA: `assert property (...)`, `|->`, `|=>`, `##N`, `s_eventually`, `$stable`, `$rose`, `$past`, `nexttime`, `default clocking`, PSL/FL syntax. Temporal SVA is the job of `sv verify-auto` (slang elaboration + mununu's own translator, `adapter/slang/translate.rs`), independent of the yosys frontend. On the yosys lift itself, properties needing temporal operators are encoded with **shadow-register patterns** — a pre-cycle latch tracks the antecedent, an immediate Boolean assertion tests the consequent. This mirrors how every working OSS Yosys SVA example is actually written. See `examples/btor2/` in the repo for a corpus.
 
 ### State-bit budget
 

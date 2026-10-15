@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "exp_id": "EXP-0031-bitcap-frontier",
+  "commit": "d7462e5758780106bdcb29318fc90986253464a6",
+  "branch": "feat/bitcap-frontier-and-sva-truth-table",
+  "git_dirty": "yes",
+  "host": "Marianos-MacBook-Pro.local",
+  "container": "no",
+  "command": "scripts/bitcap_frontier.py sweep --fresh   # one shape at a time: --shapes <shape> [--config <c>]",
+  "started_at": "2026-10-15T01:12:53.510162+00:00",
+  "ended_at": "2026-10-15T01:16:44.270557+00:00",
+  "exit_code": 0,
+  "hw_fingerprint_sha256": "6250e6b14873c75519e8810d3d426f2e5c3cc342106a19ec388768dbfda698bc",
+  "criterion_archive_sha256": "",
+  "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
+  "rust_toolchain_toml_sha256": "a551d25326bc938381084552ef6973a4cccd86429d214a41f8f1ff3e69bb90ed",
+  "dev_container_dockerfile_sha256": "8388c74dcfcd2594b9446e4936bddabd0660e7354153b89cf772e726bf2cd9e5",
+  "frontier_json_sha256": "4b48588facd8f6bd5dde790ea66bf4eb9cae4cfc9e433033b9c6fc7b50d7ea66",
+  "binary_sha256": "5fffc9d6683f5b71c14979d5075693a823487d62a5488d58e5b8f078ebac40a6",
+  "notes": "bit-cap frontier sweep (scripts/bitcap_frontier.py); no Criterion archive \u2014 the measurement is frontier.json. Wall times are this host's; the deterministic bounds (bit-cap, arena-overflow, iteration-budget, latency) reproduce."
+}
