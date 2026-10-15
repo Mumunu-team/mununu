@@ -1,6 +1,66 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "definitions": {
+    "AssumptionNotAppliedView": {
+      "description": "A named item with the reason it was not applied / not relativized.",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "AssumptionsView": {
+      "description": "What `sv verify-auto` did with the design's `assume` statements.",
+      "properties": {
+        "applied": {
+          "description": "Assumptions applied as preconditions.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "consistency": {
+          "description": "`consistent`, `contradictory` (no trace satisfies every applied assumption: every HOLDS is vacuous) or `unknown`; omitted when nothing was applied.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "description": "`precondition` (the default: guarantees are checked on the traces that satisfy the applied assumptions), `check` (assumptions are checked like assertions) or `ignore`.",
+          "type": "string"
+        },
+        "unapplied": {
+          "description": "Assumptions not applied, with the reason. The guarantees were checked without them.",
+          "items": {
+            "$ref": "#/definitions/AssumptionNotAppliedView"
+          },
+          "type": "array"
+        },
+        "unguarded": {
+          "description": "Guarantees checked WITHOUT the assumptions (their formula could not be relativized).",
+          "items": {
+            "$ref": "#/definitions/AssumptionNotAppliedView"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "applied",
+        "mode",
+        "unapplied",
+        "unguarded"
+      ],
+      "type": "object"
+    },
     "BottomReasonView": {
       "description": "monono ask 26 — WHY a property is `⊥`, machine-readable.\n\nThe complement to `unknown_cells`: that field says HOW MUCH of the cube space stayed undecided, this one says WHY nothing decided it. A consumer previously had the quantity and not the cause, so the only available move on a `⊥` was to try budget knobs blind.\n\nCarried as a FIELD rather than a note deliberately: a consumer that does not know about a field cannot silently filter it out, and a consumer that does not know about a note routinely does — which is exactly how the equivalent `bottom-reason` note (shipped in mununu#492) never reached the reader it was written for.",
       "properties": {
@@ -432,6 +492,17 @@
   },
   "description": "Response for `/api/v1/sv/verify-auto`.",
   "properties": {
+    "assumptions": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/AssumptionsView"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "OpenTitan coverage, Phase 4 — what the run did with the design's SVA `assume` statements. Omitted when the design has none."
+    },
     "diagnostics": {
       "allOf": [
         {

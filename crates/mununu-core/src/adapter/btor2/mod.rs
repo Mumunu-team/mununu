@@ -22,6 +22,7 @@
 pub mod abs_safety;
 pub mod antecedent_propagation;
 pub mod array_prophecy;
+pub mod assume_monitor;
 pub mod ast;
 pub mod bad_monitor;
 pub mod bit_blast;

@@ -531,8 +531,292 @@ fn strong_reading_notes(
 }
 
 /// Result of an automated SVA verification run.
+/// How `sv verify-auto` treats SVA `assume` statements (OpenTitan coverage, Phase 4). CLI
+/// `--assumes`, API `assumes`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AssumeMode {
+    /// The default: the guarantees are checked on the traces along which every applied
+    /// assumption has held so far (`btor2::assume_monitor` + `assume_guarantee::relativize`).
+    #[default]
+    Precondition,
+    /// Each assumption is CHECKED like an assertion and constrains nothing (the behaviour before
+    /// 2026-10-15).
+    Check,
+    /// Assumptions are dropped: neither checked nor applied.
+    Ignore,
+}
+
+impl AssumeMode {
+    /// The stable wire spelling.
+    pub fn label(self) -> &'static str {
+        match self {
+            AssumeMode::Precondition => "precondition",
+            AssumeMode::Check => "check",
+            AssumeMode::Ignore => "ignore",
+        }
+    }
+
+    /// Parse the wire spelling (`None` for anything else).
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "precondition" => Some(AssumeMode::Precondition),
+            "check" => Some(AssumeMode::Check),
+            "ignore" => Some(AssumeMode::Ignore),
+            _ => None,
+        }
+    }
+}
+
+/// What the run did with the design's `assume` statements. Empty `mode` ⇒ the design has none.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AssumptionReport {
+    /// [`AssumeMode::label`], or empty when the design has no `assume`.
+    pub mode: String,
+    /// Assumptions applied as preconditions (label, or name when unlabelled).
+    pub applied: Vec<String>,
+    /// Assumptions NOT applied, with the reason (an unsupported shape, an unresolved signal, or
+    /// `--assumes ignore`). The guarantees were checked without them — the stronger obligation.
+    pub unapplied: Vec<(String, String)>,
+    /// Guarantees checked WITHOUT the assumptions because their formula could not be relativized.
+    pub unguarded: Vec<(String, String)>,
+    /// `consistent` (some trace satisfies every applied assumption forever), `contradictory`
+    /// (none does: every HOLDS is vacuous) or `unknown`; `None` when nothing was applied.
+    pub consistency: Option<String>,
+}
+
+/// The `$past` depth a signal name reads: `x__past` → 1, `x__past3` → 3, `x__past__bits7_0` → 1,
+/// anything else → 0.
+fn shadow_depth_of_name(name: &str) -> u32 {
+    let Some(i) = name.find("__past") else {
+        return 0;
+    };
+    let digits: String = name[i + "__past".len()..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.parse().unwrap_or(1)
+}
+
+/// The deepest `$past` any atom under `id` reads (a minted expression contributes its leaves').
+fn subtree_past_depth(
+    f: &crate::mu_calculus::Formula,
+    id: crate::mu_calculus::NodeId,
+    minted: &std::collections::HashMap<&str, u32>,
+) -> u32 {
+    use crate::mu_calculus::Node as N;
+    match f.node(id) {
+        N::Predicate(atom) => atom
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .filter(|t| !t.is_empty())
+            .map(|t| {
+                minted
+                    .get(t)
+                    .copied()
+                    .unwrap_or(0)
+                    .max(shadow_depth_of_name(t))
+            })
+            .max()
+            .unwrap_or(0),
+        N::Not(a) => subtree_past_depth(f, *a, minted),
+        N::And(a, b) | N::Or(a, b) => {
+            subtree_past_depth(f, *a, minted).max(subtree_past_depth(f, *b, minted))
+        }
+        N::Modal { target, .. } => subtree_past_depth(f, *target, minted),
+        N::Mu { body, .. } | N::Nu { body, .. } => subtree_past_depth(f, *body, minted),
+        _ => 0,
+    }
+}
+
+/// The internal property `AF ¬ok` that decides [`AssumptionReport::consistency`]: it HOLDS iff
+/// every trace eventually breaks an applied assumption. Removed from the report by
+/// [`finish_assumptions`].
+pub(crate) const ASSUMPTION_CONSISTENCY_PROPERTY: &str = "mununu_assumption_consistency";
+
+/// Phase 4 — split the `assume` statements off `ex.translated` per `mode`. Under
+/// [`AssumeMode::Precondition`] the applicable ones are returned as `(display name, formula)` for
+/// the monitor, every other translated formula is relativized to `mununu_assume_ok`, and the
+/// consistency property is appended. Pure (no model): the monitor is emitted later, once the
+/// expressions it reads are minted.
+fn plan_assumptions(
+    ex: &mut crate::adapter::slang::translate::TranslationReport,
+    mode: AssumeMode,
+) -> (AssumptionReport, Vec<(String, String)>) {
+    use crate::adapter::btor2::assume_monitor::{ASSUME_OK_SYMBOL, assume_shape};
+    use crate::adapter::slang::assume_guarantee::relativize;
+    let assumes: Vec<_> = ex
+        .translated
+        .iter()
+        .filter(|t| t.kind == SvaKind::Assume)
+        .cloned()
+        .collect();
+    let unsupported_assumes = ex
+        .unsupported
+        .iter()
+        .filter(|u| u.kind == Some(SvaKind::Assume))
+        .count();
+    if assumes.is_empty() && unsupported_assumes == 0 {
+        return (AssumptionReport::default(), Vec::new());
+    }
+    let mut rep = AssumptionReport {
+        mode: mode.label().to_string(),
+        ..Default::default()
+    };
+    let display = |t: &crate::adapter::slang::translate::TranslatedAssertion| {
+        t.label.clone().unwrap_or_else(|| t.name.clone())
+    };
+    match mode {
+        AssumeMode::Check => return (rep, Vec::new()),
+        AssumeMode::Ignore => {
+            ex.translated.retain(|t| t.kind != SvaKind::Assume);
+            rep.unapplied = assumes
+                .iter()
+                .map(|a| (display(a), "ignored (--assumes ignore)".to_string()))
+                .collect();
+            return (rep, Vec::new());
+        }
+        AssumeMode::Precondition => {}
+    }
+    ex.translated.retain(|t| t.kind != SvaKind::Assume);
+    let mut candidates = Vec::new();
+    for a in &assumes {
+        let applicable = crate::mu_calculus::parser::parse(&a.formula)
+            .ok()
+            .and_then(|f| assume_shape(&f))
+            .is_some();
+        if applicable {
+            candidates.push((display(a), a.formula.clone()));
+        } else {
+            rep.unapplied.push((
+                display(a),
+                "only `assume property (B)` and `A |=> B` over booleans are applied as \
+                 preconditions"
+                    .to_string(),
+            ));
+        }
+    }
+    if candidates.is_empty() {
+        return (rep, candidates);
+    }
+    for t in &mut ex.translated {
+        match relativize(&t.formula, ASSUME_OK_SYMBOL, t.kind == SvaKind::Cover) {
+            Ok(f) => t.formula = f,
+            Err(why) => rep.unguarded.push((display(t), why)),
+        }
+        if let Some(c) = &t.recoverability_companion {
+            t.recoverability_companion = relativize(c, ASSUME_OK_SYMBOL, false).ok();
+        }
+    }
+    ex.translated
+        .push(crate::adapter::slang::translate::TranslatedAssertion {
+            name: ASSUMPTION_CONSISTENCY_PROPERTY.to_string(),
+            label: None,
+            kind: SvaKind::Assert,
+            formula: format!("mu Y. ((!({ASSUME_OK_SYMBOL})) || [] Y)"),
+            recoverability_companion: None,
+        });
+    (rep, candidates)
+}
+
+/// Phase 4 — turn the internal consistency property into [`AssumptionReport::consistency`],
+/// remove it from the report, and scope the verdicts: a `contradictory` set of assumptions makes
+/// every HOLDS vacuous, which each such property is told.
+pub(crate) fn finish_assumptions(report: &mut AutoVerifyReport) {
+    if let Some(i) = report
+        .properties
+        .iter()
+        .position(|p| p.name == ASSUMPTION_CONSISTENCY_PROPERTY)
+    {
+        let p = report.properties.remove(i);
+        report.assumptions.consistency = Some(
+            match p.outcome {
+                VerifyOutcome::Holds => "contradictory",
+                VerifyOutcome::Violated { .. } => "consistent",
+                _ => "unknown",
+            }
+            .to_string(),
+        );
+    }
+    report
+        .notes
+        .retain(|n| n.property.as_deref() != Some(ASSUMPTION_CONSISTENCY_PROPERTY));
+    let a = &report.assumptions;
+    if a.mode.is_empty() {
+        return;
+    }
+    let mut detail = format!("SVA `assume` statements: --assumes {}.", a.mode);
+    if !a.applied.is_empty() {
+        detail.push_str(&format!(
+            " Every verdict is SCOPED to the traces on which the applied assumptions hold: {}.",
+            a.applied.join(", ")
+        ));
+    }
+    if !a.unapplied.is_empty() {
+        detail.push_str(" Not applied (the guarantees were checked without them): ");
+        detail.push_str(
+            &a.unapplied
+                .iter()
+                .map(|(n, r)| format!("{n} ({r})"))
+                .collect::<Vec<_>>()
+                .join("; "),
+        );
+        detail.push('.');
+    }
+    if !a.unguarded.is_empty() {
+        detail.push_str(&format!(
+            " Checked without the assumptions (formula not relativizable): {}.",
+            a.unguarded
+                .iter()
+                .map(|(n, _)| n.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    let contradictory = a.consistency.as_deref() == Some("contradictory");
+    report.notes.push(VerificationNote {
+        kind: "assumptions".to_string(),
+        level: NoteLevel::ScopeCaveat,
+        summary: match a.consistency.as_deref() {
+            Some("contradictory") => "the applied assumptions are CONTRADICTORY: no trace \
+                                      satisfies them all, so every HOLDS is vacuous"
+                .to_string(),
+            Some(c) => format!(
+                "{} assumption(s) applied as preconditions (consistency: {c})",
+                a.applied.len()
+            ),
+            None => format!("assumptions: --assumes {}", a.mode),
+        },
+        detail,
+        items: a.applied.clone(),
+        property: None,
+    });
+    if contradictory {
+        let holds: Vec<String> = report
+            .properties
+            .iter()
+            .filter(|p| matches!(p.outcome, VerifyOutcome::Holds))
+            .map(|p| p.name.clone())
+            .collect();
+        for name in holds {
+            report.notes.push(VerificationNote {
+                kind: "assumptions-contradictory".to_string(),
+                level: NoteLevel::ScopeCaveat,
+                summary: format!("{name}: HOLDS vacuously — the assumptions admit no trace"),
+                detail: "Every trace eventually breaks an applied assumption, so a guarantee \
+                         relativized to them holds on nothing. Fix the assumptions or run with \
+                         --assumes check to see which one fails."
+                    .to_string(),
+                items: Vec::new(),
+                property: Some(name),
+            });
+        }
+    }
+    refresh_coverage_summary(report);
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct AutoVerifyReport {
+    /// Phase 4 — what the run did with the design's `assume` statements.
+    pub assumptions: AssumptionReport,
     pub properties: Vec<PropertyVerdict>,
     /// Assertions that did not translate (name, reason), carried from extraction.
     pub unsupported: Vec<(String, String)>,
@@ -1658,6 +1942,9 @@ pub struct VerifyAutoOptions {
     /// no-op. CLI `--lift-override NAME=PATH`, API `lift_overrides: [{name, content}]`.
     /// Default empty.
     pub lift_overrides: Vec<(String, String)>,
+    /// How SVA `assume` statements are treated ([`AssumeMode`]); default
+    /// [`AssumeMode::Precondition`]. CLI `--assumes`, API `assumes`.
+    pub assume_mode: AssumeMode,
 }
 
 /// PORTFOLIO scheduling mode — the budget knob for the multi-engine default.
@@ -1721,6 +2008,7 @@ impl Default for VerifyAutoOptions {
             antecedent_propagate: true,
             input_state: true,
             lift_overrides: Vec::new(),
+            assume_mode: AssumeMode::Precondition,
         }
     }
 }
@@ -3133,7 +3421,11 @@ pub fn verify_auto(
     // former inline `verify_auto_portfolio`; the routing reasoning now lives in the planner.
     if opts.portfolio.is_some() {
         return match prepare_model(sources, yosys_opts, opts)? {
-            Prepared::Empty(report) => Ok(*report),
+            Prepared::Empty(report) => {
+                let mut report = *report;
+                finish_assumptions(&mut report);
+                Ok(report)
+            }
             Prepared::Model(m) => {
                 let m = *m;
                 let task = crate::planner::VerificationTask {
@@ -3142,7 +3434,12 @@ pub fn verify_auto(
                     opts,
                 };
                 let plan = crate::planner::plan(Some(&m), opts);
-                crate::planner::execute(&plan, &m, &task)
+                let mut report = crate::planner::execute(&plan, &m, &task)?;
+                // The merge builds its report from the operators'; the assumption summary is the
+                // prepared model's, whatever the merge kept.
+                report.assumptions = m.report.assumptions.clone();
+                finish_assumptions(&mut report);
+                Ok(report)
             }
         };
     }
@@ -3151,7 +3448,9 @@ pub fn verify_auto(
     // it checks A.6 (exact + no-reset-gating rejection) at the top, BEFORE any lift, then builds
     // the model inline and runs the one engine. No cost rationale — the predicted engine is
     // trivially the one the user selected. (Only the portfolio uses the plan/execute pipeline.)
-    verify_auto_impl(sources, yosys_opts, opts, None)
+    let mut report = verify_auto_impl(sources, yosys_opts, opts, None)?;
+    finish_assumptions(&mut report);
+    Ok(report)
 }
 
 /// The SV → BTOR2 lift output (incl. the `auto_stub_flops` re-lift), factored out so the
@@ -3388,10 +3687,14 @@ pub(crate) fn prepare_model(
 
     // 1. Extract + translate the SVA (slang) + merge `@mununu_guarantee` annotations.
     let SharedExtraction {
-        extraction,
+        mut extraction,
         ann_scan,
         predicate_hints,
     } = extract_front(sources, opts)?;
+    // Phase 4 — `assume` statements: split off, guarantees relativized (the monitor itself is
+    // emitted below, once the expressions it reads are minted).
+    let (assumption_report, assume_candidates) =
+        plan_assumptions(&mut extraction, opts.assume_mode);
 
     // Validate `--param` override names against the design's declared parameters
     // (from the slang AST). The read_verilog lift's `chparam` errors on an unknown
@@ -3425,8 +3728,27 @@ pub(crate) fn prepare_model(
         unsupported: extraction
             .unsupported
             .iter()
+            .filter(|u| {
+                // An `assume` that did not translate is reported with the assumptions when they
+                // are applied or ignored, not as an unchecked assertion.
+                opts.assume_mode == AssumeMode::Check || u.kind != Some(SvaKind::Assume)
+            })
             .map(|u| (u.name.clone(), u.reason.clone()))
             .collect(),
+        assumptions: {
+            let mut a = assumption_report;
+            if opts.assume_mode != AssumeMode::Check {
+                for u in extraction
+                    .unsupported
+                    .iter()
+                    .filter(|u| u.kind == Some(SvaKind::Assume))
+                {
+                    a.unapplied
+                        .push((u.name.clone(), format!("did not translate: {}", u.reason)));
+                }
+            }
+            a
+        },
         ..Default::default()
     };
     if extraction.translated.is_empty() {
@@ -3548,6 +3870,77 @@ pub(crate) fn prepare_model(
         .map(|m| (m.name.as_str(), &m.expr))
         .collect();
     let btor2 = crate::adapter::btor2::minted_expr::augment_with_expressions(&btor2, &expr_refs)?;
+    // Phase 4 — the `mununu_assume_ok` monitor the relativized guarantees read. Warm-up: the
+    // deepest `$past` any property reads, so no assumption is enforced over a shadow's pre-fill.
+    let btor2 = if assume_candidates.is_empty() {
+        btor2
+    } else {
+        let parsed: Vec<crate::mu_calculus::Formula> = assume_candidates
+            .iter()
+            .map(|(_, f)| crate::mu_calculus::parser::parse(f).expect("planned assumes parse"))
+            .collect();
+        // The `$past` depth each part of an assumption reads — its atoms' shadows, including
+        // the shadows inside a minted expression — so each part is enforced as soon as its
+        // history is filled (`AssumeSpec`).
+        let minted_depth: std::collections::HashMap<&str, u32> = extraction
+            .required_expressions
+            .iter()
+            .map(|m| {
+                let d = m
+                    .expr
+                    .leaves()
+                    .iter()
+                    .map(|(leaf, _)| shadow_depth_of_name(leaf))
+                    .max()
+                    .unwrap_or(0);
+                (m.name.as_str(), d)
+            })
+            .collect();
+        let shaped: Vec<(
+            &crate::mu_calculus::Formula,
+            crate::adapter::btor2::assume_monitor::AssumeSpec,
+        )> = parsed
+            .iter()
+            .map(|f| {
+                use crate::adapter::btor2::assume_monitor::{
+                    AssumeShape, AssumeSpec, assume_shape,
+                };
+                let shape = assume_shape(f).expect("planned assumes have a shape");
+                let depth = |id| subtree_past_depth(f, id, &minted_depth);
+                let spec = match shape {
+                    AssumeShape::Invariant { body } => AssumeSpec {
+                        shape,
+                        hold_after: depth(body),
+                        arm_after: 0,
+                    },
+                    AssumeShape::ImpliesNext {
+                        disable,
+                        neg_ante,
+                        cons,
+                    } => AssumeSpec {
+                        shape,
+                        hold_after: 0,
+                        arm_after: depth(neg_ante)
+                            .max(disable.map(depth).unwrap_or(0))
+                            .max(depth(cons).saturating_sub(1)),
+                    },
+                };
+                (f, spec)
+            })
+            .collect();
+        let (augmented, outcome) = crate::adapter::btor2::assume_monitor::emit_assume_ok_monitor(
+            &btor2,
+            &shaped,
+            !reset_pins.is_empty(),
+        )?;
+        for ((name, _), result) in assume_candidates.iter().zip(outcome) {
+            match result {
+                None => report.assumptions.applied.push(name.clone()),
+                Some(why) => report.assumptions.unapplied.push((name.clone(), why)),
+            }
+        }
+        augmented
+    };
 
     // mununu#459 — snapshot the model's real primary-input names BEFORE any pinning
     // rewrites them to constants, so a user `--config-value` can be validated
@@ -9146,6 +9539,7 @@ module uart_tx(); endmodule"#;
         // posture, and each model-level decision (reset-gating, flop stubs, cut
         // modules), plus a config-concretization ScopeCaveat when pins are given.
         let report = AutoVerifyReport {
+            assumptions: Default::default(),
             properties: vec![
                 PropertyVerdict {
                     name: "p_holds".into(),
@@ -9263,6 +9657,7 @@ module uart_tx(); endmodule"#;
         // when there was no fallback, ScopeCaveat + the reason when `--frontend auto`
         // fell back (read_verilog errored → slang), and no note when unrecorded.
         let base = |frontend: Option<&str>, fallback: Option<&str>| AutoVerifyReport {
+            assumptions: Default::default(),
             properties: Vec::new(),
             unsupported: Vec::new(),
             diagnostics: ModelDiagnostics {
@@ -9384,6 +9779,7 @@ module uart_tx(); endmodule"#;
         // the cut list and the over-approximation posture. It documents that a HOLDS
         // is sound but a VIOLATED is sound only when guard-independent (orphan case).
         let report = AutoVerifyReport {
+            assumptions: Default::default(),
             properties: vec![PropertyVerdict {
                 name: "p".into(),
                 label: None,
@@ -9440,6 +9836,7 @@ module uart_tx(); endmodule"#;
         // A.3 — the abstraction-posture note is honest about the may-relation the
         // run actually used, rather than hardcoding "may-over-approximation".
         let report = AutoVerifyReport {
+            assumptions: Default::default(),
             properties: vec![PropertyVerdict {
                 name: "recover".into(),
                 label: None,
@@ -10191,6 +10588,133 @@ module uart_tx(); endmodule"#;
         assert!(synth_sidecar_json(&[], &[], &[], &empty_refs, &empty_inits).is_none());
     }
 
+    /// The seam between the translator and the assumption rewrite: every formula the translator
+    /// emits for the three real slang fixtures relativizes (or is refused with a reason — none is
+    /// today), and the result still parses and keeps the rescue-reducible shapes reducible.
+    #[test]
+    fn every_translated_formula_of_the_real_fixtures_relativizes() {
+        use crate::adapter::btor2::assume_monitor::ASSUME_OK_SYMBOL;
+        use crate::adapter::slang::assume_guarantee::relativize;
+        let mut refused = Vec::new();
+        for json in [
+            include_str!("testdata/sva_fragment_forms.ast.json"),
+            include_str!("testdata/sva_phase1_forms.ast.json"),
+            include_str!("testdata/sva_expr_forms.ast.json"),
+        ] {
+            let report = crate::adapter::slang::translate::translate_ast_json(json).unwrap();
+            for t in &report.translated {
+                match relativize(&t.formula, ASSUME_OK_SYMBOL, t.kind == SvaKind::Cover) {
+                    Ok(r) => {
+                        let orig = mu_parser::parse(&t.formula).unwrap();
+                        let rel = mu_parser::parse(&r).unwrap();
+                        // A shape the safety rescue lanes reduce stays reducible.
+                        assert_eq!(
+                            crate::adapter::reach_rescue::reduce_ag_boolean_body(&orig).is_some(),
+                            crate::adapter::reach_rescue::reduce_ag_boolean_body(&rel).is_some(),
+                            "{}: {} -> {r}",
+                            t.name,
+                            t.formula
+                        );
+                        assert_eq!(
+                            crate::adapter::reach_rescue::reduce_ag_implies_next(&orig).is_some(),
+                            crate::adapter::reach_rescue::reduce_ag_implies_next(&rel).is_some(),
+                            "{}: {} -> {r}",
+                            t.name,
+                            t.formula
+                        );
+                    }
+                    Err(why) => refused.push(format!("{}: {why}: {}", t.name, t.formula)),
+                }
+            }
+        }
+        assert!(refused.is_empty(), "\n{}", refused.join("\n"));
+    }
+
+    #[test]
+    fn past_depths_are_read_from_atoms_and_minted_leaves() {
+        assert_eq!(shadow_depth_of_name("req"), 0);
+        assert_eq!(shadow_depth_of_name("req__past"), 1);
+        assert_eq!(shadow_depth_of_name("req__past3"), 3);
+        assert_eq!(shadow_depth_of_name("req__past__bits7_0"), 1);
+        let minted: std::collections::HashMap<&str, u32> =
+            [("mununu_x_00000000000000aa", 2)].into_iter().collect();
+        let f = mu_parser::parse(
+            "nu X. ((((!(a)) || (b == c__past)) || [] mununu_x_00000000000000aa) && [] X)",
+        )
+        .unwrap();
+        assert_eq!(subtree_past_depth(&f, f.root(), &minted), 2);
+    }
+
+    #[test]
+    fn assumptions_are_split_off_and_the_guarantees_relativized_per_mode() {
+        use crate::adapter::slang::translate::{TranslatedAssertion, TranslationReport};
+        let t = |name: &str, kind: SvaKind, formula: &str| TranslatedAssertion {
+            name: name.to_string(),
+            label: Some(name.to_string()),
+            kind,
+            formula: formula.to_string(),
+            recoverability_companion: None,
+        };
+        let report = || TranslationReport {
+            translated: vec![
+                t("m_inv", SvaKind::Assume, "nu X. ((!(inc)) && [] X)"),
+                t(
+                    "m_next",
+                    SvaKind::Assume,
+                    "nu X. (((!(req)) || [] req) && [] X)",
+                ),
+                t(
+                    "m_deep",
+                    SvaKind::Assume,
+                    "nu X. (((!(req)) || [] [] req) && [] X)",
+                ),
+                t("a", SvaKind::Assert, "nu X. ((cnt == 0) && [] X)"),
+                t("c", SvaKind::Cover, "mu X. ((cnt == 2) || <> X)"),
+            ],
+            ..Default::default()
+        };
+        // precondition
+        let mut ex = report();
+        let (rep, candidates) = plan_assumptions(&mut ex, AssumeMode::Precondition);
+        assert_eq!(rep.mode, "precondition");
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|(n, _)| n.as_str())
+                .collect::<Vec<_>>(),
+            vec!["m_inv", "m_next"]
+        );
+        assert_eq!(
+            rep.unapplied.len(),
+            1,
+            "the nested-box assume is not applied"
+        );
+        let names: Vec<&str> = ex.translated.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["a", "c", ASSUMPTION_CONSISTENCY_PROPERTY]);
+        assert!(ex.translated[0].formula.contains("(!(mununu_assume_ok))"));
+        assert!(ex.translated[1].formula.contains("(mununu_assume_ok && "));
+        // check: untouched
+        let mut ex = report();
+        let (rep, candidates) = plan_assumptions(&mut ex, AssumeMode::Check);
+        assert_eq!(rep.mode, "check");
+        assert!(candidates.is_empty());
+        assert_eq!(ex.translated.len(), 5);
+        // ignore: assumes dropped, guarantees untouched
+        let mut ex = report();
+        let (rep, _) = plan_assumptions(&mut ex, AssumeMode::Ignore);
+        assert_eq!(rep.unapplied.len(), 3);
+        assert_eq!(ex.translated.len(), 2);
+        assert_eq!(ex.translated[0].formula, "nu X. ((cnt == 0) && [] X)");
+        // no assume: nothing at all
+        let mut ex = TranslationReport {
+            translated: vec![t("a", SvaKind::Assert, "nu X. ((cnt == 0) && [] X)")],
+            ..Default::default()
+        };
+        let (rep, _) = plan_assumptions(&mut ex, AssumeMode::Precondition);
+        assert!(rep.mode.is_empty());
+        assert_eq!(ex.translated.len(), 1);
+    }
+
     #[test]
     fn lift_overrides_replace_same_named_sources_and_refuse_unknown_names() {
         let yopts = YosysOptions {
@@ -10371,6 +10895,165 @@ module uart_tx(); endmodule"#;
             matches!(outcome("a_past_w"), Some(VerifyOutcome::Holds)),
             "the wire alias keeps deciding: {:?}",
             outcome("a_past_w")
+        );
+    }
+
+    /// mununu#705 — `disable iff` disables the attempt at ANY of its cycles. `c = a_q & !d`, so
+    /// `a |=> c` fails exactly when `d` rises at the consequent's cycle — which the disable
+    /// excuses. The twin `a |=> !c` is VIOLATED (whenever `d` stays low).
+    #[test]
+    #[ignore = "requires slang + sv2v + Yosys + z3 (use the mununu-sva docker image); run with --ignored"]
+    fn e2e_a_disable_rising_mid_attempt_disables_it() {
+        // A compound disable of two plain inputs, so reset gating keeps it.
+        let design = "module dd_dut (input logic clk, input logic en, input logic a,\n\
+                      input logic d, output logic c);\n\
+                        logic a_q;\n\
+                        always_ff @(posedge clk) a_q <= a;\n\
+                        assign c = a_q & !d;\n\
+                        a_mid: assert property (@(posedge clk) disable iff (d || !en) a |=> c);\n\
+                        a_mid_twin: assert property (@(posedge clk) disable iff (d || !en) a |=> !c);\n\
+                      endmodule\n";
+        let sources = vec![("dd_dut.sv".to_string(), design.to_string())];
+        let yopts = YosysOptions {
+            top: Some("dd_dut".to_string()),
+            use_sv2v: true,
+            ..Default::default()
+        };
+        let opts = VerifyAutoOptions {
+            portfolio: Some(PortfolioMode::Sequential),
+            ..Default::default()
+        };
+        let report = verify_auto(&sources, &yopts, &opts).expect("verify_auto runs");
+        for p in &report.properties {
+            eprintln!("  {:?}: {:?}\n      {}", p.label, p.outcome, p.formula);
+        }
+        let outcome = |l: &str| {
+            report
+                .properties
+                .iter()
+                .find(|p| p.label.as_deref() == Some(l))
+                .map(|p| p.outcome.clone())
+                .unwrap_or_else(|| panic!("no `{l}`"))
+        };
+        assert!(
+            matches!(outcome("a_mid"), VerifyOutcome::Holds),
+            "a disable at the consequent's cycle excuses it: {:?}",
+            outcome("a_mid")
+        );
+        assert!(matches!(
+            outcome("a_mid_twin"),
+            VerifyOutcome::Violated { .. }
+        ));
+    }
+
+    /// OpenTitan coverage, Phase 4 — `assume` statements as preconditions, in all three modes,
+    /// plus a contradictory set. `cnt` counts `inc`; `held` is last cycle's `req`.
+    ///
+    /// - precondition (default): under `assume !inc`, `cnt == 0` HOLDS (its twin `cnt == 1` stays
+    ///   VIOLATED); under `assume req |=> req`, `held |-> req` HOLDS; the set is `consistent`.
+    /// - check: the guarantees are VIOLATED and each assumption is checked (VIOLATED).
+    /// - ignore: the guarantees are VIOLATED and the assumptions are listed as not applied.
+    /// - `assume req` + `assume !req`: `contradictory`, and every HOLDS is flagged vacuous.
+    #[test]
+    #[ignore = "requires slang + sv2v + Yosys + z3 (use the mununu-sva docker image); run with --ignored"]
+    fn e2e_assumes_are_applied_as_preconditions() {
+        let module = |assumes: &str| {
+            format!(
+                "module ag_dut (input logic clk, input logic rst_n, input logic req,\n\
+                 input logic inc, output logic [1:0] cnt, output logic held);\n\
+                   always_ff @(posedge clk or negedge rst_n) begin\n\
+                     if (!rst_n) begin cnt <= 2'd0; held <= 1'b0; end\n\
+                     else begin if (inc) cnt <= cnt + 2'd1; held <= req; end\n\
+                   end\n{assumes}\
+                   a_zero: assert property (@(posedge clk) disable iff (!rst_n) cnt == 2'd0);\n\
+                   a_zero_twin: assert property (@(posedge clk) disable iff (!rst_n) cnt == 2'd1);\n\
+                   a_held: assert property (@(posedge clk) disable iff (!rst_n) held |-> req);\n\
+                 endmodule\n"
+            )
+        };
+        let run = |design: String, mode: AssumeMode| {
+            let sources = vec![("ag_dut.sv".to_string(), design)];
+            let yopts = YosysOptions {
+                top: Some("ag_dut".to_string()),
+                use_sv2v: true,
+                ..Default::default()
+            };
+            let opts = VerifyAutoOptions {
+                portfolio: Some(PortfolioMode::Sequential),
+                assume_mode: mode,
+                ..Default::default()
+            };
+            let report = verify_auto(&sources, &yopts, &opts).expect("verify_auto runs");
+            eprintln!("--- {mode:?}: {:?}", report.assumptions);
+            for p in &report.properties {
+                eprintln!("  {:?}: {:?}\n      {}", p.label, p.outcome, p.formula);
+            }
+            report
+        };
+        let outcome = |r: &AutoVerifyReport, l: &str| {
+            r.properties
+                .iter()
+                .find(|p| p.label.as_deref() == Some(l))
+                .map(|p| p.outcome.clone())
+                .unwrap_or_else(|| panic!("no `{l}`"))
+        };
+        let holds = |o: VerifyOutcome| matches!(o, VerifyOutcome::Holds);
+        let violated = |o: VerifyOutcome| matches!(o, VerifyOutcome::Violated { .. });
+        let assumes = "  m_noinc: assume property (@(posedge clk) disable iff (!rst_n) !inc);\n\
+                       m_stay: assume property (@(posedge clk) disable iff (!rst_n) req |=> req);\n";
+
+        let pre = run(module(assumes), AssumeMode::Precondition);
+        assert_eq!(pre.assumptions.mode, "precondition");
+        assert_eq!(pre.assumptions.applied, vec!["m_noinc", "m_stay"]);
+        assert_eq!(pre.assumptions.consistency.as_deref(), Some("consistent"));
+        assert!(
+            holds(outcome(&pre, "a_zero")),
+            "{:?}",
+            outcome(&pre, "a_zero")
+        );
+        assert!(violated(outcome(&pre, "a_zero_twin")));
+        assert!(
+            holds(outcome(&pre, "a_held")),
+            "{:?}",
+            outcome(&pre, "a_held")
+        );
+        assert!(
+            pre.properties
+                .iter()
+                .all(|p| p.label.as_deref() != Some("m_noinc")
+                    && p.name != ASSUMPTION_CONSISTENCY_PROPERTY),
+            "assumptions and the consistency check are not reported as properties"
+        );
+
+        let chk = run(module(assumes), AssumeMode::Check);
+        assert!(violated(outcome(&chk, "a_zero")));
+        assert!(violated(outcome(&chk, "a_held")));
+        assert!(
+            violated(outcome(&chk, "m_noinc")),
+            "an assumption is checked in check mode"
+        );
+
+        let ign = run(module(assumes), AssumeMode::Ignore);
+        assert!(violated(outcome(&ign, "a_zero")));
+        assert_eq!(ign.assumptions.unapplied.len(), 2);
+
+        let contra = run(
+            module(
+                "  m_on: assume property (@(posedge clk) disable iff (!rst_n) req);\n\
+                   m_off: assume property (@(posedge clk) disable iff (!rst_n) !req);\n",
+            ),
+            AssumeMode::Precondition,
+        );
+        assert_eq!(
+            contra.assumptions.consistency.as_deref(),
+            Some("contradictory")
+        );
+        assert!(
+            contra
+                .notes
+                .iter()
+                .any(|n| n.kind == "assumptions-contradictory"),
+            "every vacuous HOLDS is flagged"
         );
     }
 

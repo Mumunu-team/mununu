@@ -352,6 +352,43 @@ There is deliberately **no** "tolerate undecided" flag. One was written downstre
 
 The API peer is an `expectations` object on the request (`all_hold`, `count`, `violated`, `named`), with the result returned as `expectations: { satisfied, failures[] }` — so an HTTP consumer learns *which* claim failed without parsing prose.
 
+### SVA `assume` statements are preconditions: `--assumes`
+
+> Source of truth: [`AssumeMode`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) + [`emit_assume_ok_monitor`](../crates/mununu-core/src/adapter/btor2/assume_monitor.rs) + [`relativize`](../crates/mununu-core/src/adapter/slang/assume_guarantee.rs) — surface: (CLI+API)
+
+An `assume property (P)` restricts the traces a design is checked on, as a formal tool reads it.
+By default (`--assumes precondition`, API `assumes: "precondition"`) each supported assumption is
+applied: the guarantees are checked on the traces along which every applied assumption has held
+so far. Under `check` each assumption is instead checked like an assertion and constrains nothing
+(the behaviour before 2026-10-15); `ignore` drops them.
+
+```bash
+mununu sv verify-auto prim_arbiter_ppc.sv --top prim_arbiter_ppc --preprocess-sv2v ... --json \
+  | jq '.assumptions'
+# {"mode":"precondition","applied":["ReqStaysHighUntilGranted0_M"],"unapplied":[],
+#  "unguarded":[],"consistency":"consistent"}
+```
+
+**How.** The assumptions become one monitor signal `mununu_assume_ok`, true while every applied
+assumption has held at every cycle so far (a latch: once broken, false for good). Each boolean
+block of a guarantee is guarded by it — `(!ok || B)` where the guarantee quantifies universally,
+`(ok && B)` inside a `cover` or the `EF` of a recoverability check — so every engine evaluates the
+same relativized formula and the safety and liveness rescue lanes still reduce it.
+
+**Applied:** `assume property (B)` and `A |=> B` over booleans (expressions included), each with
+an optional `disable iff`. Any other shape is reported under `unapplied` with the reason, and the
+guarantees are checked without it — the stronger obligation. Every lossy step makes an assumption
+WEAKER, never stronger: an obligation that reads `$past` is enforced only once that history is
+filled, and a `disable iff` voids the attempt at any of its cycles.
+
+**Vacuity.** `consistency` is decided by the engines: `contradictory` means no trace satisfies all
+applied assumptions — every HOLDS is then vacuous and each such property gets an
+`assumptions-contradictory` note. `consistent` means some trace satisfies them forever.
+
+**The report.** Assumptions never appear among `properties`, so `--expect-*`, `--fail-on` and the
+pass/fail totals count guarantees only. A note of kind `assumptions` lists what was applied: every
+verdict is scoped to the traces those assumptions admit.
+
 ### Real assertion macros, synthesis macros for the lift: `--lift-override`
 
 > Source of truth: [`VerifyAutoOptions::lift_overrides`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) + [`apply_lift_overrides`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) — surface: (CLI+API)
@@ -1064,6 +1101,12 @@ evaluator on every valuation of random expressions; the minted IR of real slang 
 `e2e_minted_expressions_agree_with_yosys_elaboration` has sv2v + yosys elaborate random expressions
 into `assign r = E` while the assertion `r == E` is lowered by the compiler: every translated
 assertion must HOLD.
+
+**A kept `disable iff` voids the attempt at any of its cycles** (fixed 2026-10-15, mununu#705). A
+`disable iff (D)` reset gating does not drop (a compound condition, OpenTitan's `!rst_ni ||
+!req_chk_i`) was checked only at the attempt's first cycle, so an attempt disabled mid-way still
+had to complete — a spurious VIOLATED. Each boolean block of the body is now guarded by `D` at the
+cycle it is evaluated: exact for `a |=> c`, never weaker than SVA for longer attempts.
 
 **Comparison conversions are applied** (fixed 2026-10-15, mununu#702). The atom lowering compared
 the operands with slang's conversions stripped: `r == 8'(s)` read the raw 4-bit `s` (its sign
