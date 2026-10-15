@@ -10135,6 +10135,80 @@ module uart_tx(); endmodule"#;
         assert!(outcome("a_xu").is_some(), "x < u still translates");
     }
 
+    /// `$past` of a COMBINATIONAL output samples the output, not the nearest register in its cone.
+    /// `o = q | 8` and `w = q` (a plain wire) over a free-running 4-bit counter `q`. When `q == 5`,
+    /// `o` is 13; one cycle later `$past(o)` must read 13. Binding `o__past` to `q`'s shadow (the
+    /// cone walk's nearest state) reads 5: `a_past_o` turns VIOLATED and its twin `a_past_o_twin`
+    /// (`$past(o) == 5`, false) HOLDS. `a_past_w` pins the wire case, which must keep deciding.
+    #[test]
+    #[ignore = "requires slang + sv2v + Yosys + z3 (use the mununu-sva docker image); run with --ignored"]
+    fn e2e_past_of_a_combinational_output_samples_the_output() {
+        let design = "module po_dut (input logic clk, input logic rst_n,\n\
+                      output logic [3:0] o, output logic [3:0] w);\n\
+                        logic [3:0] q;\n\
+                        always_ff @(posedge clk or negedge rst_n) begin\n\
+                          if (!rst_n) q <= 4'd0; else q <= q + 4'd1;\n\
+                        end\n\
+                        assign o = q | 4'b1000;\n\
+                        assign w = q;\n\
+                        a_past_o: assert property (@(posedge clk) disable iff (!rst_n)\n\
+                          q == 4'd5 |=> $past(o) == 4'd13);\n\
+                        a_past_o_twin: assert property (@(posedge clk) disable iff (!rst_n)\n\
+                          q == 4'd5 |=> $past(o) == 4'd5);\n\
+                        a_past_w: assert property (@(posedge clk) disable iff (!rst_n)\n\
+                          q == 4'd5 |=> $past(w) == 4'd5);\n\
+                      endmodule\n";
+        let sources = vec![("po_dut.sv".to_string(), design.to_string())];
+        let yopts = YosysOptions {
+            top: Some("po_dut".to_string()),
+            use_sv2v: true,
+            frontend: crate::adapter::yosys::SvFrontend::Slang,
+            ..Default::default()
+        };
+        let opts = VerifyAutoOptions {
+            portfolio: Some(PortfolioMode::Sequential),
+            ..Default::default()
+        };
+        let report = verify_auto(&sources, &yopts, &opts).expect("verify_auto runs");
+        for p in &report.properties {
+            eprintln!(
+                "  {} ({:?}): {:?}\n      {}",
+                p.name, p.label, p.outcome, p.formula
+            );
+        }
+        eprintln!("  unsupported: {:?}", report.unsupported);
+        let outcome = |l: &str| {
+            report
+                .properties
+                .iter()
+                .find(|p| p.label.as_deref() == Some(l))
+                .map(|p| p.outcome.clone())
+        };
+        assert!(
+            !matches!(outcome("a_past_o_twin"), Some(VerifyOutcome::Holds)),
+            "$past(o) == 5 is false (o is 13 when q is 5) but reported HOLDS: {:?}",
+            outcome("a_past_o_twin")
+        );
+        assert!(
+            matches!(outcome("a_past_o"), Some(VerifyOutcome::Holds)),
+            "$past(o) == 13 one cycle after q == 5: {:?}",
+            outcome("a_past_o")
+        );
+        assert!(
+            matches!(
+                outcome("a_past_o_twin"),
+                Some(VerifyOutcome::Violated { .. })
+            ),
+            "the false twin decides VIOLATED: {:?}",
+            outcome("a_past_o_twin")
+        );
+        assert!(
+            matches!(outcome("a_past_w"), Some(VerifyOutcome::Holds)),
+            "the wire alias keeps deciding: {:?}",
+            outcome("a_past_w")
+        );
+    }
+
     /// `throughout` and `$countones` (2026-10-15) decide end to end under the shipped default, with
     /// twins. `st`: IDLE 0 -req-> WAIT 1; WAIT -ack-> DONE 2; DONE -> IDLE. `gnt` is one-hot of
     /// `st`; `pair` is the two free inputs.

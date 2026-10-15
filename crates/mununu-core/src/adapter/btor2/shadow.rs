@@ -120,10 +120,10 @@ pub fn augment_with_past_shadows(
         let source = resolve_shadow_source(&file, base).ok_or_else(|| AdapterError {
             kind: AdapterErrorKind::UnsupportedConstruct,
             message: format!(
-                "adapter/btor2/shadow: base signal `{base}` resolves to neither a BTOR2 state \
-                 cell nor a primary input, so its `{stage1_symbol}` shadow chain cannot be \
-                 synthesised (the Tier-2 history atom would never bind). Check the SVA signal \
-                 name matches a register or a module input."
+                "adapter/btor2/shadow: base signal `{base}` resolves to no unique BTOR2 state \
+                 cell, primary input, output port or named net, so its `{stage1_symbol}` \
+                 shadow chain cannot be synthesised (the Tier-2 history atom would never \
+                 bind). Check the SVA signal name matches a register, an input or an output."
             ),
             location: None,
         })?;
@@ -137,7 +137,10 @@ pub fn augment_with_past_shadows(
         // stage. A state cell's init needs no such care: it reuses the source's
         // own value node, already far below.
         let mut zero_nid = None;
-        if matches!(source, ShadowSource::PrimaryInput { .. }) {
+        if matches!(
+            source,
+            ShadowSource::PrimaryInput { .. } | ShadowSource::Combinational { .. }
+        ) {
             zero_nid = Some(next_nid);
             appended.push(format!("{next_nid} zero {sort_nid}"));
             next_nid += 1;
@@ -150,7 +153,7 @@ pub fn augment_with_past_shadows(
                 Node::Init { state, value, .. } if *state == nid => Some(*value),
                 _ => None,
             }),
-            ShadowSource::PrimaryInput { .. } => None,
+            ShadowSource::PrimaryInput { .. } | ShadowSource::Combinational { .. } => None,
         };
 
         // Build the shift chain: stage 1 samples the source; stage j (j ≥ 2)
@@ -216,8 +219,14 @@ pub fn augment_with_past_shadows(
                 //
                 // Full argument, per-engine ledger, and why no engine may assume
                 // stutter equivalence here: docs/design/past-shadow-soundness.md
-                ShadowSource::PrimaryInput { .. } => {
-                    let zero = zero_nid.expect("an input source allocates its zero above");
+                //
+                // SOUNDNESS: a COMBINATIONAL source (an output port's driver or a named
+                // net, e.g. `o = q | 8`) takes the same zero pre-fill, for the same reason:
+                // its cycle-0 value is a function of the initial state, and an init that is
+                // an expression over states is read differently by different engines. Every
+                // later cycle samples the net itself — exact.
+                ShadowSource::PrimaryInput { .. } | ShadowSource::Combinational { .. } => {
+                    let zero = zero_nid.expect("an input or net source allocates its zero above");
                     let shadow_init = next_nid;
                     next_nid += 1;
                     appended.push(format!(
@@ -503,11 +512,6 @@ pub fn can_shadow(file: &Btor2File, base: &str) -> bool {
     resolve_shadow_source(file, base).is_some()
 }
 
-/// Resolve a `$past` base to its source line: `(nid, sort, is_input)`.
-///
-/// A state cell is tried first, matching the historical behaviour and keeping
-/// the symbol-distance heuristic in `resolve_state_by_symbol` authoritative
-/// when a name could mean either. A primary input is the fallback.
 /// Where a `__past` shadow takes its value from, and hence how its cycle 0 is set.
 #[derive(Clone, Copy)]
 enum ShadowSource {
@@ -516,52 +520,68 @@ enum ShadowSource {
     /// A primary input — there is no `init` to mirror, so the shadow's cycle-0
     /// value is chosen. See the SOUNDNESS note in `augment_with_past_shadows`.
     PrimaryInput { nid: Nid, sort: Nid },
+    /// A combinational net — an output port's driver or a named `Op` that is not a
+    /// value-identical alias of one state cell. The shadow samples the net's own value;
+    /// its cycle-0 value is chosen as for an input.
+    Combinational { nid: Nid, sort: Nid },
 }
 
 impl ShadowSource {
     /// The NID the shadow's `next` reads from.
     fn nid(self) -> Nid {
         match self {
-            Self::StateCell { nid, .. } | Self::PrimaryInput { nid, .. } => nid,
+            Self::StateCell { nid, .. }
+            | Self::PrimaryInput { nid, .. }
+            | Self::Combinational { nid, .. } => nid,
         }
     }
 
     /// The sort both the shadow flop and its `next` carry.
     fn sort(self) -> Nid {
         match self {
-            Self::StateCell { sort, .. } | Self::PrimaryInput { sort, .. } => sort,
+            Self::StateCell { sort, .. }
+            | Self::PrimaryInput { sort, .. }
+            | Self::Combinational { sort, .. } => sort,
         }
     }
 }
 
 /// Resolve `base` to the signal a `{base}__past` shadow should sample.
 ///
-/// Precedence is EXACT BEFORE FUZZY, and that ordering is the point.
-/// `parser::resolve_state_by_symbol` also matches an `Op`/`Output` line named
-/// `base` and walks its cone to the nearest state — a match at distance N. Asking
-/// it first would let that distant state outrank an `input` line that carries the
-/// name exactly, silently shadowing the wrong signal. So: exact state, then exact
-/// input, then the cone walk.
+/// The shadow must sample `base`'s OWN value, so every tier names that value exactly:
 ///
-/// Tier 1 requires a UNIQUE exact state match; two states sharing a symbol fall
-/// through to the walk, which rejects the ambiguity itself (`tied` → `None`)
-/// rather than picking one arbitrarily.
+/// 1. a unique state cell named `base`;
+/// 2. a primary input named `base`;
+/// 3. a value-identical alias of ONE state cell (`parser::resolve_state_alias` without the
+///    reset-mux edge: an `output` or `uext … 0` rename) — the shadow mirrors that cell, init
+///    included;
+/// 4. an `output` port named `base` — its driver (a state, an input, or a combinational net);
+/// 5. a unique `Op` named `base` — a combinational net.
+///
+/// Two state cells sharing the symbol resolve to nothing (no arbitrary pick). The former last
+/// tier, `parser::resolve_state_by_symbol`, walked a net's cone to the NEAREST state and
+/// shadowed that state instead: `$past(o)` with `o = q | 8` read `$past(q)`, and a false
+/// `$past(o) == 5` reported HOLDS (2026-10-15).
 fn resolve_shadow_source(file: &Btor2File, base: &str) -> Option<ShadowSource> {
-    let mut exact_states = file.lines.iter().filter_map(|l| match &l.node {
-        Node::State {
-            sort,
-            symbol: Some(s),
-            ..
-        } if s == base => Some(ShadowSource::StateCell {
-            nid: l.nid,
-            sort: *sort,
-        }),
-        _ => None,
-    });
-    if let Some(only) = exact_states.next()
-        && exact_states.next().is_none()
-    {
-        return Some(only);
+    let states: Vec<ShadowSource> = file
+        .lines
+        .iter()
+        .filter_map(|l| match &l.node {
+            Node::State {
+                sort,
+                symbol: Some(s),
+                ..
+            } if s == base => Some(ShadowSource::StateCell {
+                nid: l.nid,
+                sort: *sort,
+            }),
+            _ => None,
+        })
+        .collect();
+    match states.as_slice() {
+        [only] => return Some(*only),
+        [] => {}
+        _ => return None,
     }
 
     let exact_input = file.lines.iter().find_map(|l| match &l.node {
@@ -578,9 +598,29 @@ fn resolve_shadow_source(file: &Btor2File, base: &str) -> Option<ShadowSource> {
         return exact_input;
     }
 
-    let nid = parser::resolve_state_by_symbol(file, base)?;
-    match file.lookup(nid).map(|l| &l.node) {
-        Some(Node::State { sort, .. }) => Some(ShadowSource::StateCell { nid, sort: *sort }),
+    let source_of = |nid: Nid| -> Option<ShadowSource> {
+        match &file.lookup(nid)?.node {
+            Node::State { sort, .. } => Some(ShadowSource::StateCell { nid, sort: *sort }),
+            Node::Input { sort, .. } => Some(ShadowSource::PrimaryInput { nid, sort: *sort }),
+            Node::Op { sort, .. } | Node::Const { sort, .. } => {
+                Some(ShadowSource::Combinational { nid, sort: *sort })
+            }
+            _ => None,
+        }
+    };
+
+    if let Some(cell) = parser::resolve_state_alias(file, base, false) {
+        return source_of(cell);
+    }
+    if let Some((driver, _)) = crate::adapter::btor2::bad_monitor::output_nid_and_sort(file, base) {
+        return source_of(driver);
+    }
+    let mut named = file
+        .lines
+        .iter()
+        .filter(|l| matches!(&l.node, Node::Op { symbol: Some(s), .. } if s == base));
+    match (named.next(), named.next()) {
+        (Some(l), None) => source_of(l.nid),
         _ => None,
     }
 }
@@ -927,10 +967,8 @@ mod tests {
 
     #[test]
     fn an_exact_input_outranks_a_like_named_alias_over_a_distant_state() {
-        // `resolve_state_by_symbol` also matches an `output`/op line named `din`
-        // and walks its cone to the nearest state — a hit at distance N. If the
-        // walk were tried first, that distant `q` would shadow the wrong signal
-        // while an `input` line carries the name exactly. Exact beats fuzzy.
+        // An `output` line named `din` drives from the state `q`; an `input` line
+        // carries the name exactly. The exact input wins.
         let aliased = "1 sort bitvec 8\n                       2 input 1 din\n                       3 state 1 q\n                       4 next 1 3 2\n                       5 output 3 din\n";
         let out = augment_with_past_shadows(aliased, &[("din", 1)]).expect("augment");
         let file = parser::parse(&out).expect("parse");
@@ -945,6 +983,66 @@ mod tests {
             file.lines.iter().any(|l| matches!(&l.node,
                 Node::Next { state, value, .. } if *state == shadow_nid && value.nid() == 2)),
             "next(din__past) must read the INPUT (nid 2), not the aliased state"
+        );
+    }
+
+    /// The shadow of `base` reads `next(base__past)` from this nid.
+    fn shadow_source_nid(btor2: &str, base: &str) -> Nid {
+        let out = augment_with_past_shadows(btor2, &[(base, 1)]).expect("augment");
+        let file = parser::parse(&out).expect("parse");
+        let symbols = parser::collect_symbols(&file);
+        let want = format!("{base}__past");
+        let shadow = file
+            .lines
+            .iter()
+            .find(|l| symbols.get(&l.nid).map(String::as_str) == Some(want.as_str()))
+            .expect("shadow minted")
+            .nid;
+        file.lines
+            .iter()
+            .find_map(|l| match &l.node {
+                Node::Next { state, value, .. } if *state == shadow => Some(value.nid()),
+                _ => None,
+            })
+            .expect("shadow next")
+    }
+
+    #[test]
+    fn past_of_a_combinational_output_samples_the_output_not_the_register_in_its_cone() {
+        // `o = q | 8` is an output over the 4-bit counter `q`. Its shadow must sample the `or`
+        // (nid 6), never `q` (nid 2) — the old cone walk picked `q`, so `$past(o) == 5` held
+        // one cycle after `q == 5` although `o` was 13 (2026-10-15).
+        let btor2 = "1 sort bitvec 4\n2 state 1 q\n3 one 1\n4 add 1 2 3\n5 const 1 1000\n\
+                     6 or 1 2 5\n7 next 1 2 4\n8 output 6 o\n";
+        assert_eq!(shadow_source_nid(btor2, "o"), 6);
+        // The same net reached through a named `Op` instead of an `output` line.
+        let named = "1 sort bitvec 4\n2 state 1 q\n3 one 1\n4 add 1 2 3\n5 const 1 1000\n\
+                     6 or 1 2 5 o\n7 next 1 2 4\n";
+        assert_eq!(shadow_source_nid(named, "o"), 6);
+    }
+
+    #[test]
+    fn past_of_a_wire_alias_still_mirrors_the_register_and_its_init() {
+        // `w = q` (an `output` straight off the state): the shadow samples `q` and mirrors
+        // `q`'s init, exactly as `$past(q)` would.
+        let btor2 = "1 sort bitvec 4\n2 state 1 q\n3 one 1\n4 add 1 2 3\n5 const 1 0101\n\
+                     6 init 1 2 5\n7 next 1 2 4\n8 output 2 w\n";
+        assert_eq!(shadow_source_nid(btor2, "w"), 2);
+        let out = augment_with_past_shadows(btor2, &[("w", 1)]).expect("augment");
+        assert!(
+            out.lines()
+                .any(|l| l.ends_with(" 5") && l.contains(" init 1 ") && !l.starts_with("6 ")),
+            "the shadow mirrors q's init (const nid 5):\n{out}"
+        );
+    }
+
+    #[test]
+    fn two_states_sharing_a_symbol_resolve_to_no_shadow() {
+        let btor2 = "1 sort bitvec 4\n2 state 1 s\n3 state 1 s\n4 next 1 2 3\n5 next 1 3 2\n";
+        let file = parser::parse(btor2).expect("parse");
+        assert!(
+            !can_shadow(&file, "s"),
+            "an ambiguous name must not pick a cell"
         );
     }
 
