@@ -1,0 +1,1371 @@
+{
+  "design": {
+    "name": "$root",
+    "kind": "Root",
+    "addr": 93825666116656,
+    "members": [
+      {
+        "name": "",
+        "kind": "CompilationUnit",
+        "addr": 93825666185440
+      },
+      {
+        "name": "t",
+        "kind": "Instance",
+        "addr": 93825666194624,
+        "body": {
+          "name": "t",
+          "kind": "InstanceBody",
+          "addr": 93825666185712,
+          "members": [
+            {
+              "name": "clk",
+              "kind": "Port",
+              "addr": 93825666194760,
+              "type": "logic",
+              "direction": "In",
+              "internalSymbol": "93825666194880 clk"
+            },
+            {
+              "name": "clk",
+              "kind": "Net",
+              "addr": 93825666194880,
+              "type": "logic",
+              "netType": {
+                "name": "wire",
+                "kind": "NetType",
+                "addr": 93825666065264,
+                "type": "logic"
+              }
+            },
+            {
+              "name": "rst_n",
+              "kind": "Port",
+              "addr": 93825666195040,
+              "type": "logic",
+              "direction": "In",
+              "internalSymbol": "93825666195160 rst_n"
+            },
+            {
+              "name": "rst_n",
+              "kind": "Net",
+              "addr": 93825666195160,
+              "type": "logic",
+              "netType": {
+                "name": "wire",
+                "kind": "NetType",
+                "addr": 93825666065264,
+                "type": "logic"
+              }
+            },
+            {
+              "name": "a",
+              "kind": "Port",
+              "addr": 93825666195320,
+              "type": "logic",
+              "direction": "In",
+              "internalSymbol": "93825666195440 a"
+            },
+            {
+              "name": "a",
+              "kind": "Net",
+              "addr": 93825666195440,
+              "type": "logic",
+              "netType": {
+                "name": "wire",
+                "kind": "NetType",
+                "addr": 93825666065264,
+                "type": "logic"
+              }
+            },
+            {
+              "name": "b",
+              "kind": "Port",
+              "addr": 93825666195600,
+              "type": "logic",
+              "direction": "In",
+              "internalSymbol": "93825666195720 b"
+            },
+            {
+              "name": "b",
+              "kind": "Net",
+              "addr": 93825666195720,
+              "type": "logic",
+              "netType": {
+                "name": "wire",
+                "kind": "NetType",
+                "addr": 93825666065264,
+                "type": "logic"
+              }
+            },
+            {
+              "name": "c",
+              "kind": "Port",
+              "addr": 93825666195880,
+              "type": "logic",
+              "direction": "In",
+              "internalSymbol": "93825666196000 c"
+            },
+            {
+              "name": "c",
+              "kind": "Net",
+              "addr": 93825666196000,
+              "type": "logic",
+              "netType": {
+                "name": "wire",
+                "kind": "NetType",
+                "addr": 93825666065264,
+                "type": "logic"
+              }
+            },
+            {
+              "name": "v",
+              "kind": "Port",
+              "addr": 93825666196160,
+              "type": "logic[7:0]",
+              "direction": "In",
+              "internalSymbol": "93825666196280 v"
+            },
+            {
+              "name": "v",
+              "kind": "Net",
+              "addr": 93825666196280,
+              "type": "logic[7:0]",
+              "netType": {
+                "name": "wire",
+                "kind": "NetType",
+                "addr": 93825666065264,
+                "type": "logic"
+              }
+            },
+            {
+              "name": "idx",
+              "kind": "Port",
+              "addr": 93825666196440,
+              "type": "logic[3:0]",
+              "direction": "In",
+              "internalSymbol": "93825666196560 idx"
+            },
+            {
+              "name": "idx",
+              "kind": "Net",
+              "addr": 93825666196560,
+              "type": "logic[3:0]",
+              "netType": {
+                "name": "wire",
+                "kind": "NetType",
+                "addr": 93825666065264,
+                "type": "logic"
+              }
+            },
+            {
+              "name": "vec",
+              "kind": "Variable",
+              "addr": 93825666185952,
+              "type": "logic[7:0]",
+              "lifetime": "Static"
+            },
+            {
+              "name": "",
+              "kind": "ProceduralBlock",
+              "addr": 93825666186088,
+              "procedureKind": "AlwaysFF",
+              "body": {
+                "kind": "Timed",
+                "timing": {
+                  "kind": "SignalEvent",
+                  "expr": {
+                    "kind": "NamedValue",
+                    "type": "logic",
+                    "symbol": "93825666194880 clk"
+                  },
+                  "edge": "PosEdge"
+                },
+                "stmt": {
+                  "kind": "ExpressionStatement",
+                  "expr": {
+                    "kind": "Assignment",
+                    "type": "logic[7:0]",
+                    "left": {
+                      "kind": "NamedValue",
+                      "type": "logic[7:0]",
+                      "symbol": "93825666185952 vec"
+                    },
+                    "right": {
+                      "kind": "NamedValue",
+                      "type": "logic[7:0]",
+                      "symbol": "93825666196280 v"
+                    },
+                    "isNonBlocking": true
+                  }
+                }
+              }
+            },
+            {
+              "name": "p_sev",
+              "kind": "StatementBlock",
+              "addr": 93825666186296
+            },
+            {
+              "name": "",
+              "kind": "ProceduralBlock",
+              "addr": 93825666186192,
+              "procedureKind": "Always",
+              "body": {
+                "kind": "Block",
+                "blockKind": "Sequential",
+                "block": "93825666186296 p_sev",
+                "body": {
+                  "kind": "ConcurrentAssertion",
+                  "propertySpec": {
+                    "kind": "Clocking",
+                    "clocking": {
+                      "kind": "SignalEvent",
+                      "expr": {
+                        "kind": "NamedValue",
+                        "type": "logic",
+                        "symbol": "93825666194880 clk"
+                      },
+                      "edge": "PosEdge"
+                    },
+                    "expr": {
+                      "kind": "DisableIff",
+                      "condition": {
+                        "kind": "UnaryOp",
+                        "type": "logic",
+                        "op": "LogicalNot",
+                        "operand": {
+                          "kind": "NamedValue",
+                          "type": "logic",
+                          "symbol": "93825666195160 rst_n"
+                        }
+                      },
+                      "expr": {
+                        "kind": "Unary",
+                        "op": "SEventually",
+                        "expr": {
+                          "kind": "Simple",
+                          "expr": {
+                            "kind": "NamedValue",
+                            "type": "logic",
+                            "symbol": "93825666195720 b"
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "ifTrue": {
+                    "kind": "Empty"
+                  },
+                  "assertionKind": "Assert"
+                }
+              }
+            },
+            {
+              "name": "p_sev_imp",
+              "kind": "StatementBlock",
+              "addr": 93825666186552
+            },
+            {
+              "name": "",
+              "kind": "ProceduralBlock",
+              "addr": 93825666186448,
+              "procedureKind": "Always",
+              "body": {
+                "kind": "Block",
+                "blockKind": "Sequential",
+                "block": "93825666186552 p_sev_imp",
+                "body": {
+                  "kind": "ConcurrentAssertion",
+                  "propertySpec": {
+                    "kind": "Clocking",
+                    "clocking": {
+                      "kind": "SignalEvent",
+                      "expr": {
+                        "kind": "NamedValue",
+                        "type": "logic",
+                        "symbol": "93825666194880 clk"
+                      },
+                      "edge": "PosEdge"
+                    },
+                    "expr": {
+                      "kind": "Binary",
+                      "op": "OverlappedImplication",
+                      "left": {
+                        "kind": "Simple",
+                        "expr": {
+                          "kind": "NamedValue",
+                          "type": "logic",
+                          "symbol": "93825666195440 a"
+                        }
+                      },
+                      "right": {
+                        "kind": "Unary",
+                        "op": "SEventually",
+                        "expr": {
+                          "kind": "Simple",
+                          "expr": {
+                            "kind": "NamedValue",
+                            "type": "logic",
+                            "symbol": "93825666195720 b"
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "ifTrue": {
+                    "kind": "Empty"
+                  },
+                  "assertionKind": "Assert"
+                }
+              }
+            },
+            {
+              "name": "p_sev_rng",
+              "kind": "StatementBlock",
+              "addr": 93825666186808
+            },
+            {
+              "name": "",
+              "kind": "ProceduralBlock",
+              "addr": 93825666186704,
+              "procedureKind": "Always",
+              "body": {
+                "kind": "Block",
+                "blockKind": "Sequential",
+                "block": "93825666186808 p_sev_rng",
+                "body": {
+                  "kind": "ConcurrentAssertion",
+                  "propertySpec": {
+                    "kind": "Clocking",
+                    "clocking": {
+                      "kind": "SignalEvent",
+                      "expr": {
+                        "kind": "NamedValue",
+                        "type": "logic",
+                        "symbol": "93825666194880 clk"
+                      },
+                      "edge": "PosEdge"
+                    },
+                    "expr": {
+                      "kind": "Binary",
+                      "op": "OverlappedImplication",
+                      "left": {
+                        "kind": "Simple",
+                        "expr": {
+                          "kind": "NamedValue",
+                          "type": "logic",
+                          "symbol": "93825666195440 a"
+                        }
+                      },
+                      "right": {
+                        "kind": "Unary",
+                        "op": "SEventually",
+                        "expr": {
+                          "kind": "Simple",
+                          "expr": {
+                            "kind": "NamedValue",
+                            "type": "logic",
+                            "symbol": "93825666195720 b"
+                          }
+                        },
+                        "min": 1,
+                        "max": 3
+                      }
+                    }
+                  },
+                  "ifTrue": {
+                    "kind": "Empty"
+                  },
+                  "assertionKind": "Assert"
+                }
+              }
+            },
+            {
+              "name": "p_unb",
+              "kind": "StatementBlock",
+              "addr": 93825666187064
+            },
+            {
+              "name": "",
+              "kind": "ProceduralBlock",
+              "addr": 93825666186960,
+              "procedureKind": "Always",
+              "body": {
+                "kind": "Block",
+                "blockKind": "Sequential",
+                "block": "93825666187064 p_unb",
+                "body": {
+                  "kind": "ConcurrentAssertion",
+                  "propertySpec": {
+                    "kind": "Clocking",
+                    "clocking": {
+                      "kind": "SignalEvent",
+                      "expr": {
+                        "kind": "NamedValue",
+                        "type": "logic",
+                        "symbol": "93825666194880 clk"
+                      },
+                      "edge": "PosEdge"
+                    },
+                    "expr": {
+                      "kind": "Binary",
+                      "op": "OverlappedImplication",
+                      "left": {
+                        "kind": "Simple",
+                        "expr": {
+                          "kind": "NamedValue",
+                          "type": "logic",
+                          "symbol": "93825666195440 a"
+                        }
+                      },
+                      "right": {
+                        "kind": "SequenceConcat",
+                        "elements": [
+                          {
+                            "sequence": {
+                              "kind": "Simple",
+                              "expr": {
+                                "kind": "NamedValue",
+                                "type": "logic",
+                                "symbol": "93825666195720 b"
+                              }
+                            },
+                            "min": 1,
+                            "max": "$"
+                          }
+                        ]
+                      }
+                    }
+                  },
+                  "ifTrue": {
+                    "kind": "Empty"
+                  },
+                  "assertionKind": "Assert"
+                }
+              }
+            },
+            {
+              "name": "p_strong",
+              "kind": "StatementBlock",
+              "addr": 93825666187320
+            },
+            {
+              "name": "",
+              "kind": "ProceduralBlock",
+              "addr": 93825666187216,
+              "procedureKind": "Always",
+              "body": {
+                "kind": "Block",
+                "blockKind": "Sequential",
+                "block": "93825666187320 p_strong",
+                "body": {
+                  "kind": "ConcurrentAssertion",
+                  "propertySpec": {
+                    "kind": "Clocking",
+                    "clocking": {
+                      "kind": "SignalEvent",
+                      "expr": {
+                        "kind": "NamedValue",
+                        "type": "logic",
+                        "symbol": "93825666194880 clk"
+                      },
+                      "edge": "PosEdge"
+                    },
+                    "expr": {
+                      "kind": "Binary",
+                      "op": "OverlappedImplication",
+                      "left": {
+                        "kind": "Simple",
+                        "expr": {
+                          "kind": "NamedValue",
+                          "type": "logic",
+                          "symbol": "93825666195440 a"
+                        }
+                      },
+                      "right": {
+                        "kind": "StrongWeak",
+                        "expr": {
+                          "kind": "SequenceConcat",
+                          "elements": [
+                            {
+                              "sequence": {
+                                "kind": "Simple",
+                                "expr": {
+                                  "kind": "NamedValue",
+                                  "type": "logic",
+                                  "symbol": "93825666195720 b"
+                                }
+                              },
+                              "min": 1,
+                              "max": "$"
+                            }
+                          ]
+                        },
+                        "strength": "strong"
+                      }
+                    }
+                  },
+                  "ifTrue": {
+                    "kind": "Empty"
+                  },
+                  "assertionKind": "Assert"
+                }
+              }
+            },
+            {
+              "name": "p_weak",
+              "kind": "StatementBlock",
+              "addr": 93825666187576
+            },
+            {
+              "name": "",
+              "kind": "ProceduralBlock",
+              "addr": 93825666187472,
+              "procedureKind": "Always",
+              "body": {
+                "kind": "Block",
+                "blockKind": "Sequential",
+                "block": "93825666187576 p_weak",
+                "body": {
+                  "kind": "ConcurrentAssertion",
+                  "propertySpec": {
+                    "kind": "Clocking",
+                    "clocking": {
+                      "kind": "SignalEvent",
+                      "expr": {
+                        "kind": "NamedValue",
+                        "type": "logic",
+                        "symbol": "93825666194880 clk"
+                      },
+                      "edge": "PosEdge"
+                    },
+                    "expr": {
+                      "kind": "Binary",
+                      "op": "OverlappedImplication",
+                      "left": {
+                        "kind": "Simple",
+                        "expr": {
+                          "kind": "NamedValue",
+                          "type": "logic",
+                          "symbol": "93825666195440 a"
+                        }
+                      },
+                      "right": {
+                        "kind": "StrongWeak",
+                        "expr": {
+                          "kind": "SequenceConcat",
+                          "elements": [
+                            {
+                              "sequence": {
+                                "kind": "Simple",
+                                "expr": {
+                                  "kind": "NamedValue",
+                                  "type": "logic",
+                                  "symbol": "93825666195720 b"
+                                }
+                              },
+                              "min": 1,
+                              "max": "$"
+                            }
+                          ]
+                        },
+                        "strength": "weak"
+                      }
+                    }
+                  },
+                  "ifTrue": {
+                    "kind": "Empty"
+                  },
+                  "assertionKind": "Assert"
+                }
+              }
+            },
+            {
+              "name": "p_unb_mid",
+              "kind": "StatementBlock",
+              "addr": 93825666187832
+            },
+            {
+              "name": "",
+              "kind": "ProceduralBlock",
+              "addr": 93825666187728,
+              "procedureKind": "Always",
+              "body": {
+                "kind": "Block",
+                "blockKind": "Sequential",
+                "block": "93825666187832 p_unb_mid",
+                "body": {
+                  "kind": "ConcurrentAssertion",
+                  "propertySpec": {
+                    "kind": "Clocking",
+                    "clocking": {
+                      "kind": "SignalEvent",
+                      "expr": {
+                        "kind": "NamedValue",
+                        "type": "logic",
+                        "symbol": "93825666194880 clk"
+                      },
+                      "edge": "PosEdge"
+                    },
+                    "expr": {
+                      "kind": "Binary",
+                      "op": "OverlappedImplication",
+                      "left": {
+                        "kind": "Simple",
+                        "expr": {
+                          "kind": "NamedValue",
+                          "type": "logic",
+                          "symbol": "93825666195440 a"
+                        }
+                      },
+                      "right": {
+                        "kind": "SequenceConcat",
+                        "elements": [
+                          {
+                            "sequence": {
+                              "kind": "Simple",
+                              "expr": {
+                                "kind": "NamedValue",
+                                "type": "logic",
+                                "symbol": "93825666195720 b"
+                              }
+                            },
+                            "min": 1,
+                            "max": "$"
+                          },
+                          {
+                            "sequence": {
+                              "kind": "Simple",
+                              "expr": {
+                                "kind": "NamedValue",
+                                "type": "logic",
+                                "symbol": "93825666196000 c"
+                              }
+                            },
+                            "min": 1,
+                            "max": 1
+                          }
+                        ]
+                      }
+                    }
+                  },
+                  "ifTrue": {
+                    "kind": "Empty"
+                  },
+                  "assertionKind": "Assert"
+                }
+              }
+            },
+            {
+              "name": "p_unbrep",
+              "kind": "StatementBlock",
+              "addr": 93825666188088
+            },
+            {
+              "name": "",
+              "kind": "ProceduralBlock",
+              "addr": 93825666187984,
+              "procedureKind": "Always",
+              "body": {
+                "kind": "Block",
+                "blockKind": "Sequential",
+                "block": "93825666188088 p_unbrep",
+                "body": {
+                  "kind": "ConcurrentAssertion",
+                  "propertySpec": {
+                    "kind": "Clocking",
+                    "clocking": {
+                      "kind": "SignalEvent",
+                      "expr": {
+                        "kind": "NamedValue",
+                        "type": "logic",
+                        "symbol": "93825666194880 clk"
+                      },
+                      "edge": "PosEdge"
+                    },
+                    "expr": {
+                      "kind": "Binary",
+                      "op": "OverlappedImplication",
+                      "left": {
+                        "kind": "Simple",
+                        "expr": {
+                          "kind": "NamedValue",
+                          "type": "logic",
+                          "symbol": "93825666195440 a"
+                        }
+                      },
+                      "right": {
+                        "kind": "Simple",
+                        "expr": {
+                          "kind": "NamedValue",
+                          "type": "logic",
+                          "symbol": "93825666195720 b"
+                        },
+                        "repetition": {
+                          "kind": "Consecutive",
+                          "min": 1,
+                          "max": "$"
+                        }
+                      }
+                    }
+                  },
+                  "ifTrue": {
+                    "kind": "Empty"
+                  },
+                  "assertionKind": "Assert"
+                }
+              }
+            },
+            {
+              "name": "p_goto",
+              "kind": "StatementBlock",
+              "addr": 93825666188344
+            },
+            {
+              "name": "",
+              "kind": "ProceduralBlock",
+              "addr": 93825666188240,
+              "procedureKind": "Always",
+              "body": {
+                "kind": "Block",
+                "blockKind": "Sequential",
+                "block": "93825666188344 p_goto",
+                "body": {
+                  "kind": "ConcurrentAssertion",
+                  "propertySpec": {
+                    "kind": "Clocking",
+                    "clocking": {
+                      "kind": "SignalEvent",
+                      "expr": {
+                        "kind": "NamedValue",
+                        "type": "logic",
+                        "symbol": "93825666194880 clk"
+                      },
+                      "edge": "PosEdge"
+                    },
+                    "expr": {
+                      "kind": "Binary",
+                      "op": "OverlappedImplication",
+                      "left": {
+                        "kind": "Simple",
+                        "expr": {
+                          "kind": "NamedValue",
+                          "type": "logic",
+                          "symbol": "93825666195440 a"
+                        }
+                      },
+                      "right": {
+                        "kind": "Simple",
+                        "expr": {
+                          "kind": "NamedValue",
+                          "type": "logic",
+                          "symbol": "93825666195720 b"
+                        },
+                        "repetition": {
+                          "kind": "GoTo",
+                          "min": 2,
+                          "max": 2
+                        }
+                      }
+                    }
+                  },
+                  "ifTrue": {
+                    "kind": "Empty"
+                  },
+                  "assertionKind": "Assert"
+                }
+              }
+            },
+            {
+              "name": "p_nonc",
+              "kind": "StatementBlock",
+              "addr": 93825666188600
+            },
+            {
+              "name": "",
+              "kind": "ProceduralBlock",
+              "addr": 93825666188496,
+              "procedureKind": "Always",
+              "body": {
+                "kind": "Block",
+                "blockKind": "Sequential",
+                "block": "93825666188600 p_nonc",
+                "body": {
+                  "kind": "ConcurrentAssertion",
+                  "propertySpec": {
+                    "kind": "Clocking",
+                    "clocking": {
+                      "kind": "SignalEvent",
+                      "expr": {
+                        "kind": "NamedValue",
+                        "type": "logic",
+                        "symbol": "93825666194880 clk"
+                      },
+                      "edge": "PosEdge"
+                    },
+                    "expr": {
+                      "kind": "Binary",
+                      "op": "OverlappedImplication",
+                      "left": {
+                        "kind": "Simple",
+                        "expr": {
+                          "kind": "NamedValue",
+                          "type": "logic",
+                          "symbol": "93825666195440 a"
+                        }
+                      },
+                      "right": {
+                        "kind": "Simple",
+                        "expr": {
+                          "kind": "NamedValue",
+                          "type": "logic",
+                          "symbol": "93825666195720 b"
+                        },
+                        "repetition": {
+                          "kind": "Nonconsecutive",
+                          "min": 2,
+                          "max": 2
+                        }
+                      }
+                    }
+                  },
+                  "ifTrue": {
+                    "kind": "Empty"
+                  },
+                  "assertionKind": "Assert"
+                }
+              }
+            },
+            {
+              "name": "p_thr",
+              "kind": "StatementBlock",
+              "addr": 93825666188856
+            },
+            {
+              "name": "",
+              "kind": "ProceduralBlock",
+              "addr": 93825666188752,
+              "procedureKind": "Always",
+              "body": {
+                "kind": "Block",
+                "blockKind": "Sequential",
+                "block": "93825666188856 p_thr",
+                "body": {
+                  "kind": "ConcurrentAssertion",
+                  "propertySpec": {
+                    "kind": "Clocking",
+                    "clocking": {
+                      "kind": "SignalEvent",
+                      "expr": {
+                        "kind": "NamedValue",
+                        "type": "logic",
+                        "symbol": "93825666194880 clk"
+                      },
+                      "edge": "PosEdge"
+                    },
+                    "expr": {
+                      "kind": "Binary",
+                      "op": "OverlappedImplication",
+                      "left": {
+                        "kind": "Simple",
+                        "expr": {
+                          "kind": "NamedValue",
+                          "type": "logic",
+                          "symbol": "93825666195440 a"
+                        }
+                      },
+                      "right": {
+                        "kind": "Binary",
+                        "op": "Throughout",
+                        "left": {
+                          "kind": "Simple",
+                          "expr": {
+                            "kind": "NamedValue",
+                            "type": "logic",
+                            "symbol": "93825666196000 c"
+                          }
+                        },
+                        "right": {
+                          "kind": "SequenceConcat",
+                          "elements": [
+                            {
+                              "sequence": {
+                                "kind": "Simple",
+                                "expr": {
+                                  "kind": "NamedValue",
+                                  "type": "logic",
+                                  "symbol": "93825666195720 b"
+                                }
+                              },
+                              "min": 0,
+                              "max": 0
+                            },
+                            {
+                              "sequence": {
+                                "kind": "Simple",
+                                "expr": {
+                                  "kind": "NamedValue",
+                                  "type": "logic",
+                                  "symbol": "93825666195720 b"
+                                }
+                              },
+                              "min": 1,
+                              "max": 1
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  },
+                  "ifTrue": {
+                    "kind": "Empty"
+                  },
+                  "assertionKind": "Assert"
+                }
+              }
+            },
+            {
+              "name": "p_cnt",
+              "kind": "StatementBlock",
+              "addr": 93825666192936
+            },
+            {
+              "name": "",
+              "kind": "ProceduralBlock",
+              "addr": 93825666192832,
+              "procedureKind": "Always",
+              "body": {
+                "kind": "Block",
+                "blockKind": "Sequential",
+                "block": "93825666192936 p_cnt",
+                "body": {
+                  "kind": "ConcurrentAssertion",
+                  "propertySpec": {
+                    "kind": "Clocking",
+                    "clocking": {
+                      "kind": "SignalEvent",
+                      "expr": {
+                        "kind": "NamedValue",
+                        "type": "logic",
+                        "symbol": "93825666194880 clk"
+                      },
+                      "edge": "PosEdge"
+                    },
+                    "expr": {
+                      "kind": "Simple",
+                      "expr": {
+                        "kind": "BinaryOp",
+                        "type": "bit",
+                        "op": "LessThanEqual",
+                        "left": {
+                          "kind": "Call",
+                          "type": "int",
+                          "subroutine": "$countones",
+                          "arguments": [
+                            {
+                              "kind": "NamedValue",
+                              "type": "logic[7:0]",
+                              "symbol": "93825666196280 v"
+                            }
+                          ]
+                        },
+                        "right": {
+                          "kind": "IntegerLiteral",
+                          "type": "int",
+                          "value": "2"
+                        }
+                      }
+                    }
+                  },
+                  "ifTrue": {
+                    "kind": "Empty"
+                  },
+                  "assertionKind": "Assert"
+                }
+              }
+            },
+            {
+              "name": "p_unk",
+              "kind": "StatementBlock",
+              "addr": 93825666193192
+            },
+            {
+              "name": "",
+              "kind": "ProceduralBlock",
+              "addr": 93825666193088,
+              "procedureKind": "Always",
+              "body": {
+                "kind": "Block",
+                "blockKind": "Sequential",
+                "block": "93825666193192 p_unk",
+                "body": {
+                  "kind": "ConcurrentAssertion",
+                  "propertySpec": {
+                    "kind": "Clocking",
+                    "clocking": {
+                      "kind": "SignalEvent",
+                      "expr": {
+                        "kind": "NamedValue",
+                        "type": "logic",
+                        "symbol": "93825666194880 clk"
+                      },
+                      "edge": "PosEdge"
+                    },
+                    "expr": {
+                      "kind": "Simple",
+                      "expr": {
+                        "kind": "UnaryOp",
+                        "type": "bit",
+                        "op": "LogicalNot",
+                        "operand": {
+                          "kind": "Call",
+                          "type": "bit",
+                          "subroutine": "$isunknown",
+                          "arguments": [
+                            {
+                              "kind": "NamedValue",
+                              "type": "logic[7:0]",
+                              "symbol": "93825666196280 v"
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  },
+                  "ifTrue": {
+                    "kind": "Empty"
+                  },
+                  "assertionKind": "Assert"
+                }
+              }
+            },
+            {
+              "name": "p_bit",
+              "kind": "StatementBlock",
+              "addr": 93825666193448
+            },
+            {
+              "name": "",
+              "kind": "ProceduralBlock",
+              "addr": 93825666193344,
+              "procedureKind": "Always",
+              "body": {
+                "kind": "Block",
+                "blockKind": "Sequential",
+                "block": "93825666193448 p_bit",
+                "body": {
+                  "kind": "ConcurrentAssertion",
+                  "propertySpec": {
+                    "kind": "Clocking",
+                    "clocking": {
+                      "kind": "SignalEvent",
+                      "expr": {
+                        "kind": "NamedValue",
+                        "type": "logic",
+                        "symbol": "93825666194880 clk"
+                      },
+                      "edge": "PosEdge"
+                    },
+                    "expr": {
+                      "kind": "Binary",
+                      "op": "OverlappedImplication",
+                      "left": {
+                        "kind": "Simple",
+                        "expr": {
+                          "kind": "NamedValue",
+                          "type": "logic",
+                          "symbol": "93825666195440 a"
+                        }
+                      },
+                      "right": {
+                        "kind": "Simple",
+                        "expr": {
+                          "kind": "ElementSelect",
+                          "type": "logic",
+                          "value": {
+                            "kind": "NamedValue",
+                            "type": "logic[7:0]",
+                            "symbol": "93825666196280 v"
+                          },
+                          "selector": {
+                            "kind": "IntegerLiteral",
+                            "type": "int",
+                            "value": "3",
+                            "constant": "3"
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "ifTrue": {
+                    "kind": "Empty"
+                  },
+                  "assertionKind": "Assert"
+                }
+              }
+            },
+            {
+              "name": "p_rng_ante",
+              "kind": "StatementBlock",
+              "addr": 93825666193704
+            },
+            {
+              "name": "",
+              "kind": "ProceduralBlock",
+              "addr": 93825666193600,
+              "procedureKind": "Always",
+              "body": {
+                "kind": "Block",
+                "blockKind": "Sequential",
+                "block": "93825666193704 p_rng_ante",
+                "body": {
+                  "kind": "ConcurrentAssertion",
+                  "propertySpec": {
+                    "kind": "Clocking",
+                    "clocking": {
+                      "kind": "SignalEvent",
+                      "expr": {
+                        "kind": "NamedValue",
+                        "type": "logic",
+                        "symbol": "93825666194880 clk"
+                      },
+                      "edge": "PosEdge"
+                    },
+                    "expr": {
+                      "kind": "Binary",
+                      "op": "OverlappedImplication",
+                      "left": {
+                        "kind": "SequenceConcat",
+                        "elements": [
+                          {
+                            "sequence": {
+                              "kind": "Simple",
+                              "expr": {
+                                "kind": "NamedValue",
+                                "type": "logic",
+                                "symbol": "93825666195440 a"
+                              }
+                            },
+                            "min": 0,
+                            "max": 0
+                          },
+                          {
+                            "sequence": {
+                              "kind": "Simple",
+                              "expr": {
+                                "kind": "NamedValue",
+                                "type": "logic",
+                                "symbol": "93825666195720 b"
+                              }
+                            },
+                            "min": 1,
+                            "max": 2
+                          }
+                        ]
+                      },
+                      "right": {
+                        "kind": "Simple",
+                        "expr": {
+                          "kind": "NamedValue",
+                          "type": "logic",
+                          "symbol": "93825666196000 c"
+                        }
+                      }
+                    }
+                  },
+                  "ifTrue": {
+                    "kind": "Empty"
+                  },
+                  "assertionKind": "Assert"
+                }
+              }
+            },
+            {
+              "name": "p_evt",
+              "kind": "StatementBlock",
+              "addr": 93825666193960
+            },
+            {
+              "name": "",
+              "kind": "ProceduralBlock",
+              "addr": 93825666193856,
+              "procedureKind": "Always",
+              "body": {
+                "kind": "Block",
+                "blockKind": "Sequential",
+                "block": "93825666193960 p_evt",
+                "body": {
+                  "kind": "ConcurrentAssertion",
+                  "propertySpec": {
+                    "kind": "Clocking",
+                    "clocking": {
+                      "kind": "SignalEvent",
+                      "expr": {
+                        "kind": "NamedValue",
+                        "type": "logic",
+                        "symbol": "93825666194880 clk"
+                      },
+                      "edge": "PosEdge"
+                    },
+                    "expr": {
+                      "kind": "Binary",
+                      "op": "OverlappedImplication",
+                      "left": {
+                        "kind": "Simple",
+                        "expr": {
+                          "kind": "NamedValue",
+                          "type": "logic",
+                          "symbol": "93825666195440 a"
+                        }
+                      },
+                      "right": {
+                        "kind": "Unary",
+                        "op": "Eventually",
+                        "expr": {
+                          "kind": "Simple",
+                          "expr": {
+                            "kind": "NamedValue",
+                            "type": "logic",
+                            "symbol": "93825666195720 b"
+                          }
+                        },
+                        "min": 1,
+                        "max": 3
+                      }
+                    }
+                  },
+                  "ifTrue": {
+                    "kind": "Empty"
+                  },
+                  "assertionKind": "Assert"
+                }
+              }
+            },
+            {
+              "name": "p_nexttime",
+              "kind": "StatementBlock",
+              "addr": 93825666194216
+            },
+            {
+              "name": "",
+              "kind": "ProceduralBlock",
+              "addr": 93825666194112,
+              "procedureKind": "Always",
+              "body": {
+                "kind": "Block",
+                "blockKind": "Sequential",
+                "block": "93825666194216 p_nexttime",
+                "body": {
+                  "kind": "ConcurrentAssertion",
+                  "propertySpec": {
+                    "kind": "Clocking",
+                    "clocking": {
+                      "kind": "SignalEvent",
+                      "expr": {
+                        "kind": "NamedValue",
+                        "type": "logic",
+                        "symbol": "93825666194880 clk"
+                      },
+                      "edge": "PosEdge"
+                    },
+                    "expr": {
+                      "kind": "Binary",
+                      "op": "OverlappedImplication",
+                      "left": {
+                        "kind": "Simple",
+                        "expr": {
+                          "kind": "NamedValue",
+                          "type": "logic",
+                          "symbol": "93825666195440 a"
+                        }
+                      },
+                      "right": {
+                        "kind": "Unary",
+                        "op": "NextTime",
+                        "expr": {
+                          "kind": "Simple",
+                          "expr": {
+                            "kind": "NamedValue",
+                            "type": "logic",
+                            "symbol": "93825666195720 b"
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "ifTrue": {
+                    "kind": "Empty"
+                  },
+                  "assertionKind": "Assert"
+                }
+              }
+            },
+            {
+              "name": "p_always",
+              "kind": "StatementBlock",
+              "addr": 93825666194472
+            },
+            {
+              "name": "",
+              "kind": "ProceduralBlock",
+              "addr": 93825666194368,
+              "procedureKind": "Always",
+              "body": {
+                "kind": "Block",
+                "blockKind": "Sequential",
+                "block": "93825666194472 p_always",
+                "body": {
+                  "kind": "ConcurrentAssertion",
+                  "propertySpec": {
+                    "kind": "Clocking",
+                    "clocking": {
+                      "kind": "SignalEvent",
+                      "expr": {
+                        "kind": "NamedValue",
+                        "type": "logic",
+                        "symbol": "93825666194880 clk"
+                      },
+                      "edge": "PosEdge"
+                    },
+                    "expr": {
+                      "kind": "Unary",
+                      "op": "Always",
+                      "expr": {
+                        "kind": "Simple",
+                        "expr": {
+                          "kind": "NamedValue",
+                          "type": "logic",
+                          "symbol": "93825666195720 b"
+                        }
+                      }
+                    }
+                  },
+                  "ifTrue": {
+                    "kind": "Empty"
+                  },
+                  "assertionKind": "Assert"
+                }
+              }
+            }
+          ],
+          "definition": "93825666068320 t"
+        },
+        "connections": [
+        ]
+      }
+    ]
+  },
+  "definitions": [
+    {
+      "name": "t",
+      "kind": "Definition",
+      "addr": 93825666068320,
+      "defaultNetType": "93825666065264 wire",
+      "definitionKind": "Module",
+      "defaultLifetime": "Static",
+      "unconnectedDrive": "None",
+      "cellDefine": false
+    }
+  ]
+}

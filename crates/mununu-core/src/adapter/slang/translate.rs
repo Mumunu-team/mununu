@@ -5,58 +5,80 @@
 //! formula string that [`crate::mu_calculus::parser::parse`] accepts and the
 //! cube/CEGAR evaluator can check.
 //!
-//! **Tier-1 fragment + encoding** (the [XL.0] schema mapping):
+//! **The shipped fragment** — this table is EXECUTABLE: `the_shipped_fragment_truth_table` (in
+//! `mod tests`) carries one row per line below, supported and rejected alike, so the two cannot
+//! drift apart without a red test. The slang shapes it uses are the real ones
+//! (`testdata/sva_fragment_forms.{sv,ast.json}`, slang 11.0.448, 2026-10-14).
 //!
-//! | SVA | mu-calculus |
-//! |---|---|
-//! | `assert property (b)` | `nu X. (b && [] X)` (AG b) |
-//! | `a \|-> b` | `nu X. ((!a \|\| b) && [] X)` (AG(a→b)) |
-//! | `a \|=> b` | `nu X. ((!a \|\| [] b) && [] X)` (AG(a→AX b)) |
-//! | `a \|-> ##k b` (XL.4) | `nu X. ((!a \|\| []…[] b) && [] X)` — k boxes (AG(a→AXᵏ b)) |
-//! | `a \|-> ##[m:n] b` (XL.4) | `nu X. ((!a \|\| []ᵐ(b\|\|[](b\|\|…\|\|[]b))) && [] X)` — b within [m,n] |
-//! | `cover property (b)` | `mu X. (b \|\| <> X)` (EF b) |
-//! | `cover property (b)` **recoverability lens** (XL.2) | `nu Y. ((mu X. (b \|\| <> X)) && [] Y)` (AG EF b) |
-//! | `disable iff (r) P` | gate the body: `(r \|\| body)` (vacuous while disabled) |
-//! | **Tier-2 history (XL.3)** `$stable(x)` | `(x == x__past)` |
-//! | `$changed(x)` | `(x != x__past)` |
-//! | `$rose(x)` (1-bit) | `(x && !x__past)` |
-//! | `$fell(x)` (1-bit) | `(!x && x__past)` |
-//! | `$past(x)` (depth 1) | the shadow atom `x__past` (a value; used inside a comparison) |
+//! | SVA | mu-calculus | since |
+//! |---|---|---|
+//! | `assert property (b)` | `nu X. (b && [] X)` (AG b) | XL.1b |
+//! | `a \|-> b` | `nu X. ((!a \|\| b) && [] X)` (AG(a→b)) | XL.1b |
+//! | `a \|=> b` | `nu X. ((!a \|\| [] b) && [] X)` (AG(a→AX b)) | XL.1b |
+//! | `a \|-> ##k b` | k boxes: `(!a \|\| []…[] b)` | XL.4 |
+//! | `a \|-> ##[m:n] b` | `[]ᵐ(b \|\| [](b \|\| … \|\| []b))` — b within [m,n] | XL.4 |
+//! | `a \|-> b[*n]` | `(b && [](b && … && []b))` — n consecutive | XL.5 |
+//! | `a \|-> b ##1 c ##2 d` | `(b && [](c && [][]d))` — a bounded chain of booleans | XL.5 |
+//! | `(a ##1 b) \|-> c`, `a[*n] \|-> c` | `(!a \|\| [](!b \|\| c))` — FIXED-delay sequence antecedents | XL.5 |
+//! | `cover property (b)` | `mu X. (b \|\| <> X)` (EF b), plus the recoverability lens `nu Y. ((mu X. …) && [] Y)` | XL.2 |
+//! | `disable iff (r) P` | gate the body `(r \|\| body)`, or drop it and record the reset when `gate_reset` | XL.1c |
+//! | `$stable(x)` / `$changed(x)` | `(x == x__past)` / `(x != x__past)` | XL.3 |
+//! | `$rose(x)` / `$fell(x)` (1-bit) | `(x && !x__past)` / `(!x && x__past)` | XL.3 |
+//! | `$past(x[, k])`, any k ≥ 1 | the shadow atom `x__past` / `x__pastk` (a value, used inside a comparison) | XL.3, k-deep later |
+//! | `$onehot(x)` / `$onehot0(x)` (≤ 32-bit) | the value set `x ∈ {1,2,4,…}` / `{0,1,2,4,…}` — one Or-of-Cmp atom | #204 |
+//! | `x inside {v, [lo:hi], …}` (≤ 64 values) | `(x == v) \|\| ((x >= lo) && (x <= hi)) \|\| …` | XL.6 |
+//! | `sig[hi:lo] OP k`, `$past(sig[hi:lo])` | the minted slice signal `sig__bitshi_lo` (`[hi:lo]` only) | mununu#565 |
+//! | `\|x`, `~\|x`, `&x`, `~&x` | `(x != 0)`, `(x == 0)`, `(x == 2^W-1)`, `(x != 2^W-1)` | XL.1c |
+//! | `reg OP reg`, `reg == $past(reg) + k` | relational / addend atoms (`CmpReg`, `CmpRegAddend`) | H.D / H.G |
+//! | `state_q == S_IDLE` (enum, `parameter`, `localparam`) | the elaborated integer | XL.6b, mununu#632 |
 //!
 //! Implication `a → b` is emitted as `!a || b` — the mu-calculus parser has no
-//! `->` operator, and the rewrite is exact.
+//! `->` operator, and the rewrite is exact. Every rewrite above is exact
+//! (semantics-preserving): added shadow flops and minted slice signals, no abstraction.
+//!
+//! **Rejected — with a named reason, never dropped** (claims-integrity), each a row of the same
+//! test. Every `Err` reaches the user as `[unsupported] name: reason` / `UnsupportedAssertionView`:
+//!
+//! | SVA | reason, in short |
+//! |---|---|
+//! | `##[m:$]`, `[*n:$]` (unbounded), also mid-chain | needs a sequence automaton — Tier-3b |
+//! | `[->n]` goto, `[=n]` non-consecutive repetition | needs a sequence automaton — Tier-3b |
+//! | `##[m:n]` or `[*m:n]` in an ANTECEDENT, `[*m:n]` as a consequent, repetition inside a chain element | multiple match ends / length composition — Tier-3b |
+//! | `s_eventually b`, `always b`, `eventually [m:n] b`, `nexttime b`, `strong(…)` / `weak(…)` | `Unary` / `StrongWeak` property kinds: unsupported property kind / consequent |
+//! | `e throughout S` | `Binary{Throughout}`: unsupported consequent |
+//! | `sig[k]` constant bit-select, `sig[idx]` dynamic, `mem[i]` array content | three distinct refusals (mununu#514) |
+//! | `x[i +: w]`, `x[i -: w]` | indexed part-select: slang gives base-and-WIDTH, declined rather than mis-sliced (mununu#565) |
+//! | `$isunknown`, `$countones`, other system calls | not in the Tier-1c/Tier-2 fragment |
+//! | `^x` / `~^x` | parity is not a propositional atom |
+//! | `$rose` / `$fell` on a vector, `$past(x, 0)`, `$stable(x, k)` | 1-bit only / depth ≥ 1 / single signal |
+//! | `reg * k`, `reg + reg`, other arithmetic | only the constant addend is carried |
+//!
+//! Widening this fragment is the SVA-extraction-gaps plan (2026-10-14): constant bit-select,
+//! `$isunknown` as a 2-state fold, liveness SVA (`s_eventually`, `##[m:$]` consequents) through the
+//! l2s rescue, ranged antecedents by NNF unrolling, `throughout` on bounded consequents, and a
+//! minted `$countones`. Goto / `[=n]` and unbounded antecedents stay out.
 //!
 //! **Tier-2 shadow registers (XL.3).** `$past`/`$stable`/`$changed`/`$rose`/
 //! `$fell` read a signal's *previous-cycle* value, encoded as an atom over a
-//! 1-step shadow `<sig>__past`. The translator emits the atom and records the
-//! requirement in [`TranslationReport::required_shadows`]; the BTOR2
+//! shadow `<sig>__past` (`<sig>__pastk` at depth k). The translator emits the atom and records
+//! the requirement in [`TranslationReport::required_shadows`]; the BTOR2
 //! model-augmentation step (XL.3b) synthesises the shadow flop
-//! (`next(<sig>__past) = <sig>`) so the atom binds. The Tier-2 rewrites are
-//! exact (added flops, no abstraction). `$past` depth > 1 is rejected.
+//! (`next(<sig>__past) = <sig>`) so the atom binds.
 //!
 //! **Atoms (XL.1b + XL.1c).** A boolean leaf is one of:
 //! - a 1-bit signal (`NamedValue` → identifier atom);
 //! - a multi-bit signal in boolean position (vector → `(sig != 0)`, the implicit
 //!   reduction-or SV applies to a vector condition);
-//! - a comparison `sig OP k` (`==`/`!=`/`<`/`>`/`<=`/`>=` against an integer);
+//! - a comparison `sig OP k` (`==`/`!=`/`<`/`>`/`<=`/`>=` against an integer), `sig OP sig`,
+//!   or `sig == sig + k`;
 //! - a **reduction** (XL.1c): `|x`→`(x != 0)`, `~|x`→`(x == 0)`, `&x`→`(x == 2^W-1)`,
 //!   `~&x`→`(x != 2^W-1)` (width `W` from the operand's slang type);
 //! - a **compare-to-zero of a boolean expr** (XL.1c): `bexpr !== '0`→`bexpr`,
 //!   `bexpr === '0`→`!bexpr` — this is how OpenTitan's `` `ASSERT `` macro encodes
 //!   `disable iff ((!rst_ni) !== '0)`.
 //!
-//! Every XL.1c rewrite above is **exact** (semantics-preserving), so it adds no
-//! new soundness regime over XL.1b. Boolean structure (`!`, `&&`, `||`) recurses.
-//! `$onehot0(x)` / `$onehot(x)` expand to the exact value-set predicate
-//! `x ∈ {0,1,2,4,…}` / `x ∈ {1,2,4,…}` (one `Or`-of-`Cmp` atom). Anything still
-//! outside the fragment — bit-arithmetic, bit-select indexing (`sig[i]`),
-//! reduction-or/xor (`|x`, `^x`), system calls (`$isunknown`, `$countones`),
-//! unbounded `##[m:$]` / `[*n:$]`, goto `[->n]` / non-consecutive `[=n]`
-//! repetition, and sequence *antecedents* (`a ##1 c |-> …`), etc. — is **rejected
-//! with a reason, never silently dropped** (claims-integrity), and every emitted
-//! formula is validated through the mu-calculus parser as a safety net. (Bounded
-//! sequence *consequents* — `##k`/`##[m:n]` delays, fixed `[*n]` repetition, and
-//! multi-element `##` chains of booleans — ARE supported: XL.4, `consequent_expr`.)
+//! Boolean structure (`!`, `&&`, `||`) recurses. Every emitted formula is validated through the
+//! mu-calculus parser as a safety net.
 //!
 //! [XL.0]: ../../../../.claude/plans/measurements/XL-0-sva-parser-spike-2026-06-26.md
 
@@ -724,10 +746,10 @@ fn property_body(
             let cond = bool_expr(cond_node)?;
             Ok(format!("({cond} || {inner})"))
         }
-        // `a |-> <conseq>` / `a |=> <conseq>` — a boolean antecedent (Tier-1
-        // `Simple`) implies a boolean OR a bounded cycle-delay consequent
-        // (`##k b` / `##[m:n] b`, XL.4). The antecedent stays boolean; a sequence
-        // antecedent is out of fragment (Tier-3).
+        // `a |-> <conseq>` / `a |=> <conseq>` — the antecedent is a boolean, a fixed-delay
+        // `##` chain of booleans or a fixed `[*n]` repetition (XL.5, `antecedent_implies`);
+        // the consequent is a boolean or a bounded sequence (XL.4, `consequent_expr`). Ranged
+        // or unbounded antecedents are rejected there with their reason.
         "Binary" => {
             let op = spec.get("op").and_then(Value::as_str).unwrap_or("?");
             let conseq = consequent_expr(child(spec, "right")?)?;
@@ -3127,5 +3149,417 @@ mod tests {
         // The Tier-1 fixture uses no history calls → empty shadow set.
         let report = translate_ast_json(TIER1_JSON).expect("valid ast-json");
         assert!(report.required_shadows.is_empty());
+    }
+
+    /// The shipped fragment as an EXECUTABLE table (SVA-extraction-gaps plan, step 0, 2026-10-14):
+    /// one row per form the module doc at the top of this file lists as supported or rejected, so
+    /// that table cannot drift from the code without a red test. Property-level rows go through
+    /// `property_body` (the entry `translate_one` uses); atom-level rows through `bool_expr`.
+    ///
+    /// `Translates(needle)`: the lowering contains `needle` and parses. `Rejected(needle)`: the
+    /// reason contains `needle` — a rejection is a contract too (claims-integrity: named, never
+    /// dropped). `RejectedWithReason`: rejected with some non-empty reason, where the exact text is
+    /// not part of the contract.
+    ///
+    /// The JSON shapes are the ones slang 11.0.448 emits (`--ast-json`, captured 2026-10-14 in the
+    /// `mununu-sva` image from `testdata/sva_fragment_forms.sv`): `s_eventually` / `eventually` /
+    /// `nexttime` / `always` are `Unary{op}` (a ranged one carries `min`/`max`), `strong(…)` /
+    /// `weak(…)` are `StrongWeak{strength}`, `throughout` is `Binary{Throughout}`, an unbounded `$`
+    /// is the STRING `"$"` in `max`, goto / non-consecutive repetition are `GoTo` / `Nonconsecutive`.
+    #[test]
+    fn the_shipped_fragment_truth_table() {
+        enum Want {
+            Translates(&'static str),
+            Rejected(&'static str),
+            RejectedWithReason,
+        }
+        use Want::*;
+        let sig = |n: &str| serde_json::json!({"kind": "NamedValue", "symbol": format!("1 {n}"), "type": "logic"});
+        let vec8 = |n: &str| serde_json::json!({"kind": "NamedValue", "symbol": format!("1 {n}"), "type": "logic[7:0]"});
+        let lit = |v: &str| serde_json::json!({"kind": "IntegerLiteral", "type": "int", "value": v, "constant": v});
+        let simple = |e: Value| serde_json::json!({"kind": "Simple", "expr": e});
+        let rep = |e: Value, kind: &str, min: Value, max: Value| serde_json::json!({"kind": "Simple", "expr": e, "repetition": {"kind": kind, "min": min, "max": max}});
+        let concat = |els: Vec<(Value, Value, Value)>| {
+            serde_json::json!({"kind": "SequenceConcat", "elements": els.into_iter()
+                .map(|(seq, min, max)| serde_json::json!({"sequence": seq, "min": min, "max": max}))
+                .collect::<Vec<_>>()})
+        };
+        let imp = |op: &str, l: Value, r: Value| serde_json::json!({"kind": "Binary", "op": op, "left": l, "right": r});
+        let unary = |op: &str, e: Value| serde_json::json!({"kind": "Unary", "op": op, "expr": e});
+        let call = |sub: &str, args: Vec<Value>| serde_json::json!({"kind": "Call", "subroutine": sub, "arguments": args});
+        let cmp = |op: &str, l: Value, r: Value| serde_json::json!({"kind": "BinaryOp", "op": op, "left": l, "right": r});
+        let n = |v: u64| serde_json::json!(v);
+        let dollar = || serde_json::json!("$");
+        let ov = "OverlappedImplication";
+        let nov = "NonOverlappedImplication";
+
+        // ---- property level: (what it is in SVA, the slang shape, the contract)
+        let props: Vec<(&str, Value, Want)> = vec![
+            ("assert property (b)", simple(sig("b")), Translates("b")),
+            (
+                "a |-> b",
+                imp(ov, simple(sig("a")), simple(sig("b"))),
+                Translates("(!(a) || b)"),
+            ),
+            (
+                "a |=> b",
+                imp(nov, simple(sig("a")), simple(sig("b"))),
+                Translates("(!(a) || [] b)"),
+            ),
+            (
+                "a |-> ##2 b (XL.4)",
+                imp(
+                    ov,
+                    simple(sig("a")),
+                    concat(vec![(simple(sig("b")), n(2), n(2))]),
+                ),
+                Translates("(!(a) || [] [] b)"),
+            ),
+            (
+                "a |=> ##[1:3] b (XL.4)",
+                imp(
+                    nov,
+                    simple(sig("a")),
+                    concat(vec![(simple(sig("b")), n(1), n(3))]),
+                ),
+                Translates("[] [] (b || [] (b || [] b))"),
+            ),
+            (
+                "a |-> b[*3] (XL.5)",
+                imp(
+                    ov,
+                    simple(sig("a")),
+                    rep(sig("b"), "Consecutive", n(3), n(3)),
+                ),
+                Translates("(b && [] (b && [] b))"),
+            ),
+            (
+                "a |-> b ##1 c ##2 d (XL.5)",
+                imp(
+                    ov,
+                    simple(sig("a")),
+                    concat(vec![
+                        (simple(sig("b")), n(0), n(0)),
+                        (simple(sig("c")), n(1), n(1)),
+                        (simple(sig("d")), n(2), n(2)),
+                    ]),
+                ),
+                Translates("(b && [] (c && [] [] d))"),
+            ),
+            (
+                "(a ##1 b) |-> c (XL.5 fixed-delay antecedent)",
+                imp(
+                    ov,
+                    concat(vec![
+                        (simple(sig("a")), n(0), n(0)),
+                        (simple(sig("b")), n(1), n(1)),
+                    ]),
+                    simple(sig("c")),
+                ),
+                Translates("(!(a) || [] (!(b) || c))"),
+            ),
+            (
+                "a[*3] |=> c (XL.5 repetition antecedent)",
+                imp(
+                    nov,
+                    rep(sig("a"), "Consecutive", n(3), n(3)),
+                    simple(sig("c")),
+                ),
+                Translates("(!(a) || [] (!(a) || [] (!(a) || [] c)))"),
+            ),
+            // -- rejected, each with its named reason
+            (
+                "(a ##[1:2] b) |-> c — range delay in an antecedent",
+                imp(
+                    ov,
+                    concat(vec![
+                        (simple(sig("a")), n(0), n(0)),
+                        (simple(sig("b")), n(1), n(2)),
+                    ]),
+                    simple(sig("c")),
+                ),
+                Rejected("Tier-3b"),
+            ),
+            (
+                "a |-> ##[1:$] b — unbounded delay",
+                imp(
+                    ov,
+                    simple(sig("a")),
+                    concat(vec![(simple(sig("b")), n(1), dollar())]),
+                ),
+                Rejected("Tier-3b"),
+            ),
+            (
+                "a |-> ##[1:$] b ##1 c — unbounded gap mid-chain",
+                imp(
+                    ov,
+                    simple(sig("a")),
+                    concat(vec![
+                        (simple(sig("b")), n(1), dollar()),
+                        (simple(sig("c")), n(1), n(1)),
+                    ]),
+                ),
+                Rejected("Tier-3b"),
+            ),
+            (
+                "a |-> b[*1:$] — unbounded repetition",
+                imp(
+                    ov,
+                    simple(sig("a")),
+                    rep(sig("b"), "Consecutive", n(1), dollar()),
+                ),
+                Rejected("Tier-3b"),
+            ),
+            (
+                "a |-> b[*1:3] — range repetition",
+                imp(
+                    ov,
+                    simple(sig("a")),
+                    rep(sig("b"), "Consecutive", n(1), n(3)),
+                ),
+                Rejected("Tier-3b"),
+            ),
+            (
+                "a |-> b[->2] — goto repetition",
+                imp(ov, simple(sig("a")), rep(sig("b"), "GoTo", n(2), n(2))),
+                Rejected("Tier-3b"),
+            ),
+            (
+                "a |-> b[=2] — non-consecutive repetition",
+                imp(
+                    ov,
+                    simple(sig("a")),
+                    rep(sig("b"), "Nonconsecutive", n(2), n(2)),
+                ),
+                Rejected("Tier-3b"),
+            ),
+            (
+                "s_eventually b — liveness SVA",
+                unary("SEventually", simple(sig("b"))),
+                Rejected("unsupported property kind"),
+            ),
+            (
+                "a |-> s_eventually b",
+                imp(ov, simple(sig("a")), unary("SEventually", simple(sig("b")))),
+                Rejected("unsupported implication consequent"),
+            ),
+            (
+                "a |-> strong(##[1:$] b)",
+                imp(
+                    ov,
+                    simple(sig("a")),
+                    serde_json::json!({"kind": "StrongWeak", "strength": "strong",
+                "expr": concat(vec![(simple(sig("b")), n(1), dollar())])}),
+                ),
+                Rejected("unsupported implication consequent"),
+            ),
+            (
+                "a |-> eventually [1:3] b",
+                imp(
+                    ov,
+                    simple(sig("a")),
+                    serde_json::json!({"kind": "Unary", "op": "Eventually",
+                "expr": simple(sig("b")), "min": 1, "max": 3}),
+                ),
+                Rejected("unsupported implication consequent"),
+            ),
+            (
+                "a |-> nexttime b",
+                imp(ov, simple(sig("a")), unary("NextTime", simple(sig("b")))),
+                Rejected("unsupported implication consequent"),
+            ),
+            (
+                "a |-> (c throughout (b ##1 b))",
+                imp(
+                    ov,
+                    simple(sig("a")),
+                    serde_json::json!({"kind": "Binary", "op": "Throughout",
+                "left": simple(sig("c")),
+                "right": concat(vec![(simple(sig("b")), n(0), n(0)), (simple(sig("b")), n(1), n(1))])}),
+                ),
+                Rejected("unsupported implication consequent"),
+            ),
+            (
+                "always b",
+                unary("Always", simple(sig("b"))),
+                Rejected("unsupported property kind"),
+            ),
+        ];
+        for (what, spec, want) in &props {
+            let got = property_body(spec, &TranslateOptions::default(), &mut Vec::new());
+            check(what, got, want);
+        }
+
+        // ---- atom level
+        let atoms: Vec<(&str, Value, Want)> = vec![
+            (
+                "$stable(x) (XL.3)",
+                call("$stable", vec![sig("x")]),
+                Translates("(x == x__past)"),
+            ),
+            (
+                "$changed(x)",
+                call("$changed", vec![sig("x")]),
+                Translates("(x != x__past)"),
+            ),
+            (
+                "$rose(v) (1-bit)",
+                call("$rose", vec![sig("v")]),
+                Translates("(v && (!(v__past)))"),
+            ),
+            (
+                "$fell(v) (1-bit)",
+                call("$fell", vec![sig("v")]),
+                Translates("((!(v)) && v__past)"),
+            ),
+            (
+                "$past(x, 2) — any depth",
+                call("$past", vec![sig("x"), lit("2")]),
+                Translates("x__past2"),
+            ),
+            (
+                "cnt == $past(cnt) + 1 (H.G addend)",
+                cmp(
+                    "Equality",
+                    vec8("cnt"),
+                    cmp("Add", call("$past", vec![vec8("cnt")]), lit("1")),
+                ),
+                Translates("(cnt == cnt__past + 1)"),
+            ),
+            (
+                "a >= b (relational, signal vs signal)",
+                cmp("GreaterThanEqual", vec8("a"), vec8("b")),
+                Translates("(a >= b)"),
+            ),
+            (
+                "$onehot(gnt) (8-bit)",
+                call("$onehot", vec![vec8("gnt")]),
+                Translates("(gnt == 128)"),
+            ),
+            (
+                "x inside {2, 4, [1:3]}",
+                serde_json::json!({"kind": "Inside", "left": vec8("x"), "rangeList": [
+                lit("2"), lit("4"), {"kind": "ValueRange", "rangeKind": "Simple", "left": lit("1"), "right": lit("3")}]}),
+                Translates("((x >= 1) && (x <= 3))"),
+            ),
+            (
+                "wdata[7:0] == 165 (mununu#565 slice)",
+                cmp(
+                    "Equality",
+                    serde_json::json!({
+                "kind": "RangeSelect", "type": "logic[7:0]", "selectionKind": "Simple",
+                "value": {"kind": "NamedValue", "type": "logic[31:0]", "symbol": "1 wdata"},
+                "left": lit("7"), "right": lit("0")}),
+                    lit("165"),
+                ),
+                Translates("(wdata__bits7_0 == 165)"),
+            ),
+            (
+                "|x (XL.1c reduction-or)",
+                serde_json::json!({"kind": "UnaryOp", "op": "BitwiseOr", "operand": vec8("x")}),
+                Translates("(x != 0)"),
+            ),
+            // -- rejected
+            (
+                "vec[3] — constant bit-select",
+                serde_json::json!({"kind": "ElementSelect", "selector": lit("3"), "value": vec8("vec")}),
+                Rejected("constant bit-select"),
+            ),
+            (
+                "req[idx] — dynamic bit-select",
+                serde_json::json!({"kind": "ElementSelect",
+                "selector": {"kind": "NamedValue", "symbol": "1 idx", "type": "logic[2:0]"}, "value": vec8("req")}),
+                Rejected("dynamic bit-select"),
+            ),
+            (
+                "mem[0] — unpacked array content (mununu#514)",
+                serde_json::json!({"kind": "ElementSelect", "selector": lit("0"),
+                "value": {"kind": "NamedValue", "symbol": "1 mem", "type": "logic[14:0]$[0:319]"}}),
+                Rejected("unpacked array"),
+            ),
+            (
+                "wdata[7 -: 8] — indexed part-select (mununu#565)",
+                cmp(
+                    "Equality",
+                    serde_json::json!({
+                "kind": "RangeSelect", "type": "logic[7:0]", "selectionKind": "IndexedDown",
+                "value": {"kind": "NamedValue", "type": "logic[31:0]", "symbol": "1 wdata"},
+                "left": lit("7"), "right": lit("8")}),
+                    lit("165"),
+                ),
+                Rejected("IndexedDown"),
+            ),
+            (
+                "$isunknown(v)",
+                call("$isunknown", vec![vec8("v")]),
+                Rejected("not in the"),
+            ),
+            (
+                "$countones(v) <= 2",
+                cmp(
+                    "LessThanEqual",
+                    call("$countones", vec![vec8("v")]),
+                    lit("2"),
+                ),
+                RejectedWithReason,
+            ),
+            (
+                "^x — parity",
+                serde_json::json!({"kind": "UnaryOp", "op": "BitwiseXor", "operand": vec8("x")}),
+                Rejected("parity"),
+            ),
+            (
+                "$rose(bus) on a vector",
+                call("$rose", vec![vec8("bus")]),
+                Rejected("1-bit"),
+            ),
+            (
+                "$past(x, 0)",
+                call("$past", vec![sig("x"), lit("0")]),
+                Rejected(">= 1"),
+            ),
+            (
+                "cnt == cnt * 2 — non-linear arithmetic",
+                cmp(
+                    "Equality",
+                    vec8("cnt"),
+                    cmp("Multiply", vec8("cnt"), lit("2")),
+                ),
+                Rejected("arithmetic"),
+            ),
+        ];
+        for (what, expr, want) in &atoms {
+            check(what, bool_expr(expr), want);
+        }
+
+        fn check(what: &str, got: Result<String, String>, want: &Want) {
+            match (want, got) {
+                (Translates(needle), Ok(f)) => {
+                    assert!(
+                        f.contains(needle),
+                        "{what}: expected `{needle}` in the lowering, got `{f}`"
+                    );
+                    crate::mu_calculus::parser::parse(&f)
+                        .unwrap_or_else(|e| panic!("{what}: lowering `{f}` does not parse: {e}"));
+                }
+                (Translates(needle), Err(e)) => {
+                    panic!("{what}: expected a lowering containing `{needle}`, got rejection: {e}")
+                }
+                (Rejected(needle), Err(e)) => {
+                    assert!(
+                        e.contains(needle),
+                        "{what}: expected the reason to name `{needle}`, got: {e}"
+                    );
+                }
+                (RejectedWithReason, Err(e)) => {
+                    assert!(!e.trim().is_empty(), "{what}: rejected without a reason")
+                }
+                (Rejected(_) | RejectedWithReason, Ok(f)) => {
+                    panic!(
+                        "{what}: expected a rejection, but it translated to `{f}` — update the module-doc table"
+                    )
+                }
+            }
+        }
     }
 }
