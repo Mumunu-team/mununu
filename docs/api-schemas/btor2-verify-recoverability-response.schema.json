@@ -332,6 +332,20 @@
   },
   "description": "Response for `POST /api/v1/btor2/verify-recoverability`.",
   "properties": {
+    "engine": {
+      "description": "Which rung of the recoverability ladder produced the canonical verdict: `\"exact\"` (the exact-symbolic ROBDD engine), `\"exact-reach-restricted\"` (its reach-restricted stage) or `\"cube-ladder\"` (the predicate-cube ladder, after the exact engine abstained). Absent only when no engine ran (the target did not parse).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "exact_abstention": {
+      "description": "When the exact engine abstained before the cube ladder decided: the typed reading of its abstention — `bit-cap`, `arena-overflow`, `iteration-budget`, `latency`, `arena-safety`, `deadline`, `cancelled`, `refused-input-atom`, `reach-declined` or `other`. Absent when the exact engine decided.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "property": {
       "description": "The decided property, echoed for provenance: `AG EF (<target>)`.",
       "type": "string"

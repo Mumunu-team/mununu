@@ -5654,6 +5654,24 @@ impl AbstentionKind {
             Self::BitCap | Self::RefusedInputAtom | Self::Cancelled | Self::Other
         )
     }
+
+    /// The kebab-case label a report carries (`exact_abstention` on the recoverability verbs,
+    /// both surfaces): one string per variant, pinned distinct by
+    /// `abstention_kind_labels_are_distinct` so a consumer can key on it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::BitCap => "bit-cap",
+            Self::ArenaSafety => "arena-safety",
+            Self::IterationBudget => "iteration-budget",
+            Self::Latency => "latency",
+            Self::Deadline => "deadline",
+            Self::Cancelled => "cancelled",
+            Self::RefusedInputAtom => "refused-input-atom",
+            Self::ReachDeclined => "reach-declined",
+            Self::ArenaOverflow => "arena-overflow",
+            Self::Other => "other",
+        }
+    }
 }
 
 /// mununu#602 — `MUNUNU_COI=signal` selects the whole-register cone (the pre-#602 granularity).
@@ -14502,6 +14520,38 @@ mod tests {
 #[cfg(test)]
 mod lever_gating_tests {
     use super::*;
+
+    /// Every [`AbstentionKind`] carries a distinct kebab-case report label — the recoverability
+    /// verbs expose it as `exact_abstention` and a consumer keys on it, so two variants must never
+    /// share one and no label may carry a character a JSON consumer would have to escape.
+    #[test]
+    fn abstention_kind_labels_are_distinct() {
+        use AbstentionKind::*;
+        let all = [
+            BitCap,
+            ArenaSafety,
+            IterationBudget,
+            Latency,
+            Deadline,
+            Cancelled,
+            RefusedInputAtom,
+            ReachDeclined,
+            ArenaOverflow,
+            Other,
+        ];
+        let labels: std::collections::BTreeSet<&str> = all.iter().map(|k| k.label()).collect();
+        assert_eq!(
+            labels.len(),
+            all.len(),
+            "two variants share a label: {labels:?}"
+        );
+        for label in &labels {
+            assert!(
+                label.chars().all(|c| c.is_ascii_lowercase() || c == '-'),
+                "label `{label}` is not kebab-case"
+            );
+        }
+    }
 
     /// P0 — every abstention site's message classifies to one variant, pinned here so a new
     /// site (or a reworded message) that falls to `Other` shows up red on the author's machine.
