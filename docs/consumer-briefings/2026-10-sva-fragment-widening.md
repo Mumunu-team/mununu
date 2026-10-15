@@ -71,7 +71,7 @@ docker run --rm -v "$(pwd)":/work -v mununu-target:/cargo-target -w /work mununu
 
 ## Provenance
 
-Fix + feature PR: PR_PLACEHOLDER. Plan: SVA-extraction gaps, Part 1 steps 1–2 (2026-10-14). Shapes captured from slang 11.0.448 in `crates/mununu-core/src/adapter/slang/testdata/sva_{fragment,bit_select}_forms.*`.
+Fix + feature PR: [mununu#686](https://github.com/Mumunu-team/mununu/pull/686). Plan: SVA-extraction gaps, Part 1 steps 1–2 (2026-10-14). Shapes captured from slang 11.0.448 in `crates/mununu-core/src/adapter/slang/testdata/sva_{fragment,bit_select}_forms.*`.
 
 ## Not covered here
 
