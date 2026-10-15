@@ -44,7 +44,7 @@ docker run --rm -v "$(pwd)":/work -v mununu-target:/cargo-target -w /work mununu
 
 ## Provenance
 
-PR: PR_PLACEHOLDER. `Repro: in-repo` — both reproducers fail on main 6732909 (checked in a worktree).
+PR: [695](https://github.com/Mumunu-team/mununu/pull/695). `Repro: in-repo` — both reproducers fail on main 6732909 (checked in a worktree).
 
 ## Not covered here
 
