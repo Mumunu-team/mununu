@@ -124,6 +124,14 @@
         "null"
       ]
     },
+    "lift_overrides": {
+      "default": [],
+      "description": "Lift-only source overrides: each entry REPLACES the same-named source (`top.sv` names `source`; otherwise an `additional_sources` name) for the SV → BTOR2 lift only, while SVA extraction still reads the originals — e.g. OpenTitan's synthesis `prim_assert.sv` shim for the lift beside the real assertion macros for extraction. A name that matches no source is a 400. Mirrors the CLI's `--lift-override NAME=PATH`. Default empty.",
+      "items": {
+        "$ref": "#/definitions/FileContent"
+      },
+      "type": "array"
+    },
     "max_iterations": {
       "default": null,
       "description": "Max CEGAR iterations per property (default 16).",

@@ -1805,6 +1805,13 @@ pub struct SvVerifyAutoRequest {
     /// mirrored on the CLI as `--no-input-state` and by `MUNUNU_NO_INPUT_STATE=1`.
     #[serde(default)]
     pub no_input_state: Option<bool>,
+    /// Lift-only source overrides: each entry REPLACES the same-named source (`top.sv` names
+    /// `source`; otherwise an `additional_sources` name) for the SV → BTOR2 lift only, while SVA
+    /// extraction still reads the originals — e.g. OpenTitan's synthesis `prim_assert.sv` shim
+    /// for the lift beside the real assertion macros for extraction. A name that matches no
+    /// source is a 400. Mirrors the CLI's `--lift-override NAME=PATH`. Default empty.
+    #[serde(default)]
+    pub lift_overrides: Vec<FileContent>,
     /// mununu#537 — assert that this run produces the verdicts the caller claims. Omitted ⇒ no
     /// claim, and the response carries no `expectations` block.
     ///

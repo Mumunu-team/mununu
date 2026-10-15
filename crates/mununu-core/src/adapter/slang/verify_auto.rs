@@ -625,6 +625,13 @@ fn must_edge_inference_label(mode: MustEdgeInference) -> &'static str {
 /// signals actually pinned in the BTOR2 are substituted, so the formula and the
 /// pinned model agree. Empty config ⇒ the string is returned unchanged. Pure +
 /// unit-tested.
+///
+/// A pinned signal in BOOLEAN position — an operand of `!`, `&&`, `||`, a bare
+/// conjunct, as OpenTitan's `disable iff (... || !rst_ni)` keeps it — becomes
+/// `true` / `false` (SV truthiness: non-zero is true), because a number is not a
+/// formula: `(!(1))` failed to parse and skipped the property. Value position is
+/// next to a comparison or an addend (`== != < <= > >= +`); the diamond `<>` is a
+/// modality, not a comparison.
 fn substitute_config_in_formula(formula: &str, config: &[(String, u64)]) -> String {
     if config.is_empty() {
         return formula.to_string();
@@ -643,7 +650,24 @@ fn substitute_config_in_formula(formula: &str, config: &[(String, u64)]) -> Stri
             }
             let tok: String = chars[start..i].iter().collect();
             match map.get(tok.as_str()) {
-                Some(v) => out.push_str(&v.to_string()),
+                Some(v) => {
+                    let after = chars[i..].iter().find(|c| !c.is_whitespace());
+                    let mut before = chars[..start].iter().rev().filter(|c| !c.is_whitespace());
+                    let (b1, b2) = (before.next(), before.next());
+                    let value_after = matches!(after, Some('=' | '!' | '<' | '>' | '+'))
+                        && !chars[i..]
+                            .iter()
+                            .collect::<String>()
+                            .trim_start()
+                            .starts_with("<>");
+                    let value_before = matches!(b1, Some('=' | '<' | '+'))
+                        || (b1 == Some(&'>') && b2 != Some(&'<'));
+                    if value_after || value_before {
+                        out.push_str(&v.to_string());
+                    } else {
+                        out.push_str(if *v != 0 { "true" } else { "false" });
+                    }
+                }
                 None => out.push_str(&tok),
             }
         } else {
@@ -1626,6 +1650,14 @@ pub struct VerifyAutoOptions {
     /// differential switch): CLI `--no-input-state`, API `no_input_state: true`, process-global
     /// `MUNUNU_NO_INPUT_STATE=1`; either channel disabling it wins.
     pub input_state: bool,
+    /// Lift-only source overrides, `(file name, content)`: each REPLACES the same-named source
+    /// (the primary or an additional one) for the SV → BTOR2 lift only; SVA extraction still
+    /// reads the originals. The use: a design whose real assertion macros (OpenTitan's
+    /// `prim_assert.sv`) do not survive yosys / sv2v lifts with the synthesis shim while slang
+    /// extracts the real assertions. A name that matches no source is an error, never a silent
+    /// no-op. CLI `--lift-override NAME=PATH`, API `lift_overrides: [{name, content}]`.
+    /// Default empty.
+    pub lift_overrides: Vec<(String, String)>,
 }
 
 /// PORTFOLIO scheduling mode — the budget knob for the multi-engine default.
@@ -1688,6 +1720,7 @@ impl Default for VerifyAutoOptions {
             antecedent_shadow: true,
             antecedent_propagate: true,
             input_state: true,
+            lift_overrides: Vec::new(),
         }
     }
 }
@@ -3151,11 +3184,23 @@ pub(crate) fn lift_sv(
     opts: &VerifyAutoOptions,
 ) -> Result<PreLift, AdapterError> {
     use crate::adapter::yosys::sv_to_btor2_with_blackboxes;
-    let (_, primary_content) = sources.first().ok_or_else(|| AdapterError {
+    let (primary_name, primary_content) = sources.first().ok_or_else(|| AdapterError {
         kind: AdapterErrorKind::ParseError,
         message: "adapter/slang/verify_auto: no SV sources provided".to_string(),
         location: None,
     })?;
+    let overridden;
+    let (primary_content, yosys_opts) = if opts.lift_overrides.is_empty() {
+        (primary_content, yosys_opts)
+    } else {
+        overridden = apply_lift_overrides(
+            primary_name,
+            primary_content,
+            yosys_opts,
+            &opts.lift_overrides,
+        )?;
+        (&overridden.0, &overridden.1)
+    };
     // 2. SV → flattened BTOR2. The lift reports modules it black-boxed (instantiated, no
     // body) — surfaced in `diagnostics.blackboxed_modules` so a cut FSM (the
     // `prim_sparse_fsm_flop`-class root cause) is visible, not silent.
@@ -3192,6 +3237,48 @@ pub(crate) fn lift_sv(
         frontend_used: lift.frontend_used,
         fallback_reason: lift.fallback_reason,
     })
+}
+
+/// Apply [`VerifyAutoOptions::lift_overrides`]: the primary's content and the lift's additional
+/// sources with every same-named file replaced. Errors on an override that names no source, and on
+/// a name given twice — a typo must not silently lift the real file.
+fn apply_lift_overrides(
+    primary_name: &str,
+    primary_content: &str,
+    yosys_opts: &YosysOptions,
+    overrides: &[(String, String)],
+) -> Result<(String, YosysOptions), AdapterError> {
+    let err = |message: String| AdapterError {
+        kind: AdapterErrorKind::ParseError,
+        message,
+        location: None,
+    };
+    let mut primary = primary_content.to_string();
+    let mut yopts = yosys_opts.clone();
+    let mut seen = std::collections::HashSet::new();
+    for (name, content) in overrides {
+        if !seen.insert(name.as_str()) {
+            return Err(err(format!("lift override `{name}` given more than once")));
+        }
+        let mut hit = false;
+        if name == primary_name {
+            primary = content.clone();
+            hit = true;
+        }
+        for (n, c) in yopts.additional_sources.iter_mut() {
+            if n == name {
+                *c = content.clone();
+                hit = true;
+            }
+        }
+        if !hit {
+            return Err(err(format!(
+                "lift override `{name}` matches no source (the override replaces a same-named \
+                 source for the lift; it does not add one)"
+            )));
+        }
+    }
+    Ok((primary, yopts))
 }
 
 /// P-3 (common-IR hub) — the SVA + annotation extraction result, factored out so the execution
@@ -8890,6 +8977,34 @@ module uart_tx(); endmodule"#;
         );
     }
 
+    /// OpenTitan's `ASSERT` macro keeps `disable iff (... || !rst_ni)` as a compound guard, so a
+    /// pinned `rst_ni` sits in BOOLEAN position. It used to become `(!(1))`, which does not parse —
+    /// every such property skipped ("formula failed to parse"). It must read `true` / `false`
+    /// there, stay numeric beside a comparison or an addend, and leave the `<>` modality alone.
+    #[test]
+    fn a_pinned_signal_in_boolean_position_substitutes_a_boolean() {
+        let cfg = [("rst_ni".to_string(), 1u64), ("en".to_string(), 0u64)];
+        let f = "nu X. ((((err_d || fpv) || (!(rst_ni))) || [] (a == b)) && [] X)";
+        let out = substitute_config_in_formula(f, &cfg);
+        assert_eq!(
+            out,
+            "nu X. ((((err_d || fpv) || (!(true))) || [] (a == b)) && [] X)"
+        );
+        crate::mu_calculus::parser::parse(&out).expect("the substituted formula parses");
+        for (input, want) in [
+            ("(rst_ni && en)", "(true && false)"),
+            ("(x == rst_ni)", "(x == 1)"),
+            ("(rst_ni != x)", "(1 != x)"),
+            ("(x >= en)", "(x >= 0)"),
+            ("(y == x + rst_ni)", "(y == x + 1)"),
+            ("<> rst_ni", "<> true"),
+            ("(rst_ni || <> X)", "(true || <> X)"),
+            ("(rst_ni)", "(true)"),
+        ] {
+            assert_eq!(substitute_config_in_formula(input, &cfg), want, "{input}");
+        }
+    }
+
     #[test]
     fn counter_registers_detects_past_shadow() {
         // H.H — a state register whose `$past` shadow is also referenced is a
@@ -10068,6 +10183,47 @@ module uart_tx(); endmodule"#;
     }
 
     #[test]
+    fn lift_overrides_replace_same_named_sources_and_refuse_unknown_names() {
+        let yopts = YosysOptions {
+            additional_sources: vec![
+                ("prim_assert.sv".into(), "REAL MACROS".into()),
+                ("pkg.sv".into(), "PKG".into()),
+            ],
+            ..Default::default()
+        };
+        let ov = |v: &[(&str, &str)]| -> Vec<(String, String)> {
+            v.iter()
+                .map(|(a, b)| (a.to_string(), b.to_string()))
+                .collect()
+        };
+        // An additional source: replaced for the lift, the rest untouched.
+        let (primary, y) =
+            apply_lift_overrides("top.sv", "TOP", &yopts, &ov(&[("prim_assert.sv", "SHIM")]))
+                .unwrap();
+        assert_eq!(primary, "TOP");
+        assert_eq!(
+            y.additional_sources,
+            ov(&[("prim_assert.sv", "SHIM"), ("pkg.sv", "PKG")])
+        );
+        // The primary itself.
+        let (primary, _) =
+            apply_lift_overrides("top.sv", "TOP", &yopts, &ov(&[("top.sv", "TOP2")])).unwrap();
+        assert_eq!(primary, "TOP2");
+        // A typo must not silently lift the real file; neither may a duplicate.
+        let e = apply_lift_overrides("top.sv", "TOP", &yopts, &ov(&[("prim_asert.sv", "X")]))
+            .unwrap_err();
+        assert!(e.message.contains("matches no source"), "{}", e.message);
+        let e = apply_lift_overrides(
+            "top.sv",
+            "TOP",
+            &yopts,
+            &ov(&[("pkg.sv", "A"), ("pkg.sv", "B")]),
+        )
+        .unwrap_err();
+        assert!(e.message.contains("more than once"), "{}", e.message);
+    }
+
+    #[test]
     fn empty_sources_errors() {
         let err = verify_auto(&[], &YosysOptions::default(), &VerifyAutoOptions::default())
             .expect_err("no sources");
@@ -10133,6 +10289,161 @@ module uart_tx(); endmodule"#;
         );
         // The unsigned mixed comparison still decides (x reads 14 or 15 unsigned; u is 15 then 14).
         assert!(outcome("a_xu").is_some(), "x < u still translates");
+    }
+
+    /// `$past` of a COMBINATIONAL output samples the output, not the nearest register in its cone.
+    /// `o = q | 8` and `w = q` (a plain wire) over a free-running 4-bit counter `q`. When `q == 5`,
+    /// `o` is 13; one cycle later `$past(o)` must read 13. Binding `o__past` to `q`'s shadow (the
+    /// cone walk's nearest state) reads 5: `a_past_o` turns VIOLATED and its twin `a_past_o_twin`
+    /// (`$past(o) == 5`, false) HOLDS. `a_past_w` pins the wire case, which must keep deciding.
+    #[test]
+    #[ignore = "requires slang + sv2v + Yosys + z3 (use the mununu-sva docker image); run with --ignored"]
+    fn e2e_past_of_a_combinational_output_samples_the_output() {
+        let design = "module po_dut (input logic clk, input logic rst_n,\n\
+                      output logic [3:0] o, output logic [3:0] w);\n\
+                        logic [3:0] q;\n\
+                        always_ff @(posedge clk or negedge rst_n) begin\n\
+                          if (!rst_n) q <= 4'd0; else q <= q + 4'd1;\n\
+                        end\n\
+                        assign o = q | 4'b1000;\n\
+                        assign w = q;\n\
+                        a_past_o: assert property (@(posedge clk) disable iff (!rst_n)\n\
+                          q == 4'd5 |=> $past(o) == 4'd13);\n\
+                        a_past_o_twin: assert property (@(posedge clk) disable iff (!rst_n)\n\
+                          q == 4'd5 |=> $past(o) == 4'd5);\n\
+                        a_past_w: assert property (@(posedge clk) disable iff (!rst_n)\n\
+                          q == 4'd5 |=> $past(w) == 4'd5);\n\
+                      endmodule\n";
+        let sources = vec![("po_dut.sv".to_string(), design.to_string())];
+        let yopts = YosysOptions {
+            top: Some("po_dut".to_string()),
+            use_sv2v: true,
+            frontend: crate::adapter::yosys::SvFrontend::Slang,
+            ..Default::default()
+        };
+        let opts = VerifyAutoOptions {
+            portfolio: Some(PortfolioMode::Sequential),
+            ..Default::default()
+        };
+        let report = verify_auto(&sources, &yopts, &opts).expect("verify_auto runs");
+        for p in &report.properties {
+            eprintln!(
+                "  {} ({:?}): {:?}\n      {}",
+                p.name, p.label, p.outcome, p.formula
+            );
+        }
+        eprintln!("  unsupported: {:?}", report.unsupported);
+        let outcome = |l: &str| {
+            report
+                .properties
+                .iter()
+                .find(|p| p.label.as_deref() == Some(l))
+                .map(|p| p.outcome.clone())
+        };
+        assert!(
+            !matches!(outcome("a_past_o_twin"), Some(VerifyOutcome::Holds)),
+            "$past(o) == 5 is false (o is 13 when q is 5) but reported HOLDS: {:?}",
+            outcome("a_past_o_twin")
+        );
+        assert!(
+            matches!(outcome("a_past_o"), Some(VerifyOutcome::Holds)),
+            "$past(o) == 13 one cycle after q == 5: {:?}",
+            outcome("a_past_o")
+        );
+        assert!(
+            matches!(
+                outcome("a_past_o_twin"),
+                Some(VerifyOutcome::Violated { .. })
+            ),
+            "the false twin decides VIOLATED: {:?}",
+            outcome("a_past_o_twin")
+        );
+        assert!(
+            matches!(outcome("a_past_w"), Some(VerifyOutcome::Holds)),
+            "the wire alias keeps deciding: {:?}",
+            outcome("a_past_w")
+        );
+    }
+
+    /// OpenTitan coverage, Phase 1 — every new lowering decides under the shipped default, each
+    /// with a twin whose verdict flips if the bit mapping is wrong. `w` is the constant
+    /// `{hi: 9, mid: 2, lo: 1}` = `1001_10_1`: read first-member-LEAST-significant, `w.mid` would
+    /// be bits 5..4 = 1 and both `a_mid` and its twin would flip. `cnt[0]` is the constant 5 while
+    /// `cnt[1]` counts, so swapping the element order flips `a_el` and its twin. `a` and `b`
+    /// toggle in antiphase from 0 / 1.
+    #[test]
+    #[ignore = "requires slang + sv2v + Yosys + z3 (use the mununu-sva docker image); run with --ignored"]
+    fn e2e_phase1_forms_decide_with_twins() {
+        let design = "package p1;\n\
+                        typedef struct packed { logic [3:0] hi; logic [1:0] mid; logic lo; } wide_t;\n\
+                      endpackage\n\
+                      module ph_dut import p1::*; (input logic clk, input logic rst_n,\n\
+                        output wide_t w, output logic [1:0][3:0] cnt, output logic a, output logic b);\n\
+                        always_ff @(posedge clk or negedge rst_n) begin\n\
+                          if (!rst_n) begin w <= {4'd9, 2'd2, 1'b1}; cnt <= {4'd0, 4'd5}; a <= 1'b0; b <= 1'b1; end\n\
+                          else begin w <= w; cnt <= {cnt[1] + 4'd1, cnt[0]}; a <= ~a; b <= ~b; end\n\
+                        end\n\
+                        a_mid:       assert property (@(posedge clk) disable iff (!rst_n) w.mid == 2'd2);\n\
+                        a_mid_twin:  assert property (@(posedge clk) disable iff (!rst_n) w.mid == 2'd1);\n\
+                        a_hi:        assert property (@(posedge clk) disable iff (!rst_n) w.hi == 4'd9 && w.lo);\n\
+                        a_el:        assert property (@(posedge clk) disable iff (!rst_n) cnt[0] == 4'd5);\n\
+                        a_el_twin:   assert property (@(posedge clk) disable iff (!rst_n) cnt[1] == 4'd5);\n\
+                        a_xor:       assert property (@(posedge clk) disable iff (!rst_n) a ^ b);\n\
+                        a_and_twin:  assert property (@(posedge clk) disable iff (!rst_n) a & b);\n\
+                        a_impl:      assert property (@(posedge clk) disable iff (!rst_n) a -> !b);\n\
+                        a_equiv_twin: assert property (@(posedge clk) disable iff (!rst_n) a <-> b);\n\
+                        a_seq:       assert property (@(posedge clk) disable iff (!rst_n) ##1 a != b);\n\
+                        a_seq_twin:  assert property (@(posedge clk) disable iff (!rst_n) ##1 a);\n\
+                        a_rep:       assert property (@(posedge clk) disable iff (!rst_n) cnt[0] != {4{1'b1}});\n\
+                      endmodule\n";
+        let sources = vec![("ph_dut.sv".to_string(), design.to_string())];
+        let yopts = YosysOptions {
+            top: Some("ph_dut".to_string()),
+            use_sv2v: true,
+            frontend: crate::adapter::yosys::SvFrontend::Slang,
+            ..Default::default()
+        };
+        let opts = VerifyAutoOptions {
+            portfolio: Some(PortfolioMode::Sequential),
+            ..Default::default()
+        };
+        let report = verify_auto(&sources, &yopts, &opts).expect("verify_auto runs");
+        for p in &report.properties {
+            eprintln!(
+                "  {} ({:?}): {:?}\n      {}",
+                p.name, p.label, p.outcome, p.formula
+            );
+        }
+        eprintln!("  unsupported: {:?}", report.unsupported);
+        assert!(report.unsupported.is_empty(), "{:?}", report.unsupported);
+        let outcome = |l: &str| {
+            report
+                .properties
+                .iter()
+                .find(|p| p.label.as_deref() == Some(l))
+                .map(|p| p.outcome.clone())
+                .unwrap_or_else(|| panic!("no property `{l}`"))
+        };
+        for l in ["a_mid", "a_hi", "a_el", "a_xor", "a_impl", "a_seq", "a_rep"] {
+            assert!(
+                matches!(outcome(l), VerifyOutcome::Holds),
+                "{l} HOLDS: {:?}",
+                outcome(l)
+            );
+        }
+        for l in [
+            "a_mid_twin",
+            "a_el_twin",
+            "a_and_twin",
+            "a_equiv_twin",
+            "a_seq_twin",
+        ] {
+            assert!(
+                matches!(outcome(l), VerifyOutcome::Violated { .. }),
+                "{l} VIOLATED: {:?}",
+                outcome(l)
+            );
+        }
     }
 
     /// `throughout` and `$countones` (2026-10-15) decide end to end under the shipped default, with

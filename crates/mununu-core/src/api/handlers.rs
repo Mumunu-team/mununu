@@ -1966,6 +1966,11 @@ fn sv_verify_auto_handler_impl(
         antecedent_propagate: !request.no_antecedent_propagate.unwrap_or(false),
         // mununu#656 — per-request inputs-in-the-state opt-out.
         input_state: !request.no_input_state.unwrap_or(false),
+        lift_overrides: request
+            .lift_overrides
+            .iter()
+            .map(|f| (f.name.clone(), f.content.clone()))
+            .collect(),
     };
 
     let report = verify_auto(&sources, &yopts, &opts).map_err(|e| ApiError::BadRequest {

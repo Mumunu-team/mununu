@@ -28,7 +28,7 @@
 //! | `$past(x[, k])`, any k ≥ 1 | the shadow atom `x__past` / `x__pastk` (a value, used inside a comparison) | XL.3, k-deep later |
 //! | `$onehot(x)` / `$onehot0(x)` (≤ 32-bit) | the value set `x ∈ {1,2,4,…}` / `{0,1,2,4,…}` — one Or-of-Cmp atom | #204 |
 //! | `x inside {v, [lo:hi], …}` (≤ 64 values) | `(x == v) \|\| ((x >= lo) && (x <= hi)) \|\| …` | XL.6 |
-//! | `sig[hi:lo] OP k`, `$past(sig[hi:lo])` | the minted slice signal `sig__bitsM_L` (`[hi:lo]` only); `M`/`L` are the BIT POSITIONS yosys gives the indices (`sv_index_to_bit`), so `x[11:8]` of `logic [15:8] x` is `x__bits3_0` | mununu#565, positions 2026-10-15 |
+//! | `sig[hi:lo] OP k`, `$past(sig[hi:lo])` | the minted slice signal `sig__bitsM_L` (`[hi:lo]` only); `M`/`L` are the BIT POSITIONS yosys gives the indices (`index_positions`), so `x[11:8]` of `logic [15:8] x` is `x__bits3_0` | mununu#565, positions 2026-10-15 |
 //! | `sig[k]` constant bit-select (packed, one dimension, typedef / struct resolved) | the 1-bit slice `sig__bitsP_P`; bare in boolean position | 2026-10-15 |
 //! | `$rose` / `$fell` / `$stable` / `$changed` over `sig[k]` or `sig[hi:lo]` | the slice now against the same slice of `sig__past` | 2026-10-15 |
 //! | `e throughout S`, `S` bounded | `S` with `e` conjoined at every cycle of the match, gap cycles included (`throughout_consequent`) | 2026-10-15 |
@@ -41,6 +41,10 @@
 //! | `\|x`, `~\|x`, `&x`, `~&x` | `(x != 0)`, `(x == 0)`, `(x == 2^W-1)`, `(x != 2^W-1)` | XL.1c |
 //! | `reg OP reg`, `reg == $past(reg) + k` | relational / addend atoms (`CmpReg`, `CmpRegAddend`) | H.D / H.G |
 //! | `state_q == S_IDLE` (enum, `parameter`, `localparam`) | the elaborated integer | XL.6b, mununu#632 |
+//! | packed-struct member `s.f` / `s.f.g`, element `cnt_q[1]` of `logic [1:0][W-1:0]` | the member's / element's slice (`packed_sub`: first member most significant, right-most dimension fastest); bare when 1-bit, `!= 0` otherwise in boolean position | OpenTitan Phase 1 |
+//! | `a -> b`, `a <-> b`; `& \| ^ ~^ ~` with every operand and the result 1-bit | `(!a \|\| b)`, XNOR; the boolean connectives | OpenTitan Phase 1 |
+//! | a constant slang folded (`constant` on the node: `{W{1'b1}}`, `W - 1`, a converted literal) | the folded value; X/Z refused | OpenTitan Phase 1 |
+//! | a bare sequence as the property (`##1 a == b`) | `consequent_expr` — it holds at a start iff it matches there | OpenTitan Phase 1 |
 //!
 //! Implication `a → b` is emitted as `!a || b` — the mu-calculus parser has no
 //! `->` operator, and the rewrite is exact. Every rewrite above is exact
@@ -58,7 +62,8 @@
 //! | `[->n]` goto, `[=n]` non-consecutive repetition | needs a sequence automaton — Tier-3b |
 //! | `[*m:n]` as a consequent, repetition inside a CONSEQUENT chain element, a nested sub-sequence in an antecedent, `[*0…]`, an antecedent past 64 alternatives | length composition / the size guard |
 //! | `e throughout S` with `S` unbounded or a repetition inside its chain; a non-boolean `e` | needs a sequence automaton / length composition |
-//! | `sig[idx]` dynamic, `mem[i]` array content, `md[i]` of a multi-dimensional packed array, an enum- or otherwise opaque-typed base | distinct refusals (mununu#514; the index cannot be mapped to a bit) |
+//! | `sig[idx]` dynamic, `mem[i]` array content, an enum- or otherwise opaque-typed base | distinct refusals (mununu#514; the index cannot be mapped to a bit) |
+//! | `&`, `\|`, `^`, `~` over vectors | a value transform, not a boolean (the expression compiler's job) |
 //! | `x[i +: w]`, `x[i -: w]` | indexed part-select: slang gives base-and-WIDTH, declined rather than mis-sliced (mununu#565) |
 //! | `$countones` over more than 64 bits or a non-signal; other system calls | the count cap / not in the Tier-1c/Tier-2 fragment |
 //! | `^x` / `~^x` | parity is not a propositional atom |
@@ -68,6 +73,8 @@
 //! The first widening (2026-10-15) added the bit-select, the 2-state `$isunknown` fold and the
 //! liveness forms above; the second adds ranged antecedents (and repetition inside an antecedent
 //! chain) by NNF unrolling, `throughout` on bounded consequents and a minted `$countones`.
+//! The OpenTitan Phase 1 (2026-10-15) adds struct members, multi-dimensional elements, `->` /
+//! `<->`, 1-bit bitwise operators, slang-folded constants and bare sequence properties.
 //! Goto / `[=n]` and unbounded antecedents stay out.
 //!
 //! **Tier-2 shadow registers (XL.3).** `$past`/`$stable`/`$changed`/`$rose`/
@@ -343,7 +350,7 @@ pub fn translate_ast_json_with_options(
         let spec = resolve_enum_refs(spec, &enum_values);
         // A typedef'd signal carries an opaque `type` (`"<addr> mod.byte_t"`); replace it by the
         // alias target (`logic[7:0]`) so a bit-select or slice can map SV indices to bit
-        // positions (`sv_index_to_bit`).
+        // positions (`index_positions`).
         let spec = resolve_type_aliases(&spec, &type_aliases);
         let spec = &spec;
         match translate_one(spec, kind, opts, &mut report.reset_signals) {
@@ -628,6 +635,44 @@ fn alias_addr(ty: &str) -> Option<&str> {
     (!rest.is_empty() && addr.chars().all(|c| c.is_ascii_digit())).then_some(addr)
 }
 
+/// Expand the alias references EMBEDDED in a type string — a packed struct's member typed by
+/// another typedef serialises as `struct packed{93825836944992 p::esc_t tx;logic[2:0] cnt;}p::s$3`
+/// — so the member's width is readable. A reference is a run of digits at the start of a member
+/// (after `{` or `;`), a space, and the alias name up to the next space. Up to 8 rounds (nested
+/// typedefs); an unknown address is left as it is (its width then stays unreadable — a refusal).
+fn expand_embedded_aliases(
+    ty: &str,
+    aliases: &std::collections::HashMap<String, String>,
+) -> String {
+    let mut t = ty.to_string();
+    for _ in 0..8 {
+        let mut out = String::with_capacity(t.len());
+        let mut changed = false;
+        let mut rest = t.as_str();
+        while let Some(i) = rest.find(['{', ';']) {
+            out.push_str(&rest[..=i]);
+            rest = &rest[i + 1..];
+            let digits = rest.chars().take_while(char::is_ascii_digit).count();
+            if digits > 0
+                && rest[digits..].starts_with(' ')
+                && let Some(target) = aliases.get(&rest[..digits])
+            {
+                let after = &rest[digits + 1..];
+                let name_len = after.find([' ', ';', '}']).unwrap_or(after.len());
+                out.push_str(target);
+                rest = &after[name_len..];
+                changed = true;
+            }
+        }
+        out.push_str(rest);
+        t = out;
+        if !changed {
+            break;
+        }
+    }
+    t
+}
+
 /// Deep-clone `node`, replacing every alias-named `type` by the alias target (followed through
 /// up to 8 links). Any other field is untouched.
 fn resolve_type_aliases(
@@ -648,7 +693,10 @@ fn resolve_type_aliases(
                             None => break,
                         }
                     }
-                    obj.insert(k.clone(), Value::String(t));
+                    obj.insert(
+                        k.clone(),
+                        Value::String(expand_embedded_aliases(&t, aliases)),
+                    );
                 } else {
                     obj.insert(k.clone(), resolve_type_aliases(v, aliases));
                 }
@@ -895,7 +943,11 @@ fn collect_shadow_signals(node: &Value, out: &mut Vec<ShadowSignal>) {
                     let Some(Ok((base, _, _))) = slice_ref(arg) else {
                         return None;
                     };
-                    let width = signal_width(unwrap(arg.get("value")?));
+                    let mut root = arg;
+                    while let Some(v) = root.get("value") {
+                        root = unwrap(v);
+                    }
+                    let width = signal_width(root);
                     let depth = if sub == Some("$past") {
                         past_call_depth(node)?
                     } else {
@@ -1082,6 +1134,10 @@ fn property_body(
         // temporal property with no antecedent — lowered exactly as a consequent would be, then
         // checked at every cycle by the `nu X` wrapper (`s_eventually b` → `AG AF b`).
         "Unary" | "StrongWeak" => consequent_expr(spec),
+        // A bare sequence as the whole property (`##1 a == b`, `a ##2 b`): IEEE 1800 16.12.2 —
+        // it holds at a start iff the sequence matches from there, which is how a consequent
+        // reads it. Bounded sequences only (`consequent_expr` refuses the rest).
+        "SequenceConcat" => consequent_expr(spec),
         other => Err(format!("unsupported property kind: {other}")),
     }
 }
@@ -1747,6 +1803,40 @@ fn bool_expr(expr: &Value) -> Result<String, String> {
                     let r = bool_expr(child(expr, "right")?)?;
                     Ok(format!("({l} || {r})"))
                 }
+                // `a -> b` and `a <-> b` (SV 11.4.7): logical operators over the operands' truth
+                // values, exactly as `||` / `&&` read them.
+                "LogicalImplication" => {
+                    let l = bool_expr(child(expr, "left")?)?;
+                    let r = bool_expr(child(expr, "right")?)?;
+                    Ok(format!("((!({l})) || {r})"))
+                }
+                "LogicalEquivalence" => {
+                    let l = bool_expr(child(expr, "left")?)?;
+                    let r = bool_expr(child(expr, "right")?)?;
+                    Ok(xnor(&l, &r))
+                }
+                // `&`, `|`, `^`, `~^` are bitwise, i.e. value transforms; on 1-bit operands with a
+                // 1-bit result they coincide with the boolean connectives. Anything wider is a
+                // vector the expression compiler must mint, so it is refused here.
+                "BinaryAnd" | "BinaryOr" | "BinaryXor" | "BinaryXnor" => {
+                    let (l, r) = (child(expr, "left")?, child(expr, "right")?);
+                    let one = |n: &Value| {
+                        n.get("type").and_then(Value::as_str).and_then(type_width) == Some(1)
+                    };
+                    if !(one(expr) && one(unwrap(l)) && one(unwrap(r))) {
+                        return Err(format!(
+                            "bitwise `{op}` over multi-bit operands is a value transform, not a \
+                             boolean; only its 1-bit form is supported"
+                        ));
+                    }
+                    let (a, b) = (bool_expr(l)?, bool_expr(r)?);
+                    Ok(match op {
+                        "BinaryAnd" => format!("({a} && {b})"),
+                        "BinaryOr" => format!("({a} || {b})"),
+                        "BinaryXor" => xor(&a, &b),
+                        _ => xnor(&a, &b),
+                    })
+                }
                 "Equality" | "CaseEquality" => compare(expr, "=="),
                 "Inequality" | "CaseInequality" => compare(expr, "!="),
                 "LessThan" => compare(expr, "<"),
@@ -1775,23 +1865,18 @@ fn bool_expr(expr: &Value) -> Result<String, String> {
             } else if sv_integer(selector).is_some() {
                 // A constant bit-select is the 1-bit slice `[k:k]` (SVA-fragment widening,
                 // 2026-10-15): the same minted signal mununu#565 built for `[hi:lo]`, with the
-                // SV index mapped to the bit position yosys gives it (`sv_index_to_bit`). In
-                // boolean position it is the bare 1-bit atom.
-                match slice_ref(expr) {
-                    Some(Ok((b, pos, _))) => Ok(slice_atom_name(&b, pos, pos)),
-                    Some(Err(reason)) => Err(reason),
-                    None => Err(
-                        "constant bit-select over an expression that is not a plain \
-                                 packed signal"
-                            .to_string(),
-                    ),
-                }
+                // SV index mapped to the bit position yosys gives it (`index_positions`). An
+                // element of a multi-dimensional packed array (`cnt_q[1]`) is the W-bit slice of
+                // that element. In boolean position a bit is the bare atom, a vector `!= 0`.
+                packed_bool(expr)
             } else {
                 Err("dynamic bit-select `sig[idx]` (index is a signal) is not \
                      expressible as a propositional atom"
                     .to_string())
             }
         }
+        // A packed-struct member (`esc_tx_i.esc_p`) or a part-select in boolean position.
+        "MemberAccess" | "RangeSelect" => packed_bool(expr),
         // XL.3 (Tier-2 history). `$stable`/`$changed`/`$rose`/`$fell`/`$past`
         // lower to atoms over a 1-step shadow register `<sig>__past` (the XL.3b
         // BTOR2 model-augmentation step synthesises that flop). All exact.
@@ -1854,6 +1939,22 @@ fn bool_expr(expr: &Value) -> Result<String, String> {
                 }
                 // `$past(x[, k])` is a value; in boolean position a vector → `!= 0`.
                 // `k` (default 1) selects the depth-`k` shadow along the shift chain.
+                "$past" if past_call_arg_node(expr).and_then(slice_ref).is_some() => {
+                    let atom = cmp_signal_atom(expr).ok_or_else(|| {
+                        let arg = past_call_arg_node(expr).expect("guarded");
+                        match slice_ref(arg) {
+                            Some(Err(e)) => e,
+                            _ => "$past over a selection with a non-constant depth".to_string(),
+                        }
+                    })?;
+                    let (_, msb, lsb) =
+                        slice_ref(past_call_arg_node(expr).expect("guarded")).expect("guarded")?;
+                    Ok(if msb > lsb {
+                        format!("({atom} != 0)")
+                    } else {
+                        atom
+                    })
+                }
                 "$past" => {
                     let (sig, w, depth) = past_call_arg(expr)?;
                     let shadow = past_shadow_name(sig, depth);
@@ -2090,9 +2191,9 @@ fn compare(expr: &Value, op: &str) -> Result<String, String> {
         && let (Ok(a), Ok(b)) = (bool_expr(left), bool_expr(right))
     {
         return Ok(if op == "!=" {
-            format!("(({a} && (!({b}))) || ((!({a})) && {b}))") // a XOR b
+            xor(&a, &b)
         } else {
-            format!("(({a} && {b}) || ((!({a})) && (!({b}))))") // a XNOR b
+            xnor(&a, &b)
         });
     }
     Err(format!(
@@ -2189,133 +2290,374 @@ fn slice_atom_name(base: &str, msb: u32, lsb: u32) -> String {
 /// is the honest option until the indexed arithmetic is written and tested.
 fn slice_ref(expr: &Value) -> Option<Result<(String, u32, u32), String>> {
     let expr = unwrap(expr);
-    match expr.get("kind").and_then(Value::as_str) {
-        // A constant bit-select `sig[k]` on a packed one-dimensional vector is the 1-bit slice
-        // `[k:k]`. An unpacked array (`mem[i]`), a signal index or a multi-dimensional element are
-        // NOT this — `None`, so `bool_expr`'s `ElementSelect` arm gives their own reasons.
-        Some("ElementSelect") => {
-            let base = unwrap(expr.get("value")?);
-            if is_unpacked_array(base) {
+    let kind = expr.get("kind").and_then(Value::as_str)?;
+    if !matches!(kind, "ElementSelect" | "RangeSelect" | "MemberAccess") {
+        return None;
+    }
+    match packed_sub(expr)? {
+        Ok(sub) => Some(Ok((sub.base, sub.lsb + sub.width - 1, sub.lsb))),
+        Err(reason) => Some(Err(reason)),
+    }
+}
+
+/// A packed sub-range of one signal, in BTOR2 bit positions: `base[lsb + width - 1 : lsb]`,
+/// with slang's type string for the sub-range (to select further into it).
+struct PackedSub {
+    base: String,
+    lsb: u32,
+    width: u32,
+    ty: String,
+}
+
+/// Resolve a constant selection chain over ONE packed signal to its bit range: the signal itself,
+/// a packed-struct member (`s.f`, `s.f.g`), a constant element or bit (`v[k]`, `cnt_q[1]` of a
+/// `logic [1:0][3:0]`) and a simple part-select (`v[hi:lo]`), in any nesting.
+///
+/// `None` when `expr` is not such a chain at all (an unpacked array, a dynamic index, an
+/// expression base) so the caller gives its own reason; `Some(Err)` for a chain this function
+/// recognises but refuses — an indexed part-select, an unreadable type, an out-of-range index.
+///
+/// The layout facts it relies on (SV 7.4, 7.2.1): a packed array's RIGHT-most dimension varies
+/// fastest and bit 0 is the right-most declared index of the last dimension; a packed struct's
+/// FIRST member is the most significant. slang serialises a struct type as
+/// `struct packed{logic[3:0] hi;logic[1:0] mid;logic lo;}p::s$2` once the alias pre-pass has
+/// resolved the typedef (captured from slang 11.0.448, 2026-10-15).
+fn packed_sub(expr: &Value) -> Option<Result<PackedSub, String>> {
+    let expr = unwrap(expr);
+    let ty_of = |n: &Value| {
+        n.get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    };
+    match expr.get("kind").and_then(Value::as_str)? {
+        "NamedValue" => {
+            if is_unpacked_array(expr) {
                 return None;
             }
-            let k = expr.get("selector").map(unwrap).and_then(sv_integer)?;
-            let name = match signal_name(base) {
-                Ok(b) => b.to_string(),
-                Err(_) => {
+            let name = signal_name(expr).ok()?.to_string();
+            let ty = ty_of(expr);
+            Some(match type_width(&ty) {
+                Some(width) => Ok(PackedSub {
+                    base: name,
+                    lsb: 0,
+                    width,
+                    ty,
+                }),
+                None => Err(format!(
+                    "cannot map a selection of `{name}` to bit positions: its type `{ty}` is not a \
+                     plain packed vector (`logic [hi:lo]`), a packed array or a packed struct"
+                )),
+            })
+        }
+        "MemberAccess" => {
+            let parent = match packed_sub(expr.get("value")?) {
+                Some(Ok(p)) => p,
+                Some(Err(e)) => return Some(Err(e)),
+                None => {
                     return Some(Err(
-                        "bit-select base is not a plain signal reference; only `signal[k]` is \
-                         supported"
+                        "member access over an expression that is not a packed-struct signal"
                             .to_string(),
                     ));
                 }
             };
-            Some(sv_index_to_bit(base, k).map(|pos| (name, pos, pos)))
-        }
-        Some("RangeSelect") => {
-            let kind = expr
-                .get("selectionKind")
+            let member = expr
+                .get("member")
                 .and_then(Value::as_str)
+                .map(|m| m.rsplit(' ').next().unwrap_or(m))
                 .unwrap_or("?");
-            if kind != "Simple" {
+            let Some(fields) = struct_fields(&parent.ty) else {
                 return Some(Err(format!(
-                    "bit-slice with selectionKind `{kind}` (an indexed part-select such as `x[i +: w]` / \
-                     `x[i -: w]`) is not supported; slang reports its bounds as base-and-WIDTH rather than \
-                     high-and-low, so treating them as a range would silently slice the wrong bits. Use an \
-                     explicit `x[hi:lo]` range."
+                    "member `.{member}` of `{}`: its type `{}` is not a packed struct",
+                    parent.base, parent.ty
+                )));
+            };
+            let mut lsb = 0u32;
+            for (name, fty) in fields.iter().rev() {
+                let Some(w) = type_width(fty) else {
+                    return Some(Err(format!(
+                        "packed struct of `{}`: the width of member `{name}` (`{fty}`) is not \
+                         readable, so `.{member}`'s bit offset is unknown",
+                        parent.base
+                    )));
+                };
+                if name == member {
+                    let ty = ty_of(expr);
+                    if type_width(&ty).is_some_and(|tw| tw != w) {
+                        return Some(Err(format!(
+                            "member `.{member}`: slang types it `{ty}` but the struct declares \
+                             `{fty}`; refusing to guess its bits"
+                        )));
+                    }
+                    return Some(Ok(PackedSub {
+                        base: parent.base,
+                        lsb: parent.lsb + lsb,
+                        width: w,
+                        ty: fty.clone(),
+                    }));
+                }
+                lsb += w;
+            }
+            Some(Err(format!(
+                "member `.{member}` not found in `{}`'s struct type `{}`",
+                parent.base, parent.ty
+            )))
+        }
+        "ElementSelect" | "RangeSelect" => {
+            let is_range = expr.get("kind").and_then(Value::as_str) == Some("RangeSelect");
+            let base_node = unwrap(expr.get("value")?);
+            if is_unpacked_array(base_node) {
+                return None;
+            }
+            if is_range {
+                let kind = expr
+                    .get("selectionKind")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?");
+                if kind != "Simple" {
+                    return Some(Err(format!(
+                        "bit-slice with selectionKind `{kind}` (an indexed part-select such as `x[i +: w]` / \
+                         `x[i -: w]`) is not supported; slang reports its bounds as base-and-WIDTH rather than \
+                         high-and-low, so treating them as a range would silently slice the wrong bits. Use an \
+                         explicit `x[hi:lo]` range."
+                    )));
+                }
+            }
+            let (hi_idx, lo_idx) = if is_range {
+                match (
+                    expr.get("left").and_then(sv_integer),
+                    expr.get("right").and_then(sv_integer),
+                ) {
+                    (Some(l), Some(r)) => (l, r),
+                    _ => {
+                        return Some(Err(
+                            "bit-slice bounds must be constant integer literals".to_string()
+                        ));
+                    }
+                }
+            } else {
+                // A signal index is not a constant selection — `None`, so `bool_expr` reports it.
+                let k = expr.get("selector").map(unwrap).and_then(sv_integer)?;
+                (k, k)
+            };
+            let parent = match packed_sub(base_node) {
+                Some(Ok(p)) => p,
+                Some(Err(e)) => return Some(Err(e)),
+                None => {
+                    return Some(Err(
+                        "bit-select base is not a plain signal reference; only `signal[k]`, \
+                         `signal[hi:lo]` and selections of packed-struct members are supported"
+                            .to_string(),
+                    ));
+                }
+            };
+            let name = parent.base.clone();
+            let (msb_pos, lsb_pos, elem_w, elem_ty) =
+                match index_positions(&parent.ty, &name, hi_idx, lo_idx) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
+            if msb_pos < lsb_pos {
+                return Some(Err(format!(
+                    "bit-slice `{name}[{hi_idx}:{lo_idx}]` runs against the declared range of `{name}`"
                 )));
             }
-            // A slice of anything but a plain signal (a slice of a slice, of a concat, …) is out of
-            // scope.
-            let base_node = unwrap(expr.get("value")?);
-            let base = match signal_name(base_node) {
-                Ok(b) => b.to_string(),
-                Err(_) => {
-                    return Some(Err(
-                        "bit-slice base is not a plain signal reference; only `signal[hi:lo]` is \
-                         supported"
-                            .to_string(),
-                    ));
-                }
+            let width = (msb_pos - lsb_pos + 1) * elem_w;
+            let ty = if is_range || elem_w == 1 {
+                format!("logic[{}:0]", width - 1)
+            } else {
+                elem_ty
             };
-            let (Some(l), Some(r)) = (
-                expr.get("left").and_then(sv_integer),
-                expr.get("right").and_then(sv_integer),
-            ) else {
-                return Some(Err(
-                    "bit-slice bounds must be constant integer literals".to_string()
-                ));
-            };
-            // The LEFT index is the slice's most significant bit in SV for either range direction,
-            // so `msb = pos(left)`, `lsb = pos(right)`; a slice written against the declared
-            // direction (`x[0:3]` of a `[7:0]` vector) is illegal SV and slang rejects it first.
-            Some(
-                match (sv_index_to_bit(base_node, l), sv_index_to_bit(base_node, r)) {
-                    (Ok(msb), Ok(lsb)) if msb >= lsb => Ok((base, msb, lsb)),
-                    (Ok(_), Ok(_)) => Err(format!(
-                        "bit-slice `{base}[{l}:{r}]` runs against the declared range of `{base}`"
-                    )),
-                    (Err(e), _) | (_, Err(e)) => Err(e),
-                },
-            )
+            Some(Ok(PackedSub {
+                base: parent.base,
+                lsb: parent.lsb + lsb_pos * elem_w,
+                width,
+                ty,
+            }))
         }
         _ => None,
     }
 }
 
-/// Map an SV index of `base` to the BTOR2 bit position yosys gives it: bit 0 is the
-/// RIGHT-most declared index, whatever the range. `logic [15:8] x` → `x[9]` is bit 1;
-/// `logic [0:7] y` → `y[1]` is bit 6; a packed struct is `[W-1:0]` by definition.
+/// For a selection `[hi_idx:lo_idx]` (equal for an element) of a value of slang type `ty`: the
+/// element positions of the two bounds counted from the least significant element, the element
+/// width, and the element's type. A packed struct is indexed as `[W-1:0]` bits.
 ///
-/// Before 2026-10-15 the slice path passed SV indices through as bit positions. For a
-/// zero-based `[N-1:0]` vector that is the identity, which is why it went unnoticed; for any
-/// other range the minted slice read the wrong bits (`x[7:4]` of a `[11:4]` vector became BTOR2
-/// bits 7..4, i.e. SV bits 11..8) or fell off the end of the vector and never bound. A type this
-/// function cannot read declines, naming the type, rather than guess.
-fn sv_index_to_bit(base: &Value, idx: i64) -> Result<u32, String> {
-    let name = signal_name(base).unwrap_or("<expr>");
-    let ty = base.get("type").and_then(Value::as_str).unwrap_or("");
+/// Position 0 is the RIGHT-most declared index, whatever the range: `logic [15:8] x` → `x[9]` is
+/// bit 1; `logic [0:7] y` → `y[1]` is bit 6. Before 2026-10-15 the slice path passed SV indices
+/// through as bit positions — the identity for `[N-1:0]`, wrong for any other range.
+fn index_positions(
+    ty: &str,
+    name: &str,
+    hi_idx: i64,
+    lo_idx: i64,
+) -> Result<(u32, u32, u32, String), String> {
     let ty = ty.trim();
-    if ty.starts_with("struct packed") || ty.starts_with("union packed") {
-        return u32::try_from(idx).map_err(|_| format!("negative bit index {idx} into `{name}`"));
-    }
-    // The packed dimensions are the `[a:b]` groups; an unpacked one (`$[…]`) never reaches here.
-    let dims: Vec<(i64, i64)> = ty
-        .match_indices('[')
-        .filter_map(|(i, _)| {
-            let close = ty[i..].find(']')? + i;
-            let (a, b) = ty[i + 1..close].split_once(':')?;
-            Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
-        })
-        .collect();
-    let head = ty.split('[').next().unwrap_or("").trim();
-    let scalar_kind = matches!(
+    let (dims, head) = if ty.starts_with("struct packed") || ty.starts_with("union packed") {
+        let w =
+            type_width(ty).ok_or_else(|| format!("cannot read the width of `{name}` (`{ty}`)"))?;
+        (vec![(i64::from(w) - 1, 0)], "logic".to_string())
+    } else {
+        let (head, dims) = packed_dims(ty).ok_or_else(|| {
+            format!(
+                "cannot map an index of `{name}` to a bit position: its type `{ty}` is not a plain \
+                 packed vector (`logic [hi:lo]`), a packed array or a packed struct"
+            )
+        })?;
+        (dims, head)
+    };
+    let (first, rest) = dims
+        .split_first()
+        .ok_or_else(|| format!("`{name}` (`{ty}`) is a scalar; it has no bits to select"))?;
+    let elem_w: u32 = rest
+        .iter()
+        .map(|(a, b)| (a - b).unsigned_abs() as u32 + 1)
+        .product();
+    let (left, right) = *first;
+    let (hi, lo) = (left.max(right), left.min(right));
+    let pos = |idx: i64| -> Result<u32, String> {
+        if idx < lo || idx > hi {
+            return Err(format!(
+                "index {idx} is outside `{name}`'s declared range [{left}:{right}]"
+            ));
+        }
+        Ok((if left >= right {
+            idx - right
+        } else {
+            right - idx
+        }) as u32)
+    };
+    let elem_ty = if rest.is_empty() {
+        head.clone()
+    } else {
+        let mut t = head.clone();
+        for (a, b) in rest {
+            t.push_str(&format!("[{a}:{b}]"));
+        }
+        t
+    };
+    Ok((pos(hi_idx)?, pos(lo_idx)?, elem_w, elem_ty))
+}
+
+/// The scalar kinds a packed vector / array is built from.
+fn scalar_head(head: &str) -> bool {
+    matches!(
         head,
         "logic" | "bit" | "reg" | "wire" | "logic signed" | "bit signed" | "reg signed"
-    );
-    match dims.as_slice() {
-        [(left, right)] if scalar_kind => {
-            let (hi, lo) = ((*left).max(*right), (*left).min(*right));
-            if idx < lo || idx > hi {
-                return Err(format!(
-                    "bit index {idx} is outside `{name}`'s declared range [{left}:{right}]"
-                ));
-            }
-            let pos = if left >= right {
-                idx - right
-            } else {
-                right - idx
-            };
-            Ok(pos as u32)
-        }
-        [_, _, ..] => Err(format!(
-            "`{name}` is a multi-dimensional packed array (`{ty}`); selecting one element yields a \
-             sub-vector, not a bit, and is not a supported atom"
-        )),
-        _ => Err(format!(
-            "cannot map an index of `{name}` to a bit position: its type `{ty}` is not a plain \
-             packed vector (`logic [hi:lo]`), a packed struct or a typedef of one"
-        )),
+    )
+}
+
+/// `logic[1:0][3:0]` → `("logic", [(1,0), (3,0)])`. `None` unless the type is a scalar kind with
+/// only constant packed dimensions (an unpacked `$[…]` suffix is not part of the packed type).
+fn packed_dims(ty: &str) -> Option<(String, Vec<(i64, i64)>)> {
+    let ty = ty.split('$').next().unwrap_or("").trim();
+    let head = ty.split('[').next().unwrap_or("").trim().to_string();
+    if !scalar_head(&head) {
+        return None;
     }
+    let mut dims = Vec::new();
+    let mut rest = &ty[head.len()..];
+    while let Some(open) = rest.find('[') {
+        if !rest[..open].trim().is_empty() {
+            return None;
+        }
+        let close = rest[open..].find(']')? + open;
+        let (a, b) = rest[open + 1..close].split_once(':')?;
+        dims.push((a.trim().parse().ok()?, b.trim().parse().ok()?));
+        rest = &rest[close + 1..];
+    }
+    rest.trim().is_empty().then_some((head, dims))
+}
+
+/// Width in bits of a slang type string: a scalar (`logic` = 1), a packed vector or array (the
+/// product of every packed dimension — `logic[1:0][3:0]` is 8), the 2-state integer types, or a
+/// packed struct / union (sum / widest of its members). `None` for anything unreadable.
+fn type_width(ty: &str) -> Option<u32> {
+    let ty = ty.trim();
+    if ty.starts_with("struct packed") || ty.starts_with("union packed") {
+        let widths: Option<Vec<u32>> = struct_fields(ty)?
+            .iter()
+            .map(|(_, t)| type_width(t))
+            .collect();
+        let widths = widths?;
+        return if ty.starts_with("struct") {
+            Some(widths.iter().sum())
+        } else {
+            widths.iter().copied().max()
+        };
+    }
+    let base = ty.split('$').next().unwrap_or("").trim();
+    match base.strip_suffix(" signed").unwrap_or(base) {
+        "byte" => return Some(8),
+        "shortint" => return Some(16),
+        "int" | "integer" => return Some(32),
+        "longint" => return Some(64),
+        _ => {}
+    }
+    let (_, dims) = packed_dims(ty)?;
+    Some(
+        dims.iter()
+            .map(|(a, b)| (a - b).unsigned_abs() as u32 + 1)
+            .product(),
+    )
+}
+
+/// The members of a packed struct / union type string, in declaration order (first = most
+/// significant): `struct packed{logic[3:0] hi;logic lo;}p::s$2` → `[("hi", "logic[3:0]"),
+/// ("lo", "logic")]`. Nested struct members keep their braces. `None` when the string is not
+/// a packed struct / union or does not parse.
+fn struct_fields(ty: &str) -> Option<Vec<(String, String)>> {
+    let ty = ty.trim();
+    if !(ty.starts_with("struct packed") || ty.starts_with("union packed")) {
+        return None;
+    }
+    let open = ty.find('{')?;
+    let mut depth = 0i32;
+    let mut close = None;
+    for (i, c) in ty[open..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(open + i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let body = &ty[open + 1..close?];
+    let mut fields = Vec::new();
+    let (mut depth, mut start) = (0i32, 0usize);
+    for (i, c) in body.char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => depth -= 1,
+            ';' if depth == 0 => {
+                let f = body[start..i].trim();
+                start = i + 1;
+                if f.is_empty() {
+                    continue;
+                }
+                // The name is the last space-separated token at brace depth 0.
+                let mut d = 0i32;
+                let mut split = None;
+                for (k, ch) in f.char_indices() {
+                    match ch {
+                        '{' => d += 1,
+                        '}' => d -= 1,
+                        ' ' if d == 0 => split = Some(k),
+                        _ => {}
+                    }
+                }
+                let k = split?;
+                fields.push((f[k + 1..].trim().to_string(), f[..k].trim().to_string()));
+            }
+            _ => {}
+        }
+    }
+    (!fields.is_empty()).then_some(fields)
 }
 
 /// A comparison operand that resolves to a mu-calc atom name: a plain signal, or
@@ -2473,6 +2815,37 @@ fn bitwise_not(operand: &Value) -> Result<String, String> {
     }
 }
 
+/// `a XOR b` in the propositional fragment.
+fn xor(a: &str, b: &str) -> String {
+    format!("(({a} && (!({b}))) || ((!({a})) && {b}))")
+}
+
+/// `a XNOR b` in the propositional fragment.
+fn xnor(a: &str, b: &str) -> String {
+    format!("(({a} && {b}) || ((!({a})) && (!({b}))))")
+}
+
+/// A constant selection (bit, element, member, part-select) in boolean position: a 1-bit
+/// selection is the bare minted atom; a wider one is SV's implicit `!= 0`.
+fn packed_bool(expr: &Value) -> Result<String, String> {
+    match slice_ref(expr) {
+        Some(Ok((b, msb, lsb))) => {
+            let atom = slice_atom_name(&b, msb, lsb);
+            Ok(if msb > lsb {
+                format!("({atom} != 0)")
+            } else {
+                atom
+            })
+        }
+        Some(Err(reason)) => Err(reason),
+        None => Err(
+            "selection over an expression that is not a packed signal, struct member or \
+             constant index"
+                .to_string(),
+        ),
+    }
+}
+
 /// Peel slang `Conversion` (width-cast) wrappers to the underlying expression.
 fn unwrap(mut e: &Value) -> &Value {
     while e.get("kind").and_then(Value::as_str) == Some("Conversion") {
@@ -2504,21 +2877,10 @@ fn is_unpacked_array(expr: &Value) -> bool {
 }
 
 fn signal_width(expr: &Value) -> u32 {
-    let Some(ty) = expr.get("type").and_then(Value::as_str) else {
-        return 1;
-    };
-    match (ty.find('['), ty.find(']')) {
-        (Some(l), Some(r)) if r > l => {
-            let inner = &ty[l + 1..r];
-            if let Some((hi, lo)) = inner.split_once(':')
-                && let (Ok(hi), Ok(lo)) = (hi.trim().parse::<i64>(), lo.trim().parse::<i64>())
-            {
-                return (hi - lo).unsigned_abs() as u32 + 1;
-            }
-            1
-        }
-        _ => 1,
-    }
+    expr.get("type")
+        .and_then(Value::as_str)
+        .and_then(type_width)
+        .unwrap_or(1)
 }
 
 /// Does slang type this node (as the comparison sees it — the `Conversion` target, before
@@ -2601,6 +2963,22 @@ fn signal_name(expr: &Value) -> Result<&str, String> {
 /// serialised by slang as `1'b0`/`1'b1`) forms. `Conversion`-wrapped literals
 /// are peeled first.
 fn sv_integer(expr: &Value) -> Option<i64> {
+    // slang annotates every constant expression it folded with `constant` — a replication
+    // `{4{1'b1}}`, `W - 1`, a `Conversion` of a literal (holding the CONVERTED value). The
+    // outermost annotation wins; X/Z digits do not parse, so a 4-state constant stays refused.
+    let mut e = expr;
+    loop {
+        let k = e.get("kind").and_then(Value::as_str).unwrap_or("");
+        if k != "NamedValue"
+            && let Some(c) = e.get("constant").and_then(Value::as_str)
+        {
+            return parse_sv_literal(c);
+        }
+        match (k, e.get("operand")) {
+            ("Conversion", Some(o)) => e = o,
+            _ => break,
+        }
+    }
     let expr = unwrap(expr);
     let k = expr.get("kind").and_then(Value::as_str)?;
     if !k.contains("IntegerLiteral") {
@@ -4539,7 +4917,8 @@ mod tests {
     /// The real slang 11.0.448 shapes (`testdata/sva_bit_select_forms.{sv,ast.json}`, captured in
     /// the `mununu-sva` image): every bit-select and slice maps to the bit position yosys gives it,
     /// a typedef resolves through its `TypeAlias`, a packed struct is zero-based, a
-    /// multi-dimensional element declines, and history calls over a bit request both halves.
+    /// multi-dimensional element is its W-bit slice, and history calls over a bit request both
+    /// halves.
     #[test]
     fn bit_selects_and_slices_map_sv_indices_to_yosys_bit_positions() {
         let report = translate_ast_json(include_str!("testdata/sva_bit_select_forms.ast.json"))
@@ -4561,18 +4940,13 @@ mod tests {
             "(v__bits7_4 == v__past__bits7_4)",      // $stable(v[7:4])
             "(v__bits2_2 == v__past__bits2_2)",      // v[2] == $past(v[2])
             "(!(false))",                            // !$isunknown(v)
+            "(md__bits15_8 == 2)",                   // md[1] of logic[3:0][7:0] (element 1)
         ] {
             assert!(has(needle), "no formula contains `{needle}`: {formulas:#?}");
         }
-        assert_eq!(
-            report.unsupported.len(),
-            1,
-            "only md[1] declines: {:?}",
-            report.unsupported
-        );
         assert!(
-            report.unsupported[0].reason.contains("multi-dimensional"),
-            "{:?}",
+            report.unsupported.is_empty(),
+            "every form translates: {:?}",
             report.unsupported
         );
         assert!(
@@ -4589,6 +4963,68 @@ mod tests {
                 .iter()
                 .any(|t| t.name == report.two_state_folds[0].assertion)
         );
+    }
+
+    /// OpenTitan coverage, Phase 1 — the real slang 11.0.448 shapes
+    /// (`testdata/sva_phase1_forms.{sv,ast.json}`, captured in the `mununu-sva` image). Struct
+    /// members map first-member-most-significant, a member typed by another typedef expands
+    /// through the embedded alias, a `logic [1:0][W-1:0]` element is its W-bit slice, `->` / `<->`
+    /// and 1-bit `& | ^ ~` are boolean, slang's folded constants are literals and a bare `##1`
+    /// sequence is a consequent. A vector `&` stays refused (a value, for the expression compiler).
+    #[test]
+    fn phase1_forms_translate_from_real_slang_json() {
+        let report = translate_ast_json(include_str!("testdata/sva_phase1_forms.ast.json"))
+            .expect("the fixture parses");
+        let by_label = |l: &str| {
+            report
+                .translated
+                .iter()
+                .find(|t| t.label.as_deref() == Some(l))
+                .map(|t| t.formula.clone())
+                .unwrap_or_else(|| panic!("`{l}` did not translate: {:?}", report.unsupported))
+        };
+        for (label, needle) in [
+            ("p_mem", "(e__bits1_1 == e__bits0_0)"),
+            ("p_memw", "(w__bits2_1 == 1)"),
+            ("p_nest", "n__bits3_3"),
+            ("p_nest", "(n__bits2_0 == 5)"),
+            (
+                "p_xor",
+                "((e__bits1_1 && (!(e__bits0_0))) || ((!(e__bits1_1)) && e__bits0_0))",
+            ),
+            ("p_rose", "(e__bits1_1 && (!(e__past__bits1_1)))"),
+            ("p_pastm", "(w__past__bits6_3 == 3)"),
+            ("p_md", "(cnt__bits7_4 == 3)"),
+            ("p_mdst", "(cnt__bits7_4 == cnt__past__bits7_4)"),
+            ("p_band", "((!(a)) || b)"),
+            ("p_impl", "((!(a)) || (!(b)))"),
+            ("p_equiv", "((a && b) || ((!(a)) && (!(b))))"),
+            ("p_seq", "[] (a == b)"),
+            ("p_rep", "(cnt__bits3_0 == 15)"),
+        ] {
+            let f = by_label(label);
+            assert!(f.contains(needle), "{label}: `{f}` lacks `{needle}`");
+        }
+        assert_eq!(report.unsupported.len(), 1, "{:?}", report.unsupported);
+        assert!(
+            report.unsupported[0].reason.contains("value transform"),
+            "{:?}",
+            report.unsupported
+        );
+        // History over a member / element requests the WHOLE base's shadow.
+        for base in ["e", "w", "cnt"] {
+            assert!(
+                report.required_shadows.iter().any(|s| s.base == base),
+                "no `{base}` shadow: {:?}",
+                report.required_shadows
+            );
+        }
+        let w = report
+            .required_shadows
+            .iter()
+            .find(|s| s.base == "w")
+            .expect("w");
+        assert_eq!(w.width, 7, "the shadow is over the whole 7-bit struct");
     }
 
     /// **The contract between the SVA translator's liveness lowerings and the l2s rescue**
@@ -4810,6 +5246,11 @@ mod tests {
         // ---- property level: (what it is in SVA, the slang shape, the contract)
         let props: Vec<(&str, Value, Want)> = vec![
             ("assert property (b)", simple(sig("b")), Translates("b")),
+            (
+                "assert property (##1 b) — a bare sequence (holds iff it matches from each start)",
+                concat(vec![(simple(sig("b")), n(1), n(1))]),
+                Translates("[] b"),
+            ),
             (
                 "a |-> b",
                 imp(ov, simple(sig("a")), simple(sig("b"))),
@@ -5148,12 +5589,80 @@ mod tests {
                 ),
                 Translates("(v__bits3_3 && (!(v__past__bits3_3)))"),
             ),
-            // -- rejected
+            // OpenTitan coverage, Phase 1 (2026-10-15) — shapes from slang 11.0.448.
             (
-                "md[1] — element of a multi-dimensional packed array",
+                "md[1] — element of a multi-dimensional packed array (a W-bit slice)",
                 serde_json::json!({"kind": "ElementSelect", "selector": lit("1"),
                 "value": {"kind": "NamedValue", "symbol": "1 md", "type": "logic[3:0][7:0]"}}),
-                Rejected("multi-dimensional"),
+                Translates("(md__bits15_8 != 0)"),
+            ),
+            (
+                "cnt_q[1] == 3 — element compared",
+                cmp(
+                    "Equality",
+                    serde_json::json!({"kind": "ElementSelect", "type": "logic[3:0]", "selector": lit("1"),
+                    "value": {"kind": "NamedValue", "symbol": "1 cnt_q", "type": "logic[1:0][3:0]"}}),
+                    lit("3"),
+                ),
+                Translates("(cnt_q__bits7_4 == 3)"),
+            ),
+            (
+                "e.esc_p — packed-struct member (first member = most significant)",
+                serde_json::json!({"kind": "MemberAccess", "type": "logic", "member": "1 esc_p",
+                "value": {"kind": "NamedValue", "symbol": "1 e",
+                          "type": "struct packed{logic esc_p;logic esc_n;}p::s$1"}}),
+                Translates("e__bits1_1"),
+            ),
+            (
+                "w.mid == 1 — a multi-bit member",
+                cmp(
+                    "Equality",
+                    serde_json::json!({"kind": "MemberAccess", "type": "logic[1:0]", "member": "1 mid",
+                    "value": {"kind": "NamedValue", "symbol": "1 w",
+                              "type": "struct packed{logic[3:0] hi;logic[1:0] mid;logic lo;}p::s$2"}}),
+                    lit("1"),
+                ),
+                Translates("(w__bits2_1 == 1)"),
+            ),
+            (
+                "a -> b — boolean implication",
+                cmp("LogicalImplication", sig("a"), sig("b")),
+                Translates("((!(a)) || b)"),
+            ),
+            (
+                "a <-> b — boolean equivalence",
+                cmp("LogicalEquivalence", sig("a"), sig("b")),
+                Translates("((a && b) || ((!(a)) && (!(b))))"),
+            ),
+            (
+                "p ^ n — XOR of 1-bit operands",
+                serde_json::json!({"kind": "BinaryOp", "op": "BinaryXor", "type": "logic",
+                                   "left": sig("p"), "right": sig("n")}),
+                Translates("((p && (!(n))) || ((!(p)) && n))"),
+            ),
+            (
+                "a & b — AND of 1-bit operands",
+                serde_json::json!({"kind": "BinaryOp", "op": "BinaryAnd", "type": "logic",
+                                   "left": sig("a"), "right": sig("b")}),
+                Translates("(a && b)"),
+            ),
+            (
+                "x == {8{1'b1}} — a constant folded by slang (replication)",
+                cmp(
+                    "Equality",
+                    vec8("x"),
+                    serde_json::json!({"kind": "Conversion", "type": "logic[7:0]", "constant": "8'b11111111",
+                    "operand": {"kind": "Replication", "type": "bit[7:0]", "constant": "8'b11111111",
+                                "count": lit("8"), "concat": {"kind": "Concatenation"}}}),
+                ),
+                Translates("(x == 255)"),
+            ),
+            // -- rejected
+            (
+                "x & y — bitwise AND of vectors (a value, not a boolean)",
+                serde_json::json!({"kind": "BinaryOp", "op": "BinaryAnd", "type": "logic[7:0]",
+                                   "left": vec8("x"), "right": vec8("y")}),
+                Rejected("value transform"),
             ),
             (
                 "off[3] — index outside the declared range [15:8]",
