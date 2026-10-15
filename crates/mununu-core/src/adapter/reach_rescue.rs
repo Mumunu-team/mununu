@@ -292,7 +292,7 @@ fn is_plain_box(formula: &Formula, id: NodeId) -> bool {
 /// [`crate::adapter::btor2::bad_monitor`]'s compound compiler uses the same entry point, so
 /// the gate and the compiler cannot disagree about what a leaf means — the disagreement
 /// being precisely this bug.
-fn is_compilable_boolean_body(formula: &Formula, id: NodeId) -> bool {
+pub(crate) fn is_compilable_boolean_body(formula: &Formula, id: NodeId) -> bool {
     match formula.node(id) {
         Node::True | Node::False => true,
         Node::Not(inner) => is_compilable_boolean_body(formula, *inner),
