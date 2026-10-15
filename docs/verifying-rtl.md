@@ -978,7 +978,7 @@ works when you want the intermediate BTOR2.)
 
 ### 3. Coverage is a fragment, and verdicts are honest
 
-> Source of truth: [`property_body`](../crates/mununu-core/src/adapter/slang/translate.rs#L721) + [`bool_expr`](../crates/mununu-core/src/adapter/slang/translate.rs#L1050) (the translator `sv verify-auto` runs; the executable table `the_shipped_fragment_truth_table` in the same file has one row per supported and per rejected form, against the real slang 11.0.448 shapes in `adapter/slang/testdata/sva_fragment_forms.{sv,ast.json}`) — surface: (CLI+API)
+> Source of truth: [`property_body`](../crates/mununu-core/src/adapter/slang/translate.rs#L1088) + [`bool_expr`](../crates/mununu-core/src/adapter/slang/translate.rs#L1760) (the translator `sv verify-auto` runs; the executable table `the_shipped_fragment_truth_table` in the same file has one row per supported and per rejected form, against the real slang 11.0.448 shapes in `adapter/slang/testdata/sva_fragment_forms.{sv,ast.json}`) — surface: (CLI+API)
 
 The SVA translator supports a defined fragment; assertions outside it come back in the `unsupported`
 list **with a reason**, never dropped. Since 2026-10-14 the fragment is an executable table in the
