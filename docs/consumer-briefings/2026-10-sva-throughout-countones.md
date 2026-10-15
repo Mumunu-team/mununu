@@ -50,7 +50,7 @@ docker run --rm -v "$(pwd)":/work -v mununu-target:/cargo-target -w /work mununu
 
 ## Provenance
 
-PR: PR_PLACEHOLDER. Plan: SVA-extraction gaps, Part 1 steps 4–5. Semantic check for `throughout`: `throughout_lowering_agrees_with_a_brute_force_matcher` (exact engine vs a brute-force matcher on random periodic waveforms; fails on a deliberately wrong lowering).
+PR: [mununu#692](https://github.com/Mumunu-team/mununu/pull/692). Plan: SVA-extraction gaps, Part 1 steps 4–5. Semantic check for `throughout`: `throughout_lowering_agrees_with_a_brute_force_matcher` (exact engine vs a brute-force matcher on random periodic waveforms; fails on a deliberately wrong lowering).
 
 ## Not covered here
 
