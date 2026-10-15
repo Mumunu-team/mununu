@@ -45,6 +45,8 @@
 //! | `a -> b`, `a <-> b`; `& \| ^ ~^ ~` with every operand and the result 1-bit | `(!a \|\| b)`, XNOR; the boolean connectives | OpenTitan Phase 1 |
 //! | a constant slang folded (`constant` on the node: `{W{1'b1}}`, `W - 1`, a converted literal) | the folded value; X/Z refused | OpenTitan Phase 1 |
 //! | a bare sequence as the property (`##1 a == b`) | `consequent_expr` — it holds at a start iff it matches there | OpenTitan Phase 1 |
+//! | any expression the rows above refuse: arithmetic (`*` ≤ 32 bits), vector `& \| ^ ~`, shifts, `?:`, concatenation, signed comparisons, `^x`, `$past(expr)`, edge / `$countones` / `$onehot` calls over expressions, an in-range dynamic bit-select | `bool_expr`'s fallback: `expr_ir::build_expr` mints the expression as `mununu_x_<hash>` (`btor2::minted_expr`); bare when 1-bit, `!= 0` otherwise, `(mununu_x_… OP k)` against a constant | OpenTitan Phase 2 |
+//! | a call to a user function whose body is one `return` (`min` / `max`) | inlined by the expression compiler | OpenTitan Phase 3 |
 //!
 //! Implication `a → b` is emitted as `!a || b` — the mu-calculus parser has no
 //! `->` operator, and the rewrite is exact. Every rewrite above is exact
@@ -63,12 +65,10 @@
 //! | `[*m:n]` as a consequent, repetition inside a CONSEQUENT chain element, a nested sub-sequence in an antecedent, `[*0…]`, an antecedent past 64 alternatives | length composition / the size guard |
 //! | `e throughout S` with `S` unbounded or a repetition inside its chain; a non-boolean `e` | needs a sequence automaton / length composition |
 //! | `sig[idx]` dynamic, `mem[i]` array content, an enum- or otherwise opaque-typed base | distinct refusals (mununu#514; the index cannot be mapped to a bit) |
-//! | `&`, `\|`, `^`, `~` over vectors | a value transform, not a boolean (the expression compiler's job) |
+//! | `/ % **`, `*` wider than 32 bits, X/Z constants, a dynamic index that can leave the range, `>>>` of a signed operand in an unsigned context, a function body other than one `return` | the expression compiler's refusals (`expr_ir`) |
 //! | `x[i +: w]`, `x[i -: w]` | indexed part-select: slang gives base-and-WIDTH, declined rather than mis-sliced (mununu#565) |
-//! | `$countones` over more than 64 bits or a non-signal; other system calls | the count cap / not in the Tier-1c/Tier-2 fragment |
-//! | `^x` / `~^x` | parity is not a propositional atom |
-//! | `$rose` / `$fell` on a vector or a multi-bit slice, `$past(x, 0)`, `$stable(x, k)` | 1 bit only / depth ≥ 1 / single signal |
-//! | `reg * k`, `reg + reg`, other arithmetic | only the constant addend is carried |
+//! | `$countones` over more than 64 bits; other system calls | the count cap / not supported |
+//! | `$past(x, 0)`, `$stable(x, k)` | depth ≥ 1 / single argument |
 //!
 //! The first widening (2026-10-15) added the bit-select, the 2-state `$isunknown` fold and the
 //! liveness forms above; the second adds ranged antecedents (and repetition inside an antecedent
@@ -102,6 +102,8 @@
 //! [XL.0]: ../../../../.claude/plans/measurements/XL-0-sva-parser-spike-2026-06-26.md
 
 use serde_json::Value;
+
+use crate::adapter::btor2::minted_expr::{CmpOp, ExprIr};
 
 use crate::adapter::{AdapterError, AdapterErrorKind};
 
@@ -236,6 +238,17 @@ pub struct TranslationReport {
     /// Bases of `$countones(base)` the translated formulas read (deduped; a base may be a minted
     /// slice). The BTOR2 augmentation mints `<base>__popcount` per entry.
     pub required_popcounts: Vec<String>,
+    /// Expressions the translated formulas read as minted atoms (`mununu_x_<hash>`, deduped):
+    /// the expression compiler's output (`expr_ir`). The BTOR2 augmentation
+    /// (`btor2::minted_expr::augment_with_expressions`) mints one named node per entry.
+    pub required_expressions: Vec<MintedExpression>,
+}
+
+/// An expression a formula reads as the atom `name` (= `expr.minted_name()`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MintedExpression {
+    pub name: String,
+    pub expr: ExprIr,
 }
 
 /// A per-assertion caveat the translator recorded: a 2-state fold
@@ -320,6 +333,13 @@ pub fn translate_ast_json_with_options(
     }
 
     let type_aliases = collect_type_aliases(&root);
+    // Phase 3: user functions the expression compiler may inline, typedefs resolved like specs.
+    let subroutines: std::collections::HashMap<String, Value> =
+        super::expr_ir::collect_subroutines(&root)
+            .into_iter()
+            .map(|(addr, def)| (addr, resolve_type_aliases(&def, &type_aliases)))
+            .collect();
+    MINT.with(|m| m.borrow_mut().subroutines = subroutines);
 
     let mut report = TranslationReport::default();
     for (idx, (module, label, node)) in found.iter().enumerate() {
@@ -353,8 +373,31 @@ pub fn translate_ast_json_with_options(
         // positions (`index_positions`).
         let spec = resolve_type_aliases(&spec, &type_aliases);
         let spec = &spec;
+        MINT.with(|m| {
+            let mut m = m.borrow_mut();
+            m.exprs.clear();
+            m.shadows.clear();
+        });
         match translate_one(spec, kind, opts, &mut report.reset_signals) {
             Ok(formula) => {
+                // Phase 2: the expressions (and their `$past` shadows) this formula reads.
+                let (exprs, shadows) = MINT.with(|m| {
+                    let mut m = m.borrow_mut();
+                    (std::mem::take(&mut m.exprs), std::mem::take(&mut m.shadows))
+                });
+                for e in exprs {
+                    if !report.required_expressions.iter().any(|r| r.name == e.name) {
+                        report.required_expressions.push(e);
+                    }
+                }
+                for (base, width, depth) in shadows {
+                    match report.required_shadows.iter_mut().find(|s| s.base == base) {
+                        Some(s) => s.depth = s.depth.max(depth),
+                        None => report
+                            .required_shadows
+                            .push(ShadowSignal { base, width, depth }),
+                    }
+                }
                 // XL.2: a cover's `EF φ` gets its `AG EF φ` recoverability lens.
                 // (Omitted if the companion somehow fails to parse — never ship
                 // a formula the evaluator can't read.)
@@ -583,11 +626,16 @@ fn resolve_enum_refs(node: &Value, enums: &std::collections::HashMap<String, i64
                 && let Some(sym) = m.get("symbol").and_then(Value::as_str)
                 && let Some(&v) = enums.get(sym.rsplit(' ').next().unwrap_or(sym))
             {
-                return serde_json::json!({
+                // Keep slang's `type`: the expression compiler sizes the literal by it.
+                let mut lit = serde_json::json!({
                     "kind": "IntegerLiteral",
                     "constant": v.to_string(),
                     "value": v.to_string(),
                 });
+                if let Some(ty) = m.get("type") {
+                    lit["type"] = ty.clone();
+                }
+                return lit;
             }
             let mut obj = serde_json::Map::new();
             for (k, v) in m {
@@ -1757,7 +1805,101 @@ fn antecedent_links(left: &Value) -> Result<Vec<AntecedentLink>, String> {
 }
 
 /// Translate a boolean `Expression` into mu-calculus atom/connective text.
+/// A boolean-position expression: the atom lowering first ([`bool_expr_atoms`]); where it
+/// refuses, the expression compiler (`expr_ir::build_expr`) mints the expression as one named
+/// combinational node and the formula reads that node — bare when 1 bit, `!= 0` otherwise, and
+/// `(node OP k)` for an unsigned comparison against a constant, so the predicate cube keeps a
+/// dimension. A form both refuse keeps the atom lowering's reason, with the compiler's appended.
 fn bool_expr(expr: &Value) -> Result<String, String> {
+    match bool_expr_atoms(expr) {
+        Ok(f) => Ok(f),
+        Err(reason) => {
+            mint_boolean(expr).map_err(|why| format!("{reason} (expression compiler: {why})"))
+        }
+    }
+}
+
+/// Translation-time state of the expression compiler for the assertion being translated.
+#[derive(Default)]
+struct MintState {
+    /// User subroutines of the design by slang address (for inlining).
+    subroutines: std::collections::HashMap<String, Value>,
+    /// Expressions the current assertion's formula reads.
+    exprs: Vec<MintedExpression>,
+    /// `(base, width, depth)` shadows those expressions read.
+    shadows: Vec<(String, u32, u32)>,
+}
+
+thread_local! {
+    static MINT: std::cell::RefCell<MintState> = std::cell::RefCell::default();
+}
+
+/// [`bool_expr`]'s compiler fallback. An unsigned comparison with one constant side mints only
+/// the other side and keeps the literal, so the predicate cube gets a dimension.
+fn mint_boolean(expr: &Value) -> Result<String, String> {
+    let subs = MINT.with(|m| m.borrow().subroutines.clone());
+    let mut probe = super::expr_ir::BuildCtx::with_subroutines(subs);
+    let ir = super::expr_ir::build_expr(expr, &mut probe)?;
+    if let ExprIr::Cmp { op, signed, a, b } = &ir
+        && (!*signed || matches!(op, CmpOp::Eq | CmpOp::Ne))
+    {
+        let lit = |e: &ExprIr| match e {
+            ExprIr::Const { bits, .. } if *bits <= i64::MAX as u128 => Some(*bits),
+            _ => None,
+        };
+        let sym = |op: CmpOp| match op {
+            CmpOp::Eq => "==",
+            CmpOp::Ne => "!=",
+            CmpOp::Lt => "<",
+            CmpOp::Le => "<=",
+            CmpOp::Gt => ">",
+            CmpOp::Ge => ">=",
+        };
+        let side = match (lit(a), lit(b)) {
+            (None, Some(k)) => Some(((**a).clone(), sym(*op), k)),
+            (Some(k), None) => Some(((**b).clone(), flip_op(sym(*op)), k)),
+            _ => None,
+        };
+        if let Some((value, op, k)) = side {
+            let name = register_ir(value, probe.shadows);
+            return Ok(format!("({name} {op} {k})"));
+        }
+    }
+    let w = ir.width();
+    let name = register_ir(ir, probe.shadows);
+    Ok(if w == 1 {
+        name
+    } else {
+        format!("({name} != 0)")
+    })
+}
+
+/// Record an already-built expression (and the shadows its build needed); its atom name.
+fn register_ir(ir: ExprIr, shadows: Vec<(String, u32, u32)>) -> String {
+    let name = match &ir {
+        ExprIr::Leaf { name, .. } => name.clone(),
+        _ => ir.minted_name(),
+    };
+    MINT.with(|m| {
+        let mut m = m.borrow_mut();
+        if !matches!(ir, ExprIr::Leaf { .. }) && !m.exprs.iter().any(|e| e.name == name) {
+            m.exprs.push(MintedExpression {
+                name: name.clone(),
+                expr: ir,
+            });
+        }
+        for (b, w, d) in shadows {
+            match m.shadows.iter_mut().find(|s| s.0 == b) {
+                Some(s) => s.2 = s.2.max(d),
+                None => m.shadows.push((b, w, d)),
+            }
+        }
+    });
+    name
+}
+
+/// The atom lowering of a boolean-position expression (the translator's own fragment).
+fn bool_expr_atoms(expr: &Value) -> Result<String, String> {
     let expr = unwrap(expr);
     let k = expr.get("kind").and_then(Value::as_str).unwrap_or("?");
     match k {
@@ -2094,8 +2236,28 @@ fn bool_expr(expr: &Value) -> Result<String, String> {
 /// 3. `bool-expr ==/!= 0`  → `!bexpr` / `bexpr` (exact, since `bool != 0 ≡ bool`).
 fn compare(expr: &Value, op: &str) -> Result<String, String> {
     signed_comparison_guard(child(expr, "left")?, child(expr, "right")?, op)?;
+    // SOUNDNESS: the atom forms below compare the UNCONVERTED operands (`unwrap` strips every
+    // `Conversion`). That is exact only when each conversion preserves the value: a zero-extension
+    // or a same-width re-typing. A sign extension (`8'(s)` of a signed `s`, a signed `s` against a
+    // wider signed operand) or a truncation changes it, so the comparison goes to the expression
+    // compiler, which applies the conversions (`bool_expr`'s fallback). Before 2026-10-15 the
+    // sign extension was dropped: `r == 8'(s)` compared the raw 4-bit `s`.
+    for side in ["left", "right"] {
+        if let Some(why) = value_changing_conversion(child(expr, side)?) {
+            return Err(format!(
+                "the comparison's {side} operand is {why}; the atom lowering compares unconverted \
+                 values"
+            ));
+        }
+    }
     let left = unwrap(child(expr, "left")?);
     let right = unwrap(child(expr, "right")?);
+    // A literal operand is read BEFORE its conversions are stripped: slang folds the converted
+    // value onto the outer node (`-8'sd11` cast into an unsigned comparison is `8'd245`).
+    let (lit_l, lit_r) = (
+        sv_integer(child(expr, "left")?),
+        sv_integer(child(expr, "right")?),
+    );
 
     // mununu#565 — a slice this translator refuses reports WHY, before the generic shape message
     // below can blame the operand kind. An indexed part-select mis-sliced silently would be a
@@ -2111,18 +2273,18 @@ fn compare(expr: &Value, op: &str) -> Result<String, String> {
 
     // (1) signal OP literal — `signal` may be a bit-slice (mununu#565), which resolves to its
     // minted derived signal so the atom stays a plain identifier.
-    if let (Some(sig), Some(lit)) = (cmp_signal_atom(left), sv_integer(right)) {
+    if let (Some(sig), Some(lit)) = (cmp_signal_atom(left), lit_r) {
         return Ok(format!("({sig} {op} {lit})"));
     }
     // (2) literal OP signal  → flip to signal OP' literal
-    if let (Some(lit), Some(sig)) = (sv_integer(left), cmp_signal_atom(right)) {
+    if let (Some(lit), Some(sig)) = (lit_l, cmp_signal_atom(right)) {
         return Ok(format!("({sig} {} {lit})", flip_op(op)));
     }
     // (3) boolean-expr ==/!= 0
     if matches!(op, "==" | "!=") {
-        let other = if sv_integer(right) == Some(0) {
+        let other = if lit_r == Some(0) {
             Some(left)
-        } else if sv_integer(left) == Some(0) {
+        } else if lit_l == Some(0) {
             Some(right)
         } else {
             None
@@ -2207,6 +2369,31 @@ fn compare(expr: &Value, op: &str) -> Result<String, String> {
     ))
 }
 
+/// `Some(reason)` when a chain of slang `Conversion`s around `node` changes its value — a sign
+/// extension (a widening into a signed type: SV extends by the expression's signedness) or a
+/// truncation. A folded constant (`constant` present) is exempt: its value is read after the
+/// conversions.
+fn value_changing_conversion(node: &Value) -> Option<&'static str> {
+    let mut n = node;
+    while n.get("kind").and_then(Value::as_str) == Some("Conversion") {
+        if n.get("constant").is_some() {
+            return None;
+        }
+        let op = n.get("operand")?;
+        let width = |x: &Value| x.get("type").and_then(Value::as_str).and_then(type_width);
+        if let (Some(to), Some(from)) = (width(n), width(op)) {
+            if to < from {
+                return Some("truncated by a conversion");
+            }
+            if to > from && typed_signed(n) {
+                return Some("sign-extended by a conversion");
+            }
+        }
+        n = op;
+    }
+    None
+}
+
 /// H.D — if `expr` is a 1-bit `!signal` (`UnaryOp{op: LogicalNot, operand:
 /// NamedValue}`), return the inner signal's name. The 1-bit gate keeps the
 /// peel-and-flip equivalence `(!x) == y ≡ x != y` exact: for a multi-bit operand
@@ -2254,7 +2441,7 @@ fn reduction_to_cmp(operand: &Value, op: &str, need_all_ones: bool) -> Result<St
 /// `$past`/`$stable`/`$rose`/`$fell` and every existing model); depth `k ≥ 2`
 /// (from `$past(x, k)`) is `<base>__past{k}`. `shadow::shadow_stage_name` MUST
 /// mirror this exactly — the two are the two halves of one naming contract.
-fn past_shadow_name(base: &str, depth: u32) -> String {
+pub(super) fn past_shadow_name(base: &str, depth: u32) -> String {
     if depth <= 1 {
         format!("{base}__past")
     } else {
@@ -2302,10 +2489,10 @@ fn slice_ref(expr: &Value) -> Option<Result<(String, u32, u32), String>> {
 
 /// A packed sub-range of one signal, in BTOR2 bit positions: `base[lsb + width - 1 : lsb]`,
 /// with slang's type string for the sub-range (to select further into it).
-struct PackedSub {
-    base: String,
-    lsb: u32,
-    width: u32,
+pub(super) struct PackedSub {
+    pub(super) base: String,
+    pub(super) lsb: u32,
+    pub(super) width: u32,
     ty: String,
 }
 
@@ -2322,7 +2509,7 @@ struct PackedSub {
 /// FIRST member is the most significant. slang serialises a struct type as
 /// `struct packed{logic[3:0] hi;logic[1:0] mid;logic lo;}p::s$2` once the alias pre-pass has
 /// resolved the typedef (captured from slang 11.0.448, 2026-10-15).
-fn packed_sub(expr: &Value) -> Option<Result<PackedSub, String>> {
+pub(super) fn packed_sub(expr: &Value) -> Option<Result<PackedSub, String>> {
     let expr = unwrap(expr);
     let ty_of = |n: &Value| {
         n.get("type")
@@ -2549,7 +2736,7 @@ fn scalar_head(head: &str) -> bool {
 
 /// `logic[1:0][3:0]` → `("logic", [(1,0), (3,0)])`. `None` unless the type is a scalar kind with
 /// only constant packed dimensions (an unpacked `$[…]` suffix is not part of the packed type).
-fn packed_dims(ty: &str) -> Option<(String, Vec<(i64, i64)>)> {
+pub(super) fn packed_dims(ty: &str) -> Option<(String, Vec<(i64, i64)>)> {
     let ty = ty.split('$').next().unwrap_or("").trim();
     let head = ty.split('[').next().unwrap_or("").trim().to_string();
     if !scalar_head(&head) {
@@ -2572,7 +2759,7 @@ fn packed_dims(ty: &str) -> Option<(String, Vec<(i64, i64)>)> {
 /// Width in bits of a slang type string: a scalar (`logic` = 1), a packed vector or array (the
 /// product of every packed dimension — `logic[1:0][3:0]` is 8), the 2-state integer types, or a
 /// packed struct / union (sum / widest of its members). `None` for anything unreadable.
-fn type_width(ty: &str) -> Option<u32> {
+pub(super) fn type_width(ty: &str) -> Option<u32> {
     let ty = ty.trim();
     if ty.starts_with("struct packed") || ty.starts_with("union packed") {
         let widths: Option<Vec<u32>> = struct_fields(ty)?
@@ -2869,7 +3056,7 @@ fn unwrap(mut e: &Value) -> &Value {
 /// from unpacked dimensions via yosys `memory_collect`.
 ///
 /// Measured against slang's `--ast-json` on a fixture carrying both forms (2026-09-07).
-fn is_unpacked_array(expr: &Value) -> bool {
+pub(super) fn is_unpacked_array(expr: &Value) -> bool {
     unwrap(expr)
         .get("type")
         .and_then(Value::as_str)
@@ -2885,7 +3072,7 @@ fn signal_width(expr: &Value) -> u32 {
 
 /// Does slang type this node (as the comparison sees it — the `Conversion` target, before
 /// `unwrap` strips it) as signed?
-fn typed_signed(node: &Value) -> bool {
+pub(super) fn typed_signed(node: &Value) -> bool {
     node.get("type")
         .and_then(Value::as_str)
         .is_some_and(|t| t.contains("signed") && !t.contains("unsigned"))
@@ -2945,7 +3132,7 @@ fn flip_op(op: &str) -> &str {
 
 /// Extract the signal name from a `NamedValue` (`"symbol": "<id> name"`),
 /// peeling `Conversion` wrappers first.
-fn signal_name(expr: &Value) -> Result<&str, String> {
+pub(super) fn signal_name(expr: &Value) -> Result<&str, String> {
     let expr = unwrap(expr);
     if expr.get("kind").and_then(Value::as_str) != Some("NamedValue") {
         return Err("expected a NamedValue signal reference".to_string());
@@ -2998,6 +3185,12 @@ fn parse_sv_literal(raw: &str) -> Option<i64> {
         .chars()
         .filter(|c| !c.is_whitespace() && *c != '_')
         .collect();
+    // A negative signed constant (`-4'sd8`, as slang folds one) is the negated magnitude.
+    if let Some(rest) = s.strip_prefix('-')
+        && rest.contains('\'')
+    {
+        return parse_sv_literal(rest).map(|v| -v);
+    }
     let Some(tick) = s.find('\'') else {
         return s.parse::<i64>().ok();
     };
@@ -3867,15 +4060,40 @@ mod tests {
     }
 
     #[test]
-    fn xl1c_dynamic_bit_select_is_rejected_with_reason() {
-        // `req_i[idx_o]` — selector is a signal → dynamic, not a Tier-1c atom.
-        let expr = serde_json::json!({
-            "kind": "ElementSelect",
-            "selector": {"kind": "NamedValue", "symbol": "1 idx_o", "type": "logic[2:0]"},
-            "value": {"kind": "NamedValue", "symbol": "2 req_i", "type": "logic[7:0]"}
-        });
-        let err = bool_expr(&expr).expect_err("dynamic index must reject");
-        assert!(err.contains("dynamic bit-select"), "got: {err}");
+    fn xl1c_dynamic_bit_select_mints_only_while_the_index_stays_in_range() {
+        // `req_i[idx_o]` with a 3-bit index into an 8-bit vector — every index is in range, so
+        // the expression compiler mints `(req_i >> idx_o)[0]`.
+        let sel = |iw: u32| {
+            serde_json::json!({
+                "kind": "ElementSelect", "type": "logic",
+                "selector": {"kind": "NamedValue", "symbol": "1 idx_o",
+                             "type": format!("logic[{}:0]", iw - 1)},
+                "value": {"kind": "NamedValue", "symbol": "2 req_i", "type": "logic[7:0]"}
+            })
+        };
+        let atom = bool_expr(&sel(3)).expect("in range mints");
+        let ir = minted(&atom);
+        let env = |n: &str| if n == "req_i" { 0b0010_0100 } else { 5 };
+        assert_eq!(ir.eval(&env), 1, "req_i[5] of 0b0010_0100");
+        // A 4-bit index can reach 8..15, where SV reads X: refused, both reasons named.
+        let err = bool_expr(&sel(4)).expect_err("out of range must refuse");
+        assert!(
+            err.contains("dynamic bit-select") && err.contains("outside"),
+            "got: {err}"
+        );
+    }
+
+    /// The expression a minted atom name stands for (the most recent registration).
+    fn minted(atom: &str) -> ExprIr {
+        MINT.with(|m| {
+            m.borrow()
+                .exprs
+                .iter()
+                .rev()
+                .find(|e| e.name == atom)
+                .map(|e| e.expr.clone())
+                .unwrap_or_else(|| panic!("`{atom}` was not minted"))
+        })
     }
 
     /// mununu#514 — the constant-index bit-select branch had NO test, which is how the array
@@ -5005,11 +5223,13 @@ mod tests {
             let f = by_label(label);
             assert!(f.contains(needle), "{label}: `{f}` lacks `{needle}`");
         }
-        assert_eq!(report.unsupported.len(), 1, "{:?}", report.unsupported);
+        // `(cnt[0] & cnt[1]) == 0` — a vector `&` — is the expression compiler's: the value is
+        // minted and compared against the literal.
+        assert!(report.unsupported.is_empty(), "{:?}", report.unsupported);
         assert!(
-            report.unsupported[0].reason.contains("value transform"),
-            "{:?}",
-            report.unsupported
+            by_label("p_wide").contains("mununu_x_"),
+            "{}",
+            by_label("p_wide")
         );
         // History over a member / element requests the WHOLE base's shadow.
         for base in ["e", "w", "cnt"] {
@@ -5025,6 +5245,99 @@ mod tests {
             .find(|s| s.base == "w")
             .expect("w");
         assert_eq!(w.width, 7, "the shadow is over the whole 7-bit struct");
+    }
+
+    /// OpenTitan coverage, Phases 2 + 3 — the real slang 11.0.448 shapes
+    /// (`testdata/sva_expr_forms.{sv,ast.json}`): every form translates, and the minted IR of
+    /// prim_count's counter checks computes what the SVA means (`$past` pushed to the leaves,
+    /// the signed cast, `min` / `max` inlined from their single-`return` bodies).
+    #[test]
+    fn expression_forms_translate_from_real_slang_json() {
+        let report = translate_ast_json(include_str!("testdata/sva_expr_forms.ast.json"))
+            .expect("the fixture parses");
+        assert!(report.unsupported.is_empty(), "{:#?}", report.unsupported);
+        let formula = |l: &str| {
+            report
+                .translated
+                .iter()
+                .find(|t| t.label.as_deref() == Some(l))
+                .map(|t| t.formula.clone())
+                .unwrap_or_else(|| panic!("no `{l}`"))
+        };
+        // The one minted expression a label's formula reads (its consequent's).
+        let minted_in = |l: &str| -> Vec<ExprIr> {
+            let f = formula(l);
+            report
+                .required_expressions
+                .iter()
+                .filter(|m| f.contains(&m.name))
+                .map(|m| m.expr.clone())
+                .collect()
+        };
+        let env = |vals: &'static [(&'static str, u128)]| {
+            move |n: &str| {
+                vals.iter()
+                    .find(|(k, _)| *k == n)
+                    .map(|(_, v)| *v)
+                    .unwrap_or_else(|| panic!("leaf `{n}` not in the environment"))
+            }
+        };
+        // e_min: cnt_o == min($past(cnt_o) + $past({2'b0, step_i}), 15) — saturating increment.
+        let e_min_all = minted_in("e_min");
+        let [e_min] = &e_min_all[..] else {
+            panic!("{}", formula("e_min"))
+        };
+        let at = |cnt: u128, past: u128, step: u128| {
+            let vals: Vec<(&str, u128)> = vec![
+                ("cnt_o", cnt),
+                ("cnt_o__past", past),
+                ("step_i__past", step),
+            ];
+            e_min.eval(&move |n| vals.iter().find(|(k, _)| *k == n).map(|(_, v)| *v).unwrap())
+        };
+        assert_eq!(at(12, 9, 3), 1, "9 + 3 = 12");
+        assert_eq!(at(11, 9, 3), 0);
+        assert_eq!(at(15, 14, 3), 1, "14 + 3 saturates at 15");
+        assert_eq!(at(1, 14, 3), 0, "no 4-bit wrap: the sum is 6 bits wide");
+        // e_max: cnt_q[1] == max($past(signed'({2'b0, cnt_q[1]})) - $past({2'b0, step_i}), '0)
+        // — a saturating decrement over the SIGNED difference.
+        let e_max_all = minted_in("e_max");
+        let [e_max] = &e_max_all[..] else {
+            panic!("{}", formula("e_max"))
+        };
+        let dec = |now: u128, past: u128, step: u128| {
+            // cnt_q is logic[1:0][3:0]: element 1 is bits 7..4.
+            let vals: Vec<(&str, u128)> = vec![
+                ("cnt_q", now << 4),
+                ("cnt_q__past", past << 4),
+                ("step_i__past", step),
+            ];
+            e_max.eval(&move |n| vals.iter().find(|(k, _)| *k == n).map(|(_, v)| *v).unwrap())
+        };
+        assert_eq!(dec(7, 9, 2), 1, "9 - 2 = 7");
+        assert_eq!(dec(0, 1, 3), 1, "1 - 3 saturates at 0 (signed max)");
+        assert_eq!(dec(14, 1, 3), 0, "an unsigned max would read 1 - 3 as 62");
+        // e_sgn: sx < 0 |-> sx >= -8 — a signed comparison, true for every 4-bit sx.
+        let sgn = minted_in("e_sgn");
+        assert!(!sgn.is_empty(), "{}", formula("e_sgn"));
+        for e in &sgn {
+            if let ExprIr::Cmp { signed, .. } = e {
+                assert!(*signed, "{e:?}");
+            }
+        }
+        // e_dyn: gnt_o[idx_i] && req_i[idx_i] — a 2-bit index into 4 bits, always in range.
+        let dyn_ = minted_in("e_dyn");
+        assert_eq!(dyn_.len(), 2, "{}", formula("e_dyn"));
+        let e = env(&[("gnt_o", 0b0100), ("req_i", 0b0100), ("idx_i", 2)]);
+        assert!(dyn_.iter().all(|x| x.eval(&e) == 1));
+        // Every `$past` leaf requested its shadow.
+        for base in ["cnt_o", "step_i", "cnt_q", "idx_i"] {
+            assert!(
+                report.required_shadows.iter().any(|s| s.base == base),
+                "no `{base}` shadow: {:?}",
+                report.required_shadows
+            );
+        }
     }
 
     /// **The contract between the SVA translator's liveness lowerings and the l2s rescue**
@@ -5160,37 +5473,59 @@ mod tests {
     /// commit `x >= 0` translated to `(x >= 0)`, which the engines decide unsigned — a false HOLDS on
     /// an always-negative `x` (`e2e_signed_relational_comparison_is_not_decided_unsigned`).
     #[test]
-    fn signed_relational_comparison_is_refused_not_decided_unsigned() {
+    fn signed_comparisons_mint_a_signed_comparison_never_an_unsigned_atom() {
         let conv = |ty: &str, operand: Value| serde_json::json!({"kind": "Conversion", "type": ty, "operand": operand});
         let x =
             serde_json::json!({"kind": "NamedValue", "type": "logic signed[3:0]", "symbol": "1 x"});
         let u = serde_json::json!({"kind": "NamedValue", "type": "logic[3:0]", "symbol": "2 u"});
         let int = |v: &str| serde_json::json!({"kind": "IntegerLiteral", "type": "int", "value": v, "constant": v});
         let cmp = |op: &str, l: Value, r: Value| serde_json::json!({"kind": "BinaryOp", "type": "logic", "op": op, "left": l, "right": r});
-        // `x >= 0` and `x < 0` — both operands converted to `logic signed[31:0]`.
-        for op in ["GreaterThanEqual", "LessThan"] {
+        // `x >= 0` and `x < 0` — both operands converted to `logic signed[31:0]`. The atom
+        // lowering refuses (its `<` is unsigned); the expression compiler mints a SIGNED
+        // comparison over the sign-extended operands, which reads x = 4'b1111 as -1.
+        for (op, at_minus_one, at_three) in [("GreaterThanEqual", 0, 1), ("LessThan", 1, 0)] {
             let e = cmp(
                 op,
                 conv("logic signed[31:0]", x.clone()),
                 conv("logic signed[31:0]", int("0")),
             );
-            let err =
-                bool_expr(&e).expect_err("a signed relational must not become an unsigned atom");
-            assert!(err.contains("signed"), "{err}");
+            let atom = bool_expr(&e).expect("minted");
+            let ir = minted(&atom);
+            assert!(matches!(ir, ExprIr::Cmp { signed: true, .. }), "{ir:?}");
+            assert_eq!(ir.eval(&|_| 0b1111), at_minus_one, "{op} at x = -1");
+            assert_eq!(ir.eval(&|_| 3), at_three, "{op} at x = 3");
         }
-        // Signed equality: in range decides as the bit pattern; out of range is refused.
+        // Signed equality: in range decides as the bit pattern; out of range mints a comparison
+        // of the sign-extended value, which is never 15 (the old refusal is now exact).
         let eq3 = cmp(
             "Equality",
             conv("logic signed[31:0]", x.clone()),
             conv("logic signed[31:0]", int("3")),
         );
-        assert_eq!(bool_expr(&eq3).unwrap(), "(x == 3)");
+        // The sign extension makes it a minted value against the literal (exact either way here,
+        // since 3 is non-negative, but the conversion is applied, not assumed away).
+        let atom = bool_expr(&eq3).unwrap();
+        assert!(
+            atom.starts_with("(mununu_x_") && atom.ends_with(" == 3)"),
+            "{atom}"
+        );
         let eq15 = cmp(
             "Equality",
             conv("logic signed[31:0]", x.clone()),
             conv("logic signed[31:0]", int("15")),
         );
-        assert!(bool_expr(&eq15).unwrap_err().contains("signed range"));
+        let atom = bool_expr(&eq15).expect("minted");
+        let name = atom
+            .trim_start_matches('(')
+            .split(' ')
+            .next()
+            .expect("an atom name");
+        assert!(atom.ends_with(" == 15)"), "{atom}");
+        let value = minted(name);
+        assert!(
+            (0..16).all(|v| value.eval(&|_| v) != 15),
+            "the sign-extended x is never 15: {value:?}"
+        );
         // Mixed signed/unsigned: slang converts to UNSIGNED, so it translates.
         let xu = cmp("LessThan", conv("logic[3:0]", x.clone()), u.clone());
         assert_eq!(bool_expr(&xu).unwrap(), "(x < u)");
@@ -5201,6 +5536,43 @@ mod tests {
             conv("logic[31:0]", int("13")),
         );
         assert_eq!(bool_expr(&u13).unwrap(), "(u > 13)");
+    }
+
+    /// A sign extension slang put on a comparison operand must be APPLIED, not stripped.
+    /// `r == 8'(s)` with `logic [7:0] r` and `logic signed [3:0] s` (slang 11.0.448:
+    /// `conv<logic[7:0]>(conv<logic signed[7:0]>(s))`) used to lower to the atom `(r == s)`, which
+    /// compares the raw 4-bit `s`: with RTL `r = {4'b0, s}` the assertion is false for a negative
+    /// `s`, yet the atom holds — a false HOLDS.
+    #[test]
+    fn a_sign_extended_comparison_operand_is_not_compared_unconverted() {
+        let e = serde_json::json!({"kind": "BinaryOp", "op": "Equality", "type": "logic",
+            "left": {"kind": "NamedValue", "symbol": "1 r", "type": "logic[7:0]"},
+            "right": {"kind": "Conversion", "type": "logic[7:0]",
+                "operand": {"kind": "Conversion", "type": "logic signed[7:0]",
+                    "operand": {"kind": "NamedValue", "symbol": "2 s", "type": "logic signed[3:0]"}}}});
+        let atom = bool_expr(&e).expect("translates");
+        assert_ne!(atom, "(r == s)", "the sign extension was dropped");
+        let ir = minted(&atom);
+        let at = |r: u128, s: u128| ir.eval(&move |n| if n == "r" { r } else { s });
+        assert_eq!(at(0xFF, 0xF), 1, "8'(-1) is 8'hFF");
+        assert_eq!(
+            at(0x0F, 0xF),
+            0,
+            "{{4'b0, s}} is not 8'(s) for a negative s"
+        );
+        assert_eq!(at(0x05, 0x5), 1);
+    }
+
+    /// A literal operand is read AFTER slang's conversions. `x4 != 4'(20)` — a size cast slang
+    /// folds to `4'd4` on the `Conversion` — used to read the inner literal `20`: `(x4 != 20)` is
+    /// always true for a 4-bit `x4`, so the assertion held even where `x4` is 4.
+    #[test]
+    fn a_narrowing_cast_on_a_literal_operand_is_applied() {
+        let e = serde_json::json!({"kind": "BinaryOp", "op": "Inequality", "type": "logic",
+            "left": {"kind": "NamedValue", "symbol": "1 x4", "type": "logic[3:0]"},
+            "right": {"kind": "Conversion", "type": "logic[3:0]", "constant": "4'd4",
+                "operand": {"kind": "IntegerLiteral", "type": "int", "value": "20", "constant": "20"}}});
+        assert_eq!(bool_expr(&e).unwrap(), "(x4 != 4)");
     }
 
     /// The shipped fragment as an EXECUTABLE table (SVA-extraction-gaps plan, step 0, 2026-10-14):
@@ -5486,9 +5858,10 @@ mod tests {
                 Translates("(nu W. (b && [] W))"),
             ),
         ];
+        let mut failures: Vec<String> = Vec::new();
         for (what, spec, want) in &props {
             let got = property_body(spec, &TranslateOptions::default(), &mut Vec::new());
-            check(what, got, want);
+            failures.extend(check(what, got, want));
         }
 
         // ---- atom level
@@ -5657,13 +6030,13 @@ mod tests {
                 ),
                 Translates("(x == 255)"),
             ),
-            // -- rejected
             (
-                "x & y — bitwise AND of vectors (a value, not a boolean)",
+                "x & y — bitwise AND of vectors in boolean position: a minted value, `!= 0`",
                 serde_json::json!({"kind": "BinaryOp", "op": "BinaryAnd", "type": "logic[7:0]",
                                    "left": vec8("x"), "right": vec8("y")}),
-                Rejected("value transform"),
+                Translates("!= 0)"),
             ),
+            // -- rejected
             (
                 "off[3] — index outside the declared range [15:8]",
                 serde_json::json!({"kind": "ElementSelect", "selector": lit("3"),
@@ -5671,21 +6044,24 @@ mod tests {
                 Rejected("outside"),
             ),
             (
-                "$rose(v[7:4]) — an edge of a multi-bit slice",
-                call(
-                    "$rose",
-                    vec![
-                        serde_json::json!({"kind": "RangeSelect", "selectionKind": "Simple",
-                    "value": vec8("v"), "left": lit("7"), "right": lit("4")}),
-                    ],
-                ),
-                Rejected("single bit"),
+                "$rose(v[7:4]) — an edge of a multi-bit slice (its LSB)",
+                serde_json::json!({"kind": "Call", "subroutine": "$rose", "type": "bit",
+                    "arguments": [{"kind": "RangeSelect", "selectionKind": "Simple",
+                    "type": "logic[3:0]", "value": vec8("v"), "left": lit("7"), "right": lit("4")}]}),
+                // The expression compiler (Phase 2): IEEE 1800 16.9.3 — the LSB's edge.
+                Translates("mununu_x_"),
             ),
             (
-                "req[idx] — dynamic bit-select",
-                serde_json::json!({"kind": "ElementSelect",
+                "req[idx] — dynamic bit-select, the 3-bit index always in range (minted)",
+                serde_json::json!({"kind": "ElementSelect", "type": "logic",
                 "selector": {"kind": "NamedValue", "symbol": "1 idx", "type": "logic[2:0]"}, "value": vec8("req")}),
-                Rejected("dynamic bit-select"),
+                Translates("mununu_x_"),
+            ),
+            (
+                "req[idx] — a 4-bit index can leave [7:0], where SV reads X",
+                serde_json::json!({"kind": "ElementSelect", "type": "logic",
+                "selector": {"kind": "NamedValue", "symbol": "1 idx", "type": "logic[3:0]"}, "value": vec8("req")}),
+                Rejected("outside"),
             ),
             (
                 "mem[0] — unpacked array content (mununu#514)",
@@ -5715,14 +6091,15 @@ mod tests {
                 Rejected("capped"),
             ),
             (
-                "^x — parity",
-                serde_json::json!({"kind": "UnaryOp", "op": "BitwiseXor", "operand": vec8("x")}),
-                Rejected("parity"),
+                "^x — parity (a minted reduction)",
+                serde_json::json!({"kind": "UnaryOp", "op": "BitwiseXor", "type": "logic", "operand": vec8("x")}),
+                Translates("mununu_x_"),
             ),
             (
-                "$rose(bus) on a vector",
-                call("$rose", vec![vec8("bus")]),
-                Rejected("1-bit"),
+                "$rose(bus) on a vector (its LSB, minted)",
+                serde_json::json!({"kind": "Call", "subroutine": "$rose", "type": "bit",
+                    "arguments": [vec8("bus")]}),
+                Translates("mununu_x_"),
             ),
             (
                 "$past(x, 0)",
@@ -5730,44 +6107,53 @@ mod tests {
                 Rejected(">= 1"),
             ),
             (
-                "cnt == cnt * 2 — non-linear arithmetic",
-                cmp(
-                    "Equality",
-                    vec8("cnt"),
-                    cmp("Multiply", vec8("cnt"), lit("2")),
-                ),
-                Rejected("arithmetic"),
+                "cnt == cnt * 2 — an 8-bit multiplication (minted)",
+                serde_json::json!({"kind": "BinaryOp", "op": "Equality", "type": "logic",
+                    "left": vec8("cnt"),
+                    "right": {"kind": "BinaryOp", "op": "Multiply", "type": "logic[7:0]",
+                        "left": vec8("cnt"),
+                        "right": {"kind": "Conversion", "type": "logic[7:0]", "constant": "8'd2",
+                                  "operand": lit("2")}}}),
+                Translates("mununu_x_"),
+            ),
+            (
+                "w * w over 64 bits — past the minted multiplication cap",
+                serde_json::json!({"kind": "BinaryOp", "op": "Inequality", "type": "logic",
+                    "left": {"kind": "BinaryOp", "op": "Multiply", "type": "logic[63:0]",
+                        "left": {"kind": "NamedValue", "symbol": "1 w", "type": "logic[63:0]"},
+                        "right": {"kind": "NamedValue", "symbol": "1 w", "type": "logic[63:0]"}},
+                    "right": {"kind": "Conversion", "type": "logic[63:0]", "constant": "64'd0",
+                              "operand": lit("0")}}),
+                Rejected("multiplication"),
             ),
         ];
         for (what, expr, want) in &atoms {
-            check(what, bool_expr(expr), want);
+            failures.extend(check(what, bool_expr(expr), want));
         }
 
-        fn check(what: &str, got: Result<String, String>, want: &Want) {
+        fn check(what: &str, got: Result<String, String>, want: &Want) -> Option<String> {
             match (want, got) {
                 (Translates(needle), Ok(f)) => {
-                    assert!(
-                        f.contains(needle),
-                        "{what}: expected `{needle}` in the lowering, got `{f}`"
-                    );
+                    if !f.contains(needle) {
+                        return Some(format!(
+                            "{what}: expected `{needle}` in the lowering, got `{f}`"
+                        ));
+                    }
                     crate::mu_calculus::parser::parse(&f)
-                        .unwrap_or_else(|e| panic!("{what}: lowering `{f}` does not parse: {e}"));
+                        .err()
+                        .map(|e| format!("{what}: lowering `{f}` does not parse: {e}"))
                 }
-                (Translates(needle), Err(e)) => {
-                    panic!("{what}: expected a lowering containing `{needle}`, got rejection: {e}")
-                }
-                (Rejected(needle), Err(e)) => {
-                    assert!(
-                        e.contains(needle),
-                        "{what}: expected the reason to name `{needle}`, got: {e}"
-                    );
-                }
-                (Rejected(_), Ok(f)) => {
-                    panic!(
-                        "{what}: expected a rejection, but it translated to `{f}` — update the module-doc table"
-                    )
-                }
+                (Translates(needle), Err(e)) => Some(format!(
+                    "{what}: expected a lowering containing `{needle}`, got rejection: {e}"
+                )),
+                (Rejected(needle), Err(e)) => (!e.contains(needle))
+                    .then(|| format!("{what}: expected the reason to name `{needle}`, got: {e}")),
+                (Rejected(_), Ok(f)) => Some(format!(
+                    "{what}: expected a rejection, but it translated to `{f}` — update the \
+                     module-doc table"
+                )),
             }
         }
+        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
     }
 }

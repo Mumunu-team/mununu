@@ -34,6 +34,7 @@ pub mod emit;
 pub mod input_state;
 pub mod kmts_lift;
 pub mod l2s_monitor;
+pub mod minted_expr;
 pub(crate) mod model_facts;
 pub mod mutate;
 pub mod native_bmc;

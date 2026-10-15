@@ -1008,6 +1008,8 @@ repo, so the lists below cannot drift from the code without a red test.
 | `a -> b`, `a <-> b`; `&`, `\|`, `^`, `~^`, `~` over **1-bit** operands | `!a \|\| b`, XNOR; the boolean connectives | 2026-10-15 (OpenTitan Phase 1) |
 | constants slang folds (`{W{1'b1}}`, `W - 1`, a converted literal) | the folded value; an X/Z constant stays refused | 2026-10-15 (OpenTitan Phase 1) |
 | a bare sequence as the whole property (`assert property (##1 a == b)`) | read as a consequent: it holds at a start iff it matches from there (IEEE 1800-2017 §16.12.2) | 2026-10-15 (OpenTitan Phase 1) |
+| **expressions**: `+ - *` (≤ 32 bits), unary `-`, `& \| ^ ~^ ~` over vectors, `<< >> >>>`, `?:`, concatenation and constant replication, signed and unsigned comparisons, reductions (`^x` included), `$past(expr, k)`, `$stable` / `$changed` / `$rose` / `$fell` of an expression (`$rose` / `$fell` read its LSB), `$countones` / `$onehot` / `$onehot0` of an expression, a dynamic bit-select whose index cannot leave the range | one **minted** combinational node `mununu_x_<hash>` per expression, built from slang's own types and conversions; the formula reads it as an atom (`(mununu_x_… == 3)` against a constant, so the predicate cube keeps a dimension) | 2026-10-15 (OpenTitan Phase 2) |
+| a call to a user function whose body is one `return` (OpenTitan's `min` / `max`) | inlined into the expression, arguments bound with assignment semantics | 2026-10-15 (OpenTitan Phase 3) |
 
 Each definite verdict transfers exactly as in the plain `|=>` case — the lowerings add boxes,
 flops and fixpoints, never an abstraction.
@@ -1044,9 +1046,30 @@ sub-sequence inside an antecedent, an antecedent past 64 alternatives, and `[*m:
 or inside a consequent chain; `s_eventually` or `##[m:$]` over a sequence; a `cover` of an
 eventuality; ranged `nexttime [k]` / `always [m:n]`; `weak()` of an unbounded sequence;
 `throughout` over an unbounded sequence; dynamic `sig[idx]` and array content `mem[i]`; indexed
-part-selects `x[i +: w]` (#565); `$countones` past 64 bits; `^x` parity; `$rose` / `$fell` on more
-than one bit; bitwise `& | ^ ~` over vectors (a value, not a boolean); non-linear arithmetic. Goto /
-`[=n]` / unbounded antecedents / PSL stay out.
+part-selects `x[i +: w]` (#565); `$countones` past 64 bits; `/ % **` and a multiplication wider
+than 32 bits; a dynamic select whose index can leave the declared range (SV reads X there, and the
+model has no X); an X/Z constant; a function body other than one `return`; `>>>` of a signed
+operand in an unsigned context (the standard fills with 0, Verilator / iverilog / yosys with the
+sign — the design's lift follows the tools, so neither reading is assumed). Goto / `[=n]` /
+unbounded antecedents / PSL stay out.
+
+**The expression compiler** (`adapter/slang/expr_ir.rs`, emitted by
+`adapter/btor2/minted_expr.rs`) takes over where the atom lowering refuses. It follows slang's
+per-node `type` and every `Conversion` — inside an expression an operand is extended by the
+expression's signedness (a signed `s` in an unsigned comparison is zero-extended), a function
+argument by its own — and refuses on any width it would have to guess. `$past(e)` reads every
+signal of `e` from its shadow. Three checks pin it: the BTOR2 it emits against a reference
+evaluator on every valuation of random expressions; the minted IR of real slang JSON (prim_count's
+`min` / `max` checks) against hand-computed values; and an **independent elaborator** —
+`e2e_minted_expressions_agree_with_yosys_elaboration` has sv2v + yosys elaborate random expressions
+into `assign r = E` while the assertion `r == E` is lowered by the compiler: every translated
+assertion must HOLD.
+
+**Comparison conversions are applied** (fixed 2026-10-15, mununu#702). The atom lowering compared
+the operands with slang's conversions stripped: `r == 8'(s)` read the raw 4-bit `s` (its sign
+extension dropped), and `x4 != 4'(20)` read `20` instead of the folded `4'd4` — both could report a
+false HOLDS. A value-changing conversion (a sign extension or a truncation) now sends the comparison
+to the expression compiler, and a literal is read after its conversions.
 A slice or a `$countones` of an **output port** resolves to the port's driver (fixed 2026-10-15: a
 slice of an output was never minted and its property skipped).
 

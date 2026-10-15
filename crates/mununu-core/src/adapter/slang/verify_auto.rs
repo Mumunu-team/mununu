@@ -3539,6 +3539,15 @@ pub(crate) fn prepare_model(
         .map(String::as_str)
         .collect();
     let btor2 = crate::adapter::btor2::augment_with_popcounts(&btor2, &popcount_refs)?;
+    // OpenTitan coverage, Phase 2 — each expression the formulas read as a minted atom
+    // (`mununu_x_<hash>`), AFTER the shadow / slice / count passes so its leaves resolve.
+    // Combinational; a design whose properties mint nothing is returned unchanged.
+    let expr_refs: Vec<(&str, &crate::adapter::btor2::minted_expr::ExprIr)> = extraction
+        .required_expressions
+        .iter()
+        .map(|m| (m.name.as_str(), &m.expr))
+        .collect();
+    let btor2 = crate::adapter::btor2::minted_expr::augment_with_expressions(&btor2, &expr_refs)?;
 
     // mununu#459 — snapshot the model's real primary-input names BEFORE any pinning
     // rewrites them to constants, so a user `--config-value` can be validated
@@ -10362,6 +10371,203 @@ module uart_tx(); endmodule"#;
             matches!(outcome("a_past_w"), Some(VerifyOutcome::Holds)),
             "the wire alias keeps deciding: {:?}",
             outcome("a_past_w")
+        );
+    }
+
+    /// OpenTitan coverage, Phases 2 + 3 — prim_count's saturating-counter checks, verbatim in
+    /// shape (`min` / `max` single-return helpers over 6-bit signed sums of `$past` expressions),
+    /// decide on a saturating up/down counter; the twins drop the saturation (or the signed cast)
+    /// and must be VIOLATED.
+    #[test]
+    #[ignore = "requires slang + sv2v + Yosys + z3 (use the mununu-sva docker image); run with --ignored"]
+    fn e2e_prim_count_saturation_checks_decide_with_twins() {
+        let design = "module pc_dut (input logic clk, input logic rst_n, input logic incr,\n\
+                      input logic decr, input logic [1:0] step, output logic [3:0] cnt);\n\
+                        function automatic logic signed [5:0] max(logic signed [5:0] a, logic signed [5:0] b);\n\
+                          return (a > b) ? a : b;\n\
+                        endfunction\n\
+                        function automatic logic signed [5:0] min(logic signed [5:0] a, logic signed [5:0] b);\n\
+                          return (a < b) ? a : b;\n\
+                        endfunction\n\
+                        logic [4:0] up;\n\
+                        assign up = cnt + step;\n\
+                        always_ff @(posedge clk or negedge rst_n) begin\n\
+                          if (!rst_n) cnt <= 4'd0;\n\
+                          else if (incr && !decr) cnt <= up[4] ? 4'd15 : up[3:0];\n\
+                          else if (decr && !incr) cnt <= (cnt < step) ? 4'd0 : cnt - step;\n\
+                        end\n\
+                        a_up: assert property (@(posedge clk) disable iff (!rst_n) incr && !decr |=>\n\
+                          cnt == min($past(cnt) + $past({2'b0, step}), {2'b0, {4{1'b1}}}));\n\
+                        a_up_twin: assert property (@(posedge clk) disable iff (!rst_n) incr && !decr |=>\n\
+                          cnt == $past(cnt) + $past(step));\n\
+                        a_dn: assert property (@(posedge clk) disable iff (!rst_n) decr && !incr |=>\n\
+                          cnt == max($past(signed'({2'b0, cnt})) - $past({2'b0, step}), '0));\n\
+                        a_dn_twin: assert property (@(posedge clk) disable iff (!rst_n) decr && !incr |=>\n\
+                          cnt == $past(cnt) - $past(step));\n\
+                        a_stable: assert property (@(posedge clk) disable iff (!rst_n) !incr && !decr |=> $stable(cnt));\n\
+                      endmodule\n";
+        let sources = vec![("pc_dut.sv".to_string(), design.to_string())];
+        let yopts = YosysOptions {
+            top: Some("pc_dut".to_string()),
+            use_sv2v: true,
+            ..Default::default()
+        };
+        let opts = VerifyAutoOptions {
+            portfolio: Some(PortfolioMode::Sequential),
+            ..Default::default()
+        };
+        let report = verify_auto(&sources, &yopts, &opts).expect("verify_auto runs");
+        for p in &report.properties {
+            eprintln!(
+                "  {} ({:?}): {:?}\n      {}",
+                p.name, p.label, p.outcome, p.formula
+            );
+        }
+        assert!(report.unsupported.is_empty(), "{:?}", report.unsupported);
+        let outcome = |l: &str| {
+            report
+                .properties
+                .iter()
+                .find(|p| p.label.as_deref() == Some(l))
+                .map(|p| p.outcome.clone())
+                .unwrap_or_else(|| panic!("no `{l}`"))
+        };
+        for l in ["a_up", "a_dn", "a_stable"] {
+            assert!(
+                matches!(outcome(l), VerifyOutcome::Holds),
+                "{l}: {:?}",
+                outcome(l)
+            );
+        }
+        for l in ["a_up_twin", "a_dn_twin"] {
+            assert!(
+                matches!(outcome(l), VerifyOutcome::Violated { .. }),
+                "{l}: {:?}",
+                outcome(l)
+            );
+        }
+    }
+
+    /// OpenTitan coverage, Phase 2 — the INDEPENDENT oracle for the expression compiler: sv2v +
+    /// yosys `read_verilog` elaborate each random SV expression `E` into `assign r_k = E` (and a registered copy
+    /// `q_k <= E`), and `assert property (r_k == E)` / `(##1 q_k == $past(E))` must HOLD under the
+    /// shipped default with `E` lowered by OUR compiler (minted into the model). Mixed widths
+    /// (1–6 bits) and signedness exercise slang's conversions, which both elaborators must agree
+    /// on; a disagreement is a VIOLATED with the expression named.
+    #[test]
+    #[ignore = "requires slang + sv2v + Yosys + z3 (use the mununu-sva docker image); run with --ignored"]
+    fn e2e_minted_expressions_agree_with_yosys_elaboration() {
+        // Deterministic generator over inputs a[3:0], b[5:0] (unsigned), s[3:0] (signed), c.
+        let mut seed: u64 = 0x0e7_2026_1015;
+        let mut rnd = |n: u64| {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) % n
+        };
+        fn random_expr(rnd: &mut dyn FnMut(u64) -> u64, depth: u32) -> String {
+            let leaves = [
+                "a", "b", "s", "c", "a[2:1]", "b[5]", "4'd9", "3'sd3", "6'h2a",
+            ];
+            if depth == 0 || rnd(4) == 0 {
+                return leaves[rnd(leaves.len() as u64) as usize].to_string();
+            }
+            let (x, y) = (random_expr(rnd, depth - 1), random_expr(rnd, depth - 1));
+            match rnd(20) {
+                0 => format!("({x} + {y})"),
+                1 => format!("({x} - {y})"),
+                2 => format!("({x} & {y})"),
+                3 => format!("({x} | {y})"),
+                4 => format!("({x} ^ {y})"),
+                5 => format!("(~{x})"),
+                6 => format!("({x} << a[1:0])"),
+                7 => format!("({x} >> {y})"),
+                8 => format!("(c ? {x} : {y})"),
+                9 => format!("{{{x}, {y}}}"),
+                10 => format!("({x} < {y})"),
+                11 => format!("($signed({x}) >>> 1)"),
+                12 => format!("(^{x})"),
+                13 => format!("(-{x})"),
+                14 => format!("({x} == {y})"),
+                15 => format!("(s >= $signed({x}))"),
+                16 => format!("$countones({x})"),
+                17 => format!("$onehot0({x})"),
+                18 => "b[a[1:0]]".to_string(),
+                _ => format!("({x} * 2'd3)"),
+            }
+        }
+        let exprs: Vec<String> = (0..72).map(|_| random_expr(&mut rnd, 3)).collect();
+        let mut body = String::new();
+        for (k, e) in exprs.iter().enumerate() {
+            // A 64-bit SIGNED sink: wide enough for every generated `E`, and signed so the
+            // assignment (which extends `E` by its own signedness) and the comparison (which
+            // extends both sides by the comparison's) mean the same thing. A size cast `N'(E)` is
+            // avoided — sv2v and slang disagree on its operand width. `$past`'s argument is
+            // SELF-determined (SV 11.8.1), so the registered copy holds `{E}` — a concatenation,
+            // self-determined too — and is compared with `$past({E})`.
+            body.push_str(&format!(
+                "  logic signed [63:0] r{k};\n  logic [63:0] q{k};\n  assign r{k} = {e};\n  \
+                 always_ff @(posedge clk) q{k} <= {{{e}}};\n  \
+                 eq{k}: assert property (@(posedge clk) r{k} == {e});\n  \
+                 pq{k}: assert property (@(posedge clk) ##1 q{k} == $past({{{e}}}));\n"
+            ));
+        }
+        let design = format!(
+            "module ex_dut (input logic clk, input logic [3:0] a, input logic [5:0] b,\n\
+             input logic signed [3:0] s, input logic c);\n{body}endmodule\n"
+        );
+        let sources = vec![("ex_dut.sv".to_string(), design.clone())];
+        let yopts = YosysOptions {
+            top: Some("ex_dut".to_string()),
+            // sv2v + `read_verilog`: an elaborator independent of slang (which typed the SVA
+            // side), and one that ignores the assertions the slang plugin refuses to lift.
+            use_sv2v: true,
+            ..Default::default()
+        };
+        let opts = VerifyAutoOptions {
+            portfolio: Some(PortfolioMode::Sequential),
+            ..Default::default()
+        };
+        let report = verify_auto(&sources, &yopts, &opts)
+            .unwrap_or_else(|e| panic!("{}\n{design}", e.message));
+        let mut bad = Vec::new();
+        for p in &report.properties {
+            let l = p.label.as_deref().unwrap_or("?");
+            let k: usize = l
+                .trim_start_matches(|c: char| c.is_alphabetic())
+                .parse()
+                .unwrap();
+            if !matches!(p.outcome, VerifyOutcome::Holds) {
+                bad.push(format!(
+                    "{l} `{}`: {:?}\n      {}",
+                    exprs[k], p.outcome, p.formula
+                ));
+            }
+        }
+        // A multiplication the comparison widens past 32 bits is refused by design (the cap), and
+        // so is `>>>` of a signed operand in an unsigned context (the tools disagree); every
+        // other refusal is a finding.
+        let by_design = |r: &str| {
+            r.contains("multiplication (the cap is 32 bits)") || r.contains("fill differently")
+        };
+        let capped = report
+            .unsupported
+            .iter()
+            .filter(|(_, r)| by_design(r))
+            .count();
+        for (n, r) in &report.unsupported {
+            if !by_design(r) {
+                bad.push(format!("unsupported {n}: {r}"));
+            }
+        }
+        assert!(bad.is_empty(), "\n{}", bad.join("\n"));
+        eprintln!(
+            "{} assertions HOLD, {capped} refused by design",
+            report.properties.len()
+        );
+        assert!(
+            report.properties.len() * 5 >= 2 * exprs.len() * 4,
+            "at least 80% of the assertions translate"
         );
     }
 
