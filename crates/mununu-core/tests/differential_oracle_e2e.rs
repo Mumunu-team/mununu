@@ -1933,3 +1933,147 @@ fn e2e_sv_mutate_off_by_one_flips_a_threshold_property() {
         flip.mutant
     );
 }
+
+/// OpenTitan's OWN SVA through `sv verify-auto` — a census, not a gate. For every corpus design it
+/// runs the vendored assertions as they are (no `@mununu_guarantee` annotations, the design's
+/// reset/config pins, the CLI's default `portfolio-sequential` engine) and prints one
+/// tab-separated `CENSUS` line per assertion: outcome class, detail (a ⊥ / skip reason or the
+/// unsupported reason) and the per-property translator notes (`two-state-fold`,
+/// `strong-sequence-reading`). Diffing two commits' output measures what an SVA-translator change
+/// moved on real upstream assertions — including how much of a gain is merely a `$isunknown` fold,
+/// which holds trivially and must not be counted as a decided check. SVA extraction reads the real
+/// OpenTitan macros. The lift reads them too — assertion-side logic (`fpv_err_present`, `err_d`)
+/// exists only then — unless that lift FAILS (`ASSERT_FPV_LINEAR_FSM`, the senders' sequence
+/// blocks): then it is retried on the design's own synthesis shim through
+/// `VerifyAutoOptions::lift_overrides`, and the design's `census:` line says `lift=shim`.
+#[test]
+#[ignore = "census: requires slang + sv2v + yosys (mununu-sva image); run with --ignored --nocapture"]
+fn e2e_opentitan_sva_census() {
+    use mununu_core::adapter::slang::verify_auto::PortfolioMode;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/verify");
+    for d in CORPUS {
+        let read = |file: &str| {
+            let p = root.join(d.dir).join("source").join(file);
+            std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()))
+        };
+        // The corpus's `prim_assert.sv` is the synthesis shim that expands every `ASSERT` macro
+        // to NOTHING; swap in the genuine OpenTitan macro set (vendored with the M.0 fixture), as
+        // `e2e_csrng_real_sva_verdict_breakdown` does, or the census sees no assertion at all.
+        let prim = root.join("m0_opentitan_prim_arbiter/source");
+        let mut sources: Vec<(String, String)> = d
+            .files
+            .iter()
+            .filter(|f| **f != "prim_assert.sv")
+            .map(|f| (f.to_string(), read(f)))
+            .collect();
+        for f in [
+            "prim_assert.sv",
+            "prim_assert_standard_macros.svh",
+            "prim_assert_sec_cm.svh",
+            "prim_flop_macros.sv",
+        ] {
+            if !sources.iter().any(|(n, _)| n == f) {
+                let text = std::fs::read_to_string(prim.join(f)).expect("M.0 macro file");
+                sources.push((f.to_string(), text));
+            }
+        }
+        let yopts = YosysOptions {
+            top: Some(d.top.to_string()),
+            use_sv2v: true,
+            additional_sources: sources[1..].to_vec(),
+            ..Default::default()
+        };
+        // The lift sees exactly the corpus's own sources: its `prim_assert.sv` shim in place of
+        // the real one, and the real macro files the corpus never carried blanked — staged, they
+        // would re-define the `ASSERT` macros the shim compiles out.
+        let lift_overrides: Vec<(String, String)> = sources
+            .iter()
+            .filter_map(|(name, _)| {
+                if d.files.contains(&name.as_str()) {
+                    (name == "prim_assert.sv").then(|| (name.clone(), read(name)))
+                } else {
+                    Some((name.clone(), String::new()))
+                }
+            })
+            .collect();
+        let opts = VerifyAutoOptions {
+            config_values: d.config.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
+            portfolio: Some(PortfolioMode::Sequential),
+            lift_overrides,
+            ..Default::default()
+        };
+        let t0 = std::time::Instant::now();
+        let real_lift = VerifyAutoOptions {
+            lift_overrides: Vec::new(),
+            ..opts.clone()
+        };
+        let mut lift = "real";
+        let run = match verify_auto(&sources, &yopts, &real_lift) {
+            Err(e) if e.message.contains("SV → BTOR2") => {
+                lift = "shim";
+                verify_auto(&sources, &yopts, &opts)
+            }
+            other => other,
+        };
+        let report = match run {
+            Ok(r) => r,
+            Err(e) => {
+                println!(
+                    "CENSUS\t{}\t-\t-\terror\t{}",
+                    d.name,
+                    e.message.replace(['\n', '\t'], " ")
+                );
+                continue;
+            }
+        };
+        for p in &report.properties {
+            let (class, detail) = match &p.outcome {
+                VerifyOutcome::Holds => ("holds", String::new()),
+                VerifyOutcome::Violated { .. } => ("violated", String::new()),
+                VerifyOutcome::Unknown { .. } => (
+                    "unknown",
+                    p.bottom_reason
+                        .as_ref()
+                        .map(|b| format!("{b:?}"))
+                        .unwrap_or_default(),
+                ),
+                VerifyOutcome::Skipped { reason } => ("skipped", reason.clone()),
+            };
+            let notes: Vec<&str> = report
+                .notes
+                .iter()
+                .filter(|n| n.property.as_deref() == Some(p.name.as_str()))
+                .filter(|n| n.kind == "two-state-fold" || n.kind == "strong-sequence-reading")
+                .map(|n| n.kind.as_str())
+                .collect();
+            println!(
+                "CENSUS\t{}\t{}\t{}\t{class}\t{}\t{}",
+                d.name,
+                p.name,
+                p.label.as_deref().unwrap_or("-"),
+                detail
+                    .replace(['\n', '\t'], " ")
+                    .chars()
+                    .take(160)
+                    .collect::<String>(),
+                notes.join(",")
+            );
+        }
+        for (name, reason) in &report.unsupported {
+            println!(
+                "CENSUS\t{}\t{name}\t-\tunsupported\t{}\t",
+                d.name,
+                reason
+                    .replace(['\n', '\t'], " ")
+                    .chars()
+                    .take(160)
+                    .collect::<String>()
+            );
+        }
+        eprintln!(
+            "census: {} in {:.1}s (lift={lift})",
+            d.name,
+            t0.elapsed().as_secs_f64()
+        );
+    }
+}

@@ -2137,6 +2137,15 @@ struct SvVerifyAutoArgs {
     /// the API as `no_input_state: true` and by `MUNUNU_NO_INPUT_STATE=1`.
     #[arg(long = "no-input-state")]
     no_input_state: bool,
+    /// Lift-only source override, `NAME=PATH` (repeatable): the file at PATH
+    /// REPLACES the source named NAME (the primary's or a `--source`'s file name)
+    /// for the SV → BTOR2 lift only; SVA extraction still reads the original. Use
+    /// it when the real assertion macros do not lift but must be extracted —
+    /// e.g. `--lift-override prim_assert.sv=shim/prim_assert.sv` beside the
+    /// real OpenTitan `prim_assert.sv`. A NAME that matches no source is an
+    /// error. Mirrored on the API as `lift_overrides: [{name, content}]`.
+    #[arg(long = "lift-override", value_name = "NAME=PATH")]
+    lift_override: Vec<String>,
     /// H.J.b — config concretization: pin a wide config input to a constant so
     /// comparisons against it become decidable (e.g. a timer threshold).
     /// Repeatable; format `SIGNAL=VALUE` (e.g. `--config-value
@@ -4286,6 +4295,21 @@ fn sv_verify_auto(args: SvVerifyAutoArgs) -> Result<(), String> {
             Some((name.trim().to_string(), val.trim().parse::<u64>().ok()?))
         })
         .collect();
+    // `--lift-override NAME=PATH` — a malformed entry or an unreadable PATH is a hard error;
+    // a NAME matching no source is refused inside `verify_auto`.
+    let lift_overrides: Vec<(String, String)> = args
+        .lift_override
+        .iter()
+        .map(|e| {
+            let (name, path) = e
+                .split_once('=')
+                .filter(|(n, p)| !n.trim().is_empty() && !p.trim().is_empty())
+                .ok_or_else(|| format!("malformed --lift-override '{e}': expected NAME=PATH"))?;
+            let body = std::fs::read_to_string(path.trim())
+                .map_err(|err| format!("Failed to read --lift-override '{e}': {err}"))?;
+            Ok((name.trim().to_string(), body))
+        })
+        .collect::<Result<_, String>>()?;
     let opts = VerifyAutoOptions {
         max_iterations: args.max_iterations,
         must_edge_inference,
@@ -4320,6 +4344,7 @@ fn sv_verify_auto(args: SvVerifyAutoArgs) -> Result<(), String> {
         antecedent_propagate: !args.no_antecedent_propagate,
         // mununu#656 — --no-input-state restores the input refusal.
         input_state: !args.no_input_state,
+        lift_overrides,
     };
 
     let report = verify_auto(&sources, &yopts, &opts)

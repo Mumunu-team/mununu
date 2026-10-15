@@ -307,7 +307,7 @@ mununu --quiet sv verify-auto design.sv --json | jq -r '.unsupported[] | "\(.nam
 mununu --quiet sv verify-auto design.sv --json | jq '[.notes[] | select(.level=="scope-caveat")]'
 ```
 
-`unsupported[]` carries mununu's own **reason** for every assertion it could not translate (`"unsupported binary op: BinaryAnd"`, `"dynamic bit-select …"`). An assertion that does not appear in `properties[]` is not being checked, and this is where it says why.
+`unsupported[]` carries mununu's own **reason** for every assertion it could not translate (`"unsupported binary op: Divide"`, `"dynamic bit-select …"`). An assertion that does not appear in `properties[]` is not being checked, and this is where it says why.
 
 ### Asserting the verdicts you claim: `--expect-*` (mununu#537)
 
@@ -351,6 +351,35 @@ mununu sv verify-auto dut.sv --source dut_sva.sv --top dut \
 There is deliberately **no** "tolerate undecided" flag. One was written downstream and deleted: it was introduced for three abstaining assertions that turned out to be **false rather than hard**, and the excuse made the abstention comfortable until they were restated decidably and all nine held. A ⊥ should keep feeling like "not checked".
 
 The API peer is an `expectations` object on the request (`all_hold`, `count`, `violated`, `named`), with the result returned as `expectations: { satisfied, failures[] }` — so an HTTP consumer learns *which* claim failed without parsing prose.
+
+### Real assertion macros, synthesis macros for the lift: `--lift-override`
+
+> Source of truth: [`VerifyAutoOptions::lift_overrides`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) + [`apply_lift_overrides`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) — surface: (CLI+API)
+
+`sv verify-auto` reads the sources twice: slang extracts the SVA, and sv2v / yosys lift the RTL to
+BTOR2. Some assertion macro sets do not survive the lift — OpenTitan's real `prim_assert.sv` expands
+`ASSERT_FPV_LINEAR_FSM` into a local-variable property and a `posedge !rst_ni` flop, which the
+lift rejects — while the design's synthesis shim (every `ASSERT` macro expands to nothing) lifts fine
+but leaves slang nothing to extract. `--lift-override NAME=PATH` replaces the source named `NAME`
+for the **lift only**; extraction still reads the original:
+
+```bash
+mununu sv verify-auto prim_esc_sender.sv --top prim_esc_sender --preprocess-sv2v \
+  --source prim_assert.sv --source prim_assert_standard_macros.svh \
+  --lift-override prim_assert.sv=shim/prim_assert.sv \
+  --lift-override prim_assert_standard_macros.svh=/dev/null
+```
+
+Blank every header the real macro set stages that the shim does not include (the `/dev/null`
+line): staged, it re-defines the `ASSERT` macros the shim compiles out and the lift fails as
+before. Prefer the real-macro lift when it succeeds — assertion-side logic (OpenTitan's
+`fpv_err_present`) exists only there, and a property reading it skips on a shim lift.
+
+`NAME` is a file name as staged — the primary's or a `--source`'s; on the API the primary is
+`top.sv` and the field is `lift_overrides: [{name, content}]`. A name that matches no source is an
+error (a typo must not silently lift the real file), and so is a name given twice. The override
+changes nothing about what is checked: the assertions are the real ones, and the model is the RTL
+with its assertion code compiled out, which is what the shim is for.
 
 ### Shrinking a parameterised design: `--param`
 
@@ -974,6 +1003,11 @@ repo, so the lists below cannot drift from the code without a red test.
 | `a \|-> ##[m:$] b`, `strong(##[m:$] b)` | `AG(a → AXᵐ AF b)`; an unmarked one carries a **`strong-sequence-reading`** note | 2026-10-15 |
 | `a \|-> b[*n:$]` (the whole consequent, n ≥ 1) | `b[*n]` — its first match, exact | 2026-10-15 |
 | `s_eventually [m:n] b`, `eventually [m:n] b`, `nexttime p`, `always p` | `b` within `[m, n]`; `AX p`; `AG p` | 2026-10-15 |
+| packed-struct members `s.f`, `s.f.g` (any member typedef'd or not) | the member's slice, first member most significant; bare in boolean position when 1-bit, `!= 0` otherwise; history calls shadow the whole struct | 2026-10-15 (OpenTitan Phase 1) |
+| element of a multi-dimensional packed array (`cnt_q[1]` of `logic [1:0][W-1:0]`) | the element's W-bit slice | 2026-10-15 (OpenTitan Phase 1) |
+| `a -> b`, `a <-> b`; `&`, `\|`, `^`, `~^`, `~` over **1-bit** operands | `!a \|\| b`, XNOR; the boolean connectives | 2026-10-15 (OpenTitan Phase 1) |
+| constants slang folds (`{W{1'b1}}`, `W - 1`, a converted literal) | the folded value; an X/Z constant stays refused | 2026-10-15 (OpenTitan Phase 1) |
+| a bare sequence as the whole property (`assert property (##1 a == b)`) | read as a consequent: it holds at a start iff it matches from there (IEEE 1800-2017 §16.12.2) | 2026-10-15 (OpenTitan Phase 1) |
 
 Each definite verdict transfers exactly as in the plain `|=>` case — the lowerings add boxes,
 flops and fixpoints, never an abstraction.
@@ -1009,11 +1043,19 @@ many match ends), goto `[->n]` / non-consecutive `[=n]` (a sequence automaton); 
 sub-sequence inside an antecedent, an antecedent past 64 alternatives, and `[*m:n]` as a consequent
 or inside a consequent chain; `s_eventually` or `##[m:$]` over a sequence; a `cover` of an
 eventuality; ranged `nexttime [k]` / `always [m:n]`; `weak()` of an unbounded sequence;
-`throughout` over an unbounded sequence; dynamic `sig[idx]`, array content `mem[i]` and an element of a multi-dimensional
-packed array; indexed part-selects `x[i +: w]` (#565); `$countones` past 64 bits; `^x` parity; `$rose` / `$fell`
-on more than one bit; non-linear arithmetic. Goto / `[=n]` / unbounded antecedents / PSL stay out.
+`throughout` over an unbounded sequence; dynamic `sig[idx]` and array content `mem[i]`; indexed
+part-selects `x[i +: w]` (#565); `$countones` past 64 bits; `^x` parity; `$rose` / `$fell` on more
+than one bit; bitwise `& | ^ ~` over vectors (a value, not a boolean); non-linear arithmetic. Goto /
+`[=n]` / unbounded antecedents / PSL stay out.
 A slice or a `$countones` of an **output port** resolves to the port's driver (fixed 2026-10-15: a
 slice of an output was never minted and its property skipped).
+
+**`$past` of an output or a named net samples that net** (fixed 2026-10-15, mununu#696). The shadow
+resolver used to walk an output's cone to the *nearest register* and shadow it, so `$past(o)` with
+`o = q | 8` read `$past(q)`: `q == 5 |=> $past(o) == 5` reported HOLDS although `o` is 13 there. The
+shadow now samples the output's driver; a plain wire to one register (`w = q`) still mirrors that
+register, init included. A combinational source starts from zero at cycle 0, as a primary input's
+shadow does ([`design/past-shadow-soundness.md`](design/past-shadow-soundness.md)).
 
 **The liveness rescue's reach.** Every liveness shape the translator emits reduces to the
 liveness-to-safety monitor, so it decides past the exact engine's reach and past a primary-input
