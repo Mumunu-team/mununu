@@ -382,6 +382,22 @@ pub fn decide_reach_portfolio_parallel_with_timeout(
     file: &Btor2File,
     subprocess_timeout: std::time::Duration,
 ) -> ReachOutcome {
+    decide_reach_portfolio_cancellable(file, subprocess_timeout, None)
+}
+
+/// [`decide_reach_portfolio_parallel_with_timeout`] with an EXTERNAL cancellation flag: when the
+/// caller sets `cancel`, every cancellable member bails exactly as it does when another member
+/// decides (the subprocess members kill their child after the grace, native / interpolation
+/// poll), and the outcome is whatever had been decided — usually `Unknown`. For a caller that
+/// races this portfolio against something else and must not return while it still runs
+/// (mununu#689: the justice parallel policy left it running on a detached thread). The exact
+/// member and the in-process SPACER fallback have no cancellation point and run to their own
+/// budgets.
+pub fn decide_reach_portfolio_cancellable(
+    file: &Btor2File,
+    subprocess_timeout: std::time::Duration,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> ReachOutcome {
     use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
     let content = emit_btor2(file);
     // Raising the wall budget signals "reach deeper" — so lift btormc's depth cap too.
@@ -408,7 +424,22 @@ pub fn decide_reach_portfolio_parallel_with_timeout(
     // always end `Unknown`.
     let decided = AtomicBool::new(false);
     let decided = &decided;
+    let finished = AtomicBool::new(false);
+    let finished = &finished;
     std::thread::scope(|scope| {
+        // Forward an external cancellation into `decided`, which every cancellable member
+        // already polls. Stops when the members are joined.
+        if let Some(cancel) = cancel {
+            scope.spawn(move || {
+                while !finished.load(Relaxed) {
+                    if cancel.load(Relaxed) {
+                        decided.store(true, Relaxed);
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+            });
+        }
         let btormc_h = scope.spawn(|| {
             let v = timed("btormc", || {
                 btormc::decide_via_btormc(file, btormc_kmax, subprocess_timeout, Some(decided)).ok()
@@ -465,6 +496,7 @@ pub fn decide_reach_portfolio_parallel_with_timeout(
         let btormc_v = btormc_h.join().unwrap_or(None);
         let pono_v = pono_h.join().unwrap_or(None);
         let interp = interp_h.join().unwrap_or(None);
+        finished.store(true, Relaxed);
         collect(exact, native, spacer, interp, btormc_v, pono_v)
     })
 }

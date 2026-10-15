@@ -449,6 +449,27 @@ pub fn response_liveness_rescue_under_fairness(
     fairness_atoms: &[Atom],
     reset_pinned: bool,
 ) -> Option<(LivenessVerdict, ReachOutcome)> {
+    response_liveness_rescue_under_fairness_cancellable(
+        design_btor2,
+        ante,
+        cons,
+        fairness_atoms,
+        reset_pinned,
+        None,
+    )
+}
+
+/// [`response_liveness_rescue_under_fairness`] with an external cancellation flag threaded into
+/// the reachability portfolio ([`crate::adapter::reach_portfolio::decide_reach_portfolio_cancellable`]).
+/// A cancelled run reports `Inconclusive`.
+pub fn response_liveness_rescue_under_fairness_cancellable(
+    design_btor2: &str,
+    ante: &Atom,
+    cons: &Atom,
+    fairness_atoms: &[Atom],
+    reset_pinned: bool,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> Option<(LivenessVerdict, ReachOutcome)> {
     let fair_tuples: Vec<(&str, CmpOp, u128)> = fairness_atoms
         .iter()
         .map(|a| (a.signal.as_str(), a.op, a.value))
@@ -462,7 +483,11 @@ pub fn response_liveness_rescue_under_fairness(
     )
     .ok()?;
     let file = parser::parse(&monitored).ok()?;
-    let outcome = decide_reach_portfolio(&file);
+    let outcome = crate::adapter::reach_portfolio::decide_reach_portfolio_cancellable(
+        &file,
+        crate::adapter::btormc::DEFAULT_TIMEOUT,
+        cancel,
+    );
     let verdict = match outcome.verdict {
         ReachVerdict::Unreachable => LivenessVerdict::Holds,
         ReachVerdict::Reachable => LivenessVerdict::Violated,

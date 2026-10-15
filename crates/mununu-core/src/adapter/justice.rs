@@ -29,7 +29,7 @@ use crate::adapter::btor2::parser;
 use crate::adapter::btor2::predicate_expr::CmpOp;
 use crate::adapter::btor2::symbolic_bitblast::{ExactSymbolicOptions, ExactVerdict, exact_ladder};
 use crate::adapter::liveness_rescue::{
-    Atom, LivenessVerdict, response_liveness_rescue_under_fairness,
+    Atom, LivenessVerdict, response_liveness_rescue_under_fairness_cancellable,
 };
 use crate::verdict::PropertyVerdict;
 use crate::verify::fairness::{Assumption, fair_eg};
@@ -252,14 +252,38 @@ fn exact_rung(
 }
 
 /// The l2s rung on one justice set.
-fn l2s_rung(named: &str, lits: &[String]) -> (PropertyVerdict, Vec<String>, Vec<String>) {
+/// Rung threads of the parallel policy still running (mununu#689). Incremented when a rung
+/// starts, decremented by [`RungGuard`] when it ends — on every path, including a panic.
+static LIVE_RUNGS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+struct RungGuard;
+
+impl RungGuard {
+    fn enter() -> Self {
+        LIVE_RUNGS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        RungGuard
+    }
+}
+
+impl Drop for RungGuard {
+    fn drop(&mut self) {
+        LIVE_RUNGS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+fn l2s_rung(
+    named: &str,
+    lits: &[String],
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> (PropertyVerdict, Vec<String>, Vec<String>) {
     let fair_atoms: Vec<Atom> = lits.iter().map(|n| atom(n)).collect();
-    match response_liveness_rescue_under_fairness(
+    match response_liveness_rescue_under_fairness_cancellable(
         named,
         &atom("mununu_true"),
         &atom("mununu_false"),
         &fair_atoms,
         false,
+        cancel,
     ) {
         Some((LivenessVerdict::Holds, outcome)) => {
             let mut by = vec!["l2s".to_string()];
@@ -314,57 +338,71 @@ pub fn verify_justice_with(
                 Err(e) => notes.push(e),
             },
             JusticeRung::L2s => {
-                let (v, by, mut n) = l2s_rung(&named, &lits);
+                let (v, by, mut n) = l2s_rung(&named, &lits, None);
                 verdict = v;
                 decided_by = by;
                 notes.append(&mut n);
             }
             JusticeRung::Both if opts.parallel_rungs => {
-                // Both rungs at once; the first definite verdict wins and the exact ladder is
-                // cancelled (the l2s portfolio's members run out on their own timeouts).
+                // Both rungs at once; the first definite verdict wins and the other is
+                // CANCELLED and JOINED before this returns. mununu#689: the rungs used to run on
+                // detached threads, so the loser — an l2s reachability portfolio inside z3 —
+                // was still running for ~100 ms after this returned (measured: 2 OS threads
+                // before the call, 8 right after). A process that exited in that window tore
+                // native state down under a live z3 thread; CI saw a SIGSEGV after the test had
+                // passed. Scoped threads make "returned" mean "nothing left running".
                 let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let (tx, rx) = std::sync::mpsc::channel();
-                {
-                    let tx = tx.clone();
-                    let named = named.clone();
-                    let lits = lits.clone();
-                    let cancel = cancel.clone();
-                    std::thread::spawn(move || {
-                        let r = exact_rung(&named, &lits, total, Some(cancel));
-                        let _ = tx.send(("exact", r));
-                    });
-                }
-                {
-                    let named = named.clone();
-                    let lits = lits.clone();
-                    std::thread::spawn(move || {
-                        let (v, by, n) = l2s_rung(&named, &lits);
-                        let r = if v == PropertyVerdict::Unknown {
-                            Err(n.join(" | "))
-                        } else {
-                            Ok((v, "l2s", by))
-                        };
-                        let _ = tx.send(("l2s", r));
-                    });
-                }
-                let mut pending = 2;
-                while pending > 0 {
-                    let Ok((who, r)) = rx.recv() else { break };
-                    pending -= 1;
-                    match r {
-                        Ok((v, stage, mut by)) => {
-                            verdict = v;
-                            if who == "exact" {
-                                decided_by.push(stage.to_string());
+                std::thread::scope(|scope| {
+                    let exact_h = {
+                        let tx = tx.clone();
+                        let cancel = cancel.clone();
+                        let (named, lits) = (&named, &lits);
+                        scope.spawn(move || {
+                            let _live = RungGuard::enter();
+                            let r = exact_rung(named, lits, total, Some(cancel));
+                            let _ = tx.send(("exact", r));
+                        })
+                    };
+                    let l2s_h = {
+                        let tx = tx.clone();
+                        let cancel = &*cancel;
+                        let (named, lits) = (&named, &lits);
+                        scope.spawn(move || {
+                            let _live = RungGuard::enter();
+                            let (v, by, n) = l2s_rung(named, lits, Some(cancel));
+                            let r = if v == PropertyVerdict::Unknown {
+                                Err(n.join(" | "))
                             } else {
-                                decided_by.append(&mut by);
+                                Ok((v, "l2s", by))
+                            };
+                            let _ = tx.send(("l2s", r));
+                        })
+                    };
+                    drop(tx);
+                    let mut pending = 2;
+                    while pending > 0 {
+                        let Ok((who, r)) = rx.recv() else { break };
+                        pending -= 1;
+                        match r {
+                            Ok((v, stage, mut by)) => {
+                                verdict = v;
+                                if who == "exact" {
+                                    decided_by.push(stage.to_string());
+                                } else {
+                                    decided_by.append(&mut by);
+                                }
+                                break;
                             }
-                            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-                            break;
+                            Err(e) => notes.push(format!("{who}: {e}")),
                         }
-                        Err(e) => notes.push(format!("{who}: {e}")),
                     }
-                }
+                    cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                    // Joined explicitly so a panicking rung abstains (as the detached thread
+                    // did) instead of re-panicking out of the scope.
+                    let _ = exact_h.join();
+                    let _ = l2s_h.join();
+                });
             }
             JusticeRung::Both => {
                 // exact ≤ EXACT_SLICE → l2s → exact with the remainder.
@@ -379,7 +417,7 @@ pub fn verify_justice_with(
                     Err(e) => notes.push(e),
                 }
                 if verdict == PropertyVerdict::Unknown {
-                    let (v, by, mut n) = l2s_rung(&named, &lits);
+                    let (v, by, mut n) = l2s_rung(&named, &lits, None);
                     verdict = v;
                     decided_by = by;
                     notes.append(&mut n);
@@ -591,8 +629,13 @@ mod policy_tests {
         assert_eq!(r[0].decided_by, vec![LADDER_STAGE_UNRESTRICTED.to_string()]);
     }
 
+    /// `LIVE_RUNGS` is process-wide; the tests that run the parallel policy hold this lock so
+    /// one test's rungs are never counted by another.
+    static PARALLEL_POLICY: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn the_parallel_policy_decides_and_cancels_the_other_rung() {
+        let _serial = PARALLEL_POLICY.lock().unwrap_or_else(|e| e.into_inner());
         let r = verify_justice_with(
             STUCK,
             &JusticeOptions {
@@ -604,6 +647,40 @@ mod policy_tests {
         .expect("runs");
         assert_eq!(r[0].verdict, PropertyVerdict::Holds, "{:?}", r[0]);
         assert!(!r[0].decided_by.is_empty(), "{:?}", r[0]);
+    }
+
+    /// REPRODUCER (mununu#689) — the parallel policy must not RETURN while a rung still runs.
+    ///
+    /// CI saw `the_parallel_policy_decides_and_cancels_the_other_rung` report `ok` and then die
+    /// with SIGSEGV. The rungs ran on detached threads, so the losing one — an l2s reachability
+    /// portfolio inside z3 — outlived the call: measured in the dev image, 2 OS threads before
+    /// the call, 8 right after it returned, back to the warm baseline only ~100 ms later. A
+    /// process exiting in that window tears native state down under a live z3 thread.
+    ///
+    /// `LIVE_RUNGS` counts rung threads still running; it must be 0 the instant the call returns.
+    /// With only the counter applied to the parent commit this fails (the losing rung is still
+    /// counted); with scoped, cancelled, joined rungs it passes. (A raw OS-thread count is not the
+    /// observable: idle OxiDD worker pools come and go with BDD managers and make it noisy.)
+    #[test]
+    fn the_parallel_policy_leaves_no_rung_running_after_it_returns() {
+        let _serial = PARALLEL_POLICY.lock().unwrap_or_else(|e| e.into_inner());
+        for design in [STUCK, COUNTER] {
+            let r = verify_justice_with(
+                design,
+                &JusticeOptions {
+                    rung: JusticeRung::Both,
+                    budget_ms: Some(60_000),
+                    parallel_rungs: true,
+                },
+            )
+            .expect("runs");
+            assert_ne!(r[0].verdict, PropertyVerdict::Unknown, "{:?}", r[0]);
+            assert_eq!(
+                LIVE_RUNGS.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "a rung is still running after the call returned"
+            );
+        }
     }
 
     #[test]
