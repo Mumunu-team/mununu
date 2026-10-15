@@ -65,6 +65,14 @@
       },
       "type": "array"
     },
+    "assumes": {
+      "default": null,
+      "description": "How SVA `assume` statements are treated: `\"precondition\"` (default — the guarantees are checked on the traces along which every applied assumption has held), `\"check\"` (each assumption is checked like an assertion and constrains nothing) or `\"ignore\"`. Mirrors the CLI's `--assumes`. Any other value is a 400.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "auto_stub_flops": {
       "default": null,
       "description": "Auto-inject behavioral stubs for cut flop primitives (e.g. OpenTitan's `prim_sparse_fsm_flop`) so the register survives the lift (default `true`). Set `false` to leave cut flops reported as black-boxed.",

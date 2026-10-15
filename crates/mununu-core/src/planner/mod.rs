@@ -985,6 +985,7 @@ mod tests {
         use crate::adapter::slang::translate::SvaKind;
         use crate::adapter::slang::verify_auto::PropertyVerdict;
         AutoVerifyReport {
+            assumptions: Default::default(),
             properties: vec![PropertyVerdict {
                 name: name.into(),
                 label: None,
@@ -1091,6 +1092,7 @@ mod tests {
 6 next 1 3 5
 ";
         let report = AutoVerifyReport {
+            assumptions: Default::default(),
             properties: vec![
                 PropertyVerdict {
                     name: "p_wide".into(),

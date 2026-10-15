@@ -1812,6 +1812,12 @@ pub struct SvVerifyAutoRequest {
     /// source is a 400. Mirrors the CLI's `--lift-override NAME=PATH`. Default empty.
     #[serde(default)]
     pub lift_overrides: Vec<FileContent>,
+    /// How SVA `assume` statements are treated: `"precondition"` (default — the guarantees are
+    /// checked on the traces along which every applied assumption has held), `"check"` (each
+    /// assumption is checked like an assertion and constrains nothing) or `"ignore"`. Mirrors the
+    /// CLI's `--assumes`. Any other value is a 400.
+    #[serde(default)]
+    pub assumes: Option<String>,
     /// mununu#537 — assert that this run produces the verdicts the caller claims. Omitted ⇒ no
     /// claim, and the response carries no `expectations` block.
     ///
@@ -1894,6 +1900,35 @@ pub struct SvVerifyAutoResponse {
     /// Present so a consumer learns **which** claim failed without parsing prose.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expectations: Option<ExpectationResultView>,
+    /// OpenTitan coverage, Phase 4 — what the run did with the design's SVA `assume`
+    /// statements. Omitted when the design has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assumptions: Option<AssumptionsView>,
+}
+
+/// What `sv verify-auto` did with the design's `assume` statements.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct AssumptionsView {
+    /// `precondition` (the default: guarantees are checked on the traces that satisfy the
+    /// applied assumptions), `check` (assumptions are checked like assertions) or `ignore`.
+    pub mode: String,
+    /// Assumptions applied as preconditions.
+    pub applied: Vec<String>,
+    /// Assumptions not applied, with the reason. The guarantees were checked without them.
+    pub unapplied: Vec<AssumptionNotAppliedView>,
+    /// Guarantees checked WITHOUT the assumptions (their formula could not be relativized).
+    pub unguarded: Vec<AssumptionNotAppliedView>,
+    /// `consistent`, `contradictory` (no trace satisfies every applied assumption: every HOLDS
+    /// is vacuous) or `unknown`; omitted when nothing was applied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consistency: Option<String>,
+}
+
+/// A named item with the reason it was not applied / not relativized.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct AssumptionNotAppliedView {
+    pub name: String,
+    pub reason: String,
 }
 
 /// mununu#537 — one unmet claim. `property` is absent for a run-level claim (the count).
@@ -2071,7 +2106,24 @@ impl From<&crate::adapter::slang::verify_auto::AutoVerifyReport> for SvVerifyAut
             })
             .collect();
 
+        let a = &report.assumptions;
+        let not_applied = |v: &[(String, String)]| -> Vec<AssumptionNotAppliedView> {
+            v.iter()
+                .map(|(name, reason)| AssumptionNotAppliedView {
+                    name: name.clone(),
+                    reason: reason.clone(),
+                })
+                .collect()
+        };
+        let assumptions = (!a.mode.is_empty()).then(|| AssumptionsView {
+            mode: a.mode.clone(),
+            applied: a.applied.clone(),
+            unapplied: not_applied(&a.unapplied),
+            unguarded: not_applied(&a.unguarded),
+            consistency: a.consistency.clone(),
+        });
         SvVerifyAutoResponse {
+            assumptions,
             properties,
             unsupported: report
                 .unsupported

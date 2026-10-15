@@ -697,6 +697,20 @@ enum EngineArg {
 /// selector for `mununu btor2 cegar`. Mirrors the values of
 /// [`mununu_core::adapter::btor2::kmts_lift::MustEdgeInference`].
 /// RTL front-end for the SV → BTOR2 lift (CLI mirror of
+/// How `sv verify-auto` treats SVA `assume` statements
+/// ([`mununu_core::adapter::slang::verify_auto::AssumeMode`]).
+#[derive(Clone, Debug, Copy, clap::ValueEnum, Default)]
+enum AssumesArg {
+    /// Apply each supported assumption as a precondition: the guarantees are checked on the
+    /// traces along which every assumption has held so far.
+    #[default]
+    Precondition,
+    /// Check each assumption like an assertion; it constrains nothing.
+    Check,
+    /// Drop the assumptions: neither checked nor applied.
+    Ignore,
+}
+
 /// [`mununu_core::adapter::yosys::SvFrontend`]).
 #[derive(Clone, Debug, Copy, clap::ValueEnum, Default)]
 enum SvFrontendArg {
@@ -2146,6 +2160,14 @@ struct SvVerifyAutoArgs {
     /// error. Mirrored on the API as `lift_overrides: [{name, content}]`.
     #[arg(long = "lift-override", value_name = "NAME=PATH")]
     lift_override: Vec<String>,
+    /// How SVA `assume` statements are treated. `precondition` (default): each
+    /// supported assumption (`assume property (B)`, `A |=> B` over booleans)
+    /// restricts the traces the guarantees are checked on; the report says
+    /// which were applied, which were not and whether they are consistent.
+    /// `check`: each assumption is checked like an assertion and constrains
+    /// nothing. `ignore`: dropped. Mirrored on the API as `assumes`.
+    #[arg(long = "assumes", value_enum, default_value_t = AssumesArg::Precondition)]
+    assumes: AssumesArg,
     /// H.J.b — config concretization: pin a wide config input to a constant so
     /// comparisons against it become decidable (e.g. a timer threshold).
     /// Repeatable; format `SIGNAL=VALUE` (e.g. `--config-value
@@ -4345,6 +4367,13 @@ fn sv_verify_auto(args: SvVerifyAutoArgs) -> Result<(), String> {
         // mununu#656 — --no-input-state restores the input refusal.
         input_state: !args.no_input_state,
         lift_overrides,
+        assume_mode: match args.assumes {
+            AssumesArg::Precondition => {
+                mununu_core::adapter::slang::verify_auto::AssumeMode::Precondition
+            }
+            AssumesArg::Check => mununu_core::adapter::slang::verify_auto::AssumeMode::Check,
+            AssumesArg::Ignore => mununu_core::adapter::slang::verify_auto::AssumeMode::Ignore,
+        },
     };
 
     let report = verify_auto(&sources, &yopts, &opts)

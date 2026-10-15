@@ -1159,7 +1159,13 @@ fn property_body(
                 }
             }
             let cond = bool_expr(cond_node)?;
-            Ok(format!("({cond} || {inner})"))
+            // mununu#705 — the disable guards every boolean block at the cycle it is evaluated,
+            // not only the attempt's first (`assume_guarantee::guard_with_disable`). A body this
+            // cannot guard keeps the first-cycle form: stronger than SVA, never weaker.
+            Ok(
+                super::assume_guarantee::guard_with_disable(&inner, &cond, false)
+                    .unwrap_or_else(|_| format!("({cond} || {inner})")),
+            )
         }
         // `a |-> <conseq>` / `a |=> <conseq>` — the antecedent is a boolean, a fixed-delay
         // `##` chain of booleans or a fixed `[*n]` repetition (XL.5, `antecedent_implies`);
@@ -5561,6 +5567,26 @@ mod tests {
             "{{4'b0, s}} is not 8'(s) for a negative s"
         );
         assert_eq!(at(0x05, 0x5), 1);
+    }
+
+    /// mununu#705 — a kept `disable iff (D)` guards EVERY cycle of the attempt, not only its
+    /// first: `disable iff (d) a |=> c` must excuse the consequent when `d` holds at ITS cycle.
+    /// The former lowering `(d || (!(a) || [] c))` demanded `c` even when `d` rose mid-attempt.
+    #[test]
+    fn a_kept_disable_guards_every_cycle_of_the_attempt() {
+        let sig = |n: &str| serde_json::json!({"kind": "NamedValue", "symbol": format!("1 {n}"), "type": "logic"});
+        // `d` is not a recognisable single reset (a plain input), so the guard is kept.
+        let spec = serde_json::json!({"kind": "DisableIff", "condition": sig("d"),
+            "expr": {"kind": "Binary", "op": "NonOverlappedImplication",
+                     "left": {"kind": "Simple", "expr": sig("a")},
+                     "right": {"kind": "Simple", "expr": sig("c")}}});
+        let opts = TranslateOptions { gate_reset: false };
+        let body = property_body(&spec, &opts, &mut Vec::new()).unwrap();
+        crate::mu_calculus::parser::parse(&body).unwrap();
+        assert!(
+            body.contains("[] (d || c)"),
+            "the consequent is excused by `d`: {body}"
+        );
     }
 
     /// A literal operand is read AFTER slang's conversions. `x4 != 4'(20)` — a size cast slang

@@ -1938,6 +1938,15 @@ fn sv_verify_auto_handler_impl(
         .collect();
     let (engine_symbolic, engine_exact, engine_portfolio) =
         crate::adapter::slang::verify_auto::engine_selection(request.engine.as_deref());
+    let assume_mode = match request.assumes.as_deref() {
+        None => crate::adapter::slang::verify_auto::AssumeMode::Precondition,
+        Some(m) => crate::adapter::slang::verify_auto::AssumeMode::parse(m).ok_or_else(|| {
+            ApiError::BadRequest {
+                message: format!("unknown assumes mode '{m}'"),
+                details: Some("expected \"precondition\", \"check\" or \"ignore\"".into()),
+            }
+        })?,
+    };
     let opts = VerifyAutoOptions {
         max_iterations: request.max_iterations.unwrap_or(16),
         must_edge_inference,
@@ -1971,6 +1980,7 @@ fn sv_verify_auto_handler_impl(
             .iter()
             .map(|f| (f.name.clone(), f.content.clone()))
             .collect(),
+        assume_mode,
     };
 
     let report = verify_auto(&sources, &yopts, &opts).map_err(|e| ApiError::BadRequest {
