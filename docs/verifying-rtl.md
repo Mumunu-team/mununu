@@ -960,6 +960,7 @@ repo, so the lists below cannot drift from the code without a red test.
 | `assert property (b)`, `a \|-> b`, `a \|=> b` | `AG b`, `AG(a → b)`, `AG(a → AX b)` | XL.1 |
 | consequents `##k`, `##[m:n]`, `b[*n]`, bounded `##` chains (`a \|-> b ##1 c ##2 d`) | nested `[]` — `a \|-> ##2 b` → `AG(a → AX² b)`; the range form is "b within [m,n]" | XL.4 / XL.5 |
 | **fixed-delay sequence antecedents** `(a ##1 b) \|-> c`, `a[*n] \|-> c` | `AG(a → AX(b → c))` | XL.5 |
+| **ranged antecedents** `(a ##[m:n] b) \|-> c`, `a[*m:n] \|-> c`, `a[*2] ##1 b \|-> c` | the consequent at **every** match end (IEEE 1800-2017 §16.12.7), a conjunction over the alternatives in negation-normal form; ≤ 64 alternatives, ≤ 64 cycles | 2026-10-15 |
 | `$past(x[, k])` any k ≥ 1, `$stable`, `$changed`, `$rose`, `$fell` | shadow registers `x__past`, `x__pastk` (added flops, exact) | XL.3 |
 | `$onehot` / `$onehot0` (≤ 32-bit), `x inside {v, [lo:hi], …}` (≤ 64 values) | value-set disjunctions over the comparison fragment | #204, XL.6 |
 | `sig[hi:lo]` slices, reductions `\|x` `&x`, `reg OP reg`, `reg == $past(reg) + k` | minted slice signals; relational / addend atoms | #565, XL.1c, H.D/H.G |
@@ -992,17 +993,24 @@ mean, and says so in a per-property `strong-sequence-reading` note. A VIOLATED i
 or `strong(…)` to state the intent and drop the note; an explicit `weak(##[1:$] b)` is refused,
 because it checks nothing.
 
+**Ranged antecedents are decided by the exact engine.** The lowering is ordinary nested-box
+safety, and the default `portfolio-sequential` engine decides it — VIOLATED with a witness when a
+later match end fails. With `--engine explicit` (the predicate cube alone) a HOLDS still decides,
+but a violation at a nested match end can stay ⊥: the cube's may-relation cannot witness it and no
+rescue lane reduces the shape. A semantic differential pins the lowering against a brute-force SVA
+matcher on random periodic waveforms (`ranged_antecedent_lowering_agrees_with_a_brute_force_matcher`).
+
 **Rejected, each with a named reason** (the second half of the same test): an unbounded gap
 anywhere but before the last element (`##[1:$] b ##1 c` is `F(b ∧ X c)`, which the box lowering
-would strengthen), `[*0:$]`, unbounded antecedents, goto `[->n]` / non-consecutive `[=n]`
-(a sequence automaton); **ranged** antecedents `(a ##[1:2] b) |-> c` and `[*m:n]` in an antecedent
-or as a consequent (multiple match ends); `s_eventually` or `##[m:$]` over a sequence; a `cover` of
-an eventuality; ranged `nexttime [k]` / `always [m:n]`; `weak()` of an unbounded sequence;
+would strengthen), `[*0…]`, unbounded antecedents (`##[m:$]` / `[*n:$]` before `|->` — unboundedly
+many match ends), goto `[->n]` / non-consecutive `[=n]` (a sequence automaton); a nested
+sub-sequence inside an antecedent, an antecedent past 64 alternatives, and `[*m:n]` as a consequent
+or inside a consequent chain; `s_eventually` or `##[m:$]` over a sequence; a `cover` of an
+eventuality; ranged `nexttime [k]` / `always [m:n]`; `weak()` of an unbounded sequence;
 `throughout`; dynamic `sig[idx]`, array content `mem[i]` and an element of a multi-dimensional
 packed array; indexed part-selects `x[i +: w]` (#565); `$countones`; `^x` parity; `$rose` / `$fell`
-on more than one bit; non-linear arithmetic. The next widening covers ranged antecedents by finite
-unrolling, `throughout` on bounded consequents and a minted `$countones`; goto / `[=n]` /
-unbounded antecedents / PSL stay out.
+on more than one bit; non-linear arithmetic. Still planned: `throughout` on bounded consequents and
+a minted `$countones`; goto / `[=n]` / unbounded antecedents / PSL stay out.
 
 **The liveness rescue's reach.** Every liveness shape the translator emits reduces to the
 liveness-to-safety monitor, so it decides past the exact engine's reach and past a primary-input
