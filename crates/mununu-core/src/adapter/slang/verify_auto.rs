@@ -625,6 +625,13 @@ fn must_edge_inference_label(mode: MustEdgeInference) -> &'static str {
 /// signals actually pinned in the BTOR2 are substituted, so the formula and the
 /// pinned model agree. Empty config ⇒ the string is returned unchanged. Pure +
 /// unit-tested.
+///
+/// A pinned signal in BOOLEAN position — an operand of `!`, `&&`, `||`, a bare
+/// conjunct, as OpenTitan's `disable iff (... || !rst_ni)` keeps it — becomes
+/// `true` / `false` (SV truthiness: non-zero is true), because a number is not a
+/// formula: `(!(1))` failed to parse and skipped the property. Value position is
+/// next to a comparison or an addend (`== != < <= > >= +`); the diamond `<>` is a
+/// modality, not a comparison.
 fn substitute_config_in_formula(formula: &str, config: &[(String, u64)]) -> String {
     if config.is_empty() {
         return formula.to_string();
@@ -643,7 +650,24 @@ fn substitute_config_in_formula(formula: &str, config: &[(String, u64)]) -> Stri
             }
             let tok: String = chars[start..i].iter().collect();
             match map.get(tok.as_str()) {
-                Some(v) => out.push_str(&v.to_string()),
+                Some(v) => {
+                    let after = chars[i..].iter().find(|c| !c.is_whitespace());
+                    let mut before = chars[..start].iter().rev().filter(|c| !c.is_whitespace());
+                    let (b1, b2) = (before.next(), before.next());
+                    let value_after = matches!(after, Some('=' | '!' | '<' | '>' | '+'))
+                        && !chars[i..]
+                            .iter()
+                            .collect::<String>()
+                            .trim_start()
+                            .starts_with("<>");
+                    let value_before = matches!(b1, Some('=' | '<' | '+'))
+                        || (b1 == Some(&'>') && b2 != Some(&'<'));
+                    if value_after || value_before {
+                        out.push_str(&v.to_string());
+                    } else {
+                        out.push_str(if *v != 0 { "true" } else { "false" });
+                    }
+                }
                 None => out.push_str(&tok),
             }
         } else {
@@ -8888,6 +8912,34 @@ module uart_tx(); endmodule"#;
             substitute_config_in_formula("cnt == cnt_past + 1 && x >= thr", &cfg2),
             "cnt == cnt_past + 1 && x >= 3"
         );
+    }
+
+    /// OpenTitan's `ASSERT` macro keeps `disable iff (... || !rst_ni)` as a compound guard, so a
+    /// pinned `rst_ni` sits in BOOLEAN position. It used to become `(!(1))`, which does not parse —
+    /// every such property skipped ("formula failed to parse"). It must read `true` / `false`
+    /// there, stay numeric beside a comparison or an addend, and leave the `<>` modality alone.
+    #[test]
+    fn a_pinned_signal_in_boolean_position_substitutes_a_boolean() {
+        let cfg = [("rst_ni".to_string(), 1u64), ("en".to_string(), 0u64)];
+        let f = "nu X. ((((err_d || fpv) || (!(rst_ni))) || [] (a == b)) && [] X)";
+        let out = substitute_config_in_formula(f, &cfg);
+        assert_eq!(
+            out,
+            "nu X. ((((err_d || fpv) || (!(true))) || [] (a == b)) && [] X)"
+        );
+        crate::mu_calculus::parser::parse(&out).expect("the substituted formula parses");
+        for (input, want) in [
+            ("(rst_ni && en)", "(true && false)"),
+            ("(x == rst_ni)", "(x == 1)"),
+            ("(rst_ni != x)", "(1 != x)"),
+            ("(x >= en)", "(x >= 0)"),
+            ("(y == x + rst_ni)", "(y == x + 1)"),
+            ("<> rst_ni", "<> true"),
+            ("(rst_ni || <> X)", "(true || <> X)"),
+            ("(rst_ni)", "(true)"),
+        ] {
+            assert_eq!(substitute_config_in_formula(input, &cfg), want, "{input}");
+        }
     }
 
     #[test]
