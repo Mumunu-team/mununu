@@ -160,6 +160,111 @@ pub fn emit_response_l2s_monitor_under_fairness(
     fairness_atoms: &[(&str, CmpOp, u128)],
     reset_pinned: bool,
 ) -> Result<String, AdapterError> {
+    emit_l2s_monitor(content, Some(ante), 0, cons, fairness_atoms, reset_pinned)
+}
+
+/// The l2s `bad` monitor with an OPTIONAL request atom and a request DELAY. `ante: None` is the
+/// antecedent-free `AG AF cons` (`assert property (s_eventually b)`): every cycle is a request,
+/// the `pending` latch's `a` input is the constant `1`.
+///
+/// `ante_delay = m > 0` decides `AG(a → AXᵐ AF cons)` (`a |=> s_eventually b` is m = 1,
+/// `a |-> ##[m:$] b` is m). The request is read through an m-latch delay line
+/// (`a_d₁ … a_dₘ`, init 0, `next(a_d₁) = a`, `next(a_dᵢ₊₁) = a_dᵢ`), and the monitor checks
+/// `AG(a_dₘ → AF cons)`. The two are equivalent: `a_dₘ` holds at a state exactly when `a` held m
+/// steps earlier ON THAT PATH, and `AG(a → AXᵐ ψ)` says every m-step successor of an `a` state
+/// satisfies ψ. The delay line is deterministic and does not feed the design, so a lasso over the
+/// ORIGINAL state cells (the only cells the snapshot compares, as before) is still a genuine path —
+/// the soundness and completeness arguments of [`emit_response_l2s_monitor_under_fairness`] carry
+/// over with `a` replaced by `a_dₘ`. Init 0 is right: no request precedes cycle 0.
+pub fn emit_l2s_monitor(
+    content: &str,
+    ante: Option<(&str, CmpOp, u128)>,
+    ante_delay: u32,
+    cons: (&str, CmpOp, u128),
+    fairness_atoms: &[(&str, CmpOp, u128)],
+    reset_pinned: bool,
+) -> Result<String, AdapterError> {
+    emit_l2s_core(
+        content,
+        ante_delay,
+        fairness_atoms,
+        reset_pinned,
+        |file, e, bool_sort| {
+            let a = match ante {
+                Some(ante) => emit_atom(file, e, bool_sort, ante, reset_pinned, "antecedent")?,
+                None => e.push(format!("one {bool_sort}")),
+            };
+            let b = emit_atom(file, e, bool_sort, cons, reset_pinned, "consequent")?;
+            Ok((a, b))
+        },
+    )
+}
+
+/// [`emit_l2s_monitor`] with the request and the grant given as BOOLEAN SUBTREES of `formula`
+/// (`And` / `Or` / `Not` / constants over register comparisons), compiled by the same
+/// [`compile_boolean_subtree`] the `|=>` safety monitor uses — so `(req && st == IDLE) |->
+/// s_eventually done` reduces, not only single-atom requests. Leaves resolve state cell → output
+/// → primary input → named internal net. `ante: None` is `AG AF cons`.
+///
+/// The soundness argument is unchanged: `a` and `b` are still functions of the CURRENT state and
+/// inputs, the snapshot still compares only the original state cells, and a cycle's inputs can be
+/// replayed, so a `b`-free loop over the original states is a genuine lasso on which `b` never
+/// holds.
+pub fn emit_l2s_monitor_from_formula(
+    content: &str,
+    formula: &crate::mu_calculus::Formula,
+    ante: Option<crate::mu_calculus::NodeId>,
+    ante_delay: u32,
+    cons: crate::mu_calculus::NodeId,
+    fairness_atoms: &[(&str, CmpOp, u128)],
+    reset_pinned: bool,
+) -> Result<String, AdapterError> {
+    use crate::adapter::btor2::bad_monitor::compile_boolean_subtree;
+    emit_l2s_core(
+        content,
+        ante_delay,
+        fairness_atoms,
+        reset_pinned,
+        |file, e, bool_sort| {
+            let a = match ante {
+                Some(id) => compile_boolean_subtree(
+                    formula,
+                    id,
+                    file,
+                    reset_pinned,
+                    bool_sort,
+                    &mut e.next,
+                    &mut e.lines,
+                )?,
+                None => e.push(format!("one {bool_sort}")),
+            };
+            let b = compile_boolean_subtree(
+                formula,
+                cons,
+                file,
+                reset_pinned,
+                bool_sort,
+                &mut e.next,
+                &mut e.lines,
+            )?;
+            Ok((a, b))
+        },
+    )
+}
+
+/// The l2s construction shared by both entry points; `request_grant` emits the 1-bit request and
+/// grant nodes and returns their NIDs.
+fn emit_l2s_core(
+    content: &str,
+    ante_delay: u32,
+    fairness_atoms: &[(&str, CmpOp, u128)],
+    reset_pinned: bool,
+    request_grant: impl FnOnce(
+        &crate::adapter::btor2::ast::Btor2File,
+        &mut Emit,
+        Nid,
+    ) -> Result<(Nid, Nid), AdapterError>,
+) -> Result<String, AdapterError> {
     let file = parser::parse(content).map_err(|mut e| {
         e.message = format!("adapter/btor2/l2s_monitor: {}", e.message);
         e
@@ -184,12 +289,20 @@ pub fn emit_response_l2s_monitor_under_fairness(
     let bool_sort = find_or_make_bool_sort(&file, &mut e.next, &mut prelude);
     e.lines.extend(prelude);
 
-    // Request / grant atoms.
-    let a = emit_atom(&file, &mut e, bool_sort, ante, reset_pinned, "antecedent")?;
-    let b = emit_atom(&file, &mut e, bool_sort, cons, reset_pinned, "consequent")?;
+    // Request / grant nodes.
+    let (a_now, b) = request_grant(&file, &mut e, bool_sort)?;
 
     // A fresh `zero` of the boolean sort for the 1-bit latch inits.
     let zero1 = e.push(format!("zero {bool_sort}"));
+
+    // The request delay line: `a_d₁ … a_dₘ`, init 0; the monitor reads `a_dₘ` (or `a` for m = 0).
+    let mut a = a_now;
+    for i in 1..=ante_delay {
+        let d = e.push(format!("state {bool_sort} mununu_l2s_req_d{i}"));
+        e.push(format!("init {bool_sort} {d} {zero1}"));
+        e.push(format!("next {bool_sort} {d} {a}"));
+        a = d;
+    }
 
     // pending: next = (pending || a) && !b.
     let pending = e.push(format!("state {bool_sort} mununu_l2s_pending"));

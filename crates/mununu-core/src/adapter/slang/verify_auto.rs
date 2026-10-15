@@ -472,6 +472,64 @@ pub struct VerificationNote {
     pub property: Option<String>,
 }
 
+/// One per-property `two-state-fold` scope note per construct the translator folded because the
+/// model is 2-state (today `$isunknown(x)` → `false`). A property that guards against X then holds
+/// trivially; the note keeps that verdict from reading as an X-propagation check.
+fn two_state_fold_notes(
+    folds: &[crate::adapter::slang::translate::TranslationCaveat],
+) -> Vec<VerificationNote> {
+    folds
+        .iter()
+        .map(|f| VerificationNote {
+            kind: "two-state-fold".into(),
+            level: NoteLevel::ScopeCaveat,
+            summary: format!(
+                "{}: `{}(…)` folded to `false` — the lifted model is 2-state",
+                f.assertion, f.construct
+            ),
+            detail:
+                "The design is lifted to a 2-state model (BTOR2 has no X or Z), so no value is \
+                     ever unknown and `$isunknown(x)` is `false` on every path. A property such as \
+                     `!$isunknown(x)` therefore holds trivially here: the verdict is exact for the \
+                     model but says nothing about X-propagation in the RTL, which needs a 4-state \
+                     simulator or an X-aware formal tool."
+                    .into(),
+            items: vec![f.construct.clone()],
+            property: Some(f.assertion.clone()),
+        })
+        .collect()
+}
+
+/// One per-property `strong-sequence-reading` scope note per unbounded `##[m:$]` the translator
+/// read as an eventuality. IEEE 1800-2017 makes a sequence in an `assert` weak by default, and a
+/// weak unbounded sequence is satisfied by every infinite trace; reading it strongly is what its
+/// author almost always means, but it is a choice, so the verdict says so.
+fn strong_reading_notes(
+    readings: &[crate::adapter::slang::translate::TranslationCaveat],
+) -> Vec<VerificationNote> {
+    readings
+        .iter()
+        .map(|r| VerificationNote {
+            kind: "strong-sequence-reading".into(),
+            level: NoteLevel::ScopeCaveat,
+            summary: format!(
+                "{}: `{}` read as an eventuality (strong), not with the standard's weak default",
+                r.assertion, r.construct
+            ),
+            detail: "IEEE 1800-2017 §16.12.2 makes a sequence in an `assert` weak by default, and a \
+                     weak unbounded sequence such as `a |-> ##[1:$] b` is satisfied by every infinite \
+                     trace — it can never fail. mununu reads it strongly, as `a |-> s_eventually b` \
+                     (AG(a → AF b)), which is what such an assertion is almost always written to \
+                     mean. A VIOLATED here is a path on which `b` never arrives; under the weak \
+                     reading the same assertion would pass vacuously. Write `s_eventually` or \
+                     `strong(…)` to make the intent explicit and remove this note."
+                .into(),
+            items: vec![r.construct.clone()],
+            property: Some(r.assertion.clone()),
+        })
+        .collect()
+}
+
 /// Result of an automated SVA verification run.
 #[derive(Debug, Clone, Default)]
 pub struct AutoVerifyReport {
@@ -4702,6 +4760,12 @@ pub(crate) fn verify_auto_impl(
     if let Some(n) = annotation_note(&ann_scan) {
         report.notes.push(n);
     }
+    report
+        .notes
+        .extend(two_state_fold_notes(&extraction.two_state_folds));
+    report
+        .notes
+        .extend(strong_reading_notes(&extraction.strong_readings));
     // mununu#490 — a process-memory ceiling was configured AND we hit it before
     // finishing every property. Surface the abstention as a first-class note so a
     // downstream gate sees "this run was truncated by the ceiling" rather than
@@ -4794,8 +4858,7 @@ pub(crate) fn escalate_bottom(
 ) -> Vec<VerificationNote> {
     use crate::adapter::btor2::predicate_expr::CmpOp;
     use crate::adapter::liveness_rescue::{
-        LivenessVerdict, reduce_ag_ef_target, reduce_response_af, response_liveness_rescue,
-        response_liveness_rescue_under_fairness,
+        LivenessVerdict, reduce_ag_ef_target, response_liveness_rescue_formula,
     };
     use crate::adapter::reach_rescue::RescueVerdict;
     use crate::adapter::recoverability::{
@@ -4906,11 +4969,9 @@ pub(crate) fn escalate_bottom(
                 // fairness ⇒ falls through to the plain rescue below, unchanged.
                 if opts.rescue_bottom_liveness
                     && !fairness_atoms.is_empty()
-                    && let Some(r) = reduce_response_af(&formula)
-                    && let Some((verdict, reach)) = response_liveness_rescue_under_fairness(
+                    && let Some((verdict, reach)) = response_liveness_rescue_formula(
                         design_btor2,
-                        &r.ante,
-                        &r.cons,
+                        &formula,
                         fairness_atoms,
                         reset_pinned,
                     )
@@ -4942,7 +5003,7 @@ pub(crate) fn escalate_bottom(
                 if !handled
                     && opts.rescue_bottom_liveness
                     && let Some((verdict, reach)) =
-                        response_liveness_rescue(design_btor2, &formula, reset_pinned)
+                        response_liveness_rescue_formula(design_btor2, &formula, &[], reset_pinned)
                 {
                     handled = true;
                     let engines = engines_of(&reach);
@@ -9336,16 +9397,16 @@ module uart_tx(); endmodule"#;
                 |n| {
                     // The minted signals: a slice of an input is input-dependent; a slice of a
                     // (shadow) state cell is state-only.
-                    if n == "wdata__bits7_0" {
+                    if n == "wdata__bits7_0" || n == "wdata__bits3_3" {
                         Some(CombKind::InputDependent)
-                    } else if n == "wdata__past__bits7_0" {
+                    } else if n == "wdata__past__bits7_0" || n == "st__bits1_1" {
                         Some(CombKind::StateOnly)
                     } else {
                         None
                     }
                 },
                 |n| {
-                    if n == "wdata__bits7_0" {
+                    if n == "wdata__bits7_0" || n == "wdata__bits3_3" {
                         vec!["wdata".to_string()]
                     } else {
                         Vec::new()
@@ -9353,11 +9414,18 @@ module uart_tx(); endmodule"#;
                 },
                 &[],
             );
+            // `Simple` must mean "seeded", not "nothing happened": a formula with atoms that
+            // seeds neither a dimension nor a derived label would otherwise pass as `Simple`.
+            let has_atoms = f.nodes().iter().any(|n| matches!(n, Node::Predicate(_)));
             if !s.unseedable.is_empty() {
                 Class::Unseedable
             } else if !s.compounds.is_empty() {
                 Class::Compound
             } else {
+                assert!(
+                    !has_atoms || !s.specs.is_empty() || !s.derived.is_empty(),
+                    "{formula}: atoms present but nothing seeded"
+                );
                 Class::Simple
             }
         };
@@ -9372,24 +9440,24 @@ module uart_tx(); endmodule"#;
             // input-dependent-combinational route (H.E), which is why `wdata[7:0] == 8'hA5`
             // DECIDES.
             ("nu X. ((wdata__bits7_0 == 165) && [] X)", Class::Simple),
+            // SVA-fragment widening (2026-10-15) — a constant bit-select is the 1-bit slice. In
+            // boolean position it is the BARE minted atom (of an input, then of a state cell),
+            // and compared it is the ordinary `slice == literal`.
+            ("nu X. (wdata__bits3_3 && [] X)", Class::Simple),
+            ("nu X. (st__bits1_1 && [] X)", Class::Simple),
+            ("nu X. ((st__bits1_1 == 1) && [] X)", Class::Simple),
+            // `!$isunknown(x)` folds to `false` in the 2-state model: no atom at all.
+            ("nu X. ((!(false)) && [] X)", Class::Simple),
         ];
 
-        // ⚠️ NOT in the table, and the omission is the honest part.
-        //
-        // mununu#565's boundary — `q == wdata__past__bits7_0`, a slice inside a RELATIONAL atom —
-        // classifies `Simple` here but was reported `Unseedable` by the e2e on a real lift. One of
-        // the two is wrong, and a row asserting either would be a test agreeing with an assumption
-        // rather than with the system.
-        //
-        // The difference has to be in an input this mock does not reproduce: `combinational_nid`
-        // is built from the real BTOR2's `Op` symbols, and whether the minted slice node is
-        // present, and whether its cone reaches an input, decide the classification. Settling it
-        // means dumping the model (`MUNUNU_SHADOW_BTOR2_DUMP`, mununu#552) and reading which
-        // symbols the lift actually carries — worth doing, because if the slice is NOT being
-        // minted on that path then #565's shadow half is not working the way its e2e implies.
-        //
-        // Tracked rather than guessed. The five rows above are the shapes whose classification IS
-        // a function of the mocked inputs, and they are the ones this tier can honestly pin.
+        // The mununu#565 discrepancy this comment used to record — `q == wdata__past__bits7_0`
+        // classified seedable here but `Unseedable` by the e2e — was the e2e that was wrong, and
+        // for the reason this comment suspected: on that path the slice was NOT minted, because
+        // `$past(wdata[7:0])` never requested `wdata`'s shadow (fixed 2026-10-15, reproducer
+        // `past_over_a_slice_requests_the_base_shadow`). With the shadow requested the e2e binds
+        // the atom too, so the two tiers agree; the relational row is still left out because its
+        // classification depends on `combinational_kind` of a real lift, which this mock only
+        // approximates.
 
         for (formula, want) in table {
             let got = classify(formula);
@@ -9983,6 +10051,202 @@ module uart_tx(); endmodule"#;
         assert_eq!(err.kind, AdapterErrorKind::ParseError);
     }
 
+    /// SVA-fragment widening (2026-10-15) — liveness SVA decides end to end, with the HOLDS /
+    /// VIOLATED twins that show it is not vacuous.
+    ///
+    /// `st` is a responder (idle -req-> 1 -> 2 -> idle); `st2` is its staller twin (idle -req-> 1
+    /// -> 3, stuck). The same assertion over each must split HOLDS / VIOLATED. `##[1:$]` carries
+    /// its `strong-sequence-reading` note; `s_eventually` and the other forms carry none.
+    #[test]
+    #[ignore = "requires slang + sv2v + Yosys + z3 (use the mununu-sva docker image); run with --ignored"]
+    fn e2e_sva_liveness_forms_decide_with_responder_and_staller_twins() {
+        let design = "module live_dut (input logic clk, input logic rst_n, input logic req,\n\
+                      output logic [1:0] st, output logic [1:0] st2);\n\
+                        always_ff @(posedge clk or negedge rst_n) begin\n\
+                          if (!rst_n) begin st <= 2'd0; st2 <= 2'd0; end\n\
+                          else begin\n\
+                            case (st)\n\
+                              2'd0: st <= req ? 2'd1 : 2'd0;\n\
+                              2'd1: st <= 2'd2;\n\
+                              default: st <= 2'd0;\n\
+                            endcase\n\
+                            case (st2)\n\
+                              2'd0: st2 <= req ? 2'd1 : 2'd0;\n\
+                              2'd1: st2 <= 2'd3;\n\
+                              default: st2 <= st2;\n\
+                            endcase\n\
+                          end\n\
+                        end\n\
+                        a_resp: assert property (@(posedge clk) disable iff (!rst_n)\n\
+                          req |-> s_eventually (st == 2'd2));\n\
+                        a_resp_stall: assert property (@(posedge clk) disable iff (!rst_n)\n\
+                          req |-> s_eventually (st2 == 2'd2));\n\
+                        a_home: assert property (@(posedge clk) disable iff (!rst_n)\n\
+                          s_eventually (st == 2'd0));\n\
+                        a_home_stall: assert property (@(posedge clk) disable iff (!rst_n)\n\
+                          s_eventually (st2 == 2'd0));\n\
+                        a_unbounded: assert property (@(posedge clk) disable iff (!rst_n)\n\
+                          (req && st == 2'd0) |-> ##[1:$] (st == 2'd2));\n\
+                        a_rep: assert property (@(posedge clk) disable iff (!rst_n)\n\
+                          (req && st == 2'd0) |=> (st == 2'd1)[*1:$]);\n\
+                        a_next: assert property (@(posedge clk) disable iff (!rst_n)\n\
+                          (st == 2'd1) |-> nexttime (st == 2'd2));\n\
+                      endmodule\n";
+        let sources = vec![("live_dut.sv".to_string(), design.to_string())];
+        let yopts = YosysOptions {
+            top: Some("live_dut".to_string()),
+            use_sv2v: true,
+            frontend: crate::adapter::yosys::SvFrontend::Slang,
+            ..Default::default()
+        };
+        let report = verify_auto(&sources, &yopts, &VerifyAutoOptions::default())
+            .expect("verify_auto runs on the liveness design");
+        for p in &report.properties {
+            eprintln!(
+                "  {} ({:?}): {:?}\n      {}",
+                p.name, p.label, p.outcome, p.formula
+            );
+        }
+        for n in &report.notes {
+            eprintln!("  note [{}] {:?}: {}", n.kind, n.property, n.summary);
+        }
+        assert!(
+            report.unsupported.is_empty(),
+            "all seven translate: {:?}",
+            report.unsupported
+        );
+        let by_label = |l: &str| {
+            report
+                .properties
+                .iter()
+                .find(|p| p.label.as_deref() == Some(l))
+                .unwrap_or_else(|| panic!("`{l}` missing from {:?}", report.properties))
+        };
+        for l in ["a_resp", "a_home", "a_unbounded", "a_rep", "a_next"] {
+            assert!(
+                matches!(by_label(l).outcome, VerifyOutcome::Holds),
+                "{l} must HOLD: {:?} / {}",
+                by_label(l).outcome,
+                by_label(l).formula
+            );
+        }
+        for l in ["a_resp_stall", "a_home_stall"] {
+            assert!(
+                matches!(by_label(l).outcome, VerifyOutcome::Violated { .. }),
+                "{l} must be VIOLATED (st2 sticks at 3): {:?} / {}",
+                by_label(l).outcome,
+                by_label(l).formula
+            );
+        }
+        let strong_notes: Vec<_> = report
+            .notes
+            .iter()
+            .filter(|n| n.kind == "strong-sequence-reading")
+            .map(|n| n.property.clone())
+            .collect();
+        assert_eq!(
+            strong_notes,
+            vec![Some(by_label("a_unbounded").name.clone())],
+            "exactly the `##[1:$]` assertion carries the strong-reading note"
+        );
+    }
+
+    /// SVA-fragment widening (2026-10-15) — constant bit-selects, slices of a NON-zero-based
+    /// vector, an edge of one bit and `!$isunknown` decide end to end on a real slang + yosys lift.
+    ///
+    /// `din` is declared `[15:8]`, so every index here is offset from the bit position yosys gives
+    /// it — the case the slice path got wrong before (an `[11:8]` slice was minted as BTOR2 bits
+    /// 11..8 of an 8-bit vector and never bound). The HOLDS / VIOLATED twins (`din[9]` vs `din[8]`)
+    /// are the control that the index mapping picks the RIGHT bit, not merely some bit.
+    #[test]
+    #[ignore = "requires slang + sv2v + Yosys + z3 (use the mununu-sva docker image); run with --ignored"]
+    fn e2e_bit_select_offset_slice_edge_and_two_state_fold_decide() {
+        let design = "module bs_dut (input logic clk, input logic rst_n, input logic we,\n\
+                      input logic [15:8] din, output logic [15:8] q, output logic flag);\n\
+                        always_ff @(posedge clk or negedge rst_n) begin\n\
+                          if (!rst_n) begin q <= '0; flag <= 1'b0; end\n\
+                          else if (we) begin q <= din; flag <= din[9]; end\n\
+                        end\n\
+                        a_bit: assert property (@(posedge clk) disable iff (!rst_n)\n\
+                          (we && din[9]) |=> flag);\n\
+                        a_bit_twin: assert property (@(posedge clk) disable iff (!rst_n)\n\
+                          (we && din[8]) |=> flag);\n\
+                        a_offset_slice: assert property (@(posedge clk) disable iff (!rst_n)\n\
+                          (we && (din[11:8] == 4'd5)) |=> (q[11:8] == 4'd5));\n\
+                        a_rose_bit: assert property (@(posedge clk) disable iff (!rst_n)\n\
+                          $rose(q[9]) |-> $past(we));\n\
+                        a_known: assert property (@(posedge clk) disable iff (!rst_n)\n\
+                          !$isunknown(q));\n\
+                      endmodule\n";
+        let sources = vec![("bs_dut.sv".to_string(), design.to_string())];
+        let yopts = YosysOptions {
+            top: Some("bs_dut".to_string()),
+            use_sv2v: true,
+            frontend: crate::adapter::yosys::SvFrontend::Slang,
+            ..Default::default()
+        };
+        let report = verify_auto(&sources, &yopts, &VerifyAutoOptions::default())
+            .expect("verify_auto runs on the bit-select design");
+        for p in &report.properties {
+            eprintln!(
+                "  {} ({:?}): {:?}\n      {}",
+                p.name, p.label, p.outcome, p.formula
+            );
+        }
+        for n in &report.notes {
+            eprintln!("  note [{}] {:?}: {}", n.kind, n.property, n.summary);
+        }
+        assert!(
+            report.unsupported.is_empty(),
+            "all five translate: {:?}",
+            report.unsupported
+        );
+        let by_label = |l: &str| {
+            report
+                .properties
+                .iter()
+                .find(|p| p.label.as_deref() == Some(l))
+                .unwrap_or_else(|| panic!("`{l}` missing from {:?}", report.properties))
+        };
+        for l in ["a_bit", "a_offset_slice", "a_rose_bit", "a_known"] {
+            assert!(
+                matches!(by_label(l).outcome, VerifyOutcome::Holds),
+                "{l} must HOLD: {:?} / {}",
+                by_label(l).outcome,
+                by_label(l).formula
+            );
+        }
+        assert!(
+            matches!(
+                by_label("a_bit_twin").outcome,
+                VerifyOutcome::Violated { .. }
+            ),
+            "the din[8] twin must be VIOLATED (flag latches din[9]): {:?}",
+            by_label("a_bit_twin").outcome
+        );
+        // The offset mapping, visible in the atom names: din[9] is bit 1, din[11:8] bits 3..0.
+        assert!(
+            by_label("a_bit").formula.contains("din__bits1_1"),
+            "{}",
+            by_label("a_bit").formula
+        );
+        assert!(by_label("a_offset_slice").formula.contains("q__bits3_0"));
+        // The 2-state fold is reported against the property it applies to.
+        let known = &by_label("a_known").name;
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|n| n.kind == "two-state-fold" && n.property.as_ref() == Some(known)),
+            "a two-state-fold note for {known}: {:?}",
+            report
+                .notes
+                .iter()
+                .map(|n| (&n.kind, &n.property))
+                .collect::<Vec<_>>()
+        );
+    }
+
     /// mununu#565 — a bit-slice comparison lifts, binds and DECIDES end to end.
     ///
     /// The refusal this replaces was `got left=Some("RangeSelect") right=Some("IntegerLiteral")`,
@@ -10053,29 +10317,26 @@ module uart_tx(); endmodule"#;
             by_name("slice_dut_sva_2").outcome
         );
 
-        // (3) THE BOUNDARY, measured rather than hoped for. `shadow_q == $past(wdata[7:0])` is a
-        // RELATIONAL atom, and `seed_from_formula` requires a compound's registers to be
-        // ALL-STATE (see its doc: "an input inside a compound is unseedable"). Slicing turns the
-        // `wdata__past` state cell into a combinational `Op`, so the compound stops being
-        // all-state and is skipped.
-        //
-        // That is a PRE-EXISTING rule about compounds, not something the slice support
-        // introduced — `shadow_q == $past(wdata)` (unsliced, both sides state) seeds fine. What
-        // matters for soundness is that it SKIPS WITH A NAMED REASON rather than guessing: the
-        // property is not silently dropped and not given a misleading verdict.
-        let skipped = &by_name("slice_dut_sva_1").outcome;
-        match skipped {
-            VerifyOutcome::Skipped { reason } => {
-                assert!(
-                    reason.contains("non-state") && reason.contains("wdata__past__bits7_0"),
-                    "the skip must NAME the atom and why it is unbindable: {reason}"
-                );
-            }
-            other => panic!(
-                "sva_1 is expected to skip on the all-state compound rule. If it now DECIDES, \
-                 that rule changed and this test should be tightened to assert the verdict: {other:?}"
-            ),
-        }
+        // (3) THE BOUNDARY, re-measured 2026-10-15. `shadow_q == $past(wdata[7:0])` used to SKIP,
+        // and this test explained it by the all-state compound rule. That explanation was wrong:
+        // `$past(wdata[7:0])` never requested `wdata`'s shadow (`collect_shadow_signals` resolved
+        // only a plain-signal argument), so `wdata__past` did not exist, the slice
+        // `wdata__past__bits7_0` had no base and was never minted, and the atom was unbound. With
+        // the shadow requested (`past_over_a_slice_requests_the_base_shadow`), the atom binds and
+        // the property reaches the engines. It is ⊥ today, not a verdict: a register-vs-register
+        // consequent behind `|=>` is the known leaf-shape gap of the safety-rescue lane. What
+        // this row pins is that it is NO LONGER skipped for an unbound atom, and is never given a
+        // verdict it did not earn (it is true on the design, so VIOLATED would be a bug).
+        let past_slice = &by_name("slice_dut_sva_1").outcome;
+        eprintln!("  slice_dut_sva_1 (`we |=> shadow_q == $past(wdata[7:0])`): {past_slice:?}");
+        assert!(
+            !matches!(past_slice, VerifyOutcome::Skipped { reason } if reason.contains("wdata__past__bits7_0")),
+            "the `$past`-of-a-slice atom must bind now: {past_slice:?}"
+        );
+        assert!(
+            !matches!(past_slice, VerifyOutcome::Violated { .. }),
+            "the property is true on the design; VIOLATED would be unsound: {past_slice:?}"
+        );
 
         // And the minted derived signals are the ones the naming contract promises, so a
         // counterexample or a seeded-predicate list names something a reader can find.

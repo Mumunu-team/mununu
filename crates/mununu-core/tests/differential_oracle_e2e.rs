@@ -632,8 +632,14 @@ enum Engine {
     /// The same explicit engine with the pre-#663 posture — may-only edges on every property
     /// (`must_edge_auto = false`, `must_edge_inference = Off`). On a μ under a ν its `◇` can
     /// never turn true, so an `AG EF` / `AG AF` is structurally ⊥: the gap `auto` closes and the
-    /// portfolio used to close for it.
+    /// portfolio used to close for it. The ⊥ ESCALATION is off too (`rescue_bottom_liveness =
+    /// false`): this variant measures the engine's own posture, and since 2026-10-15 the
+    /// liveness-to-safety rescue reduces the antecedent-free `AG AF b` and would close the gap
+    /// behind the engine's back (see `CegarMayOnlyRescued`).
     CegarMayOnly,
+    /// `CegarMayOnly` WITH the ⊥ escalation on (the default): what a user running the may-only
+    /// engine actually gets. The difference to `CegarMayOnly` is the liveness rescue's reach.
+    CegarMayOnlyRescued,
     /// Predicate-cube BDD CEGAR loop (`--engine symbolic`, `symbolic_engine=true`): the
     /// default-flip *candidate*. Same cube space + init-cube read as `Cegar`; differs only in
     /// the refinement loop (`symbolic_cegar_refine`).
@@ -651,7 +657,9 @@ impl Engine {
     /// Apply this engine's selection to a fresh option set.
     fn apply(self, opts: &mut VerifyAutoOptions) {
         let (sym, exact, portfolio) = match self {
-            Engine::Cegar | Engine::CegarMayOnly => (false, false, None),
+            Engine::Cegar | Engine::CegarMayOnly | Engine::CegarMayOnlyRescued => {
+                (false, false, None)
+            }
             Engine::SymbolicCube => (true, false, None),
             Engine::ExactSymbolic => (false, true, None),
             Engine::PortfolioSequential => (false, false, Some(PortfolioMode::Sequential)),
@@ -660,8 +668,11 @@ impl Engine {
         opts.symbolic_engine = sym;
         opts.exact_symbolic = exact;
         opts.portfolio = portfolio;
-        if matches!(self, Engine::CegarMayOnly) {
+        if matches!(self, Engine::CegarMayOnly | Engine::CegarMayOnlyRescued) {
             opts.must_edge_auto = false;
+        }
+        if matches!(self, Engine::CegarMayOnly) {
+            opts.rescue_bottom_liveness = false;
         }
     }
 }
@@ -1483,6 +1494,23 @@ fn e2e_portfolio_decides_what_the_default_engine_misses() {
          the portfolio — and since mununu#663 the `auto` policy — closes) — if it decides both, \
          this gate has no gap left to test on this design and must move to one that has; got \
          {cegar:?}"
+    );
+
+    // 1b. 2026-10-15 — the liveness rescue's reach on this design. With the ⊥ escalation on, the
+    //     may-only engine's run ends with the box form DECIDED, matching the exact oracle: the
+    //     antecedent-free `AG AF (bit_cnt_q == 0)` now reduces to the liveness-to-safety monitor
+    //     (`liveness_rescue::reduce_response_shape`). Measured, not assumed — if this regresses
+    //     to ⊥, the rescue lost a shape.
+    let rescued = run_corpus_verdicts(uart, Engine::CegarMayOnlyRescued);
+    let rescued_box = rescued
+        .iter()
+        .find(|(n, _, _)| *n == "(mu Y. ((bit_cnt_q == 0) or [] Y))")
+        .unwrap_or_else(|| panic!("box form missing from {rescued:?}"));
+    eprintln!("may-only Cegar + ⊥ escalation on uart_tx: {rescued:?}");
+    assert_eq!(
+        rescued_box.1,
+        LedgerVerdict::False,
+        "the liveness rescue decides AG AF (bit_cnt_q == 0) as the exact oracle does: {rescued:?}"
     );
 
     // 2. mununu#663 — the default engine (`auto`: per-target must on a μ under a ν) decides

@@ -27,7 +27,14 @@
 //! | `$past(x[, k])`, any k ≥ 1 | the shadow atom `x__past` / `x__pastk` (a value, used inside a comparison) | XL.3, k-deep later |
 //! | `$onehot(x)` / `$onehot0(x)` (≤ 32-bit) | the value set `x ∈ {1,2,4,…}` / `{0,1,2,4,…}` — one Or-of-Cmp atom | #204 |
 //! | `x inside {v, [lo:hi], …}` (≤ 64 values) | `(x == v) \|\| ((x >= lo) && (x <= hi)) \|\| …` | XL.6 |
-//! | `sig[hi:lo] OP k`, `$past(sig[hi:lo])` | the minted slice signal `sig__bitshi_lo` (`[hi:lo]` only) | mununu#565 |
+//! | `sig[hi:lo] OP k`, `$past(sig[hi:lo])` | the minted slice signal `sig__bitsM_L` (`[hi:lo]` only); `M`/`L` are the BIT POSITIONS yosys gives the indices (`sv_index_to_bit`), so `x[11:8]` of `logic [15:8] x` is `x__bits3_0` | mununu#565, positions 2026-10-15 |
+//! | `sig[k]` constant bit-select (packed, one dimension, typedef / struct resolved) | the 1-bit slice `sig__bitsP_P`; bare in boolean position | 2026-10-15 |
+//! | `$rose` / `$fell` / `$stable` / `$changed` over `sig[k]` or `sig[hi:lo]` | the slice now against the same slice of `sig__past` | 2026-10-15 |
+//! | `$isunknown(x)` | `false` — the model is 2-state; recorded per assertion (`two_state_folds` → a `two-state-fold` note) | 2026-10-15 |
+//! | `s_eventually b`, `a \|-> s_eventually b` | `AF b` = `mu Y. (b \|\| [] Y)`, the response shape the l2s rescue reduces | 2026-10-15 |
+//! | `##[m:$] b` (last gap, boolean operand), `strong(…)` of it | `[]ᵐ AF b`; an unmarked one is read strongly and recorded (`strong_readings`) | 2026-10-15 |
+//! | `b[*n:$]` as the whole consequent, n ≥ 1 | `b[*n]` (its first match; exact) | 2026-10-15 |
+//! | `s_eventually [m:n] b`, `eventually [m:n] b`, `nexttime p`, `always p` | `b` within `[m,n]`; `[] p`; `nu W. (p && [] W)` | 2026-10-15 |
 //! | `\|x`, `~\|x`, `&x`, `~&x` | `(x != 0)`, `(x == 0)`, `(x == 2^W-1)`, `(x != 2^W-1)` | XL.1c |
 //! | `reg OP reg`, `reg == $past(reg) + k` | relational / addend atoms (`CmpReg`, `CmpRegAddend`) | H.D / H.G |
 //! | `state_q == S_IDLE` (enum, `parameter`, `localparam`) | the elaborated integer | XL.6b, mununu#632 |
@@ -41,22 +48,24 @@
 //!
 //! | SVA | reason, in short |
 //! |---|---|
-//! | `##[m:$]`, `[*n:$]` (unbounded), also mid-chain | needs a sequence automaton — Tier-3b |
+//! | `##[m:$]` before anything but the LAST element, `[*0:$]`, unbounded in an antecedent | needs a sequence automaton — Tier-3b |
+//! | `weak(…)` of an unbounded sequence | satisfied by every infinite trace — checks nothing |
+//! | `s_eventually` / `##[m:$]` over a sequence, `cover` of an eventuality | operand must be a boolean / `EF` of an `AF` is not a reachability question |
+//! | `nexttime [k]`, `always [m:n]`, `s_nexttime` with a range | ranged forms not captured |
 //! | `[->n]` goto, `[=n]` non-consecutive repetition | needs a sequence automaton — Tier-3b |
 //! | `##[m:n]` or `[*m:n]` in an ANTECEDENT, `[*m:n]` as a consequent, repetition inside a chain element | multiple match ends / length composition — Tier-3b |
-//! | `s_eventually b`, `always b`, `eventually [m:n] b`, `nexttime b`, `strong(…)` / `weak(…)` | `Unary` / `StrongWeak` property kinds: unsupported property kind / consequent |
 //! | `e throughout S` | `Binary{Throughout}`: unsupported consequent |
-//! | `sig[k]` constant bit-select, `sig[idx]` dynamic, `mem[i]` array content | three distinct refusals (mununu#514) |
+//! | `sig[idx]` dynamic, `mem[i]` array content, `md[i]` of a multi-dimensional packed array, an enum- or otherwise opaque-typed base | distinct refusals (mununu#514; the index cannot be mapped to a bit) |
 //! | `x[i +: w]`, `x[i -: w]` | indexed part-select: slang gives base-and-WIDTH, declined rather than mis-sliced (mununu#565) |
-//! | `$isunknown`, `$countones`, other system calls | not in the Tier-1c/Tier-2 fragment |
+//! | `$countones`, other system calls | not in the Tier-1c/Tier-2 fragment |
 //! | `^x` / `~^x` | parity is not a propositional atom |
-//! | `$rose` / `$fell` on a vector, `$past(x, 0)`, `$stable(x, k)` | 1-bit only / depth ≥ 1 / single signal |
+//! | `$rose` / `$fell` on a vector or a multi-bit slice, `$past(x, 0)`, `$stable(x, k)` | 1 bit only / depth ≥ 1 / single signal |
 //! | `reg * k`, `reg + reg`, other arithmetic | only the constant addend is carried |
 //!
-//! Widening this fragment is the SVA-extraction-gaps plan (2026-10-14): constant bit-select,
-//! `$isunknown` as a 2-state fold, liveness SVA (`s_eventually`, `##[m:$]` consequents) through the
-//! l2s rescue, ranged antecedents by NNF unrolling, `throughout` on bounded consequents, and a
-//! minted `$countones`. Goto / `[=n]` and unbounded antecedents stay out.
+//! The first widening (2026-10-15) added the bit-select, the 2-state `$isunknown` fold and the
+//! liveness forms above. The second (planned) adds ranged antecedents by NNF unrolling,
+//! `throughout` on bounded consequents and a minted `$countones`. Goto / `[=n]` and unbounded
+//! antecedents stay out.
 //!
 //! **Tier-2 shadow registers (XL.3).** `$past`/`$stable`/`$changed`/`$rose`/
 //! `$fell` read a signal's *previous-cycle* value, encoded as an atom over a
@@ -203,6 +212,28 @@ pub struct TranslationReport {
     /// silently ignores an unknown name, so this is where an unapplicable `--param`
     /// is turned into a hard error rather than a silent drop. Deduped.
     pub parameter_names: Vec<String>,
+    /// Constructs folded to a constant because the lifted model is 2-state (`$isunknown(x)` is
+    /// `false`: there is no X or Z to observe). One entry per (assertion, construct); verify-auto
+    /// turns each into a per-property `two-state-fold` scope note, because a property that guards
+    /// against X then holds trivially and must not read as an X-propagation check.
+    pub two_state_folds: Vec<TranslationCaveat>,
+    /// Unbounded sequences (`##[m:$] b`) read with the STRONG semantics. IEEE 1800-2017 makes a
+    /// sequence in an `assert` weak by default, and a weak `##[1:$] b` is satisfied by every
+    /// infinite trace — vacuous. Authors who write it mean "eventually", so the translator reads it
+    /// as `s_eventually` and verify-auto says so per property (`strong-sequence-reading` note).
+    /// An explicit `strong(…)` or `s_eventually` is not recorded: it already says what it means.
+    pub strong_readings: Vec<TranslationCaveat>,
+}
+
+/// A per-assertion caveat the translator recorded: a 2-state fold
+/// ([`TranslationReport::two_state_folds`]) or a strong reading of an unbounded sequence
+/// ([`TranslationReport::strong_readings`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranslationCaveat {
+    /// The assertion's report name (`<module>_sva_<n>`), the same key a verdict carries.
+    pub assertion: String,
+    /// The SVA construct, e.g. `$isunknown` or `##[1:$]`.
+    pub construct: String,
 }
 
 /// Options controlling translation.
@@ -275,6 +306,8 @@ pub fn translate_ast_json_with_options(
         enum_values.entry(name).or_insert(value);
     }
 
+    let type_aliases = collect_type_aliases(&root);
+
     let mut report = TranslationReport::default();
     for (idx, (module, label, node)) in found.iter().enumerate() {
         let name = format!("{module}_sva_{idx}");
@@ -302,6 +335,10 @@ pub fn translate_ast_json_with_options(
         };
         // Rewrite enum-member references to integer literals before translating.
         let spec = resolve_enum_refs(spec, &enum_values);
+        // A typedef'd signal carries an opaque `type` (`"<addr> mod.byte_t"`); replace it by the
+        // alias target (`logic[7:0]`) so a bit-select or slice can map SV indices to bit
+        // positions (`sv_index_to_bit`).
+        let spec = resolve_type_aliases(&spec, &type_aliases);
         let spec = &spec;
         match translate_one(spec, kind, opts, &mut report.reset_signals) {
             Ok(formula) => {
@@ -315,6 +352,18 @@ pub fn translate_ast_json_with_options(
                 // (only for assertions that actually translated).
                 collect_shadow_signals(spec, &mut report.required_shadows);
                 collect_slice_signals(spec, &mut report.required_slices);
+                for construct in collect_two_state_folds(spec) {
+                    report.two_state_folds.push(TranslationCaveat {
+                        assertion: name.clone(),
+                        construct,
+                    });
+                }
+                for construct in collect_implicit_strong_readings(spec) {
+                    report.strong_readings.push(TranslationCaveat {
+                        assertion: name.clone(),
+                        construct,
+                    });
+                }
                 report.translated.push(TranslatedAssertion {
                     name,
                     label,
@@ -533,6 +582,75 @@ fn resolve_enum_refs(node: &Value, enums: &std::collections::HashMap<String, i64
     }
 }
 
+/// Every `TypeAlias` in the AST, `addr → target type string` (`"logic[7:0]"`,
+/// `"struct packed{…}…"`). slang writes a typedef'd signal's `type` as `"<addr> <scope>.<name>"`,
+/// which says nothing about its declared range; the alias node, found by address, does. Chains
+/// (an alias of an alias) are followed up to a fixed depth.
+fn collect_type_aliases(root: &Value) -> std::collections::HashMap<String, String> {
+    fn walk(n: &Value, out: &mut std::collections::HashMap<String, String>) {
+        match n {
+            Value::Object(m) => {
+                if m.get("kind").and_then(Value::as_str) == Some("TypeAlias")
+                    && let (Some(addr), Some(target)) = (
+                        m.get("addr").and_then(Value::as_u64),
+                        m.get("target").and_then(Value::as_str),
+                    )
+                {
+                    out.insert(addr.to_string(), target.to_string());
+                }
+                for v in m.values() {
+                    walk(v, out);
+                }
+            }
+            Value::Array(a) => a.iter().for_each(|v| walk(v, out)),
+            _ => {}
+        }
+    }
+    let mut out = std::collections::HashMap::new();
+    walk(root, &mut out);
+    out
+}
+
+/// The alias address a slang type string names, when it names one: `"9382… t.byte_t"` → `"9382…"`.
+fn alias_addr(ty: &str) -> Option<&str> {
+    let (addr, rest) = ty.split_once(' ')?;
+    (!rest.is_empty() && addr.chars().all(|c| c.is_ascii_digit())).then_some(addr)
+}
+
+/// Deep-clone `node`, replacing every alias-named `type` by the alias target (followed through
+/// up to 8 links). Any other field is untouched.
+fn resolve_type_aliases(
+    node: &Value,
+    aliases: &std::collections::HashMap<String, String>,
+) -> Value {
+    match node {
+        Value::Object(m) => {
+            let mut obj = serde_json::Map::new();
+            for (k, v) in m {
+                if k == "type"
+                    && let Some(ty) = v.as_str()
+                {
+                    let mut t = ty.to_string();
+                    for _ in 0..8 {
+                        match alias_addr(&t).and_then(|a| aliases.get(a)) {
+                            Some(target) => t = target.clone(),
+                            None => break,
+                        }
+                    }
+                    obj.insert(k.clone(), Value::String(t));
+                } else {
+                    obj.insert(k.clone(), resolve_type_aliases(v, aliases));
+                }
+            }
+            Value::Object(obj)
+        }
+        Value::Array(a) => {
+            Value::Array(a.iter().map(|v| resolve_type_aliases(v, aliases)).collect())
+        }
+        other => other.clone(),
+    }
+}
+
 /// XL.3: walk a (translated) assertion's spec and record every base signal a
 /// Tier-2 history call (`$past`/`$stable`/`$changed`/`$rose`/`$fell`) reads, so
 /// the BTOR2 augmentation knows which `__past` shadow flops to synthesise.
@@ -554,6 +672,14 @@ fn collect_slice_signals(node: &Value, out: &mut Vec<SliceSignal>) {
                     let depth = past_call_depth(node).unwrap_or(1);
                     push_slice(out, past_shadow_name(&base, depth), msb, lsb);
                 }
+            } else if is_edge_or_stability_call(node) {
+                // `$rose(sig[3])`, `$stable(sig[7:4])` read the slice NOW and the same slice of
+                // the depth-1 shadow; the walk below records the current-cycle one.
+                if let Some(arg) = past_call_arg_node(node)
+                    && let Some(Ok((base, msb, lsb))) = slice_ref(arg)
+                {
+                    push_slice(out, past_shadow_name(&base, 1), msb, lsb);
+                }
             } else if let Some(Ok((base, msb, lsb))) = slice_ref(node) {
                 push_slice(out, base, msb, lsb);
             }
@@ -568,6 +694,90 @@ fn collect_slice_signals(node: &Value, out: &mut Vec<SliceSignal>) {
         }
         _ => {}
     }
+}
+
+/// The 2-state folds an assertion's spec uses (deduped): today `$isunknown`.
+fn collect_two_state_folds(node: &Value) -> Vec<String> {
+    fn walk(n: &Value, out: &mut Vec<String>) {
+        match n {
+            Value::Object(m) => {
+                if m.get("kind").and_then(Value::as_str) == Some("Call")
+                    && let Some(sub @ "$isunknown") = m.get("subroutine").and_then(Value::as_str)
+                    && !out.iter().any(|c| c == sub)
+                {
+                    out.push(sub.to_string());
+                }
+                m.values().for_each(|v| walk(v, out));
+            }
+            Value::Array(a) => a.iter().for_each(|v| walk(v, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(node, &mut out);
+    out
+}
+
+/// The unbounded delays (`##[m:$]`) an assertion reads with the strong semantics WITHOUT the author
+/// having said `strong(…)` (deduped, spelled as written). Unbounded repetition `[*n:$]` is not
+/// recorded: as a consequent it collapses exactly to `[*n]` under either reading.
+fn collect_implicit_strong_readings(node: &Value) -> Vec<String> {
+    fn walk(n: &Value, under_strong: bool, out: &mut Vec<String>) {
+        match n {
+            Value::Object(m) => {
+                let kind = m.get("kind").and_then(Value::as_str);
+                let strong_here = under_strong
+                    || (kind == Some("StrongWeak")
+                        && m.get("strength").and_then(Value::as_str) == Some("strong"));
+                if kind == Some("SequenceConcat")
+                    && !strong_here
+                    && let Some(els) = m.get("elements").and_then(Value::as_array)
+                {
+                    for el in els {
+                        if el.get("max").and_then(Value::as_str) == Some("$") {
+                            let min = el.get("min").and_then(Value::as_u64).unwrap_or(0);
+                            let c = format!("##[{min}:$]");
+                            if !out.contains(&c) {
+                                out.push(c);
+                            }
+                        }
+                    }
+                }
+                m.values().for_each(|v| walk(v, strong_here, out));
+            }
+            Value::Array(a) => a.iter().for_each(|v| walk(v, under_strong, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(node, false, &mut out);
+    out
+}
+
+/// Does the spec use a liveness construct (an unbounded eventuality)? A `cover` of one is
+/// rejected: `cover` is `EF`, and `EF` of an `AF` is not what a cover author means.
+fn uses_eventuality(node: &Value) -> bool {
+    match node {
+        Value::Object(m) => {
+            let unary_ev = m.get("kind").and_then(Value::as_str) == Some("Unary")
+                && m.get("op").and_then(Value::as_str) == Some("SEventually");
+            unary_ev
+                || m.get("max").and_then(Value::as_str) == Some("$")
+                || m.values().any(uses_eventuality)
+        }
+        Value::Array(a) => a.iter().any(uses_eventuality),
+        _ => false,
+    }
+}
+
+/// `$stable` / `$changed` / `$rose` / `$fell` — the depth-1 history calls.
+fn is_edge_or_stability_call(expr: &Value) -> bool {
+    let expr = unwrap(expr);
+    expr.get("kind").and_then(Value::as_str) == Some("Call")
+        && matches!(
+            expr.get("subroutine").and_then(Value::as_str),
+            Some("$stable" | "$changed" | "$rose" | "$fell")
+        )
 }
 
 /// Dedupe helper for [`collect_slice_signals`].
@@ -593,11 +803,33 @@ fn collect_shadow_signals(node: &Value, out: &mut Vec<ShadowSignal>) {
                 // `$past` carries a depth; the others are depth-1. Record the
                 // DEEPEST depth per base (the shift chain covers all shallower).
                 let resolved = if sub == Some("$past") {
-                    past_call_arg(node).ok()
+                    past_call_arg(node)
+                        .ok()
+                        .map(|(b, w, d)| (b.to_string(), w, d))
                 } else {
-                    call_arg_signal(node).ok().map(|(b, w)| (b, w, 1))
+                    call_arg_signal(node)
+                        .ok()
+                        .map(|(b, w)| (b.to_string(), w, 1))
                 };
+                // A history call over a SLICE or a BIT (`$past(sig[7:0])`, `$rose(sig[3])`) reads
+                // `slice(<sig>__past…)`, so the WHOLE base needs its shadow. Without this the
+                // shadow was never requested, the minted slice had no base, and the atom never
+                // bound — the property skipped (found 2026-10-15).
+                let resolved = resolved.or_else(|| {
+                    let arg = past_call_arg_node(node)?;
+                    let Some(Ok((base, _, _))) = slice_ref(arg) else {
+                        return None;
+                    };
+                    let width = signal_width(unwrap(arg.get("value")?));
+                    let depth = if sub == Some("$past") {
+                        past_call_depth(node)?
+                    } else {
+                        1
+                    };
+                    Some((base, width, depth))
+                });
                 if let Some((base, width, depth)) = resolved {
+                    let base: &str = &base;
                     if let Some(existing) = out.iter_mut().find(|s| s.base == base) {
                         existing.depth = existing.depth.max(depth);
                     } else {
@@ -630,6 +862,14 @@ fn translate_one(
     opts: &TranslateOptions,
     reset_signals: &mut Vec<ResetSignal>,
 ) -> Result<String, String> {
+    if kind == SvaKind::Cover && uses_eventuality(spec) {
+        return Err(
+            "a `cover` of a liveness sequence (`s_eventually`, `##[m:$]`) is not \
+                    supported: `cover` reads as `EF`, and `EF` of an eventuality is not a \
+                    reachability question"
+                .to_string(),
+        );
+    }
     let body = property_body(spec, opts, reset_signals)?;
     let formula = match kind {
         SvaKind::Assert | SvaKind::Assume => format!("nu X. (({body}) && [] X)"),
@@ -763,6 +1003,10 @@ fn property_body(
             antecedent_implies(child(spec, "left")?, &conseq)
         }
         "Simple" => bool_expr(child(spec, "expr")?),
+        // `assert property (s_eventually b)`, `(always b)`, `(nexttime b)`, `strong(…)`: a
+        // temporal property with no antecedent — lowered exactly as a consequent would be, then
+        // checked at every cycle by the `nu X` wrapper (`s_eventually b` → `AG AF b`).
+        "Unary" | "StrongWeak" => consequent_expr(spec),
         other => Err(format!("unsupported property kind: {other}")),
     }
 }
@@ -793,8 +1037,46 @@ const MAX_SEQ_UNROLL: u64 = 64;
 /// *antecedents* (`a ##1 b |-> …` — handled in the `Binary` arm, still boolean).
 fn consequent_expr(spec: &Value) -> Result<String, String> {
     match spec.get("kind").and_then(Value::as_str) {
+        // `b[*n:$]` as the WHOLE consequent: its first match is `b[*n]`, and an implication's
+        // consequent holds iff some match exists, so it is exactly `b[*n]` (n ≥ 1). Inside a
+        // chain it is not, and `seq_leaf` keeps rejecting it there.
+        Some("Simple")
+            if spec
+                .get("repetition")
+                .and_then(|r| r.get("max"))
+                .and_then(Value::as_str)
+                == Some("$") =>
+        {
+            let rep = spec.get("repetition").expect("guarded");
+            let min = rep.get("min").and_then(Value::as_u64).unwrap_or(0);
+            if rep.get("kind").and_then(Value::as_str) != Some("Consecutive") || min == 0 {
+                return Err(format!(
+                    "unbounded repetition `[*{min}:$]` other than a consecutive `[*n:$]` with \
+                     n >= 1 needs a sequence automaton — Tier-3b"
+                ));
+            }
+            let fixed = serde_json::json!({"kind": "Consecutive", "min": min, "max": min});
+            lower_repetition(&bool_expr(child(spec, "expr")?)?, &fixed)
+        }
         // A boolean leaf, possibly with a consecutive repetition (`b[*n]`).
         Some("Simple") => seq_leaf(spec),
+        Some("Unary") => unary_temporal(spec),
+        // `strong(S)` / `weak(S)`. Over a BOUNDED sequence the two readings coincide on infinite
+        // traces. Over an unbounded one, `strong` is the eventuality; `weak` is satisfied by every
+        // infinite trace, and lowering it to `true` would be exact but would read as a proof.
+        Some("StrongWeak") => {
+            let inner = child(spec, "expr")?;
+            let weak = spec.get("strength").and_then(Value::as_str) == Some("weak");
+            if weak && uses_eventuality(inner) {
+                return Err(
+                    "`weak(…)` of an unbounded sequence is satisfied by every infinite \
+                            trace, so it checks nothing; write `strong(…)` or `s_eventually` \
+                            for the eventuality"
+                        .to_string(),
+                );
+            }
+            consequent_expr(inner)
+        }
         Some("SequenceConcat") => {
             let elements = spec
                 .get("elements")
@@ -810,6 +1092,11 @@ fn consequent_expr(spec: &Value) -> Result<String, String> {
                 let seq = el
                     .get("sequence")
                     .ok_or("sequence element without a `sequence`")?;
+                // `##[m:$] b` — b at some cycle ≥ m: `[]^m AF b` (the strong reading; see
+                // `TranslationReport::strong_readings`). Only over a boolean leaf.
+                if el.get("max").and_then(Value::as_str) == Some("$") {
+                    return unbounded_delay(el, seq);
+                }
                 let leaf = seq_leaf(seq)?;
                 let (min, max) = elem_delay(el)?;
                 Ok(delayed(&leaf, min, max))
@@ -819,7 +1106,25 @@ fn consequent_expr(spec: &Value) -> Result<String, String> {
                 // repetition / nested sub-sequence — those compose lengths, Tier-3b).
                 let mut leaves: Vec<String> = Vec::with_capacity(elements.len());
                 let mut delays: Vec<(u32, u32)> = Vec::with_capacity(elements.len());
-                for el in elements {
+                // An unbounded gap is lowered only before the LAST element: `b ##[1:$] c` is
+                // `b && [] AF c`. Anywhere else (`##[1:$] b ##1 c`) it is LTL `F(b ∧ X c)`, which
+                // `AF(b ∧ AX c)` would strengthen — rejected.
+                let last = elements.len() - 1;
+                let mut unbounded_tail: Option<String> = None;
+                for (i, el) in elements.iter().enumerate() {
+                    if el.get("max").and_then(Value::as_str) == Some("$") {
+                        if i != last || i == 0 {
+                            return Err("an unbounded `##[m:$]` gap is supported only before \
+                                 the last element of a chain (`b ##[1:$] c`); elsewhere it \
+                                 needs a sequence automaton — Tier-3b"
+                                .into());
+                        }
+                        let seq = el
+                            .get("sequence")
+                            .ok_or("sequence element without a `sequence`")?;
+                        unbounded_tail = Some(unbounded_delay(el, seq)?);
+                        continue;
+                    }
                     let seq = el
                         .get("sequence")
                         .ok_or("sequence element without a `sequence`")?;
@@ -835,9 +1140,13 @@ fn consequent_expr(spec: &Value) -> Result<String, String> {
                     delays.push(elem_delay(el)?);
                 }
                 // Fold from the last element: S(i) = leafᵢ && delayed(S(i+1), gapᵢ₊₁),
-                // then prefix the first element's own gap.
+                // then prefix the first element's own gap. An unbounded tail is already
+                // `[]^m AF c` and is conjoined to the element before it.
                 let n = leaves.len();
-                let mut s = leaves[n - 1].clone();
+                let mut s = match unbounded_tail {
+                    Some(tail) => format!("({} && {tail})", leaves[n - 1]),
+                    None => leaves[n - 1].clone(),
+                };
                 for i in (1..n).rev() {
                     let (min, max) = delays[i];
                     s = format!("({} && {})", leaves[i - 1], delayed(&s, min, max));
@@ -849,6 +1158,92 @@ fn consequent_expr(spec: &Value) -> Result<String, String> {
         other => Err(format!(
             "unsupported implication consequent (expected a boolean, a `##k`/`##[m:n]` \
              delayed boolean, a `b[*n]` repetition, or a `##` chain of booleans, got {other:?})"
+        )),
+    }
+}
+
+/// `μ Y. (f ∨ [] Y)` — `AF f`, "f on every path, eventually". The box recursion is the
+/// universal reading the l2s rescue reduces (`liveness_rescue::reduce_response_af`); the
+/// diamond would be `EF`, recoverability, a different property.
+fn eventually(f: &str) -> String {
+    format!("(mu Y. ({f} || [] Y))")
+}
+
+/// `##[m:$] b` over a boolean leaf → `[]^m AF b`.
+fn unbounded_delay(el: &Value, seq: &Value) -> Result<String, String> {
+    if seq.get("kind").and_then(Value::as_str) != Some("Simple") || seq.get("repetition").is_some()
+    {
+        return Err(
+            "`##[m:$]` is supported only before a boolean (`##[1:$] b`); a sequence \
+                    after an unbounded gap needs a sequence automaton — Tier-3b"
+                .into(),
+        );
+    }
+    let min = el.get("min").and_then(Value::as_u64).unwrap_or(0);
+    if min > MAX_SEQ_UNROLL {
+        return Err(format!(
+            "sequence delay {min} exceeds the unroll cap {MAX_SEQ_UNROLL}"
+        ));
+    }
+    Ok(nest_boxes(
+        min as u32,
+        &eventually(&bool_expr(child(seq, "expr")?)?),
+    ))
+}
+
+/// The unary temporal property operators slang serialises as `Unary{op}` (shapes captured from
+/// slang 11.0.448, `testdata/sva_fragment_forms.ast.json`):
+///
+/// - `s_eventually b` → `AF b`; `s_eventually [m:$] b` → `[]^m AF b`; `s_eventually [m:n] b` and
+///   the weak `eventually [m:n] b` → `b` within `[m, n]` (the two coincide on infinite traces).
+///   The operand must be a boolean.
+/// - `nexttime p` → `[] p`; `always p` → `ν W. (p ∧ [] W)`, `p` any consequent. Their ranged
+///   forms (`nexttime [k]`, `always [m:n]`) are not lowered — their shapes were not captured.
+fn unary_temporal(spec: &Value) -> Result<String, String> {
+    let op = spec.get("op").and_then(Value::as_str).unwrap_or("?");
+    let inner = child(spec, "expr")?;
+    let ranged = spec.get("min").is_some() || spec.get("max").is_some();
+    let boolean_operand = || -> Result<String, String> {
+        if inner.get("kind").and_then(Value::as_str) != Some("Simple")
+            || inner.get("repetition").is_some()
+        {
+            return Err(format!(
+                "`{op}` over a sequence or a property is not supported; its operand must be a \
+                 boolean"
+            ));
+        }
+        bool_expr(child(inner, "expr")?)
+    };
+    match op {
+        "SEventually" | "Eventually" if ranged => {
+            let min = spec.get("min").and_then(Value::as_u64).unwrap_or(0);
+            let b = boolean_operand()?;
+            match spec.get("max") {
+                Some(Value::String(d)) if d == "$" => {
+                    if min > MAX_SEQ_UNROLL {
+                        return Err(format!("eventuality delay {min} exceeds the unroll cap"));
+                    }
+                    Ok(nest_boxes(min as u32, &eventually(&b)))
+                }
+                Some(m) => {
+                    let max = m
+                        .as_u64()
+                        .ok_or_else(|| format!("`{op}` range bound is not a constant"))?;
+                    if max < min || max > MAX_SEQ_UNROLL {
+                        return Err(format!("`{op} [{min}:{max}]` range is out of bounds"));
+                    }
+                    Ok(delayed(&b, min as u32, max as u32))
+                }
+                None => Err(format!("`{op}` with a lower bound and no upper bound")),
+            }
+        }
+        "SEventually" => Ok(eventually(&boolean_operand()?)),
+        "NextTime" | "SNextTime" if !ranged => Ok(format!("[] {}", consequent_expr(inner)?)),
+        "Always" if !ranged => Ok(format!("(nu W. ({} && [] W))", consequent_expr(inner)?)),
+        "Eventually" => Err("unranged weak `eventually` is not legal SVA".to_string()),
+        other => Err(format!(
+            "unsupported temporal property operator `{other}`{}",
+            if ranged { " with a range" } else { "" }
         )),
     }
 }
@@ -1119,11 +1514,19 @@ fn bool_expr(expr: &Value) -> Result<String, String> {
                      property: the atom never reaches an engine. See mununu#514"
                 ))
             } else if sv_integer(selector).is_some() {
-                Err(
-                    "constant bit-select `sig[k]` needs a bit-level model predicate \
-                     (H.1 auto-seeding); not a Tier-1c atom"
-                        .to_string(),
-                )
+                // A constant bit-select is the 1-bit slice `[k:k]` (SVA-fragment widening,
+                // 2026-10-15): the same minted signal mununu#565 built for `[hi:lo]`, with the
+                // SV index mapped to the bit position yosys gives it (`sv_index_to_bit`). In
+                // boolean position it is the bare 1-bit atom.
+                match slice_ref(expr) {
+                    Some(Ok((b, pos, _))) => Ok(slice_atom_name(&b, pos, pos)),
+                    Some(Err(reason)) => Err(reason),
+                    None => Err(
+                        "constant bit-select over an expression that is not a plain \
+                                 packed signal"
+                            .to_string(),
+                    ),
+                }
             } else {
                 Err("dynamic bit-select `sig[idx]` (index is a signal) is not \
                      expressible as a propositional atom"
@@ -1139,6 +1542,36 @@ fn bool_expr(expr: &Value) -> Result<String, String> {
                 .and_then(Value::as_str)
                 .unwrap_or("?");
             match sub {
+                // Over a slice or a bit (`$stable(sig[7:4])`, `$rose(sig[3])`): the slice now
+                // against the same slice of the depth-1 shadow (`collect_shadow_signals` requests
+                // the base shadow, `collect_slice_signals` both slices).
+                "$stable" | "$changed" | "$rose" | "$fell"
+                    if past_call_arg_node(expr).and_then(slice_ref).is_some() =>
+                {
+                    let arg = past_call_arg_node(expr).expect("guarded");
+                    if expr
+                        .get("arguments")
+                        .and_then(Value::as_array)
+                        .is_some_and(|a| a.len() != 1)
+                    {
+                        return Err(format!(
+                            "{sub} with a depth argument; only `$past` carries a depth"
+                        ));
+                    }
+                    let (base, msb, lsb) = slice_ref(arg).expect("guarded")?;
+                    let now = slice_atom_name(&base, msb, lsb);
+                    let then = slice_atom_name(&past_shadow_name(&base, 1), msb, lsb);
+                    match sub {
+                        "$stable" => Ok(format!("({now} == {then})")),
+                        "$changed" => Ok(format!("({now} != {then})")),
+                        _ if msb != lsb => Err(format!(
+                            "{sub}(<{}-bit slice>) — Tier-2 supports {sub} on a single bit only",
+                            msb - lsb + 1
+                        )),
+                        "$rose" => Ok(format!("({now} && (!({then})))")),
+                        _ => Ok(format!("((!({now})) && {then})")),
+                    }
+                }
                 "$stable" | "$changed" => {
                     let (sig, _w) = call_arg_signal(expr)?;
                     let shadow = past_shadow_name(sig, 1);
@@ -1201,8 +1634,14 @@ fn bool_expr(expr: &Value) -> Result<String, String> {
                     }
                     Ok(format!("({})", terms.join(" || ")))
                 }
+                // SOUNDNESS: exact for the model, which is 2-state — the lift has no X or Z, so no
+                // value is unknown. The fold is recorded (`collect_two_state_folds`) and surfaced
+                // per property as a `two-state-fold` scope note: `!$isunknown(x)` then HOLDS
+                // trivially and says nothing about X-propagation in the RTL, which needs a 4-state
+                // simulator or an X-aware formal tool.
+                "$isunknown" => Ok("false".to_string()),
                 other => Err(format!(
-                    "system/subroutine call `{other}` (e.g. `$isunknown`, `$countones`) \
+                    "system/subroutine call `{other}` (e.g. `$countones`) \
                      is not in the Tier-1c/Tier-2 fragment"
                 )),
             }
@@ -1472,37 +1911,131 @@ fn slice_atom_name(base: &str, msb: u32, lsb: u32) -> String {
 /// is the honest option until the indexed arithmetic is written and tested.
 fn slice_ref(expr: &Value) -> Option<Result<(String, u32, u32), String>> {
     let expr = unwrap(expr);
-    if expr.get("kind").and_then(Value::as_str) != Some("RangeSelect") {
-        return None;
-    }
-    let kind = expr
-        .get("selectionKind")
-        .and_then(Value::as_str)
-        .unwrap_or("?");
-    if kind != "Simple" {
-        return Some(Err(format!(
-            "bit-slice with selectionKind `{kind}` (an indexed part-select such as `x[i +: w]` /              `x[i -: w]`) is not supported; slang reports its bounds as base-and-WIDTH rather than              high-and-low, so treating them as a range would silently slice the wrong bits. Use an              explicit `x[hi:lo]` range."
-        )));
-    }
-    // A slice of anything but a plain signal (a slice of a slice, of a concat, …) is out of scope.
-    let base = match expr.get("value").map(|v| signal_name(v)) {
-        Some(Ok(b)) => b.to_string(),
-        _ => {
-            return Some(Err(
-                "bit-slice base is not a plain signal reference; only `signal[hi:lo]` is supported"
-                    .to_string(),
-            ));
+    match expr.get("kind").and_then(Value::as_str) {
+        // A constant bit-select `sig[k]` on a packed one-dimensional vector is the 1-bit slice
+        // `[k:k]`. An unpacked array (`mem[i]`), a signal index or a multi-dimensional element are
+        // NOT this — `None`, so `bool_expr`'s `ElementSelect` arm gives their own reasons.
+        Some("ElementSelect") => {
+            let base = unwrap(expr.get("value")?);
+            if is_unpacked_array(base) {
+                return None;
+            }
+            let k = expr.get("selector").map(unwrap).and_then(sv_integer)?;
+            let name = match signal_name(base) {
+                Ok(b) => b.to_string(),
+                Err(_) => {
+                    return Some(Err(
+                        "bit-select base is not a plain signal reference; only `signal[k]` is \
+                         supported"
+                            .to_string(),
+                    ));
+                }
+            };
+            Some(sv_index_to_bit(base, k).map(|pos| (name, pos, pos)))
         }
-    };
-    let hi = expr.get("left").and_then(sv_integer);
-    let lo = expr.get("right").and_then(sv_integer);
-    match (hi, lo) {
-        (Some(hi), Some(lo)) if hi >= 0 && lo >= 0 && hi >= lo => {
-            Some(Ok((base, hi as u32, lo as u32)))
+        Some("RangeSelect") => {
+            let kind = expr
+                .get("selectionKind")
+                .and_then(Value::as_str)
+                .unwrap_or("?");
+            if kind != "Simple" {
+                return Some(Err(format!(
+                    "bit-slice with selectionKind `{kind}` (an indexed part-select such as `x[i +: w]` / \
+                     `x[i -: w]`) is not supported; slang reports its bounds as base-and-WIDTH rather than \
+                     high-and-low, so treating them as a range would silently slice the wrong bits. Use an \
+                     explicit `x[hi:lo]` range."
+                )));
+            }
+            // A slice of anything but a plain signal (a slice of a slice, of a concat, …) is out of
+            // scope.
+            let base_node = unwrap(expr.get("value")?);
+            let base = match signal_name(base_node) {
+                Ok(b) => b.to_string(),
+                Err(_) => {
+                    return Some(Err(
+                        "bit-slice base is not a plain signal reference; only `signal[hi:lo]` is \
+                         supported"
+                            .to_string(),
+                    ));
+                }
+            };
+            let (Some(l), Some(r)) = (
+                expr.get("left").and_then(sv_integer),
+                expr.get("right").and_then(sv_integer),
+            ) else {
+                return Some(Err(
+                    "bit-slice bounds must be constant integer literals".to_string()
+                ));
+            };
+            // The LEFT index is the slice's most significant bit in SV for either range direction,
+            // so `msb = pos(left)`, `lsb = pos(right)`; a slice written against the declared
+            // direction (`x[0:3]` of a `[7:0]` vector) is illegal SV and slang rejects it first.
+            Some(
+                match (sv_index_to_bit(base_node, l), sv_index_to_bit(base_node, r)) {
+                    (Ok(msb), Ok(lsb)) if msb >= lsb => Ok((base, msb, lsb)),
+                    (Ok(_), Ok(_)) => Err(format!(
+                        "bit-slice `{base}[{l}:{r}]` runs against the declared range of `{base}`"
+                    )),
+                    (Err(e), _) | (_, Err(e)) => Err(e),
+                },
+            )
         }
-        _ => Some(Err(
-            "bit-slice bounds must be non-negative constant integer literals with hi >= lo"
-                .to_string(),
+        _ => None,
+    }
+}
+
+/// Map an SV index of `base` to the BTOR2 bit position yosys gives it: bit 0 is the
+/// RIGHT-most declared index, whatever the range. `logic [15:8] x` → `x[9]` is bit 1;
+/// `logic [0:7] y` → `y[1]` is bit 6; a packed struct is `[W-1:0]` by definition.
+///
+/// Before 2026-10-15 the slice path passed SV indices through as bit positions. For a
+/// zero-based `[N-1:0]` vector that is the identity, which is why it went unnoticed; for any
+/// other range the minted slice read the wrong bits (`x[7:4]` of a `[11:4]` vector became BTOR2
+/// bits 7..4, i.e. SV bits 11..8) or fell off the end of the vector and never bound. A type this
+/// function cannot read declines, naming the type, rather than guess.
+fn sv_index_to_bit(base: &Value, idx: i64) -> Result<u32, String> {
+    let name = signal_name(base).unwrap_or("<expr>");
+    let ty = base.get("type").and_then(Value::as_str).unwrap_or("");
+    let ty = ty.trim();
+    if ty.starts_with("struct packed") || ty.starts_with("union packed") {
+        return u32::try_from(idx).map_err(|_| format!("negative bit index {idx} into `{name}`"));
+    }
+    // The packed dimensions are the `[a:b]` groups; an unpacked one (`$[…]`) never reaches here.
+    let dims: Vec<(i64, i64)> = ty
+        .match_indices('[')
+        .filter_map(|(i, _)| {
+            let close = ty[i..].find(']')? + i;
+            let (a, b) = ty[i + 1..close].split_once(':')?;
+            Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
+        })
+        .collect();
+    let head = ty.split('[').next().unwrap_or("").trim();
+    let scalar_kind = matches!(
+        head,
+        "logic" | "bit" | "reg" | "wire" | "logic signed" | "bit signed" | "reg signed"
+    );
+    match dims.as_slice() {
+        [(left, right)] if scalar_kind => {
+            let (hi, lo) = ((*left).max(*right), (*left).min(*right));
+            if idx < lo || idx > hi {
+                return Err(format!(
+                    "bit index {idx} is outside `{name}`'s declared range [{left}:{right}]"
+                ));
+            }
+            let pos = if left >= right {
+                idx - right
+            } else {
+                right - idx
+            };
+            Ok(pos as u32)
+        }
+        [_, _, ..] => Err(format!(
+            "`{name}` is a multi-dimensional packed array (`{ty}`); selecting one element yields a \
+             sub-vector, not a bit, and is not a supported atom"
+        )),
+        _ => Err(format!(
+            "cannot map an index of `{name}` to a bit position: its type `{ty}` is not a plain \
+             packed vector (`logic [hi:lo]`), a packed struct or a typedef of one"
         )),
     }
 }
@@ -1989,10 +2522,12 @@ mod tests {
                 "right": right
             })
         };
-        // Unbounded repetition `c[*1:$]` — slang encodes `$` as a string max.
+        // Unbounded repetition `c[*0:$]` — slang encodes `$` as a string max. (`c[*n:$]` with
+        // n >= 1 as the WHOLE consequent collapses exactly to `c[*n]` since 2026-10-15; the empty
+        // lower bound does not.)
         let unb = mk(serde_json::json!({
             "kind": "Simple", "expr": {"kind": "NamedValue", "symbol": "2 c"},
-            "repetition": {"kind": "Consecutive", "min": 1, "max": "$"}
+            "repetition": {"kind": "Consecutive", "min": 0, "max": "$"}
         }));
         let err = property_body(&unb, &TranslateOptions::default(), &mut Vec::new())
             .expect_err("unbounded must reject");
@@ -2197,19 +2732,15 @@ mod tests {
     /// case came to share its message. Pins the bit-select side so the array split below cannot
     /// swallow it.
     #[test]
-    fn xl1c_constant_bit_select_is_rejected_as_a_bit_select() {
-        // `vec[3]` on a PACKED vector — a genuine bit-select.
+    fn xl1c_constant_bit_select_is_the_one_bit_slice() {
+        // `vec[3]` on a PACKED vector — a genuine bit-select, since 2026-10-15 the 1-bit slice
+        // `vec[3:3]`, minted as `vec__bits3_3` (and, in boolean position, the bare atom).
         let expr = serde_json::json!({
             "kind": "ElementSelect",
             "selector": {"kind": "IntegerLiteral", "value": "3"},
             "value": {"kind": "NamedValue", "symbol": "1 vec", "type": "logic[7:0]"}
         });
-        let err = bool_expr(&expr).expect_err("constant bit-select must reject");
-        assert!(err.contains("constant bit-select"), "got: {err}");
-        assert!(
-            !err.contains("unpacked array"),
-            "a packed vector must NOT be reported as an array: {err}"
-        );
+        assert_eq!(bool_expr(&expr).unwrap(), "vec__bits3_3");
     }
 
     /// mununu#514 — an ARRAY read is not a bit-select. `mem` is `logic [14:0] mem [0:319]`,
@@ -2826,7 +3357,7 @@ mod tests {
     }
 
     #[test]
-    fn onehot_expands_isunknown_still_rejected() {
+    fn onehot_expands_countones_still_rejected() {
         // `$onehot0` / `$onehot` now expand to a value-set predicate; other system
         // calls (`$isunknown`, `$countones`, …) stay rejected.
         let oh0 = serde_json::json!({
@@ -2853,15 +3384,12 @@ mod tests {
             "onehot spans the powers of two: {s1}"
         );
 
-        let unk = serde_json::json!({
-            "kind": "Call", "subroutine": "$isunknown",
+        let cnt = serde_json::json!({
+            "kind": "Call", "subroutine": "$countones",
             "arguments": [{"kind": "NamedValue", "symbol": "1 gnt", "type": "logic[7:0]"}]
         });
-        let err = bool_expr(&unk).expect_err("$isunknown must reject");
-        assert!(
-            err.contains("$isunknown") || err.contains("not in the"),
-            "got: {err}"
-        );
+        let err = bool_expr(&cnt).expect_err("$countones must reject");
+        assert!(err.contains("$countones"), "got: {err}");
     }
 
     #[test]
@@ -3151,6 +3679,274 @@ mod tests {
         assert!(report.required_shadows.is_empty());
     }
 
+    /// REPRODUCER (2026-10-15) — a slice of a NON-zero-based vector read the wrong bits.
+    ///
+    /// yosys numbers a vector's bits from 0 at the right-most declared index whatever the range, so
+    /// `off[11:8]` of `logic [15:8] off` is BTOR2 bits 3..0. The slice path passed SV indices through
+    /// as bit positions, minting `slice … 11 8` — past the end of an 8-bit vector, so the slice was
+    /// never minted and the property skipped; on `logic [11:4]` the same mistake reads the WRONG bits
+    /// silently. Fails on the parent commit (`off__bits11_8`).
+    #[test]
+    fn slice_of_an_offset_vector_reads_the_yosys_bit_positions() {
+        let lit = |v: &str| serde_json::json!({"kind": "IntegerLiteral", "type": "int", "value": v, "constant": v});
+        let slice = |ty: &str, l: &str, r: &str| {
+            serde_json::json!({"kind": "RangeSelect", "selectionKind": "Simple",
+                "value": {"kind": "NamedValue", "symbol": "1 off", "type": ty},
+                "left": lit(l), "right": lit(r)})
+        };
+        let cmp = |sl: Value| serde_json::json!({"kind": "BinaryOp", "op": "Equality", "left": sl, "right": lit("3")});
+        assert_eq!(
+            bool_expr(&cmp(slice("logic[15:8]", "11", "8"))).unwrap(),
+            "(off__bits3_0 == 3)"
+        );
+        assert_eq!(
+            bool_expr(&cmp(slice("logic[11:4]", "7", "4"))).unwrap(),
+            "(off__bits3_0 == 3)"
+        );
+        // An ascending vector: `asc[0:3]` of `logic [0:7]` is its four MOST significant bits.
+        assert_eq!(
+            bool_expr(&cmp(slice("logic[0:7]", "0", "3"))).unwrap(),
+            "(off__bits7_4 == 3)"
+        );
+        // The zero-based case is unchanged — the identity, which is why this went unnoticed.
+        assert_eq!(
+            bool_expr(&cmp(slice("logic[31:0]", "7", "0"))).unwrap(),
+            "(off__bits7_0 == 3)"
+        );
+    }
+
+    /// REPRODUCER (2026-10-15) — `$past(sig[7:0])` never requested `sig`'s shadow.
+    ///
+    /// The atom is a slice OF the shadow (`sig__past__bits7_0`), but `collect_shadow_signals` only
+    /// resolved a plain-signal argument, so `sig__past` was never built, the slice had no base and
+    /// was never minted, and the property skipped. (This is the mechanism behind the
+    /// `q == wdata__past__bits7_0` discrepancy the verify-auto seam test records.) Fails on the
+    /// parent commit (no shadow recorded).
+    #[test]
+    fn past_over_a_slice_requests_the_base_shadow() {
+        let lit = |v: &str| serde_json::json!({"kind": "IntegerLiteral", "type": "int", "value": v, "constant": v});
+        let sl = serde_json::json!({"kind": "RangeSelect", "selectionKind": "Simple",
+            "value": {"kind": "NamedValue", "symbol": "1 sig", "type": "logic[15:0]"},
+            "left": lit("7"), "right": lit("0")});
+        let bit = serde_json::json!({"kind": "ElementSelect", "selector": lit("3"),
+            "value": {"kind": "NamedValue", "symbol": "2 flag", "type": "logic[7:0]"}});
+        let spec = serde_json::json!({"kind": "Simple", "expr": {"kind": "BinaryOp", "op": "LogicalAnd",
+            "left": {"kind": "BinaryOp", "op": "Equality",
+                     "left": {"kind": "NamedValue", "symbol": "3 q", "type": "logic[7:0]"},
+                     "right": {"kind": "Call", "subroutine": "$past", "arguments": [sl, lit("2")]}},
+            "right": {"kind": "Call", "subroutine": "$rose", "arguments": [bit]}}});
+        let mut shadows = Vec::new();
+        collect_shadow_signals(&spec, &mut shadows);
+        let sig = shadows
+            .iter()
+            .find(|s| s.base == "sig")
+            .expect("`sig` needs its shadow");
+        assert_eq!((sig.width, sig.depth), (16, 2));
+        let flag = shadows
+            .iter()
+            .find(|s| s.base == "flag")
+            .expect("`flag` needs its shadow");
+        assert_eq!((flag.width, flag.depth), (8, 1));
+        let mut slices = Vec::new();
+        collect_slice_signals(&spec, &mut slices);
+        let has = |b: &str, m: u32, l: u32| {
+            slices
+                .iter()
+                .any(|s| s.base == b && s.msb == m && s.lsb == l)
+        };
+        assert!(
+            has("sig__past2", 7, 0),
+            "the slice of the depth-2 shadow: {slices:?}"
+        );
+        assert!(
+            has("flag", 3, 3) && has("flag__past", 3, 3),
+            "both halves of $rose: {slices:?}"
+        );
+    }
+
+    /// The real slang 11.0.448 shapes (`testdata/sva_bit_select_forms.{sv,ast.json}`, captured in
+    /// the `mununu-sva` image): every bit-select and slice maps to the bit position yosys gives it,
+    /// a typedef resolves through its `TypeAlias`, a packed struct is zero-based, a
+    /// multi-dimensional element declines, and history calls over a bit request both halves.
+    #[test]
+    fn bit_selects_and_slices_map_sv_indices_to_yosys_bit_positions() {
+        let report = translate_ast_json(include_str!("testdata/sva_bit_select_forms.ast.json"))
+            .expect("the fixture parses");
+        let formulas: Vec<&str> = report
+            .translated
+            .iter()
+            .map(|t| t.formula.as_str())
+            .collect();
+        let has = |needle: &str| formulas.iter().any(|f| f.contains(needle));
+        for needle in [
+            "off__bits1_1",                          // off[9]       of logic[15:8]
+            "(off__bits3_0 == 3)",                   // off[11:8]    of logic[15:8]
+            "asc__bits6_6",                          // asc[1]       of logic[0:7]
+            "(asc__bits7_4 == 3)",                   // asc[0:3]     of logic[0:7]
+            "tb__bits2_2",                           // tb[2], typedef logic[7:0] byte_t
+            "ps__bits5_5",                           // ps[5], packed struct
+            "(v__bits3_3 && (!(v__past__bits3_3)))", // $rose(v[3])
+            "(v__bits7_4 == v__past__bits7_4)",      // $stable(v[7:4])
+            "(v__bits2_2 == v__past__bits2_2)",      // v[2] == $past(v[2])
+            "(!(false))",                            // !$isunknown(v)
+        ] {
+            assert!(has(needle), "no formula contains `{needle}`: {formulas:#?}");
+        }
+        assert_eq!(
+            report.unsupported.len(),
+            1,
+            "only md[1] declines: {:?}",
+            report.unsupported
+        );
+        assert!(
+            report.unsupported[0].reason.contains("multi-dimensional"),
+            "{:?}",
+            report.unsupported
+        );
+        assert!(
+            report
+                .required_shadows
+                .iter()
+                .any(|s| s.base == "v" && s.width == 8 && s.depth == 1)
+        );
+        assert_eq!(report.two_state_folds.len(), 1);
+        assert_eq!(report.two_state_folds[0].construct, "$isunknown");
+        assert!(
+            report
+                .translated
+                .iter()
+                .any(|t| t.name == report.two_state_folds[0].assertion)
+        );
+    }
+
+    /// **The contract between the SVA translator's liveness lowerings and the l2s rescue**
+    /// (`liveness_rescue::reduce_response_af`) — the seam the plan named, in the cheap tier.
+    ///
+    /// The exact engine decides every one of these directly when it can; the rescue is what
+    /// carries them past it (and past a primary-input atom, which the exact engine refuses). One
+    /// row per liveness shape the translator can emit: it must classify as `Liveness` and reduce
+    /// to `(has antecedent, delay)` — the delay being the boxes `|=>` and `##[m≥1:$]` put between
+    /// the implication and the `AF`, which the monitor reads through a request delay line. The
+    /// last row is the recorded gap: a relational eventuality the monitor's boolean compiler cannot bind.
+    #[test]
+    fn every_translator_liveness_shape_is_recognised_by_the_rescue() {
+        use crate::adapter::liveness_rescue::reduce_response_shape;
+        use crate::mu_calculus::PropertyClass;
+        let sig = |n: &str| serde_json::json!({"kind": "NamedValue", "symbol": format!("1 {n}"), "type": "logic"});
+        let simple = |e: Value| serde_json::json!({"kind": "Simple", "expr": e});
+        let imp = |op: &str, l: Value, r: Value| serde_json::json!({"kind": "Binary", "op": op, "left": l, "right": r});
+        let sev = |e: Value| serde_json::json!({"kind": "Unary", "op": "SEventually", "expr": e});
+        let unb = |min: u64| {
+            serde_json::json!({"kind": "SequenceConcat",
+            "elements": [{"sequence": simple(sig("b")), "min": min, "max": "$"}]})
+        };
+        let rel = serde_json::json!({"kind": "BinaryOp", "op": "Equality",
+            "left": {"kind": "NamedValue", "symbol": "1 x", "type": "logic[3:0]"},
+            "right": {"kind": "NamedValue", "symbol": "2 y", "type": "logic[3:0]"}});
+        let ov = "OverlappedImplication";
+        // (what, spec, Some((has_antecedent, delay)) if it must reduce, None for the recorded gap)
+        type Row<'a> = (&'a str, Value, Option<(bool, u32)>);
+        let rows: Vec<Row> = vec![
+            ("s_eventually b", sev(simple(sig("b"))), Some((false, 0))),
+            (
+                "a |-> s_eventually b",
+                imp(ov, simple(sig("a")), sev(simple(sig("b")))),
+                Some((true, 0)),
+            ),
+            (
+                "a |-> ##[0:$] b",
+                imp(ov, simple(sig("a")), unb(0)),
+                Some((true, 0)),
+            ),
+            (
+                "a |=> s_eventually b",
+                imp(
+                    "NonOverlappedImplication",
+                    simple(sig("a")),
+                    sev(simple(sig("b"))),
+                ),
+                Some((true, 1)),
+            ),
+            (
+                "a |-> ##[1:$] b",
+                imp(ov, simple(sig("a")), unb(1)),
+                Some((true, 1)),
+            ),
+            (
+                "a |-> ##[3:$] b",
+                imp(ov, simple(sig("a")), unb(3)),
+                Some((true, 3)),
+            ),
+            (
+                "(a && b) |-> s_eventually !c — compound request and grant",
+                imp(
+                    ov,
+                    simple(serde_json::json!({"kind": "BinaryOp", "op": "LogicalAnd",
+                        "left": sig("a"), "right": sig("b")})),
+                    sev(simple(
+                        serde_json::json!({"kind": "UnaryOp", "op": "LogicalNot",
+                        "operand": sig("c")}),
+                    )),
+                ),
+                Some((true, 0)),
+            ),
+            // The recorded gap: the monitor compiles register comparisons, not `reg == reg`.
+            (
+                "a |-> s_eventually (x == y)",
+                imp(ov, simple(sig("a")), sev(simple(rel))),
+                None,
+            ),
+        ];
+        for (what, spec, want) in rows {
+            let f = translate_one(
+                &spec,
+                SvaKind::Assert,
+                &TranslateOptions::default(),
+                &mut Vec::new(),
+            )
+            .unwrap_or_else(|e| panic!("{what}: {e}"));
+            let parsed = crate::mu_calculus::parser::parse(&f).expect("parses");
+            assert_eq!(
+                parsed.property_class(),
+                PropertyClass::Liveness,
+                "{what}: {f}"
+            );
+            let got = reduce_response_shape(&parsed).map(|r| (r.ante.is_some(), r.delay));
+            eprintln!("[liveness contract] {what} => {f} => {got:?}");
+            assert_eq!(got, want, "{what}: the rescue's view of `{f}` changed");
+        }
+    }
+
+    /// The caveat collectors: an unmarked `##[m:$]` is recorded as a strong reading, an explicit
+    /// `strong(…)` and `s_eventually` are not, and a `cover` of an eventuality is refused.
+    #[test]
+    fn unbounded_sequences_record_their_strong_reading_and_cover_refuses_them() {
+        let sig = |n: &str| serde_json::json!({"kind": "NamedValue", "symbol": format!("1 {n}"), "type": "logic"});
+        let simple = |e: Value| serde_json::json!({"kind": "Simple", "expr": e});
+        let unb = serde_json::json!({"kind": "SequenceConcat",
+            "elements": [{"sequence": simple(sig("b")), "min": 1, "max": "$"}]});
+        let plain = serde_json::json!({"kind": "Binary", "op": "OverlappedImplication",
+            "left": simple(sig("a")), "right": unb.clone()});
+        assert_eq!(
+            collect_implicit_strong_readings(&plain),
+            vec!["##[1:$]".to_string()]
+        );
+        let strong = serde_json::json!({"kind": "Binary", "op": "OverlappedImplication",
+            "left": simple(sig("a")), "right": {"kind": "StrongWeak", "strength": "strong", "expr": unb}});
+        assert!(collect_implicit_strong_readings(&strong).is_empty());
+        let sev =
+            serde_json::json!({"kind": "Unary", "op": "SEventually", "expr": simple(sig("b"))});
+        assert!(collect_implicit_strong_readings(&sev).is_empty());
+        let err = translate_one(
+            &sev,
+            SvaKind::Cover,
+            &TranslateOptions::default(),
+            &mut Vec::new(),
+        )
+        .expect_err("a cover of an eventuality is refused");
+        assert!(err.contains("cover"), "{err}");
+    }
+
     /// The shipped fragment as an EXECUTABLE table (SVA-extraction-gaps plan, step 0, 2026-10-14):
     /// one row per form the module doc at the top of this file lists as supported or rejected, so
     /// that table cannot drift from the code without a red test. Property-level rows go through
@@ -3281,13 +4077,13 @@ mod tests {
                 Rejected("Tier-3b"),
             ),
             (
-                "a |-> ##[1:$] b — unbounded delay",
+                "a |-> ##[1:$] b — unbounded delay, read strongly (2026-10-15)",
                 imp(
                     ov,
                     simple(sig("a")),
                     concat(vec![(simple(sig("b")), n(1), dollar())]),
                 ),
-                Rejected("Tier-3b"),
+                Translates("(!(a) || [] (mu Y. (b || [] Y)))"),
             ),
             (
                 "a |-> ##[1:$] b ##1 c — unbounded gap mid-chain",
@@ -3302,13 +4098,38 @@ mod tests {
                 Rejected("Tier-3b"),
             ),
             (
-                "a |-> b[*1:$] — unbounded repetition",
+                "a |-> b[*2:$] — unbounded repetition as the whole consequent ≡ b[*2] (2026-10-15)",
                 imp(
                     ov,
                     simple(sig("a")),
-                    rep(sig("b"), "Consecutive", n(1), dollar()),
+                    rep(sig("b"), "Consecutive", n(2), dollar()),
                 ),
-                Rejected("Tier-3b"),
+                Translates("(!(a) || (b && [] b))"),
+            ),
+            (
+                "a |-> weak(##[1:$] b) — satisfied by every trace",
+                imp(
+                    ov,
+                    simple(sig("a")),
+                    serde_json::json!({"kind": "StrongWeak", "strength": "weak",
+                "expr": concat(vec![(simple(sig("b")), n(1), dollar())])}),
+                ),
+                Rejected("every infinite trace"),
+            ),
+            (
+                "a |-> s_eventually (b ##1 c) — eventuality of a sequence",
+                imp(
+                    ov,
+                    simple(sig("a")),
+                    unary(
+                        "SEventually",
+                        concat(vec![
+                            (simple(sig("b")), n(0), n(0)),
+                            (simple(sig("c")), n(1), n(1)),
+                        ]),
+                    ),
+                ),
+                Rejected("must be a boolean"),
             ),
             (
                 "a |-> b[*1:3] — range repetition",
@@ -3334,14 +4155,14 @@ mod tests {
                 Rejected("Tier-3b"),
             ),
             (
-                "s_eventually b — liveness SVA",
+                "s_eventually b — AG AF b (2026-10-15)",
                 unary("SEventually", simple(sig("b"))),
-                Rejected("unsupported property kind"),
+                Translates("(mu Y. (b || [] Y))"),
             ),
             (
-                "a |-> s_eventually b",
+                "a |-> s_eventually b — AG(a → AF b), the l2s response shape (2026-10-15)",
                 imp(ov, simple(sig("a")), unary("SEventually", simple(sig("b")))),
-                Rejected("unsupported implication consequent"),
+                Translates("(!(a) || (mu Y. (b || [] Y)))"),
             ),
             (
                 "a |-> strong(##[1:$] b)",
@@ -3351,7 +4172,7 @@ mod tests {
                     serde_json::json!({"kind": "StrongWeak", "strength": "strong",
                 "expr": concat(vec![(simple(sig("b")), n(1), dollar())])}),
                 ),
-                Rejected("unsupported implication consequent"),
+                Translates("(!(a) || [] (mu Y. (b || [] Y)))"),
             ),
             (
                 "a |-> eventually [1:3] b",
@@ -3361,12 +4182,12 @@ mod tests {
                     serde_json::json!({"kind": "Unary", "op": "Eventually",
                 "expr": simple(sig("b")), "min": 1, "max": 3}),
                 ),
-                Rejected("unsupported implication consequent"),
+                Translates("(!(a) || [] (b || [] (b || [] b)))"),
             ),
             (
                 "a |-> nexttime b",
                 imp(ov, simple(sig("a")), unary("NextTime", simple(sig("b")))),
-                Rejected("unsupported implication consequent"),
+                Translates("(!(a) || [] b)"),
             ),
             (
                 "a |-> (c throughout (b ##1 b))",
@@ -3382,7 +4203,7 @@ mod tests {
             (
                 "always b",
                 unary("Always", simple(sig("b"))),
-                Rejected("unsupported property kind"),
+                Translates("(nu W. (b && [] W))"),
             ),
         ];
         for (what, spec, want) in &props {
@@ -3459,11 +4280,49 @@ mod tests {
                 serde_json::json!({"kind": "UnaryOp", "op": "BitwiseOr", "operand": vec8("x")}),
                 Translates("(x != 0)"),
             ),
+            (
+                "vec[3] — constant bit-select, the 1-bit slice (2026-10-15)",
+                serde_json::json!({"kind": "ElementSelect", "selector": lit("3"), "value": vec8("vec")}),
+                Translates("vec__bits3_3"),
+            ),
+            (
+                "$isunknown(v) — folded to false in the 2-state model (2026-10-15)",
+                call("$isunknown", vec![vec8("v")]),
+                Translates("false"),
+            ),
+            (
+                "$rose(v[3]) — an edge of one bit",
+                call(
+                    "$rose",
+                    vec![
+                        serde_json::json!({"kind": "ElementSelect", "selector": lit("3"), "value": vec8("v")}),
+                    ],
+                ),
+                Translates("(v__bits3_3 && (!(v__past__bits3_3)))"),
+            ),
             // -- rejected
             (
-                "vec[3] — constant bit-select",
-                serde_json::json!({"kind": "ElementSelect", "selector": lit("3"), "value": vec8("vec")}),
-                Rejected("constant bit-select"),
+                "md[1] — element of a multi-dimensional packed array",
+                serde_json::json!({"kind": "ElementSelect", "selector": lit("1"),
+                "value": {"kind": "NamedValue", "symbol": "1 md", "type": "logic[3:0][7:0]"}}),
+                Rejected("multi-dimensional"),
+            ),
+            (
+                "off[3] — index outside the declared range [15:8]",
+                serde_json::json!({"kind": "ElementSelect", "selector": lit("3"),
+                "value": {"kind": "NamedValue", "symbol": "1 off", "type": "logic[15:8]"}}),
+                Rejected("outside"),
+            ),
+            (
+                "$rose(v[7:4]) — an edge of a multi-bit slice",
+                call(
+                    "$rose",
+                    vec![
+                        serde_json::json!({"kind": "RangeSelect", "selectionKind": "Simple",
+                    "value": vec8("v"), "left": lit("7"), "right": lit("4")}),
+                    ],
+                ),
+                Rejected("single bit"),
             ),
             (
                 "req[idx] — dynamic bit-select",
@@ -3488,11 +4347,6 @@ mod tests {
                     lit("165"),
                 ),
                 Rejected("IndexedDown"),
-            ),
-            (
-                "$isunknown(v)",
-                call("$isunknown", vec![vec8("v")]),
-                Rejected("not in the"),
             ),
             (
                 "$countones(v) <= 2",

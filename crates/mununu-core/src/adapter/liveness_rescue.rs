@@ -66,10 +66,13 @@
 //! lesson).
 
 use crate::adapter::btor2::l2s_monitor::{
-    emit_response_l2s_monitor, emit_response_l2s_monitor_under_fairness,
+    emit_l2s_monitor_from_formula, emit_response_l2s_monitor,
+    emit_response_l2s_monitor_under_fairness,
 };
 use crate::adapter::btor2::parser;
-use crate::adapter::btor2::predicate_expr::{CmpOp, PredicateExpr, parse_predicate_expr};
+use crate::adapter::btor2::predicate_expr::{
+    CmpOp, PredicateExpr, parse_predicate_atom_bool, parse_predicate_expr,
+};
 use crate::adapter::reach_portfolio::{ReachOutcome, ReachVerdict, decide_reach_portfolio};
 use crate::mu_calculus::{Formula, FormulaVarId, Guard, ModalKind, Node, NodeId};
 
@@ -85,20 +88,42 @@ pub struct Atom {
     pub value: u128,
 }
 
-/// A reducible response-liveness property `AG(a → AF b)` over two single atoms.
+/// A reducible response-liveness property `AG(a → AF b)` over two single atoms, or the
+/// antecedent-free `AG AF b` (`ante: None` — every cycle is a request).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResponseAf {
-    /// The antecedent `a` — the request.
-    pub ante: Atom,
+    /// The antecedent `a` — the request. `None` for `AG AF b` (`assert property (s_eventually
+    /// b)`), where the l2s monitor's request is the constant `1`.
+    pub ante: Option<Atom>,
     /// The consequent `b` — the grant that must eventually follow on every path.
     pub cons: Atom,
+    /// `m` in `AG(a → AXᵐ AF b)` — the boxes between the implication and the eventuality, as
+    /// `a |=> s_eventually b` (m = 1) and `a |-> ##[m:$] b` translate. `0` for the plain response.
+    /// The monitor reads the request through an m-cycle delay line (`a_d`), and
+    /// `AG(a → AXᵐ AF b)` ≡ `AG(a_d → AF b)` on the product (see `emit_l2s_monitor`).
+    pub delay: u32,
 }
 
-/// Conservatively classify `formula` as the response-liveness shape
-/// `ν Z. ((¬a ∨ μ Y. (b ∨ [] Y)) ∧ [] Z)` with single-atom `a`, `b`. Returns
-/// `None` for every other shape (see the module docs) so the reduction never
+/// The response-liveness shape `ν Z. ((¬a ∨ []ᵐ μ Y. (b ∨ [] Y)) ∧ [] Z)` — or `AG AXᵐ AF b` with
+/// no antecedent — with `a` and `b` any BOOLEAN subtrees over register comparisons (`And` / `Or` /
+/// `Not` / constants), as node ids of the formula. The SVA translator's `(req && st == IDLE) |->
+/// s_eventually done` lands here; the single-atom [`ResponseAf`] is the special case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResponseShape {
+    /// The request subtree (`a`, not `¬a`); `None` for `AG AF b`.
+    pub ante: Option<NodeId>,
+    /// The grant subtree `b`.
+    pub cons: NodeId,
+    /// `m` in `AG(a → AXᵐ AF b)`.
+    pub delay: u32,
+}
+
+/// Conservatively recognise [`ResponseShape`]. Returns `None` for every other shape — in
+/// particular a guarded box, a diamond inner recursion (`EF`, recoverability), and a leaf the
+/// boolean compiler cannot bind (relational / addend / select atoms) — so the reduction never
 /// mis-reduces a property it does not fully recognise.
-pub fn reduce_response_af(formula: &Formula) -> Option<ResponseAf> {
+pub fn reduce_response_shape(formula: &Formula) -> Option<ResponseShape> {
+    use crate::adapter::reach_rescue::is_compilable_boolean_body;
     // Root must be `ν Z. BODY` (the outer `AG`).
     let Node::Nu { var: z, body } = formula.node(formula.root()) else {
         return None;
@@ -108,16 +133,21 @@ pub fn reduce_response_af(formula: &Formula) -> Option<ResponseAf> {
         return None;
     };
     let (core_id, _boxz_id) = split_and_box_to_var(formula, *l, *r, *z)?;
-    // core = `¬a ∨ (μ Y. (b ∨ [] Y))`.
-    let Node::Or(cl, cr) = formula.node(core_id) else {
-        return None;
+    // core = `¬a ∨ []ᵐ (μ Y. (b ∨ [] Y))`, or the antecedent-free `[]ᵐ μ Y. (b ∨ [] Y)`.
+    let (ante, boxed_af_id) = match formula.node(core_id) {
+        Node::Or(cl, cr) => {
+            let (neg_ante_id, af_id) = classify_or_notpred_boxed_mu(formula, *cl, *cr)?;
+            let Node::Not(a_id) = formula.node(neg_ante_id) else {
+                return None;
+            };
+            if !is_compilable_boolean_body(formula, *a_id) {
+                return None;
+            }
+            (Some(*a_id), af_id)
+        }
+        _ => (None, core_id),
     };
-    let (neg_ante_id, af_id) = classify_or_notpred_mu(formula, *cl, *cr)?;
-    // ¬a = `Not(Predicate(a))`.
-    let Node::Not(a_pred_id) = formula.node(neg_ante_id) else {
-        return None;
-    };
-    let ante = predicate_atom(formula, *a_pred_id)?;
+    let (delay, af_id) = strip_unconstrained_boxes(formula, boxed_af_id);
     // AF b = `μ Y. (b ∨ [] Y)`.
     let Node::Mu {
         var: y,
@@ -130,8 +160,64 @@ pub fn reduce_response_af(formula: &Formula) -> Option<ResponseAf> {
         return None;
     };
     let (cons_id, _boxy_id) = split_and_box_to_var(formula, *ml, *mr, *y)?;
-    let cons = predicate_atom(formula, cons_id)?;
-    Some(ResponseAf { ante, cons })
+    if !is_compilable_boolean_body(formula, cons_id) {
+        return None;
+    }
+    Some(ResponseShape {
+        ante,
+        cons: cons_id,
+        delay,
+    })
+}
+
+/// Conservatively classify `formula` as the response-liveness shape
+/// `ν Z. ((¬a ∨ []ᵐ μ Y. (b ∨ [] Y)) ∧ [] Z)` with SINGLE-ATOM `a`, `b` (or no `a`) — the
+/// [`ResponseShape`] whose request and grant are each one register comparison, as the
+/// `verify-liveness` surface takes them. Returns `None` for every other shape.
+pub fn reduce_response_af(formula: &Formula) -> Option<ResponseAf> {
+    let shape = reduce_response_shape(formula)?;
+    let ante = match shape.ante {
+        Some(id) => Some(predicate_atom(formula, id)?),
+        None => None,
+    };
+    Some(ResponseAf {
+        ante,
+        cons: predicate_atom(formula, shape.cons)?,
+        delay: shape.delay,
+    })
+}
+
+/// Decide `formula` if it is a [`ResponseShape`] — compound request / grant included — under an
+/// optional conjunctive fairness assumption. The entry `verify_auto`'s ⊥ escalation uses.
+pub fn response_liveness_rescue_formula(
+    design_btor2: &str,
+    formula: &Formula,
+    fairness_atoms: &[Atom],
+    reset_pinned: bool,
+) -> Option<(LivenessVerdict, ReachOutcome)> {
+    let shape = reduce_response_shape(formula)?;
+    let fair_tuples: Vec<(&str, CmpOp, u128)> = fairness_atoms
+        .iter()
+        .map(|a| (a.signal.as_str(), a.op, a.value))
+        .collect();
+    let monitored = emit_l2s_monitor_from_formula(
+        design_btor2,
+        formula,
+        shape.ante,
+        shape.delay,
+        shape.cons,
+        &fair_tuples,
+        reset_pinned,
+    )
+    .ok()?;
+    let file = parser::parse(&monitored).ok()?;
+    let outcome = decide_reach_portfolio(&file);
+    let verdict = match outcome.verdict {
+        ReachVerdict::Unreachable => LivenessVerdict::Holds,
+        ReachVerdict::Reachable => LivenessVerdict::Violated,
+        ReachVerdict::Unknown | ReachVerdict::Contradiction => LivenessVerdict::Inconclusive,
+    };
+    Some((verdict, outcome))
 }
 
 /// Return `(other, box_to_var)` iff exactly one of `l` / `r` is an unconstrained
@@ -153,11 +239,37 @@ fn split_and_box_to_var(
     }
 }
 
-/// Return `(not_pred, mu)` iff exactly one of `l` / `r` is a `Not` node and the
-/// other is a `Mu` fixpoint — the `¬a ∨ AF b` split. `None` otherwise.
-fn classify_or_notpred_mu(formula: &Formula, l: NodeId, r: NodeId) -> Option<(NodeId, NodeId)> {
+/// Peel unconstrained `[]` modalities (`[]ᵐ φ`) and return `(m, φ)`. A guarded box is not
+/// peeled: it is a stronger property than the delay line encodes.
+fn strip_unconstrained_boxes(formula: &Formula, mut id: NodeId) -> (u32, NodeId) {
+    let mut m = 0;
+    while let Node::Modal {
+        kind: ModalKind::Box,
+        guard,
+        target,
+    } = formula.node(id)
+    {
+        if *guard != Guard::default() {
+            break;
+        }
+        m += 1;
+        id = *target;
+    }
+    (m, id)
+}
+
+/// Return `(not_pred, boxed_mu)` iff exactly one of `l` / `r` is a `Not` node and the other is a
+/// `Mu` fixpoint behind zero or more unconstrained boxes — the `¬a ∨ []ᵐ AF b` split.
+fn classify_or_notpred_boxed_mu(
+    formula: &Formula,
+    l: NodeId,
+    r: NodeId,
+) -> Option<(NodeId, NodeId)> {
     let is_not = |id: NodeId| matches!(formula.node(id), Node::Not(_));
-    let is_mu = |id: NodeId| matches!(formula.node(id), Node::Mu { .. });
+    let is_mu = |id: NodeId| {
+        let (_, inner) = strip_unconstrained_boxes(formula, id);
+        matches!(formula.node(inner), Node::Mu { .. })
+    };
     match (is_not(l) && is_mu(r), is_not(r) && is_mu(l)) {
         (true, false) => Some((l, r)),
         (false, true) => Some((r, l)),
@@ -229,11 +341,16 @@ pub fn reduce_ag_ef_target(formula: &Formula) -> Option<Atom> {
 
 /// Parse a `Predicate` node as a single register-comparison atom. `None` for a
 /// relational (`reg ⋈ reg`), compound, or unparseable atom.
+///
+/// A bare identifier (`grant`) is the 1-bit atom `grant != 0` — the shape the SVA translator
+/// emits for a 1-bit signal (`a |-> s_eventually b` → `(!(a) || mu Y. (b || [] Y))`). Before
+/// 2026-10-15 the strict parser refused it, so the most common SVA liveness spelling never
+/// reached this reduction.
 fn predicate_atom(formula: &Formula, id: NodeId) -> Option<Atom> {
     let Node::Predicate(atom) = formula.node(id) else {
         return None;
     };
-    match parse_predicate_expr(atom) {
+    match parse_predicate_atom_bool(atom) {
         Ok(PredicateExpr::Cmp {
             register,
             op,
@@ -277,8 +394,7 @@ pub fn response_liveness_rescue(
     formula: &Formula,
     reset_pinned: bool,
 ) -> Option<(LivenessVerdict, ReachOutcome)> {
-    let r = reduce_response_af(formula)?;
-    response_liveness_rescue_atoms(design_btor2, &r.ante, &r.cons, reset_pinned)
+    response_liveness_rescue_formula(design_btor2, formula, &[], reset_pinned)
 }
 
 /// Like [`response_liveness_rescue`] but with the request / grant atoms given
@@ -503,9 +619,10 @@ mod tests {
     fn reduces_response_af() {
         let f = parse("nu Z. ((!(req == 1) || mu Y. ((grant == 1) || [] Y)) && [] Z)");
         let r = reduce_response_af(&f).expect("reducible");
-        assert_eq!(r.ante.signal, "req");
-        assert_eq!(r.ante.op, CmpOp::Eq);
-        assert_eq!(r.ante.value, 1);
+        let ante = r.ante.as_ref().expect("has an antecedent");
+        assert_eq!(ante.signal, "req");
+        assert_eq!(ante.op, CmpOp::Eq);
+        assert_eq!(ante.value, 1);
         assert_eq!(r.cons.signal, "grant");
         assert_eq!(r.cons.op, CmpOp::Eq);
         assert_eq!(r.cons.value, 1);
@@ -516,10 +633,164 @@ mod tests {
     fn reduces_response_af_reordered() {
         let f = parse("nu Z. (([] Z) && ((mu Y. (([] Y) || (b != 0))) || !(a == 3)))");
         let r = reduce_response_af(&f).expect("reducible under reordering");
-        assert_eq!(r.ante.signal, "a");
-        assert_eq!(r.ante.value, 3);
+        let ante = r.ante.as_ref().expect("has an antecedent");
+        assert_eq!(ante.signal, "a");
+        assert_eq!(ante.value, 3);
         assert_eq!(r.cons.signal, "b");
         assert_eq!(r.cons.op, CmpOp::Ne);
+    }
+
+    /// The SVA translator writes a 1-bit signal as a BARE atom (`a |-> s_eventually b` →
+    /// `(!(a) || mu Y. (b || [] Y))`); the reducer reads it as `sig != 0`, as the exact engine
+    /// does. It used the strict parser before 2026-10-15 and returned `None` here.
+    #[test]
+    fn reduce_response_af_accepts_bare_boolean_atoms() {
+        let f = parse("nu X. (((!(req) || (mu Y. (grant || [] Y)))) && [] X)");
+        let r = reduce_response_af(&f).expect("bare 1-bit atoms reduce");
+        let ante = r.ante.expect("has an antecedent");
+        assert_eq!(
+            (ante.signal.as_str(), ante.op, ante.value),
+            ("req", CmpOp::Ne, 0)
+        );
+        assert_eq!(
+            (r.cons.signal.as_str(), r.cons.op, r.cons.value),
+            ("grant", CmpOp::Ne, 0)
+        );
+    }
+
+    /// `assert property (s_eventually b)` translates to `AG AF b` — no antecedent. It reduces
+    /// with `ante: None` (every cycle is a request).
+    #[test]
+    fn reduce_response_af_accepts_antecedent_free_af() {
+        let f = parse("nu X. (((mu Y. ((st == 2) || [] Y))) && [] X)");
+        let r = reduce_response_af(&f).expect("AG AF b reduces");
+        assert!(r.ante.is_none());
+        assert_eq!((r.cons.signal.as_str(), r.cons.value), ("st", 2));
+        // The diamond (recoverability, AG EF) is still not this shape.
+        let ef = parse("nu X. (((mu Y. ((st == 2) || <> Y))) && [] X)");
+        assert!(reduce_response_af(&ef).is_none());
+    }
+
+    /// `AG AF b` through l2s agrees with the exact engine both ways on the responder: `st == 0`
+    /// recurs on every path (HOLDS), but `st == 2` does not — the environment can keep `go` low
+    /// and idle forever (VIOLATED). The second is the case an antecedent-ful monitor could not
+    /// express: no request ever has to occur.
+    #[test]
+    fn antecedent_free_af_l2s_matches_exact_both_ways() {
+        use crate::adapter::btor2::symbolic_bitblast::{ExactVerdict, exact_symbolic_verdict};
+        for (target, want_exact, want_l2s) in [
+            ("st == 0", ExactVerdict::Holds, LivenessVerdict::Holds),
+            ("st == 2", ExactVerdict::Violated, LivenessVerdict::Violated),
+        ] {
+            let f = parse(&format!("nu X. (((mu Y. (({target}) || [] Y))) && [] X)"));
+            let exact = exact_symbolic_verdict(RESPONDER, &f).expect("exact decides");
+            assert_eq!(exact, want_exact, "exact on AG AF ({target})");
+            let (v, out) = response_liveness_rescue(RESPONDER, &f, false).expect("reducible");
+            assert_eq!(v, want_l2s, "l2s on AG AF ({target}): {out:?}");
+        }
+    }
+
+    /// `AG(a → AXᵐ AF b)` through the request delay line agrees with the exact engine. On the
+    /// responder, `st == 2 → AF (st == 2)` holds trivially (b is now), but `st == 2 → AX AF
+    /// (st == 2)` is VIOLATED (grant → idle, and the environment may idle forever); the
+    /// one-cycle delay is what tells the two apart. `st == 1 → AX AF (st == 2)` holds.
+    #[test]
+    fn delayed_response_l2s_matches_exact() {
+        use crate::adapter::btor2::symbolic_bitblast::{ExactVerdict, exact_symbolic_verdict};
+        for (formula, want_delay, want_exact, want_l2s) in [
+            (
+                "nu X. ((!(st == 2) || mu Y. ((st == 2) || [] Y)) && [] X)",
+                0,
+                ExactVerdict::Holds,
+                LivenessVerdict::Holds,
+            ),
+            (
+                "nu X. ((!(st == 2) || [] (mu Y. ((st == 2) || [] Y))) && [] X)",
+                1,
+                ExactVerdict::Violated,
+                LivenessVerdict::Violated,
+            ),
+            (
+                "nu X. ((!(st == 1) || [] (mu Y. ((st == 2) || [] Y))) && [] X)",
+                1,
+                ExactVerdict::Holds,
+                LivenessVerdict::Holds,
+            ),
+            (
+                "nu X. ((!(st == 1) || [] [] (mu Y. ((st == 0) || [] Y))) && [] X)",
+                2,
+                ExactVerdict::Holds,
+                LivenessVerdict::Holds,
+            ),
+        ] {
+            let f = parse(formula);
+            let r = reduce_response_af(&f).unwrap_or_else(|| panic!("{formula} reduces"));
+            assert_eq!(r.delay, want_delay, "{formula}");
+            let exact = exact_symbolic_verdict(RESPONDER, &f).expect("exact decides");
+            assert_eq!(exact, want_exact, "exact on {formula}");
+            let (v, out) = response_liveness_rescue(RESPONDER, &f, false).expect("reducible");
+            assert_eq!(v, want_l2s, "l2s on {formula}: {out:?}");
+        }
+        // A GUARDED box is not peeled — it is not a plain delay.
+        let guarded = parse(
+            "nu X. ((!(st == 1) || [(ctrl = controllable)] (mu Y. ((st == 2) || [] Y))) && [] X)",
+        );
+        assert!(reduce_response_af(&guarded).is_none());
+    }
+
+    /// A COMPOUND request and grant (`(req && st == IDLE) |-> s_eventually done`, the usual SVA
+    /// antecedent) reduce through `reduce_response_shape` and the boolean compiler, and agree with
+    /// the exact engine. State-only atoms, so the exact engine is the oracle.
+    #[test]
+    fn compound_response_l2s_matches_exact() {
+        use crate::adapter::btor2::symbolic_bitblast::{ExactVerdict, exact_symbolic_verdict};
+        for (formula, want_exact, want_l2s) in [
+            // (st==0 || st==1) → AF st==2: idle can idle forever → VIOLATED.
+            (
+                "nu X. ((!((st == 0) || (st == 1)) || mu Y. ((st == 2) || [] Y)) && [] X)",
+                ExactVerdict::Violated,
+                LivenessVerdict::Violated,
+            ),
+            // (st==1 && !(st==0)) → AX AF (st==0 || st==2): holds.
+            (
+                "nu X. ((!((st == 1) && (!(st == 0))) || [] (mu Y. (((st == 0) || (st == 2)) || [] Y))) && [] X)",
+                ExactVerdict::Holds,
+                LivenessVerdict::Holds,
+            ),
+        ] {
+            let f = parse(formula);
+            let shape = reduce_response_shape(&f).unwrap_or_else(|| panic!("{formula} reduces"));
+            assert!(shape.ante.is_some());
+            assert!(
+                reduce_response_af(&f).is_none(),
+                "not single-atom: the atom reducer abstains"
+            );
+            let exact = exact_symbolic_verdict(RESPONDER, &f).expect("exact decides");
+            assert_eq!(exact, want_exact, "exact on {formula}");
+            let (v, out) =
+                response_liveness_rescue_formula(RESPONDER, &f, &[], false).expect("reducible");
+            assert_eq!(v, want_l2s, "l2s on {formula}: {out:?}");
+        }
+        // A relational leaf cannot be compiled by the monitor — still abstains.
+        let rel = parse("nu X. ((!(st == 1) || mu Y. ((x == y) || [] Y)) && [] X)");
+        assert!(reduce_response_shape(&rel).is_none());
+    }
+
+    /// A primary input in the request — what the exact engine refuses on this path — is a leaf
+    /// the boolean compiler binds. On the responder `(go && st == 0) → AX AF (st == 2)` holds:
+    /// `go` in idle moves to 1, and 1 always moves to 2.
+    #[test]
+    fn input_in_the_request_reduces_and_decides() {
+        let f =
+            parse("nu X. ((!((go == 1) && (st == 0)) || [] (mu Y. ((st == 2) || [] Y))) && [] X)");
+        let (v, out) =
+            response_liveness_rescue_formula(RESPONDER, &f, &[], false).expect("reducible");
+        assert_eq!(v, LivenessVerdict::Holds, "{out:?}");
+        let g =
+            parse("nu X. ((!((go == 1) && (st == 0)) || [] (mu Y. ((st == 0) || [] Y))) && [] X)");
+        let (v, _) =
+            response_liveness_rescue_formula(RESPONDER, &g, &[], false).expect("reducible");
+        assert_eq!(v, LivenessVerdict::Holds, "1 → 2 → 0: idle recurs");
     }
 
     // The DIAMOND response (mununu's LTL `G(a->F b)` = AG(a->EF b)) is NOT this

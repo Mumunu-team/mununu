@@ -965,19 +965,56 @@ repo, so the lists below cannot drift from the code without a red test.
 | `sig[hi:lo]` slices, reductions `\|x` `&x`, `reg OP reg`, `reg == $past(reg) + k` | minted slice signals; relational / addend atoms | #565, XL.1c, H.D/H.G |
 | enum members, `parameter` / `localparam` references | the elaborated integer | XL.6b, #632 |
 | `disable iff (r)` | the reset is recognised and pinned inactive (or the body gated) | XL.1c |
+| constant bit-select `sig[k]` (packed vector, typedef or packed struct) | the 1-bit slice, bare in boolean position; `$rose` / `$fell` / `$stable` / `$changed` over a bit or a slice | 2026-10-15 |
+| `$isunknown(x)` | `false` — the model is 2-state; the property carries a **`two-state-fold`** note | 2026-10-15 |
+| `s_eventually b`, `a \|-> s_eventually b` | `AG AF b`, `AG(a → AF b)` — liveness; the exact engine decides it, the liveness-to-safety rescue carries it past the exact engine's reach | 2026-10-15 |
+| `a \|-> ##[m:$] b`, `strong(##[m:$] b)` | `AG(a → AXᵐ AF b)`; an unmarked one carries a **`strong-sequence-reading`** note | 2026-10-15 |
+| `a \|-> b[*n:$]` (the whole consequent, n ≥ 1) | `b[*n]` — its first match, exact | 2026-10-15 |
+| `s_eventually [m:n] b`, `eventually [m:n] b`, `nexttime p`, `always p` | `b` within `[m, n]`; `AX p`; `AG p` | 2026-10-15 |
 
-Each definite verdict transfers exactly as in the plain `|=>` case — the lowerings add boxes and
-flops, never an abstraction. **Rejected, each with a named reason** (the second half of the same
-test): unbounded `##[m:$]` / `[*n:$]` (also mid-chain) and goto `[->n]` / non-consecutive `[=n]`
-repetition (a sequence automaton); **ranged** antecedents `(a ##[1:2] b) |-> c` and `[*m:n]` in an
-antecedent or as a consequent (multiple match ends); `s_eventually`, `always`, `eventually [m:n]`,
-`nexttime`, `strong()` / `weak()` (liveness and property-level SVA); `throughout`; constant
-bit-select `sig[k]`, dynamic `sig[idx]`, array content `mem[i]` (three distinct refusals, #514);
-indexed part-selects `x[i +: w]` (#565); `$isunknown`, `$countones`; `^x` parity; `$rose` / `$fell`
-on a vector; non-linear arithmetic. Of these, the widening tracked for the next release covers
-constant bit-selects, `$isunknown` (as a two-state fold with a note), liveness SVA through the
-liveness-to-safety rescue, ranged antecedents by finite unrolling, `throughout` on bounded
-consequents and a minted `$countones`; goto / `[=n]` / unbounded antecedents / PSL stay out.
+Each definite verdict transfers exactly as in the plain `|=>` case — the lowerings add boxes,
+flops and fixpoints, never an abstraction.
+
+**Bit positions, not SV indices** (fixed 2026-10-15). yosys numbers a vector's bits from 0 at the
+right-most declared index, whatever the range. A slice or bit-select is minted at those positions:
+`x[11:8]` of `logic [15:8] x` is `x__bits3_0`, and `y[1]` of `logic [0:7] y` is `y__bits6_6`. Before
+this fix the slice path used SV indices as positions, so a slice of a vector not declared `[N-1:0]`
+either never bound (the property skipped) or read the wrong bits silently; a zero-based vector was
+unaffected. A typedef is resolved through the AST; a packed struct is `[W-1:0]` by definition; an
+enum-typed or otherwise opaque base declines rather than guess. In the same change
+`$past(sig[7:0])` gained the shadow of `sig` it had never requested — such properties skipped.
+
+**Unbounded sequences are read strongly.** IEEE 1800-2017 §16.12.2 makes a sequence in an `assert`
+weak by default, and a weak `a |-> ##[1:$] b` is satisfied by every infinite trace: it can never
+fail. mununu reads it as `a |-> s_eventually b`, what such an assertion is almost always written to
+mean, and says so in a per-property `strong-sequence-reading` note. A VIOLATED is a path on which
+`b` never arrives; under the weak reading the assertion would pass vacuously. Write `s_eventually`
+or `strong(…)` to state the intent and drop the note; an explicit `weak(##[1:$] b)` is refused,
+because it checks nothing.
+
+**Rejected, each with a named reason** (the second half of the same test): an unbounded gap
+anywhere but before the last element (`##[1:$] b ##1 c` is `F(b ∧ X c)`, which the box lowering
+would strengthen), `[*0:$]`, unbounded antecedents, goto `[->n]` / non-consecutive `[=n]`
+(a sequence automaton); **ranged** antecedents `(a ##[1:2] b) |-> c` and `[*m:n]` in an antecedent
+or as a consequent (multiple match ends); `s_eventually` or `##[m:$]` over a sequence; a `cover` of
+an eventuality; ranged `nexttime [k]` / `always [m:n]`; `weak()` of an unbounded sequence;
+`throughout`; dynamic `sig[idx]`, array content `mem[i]` and an element of a multi-dimensional
+packed array; indexed part-selects `x[i +: w]` (#565); `$countones`; `^x` parity; `$rose` / `$fell`
+on more than one bit; non-linear arithmetic. The next widening covers ranged antecedents by finite
+unrolling, `throughout` on bounded consequents and a minted `$countones`; goto / `[=n]` /
+unbounded antecedents / PSL stay out.
+
+**The liveness rescue's reach.** Every liveness shape the translator emits reduces to the
+liveness-to-safety monitor, so it decides past the exact engine's reach and past a primary-input
+atom the exact engine refuses: `AG(a → AF b)` (`a |-> s_eventually b`), `AG AF b`
+(`s_eventually b`), and `AG(a → AXᵐ AF b)` (`a |=> s_eventually b`, `a |-> ##[m:$] b`), the last
+through an m-latch delay line on the request — `a` held m cycles earlier on the path — which is
+exactly equivalent. The request and the grant may be boolean combinations
+(`(req && st == IDLE) |-> s_eventually done`): they compile through the same boolean compiler the
+`|=>` safety monitor uses, with leaves resolving to a state cell, an output, a primary input or a
+named internal net. An eventuality over a relational atom (`s_eventually (x == y)`) is the recorded
+gap — the compiler binds register-vs-constant comparisons — so past the exact engine it stays ⊥
+with a reason (`every_translator_liveness_shape_is_recognised_by_the_rescue`).
 
 **Which comparison OPERANDS are accepted** (mununu#565). Until now this fragment was documented
 only in the refusal message, so the boundary was discoverable only by hitting it — which is how a
