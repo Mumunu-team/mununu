@@ -1,0 +1,1895 @@
+{
+  "design": {
+    "name": "$root",
+    "kind": "Root",
+    "addr": 93825680466576,
+    "members": [
+      {
+        "name": "",
+        "kind": "CompilationUnit",
+        "addr": 93825680535360
+      },
+      {
+        "name": "t",
+        "kind": "Instance",
+        "addr": 93825680546480,
+        "body": {
+          "name": "t",
+          "kind": "InstanceBody",
+          "addr": 93825680535632,
+          "members": [
+            {
+              "name": "Width",
+              "kind": "Parameter",
+              "addr": 93825680535808,
+              "type": "int",
+              "initializer": {
+                "kind": "IntegerLiteral",
+                "type": "int",
+                "value": "4",
+                "constant": "4"
+              },
+              "value": "4",
+              "isLocal": false,
+              "isPort": true,
+              "isBody": false
+            },
+            {
+              "name": "N",
+              "kind": "Parameter",
+              "addr": 93825680535976,
+              "type": "int",
+              "initializer": {
+                "kind": "IntegerLiteral",
+                "type": "int",
+                "value": "4",
+                "constant": "4"
+              },
+              "value": "4",
+              "isLocal": false,
+              "isPort": true,
+              "isBody": false
+            },
+            {
+              "name": "ResetValue",
+              "kind": "Parameter",
+              "addr": 93825680536144,
+              "type": "logic[3:0]",
+              "initializer": {
+                "kind": "UnbasedUnsizedIntegerLiteral",
+                "type": "logic[3:0]",
+                "value": "4'b0",
+                "constant": "4'b0"
+              },
+              "value": "4'b0",
+              "isLocal": false,
+              "isPort": true,
+              "isBody": false
+            },
+            {
+              "name": "clk",
+              "kind": "Port",
+              "addr": 93825680546616,
+              "type": "logic",
+              "direction": "In",
+              "internalSymbol": "93825680546736 clk"
+            },
+            {
+              "name": "clk",
+              "kind": "Net",
+              "addr": 93825680546736,
+              "type": "logic",
+              "netType": {
+                "name": "wire",
+                "kind": "NetType",
+                "addr": 93825680401488,
+                "type": "logic"
+              }
+            },
+            {
+              "name": "step_i",
+              "kind": "Port",
+              "addr": 93825680546896,
+              "type": "logic[3:0]",
+              "direction": "In",
+              "internalSymbol": "93825680547016 step_i"
+            },
+            {
+              "name": "step_i",
+              "kind": "Net",
+              "addr": 93825680547016,
+              "type": "logic[3:0]",
+              "netType": {
+                "name": "wire",
+                "kind": "NetType",
+                "addr": 93825680401488,
+                "type": "logic"
+              }
+            },
+            {
+              "name": "req_i",
+              "kind": "Port",
+              "addr": 93825680547176,
+              "type": "logic[3:0]",
+              "direction": "In",
+              "internalSymbol": "93825680547296 req_i"
+            },
+            {
+              "name": "req_i",
+              "kind": "Net",
+              "addr": 93825680547296,
+              "type": "logic[3:0]",
+              "netType": {
+                "name": "wire",
+                "kind": "NetType",
+                "addr": 93825680401488,
+                "type": "logic"
+              }
+            },
+            {
+              "name": "idx_i",
+              "kind": "Port",
+              "addr": 93825680547456,
+              "type": "logic[1:0]",
+              "direction": "In",
+              "internalSymbol": "93825680547576 idx_i"
+            },
+            {
+              "name": "idx_i",
+              "kind": "Net",
+              "addr": 93825680547576,
+              "type": "logic[1:0]",
+              "netType": {
+                "name": "wire",
+                "kind": "NetType",
+                "addr": 93825680401488,
+                "type": "logic"
+              }
+            },
+            {
+              "name": "sx",
+              "kind": "Port",
+              "addr": 93825680547736,
+              "type": "logic signed[3:0]",
+              "direction": "In",
+              "internalSymbol": "93825680547856 sx"
+            },
+            {
+              "name": "sx",
+              "kind": "Net",
+              "addr": 93825680547856,
+              "type": "logic signed[3:0]",
+              "netType": {
+                "name": "wire",
+                "kind": "NetType",
+                "addr": 93825680401488,
+                "type": "logic"
+              }
+            },
+            {
+              "name": "a",
+              "kind": "Port",
+              "addr": 93825680548016,
+              "type": "logic",
+              "direction": "In",
+              "internalSymbol": "93825680548136 a"
+            },
+            {
+              "name": "a",
+              "kind": "Net",
+              "addr": 93825680548136,
+              "type": "logic",
+              "netType": {
+                "name": "wire",
+                "kind": "NetType",
+                "addr": 93825680401488,
+                "type": "logic"
+              }
+            },
+            {
+              "name": "cnt_o",
+              "kind": "Port",
+              "addr": 93825680549120,
+              "type": "logic[3:0]",
+              "direction": "Out",
+              "internalSymbol": "93825680549240 cnt_o"
+            },
+            {
+              "name": "cnt_o",
+              "kind": "Variable",
+              "addr": 93825680549240,
+              "type": "logic[3:0]",
+              "lifetime": "Static"
+            },
+            {
+              "name": "cnt_q",
+              "kind": "Port",
+              "addr": 93825680549376,
+              "type": "logic[1:0][3:0]",
+              "direction": "Out",
+              "internalSymbol": "93825680549496 cnt_q"
+            },
+            {
+              "name": "cnt_q",
+              "kind": "Variable",
+              "addr": 93825680549496,
+              "type": "logic[1:0][3:0]",
+              "lifetime": "Static"
+            },
+            {
+              "name": "gnt_o",
+              "kind": "Port",
+              "addr": 93825680549632,
+              "type": "logic[3:0]",
+              "direction": "Out",
+              "internalSymbol": "93825680549752 gnt_o"
+            },
+            {
+              "name": "gnt_o",
+              "kind": "Variable",
+              "addr": 93825680549752,
+              "type": "logic[3:0]",
+              "lifetime": "Static"
+            },
+            {
+              "name": "max",
+              "kind": "Subroutine",
+              "addr": 93825680536376,
+              "members": [
+                {
+                  "name": "a",
+                  "kind": "FormalArgument",
+                  "addr": 93825680536656,
+                  "type": "logic signed[5:0]",
+                  "lifetime": "Automatic",
+                  "direction": "In"
+                },
+                {
+                  "name": "b",
+                  "kind": "FormalArgument",
+                  "addr": 93825680536824,
+                  "type": "logic signed[5:0]",
+                  "lifetime": "Automatic",
+                  "direction": "In"
+                },
+                {
+                  "name": "max",
+                  "kind": "Variable",
+                  "addr": 93825680536992,
+                  "type": "logic signed[5:0]",
+                  "lifetime": "Automatic",
+                  "flags": "compiler_generated"
+                }
+              ],
+              "returnType": "logic signed[5:0]",
+              "defaultLifetime": "Automatic",
+              "subroutineKind": "Function",
+              "body": {
+                "kind": "Return",
+                "expr": {
+                  "kind": "ConditionalOp",
+                  "type": "logic signed[5:0]",
+                  "conditions": [
+                    {
+                      "expr": {
+                        "kind": "BinaryOp",
+                        "type": "logic",
+                        "op": "GreaterThan",
+                        "left": {
+                          "kind": "NamedValue",
+                          "type": "logic signed[5:0]",
+                          "symbol": "93825680536656 a"
+                        },
+                        "right": {
+                          "kind": "NamedValue",
+                          "type": "logic signed[5:0]",
+                          "symbol": "93825680536824 b"
+                        }
+                      }
+                    }
+                  ],
+                  "left": {
+                    "kind": "NamedValue",
+                    "type": "logic signed[5:0]",
+                    "symbol": "93825680536656 a"
+                  },
+                  "right": {
+                    "kind": "NamedValue",
+                    "type": "logic signed[5:0]",
+                    "symbol": "93825680536824 b"
+                  }
+                }
+              },
+              "visibility": "Public",
+              "arguments": [
+                {
+                  "name": "a",
+                  "kind": "FormalArgument",
+                  "addr": 93825680536656,
+                  "type": "logic signed[5:0]",
+                  "lifetime": "Automatic",
+                  "direction": "In"
+                },
+                {
+                  "name": "b",
+                  "kind": "FormalArgument",
+                  "addr": 93825680536824,
+                  "type": "logic signed[5:0]",
+                  "lifetime": "Automatic",
+                  "direction": "In"
+                }
+              ]
+            },
+            {
+              "name": "min",
+              "kind": "Subroutine",
+              "addr": 93825680537144,
+              "members": [
+                {
+                  "name": "a",
+                  "kind": "FormalArgument",
+                  "addr": 93825680537424,
+                  "type": "logic signed[5:0]",
+                  "lifetime": "Automatic",
+                  "direction": "In"
+                },
+                {
+                  "name": "b",
+                  "kind": "FormalArgument",
+                  "addr": 93825680537592,
+                  "type": "logic signed[5:0]",
+                  "lifetime": "Automatic",
+                  "direction": "In"
+                },
+                {
+                  "name": "min",
+                  "kind": "Variable",
+                  "addr": 93825680537760,
+                  "type": "logic signed[5:0]",
+                  "lifetime": "Automatic",
+                  "flags": "compiler_generated"
+                }
+              ],
+              "returnType": "logic signed[5:0]",
+              "defaultLifetime": "Automatic",
+              "subroutineKind": "Function",
+              "body": {
+                "kind": "Return",
+                "expr": {
+                  "kind": "ConditionalOp",
+                  "type": "logic signed[5:0]",
+                  "conditions": [
+                    {
+                      "expr": {
+                        "kind": "BinaryOp",
+                        "type": "logic",
+                        "op": "LessThan",
+                        "left": {
+                          "kind": "NamedValue",
+                          "type": "logic signed[5:0]",
+                          "symbol": "93825680537424 a"
+                        },
+                        "right": {
+                          "kind": "NamedValue",
+                          "type": "logic signed[5:0]",
+                          "symbol": "93825680537592 b"
+                        }
+                      }
+                    }
+                  ],
+                  "left": {
+                    "kind": "NamedValue",
+                    "type": "logic signed[5:0]",
+                    "symbol": "93825680537424 a"
+                  },
+                  "right": {
+                    "kind": "NamedValue",
+                    "type": "logic signed[5:0]",
+                    "symbol": "93825680537592 b"
+                  }
+                }
+              },
+              "visibility": "Public",
+              "arguments": [
+                {
+                  "name": "a",
+                  "kind": "FormalArgument",
+                  "addr": 93825680537424,
+                  "type": "logic signed[5:0]",
+                  "lifetime": "Automatic",
+                  "direction": "In"
+                },
+                {
+                  "name": "b",
+                  "kind": "FormalArgument",
+                  "addr": 93825680537592,
+                  "type": "logic signed[5:0]",
+                  "lifetime": "Automatic",
+                  "direction": "In"
+                }
+              ]
+            },
+            {
+              "name": "",
+              "kind": "ProceduralBlock",
+              "addr": 93825680537912,
+              "procedureKind": "AlwaysFF",
+              "body": {
+                "kind": "Timed",
+                "timing": {
+                  "kind": "SignalEvent",
+                  "expr": {
+                    "kind": "NamedValue",
+                    "type": "logic",
+                    "symbol": "93825680546736 clk"
+                  },
+                  "edge": "PosEdge"
+                },
+                "stmt": {
+                  "kind": "Block",
+                  "blockKind": "Sequential",
+                  "body": {
+                    "kind": "List",
+                    "list": [
+                      {
+                        "kind": "ExpressionStatement",
+                        "expr": {
+                          "kind": "Assignment",
+                          "type": "logic[3:0]",
+                          "left": {
+                            "kind": "NamedValue",
+                            "type": "logic[3:0]",
+                            "symbol": "93825680549240 cnt_o"
+                          },
+                          "right": {
+                            "kind": "BinaryOp",
+                            "type": "logic[3:0]",
+                            "op": "Add",
+                            "left": {
+                              "kind": "NamedValue",
+                              "type": "logic[3:0]",
+                              "symbol": "93825680549240 cnt_o"
+                            },
+                            "right": {
+                              "kind": "NamedValue",
+                              "type": "logic[3:0]",
+                              "symbol": "93825680547016 step_i"
+                            }
+                          },
+                          "isNonBlocking": true
+                        }
+                      },
+                      {
+                        "kind": "ExpressionStatement",
+                        "expr": {
+                          "kind": "Assignment",
+                          "type": "logic[1:0][3:0]",
+                          "left": {
+                            "kind": "NamedValue",
+                            "type": "logic[1:0][3:0]",
+                            "symbol": "93825680549496 cnt_q"
+                          },
+                          "right": {
+                            "kind": "Concatenation",
+                            "type": "logic[7:0]",
+                            "operands": [
+                              {
+                                "kind": "ElementSelect",
+                                "type": "logic[3:0]",
+                                "value": {
+                                  "kind": "NamedValue",
+                                  "type": "logic[1:0][3:0]",
+                                  "symbol": "93825680549496 cnt_q"
+                                },
+                                "selector": {
+                                  "kind": "IntegerLiteral",
+                                  "type": "int",
+                                  "value": "0",
+                                  "constant": "0"
+                                }
+                              },
+                              {
+                                "kind": "NamedValue",
+                                "type": "logic[3:0]",
+                                "symbol": "93825680549240 cnt_o"
+                              }
+                            ]
+                          },
+                          "isNonBlocking": true
+                        }
+                      },
+                      {
+                        "kind": "ExpressionStatement",
+                        "expr": {
+                          "kind": "Assignment",
+                          "type": "logic[3:0]",
+                          "left": {
+                            "kind": "NamedValue",
+                            "type": "logic[3:0]",
+                            "symbol": "93825680549752 gnt_o"
+                          },
+                          "right": {
+                            "kind": "NamedValue",
+                            "type": "logic[3:0]",
+                            "symbol": "93825680547296 req_i"
+                          },
+                          "isNonBlocking": true
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "name": "e_fwd",
+              "kind": "StatementBlock",
+              "addr": 93825680538120
+            },
+            {
+              "name": "",
+              "kind": "ProceduralBlock",
+              "addr": 93825680538016,
+              "procedureKind": "Always",
+              "body": {
+                "kind": "Block",
+                "blockKind": "Sequential",
+                "block": "93825680538120 e_fwd",
+                "body": {
+                  "kind": "ConcurrentAssertion",
+                  "propertySpec": {
+                    "kind": "Clocking",
+                    "clocking": {
+                      "kind": "SignalEvent",
+                      "expr": {
+                        "kind": "NamedValue",
+                        "type": "logic",
+                        "symbol": "93825680546736 clk"
+                      },
+                      "edge": "PosEdge"
+                    },
+                    "expr": {
+                      "kind": "Binary",
+                      "op": "NonOverlappedImplication",
+                      "left": {
+                        "kind": "Simple",
+                        "expr": {
+                          "kind": "NamedValue",
+                          "type": "logic",
+                          "symbol": "93825680548136 a"
+                        }
+                      },
+                      "right": {
+                        "kind": "Simple",
+                        "expr": {
+                          "kind": "BinaryOp",
+                          "type": "logic",
+                          "op": "Equality",
+                          "left": {
+                            "kind": "ElementSelect",
+                            "type": "logic[3:0]",
+                            "value": {
+                              "kind": "NamedValue",
+                              "type": "logic[1:0][3:0]",
+                              "symbol": "93825680549496 cnt_q"
+                            },
+                            "selector": {
+                              "kind": "IntegerLiteral",
+                              "type": "int",
+                              "value": "1",
+                              "constant": "1"
+                            }
+                          },
+                          "right": {
+                            "kind": "BinaryOp",
+                            "type": "logic[3:0]",
+                            "op": "Subtract",
+                            "left": {
+                              "kind": "Conversion",
+                              "type": "logic[3:0]",
+                              "operand": {
+                                "kind": "Replication",
+                                "type": "bit[3:0]",
+                                "count": {
+                                  "kind": "NamedValue",
+                                  "type": "int",
+                                  "symbol": "93825680535808 Width",
+                                  "constant": "4"
+                                },
+                                "concat": {
+                                  "kind": "Concatenation",
+                                  "type": "bit[0:0]",
+                                  "operands": [
+                                    {
+                                      "kind": "IntegerLiteral",
+                                      "type": "bit[0:0]",
+                                      "value": "1'b1",
+                                      "constant": "1'b1"
+                                    }
+                                  ],
+                                  "constant": "1'b1"
+                                },
+                                "constant": "4'b1111"
+                              },
+                              "constant": "4'b1111"
+                            },
+                            "right": {
+                              "kind": "NamedValue",
+                              "type": "logic[3:0]",
+                              "symbol": "93825680536144 ResetValue"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "ifTrue": {
+                    "kind": "Empty"
+                  },
+                  "assertionKind": "Assert"
+                }
+              }
+            },
+            {
+              "name": "e_set",
+              "kind": "StatementBlock",
+              "addr": 93825680538376
+            },
+            {
+              "name": "",
+              "kind": "ProceduralBlock",
+              "addr": 93825680538272,
+              "procedureKind": "Always",
+              "body": {
+                "kind": "Block",
+                "blockKind": "Sequential",
+                "block": "93825680538376 e_set",
+                "body": {
+                  "kind": "ConcurrentAssertion",
+                  "propertySpec": {
+                    "kind": "Clocking",
+                    "clocking": {
+                      "kind": "SignalEvent",
+                      "expr": {
+                        "kind": "NamedValue",
+                        "type": "logic",
+                        "symbol": "93825680546736 clk"
+                      },
+                      "edge": "PosEdge"
+                    },
+                    "expr": {
+                      "kind": "Binary",
+                      "op": "NonOverlappedImplication",
+                      "left": {
+                        "kind": "Simple",
+                        "expr": {
+                          "kind": "NamedValue",
+                          "type": "logic",
+                          "symbol": "93825680548136 a"
+                        }
+                      },
+                      "right": {
+                        "kind": "Simple",
+                        "expr": {
+                          "kind": "BinaryOp",
+                          "type": "logic",
+                          "op": "Equality",
+                          "left": {
+                            "kind": "ElementSelect",
+                            "type": "logic[3:0]",
+                            "value": {
+                              "kind": "NamedValue",
+                              "type": "logic[1:0][3:0]",
+                              "symbol": "93825680549496 cnt_q"
+                            },
+                            "selector": {
+                              "kind": "IntegerLiteral",
+                              "type": "int",
+                              "value": "1",
+                              "constant": "1"
+                            }
+                          },
+                          "right": {
+                            "kind": "BinaryOp",
+                            "type": "logic[3:0]",
+                            "op": "Subtract",
+                            "left": {
+                              "kind": "Conversion",
+                              "type": "logic[3:0]",
+                              "operand": {
+                                "kind": "Replication",
+                                "type": "bit[3:0]",
+                                "count": {
+                                  "kind": "NamedValue",
+                                  "type": "int",
+                                  "symbol": "93825680535808 Width",
+                                  "constant": "4"
+                                },
+                                "concat": {
+                                  "kind": "Concatenation",
+                                  "type": "bit[0:0]",
+                                  "operands": [
+                                    {
+                                      "kind": "IntegerLiteral",
+                                      "type": "bit[0:0]",
+                                      "value": "1'b1",
+                                      "constant": "1'b1"
+                                    }
+                                  ],
+                                  "constant": "1'b1"
+                                },
+                                "constant": "4'b1111"
+                              },
+                              "constant": "4'b1111"
+                            },
+                            "right": {
+                              "kind": "Call",
+                              "type": "logic[3:0]",
+                              "subroutine": "$past",
+                              "arguments": [
+                                {
+                                  "kind": "NamedValue",
+                                  "type": "logic[3:0]",
+                                  "symbol": "93825680547016 step_i"
+                                }
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "ifTrue": {
+                    "kind": "Empty"
+                  },
+                  "assertionKind": "Assert"
+                }
+              }
+            },
+            {
+              "name": "e_min",
+              "kind": "StatementBlock",
+              "addr": 93825680538632
+            },
+            {
+              "name": "",
+              "kind": "ProceduralBlock",
+              "addr": 93825680538528,
+              "procedureKind": "Always",
+              "body": {
+                "kind": "Block",
+                "blockKind": "Sequential",
+                "block": "93825680538632 e_min",
+                "body": {
+                  "kind": "ConcurrentAssertion",
+                  "propertySpec": {
+                    "kind": "Clocking",
+                    "clocking": {
+                      "kind": "SignalEvent",
+                      "expr": {
+                        "kind": "NamedValue",
+                        "type": "logic",
+                        "symbol": "93825680546736 clk"
+                      },
+                      "edge": "PosEdge"
+                    },
+                    "expr": {
+                      "kind": "Binary",
+                      "op": "NonOverlappedImplication",
+                      "left": {
+                        "kind": "Simple",
+                        "expr": {
+                          "kind": "NamedValue",
+                          "type": "logic",
+                          "symbol": "93825680548136 a"
+                        }
+                      },
+                      "right": {
+                        "kind": "Simple",
+                        "expr": {
+                          "kind": "BinaryOp",
+                          "type": "logic",
+                          "op": "Equality",
+                          "left": {
+                            "kind": "Conversion",
+                            "type": "logic[5:0]",
+                            "operand": {
+                              "kind": "NamedValue",
+                              "type": "logic[3:0]",
+                              "symbol": "93825680549240 cnt_o"
+                            }
+                          },
+                          "right": {
+                            "kind": "Conversion",
+                            "type": "logic[5:0]",
+                            "operand": {
+                              "kind": "Call",
+                              "type": "logic signed[5:0]",
+                              "subroutine": "93825680537144 min",
+                              "arguments": [
+                                {
+                                  "kind": "Conversion",
+                                  "type": "logic signed[5:0]",
+                                  "operand": {
+                                    "kind": "BinaryOp",
+                                    "type": "logic[5:0]",
+                                    "op": "Add",
+                                    "left": {
+                                      "kind": "Conversion",
+                                      "type": "logic[5:0]",
+                                      "operand": {
+                                        "kind": "Call",
+                                        "type": "logic[3:0]",
+                                        "subroutine": "$past",
+                                        "arguments": [
+                                          {
+                                            "kind": "NamedValue",
+                                            "type": "logic[3:0]",
+                                            "symbol": "93825680549240 cnt_o"
+                                          }
+                                        ]
+                                      }
+                                    },
+                                    "right": {
+                                      "kind": "Call",
+                                      "type": "logic[5:0]",
+                                      "subroutine": "$past",
+                                      "arguments": [
+                                        {
+                                          "kind": "Concatenation",
+                                          "type": "logic[5:0]",
+                                          "operands": [
+                                            {
+                                              "kind": "IntegerLiteral",
+                                              "type": "bit[1:0]",
+                                              "value": "2'b0"
+                                            },
+                                            {
+                                              "kind": "NamedValue",
+                                              "type": "logic[3:0]",
+                                              "symbol": "93825680547016 step_i"
+                                            }
+                                          ]
+                                        }
+                                      ]
+                                    }
+                                  }
+                                },
+                                {
+                                  "kind": "Conversion",
+                                  "type": "logic signed[5:0]",
+                                  "operand": {
+                                    "kind": "Conversion",
+                                    "type": "logic[5:0]",
+                                    "operand": {
+                                      "kind": "Concatenation",
+                                      "type": "bit[5:0]",
+                                      "operands": [
+                                        {
+                                          "kind": "IntegerLiteral",
+                                          "type": "bit[1:0]",
+                                          "value": "2'b0",
+                                          "constant": "2'b0"
+                                        },
+                                        {
+                                          "kind": "Replication",
+                                          "type": "bit[3:0]",
+                                          "count": {
+                                            "kind": "NamedValue",
+                                            "type": "int",
+                                            "symbol": "93825680535808 Width",
+                                            "constant": "4"
+                                          },
+                                          "concat": {
+                                            "kind": "Concatenation",
+                                            "type": "bit[0:0]",
+                                            "operands": [
+                                              {
+                                                "kind": "IntegerLiteral",
+                                                "type": "bit[0:0]",
+                                                "value": "1'b1",
+                                                "constant": "1'b1"
+                                              }
+                                            ],
+                                            "constant": "1'b1"
+                                          },
+                                          "constant": "4'b1111"
+                                        }
+                                      ],
+                                      "constant": "6'b1111"
+                                    },
+                                    "constant": "6'b1111"
+                                  },
+                                  "constant": "6'sd15"
+                                }
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "ifTrue": {
+                    "kind": "Empty"
+                  },
+                  "assertionKind": "Assert"
+                }
+              }
+            },
+            {
+              "name": "e_max",
+              "kind": "StatementBlock",
+              "addr": 93825680544256
+            },
+            {
+              "name": "",
+              "kind": "ProceduralBlock",
+              "addr": 93825680538784,
+              "procedureKind": "Always",
+              "body": {
+                "kind": "Block",
+                "blockKind": "Sequential",
+                "block": "93825680544256 e_max",
+                "body": {
+                  "kind": "ConcurrentAssertion",
+                  "propertySpec": {
+                    "kind": "Clocking",
+                    "clocking": {
+                      "kind": "SignalEvent",
+                      "expr": {
+                        "kind": "NamedValue",
+                        "type": "logic",
+                        "symbol": "93825680546736 clk"
+                      },
+                      "edge": "PosEdge"
+                    },
+                    "expr": {
+                      "kind": "Binary",
+                      "op": "NonOverlappedImplication",
+                      "left": {
+                        "kind": "Simple",
+                        "expr": {
+                          "kind": "NamedValue",
+                          "type": "logic",
+                          "symbol": "93825680548136 a"
+                        }
+                      },
+                      "right": {
+                        "kind": "Simple",
+                        "expr": {
+                          "kind": "BinaryOp",
+                          "type": "logic",
+                          "op": "Equality",
+                          "left": {
+                            "kind": "Conversion",
+                            "type": "logic[5:0]",
+                            "operand": {
+                              "kind": "ElementSelect",
+                              "type": "logic[3:0]",
+                              "value": {
+                                "kind": "NamedValue",
+                                "type": "logic[1:0][3:0]",
+                                "symbol": "93825680549496 cnt_q"
+                              },
+                              "selector": {
+                                "kind": "IntegerLiteral",
+                                "type": "int",
+                                "value": "1",
+                                "constant": "1"
+                              }
+                            }
+                          },
+                          "right": {
+                            "kind": "Conversion",
+                            "type": "logic[5:0]",
+                            "operand": {
+                              "kind": "Call",
+                              "type": "logic signed[5:0]",
+                              "subroutine": "93825680536376 max",
+                              "arguments": [
+                                {
+                                  "kind": "Conversion",
+                                  "type": "logic signed[5:0]",
+                                  "operand": {
+                                    "kind": "BinaryOp",
+                                    "type": "logic[5:0]",
+                                    "op": "Subtract",
+                                    "left": {
+                                      "kind": "Conversion",
+                                      "type": "logic[5:0]",
+                                      "operand": {
+                                        "kind": "Call",
+                                        "type": "logic signed[5:0]",
+                                        "subroutine": "$past",
+                                        "arguments": [
+                                          {
+                                            "kind": "Conversion",
+                                            "type": "logic signed[5:0]",
+                                            "operand": {
+                                              "kind": "Concatenation",
+                                              "type": "logic[5:0]",
+                                              "operands": [
+                                                {
+                                                  "kind": "IntegerLiteral",
+                                                  "type": "bit[1:0]",
+                                                  "value": "2'b0"
+                                                },
+                                                {
+                                                  "kind": "ElementSelect",
+                                                  "type": "logic[3:0]",
+                                                  "value": {
+                                                    "kind": "NamedValue",
+                                                    "type": "logic[1:0][3:0]",
+                                                    "symbol": "93825680549496 cnt_q"
+                                                  },
+                                                  "selector": {
+                                                    "kind": "IntegerLiteral",
+                                                    "type": "int",
+                                                    "value": "1",
+                                                    "constant": "1"
+                                                  }
+                                                }
+                                              ]
+                                            }
+                                          }
+                                        ]
+                                      }
+                                    },
+                                    "right": {
+                                      "kind": "Call",
+                                      "type": "logic[5:0]",
+                                      "subroutine": "$past",
+                                      "arguments": [
+                                        {
+                                          "kind": "Concatenation",
+                                          "type": "logic[5:0]",
+                                          "operands": [
+                                            {
+                                              "kind": "IntegerLiteral",
+                                              "type": "bit[1:0]",
+                                              "value": "2'b0"
+                                            },
+                                            {
+                                              "kind": "NamedValue",
+                                              "type": "logic[3:0]",
+                                              "symbol": "93825680547016 step_i"
+                                            }
+                                          ]
+                                        }
+                                      ]
+                                    }
+                                  }
+                                },
+                                {
+                                  "kind": "Conversion",
+                                  "type": "logic signed[5:0]",
+                                  "operand": {
+                                    "kind": "UnbasedUnsizedIntegerLiteral",
+                                    "type": "logic[5:0]",
+                                    "value": "6'b0",
+                                    "constant": "6'b0"
+                                  },
+                                  "constant": "6'sd0"
+                                }
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "ifTrue": {
+                    "kind": "Empty"
+                  },
+                  "assertionKind": "Assert"
+                }
+              }
+            },
+            {
+              "name": "e_sum",
+              "kind": "StatementBlock",
+              "addr": 93825680544512
+            },
+            {
+              "name": "",
+              "kind": "ProceduralBlock",
+              "addr": 93825680544408,
+              "procedureKind": "Always",
+              "body": {
+                "kind": "Block",
+                "blockKind": "Sequential",
+                "block": "93825680544512 e_sum",
+                "body": {
+                  "kind": "ConcurrentAssertion",
+                  "propertySpec": {
+                    "kind": "Clocking",
+                    "clocking": {
+                      "kind": "SignalEvent",
+                      "expr": {
+                        "kind": "NamedValue",
+                        "type": "logic",
+                        "symbol": "93825680546736 clk"
+                      },
+                      "edge": "PosEdge"
+                    },
+                    "expr": {
+                      "kind": "SequenceConcat",
+                      "elements": [
+                        {
+                          "sequence": {
+                            "kind": "Simple",
+                            "expr": {
+                              "kind": "BinaryOp",
+                              "type": "logic",
+                              "op": "Equality",
+                              "left": {
+                                "kind": "Call",
+                                "type": "logic",
+                                "subroutine": "$past",
+                                "arguments": [
+                                  {
+                                    "kind": "BinaryOp",
+                                    "type": "logic",
+                                    "op": "Inequality",
+                                    "left": {
+                                      "kind": "BinaryOp",
+                                      "type": "logic[3:0]",
+                                      "op": "Add",
+                                      "left": {
+                                        "kind": "ElementSelect",
+                                        "type": "logic[3:0]",
+                                        "value": {
+                                          "kind": "NamedValue",
+                                          "type": "logic[1:0][3:0]",
+                                          "symbol": "93825680549496 cnt_q"
+                                        },
+                                        "selector": {
+                                          "kind": "IntegerLiteral",
+                                          "type": "int",
+                                          "value": "1",
+                                          "constant": "1"
+                                        }
+                                      },
+                                      "right": {
+                                        "kind": "ElementSelect",
+                                        "type": "logic[3:0]",
+                                        "value": {
+                                          "kind": "NamedValue",
+                                          "type": "logic[1:0][3:0]",
+                                          "symbol": "93825680549496 cnt_q"
+                                        },
+                                        "selector": {
+                                          "kind": "IntegerLiteral",
+                                          "type": "int",
+                                          "value": "0",
+                                          "constant": "0"
+                                        }
+                                      }
+                                    },
+                                    "right": {
+                                      "kind": "Conversion",
+                                      "type": "logic[3:0]",
+                                      "operand": {
+                                        "kind": "Replication",
+                                        "type": "bit[3:0]",
+                                        "count": {
+                                          "kind": "NamedValue",
+                                          "type": "int",
+                                          "symbol": "93825680535808 Width",
+                                          "constant": "4"
+                                        },
+                                        "concat": {
+                                          "kind": "Concatenation",
+                                          "type": "bit[0:0]",
+                                          "operands": [
+                                            {
+                                              "kind": "IntegerLiteral",
+                                              "type": "bit[0:0]",
+                                              "value": "1'b1",
+                                              "constant": "1'b1"
+                                            }
+                                          ],
+                                          "constant": "1'b1"
+                                        },
+                                        "constant": "4'b1111"
+                                      },
+                                      "constant": "4'b1111"
+                                    }
+                                  }
+                                ]
+                              },
+                              "right": {
+                                "kind": "NamedValue",
+                                "type": "logic",
+                                "symbol": "93825680548136 a"
+                              }
+                            }
+                          },
+                          "min": 1,
+                          "max": 1
+                        }
+                      ]
+                    }
+                  },
+                  "ifTrue": {
+                    "kind": "Empty"
+                  },
+                  "assertionKind": "Assert"
+                }
+              }
+            },
+            {
+              "name": "e_rr",
+              "kind": "StatementBlock",
+              "addr": 93825680544768
+            },
+            {
+              "name": "",
+              "kind": "ProceduralBlock",
+              "addr": 93825680544664,
+              "procedureKind": "Always",
+              "body": {
+                "kind": "Block",
+                "blockKind": "Sequential",
+                "block": "93825680544768 e_rr",
+                "body": {
+                  "kind": "ConcurrentAssertion",
+                  "propertySpec": {
+                    "kind": "Clocking",
+                    "clocking": {
+                      "kind": "SignalEvent",
+                      "expr": {
+                        "kind": "NamedValue",
+                        "type": "logic",
+                        "symbol": "93825680546736 clk"
+                      },
+                      "edge": "PosEdge"
+                    },
+                    "expr": {
+                      "kind": "Binary",
+                      "op": "OverlappedImplication",
+                      "left": {
+                        "kind": "SequenceConcat",
+                        "elements": [
+                          {
+                            "sequence": {
+                              "kind": "Simple",
+                              "expr": {
+                                "kind": "UnaryOp",
+                                "type": "logic",
+                                "op": "BitwiseOr",
+                                "operand": {
+                                  "kind": "BinaryOp",
+                                  "type": "logic[31:0]",
+                                  "op": "BinaryAnd",
+                                  "left": {
+                                    "kind": "Conversion",
+                                    "type": "logic[31:0]",
+                                    "operand": {
+                                      "kind": "NamedValue",
+                                      "type": "logic[3:0]",
+                                      "symbol": "93825680547296 req_i"
+                                    }
+                                  },
+                                  "right": {
+                                    "kind": "UnaryOp",
+                                    "type": "logic[31:0]",
+                                    "op": "BitwiseNot",
+                                    "operand": {
+                                      "kind": "BinaryOp",
+                                      "type": "logic[31:0]",
+                                      "op": "Subtract",
+                                      "left": {
+                                        "kind": "BinaryOp",
+                                        "type": "logic[31:0]",
+                                        "op": "LogicalShiftLeft",
+                                        "left": {
+                                          "kind": "Conversion",
+                                          "type": "logic[31:0]",
+                                          "operand": {
+                                            "kind": "Conversion",
+                                            "type": "bit signed[3:0]",
+                                            "operand": {
+                                              "kind": "IntegerLiteral",
+                                              "type": "int",
+                                              "value": "1",
+                                              "constant": "1"
+                                            },
+                                            "constant": "4'sd1"
+                                          },
+                                          "constant": "32'd1"
+                                        },
+                                        "right": {
+                                          "kind": "BinaryOp",
+                                          "type": "logic[31:0]",
+                                          "op": "Add",
+                                          "left": {
+                                            "kind": "Conversion",
+                                            "type": "logic[31:0]",
+                                            "operand": {
+                                              "kind": "Call",
+                                              "type": "logic[1:0]",
+                                              "subroutine": "$past",
+                                              "arguments": [
+                                                {
+                                                  "kind": "NamedValue",
+                                                  "type": "logic[1:0]",
+                                                  "symbol": "93825680547576 idx_i"
+                                                }
+                                              ]
+                                            }
+                                          },
+                                          "right": {
+                                            "kind": "Conversion",
+                                            "type": "logic[31:0]",
+                                            "operand": {
+                                              "kind": "IntegerLiteral",
+                                              "type": "int",
+                                              "value": "1",
+                                              "constant": "1"
+                                            },
+                                            "constant": "32'd1"
+                                          }
+                                        }
+                                      },
+                                      "right": {
+                                        "kind": "Conversion",
+                                        "type": "logic[31:0]",
+                                        "operand": {
+                                          "kind": "IntegerLiteral",
+                                          "type": "int",
+                                          "value": "1",
+                                          "constant": "1"
+                                        },
+                                        "constant": "32'd1"
+                                      }
+                                    }
+                                  }
+                                }
+                              }
+                            },
+                            "min": 1,
+                            "max": 1
+                          }
+                        ]
+                      },
+                      "right": {
+                        "kind": "Simple",
+                        "expr": {
+                          "kind": "BinaryOp",
+                          "type": "logic",
+                          "op": "GreaterThan",
+                          "left": {
+                            "kind": "NamedValue",
+                            "type": "logic[1:0]",
+                            "symbol": "93825680547576 idx_i"
+                          },
+                          "right": {
+                            "kind": "Call",
+                            "type": "logic[1:0]",
+                            "subroutine": "$past",
+                            "arguments": [
+                              {
+                                "kind": "NamedValue",
+                                "type": "logic[1:0]",
+                                "symbol": "93825680547576 idx_i"
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "ifTrue": {
+                    "kind": "Empty"
+                  },
+                  "assertionKind": "Assert"
+                }
+              }
+            },
+            {
+              "name": "e_dyn",
+              "kind": "StatementBlock",
+              "addr": 93825680545024
+            },
+            {
+              "name": "",
+              "kind": "ProceduralBlock",
+              "addr": 93825680544920,
+              "procedureKind": "Always",
+              "body": {
+                "kind": "Block",
+                "blockKind": "Sequential",
+                "block": "93825680545024 e_dyn",
+                "body": {
+                  "kind": "ConcurrentAssertion",
+                  "propertySpec": {
+                    "kind": "Clocking",
+                    "clocking": {
+                      "kind": "SignalEvent",
+                      "expr": {
+                        "kind": "NamedValue",
+                        "type": "logic",
+                        "symbol": "93825680546736 clk"
+                      },
+                      "edge": "PosEdge"
+                    },
+                    "expr": {
+                      "kind": "Binary",
+                      "op": "OverlappedImplication",
+                      "left": {
+                        "kind": "Simple",
+                        "expr": {
+                          "kind": "NamedValue",
+                          "type": "logic",
+                          "symbol": "93825680548136 a"
+                        }
+                      },
+                      "right": {
+                        "kind": "Simple",
+                        "expr": {
+                          "kind": "BinaryOp",
+                          "type": "logic",
+                          "op": "LogicalAnd",
+                          "left": {
+                            "kind": "ElementSelect",
+                            "type": "logic",
+                            "value": {
+                              "kind": "NamedValue",
+                              "type": "logic[3:0]",
+                              "symbol": "93825680549752 gnt_o"
+                            },
+                            "selector": {
+                              "kind": "NamedValue",
+                              "type": "logic[1:0]",
+                              "symbol": "93825680547576 idx_i"
+                            }
+                          },
+                          "right": {
+                            "kind": "ElementSelect",
+                            "type": "logic",
+                            "value": {
+                              "kind": "NamedValue",
+                              "type": "logic[3:0]",
+                              "symbol": "93825680547296 req_i"
+                            },
+                            "selector": {
+                              "kind": "NamedValue",
+                              "type": "logic[1:0]",
+                              "symbol": "93825680547576 idx_i"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "ifTrue": {
+                    "kind": "Empty"
+                  },
+                  "assertionKind": "Assert"
+                }
+              }
+            },
+            {
+              "name": "e_oh",
+              "kind": "StatementBlock",
+              "addr": 93825680545280
+            },
+            {
+              "name": "",
+              "kind": "ProceduralBlock",
+              "addr": 93825680545176,
+              "procedureKind": "Always",
+              "body": {
+                "kind": "Block",
+                "blockKind": "Sequential",
+                "block": "93825680545280 e_oh",
+                "body": {
+                  "kind": "ConcurrentAssertion",
+                  "propertySpec": {
+                    "kind": "Clocking",
+                    "clocking": {
+                      "kind": "SignalEvent",
+                      "expr": {
+                        "kind": "NamedValue",
+                        "type": "logic",
+                        "symbol": "93825680546736 clk"
+                      },
+                      "edge": "PosEdge"
+                    },
+                    "expr": {
+                      "kind": "Simple",
+                      "expr": {
+                        "kind": "Call",
+                        "type": "bit",
+                        "subroutine": "$onehot",
+                        "arguments": [
+                          {
+                            "kind": "Concatenation",
+                            "type": "logic[2:0]",
+                            "operands": [
+                              {
+                                "kind": "NamedValue",
+                                "type": "logic",
+                                "symbol": "93825680548136 a"
+                              },
+                              {
+                                "kind": "ElementSelect",
+                                "type": "logic",
+                                "value": {
+                                  "kind": "NamedValue",
+                                  "type": "logic[3:0]",
+                                  "symbol": "93825680549752 gnt_o"
+                                },
+                                "selector": {
+                                  "kind": "IntegerLiteral",
+                                  "type": "int",
+                                  "value": "0",
+                                  "constant": "0"
+                                }
+                              },
+                              {
+                                "kind": "ElementSelect",
+                                "type": "logic",
+                                "value": {
+                                  "kind": "NamedValue",
+                                  "type": "logic[3:0]",
+                                  "symbol": "93825680549752 gnt_o"
+                                },
+                                "selector": {
+                                  "kind": "IntegerLiteral",
+                                  "type": "int",
+                                  "value": "1",
+                                  "constant": "1"
+                                }
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    }
+                  },
+                  "ifTrue": {
+                    "kind": "Empty"
+                  },
+                  "assertionKind": "Assert"
+                }
+              }
+            },
+            {
+              "name": "e_tern",
+              "kind": "StatementBlock",
+              "addr": 93825680545536
+            },
+            {
+              "name": "",
+              "kind": "ProceduralBlock",
+              "addr": 93825680545432,
+              "procedureKind": "Always",
+              "body": {
+                "kind": "Block",
+                "blockKind": "Sequential",
+                "block": "93825680545536 e_tern",
+                "body": {
+                  "kind": "ConcurrentAssertion",
+                  "propertySpec": {
+                    "kind": "Clocking",
+                    "clocking": {
+                      "kind": "SignalEvent",
+                      "expr": {
+                        "kind": "NamedValue",
+                        "type": "logic",
+                        "symbol": "93825680546736 clk"
+                      },
+                      "edge": "PosEdge"
+                    },
+                    "expr": {
+                      "kind": "Simple",
+                      "expr": {
+                        "kind": "BinaryOp",
+                        "type": "logic",
+                        "op": "Inequality",
+                        "left": {
+                          "kind": "ConditionalOp",
+                          "type": "logic[3:0]",
+                          "conditions": [
+                            {
+                              "expr": {
+                                "kind": "NamedValue",
+                                "type": "logic",
+                                "symbol": "93825680548136 a"
+                              }
+                            }
+                          ],
+                          "left": {
+                            "kind": "NamedValue",
+                            "type": "logic[3:0]",
+                            "symbol": "93825680549240 cnt_o"
+                          },
+                          "right": {
+                            "kind": "NamedValue",
+                            "type": "logic[3:0]",
+                            "symbol": "93825680547016 step_i"
+                          }
+                        },
+                        "right": {
+                          "kind": "Conversion",
+                          "type": "logic[3:0]",
+                          "operand": {
+                            "kind": "IntegerLiteral",
+                            "type": "bit[3:0]",
+                            "value": "4'b1001",
+                            "constant": "4'b1001"
+                          },
+                          "constant": "4'b1001"
+                        }
+                      }
+                    }
+                  },
+                  "ifTrue": {
+                    "kind": "Empty"
+                  },
+                  "assertionKind": "Assert"
+                }
+              }
+            },
+            {
+              "name": "e_sgn",
+              "kind": "StatementBlock",
+              "addr": 93825680545792
+            },
+            {
+              "name": "",
+              "kind": "ProceduralBlock",
+              "addr": 93825680545688,
+              "procedureKind": "Always",
+              "body": {
+                "kind": "Block",
+                "blockKind": "Sequential",
+                "block": "93825680545792 e_sgn",
+                "body": {
+                  "kind": "ConcurrentAssertion",
+                  "propertySpec": {
+                    "kind": "Clocking",
+                    "clocking": {
+                      "kind": "SignalEvent",
+                      "expr": {
+                        "kind": "NamedValue",
+                        "type": "logic",
+                        "symbol": "93825680546736 clk"
+                      },
+                      "edge": "PosEdge"
+                    },
+                    "expr": {
+                      "kind": "Binary",
+                      "op": "OverlappedImplication",
+                      "left": {
+                        "kind": "Simple",
+                        "expr": {
+                          "kind": "BinaryOp",
+                          "type": "logic",
+                          "op": "LessThan",
+                          "left": {
+                            "kind": "Conversion",
+                            "type": "logic signed[31:0]",
+                            "operand": {
+                              "kind": "NamedValue",
+                              "type": "logic signed[3:0]",
+                              "symbol": "93825680547856 sx"
+                            }
+                          },
+                          "right": {
+                            "kind": "Conversion",
+                            "type": "logic signed[31:0]",
+                            "operand": {
+                              "kind": "IntegerLiteral",
+                              "type": "int",
+                              "value": "0",
+                              "constant": "0"
+                            },
+                            "constant": "0"
+                          }
+                        }
+                      },
+                      "right": {
+                        "kind": "Simple",
+                        "expr": {
+                          "kind": "BinaryOp",
+                          "type": "logic",
+                          "op": "GreaterThanEqual",
+                          "left": {
+                            "kind": "NamedValue",
+                            "type": "logic signed[3:0]",
+                            "symbol": "93825680547856 sx"
+                          },
+                          "right": {
+                            "kind": "UnaryOp",
+                            "type": "logic signed[3:0]",
+                            "op": "Minus",
+                            "operand": {
+                              "kind": "Conversion",
+                              "type": "logic signed[3:0]",
+                              "operand": {
+                                "kind": "IntegerLiteral",
+                                "type": "bit signed[3:0]",
+                                "value": "-4'sd8",
+                                "constant": "-4'sd8"
+                              },
+                              "constant": "-4'sd8"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "ifTrue": {
+                    "kind": "Empty"
+                  },
+                  "assertionKind": "Assert"
+                }
+              }
+            },
+            {
+              "name": "e_shr",
+              "kind": "StatementBlock",
+              "addr": 93825680546048
+            },
+            {
+              "name": "",
+              "kind": "ProceduralBlock",
+              "addr": 93825680545944,
+              "procedureKind": "Always",
+              "body": {
+                "kind": "Block",
+                "blockKind": "Sequential",
+                "block": "93825680546048 e_shr",
+                "body": {
+                  "kind": "ConcurrentAssertion",
+                  "propertySpec": {
+                    "kind": "Clocking",
+                    "clocking": {
+                      "kind": "SignalEvent",
+                      "expr": {
+                        "kind": "NamedValue",
+                        "type": "logic",
+                        "symbol": "93825680546736 clk"
+                      },
+                      "edge": "PosEdge"
+                    },
+                    "expr": {
+                      "kind": "Simple",
+                      "expr": {
+                        "kind": "BinaryOp",
+                        "type": "logic",
+                        "op": "LessThanEqual",
+                        "left": {
+                          "kind": "BinaryOp",
+                          "type": "logic[3:0]",
+                          "op": "LogicalShiftRight",
+                          "left": {
+                            "kind": "NamedValue",
+                            "type": "logic[3:0]",
+                            "symbol": "93825680549240 cnt_o"
+                          },
+                          "right": {
+                            "kind": "IntegerLiteral",
+                            "type": "int",
+                            "value": "2",
+                            "constant": "2"
+                          }
+                        },
+                        "right": {
+                          "kind": "Conversion",
+                          "type": "logic[3:0]",
+                          "operand": {
+                            "kind": "IntegerLiteral",
+                            "type": "bit[3:0]",
+                            "value": "4'b11",
+                            "constant": "4'b11"
+                          },
+                          "constant": "4'b11"
+                        }
+                      }
+                    }
+                  },
+                  "ifTrue": {
+                    "kind": "Empty"
+                  },
+                  "assertionKind": "Assert"
+                }
+              }
+            },
+            {
+              "name": "e_cmp2",
+              "kind": "StatementBlock",
+              "addr": 93825680546304
+            },
+            {
+              "name": "",
+              "kind": "ProceduralBlock",
+              "addr": 93825680546200,
+              "procedureKind": "Always",
+              "body": {
+                "kind": "Block",
+                "blockKind": "Sequential",
+                "block": "93825680546304 e_cmp2",
+                "body": {
+                  "kind": "ConcurrentAssertion",
+                  "propertySpec": {
+                    "kind": "Clocking",
+                    "clocking": {
+                      "kind": "SignalEvent",
+                      "expr": {
+                        "kind": "NamedValue",
+                        "type": "logic",
+                        "symbol": "93825680546736 clk"
+                      },
+                      "edge": "PosEdge"
+                    },
+                    "expr": {
+                      "kind": "Simple",
+                      "expr": {
+                        "kind": "BinaryOp",
+                        "type": "logic",
+                        "op": "Equality",
+                        "left": {
+                          "kind": "BinaryOp",
+                          "type": "logic[3:0]",
+                          "op": "Add",
+                          "left": {
+                            "kind": "NamedValue",
+                            "type": "logic[3:0]",
+                            "symbol": "93825680549240 cnt_o"
+                          },
+                          "right": {
+                            "kind": "NamedValue",
+                            "type": "logic[3:0]",
+                            "symbol": "93825680547016 step_i"
+                          }
+                        },
+                        "right": {
+                          "kind": "BinaryOp",
+                          "type": "logic[3:0]",
+                          "op": "Add",
+                          "left": {
+                            "kind": "NamedValue",
+                            "type": "logic[3:0]",
+                            "symbol": "93825680547016 step_i"
+                          },
+                          "right": {
+                            "kind": "NamedValue",
+                            "type": "logic[3:0]",
+                            "symbol": "93825680549240 cnt_o"
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "ifTrue": {
+                    "kind": "Empty"
+                  },
+                  "assertionKind": "Assert"
+                }
+              }
+            }
+          ],
+          "definition": "93825680404496 t"
+        },
+        "connections": [
+        ]
+      }
+    ]
+  },
+  "definitions": [
+    {
+      "name": "t",
+      "kind": "Definition",
+      "addr": 93825680404496,
+      "defaultNetType": "93825680401488 wire",
+      "definitionKind": "Module",
+      "defaultLifetime": "Static",
+      "unconnectedDrive": "None",
+      "cellDefine": false
+    }
+  ]
+}

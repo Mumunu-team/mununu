@@ -25,6 +25,7 @@ use std::process::Command;
 use crate::adapter::{AdapterError, AdapterErrorKind};
 
 pub mod expectations;
+pub mod expr_ir;
 pub mod extract;
 pub mod prim_stubs;
 pub(crate) mod report_consistency;
