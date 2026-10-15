@@ -6586,7 +6586,10 @@ fn eval_op(
         let w = a.width();
         if b.width() <= 128 {
             b.low128().min(u128::from(w)) as u32
-        } else if b.ugte(&Bv::from_u128(u128::from(w), b.width())).is_zero() {
+        } else if b
+            .ugte(&Bv::from_u128_width(u128::from(w), b.width()))
+            .is_zero()
+        {
             b.low128() as u32
         } else {
             w
@@ -11771,6 +11774,27 @@ mod tests {
         );
         assert_eq!(
             step("1 sort bitvec 8\n2 state 1 x\n3 constd 1 200\n4 sra 1 2 3\n5 next 1 2 4\n"),
+            0
+        );
+    }
+
+    /// A shift whose amount operand is wider than 128 bits (OpenTitan's keymgr_ctrl lifts one)
+    /// panicked in the amount clamp — `Bv::from_u128` at the amount's width — and took the whole
+    /// `sv verify-auto` run down with it. 200-bit `1 << 3` is 8; `1 << 300` fills to 0.
+    #[test]
+    fn simulator_shift_by_an_amount_wider_than_128_bits_does_not_panic() {
+        let step = |src: &str| {
+            let f = parser::parse(src).expect("parses");
+            let regs: std::collections::HashMap<String, u128> =
+                [("x".to_string(), 1u128)].into_iter().collect();
+            simulate_one_step(&f, &regs, &std::collections::HashMap::new()).expect("steps")["x"]
+        };
+        assert_eq!(
+            step("1 sort bitvec 200\n2 state 1 x\n3 constd 1 3\n4 sll 1 2 3\n5 next 1 2 4\n"),
+            8
+        );
+        assert_eq!(
+            step("1 sort bitvec 200\n2 state 1 x\n3 constd 1 300\n4 sll 1 2 3\n5 next 1 2 4\n"),
             0
         );
     }
