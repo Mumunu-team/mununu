@@ -11292,12 +11292,6 @@ module uart_tx(); endmodule"#;
             &yopts,
             &VerifyAutoOptions {
                 must_edge_inference: MustEdgeInference::SmtHyperMust,
-                // Extraction reads the real macros; the lift reads the design's own synthesis
-                // shim, as `--lift-override prim_assert.sv=<csrng>/prim_assert.sv` would.
-                lift_overrides: vec![(
-                    "prim_assert.sv".to_string(),
-                    read(csrng.join("prim_assert.sv")),
-                )],
                 ..Default::default()
             },
         )
