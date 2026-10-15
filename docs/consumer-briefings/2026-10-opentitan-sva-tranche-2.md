@@ -83,7 +83,7 @@ docker run --rm -v "$(pwd)":/work -v mununu-target:/cargo-target -w /work mununu
 
 ## Provenance
 
-PR: (filled in once opened). `Repro: in-repo` for #702. Both reproducers fail on main `881dc70`, producing `(r == s)` and `(x4 != 20)`. This was checked by hand in a worktree. The defect was found by the yosys-elaboration oracle.
+PR: [704](https://github.com/Mumunu-team/mununu/pull/704). `Repro: in-repo` for #702. Both reproducers fail on main `881dc70`, producing `(r == s)` and `(x4 != 20)`. This was checked by hand in a worktree. The defect was found by the yosys-elaboration oracle.
 
 ## Not covered here
 
