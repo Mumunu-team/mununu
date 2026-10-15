@@ -20,6 +20,7 @@
 //! | `a \|-> b[*n]` | `(b && [](b && … && []b))` — n consecutive | XL.5 |
 //! | `a \|-> b ##1 c ##2 d` | `(b && [](c && [][]d))` — a bounded chain of booleans | XL.5 |
 //! | `(a ##1 b) \|-> c`, `a[*n] \|-> c` | `(!a \|\| [](!b \|\| c))` — FIXED-delay sequence antecedents | XL.5 |
+//! | `(a ##[m:n] b) \|-> c`, `a[*m:n] \|-> c`, `a[*2] ##1 b \|-> c` | the consequent at EVERY match end, as a conjunction over the alternatives in NNF (`antecedent_implies`); ≤ 64 alternatives, ≤ 64 cycles | 2026-10-15 |
 //! | `cover property (b)` | `mu X. (b \|\| <> X)` (EF b), plus the recoverability lens `nu Y. ((mu X. …) && [] Y)` | XL.2 |
 //! | `disable iff (r) P` | gate the body `(r \|\| body)`, or drop it and record the reset when `gate_reset` | XL.1c |
 //! | `$stable(x)` / `$changed(x)` | `(x == x__past)` / `(x != x__past)` | XL.3 |
@@ -48,12 +49,12 @@
 //!
 //! | SVA | reason, in short |
 //! |---|---|
-//! | `##[m:$]` before anything but the LAST element, `[*0:$]`, unbounded in an antecedent | needs a sequence automaton — Tier-3b |
+//! | `##[m:$]` before anything but the LAST element, `[*0:$]`, `##[m:$]` / `[*n:$]` in an antecedent | needs a sequence automaton — Tier-3b (an unbounded antecedent has unboundedly many match ends) |
 //! | `weak(…)` of an unbounded sequence | satisfied by every infinite trace — checks nothing |
 //! | `s_eventually` / `##[m:$]` over a sequence, `cover` of an eventuality | operand must be a boolean / `EF` of an `AF` is not a reachability question |
 //! | `nexttime [k]`, `always [m:n]`, `s_nexttime` with a range | ranged forms not captured |
 //! | `[->n]` goto, `[=n]` non-consecutive repetition | needs a sequence automaton — Tier-3b |
-//! | `##[m:n]` or `[*m:n]` in an ANTECEDENT, `[*m:n]` as a consequent, repetition inside a chain element | multiple match ends / length composition — Tier-3b |
+//! | `[*m:n]` as a consequent, repetition inside a CONSEQUENT chain element, a nested sub-sequence in an antecedent, `[*0…]`, an antecedent past 64 alternatives | length composition / the size guard |
 //! | `e throughout S` | `Binary{Throughout}`: unsupported consequent |
 //! | `sig[idx]` dynamic, `mem[i]` array content, `md[i]` of a multi-dimensional packed array, an enum- or otherwise opaque-typed base | distinct refusals (mununu#514; the index cannot be mapped to a bit) |
 //! | `x[i +: w]`, `x[i -: w]` | indexed part-select: slang gives base-and-WIDTH, declined rather than mis-sliced (mununu#565) |
@@ -63,9 +64,9 @@
 //! | `reg * k`, `reg + reg`, other arithmetic | only the constant addend is carried |
 //!
 //! The first widening (2026-10-15) added the bit-select, the 2-state `$isunknown` fold and the
-//! liveness forms above. The second (planned) adds ranged antecedents by NNF unrolling,
-//! `throughout` on bounded consequents and a minted `$countones`. Goto / `[=n]` and unbounded
-//! antecedents stay out.
+//! liveness forms above; the second adds ranged antecedents (and repetition inside an antecedent
+//! chain) by NNF unrolling, and plans `throughout` on bounded consequents and a minted
+//! `$countones`. Goto / `[=n]` and unbounded antecedents stay out.
 //!
 //! **Tier-2 shadow registers (XL.3).** `$past`/`$stable`/`$changed`/`$rose`/
 //! `$fell` read a signal's *previous-cycle* value, encoded as an atom over a
@@ -1358,51 +1359,127 @@ fn nest_boxes(n: u32, f: &str) -> String {
     out
 }
 
-/// XL.5 — an implication whose *antecedent* may be a bounded sequence:
-/// `<antecedent> |-> <conseq>`, where `conseq` is the already-lowered consequent
+/// XL.5 / ranged antecedents (2026-10-15) — an implication whose *antecedent* is a bounded
+/// sequence: `<antecedent> |-> <conseq>`, where `conseq` is the already-lowered consequent
 /// (aligned to the antecedent's match end; the caller adds the `|=>` extra `[]`).
-/// A boolean antecedent gives the shipped `(!a || conseq)`; a fixed-delay `##`
-/// chain / fixed `[*n]` gives the nested implication
-/// `!e₀ || []^δ₁(!e₁ || []^δ₂(… || conseq))` — "whenever the antecedent matches,
-/// the consequent holds at the match end". SOUNDNESS: the antecedent atoms sit in
-/// negative position under boxes evaluated ∀-may; the whole is an ordinary
-/// mu-calculus formula the KMTS evaluator decides soundly (definite verdicts
-/// transfer). A RANGE delay / range repetition in an antecedent creates multiple
-/// match ends (Tier-3b) and is rejected in [`antecedent_elements`].
+///
+/// IEEE 1800-2017 §16.12.7: the consequent must hold at EVERY match end of the antecedent. Each
+/// link of the antecedent is a boolean `b` preceded by a gap `##[lo:hi]` and repeated `[*rlo:rhi]`
+/// consecutive times (`##k` / `[*n]` are the degenerate ranges); every alternative is a separate
+/// match, so each range lowers to a CONJUNCTION over its alternatives, in negation-normal form —
+/// never a `!` over a modality (the cube evaluator would turn `¬[]` into a must-diamond):
+///
+/// - gap `[lo:hi]` before `f`: `[]^lo (f && [] (f && … [] f))` — `f` at each of the hi−lo+1
+///   cycles ([`boxes_all`], the dual of [`delayed`]);
+/// - `b[*rlo:rhi]` then `next`: `!b || T(1)` with
+///   `T(j) = (next, if j ≥ rlo) && ([] (!b || T(j+1)), if j < rhi)` — after the j-th consecutive
+///   `b`, the match ends here if `j` is in range, and continues if one more `b` comes.
+///
+/// For fixed gaps and repetitions this is exactly the XL.5 nested implication
+/// `!e₀ || []^δ₁(!e₁ || []^δ₂(… || conseq))`. SOUNDNESS: the antecedent atoms sit in negative
+/// position under boxes evaluated ∀-may; the whole is an ordinary mu-calculus formula the KMTS
+/// evaluator decides soundly. Size is the PRODUCT of the alternatives across links, guarded at
+/// [`MAX_ANTECEDENT_ALTERNATIVES`], and the total span at [`MAX_SEQ_UNROLL`].
 fn antecedent_implies(left: &Value, conseq: &str) -> Result<String, String> {
-    let elems = antecedent_elements(left)?;
-    let n = elems.len();
-    // Innermost: the last antecedent element implies the consequent at its cycle.
-    let mut acc = format!("(!({}) || {conseq})", elems[n - 1].0);
-    // Walk back, prefixing each preceding element's gap-to-the-next.
-    for i in (1..n).rev() {
-        let (b, _) = &elems[i - 1];
-        let gap = elems[i].1;
-        acc = format!("(!({b}) || {})", nest_boxes(gap, &acc));
+    let links = antecedent_links(left)?;
+    let mut acc = conseq.to_string();
+    for l in links.iter().rev() {
+        let elem = repeated_implies(&l.b, l.rep.0, l.rep.1, &acc);
+        acc = boxes_all(&elem, l.gap.0, l.gap.1);
     }
-    // The first element's own leading gap (usually 0).
-    Ok(nest_boxes(elems[0].1, &acc))
+    Ok(acc)
 }
 
-/// Flatten a bounded FIXED-delay antecedent into `(boolean, gap-before)` length-1
-/// elements: a boolean → one element; a fixed `a[*n]` → n elements (gaps
-/// `0,1,…,1`); a fixed `##` chain of booleans → one element per link. Rejects
-/// range delays / range repetition (multiple match ends — Tier-3b), goto/non-
-/// consecutive/unbounded repetition, and nested sub-sequences.
-fn antecedent_elements(left: &Value) -> Result<Vec<(String, u32)>, String> {
-    match left.get("kind").and_then(Value::as_str) {
-        Some("Simple") => {
-            let b = bool_expr(child(left, "expr")?)?;
-            match left.get("repetition") {
-                None => Ok(vec![(b, 0)]),
-                Some(rep) => {
-                    let n = fixed_consecutive_count(rep)?;
-                    Ok((0..n)
-                        .map(|i| (b.clone(), if i == 0 { 0 } else { 1 }))
-                        .collect())
-                }
-            }
+/// The most match-end alternatives a ranged antecedent may expand to (the product over its links
+/// of gap width × repetition width). Each alternative copies the consequent once.
+const MAX_ANTECEDENT_ALTERNATIVES: u64 = 64;
+
+/// One link of a bounded antecedent: boolean `b`, the gap `##[lo:hi]` before it, and its
+/// consecutive repetition `[*rlo:rhi]` (`(1, 1)` when unrepeated).
+struct AntecedentLink {
+    b: String,
+    gap: (u32, u32),
+    rep: (u32, u32),
+}
+
+/// `f` at every cycle in `[lo, hi]`: `[]^lo (f && [] (f && … [] f))`.
+fn boxes_all(f: &str, lo: u32, hi: u32) -> String {
+    let mut out = f.to_string();
+    for _ in 0..(hi - lo) {
+        out = format!("({f} && [] {out})");
+    }
+    nest_boxes(lo, &out)
+}
+
+/// `b[*rlo:rhi]` starting now implies `next` at each of its match ends: `!b || T(1)`.
+fn repeated_implies(b: &str, rlo: u32, rhi: u32, next: &str) -> String {
+    let mut t = next.to_string(); // T(rhi): the run cannot continue, so it must end here.
+    for j in (1..rhi).rev() {
+        let cont = format!("[] (!({b}) || {t})");
+        t = if j >= rlo {
+            format!("({next} && {cont})")
+        } else {
+            cont
+        };
+    }
+    format!("(!({b}) || {t})")
+}
+
+/// A consecutive repetition range `[*m:n]`, `1 ≤ m ≤ n`, bounded. Goto / non-consecutive /
+/// unbounded / empty (`[*0…]`) repetition is rejected.
+fn consecutive_range(rep: &Value) -> Result<(u32, u32), String> {
+    let kind = rep.get("kind").and_then(Value::as_str).unwrap_or("?");
+    if kind != "Consecutive" {
+        return Err(format!(
+            "`{kind}` repetition (goto `[->n]` / non-consecutive `[=n]`) needs a \
+             sequence automaton — Tier-3b"
+        ));
+    }
+    let min = rep.get("min").and_then(Value::as_u64);
+    let Some(max) = rep.get("max").and_then(Value::as_u64) else {
+        return Err(
+            "unbounded repetition `[*n:$]` in an ANTECEDENT has unboundedly many match \
+                    ends; it needs a sequence automaton — Tier-3b"
+                .into(),
+        );
+    };
+    let min = min.unwrap_or(0);
+    if min == 0 {
+        return Err("a repetition that can match empty (`[*0…]`) is out of fragment".into());
+    }
+    if max < min || max > MAX_SEQ_UNROLL {
+        return Err(format!(
+            "repetition range `[*{min}:{max}]` is out of bounds"
+        ));
+    }
+    Ok((min as u32, max as u32))
+}
+
+/// The links of a bounded antecedent: a boolean, a repeated boolean `b[*m:n]`, or a `##` chain
+/// whose elements are booleans or repeated booleans with fixed or ranged gaps. Rejects
+/// unbounded gaps / repetition, goto / non-consecutive repetition, nested sub-sequences, and an
+/// expansion past the size guards.
+fn antecedent_links(left: &Value) -> Result<Vec<AntecedentLink>, String> {
+    let leaf = |seq: &Value, gap: (u32, u32)| -> Result<AntecedentLink, String> {
+        if seq.get("kind").and_then(Value::as_str) != Some("Simple") {
+            return Err(format!(
+                "a nested sub-sequence in an antecedent (got {:?}) needs length composition — \
+                 Tier-3b",
+                seq.get("kind").and_then(Value::as_str)
+            ));
         }
+        let rep = match seq.get("repetition") {
+            None => (1, 1),
+            Some(r) => consecutive_range(r)?,
+        };
+        Ok(AntecedentLink {
+            b: bool_expr(child(seq, "expr")?)?,
+            gap,
+            rep,
+        })
+    };
+    let links = match left.get("kind").and_then(Value::as_str) {
+        Some("Simple") => vec![leaf(left, (0, 0))?],
         Some("SequenceConcat") => {
             let elements = left
                 .get("elements")
@@ -1413,32 +1490,47 @@ fn antecedent_elements(left: &Value) -> Result<Vec<(String, u32)>, String> {
                 let seq = el
                     .get("sequence")
                     .ok_or("sequence element without a `sequence`")?;
-                if seq.get("kind").and_then(Value::as_str) != Some("Simple")
-                    || seq.get("repetition").is_some()
-                {
-                    return Err("a sequence-antecedent element must be a length-1 boolean \
-                         (a repetition or nested sub-sequence in an antecedent is Tier-3b)"
-                        .into());
+                if el.get("max").and_then(Value::as_str) == Some("$") {
+                    return Err(
+                        "an unbounded `##[m:$]` gap in an ANTECEDENT has unboundedly \
+                                many match ends; it needs a sequence automaton — Tier-3b"
+                            .into(),
+                    );
                 }
-                let (min, max) = elem_delay(el)?;
-                if min != max {
-                    return Err(format!(
-                        "a range delay `##[{min}:{max}]` in an ANTECEDENT creates multiple \
-                         match ends — Tier-3b; a fixed `##k` antecedent is supported"
-                    ));
-                }
-                v.push((bool_expr(child(seq, "expr")?)?, min));
+                v.push(leaf(seq, elem_delay(el)?)?);
             }
             if v.is_empty() {
                 return Err("empty SequenceConcat antecedent".into());
             }
-            Ok(v)
+            v
         }
-        other => Err(format!(
-            "unsupported implication antecedent (expected a boolean or a fixed `##` chain \
-             / `[*n]`, got {other:?})"
-        )),
+        other => {
+            return Err(format!(
+                "unsupported implication antecedent (expected a boolean, a repeated boolean or \
+                 a bounded `##` chain of them, got {other:?})"
+            ));
+        }
+    };
+    let alternatives: u64 = links
+        .iter()
+        .map(|l| u64::from(l.gap.1 - l.gap.0 + 1) * u64::from(l.rep.1 - l.rep.0 + 1))
+        .product();
+    if alternatives > MAX_ANTECEDENT_ALTERNATIVES {
+        return Err(format!(
+            "the antecedent's ranges expand to {alternatives} match-end alternatives (> \
+             {MAX_ANTECEDENT_ALTERNATIVES}); each copies the consequent — narrow the ranges"
+        ));
     }
+    let span: u64 = links
+        .iter()
+        .map(|l| u64::from(l.gap.1) + u64::from(l.rep.1))
+        .sum();
+    if span > MAX_SEQ_UNROLL {
+        return Err(format!(
+            "the antecedent spans up to {span} cycles, past the unroll cap {MAX_SEQ_UNROLL}"
+        ));
+    }
+    Ok(links)
 }
 
 /// Translate a boolean `Expression` into mu-calculus atom/connective text.
@@ -2602,21 +2694,275 @@ mod tests {
         crate::mu_calculus::parser::parse(&f).expect("parses");
     }
 
+    /// The JSON of a bounded antecedent element: boolean `name`, gap `[lo:hi]`, optional
+    /// consecutive repetition `[rlo:rhi]` (shapes as slang 11.0.448 serialises them).
+    fn ante_el(name: &str, lo: u64, hi: u64, rep: Option<(u64, u64)>) -> Value {
+        let mut seq = serde_json::json!({"kind": "Simple",
+            "expr": {"kind": "NamedValue", "symbol": format!("1 {name}"), "type": "logic"}});
+        if let Some((rlo, rhi)) = rep {
+            seq["repetition"] = serde_json::json!({"kind": "Consecutive", "min": rlo, "max": rhi});
+        }
+        serde_json::json!({"sequence": seq, "min": lo, "max": hi})
+    }
+
+    fn implication(op: &str, elements: Vec<Value>, cons: &str) -> Value {
+        serde_json::json!({"kind": "Binary", "op": op,
+            "left": {"kind": "SequenceConcat", "elements": elements},
+            "right": {"kind": "Simple",
+                      "expr": {"kind": "NamedValue", "symbol": format!("9 {cons}"), "type": "logic"}}})
+    }
+
+    /// `(a ##[1:2] b) |-> c` — two match ends, the consequent at BOTH (IEEE 1800-2017 §16.12.7).
     #[test]
-    fn xl5_range_antecedent_rejected() {
-        // (a ##[1:2] b) |-> c — a range delay in an ANTECEDENT has multiple match
-        // ends (Tier-3b), rejected.
-        let spec = serde_json::json!({
-            "kind": "Binary", "op": "OverlappedImplication",
+    fn xl5_range_delay_antecedent_holds_at_every_match_end() {
+        let spec = implication(
+            "OverlappedImplication",
+            vec![ante_el("a", 0, 0, None), ante_el("b", 1, 2, None)],
+            "c",
+        );
+        let f = property_body(&spec, &TranslateOptions::default(), &mut Vec::new()).unwrap();
+        assert_eq!(f, "(!(a) || [] ((!(b) || c) && [] (!(b) || c)))");
+        crate::mu_calculus::parser::parse(&format!("nu X. ({f} && [] X)")).expect("parses");
+    }
+
+    /// `a[*1:3] |-> c` — a match ends after each of the first three consecutive `a`s; the
+    /// lowering nests in NNF and never puts `!` over a modality.
+    #[test]
+    fn xl5_range_repetition_antecedent_nests_without_negated_boxes() {
+        let spec = serde_json::json!({"kind": "Binary", "op": "OverlappedImplication",
+            "left": {"kind": "Simple", "expr": {"kind": "NamedValue", "symbol": "1 a"},
+                     "repetition": {"kind": "Consecutive", "min": 1, "max": 3}},
+            "right": {"kind": "Simple", "expr": {"kind": "NamedValue", "symbol": "2 c"}}});
+        let f = property_body(&spec, &TranslateOptions::default(), &mut Vec::new()).unwrap();
+        assert_eq!(f, "(!(a) || (c && [] (!(a) || (c && [] (!(a) || c)))))");
+        assert!(
+            !f.contains("!([]") && !f.contains("!(<>"),
+            "no negated modality: {f}"
+        );
+    }
+
+    /// `|=>` adds its one box before the antecedent is lowered — once, at each match end.
+    #[test]
+    fn xl5_range_antecedent_nonoverlap_adds_one_box() {
+        let spec = implication(
+            "NonOverlappedImplication",
+            vec![ante_el("a", 0, 0, None), ante_el("b", 1, 2, None)],
+            "c",
+        );
+        let f = property_body(&spec, &TranslateOptions::default(), &mut Vec::new()).unwrap();
+        assert_eq!(f, "(!(a) || [] ((!(b) || [] c) && [] (!(b) || [] c)))");
+    }
+
+    /// `a[*2] ##1 b |-> c` — a repetition inside a chain composes (was Tier-3b).
+    #[test]
+    fn xl5_repetition_inside_antecedent_chain_composes() {
+        let spec = implication(
+            "OverlappedImplication",
+            vec![ante_el("a", 0, 0, Some((2, 2))), ante_el("b", 1, 1, None)],
+            "c",
+        );
+        let f = property_body(&spec, &TranslateOptions::default(), &mut Vec::new()).unwrap();
+        assert_eq!(f, "(!(a) || [] (!(a) || [] (!(b) || c)))");
+    }
+
+    /// The size guards: the product of alternatives and the total span; unbounded and empty
+    /// repetition stay rejected.
+    #[test]
+    fn xl5_range_antecedent_product_guard() {
+        let reject = |elements: Vec<Value>, needle: &str| {
+            let spec = implication("OverlappedImplication", elements, "c");
+            let err = property_body(&spec, &TranslateOptions::default(), &mut Vec::new())
+                .expect_err("must reject");
+            assert!(err.contains(needle), "want `{needle}` in: {err}");
+        };
+        // 9 × 9 = 81 alternatives > 64.
+        reject(
+            vec![ante_el("a", 0, 8, None), ante_el("b", 1, 9, None)],
+            "alternatives",
+        );
+        // 8 × 8 = 64 is fine.
+        let ok = implication(
+            "OverlappedImplication",
+            vec![ante_el("a", 0, 7, None), ante_el("b", 1, 8, None)],
+            "c",
+        );
+        assert!(property_body(&ok, &TranslateOptions::default(), &mut Vec::new()).is_ok());
+        reject(vec![ante_el("a", 0, 0, Some((0, 2)))], "empty");
+        let unb = serde_json::json!({"kind": "Binary", "op": "OverlappedImplication",
             "left": {"kind": "SequenceConcat", "elements": [
-                {"sequence": {"kind": "Simple", "expr": {"kind": "NamedValue", "symbol": "1 a"}}, "min":0, "max":0},
-                {"sequence": {"kind": "Simple", "expr": {"kind": "NamedValue", "symbol": "2 b"}}, "min":1, "max":2}
-            ]},
-            "right": {"kind": "Simple", "expr": {"kind": "NamedValue", "symbol": "3 c"}}
-        });
-        let err = property_body(&spec, &TranslateOptions::default(), &mut Vec::new())
-            .expect_err("range antecedent must reject");
-        assert!(err.contains("Tier-3b"), "got: {err}");
+                ante_el("a", 0, 0, None),
+                {"sequence": {"kind": "Simple", "expr": {"kind": "NamedValue", "symbol": "2 b"}},
+                 "min": 1, "max": "$"}]},
+            "right": {"kind": "Simple", "expr": {"kind": "NamedValue", "symbol": "3 c"}}});
+        let err = property_body(&unb, &TranslateOptions::default(), &mut Vec::new()).unwrap_err();
+        assert!(err.contains("unboundedly"), "{err}");
+    }
+
+    /// SEMANTIC differential for the ranged-antecedent lowering. `a`, `b`, `c` are registers
+    /// driven by three 8-cycle periodic waveforms off a 3-bit counter, so the design has ONE
+    /// path. The exact engine decides the lowered formula; a brute-force matcher enumerates every
+    /// antecedent match on the same waveform and checks the consequent at each match end. They
+    /// must agree on every shape × waveform — the check that the NNF unrolling means what IEEE
+    /// 1800-2017 §16.12.7 says, not merely that its text looks right.
+    #[test]
+    fn ranged_antecedent_lowering_agrees_with_a_brute_force_matcher() {
+        use crate::adapter::btor2::symbolic_bitblast::{ExactVerdict, exact_symbolic_verdict};
+        // (gap lo, gap hi, rep lo, rep hi, signal index 0=a 1=b 2=c) per link; consequent signal;
+        // `|=>`?
+        type Link = (u32, u32, u32, u32, usize);
+        let shapes: Vec<(Vec<Link>, usize, bool)> = vec![
+            (vec![(0, 0, 1, 1, 0), (1, 2, 1, 1, 1)], 2, false), // a ##[1:2] b |-> c
+            (vec![(0, 0, 1, 3, 0)], 2, false),                  // a[*1:3] |-> c
+            (vec![(0, 0, 2, 2, 0), (1, 1, 1, 1, 1)], 2, false), // a[*2] ##1 b |-> c
+            (vec![(0, 0, 1, 1, 0), (0, 2, 1, 2, 1)], 2, true),  // a ##[0:2] b[*1:2] |=> c
+            (
+                vec![(0, 0, 1, 1, 0), (1, 1, 1, 1, 1), (1, 3, 1, 1, 2)],
+                0,
+                false,
+            ), // a ##1 b ##[1:3] c |-> a
+        ];
+        let names = ["a", "b", "c"];
+        let mut seed: u32 = 0x2026_1015;
+        let mut rnd = || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed >> 16) as u8
+        };
+        let mut disagreements = Vec::new();
+        let mut holds_seen = 0;
+        let mut violated_seen = 0;
+        for (shape, cons, nonoverlap) in &shapes {
+            let elements: Vec<Value> = shape
+                .iter()
+                .map(|&(lo, hi, rlo, rhi, s)| {
+                    let rep = (rlo, rhi) != (1, 1);
+                    ante_el(
+                        names[s],
+                        lo.into(),
+                        hi.into(),
+                        rep.then_some((rlo.into(), rhi.into())),
+                    )
+                })
+                .collect();
+            let op = if *nonoverlap {
+                "NonOverlappedImplication"
+            } else {
+                "OverlappedImplication"
+            };
+            let spec = implication(op, elements, names[*cons]);
+            let f = translate_one(
+                &spec,
+                SvaKind::Assert,
+                &TranslateOptions::default(),
+                &mut Vec::new(),
+            )
+            .expect("translates");
+            let formula = crate::mu_calculus::parser::parse(&f).expect("parses");
+            for _ in 0..40 {
+                // Biased toward 1s so antecedents actually match.
+                let masks = [rnd() | rnd(), rnd() | rnd(), rnd()];
+                let sig = |s: usize, t: usize| masks[s] >> (t % 8) & 1 == 1;
+                // Brute force over the periodic word: every start t in one period covers all.
+                let mut holds = true;
+                for t in 0..8 {
+                    let mut ends = vec![];
+                    // (link index, earliest cycle the link's gap counts from)
+                    fn walk(
+                        shape: &[(u32, u32, u32, u32, usize)],
+                        i: usize,
+                        from: usize,
+                        sig: &dyn Fn(usize, usize) -> bool,
+                        ends: &mut Vec<usize>,
+                    ) {
+                        let (lo, hi, rlo, rhi, s) = shape[i];
+                        for d in lo..=hi {
+                            let start = from + d as usize;
+                            for r in rlo..=rhi {
+                                if (0..r as usize).all(|k| sig(s, start + k)) {
+                                    let end = start + r as usize - 1;
+                                    if i + 1 == shape.len() {
+                                        ends.push(end);
+                                    } else {
+                                        walk(shape, i + 1, end, sig, ends);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    walk(shape, 0, t, &sig, &mut ends);
+                    if ends
+                        .iter()
+                        .any(|&e| !sig(*cons, e + usize::from(*nonoverlap)))
+                    {
+                        holds = false;
+                    }
+                }
+                let btor2 = periodic_design(&masks);
+                let exact = exact_symbolic_verdict(&btor2, &formula).expect("exact decides");
+                let want = if holds {
+                    ExactVerdict::Holds
+                } else {
+                    ExactVerdict::Violated
+                };
+                if holds {
+                    holds_seen += 1;
+                } else {
+                    violated_seen += 1;
+                }
+                if exact != want {
+                    disagreements.push((f.clone(), masks, exact, want));
+                }
+            }
+        }
+        assert!(
+            disagreements.is_empty(),
+            "lowering ≠ SVA semantics: {disagreements:#?}"
+        );
+        assert!(
+            holds_seen > 20 && violated_seen > 20,
+            "both verdicts exercised: {holds_seen} / {violated_seen}"
+        );
+    }
+
+    /// A 3-bit counter `cnt` (init 0, +1 mod 8) and registers `a`, `b`, `c` with
+    /// `x(t) = mask_x bit (t mod 8)`: init = bit 0, next = bit `(cnt + 1) mod 8`.
+    fn periodic_design(masks: &[u8; 3]) -> String {
+        let mut l = vec![
+            "1 sort bitvec 1".to_string(),
+            "2 sort bitvec 3".to_string(),
+            "3 state 2 cnt".to_string(),
+            "4 zero 2".to_string(),
+            "5 init 2 3 4".to_string(),
+            "6 one 2".to_string(),
+            "7 add 2 3 6".to_string(),
+            "8 next 2 3 7".to_string(),
+            "9 zero 1".to_string(),
+            "10 one 1".to_string(),
+        ];
+        let mut nid = 11;
+        // eq_k = (cnt + 1 == k) for k in 0..8, shared by the three registers.
+        let mut eq = vec![];
+        for k in 0..8 {
+            l.push(format!("{nid} constd 2 {k}"));
+            l.push(format!("{} eq 1 7 {nid}", nid + 1));
+            eq.push(nid + 1);
+            nid += 2;
+        }
+        for (i, name) in ["a", "b", "c"].iter().enumerate() {
+            let bit = |t: usize| if masks[i] >> t & 1 == 1 { 10 } else { 9 };
+            let st = nid;
+            l.push(format!("{st} state 1 {name}"));
+            l.push(format!("{} init 1 {st} {}", st + 1, bit(0)));
+            nid += 2;
+            let mut acc = bit(7);
+            for k in (0..7).rev() {
+                l.push(format!("{nid} ite 1 {} {} {acc}", eq[k], bit(k)));
+                acc = nid;
+                nid += 1;
+            }
+            l.push(format!("{nid} next 1 {st} {acc}"));
+            nid += 1;
+        }
+        l.join("\n") + "\n"
     }
 
     #[test]
@@ -4065,7 +4411,7 @@ mod tests {
             ),
             // -- rejected, each with its named reason
             (
-                "(a ##[1:2] b) |-> c — range delay in an antecedent",
+                "(a ##[1:2] b) |-> c — ranged antecedent, c at every match end (2026-10-15)",
                 imp(
                     ov,
                     concat(vec![
@@ -4074,7 +4420,28 @@ mod tests {
                     ]),
                     simple(sig("c")),
                 ),
-                Rejected("Tier-3b"),
+                Translates("(!(a) || [] ((!(b) || c) && [] (!(b) || c)))"),
+            ),
+            (
+                "a[*1:2] |-> c — ranged repetition antecedent (2026-10-15)",
+                imp(
+                    ov,
+                    rep(sig("a"), "Consecutive", n(1), n(2)),
+                    simple(sig("c")),
+                ),
+                Translates("(!(a) || (c && [] (!(a) || c)))"),
+            ),
+            (
+                "(a ##[1:$] b) |-> c — unbounded antecedent",
+                imp(
+                    ov,
+                    concat(vec![
+                        (simple(sig("a")), n(0), n(0)),
+                        (simple(sig("b")), n(1), dollar()),
+                    ]),
+                    simple(sig("c")),
+                ),
+                Rejected("unboundedly many match ends"),
             ),
             (
                 "a |-> ##[1:$] b — unbounded delay, read strongly (2026-10-15)",

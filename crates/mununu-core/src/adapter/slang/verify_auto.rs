@@ -9446,6 +9446,8 @@ module uart_tx(); endmodule"#;
             ("nu X. (wdata__bits3_3 && [] X)", Class::Simple),
             ("nu X. (st__bits1_1 && [] X)", Class::Simple),
             ("nu X. ((st__bits1_1 == 1) && [] X)", Class::Simple),
+            // Ranged antecedents (2026-10-15) add NO atom shape — they only nest the existing
+            // boolean atoms under boxes — so they add no row here.
             // `!$isunknown(x)` folds to `false` in the 2-state model: no atom at all.
             ("nu X. ((!(false)) && [] X)", Class::Simple),
         ];
@@ -10049,6 +10051,118 @@ module uart_tx(); endmodule"#;
         let err = verify_auto(&[], &YosysOptions::default(), &VerifyAutoOptions::default())
             .expect_err("no sources");
         assert_eq!(err.kind, AdapterErrorKind::ParseError);
+    }
+
+    /// Ranged antecedents (2026-10-15) decide end to end, with twins. `st`: IDLE 0 -req-> WAIT 1;
+    /// WAIT -ack-> DONE 2 (else stays); DONE -> IDLE.
+    ///
+    /// - `a_range`: `(IDLE && req) ##[1:2] (WAIT && ack) |=> DONE` — both match ends land on DONE.
+    /// - `a_range_twin`: the same without `WAIT &&` — `ack` at +1 AND +2 gives a second match end
+    ///   one cycle after DONE, back in IDLE: VIOLATED. The twin is the check that the second match
+    ///   end is actually tested.
+    /// - `a_rep`: `WAIT[*1:2] |-> !DONE` holds; `a_rep_twin`: `WAIT[*2:3] |=> WAIT` is VIOLATED (an
+    ///   `ack` after two cycles of waiting leaves WAIT).
+    /// - `a_rep_chain`: `(IDLE && req) ##1 WAIT[*2] |=> !IDLE` — repetition inside a chain.
+    #[test]
+    #[ignore = "requires slang + sv2v + Yosys + z3 (use the mununu-sva docker image); run with --ignored"]
+    fn e2e_range_antecedent_decides_on_handshake_fsm() {
+        let design = "module hs_dut (input logic clk, input logic rst_n, input logic req,\n\
+                      input logic ack, output logic [1:0] st);\n\
+                        always_ff @(posedge clk or negedge rst_n) begin\n\
+                          if (!rst_n) st <= 2'd0;\n\
+                          else case (st)\n\
+                            2'd0: st <= req ? 2'd1 : 2'd0;\n\
+                            2'd1: st <= ack ? 2'd2 : 2'd1;\n\
+                            default: st <= 2'd0;\n\
+                          endcase\n\
+                        end\n\
+                        a_range: assert property (@(posedge clk) disable iff (!rst_n)\n\
+                          ((st == 2'd0) && req) ##[1:2] ((st == 2'd1) && ack) |=> (st == 2'd2));\n\
+                        a_range_twin: assert property (@(posedge clk) disable iff (!rst_n)\n\
+                          ((st == 2'd0) && req) ##[1:2] ack |=> (st == 2'd2));\n\
+                        a_rep: assert property (@(posedge clk) disable iff (!rst_n)\n\
+                          (st == 2'd1)[*1:2] |-> (st != 2'd2));\n\
+                        a_rep_twin: assert property (@(posedge clk) disable iff (!rst_n)\n\
+                          (st == 2'd1)[*2:3] |=> (st == 2'd1));\n\
+                        a_rep_chain: assert property (@(posedge clk) disable iff (!rst_n)\n\
+                          ((st == 2'd0) && req) ##1 (st == 2'd1)[*2] |=> (st != 2'd0));\n\
+                      endmodule\n";
+        let sources = vec![("hs_dut.sv".to_string(), design.to_string())];
+        let yopts = YosysOptions {
+            top: Some("hs_dut".to_string()),
+            use_sv2v: true,
+            frontend: crate::adapter::yosys::SvFrontend::Slang,
+            ..Default::default()
+        };
+        // The shipped CLI / API default is `portfolio-sequential` (exact first); the library
+        // default runs the predicate cube + rescues only. Both are measured.
+        let run = |portfolio: Option<PortfolioMode>| {
+            let opts = VerifyAutoOptions {
+                portfolio,
+                ..Default::default()
+            };
+            let report = verify_auto(&sources, &yopts, &opts)
+                .expect("verify_auto runs on the handshake design");
+            eprintln!("== portfolio {portfolio:?}");
+            for p in &report.properties {
+                eprintln!(
+                    "  {} ({:?}): {:?} [{:?}]\n      {}",
+                    p.name, p.label, p.outcome, p.decided_by, p.formula
+                );
+            }
+            assert!(
+                report.unsupported.is_empty(),
+                "all five translate: {:?}",
+                report.unsupported
+            );
+            report
+        };
+        let outcome = |r: &AutoVerifyReport, l: &str| {
+            r.properties
+                .iter()
+                .find(|p| p.label.as_deref() == Some(l))
+                .unwrap_or_else(|| panic!("`{l}` missing: {:?}", r.properties))
+                .outcome
+                .clone()
+        };
+        let holds = ["a_range", "a_rep", "a_rep_chain"];
+        let violated = ["a_range_twin", "a_rep_twin"];
+
+        // The shipped default decides all five, and the twins' second match ends are tested.
+        let portfolio = run(Some(PortfolioMode::Sequential));
+        for l in holds {
+            assert!(
+                matches!(outcome(&portfolio, l), VerifyOutcome::Holds),
+                "{l}: {:?}",
+                outcome(&portfolio, l)
+            );
+        }
+        for l in violated {
+            assert!(
+                matches!(outcome(&portfolio, l), VerifyOutcome::Violated { .. }),
+                "{l} must be VIOLATED under the default portfolio: {:?}",
+                outcome(&portfolio, l)
+            );
+        }
+
+        // The cube alone (library default): the HOLDS rows decide; a twin is never HOLDS (it
+        // may be ⊥ — the cube's may-relation cannot witness these nested-box violations and no
+        // rescue lane reduces the shape — but a HOLDS would be unsound).
+        let cube = run(None);
+        for l in holds {
+            assert!(
+                matches!(outcome(&cube, l), VerifyOutcome::Holds),
+                "{l}: {:?}",
+                outcome(&cube, l)
+            );
+        }
+        for l in violated {
+            assert!(
+                !matches!(outcome(&cube, l), VerifyOutcome::Holds),
+                "{l}: {:?}",
+                outcome(&cube, l)
+            );
+        }
     }
 
     /// SVA-fragment widening (2026-10-15) — liveness SVA decides end to end, with the HOLDS /
