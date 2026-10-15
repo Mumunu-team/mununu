@@ -50,7 +50,7 @@ engine decides, what it soundly refuses, and where it hits the bit cap:
 | `twocount32.btor2` | 32-bit | — | decides / near cap |
 | `noninitstate.btor2` | has a `constraint` | — | **refused** (constraint not modelled — soundness guard) |
 | `twocount2c.btor2` | has a `constraint` | — | **refused** (constraint guard) |
-| `ponylink-slaveTXlen-sat.btor2` | 228-bit, 320 states | **yes** (`-sat`) | **Skipped** (over the 40-bit cap) — btormc decides |
+| `ponylink-slaveTXlen-sat.btor2` | 228-bit, 320 states | **yes** (`-sat`) | **Skipped** (228 bits is over the exact engine's 192-bit auto-cap) — btormc decides |
 
 The `-sat` / `-unsat` filename suffix is the upstream competition convention for the
 known verdict (`sat` = `bad` reachable / unsafe; `unsat` = safe). The study asserts

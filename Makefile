@@ -20,7 +20,7 @@ PROPTEST_CASES ?= 64
         test-fast e2e e2e-oneshot test-properties stress fuzz proptest-deep \
         coverage mem-profile sweep \
         bench-baseline bench-compare bench-record \
-        experiment replay publish-prep
+        experiment replay publish-prep frontier-smoke
 
 help:
 	@echo "Build / test / lint:"
@@ -57,6 +57,7 @@ help:
 	@echo "  experiment      - EXP=NNNN-<slug> ; scaffolds experiments/EXP-<EXP>/"
 	@echo "  replay          - EXP=<EXP-ID> ; replays an archived experiment"
 	@echo "  publish-prep    - validate every experiment archive (scripts/check_repro.sh)"
+	@echo "  frontier-smoke  - build the release binary and assert the exact engine's known bit-cap frontier points (scripts/bitcap_frontier.py smoke, ≈ 1–2 min; not in ci)"
 
 build:
 	$(CARGO) build --release -p mununu-cli
@@ -203,6 +204,13 @@ verify-repro:
 
 docs-audit:
 	@scripts/docs-audit.sh $(DOCS_THRESHOLD)
+
+# The exact engine's bit-cap frontier — the known points, asserted against the release binary
+# under the shipped defaults (every MUNUNU_* scrubbed). Not in `ci`: it runs the engine on a
+# 32-bit multiplier (~30 s) and a 48-bit one through the cube ladder. `scripts/bitcap_frontier.py
+# sweep` is the full measurement; `experiments/EXP-0031-bitcap-frontier/` the recorded table.
+frontier-smoke: build
+	@scripts/bitcap_frontier.py smoke
 
 clean:
 	$(CARGO) clean

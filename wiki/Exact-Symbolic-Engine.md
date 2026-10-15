@@ -153,12 +153,22 @@ includes the reset edge.
 - **Sound and definite.** No abstraction ⇒ the 2-valued verdict is exact for the model
   at every alternation depth. A `Holds` and a `Violated` both transfer to the modeled
   design; there is no `⊥` to interpret.
-- **Bounded by BDD size.** The bit-blaster builds BDDs over *every* register + input
-  bit (no cone-of-influence restriction yet). A design whose register+input bit count
-  exceeds the cap ([`MAX_BITBLAST_BITS = 40`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/adapter/btor2/symbolic_bitblast.rs#L195)) is rejected with a clean error *before* the
-  BDD manager is allocated, and `verify-auto` degrades that property to `Skipped` — a
-  wide datapath belongs on the [Predicate-Cube CEGAR](Predicate-Cube-CEGAR) path with
-  its honest `⊥` and CEGAR refinement. The engineering choice, per property and per
+- **Bounded by BDD size, and the bound is the cone's shape.** The bit-blaster builds BDDs over
+  the property's **bit-level cone of influence** (mununu#602: a register read through a constant
+  part-select keeps the slice, not the width). The exact engine admits cones up to 40 bits by default and raises its own cap to fit the cone up to 192; above that it abstains with a reason unless told otherwise. The width it can actually decide depends on the shape — see the frontier table. Concretely: the floor is
+  [`MAX_BITBLAST_BITS = 40`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/adapter/btor2/symbolic_bitblast.rs#L134),
+  [`default_cap_for_cone`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/adapter/btor2/symbolic_bitblast.rs#L254)
+  raises it to the cone up to [`AUTO_CAP_CEILING = 192`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/adapter/btor2/symbolic_bitblast.rs#L163),
+  and the recoverability verb retries a refused cone once at the 1024-bit ceiling. A refusal is a
+  clean, typed abstention (`bit-cap`, `arena-overflow`, `iteration-budget`, `latency`, …) *before* or
+  during the build — never a wrong verdict — and `sv verify-auto` / `verify-recoverability` escalate
+  the property to the [Predicate-Cube CEGAR](Predicate-Cube-CEGAR) legs with their honest `⊥`; the
+  JSON says which engine decided (`engine`) and why the exact one stopped (`exact_abstention`).
+  Within the cap, width is not what walls a run: a multiplier's BDD is exponential at every width
+  (under the default arena the exact engine leaves it at 9 bits per operand and the predicate-cube
+  ladder decides it to 32), while FSM-plus-timer control logic decides at every width to the 1024-bit
+  ceiling — the measured table is in
+  [`docs/verifying-rtl.md`](https://github.com/Mumunu-team/mununu/blob/main/docs/verifying-rtl.md#what-decides-at-what-width--the-measured-frontier). The engineering choice, per property and per
   design, is between an exact answer where the state fits and a sound-but-possibly-`⊥`
   answer where it does not.
 - **The model is what yosys emits.** The verdict is exact *for the bit-blasted BTOR2*;

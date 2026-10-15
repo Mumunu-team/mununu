@@ -40,8 +40,11 @@ Lex order on `(outer, inner)` is well-founded, so the descent reaches `outer == 
 
 | Setup | `always_recoverable` | How |
 |---|---|---|
-| **Small** (`OW=8`, ≤ ~40 bits) | **`Holds`** | exact 3-valued engine |
-| **Wide** (`OW=48`, beyond the exact cap) | **`Holds`** | the **lexicographic** ranking certificate |
+| **Small** (`OW=8`) | **`Holds`** | exact engine (`engine: exact`) |
+| **Wide** (`OW=48`) | **`Holds`** | exact engine (`engine: exact`, measured 2026-10-14); the **lexicographic** ranking certificate is the decider past the exact engine's reach |
+
+> **Re-measured 2026-10-14** on the release binary (`engine` field, mununu#682): both rows are decided by the **exact engine** directly — the cap has auto-raised to fit the cone up to 192 bits since mununu#402, so these widths no longer leave it. The ranking certificate described below remains the engine of record for a cone the exact engine abstains on; this example no longer exercises it. See `docs/verifying-rtl.md` → "What decides at what width".
+
 
 ## Run it
 

@@ -39,7 +39,7 @@ A 3-bit saturating counter with an `assume`-based environment constraint ("rst i
 
 ## Yosys SVA support — what the built-in parser actually accepts
 
-Yosys 0.59's `read_verilog -formal -sv` is a synthesis frontend, not a full SystemVerilog assertion frontend. It accepts:
+**Scope: the yosys `read_verilog` lift used by this corpus** (`btor2 from-sv`, plain `sv verify`). Temporal SVA is not lost to mununu — `sv verify-auto` elaborates the design with slang and translates `assert property` itself; its fragment is listed in [`docs/verifying-rtl.md` §3](../../docs/verifying-rtl.md#3-coverage-is-a-fragment-and-verdicts-are-honest). What follows is what the **yosys** frontend accepts. Yosys 0.59's `read_verilog -formal -sv` is a synthesis frontend, not a full SystemVerilog assertion frontend. It accepts:
 
 - **Immediate assertions** inside `always @(posedge clk)`: `assert (boolean_expr);`
 - **Immediate assumes / covers**: `assume (...)`, `cover (...)`
@@ -53,7 +53,7 @@ It does **not** accept:
 
 The example corpus uses **shadow-register patterns** to encode property semantics that need temporal SVA — a pre-cycle latch tracks the antecedent, an immediate Boolean assertion tests the consequent. This is the canonical Yosys-flow workaround documented in YosysHQ's tutorials and mirrors how every working OSS SVA example is actually written.
 
-The full SVA story arrives in **Phase 2** of the RTL roadmap (`adapter/sva/`), independent of the Yosys frontend. Phase 2A handles the LTL fragment of SVA via mununu's own parser; Phase 2B handles sequence operators via NFA construction. See [as-a-business-and-velvety-stallman.md §5 Phase 2](../../docs/) for details.
+Temporal SVA is verified by `sv verify-auto` (slang elaboration + mununu's own translator in `crates/mununu-core/src/adapter/slang/translate.rs`), independent of the yosys frontend; its supported fragment and the rejected forms are listed in [`docs/verifying-rtl.md` §3](../../docs/verifying-rtl.md#3-coverage-is-a-fragment-and-verdicts-are-honest).
 
 ## CLI
 

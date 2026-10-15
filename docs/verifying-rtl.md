@@ -49,7 +49,7 @@ mununu btor2 verify design.btor2
 
 ### `btor2 verify-liveness` — response liveness `AG(request → AF grant)`
 
-> Source of truth: [`response_liveness_rescue_atoms`](../crates/mununu-core/src/adapter/liveness_rescue.rs#L239) — surface: (CLI+API+UI)
+> Source of truth: [`response_liveness_rescue_atoms`](../crates/mununu-core/src/adapter/liveness_rescue.rs#L292) — surface: (CLI+API+UI)
 
 Decides the canonical request/grant property — "whenever `request` holds, `grant` is
 eventually reached on **every** path" — by a sound liveness-to-safety reduction
@@ -64,7 +64,7 @@ mununu btor2 verify-liveness design.btor2 --request "st == 1" --grant "st == 2"
 
 ### `btor2 verify-liveness-under-fairness` — response liveness under a `GF` fairness assumption (mununu#477)
 
-> Source of truth: [`response_liveness_rescue_under_fairness`](../crates/mununu-core/src/adapter/liveness_rescue.rs#L313) — surface: (CLI+API+UI)
+> Source of truth: [`response_liveness_rescue_under_fairness`](../crates/mununu-core/src/adapter/liveness_rescue.rs#L329) — surface: (CLI+API+UI)
 
 Decides `(⋀ⱼ GF fairⱼ) → AG(request → AF grant)` via the Emerson–Lei extension of the plain l2s: one `fairⱼ_seen` latch per fairness atom (each mirroring the existing `b_seen`), conjuncted into `bad = looped ∧ ¬b_seen ∧ ⋀ⱼ fairⱼ_seen`. A reachable `bad` ⇒ a lasso exists that satisfies every fairness constraint AND leaves a request forever ungranted ⇒ VIOLATED. Empty `--fairness` recovers `verify-liveness` exactly, byte-for-byte on the emitted monitor. Sound + complete for the response shape (a useless fairness atom env satisfies trivially does NOT rescue a genuinely starving design — the `fair_gated_is_not_rescued_by_useless_fairness` soundness control validates this).
 
@@ -83,7 +83,7 @@ mununu btor2 verify-liveness-under-fairness design.btor2 \
 
 ### `btor2 verify-recoverability` — recoverability `AG EF good`
 
-> Source of truth: [`verify_recoverability`](../crates/mununu-core/src/adapter/recoverability.rs#L46) — surface: (CLI+API+UI)
+> Source of truth: [`verify_recoverability`](../crates/mununu-core/src/adapter/recoverability.rs#L1051) — surface: (CLI+API+UI)
 
 Decides "from every reachable state, can the design still get **back** to a good
 state?" — the CTL formula `AG EF good = ν Y. ((μ X. (good ∨ ◇X)) ∧ □Y)`. This is an
@@ -91,8 +91,15 @@ alternating fixpoint: the `◇` (some-successor) inside the `□` (all-successor
 branching content that **SVA / LTL cannot express** (see
 [`recoverability-vs-sva.md`](design/recoverability-vs-sva.md)). A `violated` verdict
 means a reachable state is a trap from which `good` is unreachable. Decided by the
-exact 3-valued engine (sound at every alternation depth, definite within its 40-bit
-cone cap; `unknown` over the cap).
+exact 3-valued engine first (sound at every alternation depth, definite within its bit
+cap — 40 by default, auto-raised to fit the cone up to 192, and retried once at the
+1024-bit ceiling by this verb), then by the predicate-cube ladder when the exact engine
+abstains. The JSON says **who decided and why the exact engine stopped** (mununu#682):
+`engine` is `exact`, `exact-reach-restricted` (the same verdict, via the reachable-state
+restriction) or `cube-ladder`; `exact_abstention` is the typed reason when the ladder ran
+(`bit-cap`, `arena-overflow`, `iteration-budget`, `latency`, `arena-safety`, …). Within
+the cap the deciding width is the cone's *shape*, not its bit count — see
+["What decides at what width"](#what-decides-at-what-width--the-measured-frontier).
 
 ```bash
 mununu btor2 verify-recoverability design.btor2 --target "state_q == 3"
@@ -226,7 +233,7 @@ SystemVerilog. An annotation name is author-chosen, one per annotation, and has 
 
 ## No-sidecar SystemVerilog verification: `sv verify-auto`
 
-> Source of truth: [`verify_auto`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L1537) — surface: (CLI+API+UI)
+> Source of truth: [`verify_auto`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L3033) — surface: (CLI+API+UI)
 
 `sv verify-auto` takes a SystemVerilog module and checks its properties with **no
 hand-written sidecar and no supplied formula**. End to end:
@@ -380,7 +387,8 @@ The exact engine has **four** independent budgets, and an abstention **names whi
 one it hit and the knob to raise** — `BIT CAP` (`MUNUNU_BDD_MAX_BITS`), `NODE`
 budget (`MUNUNU_BDD_ARENA_NODES`, which scales the OxiDD arena), `ITERATION`
 budget (`MUNUNU_BDD_ITER_BUDGET`, the μ/ν fixpoint step cap), and `WALL-CLOCK`
-(`MUNUNU_BDD_TIME_BUDGET_MS`, default 10 s). Bit count cannot see the reachable
+(`MUNUNU_BDD_TIME_BUDGET_MS`, **off by default since mununu#553** — a wall clock makes
+the verdict host-dependent, so it is opt-in). Bit count cannot see the reachable
 *diameter*, so a cone that fits the bit cap can still abstain on the iteration or
 wall-clock budget — the message distinguishes the four so the remedy is not blind
 trial-and-error.
@@ -434,6 +442,68 @@ A cone that reaches an array stays signal-level (the memory havoc applies). `MUN
 restores the signal-level cone for a differential run; the verdict is identical wherever both
 decide (the wall-class matrix is identical at both granularities, and the `crossed_vector_field`
 class decides only at bit level).
+
+### What decides at what width — the measured frontier (2026-10-14)
+
+> Source of truth: [`default_cap_for_cone`](../crates/mununu-core/src/adapter/btor2/symbolic_bitblast.rs#L254) + [`scripts/bitcap_frontier.py`](../scripts/bitcap_frontier.py) + [`experiments/EXP-0031-bitcap-frontier/`](../experiments/EXP-0031-bitcap-frontier/) — surface: (CLI+API) — the `engine` / `exact_abstention` fields of `btor2 verify-recoverability` and `sv verify-recoverability` (mununu#682) are what the sweep reads.
+
+"How many bits can the exact engine handle?" has no single answer, and "40 bits" is the wrong one.
+The mechanics: `MAX_BITBLAST_BITS = 40` is the admission **floor**; `default_cap_for_cone` raises the cap
+to fit the cone up to `AUTO_CAP_CEILING = 192`, so every cone of at most 192 register+input bits (after
+the bit-level cone of influence above) is admitted by default; the recoverability verb retries a bit-cap
+abstention once at the 1024-bit `HARD_BITBLAST_CEILING` (the cap ladder, 60 s); `MUNUNU_BDD_MAX_BITS`
+overrides all of it. Within the cap, what stops a run is the cone's **shape**: the arena (`arena-overflow`,
+a BDD that does not compress — `MUNUNU_BDD_ARENA_NODES`), the iteration budget (`iteration-budget` — a
+fixpoint traversing a long chain, which the squaring rescue usually absorbs), or the latency bound. The
+engine names the budget it hit, and since mununu#682 the verbs carry it as `exact_abstention` next to
+`engine` — so a table of *largest deciding width per shape* is a measurement, not a guess.
+
+`scripts/bitcap_frontier.py` is that measurement. For each shape it bisects a width knob whose cone
+grows monotonically and records the largest width the exact engine decides (`engine` = `exact` /
+`exact-reach-restricted`) and the first it does not, with the typed reason — every probe under the
+**shipped defaults** (every `MUNUNU_*` scrubbed, release binary, 300 s wall cap per probe), every probe
+kept, non-monotone pairs flagged (the arena tier steps at 40 bits). `make frontier-smoke` asserts the
+known points in about 1.5 min. The sweep below is `experiments/EXP-0031-bitcap-frontier/` (manifest,
+hardware fingerprint, every probe); re-run it with `scripts/bitcap_frontier.py sweep`.
+
+| shape (generator in `scripts/profile_cases.py`) | knob → cone bits | largest width the exact engine decides | first width it does not | bounded by |
+|---|---|---|---|---|
+| 6-state FSM + W-bit timeout against a programmable limit (`fsm-timeout`) | W → 2W+6 | W = 509, **1024 b**, HOLDS, `exact`, 0.5 s | W = 510 (1026 b) | `bit-cap` — the hard ceiling |
+| the same with an absorbing ERROR (`fsm-timeout-stuck`) | W → 2W+5 (`clr` leaves the cone) | W = 509, 1023 b, VIOLATED with witness, `exact`, 152 s | W = 510 | `bit-cap` |
+| requester / granter FSM pair + two timers (`fsm-pair`) | W → 3W+9 | W = 338, 1023 b, HOLDS, `exact`, 0.5 s | W = 339 (1026 b) | `bit-cap` |
+| two held registers, `done` on `a == b` (`relational`, default interleaved order) | n → 2n+1 | n = 511, 1023 b, VIOLATED, `exact`, 0.4 s | n = 512 (1025 b) | `bit-cap` |
+| the same under `MUNUNU_BDD_VAR_ORDER=cell-major` | n → 2n+1 | n = 11, 23 b, VIOLATED, `exact-reach-restricted`, 29 s | n = 12 (25 b) | wall cap 300 s (host) — the representation cliff of the opt-out order |
+| two wrapping counters, `done` at both m−1 (`twocount`, squaring on) | w → 2w+2 | w = 346, 694 b, HOLDS, `exact`, 293 s | w = 347 (696 b) | wall cap 300 s (host) — the squaring closure's cost grows with w |
+| the same under `MUNUNU_BDD_SQUARING=0` | w → 2w+2 | w = 17, 36 b, HOLDS, `exact-reach-restricted`, 5.6 s | w = 18 (38 b) | `latency` (10 M nodes ∧ > 5 000 iterations) |
+| video raster 800 × 2^vb, `vcount == v−1` (`raster`, squaring on) | vb → 10+vb | vb = 64, 74 b, HOLDS, `exact`, 0.7 s | none within reach — the target literal `2^vb−1` is folded by the atom parser and stops past 64 bits (vb = 126 is unrunnable, not undecided) | — |
+| the same under `MUNUNU_BDD_SQUARING=0` | vb → 10+vb | vb = 10, 20 b, HOLDS, `exact-reach-restricted`, 5.2 s | vb = 11 (21 b) | `latency` |
+| multiplier, `done` on `a·b == k` over two free n-bit registers (`mult`) | n → 2n+1 | n = 9, 19 b, VIOLATED, `exact`, 0.3 s | n = 10 (21 b) | `arena-overflow` — the 16 M-node arena of the ≤ 40-bit tier, during the bit-blast; the predicate-cube ladder still decides VIOLATED to n = 32 (≈ 55 s, 65 b) and reports `unknown` from n = 48 |
+| i2c `scl_padoen_o == 1` (real RTL, `wall_classes/`) | 146 kept b | HOLDS, `exact`, 0.2 s | — | — |
+| aes cipher control FSM `cs == 9` (real RTL) | 37 kept b | HOLDS, `exact`, 0.1 s | — | — |
+
+Every row: `btor2 verify-recoverability`, `MUNUNU_*` scrubbed, release binary at the commit in
+`experiments/EXP-0031-bitcap-frontier/manifest.json`, wall cap 300 s per probe, Intel i7-9750H.
+`exact-reach-restricted` is the same verdict reached through the reachable-state restriction (stage 2
+of the exact ladder, after the 2 s first slice); rows above 192 bits went through the cap ladder's
+retry at 1024.
+
+How to read it: **control logic is not what walls the exact engine.** A six-state FSM with a W-bit
+timeout counter against a programmable limit, and two such machines coupled by a handshake, decide at
+**every** width up to the 1024-bit hard ceiling, in half a second — their BDDs (increment, equality)
+are linear in W — and a VIOLATED pays only the witness extraction (152 s at 1023 bits). A relational
+`a == b` does the same under the default interleaved order. What walls is a **multiplier**: its BDD is
+exponential under every variable order (Bryant 1986), so under the shipped arena the exact engine
+leaves it at 9 bits per operand — `arena-overflow` during the bit-blast, before any fixpoint — and the
+predicate-cube ladder takes over (VIOLATED to 32 bits per operand, `unknown` from 48). The "decides to
+32 bits" figure quoted earlier came from a profiling run with the arena widened to 1<<26; it was never
+a default. The opt-out `cell-major` order shows the representation cliff at 25 bits; the counters
+that used to trip the iteration budget (`twocount`, the video raster) decide through the squaring
+rescue — `twocount` to 694 bits inside the 300 s cap — and their iteration frontier reappears only
+with `MUNUNU_BDD_SQUARING=0` (`latency` at 38 and 21 bits). So the honest sentence for a block is:
+*admitted up to 192 bits by default (1024 on the recoverability verb), decided or not by shape — read
+`engine` and `exact_abstention`, and raise the named knob when the reason is a budget.* Wall times are
+the development host's; the deterministic bounds (`bit-cap`, `arena-overflow`, `latency`) reproduce
+anywhere.
 
 ### Compound-atom safety escalation + `bottom-reason` diagnostic (mununu#492)
 
@@ -879,20 +949,35 @@ works when you want the intermediate BTOR2.)
 
 ### 3. Coverage is a fragment, and verdicts are honest
 
-The SVA translator supports a defined fragment (implication `|->` / `|=>` over
-**bounded sequences** on either side, `$past` (including a depth `$past(x, k)`,
-k ≥ 1) / `$stable` / `$rose` / `$fell`, `$onehot` / `$onehot0`, …); assertions
-outside it come back in the `unsupported` list. The bounded-sequence layer covers
-cycle delays (`##k`, `##[m:n]`), fixed consecutive repetition (`b[*n]`), and
-multi-element `##` chains of booleans (`a |-> b ##1 c ##2 d`) — in the consequent
-*and*, at fixed delays, the antecedent (`(a ##1 b) |-> c`, `a[*n] |-> c`). Each
-lowers to nested `[]` — `a |-> ##2 b` → `AG(a → AX² b)`; `(a ##1 b) |-> c` →
-`AG(a → AX(b → c))` — so a definite verdict transfers just like the plain `|=>`
-(one `[]`) case. What stays out of fragment (rejected with a reason, never
-dropped — it needs a SERE→automaton subsystem): **unbounded** `##[m:$]` / `[*n:$]`,
-**goto** `[->n]` / **non-consecutive** `[=n]` repetition, range delays/repetition
-*inside* a multi-element chain or in an antecedent, and repetition/nesting inside
-a chain element.
+> Source of truth: [`property_body`](../crates/mununu-core/src/adapter/slang/translate.rs#L721) + [`bool_expr`](../crates/mununu-core/src/adapter/slang/translate.rs#L1050) (the translator `sv verify-auto` runs; the executable table `the_shipped_fragment_truth_table` in the same file has one row per supported and per rejected form, against the real slang 11.0.448 shapes in `adapter/slang/testdata/sva_fragment_forms.{sv,ast.json}`) — surface: (CLI+API)
+
+The SVA translator supports a defined fragment; assertions outside it come back in the `unsupported`
+list **with a reason**, never dropped. Since 2026-10-14 the fragment is an executable table in the
+repo, so the lists below cannot drift from the code without a red test.
+
+| form | lowering | since |
+|---|---|---|
+| `assert property (b)`, `a \|-> b`, `a \|=> b` | `AG b`, `AG(a → b)`, `AG(a → AX b)` | XL.1 |
+| consequents `##k`, `##[m:n]`, `b[*n]`, bounded `##` chains (`a \|-> b ##1 c ##2 d`) | nested `[]` — `a \|-> ##2 b` → `AG(a → AX² b)`; the range form is "b within [m,n]" | XL.4 / XL.5 |
+| **fixed-delay sequence antecedents** `(a ##1 b) \|-> c`, `a[*n] \|-> c` | `AG(a → AX(b → c))` | XL.5 |
+| `$past(x[, k])` any k ≥ 1, `$stable`, `$changed`, `$rose`, `$fell` | shadow registers `x__past`, `x__pastk` (added flops, exact) | XL.3 |
+| `$onehot` / `$onehot0` (≤ 32-bit), `x inside {v, [lo:hi], …}` (≤ 64 values) | value-set disjunctions over the comparison fragment | #204, XL.6 |
+| `sig[hi:lo]` slices, reductions `\|x` `&x`, `reg OP reg`, `reg == $past(reg) + k` | minted slice signals; relational / addend atoms | #565, XL.1c, H.D/H.G |
+| enum members, `parameter` / `localparam` references | the elaborated integer | XL.6b, #632 |
+| `disable iff (r)` | the reset is recognised and pinned inactive (or the body gated) | XL.1c |
+
+Each definite verdict transfers exactly as in the plain `|=>` case — the lowerings add boxes and
+flops, never an abstraction. **Rejected, each with a named reason** (the second half of the same
+test): unbounded `##[m:$]` / `[*n:$]` (also mid-chain) and goto `[->n]` / non-consecutive `[=n]`
+repetition (a sequence automaton); **ranged** antecedents `(a ##[1:2] b) |-> c` and `[*m:n]` in an
+antecedent or as a consequent (multiple match ends); `s_eventually`, `always`, `eventually [m:n]`,
+`nexttime`, `strong()` / `weak()` (liveness and property-level SVA); `throughout`; constant
+bit-select `sig[k]`, dynamic `sig[idx]`, array content `mem[i]` (three distinct refusals, #514);
+indexed part-selects `x[i +: w]` (#565); `$isunknown`, `$countones`; `^x` parity; `$rose` / `$fell`
+on a vector; non-linear arithmetic. Of these, the widening tracked for the next release covers
+constant bit-selects, `$isunknown` (as a two-state fold with a note), liveness SVA through the
+liveness-to-safety rescue, ranged antecedents by finite unrolling, `throughout` on bounded
+consequents and a minted `$countones`; goto / `[=n]` / unbounded antecedents / PSL stay out.
 
 **Which comparison OPERANDS are accepted** (mununu#565). Until now this fragment was documented
 only in the refusal message, so the boundary was discoverable only by hitting it — which is how a
@@ -1009,7 +1094,7 @@ portfolio engines) — an agent can trust a definite verdict and treat `unknown`
 
 ## Preflight: `sv lint` — structural faults refused at write time
 
-> Source of truth: [`sv_lint_registers`](../crates/mununu-core/src/adapter/sv_verify.rs#L228) — surface: (CLI+API+UI)
+> Source of truth: [`sv_lint_registers`](../crates/mununu-core/src/adapter/sv_verify.rs#L311) — surface: (CLI+API+UI)
 
 `sv lint` runs a set of **purely structural** checks over the lifted netlist — no
 bit-blast, no properties, no environment, ~lift cost. Each finding carries a
@@ -1188,7 +1273,7 @@ sibling libraries — for a design + peer-utility layout.
 
 ## Are the properties adequate? `sv mutate`
 
-> Source of truth: [`mutate_and_compare`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L1824) — surface: (CLI+API+UI)
+> Source of truth: [`mutate_and_compare`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L2984) — surface: (CLI+API+UI)
 
 A `holds` verdict is only as strong as the property that produced it — a **vacuous**
 property `holds` no matter what the design does. `sv mutate` measures that: it applies

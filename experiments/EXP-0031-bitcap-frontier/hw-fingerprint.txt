@@ -1,0 +1,61 @@
+# captured                   2026-10-15T01:17:36Z
+# host                       Marianos-MacBook-Pro.local
+# uname                      Darwin Marianos-MacBook-Pro.local 25.6.0 Darwin Kernel Version 25.6.0: Fri Jul 31 19:11:49 PDT 2026; root:xnu-12377.161.14~5/RELEASE_X86_64 x86_64
+
+--- OS ---
+ProductName:		macOS
+ProductVersion:		26.6.2
+BuildVersion:		25G83
+
+--- CPU ---
+Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz
+model.brand                  Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz
+hw.ncpu                      12
+hw.physicalcpu               6
+hw.logicalcpu                12
+hw.cpufamily                 260141638
+hw.cputype                   7
+hw.cpusubtype                8
+hw.l1icachesize              32768
+hw.l1dcachesize              32768
+hw.l2cachesize               262144
+hw.l3cachesize               12582912
+hw.cachelinesize             64
+hw.pagesize                  4096
+hw.optional.arm.FEAT_FP16    unavailable
+hw.optional.arm.FEAT_DotProd unavailable
+
+--- Memory ---
+hw.memsize                   17179869184
+
+--- Frequency / governor ---
+powermetrics                 available
+
+--- NUMA ---
+numactl                      unavailable
+
+--- Container ---
+container                    no
+
+--- Toolchain ---
+rustc                        rustc 1.95.0 (59807616e 2026-04-14)
+cargo                        cargo 1.95.0 (f2d3ce0bd 2026-03-21)
+git.commit                   d7462e5758780106bdcb29318fc90986253464a6
+git.branch                   feat/bitcap-frontier-and-sva-truth-table
+git.dirty                    yes
+
+--- rust-toolchain.toml ---
+[toolchain]
+# Pinned exactly so host devs, the dev container, and CI all run the
+# same clippy lint set. The Dockerfile.dev's ARG RUST_VERSION mirrors
+# this pin (drift between the two is the silent-fail case we want to
+# catch in PR review). To bump: update both files in the same commit
+# and re-run `make ci` locally first to surface any new lints.
+channel = "1.95.0"
+components = ["rustfmt", "clippy"]
+
+--- Environment subset ---
+CARGO_TARGET_DIR             <unset>
+RUSTFLAGS                    <unset>
+RUST_LOG                     <unset>
+RAYON_NUM_THREADS            <unset>

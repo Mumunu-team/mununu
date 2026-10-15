@@ -49,8 +49,11 @@ Reset is tied **inactive** in both runs, so recoverability rests on the *datapat
 
 | Setup | `always_recoverable` | How |
 |---|---|---|
-| **Small FIFO** (`Depth=16`, ≤ ~40 bits of pointer state) | **`Holds`** | exact 3-valued engine (enumerates the pointer state) |
-| **Wide FIFO** (`Depth=2^21`, 22-bit pointers, beyond the exact cap) | **`Holds`** | the **ranking certificate** over the exact transition — exact walls, the predicate cube abstains |
+| **Small FIFO** (`Depth=16`) | **`Holds`** | exact engine (`engine: exact`) |
+| **Wide FIFO** (`Depth=2^21`, 22-bit pointers) | **`Holds`** | exact engine (`engine: exact`, measured 2026-10-14); the ranking certificate was the decider when the cap was 40 bits |
+
+> **Re-measured 2026-10-14** on the release binary (`engine` field, mununu#682): both rows are decided by the **exact engine** directly — the cap has auto-raised to fit the cone up to 192 bits since mununu#402, so these widths no longer leave it. The ranking certificate described below remains the engine of record for a cone the exact engine abstains on; this example no longer exercises it. See `docs/verifying-rtl.md` → "What decides at what width".
+
 
 `empty` (`wptr == rptr`) is **not invariant** — the two wrap counters advance
 **independently** (writes vs. reads), so `wptr == rptr` is *achieved* by draining, a

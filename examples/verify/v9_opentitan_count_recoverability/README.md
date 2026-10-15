@@ -43,8 +43,9 @@ measures pointing opposite ways:
 - **descent to 0** — measure δ = `cnt` (each decrement lowers it, bounded below by 0);
 - **ascent to MAX** — measure δ = `MAX − cnt` (each increment lowers it, bounded below by 0).
 
-No bounded predicate set captures a 2^W-step descent, so the predicate cube abstains and
-— beyond ~40 bits — the exact BDD engine walls. mununu's **ranking certificate** decides
+No bounded predicate set captures a 2^W-step descent, so the predicate cube abstains; the exact
+BDD engine, whose cap auto-raises to 192 bits, decides both widths here directly (measured
+2026-10-14, `engine: exact`). Beyond the exact engine's reach mununu's **ranking certificate** decides
 each directly over the exact transition: from every off-goal state *some* input strictly
 decreases the relevant δ, forcing a descent to the goal. The certificate **tries both
 measure directions**, so the same extraction decides both properties — each `Holds` at
@@ -52,8 +53,11 @@ Width = 48.
 
 | Setup | `AG EF cnt==0` (descent) | `AG EF cnt==MAX` (ascent) | How |
 |---|---|---|---|
-| **Small** (`Width=8`, ≤ ~40 bits) | **`Holds`** | **`Holds`** | exact 3-valued engine |
-| **Wide** (`Width=48`, beyond the exact cap) | **`Holds`** | **`Holds`** | the ranking certificate (∃-input variant), δ = `cnt` / δ = `MAX−cnt` |
+| **Small** (`Width=8`) | **`Holds`** | **`Holds`** | exact engine (`engine: exact`) |
+| **Wide** (`Width=48`) | **`Holds`** | **`Holds`** | exact engine (`engine: exact`, measured 2026-10-14); the ranking certificate (∃-input variant, δ = `cnt` / δ = `MAX−cnt`) is the decider past the exact engine's reach |
+
+> **Re-measured 2026-10-14** on the release binary (`engine` field, mununu#682): both rows are decided by the **exact engine** directly — the cap has auto-raised to fit the cone up to 192 bits since mununu#402, so these widths no longer leave it. The ranking certificate described below remains the engine of record for a cone the exact engine abstains on; this example no longer exercises it. See `docs/verifying-rtl.md` → "What decides at what width".
+
 
 ## A real-hardware wrinkle (and why the certificate is robust to it)
 

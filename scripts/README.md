@@ -145,6 +145,46 @@ arena so the fixpoint itself runs to convergence; otherwise every size stops at 
 around 17 s and the ranking certificate decides instead. Calibrations are written to
 `target/profiles/<case>.calibration.json` with the full sweep.
 
+## bitcap_frontier.py — where the exact engine stops deciding, per shape, under the shipped defaults
+
+> Source of truth: [`scripts/bitcap_frontier.py`](bitcap_frontier.py) + [`default_cap_for_cone`](../crates/mununu-core/src/adapter/btor2/symbolic_bitblast.rs) + the `engine` / `exact_abstention` fields of `btor2 verify-recoverability` (mununu#682) — surface: CLI-only — an engine-measurement instrument, not a verification capability.
+
+"How many bits can the exact engine handle?" has no single answer: the admission cap is 40 bits by
+default, raised to fit the cone up to 192, and the recoverability verb retries a bit-cap abstention
+once at the 1024-bit ceiling; what stops a run is the cone's *shape*. This script bisects, per shape,
+on a width knob whose cone grows monotonically and reports the largest width the exact engine decides
+(`engine` = `exact` / `exact-reach-restricted`) and the first it does not, with **why** — the typed
+`exact_abstention` (`bit-cap`, `arena-overflow`, `iteration-budget`, `latency`, …) or this host's
+wall cap. Shapes: the two FPGA control-logic generators (`fsm-timeout` — a 6-state FSM with a W-bit
+timeout against a CSR-programmed limit, HOLDS, and its `stuck` twin, VIOLATED; `fsm-pair` — a
+requester/granter handshake with two timers), the profiling families (`mult`, `relational`,
+`twocount`, `raster`) and two fixed RTL references (`i2c`, `aes`). Labelled configurations exhibit the
+documented cliffs: `squaring-off` (the iteration frontier without #611's rescue), `cell-major` (the
+representation cliff of the opt-out order).
+
+Every probe runs `target/release/mununu` (never the profiling build) with **every `MUNUNU_*`
+variable scrubbed** and `RUST_LOG` set so the escalation line and the engine's own `kept_bits` are
+captured; the cone formula is cross-checked against `kept_bits` on every probe and a mismatch is
+reported, as is a decided verdict that differs from the shape's expected one and any non-monotone
+decide/abstain pair (the arena tier steps at 40 bits). Sweeps merge into
+`target/frontier/frontier.json` by (shape, configuration), so a long sweep runs one shape at a time.
+
+```bash
+make frontier-smoke                                   # build + the known points, asserted (≈ 1–2 min)
+scripts/bitcap_frontier.py sweep --shapes fsm-timeout,fsm-pair,mult   # bisect, ≤ 8 probes each, 300 s cap
+scripts/bitcap_frontier.py sweep --shapes raster,twocount --config squaring-off
+scripts/bitcap_frontier.py table                      # the markdown table from the merged JSON
+scripts/bitcap_frontier.py record EXP-0031-bitcap-frontier            # archive with SCHEMA.md v1 provenance
+```
+
+The smoke asserts: `mult` n=32 (65-bit cone) decides VIOLATED on the exact engine; `mult` n=48 (97 b)
+abstains `arena-overflow` and the cube ladder reports `unknown`; `i2c` (146 kept bits at bit-level cone of influence) HOLDS in under 5 s;
+`fsm-timeout` W=32 (70 b) HOLDS and its `stuck` twin is VIOLATED. Observed on the development host
+(Intel i7-9750H macOS, 2026-10-14, two runs, 6/6 both): `mult` n=32 ≈ 54 s, n=48 ≈ 39 s, every other probe
+under 6 s — about 1½ min in all.
+The recorded frontier is written up in [`docs/verifying-rtl.md`](../docs/verifying-rtl.md) ("What
+decides at what width").
+
 ## heat_check.py — did the hot spots move?
 
 > Source of truth: [`scripts/heat_check.py`](heat_check.py) — surface: CLI-only — an engine-performance instrument, not a verification capability.

@@ -1,0 +1,1 @@
+scripts/bitcap_frontier.py sweep --fresh   # one shape at a time: --shapes <shape> [--config <c>]

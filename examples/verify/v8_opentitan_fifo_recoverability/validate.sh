@@ -20,7 +20,8 @@
 #     decides it anyway: over the EXACT transition it proves that from every non-empty state
 #     SOME input (a read) strictly decreases the ranking δ = wptr - rptr, which — δ bounded
 #     below — forces a descent to empty (Podelski-Rybalchenko, ∃-input variant, one relation,
-#     no 2^|P|). So AG EF empty decides HOLDS at 2^21 depth in ~0.1s where exact BDD walls.
+#     no 2^|P|). So AG EF empty decides HOLDS at 2^21 depth in ~0.1s past the exact engine's reach
+#     (since the 192-bit auto-cap the exact engine decides this width itself — read the JSON's engine field).
 #     Contrast: the ALL-PATH variant fails here (writing keeps δ non-decreasing), which is
 #     correct — the FIFO is AG EF empty but NOT AG AF empty (the env may write forever).
 #
@@ -82,7 +83,7 @@ lift 16 "${OUT}/d16.btor2"
 SMALL="$("${MUNUNU}" btor2 verify-recoverability "${OUT}/d16.btor2" --target 'cnta == cntb' 2>/dev/null | grep -oiE 'holds|violated|unknown' | head -1)"
 echo
 
-echo "--- wide FIFO (Depth=2^21 = 22-bit pointers, > exact cap) — expect HOLDS via the ∃-input ranking certificate ---"
+echo "--- wide FIFO (Depth=2^21 = 22-bit pointers) — expect HOLDS (the JSON's engine field says which engine decided) ---"
 lift 2097152 "${OUT}/wide.btor2"
 "${MUNUNU}" btor2 verify-recoverability "${OUT}/wide.btor2" --target 'cnta == cntb' 2>/dev/null | grep -iE '"verdict"'
 WIDE="$("${MUNUNU}" btor2 verify-recoverability "${OUT}/wide.btor2" --target 'cnta == cntb' 2>/dev/null | grep -oiE 'holds|violated|unknown' | head -1)"
@@ -96,7 +97,7 @@ if [[ "${SMALL}" != "holds" ]]; then echo "FAIL: small FIFO expected holds, got 
 if [[ "${WIDE}" != "holds" ]]; then echo "FAIL: wide FIFO expected holds (ranking certificate), got ${WIDE}" >&2; ok=0; fi
 
 if [[ "${ok}" == "1" ]]; then
-  echo "PASS — relational recoverability DECIDES HOLDS on real RTL at 2^21 depth (∃-input ranking certificate), where exact BDD walls and the predicate cube abstains."
+  echo "PASS — relational recoverability DECIDES HOLDS on real RTL at 2^21 depth (read the engine field: exact since the 192-bit auto-cap; the ∃-input ranking certificate past it)."
 else
   echo "FAILED"; exit 1
 fi
