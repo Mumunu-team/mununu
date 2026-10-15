@@ -85,7 +85,7 @@ docker run --rm -v "$(pwd)":/work -v mununu-target:/cargo-target -w /work mununu
 
 ## Provenance
 
-PR: (filled in once opened). Every `Repro: in-repo` reproducer failed on its parent commit with only its test hunks applied. That check was done by hand, because `make verify-repro` copies the whole test-bearing file and cannot separate an inline test from its fix.
+PR: [701](https://github.com/Mumunu-team/mununu/pull/701). Every `Repro: in-repo` reproducer failed on its parent commit with only its test hunks applied. That check was done by hand, because `make verify-repro` copies the whole test-bearing file and cannot separate an inline test from its fix.
 
 ## Not covered here
 
