@@ -166,7 +166,7 @@ Declaring an expectation **supersedes** `--fail-on` (it must — `--expect-viola
 
 ## Check that a design's properties are adequate (mutation testing)
 
-> Source of truth: [`mutate_and_compare`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L1824) — surface: (CLI+API+UI)
+> Source of truth: [`mutate_and_compare`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L3414) — surface: (CLI+API+UI)
 
 `mununu sv mutate` applies a **named structural mutation** to a SystemVerilog design, re-verifies, and reports whether each property's verdict **flips**. A flip (`holds` → `violated`) confirms the property constrains the mutated behaviour; a property that does *not* flip is the finding — the spec is vacuous with respect to that fault. This is a statement about the **properties**, never a bug report about the design.
 

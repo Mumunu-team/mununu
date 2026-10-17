@@ -510,6 +510,19 @@ pub fn emit_latched_predicate_state_named(
     Ok(format!("{}\n{}\n", content.trim_end(), appended.join("\n")))
 }
 
+/// A leaf signal's NID and sort: a state cell, then an output port, a primary input and — last
+/// (mununu#503) — a named internal combinational net.
+fn resolve_leaf(
+    file: &crate::adapter::btor2::ast::Btor2File,
+    name: &str,
+    reset_pinned: bool,
+) -> Option<(Nid, Nid)> {
+    state_nid_and_sort(file, name, reset_pinned)
+        .or_else(|| output_nid_and_sort(file, name))
+        .or_else(|| input_nid_and_sort(file, name))
+        .or_else(|| comb_nid_and_sort(file, name))
+}
+
 /// mununu#503 — compile a pure-boolean mu-calculus subtree into BTOR2 nodes, returning the NID of
 /// the resulting 1-bit expression.
 ///
@@ -621,12 +634,8 @@ pub(crate) fn compile_boolean_subtree(
                 op,
                 value,
             }) => {
-                let (sig_nid, sig_sort) = state_nid_and_sort(file, &register, reset_pinned)
-                    .or_else(|| output_nid_and_sort(file, &register))
-                    .or_else(|| input_nid_and_sort(file, &register))
-                    // mununu#503 — last: a named internal combinational net.
-                    .or_else(|| comb_nid_and_sort(file, &register))
-                    .ok_or_else(|| {
+                let (sig_nid, sig_sort) =
+                    resolve_leaf(file, &register, reset_pinned).ok_or_else(|| {
                         err(format!(
                             "adapter/btor2/bad_monitor: leaf atom `{register}` does not \
                              resolve to a state cell, output port, primary input, or named \
@@ -822,6 +831,239 @@ pub fn emit_ag_boolean_invariant_monitor(
     appended.push(format!("{bad_line} bad {bad_cond}"));
 
     Ok(format!("{}\n{}\n", content.trim_end(), appended.join("\n")))
+}
+
+/// Symbol prefix of the history latches [`emit_bounded_safety_witness_monitor`] appends.
+pub const WITNESS_LATCH_PREFIX: &str = "mununu_wit_";
+
+/// The box depth of a body the witness monitor can read along one path: a boolean block is 0,
+/// `&&` / `||` take the deeper side, an unguarded box adds one. `None` for anything else (a
+/// fixpoint, a diamond, a negated modality, a guarded box).
+fn linear_depth(
+    formula: &crate::mu_calculus::Formula,
+    id: crate::mu_calculus::NodeId,
+) -> Option<usize> {
+    use crate::mu_calculus::{Guard, ModalKind, Node as MuNode};
+    if is_witness_boolean(formula, id) {
+        return Some(0);
+    }
+    match formula.node(id) {
+        MuNode::And(l, r) | MuNode::Or(l, r) => {
+            Some(linear_depth(formula, *l)?.max(linear_depth(formula, *r)?))
+        }
+        MuNode::Modal {
+            kind: ModalKind::Box,
+            guard,
+            target,
+        } if *guard == Guard::default() => Some(linear_depth(formula, *target)? + 1),
+        _ => None,
+    }
+}
+
+/// A boolean block the witness monitor compiles: the compound compiler's fragment
+/// ([`crate::adapter::reach_rescue::is_compilable_boolean_body`]) plus register-vs-register
+/// comparisons (`resp_p != resp_p__past` — every `$stable` / `$changed` / `$past` equality), which
+/// a witness needs and the rescue lane does not decide.
+fn is_witness_boolean(
+    formula: &crate::mu_calculus::Formula,
+    id: crate::mu_calculus::NodeId,
+) -> bool {
+    use crate::adapter::btor2::predicate_expr::{PredicateExpr, parse_predicate_atom_bool};
+    use crate::mu_calculus::Node as MuNode;
+    match formula.node(id) {
+        MuNode::True | MuNode::False => true,
+        MuNode::Not(a) => is_witness_boolean(formula, *a),
+        MuNode::And(a, b) | MuNode::Or(a, b) => {
+            is_witness_boolean(formula, *a) && is_witness_boolean(formula, *b)
+        }
+        MuNode::Predicate(atom) => matches!(
+            parse_predicate_atom_bool(atom),
+            Ok(PredicateExpr::Cmp { .. } | PredicateExpr::CmpReg { .. })
+        ),
+        _ => false,
+    }
+}
+
+/// Append a `bad` monitor that is reachable iff some path falsifies `body` — read along that
+/// path, `[] φ` as "φ at the next cycle" — at some start cycle. Returns the monitored design and
+/// the body's box depth `D`.
+///
+/// `body` is the block under the `AG` (`nu X. (body && [] X)`): any bounded-depth combination of
+/// boolean blocks, `&&`, `||` and unguarded boxes, the shape every `|->` / `|=>` / `##n` property
+/// the SVA translator emits takes. The monitor judges the attempt that started `D` cycles ago: a
+/// block at box depth `k` is compiled once over the current signals and delayed `D - k` cycles
+/// through 1-bit latches ([`WITNESS_LATCH_PREFIX`], `init 0`); a `D`-latch chain of ones gates
+/// `bad` until `D` cycles have passed, so the zero-initialised history never fabricates a
+/// violation.
+///
+/// # Soundness
+///
+/// A path that falsifies the one-path reading falsifies `body` at its start: a box is true only
+/// if EVERY successor satisfies its target, so it is false wherever the chosen successor fails
+/// it. Hence a reachable `bad` is a genuine counterexample to `AG body`. The converse does not
+/// hold in general (`[] a || [] b` is false at a state with one `¬a` and one `¬b` successor
+/// although each single path satisfies the reading), so this is a WITNESS extractor, never a
+/// decider. The latches observe only and never feed back, so the design's reachable states are
+/// unchanged.
+pub fn emit_bounded_safety_witness_monitor(
+    content: &str,
+    formula: &crate::mu_calculus::Formula,
+    body: crate::mu_calculus::NodeId,
+    reset_pinned: bool,
+) -> Result<(String, usize), AdapterError> {
+    use crate::mu_calculus::Node as MuNode;
+
+    struct Emit<'a> {
+        formula: &'a crate::mu_calculus::Formula,
+        file: &'a crate::adapter::btor2::ast::Btor2File,
+        reset_pinned: bool,
+        bool_sort: Nid,
+        zero: Nid,
+        depth: usize,
+        latches: usize,
+        next_nid: Nid,
+        appended: Vec<String>,
+    }
+    impl Emit<'_> {
+        fn fresh(&mut self, line: String) -> Nid {
+            let n = self.next_nid;
+            self.next_nid += 1;
+            self.appended.push(format!("{n} {line}"));
+            n
+        }
+        /// `value` as it was `cycles` cycles ago.
+        fn delayed(&mut self, mut value: Nid, cycles: usize) -> Nid {
+            for _ in 0..cycles {
+                let (sort, zero) = (self.bool_sort, self.zero);
+                let symbol = format!("{WITNESS_LATCH_PREFIX}{}", self.latches);
+                self.latches += 1;
+                let latch = self.fresh(format!("state {sort} {symbol}"));
+                self.fresh(format!("init {sort} {latch} {zero}"));
+                self.fresh(format!("next {sort} {latch} {value}"));
+                value = latch;
+            }
+            value
+        }
+        /// A boolean block over the current signals ([`is_witness_boolean`]).
+        fn boolean(&mut self, id: crate::mu_calculus::NodeId) -> Result<Nid, AdapterError> {
+            use crate::adapter::btor2::predicate_expr::{PredicateExpr, parse_predicate_atom_bool};
+            let f = self.formula;
+            let sort = self.bool_sort;
+            match f.node(id) {
+                MuNode::Not(a) => {
+                    let a = self.boolean(*a)?;
+                    Ok(self.fresh(format!("not {sort} {a}")))
+                }
+                MuNode::And(a, b) => {
+                    let (a, b) = (self.boolean(*a)?, self.boolean(*b)?);
+                    Ok(self.fresh(format!("and {sort} {a} {b}")))
+                }
+                MuNode::Or(a, b) => {
+                    let (a, b) = (self.boolean(*a)?, self.boolean(*b)?);
+                    Ok(self.fresh(format!("or {sort} {a} {b}")))
+                }
+                MuNode::Predicate(atom) => {
+                    if let Ok(PredicateExpr::CmpReg { lhs, op, rhs }) =
+                        parse_predicate_atom_bool(atom)
+                    {
+                        let resolve = |name: &str| {
+                            resolve_leaf(self.file, name, self.reset_pinned).ok_or_else(|| {
+                                err(format!(
+                                    "adapter/btor2/bad_monitor: leaf `{name}` does not resolve"
+                                ))
+                            })
+                        };
+                        let ((l, ls), (r, rs)) = (resolve(&lhs)?, resolve(&rhs)?);
+                        if ls != rs {
+                            return Err(err(format!(
+                                "adapter/btor2/bad_monitor: `{atom}` compares different widths"
+                            )));
+                        }
+                        let kw = btor2_cmp_keyword(op);
+                        return Ok(self.fresh(format!("{kw} {sort} {l} {r}")));
+                    }
+                    compile_boolean_subtree(
+                        f,
+                        id,
+                        self.file,
+                        self.reset_pinned,
+                        sort,
+                        &mut self.next_nid,
+                        &mut self.appended,
+                    )
+                }
+                _ => compile_boolean_subtree(
+                    f,
+                    id,
+                    self.file,
+                    self.reset_pinned,
+                    sort,
+                    &mut self.next_nid,
+                    &mut self.appended,
+                ),
+            }
+        }
+        /// The node at box depth `k` of the attempt that started `depth` cycles ago.
+        fn node(&mut self, id: crate::mu_calculus::NodeId, k: usize) -> Result<Nid, AdapterError> {
+            let f = self.formula;
+            if is_witness_boolean(f, id) {
+                let now = self.boolean(id)?;
+                return Ok(self.delayed(now, self.depth - k));
+            }
+            let sort = self.bool_sort;
+            match f.node(id) {
+                MuNode::And(l, r) => {
+                    let (a, b) = (self.node(*l, k)?, self.node(*r, k)?);
+                    Ok(self.fresh(format!("and {sort} {a} {b}")))
+                }
+                MuNode::Or(l, r) => {
+                    let (a, b) = (self.node(*l, k)?, self.node(*r, k)?);
+                    Ok(self.fresh(format!("or {sort} {a} {b}")))
+                }
+                MuNode::Modal { target, .. } => self.node(*target, k + 1),
+                other => Err(err(format!(
+                    "adapter/btor2/bad_monitor: the witness monitor reads booleans, `&&`, `||` \
+                     and boxes only; found {other:?}"
+                ))),
+            }
+        }
+    }
+
+    let depth = linear_depth(formula, body).ok_or_else(|| {
+        err("adapter/btor2/bad_monitor: the body is not a bounded-depth box / boolean shape".into())
+    })?;
+    let file = parser::parse(content).map_err(|mut e| {
+        e.message = format!("adapter/btor2/bad_monitor: {}", e.message);
+        e
+    })?;
+    let mut next_nid: Nid = file.lines.iter().map(|l| l.nid).max().unwrap_or(0) + 1;
+    let mut appended: Vec<String> = Vec::new();
+    let bool_sort = find_or_make_bool_sort(&file, &mut next_nid, &mut appended);
+    // `init` needs the value's NID below the state's, so the shared zero comes first.
+    let zero = next_nid;
+    next_nid += 1;
+    appended.push(format!("{zero} zero {bool_sort}"));
+    let mut e = Emit {
+        formula,
+        file: &file,
+        reset_pinned,
+        bool_sort,
+        zero,
+        depth,
+        latches: 0,
+        next_nid,
+        appended,
+    };
+    let holds = e.node(body, 0)?;
+    let one = e.fresh(format!("one {bool_sort}"));
+    let armed = e.delayed(one, depth);
+    let fails = e.fresh(format!("not {bool_sort} {holds}"));
+    let bad_cond = e.fresh(format!("and {bool_sort} {armed} {fails} {BAD_COND_SYMBOL}"));
+    e.fresh(format!("bad {bad_cond}"));
+    Ok((
+        format!("{}\n{}\n", content.trim_end(), e.appended.join("\n")),
+        depth,
+    ))
 }
 
 #[cfg(test)]

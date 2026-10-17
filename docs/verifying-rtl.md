@@ -233,7 +233,7 @@ SystemVerilog. An annotation name is author-chosen, one per annotation, and has 
 
 ## No-sidecar SystemVerilog verification: `sv verify-auto`
 
-> Source of truth: [`verify_auto`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L3033) — surface: (CLI+API+UI)
+> Source of truth: [`verify_auto`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L3463) — surface: (CLI+API+UI)
 
 `sv verify-auto` takes a SystemVerilog module and checks its properties with **no
 hand-written sidecar and no supplied formula**. End to end:
@@ -308,6 +308,34 @@ mununu --quiet sv verify-auto design.sv --json | jq '[.notes[] | select(.level==
 ```
 
 `unsupported[]` carries mununu's own **reason** for every assertion it could not translate (`"unsupported binary op: Divide"`, `"dynamic bit-select …"`). An assertion that does not appear in `properties[]` is not being checked, and this is where it says why.
+
+### The counterexample of a violated safety property (mununu#710)
+
+> Source of truth: [`attach_safety_witnesses`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L1385) — surface: (CLI+API)
+
+Every VIOLATED safety property carries `counterexample` — whichever engine decided it: native BMC
+re-derives the **shallowest** reset → violation path on a one-path monitor of the formula, with the
+inputs of every cycle (`inputs[i]` belongs to `prefix[i]`; the last one is what tripped the
+assertion) and an empty `cycle`. The CLI prints it under the property:
+
+```text
+  [assert] u_s.hs_sub_sva_0: VIOLATED (1 cell(s))
+        formula: nu X. (((u_s.q == 0)) && [] X)
+        counterexample (reset -> violation):
+          [0] a__past=0, u_s.q=0
+              in: a=1, clk=0
+          [1] a__past=1, u_s.q=1
+              in: a=0, clk=0
+```
+
+(`a_sub_q_zero: assert property (q == 1'b0)` inside instance `u_s`, whose `q` follows the free
+input `a`; `__past` cells are the shadow registers `$past` reads.)
+
+A path BMC finds is a genuine counterexample, so the trace also cross-checks the verdict. It is
+absent when the shortest path is deeper than 60 cycles plus the property's own depth, or when only
+the branching reading fails (`[] a || [] b` can be false at a state although every single path
+satisfies one of them). The monitor's history latches (`mununu_wit_…`) appear in the states beside
+the design's registers. Liveness keeps its stall lasso; a bare `EF p` its unreachable target.
 
 ### Asserting the verdicts you claim: `--expect-*` (mununu#537)
 
@@ -1015,7 +1043,7 @@ works when you want the intermediate BTOR2.)
 
 ### 3. Coverage is a fragment, and verdicts are honest
 
-> Source of truth: [`property_body`](../crates/mununu-core/src/adapter/slang/translate.rs#L1088) + [`bool_expr`](../crates/mununu-core/src/adapter/slang/translate.rs#L1760) (the translator `sv verify-auto` runs; the executable table `the_shipped_fragment_truth_table` in the same file has one row per supported and per rejected form, against the real slang 11.0.448 shapes in `adapter/slang/testdata/sva_fragment_forms.{sv,ast.json}`) — surface: (CLI+API)
+> Source of truth: [`property_body`](../crates/mununu-core/src/adapter/slang/translate.rs#L1490) + [`bool_expr`](../crates/mununu-core/src/adapter/slang/translate.rs#L2173) (the translator `sv verify-auto` runs; the executable table `the_shipped_fragment_truth_table` in the same file has one row per supported and per rejected form, against the real slang 11.0.448 shapes in `adapter/slang/testdata/sva_fragment_forms.{sv,ast.json}`) — surface: (CLI+API)
 
 The SVA translator supports a defined fragment; assertions outside it come back in the `unsupported`
 list **with a reason**, never dropped. Since 2026-10-14 the fragment is an executable table in the
@@ -1047,6 +1075,8 @@ repo, so the lists below cannot drift from the code without a red test.
 | a bare sequence as the whole property (`assert property (##1 a == b)`) | read as a consequent: it holds at a start iff it matches from there (IEEE 1800-2017 §16.12.2) | 2026-10-15 (OpenTitan Phase 1) |
 | **expressions**: `+ - *` (≤ 32 bits), unary `-`, `& \| ^ ~^ ~` over vectors, `<< >> >>>`, `?:`, concatenation and constant replication, signed and unsigned comparisons, reductions (`^x` included), `$past(expr, k)`, `$stable` / `$changed` / `$rose` / `$fell` of an expression (`$rose` / `$fell` read its LSB), `$countones` / `$onehot` / `$onehot0` of an expression, a dynamic bit-select whose index cannot leave the range | one **minted** combinational node `mununu_x_<hash>` per expression, built from slang's own types and conversions; the formula reads it as an atom (`(mununu_x_… == 3)` against a constant, so the predicate cube keeps a dimension) | 2026-10-15 (OpenTitan Phase 2) |
 | a call to a user function whose body is one `return` (OpenTitan's `min` / `max`) | inlined into the expression, arguments bound with assignment semantics | 2026-10-15 (OpenTitan Phase 3) |
+| an assertion inside a sub-instance, at any depth (a module instantiated several times included; a logic-free checker module bound or instantiated into the design) | checked once **per instance**, over that instance's signals by their flattened names (`u_rx.state_q`) and with its own parameter values; an **input port** reads the expression connected to it, in the parent's scope; the property's `name` carries the instance path (`u_rx.u_dec.prim_diff_decode_sva_12`) | 2026-10-16 (mununu#709) |
+| a hierarchical reference from the top, `u_rx.state_q` | that flattened signal, when the module has one instance; refused with the reason when several instances share it (slang names the declaration, not the instance) or the path crosses a `for`-generate iteration (`gen[1].x` — brackets are not part of the atom grammar) | 2026-10-16 (mununu#709) |
 
 Each definite verdict transfers exactly as in the plain `|=>` case — the lowerings add boxes,
 flops and fixpoints, never an abstraction.
@@ -1107,6 +1137,38 @@ assertion must HOLD.
 !req_chk_i`) was checked only at the attempt's first cycle, so an attempt disabled mid-way still
 had to complete — a spurious VIOLATED. Each boolean block of the body is now guarded by `D` at the
 cycle it is evaluated: exact for `a |=> c`, never weaker than SVA for longer attempts.
+
+**…and at the cycle the attempt starts** (fixed 2026-10-16, mununu#708). A body that evaluates
+nothing at its first cycle (`##1 req |-> …`) has no block there, so the per-block guard never read
+`D` at the start: OpenTitan's `prim_esc_rxtx` `EscRespCheck_A` was a spurious VIOLATED that
+SymbiYosys (abc pdr) proves. Such a body is now also guarded as a whole, `(D || …)`.
+
+**An assertion in a sub-instance reads that instance's signals** (fixed 2026-10-16, mununu#709).
+> Source of truth: [`scope_refs`](../crates/mununu-core/src/adapter/slang/translate.rs#L810) — surface: (CLI+API)
+
+Before, it was checked against the TOP-level signal of the same name, or skipped when the top had
+none — a wrong-signal check that could report a false HOLDS (`e2e_a_sub_instance_assertion_reads_its_own_signals`
+is the reproducer). Each assertion is now collected once per instance (slang serialises a body
+several instances share once; the walk visits it per instance, and skips the generate branches the
+elaboration did not take), and every reference declared in that body is named with the instance
+path, generate blocks included (`u_rx.u_dec.gen_no_async.diff_pq`) — except an input port, which
+is the expression connected to it, read in the parent's scope: exact by definition, and the only
+name a port of a logic-free checker module has once yosys flattens it away. Enum members and parameters fold
+by their DECLARATION, not their name: `Width` is 6 in one module and 2 in another, and the former
+name-keyed map gave every reference the first one's value. On the `prim_esc_rxtx` harness this turns
+40 skipped sub-block assertions into checked ones.
+
+**A register is named only by a value-identical alias** (fixed 2026-10-16, mununu#711).
+> Source of truth: [`collect_symbols`](../crates/mununu-core/src/adapter/btor2/parser.rs#L354) — surface: (CLI+API)
+
+A flattened design's registers carry no symbol of their own; yosys names them through `uext … 0`
+aliases. The naming pass used to forward any width-matched named node to a register in its fan-in —
+a bit-swapped struct port (`esc_rx_o = {resp_p, resp_n}` over the flop `{resp_nq, resp_pq}`), an
+inverted output (`out_n = ~q`), a register's own next-value function (`cnt_d`) — and every engine then
+read the raw register for that name: a false HOLDS on `AG(out_n == 0)` is the reproducer
+(`x711_an_inverted_alias_is_not_read_as_its_register`). A name now reaches a register only through a
+`uext` / `sext` by 0, a passthrough output or the async-reset mux; any other named node is evaluated
+as itself.
 
 **Comparison conversions are applied** (fixed 2026-10-15, mununu#702). The atom lowering compared
 the operands with slang's conversions stripped: `r == 8'(s)` read the raw 4-bit `s` (its sign
@@ -1429,7 +1491,7 @@ sibling libraries — for a design + peer-utility layout.
 
 ## Are the properties adequate? `sv mutate`
 
-> Source of truth: [`mutate_and_compare`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L2984) — surface: (CLI+API+UI)
+> Source of truth: [`mutate_and_compare`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L3414) — surface: (CLI+API+UI)
 
 A `holds` verdict is only as strong as the property that produced it — a **vacuous**
 property `holds` no matter what the design does. `sv mutate` measures that: it applies

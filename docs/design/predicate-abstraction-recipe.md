@@ -153,7 +153,7 @@ Termination is straightforward: the image computation is a fixed-point over the 
 
 ### §3d The unified lift entry (eager / lazy / compound routing)
 
-> Source of truth: [`lift_predicate_cube`](../../crates/mununu-core/src/adapter/btor2/kmts_lift.rs#L1870) + [`ensure_compound_lift_supported`](../../crates/mununu-core/src/adapter/btor2/kmts_lift.rs#L1803) — surface: (CLI+API+UI) via `mununu btor2 cegar` / `POST /api/v1/btor2/cegar` / the `/cegar` panel.
+> Source of truth: [`lift_predicate_cube`](../../crates/mununu-core/src/adapter/btor2/kmts_lift.rs#L2392) + [`ensure_compound_lift_supported`](../../crates/mununu-core/src/adapter/btor2/kmts_lift.rs#L2319) — surface: (CLI+API+UI) via `mununu btor2 cegar` / `POST /api/v1/btor2/cegar` / the `/cegar` panel.
 
 Both the may-mode (§3b) and must-mode (§3a) images are reached through **one** gated entry, `lift_predicate_cube(predicates, btor2, opts, lift_opts, strategy)`, which the CEGAR loop and the sv-yosys verify orchestrator call. It runs the compound soundness gate once, then dispatches:
 
@@ -264,7 +264,7 @@ The architecture doc §6.9 catalogues these as part of the broader soundness sto
 
 ### §4.9 The audited-sound cube fragment
 
-> Source of truth: [`predicate_cube_lift`](../../crates/mununu-core/src/adapter/btor2/kmts_lift.rs#L1918) + [`evaluate_tri`](../../crates/mununu-core/src/mu_calculus/evaluator.rs#L792) + [`cube_modality_soundness_warnings`](../../crates/mununu-core/src/mu_calculus/mod.rs#L284) — surface: (CLI+API+UI) via `mununu btor2 cegar` / `POST /api/v1/btor2/cegar` / the `/cegar` panel.
+> Source of truth: [`predicate_cube_lift`](../../crates/mununu-core/src/adapter/btor2/kmts_lift.rs#L2440) + [`evaluate_tri`](../../crates/mununu-core/src/mu_calculus/evaluator.rs#L792) + [`cube_modality_soundness_warnings`](../../crates/mununu-core/src/mu_calculus/mod.rs#L284) — surface: (CLI+API+UI) via `mununu btor2 cegar` / `POST /api/v1/btor2/cegar` / the `/cegar` panel.
 
 A `KleeneT` / `KleeneF` verdict on the predicate cube is only *sound* — i.e.
 guaranteed to transfer to the concrete RTL by the §4.5 preservation theorem

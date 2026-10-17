@@ -57,6 +57,37 @@ pub fn pin_inputs_to_constants(content: &str, pins: &[(String, u64)]) -> (String
     (out, pinned)
 }
 
+/// The primary input `name` denotes: the input itself, or a yosys no-op alias of one
+/// (`<nid> uext <sort> <arg> 0 <name>`, possibly chained). A port of a sub-instance is such an
+/// alias of the net connected to it — `u_rx.rst_ni` of the top-level `rst_ni` — so a reset a
+/// sub-instance's `disable iff` names (mununu#709) pins the input that drives it. `None` when
+/// the name is not an input and not a pure alias of one (an internal net: it cannot be pinned).
+pub fn input_behind(file: &crate::adapter::btor2::ast::Btor2File, name: &str) -> Option<String> {
+    use crate::adapter::btor2::ast::{Node, Op};
+    let by_nid: HashMap<i64, &crate::adapter::btor2::ast::Line> =
+        file.lines.iter().map(|l| (l.nid, l)).collect();
+    let mut line = file.lines.iter().find(|l| match &l.node {
+        Node::Input { symbol, .. } | Node::Op { symbol, .. } => symbol.as_deref() == Some(name),
+        _ => false,
+    })?;
+    // Bounded: an alias chain is short, and a malformed cycle must not hang.
+    for _ in 0..64 {
+        match &line.node {
+            Node::Input { symbol, .. } => return symbol.clone(),
+            Node::Op {
+                op: Op::Uext, args, ..
+            } if line.immediates.first() == Some(&0)
+                && args.len() == 1
+                && !args[0].is_negated() =>
+            {
+                line = by_nid.get(&args[0].nid())?;
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
 /// If `line` is `<nid> input <sid> <symbol> …` and `symbol` is a wanted pin,
 /// return the rewritten constant line; otherwise `None`.
 fn try_pin_line(line: &str, want: &HashMap<&str, u64>) -> Option<String> {
@@ -88,6 +119,28 @@ fn try_pin_line(line: &str, want: &HashMap<&str, u64>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// mununu#709 — a sub-instance's port is a no-op `uext … 0` alias (possibly chained) of the
+    /// input connected to it; an internal net is no input's alias.
+    #[test]
+    fn a_ports_alias_resolves_to_the_input_behind_it() {
+        let file = crate::adapter::btor2::parser::parse(
+            "1 sort bitvec 1\n2 input 1 rst_ni\n3 uext 1 2 0 u_rx.rst_ni\n\
+             4 uext 1 3 0 u_rx.u_dec.rst_ni\n5 not 1 2\n6 uext 1 5 0 u_rx.rst_q\n",
+        )
+        .expect("parses");
+        assert_eq!(input_behind(&file, "rst_ni").as_deref(), Some("rst_ni"));
+        assert_eq!(
+            input_behind(&file, "u_rx.rst_ni").as_deref(),
+            Some("rst_ni")
+        );
+        assert_eq!(
+            input_behind(&file, "u_rx.u_dec.rst_ni").as_deref(),
+            Some("rst_ni")
+        );
+        assert_eq!(input_behind(&file, "u_rx.rst_q"), None);
+        assert_eq!(input_behind(&file, "absent"), None);
+    }
 
     #[test]
     fn pins_active_low_reset_to_one_keeps_state() {

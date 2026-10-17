@@ -203,9 +203,10 @@ pub struct PropertyVerdict {
     /// The cube predicates auto-seeded for this property (atom strings) — the
     /// diagnostic "what was tracked".
     pub seeded_predicates: Vec<String>,
-    /// D1.8b — a concrete stall-lasso counterexample, present only when the exact
-    /// engine (`--engine exact-symbolic`) reports a bare `AF p` property `Violated`
-    /// and the stall is reachable at the reset state. `None` otherwise.
+    /// A concrete counterexample for a `Violated` property. Safety: the reset → violation path
+    /// native BMC re-derives (empty `cycle`; `attach_safety_witnesses`), whichever engine
+    /// decided it — `None` when no path lies within the bound. D1.8b: a stall lasso when the
+    /// exact engine reports a bare `AF p` `Violated` and the stall is reachable at reset.
     pub counterexample: Option<ExactCounterexample>,
     /// Why this property is `⊥`, when it is. `None` for a definite outcome.
     ///
@@ -276,10 +277,10 @@ impl VacuityKind {
     }
 }
 
-/// D1.8b — a concrete stall-lasso counterexample for a `Violated` liveness property
-/// from the exact engine: a `prefix` from the reset state into a repeating `cycle`,
-/// each state a list of `(register, value)` pairs in register order. The cycle
-/// witnesses that the property is avoided forever (the "stall").
+/// A concrete counterexample for a `Violated` property: a `prefix` from the reset state,
+/// each state a list of `(register, value)` pairs in register order — into a repeating
+/// `cycle` for a liveness failure (D1.8b: the property is avoided forever, the "stall"), or
+/// ending at the failing cycle with an empty `cycle` for a safety one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExactCounterexample {
     /// States from the reset state up to (excluding) the cycle entry.
@@ -1357,6 +1358,56 @@ fn refresh_vacuity_notes(report: &mut AutoVerifyReport) {
         })
         .collect();
     report.notes.extend(fresh);
+}
+
+/// The BMC bound (beyond the property's own depth) for a safety counterexample.
+const SAFETY_WITNESS_MAX_K: u32 = 60;
+
+/// A finite safety counterexample: the path from reset to the violation (no `cycle`).
+fn safety_counterexample(
+    trace: crate::adapter::btor2::native_bmc::BmcTrace,
+) -> ExactCounterexample {
+    ExactCounterexample {
+        prefix: trace.states,
+        cycle: Vec::new(),
+        inputs: trace.inputs,
+        unreachable_target: Vec::new(),
+    }
+}
+
+/// mununu#710 — attach a concrete counterexample to every VIOLATED safety property that has none — whichever
+/// engine decided it. Native BMC re-derives the shallowest reset → violation path on a one-path
+/// monitor of the formula ([`crate::adapter::reach_rescue::safety_witness`]); a path it finds is a
+/// genuine counterexample, so the trace also cross-checks the verdict. None within the bound (a
+/// deep violation, or one only the branching reading has) leaves the field empty — the verdict is
+/// unchanged either way. Runs after every verdict-changing pass but the consistency flags, so it
+/// only spends BMC on verdicts the report ships.
+fn attach_safety_witnesses(report: &mut AutoVerifyReport, design_btor2: &str, reset_pinned: bool) {
+    use crate::mu_calculus::{PropertyClass, parser as mu_parser};
+    for prop in report.properties.iter_mut() {
+        if !matches!(prop.outcome, VerifyOutcome::Violated { .. }) || prop.counterexample.is_some()
+        {
+            continue;
+        }
+        if crate::adapter::memory_budget::check_process_memory_budget().is_err()
+            || crate::adapter::run_budget::expired()
+        {
+            break;
+        }
+        let Ok(formula) = mu_parser::parse(&prop.formula) else {
+            continue;
+        };
+        if formula.property_class() != PropertyClass::Safety {
+            continue;
+        }
+        prop.counterexample = crate::adapter::reach_rescue::safety_witness(
+            design_btor2,
+            &formula,
+            reset_pinned,
+            SAFETY_WITNESS_MAX_K,
+        )
+        .map(safety_counterexample);
+    }
 }
 
 fn downgrade_violated_on_unestablished_init(report: &mut AutoVerifyReport, model_btor2: &str) {
@@ -3800,6 +3851,21 @@ pub(crate) fn prepare_model(
     report.diagnostics.frontend = Some(frontend_used.lift_label().to_string());
     report.diagnostics.frontend_fallback_reason = fallback_reason;
 
+    // mununu#709 — a reset named inside a sub-instance (`u_rx.rst_ni`) is an alias of the input
+    // connected to it; pin that input. A name that is no input's alias stays as it was (unpinned).
+    if !reset_pins.is_empty()
+        && let Ok(file) = crate::adapter::btor2::parser::parse(&btor2)
+    {
+        let mut resolved: Vec<(String, u64)> = Vec::with_capacity(reset_pins.len());
+        for (name, value) in reset_pins.drain(..) {
+            let name = crate::adapter::btor2::pin::input_behind(&file, &name).unwrap_or(name);
+            if !resolved.iter().any(|(n, _)| *n == name) {
+                resolved.push((name, value));
+            }
+        }
+        reset_pins = resolved;
+    }
+
     // Structural reset auto-pin: when gating is on but no `disable iff` guard was recognized, detect
     // the async-reset input from the lifted BTOR2's reset-mux structure and pin it inactive (else a
     // free reset-edge spuriously VIOLATES every box/AF property). `disable iff` always wins.
@@ -5240,6 +5306,8 @@ pub(crate) fn verify_auto_impl(
     // established. Runs as a post-pass, after the rescue/escalation ladder, so it catches every
     // path that can produce one rather than nine push sites.
     downgrade_violated_on_unestablished_init(&mut report, &btor2);
+    // The trace for every safety VIOLATED the report ships, whichever engine decided it.
+    attach_safety_witnesses(&mut report, &btor2, reset_pinned);
     // mununu#579 — last of the verdict post-passes: everything above may still CHANGE a verdict, and
     // a self-contradiction must be judged on the verdicts the report actually ships.
     flag_self_contradictory_verdicts(&mut report);
@@ -5440,19 +5508,13 @@ pub(crate) fn escalate_bottom(
                             // BMC extracts the `Init → ¬invariant` path from the same bad-monitor.
                             // A safety CEX is a finite path (empty `cycle`); the monitor adds no
                             // state, so the trace is over the original design registers.
-                            if let Some(trace) = crate::adapter::reach_rescue::ag_invariant_witness(
+                            prop.counterexample = crate::adapter::reach_rescue::safety_witness(
                                 design_btor2,
                                 &formula,
                                 reset_pinned,
-                                60,
-                            ) {
-                                prop.counterexample = Some(ExactCounterexample {
-                                    prefix: trace.states,
-                                    cycle: Vec::new(),
-                                    inputs: trace.inputs,
-                                    unreachable_target: Vec::new(),
-                                });
-                            }
+                                SAFETY_WITNESS_MAX_K,
+                            )
+                            .map(safety_counterexample);
                             notes.push(rescue_note(&prop.name, "VIOLATED", &engines));
                         }
                         RescueVerdict::Inconclusive => {}
@@ -8006,7 +8068,8 @@ mod tests {
     ///
     /// The fixture is the saturating counter's real lift (`MUNUNU_SHADOW_BTOR2_DUMP`, trimmed):
     /// the state cell `6` has no symbol of its own, `cnt_d` (its next-value function, line 14)
-    /// comes first in the file and the loose alias pass names the cell after it, while the
+    /// comes first in the file and the loose alias pass named the cell after it (until
+    /// mununu#711), while the
     /// predicates say `cnt_q` (line 15, the `uext`-0 of the pinned reset mux). Looked up by name,
     /// `cnt_q` is absent and reads as unestablished — the e2e went VIOLATED at cycle 0 on that.
     /// Resolved by the strict alias it is the cell with `init 0`.
@@ -8020,12 +8083,10 @@ mod tests {
                      23 state 4 loose\n24 next 4 23 23\n25 uext 4 23 0 loose_q\n";
         let file = crate::adapter::btor2::parser::parse(btor2).expect("fixture parses");
         let names = state_cell_init_values(&file);
-        assert_eq!(
-            names.get("cnt_d"),
-            Some(&0),
-            "the loose pass names the cell `cnt_d` — the trap this test pins"
-        );
-        assert!(!names.contains_key("cnt_q"));
+        // mununu#711 — `collect_symbols` names the cell by its value-identical alias now; before,
+        // the loose pass named it `cnt_d`, the trap this test was written for.
+        assert_eq!(names.get("cnt_q"), Some(&0));
+        assert!(!names.contains_key("cnt_d"));
         assert_eq!(
             cycle_zero_class(&file, "cnt_q", true),
             CycleZero::Established(0),
@@ -10942,6 +11003,181 @@ module uart_tx(); endmodule"#;
         );
         assert!(matches!(
             outcome("a_mid_twin"),
+            VerifyOutcome::Violated { .. }
+        ));
+    }
+
+    /// mununu#709 — an assertion inside a sub-instance reads THAT instance's signals. `u_s.q` follows the free
+    /// input `a`, so `a_sub_q_zero` is VIOLATED; the top drives its own output `q` to 0, and the
+    /// assertion used to be checked against that same-named top-level net — a false HOLDS. Its
+    /// twin over `$past` HOLDS, and so does the top's hierarchical reference `u_s.q`.
+    #[test]
+    #[ignore = "requires slang + sv2v + Yosys + z3 (use the mununu-sva docker image); run with --ignored"]
+    fn e2e_a_sub_instance_assertion_reads_its_own_signals() {
+        let design = "module hs_sub (input logic clk, input logic a);\n\
+                        logic q;\n\
+                        always_ff @(posedge clk) q <= a;\n\
+                        a_sub_q_zero: assert property (@(posedge clk) q == 1'b0);\n\
+                        a_sub_q_past: assert property (@(posedge clk) ##1 q == $past(a));\n\
+                      endmodule\n\
+                      module hs_top (input logic clk, input logic a, output logic q);\n\
+                        assign q = 1'b0;\n\
+                        hs_sub u_s (.clk(clk), .a(a));\n\
+                        a_top_hier: assert property (@(posedge clk) ##1 u_s.q == $past(a));\n\
+                      endmodule\n";
+        let sources = vec![("hs_top.sv".to_string(), design.to_string())];
+        let yopts = YosysOptions {
+            top: Some("hs_top".to_string()),
+            use_sv2v: true,
+            ..Default::default()
+        };
+        let opts = VerifyAutoOptions {
+            portfolio: Some(PortfolioMode::Sequential),
+            ..Default::default()
+        };
+        let report = verify_auto(&sources, &yopts, &opts).expect("verify_auto runs");
+        for p in &report.properties {
+            eprintln!(
+                "  {} {:?}: {:?}\n      {}",
+                p.name, p.label, p.outcome, p.formula
+            );
+        }
+        let outcome = |l: &str| {
+            report
+                .properties
+                .iter()
+                .find(|p| p.label.as_deref() == Some(l))
+                .map(|p| p.outcome.clone())
+                .unwrap_or_else(|| panic!("no `{l}`: {:?}", report.unsupported))
+        };
+        assert!(
+            matches!(outcome("a_sub_q_zero"), VerifyOutcome::Violated { .. }),
+            "the sub-instance's own `q` follows `a`: {:?}",
+            outcome("a_sub_q_zero")
+        );
+        assert!(matches!(outcome("a_sub_q_past"), VerifyOutcome::Holds));
+        assert!(matches!(outcome("a_top_hier"), VerifyOutcome::Holds));
+        // The VIOLATED safety property carries its trace: reset → `a` high → `q` high.
+        let cx = report
+            .properties
+            .iter()
+            .find(|p| p.label.as_deref() == Some("a_sub_q_zero"))
+            .and_then(|p| p.counterexample.as_ref())
+            .expect("a safety counterexample");
+        assert!(cx.cycle.is_empty());
+        assert_eq!(cx.inputs.len(), cx.prefix.len());
+        assert!(
+            cx.prefix
+                .last()
+                .is_some_and(|st| st.iter().any(|(k, v)| k == "u_s.q" && *v == 1)),
+            "the trace ends with `u_s.q` high: {cx:?}"
+        );
+    }
+
+    /// mununu#711 — a port that is its register's bits SWAPPED (OpenTitan's `esc_rx_o = {resp_p,
+    /// resp_n}` over the flop `{resp_nq, resp_pq}`) is read as the port. `p = ~a` one cycle late:
+    /// `a_p_inverts` HOLDS and `a_p_follows` is VIOLATED; read through the raw flop, `p` became
+    /// `n = a` and the two swapped — a false HOLDS on `a_p_follows`.
+    #[test]
+    #[ignore = "requires slang + sv2v + Yosys + z3 (use the mununu-sva docker image); run with --ignored"]
+    fn e2e_a_bit_swapped_port_is_not_read_as_its_register() {
+        let design = "module sw_sub (input logic clk, input logic rst_n, input logic a,\n\
+                                     output logic [1:0] o);\n\
+                        logic [1:0] f;\n\
+                        always_ff @(posedge clk or negedge rst_n)\n\
+                          if (!rst_n) f <= 2'b10; else f <= {a, ~a};\n\
+                        assign o = {f[0], f[1]};\n\
+                        a_p_inverts: assert property (@(posedge clk) disable iff (!rst_n)\n\
+                          ##1 o[1] == !$past(a));\n\
+                        a_p_follows: assert property (@(posedge clk) disable iff (!rst_n)\n\
+                          ##1 o[1] == $past(a));\n\
+                      endmodule\n\
+                      module sw_top (input logic clk, input logic rst_n, input logic a,\n\
+                                     output logic [1:0] o);\n\
+                        sw_sub u_s (.clk(clk), .rst_n(rst_n), .a(a), .o(o));\n\
+                      endmodule\n";
+        let sources = vec![("sw_top.sv".to_string(), design.to_string())];
+        let yopts = YosysOptions {
+            top: Some("sw_top".to_string()),
+            use_sv2v: true,
+            ..Default::default()
+        };
+        let opts = VerifyAutoOptions {
+            portfolio: Some(PortfolioMode::Sequential),
+            ..Default::default()
+        };
+        let report = verify_auto(&sources, &yopts, &opts).expect("verify_auto runs");
+        for p in &report.properties {
+            eprintln!(
+                "  {} {:?}: {:?}\n      {}",
+                p.name, p.label, p.outcome, p.formula
+            );
+        }
+        let outcome = |l: &str| {
+            report
+                .properties
+                .iter()
+                .find(|p| p.label.as_deref() == Some(l))
+                .map(|p| p.outcome.clone())
+                .unwrap_or_else(|| panic!("no `{l}`: {:?}", report.unsupported))
+        };
+        assert!(
+            matches!(outcome("a_p_inverts"), VerifyOutcome::Holds),
+            "{:?}",
+            outcome("a_p_inverts")
+        );
+        assert!(
+            matches!(outcome("a_p_follows"), VerifyOutcome::Violated { .. }),
+            "{:?}",
+            outcome("a_p_follows")
+        );
+    }
+
+    /// mununu#708 — `disable iff` disables an attempt where it STARTS, even when the property evaluates nothing
+    /// there. `c` is last cycle's `!d`, so `##1 a |-> c` fails exactly when `d` held at the
+    /// attempt's start — which the disable excuses. The twin `##1 a |-> !c` is VIOLATED. Reduced
+    /// from OpenTitan's `prim_esc_rxtx` `EscRespCheck_A` (`##1 esc_req_i |-> …`), which the
+    /// block-only guard reported VIOLATED and SymbiYosys (abc pdr) proves.
+    #[test]
+    #[ignore = "requires slang + sv2v + Yosys + z3 (use the mununu-sva docker image); run with --ignored"]
+    fn e2e_a_disable_at_the_attempt_start_disables_it() {
+        let design = "module ds_dut (input logic clk, input logic en, input logic a,\n\
+                      input logic d, output logic c);\n\
+                        logic d_q;\n\
+                        always_ff @(posedge clk) d_q <= d;\n\
+                        assign c = !d_q;\n\
+                        a_start: assert property (@(posedge clk) disable iff (d || !en) ##1 a |-> c);\n\
+                        a_start_twin: assert property (@(posedge clk) disable iff (d || !en) ##1 a |-> !c);\n\
+                      endmodule\n";
+        let sources = vec![("ds_dut.sv".to_string(), design.to_string())];
+        let yopts = YosysOptions {
+            top: Some("ds_dut".to_string()),
+            use_sv2v: true,
+            ..Default::default()
+        };
+        let opts = VerifyAutoOptions {
+            portfolio: Some(PortfolioMode::Sequential),
+            ..Default::default()
+        };
+        let report = verify_auto(&sources, &yopts, &opts).expect("verify_auto runs");
+        for p in &report.properties {
+            eprintln!("  {:?}: {:?}\n      {}", p.label, p.outcome, p.formula);
+        }
+        let outcome = |l: &str| {
+            report
+                .properties
+                .iter()
+                .find(|p| p.label.as_deref() == Some(l))
+                .map(|p| p.outcome.clone())
+                .unwrap_or_else(|| panic!("no `{l}`"))
+        };
+        assert!(
+            matches!(outcome("a_start"), VerifyOutcome::Holds),
+            "a disable at the attempt's start excuses it: {:?}",
+            outcome("a_start")
+        );
+        assert!(matches!(
+            outcome("a_start_twin"),
             VerifyOutcome::Violated { .. }
         ));
     }
