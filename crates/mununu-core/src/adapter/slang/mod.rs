@@ -78,6 +78,39 @@ pub fn parse_slang_version(stdout: &str) -> Option<String> {
     None
 }
 
+/// The slang argument list for an `--ast-json` run — pure, so the override threading is unit
+/// testable without the binary.
+///
+/// `--quiet` suppresses slang's "Top level design units" / build-summary banner so stdout is
+/// *pure* JSON (the `-` sink). Without it the banner prefixes the JSON and downstream
+/// `serde_json` parsing fails at column 1. A `MODULE.NAME` override is passed by its bare `NAME`:
+/// slang's `-G` is top-scoped, the same convention the `read_slang` lift uses
+/// (`yosys::build_script`); an override that still does not reach the elaborated design is
+/// caught after extraction (`verify_auto::prepare_model`), never dropped.
+pub fn ast_json_args(
+    files: &[PathBuf],
+    include_dirs: &[PathBuf],
+    params: &[(String, String)],
+) -> Vec<std::ffi::OsString> {
+    let mut args: Vec<std::ffi::OsString> = ["--ast-json", "-", "--quiet", "--single-unit"]
+        .iter()
+        .map(Into::into)
+        .collect();
+    for (lhs, value) in params {
+        let name = lhs.rsplit('.').next().unwrap_or(lhs);
+        args.push("-G".into());
+        args.push(format!("{name}={value}").into());
+    }
+    for d in include_dirs {
+        args.push("-I".into());
+        args.push(d.into());
+    }
+    for f in files {
+        args.push(f.into());
+    }
+    args
+}
+
 /// Run `slang --ast-json - <files> -I <dirs> --single-unit` and return the
 /// emitted AST JSON (the `-` sink writes JSON to stdout).
 ///
@@ -91,20 +124,25 @@ pub fn run_ast_json(
     files: &[PathBuf],
     include_dirs: &[PathBuf],
 ) -> Result<String, AdapterError> {
+    run_ast_json_with_params(bin, files, include_dirs, &[])
+}
+
+/// [`run_ast_json`] elaborating the design under `--param` overrides.
+///
+/// mununu#717 — the SVA extraction must elaborate the design the way the lift does. It ran with
+/// no override, so slang elaborated every parameter at its DEFAULT while the lift applied
+/// `--param`: a bound port then read a default-width signal the lifted model did not have (the
+/// property was skipped), and a parameter folded into an atom took its default value (a verdict
+/// about a different design). The overrides are passed as slang's top-scoped `-G NAME=VALUE`,
+/// exactly as the `read_slang` lift passes them, so the two front ends agree by construction.
+pub fn run_ast_json_with_params(
+    bin: &SlangBin,
+    files: &[PathBuf],
+    include_dirs: &[PathBuf],
+    params: &[(String, String)],
+) -> Result<String, AdapterError> {
     let mut cmd = Command::new(&bin.path);
-    // `--quiet` suppresses slang's "Top level design units" / build-summary
-    // banner so stdout is *pure* JSON (the `-` sink). Without it the banner
-    // prefixes the JSON and downstream `serde_json` parsing fails at column 1.
-    cmd.arg("--ast-json")
-        .arg("-")
-        .arg("--quiet")
-        .arg("--single-unit");
-    for d in include_dirs {
-        cmd.arg("-I").arg(d);
-    }
-    for f in files {
-        cmd.arg(f);
-    }
+    cmd.args(ast_json_args(files, include_dirs, params));
 
     // mununu#504 — bounded. This ran as a bare `.output()`. slang runs FIRST, before anything is
     // known about the design, so a hang here loses the run with no output and nothing to report.
@@ -173,6 +211,43 @@ pub fn run_ast_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// mununu#717 — the SVA extraction elaborates under the same overrides the lift applies,
+    /// with a scoped `MODULE.NAME` passed by its bare name (slang's `-G` is top-scoped), the
+    /// convention of the `read_slang` lift.
+    #[test]
+    fn ast_json_args_pass_each_param_override_as_a_g_flag() {
+        let args: Vec<String> = ast_json_args(
+            &[PathBuf::from("a.sv")],
+            &[PathBuf::from("inc")],
+            &[("W".into(), "4".into()), ("cnt.D".into(), "2".into())],
+        )
+        .into_iter()
+        .map(|a| a.into_string().unwrap())
+        .collect();
+        assert_eq!(
+            args,
+            [
+                "--ast-json",
+                "-",
+                "--quiet",
+                "--single-unit",
+                "-G",
+                "W=4",
+                "-G",
+                "D=2",
+                "-I",
+                "inc",
+                "a.sv"
+            ]
+        );
+        assert!(
+            !ast_json_args(&[PathBuf::from("a.sv")], &[], &[])
+                .iter()
+                .any(|a| a == "-G"),
+            "no override, no -G"
+        );
+    }
 
     #[test]
     fn parse_slang_version_extracts_token() {

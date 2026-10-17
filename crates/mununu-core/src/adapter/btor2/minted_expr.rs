@@ -369,8 +369,52 @@ pub fn augment_with_expressions(
     content: &str,
     exprs: &[(&str, &ExprIr)],
 ) -> Result<String, AdapterError> {
+    augment_with_expressions_explained(content, exprs).map(|(out, _)| out)
+}
+
+/// A minted expression left out of the model because one of its leaves does not resolve — the
+/// reason a formula reading it later reports an unknown signal (mununu#717).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnresolvedExpression {
+    /// The minted node name (`mununu_x_<hash>`) the formula reads.
+    pub name: String,
+    /// The leaf signal that did not resolve.
+    pub leaf: String,
+    /// The width the SVA side gave the leaf.
+    pub sva_width: u32,
+    /// The leaf's width in the model, or `None` when the model has no such signal.
+    pub model_width: Option<u32>,
+}
+
+impl UnresolvedExpression {
+    /// One line a reader can act on.
+    pub fn describe(&self) -> String {
+        match self.model_width {
+            Some(w) => format!(
+                "`{}` reads `{}` as {} bit(s), but the lifted model's `{}` is {w} bit(s)",
+                self.name, self.leaf, self.sva_width, self.leaf
+            ),
+            None => format!(
+                "`{}` reads `{}`, which the lifted model does not have",
+                self.name, self.leaf
+            ),
+        }
+    }
+}
+
+/// [`augment_with_expressions`], also returning every expression it had to leave out and why.
+///
+/// mununu#717 — an expression whose leaf did not resolve was skipped silently, and the property
+/// reading it then failed later with "unknown register/signal `mununu_x_…`", a message that names
+/// a hash rather than the real disagreement (a leaf whose width differs between the SVA and the
+/// model, the signature of a parameter the two front ends elaborated differently).
+pub fn augment_with_expressions_explained(
+    content: &str,
+    exprs: &[(&str, &ExprIr)],
+) -> Result<(String, Vec<UnresolvedExpression>), AdapterError> {
+    let mut unresolved = Vec::new();
     if exprs.is_empty() {
-        return Ok(content.to_string());
+        return Ok((content.to_string(), unresolved));
     }
     let file = parser::parse(content).map_err(|mut e| {
         e.message = format!("adapter/btor2/minted_expr: {}", e.message);
@@ -442,6 +486,12 @@ pub fn augment_with_expressions(
                     leaves.insert(leaf, n);
                 }
                 _ => {
+                    unresolved.push(UnresolvedExpression {
+                        name: name.to_string(),
+                        leaf: leaf.clone(),
+                        sva_width: w,
+                        model_width: nid.and_then(width_of),
+                    });
                     resolved = false;
                     break;
                 }
@@ -466,7 +516,7 @@ pub fn augment_with_expressions(
         }
     }
     if em.lines.is_empty() {
-        return Ok(content.to_string());
+        return Ok((content.to_string(), unresolved));
     }
     let mut out = content.trim_end().to_string();
     out.push('\n');
@@ -474,7 +524,7 @@ pub fn augment_with_expressions(
         out.push_str(line);
         out.push('\n');
     }
-    Ok(out)
+    Ok((out, unresolved))
 }
 
 struct Emitter<'a> {
@@ -827,5 +877,43 @@ mod tests {
         let once = augment_with_expressions(base, &[(ok.minted_name().as_str(), &ok)]).unwrap();
         let twice = augment_with_expressions(&once, &[(ok.minted_name().as_str(), &ok)]).unwrap();
         assert_eq!(once, twice);
+    }
+
+    /// mununu#717 — a leaf whose width disagrees with the model (the 10-bit default `cur_q`
+    /// against the 4-bit lifted one) is reported with both widths, and a missing leaf as missing,
+    /// instead of leaving only a later "unknown register/signal `mununu_x_…`".
+    #[test]
+    fn an_unresolved_leaf_is_explained_with_both_widths() {
+        let base = "1 sort bitvec 4\n2 state 1 cur_q\n";
+        let wide = ExprIr::Not(Box::new(leaf("cur_q", 10)));
+        let ghost = ExprIr::Not(Box::new(leaf("ghost", 4)));
+        let (out, why) = augment_with_expressions_explained(
+            base,
+            &[
+                (wide.minted_name().as_str(), &wide),
+                (ghost.minted_name().as_str(), &ghost),
+            ],
+        )
+        .unwrap();
+        assert_eq!(out, base, "nothing minted");
+        assert_eq!(
+            why,
+            vec![
+                UnresolvedExpression {
+                    name: wide.minted_name(),
+                    leaf: "cur_q".into(),
+                    sva_width: 10,
+                    model_width: Some(4),
+                },
+                UnresolvedExpression {
+                    name: ghost.minted_name(),
+                    leaf: "ghost".into(),
+                    sva_width: 4,
+                    model_width: None,
+                },
+            ]
+        );
+        assert!(why[0].describe().contains("10 bit(s)") && why[0].describe().contains("4 bit(s)"));
+        assert!(why[1].describe().contains("does not have"));
     }
 }

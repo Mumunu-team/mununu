@@ -1,6 +1,6 @@
 //! XL.6a — SVA extraction orchestration (SV source → translated property set).
 //!
-//! Ties the three XL.1/XL.3 pieces — [`locate_slang`], [`run_ast_json`], and
+//! Ties the three XL.1/XL.3 pieces — [`locate_slang`], [`run_ast_json`](crate::adapter::slang::run_ast_json), and
 //! [`translate_ast_json`] — into one string-in / [`TranslationReport`]-out
 //! helper, so the SVA front-end is reachable from a user-facing surface (the
 //! `sv/extract-sva` CLI subcommand + HTTP endpoint + UI panel).
@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use crate::adapter::slang::translate::{
     TranslateOptions, TranslationReport, translate_ast_json_with_options,
 };
-use crate::adapter::slang::{locate_slang, run_ast_json};
+use crate::adapter::slang::{locate_slang, run_ast_json_with_params};
 use crate::adapter::{AdapterError, AdapterErrorKind};
 
 /// Extract + translate every concurrent SVA assertion from a set of in-memory
@@ -38,6 +38,17 @@ pub fn extract_sva(sources: &[(String, String)]) -> Result<TranslationReport, Ad
 pub fn extract_sva_with_options(
     sources: &[(String, String)],
     opts: &TranslateOptions,
+) -> Result<TranslationReport, AdapterError> {
+    extract_sva_with_params(sources, opts, &[])
+}
+
+/// Like [`extract_sva_with_options`] but elaborating the design under `--param` overrides
+/// (`NAME` or `MODULE.NAME`, value) — mununu#717. The verify-auto path must call this with the
+/// same overrides the lift applies, or the SVA describes the design at its parameter defaults.
+pub fn extract_sva_with_params(
+    sources: &[(String, String)],
+    opts: &TranslateOptions,
+    params: &[(String, String)],
 ) -> Result<TranslationReport, AdapterError> {
     if sources.is_empty() {
         return Err(AdapterError {
@@ -72,7 +83,7 @@ pub fn extract_sva_with_options(
 
     // The staging dir doubles as the include search path.
     let include_dirs = vec![dir.path().to_path_buf()];
-    let json = run_ast_json(&bin, &files, &include_dirs)?;
+    let json = run_ast_json_with_params(&bin, &files, &include_dirs, params)?;
     translate_ast_json_with_options(&json, opts)
     // `dir` drops here → temp files removed.
 }
