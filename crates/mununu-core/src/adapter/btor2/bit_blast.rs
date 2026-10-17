@@ -1824,6 +1824,38 @@ pub(crate) fn enum_reencode(file: &Btor2File, meta: &EnumStateMeta) -> Option<Bt
         }
     }
 
+    // mununu#698 — every value-path `ite` is narrowed to `E` bits below, so it may only be read
+    // where an `E`-bit value is expected: by S's own `next`, or as a BRANCH of another value-path
+    // `ite`. Any other reader (a mask `and`, an `eq` against an encoding, another register's
+    // `next`, an output) keeps its W-bit sort and would receive an index — a panic in the
+    // bit-blaster, or a silently wrong comparison. Abstain on it, like any other unhandled use.
+    // (Constants are never narrowed in place — each value-path constant is replaced by a fresh
+    // index constant at its use — so a constant shared with another reader is fine.)
+    let narrowed: std::collections::HashSet<Nid> = value_path
+        .iter()
+        .copied()
+        .filter(|nid| {
+            matches!(
+                file.lookup(*nid).map(|l| &l.node),
+                Some(Node::Op { op: Op::Ite, .. })
+            )
+        })
+        .collect();
+    for line in &file.lines {
+        let ok = match &line.node {
+            Node::Next { state, .. } if *state == s => true,
+            Node::Op {
+                op: Op::Ite, args, ..
+            } if narrowed.contains(&line.nid) => {
+                args.first().is_none_or(|c| !narrowed.contains(&c.nid()))
+            }
+            other => !narrowed.iter().any(|n| node_refs_nid(other, *n)),
+        };
+        if !ok {
+            return None;
+        }
+    }
+
     // Rewrite pass.
     let mut out: Vec<Line> = Vec::with_capacity(file.lines.len() + prelude.len());
     out.extend(prelude);
@@ -1839,10 +1871,16 @@ pub(crate) fn enum_reencode(file: &Btor2File, meta: &EnumStateMeta) -> Option<Bt
                 state: s,
                 value: const_for(resolve_btor2_constant(file, value.nid())?)?,
             },
+            // mununu#698 — a constant next value (the value path is that constant alone) is
+            // remapped to its index like every other value-path constant; it used to stay the
+            // W-bit constant under the E-bit sort.
             Node::Next { state, value, .. } if *state == s => Node::Next {
                 sort: e_sort,
                 state: s,
-                value: *value,
+                value: match resolve_btor2_constant(file, value.nid()) {
+                    Some(v) => const_for(v)?,
+                    None => *value,
+                },
             },
             // A value-path `ite`: sort → E, const operands → index consts (a hold or a
             // nested value-path ite keeps its NID — resolved to None by const-lookup).
@@ -7998,6 +8036,101 @@ mod tests {
                 "re-encode changed the verdict for `{prop}`: {vo:?} vs {vr:?}"
             );
         }
+    }
+
+    /// mununu#698 — the next-state MUX of an enum register read by something other than the
+    /// register: here an `and` with a mask and an `eq` against a value, the shape of an OpenTitan
+    /// sparse FSM's `state_d`. The re-encode narrowed every value-path `ite` to `E` bits but
+    /// checked only the register's other readers, so the `and` (4-bit result) received a 2-bit
+    /// operand ("index out of bounds: the len is 2 but the index is 2" in `Op::And`) and the
+    /// `eq` compared a 2-bit index against a 4-bit encoding. Fails on the parent.
+    #[test]
+    fn enum_reencode_abstains_when_the_next_state_mux_has_another_reader() {
+        use crate::adapter::btor2::parser::parse;
+        use crate::adapter::btor2::symbolic_bitblast::{ExactVerdict, exact_symbolic_verdict};
+        let btor = r#"
+1 sort bitvec 1
+2 sort bitvec 4
+3 state 2 fsm
+4 const 2 0001
+5 const 2 0010
+6 const 2 0000
+7 init 2 3 6
+8 input 1 go
+9 ite 2 8 5 4
+10 next 2 3 9
+11 eq 1 3 5
+12 output 11 done
+13 const 2 1111
+14 and 2 9 13
+15 redor 1 14
+16 output 15 nx_any
+17 eq 1 9 5
+18 output 17 nx_b
+"#;
+        let orig = parse(btor).expect("parses");
+        let metas = detect_enum_states(&orig);
+        assert_eq!(metas.len(), 1, "{metas:?}");
+        assert!(
+            enum_reencode(&orig, &metas[0]).is_none(),
+            "a value-path ite with a reader outside the value path must not be narrowed"
+        );
+        // The exact engine still decides every property, through the un-re-encoded register.
+        for (prop, want) in [
+            ("nu Y.((nx_any == 1) && [] Y)", ExactVerdict::Holds), // next is A or B: never 0
+            ("mu X.((nx_b == 1) || <> X)", ExactVerdict::Holds),   // go selects B
+            ("nu Y.((nx_b == 0) && [] Y)", ExactVerdict::Violated),
+            ("mu X.((done == 1) || <> X)", ExactVerdict::Holds),
+        ] {
+            let f = crate::mu_calculus::parser::parse(prop).expect("formula");
+            assert_eq!(
+                exact_symbolic_verdict(btor, &f).expect("decides"),
+                want,
+                "`{prop}`"
+            );
+        }
+    }
+
+    /// mununu#698, the sibling found reading the fix — a register whose `next` is a bare
+    /// constant (always step to `A`). The value path is that constant alone, and the rewrite kept
+    /// `next` pointing at the W-bit constant under the E-bit sort. Fails on the parent.
+    #[test]
+    fn enum_reencode_remaps_a_constant_next_value() {
+        use crate::adapter::btor2::parser::parse;
+        use crate::adapter::btor2::symbolic_bitblast::{ExactVerdict, exact_symbolic_verdict};
+        let btor = r#"
+1 sort bitvec 1
+2 sort bitvec 4
+3 state 2 fsm
+4 const 2 0100
+6 const 2 0000
+7 init 2 3 6
+10 next 2 3 4
+11 eq 1 3 4
+12 output 11 at_a
+"#;
+        let orig = parse(btor).expect("parses");
+        let metas = detect_enum_states(&orig);
+        assert_eq!(metas.len(), 1, "{metas:?}");
+        if let Some(reenc) = enum_reencode(&orig, &metas[0]) {
+            let reenc_str = crate::adapter::btor2::emit::emit_btor2(&reenc);
+            let parsed = crate::adapter::btor2::parser::parse(&reenc_str).expect("re-parses");
+            crate::adapter::btor2::parser::check_sorts(&parsed)
+                .expect("the re-encoded model is well sorted");
+            for prop in ["mu X.((at_a == 1) || <> X)", "nu Y.((at_a == 0) && [] Y)"] {
+                let f = crate::mu_calculus::parser::parse(prop).expect("formula");
+                assert_eq!(
+                    exact_symbolic_verdict(btor, &f).expect("orig"),
+                    exact_symbolic_verdict(&reenc_str, &f).expect("reenc"),
+                    "`{prop}`"
+                );
+            }
+        }
+        let f = crate::mu_calculus::parser::parse("mu X.((at_a == 1) || <> X)").unwrap();
+        assert_eq!(
+            exact_symbolic_verdict(btor, &f).expect("decides"),
+            ExactVerdict::Holds
+        );
     }
 
     #[test]
