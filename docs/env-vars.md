@@ -18,6 +18,8 @@ grep -rhoE 'env::var(_os)?\("MUNUNU_[A-Z0-9_]+"' crates/ | grep -oE 'MUNUNU_[A-Z
 
 | variable | purpose |
 |---|---|
+| `MUNUNU_BUILD_SHA` | **build time only** (read by `crates/mununu-cli/build.rs`, never at run time): the commit to record as the binary's identity, for builds without `.git` (the production Dockerfile's build arg). Unset: the build script asks git; neither answering means no identity (mununu#715). |
+| `MUNUNU_BUILD_DIRTY` | **build time only**: `0` (tracked files matched the commit) or `1`, paired with `MUNUNU_BUILD_SHA`. Without it a given sha is not recorded — the dirty bit is never guessed. |
 | `RUST_LOG=mununu=info` | logging (`debug` prints the engine's per-stage lines: lift, bit-blast, fixpoint, squaring steps, portfolio members). |
 | `MUNUNU_MAX_PROCESS_MEMORY_BYTES` | self-imposed RSS ceiling polled between properties and at each ⊥ re-plan step; past it the remaining properties abstain with a `memory-budget-exceeded` note instead of an allocator `abort()`. Unset ⇒ **auto**: 80 % of a detected cgroup limit, else disabled; `0` disables explicitly. Coarse: an allocation between checkpoints is not caught (mununu#490, #504 C6). |
 | `MUNUNU_SELF_EXE` | the binary the reach portfolio re-executes for the isolated `btor2 spacer-check` child (a solver segfault becomes a child exit read as ABSTAIN). Set only when the running executable cannot be located. |
