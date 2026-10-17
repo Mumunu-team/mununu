@@ -4545,14 +4545,31 @@ fn render_verify_auto_text(report: &mununu_core::adapter::slang::verify_auto::Au
         }
         // The exact engine's counterexample: either the A.4 unreachable-target witness
         // for a bare `EF p` (reachability) — "the design never reaches <p>", the repair
-        // signal a safety check never produces — or the D1.8b stall-lasso / trap-path
-        // (reset → prefix → repeating ¬p cycle) for a `AF`/`AG AF`/`AG EF` failure.
+        // signal a safety check never produces — the reset → violation path for a safety
+        // failure, or the D1.8b stall-lasso / trap-path (reset → prefix → repeating ¬p cycle)
+        // for a `AF`/`AG AF`/`AG EF` failure.
         if let Some(cex) = &p.counterexample {
             if !cex.unreachable_target.is_empty() {
                 println!(
                     "        counterexample: target UNREACHABLE from reset - the design never reaches {}",
                     cex.unreachable_target.join(" ∧ ")
                 );
+            } else if cex.cycle.is_empty() {
+                // A safety violation: the finite path from reset to the failing cycle, with the
+                // inputs each cycle read (`inputs[i]` belongs to state `i`).
+                println!("        counterexample (reset -> violation):");
+                let render = |st: &[(String, u64)]| {
+                    st.iter()
+                        .map(|(k, v)| format!("{k}={v}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                for (i, st) in cex.prefix.iter().enumerate() {
+                    println!("          [{i}] {}", render(st));
+                    if let Some(inp) = cex.inputs.get(i).filter(|inp| !inp.is_empty()) {
+                        println!("              in: {}", render(inp));
+                    }
+                }
             } else {
                 println!("        counterexample (stall lasso):");
                 let render_state = |st: &[(String, u64)]| {

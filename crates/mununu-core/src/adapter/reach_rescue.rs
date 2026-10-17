@@ -461,24 +461,45 @@ pub fn reach_portfolio_rescue_diagnosed(
     Ok((verdict, outcome))
 }
 
-/// The concrete counterexample trace for an AG-invariant the reachability portfolio
-/// found VIOLATED: rebuild the same `bad`-monitor [`reach_portfolio_rescue`] uses and
-/// run native BMC to extract the `Init → ¬invariant` path. The bad-monitor adds no
-/// state, so the trace is over the ORIGINAL design's registers (no projection).
-/// Returns `None` if the formula is not a reducible AG-invariant or no bounded
-/// counterexample is found within `max_k`.
-pub fn ag_invariant_witness(
+/// The concrete counterexample for a VIOLATED AG-safety property: the SHALLOWEST `Init → bad`
+/// path native BMC finds within `max_k` steps (plus the property's own depth), with the input
+/// assignment at every step.
+///
+/// The body may be any bounded-depth combination of boolean blocks, `&&`, `||` and boxes — every
+/// `|->` / `|=>` / `##n` shape the SVA translator emits — compiled by
+/// [`emit_bounded_safety_witness_monitor`](crate::adapter::btor2::bad_monitor::emit_bounded_safety_witness_monitor),
+/// which reads it along ONE path. A path that falsifies that reading also falsifies the
+/// formula (a box holds only if every successor satisfies its target), so a returned trace is
+/// always a genuine counterexample; the converse can fail (`[] a || [] b` can be false at a state
+/// although every single path satisfies `a` or `b` next), and then there is no trace. The monitor's
+/// history latches (`mununu_wit_…`) appear in the trace beside the design's registers.
+pub fn safety_witness(
     design_btor2: &str,
     formula: &Formula,
     reset_pinned: bool,
     max_k: u32,
 ) -> Option<crate::adapter::btor2::native_bmc::BmcTrace> {
-    let inv = reduce_ag_invariant(formula)?;
-    let monitored =
-        emit_ag_state_atom_monitor(design_btor2, &inv.signal, inv.op, inv.value, reset_pinned)
-            .ok()?;
+    let Node::Nu { var, body } = formula.node(formula.root()) else {
+        return None;
+    };
+    let Node::And(l, r) = formula.node(*body) else {
+        return None;
+    };
+    let (block, recur) = classify_and(formula, *l, *r, *var)?;
+    if !matches!(formula.node(recur), Node::Modal { guard, .. } if *guard == Guard::default()) {
+        return None;
+    }
+    let (monitored, depth) =
+        crate::adapter::btor2::bad_monitor::emit_bounded_safety_witness_monitor(
+            design_btor2,
+            formula,
+            block,
+            reset_pinned,
+        )
+        .ok()?;
     let file = parser::parse(&monitored).ok()?;
-    match crate::adapter::btor2::native_bmc::bmc_bad_reachable_witness(&file, max_k).ok()? {
+    let k = max_k.saturating_add(u32::try_from(depth).ok()?);
+    match crate::adapter::btor2::native_bmc::bmc_bad_reachable_witness(&file, k).ok()? {
         (crate::adapter::btor2::native_bmc::BmcOutcome::Violated { .. }, trace) => trace,
         _ => None,
     }
@@ -491,6 +512,66 @@ mod tests {
 
     fn parse(s: &str) -> Formula {
         mu_parser::parse(s).unwrap_or_else(|e| panic!("parse `{s}`: {e:?}"))
+    }
+
+    /// 2-bit counter 0→1→2→3→0.
+    const COUNTER: &str = "1 sort bitvec 2\n2 sort bitvec 1\n3 zero 1\n4 one 1\n\
+                           5 state 1 cnt\n6 init 1 5 3\n7 add 1 5 4\n8 next 1 5 7\n";
+
+    fn design_states(
+        trace: &crate::adapter::btor2::native_bmc::BmcTrace,
+    ) -> Vec<Vec<(String, u64)>> {
+        trace
+            .states
+            .iter()
+            .map(|st| {
+                st.iter()
+                    .filter(|(k, _)| {
+                        !k.starts_with(crate::adapter::btor2::bad_monitor::WITNESS_LATCH_PREFIX)
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// A two-step consequent (`cnt == 1 |-> ##2 cnt != 3`, which the counter breaks): the witness
+    /// is the counting path from reset to the violation, ending where the consequent fails.
+    #[test]
+    fn a_multi_step_safety_violation_has_a_witness() {
+        let f = parse("nu X. (((!((cnt == 1))) || [] [] (cnt != 3)) && [] X)");
+        let trace = safety_witness(COUNTER, &f, false, 10).expect("a witness");
+        let cnt = |v: u64| vec![("cnt".to_string(), v)];
+        assert_eq!(design_states(&trace), vec![cnt(0), cnt(1), cnt(2), cnt(3)]);
+        assert_eq!(trace.inputs.len(), trace.states.len());
+        // The property that holds (`##2 cnt == 3`) has none.
+        let holds = parse("nu X. (((!((cnt == 1))) || [] [] (cnt == 3)) && [] X)");
+        assert!(safety_witness(COUNTER, &holds, false, 10).is_none());
+    }
+
+    /// No state at all: `a |=> b` over two inputs fails at depth 1, and the witness names the
+    /// input at EVERY frame — `a` where the attempt starts, `!b` at the frame `bad` reads.
+    #[test]
+    fn an_input_only_violation_names_the_last_frames_input() {
+        let design = "1 sort bitvec 1\n2 input 1 a\n3 input 1 b\n";
+        let f = parse("nu X. (((!(a)) || [] b) && [] X)");
+        let trace = safety_witness(design, &f, false, 5).expect("a witness");
+        assert_eq!(trace.inputs.len(), 2);
+        let at = |j: usize, n: &str| {
+            trace.inputs[j]
+                .iter()
+                .find(|(k, _)| k == n)
+                .map(|(_, v)| *v)
+        };
+        assert_eq!(at(0, "a"), Some(1));
+        assert_eq!(at(1, "b"), Some(0));
+    }
+
+    /// A fixpoint inside the body (`AG AF`) is not a bounded shape: no witness, never a wrong one.
+    #[test]
+    fn an_unbounded_body_has_no_safety_witness() {
+        let f = parse("nu X. ((mu Y. ((cnt == 3) || [] Y)) && [] X)");
+        assert!(safety_witness(COUNTER, &f, false, 10).is_none());
     }
 
     #[test]

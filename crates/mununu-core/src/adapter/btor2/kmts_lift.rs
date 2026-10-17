@@ -4256,7 +4256,9 @@ mod tests {
             ("byte_controller.bit_controller.cmd", 0),
             ("tip", 1),
             ("byte_controller.bit_controller.clk_en", 1),
-            ("byte_controller.go", 1),
+            // mununu#711 — `byte_controller.go` was here, but it is `cmd_ack`-derived combinational
+            // logic (`and`), not a register: the loose naming bound it to a register in its cone.
+            ("byte_controller.cmd_ack", 1),
         ]
         .iter()
         .map(|(r, v)| spec(&format!("{r} == {v}"), r, *v))
@@ -4348,7 +4350,9 @@ mod tests {
             ("byte_controller.bit_controller.cmd", 0),
             ("tip", 1),
             ("byte_controller.bit_controller.clk_en", 1),
-            ("byte_controller.go", 1),
+            // mununu#711 — `byte_controller.go` was here, but it is `cmd_ack`-derived combinational
+            // logic (`and`), not a register: the loose naming bound it to a register in its cone.
+            ("byte_controller.cmd_ack", 1),
         ]
         .iter()
         .map(|(r, v)| spec(&format!("{r} == {v}"), r, *v))

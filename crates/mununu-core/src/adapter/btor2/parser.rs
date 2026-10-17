@@ -381,15 +381,22 @@ pub fn collect_symbols(file: &Btor2File) -> HashMap<Nid, String> {
     // The width-matched alias is the canonical "this NID *is* state S"
     // shape Yosys emits for SystemVerilog regs that lose their direct
     // symbol annotation through `flatten` + `async2sync` + `dffunmap`.
+    //
+    // mununu#711 — and only along a VALUE-PRESERVING path ([`follow_state_alias`]: a `uext` /
+    // `sext` by 0, the async-reset `ite` with a constant arm). Width alone is not identity: a
+    // bit-swapped struct port (`esc_rx_o = {resp_p, resp_n}` over the flop `{resp_nq, resp_pq}`)
+    // or an inverted output (`out_n = ~q`) reached its register here, and every evaluator then
+    // read the raw register for the name — a false HOLDS on `AG(out_n == 0)`. Such a node keeps
+    // its own name, which every evaluator binds to the node's exact value.
     let is_synthetic = |s: &str| s.starts_with('$');
     for line in &file.lines {
         if let Node::Op {
             sort: op_sort,
-            args,
             symbol: Some(name),
             ..
         } = &line.node
-            && let Some(state_nid) = trace_to_state(file, args)
+            && let Some(state_nid) =
+                follow_state_alias(file, line.nid, true, &mut std::collections::HashSet::new())
         {
             let op_width = bv_width(file, *op_sort);
             let state_width = file.lookup(state_nid).and_then(|l| match &l.node {
@@ -433,7 +440,12 @@ pub fn collect_symbols(file: &Btor2File) -> HashMap<Nid, String> {
             signal,
             symbol: Some(name),
         } = &line.node
-            && let Some(state_nid) = trace_to_state(file, &[*signal])
+            && let Some(state_nid) = follow_state_alias(
+                file,
+                signal.nid(),
+                true,
+                &mut std::collections::HashSet::new(),
+            )
         {
             let signal_width = bv_width_of_operand(file, *signal);
             let state_width = file.lookup(state_nid).and_then(|l| match &l.node {
@@ -502,33 +514,6 @@ fn bv_width_of_operand(file: &Btor2File, op: crate::adapter::btor2::ast::Operand
         _ => return None,
     };
     bv_width(file, sort_nid)
-}
-
-/// Walk the operand graph backward from a list of operands, returning
-/// the nid of the first State node reachable. Returns `None` if no state
-/// is found within a small bounded traversal (cycles + width are guarded
-/// to keep this O(n) overall across the whole file).
-fn trace_to_state(file: &Btor2File, args: &[crate::adapter::btor2::ast::Operand]) -> Option<Nid> {
-    let mut stack: Vec<Nid> = args.iter().map(|o| o.nid()).collect();
-    let mut seen: std::collections::HashSet<Nid> = std::collections::HashSet::new();
-    while let Some(nid) = stack.pop() {
-        if !seen.insert(nid) {
-            continue;
-        }
-        let Some(line) = file.lookup(nid) else {
-            continue;
-        };
-        match &line.node {
-            Node::State { .. } => return Some(line.nid),
-            Node::Op { args, .. } => {
-                for o in args {
-                    stack.push(o.nid());
-                }
-            }
-            _ => {}
-        }
-    }
-    None
 }
 
 /// M.1 Path B (§Phase 11) — find the nearest `State` NID reachable
@@ -683,10 +668,10 @@ pub fn cone_reaches_anonymous_input(file: &Btor2File, start: Nid) -> bool {
 pub fn signal_reaches_anonymous_input(file: &Btor2File, name: &str) -> bool {
     let symbols = collect_symbols(file);
     // mununu#651 — a name `collect_symbols` gives a STATE CELL binds to that cell in the exact
-    // engine (its name table is `collect_symbols`), so judge that node alone. The loose pass can
-    // name an unsymbolled cell after its NEXT-VALUE function (`state_d`), whose own `Op` symbol
-    // is the same string; OR-ing that signal in refused a faithful register because its
-    // next-state logic reads an input.
+    // engine (its name table is `collect_symbols`), so judge that node alone. The loose pass
+    // named an unsymbolled cell after its NEXT-VALUE function (`state_d`) until mununu#711,
+    // whose own `Op` symbol is the same string; OR-ing that signal in refused a faithful
+    // register because its next-state logic reads an input.
     let cells: Vec<Nid> = file
         .lines
         .iter()
@@ -945,16 +930,14 @@ pub fn resolve_to_canonical_name(
 ///    **value-identical** alias of the cell ([`resolve_state_alias`] with the async-reset
 ///    mux allowed — the `uext … 0 NAME` rename yosys emits for a register's current
 ///    value, or the port that passes it through);
-/// 3. else the loose cone-tracing name [`collect_symbols`] attaches, for a cell nothing
-///    names exactly (a hand-written lift whose only symbol sits on a derived op).
 ///
-/// Why not [`collect_symbols`] alone: its pass 2 attaches the FIRST symbol-bearing op
-/// whose cone reaches a cell, and a next-state value `beat_cnt_d` reaches the *state*
-/// register's cell (the `case (state_q)` it is computed under) before its own — so
-/// `check-fsm` reported the state register as `beat_cnt_d` and `--list` advertised a
-/// combinational wire as a register. A value-identical alias cannot name the wrong cell.
-/// `collect_symbols` itself is unchanged: the sidecar / lint resolvers that want the
-/// loose cone name keep it.
+/// A cell nothing names exactly stays anonymous. Why not [`collect_symbols`] alone: before
+/// mununu#711 its pass 2 attached the FIRST symbol-bearing op whose cone reached a cell, and a
+/// next-state value `beat_cnt_d` reaches the *state* register's cell (the `case (state_q)` it is
+/// computed under) before its own — so `check-fsm` reported the state register as `beat_cnt_d`
+/// and `--list` advertised a combinational wire as a register. `collect_symbols` now follows the
+/// same value-preserving edges; this function still differs in preferring an op alias over an
+/// output port.
 pub fn canonical_register_names(file: &Btor2File) -> HashMap<Nid, String> {
     let is_synthetic = |s: &str| s.starts_with('$');
     let mut out: HashMap<Nid, String> = HashMap::new();
@@ -993,11 +976,6 @@ pub fn canonical_register_names(file: &Btor2File) -> HashMap<Nid, String> {
             if let Some(cell) = follow_state_alias(file, line.nid, true, &mut visited) {
                 out.entry(cell).or_insert_with(|| name.clone());
             }
-        }
-    }
-    for (nid, name) in collect_symbols(file) {
-        if matches!(file.lookup(nid).map(|l| &l.node), Some(Node::State { .. })) {
-            out.entry(nid).or_insert(name);
         }
     }
     out
@@ -1152,6 +1130,41 @@ pub fn array_widths(file: &Btor2File, sort_nid: Nid) -> Option<(u32, u32)> {
 
 #[cfg(test)]
 mod tests {
+    /// mununu#711 — a name reaches the register it is forwarded to only along a value-preserving
+    /// path: a `uext … 0` rename and the async-reset mux keep it; a bit swap and an inversion do
+    /// not (the named node stays its own signal).
+    #[test]
+    fn x711_a_name_is_forwarded_to_a_register_only_along_an_identity() {
+        let src = "1 sort bitvec 2\n2 sort bitvec 1\n3 input 2 rst_ni\n4 state 1\n\
+                   5 const 1 10\n6 ite 1 3 4 5\n7 uext 1 6 0 q_alias\n\
+                   8 slice 2 6 1 1\n9 slice 2 6 0 0\n10 concat 1 9 8\n11 uext 1 10 0 swapped\n\
+                   12 state 1\n13 not 1 12\n14 uext 1 13 0 inverted\n";
+        let file = parse(src).expect("parses");
+        let names = super::collect_symbols(&file);
+        assert_eq!(names.get(&4).map(String::as_str), Some("q_alias"));
+        assert_eq!(names.get(&12), None, "an inverted alias names no register");
+        assert!(!names.values().any(|n| n == "swapped" || n == "inverted"));
+    }
+
+    /// mununu#711 — the exact engine reads an inverted alias as the alias, not the register: the
+    /// (unnamed, as after a yosys flatten) register stays 0, so `out_n = ~q` is always 1 and
+    /// `AG(out_n == 0)` is VIOLATED. Forwarded to the register, the atom read `q == 0` and the
+    /// property HELD — a false HOLDS.
+    #[test]
+    fn x711_an_inverted_alias_is_not_read_as_its_register() {
+        use crate::adapter::btor2::symbolic_bitblast::{ExactVerdict, exact_symbolic_verdict};
+        let src = "1 sort bitvec 1\n2 zero 1\n3 state 1\n4 init 1 3 2\n5 next 1 3 3\n\
+                   6 not 1 3\n7 uext 1 6 0 out_n\n";
+        let verdict = |f: &str| {
+            exact_symbolic_verdict(src, &crate::mu_calculus::parser::parse(f).unwrap()).unwrap()
+        };
+        assert_eq!(
+            verdict("nu X. ((out_n == 0) && [] X)"),
+            ExactVerdict::Violated
+        );
+        assert_eq!(verdict("nu X. ((out_n == 1) && [] X)"), ExactVerdict::Holds);
+    }
+
     /// mununu#650 — `keymgr_ctrl`'s lift carries a 128-bit `constd` past `i128::MAX`; it used to
     /// fail the whole parse. It is the same bits as the hex literal.
     #[test]
@@ -1324,11 +1337,11 @@ mod tests {
     #[test]
     fn x633_canonical_register_names_prefer_a_value_identical_alias_over_the_loose_cone_name() {
         // Cell 4 carries no symbol. Its next-value op (9, `cnt_d` = ite(go, cnt+1, cnt))
-        // comes FIRST in file order and reaches the cell in the loose cone trace, so
-        // `collect_symbols` names the cell `cnt_d`; the `uext 0` alias `cnt_q` (11) is
-        // the value-identical name and must win. Cell 12 has a direct symbol `mode`
-        // that an alias (14, `mode_o`) must not override; cell 15 is named only by an
-        // output port (17); cell 18 is named by nothing exact and keeps the loose name.
+        // comes FIRST in file order and reaches the cell, which named the cell `cnt_d` before
+        // mununu#711; the `uext 0` alias `cnt_q` (11) is the value-identical name and must win.
+        // Cell 12 has a direct symbol `mode` that an alias (14, `mode_o`) must not override;
+        // cell 15 is named only by an output port (17); cell 18 is named by nothing exact
+        // (`sum_d` = cell + 1 is not the cell) and stays anonymous.
         let src = "1 sort bitvec 1\n2 sort bitvec 2\n3 input 1 go\n\
                    4 state 2\n5 zero 2\n6 init 2 4 5\n7 one 2\n8 add 2 4 7\n\
                    9 ite 2 3 8 4 cnt_d\n10 next 2 4 9\n11 uext 2 4 0 cnt_q\n\
@@ -1336,22 +1349,21 @@ mod tests {
                    15 state 2\n16 next 2 15 15\n17 output 15 port_q\n\
                    18 state 2\n19 next 2 18 18\n20 add 2 18 7 sum_d\n";
         let file = parse(src).expect("parse");
-        let loose = collect_symbols(&file);
         assert_eq!(
-            loose.get(&4).map(String::as_str),
-            Some("cnt_d"),
-            "the loose trap"
+            collect_symbols(&file).get(&4).map(String::as_str),
+            Some("cnt_q"),
+            "mununu#711 — `collect_symbols` follows the same value-preserving edges"
         );
         let names = canonical_register_names(&file);
         assert_eq!(names.get(&4).map(String::as_str), Some("cnt_q"));
         assert_eq!(names.get(&12).map(String::as_str), Some("mode"));
         assert_eq!(names.get(&15).map(String::as_str), Some("port_q"));
         assert_eq!(
-            names.get(&18).map(String::as_str),
-            Some("sum_d"),
-            "a cell nothing names exactly keeps the loose cone name"
+            names.get(&18),
+            None,
+            "a derived op does not name the cell it reads"
         );
-        assert_eq!(names.len(), 4);
+        assert_eq!(names.len(), 3);
     }
 
     #[test]
@@ -1511,14 +1523,16 @@ mod tests {
                    10 uext 2 7 0 x_q\n11 next 2 4 8\n12 init 2 4 6\n";
         let file = parse(src).expect("parses");
         let symbols = collect_symbols(&file);
-        assert_eq!(
-            symbols.get(&4).map(String::as_str),
-            Some("x_d"),
-            "precondition: the loose pass names the cell after its next-value function"
+        // mununu#711 — the cell is named by its value-identical alias, no longer after its
+        // next-value function: `x_q` is the register, `x_d` the function that reads the input.
+        assert_eq!(symbols.get(&4).map(String::as_str), Some("x_q"));
+        assert!(
+            !signal_reaches_anonymous_input(&file, "x_q"),
+            "`x_q` binds to the state cell, which reads no input"
         );
         assert!(
-            !signal_reaches_anonymous_input(&file, "x_d"),
-            "`x_d` binds to the state cell, which reads no input"
+            signal_reaches_anonymous_input(&file, "x_d"),
+            "`x_d` is the next-value function, and an atom over it reads the input"
         );
         assert!(
             cone_reaches_anonymous_input(&file, 8),

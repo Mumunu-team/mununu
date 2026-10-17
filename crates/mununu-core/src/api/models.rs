@@ -2449,8 +2449,10 @@ pub struct PropertyVerdictView {
     pub decided_by: Option<String>,
     /// The cube predicates auto-seeded for this property (atom strings).
     pub seeded_predicates: Vec<String>,
-    /// D1.8b — a concrete stall-lasso counterexample, present only for a Violated
-    /// bare `AF p` decided by the exact engine (`engine: "exact-symbolic"`).
+    /// A concrete counterexample for a Violated property: for safety, the reset → violation
+    /// path (empty `cycle`) native BMC re-derives whichever engine decided it (absent when none
+    /// lies within the bound); D1.8b — a stall lasso for a bare `AF p` decided by the exact
+    /// engine; A.4 — the unreachable target of a bare `EF p`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub counterexample: Option<CounterexampleView>,
     /// mununu#599 — a recoverability guarantee (`AG EF(P)`) that HOLDS, judged against the other
@@ -2481,8 +2483,9 @@ pub struct VacuityView {
     pub detail: String,
 }
 
-/// D1.8b — a stall-lasso counterexample for the API (mirrors `ExactCounterexample`):
-/// reset → `prefix` → repeating `cycle`, each state an ordered list of register cells.
+/// A counterexample for the API (mirrors `ExactCounterexample`): reset → `prefix` → repeating
+/// `cycle` (D1.8b stall lasso), or reset → `prefix` with an empty `cycle` (a safety violation,
+/// ending at the failing cycle), each state an ordered list of register cells.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct CounterexampleView {
     /// States from the reset state up to (excluding) the cycle entry.
@@ -2494,8 +2497,9 @@ pub struct CounterexampleView {
     /// stall-lasso / trap-path (liveness) counterexamples, which carry `prefix`/`cycle`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unreachable_target: Vec<String>,
-    /// P3 / mununu#536 — the per-cycle INPUT assignment that drives the trace, so the
-    /// counterexample can be replayed against the RTL. Present on the core report all along;
+    /// P3 / mununu#536 — the per-cycle INPUT assignment that drives the trace (`inputs[i]`
+    /// belongs to state `i` of `prefix ++ cycle`), so the counterexample can be replayed
+    /// against the RTL. Present on the core report all along;
     /// both wire shapes dropped it, which made a trace readable but not runnable.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inputs: Vec<Vec<CexCellView>>,

@@ -172,8 +172,8 @@ Initial states satisfying: 0/1     ← FALSE from reset
 
 ## 5. `summarize` shows the declared automaton; `eval` runs the unrolled one
 
-> Source of truth: [`context_summarize`](../crates/mununu-cli/src/main.rs#L6769)
-> vs [`context_eval`](../crates/mununu-cli/src/main.rs#L6858) — surface: CLI.
+> Source of truth: [`context_summarize`](../crates/mununu-cli/src/main.rs#L7464)
+> vs [`context_eval`](../crates/mununu-cli/src/main.rs#L7553) — surface: CLI.
 
 `context summarize` reports `state_count` from the **declared** `states`
 block. `context eval` evaluates over the **unrolled** product of states and

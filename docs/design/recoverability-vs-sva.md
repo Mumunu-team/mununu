@@ -68,7 +68,7 @@ the discriminating case).
 
 ### 3.1 Sound `AG EF` over a predicate abstraction
 
-> Source of truth: [`predicate_cube_lift`](../../crates/mununu-core/src/adapter/btor2/kmts_lift.rs#L1918) + [`cegar_refine_loop`](../../crates/mununu-core/src/adapter/btor2/cegar.rs#L697) — surface: (CLI+API+UI)
+> Source of truth: [`predicate_cube_lift`](../../crates/mununu-core/src/adapter/btor2/kmts_lift.rs#L2440) + [`cegar_refine_loop`](../../crates/mununu-core/src/adapter/btor2/cegar.rs#L697) — surface: (CLI+API+UI)
 
 mununu lifts a BTOR2 design into a **predicate cube** (abstract states are
 elements of `2^|P|` over a declared predicate set `P`, not the bit-blast state

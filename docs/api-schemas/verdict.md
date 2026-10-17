@@ -68,7 +68,7 @@ Rust source: [`PropertyVerdict`](../../crates/mununu-core/src/verdict.rs#L22) �
 
 ## SvVerifyAutoResponse — top-level shape
 
-Rust source: [`SvVerifyAutoResponse`](../../crates/mununu-core/src/api/models.rs#L1691).
+Rust source: [`SvVerifyAutoResponse`](../../crates/mununu-core/src/api/models.rs#L1882).
 
 ```jsonc
 {
@@ -86,7 +86,7 @@ Rust source: [`SvVerifyAutoResponse`](../../crates/mununu-core/src/api/models.rs
 
 ## PropertyVerdictView — per-property
 
-Rust source: [`PropertyVerdictView`](../../crates/mununu-core/src/api/models.rs#L1743).
+Rust source: [`PropertyVerdictView`](../../crates/mununu-core/src/api/models.rs#L2393).
 
 ```jsonc
 {
@@ -121,7 +121,7 @@ Rust source: [`PropertyVerdictView`](../../crates/mununu-core/src/api/models.rs#
 
 ## Counterexample — CexCellView / CounterexampleView
 
-Rust source: [`CounterexampleView`](../../crates/mununu-core/src/api/models.rs#L1763) + [`CexCellView`](../../crates/mununu-core/src/api/models.rs#L1777).
+Rust source: [`CounterexampleView`](../../crates/mununu-core/src/api/models.rs#L2490) + [`CexCellView`](../../crates/mununu-core/src/api/models.rs#L2510).
 
 Two shapes co-exist in one field:
 
@@ -172,7 +172,7 @@ Every verdict-modifying decision (config pin, parameter override, cut point, res
 
 ## Unsupported assertions
 
-Rust source: [`UnsupportedAssertionView`](../../crates/mununu-core/src/api/models.rs#L1551). One entry per SVA that could not be translated:
+Rust source: [`UnsupportedAssertionView`](../../crates/mununu-core/src/api/models.rs#L1654). One entry per SVA that could not be translated:
 
 ```jsonc
 { "name": "some_property", "kind": "assert", "reason": "unbounded ##[m:$] delay in sequence antecedent" }

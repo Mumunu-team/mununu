@@ -75,7 +75,8 @@ pub struct BmcTrace {
     /// State-register valuations, frame 0 (reset) .. frame k (the bad state), each a
     /// sorted `(symbol, value)` list (only named state cells).
     pub states: Vec<Vec<(String, u64)>>,
-    /// Input valuations driving each transition, frame 0 .. frame k-1.
+    /// Input valuations at each frame, 0 .. k: `inputs[j]` drives the transition out of frame
+    /// `j`, and `inputs[k]` is what the `bad` condition read at the last frame.
     pub inputs: Vec<Vec<(String, u64)>>,
 }
 
@@ -136,14 +137,18 @@ fn extract_props(file: &Btor2File) -> Props {
 /// witness trace ([`BmcTrace`]) reports. An anonymous state/input (no `symbol`) is
 /// not surfaced in the trace.
 fn symbol_maps(file: &Btor2File) -> (HashMap<Nid, String>, HashMap<Nid, String>) {
+    // A flattened design's registers mostly carry no symbol of their own: yosys names them through
+    // a width-matched `uext … 0 <name>` alias (`u_rx.state_q`), which `collect_symbols` forwards to
+    // the state (mununu#710 — a trace over unnamed registers shows only the shadows and inputs).
+    let names = crate::adapter::btor2::parser::collect_symbols(file);
     let mut state_syms = HashMap::new();
     let mut input_syms = HashMap::new();
     for l in &file.lines {
         match &l.node {
-            Node::State {
-                symbol: Some(s), ..
-            } => {
-                state_syms.insert(l.nid, s.clone());
+            Node::State { .. } => {
+                if let Some(s) = names.get(&l.nid) {
+                    state_syms.insert(l.nid, s.clone());
+                }
             }
             Node::Input {
                 symbol: Some(s), ..
@@ -272,8 +277,9 @@ impl<'a> Unroller<'a> {
     }
 
     /// Extract the concrete `Init → bad` witness from a SAT `model` whose `bad`
-    /// fired at frame `k`: per-frame state (frames `0..=k`) and input (frames
-    /// `0..k`) valuations for the NAMED cells, each a sorted `(symbol, value)` list.
+    /// fired at frame `k`: per-frame state and input valuations (frames `0..=k`) for the
+    /// NAMED cells, each a sorted `(symbol, value)` list. The input at frame `k` is part of
+    /// the witness (mununu#710): a combinational `bad` (any `|->` monitor) reads it.
     /// `model_completion` is on, so a free (init-less / unconstrained-input) cell
     /// gets a concrete value — the trace is a full assignment of a real model run.
     fn extract_trace(
@@ -299,7 +305,7 @@ impl<'a> Unroller<'a> {
         let states = (0..=k)
             .map(|j| eval_frame(&self.frame_state[j], state_syms))
             .collect();
-        let inputs = (0..k)
+        let inputs = (0..=k)
             .map(|j| eval_frame(&self.frame_input[j], input_syms))
             .collect();
         BmcTrace { states, inputs }
@@ -679,8 +685,8 @@ mod tests {
         // The last state satisfies the `bad` condition (cnt == 3) — the trace really
         // ends in a violating state.
         assert_eq!(trace.states.last().unwrap(), &vec![("cnt".to_string(), 3)]);
-        // 3 transitions ⇒ 3 input frames; this design has no named inputs ⇒ empty.
-        assert_eq!(trace.inputs.len(), 3);
+        // One input frame per state (the last one is what `bad` read); no named inputs ⇒ empty.
+        assert_eq!(trace.inputs.len(), 4);
         assert!(trace.inputs.iter().all(Vec::is_empty));
     }
 

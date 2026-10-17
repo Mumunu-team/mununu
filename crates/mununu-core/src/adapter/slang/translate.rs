@@ -77,6 +77,12 @@
 //! `<->`, 1-bit bitwise operators, slang-folded constants and bare sequence properties.
 //! Goto / `[=n]` and unbounded antecedents stay out.
 //!
+//! **Instances (mununu#709).** Every assertion is translated once per instance it sits in, over
+//! the signals as the flattened design names them (`u_rx.state_q`), with that instance's
+//! parameter values (`scope_refs`, `ConstantValues`); a hierarchical reference from the top
+//! resolves when its module has one instance. The contract is
+//! `hierarchy_forms_translate_from_real_slang_json` (`testdata/sva_hierarchy_forms.{sv,ast.json}`).
+//!
 //! **Tier-2 shadow registers (XL.3).** `$past`/`$stable`/`$changed`/`$rose`/
 //! `$fell` read a signal's *previous-cycle* value, encoded as an atom over a
 //! shadow `<sig>__past` (`<sig>__pastk` at depth k). The translator emits the atom and records
@@ -309,8 +315,25 @@ pub fn translate_ast_json_with_options(
         })?
     };
 
-    let mut found: Vec<(String, Option<String>, &Value)> = Vec::new();
-    collect_assertions(&root, "design", None, &mut found);
+    // Every assertion with the instance it sits in: one entry PER INSTANCE (slang serialises a
+    // body shared by several instances once and refers to it by address), and the declaration
+    // scopes its references resolve against.
+    let mut scopes = Hierarchy::default();
+    let bodies = collect_instance_bodies(&root);
+    let mut found: Vec<FoundAssertion<'_>> = Vec::new();
+    collect_assertions(
+        &root,
+        &Walk {
+            enclosing: "design",
+            label: None,
+            body: None,
+            prefix: "",
+            rel: String::new(),
+        },
+        &bodies,
+        &mut scopes,
+        &mut found,
+    );
 
     // XL.6b follow-up — enum-constant resolution. slang keeps an enum-member
     // reference (e.g. `MainSmError`) as a `NamedValue`, NOT folded to its value,
@@ -327,10 +350,7 @@ pub fn translate_ast_json_with_options(
     // VIOLATED. `localparam` state encodings are the dominant hand-written and
     // LLM-written FSM style, so this removed most FSM transition properties from
     // the no-sidecar path. An enum member wins over a parameter of the same name.
-    let mut enum_values = collect_enum_values(&root);
-    for (name, value) in collect_parameter_values(&root) {
-        enum_values.entry(name).or_insert(value);
-    }
+    let enum_values = ConstantValues::collect(&root);
 
     let type_aliases = collect_type_aliases(&root);
     // Phase 3: user functions the expression compiler may inline, typedefs resolved like specs.
@@ -342,8 +362,17 @@ pub fn translate_ast_json_with_options(
     MINT.with(|m| m.borrow_mut().subroutines = subroutines);
 
     let mut report = TranslationReport::default();
-    for (idx, (module, label, node)) in found.iter().enumerate() {
-        let name = format!("{module}_sva_{idx}");
+    for (idx, found) in found.iter().enumerate() {
+        let FoundAssertion {
+            module,
+            label,
+            node,
+            body,
+            prefix,
+        } = found;
+        // An assertion inside a sub-instance names its instance (`u_rx.u_dec.prim_diff_decode_sva_12`):
+        // a module instantiated twice yields the same label twice, one per instance.
+        let name = format!("{prefix}{module}_sva_{idx}");
         let label = label.clone();
         let kind = match node.get("assertionKind").and_then(Value::as_str) {
             Some("Assert") => SvaKind::Assert,
@@ -368,6 +397,19 @@ pub fn translate_ast_json_with_options(
         };
         // Rewrite enum-member references to integer literals before translating.
         let spec = resolve_enum_refs(spec, &enum_values);
+        // Then name every signal as the flattened design does: `state_q` in instance `u_rx` is
+        // `u_rx.state_q` there, and a hierarchical reference `u_rx.state_q` from the top too.
+        let spec = match scope_refs(&spec, &scopes, *body, prefix) {
+            Ok(spec) => spec,
+            Err(reason) => {
+                report.unsupported.push(UnsupportedAssertion {
+                    name,
+                    kind: Some(kind),
+                    reason,
+                });
+                continue;
+            }
+        };
         // A typedef'd signal carries an opaque `type` (`"<addr> mod.byte_t"`); replace it by the
         // alias target (`logic[7:0]`) so a bit-select or slice can map SV indices to bit
         // positions (`index_positions`).
@@ -502,129 +544,441 @@ fn block_label(block: &str) -> Option<String> {
     Some(tail.to_string())
 }
 
-/// Collect every `ConcurrentAssertion`, with the module that encloses it and its SV label (see
-/// [`block_label`]) when it has one.
+/// One concurrent assertion as found in the AST, with where it sits.
+struct FoundAssertion<'a> {
+    /// The nearest enclosing named scope (module, generate block) — the positional name's stem.
+    module: String,
+    label: Option<String>,
+    node: &'a Value,
+    /// The instance body it sits in (`None` outside any instance).
+    body: Option<u64>,
+    /// The flattened instance prefix of this occurrence: `""` for the top, `"u_rx.u_dec."` below.
+    prefix: String,
+}
+
+/// The declaration scopes of the elaborated design, as the flattened design names them.
+#[derive(Default)]
+struct Hierarchy {
+    /// A declaration's address → its instance body and its path inside that body (`""`, or the
+    /// enclosing generate blocks: `"gen_no_async."`, `"gen_cnts[1]."`).
+    decls: std::collections::HashMap<u64, (u64, String)>,
+    /// An instance body's address → the flattened prefix of every instance of it.
+    occurrences: std::collections::HashMap<u64, Vec<String>>,
+}
+
+/// The walk's position: what [`collect_assertions`] carries down the AST.
+struct Walk<'s> {
+    enclosing: &'s str,
+    label: Option<&'s str>,
+    /// The instance body being walked, and its occurrence's flattened prefix.
+    body: Option<u64>,
+    prefix: &'s str,
+    /// The generate-block path inside `body`.
+    rel: String,
+}
+
+/// Every `InstanceBody` by address — the target of an instance whose `body` is a reference
+/// (`"<addr> <module>"`) to a body serialised under an earlier instance.
+fn collect_instance_bodies(root: &Value) -> std::collections::HashMap<u64, &Value> {
+    fn walk<'a>(n: &'a Value, out: &mut std::collections::HashMap<u64, &'a Value>) {
+        match n {
+            Value::Object(m) => {
+                if m.get("kind").and_then(Value::as_str) == Some("InstanceBody")
+                    && let Some(addr) = m.get("addr").and_then(Value::as_u64)
+                {
+                    out.entry(addr).or_insert(n);
+                }
+                for v in m.values() {
+                    walk(v, out);
+                }
+            }
+            Value::Array(a) => {
+                for v in a {
+                    walk(v, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = std::collections::HashMap::new();
+    walk(root, &mut out);
+    out
+}
+
+/// The name a generate block contributes to the flattened path: its own name, or `<array>[<i>]`
+/// for an iteration of a `for` generate (slang leaves the iteration unnamed and records the loop
+/// variable as a `Parameter` member). `None` for an iteration whose index is not found.
+fn generate_block_name(
+    block: &serde_json::Map<String, Value>,
+    array: Option<(&str, &str)>,
+) -> Option<String> {
+    let name = block.get("name").and_then(Value::as_str).unwrap_or("");
+    if !name.is_empty() {
+        return Some(name.to_string());
+    }
+    let (array_name, var) = array?;
+    let index = block
+        .get("members")?
+        .as_array()?
+        .iter()
+        .find(|m| {
+            m.get("kind").and_then(Value::as_str) == Some("Parameter")
+                && m.get("name").and_then(Value::as_str) == Some(var)
+        })?
+        .get("value")?
+        .as_str()
+        .and_then(parse_sv_literal)?;
+    Some(format!("{array_name}[{index}]"))
+}
+
+/// Collect every `ConcurrentAssertion`, with the scope that encloses it, its SV label (see
+/// [`block_label`]) when it has one, and its instance occurrence; record every declaration's
+/// scope into `scopes` on the way.
+///
+/// An `Instance` opens a new occurrence (prefix `<parent prefix><generate path><name>.`, empty
+/// for a top-level instance) and is walked through its body, resolved via `bodies` when slang
+/// serialised it as a reference. A generate block extends the path; an UNINSTANTIATED one (the
+/// branch the elaboration did not take) is skipped — its assertions are not part of the design.
 fn collect_assertions<'a>(
     node: &'a Value,
-    enclosing: &str,
-    label: Option<&str>,
-    out: &mut Vec<(String, Option<String>, &'a Value)>,
+    at: &Walk<'_>,
+    bodies: &std::collections::HashMap<u64, &'a Value>,
+    scopes: &mut Hierarchy,
+    out: &mut Vec<FoundAssertion<'a>>,
 ) {
     match node {
         Value::Object(map) => {
-            if map.get("kind").and_then(Value::as_str) == Some("ConcurrentAssertion") {
-                out.push((enclosing.to_string(), label.map(str::to_string), node));
+            let kind = map.get("kind").and_then(Value::as_str);
+            match kind {
+                Some("ConcurrentAssertion") => out.push(FoundAssertion {
+                    module: at.enclosing.to_string(),
+                    label: at.label.map(str::to_string),
+                    node,
+                    body: at.body,
+                    prefix: at.prefix.to_string(),
+                }),
+                Some("Instance") => {
+                    let name = map.get("name").and_then(Value::as_str).unwrap_or("");
+                    let body = match map.get("body") {
+                        Some(b @ Value::Object(_)) => Some(b),
+                        Some(Value::String(r)) => r
+                            .split(' ')
+                            .next()
+                            .and_then(|a| a.parse::<u64>().ok())
+                            .and_then(|a| bodies.get(&a).copied()),
+                        _ => None,
+                    };
+                    let Some(body) = body else { return };
+                    let Some(addr) = body.get("addr").and_then(Value::as_u64) else {
+                        return;
+                    };
+                    let prefix = match at.body {
+                        None => String::new(),
+                        Some(_) => format!("{}{}{name}.", at.prefix, at.rel),
+                    };
+                    scopes
+                        .occurrences
+                        .entry(addr)
+                        .or_default()
+                        .push(prefix.clone());
+                    collect_assertions(
+                        body,
+                        &Walk {
+                            enclosing: if name.is_empty() { at.enclosing } else { name },
+                            label: at.label,
+                            body: Some(addr),
+                            prefix: &prefix,
+                            rel: String::new(),
+                        },
+                        bodies,
+                        scopes,
+                        out,
+                    );
+                    return;
+                }
+                Some("GenerateBlock") | Some("GenerateBlockArray")
+                    if map.get("isUninstantiated").and_then(Value::as_bool) == Some(true) =>
+                {
+                    return;
+                }
+                Some("GenerateBlockArray") => {
+                    let array = map.get("name").and_then(Value::as_str).unwrap_or("");
+                    let var = map
+                        .get("loopVariable")
+                        .and_then(Value::as_str)
+                        .and_then(|v| v.rsplit(' ').next())
+                        .unwrap_or("");
+                    for member in map
+                        .get("members")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                    {
+                        let Value::Object(block) = member else {
+                            continue;
+                        };
+                        if block.get("kind").and_then(Value::as_str) != Some("GenerateBlock") {
+                            continue;
+                        }
+                        if block.get("isUninstantiated").and_then(Value::as_bool) == Some(true) {
+                            continue;
+                        }
+                        // An iteration whose index cannot be read keeps a path no flattened name
+                        // matches (`?`), so its references refuse rather than mis-resolve.
+                        let seg = generate_block_name(block, Some((array, var)))
+                            .unwrap_or_else(|| format!("{array}[?]"));
+                        let inner = Walk {
+                            enclosing: if array.is_empty() {
+                                at.enclosing
+                            } else {
+                                array
+                            },
+                            label: at.label,
+                            body: at.body,
+                            prefix: at.prefix,
+                            rel: format!("{}{seg}.", at.rel),
+                        };
+                        for v in block.values() {
+                            collect_assertions(v, &inner, bodies, scopes, out);
+                        }
+                    }
+                    return;
+                }
+                Some("Variable") | Some("Net") => {
+                    if let (Some(body), Some(addr)) =
+                        (at.body, map.get("addr").and_then(Value::as_u64))
+                    {
+                        scopes.decls.entry(addr).or_insert((body, at.rel.clone()));
+                    }
+                }
+                _ => {}
             }
             // Update the enclosing name for descendants when this node names one.
             let next = map
                 .get("name")
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty())
-                .unwrap_or(enclosing);
+                .unwrap_or(at.enclosing);
             // A `Block` carrying a symbol-table entry re-labels its descendants; the NEAREST
             // enclosing one wins, so a nested block shadows an outer label rather than leaking it.
-            let owned = (map.get("kind").and_then(Value::as_str) == Some("Block"))
+            let owned = (kind == Some("Block"))
                 .then(|| {
                     map.get("block")
                         .and_then(Value::as_str)
                         .and_then(block_label)
                 })
                 .flatten();
-            let next_label = owned.as_deref().or(label);
+            let rel = match kind {
+                Some("GenerateBlock") => match generate_block_name(map, None) {
+                    Some(seg) => format!("{}{seg}.", at.rel),
+                    None => at.rel.clone(),
+                },
+                _ => at.rel.clone(),
+            };
+            let inner = Walk {
+                enclosing: next,
+                label: owned.as_deref().or(at.label),
+                body: at.body,
+                prefix: at.prefix,
+                rel,
+            };
             for v in map.values() {
-                collect_assertions(v, next, next_label, out);
+                collect_assertions(v, &inner, bodies, scopes, out);
             }
         }
         Value::Array(items) => {
             for v in items {
-                collect_assertions(v, enclosing, label, out);
+                collect_assertions(v, at, bodies, scopes, out);
             }
         }
         _ => {}
     }
 }
 
-/// XL.6b follow-up — collect every enum member's integer value (`name → value`)
-/// from the `--ast-json` `EnumValue` nodes (`value` is an SV literal like
-/// `6'b101001`). Lets [`resolve_enum_refs`] fold enum-member references in
-/// comparisons (`state_q == MainSmError`) to integer literals.
-fn collect_enum_values(node: &Value) -> std::collections::HashMap<String, i64> {
-    fn walk(n: &Value, out: &mut std::collections::HashMap<String, i64>) {
-        match n {
-            Value::Object(m) => {
-                if m.get("kind").and_then(Value::as_str) == Some("EnumValue")
-                    && let Some(name) = m.get("name").and_then(Value::as_str)
-                    && let Some(v) = m
-                        .get("value")
-                        .and_then(Value::as_str)
-                        .and_then(parse_sv_literal)
-                {
-                    out.entry(name.to_string()).or_insert(v);
+/// mununu#709 — name every signal an assertion reads as the flattened design names it.
+///
+/// - A `NamedValue` declared in the assertion's own instance body becomes
+///   `<occurrence prefix><generate path><name>` — `state_q` in `u_rx` is `u_rx.state_q`. Before
+///   this, an assertion inside a sub-instance read the TOP's signal of the same name (or none):
+///   checked against the wrong net whenever the names collided.
+/// - A `HierarchicalValue` (`u_rx.state_q` written in the top) becomes a `NamedValue` of the
+///   declaration's flattened name when its body has exactly one instance.
+///
+/// `Err` for a reference that cannot be named that way: a hierarchical reference into a body
+/// several instances share (slang gives the declaration, not the instance), or a path through a
+/// `for`-generate iteration (`gen[1].x` — brackets are not part of the atom grammar).
+fn scope_refs(
+    spec: &Value,
+    scopes: &Hierarchy,
+    body: Option<u64>,
+    prefix: &str,
+) -> Result<Value, String> {
+    match spec {
+        Value::Object(m) => {
+            let kind = m.get("kind").and_then(Value::as_str);
+            if matches!(kind, Some("NamedValue") | Some("HierarchicalValue"))
+                && let Some(sym) = m.get("symbol").and_then(Value::as_str)
+                && let Some((addr, name)) = sym.split_once(' ')
+                && let Ok(addr) = addr.parse::<u64>()
+                && let Some((decl_body, rel)) = scopes.decls.get(&addr)
+            {
+                let full = if kind == Some("NamedValue") {
+                    if Some(*decl_body) != body {
+                        return Ok(spec.clone());
+                    }
+                    format!("{prefix}{rel}{name}")
+                } else {
+                    match scopes.occurrences.get(decl_body).map(Vec::as_slice) {
+                        Some([only]) => format!("{only}{rel}{name}"),
+                        Some(many) => {
+                            return Err(format!(
+                                "hierarchical reference to `{name}` in a module instantiated \
+                                 {} times: the reference does not say which instance",
+                                many.len()
+                            ));
+                        }
+                        None => return Ok(spec.clone()),
+                    }
+                };
+                if full.contains('[') {
+                    return Err(format!(
+                        "`{full}` sits in a `for`-generate iteration: a bracketed hierarchical \
+                         name is not supported yet"
+                    ));
                 }
-                for v in m.values() {
-                    walk(v, out);
-                }
+                let mut out = m.clone();
+                out.insert("kind".into(), Value::String("NamedValue".into()));
+                out.insert("symbol".into(), Value::String(format!("{addr} {full}")));
+                return Ok(Value::Object(out));
             }
-            Value::Array(a) => {
-                for v in a {
-                    walk(v, out);
-                }
+            let mut out = serde_json::Map::new();
+            for (k, v) in m {
+                out.insert(k.clone(), scope_refs(v, scopes, body, prefix)?);
             }
-            _ => {}
+            Ok(Value::Object(out))
         }
+        Value::Array(a) => a
+            .iter()
+            .map(|v| scope_refs(v, scopes, body, prefix))
+            .collect::<Result<Vec<_>, _>>()
+            .map(Value::Array),
+        other => Ok(other.clone()),
     }
-    let mut out = std::collections::HashMap::new();
-    walk(node, &mut out);
-    out
 }
 
-/// mununu#632 — collect every `parameter` / `localparam` with an elaborated
-/// integer `value` (`name → value`) from the `--ast-json` `Parameter` nodes. The
-/// value is an SV literal (`"4"`, `"3'b10"`); a parameter whose value is not a
-/// literal (a string, a type, an unpacked value) is skipped, and a reference to
-/// it stays a `NamedValue` the engine reports as unknown — the pre-#632 outcome,
-/// now only for the shapes that genuinely cannot fold. First declaration wins.
-fn collect_parameter_values(node: &Value) -> std::collections::HashMap<String, i64> {
-    fn walk(n: &Value, out: &mut std::collections::HashMap<String, i64>) {
-        match n {
-            Value::Object(m) => {
-                if m.get("kind").and_then(Value::as_str) == Some("Parameter")
-                    && let Some(name) = m.get("name").and_then(Value::as_str)
-                    && !name.is_empty()
-                    && let Some(v) = m
-                        .get("value")
-                        .and_then(Value::as_str)
-                        .and_then(parse_sv_literal)
-                {
-                    out.entry(name.to_string()).or_insert(v);
-                }
-                for v in m.values() {
-                    walk(v, out);
-                }
-            }
-            Value::Array(a) => {
-                for v in a {
-                    walk(v, out);
-                }
-            }
-            _ => {}
-        }
-    }
-    let mut out = std::collections::HashMap::new();
-    walk(node, &mut out);
-    out
+/// XL.6b follow-up / mununu#632 — the elaborated integer value of every enum member and every
+/// `parameter` / `localparam` (slang `EnumValue` / `Parameter` nodes, `value` an SV literal like
+/// `6'b101001`), so [`resolve_enum_refs`] can fold a reference to one into a literal: slang keeps
+/// `state_q == MainSmError` and `retry_cnt_q == MAX_RETRIES` as `NamedValue`s, and the engine would
+/// report the constant as an unknown signal. A value that is not a literal (a string, a type, an
+/// unpacked value) is skipped, and a reference to it stays a `NamedValue`.
+///
+/// mununu#709 — keyed by the declaration's ADDRESS, which a reference's `symbol` carries: names collide across
+/// modules (`Width` is 6 in one instance and 2 in another, `Idle` encodes differently in two FSMs),
+/// and the former name-keyed map gave every reference the first declaration's value. The by-name
+/// map is a fallback for a reference whose declaration was not serialised, holding only the names
+/// every declaration agrees on (an enum member wins over a parameter of the same name).
+struct ConstantValues {
+    by_addr: std::collections::HashMap<u64, i64>,
+    by_name: std::collections::HashMap<String, i64>,
 }
 
-/// XL.6b follow-up — deep-clone an expression tree, replacing every `NamedValue`
-/// referencing an enum member (by name, in `enums`) — or, since mununu#632, a
-/// `parameter` / `localparam` constant — with an `IntegerLiteral` of its value. A signal *of* an enum type (e.g. `state_q`) is not an enum-member
-/// name, so it is left untouched — only the constants fold.
-fn resolve_enum_refs(node: &Value, enums: &std::collections::HashMap<String, i64>) -> Value {
+impl ConstantValues {
+    fn collect(root: &Value) -> Self {
+        #[derive(Default)]
+        struct Seen {
+            by_addr: std::collections::HashMap<u64, i64>,
+            enums: std::collections::HashMap<String, Option<i64>>,
+            params: std::collections::HashMap<String, Option<i64>>,
+        }
+        fn note(map: &mut std::collections::HashMap<String, Option<i64>>, name: &str, v: i64) {
+            map.entry(name.to_string())
+                .and_modify(|e| {
+                    if *e != Some(v) {
+                        *e = None;
+                    }
+                })
+                .or_insert(Some(v));
+        }
+        fn walk(n: &Value, seen: &mut Seen) {
+            match n {
+                Value::Object(m) => {
+                    let kind = m.get("kind").and_then(Value::as_str);
+                    if matches!(kind, Some("EnumValue") | Some("Parameter"))
+                        && let Some(name) = m.get("name").and_then(Value::as_str)
+                        && !name.is_empty()
+                        && let Some(v) = m
+                            .get("value")
+                            .and_then(Value::as_str)
+                            .and_then(parse_sv_literal)
+                    {
+                        if let Some(addr) = m.get("addr").and_then(Value::as_u64) {
+                            seen.by_addr.insert(addr, v);
+                        }
+                        if kind == Some("EnumValue") {
+                            note(&mut seen.enums, name, v);
+                        } else {
+                            note(&mut seen.params, name, v);
+                        }
+                    }
+                    for v in m.values() {
+                        walk(v, seen);
+                    }
+                }
+                Value::Array(a) => {
+                    for v in a {
+                        walk(v, seen);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut seen = Seen::default();
+        walk(root, &mut seen);
+        let mut by_name = std::collections::HashMap::new();
+        for (name, v) in seen.params {
+            if let Some(v) = v {
+                by_name.insert(name, v);
+            }
+        }
+        for (name, v) in seen.enums {
+            match v {
+                Some(v) => {
+                    by_name.insert(name, v);
+                }
+                None => {
+                    by_name.remove(&name);
+                }
+            }
+        }
+        ConstantValues {
+            by_addr: seen.by_addr,
+            by_name,
+        }
+    }
+
+    /// The value a reference's `symbol` (`"<addr> <name>"`) denotes, if it is a constant.
+    fn of(&self, symbol: &str) -> Option<i64> {
+        let (addr, name) = symbol.split_once(' ').unwrap_or(("", symbol));
+        match addr.parse::<u64>().ok().and_then(|a| self.by_addr.get(&a)) {
+            Some(v) => Some(*v),
+            None => self.by_name.get(name).copied(),
+        }
+    }
+}
+
+/// XL.6b follow-up — deep-clone an expression tree, replacing every `NamedValue` (or
+/// `HierarchicalValue`) referencing an enum member — or, since mununu#632, a `parameter` /
+/// `localparam` constant — with an `IntegerLiteral` of its value ([`ConstantValues::of`]). A
+/// signal *of* an enum type (e.g. `state_q`) is not a constant, so it is left untouched.
+fn resolve_enum_refs(node: &Value, enums: &ConstantValues) -> Value {
     match node {
         Value::Object(m) => {
-            if m.get("kind").and_then(Value::as_str) == Some("NamedValue")
-                && let Some(sym) = m.get("symbol").and_then(Value::as_str)
-                && let Some(&v) = enums.get(sym.rsplit(' ').next().unwrap_or(sym))
+            if matches!(
+                m.get("kind").and_then(Value::as_str),
+                Some("NamedValue") | Some("HierarchicalValue")
+            ) && let Some(sym) = m.get("symbol").and_then(Value::as_str)
+                && let Some(v) = enums.of(sym)
             {
                 // Keep slang's `type`: the expression compiler sizes the literal by it.
                 let mut lit = serde_json::json!({
@@ -5587,6 +5941,82 @@ mod tests {
             body.contains("[] (d || c)"),
             "the consequent is excused by `d`: {body}"
         );
+    }
+
+    /// mununu#708 — a kept `disable iff (D)` also guards the attempt's FIRST cycle when nothing is evaluated
+    /// there: `disable iff (d) ##1 a |-> c` has no boolean block at its start, so guarding blocks
+    /// alone never looks at `d` there and an attempt disabled at its start still had to complete
+    /// (a spurious VIOLATED on OpenTitan's `prim_esc_rxtx` `EscRespCheck_A`).
+    #[test]
+    fn a_kept_disable_also_guards_the_attempt_start() {
+        let sig = |n: &str| serde_json::json!({"kind": "NamedValue", "symbol": format!("1 {n}"), "type": "logic"});
+        let spec = serde_json::json!({"kind": "DisableIff", "condition": sig("d"),
+            "expr": {"kind": "Binary", "op": "OverlappedImplication",
+                     "left": {"kind": "SequenceConcat", "elements": [
+                         {"sequence": {"kind": "Simple", "expr": sig("a")}, "min": 1, "max": 1}]},
+                     "right": {"kind": "Simple", "expr": sig("c")}}});
+        let opts = TranslateOptions { gate_reset: false };
+        let body = property_body(&spec, &opts, &mut Vec::new()).unwrap();
+        let f = crate::mu_calculus::parser::parse(&body).unwrap();
+        // The root is `(d || …)`: the attempt is excused when `d` holds where it starts.
+        let crate::mu_calculus::Node::Or(l, _) = f.node(f.root()) else {
+            panic!("the root is not a disjunction: {body}");
+        };
+        assert_eq!(
+            super::super::assume_guarantee::print(&f, *l).unwrap(),
+            "d",
+            "the root disjunct is the disable: {body}"
+        );
+    }
+
+    /// mununu#709 — assertions in sub-instances and hierarchical references, from real slang JSON
+    /// (`testdata/sva_hierarchy_forms.{sv,ast.json}`): every instance of a module gets its own
+    /// assertions, reading ITS signals by their flattened names and ITS parameter values.
+    #[test]
+    fn hierarchy_forms_translate_from_real_slang_json() {
+        let report = translate_ast_json(include_str!("testdata/sva_hierarchy_forms.ast.json"))
+            .expect("translates");
+        let formula = |name: &str| {
+            report
+                .translated
+                .iter()
+                .find(|t| t.name == name)
+                .unwrap_or_else(|| panic!("`{name}` not translated: {:?}", report.unsupported))
+                .formula
+                .clone()
+        };
+        let refused = |name: &str| {
+            report
+                .unsupported
+                .iter()
+                .find(|u| u.name == name)
+                .unwrap_or_else(|| panic!("`{name}` not refused"))
+                .reason
+                .clone()
+        };
+        // `u_a` and `u_b` share one serialised body; each gets its assertions, over its signals.
+        // `W` is the instance's (2), not the top's `W = 7` the former first-name-wins map gave.
+        assert!(formula("u_a.leaf_sva_0").contains("(u_a.q_r != 2)"));
+        assert!(formula("u_b.leaf_sva_2").contains("(u_b.q_r != 2)"));
+        // A generate block extends the path; the branch not elaborated contributes nothing.
+        assert!(formula("u_a.g_two_sva_1").contains("u_a.g_two.t == u_a.q_r__bits0_0"));
+        // `u_d` overrides `W` to 3 and so elaborates the other branch.
+        assert!(formula("u_d.leaf_sva_4").contains("(u_d.q_r != 3)"));
+        assert!(formula("u_d.g_other_sva_5").contains("(u_d.q_r != 0)"));
+        assert!(
+            !report
+                .translated
+                .iter()
+                .any(|t| t.name.starts_with("u_d.g_two"))
+        );
+        // The top's own `q_r` keeps its name — and no sub-instance assertion reads it.
+        assert!(formula("top_sva_12").contains("(q_r == 0)"));
+        // Hierarchical references: one instance resolves, a shared body is ambiguous.
+        assert!(formula("top_sva_10").contains("(u_d.q_r != 7)"));
+        assert!(refused("top_sva_11").contains("instantiated 4 times"));
+        // A `for`-generate iteration's names carry brackets the atom grammar cannot spell.
+        assert!(refused("g_arr[0].u_c.leaf_sva_6").contains("`for`-generate"));
+        assert_eq!(report.translated.len() + report.unsupported.len(), 13);
     }
 
     /// A literal operand is read AFTER slang's conversions. `x4 != 4'(20)` — a size cast slang

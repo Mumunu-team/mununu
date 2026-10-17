@@ -68,7 +68,7 @@ fn fixpoint_polarity(f: &Formula, body: NodeId) -> Result<Option<Polarity>, Stri
 }
 
 /// Print a node back in the syntax `mu_calculus::parser` reads.
-fn print(f: &Formula, id: NodeId) -> Result<String, String> {
+pub(super) fn print(f: &Formula, id: NodeId) -> Result<String, String> {
     Ok(match f.node(id) {
         Node::True => "true".to_string(),
         Node::False => "false".to_string(),
@@ -178,16 +178,48 @@ fn rel(f: &Formula, id: NodeId, g: &Guards, pol: Polarity) -> Result<String, Str
 /// at ANY cycle of it; the former lowering `(D || body)` checked only the first, so an attempt
 /// disabled mid-way still had to complete (a spurious VIOLATED, mununu#705). Guarding the blocks
 /// is exact for one-step attempts (`a |=> c`) and never weaker than SVA for longer ones (a block
-/// at `t+k` sees only `D_{t+k}`, not the disables at `t+1 … t+k-1`).
+/// at `t+k` sees only `D_t` and `D_{t+k}`, not the disables at `t+1 … t+k-1`).
+///
+/// The whole guarded body is ALSO guarded by `D` at the attempt's start: a body whose first
+/// evaluated block lies later (`##1 a |-> c`) would otherwise never look at `D_t`, and an attempt
+/// disabled where it starts still had to complete (a spurious VIOLATED, mununu#708 — OpenTitan
+/// `prim_esc_rxtx` `EscRespCheck_A`).
 pub fn guard_with_disable(body: &str, disable: &str, existential: bool) -> Result<String, String> {
-    guard_blocks(
+    let guarded = guard_blocks(
         body,
         &Guards {
             excused: disable.to_string(),
             owed: format!("(!({disable}))"),
         },
         existential,
-    )
+    )?;
+    let f = crate::mu_calculus::parser::parse(body)
+        .map_err(|e| format!("formula does not parse: {e:?}"))?;
+    if guards_the_start(&f, f.root(), existential) {
+        return Ok(guarded);
+    }
+    Ok(if existential {
+        format!("((!({disable})) && {guarded})")
+    } else {
+        format!("({disable} || {guarded})")
+    })
+}
+
+/// Whether guarding the boolean blocks of `id` already settles it at the attempt's start when the
+/// guard fires: a guarded block there is true (universal) or false (existential), so a disjunction
+/// needs one such side and a conjunction both — dually for the existential reading.
+fn guards_the_start(f: &Formula, id: NodeId, existential: bool) -> bool {
+    if is_boolean(f, id) {
+        return true;
+    }
+    let side = |n: &NodeId| guards_the_start(f, *n, existential);
+    match f.node(id) {
+        Node::Or(a, b) if !existential => side(a) || side(b),
+        Node::And(a, b) if existential => side(a) || side(b),
+        Node::Or(a, b) | Node::And(a, b) => side(a) && side(b),
+        Node::Mu { body, .. } | Node::Nu { body, .. } => side(body),
+        _ => false,
+    }
 }
 
 /// Relativize `formula` to the monotone assumption signal `ok`. `existential` is true for a

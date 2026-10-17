@@ -810,8 +810,8 @@ mod tests {
         };
         assert_eq!(
             loose.as_deref(),
-            Some("st_d"),
-            "the loose trap the fix bypasses"
+            Some("st_q"),
+            "mununu#711 — the next-value wire no longer names the cell"
         );
         let findings = fsm_encoding_scan(&src, DEFAULT_FSM_MAX_WIDTH).expect("scan");
         assert!(

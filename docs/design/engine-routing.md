@@ -43,11 +43,11 @@ no bound (historical behaviour).
 | `sv verify-auto` cube-**SKIPPED** (atom-less modal, e.g. no-deadlock `nu X.(<> true && [] X)`) | escalate → **exact-symbolic** rescue | none (exact needs no seeding) |
 | `btor2 cegar` (explicit) | `cegar_refine_loop` → **cube** | hand-`--predicate` unless auto-seeded upstream |
 
-> Source of truth: [`engine_selection`](../../crates/mununu-core/src/adapter/slang/verify_auto.rs#L689) + [`verify_auto_portfolio`](../../crates/mununu-core/src/adapter/slang/verify_auto.rs#L1469) (the 3-engine sequential/parallel portfolio) — surface: CLI+API.
+> Source of truth: [`engine_selection`](../../crates/mununu-core/src/adapter/slang/verify_auto.rs#L2024) + [`verify_auto_portfolio`](../../crates/mununu-core/src/adapter/slang/verify_auto.rs#L1469) (the 3-engine sequential/parallel portfolio) — surface: CLI+API.
 
 **The cube-SKIPPED → exact rescue.** A pinned cube engine (`--engine explicit`/`symbolic`) *skips* a property whose formula it cannot seed — an **atom-less** modal obligation like no-deadlock `nu X.(<> true && [] X)` has no state-cell/combinational atom to build a cube dimension from. The full-state exact engine needs no seeding, so after the cube pass every still-`Skipped` property gets one exact-symbolic attempt and is upgraded in place on a **definite** verdict. It runs only under reset-gating (the exact engine's A.6 precondition) and only on a cube run (the exact main path already ran exact). Sound: the exact engine is the differential oracle, so the upgrade is pure precision, never a contradiction. (This closes the i2c_slave-class gap where the deadlock-freedom obligation was reported `Skipped` under `--engine explicit`.)
 
-> Source of truth: [`rescue_skipped_via_exact`](../../crates/mununu-core/src/adapter/slang/verify_auto.rs#L2636) — surface: (CLI+API+UI)
+> Source of truth: [`rescue_skipped_via_exact`](../../crates/mununu-core/src/adapter/slang/verify_auto.rs#L6161) — surface: (CLI+API+UI)
 
 **The predicate-avoidance rule (P0.2), confirmed by the 2026-07-08 csrng spike:**
 
