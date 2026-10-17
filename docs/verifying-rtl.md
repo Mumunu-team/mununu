@@ -479,6 +479,18 @@ parameter of the design is a hard **error** (it lists the declared parameters),
 never a silent drop; the applied overrides are echoed as a `parameter-override`
 scope note — the verdicts are scoped to those values.
 
+**The SVA side sees the same values** (mununu#717). The assertions are extracted by a separate
+slang run, which until mununu#717 elaborated the design at its parameter **defaults** while the lift
+applied the override. A bound checker whose ports are sized for the narrowed width then read a
+default-width signal the lifted model does not have (the property was skipped), and a parameter
+folded into an atom took its default value (a verdict about a different design). The extraction now
+receives each override as `-G NAME=VALUE`, the same top-scoped form the `read_slang` lift uses. A
+`MODULE.NAME` override on a module slang does not elaborate as a top cannot reach the extraction;
+the run is then **refused** ("the override did not reach the SVA extraction"), naming the value
+slang elaborated, rather than judging the properties against the default.
+
+> Source of truth: [`ast_json_args`](../crates/mununu-core/src/adapter/slang/mod.rs) + the reached-the-SVA check in [`prepare_model`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) — surface: (CLI+API)
+
 `--param` is also the remedy for a **bit-blast size wall**: several wide counters
 (e.g. six 32-bit counters, each doubled by its `$past` shadow) can push a
 property's state cone past the BDD node budget, so the symbolic engine **abstains**
@@ -1236,7 +1248,7 @@ consumer spent two SVA rewrites on it. A comparison operand may be:
 **Which comparison CONSTANTS fold** (mununu#632). An enum member (`state_q == MainSmError`) has
 folded to its value since XL.6b; a `parameter` / `localparam` reference (`state_q == S_XFER`,
 `retry_cnt_q == MAX_RETRIES`) folds the same way since mununu#632, to the value slang elaborated
-(an overridden `--param` carries the override). Until then the translator kept the parameter's
+(since mununu#717 that is the `--param` override; before it, the default). Until then the translator kept the parameter's
 NAME in the atom and the engine skipped the property as "unknown register/signal" — on the design
 that found it, one of the four skipped properties was VIOLATED, and `localparam` state encodings
 are the dominant hand-written and LLM-written FSM style. A parameter whose value is not an integer

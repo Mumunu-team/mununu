@@ -62,7 +62,7 @@ use std::collections::HashSet;
 
 use crate::adapter::btor2::kmts_lift::{MayEdgeInference, MustEdgeInference, PredicateSpec};
 use crate::adapter::btor2::predicate_expr::{CmpOp, PredicateExpr, parse_predicate_expr};
-use crate::adapter::slang::extract::extract_sva_with_options;
+use crate::adapter::slang::extract::extract_sva_with_params;
 use crate::adapter::slang::translate::{SvaKind, TranslateOptions};
 use crate::adapter::yosys::YosysOptions;
 use crate::adapter::{AdapterError, AdapterErrorKind};
@@ -3653,12 +3653,16 @@ pub(crate) struct SharedExtraction {
 pub(crate) fn extract_front(
     sources: &[(String, String)],
     opts: &VerifyAutoOptions,
+    params: &[(String, String)],
 ) -> Result<SharedExtraction, AdapterError> {
-    let mut extraction = extract_sva_with_options(
+    // mununu#717 — the SAME `--param` overrides the lift applies, or the SVA describes the design
+    // at its parameter defaults.
+    let mut extraction = extract_sva_with_params(
         sources,
         &TranslateOptions {
             gate_reset: opts.gate_reset,
         },
+        params,
     )?;
     let ann_scan = scan_annotation_properties(sources);
     let predicate_hints: Vec<String> = ann_scan
@@ -3742,7 +3746,7 @@ pub(crate) fn prepare_model(
         mut extraction,
         ann_scan,
         predicate_hints,
-    } = extract_front(sources, opts)?;
+    } = extract_front(sources, opts, &yosys_opts.params)?;
     // Phase 4 — `assume` statements: split off, guarantees relativized (the monitor itself is
     // emitted below, once the expressions it reads are minted).
     let (assumption_report, assume_candidates) =
@@ -3770,6 +3774,32 @@ pub(crate) fn prepare_model(
                         } else {
                             extraction.parameter_names.join(", ")
                         }
+                    ),
+                });
+            }
+            // mununu#717 — the override must also have REACHED the elaborated SVA design. slang's
+            // `-G` is top-scoped, so a `MODULE.NAME` override on a module slang does not elaborate
+            // as a top leaves that module at its default while the lift applies it; the
+            // properties would then describe a different design than the one checked. Only an
+            // integer value is checked, and only when the AST carries an integer value for the
+            // name at all (a type or string parameter is not folded, so it cannot mislead).
+            if let Ok(want) = value.parse::<i64>()
+                && let Some(seen) = extraction.parameter_values.get(name)
+                && !seen.is_empty()
+                && !seen.contains(&want)
+            {
+                return Err(AdapterError {
+                    kind: AdapterErrorKind::UnsupportedConstruct,
+                    location: None,
+                    message: format!(
+                        "--param {lhs}={value}: the override did not reach the SVA extraction — \
+                         slang elaborated `{name}` as {}. The properties would be judged against \
+                         the parameter's default rather than the design being checked, so the run \
+                         is refused. A `MODULE.NAME` override only applies to a top-level module.",
+                        seen.iter()
+                            .map(i64::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     ),
                 });
             }
@@ -3936,7 +3966,31 @@ pub(crate) fn prepare_model(
         .iter()
         .map(|m| (m.name.as_str(), &m.expr))
         .collect();
-    let btor2 = crate::adapter::btor2::minted_expr::augment_with_expressions(&btor2, &expr_refs)?;
+    let (btor2, unresolved_exprs) =
+        crate::adapter::btor2::minted_expr::augment_with_expressions_explained(&btor2, &expr_refs)?;
+    // mununu#717 — a property reading an expression that could not be minted is skipped later
+    // with "unknown register/signal `mununu_x_…`"; say here what actually disagreed.
+    for u in &unresolved_exprs {
+        for t in extraction
+            .translated
+            .iter()
+            .filter(|t| t.formula.contains(u.name.as_str()))
+        {
+            report.notes.push(VerificationNote {
+                kind: "expression-leaf-unresolved".into(),
+                level: NoteLevel::ScopeCaveat,
+                summary: format!("`{}`: {}", t.name, u.describe()),
+                detail: "The property reads an expression over a signal whose width (or \
+                         existence) differs between the SVA elaboration and the lifted model, so \
+                         the expression cannot be built and the property is skipped. A width \
+                         disagreement usually means a parameter elaborated differently on the \
+                         two sides (mununu#717)."
+                    .into(),
+                items: vec![u.leaf.clone()],
+                property: Some(t.name.clone()),
+            });
+        }
+    }
     // Phase 4 — the `mununu_assume_ok` monitor the relativized guarantees read. Warm-up: the
     // deepest `$past` any property reads, so no assumption is enforced over a shadow's pre-fill.
     let btor2 = if assume_candidates.is_empty() {
@@ -12351,6 +12405,154 @@ module uart_tx(); endmodule"#;
     /// design: the third `nack` in `S_REQ` sees `retry_cnt_q == 2`, increments it to 3 and
     /// enters `S_RETRY`, so the counter sits at its limit IN the retry state. The other three
     /// HOLD. The issue measured the same with the literals spelled by hand.
+    /// mununu#717 — run the issue's shapes under a `--param` override, reset pinned inactive.
+    fn run_717(
+        sources: &[(&str, &str)],
+        top: &str,
+        params: &[(&str, &str)],
+    ) -> Result<AutoVerifyReport, AdapterError> {
+        let sources: Vec<(String, String)> = sources
+            .iter()
+            .map(|(n, c)| ((*n).to_string(), (*c).to_string()))
+            .collect();
+        let yopts = YosysOptions {
+            top: Some(top.to_string()),
+            params: params
+                .iter()
+                .map(|(n, v)| ((*n).to_string(), (*v).to_string()))
+                .collect(),
+            ..Default::default()
+        };
+        let mut opts = VerifyAutoOptions::default();
+        opts.config_values.insert("rst_n".to_string(), 1);
+        verify_auto(&sources, &yopts, &opts)
+    }
+
+    const CNT_717: &str = "module cnt #(parameter int W = 10) (\n\
+        input logic clk, input logic rst_n, input logic inc);\n\
+        logic [W-1:0] cur_q;\n\
+        always_ff @(posedge clk or negedge rst_n) begin\n\
+          if (!rst_n) cur_q <= '0;\n\
+          else if (inc && (cur_q != {W{1'b1}})) cur_q <= cur_q + 1'b1;\n\
+        end\n\
+        endmodule\n";
+
+    /// mununu#717 — a bound SVA whose port is sized for the narrowed width. slang elaborated `cnt`
+    /// at the default `W = 10` while the lift applied `W = 4`, so the bound port became a
+    /// truncation of a 10-bit signal the 4-bit model did not have, and the property was SKIPPED
+    /// ("unknown register/signal `mununu_x_…`"). Fails on the parent `e7a5b21`.
+    #[test]
+    #[ignore = "requires slang + sv2v + Yosys + z3 (use the mununu-sva docker image); run with --ignored"]
+    fn e2e_717_bound_sva_under_a_param_override_decides() {
+        let sva = "module cnt_sva (input logic clk, input logic rst_n, input logic inc,\n\
+                   input logic [3:0] cur_q);\n\
+                   a_sat: assert property (@(posedge clk) disable iff (!rst_n)\n\
+                     (cur_q == 4'd15) |=> (cur_q == 4'd15));\n\
+                   a_never_sat: assert property (@(posedge clk) disable iff (!rst_n)\n\
+                     cur_q != 4'd15);\n\
+                   endmodule\n\
+                   bind cnt cnt_sva u_sva (.*);\n";
+        let report = run_717(
+            &[("cnt.sv", CNT_717), ("cnt_sva.sv", sva)],
+            "cnt",
+            &[("W", "4")],
+        )
+        .expect("verify_auto runs");
+        let by_label = |l: &str| {
+            report
+                .properties
+                .iter()
+                .find(|p| p.label.as_deref() == Some(l))
+                .unwrap_or_else(|| panic!("`{l}` in {:?}", report.properties))
+        };
+        assert!(
+            matches!(by_label("a_sat").outcome, VerifyOutcome::Holds),
+            "saturation holds at W = 4: {:?}",
+            by_label("a_sat").outcome
+        );
+        // The contrast twin: the 4-bit counter DOES reach 15, so the claim it never does is
+        // violated — proof the HOLDS above is about the narrowed design, not a vacuous one.
+        assert!(
+            matches!(
+                by_label("a_never_sat").outcome,
+                VerifyOutcome::Violated { .. }
+            ),
+            "the counter reaches 15 at W = 4: {:?}",
+            by_label("a_never_sat").outcome
+        );
+    }
+
+    /// mununu#717, the wrong-verdict sibling — a parameter folded into an atom took its DEFAULT
+    /// value. The counter saturates at `MAXV`; under `--param MAXV=5` it reaches 5, so
+    /// `c_q != MAXV` is VIOLATED. With the default folded in (`c_q != 12`, a value the overridden
+    /// design never reaches) the parent reported a false HOLDS.
+    #[test]
+    #[ignore = "requires slang + sv2v + Yosys + z3 (use the mununu-sva docker image); run with --ignored"]
+    fn e2e_717_a_parameter_in_an_atom_folds_to_its_override() {
+        let sv = "module sat #(parameter logic [3:0] MAXV = 4'd12) (\n\
+                  input logic clk, input logic rst_n, input logic inc);\n\
+                  logic [3:0] c_q;\n\
+                  always_ff @(posedge clk or negedge rst_n) begin\n\
+                    if (!rst_n) c_q <= '0;\n\
+                    else if (inc && c_q != MAXV) c_q <= c_q + 1'b1;\n\
+                  end\n\
+                  a_reaches_max: assert property (@(posedge clk) disable iff (!rst_n) c_q != MAXV);\n\
+                  a_bounded: assert property (@(posedge clk) disable iff (!rst_n) c_q <= MAXV);\n\
+                  endmodule\n";
+        let report = run_717(&[("sat.sv", sv)], "sat", &[("MAXV", "5")]).expect("verify_auto runs");
+        let by_label = |l: &str| {
+            report
+                .properties
+                .iter()
+                .find(|p| p.label.as_deref() == Some(l))
+                .unwrap_or_else(|| panic!("`{l}` in {:?}", report.properties))
+        };
+        assert!(
+            matches!(
+                by_label("a_reaches_max").outcome,
+                VerifyOutcome::Violated { .. }
+            ),
+            "c_q reaches the overridden MAXV = 5: {:?} / {}",
+            by_label("a_reaches_max").outcome,
+            by_label("a_reaches_max").formula
+        );
+        assert!(
+            matches!(by_label("a_bounded").outcome, VerifyOutcome::Holds),
+            "{:?}",
+            by_label("a_bounded").outcome
+        );
+    }
+
+    /// mununu#717 — an override slang's top-scoped `-G` cannot apply (a `MODULE.NAME` on a
+    /// submodule) is refused, rather than extracting the SVA at the default while the lift
+    /// applies the override.
+    #[test]
+    #[ignore = "requires slang + sv2v + Yosys + z3 (use the mununu-sva docker image); run with --ignored"]
+    fn e2e_717_an_override_that_misses_the_sva_extraction_is_refused() {
+        let sv = "module sub #(parameter int W = 10) (input logic clk, input logic rst_n,\n\
+                  output logic [W-1:0] q);\n\
+                  always_ff @(posedge clk or negedge rst_n) if (!rst_n) q <= '0; else q <= q + 1'b1;\n\
+                  a_w: assert property (@(posedge clk) disable iff (!rst_n) q != W);\n\
+                  endmodule\n\
+                  module top (input logic clk, input logic rst_n, output logic [9:0] q);\n\
+                  sub u_sub (.clk(clk), .rst_n(rst_n), .q(q));\n\
+                  endmodule\n";
+        match run_717(&[("top.sv", sv)], "top", &[("sub.W", "4")]) {
+            Err(e) => assert!(
+                e.message.contains("did not reach the SVA extraction"),
+                "refused for the right reason: {}",
+                e.message
+            ),
+            // A future slang that applies scoped overrides would elaborate W = 4 on both sides;
+            // then the run is legitimate, and this test must say so rather than pass silently.
+            Ok(r) => panic!(
+                "a scoped override on a submodule was accepted — check that slang now applies it \
+                 (and retire this test if so): {:?}",
+                r.properties
+            ),
+        }
+    }
+
     #[test]
     #[ignore = "requires slang + sv2v + Yosys + z3 (use the mununu-sva docker image); run with --ignored"]
     fn e2e_632_localparam_atoms_decide_on_link_ctrl() {

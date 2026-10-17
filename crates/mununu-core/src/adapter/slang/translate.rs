@@ -230,6 +230,12 @@ pub struct TranslationReport {
     /// silently ignores an unknown name, so this is where an unapplicable `--param`
     /// is turned into a hard error rather than a silent drop. Deduped.
     pub parameter_names: Vec<String>,
+    /// Every elaborated value each `parameter` / `localparam` NAME takes in the design (one
+    /// entry per distinct integer value; a name declared in several modules can carry several).
+    /// mununu#717 — verify-auto checks that each `--param` override actually reached the
+    /// elaborated SVA design, so an override slang could not apply is a hard error rather than a
+    /// property silently judged at the parameter's default.
+    pub parameter_values: std::collections::BTreeMap<String, Vec<i64>>,
     /// Constructs folded to a constant because the lifted model is 2-state (`$isunknown(x)` is
     /// `false`: there is no X or Z to observe). One entry per (assertion, construct); verify-auto
     /// turns each into a per-property `two-state-fold` scope note, because a property that guards
@@ -484,7 +490,38 @@ pub fn translate_ast_json_with_options(
     // Design-wide parameter names (for `--param` override validation), collected
     // once from the whole AST rather than per-assertion.
     collect_parameter_names(&root, &mut report.parameter_names);
+    collect_parameter_values(&root, &mut report.parameter_values);
     Ok(report)
+}
+
+/// Every elaborated integer value of every `"kind": "Parameter"` node, by name (mununu#717).
+fn collect_parameter_values(node: &Value, out: &mut std::collections::BTreeMap<String, Vec<i64>>) {
+    match node {
+        Value::Object(map) => {
+            if map.get("kind").and_then(Value::as_str) == Some("Parameter")
+                && let Some(name) = map.get("name").and_then(Value::as_str)
+                && !name.is_empty()
+                && let Some(v) = map
+                    .get("value")
+                    .and_then(Value::as_str)
+                    .and_then(parse_sv_literal)
+            {
+                let seen = out.entry(name.to_string()).or_default();
+                if !seen.contains(&v) {
+                    seen.push(v);
+                }
+            }
+            for v in map.values() {
+                collect_parameter_values(v, out);
+            }
+        }
+        Value::Array(items) => {
+            for v in items {
+                collect_parameter_values(v, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Collect every `parameter` / `localparam` NAME in a slang `--ast-json` document
@@ -5073,6 +5110,27 @@ mod tests {
         });
         let err = bool_expr(&two_reg).expect_err("two-register addend must reject");
         assert!(err.contains("arithmetic"), "got: {err}");
+    }
+
+    #[test]
+    fn collect_parameter_values_records_every_elaborated_value() {
+        // mununu#717 — the values verify-auto checks a `--param` override against.
+        let ast = serde_json::json!({"members": [
+            {"kind": "Parameter", "name": "W", "value": "4"},
+            {"kind": "Parameter", "name": "W", "value": "10"},
+            {"kind": "Parameter", "name": "W", "value": "4"},
+            {"kind": "Parameter", "name": "MAXV", "value": "4'd12"},
+            {"kind": "Parameter", "name": "T", "type": "type"}
+        ]});
+        let mut out = std::collections::BTreeMap::new();
+        collect_parameter_values(&ast, &mut out);
+        assert_eq!(out.get("W"), Some(&vec![4, 10]));
+        assert_eq!(out.get("MAXV"), Some(&vec![12]));
+        assert_eq!(
+            out.get("T"),
+            None,
+            "a parameter with no integer value records nothing"
+        );
     }
 
     #[test]
