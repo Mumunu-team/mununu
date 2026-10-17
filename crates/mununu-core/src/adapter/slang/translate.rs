@@ -398,7 +398,7 @@ pub fn translate_ast_json_with_options(
         let spec = resolve_enum_refs(spec, &enum_values);
         // Then name every signal as the flattened design does: `state_q` in instance `u_rx` is
         // `u_rx.state_q` there, and a hierarchical reference `u_rx.state_q` from the top too.
-        let spec = match scope_refs(&spec, &scopes, scope.as_deref()) {
+        let spec = match scope_refs(&spec, &scopes, &enum_values, scope.as_deref()) {
             Ok(spec) => spec,
             Err(reason) => {
                 report.unsupported.push(UnsupportedAssertion {
@@ -848,7 +848,12 @@ fn collect_assertions<'a>(
 /// `Err` for a reference that cannot be named that way: a hierarchical reference into a body
 /// several instances share (slang gives the declaration, not the instance), or a path through a
 /// `for`-generate iteration (`gen[1].x` — brackets are not part of the atom grammar).
-fn scope_refs(spec: &Value, scopes: &Hierarchy, scope: Option<&Scope>) -> Result<Value, String> {
+fn scope_refs(
+    spec: &Value,
+    scopes: &Hierarchy,
+    consts: &ConstantValues,
+    scope: Option<&Scope>,
+) -> Result<Value, String> {
     match spec {
         Value::Object(m) => {
             let kind = m.get("kind").and_then(Value::as_str);
@@ -880,13 +885,20 @@ fn scope_refs(spec: &Value, scopes: &Hierarchy, scope: Option<&Scope>) -> Result
                 if rel.is_empty()
                     && let Some(connected) = owner.inputs.get(name)
                 {
-                    return scope_refs(connected, scopes, owner.parent.as_deref());
+                    // The connection is an expression of the parent: fold its constants (a
+                    // `for` generate's genvar in `.d(a[j])`) before naming its signals.
+                    let connected = resolve_enum_refs(connected, consts);
+                    return scope_refs(&connected, scopes, consts, owner.parent.as_deref());
                 }
-                let full = format!("{}{rel}{name}", owner.prefix);
+                // mununu#713 — a `for` generate's `gen[k]` is spelled `gen$k`, as the lifted model's
+                // symbols are (`flat_symbol_names`); only an index that could not be read stays.
+                let full = crate::adapter::btor2::parser::flat_name(&format!(
+                    "{}{rel}{name}",
+                    owner.prefix
+                ));
                 if full.contains('[') {
                     return Err(format!(
-                        "`{full}` sits in a `for`-generate iteration: a bracketed hierarchical \
-                         name is not supported yet"
+                        "`{full}` sits in a `for`-generate iteration whose index could not be read"
                     ));
                 }
                 let mut out = m.clone();
@@ -896,13 +908,13 @@ fn scope_refs(spec: &Value, scopes: &Hierarchy, scope: Option<&Scope>) -> Result
             }
             let mut out = serde_json::Map::new();
             for (k, v) in m {
-                out.insert(k.clone(), scope_refs(v, scopes, scope)?);
+                out.insert(k.clone(), scope_refs(v, scopes, consts, scope)?);
             }
             Ok(Value::Object(out))
         }
         Value::Array(a) => a
             .iter()
-            .map(|v| scope_refs(v, scopes, scope))
+            .map(|v| scope_refs(v, scopes, consts, scope))
             .collect::<Result<Vec<_>, _>>()
             .map(Value::Array),
         other => Ok(other.clone()),
@@ -6063,8 +6075,14 @@ mod tests {
         assert!(refused("top_sva_16").contains("instantiated 4 times"));
         // A logic-free checker module: its port `v` is the expression connected to it.
         assert!(formula("u_chk.chk_sva_18").contains("mununu_x_"));
-        // A `for`-generate iteration's names carry brackets the atom grammar cannot spell.
-        assert!(refused("g_arr[0].u_c.leaf_sva_9").contains("`for`-generate"));
+        // mununu#713 — a `for` generate's iterations: `g_arr[k]` is spelled `g_arr$k`, as in the
+        // lifted model, and each iteration's instance reads its own signals.
+        assert!(formula("g_arr[0].u_c.leaf_sva_9").contains("(g_arr$0.u_c.q_r != 2)"));
+        assert!(
+            formula("g_arr[1].u_c.g_two_sva_14")
+                .contains("(g_arr$1.u_c.g_two.t == g_arr$1.u_c.q_r__bits0_0)")
+        );
+        assert_eq!(report.unsupported.len(), 1, "{:?}", report.unsupported);
         assert_eq!(report.translated.len() + report.unsupported.len(), 19);
     }
 
