@@ -859,6 +859,18 @@ impl BddBitBlaster {
         // / `--engine explicit`) instead of crashing the process: this half-built blaster owns its
         // manager and is dropped on the unwind (single-threaded apply, so the RAII lock guard is
         // released during unwinding), so there is no shared/global state to corrupt.
+        // mununu#698 — the model reaching this point has been through in-memory rewrites (enum
+        // re-encode, bit-cone narrowing, input lifting) that build a `Btor2File` without the
+        // parser. A width disagreement between an operator and its operands used to surface as an
+        // index-out-of-bounds panic inside a bitwise arm, which the `catch_unwind` below reports
+        // as ARENA exhaustion — the wrong budget, and a knob that cannot help. Check first and
+        // abstain with the real reason; a malformed model is never something a retry fixes.
+        if let Err(e) = crate::adapter::btor2::parser::check_sorts(file) {
+            return Err(format!(
+                "exact bit-blaster: the prepared model is ill-sorted ({e}) — an internal rewrite \
+                 defect, not a property of the design; abstained"
+            ));
+        }
         let build_passes =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<(), String> {
                 // Pass 2 — walk the node DAG, evaluating every Const/Op into a BitVec.

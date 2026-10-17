@@ -1150,6 +1150,130 @@ pub fn find_next_value_operand(
 
 /// Resolve the bit-vector width of a sort node. Returns `None` if the
 /// referenced node is an array sort or unresolvable.
+/// mununu#698 — check that every operator whose BTOR2 sort rule is exact agrees with the widths
+/// of its operands: same-width bitwise / arithmetic operators (result = each operand), unary
+/// `not` / `neg` / `inc` / `dec`, comparisons (operands equal, result 1 bit), `ite` (1-bit
+/// condition, both branches = result) and `init` / `next` (value = state). An operand whose
+/// width does not resolve (an array) is skipped, so this only ever reports a real mismatch.
+///
+/// Deliberately NOT part of [`parse`]: it guards the in-memory rewrites (`enum_reencode`,
+/// `narrow_leaves`, …) that build a `Btor2File` without the parser, where a wrong width used to
+/// surface as an index-out-of-bounds panic deep in the bit-blaster, or not at all.
+pub fn check_sorts(file: &Btor2File) -> Result<(), String> {
+    use crate::adapter::btor2::ast::Op;
+    let width = |nid: Nid| -> Option<u32> {
+        match &file.lookup(nid)?.node {
+            Node::Input { sort, .. }
+            | Node::State { sort, .. }
+            | Node::Const { sort, .. }
+            | Node::Op { sort, .. } => bv_width(file, *sort),
+            _ => None,
+        }
+    };
+    let bad = |nid: Nid, what: String| Err(format!("btor2 sort check: node {nid}: {what}"));
+    for line in &file.lines {
+        match &line.node {
+            Node::Op { op, sort, args, .. } => {
+                let Some(res) = bv_width(file, *sort) else {
+                    continue;
+                };
+                let w: Vec<Option<u32>> = args.iter().map(|a| width(a.nid())).collect();
+                match op {
+                    Op::And
+                    | Op::Or
+                    | Op::Xor
+                    | Op::Nand
+                    | Op::Nor
+                    | Op::Xnor
+                    | Op::Add
+                    | Op::Sub
+                    | Op::Mul
+                    | Op::Udiv
+                    | Op::Sdiv
+                    | Op::Urem
+                    | Op::Srem
+                    | Op::Smod
+                    | Op::Not
+                    | Op::Neg
+                    | Op::Inc
+                    | Op::Dec => {
+                        for (i, wi) in w.iter().enumerate() {
+                            if let Some(wi) = wi
+                                && *wi != res
+                            {
+                                return bad(
+                                    line.nid,
+                                    format!(
+                                        "{op:?} result is {res} bit(s) but operand {i} (node {}) \
+                                         is {wi}",
+                                        args[i].nid()
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                    Op::Eq
+                    | Op::Neq
+                    | Op::Ugt
+                    | Op::Ugte
+                    | Op::Ult
+                    | Op::Ulte
+                    | Op::Sgt
+                    | Op::Sgte
+                    | Op::Slt
+                    | Op::Slte => {
+                        if let [Some(a), Some(b)] = w[..]
+                            && a != b
+                        {
+                            return bad(
+                                line.nid,
+                                format!("{op:?} compares {a} bit(s) with {b} bit(s)"),
+                            );
+                        }
+                    }
+                    Op::Ite if args.len() == 3 => {
+                        if let Some(c) = w[0]
+                            && c != 1
+                        {
+                            return bad(line.nid, format!("ite condition is {c} bit(s)"));
+                        }
+                        for i in [1, 2] {
+                            if let Some(wi) = w[i]
+                                && wi != res
+                            {
+                                return bad(
+                                    line.nid,
+                                    format!(
+                                        "ite result is {res} bit(s) but branch {i} (node {}) is \
+                                         {wi}",
+                                        args[i].nid()
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Node::Init { state, value, .. } | Node::Next { state, value, .. } => {
+                if let (Some(sw), Some(vw)) = (width(*state), width(value.nid()))
+                    && sw != vw
+                {
+                    return bad(
+                        line.nid,
+                        format!(
+                            "state {state} is {sw} bit(s) but its init/next value (node {}) is {vw}",
+                            value.nid()
+                        ),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 pub fn bv_width(file: &Btor2File, sort_nid: Nid) -> Option<u32> {
     match &file.lookup(sort_nid)?.node {
         Node::Sort {
@@ -1270,6 +1394,29 @@ mod tests {
     }
 
     use super::*;
+
+    /// mununu#698 — the sort check names an operand narrower than its operator, a comparison
+    /// across widths and an ill-sized `next`, and accepts a well-sorted model.
+    #[test]
+    fn check_sorts_reports_each_width_disagreement() {
+        let ok = parse("1 sort bitvec 1\n2 sort bitvec 4\n3 state 2 s\n4 input 2 i\n5 and 2 3 4\n6 eq 1 3 4\n7 next 2 3 5\n").unwrap();
+        assert_eq!(check_sorts(&ok), Ok(()));
+        let and =
+            parse("1 sort bitvec 2\n2 sort bitvec 4\n3 state 1 s\n4 input 2 i\n5 and 2 4 3\n")
+                .unwrap();
+        let e = check_sorts(&and).unwrap_err();
+        assert!(e.contains("node 5") && e.contains("operand 1"), "{e}");
+        let eq = parse("1 sort bitvec 1\n2 sort bitvec 2\n3 sort bitvec 4\n4 state 2 a\n5 state 3 b\n6 eq 1 4 5\n").unwrap();
+        assert!(
+            check_sorts(&eq)
+                .unwrap_err()
+                .contains("compares 2 bit(s) with 4")
+        );
+        let next =
+            parse("1 sort bitvec 1\n2 sort bitvec 4\n3 state 1 s\n4 const 2 0100\n5 next 1 3 4\n")
+                .unwrap();
+        assert!(check_sorts(&next).unwrap_err().contains("init/next value"));
+    }
 
     #[test]
     fn parses_minimal_safety_circuit() {
