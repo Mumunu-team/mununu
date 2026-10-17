@@ -326,8 +326,7 @@ pub fn translate_ast_json_with_options(
         &Walk {
             enclosing: "design",
             label: None,
-            body: None,
-            prefix: "",
+            scope: None,
             rel: String::new(),
         },
         &bodies,
@@ -367,11 +366,11 @@ pub fn translate_ast_json_with_options(
             module,
             label,
             node,
-            body,
-            prefix,
+            scope,
         } = found;
         // An assertion inside a sub-instance names its instance (`u_rx.u_dec.prim_diff_decode_sva_12`):
         // a module instantiated twice yields the same label twice, one per instance.
+        let prefix = scope.as_ref().map_or("", |s| s.prefix.as_str());
         let name = format!("{prefix}{module}_sva_{idx}");
         let label = label.clone();
         let kind = match node.get("assertionKind").and_then(Value::as_str) {
@@ -399,7 +398,7 @@ pub fn translate_ast_json_with_options(
         let spec = resolve_enum_refs(spec, &enum_values);
         // Then name every signal as the flattened design does: `state_q` in instance `u_rx` is
         // `u_rx.state_q` there, and a hierarchical reference `u_rx.state_q` from the top too.
-        let spec = match scope_refs(&spec, &scopes, *body, prefix) {
+        let spec = match scope_refs(&spec, &scopes, scope.as_deref()) {
             Ok(spec) => spec,
             Err(reason) => {
                 report.unsupported.push(UnsupportedAssertion {
@@ -550,10 +549,22 @@ struct FoundAssertion<'a> {
     module: String,
     label: Option<String>,
     node: &'a Value,
-    /// The instance body it sits in (`None` outside any instance).
-    body: Option<u64>,
-    /// The flattened instance prefix of this occurrence: `""` for the top, `"u_rx.u_dec."` below.
+    /// The instance occurrence it sits in (`None` outside any instance).
+    scope: Option<std::rc::Rc<Scope>>,
+}
+
+/// One instance occurrence: where its body's declarations live in the flattened design.
+struct Scope {
+    body: u64,
+    /// `""` for the top, `"u_rx.u_dec."` below.
     prefix: String,
+    /// The expression each INPUT port is connected to, by port name — an expression of
+    /// `parent`'s scope. A port of a logic-free instance (an assertion module bound into the
+    /// design) has no net of its own after flattening; the connection is what it reads. By name,
+    /// not address: an instance whose body slang serialised by reference lists the ports of its
+    /// own (unserialised) body, at addresses no reference in the shared body uses.
+    inputs: std::collections::HashMap<String, Value>,
+    parent: Option<std::rc::Rc<Scope>>,
 }
 
 /// The declaration scopes of the elaborated design, as the flattened design names them.
@@ -562,19 +573,41 @@ struct Hierarchy {
     /// A declaration's address → its instance body and its path inside that body (`""`, or the
     /// enclosing generate blocks: `"gen_no_async."`, `"gen_cnts[1]."`).
     decls: std::collections::HashMap<u64, (u64, String)>,
-    /// An instance body's address → the flattened prefix of every instance of it.
-    occurrences: std::collections::HashMap<u64, Vec<String>>,
+    /// An instance body's address → every occurrence of it.
+    occurrences: std::collections::HashMap<u64, Vec<std::rc::Rc<Scope>>>,
 }
 
 /// The walk's position: what [`collect_assertions`] carries down the AST.
 struct Walk<'s> {
     enclosing: &'s str,
     label: Option<&'s str>,
-    /// The instance body being walked, and its occurrence's flattened prefix.
-    body: Option<u64>,
-    prefix: &'s str,
-    /// The generate-block path inside `body`.
+    /// The instance occurrence being walked.
+    scope: Option<std::rc::Rc<Scope>>,
+    /// The generate-block path inside the scope's body.
     rel: String,
+}
+
+/// An instance's input-port connections: the port's name → the connected expression (an
+/// unconnected port is left out).
+fn input_connections(
+    instance: &serde_json::Map<String, Value>,
+) -> std::collections::HashMap<String, Value> {
+    instance
+        .get("connections")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|c| {
+            let port = c.get("port")?;
+            if port.get("direction").and_then(Value::as_str) != Some("In") {
+                return None;
+            }
+            let name = port.get("name").and_then(Value::as_str)?;
+            let expr = c.get("expr")?;
+            (expr.get("kind").and_then(Value::as_str) != Some("EmptyArgument"))
+                .then(|| (name.to_string(), expr.clone()))
+        })
+        .collect()
 }
 
 /// Every `InstanceBody` by address — the target of an instance whose `body` is a reference
@@ -654,8 +687,7 @@ fn collect_assertions<'a>(
                     module: at.enclosing.to_string(),
                     label: at.label.map(str::to_string),
                     node,
-                    body: at.body,
-                    prefix: at.prefix.to_string(),
+                    scope: at.scope.clone(),
                 }),
                 Some("Instance") => {
                     let name = map.get("name").and_then(Value::as_str).unwrap_or("");
@@ -672,22 +704,27 @@ fn collect_assertions<'a>(
                     let Some(addr) = body.get("addr").and_then(Value::as_u64) else {
                         return;
                     };
-                    let prefix = match at.body {
+                    let prefix = match &at.scope {
                         None => String::new(),
-                        Some(_) => format!("{}{}{name}.", at.prefix, at.rel),
+                        Some(parent) => format!("{}{}{name}.", parent.prefix, at.rel),
                     };
+                    let scope = std::rc::Rc::new(Scope {
+                        body: addr,
+                        prefix,
+                        inputs: input_connections(map),
+                        parent: at.scope.clone(),
+                    });
                     scopes
                         .occurrences
                         .entry(addr)
                         .or_default()
-                        .push(prefix.clone());
+                        .push(scope.clone());
                     collect_assertions(
                         body,
                         &Walk {
                             enclosing: if name.is_empty() { at.enclosing } else { name },
                             label: at.label,
-                            body: Some(addr),
-                            prefix: &prefix,
+                            scope: Some(scope),
                             rel: String::new(),
                         },
                         bodies,
@@ -734,8 +771,7 @@ fn collect_assertions<'a>(
                                 array
                             },
                             label: at.label,
-                            body: at.body,
-                            prefix: at.prefix,
+                            scope: at.scope.clone(),
                             rel: format!("{}{seg}.", at.rel),
                         };
                         for v in block.values() {
@@ -745,10 +781,13 @@ fn collect_assertions<'a>(
                     return;
                 }
                 Some("Variable") | Some("Net") => {
-                    if let (Some(body), Some(addr)) =
-                        (at.body, map.get("addr").and_then(Value::as_u64))
+                    if let (Some(scope), Some(addr)) =
+                        (&at.scope, map.get("addr").and_then(Value::as_u64))
                     {
-                        scopes.decls.entry(addr).or_insert((body, at.rel.clone()));
+                        scopes
+                            .decls
+                            .entry(addr)
+                            .or_insert((scope.body, at.rel.clone()));
                     }
                 }
                 _ => {}
@@ -778,8 +817,7 @@ fn collect_assertions<'a>(
             let inner = Walk {
                 enclosing: next,
                 label: owned.as_deref().or(at.label),
-                body: at.body,
-                prefix: at.prefix,
+                scope: at.scope.clone(),
                 rel,
             };
             for v in map.values() {
@@ -801,18 +839,16 @@ fn collect_assertions<'a>(
 ///   `<occurrence prefix><generate path><name>` — `state_q` in `u_rx` is `u_rx.state_q`. Before
 ///   this, an assertion inside a sub-instance read the TOP's signal of the same name (or none):
 ///   checked against the wrong net whenever the names collided.
-/// - A `HierarchicalValue` (`u_rx.state_q` written in the top) becomes a `NamedValue` of the
-///   declaration's flattened name when its body has exactly one instance.
+/// - An INPUT port is the expression connected to it, resolved in the parent's scope — exact by
+///   definition, and the only name a port of a logic-free instance (an assertion module bound
+///   into the design) has once flattened.
+/// - A `HierarchicalValue` (`u_rx.state_q` written in the top) resolves the same way when its
+///   body has exactly one instance.
 ///
 /// `Err` for a reference that cannot be named that way: a hierarchical reference into a body
 /// several instances share (slang gives the declaration, not the instance), or a path through a
 /// `for`-generate iteration (`gen[1].x` — brackets are not part of the atom grammar).
-fn scope_refs(
-    spec: &Value,
-    scopes: &Hierarchy,
-    body: Option<u64>,
-    prefix: &str,
-) -> Result<Value, String> {
+fn scope_refs(spec: &Value, scopes: &Hierarchy, scope: Option<&Scope>) -> Result<Value, String> {
     match spec {
         Value::Object(m) => {
             let kind = m.get("kind").and_then(Value::as_str);
@@ -822,14 +858,14 @@ fn scope_refs(
                 && let Ok(addr) = addr.parse::<u64>()
                 && let Some((decl_body, rel)) = scopes.decls.get(&addr)
             {
-                let full = if kind == Some("NamedValue") {
-                    if Some(*decl_body) != body {
-                        return Ok(spec.clone());
+                let owner: &Scope = if kind == Some("NamedValue") {
+                    match scope {
+                        Some(s) if s.body == *decl_body => s,
+                        _ => return Ok(spec.clone()),
                     }
-                    format!("{prefix}{rel}{name}")
                 } else {
                     match scopes.occurrences.get(decl_body).map(Vec::as_slice) {
-                        Some([only]) => format!("{only}{rel}{name}"),
+                        Some([only]) => only,
                         Some(many) => {
                             return Err(format!(
                                 "hierarchical reference to `{name}` in a module instantiated \
@@ -840,6 +876,13 @@ fn scope_refs(
                         None => return Ok(spec.clone()),
                     }
                 };
+                // A port is declared at the body's top level, never inside a generate block.
+                if rel.is_empty()
+                    && let Some(connected) = owner.inputs.get(name)
+                {
+                    return scope_refs(connected, scopes, owner.parent.as_deref());
+                }
+                let full = format!("{}{rel}{name}", owner.prefix);
                 if full.contains('[') {
                     return Err(format!(
                         "`{full}` sits in a `for`-generate iteration: a bracketed hierarchical \
@@ -853,13 +896,13 @@ fn scope_refs(
             }
             let mut out = serde_json::Map::new();
             for (k, v) in m {
-                out.insert(k.clone(), scope_refs(v, scopes, body, prefix)?);
+                out.insert(k.clone(), scope_refs(v, scopes, scope)?);
             }
             Ok(Value::Object(out))
         }
         Value::Array(a) => a
             .iter()
-            .map(|v| scope_refs(v, scopes, body, prefix))
+            .map(|v| scope_refs(v, scopes, scope))
             .collect::<Result<Vec<_>, _>>()
             .map(Value::Array),
         other => Ok(other.clone()),
@@ -5997,12 +6040,16 @@ mod tests {
         // `u_a` and `u_b` share one serialised body; each gets its assertions, over its signals.
         // `W` is the instance's (2), not the top's `W = 7` the former first-name-wins map gave.
         assert!(formula("u_a.leaf_sva_0").contains("(u_a.q_r != 2)"));
-        assert!(formula("u_b.leaf_sva_2").contains("(u_b.q_r != 2)"));
+        assert!(formula("u_b.leaf_sva_3").contains("(u_b.q_r != 2)"));
+        // An input port is its connection, read in the parent: `u_a.d` is the top's `d`; `u_b.d`
+        // is `~d` (a minted expression) — also through a body slang serialised by reference.
+        assert!(formula("u_a.leaf_sva_1").contains("(u_a.q_r == d__past)"));
+        assert!(formula("u_b.leaf_sva_4").contains("mununu_x_"));
         // A generate block extends the path; the branch not elaborated contributes nothing.
-        assert!(formula("u_a.g_two_sva_1").contains("u_a.g_two.t == u_a.q_r__bits0_0"));
+        assert!(formula("u_a.g_two_sva_2").contains("u_a.g_two.t == u_a.q_r__bits0_0"));
         // `u_d` overrides `W` to 3 and so elaborates the other branch.
-        assert!(formula("u_d.leaf_sva_4").contains("(u_d.q_r != 3)"));
-        assert!(formula("u_d.g_other_sva_5").contains("(u_d.q_r != 0)"));
+        assert!(formula("u_d.leaf_sva_6").contains("(u_d.q_r != 3)"));
+        assert!(formula("u_d.g_other_sva_8").contains("(u_d.q_r != 0)"));
         assert!(
             !report
                 .translated
@@ -6010,13 +6057,15 @@ mod tests {
                 .any(|t| t.name.starts_with("u_d.g_two"))
         );
         // The top's own `q_r` keeps its name — and no sub-instance assertion reads it.
-        assert!(formula("top_sva_12").contains("(q_r == 0)"));
+        assert!(formula("top_sva_17").contains("(q_r == 0)"));
         // Hierarchical references: one instance resolves, a shared body is ambiguous.
-        assert!(formula("top_sva_10").contains("(u_d.q_r != 7)"));
-        assert!(refused("top_sva_11").contains("instantiated 4 times"));
+        assert!(formula("top_sva_15").contains("(u_d.q_r != 7)"));
+        assert!(refused("top_sva_16").contains("instantiated 4 times"));
+        // A logic-free checker module: its port `v` is the expression connected to it.
+        assert!(formula("u_chk.chk_sva_18").contains("mununu_x_"));
         // A `for`-generate iteration's names carry brackets the atom grammar cannot spell.
-        assert!(refused("g_arr[0].u_c.leaf_sva_6").contains("`for`-generate"));
-        assert_eq!(report.translated.len() + report.unsupported.len(), 13);
+        assert!(refused("g_arr[0].u_c.leaf_sva_9").contains("`for`-generate"));
+        assert_eq!(report.translated.len() + report.unsupported.len(), 19);
     }
 
     /// A literal operand is read AFTER slang's conversions. `x4 != 4'(20)` — a size cast slang

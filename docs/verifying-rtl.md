@@ -322,9 +322,9 @@ assertion) and an empty `cycle`. The CLI prints it under the property:
   [assert] u_s.hs_sub_sva_0: VIOLATED (1 cell(s))
         formula: nu X. (((u_s.q == 0)) && [] X)
         counterexample (reset -> violation):
-          [0] a__past=0, u_s.a__past=0, u_s.q=0
+          [0] a__past=0, u_s.q=0
               in: a=1, clk=0
-          [1] a__past=1, u_s.a__past=1, u_s.q=1
+          [1] a__past=1, u_s.q=1
               in: a=0, clk=0
 ```
 
@@ -1075,7 +1075,7 @@ repo, so the lists below cannot drift from the code without a red test.
 | a bare sequence as the whole property (`assert property (##1 a == b)`) | read as a consequent: it holds at a start iff it matches from there (IEEE 1800-2017 §16.12.2) | 2026-10-15 (OpenTitan Phase 1) |
 | **expressions**: `+ - *` (≤ 32 bits), unary `-`, `& \| ^ ~^ ~` over vectors, `<< >> >>>`, `?:`, concatenation and constant replication, signed and unsigned comparisons, reductions (`^x` included), `$past(expr, k)`, `$stable` / `$changed` / `$rose` / `$fell` of an expression (`$rose` / `$fell` read its LSB), `$countones` / `$onehot` / `$onehot0` of an expression, a dynamic bit-select whose index cannot leave the range | one **minted** combinational node `mununu_x_<hash>` per expression, built from slang's own types and conversions; the formula reads it as an atom (`(mununu_x_… == 3)` against a constant, so the predicate cube keeps a dimension) | 2026-10-15 (OpenTitan Phase 2) |
 | a call to a user function whose body is one `return` (OpenTitan's `min` / `max`) | inlined into the expression, arguments bound with assignment semantics | 2026-10-15 (OpenTitan Phase 3) |
-| an assertion inside a sub-instance, at any depth (a module instantiated several times included) | checked once **per instance**, over that instance's signals by their flattened names (`u_rx.state_q`) and with its own parameter values; the property's `name` carries the instance path (`u_rx.u_dec.prim_diff_decode_sva_12`) | 2026-10-16 (mununu#709) |
+| an assertion inside a sub-instance, at any depth (a module instantiated several times included; a logic-free checker module bound or instantiated into the design) | checked once **per instance**, over that instance's signals by their flattened names (`u_rx.state_q`) and with its own parameter values; an **input port** reads the expression connected to it, in the parent's scope; the property's `name` carries the instance path (`u_rx.u_dec.prim_diff_decode_sva_12`) | 2026-10-16 (mununu#709) |
 | a hierarchical reference from the top, `u_rx.state_q` | that flattened signal, when the module has one instance; refused with the reason when several instances share it (slang names the declaration, not the instance) or the path crosses a `for`-generate iteration (`gen[1].x` — brackets are not part of the atom grammar) | 2026-10-16 (mununu#709) |
 
 Each definite verdict transfers exactly as in the plain `|=>` case — the lowerings add boxes,
@@ -1151,7 +1151,9 @@ none — a wrong-signal check that could report a false HOLDS (`e2e_a_sub_instan
 is the reproducer). Each assertion is now collected once per instance (slang serialises a body
 several instances share once; the walk visits it per instance, and skips the generate branches the
 elaboration did not take), and every reference declared in that body is named with the instance
-path, generate blocks included (`u_rx.u_dec.gen_no_async.diff_pq`). Enum members and parameters fold
+path, generate blocks included (`u_rx.u_dec.gen_no_async.diff_pq`) — except an input port, which
+is the expression connected to it, read in the parent's scope: exact by definition, and the only
+name a port of a logic-free checker module has once yosys flattens it away. Enum members and parameters fold
 by their DECLARATION, not their name: `Width` is 6 in one module and 2 in another, and the former
 name-keyed map gave every reference the first one's value. On the `prim_esc_rxtx` harness this turns
 40 skipped sub-block assertions into checked ones.
