@@ -30,7 +30,9 @@ use tracing_subscriber::{EnvFilter, Registry, fmt, layer::SubscriberExt, util::S
 #[command(
     name = "mununu",
     about = "CLTS Verification Tool CLI",
-    version,
+    // mununu#715 — `0.4.0 (e7a5b21)` / `0.4.0 (e7a5b21-dirty)`, or the bare version when the
+    // build was not told its commit (`build.rs`).
+    version = env!("MUNUNU_VERSION_LINE"),
     disable_help_subcommand = true
 )]
 struct Cli {
@@ -2740,6 +2742,12 @@ enum GraphOutputType {
 }
 
 fn main() {
+    // mununu#715 — every report this process produces (CLI `--json`, `mununu server`) carries the
+    // identity of this binary.
+    mununu_core::build_info::register(mununu_core::build_info::identity_from(
+        option_env!("MUNUNU_BUILD_SHA"),
+        option_env!("MUNUNU_BUILD_DIRTY"),
+    ));
     // Export our own path so the reachability portfolio can run z3-SPACER in an
     // ISOLATED child (`btor2 spacer-check`) — z3's Fixedpoint can flaky-segfault on some
     // CHC encodings, and isolating it keeps a crash from taking down the whole verify.
@@ -9704,4 +9712,38 @@ fn internal_engine_eval(args: InternalEngineEvalArgs) -> Result<(), String> {
         Err(e) => println!("VERDICT abstained {e}"),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod build_identity_tests {
+    /// mununu#715 — the version line is the package version, then the short commit and a
+    /// `-dirty` marker when the build knew them, and nothing else.
+    #[test]
+    fn the_version_line_carries_the_build_identity_when_known() {
+        let line = env!("MUNUNU_VERSION_LINE");
+        let version = env!("CARGO_PKG_VERSION");
+        let rest = line
+            .strip_prefix(version)
+            .unwrap_or_else(|| panic!("`{line}` starts with the package version {version}"));
+        if rest.is_empty() {
+            assert!(
+                option_env!("MUNUNU_BUILD_SHA").is_none(),
+                "a known commit must appear in the version line"
+            );
+            return;
+        }
+        let inner = rest
+            .strip_prefix(" (")
+            .and_then(|r| r.strip_suffix(')'))
+            .unwrap_or_else(|| panic!("`{rest}` is ` (<sha>[-dirty])`"));
+        let sha = inner.strip_suffix("-dirty").unwrap_or(inner);
+        assert_eq!(sha.len(), 7, "{inner}");
+        assert!(sha.chars().all(|c| c.is_ascii_hexdigit()), "{inner}");
+        let full = option_env!("MUNUNU_BUILD_SHA").expect("a commit in the line is recorded");
+        assert!(full.starts_with(sha), "{full} vs {sha}");
+        assert_eq!(
+            inner.ends_with("-dirty"),
+            option_env!("MUNUNU_BUILD_DIRTY") == Some("1")
+        );
+    }
 }

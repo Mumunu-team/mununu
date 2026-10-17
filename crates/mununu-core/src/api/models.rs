@@ -1904,6 +1904,15 @@ pub struct SvVerifyAutoResponse {
     /// statements. Omitted when the design has none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assumptions: Option<AssumptionsView>,
+    /// mununu#715 — the full commit sha of the binary that produced this report. Omitted when
+    /// the build was not told its commit; never a guess. The `--version` line carries its short
+    /// form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<String>,
+    /// mununu#715 — `true` when no tracked file differed from `build` at build time.
+    /// Present exactly when `build` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_clean: Option<bool>,
 }
 
 /// What `sv verify-auto` did with the design's `assume` statements.
@@ -2122,7 +2131,10 @@ impl From<&crate::adapter::slang::verify_auto::AutoVerifyReport> for SvVerifyAut
             unguarded: not_applied(&a.unguarded),
             consistency: a.consistency.clone(),
         });
+        let build = crate::build_info::current();
         SvVerifyAutoResponse {
+            build: build.map(|b| b.sha.clone()),
+            build_clean: build.map(|b| b.clean),
             assumptions,
             properties,
             unsupported: report

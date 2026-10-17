@@ -22,6 +22,13 @@ ENV CARGO_INCREMENTAL=0
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
 COPY src/ src/
+# mununu#715 — `.git` is not in the build context (`.dockerignore`), so the commit is passed in:
+#   docker build --build-arg MUNUNU_BUILD_SHA=$(git rev-parse HEAD) \
+#     --build-arg MUNUNU_BUILD_DIRTY=$(test -z "$(git status --porcelain --untracked-files=no)" && echo 0 || echo 1) …
+# Left empty, the binary reports no build identity (never a guess).
+ARG MUNUNU_BUILD_SHA=""
+ARG MUNUNU_BUILD_DIRTY=""
+ENV MUNUNU_BUILD_SHA=${MUNUNU_BUILD_SHA} MUNUNU_BUILD_DIRTY=${MUNUNU_BUILD_DIRTY}
 RUN cargo build --release -p mununu-cli --features api
 
 FROM debian:bookworm-slim

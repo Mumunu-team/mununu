@@ -19,6 +19,7 @@ compile_error!(
 
 pub mod abstraction;
 pub mod adapter;
+pub mod build_info;
 pub mod clts;
 pub mod codesign;
 pub mod composition;
