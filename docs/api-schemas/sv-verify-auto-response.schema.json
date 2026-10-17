@@ -503,6 +503,20 @@
       ],
       "description": "OpenTitan coverage, Phase 4 — what the run did with the design's SVA `assume` statements. Omitted when the design has none."
     },
+    "build": {
+      "description": "mununu#715 — the full commit sha of the binary that produced this report. Omitted when the build was not told its commit; never a guess. The `--version` line carries its short form.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "build_clean": {
+      "description": "mununu#715 — `true` when no tracked file differed from `build` at build time. Present exactly when `build` is.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
     "diagnostics": {
       "allOf": [
         {
