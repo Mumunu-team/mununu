@@ -922,6 +922,56 @@ pub fn resolve_to_canonical_name(
     collect_symbols(file).get(&nid).cloned()
 }
 
+/// mununu#713 — a flattened name with every constant index `[k]` written `$k`
+/// (`u_cnt.gen_cnts[1].q_o` → `u_cnt.gen_cnts$1.q_o`). yosys names what a `for` generate
+/// elaborates `gen[k]`, and `[` opens a box in the μ-calculus, so an atom cannot spell it; `$` is
+/// an identifier character in both the formula and the predicate lexer. Anything else in brackets
+/// (a range, a non-constant index) is left as it is.
+pub fn flat_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut rest = name;
+    while let Some(open) = rest.find('[') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        let digits = after.bytes().take_while(u8::is_ascii_digit).count();
+        if digits > 0 && after.as_bytes().get(digits) == Some(&b']') {
+            out.push('$');
+            out.push_str(&after[..digits]);
+            rest = &after[digits + 1..];
+        } else {
+            out.push('[');
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// [`flat_name`] applied to every symbol of a BTOR2 text, so the model and the translated
+/// formulas spell a `for`-generate's names alike. Only the part before a line's `;` comment is
+/// rewritten (a source location keeps its brackets); a BTOR2 operand or immediate is a number and
+/// never contains `[`.
+pub fn flat_symbol_names(content: &str) -> String {
+    if !content.contains('[') {
+        return content.to_string();
+    }
+    let mut out = String::with_capacity(content.len());
+    for line in content.lines() {
+        let (code, comment) = match line.find(';') {
+            Some(i) => line.split_at(i),
+            None => (line, ""),
+        };
+        if code.contains('[') {
+            out.push_str(&flat_name(code));
+        } else {
+            out.push_str(code);
+        }
+        out.push_str(comment);
+        out.push('\n');
+    }
+    out
+}
+
 /// mununu#633 — the name each state cell is REPORTED and ADDRESSED under by the
 /// register-facing verbs (`check-fsm`, `sv mutate --list` / `--mutation`), strict-preferred:
 ///
@@ -1130,6 +1180,27 @@ pub fn array_widths(file: &Btor2File, sort_nid: Nid) -> Option<(u32, u32)> {
 
 #[cfg(test)]
 mod tests {
+    /// mununu#713 — a constant index is spelled `$k`; a range or a symbolic index is not touched;
+    /// a BTOR2 text's symbols are rewritten and its comments are not.
+    #[test]
+    fn x713_a_generate_index_is_spelled_with_a_dollar() {
+        assert_eq!(
+            super::flat_name("u_cnt.gen_cnts[1].u_cnt_flop.q_o"),
+            "u_cnt.gen_cnts$1.u_cnt_flop.q_o"
+        );
+        assert_eq!(super::flat_name("g[0][12].x"), "g$0$12.x");
+        assert_eq!(super::flat_name("x[3:0]"), "x[3:0]");
+        assert_eq!(super::flat_name("x[i]"), "x[i]");
+        assert_eq!(super::flat_name("plain"), "plain");
+        let btor2 = "1 sort bitvec 1\n2 state 1 g[1].q ; a.sv:3.5-3.9 [x]\n3 uext 1 2 0 g[1].q_o\n";
+        let flat = super::flat_symbol_names(btor2);
+        assert_eq!(
+            flat,
+            "1 sort bitvec 1\n2 state 1 g$1.q ; a.sv:3.5-3.9 [x]\n3 uext 1 2 0 g$1.q_o\n"
+        );
+        super::parse(&flat).expect("still parses");
+    }
+
     /// mununu#711 — a name reaches the register it is forwarded to only along a value-preserving
     /// path: a `uext … 0` rename and the async-reset mux keep it; a bit swap and an inversion do
     /// not (the named node stays its own signal).

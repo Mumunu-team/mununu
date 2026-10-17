@@ -3581,7 +3581,8 @@ pub(crate) fn lift_sv(
         }
     }
     Ok(PreLift {
-        btor2: lift.btor2,
+        // mununu#713 — `gen[k]` as `gen$k`, the spelling the translator gives the same names.
+        btor2: crate::adapter::btor2::parser::flat_symbol_names(&lift.btor2),
         blackboxed_modules: lift.blackboxed_modules,
         auto_provided_stubs,
         frontend_used: lift.frontend_used,
@@ -4095,13 +4096,12 @@ pub(crate) fn prepare_model(
     // (never a silent no-op: a no-op mutant would spuriously read as a "no flip" =
     // vacuous-property finding it is not). The plain verify-auto surfaces pass `None`.
     let btor2 = match &opts.mutation {
-        Some(m) => crate::adapter::btor2::mutate::apply_mutation(&btor2, m).map_err(|message| {
-            AdapterError {
+        Some(m) => crate::adapter::btor2::mutate::apply_mutation(&btor2, &m.with_flat_names())
+            .map_err(|message| AdapterError {
                 kind: AdapterErrorKind::UnsupportedConstruct,
                 location: None,
                 message: format!("sv mutate ({}): {message}", m.as_label()),
-            }
-        })?,
+            })?,
         None => btor2,
     };
 
@@ -11072,6 +11072,78 @@ module uart_tx(); endmodule"#;
                 .is_some_and(|st| st.iter().any(|(k, v)| k == "u_s.q" && *v == 1)),
             "the trace ends with `u_s.q` high: {cx:?}"
         );
+    }
+
+    /// mununu#713 — assertions inside a `for` generate (OpenTitan's per-channel checks) and in
+    /// instances a `for` generate elaborates: each iteration reads its own signals, named
+    /// `g_ch$k.r` as the lifted model names `g_ch[k].r`. `a_ch_follows` / `a_sub_follows` HOLD in
+    /// every iteration; `a_ch_zero` is VIOLATED in every iteration, with a trace.
+    #[test]
+    #[ignore = "requires slang + sv2v + Yosys + z3 (use the mununu-sva docker image); run with --ignored"]
+    fn e2e_assertions_inside_a_for_generate_are_checked_per_iteration() {
+        let design = "module fg_sub (input logic clk, input logic d);\n\
+                        logic s;\n\
+                        always_ff @(posedge clk) s <= d;\n\
+                        a_sub_follows: assert property (@(posedge clk) ##1 s == $past(d));\n\
+                      endmodule\n\
+                      module fg_top (input logic clk, input logic [1:0] a, output logic [1:0] q);\n\
+                        for (genvar i = 0; i < 2; i++) begin : g_ch\n\
+                          logic r;\n\
+                          always_ff @(posedge clk) r <= a[i];\n\
+                          assign q[i] = r;\n\
+                          a_ch_follows: assert property (@(posedge clk) ##1 r == $past(a[i]));\n\
+                          a_ch_zero: assert property (@(posedge clk) r == 1'b0);\n\
+                        end\n\
+                        for (genvar j = 0; j < 2; j++) begin : g_sub\n\
+                          fg_sub u_s (.clk(clk), .d(a[j]));\n\
+                        end\n\
+                      endmodule\n";
+        let sources = vec![("fg_top.sv".to_string(), design.to_string())];
+        let yopts = YosysOptions {
+            top: Some("fg_top".to_string()),
+            use_sv2v: true,
+            ..Default::default()
+        };
+        let opts = VerifyAutoOptions {
+            portfolio: Some(PortfolioMode::Sequential),
+            ..Default::default()
+        };
+        let report = verify_auto(&sources, &yopts, &opts).expect("verify_auto runs");
+        for p in &report.properties {
+            eprintln!(
+                "  {} {:?}: {:?}\n      {}",
+                p.name, p.label, p.outcome, p.formula
+            );
+        }
+        assert!(report.unsupported.is_empty(), "{:?}", report.unsupported);
+        let with_label = |l: &str| -> Vec<&PropertyVerdict> {
+            report
+                .properties
+                .iter()
+                .filter(|p| p.label.as_deref() == Some(l))
+                .collect()
+        };
+        for l in ["a_ch_follows", "a_sub_follows"] {
+            let rows = with_label(l);
+            assert_eq!(rows.len(), 2, "one `{l}` per iteration");
+            assert!(
+                rows.iter()
+                    .all(|p| matches!(p.outcome, VerifyOutcome::Holds)),
+                "{l}: {:?}",
+                rows.iter().map(|p| &p.outcome).collect::<Vec<_>>()
+            );
+        }
+        let zero = with_label("a_ch_zero");
+        assert_eq!(zero.len(), 2);
+        for (k, p) in zero.iter().enumerate() {
+            assert!(
+                matches!(p.outcome, VerifyOutcome::Violated { .. }),
+                "{:?}",
+                p.outcome
+            );
+            assert!(p.formula.contains(&format!("g_ch${k}.r")), "{}", p.formula);
+            assert!(p.counterexample.is_some(), "a trace for {}", p.name);
+        }
     }
 
     /// mununu#711 — a port that is its register's bits SWAPPED (OpenTitan's `esc_rx_o = {resp_p,

@@ -1076,7 +1076,8 @@ repo, so the lists below cannot drift from the code without a red test.
 | **expressions**: `+ - *` (≤ 32 bits), unary `-`, `& \| ^ ~^ ~` over vectors, `<< >> >>>`, `?:`, concatenation and constant replication, signed and unsigned comparisons, reductions (`^x` included), `$past(expr, k)`, `$stable` / `$changed` / `$rose` / `$fell` of an expression (`$rose` / `$fell` read its LSB), `$countones` / `$onehot` / `$onehot0` of an expression, a dynamic bit-select whose index cannot leave the range | one **minted** combinational node `mununu_x_<hash>` per expression, built from slang's own types and conversions; the formula reads it as an atom (`(mununu_x_… == 3)` against a constant, so the predicate cube keeps a dimension) | 2026-10-15 (OpenTitan Phase 2) |
 | a call to a user function whose body is one `return` (OpenTitan's `min` / `max`) | inlined into the expression, arguments bound with assignment semantics | 2026-10-15 (OpenTitan Phase 3) |
 | an assertion inside a sub-instance, at any depth (a module instantiated several times included; a logic-free checker module bound or instantiated into the design) | checked once **per instance**, over that instance's signals by their flattened names (`u_rx.state_q`) and with its own parameter values; an **input port** reads the expression connected to it, in the parent's scope; the property's `name` carries the instance path (`u_rx.u_dec.prim_diff_decode_sva_12`) | 2026-10-16 (mununu#709) |
-| a hierarchical reference from the top, `u_rx.state_q` | that flattened signal, when the module has one instance; refused with the reason when several instances share it (slang names the declaration, not the instance) or the path crosses a `for`-generate iteration (`gen[1].x` — brackets are not part of the atom grammar) | 2026-10-16 (mununu#709) |
+| a hierarchical reference from the top, `u_rx.state_q` | that flattened signal, when the module has one instance; refused with the reason when several instances share it (slang names the declaration, not the instance) | 2026-10-16 (mununu#709) |
+| an assertion inside a `for` generate, or in an instance a `for` generate elaborates (`csrng_cmd_stage`, `prim_alert_sender`) | checked once per iteration; the iteration `gen[k]` is spelled **`gen$k`** in formulas, counterexamples and the model (`[` opens a box in the μ-calculus) — `g_ch$1.r`, `u_core.gen_cmd_stage$0.u_cmd_stage.state_q` | 2026-10-17 (mununu#713) |
 
 Each definite verdict transfers exactly as in the plain `|=>` case — the lowerings add boxes,
 flops and fixpoints, never an abstraction.
@@ -1157,6 +1158,17 @@ name a port of a logic-free checker module has once yosys flattens it away. Enum
 by their DECLARATION, not their name: `Width` is 6 in one module and 2 in another, and the former
 name-keyed map gave every reference the first one's value. On the `prim_esc_rxtx` harness this turns
 40 skipped sub-block assertions into checked ones.
+
+**`for`-generate iterations are spelled `gen$k`** (2026-10-17, mununu#713).
+> Source of truth: [`flat_name`](../crates/mununu-core/src/adapter/btor2/parser.rs#L930) — surface: (CLI+API)
+
+yosys names what a `for` generate elaborates `gen_cmd_stage[0].…`, and `[` opens a box in the
+μ-calculus, so an atom could not name it: every assertion that read a signal of an iteration — its
+own, or one in an instance the loop elaborates — was refused. Every constant index is now written
+`$k`, in the translated formulas and in the lifted model's symbols alike (`MUNUNU_SHADOW_BTOR2_DUMP`
+shows them so); property *names* keep the brackets (`g_sub[0].u_s.fg_sub_sva_4`), and `sv mutate`
+accepts the bracketed register names `--list` prints. An input port connected to `a[j]` reads the
+iteration's own bit (the genvar is folded first).
 
 **A register is named only by a value-identical alias** (fixed 2026-10-16, mununu#711).
 > Source of truth: [`collect_symbols`](../crates/mununu-core/src/adapter/btor2/parser.rs#L354) — surface: (CLI+API)

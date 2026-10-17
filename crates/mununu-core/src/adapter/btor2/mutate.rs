@@ -45,6 +45,26 @@ pub enum Mutation {
 }
 
 impl Mutation {
+    /// The same mutation over [`super::parser::flat_name`]s — what a verify-auto model calls a
+    /// register `sv mutate --list` printed as `gen[1].q` (mununu#713).
+    pub fn with_flat_names(&self) -> Mutation {
+        use super::parser::flat_name;
+        match self {
+            Mutation::Stick(r) => Mutation::Stick(flat_name(r)),
+            Mutation::DropReset(r) => Mutation::DropReset(flat_name(r)),
+            Mutation::OffByOne {
+                reg,
+                const_nid,
+                delta,
+            } => Mutation::OffByOne {
+                reg: flat_name(reg),
+                const_nid: *const_nid,
+                delta: *delta,
+            },
+            Mutation::InvertCond(s) => Mutation::InvertCond(flat_name(s)),
+        }
+    }
+
     /// The stable CLI/label spelling (`stick:<reg>` / `drop-reset:<reg>` /
     /// `off-by-one:<reg>[@<nid>][:±delta]` / `invert-cond:<sig>`).
     pub fn as_label(&self) -> String {
