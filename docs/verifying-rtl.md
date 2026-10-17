@@ -225,11 +225,12 @@ value would have a real ambiguity. The parentheses have none. A name may contain
 unrecognised and the annotation is skipped with a message, rather than being half-accepted under a
 truncated name.
 
-**A duplicate name is refused**, with the other property named in the message. The expectation
-lookup is a `find()`, so two properties answering to one pin would make `--expect <name>` silently
-match only the first. This is deliberately stricter than SVA labels, which may legally repeat — two
-asserts inside one labelled `begin…end` inherit the same label, so refusing those would reject valid
-SystemVerilog. An annotation name is author-chosen, one per annotation, and has no such excuse.
+**A duplicate name is refused**, with the other property named in the message. A pin names every
+property answering to it (mununu#716), so two annotations sharing a name would turn one claim into
+a claim about both without the author saying so. This is deliberately stricter than SVA labels,
+which may legally repeat — two asserts inside one labelled `begin…end` inherit the same label, so
+refusing those would reject valid SystemVerilog. An annotation name is author-chosen, one per
+annotation, and has no such excuse.
 
 ## No-sidecar SystemVerilog verification: `sv verify-auto`
 
@@ -361,6 +362,15 @@ mununu sv verify-auto dut.sv --source dut_sva.sv --top dut \
 | `--expect-count N` | a binding that stopped binding produces **fewer** properties, and a smaller all-green set reads as a clean pass. Nothing else catches it, because a property that stopped being produced is invisible to every per-property check |
 | `--expect-violated a,b` | a twin that breaks *every* property teaches nothing about which property covers which fault, so "everything else still holds" is not optional |
 | `--expect 'a=VERDICT,…'` | pins exact verdicts; an **unnamed** VIOLATED is still a failure, so the verb cannot become a way to ignore what you did not mention |
+
+**What a key names (mununu#716).** A key in `--expect-violated` or `--expect` names a property by
+its SV **label** or by its positional name, label first: if any property carries the key as its
+label, the key names those properties and no positional name is consulted. A repeated label names
+**every** property carrying it — each one must have the claimed verdict, and failures are reported
+under the instance path. The same rule decides the completeness half of the claim, so a twin
+pinned by its label (`--expect-violated a_clr_lands`) is "named" in "every other property must
+still hold" and in "an unnamed VIOLATED is still a failure". Before mununu#716 the completeness
+rules matched the positional name only, and a label-pinned violated claim always failed.
 
 **Exit codes.** Declaring an expectation **supersedes** `--fail-on` — it has to, or `--expect-violated` would exit 2 on the very violation you asked for.
 

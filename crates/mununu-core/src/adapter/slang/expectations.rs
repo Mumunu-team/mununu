@@ -35,7 +35,7 @@
 //! its own argument — not reintroduced here as a convenience, because the failure it enabled was
 //! not a tooling failure. It was that ⊥ stopped feeling like "not checked".
 
-use super::verify_auto::{AutoVerifyReport, VerifyOutcome};
+use super::verify_auto::{AutoVerifyReport, PropertyVerdict, VerifyOutcome};
 
 /// A verdict a caller can claim for a named property.
 ///
@@ -125,13 +125,24 @@ pub fn evaluate(report: &AutoVerifyReport, exp: &Expectations) -> ExpectationRes
     // time, instead of in one cut. The label is tried FIRST so that a design where a label
     // happens to collide with another property's positional name resolves to what the author
     // wrote.
-    let find = |name: &str| {
-        report
-            .properties
-            .iter()
-            .find(|p| p.label.as_deref() == Some(name))
-            .or_else(|| report.properties.iter().find(|p| p.name == name))
+    //
+    // mununu#716 — the SAME resolution decides both halves of a claim: which properties a key
+    // checks, and which properties count as "named" in the completeness rules below. Resolving by
+    // label but completing by name made a twin pinned by its label fail the very claim that
+    // named it. A label may legally repeat (two asserts in one labelled block, a bound module
+    // instantiated twice), so a key resolves to EVERY property carrying it.
+    let resolve = |key: &str| resolve(report, key);
+    let names = |keys: &[&str], p: &PropertyVerdict| {
+        keys.iter()
+            .any(|k| resolve(k).iter().any(|q| std::ptr::eq(*q, p)))
     };
+    let violated_keys: Vec<&str> = exp.violated.iter().map(String::as_str).collect();
+    let named_violated_keys: Vec<&str> = exp
+        .named
+        .iter()
+        .filter(|(_, w)| *w == ExpectedVerdict::Violated)
+        .map(|(n, _)| n.as_str())
+        .collect();
 
     // --- the count ------------------------------------------------------------------
     // Checked first and independently: a property that silently stopped being produced is
@@ -179,25 +190,27 @@ pub fn evaluate(report: &AutoVerifyReport, exp: &Expectations) -> ExpectationRes
 
     // --- violated (+ everything else holds) -----------------------------------------
     for name in &exp.violated {
-        match find(name) {
-            None => failures.push(ExpectationFailure {
+        let matched = resolve(name);
+        if matched.is_empty() {
+            failures.push(ExpectationFailure {
                 property: Some(name.clone()),
                 reason: absent_reason(report, name, "violated"),
-            }),
-            Some(p) if !matches!(p.outcome, VerifyOutcome::Violated { .. }) => {
+            });
+        }
+        for p in matched {
+            if !matches!(p.outcome, VerifyOutcome::Violated { .. }) {
                 failures.push(ExpectationFailure {
                     property: Some(p.name.clone()),
                     reason: format!("expected violated, got {}", describe(&p.outcome)),
-                })
+                });
             }
-            Some(_) => {}
         }
     }
     if !exp.violated.is_empty() {
         // The other half of the contrast-twin claim: a twin that breaks EVERYTHING teaches
         // nothing about which property covers which fault.
         for p in &report.properties {
-            if exp.violated.iter().any(|n| n == &p.name) {
+            if names(&violated_keys, p) {
                 continue;
             }
             if !matches!(p.outcome, VerifyOutcome::Holds) {
@@ -215,16 +228,20 @@ pub fn evaluate(report: &AutoVerifyReport, exp: &Expectations) -> ExpectationRes
 
     // --- named --------------------------------------------------------------------
     for (name, want) in &exp.named {
-        match find(name) {
-            None => failures.push(ExpectationFailure {
+        let matched = resolve(name);
+        if matched.is_empty() {
+            failures.push(ExpectationFailure {
                 property: Some(name.clone()),
                 reason: absent_reason(report, name, want.label()),
-            }),
-            Some(p) if p.outcome.label() != want.label() => failures.push(ExpectationFailure {
-                property: Some(p.name.clone()),
-                reason: format!("expected {}, got {}", want.label(), describe(&p.outcome)),
-            }),
-            Some(_) => {}
+            });
+        }
+        for p in matched {
+            if p.outcome.label() != want.label() {
+                failures.push(ExpectationFailure {
+                    property: Some(p.name.clone()),
+                    reason: format!("expected {}, got {}", want.label(), describe(&p.outcome)),
+                });
+            }
         }
     }
     if !exp.named.is_empty() {
@@ -234,10 +251,7 @@ pub fn evaluate(report: &AutoVerifyReport, exp: &Expectations) -> ExpectationRes
             if !matches!(p.outcome, VerifyOutcome::Violated { .. }) {
                 continue;
             }
-            let claimed_violated = exp
-                .named
-                .iter()
-                .any(|(n, w)| n == &p.name && *w == ExpectedVerdict::Violated);
+            let claimed_violated = names(&named_violated_keys, p);
             if !claimed_violated {
                 failures.push(ExpectationFailure {
                     property: Some(p.name.clone()),
@@ -252,6 +266,22 @@ pub fn evaluate(report: &AutoVerifyReport, exp: &Expectations) -> ExpectationRes
         satisfied: failures.is_empty(),
         failures,
     }
+}
+
+/// The properties a claim key names: every property whose SV label is `key`, or — only when no
+/// label matches — every property whose positional name is `key`. Label first, so a label that
+/// collides with another property's positional name names what the author wrote (mununu#544);
+/// all matches, so a repeated label names every property carrying it (mununu#716).
+fn resolve<'a>(report: &'a AutoVerifyReport, key: &str) -> Vec<&'a PropertyVerdict> {
+    let by_label: Vec<_> = report
+        .properties
+        .iter()
+        .filter(|p| p.label.as_deref() == Some(key))
+        .collect();
+    if !by_label.is_empty() {
+        return by_label;
+    }
+    report.properties.iter().filter(|p| p.name == key).collect()
 }
 
 /// Why a claimed property is not in the report — naming the untranslatable reason when there is
@@ -281,7 +311,6 @@ fn describe(outcome: &VerifyOutcome) -> String {
 mod tests {
     use super::*;
     use crate::adapter::slang::translate::SvaKind;
-    use crate::adapter::slang::verify_auto::PropertyVerdict;
 
     fn report(props: &[(&str, VerifyOutcome)]) -> AutoVerifyReport {
         AutoVerifyReport {
@@ -682,6 +711,128 @@ mod tests {
             res.failures.len(),
             1,
             "a claim naming a label that no longer exists must FAIL"
+        );
+    }
+
+    /// mununu#716 — a contrast twin pinned by its LABEL. rosf's `block_contract` twin reports
+    /// `name: "sva.counter_noclr_sva_sva_0"`, `label: "a_clr_lands"`; `--expect-violated
+    /// a_clr_lands` resolved the label but then failed it as "not named as violated", because the
+    /// completeness rule matched claims against `name` only.
+    #[test]
+    fn a_twin_pinned_violated_by_its_label_is_satisfied() {
+        let r = labelled_report(&[
+            (
+                "sva.counter_noclr_sva_sva_0",
+                "a_clr_lands",
+                VerifyOutcome::Violated { false_cells: 1 },
+            ),
+            (
+                "sva.counter_noclr_sva_sva_1",
+                "a_inc_counts",
+                VerifyOutcome::Holds,
+            ),
+        ]);
+        let res = evaluate(&r, &violated(&["a_clr_lands"]));
+        assert!(
+            res.failures.is_empty(),
+            "the label named the violated property: {:?}",
+            res.failures
+        );
+    }
+
+    /// mununu#716 — the same twin under a fully named claim: `--expect a_clr_lands=violated`
+    /// reported "VIOLATED but not named" for the very property the claim named.
+    #[test]
+    fn a_named_violated_claim_by_label_is_satisfied() {
+        let r = labelled_report(&[
+            (
+                "sva.counter_noclr_sva_sva_0",
+                "a_clr_lands",
+                VerifyOutcome::Violated { false_cells: 1 },
+            ),
+            (
+                "sva.counter_noclr_sva_sva_1",
+                "a_inc_counts",
+                VerifyOutcome::Holds,
+            ),
+        ]);
+        let res = evaluate(
+            &r,
+            &named(&[
+                ("a_clr_lands", ExpectedVerdict::Violated),
+                ("a_inc_counts", ExpectedVerdict::Holds),
+            ]),
+        );
+        assert!(
+            res.failures.is_empty(),
+            "the label named the violated property: {:?}",
+            res.failures
+        );
+    }
+
+    /// mununu#716 — SV labels may legally repeat (two asserts in one labelled block, or one
+    /// bound module instantiated twice). A label names EVERY property carrying it, so a twin
+    /// that violates both instances satisfies the claim...
+    #[test]
+    fn a_shared_label_names_every_property_carrying_it() {
+        let r = labelled_report(&[
+            (
+                "u_a.m_sva_0",
+                "a_x",
+                VerifyOutcome::Violated { false_cells: 1 },
+            ),
+            (
+                "u_b.m_sva_0",
+                "a_x",
+                VerifyOutcome::Violated { false_cells: 2 },
+            ),
+            ("u_a.m_sva_1", "a_y", VerifyOutcome::Holds),
+        ]);
+        let res = evaluate(&r, &violated(&["a_x"]));
+        assert!(res.failures.is_empty(), "{:?}", res.failures);
+        let res = evaluate(&r, &named(&[("a_x", ExpectedVerdict::Violated)]));
+        assert!(res.failures.is_empty(), "{:?}", res.failures);
+    }
+
+    /// ...and one instance that still holds fails the claim, naming that instance — a shared
+    /// label must not let one violated copy stand in for all of them.
+    #[test]
+    fn a_shared_label_fails_on_the_instance_that_does_not_match() {
+        let r = labelled_report(&[
+            (
+                "u_a.m_sva_0",
+                "a_x",
+                VerifyOutcome::Violated { false_cells: 1 },
+            ),
+            ("u_b.m_sva_0", "a_x", VerifyOutcome::Holds),
+        ]);
+        let res = evaluate(&r, &violated(&["a_x"]));
+        assert_eq!(res.failures.len(), 1, "{:?}", res.failures);
+        assert_eq!(res.failures[0].property.as_deref(), Some("u_b.m_sva_0"));
+    }
+
+    /// The documented collision rule survives: a key that is one property's label and another's
+    /// positional name names the LABELLED property only, in resolution and completeness alike.
+    #[test]
+    fn a_label_wins_over_a_colliding_positional_name_in_completeness_too() {
+        let r = labelled_report(&[
+            (
+                "m_sva_0",
+                "m_sva_1",
+                VerifyOutcome::Violated { false_cells: 1 },
+            ),
+            (
+                "m_sva_1",
+                "a_other",
+                VerifyOutcome::Violated { false_cells: 1 },
+            ),
+        ]);
+        let res = evaluate(&r, &violated(&["m_sva_1"]));
+        assert_eq!(res.failures.len(), 1, "{:?}", res.failures);
+        assert_eq!(
+            res.failures[0].property.as_deref(),
+            Some("m_sva_1"),
+            "the positional m_sva_1 is not named by a key that is someone else's label"
         );
     }
 }
