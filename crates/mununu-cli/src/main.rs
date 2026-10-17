@@ -9739,7 +9739,9 @@ mod build_identity_tests {
         let sha = inner.strip_suffix("-dirty").unwrap_or(inner);
         assert_eq!(sha.len(), 7, "{inner}");
         assert!(sha.chars().all(|c| c.is_ascii_hexdigit()), "{inner}");
-        let full = option_env!("MUNUNU_BUILD_SHA").expect("a commit in the line is recorded");
+        let Some(full) = option_env!("MUNUNU_BUILD_SHA") else {
+            panic!("a commit in the version line must also be recorded as MUNUNU_BUILD_SHA");
+        };
         assert!(full.starts_with(sha), "{full} vs {sha}");
         assert_eq!(
             inner.ends_with("-dirty"),
