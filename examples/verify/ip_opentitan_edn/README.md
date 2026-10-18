@@ -33,14 +33,14 @@ reset under one. Set `MUNUNU_PROPERTY_BUDGET_MS` on a run this size (see the cav
 To re-vendor at another commit: `python3 ../../../scripts/vendor_opentitan_ip.py --ip edn --commit <sha>
 --checkout <dir> --out source --rewrite "edn_core.sv|'{default: 1'b0}|'{default: '0}"` (needs `slang`).
 
-## What was measured (2026-10-18, `mununu-sva`, branch `feat/hier-refs-any-instance`, 5-min property budget)
+## What was measured (2026-10-18, `mununu-sva`, shipped defaults — `MUNUNU_PROPERTY_BUDGET_MS` 15 min, `MUNUNU_RESCUE_SLICE_MS` 60 s)
 
 | rows | holds | violated | unknown (⊥) | unsupported |
 |---|---|---|---|---|
-| the IP's own SVA (52) | **23** | 1 | 20 | 8 |
+| the IP's own SVA (52) | **23** | **8** | 13 | 8 |
 | · `ASSERT_KNOWN` (13; `$isunknown` folds to false — the model is 2-state) | 13 (`constant`) | | | |
 | · error → alert checks, `ASSERT_PRIM_*_ERROR_TRIGGER_ALERT` (15): a fault flag in a sub-instance ⇒ `alert_tx_o[1].alert_p` within 30 cycles | **10** — the main FSM, all 8 endpoint FSMs, the register-write one-hot check (`explicit` cube) | | 5 — the `prim_count` and FIFO-pointer checks (32-bit duplicated counters, cone over the 192-bit cap) | |
-| · `EdnFatalAlertNoRsp_A` ×8: `alert[1] |-> edn_o[i].edn_ack == 0` | | **1**, 6 cycles from reset (`symbolic` + BMC rescue) | 7 (the re-plan's BMC runs under a fixed 5-s per-query timeout the property budget never reaches, so one to three of the eight identical rows finish per run, load-dependent — mununu#726) | |
+| · `EdnFatalAlertNoRsp_A` ×8: `alert[1] |-> edn_o[i].edn_ack == 0` | | **8**, each 6 cycles from reset with its trace (the reach rescue's native BMC, 20–30 s a row under the 60-s `MUNUNU_RESCUE_SLICE_MS`; before mununu#726 the rescue ran under a fixed 5-s query timeout and one to three rows decided per run) | | |
 | · `EdnDataStableDisable_A` ×8 (32-bit bus stable while disabled) | | | 8 | |
 | · `EdnDataStable_A` ×8 | | | | 8 (`[->1]` goto repetition) |
 | system-level properties (`mununu_properties.sv`, 14 rows, below) | **7** | 0 | 7 | — |
@@ -69,7 +69,7 @@ logic. They read the flattened names of the lifted model and the sparse FSM enco
 | `edn_main_sm_error_is_recorded` / `_record_is_sticky` — `Error` sets the sticky `ERR_CODE` bit next cycle; it never clears | FSM → core → register block | **HOLDS** / **HOLDS** |
 | `edn_swport_entry_excludes_boot_mode` — from Idle with `CTRL.BOOT_REQ_MODE` asserted the FSM does not enter SWPortMode | FSM + control register | **HOLDS** |
 | `edn_ack_sm_0_error_is_terminal` / `_is_recorded` | endpoint FSM → register block | **HOLDS** / **HOLDS** |
-| `edn_fatal_alert_has_a_source` — a fatal alert request is recorded next cycle, or is a FIFO integrity error, or was asked for | core → register block | **⊥** — no verdict in 26 min (the cube's predicate image on a cone over most of the core; not in `mununu_properties.sv`); SymbiYosys `abc pdr` proves the same-cycle form in 3 s — an engine gap, recorded |
+| `edn_fatal_alert_has_a_source` — a fatal alert request is recorded next cycle, or is a FIFO integrity error, or was asked for | core → register block | **VIOLATED in 7 s** (reach rescue) — and rightly so: the first form listed six of the eight `ERR_CODE` bits; the trace is a software `ERR_CODE_TEST` write that records `sfifo_rescmd_err`. Before the budget plumbing of mununu#726/#728 this row ran 26 min without a verdict. The corrected form (all eight `ERR_CODE` bits) **HOLDS in 0.5 s** by the same rescue (k-induction) — the fact SymbiYosys's PDR proved; it joins `mununu_properties.sv` in the next round |
 | `edn_no_deadlock` — every state has a successor (sanity) | — | **HOLDS** (`constant`) |
 | `edn_main_sm_recover_idle` (`AG EF Idle`) and its two `EF` twins | the FSM | ⊥ ×3 (SymbiYosys `cover`: Error and SWPortMode reached at step 4) |
 | `edn_ack_sm_{0,7}_recover_idle` and their `EF DataWait` twins | endpoint FSMs | ⊥ ×4 (`cover`: DataWait reached at step 6) |

@@ -103,6 +103,11 @@ pub enum BmcError {
     Encode(EncodeError),
     /// The design declares no `bad` property — nothing to check.
     NoBadProperty,
+    /// mununu#726 / #728 — the thread-local wall-clock budget (`run_budget`) expired, or a query
+    /// timed out under it, before depth `k` was decided. Distinct from a bounded `NoCexWithin`:
+    /// a timed-out frame says NOTHING about whether `bad` is reachable there, so it must never be
+    /// read as "no counterexample".
+    BudgetExpired { k: u32 },
 }
 
 impl std::fmt::Display for BmcError {
@@ -110,6 +115,9 @@ impl std::fmt::Display for BmcError {
         match self {
             BmcError::Encode(e) => write!(f, "native BMC: encode failed: {e:?}"),
             BmcError::NoBadProperty => write!(f, "native BMC: design has no `bad` property"),
+            BmcError::BudgetExpired { k } => {
+                write!(f, "native BMC: the wall-clock budget expired at depth {k}")
+            }
         }
     }
 }
@@ -352,17 +360,41 @@ pub fn bmc_bad_reachable_witness(
         for c in u.constraints_at(0) {
             solver.assert(&c);
         }
+        // mununu#726 — under a thread-local budget every frame's query is bounded by the time
+        // left (unbounded stays unbounded: the floor is today's behaviour), and the loop polls
+        // the budget per depth. A query that times out is an ERROR, not "no cex at this depth".
+        let budgeted = crate::adapter::run_budget::current()
+            .remaining_ms()
+            .is_some();
         for k in 0..=n {
+            if crate::adapter::run_budget::expired() {
+                return Err(BmcError::BudgetExpired { k: k as u32 });
+            }
+            if budgeted {
+                let mut params = z3::Params::new();
+                params.set_u32(
+                    "timeout",
+                    crate::adapter::run_budget::clamp_query_ms(u32::MAX),
+                );
+                solver.set_params(&params);
+            }
             solver.push();
             solver.assert(u.bad_at(k));
-            let sat = matches!(solver.check(), z3::SatResult::Sat);
-            if sat {
-                // Extract the concrete witness from the model BEFORE popping it.
-                let trace = solver
-                    .get_model()
-                    .map(|m| u.extract_trace(&m, k, &state_syms, &input_syms));
-                solver.pop(1);
-                return Ok((BmcOutcome::Violated { depth: k as u32 }, trace));
+            let res = solver.check();
+            match res {
+                z3::SatResult::Sat => {
+                    // Extract the concrete witness from the model BEFORE popping it.
+                    let trace = solver
+                        .get_model()
+                        .map(|m| u.extract_trace(&m, k, &state_syms, &input_syms));
+                    solver.pop(1);
+                    return Ok((BmcOutcome::Violated { depth: k as u32 }, trace));
+                }
+                z3::SatResult::Unsat => {}
+                z3::SatResult::Unknown => {
+                    solver.pop(1);
+                    return Err(BmcError::BudgetExpired { k: k as u32 });
+                }
             }
             solver.pop(1);
             if k < n {
@@ -463,6 +495,19 @@ pub fn decide_bad_safety_cancellable(
                     >= crate::adapter::MEMBER_CANCEL_GRACE
             {
                 return Ok(SafetyVerdict::Unknown { k: k as u32 });
+            }
+            // mununu#726 — the thread-local budget stops the ladder at a depth boundary (no
+            // grace: an expired budget is not "about to finish"), and the per-query timeout is
+            // re-clamped every depth so the LAST query cannot overshoot the deadline. With no
+            // budget in effect this is exactly the fixed `timeout_ms` of before.
+            if crate::adapter::run_budget::expired() {
+                return Ok(SafetyVerdict::Unknown { k: k as u32 });
+            }
+            if let Some(ms) = timeout_ms {
+                let mut params = z3::Params::new();
+                params.set_u32("timeout", crate::adapter::run_budget::clamp_query_ms(ms));
+                base.set_params(&params);
+                step.set_params(&params);
             }
             // Base — reachable counterexample? Violated ONLY on a definite Sat.
             base.push();
@@ -749,6 +794,56 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// mununu#726 — the ladder polls the thread-local budget: with an already-expired budget it
+    /// abstains at depth 0 in well under a second instead of running `max_k` depths. Control: the
+    /// same call with no budget decides `REACH` as before.
+    #[test]
+    fn decide_bad_safety_stops_on_budget_expiry_before_any_depth() {
+        use crate::adapter::run_budget::{Budget, enter};
+        let file = parser::parse(WIDE).unwrap();
+        let t0 = std::time::Instant::now();
+        let v = {
+            let _g = enter(&Budget::with_ms(0));
+            decide_bad_safety_cancellable(&file, 400, Some(5_000), None).unwrap()
+        };
+        assert_eq!(
+            v,
+            SafetyVerdict::Unknown { k: 0 },
+            "an expired budget abstains at depth 0"
+        );
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(1),
+            "{:?}",
+            t0.elapsed()
+        );
+        let reach = parser::parse(REACH).unwrap();
+        assert_eq!(
+            decide_bad_safety(&reach, 8, Some(5_000)).unwrap(),
+            SafetyVerdict::Violated { depth: 1 },
+            "unbounded: the floor is today's behaviour"
+        );
+    }
+
+    /// mununu#726 — a witness search under an expired budget is a budget ERROR, never a bounded
+    /// `NoCexWithin` (which a caller would read as "spurious counterexample"). Unbounded, the same
+    /// call on the bounded-safe design is `NoCexWithin` exactly as before.
+    #[test]
+    fn witness_search_reports_budget_expiry_not_no_cex() {
+        use crate::adapter::run_budget::{Budget, enter};
+        let file = parser::parse(SAFE).unwrap();
+        let r = {
+            let _g = enter(&Budget::with_ms(0));
+            bmc_bad_reachable_witness(&file, 10)
+        };
+        assert!(
+            matches!(r, Err(BmcError::BudgetExpired { k: 0 })),
+            "expired budget → BudgetExpired at depth 0, got {r:?}"
+        );
+        let (o, t) = bmc_bad_reachable_witness(&file, 10).unwrap();
+        assert_eq!(o, BmcOutcome::NoCexWithin { k: 10 });
+        assert!(t.is_none());
     }
 
     #[test]

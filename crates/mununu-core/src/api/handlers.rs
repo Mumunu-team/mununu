@@ -2094,6 +2094,7 @@ fn run_symbolic_cegar_response(
         SymbolicCegarTermination::Converged => "converged",
         SymbolicCegarTermination::BoundedIterationsReached => "bounded-iterations-reached",
         SymbolicCegarTermination::PredicateSourceExhausted => "predicate-source-exhausted",
+        SymbolicCegarTermination::BudgetExpired => "budget-expired",
     }
     .to_string();
     let v = &result.final_verdicts;

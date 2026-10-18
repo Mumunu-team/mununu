@@ -145,13 +145,17 @@ fn run_exact(content: &str) -> Option<bool> {
 /// k-inductive safety proof), `None` abstained (Unknown / timeout / encode error).
 /// Unlike the exact BDD engine it has no 40-bit cone cap, and unlike btormc/Pono
 /// it needs no subprocess — mununu's own scalable safety member.
-fn run_native(file: &Btor2File, cancel: Option<&std::sync::atomic::AtomicBool>) -> Option<bool> {
+fn run_native(
+    file: &Btor2File,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+    query_ms: u32,
+) -> Option<bool> {
     timed(
         "native",
         || match native_bmc::decide_bad_safety_cancellable(
             file,
             native_bmc::DEFAULT_MAX_K,
-            Some(native_bmc::DEFAULT_TIMEOUT_MS),
+            Some(query_ms),
             cancel,
         ) {
             Ok(SafetyVerdict::Violated { .. }) => Some(true),
@@ -167,7 +171,12 @@ fn run_native(file: &Btor2File, cancel: Option<&std::sync::atomic::AtomicBool>) 
 /// invariant discovery decides *safe* designs whose invariant native k-induction
 /// cannot reach by simple induction below a large depth — also in-process, no
 /// subprocess.
-fn run_spacer(file: &Btor2File, cancel: Option<&std::sync::atomic::AtomicBool>) -> Option<bool> {
+fn run_spacer(
+    file: &Btor2File,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+    isolated_ms: u32,
+    in_process_ms: u32,
+) -> Option<bool> {
     // z3's Fixedpoint (SPACER) has a demonstrated FLAKY SIGSEGV on some CHC encodings
     // (e.g. `vis_arrays_bufferAlloc`) — a z3-internal abort, uncatchable in-process and
     // independent of concurrency (it segfaults even run alone). When the CLI / server
@@ -177,15 +186,10 @@ fn run_spacer(file: &Btor2File, cancel: Option<&std::sync::atomic::AtomicBool>) 
     // env var (unit tests, or an embedding without the CLI binary) fall back to the
     // in-process engine — those paths never exercise a crash-triggering design.
     timed("spacer", || match std::env::var_os("MUNUNU_SELF_EXE") {
-        Some(exe) => run_spacer_isolated(
-            std::path::Path::new(&exe),
-            file,
-            native_spacer::DEFAULT_TIMEOUT_MS,
-            cancel,
-        ),
+        Some(exe) => run_spacer_isolated(std::path::Path::new(&exe), file, isolated_ms, cancel),
         // The in-process engine has no cancellation point (z3's Fixedpoint runs to its own
         // timeout); it is the test-only fallback, so the flag is simply not honoured here.
-        None => run_spacer_in_process(file, native_spacer::DEFAULT_TIMEOUT_MS),
+        None => run_spacer_in_process(file, in_process_ms),
     })
 }
 
@@ -262,15 +266,20 @@ const INTERP_OVERALL_TIMEOUT_MS: u64 = 25_000;
 /// reach at their budgets — measured *unique* HWMCC coverage (`gen12`/`gen14`/`gen39`,
 /// which the whole rest of the portfolio leaves `Unknown`). cvc5 (a subprocess) is
 /// required; when it is absent the engine abstains.
-fn run_interp(file: &Btor2File, cancel: &std::sync::atomic::AtomicBool) -> Option<bool> {
+fn run_interp(
+    file: &Btor2File,
+    cancel: &std::sync::atomic::AtomicBool,
+    query_ms: u32,
+    overall_ms: u64,
+) -> Option<bool> {
     timed(
         "interp",
         || match native_interp::verify_safety_interp_cancellable(
             file,
             INTERP_MAX_SUFFIX,
             INTERP_MAX_ITERS,
-            INTERP_QUERY_TIMEOUT_MS,
-            INTERP_OVERALL_TIMEOUT_MS,
+            query_ms,
+            overall_ms,
             cancel,
         ) {
             InterpSafetyVerdict::Unsafe { .. } => Some(true),
@@ -278,6 +287,53 @@ fn run_interp(file: &Btor2File, cancel: &std::sync::atomic::AtomicBool) -> Optio
             InterpSafetyVerdict::Undecided { .. } => None,
         },
     )
+}
+
+/// mununu#726 — the members' time bounds for one portfolio run, derived from the thread-local
+/// [`run_budget`](crate::adapter::run_budget) ONCE at entry. With no budget in effect every value
+/// is the constant it always was (the floor = today's behaviour, byte-identical). Under a budget
+/// the members may use the time that is left: the native BMC / k-induction per-query timeout grows
+/// to the remaining time (the fixed 5 s let one to three of eight identical rows decide per run on
+/// the full OpenTitan `edn` IP), the isolated SPACER child and the interpolation search get the
+/// remainder as their wall, the subprocess members' wall IS the remainder (above 60 s btormc's
+/// depth cap lifts automatically, as before), and the in-process SPACER fallback — which has no
+/// cancellation point — keeps its 10 s so a test-only run never holds the join for the whole slice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MemberTimeouts {
+    pub native_query_ms: u32,
+    pub spacer_isolated_ms: u32,
+    pub spacer_in_process_ms: u32,
+    pub interp_query_ms: u32,
+    pub interp_overall_ms: u64,
+    pub subprocess: std::time::Duration,
+}
+
+pub(crate) fn member_timeouts(
+    remaining_ms: Option<u64>,
+    subprocess: std::time::Duration,
+) -> MemberTimeouts {
+    match remaining_ms {
+        None => MemberTimeouts {
+            native_query_ms: native_bmc::DEFAULT_TIMEOUT_MS,
+            spacer_isolated_ms: native_spacer::DEFAULT_TIMEOUT_MS,
+            spacer_in_process_ms: native_spacer::DEFAULT_TIMEOUT_MS,
+            interp_query_ms: INTERP_QUERY_TIMEOUT_MS,
+            interp_overall_ms: INTERP_OVERALL_TIMEOUT_MS,
+            subprocess,
+        },
+        Some(rem) => {
+            let rem = rem.max(1);
+            let rem32 = u32::try_from(rem).unwrap_or(u32::MAX);
+            MemberTimeouts {
+                native_query_ms: rem32,
+                spacer_isolated_ms: rem32,
+                spacer_in_process_ms: native_spacer::DEFAULT_TIMEOUT_MS.min(rem32),
+                interp_query_ms: INTERP_QUERY_TIMEOUT_MS.max(rem32 / 5).min(rem32),
+                interp_overall_ms: rem,
+                subprocess: std::time::Duration::from_millis(rem),
+            }
+        }
+    }
 }
 
 /// Merge the members' verdicts into a [`ReachOutcome`], in the fixed engine order
@@ -399,6 +455,16 @@ pub fn decide_reach_portfolio_cancellable(
     cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> ReachOutcome {
     use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+    // mununu#726 — read the thread-local budget ONCE: an already-expired budget decides nothing
+    // (deterministic: no member is spawned), and the members' bounds follow the time left. The
+    // scoped threads re-enter the same budget — a spawned thread inherits none (`run_budget`'s
+    // documented footgun), so without this the members would run unbounded.
+    let budget = crate::adapter::run_budget::current();
+    if budget.expired() {
+        return ReachOutcome::default();
+    }
+    let t = member_timeouts(budget.remaining_ms(), subprocess_timeout);
+    let subprocess_timeout = t.subprocess;
     let content = emit_btor2(file);
     // Raising the wall budget signals "reach deeper" — so lift btormc's depth cap too.
     let btormc_kmax = if subprocess_timeout > btormc::DEFAULT_TIMEOUT {
@@ -426,13 +492,14 @@ pub fn decide_reach_portfolio_cancellable(
     let decided = &decided;
     let finished = AtomicBool::new(false);
     let finished = &finished;
+    let budget = &budget;
     std::thread::scope(|scope| {
-        // Forward an external cancellation into `decided`, which every cancellable member
-        // already polls. Stops when the members are joined.
-        if let Some(cancel) = cancel {
+        // Forward an external cancellation — or the budget's expiry — into `decided`, which
+        // every cancellable member already polls. Stops when the members are joined.
+        if cancel.is_some() || budget.remaining_ms().is_some() {
             scope.spawn(move || {
                 while !finished.load(Relaxed) {
-                    if cancel.load(Relaxed) {
+                    if cancel.is_some_and(|c| c.load(Relaxed)) || budget.expired() {
                         decided.store(true, Relaxed);
                         break;
                     }
@@ -440,7 +507,8 @@ pub fn decide_reach_portfolio_cancellable(
                 }
             });
         }
-        let btormc_h = scope.spawn(|| {
+        let btormc_h = scope.spawn(move || {
+            let _g = crate::adapter::run_budget::enter(budget);
             let v = timed("btormc", || {
                 btormc::decide_via_btormc(file, btormc_kmax, subprocess_timeout, Some(decided)).ok()
             });
@@ -449,7 +517,8 @@ pub fn decide_reach_portfolio_cancellable(
             }
             v
         });
-        let pono_h = scope.spawn(|| {
+        let pono_h = scope.spawn(move || {
+            let _g = crate::adapter::run_budget::enter(budget);
             let v = timed("pono", || {
                 pono::decide_via_pono(
                     file,
@@ -467,15 +536,22 @@ pub fn decide_reach_portfolio_cancellable(
         // The native and SPACER engines are in-process Z3 work — each on its own
         // thread so it overlaps the exact engine + the subprocess members rather than
         // serialising.
-        let native_h = scope.spawn(|| {
-            let v = run_native(file, Some(decided));
+        let native_h = scope.spawn(move || {
+            let _g = crate::adapter::run_budget::enter(budget);
+            let v = run_native(file, Some(decided), t.native_query_ms);
             if v.is_some() {
                 decided.store(true, Relaxed);
             }
             v
         });
-        let spacer_h = scope.spawn(|| {
-            let v = run_spacer(file, Some(decided));
+        let spacer_h = scope.spawn(move || {
+            let _g = crate::adapter::run_budget::enter(budget);
+            let v = run_spacer(
+                file,
+                Some(decided),
+                t.spacer_isolated_ms,
+                t.spacer_in_process_ms,
+            );
             if v == Some(false) {
                 decided.store(true, Relaxed);
             }
@@ -483,7 +559,10 @@ pub fn decide_reach_portfolio_cancellable(
         });
         // Owned McMillan interpolation — now a FIRST-CLASS concurrent member (was
         // last-resort). Polls `decided` and bails out early once a faster member decides.
-        let interp_h = scope.spawn(|| run_interp(file, decided));
+        let interp_h = scope.spawn(move || {
+            let _g = crate::adapter::run_budget::enter(budget);
+            run_interp(file, decided, t.interp_query_ms, t.interp_overall_ms)
+        });
         // The exact engine is in-process BDD work — run it on this thread while the
         // other members run on theirs.
         let exact = run_exact(&content);
@@ -825,6 +904,64 @@ mod tests {
             out.unreachable_by.is_empty(),
             "no engine should call the reachable counter unreachable"
         );
+    }
+
+    /// mununu#726 — an already-expired thread-local budget decides nothing and spawns nothing:
+    /// `Unknown`, no engine credited, back in well under a second. The unbounded control is the
+    /// existing `portfolio_decides_reachable_without_subprocess` (same fixture, `Reachable`).
+    #[test]
+    fn portfolio_abstains_promptly_under_an_expired_budget() {
+        use crate::adapter::run_budget::{Budget, enter};
+        const COUNTER: &str = "1 sort bitvec 3\n2 zero 1\n3 state 1\n4 init 1 3 2\n5 one 1\n\
+                               6 add 1 3 5\n7 next 1 3 6\n8 constd 1 5\n9 sort bitvec 1\n\
+                               10 eq 9 3 8\n11 bad 10\n";
+        let file = parser::parse(COUNTER).expect("parse");
+        let t0 = std::time::Instant::now();
+        let out = {
+            let _g = enter(&Budget::with_ms(0));
+            decide_reach_portfolio(&file)
+        };
+        assert_eq!(out.verdict, ReachVerdict::Unknown, "{out:?}");
+        assert!(
+            out.reachable_by.is_empty() && out.unreachable_by.is_empty(),
+            "{out:?}"
+        );
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(1),
+            "{:?}",
+            t0.elapsed()
+        );
+    }
+
+    /// mununu#726 — with no budget the members keep the constants they always had (the floor);
+    /// under a budget every bound follows the time left, and the in-process SPACER fallback — no
+    /// cancellation point — never grows past its 10 s.
+    #[test]
+    fn member_timeouts_floor_is_todays_constants_and_follows_the_budget() {
+        let sixty = std::time::Duration::from_secs(60);
+        let floor = member_timeouts(None, sixty);
+        assert_eq!(floor.native_query_ms, native_bmc::DEFAULT_TIMEOUT_MS);
+        assert_eq!(floor.spacer_isolated_ms, native_spacer::DEFAULT_TIMEOUT_MS);
+        assert_eq!(
+            floor.spacer_in_process_ms,
+            native_spacer::DEFAULT_TIMEOUT_MS
+        );
+        assert_eq!(floor.interp_query_ms, INTERP_QUERY_TIMEOUT_MS);
+        assert_eq!(floor.interp_overall_ms, INTERP_OVERALL_TIMEOUT_MS);
+        assert_eq!(floor.subprocess, sixty);
+        let b = member_timeouts(Some(60_000), sixty);
+        assert_eq!(b.native_query_ms, 60_000);
+        assert_eq!(b.spacer_isolated_ms, 60_000);
+        assert_eq!(b.spacer_in_process_ms, 10_000);
+        assert_eq!(b.interp_query_ms, 12_000);
+        assert_eq!(b.interp_overall_ms, 60_000);
+        assert_eq!(b.subprocess, sixty);
+        let short = member_timeouts(Some(2_000), sixty);
+        assert!(short.native_query_ms <= 2_000 && short.interp_query_ms <= 2_000);
+        assert!(short.spacer_isolated_ms <= 2_000 && short.spacer_in_process_ms <= 2_000);
+        assert_eq!(short.subprocess, std::time::Duration::from_millis(2_000));
+        let big = member_timeouts(Some(u64::MAX), sixty);
+        assert_eq!(big.native_query_ms, u32::MAX, "no overflow");
     }
 
     #[test]

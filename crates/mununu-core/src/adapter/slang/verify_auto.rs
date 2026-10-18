@@ -2901,6 +2901,65 @@ fn synth_sidecar_json(
 /// Wiring it to one value mislabelled every budget abstention as "never attempted" — an
 /// over-attribution of exactly the kind `bottom_reason` exists to end, and it survived until the
 /// call sites were read rather than assumed.
+/// The cube pass's verdict for one property, read over every initial input flavour (H.B): a
+/// violation under SOME env input is a violation (False dominates); else an undecided flavour
+/// makes it ⊥; else Holds. With no free inputs `init_cubes == [base_init_cube]`, so this is exactly
+/// the single-cube read.
+///
+/// mununu#504 / #728 — a budget stop is `Unknown`, NEVER `Skipped` (`ci_exit_code` never fails on
+/// `skipped`, so a timed-out property mapped to `Skipped` would pass a strict `--fail-on unknown`
+/// gate green), and it is ATTRIBUTED: `Some(BudgetExpired)` whenever the refinement stopped on the
+/// clock or the per-property budget had expired when the engine returned. Which budget fired
+/// decides what happens next: only the RUN budget's expiry (`run_expired`) stops the run — a
+/// per-property expiry marks ITS row and the rows after it are still attempted. Before this
+/// split, one slow property abstained every later one.
+fn cube_outcome(
+    res: Result<(crate::mu_calculus::trit::TritSet, bool), crate::adapter::AdapterError>,
+    init_cubes: &[usize],
+    property_expired: bool,
+    run_expired: bool,
+) -> (VerifyOutcome, Option<BottomReason>, bool) {
+    match res {
+        Ok((v, stopped_on_budget)) => {
+            use crate::mu_calculus::trit::Trit;
+            let any_false = init_cubes.iter().any(|&ic| v.verdict_at(ic) == Trit::False);
+            let any_unknown = init_cubes
+                .iter()
+                .any(|&ic| v.verdict_at(ic) == Trit::Unknown);
+            if any_false {
+                let false_cells = (0..v.len())
+                    .filter(|&i| v.verdict_at(i) == Trit::False)
+                    .count();
+                (VerifyOutcome::Violated { false_cells }, None, false)
+            } else if any_unknown {
+                let unknown_cells = (0..v.len())
+                    .filter(|&i| v.verdict_at(i) == Trit::Unknown)
+                    .count();
+                let on_clock = stopped_on_budget || property_expired;
+                (
+                    VerifyOutcome::Unknown { unknown_cells },
+                    on_clock.then_some(BottomReason::BudgetExpired),
+                    on_clock && run_expired,
+                )
+            } else {
+                (VerifyOutcome::Holds, None, false)
+            }
+        }
+        Err(e) if e.kind == crate::adapter::AdapterErrorKind::ResourceBudgetExceeded => (
+            VerifyOutcome::Unknown { unknown_cells: 0 },
+            property_expired.then_some(BottomReason::BudgetExpired),
+            run_expired,
+        ),
+        Err(e) => (
+            VerifyOutcome::Skipped {
+                reason: format!("CEGAR error: {}", e.message),
+            },
+            None,
+            false,
+        ),
+    }
+}
+
 fn abstained(
     t: &crate::adapter::slang::translate::TranslatedAssertion,
     reason: BottomReason,
@@ -4281,7 +4340,6 @@ pub(crate) fn verify_auto_impl(
     };
     use crate::mu_calculus::Environment;
     use crate::mu_calculus::parser as mu_parser;
-    use crate::mu_calculus::trit::Trit;
 
     // A.6 (soundness-ledger, 2026-07-05) — reject `--engine exact-symbolic` with
     // `--no-gate-reset`. The exact full-state engine is built for the reset-GATED
@@ -4505,9 +4563,17 @@ pub(crate) fn verify_auto_impl(
     // gate run to a process kill that emitted zero bytes, including for properties mununu had
     // already decided.
     let mut time_budget_hit = false;
-    let run_budget = crate::adapter::run_budget::Budget::with_ms_opt(
+    // mununu#726 — the run budget is ENTERED for the rest of this function, not just consulted:
+    // before, it was a local the per-property guard below was a child of, so once that guard
+    // dropped (before the ⊥ re-plan) the thread-local was unbounded again and every
+    // `run_budget::expired()` poll in `escalate_bottom`, `rescue_skipped` and the witness pass
+    // was a no-op. A child of whatever is current, so an outer budget (the parallel planner
+    // re-enters one per engine thread) is honoured.
+    let run_budget = crate::adapter::run_budget::Budget::child(
+        &crate::adapter::run_budget::current(),
         crate::adapter::run_budget::run_budget_ms(),
     );
+    let _run_guard = crate::adapter::run_budget::enter(&run_budget);
     let per_property_ms = crate::adapter::run_budget::property_budget_ms();
     // ⚠️ SCOPE, corrected 2026-09-15: these records cover THIS function only — the cube pass and
     // the ⊥ re-plan. The planner's portfolio merge writes NONE, so on a portfolio run a property's
@@ -5224,8 +5290,10 @@ pub(crate) fn verify_auto_impl(
         // verdicts into the same `TritSet` shape (over `2^|final P|`, same cube
         // indexing), so the init-cube read below is identical. (The
         // `--engine exact-symbolic` path returned early above, before seeding.)
+        // `(verdict, the refinement stopped on a wall-clock budget)` — the termination travels
+        // with the verdict so a budget stop is ATTRIBUTED (mununu#728: it used to be dropped).
         let final_verdict_res: Result<
-            crate::mu_calculus::trit::TritSet,
+            (crate::mu_calculus::trit::TritSet, bool),
             crate::adapter::AdapterError,
         > = if opts.symbolic_engine {
             crate::adapter::btor2::symbolic_engine::symbolic_cegar_refine(
@@ -5236,7 +5304,13 @@ pub(crate) fn verify_auto_impl(
                 crate::adapter::btor2::symbolic_bitblast::MustSemantics::ForallExists,
                 opts.max_iterations,
             )
-            .map(|r| symbolic_final_verdict(&r))
+            .map(|r| {
+                let on_budget = matches!(
+                    r.terminated_with,
+                    crate::adapter::btor2::symbolic_engine::SymbolicCegarTermination::BudgetExpired
+                );
+                (symbolic_final_verdict(&r), on_budget)
+            })
         } else {
             cegar_refine_loop(
                 &formula,
@@ -5246,45 +5320,23 @@ pub(crate) fn verify_auto_impl(
                 &adapter_options,
                 &cegar_opts,
             )
-            .map(|trace| trace.final_verdict)
+            .map(|trace| {
+                let on_budget = matches!(
+                    trace.terminated_with,
+                    crate::adapter::btor2::cegar::CegarTermination::BudgetExpired
+                );
+                (trace.final_verdict, on_budget)
+            })
         };
-        let outcome = match final_verdict_res {
-            Ok(v) => {
-                // Combine the verdict over every initial input flavour (H.B):
-                // a violation under SOME env input is a violation (False
-                // dominates); else an undecided flavour makes it ⊥; else Holds.
-                // With no free inputs `init_cubes == [base_init_cube]`, so this
-                // is exactly the pre-H.B single-cube read.
-                let any_false = init_cubes.iter().any(|&ic| v.verdict_at(ic) == Trit::False);
-                let any_unknown = init_cubes
-                    .iter()
-                    .any(|&ic| v.verdict_at(ic) == Trit::Unknown);
-                if any_false {
-                    let false_cells = (0..v.len())
-                        .filter(|&i| v.verdict_at(i) == Trit::False)
-                        .count();
-                    VerifyOutcome::Violated { false_cells }
-                } else if any_unknown {
-                    let unknown_cells = (0..v.len())
-                        .filter(|&i| v.verdict_at(i) == Trit::Unknown)
-                        .count();
-                    VerifyOutcome::Unknown { unknown_cells }
-                } else {
-                    VerifyOutcome::Holds
-                }
-            }
-            // mununu#504 — a budget expiry is NOT a `Skipped`. `ci_exit_code` never fails on
-            // `skipped`, only on `unknown`, so mapping a timed-out property to `Skipped` would
-            // make a strict `--fail-on unknown` gate pass GREEN on a property that was never
-            // decided. That is a silent pass, which is worse than a red gate.
-            Err(e) if e.kind == crate::adapter::AdapterErrorKind::ResourceBudgetExceeded => {
-                time_budget_hit = true;
-                VerifyOutcome::Unknown { unknown_cells: 0 }
-            }
-            Err(e) => VerifyOutcome::Skipped {
-                reason: format!("CEGAR error: {}", e.message),
-            },
-        };
+        let (outcome, cube_bottom_reason, stop_run) = cube_outcome(
+            final_verdict_res,
+            &init_cubes,
+            crate::adapter::run_budget::expired(),
+            run_budget.expired(),
+        );
+        if stop_run {
+            time_budget_hit = true;
+        }
 
         // AR-S2 — the cube lift uses the sound `SmtAllPairs` may-relation, so a
         // definite cube verdict is sound by over-approximation; the A.4 honest-⊥
@@ -5292,7 +5344,7 @@ pub(crate) fn verify_auto_impl(
         // is no longer needed.
         if let Some(t0) = prop_t0 {
             eprintln!(
-                "[mununu-timing] property={} outcome={} elapsed_ms={}",
+                "[mununu-timing] property={} outcome={} elapsed_ms={} phase=main",
                 t.name,
                 outcome.label(),
                 t0.elapsed().as_millis()
@@ -5306,7 +5358,7 @@ pub(crate) fn verify_auto_impl(
             outcome,
             seeded_predicates: seeded_names,
             counterexample: None,
-            bottom_reason: None,
+            bottom_reason: cube_bottom_reason,
             decided_by: None,
             vacuity: None,
         });
@@ -5459,10 +5511,11 @@ pub(crate) fn verify_auto_impl(
             kind: "time-budget-exceeded".into(),
             level: NoteLevel::ScopeCaveat,
             summary: format!(
-                "wall-clock budget reached; the remaining properties abstained rather than \
-                 hanging (`{}` / `{}`)",
-                crate::adapter::run_budget::PROPERTY_BUDGET_ENV,
+                "the run's wall-clock budget was reached; the remaining properties abstained \
+                 rather than hanging (`{}`; per property `{}`, per rescue step `{}`)",
                 crate::adapter::run_budget::RUN_BUDGET_ENV,
+                crate::adapter::run_budget::PROPERTY_BUDGET_ENV,
+                crate::adapter::run_budget::RESCUE_SLICE_ENV,
             ),
             detail: format!(
                 "mununu#504 — a wall-clock budget expired. `{}` bounds a single property and                  `{}` bounds the whole run; the per-property budget is additionally clamped to                  the run deadline, so it can never extend it. On expiry the current property and                  every remaining one abstain (`unknown`) and PRIOR VERDICTS ARE PRESERVED — the                  point being that a run which used to hang, or be killed with no output at all,                  now reports everything it managed to decide. An abstention here is `unknown`,                  never `skipped`, so a strict `--fail-on unknown` gate still fails rather than                  passing green on a property that was never decided. Set either to `0` to                  disable.",
@@ -5506,6 +5559,26 @@ pub(crate) fn escalate_bottom(
     opts: &VerifyAutoOptions,
     fairness_atoms: &[crate::adapter::liveness_rescue::Atom],
 ) -> Vec<VerificationNote> {
+    escalate_bottom_with_slice(
+        report,
+        design_btor2,
+        reset_pinned,
+        opts,
+        fairness_atoms,
+        crate::adapter::run_budget::rescue_slice_ms(),
+    )
+}
+
+/// [`escalate_bottom`] with the rescue slice given explicitly (`None` = no slice, the row budget
+/// alone) — the seam a test uses to run a row under an already-spent slice deterministically.
+pub(crate) fn escalate_bottom_with_slice(
+    report: &mut AutoVerifyReport,
+    design_btor2: &str,
+    reset_pinned: bool,
+    opts: &VerifyAutoOptions,
+    fairness_atoms: &[crate::adapter::liveness_rescue::Atom],
+    slice_ms: Option<u64>,
+) -> Vec<VerificationNote> {
     use crate::adapter::btor2::predicate_expr::CmpOp;
     use crate::adapter::liveness_rescue::{
         LivenessVerdict, reduce_ag_ef_target, response_liveness_rescue_formula,
@@ -5536,20 +5609,38 @@ pub(crate) fn escalate_bottom(
         if crate::adapter::run_budget::expired() {
             break;
         }
+        // mununu#726 — the row gets the per-property budget (a child of the run budget, which
+        // `verify_auto_impl` keeps in effect), and every portfolio-backed arm below runs under a
+        // further RESCUE SLICE (`MUNUNU_RESCUE_SLICE_MS`, 60 s by default) so twenty undecidable
+        // rows cannot each spend fifteen minutes. The recoverability arm keeps the row budget: its
+        // cube ladder legitimately runs minutes. `[mununu-timing] … phase=replan` names the lane.
+        let row_t0 = std::env::var_os("MUNUNU_PROPERTY_TIMING")
+            .is_some()
+            .then(std::time::Instant::now);
+        let row_budget = crate::adapter::run_budget::Budget::child(
+            &crate::adapter::run_budget::current(),
+            crate::adapter::run_budget::property_budget_ms(),
+        );
+        let _row_guard = crate::adapter::run_budget::enter(&row_budget);
+        let mut lane: &str = "none";
+        let mut slice_expired = false;
         let Ok(formula) = mu_parser::parse(&prop.formula) else {
             continue;
         };
         match formula.property_class() {
             PropertyClass::Safety if opts.rescue_bottom_safety => {
+                lane = "safety";
                 // mununu#503 — use the DIAGNOSED variant so a decline is reported instead of
                 // vanishing. Before this, every decline was a bare `None`: the `bottom-reason`
                 // note told the consumer to "check for a sibling `bit-cap` / `abstained` note",
                 // and there was none, so a residual ⊥ could not be attributed at all.
-                let rescued = crate::adapter::reach_rescue::reach_portfolio_rescue_diagnosed(
-                    design_btor2,
-                    &formula,
-                    reset_pinned,
-                );
+                let rescued = under_rescue_slice(slice_ms, &mut slice_expired, || {
+                    crate::adapter::reach_rescue::reach_portfolio_rescue_diagnosed(
+                        design_btor2,
+                        &formula,
+                        reset_pinned,
+                    )
+                });
                 let rescued = match rescued {
                     Ok(v) => Some(v),
                     Err(why) => {
@@ -5584,21 +5675,26 @@ pub(crate) fn escalate_bottom(
                     match verdict {
                         RescueVerdict::Holds => {
                             prop.outcome = VerifyOutcome::Holds;
+                            prop.decided_by = Some("reach-rescue".into());
                             notes.push(rescue_note(&prop.name, "HOLDS", &engines));
                         }
                         RescueVerdict::Violated => {
                             prop.outcome = VerifyOutcome::Violated { false_cells: 0 };
+                            prop.decided_by = Some("reach-rescue".into());
                             // P3 Update 2 — attach the concrete safety counterexample: native
                             // BMC extracts the `Init → ¬invariant` path from the same bad-monitor.
                             // A safety CEX is a finite path (empty `cycle`); the monitor adds no
                             // state, so the trace is over the original design registers.
-                            prop.counterexample = crate::adapter::reach_rescue::safety_witness(
-                                design_btor2,
-                                &formula,
-                                reset_pinned,
-                                SAFETY_WITNESS_MAX_K,
-                            )
-                            .map(safety_counterexample);
+                            prop.counterexample =
+                                under_rescue_slice(slice_ms, &mut slice_expired, || {
+                                    crate::adapter::reach_rescue::safety_witness(
+                                        design_btor2,
+                                        &formula,
+                                        reset_pinned,
+                                        SAFETY_WITNESS_MAX_K,
+                                    )
+                                })
+                                .map(safety_counterexample);
                             notes.push(rescue_note(&prop.name, "VIOLATED", &engines));
                         }
                         RescueVerdict::Inconclusive => {}
@@ -5606,6 +5702,7 @@ pub(crate) fn escalate_bottom(
                 }
             }
             PropertyClass::Liveness => {
+                lane = "liveness";
                 let mut handled = false;
                 // mununu#477 Option B — if `GF <atom>` fairness assumes are present AND
                 // this guarantee reduces to response shape, route through the fair-cycle
@@ -5613,12 +5710,15 @@ pub(crate) fn escalate_bottom(
                 // fairness ⇒ falls through to the plain rescue below, unchanged.
                 if opts.rescue_bottom_liveness
                     && !fairness_atoms.is_empty()
-                    && let Some((verdict, reach)) = response_liveness_rescue_formula(
-                        design_btor2,
-                        &formula,
-                        fairness_atoms,
-                        reset_pinned,
-                    )
+                    && let Some((verdict, reach)) =
+                        under_rescue_slice(slice_ms, &mut slice_expired, || {
+                            response_liveness_rescue_formula(
+                                design_btor2,
+                                &formula,
+                                fairness_atoms,
+                                reset_pinned,
+                            )
+                        })
                 {
                     handled = true;
                     let engines = engines_of(&reach);
@@ -5647,7 +5747,14 @@ pub(crate) fn escalate_bottom(
                 if !handled
                     && opts.rescue_bottom_liveness
                     && let Some((verdict, reach)) =
-                        response_liveness_rescue_formula(design_btor2, &formula, &[], reset_pinned)
+                        under_rescue_slice(slice_ms, &mut slice_expired, || {
+                            response_liveness_rescue_formula(
+                                design_btor2,
+                                &formula,
+                                &[],
+                                reset_pinned,
+                            )
+                        })
                 {
                     handled = true;
                     let engines = engines_of(&reach);
@@ -5671,6 +5778,7 @@ pub(crate) fn escalate_bottom(
                     // SOUNDNESS: verify_recoverability_scalable runs the sound cube +
                     // smt-hyper-must νμ path and abstains (Unknown) if it cannot decide,
                     // so a ⊥ is only ever upgraded to a DEFINITE verdict.
+                    lane = "recoverability";
                     let good_str = format!("{} == {}", good.signal, good.value);
                     // ③a routing — try the EXACT+COI recoverability engine FIRST. On a
                     // control signal whose cone-of-influence fits the bit cap (e.g. a
@@ -5735,6 +5843,23 @@ pub(crate) fn escalate_bottom(
             }
             _ => {}
         }
+        // A row still ⊥ after its arm, with the row budget or a rescue slice expired, is a budget
+        // abstention — attributed here so the classifier below does not read it as a shape it
+        // could not reduce (and so a consumer knows that MORE TIME is the right response).
+        if matches!(prop.outcome, VerifyOutcome::Unknown { .. })
+            && prop.bottom_reason.is_none()
+            && (row_budget.expired() || slice_expired)
+        {
+            prop.bottom_reason = Some(BottomReason::BudgetExpired);
+        }
+        if let Some(t0) = row_t0 {
+            eprintln!(
+                "[mununu-timing] property={} outcome={} elapsed_ms={} phase=replan lane={lane}",
+                prop.name,
+                prop.outcome.label(),
+                t0.elapsed().as_millis()
+            );
+        }
     }
     // mununu#492 Part B — classify residual ⊥s so a downstream gate can distinguish
     // "resource-abstain" (the engine gave up) from "shape-not-reducible-here" (the
@@ -5745,6 +5870,12 @@ pub(crate) fn escalate_bottom(
     let stateless_model = design_stateless(design_btor2);
     for prop in report.properties.iter_mut() {
         if !matches!(prop.outcome, VerifyOutcome::Unknown { .. }) {
+            continue;
+        }
+        // mununu#728 — a reason set upstream (`BudgetExpired`, `MemoryCeilingExceeded`,
+        // `NotAttempted`, …) is more specific than anything this classifier can infer from the
+        // shape; it used to be overwritten here, which erased every budget attribution.
+        if prop.bottom_reason.is_some() {
             continue;
         }
         let reason = classify_bottom_reason(prop, stateless_model);
@@ -6027,9 +6158,10 @@ impl BottomReason {
                 format!("the engine process CRASHED (not an abstention): {detail}")
             }
             Self::BudgetExpired => "a WALL-CLOCK budget expired — retrying with more time is the \
-                 right response here. HOST-DEPENDENT: the same command on a quieter or faster \
-                 machine may DECIDE this property, so treat a gate failure here as a \
-                 configuration result, not a verdict about the design"
+                 right response here (MUNUNU_PROPERTY_BUDGET_MS for the property as a whole, \
+                 MUNUNU_RESCUE_SLICE_MS for the ⊥ re-plan's per-step slice). HOST-DEPENDENT: the \
+                 same command on a quieter or faster machine may DECIDE this property, so treat a \
+                 gate failure here as a configuration result, not a verdict about the design"
                 .to_string(),
             Self::MemoryCeilingExceeded => "the process-RSS ceiling was exceeded \
                  (MUNUNU_MAX_PROCESS_MEMORY_BYTES) — retrying with more TIME cannot help; more \
@@ -6344,6 +6476,22 @@ fn engines_of(reach: &crate::adapter::reach_portfolio::ReachOutcome) -> Vec<&'st
 }
 
 /// A provenance note for a property the reachability portfolio rescued from `⊥`.
+/// mununu#726 — run one portfolio-backed rescue step under the RESCUE SLICE: a child of the current
+/// (row) budget bounded by `MUNUNU_RESCUE_SLICE_MS`, so it can never outlive the row or the run.
+/// Records whether the slice ran out, so the caller can attribute a residual ⊥ to the clock.
+fn under_rescue_slice<T>(
+    slice_ms: Option<u64>,
+    slice_expired: &mut bool,
+    step: impl FnOnce() -> T,
+) -> T {
+    let slice =
+        crate::adapter::run_budget::Budget::child(&crate::adapter::run_budget::current(), slice_ms);
+    let _guard = crate::adapter::run_budget::enter(&slice);
+    let out = step();
+    *slice_expired |= slice.expired();
+    out
+}
+
 fn rescue_note(name: &str, verdict: &str, engines: &[&str]) -> VerificationNote {
     VerificationNote {
         kind: "portfolio-rescue".into(),
@@ -6904,6 +7052,163 @@ mod tests {
             notes.iter().any(|n| n.kind == "portfolio-rescue"),
             "a portfolio-rescue provenance note should be recorded"
         );
+    }
+
+    /// mununu#728 — a reason set upstream survives the residual-⊥ classifier. Here the row carries
+    /// `BudgetExpired` and the budget is already spent, so the re-plan's loop breaks before any
+    /// arm; before the fix the classifier then overwrote the field with a shape reason.
+    #[test]
+    fn escalate_bottom_keeps_a_budget_expired_reason_through_classification() {
+        use crate::adapter::run_budget::{Budget, enter};
+        const DESIGN: &str =
+            "1 sort bitvec 4\n2 state 1 big\n3 zero 1\n4 init 1 2 3\n5 next 1 2 2\n";
+        let mut report = AutoVerifyReport {
+            properties: vec![PropertyVerdict {
+                name: "big_zero".to_string(),
+                label: None,
+                kind: crate::adapter::slang::translate::SvaKind::Assert,
+                formula: "nu X. ((big == 0) && [] X)".to_string(),
+                outcome: VerifyOutcome::Unknown { unknown_cells: 1 },
+                seeded_predicates: Vec::new(),
+                counterexample: None,
+                bottom_reason: Some(BottomReason::BudgetExpired),
+                decided_by: None,
+                vacuity: None,
+            }],
+            ..Default::default()
+        };
+        let notes = {
+            let _g = enter(&Budget::with_ms(0));
+            escalate_bottom(
+                &mut report,
+                DESIGN,
+                false,
+                &VerifyAutoOptions::default(),
+                &[],
+            )
+        };
+        assert!(matches!(
+            report.properties[0].outcome,
+            VerifyOutcome::Unknown { .. }
+        ));
+        assert_eq!(
+            report.properties[0].bottom_reason,
+            Some(BottomReason::BudgetExpired),
+            "the upstream reason must survive the classifier"
+        );
+        assert!(
+            !notes.iter().any(|n| n.kind == "portfolio-rescue"),
+            "no rescue ran under a spent budget"
+        );
+    }
+
+    /// mununu#726 — the re-plan runs each portfolio-backed step under the rescue slice, which the
+    /// portfolio observes: with a spent slice the reducible invariant stays ⊥ and is attributed
+    /// to the clock; with no slice (the row budget alone, here unbounded) it is rescued to HOLDS.
+    #[test]
+    fn escalate_bottom_installs_a_row_budget_the_portfolio_observes() {
+        const DESIGN: &str =
+            "1 sort bitvec 4\n2 state 1 big\n3 zero 1\n4 init 1 2 3\n5 next 1 2 2\n";
+        let fresh = || AutoVerifyReport {
+            properties: vec![PropertyVerdict {
+                name: "big_zero".to_string(),
+                label: None,
+                kind: crate::adapter::slang::translate::SvaKind::Assert,
+                formula: "nu X. ((big == 0) && [] X)".to_string(),
+                outcome: VerifyOutcome::Unknown { unknown_cells: 1 },
+                seeded_predicates: Vec::new(),
+                counterexample: None,
+                bottom_reason: None,
+                decided_by: None,
+                vacuity: None,
+            }],
+            ..Default::default()
+        };
+        let mut starved = fresh();
+        let t0 = std::time::Instant::now();
+        escalate_bottom_with_slice(
+            &mut starved,
+            DESIGN,
+            false,
+            &VerifyAutoOptions::default(),
+            &[],
+            Some(0),
+        );
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(5),
+            "{:?}",
+            t0.elapsed()
+        );
+        assert!(
+            matches!(starved.properties[0].outcome, VerifyOutcome::Unknown { .. }),
+            "a spent slice rescues nothing: {:?}",
+            starved.properties[0].outcome
+        );
+        assert_eq!(
+            starved.properties[0].bottom_reason,
+            Some(BottomReason::BudgetExpired),
+            "a ⊥ left by a spent slice is attributed to the clock"
+        );
+        let mut unbounded = fresh();
+        escalate_bottom_with_slice(
+            &mut unbounded,
+            DESIGN,
+            false,
+            &VerifyAutoOptions::default(),
+            &[],
+            None,
+        );
+        assert!(matches!(
+            unbounded.properties[0].outcome,
+            VerifyOutcome::Holds
+        ));
+        assert_eq!(
+            unbounded.properties[0].decided_by.as_deref(),
+            Some("reach-rescue")
+        );
+    }
+
+    /// mununu#728 — the cube pass's classification: a refinement that stopped on the clock, or an
+    /// engine that returned after the per-property budget expired, is `unknown` carrying
+    /// `BudgetExpired`; only the RUN budget's expiry stops the run. An ordinary error is still
+    /// `skipped`, so the special case stays narrow.
+    #[test]
+    fn cube_outcome_attributes_a_budget_stop_and_stops_the_run_only_on_run_expiry() {
+        use crate::mu_calculus::trit::TritSet;
+        use bitvec::prelude::*;
+        // two cells: cell 0 ⊥ (out of bounds), cell 1 false
+        let set = TritSet::from_predicate(bitvec![usize, Lsb0; 0, 0], &bitvec![usize, Lsb0; 1, 0]);
+        let init = [0usize];
+        let (o, r, stop) = cube_outcome(Ok((set.clone(), true)), &init, false, false);
+        assert!(matches!(o, VerifyOutcome::Unknown { .. }));
+        assert_eq!(r, Some(BottomReason::BudgetExpired));
+        assert!(!stop, "a per-property stop does not stop the run");
+        let (_, r2, stop2) = cube_outcome(Ok((set.clone(), true)), &init, true, true);
+        assert_eq!(r2, Some(BottomReason::BudgetExpired));
+        assert!(stop2, "the run budget's expiry stops the run");
+        let (o3, r3, stop3) = cube_outcome(Ok((set, false)), &init, false, false);
+        assert!(matches!(o3, VerifyOutcome::Unknown { .. }));
+        assert_eq!(r3, None, "a plain ⊥ is not a budget stop");
+        assert!(!stop3);
+        let budget_err = AdapterError {
+            kind: crate::adapter::AdapterErrorKind::ResourceBudgetExceeded,
+            location: None,
+            message: "budget expired".into(),
+        };
+        let (o4, r4, stop4) = cube_outcome(Err(budget_err.clone()), &init, true, false);
+        assert_eq!(o4.label(), "unknown", "never `skipped`");
+        assert_eq!(r4, Some(BottomReason::BudgetExpired));
+        assert!(!stop4);
+        let (_, _, stop5) = cube_outcome(Err(budget_err), &init, true, true);
+        assert!(stop5);
+        let other = AdapterError {
+            kind: crate::adapter::AdapterErrorKind::ParseError,
+            location: None,
+            message: "boom".into(),
+        };
+        let (o6, r6, _) = cube_outcome(Err(other), &init, false, false);
+        assert_eq!(o6.label(), "skipped");
+        assert_eq!(r6, None);
     }
 
     // P3 Update 2 — a safety AG-invariant the cube left ⊥ that is actually VIOLATED is

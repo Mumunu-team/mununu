@@ -541,7 +541,7 @@ set empty — the script writes it), the bus and the endpoint requests stay free
 |---|---|---|---|---|---|
 | `ASSERT_KNOWN` ×13 | 13 | | | | `constant` — `$isunknown` folds to false on a 2-state model, no cone |
 | error → alert checks ×15 (`$rose(u_x.….err_o) \|-> ##[0:30] alert_tx_o[1].alert_p`) | **10** | | 5 | | `explicit` cube — the main FSM, all 8 endpoint FSMs, the register-write one-hot; ⊥ = the 32-bit `prim_count` / FIFO-pointer cones over the 192-bit cap |
-| `EdnFatalAlertNoRsp_A` ×8 | | **1** (6 cycles from reset) | 7 | | BMC rescue after the cube's ⊥ — a software-triggerable fatal error through the free bus in the cycle an endpoint acks: a spec gap in the assertion, not a design bug; the re-plan's BMC has a fixed 5-s per-query timeout the property budget never reaches, so one to three of the eight identical rows finish per run, load-dependent (mununu#726) |
+| `EdnFatalAlertNoRsp_A` ×8 | | **8** (each 6 cycles from reset, trace attached) | | | the reach rescue's native BMC after the cube's ⊥, 20–30 s a row — a software-triggerable fatal error through the free bus in the cycle an endpoint acks: a spec gap in the assertion, not a design bug (before mununu#726 the rescue's fixed 5-s query timeout let one to three rows decide per run) |
 | `EdnDataStableDisable_A` ×8 | | | 8 | | 32-bit bus cone over the cap |
 | `EdnDataStable_A` ×8 | | | | 8 | `[->1]` goto repetition |
 | `@mununu_guarantee` system properties ×14 | **7** | | 7 | | `explicit` / `symbolic` cube: Error terminal / recorded / sticky (FSM → core → register block), endpoint 0 the same, the SWPortMode entry condition; `constant` for the no-deadlock sanity row; ⊥ = every `AG EF` / `EF` row (FSM cone over the cap, no MUST path — SymbiYosys `cover` reaches each `EF` target within six cycles) |
@@ -552,8 +552,9 @@ checks ⊥. What this does and does not say: **one IP at one commit is measured,
 not "IP scale" in general, not a second IP, not a SoC, no datapath property through a cipher. What
 decides at IP scale is the predicate cube and the reach rescue; the exact engine's cones all exceed the
 cap once the register block's bus datapath is in the design. Three things to know before an IP-sized
-run: set `MUNUNU_PROPERTY_BUDGET_MS` (the budget is observed between engine calls, so one wide
-invariant can still run long) and `MUNUNU_VERIFY_AUTO_PARTIAL_JSON`; carry the `@mununu_guarantee`
+run: set `MUNUNU_PROPERTY_BUDGET_MS` (a row that hits it carries `bottom_reason: budget-expired` and the rows
+after it are still attempted; `MUNUNU_RESCUE_SLICE_MS`, 60 s, bounds each rescue step) and
+`MUNUNU_VERIFY_AUTO_PARTIAL_JSON`; carry the `@mununu_guarantee`
 annotations in an empty `package`, not an empty `module` (a bodiless module is reported as a black box, mununu#724);
 and read the trace's `inputs` knowing values wider than 64 bits are not listed (mununu#723).
 

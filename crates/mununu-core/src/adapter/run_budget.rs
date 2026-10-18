@@ -41,6 +41,10 @@ use std::time::{Duration, Instant};
 pub const PROPERTY_BUDGET_ENV: &str = "MUNUNU_PROPERTY_BUDGET_MS";
 /// Whole-run wall-clock budget. Unset ⇒ unbounded.
 pub const RUN_BUDGET_ENV: &str = "MUNUNU_VERIFY_BUDGET_MS";
+/// The ⊥ re-plan's per-call slice for a portfolio-backed rescue (the reach portfolio on a
+/// `bad`-monitor, the fair-cycle l2s rescue, the safety-witness BMC). Unset ⇒ the default below;
+/// `0` ⇒ the per-property budget alone applies.
+pub const RESCUE_SLICE_ENV: &str = "MUNUNU_RESCUE_SLICE_MS";
 
 /// A deadline plus a cancellation flag. Cloning shares the flag.
 #[derive(Clone, Debug)]
@@ -247,6 +251,39 @@ pub fn run_budget_ms() -> Option<u64> {
     parse_budget_ms_with_default(std::env::var(RUN_BUDGET_ENV).ok(), DEFAULT_RUN_BUDGET_MS)
 }
 
+/// Default rescue slice: **60 seconds** — the wall the reach portfolio already ran under
+/// (`btormc::DEFAULT_TIMEOUT`), so a consumer with btormc installed sees no change in the rescue's
+/// worst case, and about 8× the deciding query measured on the full OpenTitan `edn` IP (mununu#726:
+/// the native member's FIXED 5-s per-query timeout let one to three of eight identical rows decide
+/// per run). The slice is a CHILD of the per-property budget, which is a child of the run budget,
+/// so it can never extend either.
+///
+/// Why a slice and not the whole per-property budget: ~20 undecidable rows × 15 min would turn a
+/// ten-minute IP run into hours. Why not "remaining ÷ rows left": a sibling's ⊥ would then change
+/// THIS row's verdict — a budget may decide how long, never what.
+const DEFAULT_RESCUE_SLICE_MS: u64 = 60 * 1000;
+
+/// The rescue slice: `MUNUNU_RESCUE_SLICE_MS`, else [`DEFAULT_RESCUE_SLICE_MS`]. `0` disables
+/// (the per-property budget alone bounds the rescue).
+pub fn rescue_slice_ms() -> Option<u64> {
+    parse_budget_ms_with_default(
+        std::env::var(RESCUE_SLICE_ENV).ok(),
+        DEFAULT_RESCUE_SLICE_MS,
+    )
+}
+
+/// A solver query timeout that may GROW to the budget's remaining time: `default_ms` when no
+/// budget is in effect, else the remaining time (never 0; an expired budget yields 1 ms — the
+/// caller's [`expired`] poll is what stops the loop). The counterpart of [`clamp_query_ms`], which
+/// only ever shrinks: a rescue member that polls the budget between queries may let one query run
+/// to the deadline, which is what turns a budget into decisions (mununu#726).
+pub fn query_ms_up_to_remaining(default_ms: u32) -> u32 {
+    match current().remaining_ms() {
+        Some(rem) => u32::try_from(rem.max(1)).unwrap_or(u32::MAX),
+        None => default_ms,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -341,6 +378,40 @@ mod tests {
         assert!(
             honoured,
             "capturing `current()` and re-entering carries it over"
+        );
+    }
+
+    #[test]
+    fn query_ms_up_to_remaining_grows_to_the_budget_and_floors_at_one() {
+        assert_eq!(
+            query_ms_up_to_remaining(5_000),
+            5_000,
+            "unbounded: the default"
+        );
+        let _g = enter(&Budget::with_ms(60_000));
+        let q = query_ms_up_to_remaining(5_000);
+        assert!(
+            q > 50_000 && q <= 60_000,
+            "grows to the remaining time, got {q}"
+        );
+        drop(_g);
+        let _g = enter(&Budget::with_ms(0));
+        assert_eq!(query_ms_up_to_remaining(5_000), 1, "expired: 1 ms, never 0");
+    }
+
+    #[test]
+    fn rescue_slice_default_is_the_portfolio_wall_and_zero_disables() {
+        assert_eq!(
+            parse_budget_ms_with_default(None, DEFAULT_RESCUE_SLICE_MS),
+            Some(60_000)
+        );
+        assert_eq!(
+            parse_budget_ms_with_default(Some("0".into()), DEFAULT_RESCUE_SLICE_MS),
+            None
+        );
+        assert_eq!(
+            parse_budget_ms_with_default(Some("300000".into()), DEFAULT_RESCUE_SLICE_MS),
+            Some(300_000)
         );
     }
 
