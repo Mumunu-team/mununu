@@ -23,6 +23,13 @@ package mununu_props_edn; endpackage
 // stays in SWPortMode — the exclusion is an entry condition, `edn_main_sm.sv` reads the mode only in Idle.)
 // @mununu_guarantee(edn_swport_entry_excludes_boot_mode) nu X. ((!(u_edn_core.u_edn_main_sm.state_q == 193 && u_reg.u_ctrl_boot_req_mode.q == 6) || [] !(u_edn_core.u_edn_main_sm.state_q == 149)) && [] X)
 
+// --- the fatal alert path (core → register block) ------------------------------------------------
+// A fatal alert request from the core is recorded in some ERR_CODE bit the next cycle, or it is a FIFO
+// integrity error, or software asked for it (ALERT_TEST). All eight ERR_CODE bits are listed: a first
+// form that named six of them was VIOLATED — the trace was a software ERR_CODE_TEST write recording
+// `sfifo_rescmd_err` — which is how the missing two were found.
+// @mununu_guarantee(edn_fatal_alert_has_a_source) nu X. ((!(u_edn_core.fatal_alert_o) || u_edn_core.sfifo_rescmd_int_err || u_edn_core.sfifo_gencmd_int_err || u_reg.u_alert_test_fatal_alert.q || [] (u_reg.u_err_code_sfifo_rescmd_err.q || u_reg.u_err_code_sfifo_gencmd_err.q || u_reg.u_err_code_edn_main_sm_err.q || u_reg.u_err_code_edn_ack_sm_err.q || u_reg.u_err_code_edn_cntr_err.q || u_reg.u_err_code_fifo_write_err.q || u_reg.u_err_code_fifo_read_err.q || u_reg.u_err_code_fifo_state_err.q)) && [] X)
+
 // --- the endpoint FSMs (8 × edn_ack_sm): the same trap discipline on endpoint 0 ----------------------
 // @mununu_guarantee(edn_ack_sm_0_error_is_terminal) nu X. ((!(u_edn_core.gen_ep_blk$0.u_edn_ack_sm_ep.state_q == 465) || nu Y. ((u_edn_core.gen_ep_blk$0.u_edn_ack_sm_ep.state_q == 465) && [] Y)) && [] X)
 // @mununu_guarantee(edn_ack_sm_0_error_is_recorded) nu X. ((!(u_edn_core.gen_ep_blk$0.u_edn_ack_sm_ep.state_q == 465) || [] u_reg.u_err_code_edn_ack_sm_err.q) && [] X)

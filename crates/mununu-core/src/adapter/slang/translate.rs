@@ -32,6 +32,7 @@
 //! | `sig[k]` constant bit-select (packed, one dimension, typedef / struct resolved) | the 1-bit slice `sig__bitsP_P`; bare in boolean position | 2026-10-15 |
 //! | `$rose` / `$fell` / `$stable` / `$changed` over `sig[k]` or `sig[hi:lo]` | the slice now against the same slice of `sig__past` | 2026-10-15 |
 //! | `e throughout S`, `S` bounded | `S` with `e` conjoined at every cycle of the match, gap cycles included (`throughout_consequent`) | 2026-10-15 |
+//! | `e throughout b[->1]` (a goto of a boolean, count 1) | `nu Z. (e && (b || [] Z))` — `e` at every cycle up to and including the first `b`; `e` forever if `b` never comes (the weak reading; not vacuous, `e` constrains every cycle) | 2026-10-18 |
 //! | `$countones(x) OP k`, `$countones(x[hi:lo])`, `$countones(x)` in boolean position | the minted combinational count `x__popcount` (`btor2::shadow::augment_with_popcounts`), ≤ 64 bits | 2026-10-15 |
 //! | `$isunknown(x)` | `false` — the model is 2-state; recorded per assertion (`two_state_folds` → a `two-state-fold` note) | 2026-10-15 |
 //! | `s_eventually b`, `a \|-> s_eventually b` | `AF b` = `mu Y. (b \|\| [] Y)`, the response shape the l2s rescue reduces | 2026-10-15 |
@@ -61,7 +62,7 @@
 //! | `weak(…)` of an unbounded sequence | satisfied by every infinite trace — checks nothing |
 //! | `s_eventually` / `##[m:$]` over a sequence, `cover` of an eventuality | operand must be a boolean / `EF` of an `AF` is not a reachability question |
 //! | `nexttime [k]`, `always [m:n]`, `s_nexttime` with a range | ranged forms not captured |
-//! | `[->n]` goto, `[=n]` non-consecutive repetition | needs a sequence automaton — Tier-3b |
+//! | `[->n]` goto with n ≥ 2, `[=n]` non-consecutive repetition, a bare `b[->1]` consequent (weak-vacuous without `throughout`) | needs a sequence automaton — Tier-3b |
 //! | `[*m:n]` as a consequent, repetition inside a CONSEQUENT chain element, a nested sub-sequence in an antecedent, `[*0…]`, an antecedent past 64 alternatives | length composition / the size guard |
 //! | `e throughout S` with `S` unbounded or a repetition inside its chain; a non-boolean `e` | needs a sequence automaton / length composition |
 //! | `sig[idx]` dynamic, `mem[i]` array content, an enum- or otherwise opaque-typed base | distinct refusals (mununu#514; the index cannot be mapped to a bit) |
@@ -75,7 +76,8 @@
 //! chain) by NNF unrolling, `throughout` on bounded consequents and a minted `$countones`.
 //! The OpenTitan Phase 1 (2026-10-15) adds struct members, multi-dimensional elements, `->` /
 //! `<->`, 1-bit bitwise operators, slang-folded constants and bare sequence properties.
-//! Goto / `[=n]` and unbounded antecedents stay out.
+//! `e throughout b[->1]` (2026-10-18) is the one goto in the fragment — a weak-until, no automaton;
+//! goto with n ≥ 2, `[=n]` and unbounded antecedents stay out.
 //!
 //! **Instances (mununu#709).** Every assertion is translated once per instance it sits in, over
 //! the signals as the flattened design names them (`u_rx.state_q`), with that instance's
@@ -2157,6 +2159,16 @@ fn throughout_consequent(spec: &Value, e: &str) -> Result<String, String> {
         }
     };
     match spec.get("kind").and_then(Value::as_str) {
+        // `e throughout b[->1]` (2026-10-18): the first `b` ends the match, `e` holds at every cycle
+        // up to and including it, and if `b` never comes `e` holds forever — the WEAK reading of
+        // a goto in consequent position, which is a weak-until, not an automaton:
+        // `nu Z. (e && (b || [] Z))`. Not vacuous: `e` constrains every cycle (unlike the refused
+        // `weak(##[1:$] b)`, which constrains none). The strong reading (`b` must come) would be
+        // the `mu`; SVA's default for an unmarked consequent sequence is weak.
+        Some("Simple") if is_goto_once(spec) => {
+            let b = bool_expr(child(spec, "expr")?)?;
+            Ok(format!("(nu Z. ({e} && ({b} || [] Z)))"))
+        }
         Some("Simple") => leaf(spec),
         Some("SequenceConcat") => {
             let elements = spec
@@ -2194,6 +2206,15 @@ fn throughout_consequent(spec: &Value, e: &str) -> Result<String, String> {
              {other:?})"
         )),
     }
+}
+
+/// A `Simple` sequence leaf carrying exactly `[->1]`: a goto repetition with `min == max == 1`.
+fn is_goto_once(seq: &Value) -> bool {
+    seq.get("repetition").is_some_and(|rep| {
+        rep.get("kind").and_then(Value::as_str) == Some("GoTo")
+            && rep.get("min").and_then(Value::as_u64) == Some(1)
+            && rep.get("max").and_then(Value::as_u64) == Some(1)
+    })
 }
 
 /// [`delayed`] with an invariant: `f` at some cycle in `[min, max]` from now, and `e` at every
@@ -4648,6 +4669,69 @@ mod tests {
     /// `ranged_antecedent_lowering_agrees_with_a_brute_force_matcher`: `a |-> (c throughout S)`
     /// over random periodic waveforms, the exact engine on the lowered formula vs a brute-force
     /// check that, wherever `a` holds, SOME match of `S` starts there with `c` at every cycle of it.
+    /// `a |-> (c throughout b[->1])` against a brute-force reading over random 8-periodic
+    /// waveforms: from an `a` at `t`, `c` holds on `t..=k` where `k` is the first cycle at or after
+    /// `t` with `b`; if `b` never holds (on the period, hence forever), `c` holds forever. Both
+    /// directions are exercised (the counter asserts > 10 of each) — the lowering must agree with
+    /// the matcher on every waveform.
+    #[test]
+    fn throughout_goto_once_agrees_with_a_brute_force_matcher() {
+        use crate::adapter::btor2::symbolic_bitblast::{ExactVerdict, exact_symbolic_verdict};
+        let spec = serde_json::json!({"kind": "Binary", "op": "OverlappedImplication",
+            "left": {"kind": "Simple", "expr": {"kind": "NamedValue", "symbol": "1 a", "type": "logic"}},
+            "right": {"kind": "Binary", "op": "Throughout",
+                "left": {"kind": "Simple", "expr": {"kind": "NamedValue", "symbol": "3 c", "type": "logic"}},
+                "right": {"kind": "Simple",
+                    "expr": {"kind": "NamedValue", "symbol": "2 b", "type": "logic"},
+                    "repetition": {"kind": "GoTo", "min": 1, "max": 1}}}});
+        let f = translate_one(
+            &spec,
+            SvaKind::Assert,
+            &TranslateOptions::default(),
+            &mut Vec::new(),
+        )
+        .expect("translates");
+        assert_eq!(f, "nu X. (((!(a) || (nu Z. (c && (b || [] Z))))) && [] X)");
+        let formula = crate::mu_calculus::parser::parse(&f).expect("parses");
+        let mut seed: u32 = 0x1018_2026;
+        let mut rnd = || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed >> 16) as u8
+        };
+        let (mut holds_seen, mut violated_seen) = (0, 0);
+        let mut disagreements = Vec::new();
+        for _ in 0..60 {
+            let masks = [rnd(), rnd() & rnd(), rnd() | rnd()];
+            let sig = |s: usize, t: usize| masks[s] >> (t % 8) & 1 == 1;
+            let holds = (0..8).all(|t| {
+                if !sig(0, t) {
+                    return true;
+                }
+                match (t..t + 8).find(|&k| sig(1, k)) {
+                    Some(k) => (t..=k).all(|k| sig(2, k)),
+                    None => (t..t + 8).all(|k| sig(2, k)),
+                }
+            });
+            let btor2 = periodic_design(&masks);
+            let exact = exact_symbolic_verdict(&btor2, &formula).expect("exact decides");
+            let want = if holds {
+                holds_seen += 1;
+                ExactVerdict::Holds
+            } else {
+                violated_seen += 1;
+                ExactVerdict::Violated
+            };
+            if exact != want {
+                disagreements.push((masks, exact, want));
+            }
+        }
+        assert!(disagreements.is_empty(), "{disagreements:?}");
+        assert!(
+            holds_seen > 10 && violated_seen > 10,
+            "{holds_seen} / {violated_seen}"
+        );
+    }
+
     #[test]
     fn throughout_lowering_agrees_with_a_brute_force_matcher() {
         use crate::adapter::btor2::symbolic_bitblast::{ExactVerdict, exact_symbolic_verdict};
@@ -6944,6 +7028,22 @@ mod tests {
                 "a |-> b[->2] — goto repetition",
                 imp(ov, simple(sig("a")), rep(sig("b"), "GoTo", n(2), n(2))),
                 Rejected("Tier-3b"),
+            ),
+            (
+                "a |-> b[->1] — a bare goto consequent is weak-vacuous without `throughout`",
+                imp(ov, simple(sig("a")), rep(sig("b"), "GoTo", n(1), n(1))),
+                Rejected("Tier-3b"),
+            ),
+            (
+                "a |-> (c throughout b[->1]) — c until and including the first b, c forever if none (2026-10-18)",
+                imp(
+                    ov,
+                    simple(sig("a")),
+                    serde_json::json!({"kind": "Binary", "op": "Throughout",
+                "left": simple(sig("c")),
+                "right": rep(sig("b"), "GoTo", n(1), n(1))}),
+                ),
+                Translates("(!(a) || (nu Z. (c && (b || [] Z))))"),
             ),
             (
                 "a |-> b[=2] — non-consecutive repetition",
