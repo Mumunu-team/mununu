@@ -2192,28 +2192,24 @@ fn e2e_opentitan_ip_edn_full() {
     assert_eq!(rows("EdnEndPointOut_A").len(), 8);
     assert!(holds("EdnEndPointOut_A"));
     // `alert[1] |-> edn_o[i].edn_ack == 0`: a software-triggerable fatal error through the free bus
-    // in the cycle an endpoint acks — reachable from reset, a spec gap in the assertion. The ⊥
-    // re-plan decides at least one of the eight symmetric rows; none of them HOLDS.
+    // in the cycle an endpoint acks — reachable from reset, a spec gap in the assertion. All EIGHT
+    // symmetric rows decide VIOLATED with a trace (mununu#726: under the rescue's fixed 5-s
+    // per-query timeout one to three of them decided per run, load-dependent).
     let fatal = rows("EdnFatalAlertNoRsp_A");
     assert_eq!(fatal.len(), 8);
     assert!(
         fatal
             .iter()
-            .any(|o| matches!(o, VerifyOutcome::Violated { .. })),
-        "{fatal:?}"
-    );
-    assert!(
-        !fatal.iter().any(|o| matches!(o, VerifyOutcome::Holds)),
+            .all(|o| matches!(o, VerifyOutcome::Violated { .. })),
         "{fatal:?}"
     );
     assert!(
         report
             .properties
             .iter()
-            .any(|p| p.label.as_deref() == Some("EdnFatalAlertNoRsp_A")
-                && matches!(p.outcome, VerifyOutcome::Violated { .. })
-                && p.counterexample.is_some()),
-        "the violated row carries its trace"
+            .filter(|p| p.label.as_deref() == Some("EdnFatalAlertNoRsp_A"))
+            .all(|p| p.counterexample.is_some()),
+        "every violated row carries its trace"
     );
     // `EdnDataStable_A` ×8 uses `[->1]` (goto repetition) — the one shape still outside the fragment.
     assert_eq!(report.unsupported.len(), 8, "{:?}", report.unsupported);
@@ -2253,7 +2249,7 @@ fn e2e_opentitan_ip_edn_full() {
             rows(l)
         );
     }
-    // Floors (second pass, 2026-10-18): 23 own + 7 system HOLDS, 1 VIOLATED.
+    // Floors (2026-10-18): 23 own + 7 system HOLDS, 8 VIOLATED.
     let n_holds = report
         .properties
         .iter()

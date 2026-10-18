@@ -4746,6 +4746,7 @@ fn run_symbolic_cegar_cli(
         SymbolicCegarTermination::Converged => "converged",
         SymbolicCegarTermination::BoundedIterationsReached => "bounded-iterations-reached",
         SymbolicCegarTermination::PredicateSourceExhausted => "predicate-source-exhausted",
+        SymbolicCegarTermination::BudgetExpired => "budget-expired",
     };
     // iteration 0 is the initial evaluation; the rest are refinements.
     let refinements = result.iterations.len().saturating_sub(1);

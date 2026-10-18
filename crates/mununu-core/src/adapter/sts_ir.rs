@@ -382,10 +382,27 @@ impl<'a> BtorSts<'a> {
             // may-relation (all-pairs) — identical to `may_edges`.
             let mut may: Vec<(usize, usize)> = Vec::new();
             for i in 0..n_cubes {
+                // mununu#728 — the same two budget degradations as `may_edges` / `must_edges_over`:
+                // `may` OVER-approximates, so on expiry the remaining pairs SATURATE (more ⊥, never
+                // a wrong verdict); the hyper-must side below DROPS (an obligation nobody proved).
+                if crate::adapter::run_budget::expired() {
+                    for si in i..n_cubes {
+                        for sj in 0..n_cubes {
+                            may.push((si, sj));
+                        }
+                    }
+                    break;
+                }
                 for j in 0..n_cubes {
                     if matches!(
                         smt_per_target_may_check_uniform(
-                            &view, &primed, i as u64, j as u64, predicates, &nid_map, timeout_ms,
+                            &view,
+                            &primed,
+                            i as u64,
+                            j as u64,
+                            predicates,
+                            &nid_map,
+                            crate::adapter::run_budget::clamp_query_ms(timeout_ms),
                         ),
                         SmtMayVerdict::May
                     ) {
@@ -411,6 +428,9 @@ impl<'a> BtorSts<'a> {
                 if targets.is_empty() {
                     continue;
                 }
+                if crate::adapter::run_budget::expired() {
+                    break;
+                }
                 let target_bits_set: Vec<u64> = targets.iter().map(|&t| t as u64).collect();
                 if matches!(
                     smt_hyper_must_check_uniform(
@@ -420,7 +440,7 @@ impl<'a> BtorSts<'a> {
                         &target_bits_set,
                         predicates,
                         &nid_map,
-                        timeout_ms,
+                        crate::adapter::run_budget::clamp_query_ms(timeout_ms),
                     ),
                     SmtMustVerdict::Must
                 ) {
@@ -782,6 +802,11 @@ impl SmtEncode for BtorSts<'_> {
                 if targets.is_empty() {
                     continue;
                 }
+                // mununu#728 — a hyper-must edge is an obligation somebody PROVED; on expiry the
+                // remaining sources are DROPPED (more ⊥), as `must_edges_over` does.
+                if crate::adapter::run_budget::expired() {
+                    break;
+                }
                 let target_bits_set: Vec<u64> = targets.iter().map(|&t| t as u64).collect();
                 if matches!(
                     smt_hyper_must_check_uniform(
@@ -791,7 +816,7 @@ impl SmtEncode for BtorSts<'_> {
                         &target_bits_set,
                         predicates,
                         &nid_map,
-                        timeout_ms,
+                        crate::adapter::run_budget::clamp_query_ms(timeout_ms),
                     ),
                     SmtMustVerdict::Must
                 ) {
@@ -841,6 +866,18 @@ impl SmtEncode for BtorSts<'_> {
             // lookup. No separate combinational-NID resolution is needed.
             let mut out = Vec::with_capacity(n_cubes * derived.len());
             for i in 0..n_cubes {
+                // mununu#728 — `2^|P| × derived` queries, every CEGAR round, used to run with no
+                // budget poll and no clamp. On expiry every remaining label is `KleeneBot` — the
+                // encoder-failure value above: an honest "could not determine", never a wrong
+                // label — and the loop stops.
+                if crate::adapter::run_budget::expired() {
+                    for si in i..n_cubes {
+                        for d in 0..derived.len() {
+                            out.push((si, d, Tristate::KleeneBot));
+                        }
+                    }
+                    break;
+                }
                 for (d_idx, d) in derived.iter().enumerate() {
                     let label = smt_combinational_label(
                         &view,
@@ -848,7 +885,7 @@ impl SmtEncode for BtorSts<'_> {
                         cube_predicates,
                         &nid_map,
                         d,
-                        timeout_ms,
+                        crate::adapter::run_budget::clamp_query_ms(timeout_ms),
                     );
                     out.push((i, d_idx, label));
                 }
@@ -1326,5 +1363,100 @@ mod tests {
             Some(&Tristate::KleeneF),
             "q==1 ⇒ g==1 false"
         );
+    }
+    /// mununu#728 — the derived-label loop (`2^|P| × derived` z3 queries, every CEGAR round) polls
+    /// the budget: with it spent every label is `KleeneBot` (the honest "could not determine" the
+    /// encoder-failure arm already uses) and the call returns at once; unbounded, the labels are
+    /// the definite ones of `btor_sts_combinational_labels_determined_by_state_cube`.
+    #[test]
+    fn combinational_labels_bail_to_kleene_bot_on_expiry() {
+        use crate::adapter::run_budget::{Budget, enter};
+        use crate::clts::Tristate;
+        let file = parser::parse(COMB_LABEL_BTOR2).expect("parse combinational-label fixture");
+        let sts = BtorSts::new(&file);
+        let cube_preds = vec![PredicateSpec {
+            name: "q == 1".into(),
+            register: "q".into(),
+            value: 1,
+        }];
+        let derived = vec![PredicateSpec {
+            name: "g == 1".into(),
+            register: "g".into(),
+            value: 1,
+        }];
+        let t0 = std::time::Instant::now();
+        let starved = {
+            let _g = enter(&Budget::with_ms(0));
+            sts.combinational_labels(&cube_preds, &derived, 5_000)
+        };
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(5),
+            "{:?}",
+            t0.elapsed()
+        );
+        assert_eq!(
+            starved.len(),
+            2,
+            "one label per (cube, derived): {starved:?}"
+        );
+        assert!(
+            starved.iter().all(|(_, _, t)| *t == Tristate::KleeneBot),
+            "every label is ⊥ under a spent budget: {starved:?}"
+        );
+        let real = sts.combinational_labels(&cube_preds, &derived, 5_000);
+        assert!(
+            real.iter().any(|(_, _, t)| *t != Tristate::KleeneBot),
+            "unbounded: definite labels"
+        );
+    }
+
+    /// mununu#728 — the hyper-must loops follow the same two directions as `may_edges` /
+    /// `must_edges_over` (`budget_expiry_saturates_may_and_drops_must`): on expiry the may side
+    /// SATURATES and the hyper-must side is EMPTY, both in milliseconds.
+    #[test]
+    fn hyper_must_saturates_may_and_drops_hyper_on_expiry() {
+        use crate::adapter::btor2::kmts_lift::PredicateSpec;
+        use crate::adapter::run_budget::{Budget, enter};
+        const B: &str = "1 sort bitvec 1\n2 state 1 q\n3 zero 1\n4 init 1 2 3\n5 next 1 2 2\n";
+        let file = parser::parse(B).expect("parse");
+        let sts = BtorSts::new(&file);
+        let preds = vec![PredicateSpec {
+            name: "q == 1".into(),
+            register: "q".into(),
+            value: 1,
+        }];
+        let (may_real, hyper_real) = sts.may_and_hyper_must_edges(&preds, 5_000);
+        assert!(
+            may_real.len() < 4,
+            "the true may relation is sparser than the grid: {may_real:?}"
+        );
+        assert!(
+            !hyper_real.is_empty(),
+            "a held register has a hyper-must edge: {hyper_real:?}"
+        );
+        let t0 = std::time::Instant::now();
+        let (may_starved, hyper_starved) = {
+            let _g = enter(&Budget::with_ms(0));
+            sts.may_and_hyper_must_edges(&preds, 5_000)
+        };
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(5),
+            "{:?}",
+            t0.elapsed()
+        );
+        assert_eq!(
+            may_starved,
+            vec![(0, 0), (0, 1), (1, 0), (1, 1)],
+            "MAY saturates on expiry"
+        );
+        assert!(
+            hyper_starved.is_empty(),
+            "hyper-must DROPS on expiry: {hyper_starved:?}"
+        );
+        let standalone = {
+            let _g = enter(&Budget::with_ms(0));
+            sts.hyper_must_edges(&preds, &[(0, 0), (1, 1)], 5_000)
+        };
+        assert!(standalone.is_empty(), "{standalone:?}");
     }
 }

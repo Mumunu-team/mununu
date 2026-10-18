@@ -724,11 +724,17 @@ pub(crate) fn cycle_zero_feasible_cubes(
         };
         let nid_map = build_register_nid_map_with_inputs(&view);
         let preds = cube_predicates(predicates, compound_exprs);
-        let timeout_ms = crate::adapter::run_budget::clamp_query_ms(5_000);
         candidates
             .iter()
             .copied()
             .filter(|&cube| {
+                // mununu#728 — up to 2^|P| queries, up to three times per property: the clamp is
+                // re-read per query (it used to be computed once, before the loop), and an expired
+                // budget KEEPS the candidate — the direction an inconclusive query already takes
+                // (a kept infeasible cube is more ⊥, never a wrong verdict).
+                if crate::adapter::run_budget::expired() {
+                    return true;
+                }
                 !matches!(
                     smt_cube_feasible_at_cycle_zero(
                         &view,
@@ -736,7 +742,7 @@ pub(crate) fn cycle_zero_feasible_cubes(
                         &preds,
                         &nid_map,
                         pins,
-                        timeout_ms
+                        crate::adapter::run_budget::clamp_query_ms(5_000)
                     ),
                     z3::SatResult::Unsat
                 )
@@ -4074,6 +4080,51 @@ mod tests {
             },
         );
         (btor2, preds, compound)
+    }
+
+    /// mununu#728 — the cycle-zero filter polls the budget per query: with the budget spent every
+    /// candidate is KEPT (the direction an inconclusive query already takes), where the unbounded
+    /// control drops the contradictory cube `q == 0 ∧ q == 1`.
+    #[test]
+    fn cycle_zero_filter_keeps_every_candidate_on_expiry() {
+        use crate::adapter::run_budget::{Budget, enter};
+        const B: &str = "1 sort bitvec 2\n2 state 1 q\n3 zero 1\n4 init 1 2 3\n5 next 1 2 2\n";
+        let file = crate::adapter::btor2::parser::parse(B).expect("parse");
+        let preds = vec![
+            PredicateSpec {
+                name: "q == 0".into(),
+                register: "q".into(),
+                value: 0,
+            },
+            PredicateSpec {
+                name: "q == 1".into(),
+                register: "q".into(),
+                value: 1,
+            },
+        ];
+        let compounds = std::collections::HashMap::new();
+        let pins = std::collections::HashMap::new();
+        let unbounded =
+            cycle_zero_feasible_cubes(&file, &preds, &compounds, vec![0, 1, 2, 3], &pins);
+        assert!(
+            !unbounded.contains(&3),
+            "unbounded: the contradictory cube is dropped, got {unbounded:?}"
+        );
+        let t0 = std::time::Instant::now();
+        let starved = {
+            let _g = enter(&Budget::with_ms(0));
+            cycle_zero_feasible_cubes(&file, &preds, &compounds, vec![0, 1, 2, 3], &pins)
+        };
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(5),
+            "{:?}",
+            t0.elapsed()
+        );
+        assert_eq!(
+            starved,
+            vec![0, 1, 2, 3],
+            "a spent budget keeps every candidate (more ⊥, never a wrong verdict)"
+        );
     }
 
     #[test]

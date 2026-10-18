@@ -201,6 +201,10 @@ pub enum SymbolicCegarTermination {
     BoundedIterationsReached,
     /// WP proposed no new predicate (cone-of-influence exhausted) with ⊥ present.
     PredicateSourceExhausted,
+    /// mununu#728 — the thread-local wall-clock budget expired between refinement rounds. The
+    /// verdict is the last completed round's, which is independently sound (less refinement is
+    /// more ⊥, never a wrong verdict).
+    BudgetExpired,
 }
 
 /// R-F5.5b — one refinement-iteration record (verdict summary at the start of
@@ -256,7 +260,32 @@ pub fn symbolic_cegar_refine(
     let mut iterations: Vec<SymbolicCegarIteration> = Vec::new();
     let mut iter = 0usize;
 
+    let mut last: Option<SymbolicCubeVerdicts> = None;
     loop {
+        // mununu#728 — this member used to poll nothing: on a 200-register IP one property ran
+        // 26 min under a 5-min budget. Before iteration 0 there is no sound verdict (an ERROR);
+        // from iteration 1 the last round's verdict is returned, attributed to the clock.
+        if crate::adapter::run_budget::expired() {
+            if let Some(final_verdicts) = last.take() {
+                return Ok(SymbolicCegarResult {
+                    iterations,
+                    final_predicates: predicates,
+                    final_verdicts,
+                    terminated_with: SymbolicCegarTermination::BudgetExpired,
+                });
+            }
+            return Err(AdapterError {
+                kind: crate::adapter::AdapterErrorKind::ResourceBudgetExceeded,
+                location: None,
+                message: format!(
+                    "adapter/btor2/symbolic_engine: the wall-clock budget expired before the first \
+                     symbolic refinement round produced a verdict. Raise or clear {} / {}, or \
+                     narrow the property's cone.",
+                    crate::adapter::run_budget::PROPERTY_BUDGET_ENV,
+                    crate::adapter::run_budget::RUN_BUDGET_ENV,
+                ),
+            });
+        }
         let verdicts = symbolic_cube_verdicts(
             btor2_content,
             &predicates,
@@ -271,6 +300,7 @@ pub fn symbolic_cegar_refine(
             definite_false: verdicts.definite_false,
             bottom: verdicts.bottom,
         });
+        last = Some(verdicts.clone());
 
         // Converged — every feasible cube is definite.
         if verdicts.bottom == 0 {
@@ -790,6 +820,60 @@ mod tests {
     /// must record iterations, only ever grow the predicate set, and terminate
     /// with a valid reason (this ⊥ is a genuine thoroughness gap, so it does not
     /// converge — WP exhausts / caps).
+    /// mununu#728 — the symbolic member polls the thread-local budget: with the budget already
+    /// spent before the first round it is an ERROR (no sound verdict exists yet), not a verdict;
+    /// the unbounded control on the same inputs terminates normally.
+    #[test]
+    fn symbolic_cegar_reports_budget_expiry() {
+        use crate::adapter::AdapterOptions;
+        use crate::adapter::run_budget::{Budget, enter};
+        let options = AdapterOptions::default();
+        let initial = vec![PredicateSpec {
+            name: "top".to_string(),
+            register: "cnt".to_string(),
+            value: 3,
+        }];
+        let formula = crate::mu_calculus::parser::parse("mu X. top or <> X").expect("formula");
+        let t0 = std::time::Instant::now();
+        let starved = {
+            let _g = enter(&Budget::with_ms(0));
+            symbolic_cegar_refine(
+                SAT_COUNTER,
+                &initial,
+                &options,
+                &formula,
+                MustSemantics::ForallExists,
+                8,
+            )
+        };
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(5),
+            "{:?}",
+            t0.elapsed()
+        );
+        match starved {
+            Err(e) => assert_eq!(
+                e.kind,
+                crate::adapter::AdapterErrorKind::ResourceBudgetExceeded,
+                "{e:?}"
+            ),
+            Ok(r) => panic!(
+                "a spent budget must not yield a verdict: {:?}",
+                r.terminated_with
+            ),
+        }
+        let ok = symbolic_cegar_refine(
+            SAT_COUNTER,
+            &initial,
+            &options,
+            &formula,
+            MustSemantics::ForallExists,
+            8,
+        )
+        .expect("unbounded control");
+        assert_ne!(ok.terminated_with, SymbolicCegarTermination::BudgetExpired);
+    }
+
     #[test]
     fn rf5_5b_symbolic_refine_terminates_and_grows_predicates() {
         use crate::adapter::AdapterOptions;
@@ -835,7 +919,8 @@ mod tests {
                 assert_eq!(result.final_verdicts.bottom, 0)
             }
             SymbolicCegarTermination::BoundedIterationsReached
-            | SymbolicCegarTermination::PredicateSourceExhausted => {}
+            | SymbolicCegarTermination::PredicateSourceExhausted
+            | SymbolicCegarTermination::BudgetExpired => {}
         }
     }
 

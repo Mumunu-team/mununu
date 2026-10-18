@@ -1092,6 +1092,25 @@ pub fn cegar_refine_loop(
             // B.1 3c — `effective_strategy` forces Eager when compounds present.
             effective_strategy,
         )?;
+        // mununu#728 — the budget is polled right after the lift as well. The poll at the top of
+        // the loop only fires from iteration 1, so a first-round lift that ran past the deadline
+        // (the label and feasibility loops saturate on expiry, soundly, but return `Ok`) used to
+        // continue into evaluation and refinement unflagged. At iteration 0 there is no sound
+        // verdict yet, so this is the ERROR path; from iteration 1 the top-of-loop return
+        // attributes the stop to the clock.
+        if iteration == 0 && crate::adapter::run_budget::expired() {
+            return Err(crate::adapter::AdapterError {
+                kind: crate::adapter::AdapterErrorKind::ResourceBudgetExceeded,
+                location: None,
+                message: format!(
+                    "adapter/btor2/cegar: the wall-clock budget expired during the first \
+                     refinement round's lift — no verdict exists yet. Raise or clear {} / {}, or \
+                     narrow the property's cone.",
+                    crate::adapter::run_budget::PROPERTY_BUDGET_ENV,
+                    crate::adapter::run_budget::RUN_BUDGET_ENV,
+                ),
+            });
+        }
 
         // CTXDSL Phase 2 (2026-06-22) — capture this iteration's cube model
         // for the opt-in CTXDSL dump. Each iteration overwrites, so at any
@@ -2373,6 +2392,65 @@ mod tests {
 7 next 1 2 4
 8 next 1 3 4
 ";
+
+    /// mununu#728 — the refinement loop polls the budget at iteration 0 as well (the existing
+    /// poll fires from iteration 1 only): with the budget spent before the first round there is no
+    /// sound verdict, so the result is an ERROR of kind `ResourceBudgetExceeded`, never a verdict.
+    /// The unbounded control on the same inputs returns a trace.
+    #[test]
+    fn cegar_budget_expiry_at_iteration_zero_is_an_error_not_a_verdict() {
+        use crate::adapter::run_budget::{Budget, enter};
+        let formula = parser::parse("nu X. (a && [] X)").expect("formula parses");
+        let predicates = vec![PredicateSpec {
+            name: "a".into(),
+            register: "reg_a".into(),
+            value: 0,
+        }];
+        let env = Environment::new(4);
+        let cegar_opts = CegarOptions {
+            max_iterations: 1,
+            may_edge_inference: crate::adapter::btor2::kmts_lift::MayEdgeInference::SmtAllPairs,
+            lift_strategy: LiftStrategy::Eager,
+            ..CegarOptions::default()
+        };
+        let t0 = std::time::Instant::now();
+        let starved = {
+            let _g = enter(&Budget::with_ms(0));
+            cegar_refine_loop(
+                &formula,
+                SMALL_BTOR2,
+                predicates.clone(),
+                &env,
+                &AdapterOptions::default(),
+                &cegar_opts,
+            )
+        };
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(5),
+            "{:?}",
+            t0.elapsed()
+        );
+        match starved {
+            Err(e) => assert_eq!(
+                e.kind,
+                crate::adapter::AdapterErrorKind::ResourceBudgetExceeded,
+                "{e:?}"
+            ),
+            Ok(trace) => panic!(
+                "a budget spent before round 0 must not yield a verdict: {:?}",
+                trace.terminated_with
+            ),
+        }
+        cegar_refine_loop(
+            &formula,
+            SMALL_BTOR2,
+            predicates,
+            &env,
+            &AdapterOptions::default(),
+            &cegar_opts,
+        )
+        .expect("unbounded control");
+    }
 
     // A.5 (2026-07-05) — trap-FSM fixtures for the recoverability soundness
     // reproduction. State `s` (2 bits): idle = 1, error = 2. The FSM's next-state
