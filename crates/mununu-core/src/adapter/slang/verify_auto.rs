@@ -5841,6 +5841,59 @@ pub(crate) fn escalate_bottom_with_slice(
                     }
                 }
             }
+            // Plan 2 / B2 (2026-10-18) — a plain `EF p` the cube left ⊥ is a reachability question
+            // on its DUAL: `AG !p` violated ⇒ `EF p` holds (the portfolio's path reaches `p`),
+            // `AG !p` proved ⇒ `EF p` is violated (`p` is unreachable from reset). The same gate as
+            // the safety arm: the dual IS a safety rescue. Measured need: the four `EF` twins of the
+            // full OpenTitan edn IP's recoverability rows, which SymbiYosys `cover` reaches within
+            // six cycles while the cube certified no MUST path.
+            PropertyClass::Reachability
+                if opts.rescue_bottom_safety
+                    && crate::adapter::reach_rescue::reduce_ef_target(&formula).is_some() =>
+            {
+                lane = "reachability";
+                let dual = crate::mu_calculus::invert::invert(&formula);
+                let rescued = under_rescue_slice(slice_ms, &mut slice_expired, || {
+                    crate::adapter::reach_rescue::reach_portfolio_rescue_diagnosed(
+                        design_btor2,
+                        &dual,
+                        reset_pinned,
+                    )
+                });
+                match rescued {
+                    // the dual's `bad` (= p) is reachable: the target IS reachable
+                    Ok((RescueVerdict::Violated, reach)) => {
+                        let engines = engines_of(&reach);
+                        prop.outcome = VerifyOutcome::Holds;
+                        prop.decided_by = Some("reach-rescue".into());
+                        notes.push(reachability_rescue_note(&prop.name, "HOLDS", &engines));
+                    }
+                    // the dual holds: `p` is unreachable from reset — a violated `EF p`
+                    Ok((RescueVerdict::Holds, reach)) => {
+                        let engines = engines_of(&reach);
+                        prop.outcome = VerifyOutcome::Violated { false_cells: 0 };
+                        prop.decided_by = Some("reach-rescue".into());
+                        prop.counterexample = ef_unreachable_counterexample(&formula);
+                        notes.push(reachability_rescue_note(&prop.name, "VIOLATED", &engines));
+                    }
+                    Ok((RescueVerdict::Inconclusive, _)) => {}
+                    Err(why) => notes.push(VerificationNote {
+                        kind: "reachability-rescue-declined".into(),
+                        level: NoteLevel::ScopeCaveat,
+                        summary: format!(
+                            "`{}`: the reachability-rescue lane declined on the dual — {why}",
+                            prop.name
+                        ),
+                        detail: "A plain `EF p` the cube left ⊥ is decided by the reachability \
+                                 portfolio on its dual `AG !p` (a `bad := p` monitor). When the \
+                                 dual's monitor cannot be emitted the ⊥ stands; the reason names \
+                                 the leaf or shape, not a resource — a bigger budget will not help."
+                            .into(),
+                        items: Vec::new(),
+                        property: Some(prop.name.clone()),
+                    }),
+                }
+            }
             _ => {}
         }
         // A row still ⊥ after its arm, with the row budget or a rescue slice expired, is a budget
@@ -6492,6 +6545,32 @@ fn under_rescue_slice<T>(
     out
 }
 
+/// Plan 2 / B2 — provenance for a plain `EF p` decided on its dual by the reach portfolio.
+fn reachability_rescue_note(name: &str, verdict: &str, engines: &[&str]) -> VerificationNote {
+    VerificationNote {
+        kind: "reachability-rescue".into(),
+        level: NoteLevel::Info,
+        summary: format!(
+            "`{name}`: the cube abstraction left ⊥; the reachability portfolio decided it {verdict} \
+             on the dual `AG !p` (engine(s): {})",
+            if engines.is_empty() {
+                "—".to_string()
+            } else {
+                engines.join(", ")
+            }
+        ),
+        detail: "`EF p` holds iff some initial state reaches `p` under some input sequence — exactly \
+                 the `bad := p` reachability the portfolio decides. A reachable `bad` is a concrete \
+                 path to `p` (HOLDS); a proof that `bad` is unreachable is a proof that `p` is never \
+                 reached from reset (VIOLATED, with the target atoms as the witness). Sound in both \
+                 directions: every portfolio member is sound and a disagreement raises a \
+                 contradiction alarm rather than a verdict."
+            .into(),
+        items: Vec::new(),
+        property: Some(name.to_string()),
+    }
+}
+
 fn rescue_note(name: &str, verdict: &str, engines: &[&str]) -> VerificationNote {
     VerificationNote {
         kind: "portfolio-rescue".into(),
@@ -7008,6 +7087,78 @@ mod tests {
             !note2.detail.contains("ALTERNATING recoverability property"),
             "a safety-only report must not carry the νμ caveat; got: {}",
             note2.detail
+        );
+    }
+
+    /// Plan 2 / B2 — a plain `EF p` the cube left ⊥ is decided on its dual by the reach portfolio:
+    /// `big` is held at 0, so `EF (big == 0)` is reached at the initial state (HOLDS, with the
+    /// portfolio's path), `EF (big == 5)` is never reached (VIOLATED, the target atoms as the
+    /// witness), and an `EF` whose body is not a compilable boolean (a nested modality) is left ⊥
+    /// without a note. Before this arm every `Reachability` row fell through `_ => {}`.
+    #[test]
+    fn escalate_bottom_reachability_decides_ef_on_the_dual() {
+        const DESIGN: &str =
+            "1 sort bitvec 4\n2 state 1 big\n3 zero 1\n4 init 1 2 3\n5 next 1 2 2\n";
+        let row = |name: &str, formula: &str| PropertyVerdict {
+            name: name.to_string(),
+            label: None,
+            kind: crate::adapter::slang::translate::SvaKind::Assert,
+            formula: formula.to_string(),
+            outcome: VerifyOutcome::Unknown { unknown_cells: 1 },
+            seeded_predicates: Vec::new(),
+            counterexample: None,
+            bottom_reason: None,
+            decided_by: None,
+            vacuity: None,
+        };
+        let mut report = AutoVerifyReport {
+            properties: vec![
+                row("reach_zero", "mu Z. ((big == 0) || <> Z)"),
+                row("reach_five", "mu Z. ((big == 5) || <> Z)"),
+                row("not_reducible", "mu Z. ((big == 0) || <> <> Z)"),
+            ],
+            ..Default::default()
+        };
+        let notes = escalate_bottom(
+            &mut report,
+            DESIGN,
+            false,
+            &VerifyAutoOptions::default(),
+            &[],
+        );
+        assert!(
+            matches!(report.properties[0].outcome, VerifyOutcome::Holds),
+            "EF (big == 0) is reached at reset: {:?}",
+            report.properties[0].outcome
+        );
+        assert_eq!(
+            report.properties[0].decided_by.as_deref(),
+            Some("reach-rescue")
+        );
+        assert!(
+            matches!(report.properties[1].outcome, VerifyOutcome::Violated { .. }),
+            "EF (big == 5) is never reached: {:?}",
+            report.properties[1].outcome
+        );
+        let cx = report.properties[1]
+            .counterexample
+            .as_ref()
+            .expect("an unreachable target carries its atoms as the witness");
+        assert_eq!(cx.unreachable_target, vec!["big == 5".to_string()]);
+        assert!(cx.prefix.is_empty() && cx.cycle.is_empty());
+        assert!(
+            matches!(report.properties[2].outcome, VerifyOutcome::Unknown { .. }),
+            "a non-reducible EF stays ⊥: {:?}",
+            report.properties[2].outcome
+        );
+        assert_eq!(
+            notes
+                .iter()
+                .filter(|n| n.kind == "reachability-rescue")
+                .count(),
+            2,
+            "one provenance note per decided row: {:?}",
+            notes.iter().map(|n| n.kind.as_str()).collect::<Vec<_>>()
         );
     }
 

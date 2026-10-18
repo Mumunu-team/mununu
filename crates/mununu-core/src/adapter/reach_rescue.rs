@@ -309,6 +309,36 @@ pub(crate) fn is_compilable_boolean_body(formula: &Formula, id: NodeId) -> bool 
     }
 }
 
+/// Plan 2 / B2 (2026-10-18) — the plain reachability shape `mu Z. (p || <> Z)` (`EF p`) with `p` a
+/// compilable boolean body: the node of `p`, or `None` when the formula is any other shape. Its
+/// DUAL is the AG invariant `nu Z. (!p && [] Z)`, which [`reach_portfolio_rescue_diagnosed`] already
+/// reduces to a `bad := p` monitor — so a ⊥ `EF p` is decided by the reach portfolio on the dual:
+/// `bad` reachable ⇒ `EF p` HOLDS (with the path), `bad` proved unreachable ⇒ `EF p` VIOLATED.
+/// `<>` here is "some successor over some input", exactly BTOR2 reachability — the same reading the
+/// exact engine gives `EF`.
+pub fn reduce_ef_target(formula: &Formula) -> Option<NodeId> {
+    let Node::Mu { var, body } = formula.node(formula.root()) else {
+        return None;
+    };
+    let Node::Or(l, r) = formula.node(*body) else {
+        return None;
+    };
+    let is_diamond_to_var = |id: NodeId| {
+        matches!(
+            formula.node(id),
+            Node::Modal { kind: ModalKind::Diamond, guard, target }
+                if *guard == Guard::default()
+                    && matches!(formula.node(*target), Node::Variable(v) if *v == *var)
+        )
+    };
+    let p = match (is_diamond_to_var(*l), is_diamond_to_var(*r)) {
+        (true, false) => *r,
+        (false, true) => *l,
+        _ => return None,
+    };
+    is_compilable_boolean_body(formula, p).then_some(p)
+}
+
 /// Return `(atom_node, modal_node)` iff exactly one of `l` / `r` is a box-to-`var`
 /// and the other is not. `None` if neither or both look like the box recursion,
 /// keeping the shape match unambiguous.

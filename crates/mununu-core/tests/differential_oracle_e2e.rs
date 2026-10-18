@@ -2211,15 +2211,17 @@ fn e2e_opentitan_ip_edn_full() {
             .all(|p| p.counterexample.is_some()),
         "every violated row carries its trace"
     );
-    // `EdnDataStable_A` ×8 uses `[->1]` (goto repetition) — the one shape still outside the fragment.
-    assert_eq!(report.unsupported.len(), 8, "{:?}", report.unsupported);
+    // `EdnDataStable_A` ×8 (`$stable(bus) throughout (req || !enable)[->1]`) translates since the
+    // weak-until lowering of `throughout b[->1]` (2026-10-18): nothing is unsupported any more. Its
+    // verdict is a 32-bit bus-stability question — pinned as measured.
+    assert!(report.unsupported.is_empty(), "{:?}", report.unsupported);
+    let stable = rows("EdnDataStable_A");
+    assert_eq!(stable.len(), 8);
     assert!(
-        report
-            .unsupported
+        stable
             .iter()
-            .all(|(n, r)| n.starts_with("gen_edn_if_asserts_sva_") && r.contains("GoTo")),
-        "{:?}",
-        report.unsupported
+            .all(|o| matches!(o, VerifyOutcome::Unknown { .. })),
+        "{stable:?}"
     );
     // --- the system-level properties (cross-block: FSM → core → register block) ---
     for l in [
@@ -2232,30 +2234,39 @@ fn e2e_opentitan_ip_edn_full() {
         // the entry-condition form; the invariant form ("in SWPortMode the boot-request control
         // is off") is FALSE — software may rewrite CTRL while the FSM stays in SWPortMode
         "edn_swport_entry_excludes_boot_mode",
+        // all eight ERR_CODE bits; decided by the reach rescue's k-induction in half a second
+        "edn_fatal_alert_has_a_source",
     ] {
         assert_eq!(rows(l).len(), 1, "{l}");
         assert!(holds(l), "{l}: {:?}", rows(l));
     }
-    // Pinned abstentions: the FSM state's cone is over the exact cap and the cube certifies no MUST
-    // path. An engine that decides one of these breaks the pin — re-measure, then move the pin.
+    // The `EF` twins decide on their dual through the reach rescue (2026-10-18): each target is
+    // reached from reset (SymbiYosys `cover` reaches the same within six cycles).
     for l in [
-        "edn_main_sm_recover_idle",
         "edn_main_sm_error_reachable",
-        "edn_ack_sm_0_recover_idle",
+        "edn_main_sm_swport_reachable",
+        "edn_ack_sm_0_datawait_reachable",
+        "edn_ack_sm_7_datawait_reachable",
     ] {
+        assert!(holds(l), "{l}: {:?}", rows(l));
+    }
+    // Pinned abstentions: the `AG EF` rows — the FSM state's cone is over the exact cap and the
+    // cube certifies no MUST path. An engine that decides one breaks the pin — re-measure, then
+    // move the pin.
+    for l in ["edn_main_sm_recover_idle", "edn_ack_sm_0_recover_idle"] {
         assert!(
             matches!(rows(l)[0], VerifyOutcome::Unknown { .. }),
             "{l}: {:?}",
             rows(l)
         );
     }
-    // Floors (2026-10-18): 23 own + 7 system HOLDS, 8 VIOLATED.
+    // Floors (2026-10-18): 23 own + 8 system + 4 `EF` twins HOLDS, 8 VIOLATED.
     let n_holds = report
         .properties
         .iter()
         .filter(|p| matches!(p.outcome, VerifyOutcome::Holds))
         .count();
-    assert!(n_holds >= 30, "holds = {n_holds}");
+    assert!(n_holds >= 35, "holds = {n_holds}");
 }
 
 /// The full-IP system properties are not invariants in disguise: freezing the sticky `ERR_CODE`
