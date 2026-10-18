@@ -79,13 +79,35 @@ impl Breadcrumb {
     /// re-run cannot be misread as a continuation of an older one. Disabled (with one warning)
     /// when the path cannot be opened.
     pub fn from_env() -> Self {
+        Self::from_env_with_append(false)
+    }
+
+    /// [`Breadcrumb::from_env`], opening in APPEND mode when `append` — a later member of the
+    /// sequential portfolio (PR C): before this every member truncated the file, so the breadcrumb
+    /// of a portfolio run held only the LAST member's records. A reader takes the last record per
+    /// property; the records of every member are kept, each in the order its pass wrote them.
+    pub fn from_env_with_append(append: bool) -> Self {
         let Ok(path) = std::env::var(PARTIAL_JSON_ENV) else {
             return Self::default();
         };
         if path.trim().is_empty() {
             return Self::default();
         }
-        match std::fs::File::create(&path) {
+        Self::at_path(&path, append)
+    }
+
+    /// Open the breadcrumb at `path` — truncating, or appending when `append`. The seam the tests
+    /// use (no environment variable involved).
+    pub(crate) fn at_path(path: &str, append: bool) -> Self {
+        let opened = if append {
+            std::fs::OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(path)
+        } else {
+            std::fs::File::create(path)
+        };
+        match opened {
             Ok(file) => Self {
                 file: Some(file),
                 recorded: 0,
@@ -295,6 +317,41 @@ mod tests {
         unsafe {
             std::env::remove_var(PARTIAL_JSON_ENV);
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// PR C — a later sequential-portfolio member appends: the file keeps the first member's
+    /// records and gains the second's; the first member alone (truncating) starts the file over.
+    #[test]
+    fn append_mode_keeps_the_previous_members_records() {
+        let dir = std::env::temp_dir().join(format!("mununu-breadcrumb-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("partial.ndjson");
+        let path_s = path.to_str().unwrap();
+        {
+            let mut first = Breadcrumb::at_path(path_s, false);
+            first.record(0, "p0", "holds", "main", None);
+        }
+        {
+            let mut second = Breadcrumb::at_path(path_s, true);
+            second.record(0, "p0", "unknown", "main", None);
+            second.record(1, "p1", "violated", "main", None);
+        }
+        let lines: Vec<String> = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert!(lines[0].contains("\"holds\"") && lines[2].contains("\"p1\""));
+        {
+            let mut again = Breadcrumb::at_path(path_s, false);
+            again.record(0, "p0", "skipped", "main", None);
+        }
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap().lines().count(),
+            1,
+            "truncating restarts"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

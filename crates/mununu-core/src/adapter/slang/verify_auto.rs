@@ -1956,6 +1956,16 @@ pub struct VerifyAutoOptions {
     /// Only fires on the `AG EF (REG == VALUE)` shape. Default `true`; `--no-rescue` /
     /// API `rescue_bottom_recoverability: false` opts out.
     pub rescue_bottom_recoverability: bool,
+    /// Plan 2 / PR C — this run is one PORTFOLIO MEMBER: leave the ⊥ rows alone, the planner
+    /// re-plans the MERGED report once after every member ([`replan_merged`]). Set by the planner
+    /// only; `false` on a single-engine run, which re-plans its own ⊥ rows as before. Measured on
+    /// the full OpenTitan `edn` IP: with every member re-planning, the first member spent a 60-s
+    /// rescue slice on each of fifteen rows the next member's main pass decided in about a second,
+    /// and the rows no engine decides paid their slice once per member (1 877 s against 584 s).
+    pub replan_defer: bool,
+    /// PR C — open the `MUNUNU_VERIFY_AUTO_PARTIAL_JSON` breadcrumb in APPEND mode (a later
+    /// portfolio member; the first truncates). Set by the planner only.
+    pub breadcrumb_append: bool,
     /// #468 — apply a NAMED structural mutation to the prepared BTOR2 before
     /// verification (`prepare_model`), so `sv mutate` can assert the property
     /// verdicts FLIP (property adequacy). `None` (default) ⇒ no mutation, the model
@@ -2054,6 +2064,8 @@ impl Default for VerifyAutoOptions {
             rescue_bottom_safety: true,
             rescue_bottom_liveness: true,
             rescue_bottom_recoverability: true,
+            replan_defer: false,
+            breadcrumb_append: false,
             mutation: None,
             antecedent_shadow: true,
             antecedent_propagate: true,
@@ -3440,6 +3452,68 @@ pub(crate) fn merge_portfolio_reports(
     Ok(merged)
 }
 
+/// Plan 2 / PR C (2026-10-18) — the ⊥ re-plan on the MERGED portfolio report, run ONCE by the
+/// planner after every member ([`crate::planner::execute`]); each member runs with
+/// [`VerifyAutoOptions::replan_defer`] and leaves its ⊥ rows alone. The merged ⊥ rows are exactly
+/// the rows NO engine decided, so the rescue is paid once per row and never on a row another
+/// engine's main pass settles. Before this every member re-planned its own ⊥ rows — measured on
+/// the full OpenTitan `edn` IP: fifteen 60-s slices in the first member on rows the second decided
+/// in about a second each, and the five rows no engine decides paid a slice per member (1 877 s
+/// against 584 s). The rescue's provenance notes land on the merged report (a member's notes
+/// never survived the merge, which keeps the base engine's). The post-passes a member runs after
+/// its own re-plan run here, on the merged verdicts, in the same order.
+pub(crate) fn replan_merged(
+    report: &mut AutoVerifyReport,
+    design_btor2: &str,
+    fairness_atoms: &[crate::adapter::liveness_rescue::Atom],
+    opts: &VerifyAutoOptions,
+) {
+    if report
+        .properties
+        .iter()
+        .all(|p| outcome_definite(&p.outcome).is_some())
+    {
+        return;
+    }
+    let reset_pinned = !report.diagnostics.gated_resets.is_empty();
+    // A member's shape-derived classification is re-derived once the re-plan has run; a specific
+    // upstream reason (budget, memory, contradiction, unestablished init, engine failure) stays.
+    for p in report.properties.iter_mut() {
+        if matches!(p.outcome, VerifyOutcome::Unknown { .. })
+            && matches!(
+                p.bottom_reason,
+                Some(
+                    BottomReason::UnclassifiedBottom
+                        | BottomReason::SafetyShapeNotReducible
+                        | BottomReason::NoStateModelNonSafety
+                )
+            )
+        {
+            p.bottom_reason = None;
+        }
+    }
+    let mut breadcrumb = crate::adapter::partial_json::Breadcrumb::from_env_with_append(true);
+    let before: Vec<&'static str> = report
+        .properties
+        .iter()
+        .map(|p| p.outcome.label())
+        .collect();
+    let notes = crate::planner::replan(report, design_btor2, reset_pinned, opts, fairness_atoms);
+    for (i, p) in report.properties.iter().enumerate() {
+        if before.get(i).copied() != Some(p.outcome.label()) {
+            breadcrumb.record(i, &p.name, p.outcome.label(), "escalated", None);
+        }
+    }
+    downgrade_violated_on_unestablished_init(report, design_btor2);
+    attach_safety_witnesses(report, design_btor2, reset_pinned);
+    report.notes.extend(notes);
+    refresh_coverage_summary(report);
+    drop_stale_bottom_reasons(report);
+    flag_self_contradictory_verdicts(report);
+    flag_vacuous_guarantees(report);
+    refresh_vacuity_notes(report);
+}
+
 /// One property's baseline-vs-mutant verdict under a mutation (`sv mutate`).
 #[derive(Debug, Clone)]
 pub struct PropertyFlip {
@@ -3778,6 +3852,12 @@ impl PreparedModel {
             .iter()
             .map(|t| (t.name.clone(), t.formula.clone()))
             .collect()
+    }
+
+    /// The `@mununu_assume GF <atom>` fairness atoms the annotation scan found — the re-plan's
+    /// liveness lane reads them ([`replan_merged`]).
+    pub(crate) fn fairness_assumes(&self) -> &[crate::adapter::liveness_rescue::Atom] {
+        &self.ann_scan.fairness_assumes
     }
 }
 
@@ -4588,7 +4668,8 @@ pub(crate) fn verify_auto_impl(
     // failure in the comment above: "monono lost a gate run to a process kill that emitted zero
     // bytes, including for properties mununu had already decided." Opt-in via
     // `MUNUNU_VERIFY_AUTO_PARTIAL_JSON=<path>`; disabled and zero-cost otherwise.
-    let mut breadcrumb = crate::adapter::partial_json::Breadcrumb::from_env();
+    let mut breadcrumb =
+        crate::adapter::partial_json::Breadcrumb::from_env_with_append(opts.breadcrumb_append);
     for t in &extraction.translated {
         // Flush whatever the PREVIOUS iteration decided, before this one starts its (possibly
         // very long, possibly fatal) work. One call here covers all nine `properties.push` sites
@@ -5392,13 +5473,20 @@ pub(crate) fn verify_auto_impl(
             .collect()
     });
 
-    let rescue_notes = crate::planner::replan(
-        &mut report,
-        &btor2,
-        reset_pinned,
-        opts,
-        &ann_scan.fairness_assumes,
-    );
+    // Plan 2 / PR C — a portfolio member leaves its ⊥ rows to the planner, which re-plans the
+    // MERGED report once after every member ([`replan_merged`]); a single-engine run re-plans
+    // its own rows here, as before.
+    let rescue_notes = if opts.replan_defer {
+        Vec::new()
+    } else {
+        crate::planner::replan(
+            &mut report,
+            &btor2,
+            reset_pinned,
+            opts,
+            &ann_scan.fairness_assumes,
+        )
+    };
 
     // C7 — append an `escalated` record for every verdict the re-plan MOVED. Only the movers, so
     // the file stays a log of what changed rather than a duplicated dump.
@@ -6281,12 +6369,20 @@ fn classify_bottom_reason(prop: &PropertyVerdict, stateless_model: bool) -> Bott
     };
     match formula.property_class() {
         PropertyClass::Safety => {
-            let single_atom = crate::adapter::reach_rescue::reduce_ag_invariant(&formula).is_some();
-            let compound = crate::adapter::reach_rescue::reduce_ag_boolean_body(&formula).is_some();
-            if !single_atom && !compound {
-                BottomReason::SafetyShapeNotReducible
-            } else {
+            // The reducers the safety rescue tries, in its order — a shape any of them accepts
+            // REACHED the portfolio, so its residual ⊥ is not a shape gap (PR C added the chain).
+            use crate::adapter::reach_rescue::{
+                reduce_ag_boolean_body, reduce_ag_implies_next, reduce_ag_invariant,
+                reduce_bounded_chain,
+            };
+            let reducible = reduce_ag_invariant(&formula).is_some()
+                || reduce_ag_boolean_body(&formula).is_some()
+                || reduce_ag_implies_next(&formula).is_some()
+                || reduce_bounded_chain(&formula).is_some();
+            if reducible {
                 BottomReason::UnclassifiedBottom
+            } else {
+                BottomReason::SafetyShapeNotReducible
             }
         }
         PropertyClass::Liveness | PropertyClass::Reachability | PropertyClass::Mixed => {
@@ -7159,6 +7255,166 @@ mod tests {
             2,
             "one provenance note per decided row: {:?}",
             notes.iter().map(|n| n.kind.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    /// PR C — the bounded-chain shapes the rescue used to DECLINE in 0 ms are rescued: a
+    /// `$rose(flag) |-> ##[0:2] ack` chain on a design whose flag is constant 0 HOLDS (the
+    /// antecedent never fires; k-induction proves the monitor's `bad` unreachable), and the same
+    /// shape on the 2-bit counter with `cnt == 1` as the trigger and `cnt == 3` as the response is
+    /// VIOLATED with a trace when the window is one cycle short.
+    #[test]
+    fn escalate_bottom_safety_rescues_a_bounded_response_chain() {
+        const QUIET: &str = "1 sort bitvec 1\n2 zero 1\n3 state 1 flag\n4 init 1 3 2\n\
+                             5 next 1 3 2\n6 state 1 flag__past\n7 init 1 6 2\n8 next 1 6 3\n\
+                             9 input 1 ack\n";
+        const COUNTER: &str = "1 sort bitvec 2\n2 sort bitvec 1\n3 zero 1\n4 one 1\n\
+                               5 state 1 cnt\n6 init 1 5 3\n7 add 1 5 4\n8 next 1 5 7\n";
+        let row = |name: &str, formula: &str| PropertyVerdict {
+            name: name.to_string(),
+            label: None,
+            kind: crate::adapter::slang::translate::SvaKind::Assert,
+            formula: formula.to_string(),
+            outcome: VerifyOutcome::Unknown { unknown_cells: 1 },
+            seeded_predicates: Vec::new(),
+            counterexample: None,
+            bottom_reason: None,
+            decided_by: None,
+            vacuity: None,
+        };
+        let mut quiet = AutoVerifyReport {
+            properties: vec![row(
+                "flag_alerts",
+                "nu X. (((!((flag && (!(flag__past))))) || (ack || [] (ack || [] ack))) && [] X)",
+            )],
+            ..Default::default()
+        };
+        let notes = escalate_bottom(&mut quiet, QUIET, false, &VerifyAutoOptions::default(), &[]);
+        assert!(
+            matches!(quiet.properties[0].outcome, VerifyOutcome::Holds),
+            "a flag that never rises makes the chain hold: {:?}",
+            quiet.properties[0].outcome
+        );
+        assert_eq!(
+            quiet.properties[0].decided_by.as_deref(),
+            Some("reach-rescue")
+        );
+        assert!(
+            notes.iter().any(|n| n.kind == "portfolio-rescue"),
+            "{notes:?}"
+        );
+        let mut short = AutoVerifyReport {
+            properties: vec![row(
+                "window_short",
+                "nu X. (((!((cnt == 1))) || ((cnt == 3) || [] (cnt == 3))) && [] X)",
+            )],
+            ..Default::default()
+        };
+        escalate_bottom(
+            &mut short,
+            COUNTER,
+            false,
+            &VerifyAutoOptions::default(),
+            &[],
+        );
+        assert!(
+            matches!(short.properties[0].outcome, VerifyOutcome::Violated { .. }),
+            "{:?}",
+            short.properties[0].outcome
+        );
+        assert!(
+            short.properties[0].counterexample.is_some(),
+            "the violated chain carries its trace"
+        );
+    }
+
+    /// PR C — the planner's once-per-run re-plan on the MERGED report: a ⊥ row the rescue decides
+    /// becomes HOLDS attributed to `reach-rescue`, with the rescue's provenance note ON the merged
+    /// report (a member's notes never survived the merge) and the member's generic ⊥ reason gone;
+    /// a merged report with every row decided is left untouched.
+    #[test]
+    fn replan_merged_decides_the_rows_no_engine_decided_once() {
+        const DESIGN: &str =
+            "1 sort bitvec 4\n2 state 1 big\n3 zero 1\n4 init 1 2 3\n5 next 1 2 2\n";
+        let row = |outcome: VerifyOutcome| PropertyVerdict {
+            name: "big_zero".to_string(),
+            label: None,
+            kind: crate::adapter::slang::translate::SvaKind::Assert,
+            formula: "nu X. ((big == 0) && [] X)".to_string(),
+            outcome,
+            seeded_predicates: Vec::new(),
+            counterexample: None,
+            bottom_reason: Some(BottomReason::UnclassifiedBottom),
+            decided_by: None,
+            vacuity: None,
+        };
+        let mut merged = AutoVerifyReport {
+            properties: vec![row(VerifyOutcome::Unknown { unknown_cells: 1 })],
+            ..Default::default()
+        };
+        replan_merged(&mut merged, DESIGN, &[], &VerifyAutoOptions::default());
+        assert!(matches!(merged.properties[0].outcome, VerifyOutcome::Holds));
+        assert_eq!(
+            merged.properties[0].decided_by.as_deref(),
+            Some("reach-rescue")
+        );
+        assert!(
+            merged.properties[0].bottom_reason.is_none(),
+            "{:?}",
+            merged.properties[0].bottom_reason
+        );
+        assert!(
+            merged.notes.iter().any(|n| n.kind == "portfolio-rescue"),
+            "the rescue's provenance lands on the merged report: {:?}",
+            merged.notes.iter().map(|n| &n.kind).collect::<Vec<_>>()
+        );
+
+        let mut settled = AutoVerifyReport {
+            properties: vec![row(VerifyOutcome::Holds)],
+            ..Default::default()
+        };
+        let before = settled.notes.len();
+        replan_merged(&mut settled, DESIGN, &[], &VerifyAutoOptions::default());
+        assert_eq!(
+            settled.notes.len(),
+            before,
+            "nothing to re-plan, nothing touched"
+        );
+    }
+
+    /// PR C — the classifier agrees with the reducers: a bounded chain and a chain ending in a
+    /// weak-until block are REDUCIBLE safety shapes now (the rescue runs on them), so a residual ⊥
+    /// on one is not `safety-shape-not-reducible`; `[] a || [] b` still is. On csrng's ten control
+    /// checks the old classifier reported a shape gap for rows the portfolio had just run on.
+    #[test]
+    fn a_bounded_chain_bottom_is_not_a_shape_gap() {
+        let row = |formula: &str| PropertyVerdict {
+            name: "p".to_string(),
+            label: None,
+            kind: crate::adapter::slang::translate::SvaKind::Assert,
+            formula: formula.to_string(),
+            outcome: VerifyOutcome::Unknown { unknown_cells: 1 },
+            seeded_predicates: Vec::new(),
+            counterexample: None,
+            bottom_reason: None,
+            decided_by: None,
+            vacuity: None,
+        };
+        let chain = "nu X. (((!((a == 1))) || ((b == 1) || [] ((b == 1) || [] (b == 1)))) && [] X)";
+        let until = "nu X. (((!((a == 1))) || [] (nu Z. ((q == q__past) && ((r == 1) || [] Z)))) \
+                     && [] X)";
+        let two_boxes = "nu X. (([] (a == 1) || [] (b == 1)) && [] X)";
+        assert_eq!(
+            classify_bottom_reason(&row(chain), false),
+            BottomReason::UnclassifiedBottom
+        );
+        assert_eq!(
+            classify_bottom_reason(&row(until), false),
+            BottomReason::UnclassifiedBottom
+        );
+        assert_eq!(
+            classify_bottom_reason(&row(two_boxes), false),
+            BottomReason::SafetyShapeNotReducible
         );
     }
 

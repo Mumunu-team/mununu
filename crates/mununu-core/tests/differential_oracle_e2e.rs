@@ -2212,17 +2212,40 @@ fn e2e_opentitan_ip_edn_full() {
         "every violated row carries its trace"
     );
     // `EdnDataStable_A` ×8 (`$stable(bus) throughout (req || !enable)[->1]`) translates since the
-    // weak-until lowering of `throughout b[->1]` (2026-10-18): nothing is unsupported any more. Its
-    // verdict is a 32-bit bus-stability question — pinned as measured.
+    // weak-until lowering of `throughout b[->1]` (2026-10-18): nothing is unsupported any more. Both
+    // bus-stability families HOLD through the reach rescue's bounded-chain monitor (PR C, 2026-10-18;
+    // the weak-until block judged by a pending latch) — native k-induction, 1–5 s a row. SymbiYosys
+    // `abc pdr` proves the same assertions for all eight endpoints in 18 s, and a deliberately false
+    // control over the same pending latch fails at step 8, so the proofs are not vacuous.
     assert!(report.unsupported.is_empty(), "{:?}", report.unsupported);
-    let stable = rows("EdnDataStable_A");
-    assert_eq!(stable.len(), 8);
-    assert!(
-        stable
-            .iter()
-            .all(|o| matches!(o, VerifyOutcome::Unknown { .. })),
-        "{stable:?}"
-    );
+    for l in ["EdnDataStable_A", "EdnDataStableDisable_A"] {
+        assert_eq!(rows(l).len(), 8, "{l}");
+        assert!(holds(l), "{l}: {:?}", rows(l));
+        assert!(
+            by(l).iter().all(|d| *d == Some("reach-rescue")),
+            "{l}: {:?}",
+            by(l)
+        );
+    }
+    // The five duplicated-counter fault-flag chains reach the portfolio since PR C (declined before)
+    // and stay ⊥ with the rescue slice spent: the proof needs the invariant "the two counter copies
+    // agree", which k-induction cannot find from a free step state and z3 SPACER does not find within
+    // the 60-s slice; SymbiYosys `abc pdr` proves `!err_o` in 8 s. A lane that decides one breaks the
+    // pin — re-measure, then move it.
+    for l in [
+        "FpvSecCmCntAlertCheck_A",
+        "FpvSecCmResCmdFifoWptrCheck_A",
+        "FpvSecCmResCmdFifoRptrCheck_A",
+        "FpvSecCmGenCmdFifoWptrCheck_A",
+        "FpvSecCmGenCmdFifoRptrCheck_A",
+    ] {
+        assert_eq!(rows(l).len(), 1, "{l}");
+        assert!(
+            matches!(rows(l)[0], VerifyOutcome::Unknown { .. }),
+            "{l}: {:?}",
+            rows(l)
+        );
+    }
     // --- the system-level properties (cross-block: FSM → core → register block) ---
     for l in [
         "edn_main_sm_error_is_terminal",
@@ -2260,13 +2283,13 @@ fn e2e_opentitan_ip_edn_full() {
             rows(l)
         );
     }
-    // Floors (2026-10-18): 23 own + 8 system + 4 `EF` twins HOLDS, 8 VIOLATED.
+    // Floors (2026-10-18, PR C): 39 own + 8 system + 4 `EF` twins HOLDS, 8 VIOLATED.
     let n_holds = report
         .properties
         .iter()
         .filter(|p| matches!(p.outcome, VerifyOutcome::Holds))
         .count();
-    assert!(n_holds >= 35, "holds = {n_holds}");
+    assert!(n_holds >= 51, "holds = {n_holds}");
 }
 
 /// The full-IP system properties are not invariants in disguise: freezing the sticky `ERR_CODE`

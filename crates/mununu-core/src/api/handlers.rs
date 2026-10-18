@@ -1980,6 +1980,9 @@ fn sv_verify_auto_handler_impl(
             .iter()
             .map(|f| (f.name.clone(), f.content.clone()))
             .collect(),
+        // PR C — planner-only fields: a single API run re-plans its own rows and truncates
+        replan_defer: false,
+        breadcrumb_append: false,
         assume_mode,
     };
 

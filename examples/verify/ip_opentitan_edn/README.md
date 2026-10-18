@@ -37,17 +37,17 @@ To re-vendor at another commit: `python3 ../../../scripts/vendor_opentitan_ip.py
 
 | rows | holds | violated | unknown (⊥) | unsupported |
 |---|---|---|---|---|
-| the IP's own SVA (52) | **23** | **8** | 21 | 0 |
+| the IP's own SVA (52) | **39** | **8** | 5 | 0 |
 | · `ASSERT_KNOWN` (13; `$isunknown` folds to false — the model is 2-state) | 13 (`constant`) | | | |
-| · error → alert checks, `ASSERT_PRIM_*_ERROR_TRIGGER_ALERT` (15): a fault flag in a sub-instance ⇒ `alert_tx_o[1].alert_p` within 30 cycles | **10** — the main FSM, all 8 endpoint FSMs, the register-write one-hot check (`explicit` cube) | | 5 — the `prim_count` and FIFO-pointer checks (32-bit duplicated counters, cone over the 192-bit cap) | |
-| · `EdnFatalAlertNoRsp_A` ×8: `alert[1] |-> edn_o[i].edn_ack == 0` | | **8**, each 6 cycles from reset with its trace (the reach rescue's native BMC, 20–30 s a row under the 60-s `MUNUNU_RESCUE_SLICE_MS`; before mununu#726 the rescue ran under a fixed 5-s query timeout and one to three rows decided per run) | | |
-| · `EdnDataStableDisable_A` ×8 (32-bit bus stable while disabled) | | | 8 | |
-| · `EdnDataStable_A` ×8 (`$stable(bus) throughout (req \|\| !enable)[->1]`, lowered as a weak-until since 2026-10-18) | | | 8 (the same 32-bit bus-stability cone as the row above) | |
+| · error → alert checks, `ASSERT_PRIM_*_ERROR_TRIGGER_ALERT` (15): a fault flag in a sub-instance ⇒ `alert_tx_o[1].alert_p` within 30 cycles | **10** — the main FSM, all 8 endpoint FSMs, the register-write one-hot check (`explicit` cube) | | 5 — the `prim_count` and FIFO-pointer checks (32-bit duplicated counters): since the bounded-chain monitor (2026-10-18) they reach the reach portfolio and stay ⊥ with the 60-s rescue slice spent (`budget-expired`) — the proof needs the invariant "the two counter copies agree", which k-induction cannot find from a free step state and z3 SPACER does not find within the slice; SymbiYosys `abc pdr` proves `!err_o` in 8 s | |
+| · `EdnFatalAlertNoRsp_A` ×8: `alert[1] |-> edn_o[i].edn_ack == 0` | | **8**, each 6 cycles from reset with its trace (the reach rescue's native BMC, 16–33 s a row under the 60-s `MUNUNU_RESCUE_SLICE_MS`; before mununu#726 the rescue ran under a fixed 5-s query timeout and one to three rows decided per run) | | |
+| · `EdnDataStableDisable_A` ×8 (`!enable |=> ##1 $stable(bus)`, 32-bit bus stable while disabled) | **8** — the reach rescue's bounded-chain monitor, native k-induction, 1–2 s a row (2026-10-18) | | | |
+| · `EdnDataStable_A` ×8 (`$stable(bus) throughout (req \|\| !enable)[->1]`, lowered as a weak-until since 2026-10-18) | **8** — the same monitor with the weak-until block judged by a pending latch, native k-induction, 3–5 s a row. SymbiYosys `abc pdr` proves both families for all eight endpoints in 18 s; a deliberately false control over the same pending latch fails at step 8 (the obligation is exercised) | | | |
 | system-level properties (`mununu_properties.sv`, 15 rows, below) | **12** | 0 | 3 | — |
 
-Total: 67 properties, **35 HOLDS / 8 VIOLATED / 24 ⊥ / 0 unsupported**; `e2e_opentitan_ip_edn_full` pins them in 1 342 s.
+Total: 67 properties, **51 HOLDS / 8 VIOLATED / 8 ⊥ / 0 unsupported**; `e2e_opentitan_ip_edn_full` pins them in 1 486 s (the IP's own 52 rows alone run in 966 s under `run.sh`; the eight ⊥ rows are the five fault-flag chains and the three `AG EF` rows, each paying one 60-s rescue slice).
 
-Lift (sv2v + yosys): ≈ 10 s. Main pass: ≈ 1 min. The ⊥ re-plan spends the property budget. Engines:
+Lift (sv2v + yosys): ≈ 10 s. Main pass: ≈ 1 min per engine. The ⊥ re-plan runs once on the merged report and spends at most the 60-s rescue slice per undecided row. Engines:
 `constant` (atom-less formulas), the `explicit` predicate-cube KMTS (every cross-block invariant), the
 `symbolic` cube's BMC rescue (the counterexample); the exact ROBDD engine decided nothing on edn — every
 cone it was offered exceeds the 192-bit auto-raised cap (the register block's bus datapath reaches

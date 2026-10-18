@@ -309,6 +309,46 @@ pub(crate) fn is_compilable_boolean_body(formula: &Formula, id: NodeId) -> bool 
     }
 }
 
+/// Plan 2 / PR C (2026-10-18) — the bounded-chain safety shape: `nu X. (BODY && [] X)` whose BODY
+/// is a bounded-depth combination of boolean blocks, `&&`, `||` and unguarded boxes in which every
+/// `||` has at most one box-bearing side ([`bad_monitor::chain_is_exact`]) — the SVA translator's
+/// `$rose(x) |-> ##[0:k] y` (a disjunct at every level), `a |=> ##n c` (nested boxes), the
+/// `throughout` conjunctions, and the one-box `|=>` the sibling reducer handles — optionally ending
+/// in ONE weak-until block `nu Z. (e && (b || [] Z))`, the lowering of `e throughout b[->1]`
+/// ([`bad_monitor::weak_until_parts`]; the compiler judges it with a pending latch). Returns the
+/// BODY node, or `None` for any other shape or a depth over [`MAX_CHAIN_DEPTH`]. On these shapes
+/// the one-path monitor ([`bad_monitor::emit_bounded_chain_monitor`]) is EXACT, so the reach
+/// portfolio DECIDES them: `bad` reachable ⇔ some path falsifies the body at some cycle. Before
+/// this reducer the rescue declined every one of them in 0 ms — on the OpenTitan `edn` IP, 21 of 54
+/// non-trivial rows (the five duplicated-counter fault-flag chains, the sixteen 32-bit
+/// bus-stability rows) and csrng's ten control checks never reached an engine.
+pub fn reduce_bounded_chain(formula: &Formula) -> Option<NodeId> {
+    let Node::Nu { var, body } = formula.node(formula.root()) else {
+        return None;
+    };
+    let Node::And(l, r) = formula.node(*body) else {
+        return None;
+    };
+    let (block, recur) = classify_and(formula, *l, *r, *var)?;
+    if !matches!(formula.node(recur), Node::Modal { guard, .. } if *guard == Guard::default()) {
+        return None;
+    }
+    let depth = crate::adapter::btor2::bad_monitor::linear_depth(formula, block)?;
+    // A box-free body is the boolean reducer's (it ran first) — unless a weak-until block sits in
+    // it (`A |-> (e throughout b[->1])`), which only the chain compiler judges.
+    let has_until =
+        !crate::adapter::btor2::bad_monitor::weak_until_sites(formula, block).is_empty();
+    if (depth == 0 && !has_until) || depth > MAX_CHAIN_DEPTH {
+        return None;
+    }
+    crate::adapter::btor2::bad_monitor::chain_is_exact(formula, block).then_some(block)
+}
+
+/// The deepest chain the rescue reduces — the SVA translator's own unroll cap (`MAX_SEQ_UNROLL`),
+/// so every shape it emits is in reach; a deeper hand-written formula declines rather than
+/// growing an unbounded monitor.
+pub const MAX_CHAIN_DEPTH: usize = 64;
+
 /// Plan 2 / B2 (2026-10-18) — the plain reachability shape `mu Z. (p || <> Z)` (`EF p`) with `p` a
 /// compilable boolean body: the node of `p`, or `None` when the formula is any other shape. Its
 /// DUAL is the AG invariant `nu Z. (!p && [] Z)`, which [`reach_portfolio_rescue_diagnosed`] already
@@ -403,7 +443,10 @@ impl std::fmt::Display for RescueDecline {
         match self {
             RescueDecline::ShapeNotReducible => write!(
                 f,
-                "the formula matched neither `AG(atom)` nor `AG(boolean-of-atoms)`"
+                "the formula matched none of `AG(atom)`, `AG(boolean-of-atoms)`, `A |=> C`, or a \
+                 bounded box chain with at most one box-bearing side per `||` and at most one \
+                 `e throughout b[->1]` block, at the bottom (depth ≤ {})",
+                MAX_CHAIN_DEPTH
             ),
             RescueDecline::MonitorEmissionFailed(m) => {
                 write!(f, "the bad-monitor emitter refused the reduced body: {m}")
@@ -430,15 +473,26 @@ fn emit_boolean_or_implies_next(
         return emit_ag_boolean_invariant_monitor(design_btor2, formula, root, reset_pinned)
             .map_err(|e| RescueDecline::MonitorEmissionFailed(e.message));
     }
-    let (neg_ante, cons) =
-        reduce_ag_implies_next(formula).ok_or(RescueDecline::ShapeNotReducible)?;
-    crate::adapter::btor2::bad_monitor::emit_ag_implies_next_compound_monitor(
+    if let Some((neg_ante, cons)) = reduce_ag_implies_next(formula) {
+        return crate::adapter::btor2::bad_monitor::emit_ag_implies_next_compound_monitor(
+            design_btor2,
+            formula,
+            neg_ante,
+            cons,
+            reset_pinned,
+        )
+        .map_err(|e| RescueDecline::MonitorEmissionFailed(e.message));
+    }
+    // PR C — the bounded chains (nested boxes, a boolean beside each): the one-path monitor is a
+    // decider on them (`chain_is_exact`).
+    let block = reduce_bounded_chain(formula).ok_or(RescueDecline::ShapeNotReducible)?;
+    crate::adapter::btor2::bad_monitor::emit_bounded_chain_monitor(
         design_btor2,
         formula,
-        neg_ante,
-        cons,
+        block,
         reset_pinned,
     )
+    .map(|(monitored, _depth)| monitored)
     .map_err(|e| RescueDecline::MonitorEmissionFailed(e.message))
 }
 
@@ -602,6 +656,192 @@ mod tests {
     fn an_unbounded_body_has_no_safety_witness() {
         let f = parse("nu X. ((mu Y. ((cnt == 3) || [] Y)) && [] X)");
         assert!(safety_witness(COUNTER, &f, false, 10).is_none());
+    }
+
+    /// PR C — a bounded response window the one-box reducer declines: on the 2-bit counter
+    /// (0→1→2→3→0, no input) `cnt == 1 |-> ##[0:2] cnt == 3` HOLDS (cnt reaches 3 two cycles later)
+    /// and `cnt == 1 |-> ##[0:1] cnt == 3` is VIOLATED. Before the chain reducer both declined.
+    #[test]
+    fn bounded_chain_decides_a_response_window() {
+        let holds = parse(
+            "nu X. (((!((cnt == 1))) || ((cnt == 3) || [] ((cnt == 3) || [] (cnt == 3)))) && [] X)",
+        );
+        assert!(reduce_bounded_chain(&holds).is_some());
+        let (v, _) = reach_portfolio_rescue_diagnosed(COUNTER, &holds, false).expect("reduces");
+        assert_eq!(v, RescueVerdict::Holds);
+        let violated = parse("nu X. (((!((cnt == 1))) || ((cnt == 3) || [] (cnt == 3))) && [] X)");
+        let (v2, _) = reach_portfolio_rescue_diagnosed(COUNTER, &violated, false).expect("reduces");
+        assert_eq!(v2, RescueVerdict::Violated);
+        assert!(safety_witness(COUNTER, &violated, false, 10).is_some());
+    }
+
+    /// PR C — `!en |=> ##1 $stable(q)` is a two-box chain with a register-equality leaf
+    /// (`q == q__past`), which the one-box reducer's boolean gate rejects: with `q` free (`next q
+    /// = d`) it is VIOLATED; with `q` held it HOLDS.
+    #[test]
+    fn bounded_chain_accepts_a_register_equality_leaf() {
+        const FREE: &str = "1 sort bitvec 1\n2 input 1 en\n3 input 1 d\n4 zero 1\n5 state 1 q\n\
+                            6 init 1 5 4\n7 next 1 5 3\n8 state 1 q__past\n9 init 1 8 4\n\
+                            10 next 1 8 5\n";
+        const HELD: &str = "1 sort bitvec 1\n2 input 1 en\n3 input 1 d\n4 zero 1\n5 state 1 q\n\
+                            6 init 1 5 4\n7 next 1 5 5\n8 state 1 q__past\n9 init 1 8 4\n\
+                            10 next 1 8 5\n";
+        let f = parse("nu X. (((!((!(en != 0)))) || [] [] (q == q__past)) && [] X)");
+        assert!(
+            reduce_ag_implies_next(&f).is_none(),
+            "the one-box reducer declines two boxes"
+        );
+        assert!(reduce_bounded_chain(&f).is_some());
+        let (v, _) = reach_portfolio_rescue_diagnosed(FREE, &f, false).expect("reduces");
+        assert_eq!(v, RescueVerdict::Violated);
+        let (v2, _) = reach_portfolio_rescue_diagnosed(HELD, &f, false).expect("reduces");
+        assert_eq!(v2, RescueVerdict::Holds);
+    }
+
+    /// PR C — `A |=> (e throughout b[->1])` lowers to a box over a weak-until block
+    /// (`nu Z. (e && (b || [] Z))`, mununu#731), which the chain compiler judges with a pending
+    /// latch. A 1-bit `q` with its `q__past` shadow, a `hold` latch set by `start`: when `hold`
+    /// is released by the FIRST `req` after `start`, `q` is stable from the cycle after `start` up
+    /// to and including that `req` — HOLDS; when a `req` in the `start` cycle itself releases it,
+    /// `q` may change while the obligation is still pending — VIOLATED, with a witness.
+    #[test]
+    fn bounded_chain_decides_a_weak_until_consequent() {
+        // q' = (start | hold) ? q : d ; hold' = start | (hold & !req)
+        const HELD_UNTIL_REQ: &str = "1 sort bitvec 1\n2 input 1 start\n3 input 1 req\n\
+                                      4 input 1 d\n5 zero 1\n6 state 1 q\n7 init 1 6 5\n\
+                                      8 state 1 q__past\n9 init 1 8 5\n10 next 1 8 6\n\
+                                      11 state 1 hold\n12 init 1 11 5\n13 or 1 2 11\n\
+                                      14 ite 1 13 6 4\n15 next 1 6 14\n16 not 1 3\n\
+                                      17 and 1 11 16\n18 or 1 2 17\n19 next 1 11 18\n";
+        // hold' = (start | hold) & !req — a `req` in the start cycle releases one cycle early
+        const RELEASED_EARLY: &str = "1 sort bitvec 1\n2 input 1 start\n3 input 1 req\n\
+                                      4 input 1 d\n5 zero 1\n6 state 1 q\n7 init 1 6 5\n\
+                                      8 state 1 q__past\n9 init 1 8 5\n10 next 1 8 6\n\
+                                      11 state 1 hold\n12 init 1 11 5\n13 or 1 2 11\n\
+                                      14 ite 1 13 6 4\n15 next 1 6 14\n16 not 1 3\n\
+                                      17 and 1 13 16\n18 next 1 11 17\n";
+        let f = parse(
+            "nu X. (((!((start == 1))) || [] (nu Z. ((q == q__past) && ((req == 1) || [] Z)))) \
+             && [] X)",
+        );
+        assert!(
+            reduce_ag_implies_next(&f).is_none(),
+            "the one-box reducer declines a fixpoint consequent"
+        );
+        assert!(reduce_bounded_chain(&f).is_some());
+        let (v, _) = reach_portfolio_rescue_diagnosed(HELD_UNTIL_REQ, &f, false).expect("reduces");
+        assert_eq!(v, RescueVerdict::Holds);
+        let (v2, _) = reach_portfolio_rescue_diagnosed(RELEASED_EARLY, &f, false).expect("reduces");
+        assert_eq!(v2, RescueVerdict::Violated);
+        assert!(safety_witness(RELEASED_EARLY, &f, false, 10).is_some());
+        // two weak-until blocks, or one with a deeper box beside it, stay declined
+        let two = parse(
+            "nu X. (((nu Z. ((q == 1) && ((req == 1) || [] Z))) && (nu W. ((q == 0) && \
+             ((req == 1) || [] W)))) && [] X)",
+        );
+        assert!(reduce_bounded_chain(&two).is_none());
+        let shallower =
+            parse("nu X. (((nu Z. ((q == 1) && ((req == 1) || [] Z))) && [] (q == 0)) && [] X)");
+        assert!(reduce_bounded_chain(&shallower).is_none());
+    }
+
+    /// PR C — the shapes the one-path reading does not decide stay declined: `[] a || [] b`, a
+    /// negated box, and a chain deeper than the cap.
+    #[test]
+    fn bounded_chain_declines_what_the_one_path_reading_cannot_decide() {
+        let two_boxes = parse("nu X. (([] (cnt == 1) || [] (cnt == 2)) && [] X)");
+        assert!(reduce_bounded_chain(&two_boxes).is_none());
+        assert_eq!(
+            reach_portfolio_rescue_diagnosed(COUNTER, &two_boxes, false),
+            Err(RescueDecline::ShapeNotReducible)
+        );
+        let not_box = parse("nu X. ((!([] (cnt == 1))) && [] X)");
+        assert!(reduce_bounded_chain(&not_box).is_none());
+        let mut deep = "(cnt == 3)".to_string();
+        for _ in 0..(MAX_CHAIN_DEPTH + 1) {
+            deep = format!("((cnt == 3) || [] {deep})");
+        }
+        let too_deep = parse(&format!("nu X. (((!((cnt == 1))) || {deep}) && [] X)"));
+        assert!(reduce_bounded_chain(&too_deep).is_none());
+        let at_cap = {
+            let mut d = "(cnt == 3)".to_string();
+            for _ in 0..(MAX_CHAIN_DEPTH - 1) {
+                d = format!("((cnt == 3) || [] {d})");
+            }
+            parse(&format!("nu X. (((!((cnt == 1))) || {d}) && [] X)"))
+        };
+        assert!(reduce_bounded_chain(&at_cap).is_some());
+    }
+
+    /// PR C — the seam between the translator's shapes and the reducer: on a 3-bit counter with a
+    /// free `en` input, a dozen bounded chains (`##[m:n]` windows, `|=> ##n`, `throughout`
+    /// conjunctions, a `##[0:k]` disjunct chain) decided by the portfolio on the monitor agree with
+    /// the exact ROBDD engine on the formula — both polarities present.
+    #[test]
+    fn the_chain_monitor_agrees_with_the_exact_engine() {
+        use crate::adapter::btor2::symbolic_bitblast::{ExactVerdict, exact_symbolic_verdict};
+        const COUNTER_EN: &str = "1 sort bitvec 3\n2 sort bitvec 1\n3 zero 1\n4 one 1\n\
+                                  5 input 2 en\n6 state 1 cnt\n7 init 1 6 3\n8 add 1 6 4\n\
+                                  9 ite 1 5 8 6\n10 next 1 6 9\n";
+        let formulas = [
+            // cnt == 1 |-> ##[0:2] cnt == 3  — en may stay low: violated
+            "nu X. (((!((cnt == 1))) || ((cnt == 3) || [] ((cnt == 3) || [] (cnt == 3)))) && [] X)",
+            // cnt == 7 |=> cnt == 0 || cnt == 7  — holds (wrap or hold)
+            "nu X. (((!((cnt == 7))) || [] ((cnt == 0) || (cnt == 7))) && [] X)",
+            // cnt == 1 |=> ##1 cnt != 0  — holds (two steps from 1 reach at most 3)
+            "nu X. (((!((cnt == 1))) || [] [] (cnt != 0)) && [] X)",
+            // cnt == 1 |-> (cnt != 0) throughout ##2  — holds
+            "nu X. (((!((cnt == 1))) || ((cnt != 0) && [] ((cnt != 0) && [] (cnt != 0)))) && [] X)",
+            // cnt == 6 |=> ##1 cnt != 0  — violated (6→7→0 with en high)
+            "nu X. (((!((cnt == 6))) || [] [] (cnt != 0)) && [] X)",
+            // cnt == 2 |-> ##[1:2] cnt == 3  — violated (en low)
+            "nu X. (((!((cnt == 2))) || [] ((cnt == 3) || [] (cnt == 3))) && [] X)",
+            // cnt == 2 |-> ##[0:1] cnt <= 3  (as != 4..7) — holds
+            "nu X. (((!((cnt == 2))) || (((cnt == 2) || (cnt == 3)) || [] ((cnt == 2) || (cnt == 3)))) && [] X)",
+            // always: cnt != 4 |=> cnt != 5  — violated (4→5 after a step from 3? 3→4 then 4→5): from cnt==3 (≠4) next could be 4 (≠5 ✓) … from cnt==4 (antecedent false) — the only way to 5 is from 4, so holds
+            "nu X. (((!((cnt != 4))) || [] (cnt != 5)) && [] X)",
+            // nested boxes with a conjunct: cnt == 0 |=> (cnt != 3) && [] (cnt != 3)  — holds
+            "nu X. (((!((cnt == 0))) || [] ((cnt != 3) && [] (cnt != 3))) && [] X)",
+            // cnt == 0 |=> ##1 cnt == 2  — violated (en low)
+            "nu X. (((!((cnt == 0))) || [] [] (cnt == 2)) && [] X)",
+            // cnt == 1 |=> (cnt != 0) throughout (cnt == 4)[->1]  — holds (0 comes after 7)
+            "nu X. (((!((cnt == 1))) || [] (nu Z. ((cnt != 0) && ((cnt == 4) || [] Z)))) && [] X)",
+            // cnt == 1 |=> (cnt != 3) throughout (cnt == 4)[->1]  — violated (3 precedes 4)
+            "nu X. (((!((cnt == 1))) || [] (nu Z. ((cnt != 3) && ((cnt == 4) || [] Z)))) && [] X)",
+            // cnt == 5 |=> (cnt != 1) throughout (cnt == 0)[->1]  — holds (6, 7, 0)
+            "nu X. (((!((cnt == 5))) || [] (nu Z. ((cnt != 1) && ((cnt == 0) || [] Z)))) && [] X)",
+            // cnt == 6 |=> (cnt != 0) throughout (cnt == 2)[->1]  — violated (7, 0 before 2)
+            "nu X. (((!((cnt == 6))) || [] (nu Z. ((cnt != 0) && ((cnt == 2) || [] Z)))) && [] X)",
+            // cnt == 3 |-> ((cnt != 0) throughout (cnt == 5)[->1]) at depth 0 beside a boolean — holds
+            "nu X. (((!((cnt == 3))) || ((cnt == 3) && (nu Z. ((cnt != 0) && ((cnt == 5) || [] Z))))) && [] X)",
+        ];
+        let (mut holds_seen, mut violated_seen) = (0, 0);
+        let mut disagreements = Vec::new();
+        for text in formulas {
+            let f = parse(text);
+            assert!(reduce_bounded_chain(&f).is_some(), "{text}");
+            let exact = exact_symbolic_verdict(COUNTER_EN, &f).expect("exact decides 3 bits");
+            let (rescued, _) =
+                reach_portfolio_rescue_diagnosed(COUNTER_EN, &f, false).expect("reduces");
+            let want = match exact {
+                ExactVerdict::Holds => {
+                    holds_seen += 1;
+                    RescueVerdict::Holds
+                }
+                ExactVerdict::Violated => {
+                    violated_seen += 1;
+                    RescueVerdict::Violated
+                }
+            };
+            if rescued != want {
+                disagreements.push((text, exact, rescued));
+            }
+        }
+        assert!(disagreements.is_empty(), "{disagreements:?}");
+        assert!(
+            holds_seen >= 3 && violated_seen >= 3,
+            "{holds_seen} / {violated_seen}"
+        );
     }
 
     #[test]
