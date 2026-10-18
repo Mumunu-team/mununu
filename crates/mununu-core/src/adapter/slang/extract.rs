@@ -14,9 +14,9 @@
 use std::path::PathBuf;
 
 use crate::adapter::slang::translate::{
-    TranslateOptions, TranslationReport, translate_ast_json_with_options,
+    TranslateOptions, TranslationReport, translate_ast_json_with_source,
 };
-use crate::adapter::slang::{locate_slang, run_ast_json_with_params};
+use crate::adapter::slang::{locate_slang, run_ast_json_with_source};
 use crate::adapter::{AdapterError, AdapterErrorKind};
 
 /// Extract + translate every concurrent SVA assertion from a set of in-memory
@@ -83,8 +83,10 @@ pub fn extract_sva_with_params(
 
     // The staging dir doubles as the include search path.
     let include_dirs = vec![dir.path().to_path_buf()];
-    let json = run_ast_json_with_params(&bin, &files, &include_dirs, params)?;
-    translate_ast_json_with_options(&json, opts)
+    // mununu#722 — the preprocessed text rides along, so a hierarchical reference into a module
+    // instantiated more than once can be read from the source it was written in.
+    let (json, source) = run_ast_json_with_source(&bin, &files, &include_dirs, params)?;
+    translate_ast_json_with_source(&json, Some(&source), opts)
     // `dir` drops here → temp files removed.
 }
 

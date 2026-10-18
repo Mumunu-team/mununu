@@ -306,6 +306,19 @@ pub fn translate_ast_json_with_options(
     json: &str,
     opts: &TranslateOptions,
 ) -> Result<TranslationReport, AdapterError> {
+    translate_ast_json_with_source(json, None, opts)
+}
+
+/// [`translate_ast_json_with_options`] with the PREPROCESSED source the JSON was dumped from
+/// (`--ast-json-source-info` spans index into it) — what a hierarchical reference into a module
+/// instantiated more than once is read from (mununu#722, [`scope_refs`]). `None` keeps every
+/// other behaviour and refuses such a reference with the reason.
+pub fn translate_ast_json_with_source(
+    json: &str,
+    source: Option<&str>,
+    opts: &TranslateOptions,
+) -> Result<TranslationReport, AdapterError> {
+    let source_lines: Option<Vec<&str>> = source.map(|s| s.lines().collect());
     // slang emits deeply-nested ASTs on some designs (e.g. `wishbone_high_performance_z80`),
     // and serde_json's default 128-level recursion limit rejects them. The AST is trusted
     // (our own `slang --ast-json` invocation), so disable the limit — the actual nesting is
@@ -334,6 +347,7 @@ pub fn translate_ast_json_with_options(
             label: None,
             scope: None,
             rel: String::new(),
+            genvars: Vec::new(),
         },
         &bodies,
         &mut scopes,
@@ -373,6 +387,7 @@ pub fn translate_ast_json_with_options(
             label,
             node,
             scope,
+            genvars,
         } = found;
         // An assertion inside a sub-instance names its instance (`u_rx.u_dec.prim_diff_decode_sva_12`):
         // a module instantiated twice yields the same label twice, one per instance.
@@ -404,7 +419,11 @@ pub fn translate_ast_json_with_options(
         let spec = resolve_enum_refs(spec, &enum_values);
         // Then name every signal as the flattened design does: `state_q` in instance `u_rx` is
         // `u_rx.state_q` there, and a hierarchical reference `u_rx.state_q` from the top too.
-        let spec = match scope_refs(&spec, &scopes, &enum_values, scope.as_deref()) {
+        let refs = RefContext {
+            lines: source_lines.as_deref(),
+            genvars,
+        };
+        let spec = match scope_refs(&spec, &scopes, &enum_values, scope.as_ref(), &refs) {
             Ok(spec) => spec,
             Err(reason) => {
                 report.unsupported.push(UnsupportedAssertion {
@@ -588,6 +607,9 @@ struct FoundAssertion<'a> {
     node: &'a Value,
     /// The instance occurrence it sits in (`None` outside any instance).
     scope: Option<std::rc::Rc<Scope>>,
+    /// The genvars of the `for`-generate iterations enclosing it, by name, innermost last — what
+    /// a hierarchical path written inside the loop (`gen_ep_blk[i].u_ack_sm`) means by `i`.
+    genvars: Vec<(String, i64)>,
 }
 
 /// One instance occurrence: where its body's declarations live in the flattened design.
@@ -595,6 +617,11 @@ struct Scope {
     body: u64,
     /// `""` for the top, `"u_rx.u_dec."` below.
     prefix: String,
+    /// The instance's own name (`""` for the top).
+    name: String,
+    /// The occurrences instantiated inside this one, by their path within this body —
+    /// `u_dec`, `gen_ep_blk$3.u_ack_sm` — as a hierarchical path walks them.
+    children: std::cell::RefCell<std::collections::HashMap<String, std::rc::Rc<Scope>>>,
     /// The expression each INPUT port is connected to, by port name — an expression of
     /// `parent`'s scope. A port of a logic-free instance (an assertion module bound into the
     /// design) has no net of its own after flattening; the connection is what it reads. By name,
@@ -612,6 +639,27 @@ struct Hierarchy {
     decls: std::collections::HashMap<u64, (u64, String)>,
     /// An instance body's address → every occurrence of it.
     occurrences: std::collections::HashMap<u64, Vec<std::rc::Rc<Scope>>>,
+    /// The top instance, where an absolute hierarchical path starts.
+    top: Option<std::rc::Rc<Scope>>,
+    /// An instance body's address → each declared name → the generate paths it is declared under
+    /// (mununu#722: a hierarchical reference names a per-INSTANCE symbol slang never serialises
+    /// for any instance but the first, so the declaration is found by name in the instance the
+    /// path reaches).
+    names: std::collections::HashMap<u64, std::collections::HashMap<String, Vec<String>>>,
+}
+
+impl Hierarchy {
+    fn note_name(&mut self, body: u64, name: &str, rel: &str) {
+        let rels = self
+            .names
+            .entry(body)
+            .or_default()
+            .entry(name.to_string())
+            .or_default();
+        if !rels.iter().any(|r| r == rel) {
+            rels.push(rel.to_string());
+        }
+    }
 }
 
 /// The walk's position: what [`collect_assertions`] carries down the AST.
@@ -622,6 +670,8 @@ struct Walk<'s> {
     scope: Option<std::rc::Rc<Scope>>,
     /// The generate-block path inside the scope's body.
     rel: String,
+    /// The enclosing `for`-generate iterations' genvars, by name.
+    genvars: Vec<(String, i64)>,
 }
 
 /// An instance's input-port connections: the port's name → the connected expression (an
@@ -701,6 +751,22 @@ fn generate_block_name(
     Some(format!("{array_name}[{index}]"))
 }
 
+/// The value of the genvar `var` in one iteration block of a `for` generate (slang records it as
+/// a `Parameter` member of the iteration).
+fn genvar_value(block: &serde_json::Map<String, Value>, var: &str) -> Option<i64> {
+    block
+        .get("members")?
+        .as_array()?
+        .iter()
+        .find(|m| {
+            m.get("kind").and_then(Value::as_str) == Some("Parameter")
+                && m.get("name").and_then(Value::as_str) == Some(var)
+        })?
+        .get("value")?
+        .as_str()
+        .and_then(parse_sv_literal)
+}
+
 /// Collect every `ConcurrentAssertion`, with the scope that encloses it, its SV label (see
 /// [`block_label`]) when it has one, and its instance occurrence; record every declaration's
 /// scope into `scopes` on the way.
@@ -725,6 +791,7 @@ fn collect_assertions<'a>(
                     label: at.label.map(str::to_string),
                     node,
                     scope: at.scope.clone(),
+                    genvars: at.genvars.clone(),
                 }),
                 Some("Instance") => {
                     let name = map.get("name").and_then(Value::as_str).unwrap_or("");
@@ -748,9 +815,19 @@ fn collect_assertions<'a>(
                     let scope = std::rc::Rc::new(Scope {
                         body: addr,
                         prefix,
+                        name: name.to_string(),
+                        children: Default::default(),
                         inputs: input_connections(map),
                         parent: at.scope.clone(),
                     });
+                    if let Some(parent) = &at.scope {
+                        parent.children.borrow_mut().insert(
+                            crate::adapter::btor2::parser::flat_name(&format!("{}{name}", at.rel)),
+                            scope.clone(),
+                        );
+                    } else if scopes.top.is_none() {
+                        scopes.top = Some(scope.clone());
+                    }
                     scopes
                         .occurrences
                         .entry(addr)
@@ -763,6 +840,7 @@ fn collect_assertions<'a>(
                             label: at.label,
                             scope: Some(scope),
                             rel: String::new(),
+                            genvars: at.genvars.clone(),
                         },
                         bodies,
                         scopes,
@@ -801,6 +879,10 @@ fn collect_assertions<'a>(
                         // matches (`?`), so its references refuse rather than mis-resolve.
                         let seg = generate_block_name(block, Some((array, var)))
                             .unwrap_or_else(|| format!("{array}[?]"));
+                        let mut genvars = at.genvars.clone();
+                        if let Some(v) = genvar_value(block, var) {
+                            genvars.push((var.to_string(), v));
+                        }
                         let inner = Walk {
                             enclosing: if array.is_empty() {
                                 at.enclosing
@@ -810,6 +892,7 @@ fn collect_assertions<'a>(
                             label: at.label,
                             scope: at.scope.clone(),
                             rel: format!("{}{seg}.", at.rel),
+                            genvars,
                         };
                         for v in block.values() {
                             collect_assertions(v, &inner, bodies, scopes, out);
@@ -825,6 +908,29 @@ fn collect_assertions<'a>(
                             .decls
                             .entry(addr)
                             .or_insert((scope.body, at.rel.clone()));
+                        if let Some(n) = map.get("name").and_then(Value::as_str) {
+                            scopes.note_name(scope.body, n, &at.rel);
+                        }
+                    }
+                }
+                // mununu#722 — a port's internal symbol is a declaration too: slang serialises the
+                // `Variable` behind a port only in the FIRST body it writes, so a reference into a
+                // later instance body (`u_b.u_cnt.err_o`) finds the port alone.
+                Some("Port") => {
+                    if let (Some(scope), Some(addr)) = (
+                        &at.scope,
+                        map.get("internalSymbol")
+                            .and_then(Value::as_str)
+                            .and_then(|s| s.split(' ').next())
+                            .and_then(|a| a.parse::<u64>().ok()),
+                    ) {
+                        scopes
+                            .decls
+                            .entry(addr)
+                            .or_insert((scope.body, at.rel.clone()));
+                        if let Some(n) = map.get("name").and_then(Value::as_str) {
+                            scopes.note_name(scope.body, n, &at.rel);
+                        }
                     }
                 }
                 _ => {}
@@ -856,6 +962,7 @@ fn collect_assertions<'a>(
                 label: owned.as_deref().or(at.label),
                 scope: at.scope.clone(),
                 rel,
+                genvars: at.genvars.clone(),
             };
             for v in map.values() {
                 collect_assertions(v, &inner, bodies, scopes, out);
@@ -889,7 +996,8 @@ fn scope_refs(
     spec: &Value,
     scopes: &Hierarchy,
     consts: &ConstantValues,
-    scope: Option<&Scope>,
+    scope: Option<&std::rc::Rc<Scope>>,
+    refs: &RefContext<'_>,
 ) -> Result<Value, String> {
     match spec {
         Value::Object(m) => {
@@ -898,24 +1006,51 @@ fn scope_refs(
                 && let Some(sym) = m.get("symbol").and_then(Value::as_str)
                 && let Some((addr, name)) = sym.split_once(' ')
                 && let Ok(addr) = addr.parse::<u64>()
-                && let Some((decl_body, rel)) = scopes.decls.get(&addr)
             {
-                let owner: &Scope = if kind == Some("NamedValue") {
-                    match scope {
-                        Some(s) if s.body == *decl_body => s,
-                        _ => return Ok(spec.clone()),
+                let decl = scopes.decls.get(&addr);
+                let resolved: Option<std::rc::Rc<Scope>>;
+                let (owner, rel): (&Scope, String) = if kind == Some("HierarchicalValue") {
+                    // mununu#722 — the path the reference was WRITTEN with names its instance;
+                    // slang's symbol is per instance and serialised for the first one only, so
+                    // the address alone names the right instance just when the declaration's
+                    // body has a single occurrence.
+                    match resolve_hier_path(m, scopes, scope, refs, name) {
+                        Ok((found, rel)) => {
+                            resolved = Some(found);
+                            (resolved.as_deref().expect("just set"), rel)
+                        }
+                        Err(path_err) => match decl {
+                            Some((decl_body, rel)) => {
+                                match scopes.occurrences.get(decl_body).map(Vec::as_slice) {
+                                    Some([only]) => (only.as_ref(), rel.clone()),
+                                    Some(many) => {
+                                        return Err(format!(
+                                            "hierarchical reference to `{name}` in a module \
+                                             instantiated {} times: the reference does not say \
+                                             which instance ({path_err})",
+                                            many.len()
+                                        ));
+                                    }
+                                    None => return Ok(spec.clone()),
+                                }
+                            }
+                            // Not the first instance of its module: slang serialised no
+                            // declaration for this symbol, so only the path text can name it.
+                            None => {
+                                return Err(format!(
+                                    "{path_err}; slang names the reference by a per-instance \
+                                     symbol it serialises for the first instance only"
+                                ));
+                            }
+                        },
                     }
                 } else {
-                    match scopes.occurrences.get(decl_body).map(Vec::as_slice) {
-                        Some([only]) => only,
-                        Some(many) => {
-                            return Err(format!(
-                                "hierarchical reference to `{name}` in a module instantiated \
-                                 {} times: the reference does not say which instance",
-                                many.len()
-                            ));
-                        }
-                        None => return Ok(spec.clone()),
+                    let Some((decl_body, rel)) = decl else {
+                        return Ok(spec.clone());
+                    };
+                    match scope {
+                        Some(s) if s.body == *decl_body => (s.as_ref(), rel.clone()),
+                        _ => return Ok(spec.clone()),
                     }
                 };
                 // A port is declared at the body's top level, never inside a generate block.
@@ -925,7 +1060,7 @@ fn scope_refs(
                     // The connection is an expression of the parent: fold its constants (a
                     // `for` generate's genvar in `.d(a[j])`) before naming its signals.
                     let connected = resolve_enum_refs(connected, consts);
-                    return scope_refs(&connected, scopes, consts, owner.parent.as_deref());
+                    return scope_refs(&connected, scopes, consts, owner.parent.as_ref(), refs);
                 }
                 // mununu#713 — a `for` generate's `gen[k]` is spelled `gen$k`, as the lifted model's
                 // symbols are (`flat_symbol_names`); only an index that could not be read stays.
@@ -945,17 +1080,167 @@ fn scope_refs(
             }
             let mut out = serde_json::Map::new();
             for (k, v) in m {
-                out.insert(k.clone(), scope_refs(v, scopes, consts, scope)?);
+                out.insert(k.clone(), scope_refs(v, scopes, consts, scope, refs)?);
             }
             Ok(Value::Object(out))
         }
         Value::Array(a) => a
             .iter()
-            .map(|v| scope_refs(v, scopes, consts, scope))
+            .map(|v| scope_refs(v, scopes, consts, scope, refs))
             .collect::<Result<Vec<_>, _>>()
             .map(Value::Array),
         other => Ok(other.clone()),
     }
+}
+
+/// What a reference may be read with beyond the JSON: the preprocessed source its spans index
+/// into, and the genvars in scope where it was written.
+struct RefContext<'a> {
+    lines: Option<&'a [&'a str]>,
+    genvars: &'a [(String, i64)],
+}
+
+/// The source text under a node's span (`--ast-json-source-info`; 1-based columns, end
+/// exclusive). `None` without source info or source text.
+fn span_text(m: &serde_json::Map<String, Value>, lines: &[&str]) -> Option<String> {
+    let get = |k: &str| m.get(k).and_then(Value::as_u64).map(|v| v as usize);
+    let (l0, l1, c0, c1) = (
+        get("source_line_start")?,
+        get("source_line_end")?,
+        get("source_column_start")?,
+        get("source_column_end")?,
+    );
+    if l0 == 0 || c0 == 0 || l1 < l0 {
+        return None;
+    }
+    let mut out = String::new();
+    for l in l0..=l1 {
+        let line = lines.get(l - 1)?;
+        let from = if l == l0 { c0 - 1 } else { 0 };
+        let to = if l == l1 {
+            c1.saturating_sub(1)
+        } else {
+            line.len()
+        };
+        if from > line.len() || to > line.len() || from > to {
+            return None;
+        }
+        out.push_str(&line[from..to]);
+        if l != l1 {
+            out.push(' ');
+        }
+    }
+    let out = out.trim().to_string();
+    (!out.is_empty()).then_some(out)
+}
+
+/// mununu#722 — the instance a hierarchical reference means, and the declaration's generate path
+/// inside it, read from the path the reference was WRITTEN with (`u_core.gen_fifo[1].u_cnt.err_o`,
+/// a macro argument in OpenTitan's `ASSERT_PRIM_*_ERROR_TRIGGER_ALERT`).
+///
+/// slang names the reference by a per-instance symbol it serialises for the first instance only,
+/// so the address cannot say which instance; the text can. The path is walked over the instance
+/// tree from the scope the assertion sits in, then from the top (an absolute path; a leading
+/// `$root.` or the top's own name is skipped): each segment is an instance name or a generate
+/// block, a bracketed index being a constant or a genvar of the enclosing iterations
+/// (`gen_ep_blk[i]` inside `for (genvar i …)`), spelled `gen_ep_blk$k` as the lifted model
+/// spells it. The walk must end in an instance whose body declares `name` under exactly the
+/// generate path the segments left over spell. Refused with the reason otherwise — never a guess
+/// between instances.
+fn resolve_hier_path(
+    m: &serde_json::Map<String, Value>,
+    scopes: &Hierarchy,
+    scope: Option<&std::rc::Rc<Scope>>,
+    refs: &RefContext<'_>,
+    name: &str,
+) -> Result<(std::rc::Rc<Scope>, String), String> {
+    use crate::adapter::btor2::parser::flat_name;
+    let Some(text) = refs.lines.and_then(|lines| span_text(m, lines)) else {
+        return Err(format!(
+            "hierarchical reference to `{name}`: {}",
+            if refs.lines.is_none() {
+                "no preprocessed source to read the path from"
+            } else {
+                "the reference carries no source position to read the path from"
+            }
+        ));
+    };
+    let mut segs: Vec<&str> = text.split('.').map(str::trim).collect();
+    let last = segs.pop().unwrap_or("");
+    if last.split('[').next() != Some(name) {
+        return Err(format!(
+            "hierarchical reference `{text}` does not end in the declaration `{name}` it names"
+        ));
+    }
+    let flat_seg = |seg: &str| -> Result<String, String> {
+        let Some((base, rest)) = seg.split_once('[') else {
+            return Ok(seg.to_string());
+        };
+        let idx = rest.trim_end_matches(']').trim();
+        let value = idx.parse::<i64>().ok().or_else(|| {
+            refs.genvars
+                .iter()
+                .rev()
+                .find(|(n, _)| n == idx)
+                .map(|(_, v)| *v)
+        });
+        match value {
+            Some(v) => Ok(format!("{base}${v}")),
+            None => Err(format!(
+                "hierarchical reference `{text}`: the index `{idx}` of `{seg}` is not a constant \
+                 where the reference is written"
+            )),
+        }
+    };
+    let flat_segs: Vec<String> = segs.iter().map(|s| flat_seg(s)).collect::<Result<_, _>>()?;
+    let walk =
+        |start: &std::rc::Rc<Scope>, segs: &[String]| -> Option<(std::rc::Rc<Scope>, String)> {
+            let mut cur = start.clone();
+            let mut acc = String::new();
+            for seg in segs {
+                let key = format!("{acc}{seg}");
+                let child = cur.children.borrow().get(&key).cloned();
+                match child {
+                    Some(c) => {
+                        cur = c;
+                        acc.clear();
+                    }
+                    None => {
+                        acc.push_str(seg);
+                        acc.push('.');
+                    }
+                }
+            }
+            let rel = scopes
+                .names
+                .get(&cur.body)?
+                .get(name)?
+                .iter()
+                .find(|r| flat_name(r) == flat_name(&acc))?
+                .clone();
+            Some((cur, rel))
+        };
+    if let Some(s) = scope
+        && let Some(found) = walk(s, &flat_segs)
+    {
+        return Ok(found);
+    }
+    if let Some(top) = &scopes.top {
+        let mut skip = 0;
+        if flat_segs.first().map(String::as_str) == Some("$root") {
+            skip += 1;
+        }
+        if flat_segs.get(skip).map(String::as_str) == Some(top.name.as_str()) {
+            skip += 1;
+        }
+        if let Some(found) = walk(top, &flat_segs[skip.min(flat_segs.len())..]) {
+            return Ok(found);
+        }
+    }
+    Err(format!(
+        "hierarchical reference `{text}` does not reach an instance declaring `{name}` from where \
+         it is written"
+    ))
 }
 
 /// XL.6b follow-up / mununu#632 — the elaborated integer value of every enum member and every
@@ -1110,6 +1395,18 @@ fn collect_type_aliases(root: &Value) -> std::collections::HashMap<String, Strin
                 {
                     out.insert(addr.to_string(), target.to_string());
                 }
+                // mununu#722 — a `typedef enum logic [2:0] {…} sts_e` is a `TypeAlias` whose target
+                // names the `EnumType` node (`"<addr> p::sts_e"`), itself no alias; a struct member
+                // of that type (`csrng_rsp_t.csrng_rsp_sts`) stayed unreadable and the whole struct
+                // with it. The enum's bits are its `baseType`.
+                if m.get("kind").and_then(Value::as_str) == Some("EnumType")
+                    && let (Some(addr), Some(base)) = (
+                        m.get("addr").and_then(Value::as_u64),
+                        m.get("baseType").and_then(Value::as_str),
+                    )
+                {
+                    out.insert(addr.to_string(), base.to_string());
+                }
                 for v in m.values() {
                     walk(v, out);
                 }
@@ -1127,6 +1424,26 @@ fn collect_type_aliases(root: &Value) -> std::collections::HashMap<String, Strin
 fn alias_addr(ty: &str) -> Option<&str> {
     let (addr, rest) = ty.split_once(' ')?;
     (!rest.is_empty() && addr.chars().all(|c| c.is_ascii_digit())).then_some(addr)
+}
+
+/// A resolved alias target with the dimensions written AFTER the alias name applied: for a
+/// struct / union they trail it (`struct packed{…}s$1[7:0]`, an array of structs); for a vector
+/// they are the OUTER dimensions, so they come first (`typedef logic [3:0] t; t [7:0] x` is
+/// `logic [7:0][3:0] x`, SV 7.4.1); anything else keeps them trailing.
+fn with_outer_dims(target: &str, dims: &str) -> String {
+    if dims.is_empty() {
+        return target.to_string();
+    }
+    if target.starts_with("struct packed") || target.starts_with("union packed") {
+        return format!("{target}{dims}");
+    }
+    match packed_dims(target) {
+        Some((head, inner)) => {
+            let inner: String = inner.iter().map(|(a, b)| format!("[{a}:{b}]")).collect();
+            format!("{head}{dims}{inner}")
+        }
+        None => format!("{target}{dims}"),
+    }
 }
 
 /// Expand the alias references EMBEDDED in a type string — a packed struct's member typed by
@@ -1182,8 +1499,16 @@ fn resolve_type_aliases(
                 {
                     let mut t = ty.to_string();
                     for _ in 0..8 {
-                        match alias_addr(&t).and_then(|a| aliases.get(a)) {
-                            Some(target) => t = target.clone(),
+                        // mununu#722 — `"<addr> p::t[7:0]"`: the alias may carry packed DIMENSIONS
+                        // of its own after its name (`edn_rsp_t [NumEndPoints-1:0] edn_o`); they
+                        // used to be dropped with the alias text, so an array of structs became
+                        // the struct and its element select a bit select.
+                        let (head, dims) = match t.find('[') {
+                            Some(i) => (t[..i].to_string(), t[i..].to_string()),
+                            None => (t.clone(), String::new()),
+                        };
+                        match alias_addr(&head).and_then(|a| aliases.get(a)) {
+                            Some(target) => t = with_outer_dims(target, &dims),
                             None => break,
                         }
                     }
@@ -2263,12 +2588,32 @@ fn antecedent_links(left: &Value) -> Result<Vec<AntecedentLink>, String> {
 /// `(node OP k)` for an unsigned comparison against a constant, so the predicate cube keeps a
 /// dimension. A form both refuse keeps the atom lowering's reason, with the compiler's appended.
 fn bool_expr(expr: &Value) -> Result<String, String> {
+    // mununu#722 — a bare constant in boolean position (`assert property (1'b0)`, a parameter the
+    // elaboration folded): the truth value itself, so the formula stays atom-less and is decided
+    // as a constant rather than minted into a node the engines must then evaluate.
+    if let Some(v) = constant_truth(expr) {
+        return Ok(if v { "true" } else { "false" }.to_string());
+    }
     match bool_expr_atoms(expr) {
         Ok(f) => Ok(f),
         Err(reason) => {
             mint_boolean(expr).map_err(|why| format!("{reason} (expression compiler: {why})"))
         }
     }
+}
+
+/// The truth value of a constant node — an `IntegerLiteral`, or a `Conversion` of one — read from
+/// slang's `constant` / `value` (an X/Z literal is not a constant here). `None` for anything else.
+fn constant_truth(expr: &Value) -> Option<bool> {
+    let e = unwrap(expr);
+    if e.get("kind").and_then(Value::as_str) != Some("IntegerLiteral") {
+        return None;
+    }
+    let text = e
+        .get("constant")
+        .or_else(|| e.get("value"))
+        .and_then(Value::as_str)?;
+    parse_sv_literal(text).map(|v| v != 0)
 }
 
 /// Translation-time state of the expression compiler for the assertion being translated.
@@ -3102,7 +3447,9 @@ pub(super) fn packed_sub(expr: &Value) -> Option<Result<PackedSub, String>> {
                 )));
             }
             let width = (msb_pos - lsb_pos + 1) * elem_w;
-            let ty = if is_range || elem_w == 1 {
+            let is_aggregate =
+                elem_ty.starts_with("struct packed") || elem_ty.starts_with("union packed");
+            let ty = if is_range || (elem_w == 1 && !is_aggregate) {
                 format!("logic[{}:0]", width - 1)
             } else {
                 elem_ty
@@ -3132,7 +3479,12 @@ fn index_positions(
     lo_idx: i64,
 ) -> Result<(u32, u32, u32, String), String> {
     let ty = ty.trim();
-    let (dims, head) = if ty.starts_with("struct packed") || ty.starts_with("union packed") {
+    let (dims, head) = if let Some((aggregate, dims)) = struct_with_dims(ty) {
+        // mununu#722 — `struct packed{…}s[7:0]`: a packed ARRAY of structs (OpenTitan's
+        // `edn_rsp_t [NumEndPoints-1:0] edn_o`). Its elements are the structs, so an element
+        // select yields the struct and a member of it is a slice of the right element.
+        (dims, aggregate.to_string())
+    } else if ty.starts_with("struct packed") || ty.starts_with("union packed") {
         let w =
             type_width(ty).ok_or_else(|| format!("cannot read the width of `{name}` (`{ty}`)"))?;
         (vec![(i64::from(w) - 1, 0)], "logic".to_string())
@@ -3148,10 +3500,16 @@ fn index_positions(
     let (first, rest) = dims
         .split_first()
         .ok_or_else(|| format!("`{name}` (`{ty}`) is a scalar; it has no bits to select"))?;
+    let head_w = if head.starts_with("struct packed") || head.starts_with("union packed") {
+        type_width(&head).ok_or_else(|| format!("cannot read the width of `{name}` (`{head}`)"))?
+    } else {
+        1
+    };
     let elem_w: u32 = rest
         .iter()
         .map(|(a, b)| (a - b).unsigned_abs() as u32 + 1)
-        .product();
+        .product::<u32>()
+        * head_w;
     let (left, right) = *first;
     let (hi, lo) = (left.max(right), left.min(right));
     let pos = |idx: i64| -> Result<u32, String> {
@@ -3213,6 +3571,13 @@ pub(super) fn packed_dims(ty: &str) -> Option<(String, Vec<(i64, i64)>)> {
 /// packed struct / union (sum / widest of its members). `None` for anything unreadable.
 pub(super) fn type_width(ty: &str) -> Option<u32> {
     let ty = ty.trim();
+    if let Some((aggregate, dims)) = struct_with_dims(ty) {
+        let n: u32 = dims
+            .iter()
+            .map(|(a, b)| (a - b).unsigned_abs() as u32 + 1)
+            .product();
+        return Some(type_width(aggregate)? * n);
+    }
     if ty.starts_with("struct packed") || ty.starts_with("union packed") {
         let widths: Option<Vec<u32>> = struct_fields(ty)?
             .iter()
@@ -3241,6 +3606,45 @@ pub(super) fn type_width(ty: &str) -> Option<u32> {
     )
 }
 
+/// A packed struct / union type string with trailing packed DIMENSIONS — slang's
+/// `struct packed{logic a;logic b;}p::s$7[7:0]` for `p::t [7:0] x` — split into the element
+/// type (`struct packed{…}p::s$7`) and the dimensions (`[(7, 0)]`). `None` for a plain struct,
+/// a non-struct type, or an unreadable dimension.
+fn struct_with_dims(ty: &str) -> Option<(&str, Vec<(i64, i64)>)> {
+    let ty = ty.trim();
+    if !(ty.starts_with("struct packed") || ty.starts_with("union packed")) {
+        return None;
+    }
+    let open = ty.find('{')?;
+    let mut depth = 0i32;
+    let mut close = None;
+    for (i, c) in ty[open..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(open + i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let after = &ty[close? + 1..];
+    // The struct's name runs to the first `[`; what follows is the dimension list.
+    let dims_at = after.find('[')?;
+    if after[..dims_at].contains(char::is_whitespace) && !after[..dims_at].trim().is_empty() {
+        return None;
+    }
+    let (_, dims) = packed_dims(&format!("logic{}", &after[dims_at..]))?;
+    if dims.is_empty() {
+        return None;
+    }
+    let split = close? + 1 + dims_at;
+    Some((ty[..split].trim_end(), dims))
+}
+
 /// The members of a packed struct / union type string, in declaration order (first = most
 /// significant): `struct packed{logic[3:0] hi;logic lo;}p::s$2` → `[("hi", "logic[3:0]"),
 /// ("lo", "logic")]`. Nested struct members keep their braces. `None` when the string is not
@@ -3248,6 +3652,10 @@ pub(super) fn type_width(ty: &str) -> Option<u32> {
 fn struct_fields(ty: &str) -> Option<Vec<(String, String)>> {
     let ty = ty.trim();
     if !(ty.starts_with("struct packed") || ty.starts_with("union packed")) {
+        return None;
+    }
+    // An ARRAY of structs has no members of its own; its elements do (`struct_with_dims`).
+    if struct_with_dims(ty).is_some() {
         return None;
     }
     let open = ty.find('{')?;
@@ -6142,6 +6550,165 @@ mod tests {
         );
         assert_eq!(report.unsupported.len(), 1, "{:?}", report.unsupported);
         assert_eq!(report.translated.len() + report.unsupported.len(), 19);
+    }
+
+    /// mununu#722 — hierarchical references into a module instantiated several times resolve
+    /// from the path they were written with, read off the preprocessed source
+    /// (`testdata/sva_hierarchy_refs.{sv,pp.sv,ast.json}`, real slang 11.0.448 JSON with
+    /// `--ast-json-source-info` over the `slang -E` output). The macro-written checks name
+    /// `u_a` / `u_b`'s `u_wptr` / `u_rptr` (one shared `cnt` body, four instances) and, inside a
+    /// `for` generate, `gen_ep[i].u_ep` through the genvar.
+    #[test]
+    fn hierarchy_refs_resolve_from_real_slang_json() {
+        let json = include_str!("testdata/sva_hierarchy_refs.ast.json");
+        let pp = include_str!("testdata/sva_hierarchy_refs.pp.sv");
+        let report = translate_ast_json_with_source(json, Some(pp), &TranslateOptions::default())
+            .expect("translates");
+        let formulas = |label: &str| -> Vec<String> {
+            report
+                .translated
+                .iter()
+                .filter(|t| t.label.as_deref() == Some(label))
+                .map(|t| t.formula.clone())
+                .collect()
+        };
+        assert!(
+            report.unsupported.is_empty(),
+            "every reference resolves: {:?}",
+            report.unsupported
+        );
+        assert!(formulas("a_wptr_alerts")[0].contains("u_a.gen_normal.u_wptr.err_o"));
+        assert!(formulas("b_wptr_silent")[0].contains("u_b.gen_normal.u_wptr.err_o"));
+        assert!(formulas("a_rptr_never")[0].contains("u_a.gen_normal.u_rptr.err_o"));
+        let ep = formulas("ep_alerts");
+        assert_eq!(ep.len(), 2, "one per iteration");
+        assert!(ep[0].contains("gen_ep$0.u_ep.err_o") && ep[0].contains("ep_err__bits0_0"));
+        assert!(ep[1].contains("gen_ep$1.u_ep.err_o") && ep[1].contains("ep_err__bits1_1"));
+        // Without the source, every one of them is refused with the reason: slang serialises ONE
+        // `cnt` body for all six instances, so the symbol alone cannot say which instance is meant
+        // — even inside the `for` generate.
+        let blind = translate_ast_json(json).expect("translates");
+        let refused: Vec<&str> = blind
+            .unsupported
+            .iter()
+            .map(|u| u.reason.as_str())
+            .collect();
+        assert_eq!(refused.len(), 5, "{refused:?}");
+        assert!(
+            refused.iter().all(|r| r.contains("no preprocessed source")),
+            "{refused:?}"
+        );
+        // The instance whose declaration slang did serialise also names the occurrence count.
+        assert!(
+            refused.iter().any(|r| r.contains("instantiated 6 times")),
+            "{refused:?}"
+        );
+        assert!(
+            blind
+                .translated
+                .iter()
+                .all(|t| !t.formula.contains("err_o")),
+            "nothing hierarchical translates blind"
+        );
+    }
+
+    /// mununu#722 — a bare constant in boolean position is `true` / `false`, not a minted node.
+    #[test]
+    fn a_bare_constant_in_boolean_position_is_a_truth_value() {
+        let lit = |c: &str, v: &str| serde_json::json!({"kind": "IntegerLiteral", "type": "logic", "constant": c, "value": v});
+        assert_eq!(bool_expr(&lit("1'b0", "0")).unwrap(), "false");
+        assert_eq!(bool_expr(&lit("1'b1", "1")).unwrap(), "true");
+        assert_eq!(bool_expr(&serde_json::json!({"kind": "Conversion", "type": "logic", "operand": lit("3", "3")})).unwrap(), "true");
+        let spec = serde_json::json!({"kind": "Simple", "expr": lit("1'b0", "0")});
+        let body = property_body(&spec, &TranslateOptions::default(), &mut Vec::new()).unwrap();
+        assert_eq!(body, "false");
+    }
+
+    /// mununu#722 — an enum typedef resolves to its base type, including as a struct member
+    /// (csrng's `csrng_rsp_t` carries a `csrng_cmd_sts_e`), so the struct's width is readable.
+    #[test]
+    fn an_enum_typedef_resolves_to_its_base_type() {
+        let root = serde_json::json!({"kind": "Root", "members": [
+            {"kind": "EnumType", "name": "sts_e", "addr": 2, "baseType": "logic[2:0]", "members": []},
+            {"kind": "TypeAlias", "name": "sts_e", "addr": 1, "target": "2 p::sts_e"},
+            {"kind": "TypeAlias", "name": "rsp_t", "addr": 3,
+             "target": "struct packed{logic ack;1 p::sts_e sts;logic[7:0] bus;}p::s$9"}]});
+        let aliases = collect_type_aliases(&root);
+        let resolved = |ty: &str| {
+            resolve_type_aliases(&serde_json::json!({"type": ty}), &aliases)["type"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(resolved("1 p::sts_e"), "logic[2:0]");
+        let st = resolved("3 p::rsp_t[1:0]");
+        assert!(st.contains("logic[2:0] sts;"), "{st}");
+        assert_eq!(type_width(&st), Some(2 * (1 + 3 + 8)));
+    }
+
+    /// mununu#722 — a typedef used with its own packed dimensions (`edn_rsp_t [7:0] edn_o`): the
+    /// dimensions survive the alias expansion — trailing for a struct (an array of structs), outer
+    /// for a vector — so the element select below sees elements, not bits.
+    #[test]
+    fn an_alias_keeps_the_dimensions_written_after_its_name() {
+        let aliases: std::collections::HashMap<String, String> = [
+            (
+                "7".to_string(),
+                "struct packed{logic a;logic b;}p::s$1".to_string(),
+            ),
+            ("8".to_string(), "logic[3:0]".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let resolved = |ty: &str| {
+            resolve_type_aliases(&serde_json::json!({"type": ty}), &aliases)["type"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(
+            resolved("7 p::t[7:0]"),
+            "struct packed{logic a;logic b;}p::s$1[7:0]"
+        );
+        assert_eq!(resolved("7 p::t"), "struct packed{logic a;logic b;}p::s$1");
+        assert_eq!(resolved("8 p::v[7:0]"), "logic[7:0][3:0]");
+        assert_eq!(type_width(&resolved("7 p::t[7:0]")), Some(16));
+    }
+
+    /// mununu#722 — an element of a packed ARRAY of packed structs (OpenTitan's
+    /// `edn_rsp_t [NumEndPoints-1:0] edn_o`, `alert_tx_t [NumAlerts-1:0] alert_tx_o`): the
+    /// element is the struct, a member of it a slice of the right element. The whole array's
+    /// width is every element; a member of the whole array is not a thing.
+    #[test]
+    fn a_member_of_an_element_of_a_packed_array_of_structs_is_its_slice() {
+        let ty =
+            "struct packed{logic edn_ack;logic edn_fips;logic[31:0] edn_bus;}edn_pkg::s$83[7:0]";
+        let base = serde_json::json!({"kind": "NamedValue", "symbol": "1 edn_o", "type": ty});
+        let elem = |k: u64| {
+            serde_json::json!({"kind": "ElementSelect",
+            "type": "struct packed{logic edn_ack;logic edn_fips;logic[31:0] edn_bus;}edn_pkg::s$83",
+            "value": base, "selector": {"kind": "IntegerLiteral", "type": "int", "value": k.to_string(), "constant": k.to_string()}})
+        };
+        let member = |k: u64, m: &str| {
+            serde_json::json!({"kind": "MemberAccess",
+            "type": if m == "edn_bus" { "logic[31:0]" } else { "logic" },
+            "member": format!("9 {m}"), "value": elem(k)})
+        };
+        assert_eq!(type_width(ty), Some(8 * 34));
+        assert!(
+            struct_fields(ty).is_none(),
+            "an array of structs has no members of its own"
+        );
+        let ack2 = packed_sub(&member(2, "edn_ack")).unwrap().unwrap();
+        assert_eq!(
+            (ack2.base.as_str(), ack2.lsb, ack2.width),
+            ("edn_o", 2 * 34 + 33, 1)
+        );
+        let bus0 = packed_sub(&member(0, "edn_bus")).unwrap().unwrap();
+        assert_eq!((bus0.lsb, bus0.width), (0, 32));
+        let el7 = packed_sub(&elem(7)).unwrap().unwrap();
+        assert_eq!((el7.lsb, el7.width), (7 * 34, 34));
+        assert!(el7.ty.starts_with("struct packed"));
     }
 
     /// A literal operand is read AFTER slang's conversions. `x4 != 4'(20)` — a size cast slang

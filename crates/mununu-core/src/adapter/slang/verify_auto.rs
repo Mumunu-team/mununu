@@ -3284,7 +3284,13 @@ pub(crate) fn merge_portfolio_reports(
             // The per-property attribution was already computed here and immediately aggregated
             // into a COUNT on the next line — so the fact a consumer needs existed and was
             // discarded one statement after being derived. Keep it.
-            prop.decided_by = Some((*label).to_string());
+            // mununu#722 — a member may have attributed the verdict itself (`constant`: an
+            // atom-less formula decided before any engine ran); keep that over the engine label.
+            prop.decided_by = Some(
+                pv.decided_by
+                    .clone()
+                    .unwrap_or_else(|| (*label).to_string()),
+            );
             *decided_by.entry(*label).or_default() += 1;
         } else {
             // All ⊥ — prefer an Unknown (abstraction attempted, undecided) over a Skipped
@@ -4600,6 +4606,30 @@ pub(crate) fn verify_auto_impl(
                 continue;
             }
         };
+
+        // mununu#722 — an atom-less formula (`AG true`: an `ASSERT_KNOWN` once `$isunknown` folds)
+        // is decided here. It has no atom to restrict its cone, so the engines saw the WHOLE design
+        // as its cone and skipped it over the bit cap on any real IP; its value is the same on
+        // every total model (`Formula::constant_value`).
+        if let Some(value) = formula.constant_value() {
+            report.properties.push(PropertyVerdict {
+                name: t.name.clone(),
+                label: t.label.clone(),
+                kind: t.kind,
+                formula: formula_str.clone(),
+                outcome: if value {
+                    VerifyOutcome::Holds
+                } else {
+                    VerifyOutcome::Violated { false_cells: 0 }
+                },
+                seeded_predicates: Vec::new(),
+                counterexample: None,
+                bottom_reason: None,
+                decided_by: Some("constant".into()),
+                vacuity: None,
+            });
+            continue;
+        }
 
         // monono#partsel soundness guard (all engines). Refuse — rather than
         // silently mis-decide — a property whose atom binds to a signal reaching an
@@ -11198,6 +11228,107 @@ module uart_tx(); endmodule"#;
             assert!(p.formula.contains(&format!("g_ch${k}.r")), "{}", p.formula);
             assert!(p.counterexample.is_some(), "a trace for {}", p.name);
         }
+    }
+
+    /// mununu#722 — an `ASSERT_KNOWN` (`!$isunknown(x)`, folded to `true`) on a design WIDER than
+    /// the exact engine's cap decides trivially instead of skipping: an atom-less formula has no
+    /// cone, and its value is the same on every total model. The twin over a real atom still
+    /// reads the register (and is skipped over the cap here, as before).
+    #[test]
+    #[ignore = "requires slang + sv2v + Yosys + z3 (use the mununu-sva docker image); run with --ignored"]
+    fn e2e_an_atom_less_assertion_decides_without_a_cone() {
+        let design = "module wide_dut (input logic clk, input logic [255:0] d, output logic [255:0] q);\n\
+                        always_ff @(posedge clk) q <= d;\n\
+                        a_known: assert property (@(posedge clk) !$isunknown(q));\n\
+                        a_never: assert property (@(posedge clk) 1'b0);\n\
+                      endmodule\n";
+        let sources = vec![("wide_dut.sv".to_string(), design.to_string())];
+        let yopts = YosysOptions {
+            top: Some("wide_dut".to_string()),
+            use_sv2v: true,
+            ..Default::default()
+        };
+        let opts = VerifyAutoOptions {
+            portfolio: Some(PortfolioMode::Sequential),
+            ..Default::default()
+        };
+        let report = verify_auto(&sources, &yopts, &opts).expect("verify_auto runs");
+        for p in &report.properties {
+            eprintln!(
+                "  {} {:?}: {:?} by {:?}",
+                p.name, p.label, p.outcome, p.decided_by
+            );
+        }
+        let row = |l: &str| {
+            report
+                .properties
+                .iter()
+                .find(|p| p.label.as_deref() == Some(l))
+                .unwrap_or_else(|| panic!("no `{l}`"))
+        };
+        assert!(matches!(row("a_known").outcome, VerifyOutcome::Holds));
+        assert_eq!(row("a_known").decided_by.as_deref(), Some("constant"));
+        assert!(matches!(
+            row("a_never").outcome,
+            VerifyOutcome::Violated { .. }
+        ));
+        assert_eq!(row("a_never").decided_by.as_deref(), Some("constant"));
+    }
+
+    /// mununu#722 — a hierarchical reference into a module instantiated several times names ITS
+    /// instance (OpenTitan's `ASSERT_PRIM_*_ERROR_TRIGGER_ALERT` shape, written through a macro):
+    /// `u_a.…u_wptr`'s error does reach `alert_a` (HOLDS); `u_b`'s never reaches `alert_b`
+    /// (VIOLATED, with a trace); the `for`-generate pair resolves per iteration (HOLDS ×2).
+    #[test]
+    #[ignore = "requires slang + sv2v + Yosys + z3 (use the mununu-sva docker image); run with --ignored"]
+    fn e2e_hierarchical_references_name_their_instance() {
+        let design = include_str!("testdata/sva_hierarchy_refs.sv");
+        let sources = vec![("sva_hierarchy_refs.sv".to_string(), design.to_string())];
+        let yopts = YosysOptions {
+            top: Some("top".to_string()),
+            use_sv2v: true,
+            ..Default::default()
+        };
+        let opts = VerifyAutoOptions {
+            portfolio: Some(PortfolioMode::Sequential),
+            ..Default::default()
+        };
+        let report = verify_auto(&sources, &yopts, &opts).expect("verify_auto runs");
+        for p in &report.properties {
+            eprintln!(
+                "  {} {:?}: {:?}\n      {}",
+                p.name, p.label, p.outcome, p.formula
+            );
+        }
+        assert!(report.unsupported.is_empty(), "{:?}", report.unsupported);
+        let rows = |l: &str| -> Vec<&PropertyVerdict> {
+            report
+                .properties
+                .iter()
+                .filter(|p| p.label.as_deref() == Some(l))
+                .collect()
+        };
+        assert!(matches!(
+            rows("a_wptr_alerts")[0].outcome,
+            VerifyOutcome::Holds
+        ));
+        let b = rows("b_wptr_silent")[0];
+        assert!(
+            matches!(b.outcome, VerifyOutcome::Violated { .. }),
+            "{:?}",
+            b.outcome
+        );
+        assert!(
+            b.counterexample.is_some(),
+            "a trace for the violated instance"
+        );
+        assert!(matches!(
+            rows("a_rptr_never")[0].outcome,
+            VerifyOutcome::Holds
+        ));
+        let ep = rows("ep_alerts");
+        assert_eq!(ep.len(), 2);
+        assert!(ep.iter().all(|p| matches!(p.outcome, VerifyOutcome::Holds)));
     }
 
     /// mununu#711 — a port that is its register's bits SWAPPED (OpenTitan's `esc_rx_o = {resp_p,

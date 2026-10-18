@@ -218,9 +218,11 @@ neighbour gains a name.
 text, the source line, or the enclosing module would change under edits that do not change the
 property — which is the index-fragility this removes, wearing a different hat.
 
-**Why the name rides on the tag and not the body.** A mu-calculus body can legitimately contain a
-colon since bit-slice atoms were admitted (`wdata[7:0] == 8'hA5`), so a `name:` prefix inside the
-value would have a real ambiguity. The parentheses have none. A name may contain
+**Why the name rides on the tag and not the body.** A `name:` prefix inside the value would have to
+be told apart from the body's own text, and the parentheses have no such ambiguity. (The body is
+mu-calculus as `mu_calculus::parser` reads it — atoms are `ident`, `ident op decimal`, `ident op
+ident [+ k]`; a bit-slice or a sized literal such as `wdata[7:0] == 8'hA5` is NOT accepted here:
+slices are minted only for SVA-translated formulas.) A name may contain
 `[A-Za-z0-9_.-]`; a malformed group (empty, containing a space, unclosed) leaves the tag
 unrecognised and the annotation is skipped with a message, rather than being half-accepted under a
 truncated name.
@@ -510,6 +512,50 @@ wall-clock budget — the message distinguishes the four so the remedy is not bl
 trial-and-error.
 
 > Source of truth: [`bitblast_oom_skip_note`](../crates/mununu-core/src/planner/mod.rs) — surface: (CLI+API+UI)
+
+### Running a full IP (OpenTitan `edn`) — block-to-IP scale, measured
+
+> Source of truth: [`VerifyAutoOptions::lift_overrides`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) + [`scripts/vendor_opentitan_ip.py`](../scripts/vendor_opentitan_ip.py) — surface: (CLI+API) — `sv verify-auto … --lift-override` / `POST /api/v1/sv/verify-auto` with `additional_sources`; the vendoring script is a developer tool
+
+Everything above was measured on **extracted blocks** — one module and the primitives it needs. A full
+IP is the top with its TL-UL register block and every sub-block: `edn` (lowRISC/opentitan 558921c) is
+58 files, 200 registers once flattened, 52 assertions of its own. It lifts and runs with no new verb
+([`examples/verify/ip_opentitan_edn`](../examples/verify/ip_opentitan_edn/README.md), pinned by
+`e2e_opentitan_ip_edn_full`; measured 2026-10-18, branch of mununu#722):
+
+```bash
+# vendor the closure without fusesoc (needs slang; run in mununu-sva)
+python3 scripts/vendor_opentitan_ip.py --ip edn --commit 558921ccc8aeefab652b45c1402c10bceb63accc \
+    --checkout /tmp/ot --out examples/verify/ip_opentitan_edn/source \
+    --rewrite "edn_core.sv|'{default: 1'b0}|'{default: '0}"
+cd examples/verify/ip_opentitan_edn/source && sh run.sh --json --source mununu_properties.sv
+```
+
+`run.sh` is `sv verify-auto edn.sv --top edn --preprocess-sv2v --source … --lift-override
+prim_assert.sv=prim_assert_shim.sv --lift-override prim_assert_standard_macros.svh=/dev/null
+--lift-override prim_assert_sec_cm.svh=/dev/null --config-value rst_ni=1`: the SVA is extracted from the
+**real** `prim_assert` macros, the lift sees the **generated synthesis shim** (every macro of the real
+set empty — the script writes it), the bus and the endpoint requests stay free inputs.
+
+| rows (edn) | holds | violated | ⊥ | unsupported | decided by |
+|---|---|---|---|---|---|
+| `ASSERT_KNOWN` ×13 | 13 | | | | `constant` — `$isunknown` folds to false on a 2-state model, no cone |
+| error → alert checks ×15 (`$rose(u_x.….err_o) \|-> ##[0:30] alert_tx_o[1].alert_p`) | **10** | | 5 | | `explicit` cube — the main FSM, all 8 endpoint FSMs, the register-write one-hot; ⊥ = the 32-bit `prim_count` / FIFO-pointer cones over the 192-bit cap |
+| `EdnFatalAlertNoRsp_A` ×8 | | **1** (6 cycles from reset) | 7 | | BMC rescue after the cube's ⊥ — a software-triggerable fatal error through the free bus in the cycle an endpoint acks: a spec gap in the assertion, not a design bug; the re-plan's BMC has a fixed 5-s per-query timeout the property budget never reaches, so one to three of the eight identical rows finish per run, load-dependent (mununu#726) |
+| `EdnDataStableDisable_A` ×8 | | | 8 | | 32-bit bus cone over the cap |
+| `EdnDataStable_A` ×8 | | | | 8 | `[->1]` goto repetition |
+| `@mununu_guarantee` system properties ×14 | **7** | | 7 | | `explicit` / `symbolic` cube: Error terminal / recorded / sticky (FSM → core → register block), endpoint 0 the same, the SWPortMode entry condition; `constant` for the no-deadlock sanity row; ⊥ = every `AG EF` / `EF` row (FSM cone over the cap, no MUST path — SymbiYosys `cover` reaches each `EF` target within six cycles) |
+
+`pattgen` (87 registers) decides 14 of 14 — its four functional assertions on the **exact** engine;
+`csrng` (208 registers, `aes_cipher_core` black-boxed) 20 of 34, all `ASSERT_KNOWN`, its error → alert
+checks ⊥. What this does and does not say: **one IP at one commit is measured, block-to-IP scale** —
+not "IP scale" in general, not a second IP, not a SoC, no datapath property through a cipher. What
+decides at IP scale is the predicate cube and the reach rescue; the exact engine's cones all exceed the
+cap once the register block's bus datapath is in the design. Three things to know before an IP-sized
+run: set `MUNUNU_PROPERTY_BUDGET_MS` (the budget is observed between engine calls, so one wide
+invariant can still run long) and `MUNUNU_VERIFY_AUTO_PARTIAL_JSON`; carry the `@mununu_guarantee`
+annotations in an empty `package`, not an empty `module` (a bodiless module is reported as a black box, mununu#724);
+and read the trace's `inputs` knowing values wider than 64 bits are not listed (mununu#723).
 
 ### The cone of influence is bit-level (mununu#602)
 
@@ -1098,7 +1144,8 @@ repo, so the lists below cannot drift from the code without a red test.
 | **expressions**: `+ - *` (≤ 32 bits), unary `-`, `& \| ^ ~^ ~` over vectors, `<< >> >>>`, `?:`, concatenation and constant replication, signed and unsigned comparisons, reductions (`^x` included), `$past(expr, k)`, `$stable` / `$changed` / `$rose` / `$fell` of an expression (`$rose` / `$fell` read its LSB), `$countones` / `$onehot` / `$onehot0` of an expression, a dynamic bit-select whose index cannot leave the range | one **minted** combinational node `mununu_x_<hash>` per expression, built from slang's own types and conversions; the formula reads it as an atom (`(mununu_x_… == 3)` against a constant, so the predicate cube keeps a dimension) | 2026-10-15 (OpenTitan Phase 2) |
 | a call to a user function whose body is one `return` (OpenTitan's `min` / `max`) | inlined into the expression, arguments bound with assignment semantics | 2026-10-15 (OpenTitan Phase 3) |
 | an assertion inside a sub-instance, at any depth (a module instantiated several times included; a logic-free checker module bound or instantiated into the design) | checked once **per instance**, over that instance's signals by their flattened names (`u_rx.state_q`) and with its own parameter values; an **input port** reads the expression connected to it, in the parent's scope; the property's `name` carries the instance path (`u_rx.u_dec.prim_diff_decode_sva_12`) | 2026-10-16 (mununu#709) |
-| a hierarchical reference from the top, `u_rx.state_q` | that flattened signal, when the module has one instance; refused with the reason when several instances share it (slang names the declaration, not the instance) | 2026-10-16 (mununu#709) |
+| a hierarchical reference, `u_rx.state_q`, `u_core.u_fifo.gen_normal_fifo.u_cnt.err_o` — into any instance, however many times its module is instantiated, written directly or through a macro argument (OpenTitan's `ASSERT_PRIM_*_ERROR_TRIGGER_ALERT`) | that instance's flattened signal: the unit is preprocessed (`slang -E`) and the AST dumped with source positions, so the path is read as written and walked over the instance tree (generate blocks, `gen[i]` through the genvar, `$root.`) | 2026-10-16 (#709), any instance 2026-10-17 (mununu#722) |
+| a member of an element of a packed array of structs (`edn_o[i].edn_ack`, `alert_tx_o[1].alert_p`) | the member's slice of the right element | 2026-10-17 (mununu#722) |
 | an assertion inside a `for` generate, or in an instance a `for` generate elaborates (`csrng_cmd_stage`, `prim_alert_sender`) | checked once per iteration; the iteration `gen[k]` is spelled **`gen$k`** in formulas, counterexamples and the model (`[` opens a box in the μ-calculus) — `g_ch$1.r`, `u_core.gen_cmd_stage$0.u_cmd_stage.state_q` | 2026-10-17 (mununu#713) |
 
 Each definite verdict transfers exactly as in the plain `|=>` case — the lowerings add boxes,

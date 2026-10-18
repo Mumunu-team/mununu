@@ -19,7 +19,7 @@
 //! does not contaminate mununu's (see `docs/external-tools.md`). slang is
 //! contributor-installed (CI uses the Linux prebuilt), never bundled.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::adapter::{AdapterError, AdapterErrorKind};
@@ -125,6 +125,149 @@ pub fn run_ast_json(
     include_dirs: &[PathBuf],
 ) -> Result<String, AdapterError> {
     run_ast_json_with_params(bin, files, include_dirs, &[])
+}
+
+/// mununu#722 — the extraction with the SOURCE TEXT a hierarchical reference was written with.
+///
+/// slang's JSON names a `HierarchicalValue` by its DECLARATION (`"<addr> err_o"`), which several
+/// instances share, so a reference into a module instantiated more than once cannot say which
+/// instance it means. `--ast-json-source-info` gives every node its source span — but a span
+/// inside a macro expansion collapses to the macro's call site, and OpenTitan writes every such
+/// reference through a macro (`ASSERT_PRIM_COUNT_ERROR_TRIGGER_ALERT(…, u_core.u_cnt, …)`). So
+/// the unit is PREPROCESSED first (`slang -E`, one file, macros expanded, `include`s inlined, no
+/// `line` directives) and the AST is dumped from that text with source info: the span then slices
+/// the path verbatim (`u_core.gen_fifo.u_cnt.err_o`). Returns `(json, preprocessed text)`; the
+/// translator reads the text only for a reference it cannot resolve otherwise.
+///
+/// The preprocessed unit is written beside the first staged file (`__mununu_preprocessed.sv`) so
+/// relative `include` paths keep resolving the same way.
+pub fn run_ast_json_with_source(
+    bin: &SlangBin,
+    files: &[PathBuf],
+    include_dirs: &[PathBuf],
+    params: &[(String, String)],
+) -> Result<(String, String), AdapterError> {
+    let mut pp = Command::new(&bin.path);
+    pp.args(preprocess_args(files, include_dirs));
+    let pp_out = run_slang_bounded(&mut pp, bin, "-E")?;
+    let text = String::from_utf8_lossy(&pp_out.stdout).to_string();
+    if text.trim().is_empty() {
+        return Err(AdapterError {
+            kind: AdapterErrorKind::ParseError,
+            message: format!(
+                "adapter/slang: `slang -E` produced no output (status {}). stderr: {}",
+                pp_out.status,
+                String::from_utf8_lossy(&pp_out.stderr).trim()
+            ),
+            location: None,
+        });
+    }
+    let dir = files
+        .first()
+        .and_then(|f| f.parent())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(std::env::temp_dir);
+    let pp_path = dir.join("__mununu_preprocessed.sv");
+    std::fs::write(&pp_path, &text).map_err(|e| AdapterError {
+        kind: AdapterErrorKind::ParseError,
+        message: format!(
+            "adapter/slang: could not write the preprocessed unit `{}`: {e}",
+            pp_path.display()
+        ),
+        location: None,
+    })?;
+    let mut args = ast_json_args(std::slice::from_ref(&pp_path), include_dirs, params);
+    args.push("--ast-json-source-info".into());
+    let mut cmd = Command::new(&bin.path);
+    cmd.args(args);
+    let json = finish_ast_json(run_slang_bounded(&mut cmd, bin, "--ast-json")?)?;
+    Ok((json, text))
+}
+
+/// `slang -E` over the same unit the AST step compiles: one preprocessed text on stdout.
+pub fn preprocess_args(files: &[PathBuf], include_dirs: &[PathBuf]) -> Vec<std::ffi::OsString> {
+    let mut args: Vec<std::ffi::OsString> = ["-E", "--quiet", "--single-unit"]
+        .iter()
+        .map(Into::into)
+        .collect();
+    for d in include_dirs {
+        args.push("-I".into());
+        args.push(d.into());
+    }
+    for f in files {
+        args.push(f.into());
+    }
+    args
+}
+
+/// Run one slang command under the lift timeout (mununu#504): a timeout is a hard error here,
+/// since slang is what DISCOVERS the properties — there is no property list to degrade into.
+fn run_slang_bounded(
+    cmd: &mut Command,
+    bin: &SlangBin,
+    what: &str,
+) -> Result<std::process::Output, AdapterError> {
+    let outcome = match crate::adapter::lift_timeout() {
+        Some(t) => crate::adapter::run_with_timeout(cmd, None, t),
+        None => cmd.output().map(|o| {
+            Some((
+                o.status,
+                String::from_utf8_lossy(&o.stdout).into_owned(),
+                String::from_utf8_lossy(&o.stderr).into_owned(),
+            ))
+        }),
+    }
+    .map_err(|e| AdapterError {
+        kind: AdapterErrorKind::UnsupportedConstruct,
+        message: format!(
+            "adapter/slang: failed to run `{} {what}`: {e}",
+            bin.path.display()
+        ),
+        location: None,
+    })?;
+    let Some((status, stdout, stderr_s)) = outcome else {
+        return Err(AdapterError {
+            kind: AdapterErrorKind::ParseError,
+            message: format!(
+                "adapter/slang: `slang {what}` exceeded the lift timeout and was killed. slang runs \
+                 before the property list exists, so there is nothing to report a partial verdict \
+                 for. Raise or disable the cap with {}=<ms> (0 disables).",
+                crate::adapter::LIFT_TIMEOUT_ENV
+            ),
+            location: None,
+        });
+    };
+    Ok(std::process::Output {
+        status,
+        stdout: stdout.into_bytes(),
+        stderr: stderr_s.into_bytes(),
+    })
+}
+
+/// The JSON of a finished `--ast-json` run: empty stdout is the error, a non-zero status with JSON
+/// is not (see [`run_ast_json`]).
+fn finish_ast_json(output: std::process::Output) -> Result<String, AdapterError> {
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    if stdout.trim().is_empty() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(AdapterError {
+            kind: AdapterErrorKind::ParseError,
+            message: format!(
+                "adapter/slang: `slang --ast-json` produced no JSON (status {}). stderr: {}",
+                output.status,
+                stderr.trim()
+            ),
+            location: None,
+        });
+    }
+    if !output.status.success() {
+        tracing::warn!(
+            status = %output.status,
+            stderr = %String::from_utf8_lossy(&output.stderr).trim(),
+            "slang --ast-json exited non-zero but produced JSON; continuing"
+        );
+    }
+    Ok(stdout)
 }
 
 /// [`run_ast_json`] elaborating the design under `--param` overrides.

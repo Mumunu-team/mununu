@@ -2077,3 +2077,278 @@ fn e2e_opentitan_sva_census() {
         );
     }
 }
+
+/// The first FULL OpenTitan IP in the corpus — `edn` (TL-UL register block + core + 8 endpoint FSMs,
+/// 200 registers; `examples/verify/ip_opentitan_edn`, lowRISC/opentitan 558921c): its own 52
+/// assertions plus the system-level `@mununu_guarantee` properties of `mununu_properties.sv`, through
+/// `sv verify-auto` exactly as the example's `run.sh` does — the SVA extracted from the real
+/// `prim_assert` macros, the lift under the generated synthesis shim, `rst_ni` pinned inactive, the
+/// bus free. The pins are the measured verdicts (ledger §3.3b-6, 2026-10-18); a definite verdict
+/// that moves is a finding, not a re-baseline, and a pinned ⊥ that decides is the engine
+/// improvement announcing itself.
+#[test]
+#[ignore = "requires slang + sv2v + Yosys + z3 (use the mununu-sva docker image); run with --ignored --nocapture"]
+fn e2e_opentitan_ip_edn_full() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/verify/ip_opentitan_edn/source");
+    let read = |f: &str| {
+        std::fs::read_to_string(dir.join(f))
+            .unwrap_or_else(|e| panic!("{}: {e}", dir.join(f).display()))
+    };
+    // `sources.txt` is the compile order with the primary last; verify_auto wants the primary first.
+    let order: Vec<String> = read("sources.txt")
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    let mut sources: Vec<(String, String)> = vec![("edn.sv".to_string(), read("edn.sv"))];
+    sources.extend(
+        order
+            .iter()
+            .filter(|f| *f != "edn.sv")
+            .map(|f| (f.clone(), read(f))),
+    );
+    sources.push((
+        "mununu_properties.sv".to_string(),
+        read("mununu_properties.sv"),
+    ));
+    let yopts = YosysOptions {
+        top: Some("edn".to_string()),
+        use_sv2v: true,
+        additional_sources: sources[1..].to_vec(),
+        ..Default::default()
+    };
+    let opts = VerifyAutoOptions {
+        config_values: [("rst_ni".to_string(), 1u64)].into_iter().collect(),
+        portfolio: Some(PortfolioMode::Sequential),
+        lift_overrides: vec![
+            ("prim_assert.sv".to_string(), read("prim_assert_shim.sv")),
+            ("prim_assert_standard_macros.svh".to_string(), String::new()),
+            ("prim_assert_sec_cm.svh".to_string(), String::new()),
+        ],
+        ..Default::default()
+    };
+    let t0 = std::time::Instant::now();
+    let report = verify_auto(&sources, &yopts, &opts).expect("the full IP lifts and runs");
+    eprintln!(
+        "edn full IP: {} properties, {} unsupported, {} registers, {:.0}s",
+        report.properties.len(),
+        report.unsupported.len(),
+        report.diagnostics.state_register_count,
+        t0.elapsed().as_secs_f64()
+    );
+    for p in &report.properties {
+        eprintln!(
+            "  {:<40} {:<10} {}",
+            p.label.as_deref().unwrap_or(&p.name),
+            p.outcome.label(),
+            p.decided_by.as_deref().unwrap_or("-")
+        );
+    }
+    // The whole closure is modelled: nothing black-boxed (the properties file is an empty PACKAGE —
+    // an empty module would be reported here), the register block and the core both present.
+    assert!(
+        report.diagnostics.blackboxed_modules.is_empty(),
+        "{:?}",
+        report.diagnostics.blackboxed_modules
+    );
+    assert!(
+        report.diagnostics.state_register_count >= 180,
+        "{}",
+        report.diagnostics.state_register_count
+    );
+    let rows = |l: &str| -> Vec<&VerifyOutcome> {
+        report
+            .properties
+            .iter()
+            .filter(|p| p.label.as_deref() == Some(l))
+            .map(|p| &p.outcome)
+            .collect()
+    };
+    let by = |l: &str| -> Vec<Option<&str>> {
+        report
+            .properties
+            .iter()
+            .filter(|p| p.label.as_deref() == Some(l))
+            .map(|p| p.decided_by.as_deref())
+            .collect()
+    };
+    let holds = |l: &str| rows(l).iter().all(|o| matches!(o, VerifyOutcome::Holds));
+    // --- the IP's own SVA ---
+    // Error → alert: a fault flag deep in a sub-instance (`u_edn_core.u_edn_main_sm.u_state_regs`,
+    // `gen_ep_blk[k].u_edn_ack_sm_ep.u_state_regs`, `u_reg.u_prim_reg_we_check`) reaches
+    // `alert_tx_o[1].alert_p` within 30 cycles — the system-level rows mununu#722 made checkable.
+    assert_eq!(rows("FpvSecCmMainFsmCheck_A").len(), 1);
+    assert!(holds("FpvSecCmMainFsmCheck_A"));
+    assert_eq!(
+        rows("FpvSecCmAckFsmCheck_A").len(),
+        8,
+        "one row per endpoint instance"
+    );
+    assert!(holds("FpvSecCmAckFsmCheck_A"));
+    assert!(holds("FpvSecCmRegWeOnehotCheck_A"));
+    // `ASSERT_KNOWN` folds to a constant (the model is 2-state) and is decided without a cone.
+    assert!(holds("TlDValidKnownO_A") && holds("AlertTxKnownO_A"));
+    assert_eq!(by("AlertTxKnownO_A"), vec![Some("constant")]);
+    assert_eq!(rows("EdnEndPointOut_A").len(), 8);
+    assert!(holds("EdnEndPointOut_A"));
+    // `alert[1] |-> edn_o[i].edn_ack == 0`: a software-triggerable fatal error through the free bus
+    // in the cycle an endpoint acks — reachable from reset, a spec gap in the assertion. The ⊥
+    // re-plan decides at least one of the eight symmetric rows; none of them HOLDS.
+    let fatal = rows("EdnFatalAlertNoRsp_A");
+    assert_eq!(fatal.len(), 8);
+    assert!(
+        fatal
+            .iter()
+            .any(|o| matches!(o, VerifyOutcome::Violated { .. })),
+        "{fatal:?}"
+    );
+    assert!(
+        !fatal.iter().any(|o| matches!(o, VerifyOutcome::Holds)),
+        "{fatal:?}"
+    );
+    assert!(
+        report
+            .properties
+            .iter()
+            .any(|p| p.label.as_deref() == Some("EdnFatalAlertNoRsp_A")
+                && matches!(p.outcome, VerifyOutcome::Violated { .. })
+                && p.counterexample.is_some()),
+        "the violated row carries its trace"
+    );
+    // `EdnDataStable_A` ×8 uses `[->1]` (goto repetition) — the one shape still outside the fragment.
+    assert_eq!(report.unsupported.len(), 8, "{:?}", report.unsupported);
+    assert!(
+        report
+            .unsupported
+            .iter()
+            .all(|(n, r)| n.starts_with("gen_edn_if_asserts_sva_") && r.contains("GoTo")),
+        "{:?}",
+        report.unsupported
+    );
+    // --- the system-level properties (cross-block: FSM → core → register block) ---
+    for l in [
+        "edn_main_sm_error_is_terminal",
+        "edn_main_sm_error_is_recorded",
+        "edn_main_sm_error_record_is_sticky",
+        "edn_ack_sm_0_error_is_terminal",
+        "edn_ack_sm_0_error_is_recorded",
+        "edn_no_deadlock",
+        // the entry-condition form; the invariant form ("in SWPortMode the boot-request control
+        // is off") is FALSE — software may rewrite CTRL while the FSM stays in SWPortMode
+        "edn_swport_entry_excludes_boot_mode",
+    ] {
+        assert_eq!(rows(l).len(), 1, "{l}");
+        assert!(holds(l), "{l}: {:?}", rows(l));
+    }
+    // Pinned abstentions: the FSM state's cone is over the exact cap and the cube certifies no MUST
+    // path. An engine that decides one of these breaks the pin — re-measure, then move the pin.
+    for l in [
+        "edn_main_sm_recover_idle",
+        "edn_main_sm_error_reachable",
+        "edn_ack_sm_0_recover_idle",
+    ] {
+        assert!(
+            matches!(rows(l)[0], VerifyOutcome::Unknown { .. }),
+            "{l}: {:?}",
+            rows(l)
+        );
+    }
+    // Floors (second pass, 2026-10-18): 23 own + 7 system HOLDS, 1 VIOLATED.
+    let n_holds = report
+        .properties
+        .iter()
+        .filter(|p| matches!(p.outcome, VerifyOutcome::Holds))
+        .count();
+    assert!(n_holds >= 30, "holds = {n_holds}");
+}
+
+/// The full-IP system properties are not invariants in disguise: freezing the sticky `ERR_CODE`
+/// record (`stick:u_reg.u_err_code_edn_main_sm_err.q`, the model's alias of the register) flips
+/// `edn_main_sm_error_is_recorded` HOLDS → VIOLATED — the main FSM still reaches `Error` (software
+/// error injection through the free bus) and the record now never follows — while
+/// `edn_main_sm_error_is_terminal`, which does not read the record, stays HOLDS. Same sources and
+/// lift as [`e2e_opentitan_ip_edn_full`], the two properties carried inline so the baseline and the
+/// mutant each run only the IP's own SVA beside them.
+#[test]
+#[ignore = "requires slang + sv2v + Yosys + z3 (use the mununu-sva docker image); run with --ignored --nocapture"]
+fn e2e_opentitan_ip_edn_stick_flips_the_error_record() {
+    use mununu_core::adapter::btor2::mutate::Mutation;
+    use mununu_core::adapter::slang::verify_auto::mutate_and_compare;
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/verify/ip_opentitan_edn/source");
+    let read = |f: &str| {
+        std::fs::read_to_string(dir.join(f))
+            .unwrap_or_else(|e| panic!("{}: {e}", dir.join(f).display()))
+    };
+    let order: Vec<String> = read("sources.txt")
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    let mut sources: Vec<(String, String)> = vec![("edn.sv".to_string(), read("edn.sv"))];
+    sources.extend(
+        order
+            .iter()
+            .filter(|f| *f != "edn.sv")
+            .map(|f| (f.clone(), read(f))),
+    );
+    sources.push((
+        "mununu_flip_props.sv".to_string(),
+        "package mununu_flip_props; endpackage\n\
+         // @mununu_guarantee(edn_main_sm_error_is_terminal) nu X. ((!(u_edn_core.u_edn_main_sm.state_q == 382) || nu Y. ((u_edn_core.u_edn_main_sm.state_q == 382) && [] Y)) && [] X)\n\
+         // @mununu_guarantee(edn_main_sm_error_is_recorded) nu X. ((!(u_edn_core.u_edn_main_sm.state_q == 382) || [] u_reg.u_err_code_edn_main_sm_err.q) && [] X)\n"
+            .to_string(),
+    ));
+    let yopts = YosysOptions {
+        top: Some("edn".to_string()),
+        use_sv2v: true,
+        additional_sources: sources[1..].to_vec(),
+        ..Default::default()
+    };
+    let base_opts = VerifyAutoOptions {
+        config_values: [("rst_ni".to_string(), 1u64)].into_iter().collect(),
+        portfolio: Some(PortfolioMode::Sequential),
+        lift_overrides: vec![
+            ("prim_assert.sv".to_string(), read("prim_assert_shim.sv")),
+            ("prim_assert_standard_macros.svh".to_string(), String::new()),
+            ("prim_assert_sec_cm.svh".to_string(), String::new()),
+        ],
+        ..Default::default()
+    };
+    let report = mutate_and_compare(
+        &sources,
+        &yopts,
+        &base_opts,
+        Mutation::Stick("u_reg.u_err_code_edn_main_sm_err.q".into()),
+    )
+    .expect("baseline + mutant lifts of the full IP");
+    for p in &report.properties {
+        eprintln!(
+            "  {:<40} {:<9} -> {:<9} {}",
+            p.name,
+            p.baseline,
+            p.mutant,
+            if p.flipped { "FLIP" } else { "" }
+        );
+    }
+    // The flip report carries the positional name only: the inline file's first annotation is the
+    // terminality row, its second the record row.
+    let row = |name: &str| {
+        report
+            .properties
+            .iter()
+            .find(|p| p.name == name)
+            .unwrap_or_else(|| panic!("{name} in the mutation report"))
+    };
+    let recorded = row("ann_guarantee_1");
+    assert_eq!(recorded.baseline, "holds", "{recorded:?}");
+    assert!(
+        recorded.flipped && recorded.mutant == "violated",
+        "freezing the ERR_CODE record must flip `error_is_recorded` holds→violated: {recorded:?}"
+    );
+    let terminal = row("ann_guarantee_0");
+    assert_eq!(terminal.baseline, "holds");
+    assert!(
+        !terminal.flipped,
+        "the trap's terminality does not read the record: {terminal:?}"
+    );
+}
