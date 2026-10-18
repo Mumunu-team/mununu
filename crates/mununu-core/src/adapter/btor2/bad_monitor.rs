@@ -837,9 +837,10 @@ pub fn emit_ag_boolean_invariant_monitor(
 pub const WITNESS_LATCH_PREFIX: &str = "mununu_wit_";
 
 /// The box depth of a body the witness monitor can read along one path: a boolean block is 0,
-/// `&&` / `||` take the deeper side, an unguarded box adds one. `None` for anything else (a
-/// fixpoint, a diamond, a negated modality, a guarded box).
-fn linear_depth(
+/// `&&` / `||` take the deeper side, an unguarded box adds one, a weak-until block
+/// ([`weak_until_parts`]) is a leaf. `None` for anything else (another fixpoint, a diamond, a
+/// negated modality, a guarded box).
+pub(crate) fn linear_depth(
     formula: &crate::mu_calculus::Formula,
     id: crate::mu_calculus::NodeId,
 ) -> Option<usize> {
@@ -856,15 +857,157 @@ fn linear_depth(
             guard,
             target,
         } if *guard == Guard::default() => Some(linear_depth(formula, *target)? + 1),
+        MuNode::Nu { .. } if weak_until_parts(formula, id).is_some() => Some(0),
         _ => None,
     }
+}
+
+/// Plan 2 / PR C (2026-10-18) — the weak-until block the SVA translator emits for
+/// `e throughout b[->1]` (mununu#731): `nu Z. (e && (b || [] Z))`, `e` and `b` boolean blocks
+/// ([`is_witness_boolean`]), `Z` recurring only under the unguarded box. Returns `(e, b)`: "`e`
+/// holds at every cycle up to and including the first `b`; if `b` never comes, `e` holds forever".
+pub(crate) fn weak_until_parts(
+    formula: &crate::mu_calculus::Formula,
+    id: crate::mu_calculus::NodeId,
+) -> Option<(crate::mu_calculus::NodeId, crate::mu_calculus::NodeId)> {
+    use crate::mu_calculus::{Guard, ModalKind, Node as MuNode, NodeId};
+    let MuNode::Nu { var, body } = formula.node(id) else {
+        return None;
+    };
+    let MuNode::And(l, r) = formula.node(*body) else {
+        return None;
+    };
+    let is_recur = |n: NodeId| {
+        matches!(
+            formula.node(n),
+            MuNode::Modal { kind: ModalKind::Box, guard, target }
+                if *guard == Guard::default()
+                    && matches!(formula.node(*target), MuNode::Variable(v) if v == var)
+        )
+    };
+    // the `(b || [] Z)` side: the boolean `b`
+    let until_of = |n: NodeId| -> Option<NodeId> {
+        let MuNode::Or(a, c) = formula.node(n) else {
+            return None;
+        };
+        if is_recur(*c) && is_witness_boolean(formula, *a) {
+            Some(*a)
+        } else if is_recur(*a) && is_witness_boolean(formula, *c) {
+            Some(*c)
+        } else {
+            None
+        }
+    };
+    for (e, until) in [(*l, *r), (*r, *l)] {
+        if is_witness_boolean(formula, e)
+            && let Some(b) = until_of(until)
+        {
+            return Some((e, b));
+        }
+    }
+    None
+}
+
+/// Every weak-until block in a chain body with its box depth, in walk order (the compiler needs
+/// exactly one, at the body's own depth — see [`emit_bounded_chain_monitor`]).
+pub(crate) fn weak_until_sites(
+    formula: &crate::mu_calculus::Formula,
+    id: crate::mu_calculus::NodeId,
+) -> Vec<(crate::mu_calculus::NodeId, usize)> {
+    use crate::mu_calculus::Node as MuNode;
+    fn walk(
+        f: &crate::mu_calculus::Formula,
+        id: crate::mu_calculus::NodeId,
+        k: usize,
+        out: &mut Vec<(crate::mu_calculus::NodeId, usize)>,
+    ) {
+        if is_witness_boolean(f, id) {
+            return;
+        }
+        match f.node(id) {
+            MuNode::And(a, b) | MuNode::Or(a, b) => {
+                walk(f, *a, k, out);
+                walk(f, *b, k, out);
+            }
+            MuNode::Modal { target, .. } => walk(f, *target, k + 1, out),
+            MuNode::Nu { .. } if weak_until_parts(f, id).is_some() => out.push((id, k)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(formula, id, 0, &mut out);
+    out
+}
+
+/// Does the sub-formula contain an unguarded box (or anything deeper)? `false` for a boolean block.
+pub(crate) fn contains_modality(
+    formula: &crate::mu_calculus::Formula,
+    id: crate::mu_calculus::NodeId,
+) -> bool {
+    use crate::mu_calculus::Node as MuNode;
+    match formula.node(id) {
+        MuNode::True | MuNode::False | MuNode::Predicate(_) => false,
+        MuNode::Not(a) => contains_modality(formula, *a),
+        MuNode::And(a, b) | MuNode::Or(a, b) => {
+            contains_modality(formula, *a) || contains_modality(formula, *b)
+        }
+        _ => true,
+    }
+}
+
+/// Plan 2 / PR C (2026-10-18) — is the one-path reading of `body` EXACT, so that the bounded-chain
+/// monitor is a DECIDER and not only a witness extractor? It is when the body is a bounded-depth
+/// combination of boolean blocks ([`is_witness_boolean`]), `&&`, `||` and unguarded boxes
+/// ([`linear_depth`] is `Some`) in which **every `||` has at most one box-bearing side**: `p ∨ []q`
+/// with boolean `p` negates to `¬p ∧ ∃succ. ¬q`, a single path; `[]a ∧ []b` negates to a disjunction
+/// of diamonds, again one path; a `¬` reaches only booleans (a negated modality is refused by
+/// `linear_depth`). The one shape it excludes is `[]a ∨ []b`, false at a state with one `¬a` and one
+/// `¬b` successor although every single path satisfies the reading. Every shape the SVA translator
+/// emits for `|->` / `|=>` / `##[m:n]` / `throughout` passes (one box per level, a boolean disjunct or
+/// conjunct beside it).
+///
+/// A weak-until block `nu Z. (e && (b || [] Z))` ([`weak_until_parts`], the lowering of
+/// `e throughout b[->1]`) counts as a box-bearing leaf: its negation `mu. ¬e ∨ (¬b ∧ <>)` is again
+/// one existential path, so the reading stays exact. The compiler judges it with a pending latch
+/// rather than a delay chain, which is why it must be the body's SINGLE deepest block: with
+/// anything deeper beside it the attempt could not be judged at one cycle.
+pub(crate) fn chain_is_exact(
+    formula: &crate::mu_calculus::Formula,
+    id: crate::mu_calculus::NodeId,
+) -> bool {
+    use crate::mu_calculus::Node as MuNode;
+    let Some(depth) = linear_depth(formula, id) else {
+        return false;
+    };
+    match weak_until_sites(formula, id).as_slice() {
+        [] => {}
+        [(_, k)] if *k == depth => {}
+        _ => return false,
+    }
+    fn walk(f: &crate::mu_calculus::Formula, id: crate::mu_calculus::NodeId) -> bool {
+        if is_witness_boolean(f, id) {
+            return true;
+        }
+        match f.node(id) {
+            MuNode::Or(a, b) => {
+                (!(contains_modality(f, *a) && contains_modality(f, *b)))
+                    && walk(f, *a)
+                    && walk(f, *b)
+            }
+            MuNode::And(a, b) => walk(f, *a) && walk(f, *b),
+            MuNode::Modal { target, .. } => walk(f, *target),
+            MuNode::Nu { .. } => weak_until_parts(f, id).is_some(),
+            _ => false,
+        }
+    }
+    walk(formula, id)
 }
 
 /// A boolean block the witness monitor compiles: the compound compiler's fragment
 /// ([`crate::adapter::reach_rescue::is_compilable_boolean_body`]) plus register-vs-register
 /// comparisons (`resp_p != resp_p__past` — every `$stable` / `$changed` / `$past` equality), which
 /// a witness needs and the rescue lane does not decide.
-fn is_witness_boolean(
+pub(crate) fn is_witness_boolean(
     formula: &crate::mu_calculus::Formula,
     id: crate::mu_calculus::NodeId,
 ) -> bool {
@@ -900,12 +1043,28 @@ fn is_witness_boolean(
 ///
 /// A path that falsifies the one-path reading falsifies `body` at its start: a box is true only
 /// if EVERY successor satisfies its target, so it is false wherever the chosen successor fails
-/// it. Hence a reachable `bad` is a genuine counterexample to `AG body`. The converse does not
-/// hold in general (`[] a || [] b` is false at a state with one `¬a` and one `¬b` successor
-/// although each single path satisfies the reading), so this is a WITNESS extractor, never a
-/// decider. The latches observe only and never feed back, so the design's reachable states are
-/// unchanged.
+/// it. Hence a reachable `bad` is a genuine counterexample to `AG body` — this is what makes the
+/// monitor a WITNESS extractor for any bounded body. The converse holds only under
+/// [`chain_is_exact`] (every `||` has at most one box-bearing side): there a reachable `bad` is
+/// equivalent to a violation, so the same monitor is a DECIDER (Plan 2 / PR C, 2026-10-18); for
+/// `[] a || [] b` it is not (false at a state with one `¬a` and one `¬b` successor although every
+/// single path satisfies the reading), which is why the rescue gates on `chain_is_exact` and the
+/// witness path does not. The latches observe only and never feed back, so the design's reachable
+/// states are unchanged.
 pub fn emit_bounded_safety_witness_monitor(
+    content: &str,
+    formula: &crate::mu_calculus::Formula,
+    body: crate::mu_calculus::NodeId,
+    reset_pinned: bool,
+) -> Result<(String, usize), AdapterError> {
+    emit_bounded_chain_monitor(content, formula, body, reset_pinned)
+}
+
+/// The bounded-chain monitor behind [`emit_bounded_safety_witness_monitor`]: the same compiler,
+/// named for its second role (a decider on [`chain_is_exact`] bodies). Delay chains are shared —
+/// `delayed(value, cycles)` is memoised per `(value, cycles)` with every prefix reused — so a
+/// block that recurs at every level of a 31-deep `##[0:30]` chain costs `D` latches, not `D²/2`.
+pub fn emit_bounded_chain_monitor(
     content: &str,
     formula: &crate::mu_calculus::Formula,
     body: crate::mu_calculus::NodeId,
@@ -919,10 +1078,19 @@ pub fn emit_bounded_safety_witness_monitor(
         reset_pinned: bool,
         bool_sort: Nid,
         zero: Nid,
+        one: Nid,
         depth: usize,
         latches: usize,
         next_nid: Nid,
         appended: Vec<String>,
+        /// `(value, cycles)` → the latch carrying `value` delayed `cycles` cycles (shared prefixes).
+        delays: std::collections::HashMap<(Nid, usize), Nid>,
+        /// A boolean block compiled once, so the two readings of a weak-until body share its leaves
+        /// and delay chains.
+        booleans: std::collections::HashMap<crate::mu_calculus::NodeId, Nid>,
+        /// The constant a weak-until block reads as while the bounded part of the body is compiled
+        /// (`None` outside that compilation — a block met then is an error).
+        until: Option<bool>,
     }
     impl Emit<'_> {
         fn fresh(&mut self, line: String) -> Nid {
@@ -931,18 +1099,23 @@ pub fn emit_bounded_safety_witness_monitor(
             self.appended.push(format!("{n} {line}"));
             n
         }
-        /// `value` as it was `cycles` cycles ago.
-        fn delayed(&mut self, mut value: Nid, cycles: usize) -> Nid {
-            for _ in 0..cycles {
-                let (sort, zero) = (self.bool_sort, self.zero);
-                let symbol = format!("{WITNESS_LATCH_PREFIX}{}", self.latches);
-                self.latches += 1;
-                let latch = self.fresh(format!("state {sort} {symbol}"));
-                self.fresh(format!("init {sort} {latch} {zero}"));
-                self.fresh(format!("next {sort} {latch} {value}"));
-                value = latch;
+        /// `value` as it was `cycles` cycles ago — one shared chain per `value`.
+        fn delayed(&mut self, value: Nid, cycles: usize) -> Nid {
+            if cycles == 0 {
+                return value;
             }
-            value
+            if let Some(&l) = self.delays.get(&(value, cycles)) {
+                return l;
+            }
+            let prev = self.delayed(value, cycles - 1);
+            let (sort, zero) = (self.bool_sort, self.zero);
+            let symbol = format!("{WITNESS_LATCH_PREFIX}{}", self.latches);
+            self.latches += 1;
+            let latch = self.fresh(format!("state {sort} {symbol}"));
+            self.fresh(format!("init {sort} {latch} {zero}"));
+            self.fresh(format!("next {sort} {latch} {prev}"));
+            self.delays.insert((value, cycles), latch);
+            latch
         }
         /// A boolean block over the current signals ([`is_witness_boolean`]).
         fn boolean(&mut self, id: crate::mu_calculus::NodeId) -> Result<Nid, AdapterError> {
@@ -1003,11 +1176,20 @@ pub fn emit_bounded_safety_witness_monitor(
                 ),
             }
         }
+        /// A boolean block over the current signals, compiled once per node.
+        fn leaf(&mut self, id: crate::mu_calculus::NodeId) -> Result<Nid, AdapterError> {
+            if let Some(&n) = self.booleans.get(&id) {
+                return Ok(n);
+            }
+            let n = self.boolean(id)?;
+            self.booleans.insert(id, n);
+            Ok(n)
+        }
         /// The node at box depth `k` of the attempt that started `depth` cycles ago.
         fn node(&mut self, id: crate::mu_calculus::NodeId, k: usize) -> Result<Nid, AdapterError> {
             let f = self.formula;
             if is_witness_boolean(f, id) {
-                let now = self.boolean(id)?;
+                let now = self.leaf(id)?;
                 return Ok(self.delayed(now, self.depth - k));
             }
             let sort = self.bool_sort;
@@ -1021,9 +1203,21 @@ pub fn emit_bounded_safety_witness_monitor(
                     Ok(self.fresh(format!("or {sort} {a} {b}")))
                 }
                 MuNode::Modal { target, .. } => self.node(*target, k + 1),
+                MuNode::Nu { .. } if weak_until_parts(f, id).is_some() => {
+                    // The bounded part is compiled twice, with the block read as `false` and as
+                    // `true`; the block itself is judged by the pending latch below.
+                    let v = self.until.ok_or_else(|| {
+                        err(
+                            "adapter/btor2/bad_monitor: a weak-until block outside the chain \
+                             compiler's two readings"
+                                .into(),
+                        )
+                    })?;
+                    Ok(if v { self.one } else { self.zero })
+                }
                 other => Err(err(format!(
-                    "adapter/btor2/bad_monitor: the witness monitor reads booleans, `&&`, `||` \
-                     and boxes only; found {other:?}"
+                    "adapter/btor2/bad_monitor: the witness monitor reads booleans, `&&`, `||`, \
+                     boxes and `e throughout b[->1]` blocks only; found {other:?}"
                 ))),
             }
         }
@@ -1039,26 +1233,79 @@ pub fn emit_bounded_safety_witness_monitor(
     let mut next_nid: Nid = file.lines.iter().map(|l| l.nid).max().unwrap_or(0) + 1;
     let mut appended: Vec<String> = Vec::new();
     let bool_sort = find_or_make_bool_sort(&file, &mut next_nid, &mut appended);
-    // `init` needs the value's NID below the state's, so the shared zero comes first.
+    // `init` needs the value's NID below the state's, so the shared constants come first.
     let zero = next_nid;
     next_nid += 1;
     appended.push(format!("{zero} zero {bool_sort}"));
+    let one = next_nid;
+    next_nid += 1;
+    appended.push(format!("{one} one {bool_sort}"));
     let mut e = Emit {
         formula,
         file: &file,
         reset_pinned,
         bool_sort,
         zero,
+        one,
         depth,
         latches: 0,
         next_nid,
         appended,
+        delays: std::collections::HashMap::new(),
+        booleans: std::collections::HashMap::new(),
+        until: None,
     };
-    let holds = e.node(body, 0)?;
-    let one = e.fresh(format!("one {bool_sort}"));
+    // `D` cycles have passed: the attempt judged now started at a real cycle.
     let armed = e.delayed(one, depth);
-    let fails = e.fresh(format!("not {bool_sort} {holds}"));
-    let bad_cond = e.fresh(format!("and {bool_sort} {armed} {fails} {BAD_COND_SYMBOL}"));
+    let bad_cond = match weak_until_sites(formula, body).as_slice() {
+        [] => {
+            let holds = e.node(body, 0)?;
+            let fails = e.fresh(format!("not {bool_sort} {holds}"));
+            e.fresh(format!("and {bool_sort} {armed} {fails} {BAD_COND_SYMBOL}"))
+        }
+        [(site, k)] if *k == depth => {
+            // The body is monotone in its weak-until block `W`. Read with `W := true` it can fail
+            // only through a bounded leaf (`fixed`); read with `W := false` and true with
+            // `W := true`, the block alone decides the attempt — its obligation starts NOW
+            // (`trigger`), at the block's own depth `D`. A pending latch carries the obligation
+            // from every attempt that reached it until `b`: `active = trigger ∨ pend`, `bad` when
+            // `active ∧ ¬e`, `pend' = active ∧ ¬b`. One latch is exact — two overlapping
+            // obligations demand the same thing from now on ("`e` until the first `b`").
+            let (e_block, b_block) =
+                weak_until_parts(formula, *site).expect("a site is a weak-until block");
+            e.until = Some(false);
+            let without = e.node(body, 0)?;
+            e.until = Some(true);
+            let with = e.node(body, 0)?;
+            e.until = None;
+            let with_fails = e.fresh(format!("not {bool_sort} {with}"));
+            let fixed = e.fresh(format!("and {bool_sort} {armed} {with_fails}"));
+            let without_fails = e.fresh(format!("not {bool_sort} {without}"));
+            let decides = e.fresh(format!("and {bool_sort} {without_fails} {with}"));
+            let trigger = e.fresh(format!("and {bool_sort} {armed} {decides}"));
+            let e_now = e.leaf(e_block)?;
+            let b_now = e.leaf(b_block)?;
+            let pend = e.fresh(format!("state {bool_sort} {WITNESS_LATCH_PREFIX}until"));
+            e.latches += 1;
+            e.fresh(format!("init {bool_sort} {pend} {zero}"));
+            let active = e.fresh(format!("or {bool_sort} {trigger} {pend}"));
+            let b_fails = e.fresh(format!("not {bool_sort} {b_now}"));
+            let carry = e.fresh(format!("and {bool_sort} {active} {b_fails}"));
+            e.fresh(format!("next {bool_sort} {pend} {carry}"));
+            let e_fails = e.fresh(format!("not {bool_sort} {e_now}"));
+            let bad_until = e.fresh(format!("and {bool_sort} {active} {e_fails}"));
+            e.fresh(format!(
+                "or {bool_sort} {fixed} {bad_until} {BAD_COND_SYMBOL}"
+            ))
+        }
+        _ => {
+            return Err(err(
+                "adapter/btor2/bad_monitor: a weak-until block must be the body's \
+                            single deepest block"
+                    .into(),
+            ));
+        }
+    };
     e.fresh(format!("bad {bad_cond}"));
     Ok((
         format!("{}\n{}\n", content.trim_end(), e.appended.join("\n")),

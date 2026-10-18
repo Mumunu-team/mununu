@@ -22,7 +22,7 @@
 
 use crate::adapter::slang::verify_auto::{
     AutoVerifyReport, NoteLevel, PortfolioMode, PreparedModel, VerificationNote, VerifyAutoOptions,
-    VerifyOutcome, escalate_bottom, merge_portfolio_reports, outcome_definite,
+    VerifyOutcome, escalate_bottom, merge_portfolio_reports, outcome_definite, replan_merged,
     rescue_skipped_via_exact, verify_auto_impl,
 };
 use crate::adapter::yosys::YosysOptions;
@@ -179,22 +179,74 @@ fn single_engine_label(opts: &VerifyAutoOptions) -> &'static str {
 /// Execute the plan: run each engine operator as a single-engine [`verify_auto`] pass and
 /// merge under the runtime soundness guard. Relocated verbatim from the former
 /// `verify_auto_portfolio` — behaviour-identical, so the portfolio's verdicts are unchanged.
+/// Plan 2 / PR C — one portfolio member's option set: the portfolio disabled and the two engine
+/// flags forced to the operator's pair (so the inner call runs exactly one engine and does not
+/// recurse), the ⊥ re-plan DEFERRED to the merged report ([`replan_once`] runs it after every
+/// member), and the breadcrumb appended from the second member on (the first truncates).
+pub(crate) fn member_options(
+    base: &VerifyAutoOptions,
+    op: &EngineOp,
+    index: usize,
+) -> VerifyAutoOptions {
+    let mut o = base.clone();
+    o.portfolio = None;
+    o.symbolic_engine = op.symbolic_engine;
+    o.exact_symbolic = op.exact_symbolic;
+    o.replan_defer = true;
+    o.breadcrumb_append = index > 0;
+    o
+}
+
+/// Plan 2 / PR C — the ⊥ re-plan ONCE per run, on the merged report: exactly the rows no engine
+/// decided, each paying the rescue once ([`replan_merged`]). A `portfolio-replan` note records how
+/// many rows it took and how many it decided (telemetry; never a verdict). Before this every member
+/// re-planned its own ⊥ rows — on the full OpenTitan `edn` IP, fifteen 60-s slices in the first
+/// member on rows the second member's main pass decided in a second each.
+fn replan_once(
+    mut merged: AutoVerifyReport,
+    prepared: &PreparedModel,
+    opts: &VerifyAutoOptions,
+) -> AutoVerifyReport {
+    let undecided = |r: &AutoVerifyReport| {
+        r.properties
+            .iter()
+            .filter(|p| outcome_definite(&p.outcome).is_none())
+            .count()
+    };
+    let before = undecided(&merged);
+    if before == 0 {
+        return merged;
+    }
+    replan_merged(
+        &mut merged,
+        &prepared.btor2,
+        prepared.fairness_assumes(),
+        opts,
+    );
+    let decided = before - undecided(&merged);
+    merged.notes.push(VerificationNote {
+        kind: "portfolio-replan".to_string(),
+        level: NoteLevel::Info,
+        summary: format!(
+            "the ⊥ re-plan ran once, after every engine: {before} undecided row(s) re-planned, \
+             {decided} decided"
+        ),
+        detail: "The portfolio members leave their ⊥ rows alone; the planner re-plans the MERGED \
+                 report once, so the reach rescue is paid once per undecided row and never on a \
+                 row another engine's main pass decides. Before this each member re-planned its \
+                 own ⊥ rows."
+            .to_string(),
+        items: Vec::new(),
+        property: None,
+    });
+    merged
+}
+
 pub(crate) fn execute(
     plan: &PhysicalPlan,
     prepared: &PreparedModel,
     task: &VerificationTask,
 ) -> Result<AutoVerifyReport, AdapterError> {
-    // A single-engine option set derived from `task.opts` with the portfolio disabled and the
-    // two engine flags forced to this operator's pair (so the inner call runs exactly one
-    // engine and does not recurse).
-    let mk_opts = |op: &EngineOp| {
-        let mut o = task.opts.clone();
-        o.portfolio = None;
-        o.symbolic_engine = op.symbolic_engine;
-        o.exact_symbolic = op.exact_symbolic;
-        o
-    };
-
     // Attach the plan's cost RATIONALE as telemetry on the final report — one `plan-cost` note per
     // property + one `plan-accuracy` self-check. The precision ladder + reactive rescue decided the
     // verdicts; this only explains + checks the routing (never a verdict change). Computed ONCE by
@@ -210,19 +262,20 @@ pub(crate) fn execute(
         rep
     };
 
+    // PR C — the merged report gets the ⊥ re-plan once, then the rationale (so `plan-accuracy`
+    // judges the verdicts that ship).
+    let finish = |merged: Result<AutoVerifyReport, AdapterError>| {
+        merged.map(|r| attach(replan_once(r, prepared, task.opts)))
+    };
+
     match plan.mode {
         PortfolioMode::Sequential => {
             let mut runs: Vec<(&str, Result<AutoVerifyReport, AdapterError>)> = Vec::new();
-            for op in &plan.ops {
-                runs.push((
-                    op.label,
-                    verify_auto_impl(
-                        task.sources,
-                        task.yosys_opts,
-                        &mk_opts(op),
-                        Some(prepared.clone()),
-                    ),
-                ));
+            for (i, op) in plan.ops.iter().enumerate() {
+                let o = member_options(task.opts, op, i);
+                let run =
+                    verify_auto_impl(task.sources, task.yosys_opts, &o, Some(prepared.clone()));
+                runs.push((op.label, run));
                 // Early-exit as soon as the MERGE so far leaves no ⊥ property (the budget win).
                 let merged = merge_portfolio_reports(&runs, plan.mode);
                 if let Ok(rep) = &merged
@@ -231,10 +284,10 @@ pub(crate) fn execute(
                         .iter()
                         .all(|p| outcome_definite(&p.outcome).is_some())
                 {
-                    return merged.map(&attach);
+                    return finish(merged);
                 }
             }
-            merge_portfolio_reports(&runs, plan.mode).map(&attach)
+            finish(merge_portfolio_reports(&runs, plan.mode))
         }
         PortfolioMode::Parallel => {
             // Scoped threads borrow the task's sources / yosys_opts; each owns its option clone
@@ -250,8 +303,9 @@ pub(crate) fn execute(
                     let handles: Vec<(&str, _)> = plan
                         .ops
                         .iter()
-                        .map(|op| {
-                            let o = mk_opts(op);
+                        .enumerate()
+                        .map(|(i, op)| {
+                            let o = member_options(task.opts, op, i);
                             let pm = prepared.clone();
                             let b = parent_budget.clone();
                             (
@@ -277,7 +331,7 @@ pub(crate) fn execute(
                         })
                         .collect()
                 });
-            merge_portfolio_reports(&runs, plan.mode).map(&attach)
+            finish(merge_portfolio_reports(&runs, plan.mode))
         }
     }
 }
@@ -942,6 +996,31 @@ mod tests {
             ladder,
             "a tie must keep exact first — precision order is the tiebreak"
         );
+    }
+
+    /// PR C — every member defers its ⊥ re-plan to the merged report ([`super::replan_once`]), only
+    /// the first member truncates the breadcrumb, the engine pair is the operator's and the
+    /// portfolio is off; a single-engine run (the base options) re-plans its own rows.
+    #[test]
+    fn member_options_defer_the_replan_and_append_from_the_second_member() {
+        use super::{PRECISION_LADDER, member_options};
+        let base = opts_with(Some(PortfolioMode::Sequential), false, false);
+        assert!(
+            !base.replan_defer,
+            "a single-engine run re-plans its own rows"
+        );
+        for (i, op) in PRECISION_LADDER.iter().enumerate() {
+            let o = member_options(&base, op, i);
+            assert!(o.replan_defer, "{}", op.label);
+            assert_eq!(o.breadcrumb_append, i > 0, "{}", op.label);
+            assert!(o.portfolio.is_none(), "{}", op.label);
+            assert_eq!(
+                (o.symbolic_engine, o.exact_symbolic),
+                (op.symbolic_engine, op.exact_symbolic),
+                "{}",
+                op.label
+            );
+        }
     }
 
     #[test]

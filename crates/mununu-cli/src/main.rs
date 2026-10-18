@@ -4375,6 +4375,9 @@ fn sv_verify_auto(args: SvVerifyAutoArgs) -> Result<(), String> {
         // mununu#656 — --no-input-state restores the input refusal.
         input_state: !args.no_input_state,
         lift_overrides,
+        // PR C — planner-only fields: the CLI run re-plans its own rows and truncates
+        replan_defer: false,
+        breadcrumb_append: false,
         assume_mode: match args.assumes {
             AssumesArg::Precondition => {
                 mununu_core::adapter::slang::verify_auto::AssumeMode::Precondition

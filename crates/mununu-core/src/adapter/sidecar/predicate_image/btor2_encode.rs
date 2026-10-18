@@ -710,31 +710,64 @@ fn encode_const(
 /// encoding, shared by [`encode_const`] (recursive path) and
 /// [`Z3Backend::eval_const`] (the `BvTermBackend` forward-walk
 /// path) so both produce identical Z3 constants from one source.
+///
+/// Exact at EVERY width (2026-10-18): a literal wider than 64 bits is assembled from ≤ 64-bit
+/// chunks, most significant first. Before, `from_u64` alone carried it, so a `const` with a bit
+/// above position 63 was refused (`ConstantOutOfRange`) — on the OpenTitan `csrng` IP two such
+/// constants made every in-process reach-portfolio member abstain on the whole design in 40 ms,
+/// so no rescue ever ran there — and `ones` over 64 bits was silently encoded as 2^64 − 1, a wrong
+/// constant.
 fn encode_const_bits(nid: Nid, value: &ConstValue, width: u32) -> Result<z3::ast::BV, EncodeError> {
-    let bits: u64 = match value {
-        ConstValue::Zero => 0,
-        ConstValue::One => 1,
-        ConstValue::Ones => {
-            if width >= 64 {
-                u64::MAX
-            } else {
-                (1u64 << width) - 1
-            }
-        }
-        ConstValue::Bin(s) => {
-            u64::from_str_radix(s, 2).map_err(|_| EncodeError::ConstantOutOfRange { nid })?
-        }
+    use z3::ast::BV;
+    let out_of_range = || EncodeError::ConstantOutOfRange { nid };
+    // The literal as binary digits (any length; leading zeros allowed).
+    let bin: String = match value {
+        ConstValue::Zero => return Ok(BV::from_u64(0, width)),
+        ConstValue::One => return Ok(BV::from_u64(1, width)),
+        // two's-complement −1 sign-extends to every width
+        ConstValue::Ones => return Ok(BV::from_i64(-1, width)),
+        ConstValue::Bin(s) => s.clone(),
+        ConstValue::Hex(s) => s
+            .chars()
+            .map(|c| c.to_digit(16).map(|d| format!("{d:04b}")))
+            .collect::<Option<String>>()
+            .ok_or_else(out_of_range)?,
         ConstValue::Dec(d) => {
-            if *d < 0 || *d > (i128::from(u64::MAX)) {
-                return Err(EncodeError::ConstantOutOfRange { nid });
+            if *d < 0 {
+                return i64::try_from(*d)
+                    .map(|v| BV::from_i64(v, width))
+                    .map_err(|_| out_of_range());
             }
-            *d as u64
-        }
-        ConstValue::Hex(s) => {
-            u64::from_str_radix(s, 16).map_err(|_| EncodeError::ConstantOutOfRange { nid })?
+            format!("{d:b}")
         }
     };
-    Ok(z3::ast::BV::from_u64(bits, width))
+    let significant = bin.trim_start_matches('0');
+    if significant.len() > width as usize {
+        return Err(out_of_range());
+    }
+    let padded = format!("{significant:0>w$}", w = width as usize);
+    // ≤ 64-bit chunks, most significant first (the first one carries `width mod 64` bits).
+    let mut rest = padded.as_str();
+    let mut chunks: Vec<&str> = Vec::new();
+    let head = rest.len() % 64;
+    if head > 0 {
+        chunks.push(&rest[..head]);
+        rest = &rest[head..];
+    }
+    while !rest.is_empty() {
+        chunks.push(&rest[..64]);
+        rest = &rest[64..];
+    }
+    let mut bv: Option<BV> = None;
+    for chunk in chunks {
+        let v = u64::from_str_radix(chunk, 2).map_err(|_| out_of_range())?;
+        let part = BV::from_u64(v, chunk.len() as u32);
+        bv = Some(match bv {
+            None => part,
+            Some(acc) => acc.concat(&part),
+        });
+    }
+    bv.ok_or_else(out_of_range)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1254,6 +1287,55 @@ impl crate::adapter::btor2::term_backend::BvTermBackend for Z3Backend<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A constant wider than 64 bits is encoded bit-exactly. Before (2026-10-18): a binary or hex
+    /// literal with a bit above position 63 was refused as out of range — two such constants in the
+    /// OpenTitan `csrng` IP made every in-process reach-portfolio member abstain on the WHOLE design,
+    /// so no ⊥ re-plan ever ran there — a decimal above `u64::MAX` likewise, and `ones` over 64 bits
+    /// was silently encoded as 2^64 − 1.
+    #[test]
+    fn constants_wider_than_64_bits_encode_every_bit() {
+        use z3::ast::Ast;
+        let mut digits = vec!['0'; 128];
+        digits[127 - 100] = '1';
+        digits[127 - 3] = '1';
+        let bin: String = digits.into_iter().collect();
+        let bv = encode_const_bits(7, &ConstValue::Bin(bin), 128).expect("a wide binary literal");
+        assert_eq!(bv.get_size(), 128);
+        assert_eq!(bv.extract(100, 100).simplify().as_u64(), Some(1));
+        assert_eq!(bv.extract(3, 3).simplify().as_u64(), Some(1));
+        assert_eq!(bv.extract(127, 101).simplify().as_u64(), Some(0));
+        assert_eq!(bv.extract(99, 64).simplify().as_u64(), Some(0));
+        assert_eq!(bv.extract(63, 4).simplify().as_u64(), Some(0));
+
+        let ones = encode_const_bits(8, &ConstValue::Ones, 128).expect("ones");
+        assert_eq!(ones.extract(127, 64).simplify().as_u64(), Some(u64::MAX));
+        assert_eq!(ones.extract(63, 0).simplify().as_u64(), Some(u64::MAX));
+
+        let dec = encode_const_bits(9, &ConstValue::Dec((1i128 << 70) + 5), 96).expect("decimal");
+        assert_eq!(dec.extract(95, 64).simplify().as_u64(), Some(1 << 6));
+        assert_eq!(dec.extract(63, 0).simplify().as_u64(), Some(5));
+
+        let hex = encode_const_bits(
+            10,
+            &ConstValue::Hex("80000000000000000000000000000001".to_string()),
+            128,
+        )
+        .expect("hex");
+        assert_eq!(hex.extract(127, 127).simplify().as_u64(), Some(1));
+        assert_eq!(hex.extract(126, 1).simplify().as_u64(), Some(0));
+        assert_eq!(hex.extract(0, 0).simplify().as_u64(), Some(1));
+
+        // narrow literals are unchanged, and one that does not fit is still refused
+        assert_eq!(
+            encode_const_bits(11, &ConstValue::Dec(300), 9)
+                .expect("narrow")
+                .simplify()
+                .as_u64(),
+            Some(300)
+        );
+        assert!(encode_const_bits(12, &ConstValue::Bin("1".repeat(65)), 64).is_err());
+    }
     use crate::adapter::btor2::parser::parse;
 
     #[test]
