@@ -948,12 +948,38 @@ pub fn flat_name(name: &str) -> String {
 }
 
 /// [`flat_name`] applied to every symbol of a BTOR2 text, so the model and the translated
-/// formulas spell a `for`-generate's names alike. Only the part before a line's `;` comment is
-/// rewritten (a source location keeps its brackets); a BTOR2 operand or immediate is a number and
-/// never contains `[`.
+/// formulas spell a `for`-generate's names alike, and the lift's `genblkN.` segments dropped
+/// (mununu#722): an UNNAMED generate block is not part of a SystemVerilog hierarchical name as
+/// OpenTitan writes them, and the translator names only named blocks — but sv2v desugars an
+/// `else if` chain into an anonymous `else begin … end` that yosys then names `genblk1`
+/// (`u_fifo.genblk1.gen_normal_fifo.u_cnt` for the RTL's `u_fifo.gen_normal_fifo.u_cnt`). A
+/// segment is dropped only while the result stays unique among the text's symbols; a collision
+/// keeps the original name, so two unnamed sibling blocks never alias each other. Only the part
+/// before a line's `;` comment is rewritten (a source location keeps its brackets); a BTOR2
+/// operand or immediate is a number and never contains `[` or `genblk`.
 pub fn flat_symbol_names(content: &str) -> String {
-    if !content.contains('[') {
+    if !content.contains('[') && !content.contains("genblk") {
         return content.to_string();
+    }
+    let genblk = regex_lite_genblk();
+    let symbol_of = |code: &str| -> Option<String> {
+        // `<nid> <op> …  <symbol>`: a symbol is a trailing non-numeric token.
+        let last = code.split_whitespace().last()?;
+        (last.parse::<i64>().is_err()).then(|| last.to_string())
+    };
+    let strip = |sym: &str| -> String {
+        sym.split('.')
+            .filter(|seg| !genblk(seg))
+            .collect::<Vec<_>>()
+            .join(".")
+    };
+    // Every symbol as it would read with the `genblk` segments dropped, to detect collisions.
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for line in content.lines() {
+        let code = line.split(';').next().unwrap_or(line);
+        if let Some(sym) = symbol_of(code) {
+            *counts.entry(flat_name(&strip(&sym))).or_default() += 1;
+        }
     }
     let mut out = String::with_capacity(content.len());
     for line in content.lines() {
@@ -961,15 +987,31 @@ pub fn flat_symbol_names(content: &str) -> String {
             Some(i) => line.split_at(i),
             None => (line, ""),
         };
-        if code.contains('[') {
-            out.push_str(&flat_name(code));
-        } else {
-            out.push_str(code);
+        let mut code = flat_name(code);
+        if code.contains("genblk")
+            && let Some(sym) = symbol_of(&code)
+        {
+            let stripped = flat_name(&strip(&sym));
+            if stripped != sym
+                && counts.get(&stripped).copied().unwrap_or(0) == 1
+                && let Some(at) = code.rfind(&sym)
+            {
+                code.replace_range(at..at + sym.len(), &stripped);
+            }
         }
+        out.push_str(&code);
         out.push_str(comment);
         out.push('\n');
     }
     out
+}
+
+/// `genblk<digits>` — the name yosys gives an unnamed generate block.
+fn regex_lite_genblk() -> impl Fn(&str) -> bool {
+    |seg: &str| {
+        seg.strip_prefix("genblk")
+            .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
+    }
 }
 
 /// mununu#633 — the name each state cell is REPORTED and ADDRESSED under by the
@@ -1304,6 +1346,25 @@ pub fn array_widths(file: &Btor2File, sort_nid: Nid) -> Option<(u32, u32)> {
 
 #[cfg(test)]
 mod tests {
+    /// mununu#722 — yosys's `genblkN` for an unnamed generate block (sv2v's desugared `else if`)
+    /// is dropped from a symbol, so the model spells `u_f.gen_normal.q` as the RTL does; two
+    /// symbols that would collide once stripped keep their names.
+    #[test]
+    fn x722_genblk_segments_are_dropped_unless_they_collide() {
+        let btor2 = "1 sort bitvec 1\n2 state 1 u_f.genblk1.gen_normal.q ; src.sv:3 [x]\n\
+                     3 uext 1 2 0 u_f.genblk1.gen_normal.q_o\n4 state 1 a.genblk1.r\n5 state 1 a.genblk2.r\n\
+                     6 state 1 plain\n";
+        let flat = super::flat_symbol_names(btor2);
+        assert!(
+            flat.contains("2 state 1 u_f.gen_normal.q ; src.sv:3 [x]"),
+            "{flat}"
+        );
+        assert!(flat.contains("3 uext 1 2 0 u_f.gen_normal.q_o"));
+        assert!(flat.contains("4 state 1 a.genblk1.r") && flat.contains("5 state 1 a.genblk2.r"));
+        assert!(flat.contains("6 state 1 plain"));
+        super::parse(&flat).expect("still parses");
+    }
+
     /// mununu#713 — a constant index is spelled `$k`; a range or a symbolic index is not touched;
     /// a BTOR2 text's symbols are rewritten and its comments are not.
     #[test]

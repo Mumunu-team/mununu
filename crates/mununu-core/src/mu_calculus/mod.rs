@@ -100,6 +100,51 @@ impl Formula {
     }
 
     /// Provides read-only access to all owned nodes.
+    /// The value of a formula with NO atoms — `nu X. (true && [] X)`, the shape an
+    /// `ASSERT_KNOWN` becomes once `$isunknown` folds to `false` — on any model whose transition
+    /// relation is TOTAL (a BTOR2 design: every state has a successor), or `None` if the formula
+    /// reads a predicate or a guarded modality.
+    ///
+    /// An atom-less formula cannot tell two states apart, and with a total relation every state is
+    /// bisimilar to the one-state self-loop, so the formula's value there is its value everywhere:
+    /// `[] φ` and `<> φ` are `φ`, and a fixpoint settles within two iterations over the two-point
+    /// lattice. Deciding it here spares the engines a cone that is the WHOLE design (no atom to
+    /// restrict it) and, over the bit cap, a skip for a property that holds trivially.
+    pub fn constant_value(&self) -> Option<bool> {
+        fn eval(f: &Formula, id: NodeId, env: &mut Vec<(FormulaVarId, bool)>) -> Option<bool> {
+            Some(match f.node(id) {
+                Node::True => true,
+                Node::False => false,
+                Node::Predicate(_) => return None,
+                Node::Variable(v) => env.iter().rev().find(|(w, _)| w == v)?.1,
+                Node::Not(a) => !eval(f, *a, env)?,
+                Node::And(a, b) => eval(f, *a, env)? & eval(f, *b, env)?,
+                Node::Or(a, b) => eval(f, *a, env)? | eval(f, *b, env)?,
+                Node::Modal { guard, target, .. } => {
+                    if *guard != Guard::default() {
+                        return None;
+                    }
+                    eval(f, *target, env)?
+                }
+                Node::Mu { var, body } | Node::Nu { var, body } => {
+                    let mut cur = matches!(f.node(id), Node::Nu { .. });
+                    for _ in 0..3 {
+                        env.push((*var, cur));
+                        let next = eval(f, *body, env);
+                        env.pop();
+                        let next = next?;
+                        if next == cur {
+                            break;
+                        }
+                        cur = next;
+                    }
+                    cur
+                }
+            })
+        }
+        eval(self, self.root(), &mut Vec::new())
+    }
+
     pub fn nodes(&self) -> &[Node] {
         &self.nodes
     }
@@ -764,5 +809,26 @@ mod tests {
                 .unwrap()
                 .has_modality()
         );
+    }
+}
+
+#[cfg(test)]
+mod constant_value_tests {
+    /// mununu#722 — an atom-less formula has one value on every total model; a predicate or a
+    /// guarded modality leaves it to the engines.
+    #[test]
+    fn an_atom_less_formula_is_decided_without_a_model() {
+        let v = |s: &str| {
+            crate::mu_calculus::parser::parse(s)
+                .unwrap()
+                .constant_value()
+        };
+        assert_eq!(v("nu X. (true && [] X)"), Some(true));
+        assert_eq!(v("nu X. ((!(true)) || [] X)"), Some(true));
+        assert_eq!(v("nu X. (false && [] X)"), Some(false));
+        assert_eq!(v("mu X. (false || <> X)"), Some(false));
+        assert_eq!(v("nu X. ((mu Y. (true || [] Y)) && [] X)"), Some(true));
+        assert_eq!(v("nu X. ((a == 1) && [] X)"), None);
+        assert_eq!(v("nu X. (a && [] X)"), None);
     }
 }

@@ -1,0 +1,2381 @@
+{
+  "design": {
+    "name": "$root",
+    "kind": "Root",
+    "addr": 93825092546256,
+    "members": [
+      {
+        "name": "",
+        "kind": "CompilationUnit",
+        "addr": 93825092615040
+      },
+      {
+        "name": "top",
+        "kind": "Instance",
+        "source_file": "sva_hierarchy_refs.pp.sv",
+        "source_line": 13,
+        "source_column": 8,
+        "addr": 93825092616776,
+        "body": {
+          "name": "top",
+          "kind": "InstanceBody",
+          "source_file": "sva_hierarchy_refs.pp.sv",
+          "source_line": 13,
+          "source_column": 8,
+          "addr": 93825092615312,
+          "members": [
+            {
+              "name": "clk",
+              "kind": "Port",
+              "source_file": "sva_hierarchy_refs.pp.sv",
+              "source_line": 13,
+              "source_column": 25,
+              "addr": 93825092616912,
+              "type": "logic",
+              "direction": "In",
+              "internalSymbol": "93825092617032 clk"
+            },
+            {
+              "name": "clk",
+              "kind": "Net",
+              "source_file": "sva_hierarchy_refs.pp.sv",
+              "source_line": 13,
+              "source_column": 25,
+              "addr": 93825092617032,
+              "type": "logic",
+              "netType": {
+                "name": "wire",
+                "kind": "NetType",
+                "addr": 93825092544016,
+                "type": "logic"
+              }
+            },
+            {
+              "name": "inc",
+              "kind": "Port",
+              "source_file": "sva_hierarchy_refs.pp.sv",
+              "source_line": 13,
+              "source_column": 42,
+              "addr": 93825092617192,
+              "type": "logic",
+              "direction": "In",
+              "internalSymbol": "93825092617312 inc"
+            },
+            {
+              "name": "inc",
+              "kind": "Net",
+              "source_file": "sva_hierarchy_refs.pp.sv",
+              "source_line": 13,
+              "source_column": 42,
+              "addr": 93825092617312,
+              "type": "logic",
+              "netType": {
+                "name": "wire",
+                "kind": "NetType",
+                "addr": 93825092544016,
+                "type": "logic"
+              }
+            },
+            {
+              "name": "alert_a",
+              "kind": "Port",
+              "source_file": "sva_hierarchy_refs.pp.sv",
+              "source_line": 13,
+              "source_column": 60,
+              "addr": 93825092617472,
+              "type": "logic",
+              "direction": "Out",
+              "internalSymbol": "93825092617592 alert_a"
+            },
+            {
+              "name": "alert_a",
+              "kind": "Variable",
+              "source_file": "sva_hierarchy_refs.pp.sv",
+              "source_line": 13,
+              "source_column": 60,
+              "addr": 93825092617592,
+              "type": "logic",
+              "lifetime": "Static"
+            },
+            {
+              "name": "alert_b",
+              "kind": "Port",
+              "source_file": "sva_hierarchy_refs.pp.sv",
+              "source_line": 13,
+              "source_column": 82,
+              "addr": 93825092617728,
+              "type": "logic",
+              "direction": "Out",
+              "internalSymbol": "93825092617848 alert_b"
+            },
+            {
+              "name": "alert_b",
+              "kind": "Variable",
+              "source_file": "sva_hierarchy_refs.pp.sv",
+              "source_line": 13,
+              "source_column": 82,
+              "addr": 93825092617848,
+              "type": "logic",
+              "lifetime": "Static"
+            },
+            {
+              "name": "u_a",
+              "kind": "Instance",
+              "source_file": "sva_hierarchy_refs.pp.sv",
+              "source_line": 16,
+              "source_column": 8,
+              "addr": 93825092618016,
+              "body": {
+                "name": "fifo",
+                "kind": "InstanceBody",
+                "source_file": "sva_hierarchy_refs.pp.sv",
+                "source_line": 7,
+                "source_column": 8,
+                "addr": 93825092618144,
+                "members": [
+                  {
+                    "name": "clk",
+                    "kind": "Port",
+                    "source_file": "sva_hierarchy_refs.pp.sv",
+                    "source_line": 7,
+                    "source_column": 26,
+                    "addr": 93825092642104,
+                    "type": "logic",
+                    "direction": "In",
+                    "internalSymbol": "93825092642224 clk"
+                  },
+                  {
+                    "name": "clk",
+                    "kind": "Net",
+                    "source_file": "sva_hierarchy_refs.pp.sv",
+                    "source_line": 7,
+                    "source_column": 26,
+                    "addr": 93825092642224,
+                    "type": "logic",
+                    "netType": {
+                      "name": "wire",
+                      "kind": "NetType",
+                      "addr": 93825092544016,
+                      "type": "logic"
+                    }
+                  },
+                  {
+                    "name": "inc",
+                    "kind": "Port",
+                    "source_file": "sva_hierarchy_refs.pp.sv",
+                    "source_line": 7,
+                    "source_column": 43,
+                    "addr": 93825092642384,
+                    "type": "logic",
+                    "direction": "In",
+                    "internalSymbol": "93825092642504 inc"
+                  },
+                  {
+                    "name": "inc",
+                    "kind": "Net",
+                    "source_file": "sva_hierarchy_refs.pp.sv",
+                    "source_line": 7,
+                    "source_column": 43,
+                    "addr": 93825092642504,
+                    "type": "logic",
+                    "netType": {
+                      "name": "wire",
+                      "kind": "NetType",
+                      "addr": 93825092544016,
+                      "type": "logic"
+                    }
+                  },
+                  {
+                    "name": "wptr_err_o",
+                    "kind": "Port",
+                    "source_file": "sva_hierarchy_refs.pp.sv",
+                    "source_line": 7,
+                    "source_column": 61,
+                    "addr": 93825092642664,
+                    "type": "logic",
+                    "direction": "Out",
+                    "internalSymbol": "93825092642784 wptr_err_o"
+                  },
+                  {
+                    "name": "wptr_err_o",
+                    "kind": "Variable",
+                    "source_file": "sva_hierarchy_refs.pp.sv",
+                    "source_line": 7,
+                    "source_column": 61,
+                    "addr": 93825092642784,
+                    "type": "logic",
+                    "lifetime": "Static"
+                  },
+                  {
+                    "name": "gen_normal",
+                    "kind": "GenerateBlock",
+                    "source_file": "sva_hierarchy_refs.pp.sv",
+                    "source_line": 8,
+                    "source_column": 18,
+                    "addr": 93825092643016,
+                    "members": [
+                      {
+                        "name": "u_wptr",
+                        "kind": "Instance",
+                        "source_file": "sva_hierarchy_refs.pp.sv",
+                        "source_line": 9,
+                        "source_column": 9,
+                        "addr": 93825092644000,
+                        "body": {
+                          "name": "cnt",
+                          "kind": "InstanceBody",
+                          "source_file": "sva_hierarchy_refs.pp.sv",
+                          "source_line": 2,
+                          "source_column": 8,
+                          "addr": 93825092644128,
+                          "members": [
+                            {
+                              "name": "clk",
+                              "kind": "Port",
+                              "source_file": "sva_hierarchy_refs.pp.sv",
+                              "source_line": 2,
+                              "source_column": 25,
+                              "addr": 93825092651104,
+                              "type": "logic",
+                              "direction": "In",
+                              "internalSymbol": "93825092651224 clk"
+                            },
+                            {
+                              "name": "clk",
+                              "kind": "Net",
+                              "source_file": "sva_hierarchy_refs.pp.sv",
+                              "source_line": 2,
+                              "source_column": 25,
+                              "addr": 93825092651224,
+                              "type": "logic",
+                              "netType": {
+                                "name": "wire",
+                                "kind": "NetType",
+                                "addr": 93825092544016,
+                                "type": "logic"
+                              }
+                            },
+                            {
+                              "name": "inc",
+                              "kind": "Port",
+                              "source_file": "sva_hierarchy_refs.pp.sv",
+                              "source_line": 2,
+                              "source_column": 42,
+                              "addr": 93825092651384,
+                              "type": "logic",
+                              "direction": "In",
+                              "internalSymbol": "93825092651504 inc"
+                            },
+                            {
+                              "name": "inc",
+                              "kind": "Net",
+                              "source_file": "sva_hierarchy_refs.pp.sv",
+                              "source_line": 2,
+                              "source_column": 42,
+                              "addr": 93825092651504,
+                              "type": "logic",
+                              "netType": {
+                                "name": "wire",
+                                "kind": "NetType",
+                                "addr": 93825092544016,
+                                "type": "logic"
+                              }
+                            },
+                            {
+                              "name": "err_o",
+                              "kind": "Port",
+                              "source_file": "sva_hierarchy_refs.pp.sv",
+                              "source_line": 2,
+                              "source_column": 60,
+                              "addr": 93825092651664,
+                              "type": "logic",
+                              "direction": "Out",
+                              "internalSymbol": "93825092651784 err_o"
+                            },
+                            {
+                              "name": "err_o",
+                              "kind": "Variable",
+                              "source_file": "sva_hierarchy_refs.pp.sv",
+                              "source_line": 2,
+                              "source_column": 60,
+                              "addr": 93825092651784,
+                              "type": "logic",
+                              "lifetime": "Static"
+                            },
+                            {
+                              "name": "q",
+                              "kind": "Variable",
+                              "source_file": "sva_hierarchy_refs.pp.sv",
+                              "source_line": 3,
+                              "source_column": 15,
+                              "addr": 93825092644368,
+                              "type": "logic[1:0]",
+                              "lifetime": "Static"
+                            },
+                            {
+                              "name": "",
+                              "kind": "ProceduralBlock",
+                              "source_file": "sva_hierarchy_refs.pp.sv",
+                              "source_line": 4,
+                              "source_column": 3,
+                              "addr": 93825092644504,
+                              "procedureKind": "AlwaysFF",
+                              "body": {
+                                "source_file_start": "sva_hierarchy_refs.pp.sv",
+                                "source_file_end": "sva_hierarchy_refs.pp.sv",
+                                "source_line_start": 4,
+                                "source_line_end": 4,
+                                "source_column_start": 13,
+                                "source_column_end": 41,
+                                "kind": "Timed",
+                                "timing": {
+                                  "source_file_start": "sva_hierarchy_refs.pp.sv",
+                                  "source_file_end": "sva_hierarchy_refs.pp.sv",
+                                  "source_line_start": 4,
+                                  "source_line_end": 4,
+                                  "source_column_start": 15,
+                                  "source_column_end": 26,
+                                  "kind": "SignalEvent",
+                                  "expr": {
+                                    "source_file_start": "sva_hierarchy_refs.pp.sv",
+                                    "source_file_end": "sva_hierarchy_refs.pp.sv",
+                                    "source_line_start": 4,
+                                    "source_line_end": 4,
+                                    "source_column_start": 23,
+                                    "source_column_end": 26,
+                                    "kind": "NamedValue",
+                                    "type": "logic",
+                                    "symbol": "93825092651224 clk"
+                                  },
+                                  "edge": "PosEdge"
+                                },
+                                "stmt": {
+                                  "source_file_start": "sva_hierarchy_refs.pp.sv",
+                                  "source_file_end": "sva_hierarchy_refs.pp.sv",
+                                  "source_line_start": 4,
+                                  "source_line_end": 4,
+                                  "source_column_start": 28,
+                                  "source_column_end": 41,
+                                  "kind": "ExpressionStatement",
+                                  "expr": {
+                                    "source_file_start": "sva_hierarchy_refs.pp.sv",
+                                    "source_file_end": "sva_hierarchy_refs.pp.sv",
+                                    "source_line_start": 4,
+                                    "source_line_end": 4,
+                                    "source_column_start": 28,
+                                    "source_column_end": 40,
+                                    "kind": "Assignment",
+                                    "type": "logic[1:0]",
+                                    "left": {
+                                      "source_file_start": "sva_hierarchy_refs.pp.sv",
+                                      "source_file_end": "sva_hierarchy_refs.pp.sv",
+                                      "source_line_start": 4,
+                                      "source_line_end": 4,
+                                      "source_column_start": 28,
+                                      "source_column_end": 29,
+                                      "kind": "NamedValue",
+                                      "type": "logic[1:0]",
+                                      "symbol": "93825092644368 q"
+                                    },
+                                    "right": {
+                                      "source_file_start": "sva_hierarchy_refs.pp.sv",
+                                      "source_file_end": "sva_hierarchy_refs.pp.sv",
+                                      "source_line_start": 4,
+                                      "source_line_end": 4,
+                                      "source_column_start": 33,
+                                      "source_column_end": 40,
+                                      "kind": "BinaryOp",
+                                      "type": "logic[1:0]",
+                                      "op": "Add",
+                                      "left": {
+                                        "source_file_start": "sva_hierarchy_refs.pp.sv",
+                                        "source_file_end": "sva_hierarchy_refs.pp.sv",
+                                        "source_line_start": 4,
+                                        "source_line_end": 4,
+                                        "source_column_start": 33,
+                                        "source_column_end": 34,
+                                        "kind": "NamedValue",
+                                        "type": "logic[1:0]",
+                                        "symbol": "93825092644368 q"
+                                      },
+                                      "right": {
+                                        "source_file_start": "sva_hierarchy_refs.pp.sv",
+                                        "source_file_end": "sva_hierarchy_refs.pp.sv",
+                                        "source_line_start": 4,
+                                        "source_line_end": 4,
+                                        "source_column_start": 37,
+                                        "source_column_end": 40,
+                                        "kind": "Conversion",
+                                        "type": "logic[1:0]",
+                                        "operand": {
+                                          "source_file_start": "sva_hierarchy_refs.pp.sv",
+                                          "source_file_end": "sva_hierarchy_refs.pp.sv",
+                                          "source_line_start": 4,
+                                          "source_line_end": 4,
+                                          "source_column_start": 37,
+                                          "source_column_end": 40,
+                                          "kind": "NamedValue",
+                                          "type": "logic",
+                                          "symbol": "93825092651504 inc"
+                                        }
+                                      }
+                                    },
+                                    "isNonBlocking": true
+                                  }
+                                }
+                              }
+                            },
+                            {
+                              "name": "",
+                              "kind": "ContinuousAssign",
+                              "source_file": "sva_hierarchy_refs.pp.sv",
+                              "source_line": 5,
+                              "source_column": 10,
+                              "addr": 93825092651944,
+                              "assignment": {
+                                "source_file_start": "sva_hierarchy_refs.pp.sv",
+                                "source_file_end": "sva_hierarchy_refs.pp.sv",
+                                "source_line_start": 5,
+                                "source_line_end": 5,
+                                "source_column_start": 10,
+                                "source_column_end": 29,
+                                "kind": "Assignment",
+                                "type": "logic",
+                                "left": {
+                                  "source_file_start": "sva_hierarchy_refs.pp.sv",
+                                  "source_file_end": "sva_hierarchy_refs.pp.sv",
+                                  "source_line_start": 5,
+                                  "source_line_end": 5,
+                                  "source_column_start": 10,
+                                  "source_column_end": 15,
+                                  "kind": "NamedValue",
+                                  "type": "logic",
+                                  "symbol": "93825092651784 err_o"
+                                },
+                                "right": {
+                                  "source_file_start": "sva_hierarchy_refs.pp.sv",
+                                  "source_file_end": "sva_hierarchy_refs.pp.sv",
+                                  "source_line_start": 5,
+                                  "source_line_end": 5,
+                                  "source_column_start": 19,
+                                  "source_column_end": 28,
+                                  "kind": "BinaryOp",
+                                  "type": "logic",
+                                  "op": "Equality",
+                                  "left": {
+                                    "source_file_start": "sva_hierarchy_refs.pp.sv",
+                                    "source_file_end": "sva_hierarchy_refs.pp.sv",
+                                    "source_line_start": 5,
+                                    "source_line_end": 5,
+                                    "source_column_start": 19,
+                                    "source_column_end": 20,
+                                    "kind": "NamedValue",
+                                    "type": "logic[1:0]",
+                                    "symbol": "93825092644368 q"
+                                  },
+                                  "right": {
+                                    "source_file_start": "sva_hierarchy_refs.pp.sv",
+                                    "source_file_end": "sva_hierarchy_refs.pp.sv",
+                                    "source_line_start": 5,
+                                    "source_line_end": 5,
+                                    "source_column_start": 24,
+                                    "source_column_end": 28,
+                                    "kind": "Conversion",
+                                    "type": "logic[1:0]",
+                                    "operand": {
+                                      "source_file_start": "sva_hierarchy_refs.pp.sv",
+                                      "source_file_end": "sva_hierarchy_refs.pp.sv",
+                                      "source_line_start": 5,
+                                      "source_line_end": 5,
+                                      "source_column_start": 24,
+                                      "source_column_end": 28,
+                                      "kind": "IntegerLiteral",
+                                      "type": "bit[1:0]",
+                                      "value": "2'b11",
+                                      "constant": "2'b11"
+                                    },
+                                    "constant": "2'b11"
+                                  }
+                                },
+                                "isNonBlocking": false
+                              }
+                            }
+                          ],
+                          "definition": "93825092495232 cnt"
+                        },
+                        "connections": [
+                          {
+                            "port": {
+                              "name": "clk",
+                              "kind": "Port",
+                              "source_file": "sva_hierarchy_refs.pp.sv",
+                              "source_line": 2,
+                              "source_column": 25,
+                              "addr": 93825092651104,
+                              "type": "logic",
+                              "direction": "In",
+                              "internalSymbol": "93825092651224 clk"
+                            },
+                            "expr": {
+                              "source_file_start": "sva_hierarchy_refs.pp.sv",
+                              "source_file_end": "sva_hierarchy_refs.pp.sv",
+                              "source_line_start": 9,
+                              "source_line_end": 9,
+                              "source_column_start": 18,
+                              "source_column_end": 21,
+                              "kind": "NamedValue",
+                              "type": "logic",
+                              "symbol": "93825092642224 clk"
+                            }
+                          },
+                          {
+                            "port": {
+                              "name": "inc",
+                              "kind": "Port",
+                              "source_file": "sva_hierarchy_refs.pp.sv",
+                              "source_line": 2,
+                              "source_column": 42,
+                              "addr": 93825092651384,
+                              "type": "logic",
+                              "direction": "In",
+                              "internalSymbol": "93825092651504 inc"
+                            },
+                            "expr": {
+                              "source_file_start": "sva_hierarchy_refs.pp.sv",
+                              "source_file_end": "sva_hierarchy_refs.pp.sv",
+                              "source_line_start": 9,
+                              "source_line_end": 9,
+                              "source_column_start": 24,
+                              "source_column_end": 27,
+                              "kind": "NamedValue",
+                              "type": "logic",
+                              "symbol": "93825092642504 inc"
+                            }
+                          },
+                          {
+                            "port": {
+                              "name": "err_o",
+                              "kind": "Port",
+                              "source_file": "sva_hierarchy_refs.pp.sv",
+                              "source_line": 2,
+                              "source_column": 60,
+                              "addr": 93825092651664,
+                              "type": "logic",
+                              "direction": "Out",
+                              "internalSymbol": "93825092651784 err_o"
+                            },
+                            "expr": {
+                              "source_file_start": "sva_hierarchy_refs.pp.sv",
+                              "source_file_end": "sva_hierarchy_refs.pp.sv",
+                              "source_line_start": 9,
+                              "source_line_end": 9,
+                              "source_column_start": 36,
+                              "source_column_end": 46,
+                              "kind": "Assignment",
+                              "type": "logic",
+                              "left": {
+                                "source_file_start": "sva_hierarchy_refs.pp.sv",
+                                "source_file_end": "sva_hierarchy_refs.pp.sv",
+                                "source_line_start": 9,
+                                "source_line_end": 9,
+                                "source_column_start": 36,
+                                "source_column_end": 46,
+                                "kind": "NamedValue",
+                                "type": "logic",
+                                "symbol": "93825092642784 wptr_err_o"
+                              },
+                              "right": {
+                                "source_file_start": "sva_hierarchy_refs.pp.sv",
+                                "source_file_end": "sva_hierarchy_refs.pp.sv",
+                                "source_line_start": 9,
+                                "source_line_end": 9,
+                                "source_column_start": 36,
+                                "source_column_end": 46,
+                                "kind": "EmptyArgument",
+                                "type": "logic"
+                              },
+                              "isNonBlocking": false
+                            }
+                          }
+                        ]
+                      },
+                      {
+                        "name": "u_rptr",
+                        "kind": "Instance",
+                        "source_file": "sva_hierarchy_refs.pp.sv",
+                        "source_line": 10,
+                        "source_column": 9,
+                        "addr": 93825092644672,
+                        "body": "93825092644128 cnt",
+                        "connections": [
+                          {
+                            "port": {
+                              "name": "clk",
+                              "kind": "Port",
+                              "source_file": "sva_hierarchy_refs.pp.sv",
+                              "source_line": 2,
+                              "source_column": 25,
+                              "addr": 93825092654120,
+                              "type": "logic",
+                              "direction": "In",
+                              "internalSymbol": "93825092654240 clk"
+                            },
+                            "expr": {
+                              "source_file_start": "sva_hierarchy_refs.pp.sv",
+                              "source_file_end": "sva_hierarchy_refs.pp.sv",
+                              "source_line_start": 10,
+                              "source_line_end": 10,
+                              "source_column_start": 18,
+                              "source_column_end": 21,
+                              "kind": "NamedValue",
+                              "type": "logic",
+                              "symbol": "93825092642224 clk"
+                            }
+                          },
+                          {
+                            "port": {
+                              "name": "inc",
+                              "kind": "Port",
+                              "source_file": "sva_hierarchy_refs.pp.sv",
+                              "source_line": 2,
+                              "source_column": 42,
+                              "addr": 93825092654400,
+                              "type": "logic",
+                              "direction": "In",
+                              "internalSymbol": "93825092654520 inc"
+                            },
+                            "expr": {
+                              "source_file_start": "sva_hierarchy_refs.pp.sv",
+                              "source_file_end": "sva_hierarchy_refs.pp.sv",
+                              "source_line_start": 10,
+                              "source_line_end": 10,
+                              "source_column_start": 28,
+                              "source_column_end": 32,
+                              "kind": "Conversion",
+                              "type": "logic",
+                              "operand": {
+                                "source_file_start": "sva_hierarchy_refs.pp.sv",
+                                "source_file_end": "sva_hierarchy_refs.pp.sv",
+                                "source_line_start": 10,
+                                "source_line_end": 10,
+                                "source_column_start": 28,
+                                "source_column_end": 32,
+                                "kind": "IntegerLiteral",
+                                "type": "bit[0:0]",
+                                "value": "1'b0",
+                                "constant": "1'b0"
+                              },
+                              "constant": "1'b0"
+                            }
+                          },
+                          {
+                            "port": {
+                              "name": "err_o",
+                              "kind": "Port",
+                              "source_file": "sva_hierarchy_refs.pp.sv",
+                              "source_line": 2,
+                              "source_column": 60,
+                              "addr": 93825092654680,
+                              "type": "logic",
+                              "direction": "Out",
+                              "internalSymbol": "93825092654800 err_o"
+                            }
+                          }
+                        ]
+                      }
+                    ],
+                    "constructIndex": 1,
+                    "isUninstantiated": false,
+                    "branchKind": "IfTrue",
+                    "conditionExpression": {
+                      "source_file_start": "sva_hierarchy_refs.pp.sv",
+                      "source_file_end": "sva_hierarchy_refs.pp.sv",
+                      "source_line_start": 8,
+                      "source_line_end": 8,
+                      "source_column_start": 7,
+                      "source_column_end": 8,
+                      "kind": "IntegerLiteral",
+                      "type": "int",
+                      "value": "1",
+                      "constant": "1"
+                    }
+                  }
+                ],
+                "definition": "93825092505520 fifo"
+              },
+              "connections": [
+                {
+                  "port": {
+                    "name": "clk",
+                    "kind": "Port",
+                    "source_file": "sva_hierarchy_refs.pp.sv",
+                    "source_line": 7,
+                    "source_column": 26,
+                    "addr": 93825092642104,
+                    "type": "logic",
+                    "direction": "In",
+                    "internalSymbol": "93825092642224 clk"
+                  },
+                  "expr": {
+                    "source_file_start": "sva_hierarchy_refs.pp.sv",
+                    "source_file_end": "sva_hierarchy_refs.pp.sv",
+                    "source_line_start": 16,
+                    "source_line_end": 16,
+                    "source_column_start": 14,
+                    "source_column_end": 17,
+                    "kind": "NamedValue",
+                    "type": "logic",
+                    "symbol": "93825092617032 clk"
+                  }
+                },
+                {
+                  "port": {
+                    "name": "inc",
+                    "kind": "Port",
+                    "source_file": "sva_hierarchy_refs.pp.sv",
+                    "source_line": 7,
+                    "source_column": 43,
+                    "addr": 93825092642384,
+                    "type": "logic",
+                    "direction": "In",
+                    "internalSymbol": "93825092642504 inc"
+                  },
+                  "expr": {
+                    "source_file_start": "sva_hierarchy_refs.pp.sv",
+                    "source_file_end": "sva_hierarchy_refs.pp.sv",
+                    "source_line_start": 16,
+                    "source_line_end": 16,
+                    "source_column_start": 20,
+                    "source_column_end": 23,
+                    "kind": "NamedValue",
+                    "type": "logic",
+                    "symbol": "93825092617312 inc"
+                  }
+                },
+                {
+                  "port": {
+                    "name": "wptr_err_o",
+                    "kind": "Port",
+                    "source_file": "sva_hierarchy_refs.pp.sv",
+                    "source_line": 7,
+                    "source_column": 61,
+                    "addr": 93825092642664,
+                    "type": "logic",
+                    "direction": "Out",
+                    "internalSymbol": "93825092642784 wptr_err_o"
+                  },
+                  "expr": {
+                    "source_file_start": "sva_hierarchy_refs.pp.sv",
+                    "source_file_end": "sva_hierarchy_refs.pp.sv",
+                    "source_line_start": 16,
+                    "source_line_end": 16,
+                    "source_column_start": 37,
+                    "source_column_end": 44,
+                    "kind": "Assignment",
+                    "type": "logic",
+                    "left": {
+                      "source_file_start": "sva_hierarchy_refs.pp.sv",
+                      "source_file_end": "sva_hierarchy_refs.pp.sv",
+                      "source_line_start": 16,
+                      "source_line_end": 16,
+                      "source_column_start": 37,
+                      "source_column_end": 44,
+                      "kind": "NamedValue",
+                      "type": "logic",
+                      "symbol": "93825092617592 alert_a"
+                    },
+                    "right": {
+                      "source_file_start": "sva_hierarchy_refs.pp.sv",
+                      "source_file_end": "sva_hierarchy_refs.pp.sv",
+                      "source_line_start": 16,
+                      "source_line_end": 16,
+                      "source_column_start": 37,
+                      "source_column_end": 44,
+                      "kind": "EmptyArgument",
+                      "type": "logic"
+                    },
+                    "isNonBlocking": false
+                  }
+                }
+              ]
+            },
+            {
+              "name": "u_b",
+              "kind": "Instance",
+              "source_file": "sva_hierarchy_refs.pp.sv",
+              "source_line": 17,
+              "source_column": 8,
+              "addr": 93825092618448,
+              "body": "93825092618144 fifo",
+              "connections": [
+                {
+                  "port": {
+                    "name": "clk",
+                    "kind": "Port",
+                    "source_file": "sva_hierarchy_refs.pp.sv",
+                    "source_line": 7,
+                    "source_column": 26,
+                    "addr": 93825092657864,
+                    "type": "logic",
+                    "direction": "In",
+                    "internalSymbol": "93825092657984 clk"
+                  },
+                  "expr": {
+                    "source_file_start": "sva_hierarchy_refs.pp.sv",
+                    "source_file_end": "sva_hierarchy_refs.pp.sv",
+                    "source_line_start": 17,
+                    "source_line_end": 17,
+                    "source_column_start": 14,
+                    "source_column_end": 17,
+                    "kind": "NamedValue",
+                    "type": "logic",
+                    "symbol": "93825092617032 clk"
+                  }
+                },
+                {
+                  "port": {
+                    "name": "inc",
+                    "kind": "Port",
+                    "source_file": "sva_hierarchy_refs.pp.sv",
+                    "source_line": 7,
+                    "source_column": 43,
+                    "addr": 93825092658144,
+                    "type": "logic",
+                    "direction": "In",
+                    "internalSymbol": "93825092658264 inc"
+                  },
+                  "expr": {
+                    "source_file_start": "sva_hierarchy_refs.pp.sv",
+                    "source_file_end": "sva_hierarchy_refs.pp.sv",
+                    "source_line_start": 17,
+                    "source_line_end": 17,
+                    "source_column_start": 20,
+                    "source_column_end": 23,
+                    "kind": "NamedValue",
+                    "type": "logic",
+                    "symbol": "93825092617312 inc"
+                  }
+                },
+                {
+                  "port": {
+                    "name": "wptr_err_o",
+                    "kind": "Port",
+                    "source_file": "sva_hierarchy_refs.pp.sv",
+                    "source_line": 7,
+                    "source_column": 61,
+                    "addr": 93825092658424,
+                    "type": "logic",
+                    "direction": "Out",
+                    "internalSymbol": "93825092658544 wptr_err_o"
+                  }
+                }
+              ]
+            },
+            {
+              "name": "ep_err",
+              "kind": "Variable",
+              "source_file": "sva_hierarchy_refs.pp.sv",
+              "source_line": 18,
+              "source_column": 15,
+              "addr": 93825092615680,
+              "type": "logic[1:0]",
+              "lifetime": "Static"
+            },
+            {
+              "name": "gen_ep",
+              "kind": "GenerateBlockArray",
+              "source_file": "sva_hierarchy_refs.pp.sv",
+              "source_line": 19,
+              "source_column": 42,
+              "addr": 93825092626464,
+              "members": [
+                {
+                  "name": "i",
+                  "kind": "Genvar",
+                  "source_file": "sva_hierarchy_refs.pp.sv",
+                  "source_line": 19,
+                  "source_column": 15,
+                  "addr": 93825092626664
+                },
+                {
+                  "name": "",
+                  "kind": "GenerateBlock",
+                  "source_file": "sva_hierarchy_refs.pp.sv",
+                  "source_line": 19,
+                  "source_column": 42,
+                  "addr": 93825092627672,
+                  "members": [
+                    {
+                      "name": "i",
+                      "kind": "Parameter",
+                      "source_file": "sva_hierarchy_refs.pp.sv",
+                      "source_line": 19,
+                      "source_column": 15,
+                      "addr": 93825092627816,
+                      "type": "integer",
+                      "value": "0",
+                      "isLocal": true,
+                      "isPort": false,
+                      "isBody": true
+                    },
+                    {
+                      "name": "u_ep",
+                      "kind": "Instance",
+                      "source_file": "sva_hierarchy_refs.pp.sv",
+                      "source_line": 20,
+                      "source_column": 9,
+                      "addr": 93825092659712,
+                      "body": "93825092644128 cnt",
+                      "connections": [
+                        {
+                          "port": {
+                            "name": "clk",
+                            "kind": "Port",
+                            "source_file": "sva_hierarchy_refs.pp.sv",
+                            "source_line": 2,
+                            "source_column": 25,
+                            "addr": 93825092660384,
+                            "type": "logic",
+                            "direction": "In",
+                            "internalSymbol": "93825092660504 clk"
+                          },
+                          "expr": {
+                            "source_file_start": "sva_hierarchy_refs.pp.sv",
+                            "source_file_end": "sva_hierarchy_refs.pp.sv",
+                            "source_line_start": 20,
+                            "source_line_end": 20,
+                            "source_column_start": 16,
+                            "source_column_end": 19,
+                            "kind": "NamedValue",
+                            "type": "logic",
+                            "symbol": "93825092617032 clk"
+                          }
+                        },
+                        {
+                          "port": {
+                            "name": "inc",
+                            "kind": "Port",
+                            "source_file": "sva_hierarchy_refs.pp.sv",
+                            "source_line": 2,
+                            "source_column": 42,
+                            "addr": 93825092660664,
+                            "type": "logic",
+                            "direction": "In",
+                            "internalSymbol": "93825092660784 inc"
+                          },
+                          "expr": {
+                            "source_file_start": "sva_hierarchy_refs.pp.sv",
+                            "source_file_end": "sva_hierarchy_refs.pp.sv",
+                            "source_line_start": 20,
+                            "source_line_end": 20,
+                            "source_column_start": 26,
+                            "source_column_end": 29,
+                            "kind": "NamedValue",
+                            "type": "logic",
+                            "symbol": "93825092617312 inc"
+                          }
+                        },
+                        {
+                          "port": {
+                            "name": "err_o",
+                            "kind": "Port",
+                            "source_file": "sva_hierarchy_refs.pp.sv",
+                            "source_line": 2,
+                            "source_column": 60,
+                            "addr": 93825092660944,
+                            "type": "logic",
+                            "direction": "Out",
+                            "internalSymbol": "93825092661064 err_o"
+                          },
+                          "expr": {
+                            "source_file_start": "sva_hierarchy_refs.pp.sv",
+                            "source_file_end": "sva_hierarchy_refs.pp.sv",
+                            "source_line_start": 20,
+                            "source_line_end": 20,
+                            "source_column_start": 39,
+                            "source_column_end": 48,
+                            "kind": "Assignment",
+                            "type": "logic",
+                            "left": {
+                              "source_file_start": "sva_hierarchy_refs.pp.sv",
+                              "source_file_end": "sva_hierarchy_refs.pp.sv",
+                              "source_line_start": 20,
+                              "source_line_end": 20,
+                              "source_column_start": 39,
+                              "source_column_end": 48,
+                              "kind": "ElementSelect",
+                              "type": "logic",
+                              "value": {
+                                "source_file_start": "sva_hierarchy_refs.pp.sv",
+                                "source_file_end": "sva_hierarchy_refs.pp.sv",
+                                "source_line_start": 20,
+                                "source_line_end": 20,
+                                "source_column_start": 39,
+                                "source_column_end": 45,
+                                "kind": "NamedValue",
+                                "type": "logic[1:0]",
+                                "symbol": "93825092615680 ep_err"
+                              },
+                              "selector": {
+                                "source_file_start": "sva_hierarchy_refs.pp.sv",
+                                "source_file_end": "sva_hierarchy_refs.pp.sv",
+                                "source_line_start": 20,
+                                "source_line_end": 20,
+                                "source_column_start": 46,
+                                "source_column_end": 47,
+                                "kind": "NamedValue",
+                                "type": "integer",
+                                "symbol": "93825092627816 i",
+                                "constant": "0"
+                              }
+                            },
+                            "right": {
+                              "source_file_start": "sva_hierarchy_refs.pp.sv",
+                              "source_file_end": "sva_hierarchy_refs.pp.sv",
+                              "source_line_start": 20,
+                              "source_line_end": 20,
+                              "source_column_start": 39,
+                              "source_column_end": 48,
+                              "kind": "EmptyArgument",
+                              "type": "logic"
+                            },
+                            "isNonBlocking": false
+                          }
+                        }
+                      ]
+                    }
+                  ],
+                  "constructIndex": 0,
+                  "isUninstantiated": false,
+                  "branchKind": "LoopIteration"
+                },
+                {
+                  "name": "",
+                  "kind": "GenerateBlock",
+                  "source_file": "sva_hierarchy_refs.pp.sv",
+                  "source_line": 19,
+                  "source_column": 42,
+                  "addr": 93825092628048,
+                  "members": [
+                    {
+                      "name": "i",
+                      "kind": "Parameter",
+                      "source_file": "sva_hierarchy_refs.pp.sv",
+                      "source_line": 19,
+                      "source_column": 15,
+                      "addr": 93825092628192,
+                      "type": "integer",
+                      "value": "1",
+                      "isLocal": true,
+                      "isPort": false,
+                      "isBody": true
+                    },
+                    {
+                      "name": "u_ep",
+                      "kind": "Instance",
+                      "source_file": "sva_hierarchy_refs.pp.sv",
+                      "source_line": 20,
+                      "source_column": 9,
+                      "addr": 93825092664872,
+                      "body": "93825092644128 cnt",
+                      "connections": [
+                        {
+                          "port": {
+                            "name": "clk",
+                            "kind": "Port",
+                            "source_file": "sva_hierarchy_refs.pp.sv",
+                            "source_line": 2,
+                            "source_column": 25,
+                            "addr": 93825092665544,
+                            "type": "logic",
+                            "direction": "In",
+                            "internalSymbol": "93825092665664 clk"
+                          },
+                          "expr": {
+                            "source_file_start": "sva_hierarchy_refs.pp.sv",
+                            "source_file_end": "sva_hierarchy_refs.pp.sv",
+                            "source_line_start": 20,
+                            "source_line_end": 20,
+                            "source_column_start": 16,
+                            "source_column_end": 19,
+                            "kind": "NamedValue",
+                            "type": "logic",
+                            "symbol": "93825092617032 clk"
+                          }
+                        },
+                        {
+                          "port": {
+                            "name": "inc",
+                            "kind": "Port",
+                            "source_file": "sva_hierarchy_refs.pp.sv",
+                            "source_line": 2,
+                            "source_column": 42,
+                            "addr": 93825092665824,
+                            "type": "logic",
+                            "direction": "In",
+                            "internalSymbol": "93825092665944 inc"
+                          },
+                          "expr": {
+                            "source_file_start": "sva_hierarchy_refs.pp.sv",
+                            "source_file_end": "sva_hierarchy_refs.pp.sv",
+                            "source_line_start": 20,
+                            "source_line_end": 20,
+                            "source_column_start": 26,
+                            "source_column_end": 29,
+                            "kind": "NamedValue",
+                            "type": "logic",
+                            "symbol": "93825092617312 inc"
+                          }
+                        },
+                        {
+                          "port": {
+                            "name": "err_o",
+                            "kind": "Port",
+                            "source_file": "sva_hierarchy_refs.pp.sv",
+                            "source_line": 2,
+                            "source_column": 60,
+                            "addr": 93825092666104,
+                            "type": "logic",
+                            "direction": "Out",
+                            "internalSymbol": "93825092666224 err_o"
+                          },
+                          "expr": {
+                            "source_file_start": "sva_hierarchy_refs.pp.sv",
+                            "source_file_end": "sva_hierarchy_refs.pp.sv",
+                            "source_line_start": 20,
+                            "source_line_end": 20,
+                            "source_column_start": 39,
+                            "source_column_end": 48,
+                            "kind": "Assignment",
+                            "type": "logic",
+                            "left": {
+                              "source_file_start": "sva_hierarchy_refs.pp.sv",
+                              "source_file_end": "sva_hierarchy_refs.pp.sv",
+                              "source_line_start": 20,
+                              "source_line_end": 20,
+                              "source_column_start": 39,
+                              "source_column_end": 48,
+                              "kind": "ElementSelect",
+                              "type": "logic",
+                              "value": {
+                                "source_file_start": "sva_hierarchy_refs.pp.sv",
+                                "source_file_end": "sva_hierarchy_refs.pp.sv",
+                                "source_line_start": 20,
+                                "source_line_end": 20,
+                                "source_column_start": 39,
+                                "source_column_end": 45,
+                                "kind": "NamedValue",
+                                "type": "logic[1:0]",
+                                "symbol": "93825092615680 ep_err"
+                              },
+                              "selector": {
+                                "source_file_start": "sva_hierarchy_refs.pp.sv",
+                                "source_file_end": "sva_hierarchy_refs.pp.sv",
+                                "source_line_start": 20,
+                                "source_line_end": 20,
+                                "source_column_start": 46,
+                                "source_column_end": 47,
+                                "kind": "NamedValue",
+                                "type": "integer",
+                                "symbol": "93825092628192 i",
+                                "constant": "1"
+                              }
+                            },
+                            "right": {
+                              "source_file_start": "sva_hierarchy_refs.pp.sv",
+                              "source_file_end": "sva_hierarchy_refs.pp.sv",
+                              "source_line_start": 20,
+                              "source_line_end": 20,
+                              "source_column_start": 39,
+                              "source_column_end": 48,
+                              "kind": "EmptyArgument",
+                              "type": "logic"
+                            },
+                            "isNonBlocking": false
+                          }
+                        }
+                      ]
+                    }
+                  ],
+                  "constructIndex": 1,
+                  "isUninstantiated": false,
+                  "branchKind": "LoopIteration"
+                }
+              ],
+              "constructIndex": 1,
+              "initialExpression": {
+                "source_file_start": "sva_hierarchy_refs.pp.sv",
+                "source_file_end": "sva_hierarchy_refs.pp.sv",
+                "source_line_start": 19,
+                "source_line_end": 19,
+                "source_column_start": 19,
+                "source_column_end": 20,
+                "kind": "Conversion",
+                "type": "integer",
+                "operand": {
+                  "source_file_start": "sva_hierarchy_refs.pp.sv",
+                  "source_file_end": "sva_hierarchy_refs.pp.sv",
+                  "source_line_start": 19,
+                  "source_line_end": 19,
+                  "source_column_start": 19,
+                  "source_column_end": 20,
+                  "kind": "IntegerLiteral",
+                  "type": "int",
+                  "value": "0",
+                  "constant": "0"
+                },
+                "constant": "0"
+              },
+              "stopExpression": {
+                "source_file_start": "sva_hierarchy_refs.pp.sv",
+                "source_file_end": "sva_hierarchy_refs.pp.sv",
+                "source_line_start": 19,
+                "source_line_end": 19,
+                "source_column_start": 22,
+                "source_column_end": 27,
+                "kind": "BinaryOp",
+                "type": "logic",
+                "op": "LessThan",
+                "left": {
+                  "source_file_start": "sva_hierarchy_refs.pp.sv",
+                  "source_file_end": "sva_hierarchy_refs.pp.sv",
+                  "source_line_start": 19,
+                  "source_line_end": 19,
+                  "source_column_start": 22,
+                  "source_column_end": 23,
+                  "kind": "NamedValue",
+                  "type": "integer",
+                  "symbol": "93825092627104 i"
+                },
+                "right": {
+                  "source_file_start": "sva_hierarchy_refs.pp.sv",
+                  "source_file_end": "sva_hierarchy_refs.pp.sv",
+                  "source_line_start": 19,
+                  "source_line_end": 19,
+                  "source_column_start": 26,
+                  "source_column_end": 27,
+                  "kind": "Conversion",
+                  "type": "integer",
+                  "operand": {
+                    "source_file_start": "sva_hierarchy_refs.pp.sv",
+                    "source_file_end": "sva_hierarchy_refs.pp.sv",
+                    "source_line_start": 19,
+                    "source_line_end": 19,
+                    "source_column_start": 26,
+                    "source_column_end": 27,
+                    "kind": "IntegerLiteral",
+                    "type": "int",
+                    "value": "2",
+                    "constant": "2"
+                  },
+                  "constant": "2"
+                }
+              },
+              "iterExpression": {
+                "source_file_start": "sva_hierarchy_refs.pp.sv",
+                "source_file_end": "sva_hierarchy_refs.pp.sv",
+                "source_line_start": 19,
+                "source_line_end": 19,
+                "source_column_start": 29,
+                "source_column_end": 32,
+                "kind": "UnaryOp",
+                "type": "integer",
+                "op": "Postincrement",
+                "operand": {
+                  "source_file_start": "sva_hierarchy_refs.pp.sv",
+                  "source_file_end": "sva_hierarchy_refs.pp.sv",
+                  "source_line_start": 19,
+                  "source_line_end": 19,
+                  "source_column_start": 29,
+                  "source_column_end": 30,
+                  "kind": "NamedValue",
+                  "type": "integer",
+                  "symbol": "93825092627104 i"
+                }
+              },
+              "loopVariable": "93825092627104 i"
+            },
+            {
+              "name": "",
+              "kind": "ContinuousAssign",
+              "source_file": "sva_hierarchy_refs.pp.sv",
+              "source_line": 22,
+              "source_column": 10,
+              "addr": 93825092628440,
+              "assignment": {
+                "source_file_start": "sva_hierarchy_refs.pp.sv",
+                "source_file_end": "sva_hierarchy_refs.pp.sv",
+                "source_line_start": 22,
+                "source_line_end": 22,
+                "source_column_start": 10,
+                "source_column_end": 24,
+                "kind": "Assignment",
+                "type": "logic",
+                "left": {
+                  "source_file_start": "sva_hierarchy_refs.pp.sv",
+                  "source_file_end": "sva_hierarchy_refs.pp.sv",
+                  "source_line_start": 22,
+                  "source_line_end": 22,
+                  "source_column_start": 10,
+                  "source_column_end": 17,
+                  "kind": "NamedValue",
+                  "type": "logic",
+                  "symbol": "93825092617848 alert_b"
+                },
+                "right": {
+                  "source_file_start": "sva_hierarchy_refs.pp.sv",
+                  "source_file_end": "sva_hierarchy_refs.pp.sv",
+                  "source_line_start": 22,
+                  "source_line_end": 22,
+                  "source_column_start": 20,
+                  "source_column_end": 24,
+                  "kind": "Conversion",
+                  "type": "logic",
+                  "operand": {
+                    "source_file_start": "sva_hierarchy_refs.pp.sv",
+                    "source_file_end": "sva_hierarchy_refs.pp.sv",
+                    "source_line_start": 22,
+                    "source_line_end": 22,
+                    "source_column_start": 20,
+                    "source_column_end": 24,
+                    "kind": "IntegerLiteral",
+                    "type": "bit[0:0]",
+                    "value": "1'b0",
+                    "constant": "1'b0"
+                  },
+                  "constant": "1'b0"
+                },
+                "isNonBlocking": false
+              }
+            },
+            {
+              "name": "a_wptr_alerts",
+              "kind": "StatementBlock",
+              "source_file": "sva_hierarchy_refs.pp.sv",
+              "source_line": 24,
+              "source_column": 3,
+              "addr": 93825092616048
+            },
+            {
+              "name": "",
+              "kind": "ProceduralBlock",
+              "source_file": "sva_hierarchy_refs.pp.sv",
+              "source_line": 24,
+              "source_column": 3,
+              "addr": 93825092615944,
+              "procedureKind": "Always",
+              "body": {
+                "source_file_start": "sva_hierarchy_refs.pp.sv",
+                "source_file_end": "sva_hierarchy_refs.pp.sv",
+                "source_line_start": 24,
+                "source_line_end": 24,
+                "source_column_start": 3,
+                "source_column_end": 108,
+                "kind": "Block",
+                "blockKind": "Sequential",
+                "block": "93825092616048 a_wptr_alerts",
+                "body": {
+                  "source_file_start": "sva_hierarchy_refs.pp.sv",
+                  "source_file_end": "sva_hierarchy_refs.pp.sv",
+                  "source_line_start": 24,
+                  "source_line_end": 24,
+                  "source_column_start": 3,
+                  "source_column_end": 108,
+                  "kind": "ConcurrentAssertion",
+                  "propertySpec": {
+                    "source_file_start": "sva_hierarchy_refs.pp.sv",
+                    "source_file_end": "sva_hierarchy_refs.pp.sv",
+                    "source_line_start": 24,
+                    "source_line_end": 24,
+                    "source_column_start": 35,
+                    "source_column_end": 106,
+                    "kind": "Clocking",
+                    "clocking": {
+                      "source_file_start": "sva_hierarchy_refs.pp.sv",
+                      "source_file_end": "sva_hierarchy_refs.pp.sv",
+                      "source_line_start": 24,
+                      "source_line_end": 24,
+                      "source_column_start": 37,
+                      "source_column_end": 48,
+                      "kind": "SignalEvent",
+                      "expr": {
+                        "source_file_start": "sva_hierarchy_refs.pp.sv",
+                        "source_file_end": "sva_hierarchy_refs.pp.sv",
+                        "source_line_start": 24,
+                        "source_line_end": 24,
+                        "source_column_start": 45,
+                        "source_column_end": 48,
+                        "kind": "NamedValue",
+                        "type": "logic",
+                        "symbol": "93825092617032 clk"
+                      },
+                      "edge": "PosEdge"
+                    },
+                    "expr": {
+                      "source_file_start": "sva_hierarchy_refs.pp.sv",
+                      "source_file_end": "sva_hierarchy_refs.pp.sv",
+                      "source_line_start": 24,
+                      "source_line_end": 24,
+                      "source_column_start": 50,
+                      "source_column_end": 106,
+                      "kind": "Binary",
+                      "op": "OverlappedImplication",
+                      "left": {
+                        "source_file_start": "sva_hierarchy_refs.pp.sv",
+                        "source_file_end": "sva_hierarchy_refs.pp.sv",
+                        "source_line_start": 24,
+                        "source_line_end": 24,
+                        "source_column_start": 50,
+                        "source_column_end": 84,
+                        "kind": "Simple",
+                        "expr": {
+                          "source_file_start": "sva_hierarchy_refs.pp.sv",
+                          "source_file_end": "sva_hierarchy_refs.pp.sv",
+                          "source_line_start": 24,
+                          "source_line_end": 24,
+                          "source_column_start": 50,
+                          "source_column_end": 84,
+                          "kind": "Call",
+                          "type": "bit",
+                          "subroutine": "$rose",
+                          "arguments": [
+                            {
+                              "source_file_start": "sva_hierarchy_refs.pp.sv",
+                              "source_file_end": "sva_hierarchy_refs.pp.sv",
+                              "source_line_start": 24,
+                              "source_line_end": 24,
+                              "source_column_start": 56,
+                              "source_column_end": 83,
+                              "kind": "HierarchicalValue",
+                              "type": "logic",
+                              "symbol": "93825092651784 err_o"
+                            }
+                          ]
+                        }
+                      },
+                      "right": {
+                        "source_file_start": "sva_hierarchy_refs.pp.sv",
+                        "source_file_end": "sva_hierarchy_refs.pp.sv",
+                        "source_line_start": 24,
+                        "source_line_end": 24,
+                        "source_column_start": 89,
+                        "source_column_end": 106,
+                        "kind": "SequenceConcat",
+                        "elements": [
+                          {
+                            "sequence": {
+                              "source_file_start": "sva_hierarchy_refs.pp.sv",
+                              "source_file_end": "sva_hierarchy_refs.pp.sv",
+                              "source_line_start": 24,
+                              "source_line_end": 24,
+                              "source_column_start": 97,
+                              "source_column_end": 106,
+                              "kind": "Simple",
+                              "expr": {
+                                "source_file_start": "sva_hierarchy_refs.pp.sv",
+                                "source_file_end": "sva_hierarchy_refs.pp.sv",
+                                "source_line_start": 24,
+                                "source_line_end": 24,
+                                "source_column_start": 98,
+                                "source_column_end": 105,
+                                "kind": "NamedValue",
+                                "type": "logic",
+                                "symbol": "93825092617592 alert_a"
+                              }
+                            },
+                            "min": 0,
+                            "max": 2
+                          }
+                        ]
+                      }
+                    }
+                  },
+                  "ifTrue": {
+                    "source_file_start": "sva_hierarchy_refs.pp.sv",
+                    "source_file_end": "sva_hierarchy_refs.pp.sv",
+                    "source_line_start": 24,
+                    "source_line_end": 24,
+                    "source_column_start": 107,
+                    "source_column_end": 108,
+                    "kind": "Empty"
+                  },
+                  "assertionKind": "Assert"
+                }
+              }
+            },
+            {
+              "name": "b_wptr_silent",
+              "kind": "StatementBlock",
+              "source_file": "sva_hierarchy_refs.pp.sv",
+              "source_line": 26,
+              "source_column": 3,
+              "addr": 93825092616304
+            },
+            {
+              "name": "",
+              "kind": "ProceduralBlock",
+              "source_file": "sva_hierarchy_refs.pp.sv",
+              "source_line": 26,
+              "source_column": 3,
+              "addr": 93825092616200,
+              "procedureKind": "Always",
+              "body": {
+                "source_file_start": "sva_hierarchy_refs.pp.sv",
+                "source_file_end": "sva_hierarchy_refs.pp.sv",
+                "source_line_start": 26,
+                "source_line_end": 26,
+                "source_column_start": 3,
+                "source_column_end": 108,
+                "kind": "Block",
+                "blockKind": "Sequential",
+                "block": "93825092616304 b_wptr_silent",
+                "body": {
+                  "source_file_start": "sva_hierarchy_refs.pp.sv",
+                  "source_file_end": "sva_hierarchy_refs.pp.sv",
+                  "source_line_start": 26,
+                  "source_line_end": 26,
+                  "source_column_start": 3,
+                  "source_column_end": 108,
+                  "kind": "ConcurrentAssertion",
+                  "propertySpec": {
+                    "source_file_start": "sva_hierarchy_refs.pp.sv",
+                    "source_file_end": "sva_hierarchy_refs.pp.sv",
+                    "source_line_start": 26,
+                    "source_line_end": 26,
+                    "source_column_start": 35,
+                    "source_column_end": 106,
+                    "kind": "Clocking",
+                    "clocking": {
+                      "source_file_start": "sva_hierarchy_refs.pp.sv",
+                      "source_file_end": "sva_hierarchy_refs.pp.sv",
+                      "source_line_start": 26,
+                      "source_line_end": 26,
+                      "source_column_start": 37,
+                      "source_column_end": 48,
+                      "kind": "SignalEvent",
+                      "expr": {
+                        "source_file_start": "sva_hierarchy_refs.pp.sv",
+                        "source_file_end": "sva_hierarchy_refs.pp.sv",
+                        "source_line_start": 26,
+                        "source_line_end": 26,
+                        "source_column_start": 45,
+                        "source_column_end": 48,
+                        "kind": "NamedValue",
+                        "type": "logic",
+                        "symbol": "93825092617032 clk"
+                      },
+                      "edge": "PosEdge"
+                    },
+                    "expr": {
+                      "source_file_start": "sva_hierarchy_refs.pp.sv",
+                      "source_file_end": "sva_hierarchy_refs.pp.sv",
+                      "source_line_start": 26,
+                      "source_line_end": 26,
+                      "source_column_start": 50,
+                      "source_column_end": 106,
+                      "kind": "Binary",
+                      "op": "OverlappedImplication",
+                      "left": {
+                        "source_file_start": "sva_hierarchy_refs.pp.sv",
+                        "source_file_end": "sva_hierarchy_refs.pp.sv",
+                        "source_line_start": 26,
+                        "source_line_end": 26,
+                        "source_column_start": 50,
+                        "source_column_end": 84,
+                        "kind": "Simple",
+                        "expr": {
+                          "source_file_start": "sva_hierarchy_refs.pp.sv",
+                          "source_file_end": "sva_hierarchy_refs.pp.sv",
+                          "source_line_start": 26,
+                          "source_line_end": 26,
+                          "source_column_start": 50,
+                          "source_column_end": 84,
+                          "kind": "Call",
+                          "type": "bit",
+                          "subroutine": "$rose",
+                          "arguments": [
+                            {
+                              "source_file_start": "sva_hierarchy_refs.pp.sv",
+                              "source_file_end": "sva_hierarchy_refs.pp.sv",
+                              "source_line_start": 26,
+                              "source_line_end": 26,
+                              "source_column_start": 56,
+                              "source_column_end": 83,
+                              "kind": "HierarchicalValue",
+                              "type": "logic",
+                              "symbol": "93825092672752 err_o"
+                            }
+                          ]
+                        }
+                      },
+                      "right": {
+                        "source_file_start": "sva_hierarchy_refs.pp.sv",
+                        "source_file_end": "sva_hierarchy_refs.pp.sv",
+                        "source_line_start": 26,
+                        "source_line_end": 26,
+                        "source_column_start": 89,
+                        "source_column_end": 106,
+                        "kind": "SequenceConcat",
+                        "elements": [
+                          {
+                            "sequence": {
+                              "source_file_start": "sva_hierarchy_refs.pp.sv",
+                              "source_file_end": "sva_hierarchy_refs.pp.sv",
+                              "source_line_start": 26,
+                              "source_line_end": 26,
+                              "source_column_start": 97,
+                              "source_column_end": 106,
+                              "kind": "Simple",
+                              "expr": {
+                                "source_file_start": "sva_hierarchy_refs.pp.sv",
+                                "source_file_end": "sva_hierarchy_refs.pp.sv",
+                                "source_line_start": 26,
+                                "source_line_end": 26,
+                                "source_column_start": 98,
+                                "source_column_end": 105,
+                                "kind": "NamedValue",
+                                "type": "logic",
+                                "symbol": "93825092617848 alert_b"
+                              }
+                            },
+                            "min": 0,
+                            "max": 2
+                          }
+                        ]
+                      }
+                    }
+                  },
+                  "ifTrue": {
+                    "source_file_start": "sva_hierarchy_refs.pp.sv",
+                    "source_file_end": "sva_hierarchy_refs.pp.sv",
+                    "source_line_start": 26,
+                    "source_line_end": 26,
+                    "source_column_start": 107,
+                    "source_column_end": 108,
+                    "kind": "Empty"
+                  },
+                  "assertionKind": "Assert"
+                }
+              }
+            },
+            {
+              "name": "a_rptr_never",
+              "kind": "StatementBlock",
+              "source_file": "sva_hierarchy_refs.pp.sv",
+              "source_line": 28,
+              "source_column": 3,
+              "addr": 93825092616560
+            },
+            {
+              "name": "",
+              "kind": "ProceduralBlock",
+              "source_file": "sva_hierarchy_refs.pp.sv",
+              "source_line": 28,
+              "source_column": 3,
+              "addr": 93825092616456,
+              "procedureKind": "Always",
+              "body": {
+                "source_file_start": "sva_hierarchy_refs.pp.sv",
+                "source_file_end": "sva_hierarchy_refs.pp.sv",
+                "source_line_start": 28,
+                "source_line_end": 28,
+                "source_column_start": 3,
+                "source_column_end": 107,
+                "kind": "Block",
+                "blockKind": "Sequential",
+                "block": "93825092616560 a_rptr_never",
+                "body": {
+                  "source_file_start": "sva_hierarchy_refs.pp.sv",
+                  "source_file_end": "sva_hierarchy_refs.pp.sv",
+                  "source_line_start": 28,
+                  "source_line_end": 28,
+                  "source_column_start": 3,
+                  "source_column_end": 107,
+                  "kind": "ConcurrentAssertion",
+                  "propertySpec": {
+                    "source_file_start": "sva_hierarchy_refs.pp.sv",
+                    "source_file_end": "sva_hierarchy_refs.pp.sv",
+                    "source_line_start": 28,
+                    "source_line_end": 28,
+                    "source_column_start": 34,
+                    "source_column_end": 105,
+                    "kind": "Clocking",
+                    "clocking": {
+                      "source_file_start": "sva_hierarchy_refs.pp.sv",
+                      "source_file_end": "sva_hierarchy_refs.pp.sv",
+                      "source_line_start": 28,
+                      "source_line_end": 28,
+                      "source_column_start": 36,
+                      "source_column_end": 47,
+                      "kind": "SignalEvent",
+                      "expr": {
+                        "source_file_start": "sva_hierarchy_refs.pp.sv",
+                        "source_file_end": "sva_hierarchy_refs.pp.sv",
+                        "source_line_start": 28,
+                        "source_line_end": 28,
+                        "source_column_start": 44,
+                        "source_column_end": 47,
+                        "kind": "NamedValue",
+                        "type": "logic",
+                        "symbol": "93825092617032 clk"
+                      },
+                      "edge": "PosEdge"
+                    },
+                    "expr": {
+                      "source_file_start": "sva_hierarchy_refs.pp.sv",
+                      "source_file_end": "sva_hierarchy_refs.pp.sv",
+                      "source_line_start": 28,
+                      "source_line_end": 28,
+                      "source_column_start": 49,
+                      "source_column_end": 105,
+                      "kind": "Binary",
+                      "op": "OverlappedImplication",
+                      "left": {
+                        "source_file_start": "sva_hierarchy_refs.pp.sv",
+                        "source_file_end": "sva_hierarchy_refs.pp.sv",
+                        "source_line_start": 28,
+                        "source_line_end": 28,
+                        "source_column_start": 49,
+                        "source_column_end": 83,
+                        "kind": "Simple",
+                        "expr": {
+                          "source_file_start": "sva_hierarchy_refs.pp.sv",
+                          "source_file_end": "sva_hierarchy_refs.pp.sv",
+                          "source_line_start": 28,
+                          "source_line_end": 28,
+                          "source_column_start": 49,
+                          "source_column_end": 83,
+                          "kind": "Call",
+                          "type": "bit",
+                          "subroutine": "$rose",
+                          "arguments": [
+                            {
+                              "source_file_start": "sva_hierarchy_refs.pp.sv",
+                              "source_file_end": "sva_hierarchy_refs.pp.sv",
+                              "source_line_start": 28,
+                              "source_line_end": 28,
+                              "source_column_start": 55,
+                              "source_column_end": 82,
+                              "kind": "HierarchicalValue",
+                              "type": "logic",
+                              "symbol": "93825092654800 err_o"
+                            }
+                          ]
+                        }
+                      },
+                      "right": {
+                        "source_file_start": "sva_hierarchy_refs.pp.sv",
+                        "source_file_end": "sva_hierarchy_refs.pp.sv",
+                        "source_line_start": 28,
+                        "source_line_end": 28,
+                        "source_column_start": 88,
+                        "source_column_end": 105,
+                        "kind": "SequenceConcat",
+                        "elements": [
+                          {
+                            "sequence": {
+                              "source_file_start": "sva_hierarchy_refs.pp.sv",
+                              "source_file_end": "sva_hierarchy_refs.pp.sv",
+                              "source_line_start": 28,
+                              "source_line_end": 28,
+                              "source_column_start": 96,
+                              "source_column_end": 105,
+                              "kind": "Simple",
+                              "expr": {
+                                "source_file_start": "sva_hierarchy_refs.pp.sv",
+                                "source_file_end": "sva_hierarchy_refs.pp.sv",
+                                "source_line_start": 28,
+                                "source_line_end": 28,
+                                "source_column_start": 97,
+                                "source_column_end": 104,
+                                "kind": "NamedValue",
+                                "type": "logic",
+                                "symbol": "93825092617848 alert_b"
+                              }
+                            },
+                            "min": 0,
+                            "max": 2
+                          }
+                        ]
+                      }
+                    }
+                  },
+                  "ifTrue": {
+                    "source_file_start": "sva_hierarchy_refs.pp.sv",
+                    "source_file_end": "sva_hierarchy_refs.pp.sv",
+                    "source_line_start": 28,
+                    "source_line_end": 28,
+                    "source_column_start": 106,
+                    "source_column_end": 107,
+                    "kind": "Empty"
+                  },
+                  "assertionKind": "Assert"
+                }
+              }
+            },
+            {
+              "name": "gen_ep_chk",
+              "kind": "GenerateBlockArray",
+              "source_file": "sva_hierarchy_refs.pp.sv",
+              "source_line": 29,
+              "source_column": 42,
+              "addr": 93825092628520,
+              "members": [
+                {
+                  "name": "i",
+                  "kind": "Genvar",
+                  "source_file": "sva_hierarchy_refs.pp.sv",
+                  "source_line": 29,
+                  "source_column": 15,
+                  "addr": 93825092628720
+                },
+                {
+                  "name": "",
+                  "kind": "GenerateBlock",
+                  "source_file": "sva_hierarchy_refs.pp.sv",
+                  "source_line": 29,
+                  "source_column": 42,
+                  "addr": 93825092629640,
+                  "members": [
+                    {
+                      "name": "i",
+                      "kind": "Parameter",
+                      "source_file": "sva_hierarchy_refs.pp.sv",
+                      "source_line": 29,
+                      "source_column": 15,
+                      "addr": 93825092629784,
+                      "type": "integer",
+                      "value": "0",
+                      "isLocal": true,
+                      "isPort": false,
+                      "isBody": true
+                    },
+                    {
+                      "name": "ep_alerts",
+                      "kind": "StatementBlock",
+                      "source_file": "sva_hierarchy_refs.pp.sv",
+                      "source_line": 31,
+                      "source_column": 3,
+                      "addr": 93825092630056
+                    },
+                    {
+                      "name": "",
+                      "kind": "ProceduralBlock",
+                      "source_file": "sva_hierarchy_refs.pp.sv",
+                      "source_line": 31,
+                      "source_column": 3,
+                      "addr": 93825092629952,
+                      "procedureKind": "Always",
+                      "body": {
+                        "source_file_start": "sva_hierarchy_refs.pp.sv",
+                        "source_file_end": "sva_hierarchy_refs.pp.sv",
+                        "source_line_start": 31,
+                        "source_line_end": 31,
+                        "source_column_start": 3,
+                        "source_column_end": 99,
+                        "kind": "Block",
+                        "blockKind": "Sequential",
+                        "block": "93825092630056 ep_alerts",
+                        "body": {
+                          "source_file_start": "sva_hierarchy_refs.pp.sv",
+                          "source_file_end": "sva_hierarchy_refs.pp.sv",
+                          "source_line_start": 31,
+                          "source_line_end": 31,
+                          "source_column_start": 3,
+                          "source_column_end": 99,
+                          "kind": "ConcurrentAssertion",
+                          "propertySpec": {
+                            "source_file_start": "sva_hierarchy_refs.pp.sv",
+                            "source_file_end": "sva_hierarchy_refs.pp.sv",
+                            "source_line_start": 31,
+                            "source_line_end": 31,
+                            "source_column_start": 31,
+                            "source_column_end": 97,
+                            "kind": "Clocking",
+                            "clocking": {
+                              "source_file_start": "sva_hierarchy_refs.pp.sv",
+                              "source_file_end": "sva_hierarchy_refs.pp.sv",
+                              "source_line_start": 31,
+                              "source_line_end": 31,
+                              "source_column_start": 33,
+                              "source_column_end": 44,
+                              "kind": "SignalEvent",
+                              "expr": {
+                                "source_file_start": "sva_hierarchy_refs.pp.sv",
+                                "source_file_end": "sva_hierarchy_refs.pp.sv",
+                                "source_line_start": 31,
+                                "source_line_end": 31,
+                                "source_column_start": 41,
+                                "source_column_end": 44,
+                                "kind": "NamedValue",
+                                "type": "logic",
+                                "symbol": "93825092617032 clk"
+                              },
+                              "edge": "PosEdge"
+                            },
+                            "expr": {
+                              "source_file_start": "sva_hierarchy_refs.pp.sv",
+                              "source_file_end": "sva_hierarchy_refs.pp.sv",
+                              "source_line_start": 31,
+                              "source_line_end": 31,
+                              "source_column_start": 46,
+                              "source_column_end": 97,
+                              "kind": "Binary",
+                              "op": "OverlappedImplication",
+                              "left": {
+                                "source_file_start": "sva_hierarchy_refs.pp.sv",
+                                "source_file_end": "sva_hierarchy_refs.pp.sv",
+                                "source_line_start": 31,
+                                "source_line_end": 31,
+                                "source_column_start": 46,
+                                "source_column_end": 73,
+                                "kind": "Simple",
+                                "expr": {
+                                  "source_file_start": "sva_hierarchy_refs.pp.sv",
+                                  "source_file_end": "sva_hierarchy_refs.pp.sv",
+                                  "source_line_start": 31,
+                                  "source_line_end": 31,
+                                  "source_column_start": 46,
+                                  "source_column_end": 73,
+                                  "kind": "Call",
+                                  "type": "bit",
+                                  "subroutine": "$rose",
+                                  "arguments": [
+                                    {
+                                      "source_file_start": "sva_hierarchy_refs.pp.sv",
+                                      "source_file_end": "sva_hierarchy_refs.pp.sv",
+                                      "source_line_start": 31,
+                                      "source_line_end": 31,
+                                      "source_column_start": 52,
+                                      "source_column_end": 72,
+                                      "kind": "HierarchicalValue",
+                                      "type": "logic",
+                                      "symbol": "93825092661064 err_o"
+                                    }
+                                  ]
+                                }
+                              },
+                              "right": {
+                                "source_file_start": "sva_hierarchy_refs.pp.sv",
+                                "source_file_end": "sva_hierarchy_refs.pp.sv",
+                                "source_line_start": 31,
+                                "source_line_end": 31,
+                                "source_column_start": 78,
+                                "source_column_end": 97,
+                                "kind": "SequenceConcat",
+                                "elements": [
+                                  {
+                                    "sequence": {
+                                      "source_file_start": "sva_hierarchy_refs.pp.sv",
+                                      "source_file_end": "sva_hierarchy_refs.pp.sv",
+                                      "source_line_start": 31,
+                                      "source_line_end": 31,
+                                      "source_column_start": 86,
+                                      "source_column_end": 97,
+                                      "kind": "Simple",
+                                      "expr": {
+                                        "source_file_start": "sva_hierarchy_refs.pp.sv",
+                                        "source_file_end": "sva_hierarchy_refs.pp.sv",
+                                        "source_line_start": 31,
+                                        "source_line_end": 31,
+                                        "source_column_start": 87,
+                                        "source_column_end": 96,
+                                        "kind": "ElementSelect",
+                                        "type": "logic",
+                                        "value": {
+                                          "source_file_start": "sva_hierarchy_refs.pp.sv",
+                                          "source_file_end": "sva_hierarchy_refs.pp.sv",
+                                          "source_line_start": 31,
+                                          "source_line_end": 31,
+                                          "source_column_start": 87,
+                                          "source_column_end": 93,
+                                          "kind": "NamedValue",
+                                          "type": "logic[1:0]",
+                                          "symbol": "93825092615680 ep_err"
+                                        },
+                                        "selector": {
+                                          "source_file_start": "sva_hierarchy_refs.pp.sv",
+                                          "source_file_end": "sva_hierarchy_refs.pp.sv",
+                                          "source_line_start": 31,
+                                          "source_line_end": 31,
+                                          "source_column_start": 94,
+                                          "source_column_end": 95,
+                                          "kind": "NamedValue",
+                                          "type": "integer",
+                                          "symbol": "93825092629784 i",
+                                          "constant": "0"
+                                        }
+                                      }
+                                    },
+                                    "min": 0,
+                                    "max": 2
+                                  }
+                                ]
+                              }
+                            }
+                          },
+                          "ifTrue": {
+                            "source_file_start": "sva_hierarchy_refs.pp.sv",
+                            "source_file_end": "sva_hierarchy_refs.pp.sv",
+                            "source_line_start": 31,
+                            "source_line_end": 31,
+                            "source_column_start": 98,
+                            "source_column_end": 99,
+                            "kind": "Empty"
+                          },
+                          "assertionKind": "Assert"
+                        }
+                      }
+                    }
+                  ],
+                  "constructIndex": 0,
+                  "isUninstantiated": false,
+                  "branchKind": "LoopIteration"
+                },
+                {
+                  "name": "",
+                  "kind": "GenerateBlock",
+                  "source_file": "sva_hierarchy_refs.pp.sv",
+                  "source_line": 29,
+                  "source_column": 42,
+                  "addr": 93825092641232,
+                  "members": [
+                    {
+                      "name": "i",
+                      "kind": "Parameter",
+                      "source_file": "sva_hierarchy_refs.pp.sv",
+                      "source_line": 29,
+                      "source_column": 15,
+                      "addr": 93825092641376,
+                      "type": "integer",
+                      "value": "1",
+                      "isLocal": true,
+                      "isPort": false,
+                      "isBody": true
+                    },
+                    {
+                      "name": "ep_alerts",
+                      "kind": "StatementBlock",
+                      "source_file": "sva_hierarchy_refs.pp.sv",
+                      "source_line": 31,
+                      "source_column": 3,
+                      "addr": 93825092641648
+                    },
+                    {
+                      "name": "",
+                      "kind": "ProceduralBlock",
+                      "source_file": "sva_hierarchy_refs.pp.sv",
+                      "source_line": 31,
+                      "source_column": 3,
+                      "addr": 93825092641544,
+                      "procedureKind": "Always",
+                      "body": {
+                        "source_file_start": "sva_hierarchy_refs.pp.sv",
+                        "source_file_end": "sva_hierarchy_refs.pp.sv",
+                        "source_line_start": 31,
+                        "source_line_end": 31,
+                        "source_column_start": 3,
+                        "source_column_end": 99,
+                        "kind": "Block",
+                        "blockKind": "Sequential",
+                        "block": "93825092641648 ep_alerts",
+                        "body": {
+                          "source_file_start": "sva_hierarchy_refs.pp.sv",
+                          "source_file_end": "sva_hierarchy_refs.pp.sv",
+                          "source_line_start": 31,
+                          "source_line_end": 31,
+                          "source_column_start": 3,
+                          "source_column_end": 99,
+                          "kind": "ConcurrentAssertion",
+                          "propertySpec": {
+                            "source_file_start": "sva_hierarchy_refs.pp.sv",
+                            "source_file_end": "sva_hierarchy_refs.pp.sv",
+                            "source_line_start": 31,
+                            "source_line_end": 31,
+                            "source_column_start": 31,
+                            "source_column_end": 97,
+                            "kind": "Clocking",
+                            "clocking": {
+                              "source_file_start": "sva_hierarchy_refs.pp.sv",
+                              "source_file_end": "sva_hierarchy_refs.pp.sv",
+                              "source_line_start": 31,
+                              "source_line_end": 31,
+                              "source_column_start": 33,
+                              "source_column_end": 44,
+                              "kind": "SignalEvent",
+                              "expr": {
+                                "source_file_start": "sva_hierarchy_refs.pp.sv",
+                                "source_file_end": "sva_hierarchy_refs.pp.sv",
+                                "source_line_start": 31,
+                                "source_line_end": 31,
+                                "source_column_start": 41,
+                                "source_column_end": 44,
+                                "kind": "NamedValue",
+                                "type": "logic",
+                                "symbol": "93825092617032 clk"
+                              },
+                              "edge": "PosEdge"
+                            },
+                            "expr": {
+                              "source_file_start": "sva_hierarchy_refs.pp.sv",
+                              "source_file_end": "sva_hierarchy_refs.pp.sv",
+                              "source_line_start": 31,
+                              "source_line_end": 31,
+                              "source_column_start": 46,
+                              "source_column_end": 97,
+                              "kind": "Binary",
+                              "op": "OverlappedImplication",
+                              "left": {
+                                "source_file_start": "sva_hierarchy_refs.pp.sv",
+                                "source_file_end": "sva_hierarchy_refs.pp.sv",
+                                "source_line_start": 31,
+                                "source_line_end": 31,
+                                "source_column_start": 46,
+                                "source_column_end": 73,
+                                "kind": "Simple",
+                                "expr": {
+                                  "source_file_start": "sva_hierarchy_refs.pp.sv",
+                                  "source_file_end": "sva_hierarchy_refs.pp.sv",
+                                  "source_line_start": 31,
+                                  "source_line_end": 31,
+                                  "source_column_start": 46,
+                                  "source_column_end": 73,
+                                  "kind": "Call",
+                                  "type": "bit",
+                                  "subroutine": "$rose",
+                                  "arguments": [
+                                    {
+                                      "source_file_start": "sva_hierarchy_refs.pp.sv",
+                                      "source_file_end": "sva_hierarchy_refs.pp.sv",
+                                      "source_line_start": 31,
+                                      "source_line_end": 31,
+                                      "source_column_start": 52,
+                                      "source_column_end": 72,
+                                      "kind": "HierarchicalValue",
+                                      "type": "logic",
+                                      "symbol": "93825092666224 err_o"
+                                    }
+                                  ]
+                                }
+                              },
+                              "right": {
+                                "source_file_start": "sva_hierarchy_refs.pp.sv",
+                                "source_file_end": "sva_hierarchy_refs.pp.sv",
+                                "source_line_start": 31,
+                                "source_line_end": 31,
+                                "source_column_start": 78,
+                                "source_column_end": 97,
+                                "kind": "SequenceConcat",
+                                "elements": [
+                                  {
+                                    "sequence": {
+                                      "source_file_start": "sva_hierarchy_refs.pp.sv",
+                                      "source_file_end": "sva_hierarchy_refs.pp.sv",
+                                      "source_line_start": 31,
+                                      "source_line_end": 31,
+                                      "source_column_start": 86,
+                                      "source_column_end": 97,
+                                      "kind": "Simple",
+                                      "expr": {
+                                        "source_file_start": "sva_hierarchy_refs.pp.sv",
+                                        "source_file_end": "sva_hierarchy_refs.pp.sv",
+                                        "source_line_start": 31,
+                                        "source_line_end": 31,
+                                        "source_column_start": 87,
+                                        "source_column_end": 96,
+                                        "kind": "ElementSelect",
+                                        "type": "logic",
+                                        "value": {
+                                          "source_file_start": "sva_hierarchy_refs.pp.sv",
+                                          "source_file_end": "sva_hierarchy_refs.pp.sv",
+                                          "source_line_start": 31,
+                                          "source_line_end": 31,
+                                          "source_column_start": 87,
+                                          "source_column_end": 93,
+                                          "kind": "NamedValue",
+                                          "type": "logic[1:0]",
+                                          "symbol": "93825092615680 ep_err"
+                                        },
+                                        "selector": {
+                                          "source_file_start": "sva_hierarchy_refs.pp.sv",
+                                          "source_file_end": "sva_hierarchy_refs.pp.sv",
+                                          "source_line_start": 31,
+                                          "source_line_end": 31,
+                                          "source_column_start": 94,
+                                          "source_column_end": 95,
+                                          "kind": "NamedValue",
+                                          "type": "integer",
+                                          "symbol": "93825092641376 i",
+                                          "constant": "1"
+                                        }
+                                      }
+                                    },
+                                    "min": 0,
+                                    "max": 2
+                                  }
+                                ]
+                              }
+                            }
+                          },
+                          "ifTrue": {
+                            "source_file_start": "sva_hierarchy_refs.pp.sv",
+                            "source_file_end": "sva_hierarchy_refs.pp.sv",
+                            "source_line_start": 31,
+                            "source_line_end": 31,
+                            "source_column_start": 98,
+                            "source_column_end": 99,
+                            "kind": "Empty"
+                          },
+                          "assertionKind": "Assert"
+                        }
+                      }
+                    }
+                  ],
+                  "constructIndex": 1,
+                  "isUninstantiated": false,
+                  "branchKind": "LoopIteration"
+                }
+              ],
+              "constructIndex": 2,
+              "initialExpression": {
+                "source_file_start": "sva_hierarchy_refs.pp.sv",
+                "source_file_end": "sva_hierarchy_refs.pp.sv",
+                "source_line_start": 29,
+                "source_line_end": 29,
+                "source_column_start": 19,
+                "source_column_end": 20,
+                "kind": "Conversion",
+                "type": "integer",
+                "operand": {
+                  "source_file_start": "sva_hierarchy_refs.pp.sv",
+                  "source_file_end": "sva_hierarchy_refs.pp.sv",
+                  "source_line_start": 29,
+                  "source_line_end": 29,
+                  "source_column_start": 19,
+                  "source_column_end": 20,
+                  "kind": "IntegerLiteral",
+                  "type": "int",
+                  "value": "0",
+                  "constant": "0"
+                },
+                "constant": "0"
+              },
+              "stopExpression": {
+                "source_file_start": "sva_hierarchy_refs.pp.sv",
+                "source_file_end": "sva_hierarchy_refs.pp.sv",
+                "source_line_start": 29,
+                "source_line_end": 29,
+                "source_column_start": 22,
+                "source_column_end": 27,
+                "kind": "BinaryOp",
+                "type": "logic",
+                "op": "LessThan",
+                "left": {
+                  "source_file_start": "sva_hierarchy_refs.pp.sv",
+                  "source_file_end": "sva_hierarchy_refs.pp.sv",
+                  "source_line_start": 29,
+                  "source_line_end": 29,
+                  "source_column_start": 22,
+                  "source_column_end": 23,
+                  "kind": "NamedValue",
+                  "type": "integer",
+                  "symbol": "93825092629072 i"
+                },
+                "right": {
+                  "source_file_start": "sva_hierarchy_refs.pp.sv",
+                  "source_file_end": "sva_hierarchy_refs.pp.sv",
+                  "source_line_start": 29,
+                  "source_line_end": 29,
+                  "source_column_start": 26,
+                  "source_column_end": 27,
+                  "kind": "Conversion",
+                  "type": "integer",
+                  "operand": {
+                    "source_file_start": "sva_hierarchy_refs.pp.sv",
+                    "source_file_end": "sva_hierarchy_refs.pp.sv",
+                    "source_line_start": 29,
+                    "source_line_end": 29,
+                    "source_column_start": 26,
+                    "source_column_end": 27,
+                    "kind": "IntegerLiteral",
+                    "type": "int",
+                    "value": "2",
+                    "constant": "2"
+                  },
+                  "constant": "2"
+                }
+              },
+              "iterExpression": {
+                "source_file_start": "sva_hierarchy_refs.pp.sv",
+                "source_file_end": "sva_hierarchy_refs.pp.sv",
+                "source_line_start": 29,
+                "source_line_end": 29,
+                "source_column_start": 29,
+                "source_column_end": 32,
+                "kind": "UnaryOp",
+                "type": "integer",
+                "op": "Postincrement",
+                "operand": {
+                  "source_file_start": "sva_hierarchy_refs.pp.sv",
+                  "source_file_end": "sva_hierarchy_refs.pp.sv",
+                  "source_line_start": 29,
+                  "source_line_end": 29,
+                  "source_column_start": 29,
+                  "source_column_end": 30,
+                  "kind": "NamedValue",
+                  "type": "integer",
+                  "symbol": "93825092629072 i"
+                }
+              },
+              "loopVariable": "93825092629072 i"
+            }
+          ],
+          "definition": "93825092623360 top"
+        },
+        "connections": [
+        ]
+      }
+    ]
+  },
+  "definitions": [
+    {
+      "name": "cnt",
+      "kind": "Definition",
+      "source_file": "sva_hierarchy_refs.pp.sv",
+      "source_line": 2,
+      "source_column": 8,
+      "addr": 93825092495232,
+      "defaultNetType": "93825092544016 wire",
+      "definitionKind": "Module",
+      "defaultLifetime": "Static",
+      "unconnectedDrive": "None",
+      "cellDefine": false
+    },
+    {
+      "name": "fifo",
+      "kind": "Definition",
+      "source_file": "sva_hierarchy_refs.pp.sv",
+      "source_line": 7,
+      "source_column": 8,
+      "addr": 93825092505520,
+      "defaultNetType": "93825092544016 wire",
+      "definitionKind": "Module",
+      "defaultLifetime": "Static",
+      "unconnectedDrive": "None",
+      "cellDefine": false
+    },
+    {
+      "name": "top",
+      "kind": "Definition",
+      "source_file": "sva_hierarchy_refs.pp.sv",
+      "source_line": 13,
+      "source_column": 8,
+      "addr": 93825092623360,
+      "defaultNetType": "93825092544016 wire",
+      "definitionKind": "Module",
+      "defaultLifetime": "Static",
+      "unconnectedDrive": "None",
+      "cellDefine": false
+    }
+  ]
+}
