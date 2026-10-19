@@ -13,13 +13,121 @@
 //! properties all preserved). Optional symbols are emitted when present. The
 //! output is a valid BTOR2 file consumable by any conforming tool.
 
-use super::ast::{Btor2File, ConstValue, Line, Node, Operand, Sort};
+use super::ast::{Btor2File, ConstValue, Line, Nid, Node, Operand, Sort};
 
 /// Serialise `file` to BTOR2 text (one node per line, declaration order, trailing newline).
 pub fn emit_btor2(file: &Btor2File) -> String {
     let mut out = String::new();
     for line in &file.lines {
         emit_line(line, &mut out);
+        out.push('\n');
+    }
+    out
+}
+
+/// Plan 4 / PR D2 (mununu#736) — the BTOR2 handed to a SUBPROCESS member (btormc, pono, rIC3),
+/// renumbered so every constant precedes every state. btor2tools' parser — shared by btormc and
+/// pono — requires an `init` value's id to be smaller than the state's, and mununu's automatic
+/// reset-value `init` (mununu#578) appends its constant after the yosys output: both members
+/// rejected every `sv verify-auto` design (`state id must be greater than id of second operand`)
+/// and abstained in ~40 ms, unnoticed because mununu's own parser and rIC3 are lenient.
+///
+/// Order: sorts, then constants (they reference only sorts), then everything else in declaration
+/// order; ids are reassigned 1..n in that order and every reference — a sort, a state, an operand
+/// with its sign — is rewritten. A renumbering: the design's semantics, symbols and immediates are
+/// unchanged, so a verdict on this text IS a verdict on the design. An `init` whose value is an
+/// expression rather than a constant keeps its relative order and may still be rejected; no yosys
+/// or mununu path emits one.
+pub fn emit_btor2_for_subprocess(file: &Btor2File) -> String {
+    use std::collections::HashMap;
+    let rank = |l: &Line| match l.node {
+        Node::Sort { .. } => 0,
+        Node::Const { .. } => 1,
+        _ => 2,
+    };
+    let mut order: Vec<usize> = Vec::with_capacity(file.lines.len());
+    for pass in 0..3 {
+        order.extend(
+            file.lines
+                .iter()
+                .enumerate()
+                .filter(|(_, l)| rank(l) == pass)
+                .map(|(i, _)| i),
+        );
+    }
+    let mut map: HashMap<Nid, Nid> = HashMap::with_capacity(order.len());
+    for (new, &i) in order.iter().enumerate() {
+        map.insert(file.lines[i].nid, new as Nid + 1);
+    }
+    let re = |n: Nid| map.get(&n).copied().unwrap_or(n);
+    let rop = |o: Operand| Operand(if o.0 < 0 { -re(-o.0) } else { re(o.0) });
+    let mut out = String::new();
+    for &i in &order {
+        let l = &file.lines[i];
+        let node = match &l.node {
+            Node::Sort { sort } => Node::Sort {
+                sort: match sort {
+                    Sort::BitVec { width } => Sort::BitVec { width: *width },
+                    Sort::Array { index, element } => Sort::Array {
+                        index: re(*index),
+                        element: re(*element),
+                    },
+                },
+            },
+            Node::Input { sort, symbol } => Node::Input {
+                sort: re(*sort),
+                symbol: symbol.clone(),
+            },
+            Node::State { sort, symbol } => Node::State {
+                sort: re(*sort),
+                symbol: symbol.clone(),
+            },
+            Node::Const { sort, value } => Node::Const {
+                sort: re(*sort),
+                value: value.clone(),
+            },
+            Node::Op {
+                sort,
+                op,
+                args,
+                symbol,
+            } => Node::Op {
+                sort: re(*sort),
+                op: *op,
+                args: args.iter().map(|a| rop(*a)).collect(),
+                symbol: symbol.clone(),
+            },
+            Node::Init { sort, state, value } => Node::Init {
+                sort: re(*sort),
+                state: re(*state),
+                value: rop(*value),
+            },
+            Node::Next { sort, state, value } => Node::Next {
+                sort: re(*sort),
+                state: re(*state),
+                value: rop(*value),
+            },
+            Node::Bad { signal } => Node::Bad {
+                signal: rop(*signal),
+            },
+            Node::Constraint { signal } => Node::Constraint {
+                signal: rop(*signal),
+            },
+            Node::Fair { signal } => Node::Fair {
+                signal: rop(*signal),
+            },
+            Node::Output { signal, symbol } => Node::Output {
+                signal: rop(*signal),
+                symbol: symbol.clone(),
+            },
+            Node::Justice { signals } => Node::Justice {
+                signals: signals.iter().map(|s| rop(*s)).collect(),
+            },
+        };
+        let mut line = l.clone();
+        line.nid = re(l.nid);
+        line.node = node;
+        emit_line(&line, &mut out);
         out.push('\n');
     }
     out
@@ -127,6 +235,79 @@ fn emit_symbol(symbol: &Option<String>, out: &mut String) {
 mod tests {
     use super::*;
     use crate::adapter::btor2::parser;
+
+    /// mununu#736 — the subprocess emission puts every constant before every state, so an `init`
+    /// appended after the yosys output (mununu's reset-value establishment) parses under btor2tools'
+    /// rule (value id < state id); the renumbering keeps the design: same verdict on the native
+    /// engine, symbols and negated operands preserved, and it re-parses.
+    #[test]
+    fn subprocess_emission_hoists_constants_before_states() {
+        // a yosys-shaped file with the reset init appended last (constant AFTER the state)
+        const APPENDED_INIT: &str = "1 sort bitvec 1\n2 input 1 en\n3 state 1 q\n4 not 1 3\n\
+                                     5 ite 1 2 4 3\n6 next 1 3 5\n7 one 1\n8 eq 1 3 7\n9 bad 8\n\
+                                     10 constd 1 0\n11 init 1 3 10\n";
+        let file = crate::adapter::btor2::parser::parse(APPENDED_INIT).expect("parse");
+        let text = emit_btor2_for_subprocess(&file);
+        let re = crate::adapter::btor2::parser::parse(&text).expect("the renumbered text parses");
+        for l in &re.lines {
+            if let Node::Init { state, value, .. } = &l.node {
+                assert!(
+                    value.nid() < *state,
+                    "init value {} must precede state {} in:\n{text}",
+                    value.nid(),
+                    state
+                );
+            }
+        }
+        assert!(text.contains(" state 1 q"), "symbols survive: {text}");
+        assert!(text.contains(" input 1 en"));
+        // ids are dense 1..n in emission order, sorts first, then constants
+        let nids: Vec<i64> = re.lines.iter().map(|l| l.nid).collect();
+        assert_eq!(nids, (1..=nids.len() as i64).collect::<Vec<_>>());
+        assert!(matches!(re.lines[0].node, Node::Sort { .. }));
+        assert!(matches!(re.lines[1].node, Node::Const { .. }));
+        assert!(matches!(re.lines[2].node, Node::Const { .. }));
+        // same design: the native engine's verdict is unchanged (q toggles while en, starts 0 → q==1 reachable)
+        use crate::adapter::btor2::native_bmc;
+        let before = native_bmc::decide_bad_safety_cancellable(&file, 20, Some(5_000), None)
+            .expect("native");
+        let after =
+            native_bmc::decide_bad_safety_cancellable(&re, 20, Some(5_000), None).expect("native");
+        assert!(
+            matches!(
+                before,
+                crate::adapter::btor2::native_bmc::SafetyVerdict::Violated { .. }
+            ),
+            "{before:?}"
+        );
+        assert!(
+            matches!(
+                after,
+                crate::adapter::btor2::native_bmc::SafetyVerdict::Violated { .. }
+            ),
+            "{after:?}"
+        );
+    }
+
+    /// A negated operand (`-N`, BTOR2's bit-not shorthand) keeps its sign through the renumbering.
+    #[test]
+    fn subprocess_emission_keeps_negated_operands() {
+        const NEG: &str =
+            "1 sort bitvec 1\n2 state 1 s\n3 zero 1\n4 init 1 2 3\n5 next 1 2 -2\n6 bad -2\n";
+        let file = crate::adapter::btor2::parser::parse(NEG).expect("parse");
+        let text = emit_btor2_for_subprocess(&file);
+        let re = crate::adapter::btor2::parser::parse(&text).expect("re-parse");
+        let negs = re
+            .lines
+            .iter()
+            .filter(|l| match &l.node {
+                Node::Next { value, .. } => value.is_negated(),
+                Node::Bad { signal } => signal.is_negated(),
+                _ => false,
+            })
+            .count();
+        assert_eq!(negs, 2, "{text}");
+    }
 
     /// `parse ∘ emit ∘ parse` is a fixed point: emitting a parsed file and
     /// re-parsing yields an AST that re-emits identically.

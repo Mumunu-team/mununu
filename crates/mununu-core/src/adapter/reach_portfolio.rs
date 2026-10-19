@@ -67,6 +67,7 @@ use crate::adapter::btor2::native_spacer;
 use crate::adapter::btor2::symbolic_bitblast::exact_bad_reachable;
 use crate::adapter::btormc::{self, McVerdict};
 use crate::adapter::pono;
+use crate::adapter::ric3;
 
 /// The merged reachability verdict.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -137,6 +138,8 @@ pub(crate) struct Members {
     pub interp: Option<bool>,
     pub btormc: Option<McVerdict>,
     pub pono: Option<McVerdict>,
+    /// Plan 4 / PR D2 — rIC3 `-e ic3`, bit-level IC3/PDR over the emitted BTOR2 (mununu#736).
+    pub ric3: Option<McVerdict>,
     /// `(member, reason)` for every member that refused the design (see [`ReachOutcome::refused`]).
     pub refused: Vec<(&'static str, String)>,
 }
@@ -416,7 +419,7 @@ fn collect(m: Members) -> ReachOutcome {
         }
     }
     // Subprocess members report an `McVerdict`.
-    for (name, v) in [("btormc", m.btormc), ("pono", m.pono)] {
+    for (name, v) in [("btormc", m.btormc), ("pono", m.pono), ("ric3", m.ric3)] {
         match v {
             Some(McVerdict::Violated) => reachable_by.push(name),
             Some(McVerdict::Safe) => unreachable_by.push(name),
@@ -450,10 +453,12 @@ fn collect(m: Members) -> ReachOutcome {
     // fixed engine order so two runs of one design produce one outcome (the drivers' equality
     // tests compare whole outcomes).
     let rank = |member: &str| {
-        ["exact", "native", "spacer", "interp", "btormc", "pono"]
-            .iter()
-            .position(|m| *m == member)
-            .unwrap_or(usize::MAX)
+        [
+            "exact", "native", "spacer", "interp", "btormc", "pono", "ric3",
+        ]
+        .iter()
+        .position(|m| *m == member)
+        .unwrap_or(usize::MAX)
     };
     let mut refused = m.refused;
     refused.sort_by(|(a, _), (b, _)| rank(a).cmp(&rank(b)).then_with(|| a.cmp(b)));
@@ -461,9 +466,9 @@ fn collect(m: Members) -> ReachOutcome {
     out
 }
 
-/// Decide `bad`-reachability of `file` across all six engines — the exact BDD
+/// Decide `bad`-reachability of `file` across all seven engines — the exact BDD
 /// engine, the in-house native (BMC + k-induction), SPACER and interpolation
-/// engines, and the btormc and Pono subprocess members — merged under the
+/// engines, and the btormc, Pono and rIC3 subprocess members — merged under the
 /// differential-oracle discipline, with the subprocess members' default budget
 /// ([`btormc::DEFAULT_TIMEOUT`]).
 ///
@@ -607,6 +612,29 @@ pub fn decide_reach_portfolio_cancellable(
             }
             v
         });
+        // Plan 4 / PR D2 (mununu#736) — rIC3's bit-level IC3: the member that proves the
+        // inductive-invariant safety class (OpenTitan's duplicated-counter fault-flag chains, which
+        // k-induction cannot close from a free step state and SPACER does not within the slice).
+        // Trusted like btormc / pono: it reads the same emitted BTOR2 and answers with a certificate-
+        // capable verdict; the HWMCC adjudication ran clean before it was promoted.
+        let ric3_h = scope.spawn(move || {
+            let _g = crate::adapter::run_budget::enter(budget);
+            let v = timed("ric3", || {
+                ric3::decide_via_ric3(
+                    file,
+                    ric3::DEFAULT_ENGINE,
+                    subprocess_timeout,
+                    Some(decided),
+                )
+                .map(Some)
+                .map_err(|e| e.message)
+            });
+            let v = settle(refused, "ric3", v);
+            if matches!(v, Some(McVerdict::Violated) | Some(McVerdict::Safe)) {
+                decided.store(true, Relaxed);
+            }
+            v
+        });
         // The native and SPACER engines are in-process Z3 work — each on its own
         // thread so it overlaps the exact engine + the subprocess members rather than
         // serialising.
@@ -656,6 +684,7 @@ pub fn decide_reach_portfolio_cancellable(
         let spacer = spacer_h.join().unwrap_or(None);
         let btormc = btormc_h.join().unwrap_or(None);
         let pono = pono_h.join().unwrap_or(None);
+        let ric3 = ric3_h.join().unwrap_or(None);
         let interp = interp_h.join().unwrap_or(None);
         finished.store(true, Relaxed);
         Members {
@@ -665,6 +694,7 @@ pub fn decide_reach_portfolio_cancellable(
             interp,
             btormc,
             pono,
+            ric3,
             refused: Vec::new(),
         }
     });
@@ -1238,7 +1268,7 @@ mod tests {
                 "owned-only listed a non-owned engine {name}: {out:?}"
             );
         }
-        for ext in ["spacer", "btormc", "pono"] {
+        for ext in ["spacer", "btormc", "pono", "ric3"] {
             assert!(
                 !out.reachable_by.contains(&ext) && !out.unreachable_by.contains(&ext),
                 "owned-only must never list {ext}: {out:?}"

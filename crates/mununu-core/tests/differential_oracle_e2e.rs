@@ -322,8 +322,10 @@ fn native_engine_adjudication_over_btor2tools_suite() {
 /// ```sh
 /// curl -LO https://hwmcc.github.io/2020/hwmcc20benchmarks.tar.xz
 /// mkdir -p /tmp/hwmcc20 && tar xf hwmcc20benchmarks.tar.xz -C /tmp/hwmcc20
-/// # in the mununu-sva image (btormc + pono on PATH), point at a leaf dir of .btor2:
-/// MUNUNU_HWMCC_DIR=/tmp/hwmcc20/<btor-subdir> \
+/// # in the mununu-sva image (btormc + pono + rIC3 on PATH), point at a leaf dir of .btor2,
+/// # and give SPACER its isolated child (a release binary): run in-process, z3's Fixedpoint
+/// # SIGSEGVs on `vis_arrays_bufferAlloc` and takes the whole test with it (measured 2026-10-19)
+/// MUNUNU_SELF_EXE=/cargo-target/release/mununu MUNUNU_HWMCC_DIR=/tmp/hwmcc20/<btor-subdir> \
 ///   cargo test -p mununu-core --test differential_oracle_e2e \
 ///   hwmcc_adjudication_over_user_dir -- --ignored --nocapture
 /// ```
@@ -2137,12 +2139,29 @@ fn e2e_opentitan_ip_edn_full() {
         t0.elapsed().as_secs_f64()
     );
     for p in &report.properties {
+        // a ⊥ row names its cause (budget-expired / engine-did-not-complete with the members'
+        // refusals / …) so a failing pin is diagnosable from the transcript alone
+        let reason = p
+            .bottom_reason
+            .as_ref()
+            .map(|r| format!(" [{}]", r.one_line()))
+            .unwrap_or_default();
         eprintln!(
-            "  {:<40} {:<10} {}",
+            "  {:<40} {:<10} {}{reason}",
             p.label.as_deref().unwrap_or(&p.name),
             p.outcome.label(),
             p.decided_by.as_deref().unwrap_or("-")
         );
+        // ... and its notes (which members ran, refused or declined), for the same reason
+        if p.outcome.label() == "unknown" {
+            for n in report
+                .notes
+                .iter()
+                .filter(|n| n.property.as_deref() == Some(p.name.as_str()))
+            {
+                eprintln!("      note {}: {} {:?}", n.kind, n.summary, n.items);
+            }
+        }
     }
     // The whole closure is modelled: nothing black-boxed (the properties file is an empty PACKAGE —
     // an empty module would be reported here), the register block and the core both present.
@@ -2227,11 +2246,11 @@ fn e2e_opentitan_ip_edn_full() {
             by(l)
         );
     }
-    // The five duplicated-counter fault-flag chains reach the portfolio since PR C (declined before)
-    // and stay ⊥ with the rescue slice spent: the proof needs the invariant "the two counter copies
-    // agree", which k-induction cannot find from a free step state and z3 SPACER does not find within
-    // the 60-s slice; SymbiYosys `abc pdr` proves `!err_o` in 8 s. A lane that decides one breaks the
-    // pin — re-measure, then move it.
+    // The five duplicated-counter fault-flag chains: their proof is the invariant "the two counter
+    // copies agree", which k-induction cannot find from a free step state and z3 SPACER does not find
+    // within the rescue slice (nor within 300 s). Since the rIC3 member (bit-level IC3, 2026-10-19,
+    // mununu#736) they HOLD through the reach rescue in 2–5 s a row; SymbiYosys `abc pdr` proves
+    // `!err_o` in 8 s.
     for l in [
         "FpvSecCmCntAlertCheck_A",
         "FpvSecCmResCmdFifoWptrCheck_A",
@@ -2240,11 +2259,8 @@ fn e2e_opentitan_ip_edn_full() {
         "FpvSecCmGenCmdFifoRptrCheck_A",
     ] {
         assert_eq!(rows(l).len(), 1, "{l}");
-        assert!(
-            matches!(rows(l)[0], VerifyOutcome::Unknown { .. }),
-            "{l}: {:?}",
-            rows(l)
-        );
+        assert!(holds(l), "{l}: {:?}", rows(l));
+        assert_eq!(by(l), vec![Some("reach-rescue")], "{l}");
     }
     // --- the system-level properties (cross-block: FSM → core → register block) ---
     for l in [
@@ -2283,13 +2299,44 @@ fn e2e_opentitan_ip_edn_full() {
             rows(l)
         );
     }
-    // Floors (2026-10-18, PR C): 39 own + 8 system + 4 `EF` twins HOLDS, 8 VIOLATED.
+    // Floors (2026-10-19, rIC3): 44 own + 8 system + 4 `EF` twins HOLDS, 8 VIOLATED.
     let n_holds = report
         .properties
         .iter()
         .filter(|p| matches!(p.outcome, VerifyOutcome::Holds))
         .count();
-    assert!(n_holds >= 51, "holds = {n_holds}");
+    assert!(n_holds >= 56, "holds = {n_holds}");
+}
+
+/// Diagnostic probe, not a gate: the reach portfolio under a 60-s budget (the rescue slice's
+/// shape) on the BTOR2 file named by `MUNUNU_PROBE_BTOR2`, printing every member's verdict and
+/// refusal — the test-binary twin of `mununu btor2 verify <file>`, for comparing the two contexts
+/// on a dumped rescue monitor (`MUNUNU_RESCUE_MONITOR_DUMP`).
+#[test]
+#[ignore = "diagnostic; needs MUNUNU_PROBE_BTOR2 and the image's engines"]
+fn probe_reach_portfolio_on_env_btor2() {
+    use mununu_core::adapter::reach_portfolio::decide_reach_portfolio_parallel_with_timeout;
+    use mununu_core::adapter::run_budget::{Budget, enter};
+    let Some(path) = std::env::var_os("MUNUNU_PROBE_BTOR2") else {
+        eprintln!("MUNUNU_PROBE_BTOR2 unset — nothing to probe");
+        return;
+    };
+    let content = std::fs::read_to_string(&path).expect("read the probe BTOR2");
+    let file = mununu_core::adapter::btor2::parser::parse(&content).expect("parse the probe BTOR2");
+    let budget = Budget::with_ms(60_000);
+    let _g = enter(&budget);
+    let t0 = std::time::Instant::now();
+    let out =
+        decide_reach_portfolio_parallel_with_timeout(&file, std::time::Duration::from_secs(60));
+    eprintln!(
+        "PROBE verdict={:?} reachable_by={:?} unreachable_by={:?} refused={:?} elapsed={:.1}s RUST_LOG={:?}",
+        out.verdict,
+        out.reachable_by,
+        out.unreachable_by,
+        out.refused,
+        t0.elapsed().as_secs_f64(),
+        std::env::var("RUST_LOG").ok()
+    );
 }
 
 /// The full-IP system properties are not invariants in disguise: freezing the sticky `ERR_CODE`

@@ -33,7 +33,7 @@ signal/value of interest (`"state_q == 3"`).
 
 Decides `bad`-reachability with the multi-engine safety portfolio — the exact BDD
 engine, the in-house native BMC + k-induction and SPACER (IC3/PDR) engines (all
-in-process), plus the `btormc` and `Pono` subprocess members when present, and a
+in-process), plus the `btormc`, `Pono` and `rIC3` (bit-level IC3, 2026-10-19) subprocess members when present — fed a constant-hoisted emission since mununu#736, before which btormc and Pono rejected every `sv verify-auto` design — and a
 **last-resort** in-house interpolation engine (owned McMillan forward reachability;
 [`native_interp`](../crates/mununu-core/src/adapter/btor2/native_interp.rs)) invoked
 only when every other member abstains — merged
@@ -134,7 +134,7 @@ decides every justice line of the design with two sound rungs — `--rung exact|
   resumes the iteration where it was.
 - **l2s** — liveness-to-safety: the response monitor with antecedent `true`, consequent `false`
   and the literals as fairness atoms is exactly "a reachable cycle that visits every literal";
-  the reachability portfolio (native BMC/k-induction ⊕ spacer ⊕ btormc ⊕ Pono) decides the `bad`.
+  the reachability portfolio (native BMC/k-induction ⊕ spacer ⊕ btormc ⊕ Pono ⊕ rIC3) decides the `bad`.
 
 Before either rung runs, the literals are exposed as `output`s (`mununu_j<i>_<k>`, `mununu_f<m>`,
 `mununu_true`, `mununu_false`) — observation only, the design is otherwise untouched.
@@ -540,17 +540,19 @@ set empty — the script writes it), the bus and the endpoint requests stay free
 | rows (edn) | holds | violated | ⊥ | unsupported | decided by |
 |---|---|---|---|---|---|
 | `ASSERT_KNOWN` ×13 | 13 | | | | `constant` — `$isunknown` folds to false on a 2-state model, no cone |
-| error → alert checks ×15 (`$rose(u_x.….err_o) \|-> ##[0:30] alert_tx_o[1].alert_p`) | **10** | | 5 | | `explicit` cube — the main FSM, all 8 endpoint FSMs, the register-write one-hot; ⊥ = the 32-bit `prim_count` / FIFO-pointer checks: they reach the reach portfolio through the bounded-chain monitor (2026-10-18) and stay ⊥ with the 60-s rescue slice spent — their proof needs the invariant "the two counter copies agree", which k-induction cannot find and z3 SPACER does not find within the slice (SymbiYosys `abc pdr` proves `!err_o` in 8 s) |
+| error → alert checks ×15 (`$rose(u_x.….err_o) \|-> ##[0:30] alert_tx_o[1].alert_p`) | **15** | | | | `explicit` cube — the main FSM, all 8 endpoint FSMs, the register-write one-hot; the five 32-bit `prim_count` / FIFO-pointer checks through the bounded-chain monitor (2026-10-18) and the reach portfolio's rIC3 member (bit-level IC3, 2–5 s a row, 2026-10-19) — their proof is the invariant "the two counter copies agree", which k-induction cannot find and z3 SPACER does not find in 60 s or 300 s; SymbiYosys `abc pdr` agrees (8 s) |
 | `EdnFatalAlertNoRsp_A` ×8 | | **8** (each 6 cycles from reset, trace attached) | | | the reach rescue's native BMC after the cube's ⊥, 20–30 s a row — a software-triggerable fatal error through the free bus in the cycle an endpoint acks: a spec gap in the assertion, not a design bug (before mununu#726 the rescue's fixed 5-s query timeout let one to three rows decide per run) |
 | `EdnDataStableDisable_A` ×8 | **8** | | | | the reach rescue's bounded-chain monitor (2026-10-18), native k-induction, 1–2 s a row — the 32-bit bus cone is over the exact cap, so the cube left it ⊥ |
 | `EdnDataStable_A` ×8 | **8** | | | | translates since 2026-10-18 (`throughout b[->1]` as a weak-until); the same monitor with the weak-until block judged by a pending latch, native k-induction, 3–5 s a row; SymbiYosys `abc pdr` proves both families for all eight endpoints in 18 s |
 | `@mununu_guarantee` system properties ×15 | **12** | | 3 | | `explicit` / `symbolic` cube: Error terminal / recorded / sticky (FSM → core → register block), endpoint 0 the same, the SWPortMode entry condition; the reach rescue: the fatal-alert-has-a-source invariant (k-induction, 0.5 s) and the four `EF` twins decided on their dual (2026-10-18); `constant` for the no-deadlock row; ⊥ = the three `AG EF` rows (FSM cone over the cap, no MUST path) |
 
 `pattgen` (87 registers) decides 14 of 14 — its four functional assertions on the **exact** engine;
-`csrng` (208 registers, `aes_cipher_core` black-boxed) 30 of 34: the `ASSERT_KNOWN` rows and its six FSM /
-one-hot error → alert checks (`explicit` cube — until 2026-10-18 the native SMT encoder refused the whole
-design over a constant wider than 64 bits, and every one of them was ⊥), with its four `prim_count`
-fault-flag chains ⊥ like edn's five. What this does and does not say: **one IP at one commit is measured,
+`csrng` (208 registers, `aes_cipher_core` black-boxed) 34 of 34 translated rows (3 more are unsupported
+behind the black box): the `ASSERT_KNOWN` rows and its six FSM / one-hot error → alert checks (`explicit`
+cube — until 2026-10-18 the native SMT encoder refused the whole design over a constant wider than 64 bits,
+and every one of them was ⊥), and its four `prim_count` fault-flag chains through the reach portfolio's rIC3
+member (42–61 s a row under portfolio load — at the edge of the 60-s rescue slice, where
+`MUNUNU_RESCUE_SLICE_MS` is the knob). What this does and does not say: **one IP at one commit is measured,
 block-to-IP scale** —
 not "IP scale" in general, not a second IP, not a SoC, no datapath property through a cipher. What
 decides at IP scale is the predicate cube and the reach rescue; the exact engine's cones all exceed the
