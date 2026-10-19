@@ -83,9 +83,85 @@ pub enum RescueVerdict {
     Holds,
     /// `bad` reachable ⇒ a reachable state violates the invariant.
     Violated,
-    /// Undecided by every member, or a soundness contradiction alarm — never a
-    /// silently-picked side.
+    /// Undecided by every member — never a silently-picked side.
     Inconclusive,
+    /// Two sound members disagreed (mununu#734): a SOUNDNESS ALARM the caller reports as
+    /// `EngineContradiction`, not an abstention. Before this it was folded into
+    /// `Inconclusive` and read like an undecided search.
+    Contradiction,
+}
+
+/// The rescue verdict a portfolio outcome maps to — one place, so the arms and the tests agree.
+pub fn rescue_verdict_of(v: ReachVerdict) -> RescueVerdict {
+    match v {
+        ReachVerdict::Unreachable => RescueVerdict::Holds,
+        ReachVerdict::Reachable => RescueVerdict::Violated,
+        ReachVerdict::Unknown => RescueVerdict::Inconclusive,
+        ReachVerdict::Contradiction => RescueVerdict::Contradiction,
+    }
+}
+
+/// `MUNUNU_RESCUE_MONITOR_DUMP=<dir>` — the ⊥ re-plan writes the `bad`-monitor BTOR2 it hands the
+/// reach portfolio, one file per rescued row (`<dir>/<property>.monitor.btor2`, the `EF` dual
+/// included), so an external engine can be probed on exactly what the portfolio saw. Unset = no
+/// files. The row's name comes from [`set_monitor_dump_tag`]; without one the file is numbered.
+pub const RESCUE_MONITOR_DUMP_ENV: &str = "MUNUNU_RESCUE_MONITOR_DUMP";
+
+thread_local! {
+    static MONITOR_DUMP_TAG: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    static MONITOR_DUMP_DIR: std::cell::RefCell<Option<std::path::PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Name the next monitor dumps after `tag` (the property being rescued); `None` clears it.
+pub fn set_monitor_dump_tag(tag: Option<&str>) {
+    MONITOR_DUMP_TAG.with(|t| *t.borrow_mut() = tag.map(str::to_string));
+}
+
+/// Dump monitors into `dir` on this thread regardless of the environment (tests); `None` restores
+/// the `MUNUNU_RESCUE_MONITOR_DUMP` behaviour.
+pub fn set_monitor_dump_dir(dir: Option<&std::path::Path>) {
+    MONITOR_DUMP_DIR.with(|d| *d.borrow_mut() = dir.map(std::path::Path::to_path_buf));
+}
+
+fn dump_monitor(monitored: &str) {
+    static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let dir = MONITOR_DUMP_DIR
+        .with(|d| d.borrow().clone())
+        .or_else(|| std::env::var_os(RESCUE_MONITOR_DUMP_ENV).map(std::path::PathBuf::from));
+    let Some(dir) = dir else {
+        return;
+    };
+    let tag = MONITOR_DUMP_TAG
+        .with(|t| t.borrow().clone())
+        .unwrap_or_else(|| {
+            format!(
+                "monitor-{}",
+                COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            )
+        });
+    let safe: String = tag
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' || c == '-' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let path = dir.join(format!("{safe}.monitor.btor2"));
+    if let Err(e) = std::fs::create_dir_all(&dir).and_then(|()| {
+        std::fs::write(
+            &path,
+            format!("; mununu rescue monitor — property {tag}\n{monitored}"),
+        )
+    }) {
+        tracing::warn!(
+            "{RESCUE_MONITOR_DUMP_ENV}: could not write {}: {e}",
+            path.display()
+        );
+    }
 }
 
 /// Conservatively classify `formula` as the simple AG invariant
@@ -535,13 +611,9 @@ pub fn reach_portfolio_rescue_diagnosed(
     };
     let file = parser::parse(&monitored)
         .map_err(|e| RescueDecline::MonitoredDesignUnparseable(e.message))?;
+    dump_monitor(&monitored);
     let outcome = decide_reach_portfolio(&file);
-    let verdict = match outcome.verdict {
-        ReachVerdict::Unreachable => RescueVerdict::Holds,
-        ReachVerdict::Reachable => RescueVerdict::Violated,
-        // Undecided, or a contradiction alarm — never silently pick a side.
-        ReachVerdict::Unknown | ReachVerdict::Contradiction => RescueVerdict::Inconclusive,
-    };
+    let verdict = rescue_verdict_of(outcome.verdict);
     Ok((verdict, outcome))
 }
 
@@ -743,6 +815,50 @@ mod tests {
         let shallower =
             parse("nu X. (((nu Z. ((q == 1) && ((req == 1) || [] Z))) && [] (q == 0)) && [] X)");
         assert!(reduce_bounded_chain(&shallower).is_none());
+    }
+
+    /// mununu#734 — a portfolio contradiction is reported as such, never folded into "undecided".
+    #[test]
+    fn a_portfolio_contradiction_is_not_an_inconclusive() {
+        assert_eq!(
+            rescue_verdict_of(ReachVerdict::Contradiction),
+            RescueVerdict::Contradiction
+        );
+        assert_eq!(
+            rescue_verdict_of(ReachVerdict::Unknown),
+            RescueVerdict::Inconclusive
+        );
+        assert_eq!(
+            rescue_verdict_of(ReachVerdict::Unreachable),
+            RescueVerdict::Holds
+        );
+        assert_eq!(
+            rescue_verdict_of(ReachVerdict::Reachable),
+            RescueVerdict::Violated
+        );
+    }
+
+    /// `MUNUNU_RESCUE_MONITOR_DUMP` — the rescue writes the exact `bad`-monitor it hands the
+    /// portfolio, named after the row being rescued, so an external engine can be probed on it.
+    #[test]
+    fn monitor_dump_writes_the_rescued_design() {
+        let dir = std::env::temp_dir().join(format!("mununu-monitor-dump-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        set_monitor_dump_dir(Some(&dir));
+        set_monitor_dump_tag(Some("gen$0.cnt_sva_3"));
+        let f = parse("nu X. ((cnt == 3) && [] X)");
+        let _ = reach_portfolio_rescue_diagnosed(COUNTER, &f, false).expect("reduces");
+        set_monitor_dump_dir(None);
+        set_monitor_dump_tag(None);
+        let path = dir.join("gen_0.cnt_sva_3.monitor.btor2");
+        let text = std::fs::read_to_string(&path).expect("the monitor file exists");
+        assert!(text.starts_with("; mununu rescue monitor — property gen$0.cnt_sva_3\n"));
+        assert!(
+            text.contains(" bad "),
+            "the dump is the monitored design: {text}"
+        );
+        assert!(text.contains("cnt"), "the design's own cells are there");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// PR C — the shapes the one-path reading does not decide stay declined: `[] a || [] b`, a

@@ -5710,6 +5710,8 @@ pub(crate) fn escalate_bottom_with_slice(
             crate::adapter::run_budget::property_budget_ms(),
         );
         let _row_guard = crate::adapter::run_budget::enter(&row_budget);
+        // `MUNUNU_RESCUE_MONITOR_DUMP` names this row's monitor files after the row.
+        crate::adapter::reach_rescue::set_monitor_dump_tag(Some(&prop.name));
         let mut lane: &str = "none";
         let mut slice_expired = false;
         let Ok(formula) = mu_parser::parse(&prop.formula) else {
@@ -5785,7 +5787,15 @@ pub(crate) fn escalate_bottom_with_slice(
                                 .map(safety_counterexample);
                             notes.push(rescue_note(&prop.name, "VIOLATED", &engines));
                         }
-                        RescueVerdict::Inconclusive => {}
+                        RescueVerdict::Inconclusive => attribute_portfolio_abstention(
+                            prop,
+                            &reach,
+                            slice_expired || row_budget.expired(),
+                            &mut notes,
+                        ),
+                        RescueVerdict::Contradiction => {
+                            attribute_portfolio_contradiction(prop, &reach, &mut notes)
+                        }
                     }
                 }
             }
@@ -5964,7 +5974,15 @@ pub(crate) fn escalate_bottom_with_slice(
                         prop.counterexample = ef_unreachable_counterexample(&formula);
                         notes.push(reachability_rescue_note(&prop.name, "VIOLATED", &engines));
                     }
-                    Ok((RescueVerdict::Inconclusive, _)) => {}
+                    Ok((RescueVerdict::Inconclusive, reach)) => attribute_portfolio_abstention(
+                        prop,
+                        &reach,
+                        slice_expired || row_budget.expired(),
+                        &mut notes,
+                    ),
+                    Ok((RescueVerdict::Contradiction, reach)) => {
+                        attribute_portfolio_contradiction(prop, &reach, &mut notes)
+                    }
                     Err(why) => notes.push(VerificationNote {
                         kind: "reachability-rescue-declined".into(),
                         level: NoteLevel::ScopeCaveat,
@@ -6002,6 +6020,7 @@ pub(crate) fn escalate_bottom_with_slice(
             );
         }
     }
+    crate::adapter::reach_rescue::set_monitor_dump_tag(None);
     // mununu#492 Part B — classify residual ⊥s so a downstream gate can distinguish
     // "resource-abstain" (the engine gave up) from "shape-not-reducible-here" (the
     // rescue couldn't reduce this shape) from "no-state-model" (the property class
@@ -6628,6 +6647,91 @@ fn engines_of(reach: &crate::adapter::reach_portfolio::ReachOutcome) -> Vec<&'st
 /// mununu#726 — run one portfolio-backed rescue step under the RESCUE SLICE: a child of the current
 /// (row) budget bounded by `MUNUNU_RESCUE_SLICE_MS`, so it can never outlive the row or the run.
 /// Records whether the slice ran out, so the caller can attribute a residual ⊥ to the clock.
+/// mununu#734 — a reach portfolio that decided NOTHING on a row names its cause. When the slice and
+/// the row budget are intact, an instant `Inconclusive` is not a search that gave up: it is every
+/// member refusing the design (an encode error, an absent binary, a child without a verdict) or
+/// every member returning a clean `unknown`. Either becomes `EngineDidNotComplete { engine:
+/// "reach-portfolio", .. }` with the members' own words, plus a `portfolio-refused` note; a row that
+/// already carries a reason (an engine failure attributed upstream) is left alone; a row whose
+/// slice or budget ran out is the caller's `BudgetExpired`, attributed after the arm as before.
+fn attribute_portfolio_abstention(
+    prop: &mut PropertyVerdict,
+    reach: &crate::adapter::reach_portfolio::ReachOutcome,
+    budget_ran_out: bool,
+    notes: &mut Vec<VerificationNote>,
+) {
+    if !matches!(prop.outcome, VerifyOutcome::Unknown { .. })
+        || prop.bottom_reason.is_some()
+        || budget_ran_out
+        || !engines_of(reach).is_empty()
+    {
+        return;
+    }
+    let items: Vec<String> = reach
+        .refused
+        .iter()
+        .map(|(member, why)| format!("{member}: {why}"))
+        .collect();
+    let detail = if items.is_empty() {
+        "every portfolio member returned unknown within its budget (no refusal, no timeout)"
+            .to_string()
+    } else {
+        format!("refused by {}", items.join("; "))
+    };
+    prop.bottom_reason = Some(BottomReason::EngineDidNotComplete {
+        engine: "reach-portfolio".to_string(),
+        detail: detail.clone(),
+    });
+    notes.push(VerificationNote {
+        kind: "portfolio-refused".to_string(),
+        level: NoteLevel::ScopeCaveat,
+        summary: format!(
+            "`{}`: the reach portfolio decided nothing within an intact budget — {detail}",
+            prop.name
+        ),
+        detail: "mununu#734 — the members' refusals used to be dropped at the member boundary, so a \
+                 portfolio that abstained in 40 ms because every member refused the design read \
+                 exactly like one that searched and gave up. A refusal names a construct the member \
+                 does not carry (a constant width, an array sort, a missing binary): fix or route \
+                 around it — more time will not help. An all-unknown with no refusal is the \
+                 genuine search abstention."
+            .to_string(),
+        items,
+        property: Some(prop.name.clone()),
+    });
+}
+
+/// mununu#734 — two sound portfolio members disagreed on the monitor: a soundness alarm, carried as
+/// `EngineContradiction` (never an "unknown"), so the merge's own alarm and this one read the same.
+fn attribute_portfolio_contradiction(
+    prop: &mut PropertyVerdict,
+    reach: &crate::adapter::reach_portfolio::ReachOutcome,
+    notes: &mut Vec<VerificationNote>,
+) {
+    let detail = format!(
+        "{}: reachable@[{}] vs unreachable@[{}] on the rescue's bad-monitor",
+        prop.name,
+        reach.reachable_by.join(","),
+        reach.unreachable_by.join(",")
+    );
+    prop.bottom_reason = Some(BottomReason::EngineContradiction {
+        detail: detail.clone(),
+    });
+    notes.push(VerificationNote {
+        kind: "portfolio-rescue-contradiction".to_string(),
+        level: NoteLevel::SoundnessCaveat,
+        summary: format!(
+            "`{}`: reach portfolio members CONTRADICT each other — {detail}",
+            prop.name
+        ),
+        detail: "One member is unsound on this design. The row is ⊥, not a pick; a bigger budget \
+                 cannot help and the disagreement must be investigated."
+            .to_string(),
+        items: Vec::new(),
+        property: Some(prop.name.clone()),
+    });
+}
+
 fn under_rescue_slice<T>(
     slice_ms: Option<u64>,
     slice_expired: &mut bool,
@@ -7379,6 +7483,65 @@ mod tests {
             settled.notes.len(),
             before,
             "nothing to re-plan, nothing touched"
+        );
+    }
+
+    /// mununu#734 — a reach portfolio that decides nothing within an intact budget names its cause:
+    /// on a design with an array sort every in-process member refuses (`ArraySortUnsupportedInBvOnly`
+    /// from the SMT encoder; the exact engine has no array support) and the subprocess members are
+    /// absent on the host, so the row's ⊥ carries `EngineDidNotComplete { engine: "reach-portfolio" }`
+    /// with the members' own words and a `portfolio-refused` note — not `unclassified`, not
+    /// `budget-expired`. On OpenTitan csrng the same situation (a 64-bit constant limit) cost a debug
+    /// run and a probe on a dumped model to attribute.
+    #[test]
+    fn escalate_bottom_attributes_an_instant_inconclusive_to_the_refusing_members() {
+        const ARRAY_DESIGN: &str = "1 sort bitvec 1\n2 sort bitvec 2\n3 sort array 2 1\n\
+                                    4 state 3 mem\n5 zero 1\n6 state 1 q\n7 init 1 6 5\n\
+                                    8 next 1 6 6\n9 next 3 4 4\n";
+        let mut report = AutoVerifyReport {
+            properties: vec![PropertyVerdict {
+                name: "q_zero".to_string(),
+                label: None,
+                kind: crate::adapter::slang::translate::SvaKind::Assert,
+                formula: "nu X. ((q == 0) && [] X)".to_string(),
+                outcome: VerifyOutcome::Unknown { unknown_cells: 1 },
+                seeded_predicates: Vec::new(),
+                counterexample: None,
+                bottom_reason: None,
+                decided_by: None,
+                vacuity: None,
+            }],
+            ..Default::default()
+        };
+        let notes = escalate_bottom(
+            &mut report,
+            ARRAY_DESIGN,
+            false,
+            &VerifyAutoOptions::default(),
+            &[],
+        );
+        let p = &report.properties[0];
+        assert!(
+            matches!(p.outcome, VerifyOutcome::Unknown { .. }),
+            "{:?}",
+            p.outcome
+        );
+        match &p.bottom_reason {
+            Some(BottomReason::EngineDidNotComplete { engine, detail }) => {
+                assert_eq!(engine, "reach-portfolio");
+                assert!(
+                    detail.contains("native") && detail.to_lowercase().contains("array"),
+                    "the refusing member and its reason are named: {detail}"
+                );
+            }
+            other => panic!("expected the portfolio's refusal as the reason, got {other:?}"),
+        }
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.kind == "portfolio-refused" && !n.items.is_empty()),
+            "{:?}",
+            notes.iter().map(|n| &n.kind).collect::<Vec<_>>()
         );
     }
 

@@ -97,6 +97,14 @@ pub struct ReachOutcome {
     pub reachable_by: Vec<&'static str>,
     /// Engines that proved `bad` unreachable.
     pub unreachable_by: Vec<&'static str>,
+    /// mununu#734 — members that REFUSED the design, with their verbatim reason: an encode error
+    /// (`ConstantOutOfRange`, an array sort under the BV-only theory), an absent binary, a child
+    /// that exited without a verdict. A timeout, a cancellation and a clean `unknown` are NOT
+    /// refusals. Before this the reason was dropped at the member boundary (`Err` → `None`), so a
+    /// portfolio that abstained in 40 ms because every member refused the design read exactly like
+    /// one that searched and gave up — on OpenTitan csrng that cost a debug run and a probe on a
+    /// dumped model to attribute.
+    pub refused: Vec<(&'static str, String)>,
 }
 
 impl ReachOutcome {
@@ -113,6 +121,39 @@ impl ReachOutcome {
             verdict,
             reachable_by,
             unreachable_by,
+            refused: Vec::new(),
+        }
+    }
+}
+
+/// The members' individual results for one portfolio run, named — the input of [`collect`]. A
+/// `None` is an abstention (unknown, timeout, cancelled); a refusal is recorded in `refused` beside
+/// the `None`. Adding a member is adding a field, not a positional argument.
+#[derive(Debug, Default)]
+pub(crate) struct Members {
+    pub exact: Option<bool>,
+    pub native: Option<bool>,
+    pub spacer: Option<bool>,
+    pub interp: Option<bool>,
+    pub btormc: Option<McVerdict>,
+    pub pono: Option<McVerdict>,
+    /// `(member, reason)` for every member that refused the design (see [`ReachOutcome::refused`]).
+    pub refused: Vec<(&'static str, String)>,
+}
+
+/// Record a member's refusal (an `Err`) and abstain; a clean result passes through.
+fn settle<T>(
+    refused: &std::sync::Mutex<Vec<(&'static str, String)>>,
+    member: &'static str,
+    r: Result<Option<T>, String>,
+) -> Option<T> {
+    match r {
+        Ok(v) => v,
+        Err(why) => {
+            if let Ok(mut g) = refused.lock() {
+                g.push((member, why));
+            }
+            None
         }
     }
 }
@@ -134,22 +175,28 @@ fn timed<T: std::fmt::Debug>(member: &'static str, run: impl FnOnce() -> T) -> T
     v
 }
 
-/// The exact engine's optional verdict: `Some(true)` reachable, `Some(false)`
-/// unreachable, `None` abstained (over-cap / free-init / error).
-fn run_exact(content: &str) -> Option<bool> {
-    timed("exact", || exact_bad_reachable(content).ok())
+/// The exact engine's verdict: `Ok(Some(true))` reachable, `Ok(Some(false))` unreachable,
+/// `Err(reason)` refused (over-cap / free-init / an unsupported construct — the engine's own
+/// message, kept for the attribution of mununu#734).
+fn run_exact(content: &str) -> Result<Option<bool>, String> {
+    timed("exact", || {
+        exact_bad_reachable(content)
+            .map(Some)
+            .map_err(|e| format!("exact: {e}"))
+    })
 }
 
 /// The in-house **native engine** (BMC + k-induction on the Z3 seam) verdict:
-/// `Some(true)` reachable (a counterexample), `Some(false)` unreachable (a
-/// k-inductive safety proof), `None` abstained (Unknown / timeout / encode error).
+/// `Ok(Some(true))` reachable (a counterexample), `Ok(Some(false))` unreachable (a
+/// k-inductive safety proof), `Ok(None)` abstained (Unknown / timeout), `Err(reason)` refused
+/// (an encode error — the design has a construct the SMT encoder does not carry).
 /// Unlike the exact BDD engine it has no 40-bit cone cap, and unlike btormc/Pono
 /// it needs no subprocess — mununu's own scalable safety member.
 fn run_native(
     file: &Btor2File,
     cancel: Option<&std::sync::atomic::AtomicBool>,
     query_ms: u32,
-) -> Option<bool> {
+) -> Result<Option<bool>, String> {
     timed(
         "native",
         || match native_bmc::decide_bad_safety_cancellable(
@@ -158,9 +205,10 @@ fn run_native(
             Some(query_ms),
             cancel,
         ) {
-            Ok(SafetyVerdict::Violated { .. }) => Some(true),
-            Ok(SafetyVerdict::Safe { .. }) => Some(false),
-            Ok(SafetyVerdict::Unknown { .. }) | Err(_) => None,
+            Ok(SafetyVerdict::Violated { .. }) => Ok(Some(true)),
+            Ok(SafetyVerdict::Safe { .. }) => Ok(Some(false)),
+            Ok(SafetyVerdict::Unknown { .. }) => Ok(None),
+            Err(e) => Err(e.to_string()),
         },
     )
 }
@@ -176,7 +224,7 @@ fn run_spacer(
     cancel: Option<&std::sync::atomic::AtomicBool>,
     isolated_ms: u32,
     in_process_ms: u32,
-) -> Option<bool> {
+) -> Result<Option<bool>, String> {
     // z3's Fixedpoint (SPACER) has a demonstrated FLAKY SIGSEGV on some CHC encodings
     // (e.g. `vis_arrays_bufferAlloc`) — a z3-internal abort, uncatchable in-process and
     // independent of concurrency (it segfaults even run alone). When the CLI / server
@@ -195,11 +243,12 @@ fn run_spacer(
 
 /// In-process SPACER — the direct engine call. Used as the fallback when no isolated
 /// self-exec target is available (tests / non-CLI embeddings).
-fn run_spacer_in_process(file: &Btor2File, timeout_ms: u32) -> Option<bool> {
+fn run_spacer_in_process(file: &Btor2File, timeout_ms: u32) -> Result<Option<bool>, String> {
     match native_spacer::decide_bad_safety_spacer(file, Some(timeout_ms)) {
-        Ok(SafetyVerdict::Violated { .. }) => Some(true),
-        Ok(SafetyVerdict::Safe { .. }) => Some(false),
-        Ok(SafetyVerdict::Unknown { .. }) | Err(_) => None,
+        Ok(SafetyVerdict::Violated { .. }) => Ok(Some(true)),
+        Ok(SafetyVerdict::Safe { .. }) => Ok(Some(false)),
+        Ok(SafetyVerdict::Unknown { .. }) => Ok(None),
+        Err(e) => Err(e.to_string()),
     }
 }
 
@@ -213,7 +262,7 @@ fn run_spacer_isolated(
     file: &Btor2File,
     timeout_ms: u32,
     cancel: Option<&std::sync::atomic::AtomicBool>,
-) -> Option<bool> {
+) -> Result<Option<bool>, String> {
     let content = emit_btor2(file);
     let mut cmd = std::process::Command::new(exe);
     // `--quiet` keeps the child's tracing off stdout; we still scan for the verdict
@@ -223,26 +272,36 @@ fn run_spacer_isolated(
     // Wall headroom over the child's own z3 timeout so we read its verdict rather than
     // killing it; a hung or segfaulting child is bounded either way.
     let wall = std::time::Duration::from_millis(u64::from(timeout_ms) + 5_000);
-    let (status, stdout, _stderr) = crate::adapter::run_with_timeout_cancellable(
+    let Some((status, stdout, stderr)) = crate::adapter::run_with_timeout_cancellable(
         &mut cmd,
         Some(content.as_bytes()),
         wall,
         cancel,
     )
-    .ok()??;
+    .map_err(|e| format!("spacer child could not start: {e}"))?
+    else {
+        return Ok(None); // timeout or cancelled — an abstention, not a refusal
+    };
     if !status.success() {
-        return None; // SIGSEGV / error exit — the isolation payoff: abstain, don't crash.
+        // SIGSEGV / error exit — the isolation payoff: abstain, don't crash; say why.
+        return Err(format!(
+            "spacer child exited {}: {}",
+            status
+                .code()
+                .map_or_else(|| "by signal".to_string(), |c| c.to_string()),
+            stderr.lines().next().unwrap_or("").trim()
+        ));
     }
     // The verdict is the last `safe`/`unsafe`/`unknown` line the child printed.
     for line in stdout.lines().rev() {
         match line.trim() {
-            "safe" => return Some(false),
-            "unsafe" => return Some(true),
-            "unknown" => return None,
+            "safe" => return Ok(Some(false)),
+            "unsafe" => return Ok(Some(true)),
+            "unknown" => return Ok(None),
             _ => {}
         }
     }
-    None
+    Ok(None)
 }
 
 /// Budget for the interpolation member. In the parallel driver it runs concurrently
@@ -338,23 +397,17 @@ pub(crate) fn member_timeouts(
 
 /// Merge the members' verdicts into a [`ReachOutcome`], in the fixed engine order
 /// (`exact`, `native`, `spacer`, `interp`, `btormc`, `pono`) so the outcome is
-/// deterministic regardless of which driver (sequential / parallel) produced them.
-fn collect(
-    exact: Option<bool>,
-    native: Option<bool>,
-    spacer: Option<bool>,
-    interp: Option<bool>,
-    btormc_v: Option<McVerdict>,
-    pono_v: Option<McVerdict>,
-) -> ReachOutcome {
+/// deterministic regardless of which driver (sequential / parallel) produced them. The
+/// members' refusals ride along untouched (mununu#734).
+fn collect(m: Members) -> ReachOutcome {
     let mut reachable_by: Vec<&'static str> = Vec::new();
     let mut unreachable_by: Vec<&'static str> = Vec::new();
     // In-house engines report reachability as a bool (`Some(true)` = reachable).
     for (name, v) in [
-        ("exact", exact),
-        ("native", native),
-        ("spacer", spacer),
-        ("interp", interp),
+        ("exact", m.exact),
+        ("native", m.native),
+        ("spacer", m.spacer),
+        ("interp", m.interp),
     ] {
         match v {
             Some(true) => reachable_by.push(name),
@@ -363,7 +416,7 @@ fn collect(
         }
     }
     // Subprocess members report an `McVerdict`.
-    for (name, v) in [("btormc", btormc_v), ("pono", pono_v)] {
+    for (name, v) in [("btormc", m.btormc), ("pono", m.pono)] {
         match v {
             Some(McVerdict::Violated) => reachable_by.push(name),
             Some(McVerdict::Safe) => unreachable_by.push(name),
@@ -392,7 +445,20 @@ fn collect(
     if reachable_by == ["spacer"] && unreachable_by.is_empty() {
         reachable_by.clear();
     }
-    ReachOutcome::from_sets(reachable_by, unreachable_by)
+    let mut out = ReachOutcome::from_sets(reachable_by, unreachable_by);
+    // The refusals arrive in FINISHING order (each member on its own thread); report them in the
+    // fixed engine order so two runs of one design produce one outcome (the drivers' equality
+    // tests compare whole outcomes).
+    let rank = |member: &str| {
+        ["exact", "native", "spacer", "interp", "btormc", "pono"]
+            .iter()
+            .position(|m| *m == member)
+            .unwrap_or(usize::MAX)
+    };
+    let mut refused = m.refused;
+    refused.sort_by(|(a, _), (b, _)| rank(a).cmp(&rank(b)).then_with(|| a.cmp(b)));
+    out.refused = refused;
+    out
 }
 
 /// Decide `bad`-reachability of `file` across all six engines — the exact BDD
@@ -493,7 +559,10 @@ pub fn decide_reach_portfolio_cancellable(
     let finished = AtomicBool::new(false);
     let finished = &finished;
     let budget = &budget;
-    std::thread::scope(|scope| {
+    // mununu#734 — every member's refusal lands here, in finishing order; `collect` carries them.
+    let refused: std::sync::Mutex<Vec<(&'static str, String)>> = std::sync::Mutex::new(Vec::new());
+    let refused = &refused;
+    let mut members = std::thread::scope(|scope| {
         // Forward an external cancellation — or the budget's expiry — into `decided`, which
         // every cancellable member already polls. Stops when the members are joined.
         if cancel.is_some() || budget.remaining_ms().is_some() {
@@ -510,8 +579,11 @@ pub fn decide_reach_portfolio_cancellable(
         let btormc_h = scope.spawn(move || {
             let _g = crate::adapter::run_budget::enter(budget);
             let v = timed("btormc", || {
-                btormc::decide_via_btormc(file, btormc_kmax, subprocess_timeout, Some(decided)).ok()
+                btormc::decide_via_btormc(file, btormc_kmax, subprocess_timeout, Some(decided))
+                    .map(Some)
+                    .map_err(|e| e.message)
             });
+            let v = settle(refused, "btormc", v);
             if matches!(v, Some(McVerdict::Violated) | Some(McVerdict::Safe)) {
                 decided.store(true, Relaxed);
             }
@@ -526,8 +598,10 @@ pub fn decide_reach_portfolio_cancellable(
                     subprocess_timeout,
                     Some(decided),
                 )
-                .ok()
+                .map(Some)
+                .map_err(|e| e.message)
             });
+            let v = settle(refused, "pono", v);
             if matches!(v, Some(McVerdict::Violated) | Some(McVerdict::Safe)) {
                 decided.store(true, Relaxed);
             }
@@ -538,7 +612,11 @@ pub fn decide_reach_portfolio_cancellable(
         // serialising.
         let native_h = scope.spawn(move || {
             let _g = crate::adapter::run_budget::enter(budget);
-            let v = run_native(file, Some(decided), t.native_query_ms);
+            let v = settle(
+                refused,
+                "native",
+                run_native(file, Some(decided), t.native_query_ms),
+            );
             if v.is_some() {
                 decided.store(true, Relaxed);
             }
@@ -546,11 +624,15 @@ pub fn decide_reach_portfolio_cancellable(
         });
         let spacer_h = scope.spawn(move || {
             let _g = crate::adapter::run_budget::enter(budget);
-            let v = run_spacer(
-                file,
-                Some(decided),
-                t.spacer_isolated_ms,
-                t.spacer_in_process_ms,
+            let v = settle(
+                refused,
+                "spacer",
+                run_spacer(
+                    file,
+                    Some(decided),
+                    t.spacer_isolated_ms,
+                    t.spacer_in_process_ms,
+                ),
             );
             if v == Some(false) {
                 decided.store(true, Relaxed);
@@ -565,19 +647,29 @@ pub fn decide_reach_portfolio_cancellable(
         });
         // The exact engine is in-process BDD work — run it on this thread while the
         // other members run on theirs.
-        let exact = run_exact(&content);
+        let exact = settle(refused, "exact", run_exact(&content));
         if exact.is_some() {
             decided.store(true, Relaxed);
         }
         // A panicked member thread abstains (None) rather than poisoning the merge.
         let native = native_h.join().unwrap_or(None);
         let spacer = spacer_h.join().unwrap_or(None);
-        let btormc_v = btormc_h.join().unwrap_or(None);
-        let pono_v = pono_h.join().unwrap_or(None);
+        let btormc = btormc_h.join().unwrap_or(None);
+        let pono = pono_h.join().unwrap_or(None);
         let interp = interp_h.join().unwrap_or(None);
         finished.store(true, Relaxed);
-        collect(exact, native, spacer, interp, btormc_v, pono_v)
-    })
+        Members {
+            exact,
+            native,
+            spacer,
+            interp,
+            btormc,
+            pono,
+            refused: Vec::new(),
+        }
+    });
+    members.refused = refused.lock().map(|g| g.clone()).unwrap_or_default();
+    collect(members)
 }
 
 /// Depth cap for the owned-standalone deep counterexample search — well above
@@ -728,7 +820,8 @@ pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcom
     {
         let (content, decided, tx) = (Arc::clone(&content), Arc::clone(&decided), tx.clone());
         std::thread::spawn(move || {
-            let v = run_exact(&content);
+            // The owned-only driver reports verdicts only; a refusal is an abstention here.
+            let v = run_exact(&content).unwrap_or(None);
             if v.is_some() {
                 decided.store(true, Relaxed);
             }
@@ -851,8 +944,45 @@ mod tests {
         );
         // At the merge level a definite base is likewise untouched by an interp abstain.
         assert_eq!(
-            collect(Some(true), None, None, None, None, None).verdict,
+            collect(Members {
+                exact: Some(true),
+                ..Default::default()
+            })
+            .verdict,
             ReachVerdict::Reachable
+        );
+    }
+
+    /// mununu#734 — a member's refusal (an encode error, an absent binary, a child without a
+    /// verdict) rides through the merge beside the abstention it caused, so an instant
+    /// `Unknown` can name its cause; a timeout or a clean `unknown` leaves the list empty.
+    #[test]
+    fn collect_carries_member_refusals() {
+        let out = collect(Members {
+            refused: vec![
+                (
+                    "native",
+                    "native BMC: encode failed: ConstantOutOfRange".to_string(),
+                ),
+                ("pono", "pono binary not found".to_string()),
+            ],
+            ..Default::default()
+        });
+        assert_eq!(out.verdict, ReachVerdict::Unknown);
+        assert_eq!(out.refused.len(), 2);
+        assert_eq!(out.refused[0].0, "native");
+        assert!(out.refused[1].1.contains("not found"));
+        // a decider beside a refusal: the verdict stands, the refusal is still reported
+        let decided = collect(Members {
+            native: Some(false),
+            refused: vec![("exact", "exact: cone over the cap".to_string())],
+            ..Default::default()
+        });
+        assert_eq!(decided.verdict, ReachVerdict::Unreachable);
+        assert_eq!(decided.refused.len(), 1);
+        assert_eq!(
+            ReachOutcome::from_sets(vec![], vec![]).refused,
+            Vec::<(&str, String)>::new()
         );
     }
 
@@ -862,7 +992,10 @@ mod tests {
         // with no concrete-witness corroboration is a suspect derivation over the
         // btor2→CHC encoding, so the merge drops it and abstains rather than emit a
         // spurious Reachable.
-        let out = collect(None, None, Some(true), None, None, None);
+        let out = collect(Members {
+            spacer: Some(true),
+            ..Default::default()
+        });
         assert_eq!(
             out.verdict,
             ReachVerdict::Unknown,
@@ -874,14 +1007,24 @@ mod tests {
         );
         // Corroborated by any concrete-witness engine ⇒ trusted (stays Reachable).
         assert_eq!(
-            collect(None, Some(true), Some(true), None, None, None).verdict,
+            collect(Members {
+                native: Some(true),
+                spacer: Some(true),
+                ..Default::default()
+            })
+            .verdict,
             ReachVerdict::Reachable,
             "native BMC corroborates spacer ⇒ trust the counterexample"
         );
         // A spacer-vs-safe disagreement is a real soundness alarm, NOT silently
         // resolved — the guard only fires when spacer is the *sole* decider.
         assert_eq!(
-            collect(Some(false), None, Some(true), None, None, None).verdict,
+            collect(Members {
+                exact: Some(false),
+                spacer: Some(true),
+                ..Default::default()
+            })
+            .verdict,
             ReachVerdict::Contradiction,
             "exact-safe vs spacer-reachable must still raise the alarm"
         );
