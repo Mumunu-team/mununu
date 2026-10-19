@@ -1983,6 +1983,7 @@ fn sv_verify_auto_handler_impl(
         // PR C — planner-only fields: a single API run re-plans its own rows and truncates
         replan_defer: false,
         breadcrumb_append: false,
+        skip_rows: std::collections::HashSet::new(),
         assume_mode,
     };
 
