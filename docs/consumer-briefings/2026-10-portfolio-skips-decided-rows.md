@@ -6,7 +6,7 @@
 
 ## TL;DR
 
-- **No verdict changes; shorter runs.** The sequential portfolio merges after each member and keeps the first definite verdict, so a later member's work on a decided row could never change it. Later members now record such rows as `unknown` with `bottom_reason: not-attempted` and spend nothing on them. Measured: FILL.
+- **No verdict changes; shorter runs.** The sequential portfolio merges after each member and keeps the first definite verdict, so a later member's work on a decided row could never change it. Later members now record such rows as `unknown` with `bottom_reason: not-attempted` and spend nothing on them. Measured on the census (134 rows, verdicts identical): `keymgr_ctrl` 1 092 s → 168 s, `prim_esc_receiver` 1 755 s → 1 231 s, the whole census 2 867 s → 1 557 s.
 - **The breadcrumb ends with the verdict that ships.** `MUNUNU_VERIFY_AUTO_PARTIAL_JSON` now gets one `phase: "merged"` record per property after the merge and the ⊥ re-plan. A member's own records (`main`, `escalated`) precede it, and a later member writes `unknown` for every row it left to an earlier one — so "take the last record per property" is right again only because the `merged` record is last. Readers that stop at the last `main` record will read `unknown` for decided rows.
 - **A new Info note kind `portfolio-skip`** counts the rows each later member left alone. The `portfolio` note's detail no longer says "a ⊥ means every engine left it undecided".
 - **Trade-off, stated:** the merge's runtime contradiction alarm (`portfolio-soundness-alarm`) cannot fire in sequential mode on a row a member skipped, because the member did not run it. The parallel mode (`--portfolio parallel`) and the census remain the differential check.
@@ -29,7 +29,12 @@
 
 ## Measured
 
-FILL (census `keymgr_ctrl` wall; `e2e_opentitan_ip_edn_full` wall; verdict identity of the census and the full-IP e2e against #735).
+`mununu-sva`, shipped defaults, this branch (`314987d`) against the post-#735 tree:
+
+| run | before | after |
+|---|---|---|
+| `e2e_opentitan_sva_census` (134 rows) | 84 holds / 11 violated / 31 skipped / 8 unsupported / 0 ⊥, 2 867 s | **identical verdicts**, 1 557 s — `keymgr_ctrl` 1 092 s → 168 s, `prim_esc_receiver` 1 755 s → 1 231 s |
+| `e2e_opentitan_ip_edn_full` (67 rows) | 51 / 8 / 8 / 0, 1 486 s | **identical verdicts** (51 / 8 / 8 / 0), 1 499 s — no early exit on this IP (eight rows stay ⊥), so every member still runs and the saving is the exact member's thirteen constant rows |
 
 ## Not covered here
 
