@@ -69,6 +69,30 @@ echo "verify-repro: test '$TEST'"
 echo "  ref:             $REF"
 echo "  test-bearing:    $bearing"
 
+# The inline-test trap, detected instead of blessed (2026-10-18). A unit test lives in the file it
+# tests, and this script copies the whole test-bearing file from HEAD — so when that file ALSO carries
+# the fix, the "REF" build runs the fix and the test passes for the wrong reason. Measured on
+# mununu#729, #731 and #732: every inline reproducer read "PASSES at HEAD~1" although each failed
+# before its fix. So: a test-bearing file whose diff has a hunk BEFORE its first `#[cfg(test)]`
+# carries production code too, and the verdict is INCONCLUSIVE, never PASSES.
+for f in $bearing; do
+  tests_at="$(grep -n -m1 -E '^\s*#\[cfg\(test\)\]' "$f" | cut -d: -f1)"
+  [ -n "$tests_at" ] || continue
+  while IFS= read -r start; do
+    [ -n "$start" ] || continue
+    if [ "$start" -lt "$tests_at" ]; then
+      echo
+      echo "INCONCLUSIVE — '$f' carries the FIX as well as the test (a changed hunk at line $start,"
+      echo "  before its tests module at line $tests_at), so the REF build would run the fix and the"
+      echo "  test would pass for the wrong reason. The reproducer cannot be verified mechanically;"
+      echo "  state the evidence in the PR (a by-hand run of the test against $REF, or a measurement)."
+      exit 3
+    fi
+  done <<EOF
+$(git diff -U0 "$REF" HEAD -- "$f" | grep -E '^@@' | sed -E 's/^@@ -[0-9,]+ \+([0-9]+).*$/\1/')
+EOF
+done
+
 work="$(mktemp -d)/repro"
 cleanup() { git worktree remove --force "$work" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
@@ -98,6 +122,12 @@ fi
 
 echo "  running..."
 if (cd "$work" && cargo test -p "$PKG" --lib -- "$TEST") >"$log" 2>&1; then
+  if grep -qE '^test result: ok\. 0 passed; 0 failed' "$log"; then
+    echo
+    echo "INCONCLUSIVE — '$TEST' matched NO test at $REF (nothing ran), so there is nothing to judge."
+    echo "  Check the name; a test that does not exist at $REF cannot pass or fail there."
+    exit 3
+  fi
   echo
   echo "FAIL — '$TEST' PASSES at $REF, so it does not reproduce anything."
   echo "  This is a regression test, not a reproducer. It locks in behaviour; it does not show a"
