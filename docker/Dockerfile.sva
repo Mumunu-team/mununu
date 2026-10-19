@@ -126,7 +126,7 @@ RUN set -e; \
     slang --version     | grep -q "^slang version ${SLANG_VERSION}[.+]"; \
     sv2v --version      | grep -q "^sv2v ${SV2V_VERSION}"; \
     test -f /opt/oss-cad-suite/share/yosys/plugins/slang.so; \
-    command -v btormc pono cvc5 bitwuzla boolector >/dev/null
+    command -v btormc pono rIC3 cvc5 bitwuzla boolector >/dev/null
 
 # The labels a consumer can assert without `docker run`. They repeat the ARGs
 # verbatim, and the ARGs were just asserted against the binaries, so a label

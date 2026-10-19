@@ -269,7 +269,9 @@ pub fn decide_via_btormc(
     timeout: Duration,
     cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<McVerdict, AdapterError> {
-    let btor2 = crate::adapter::btor2::emit::emit_btor2(file);
+    // mununu#736 — constants hoisted before the states: btor2tools' parser needs an `init`
+    // value's id below the state's, and the automatic reset-value `init` appends its constant.
+    let btor2 = crate::adapter::btor2::emit::emit_btor2_for_subprocess(file);
     let bin = locate_btormc()?;
     run_btormc_cancellable(&bin, &btor2, kmax, timeout, cancel)
 }

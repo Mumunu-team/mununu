@@ -227,6 +227,7 @@ search (whether linked in-process, like Z3's SPACER, or a subprocess, like btorm
 | SPACER (IC3/PDR) via CHC | **external algorithm — Z3's SPACER** (in-process); mununu owns only the btor2→CHC *encoding* | Z3 solves the Horn-clause problem end-to-end |
 | btormc | **external** (subprocess) | BMC + k-induction |
 | Pono | **external** (subprocess) | IC3/PDR (`ic3bits`) |
+| rIC3 | **external** (subprocess) | bit-level IC3/PDR (`-e ic3`) — the member that proves the inductive-invariant safety class (OpenTitan's duplicated-counter fault-flag chains) |
 
 So mununu-owned model-checking algorithms are the exact BDD engine, native BMC,
 native k-induction, and native McMillan interpolation; the `native_spacer` path is a **Z3

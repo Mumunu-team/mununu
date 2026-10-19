@@ -32,7 +32,7 @@ grep -rhoE 'env::var(_os)?\("MUNUNU_[A-Z0-9_]+"' crates/ | grep -oE 'MUNUNU_[A-Z
 
 | variable | purpose |
 |---|---|
-| `MUNUNU_YOSYS_PATH`, `MUNUNU_SV2V_PATH`, `MUNUNU_SLANG_PATH`, `MUNUNU_VERILATOR_PATH`, `MUNUNU_PONO_PATH`, `MUNUNU_CVC5_PATH`, `MUNUNU_MATHSAT_PATH` | explicit binary paths, checked before `$PATH`. None of these tools is bundled; the `mununu-sva` image pins them (`docker/README.md`). |
+| `MUNUNU_YOSYS_PATH`, `MUNUNU_SV2V_PATH`, `MUNUNU_SLANG_PATH`, `MUNUNU_VERILATOR_PATH`, `MUNUNU_BTORMC_PATH`, `MUNUNU_PONO_PATH`, `MUNUNU_RIC3_PATH`, `MUNUNU_CVC5_PATH`, `MUNUNU_MATHSAT_PATH` | explicit binary paths, checked before `$PATH`. None of these tools is bundled; the `mununu-sva` image pins them (`docker/README.md`). |
 | `MUNUNU_YOSYS_SLANG_PLUGIN` | path of the yosys-slang plugin (`read_slang`) used for the RTL lift of designs `read_verilog` rejects; SVA is extracted separately by slang. |
 | `MUNUNU_YOSYS_FRONTEND` | prefer `slang` over `read_verilog` + sv2v for the lift (the CLI's `--frontend` is the per-request form). |
 | `MUNUNU_YOSYS_SETUNDEF_ANYSEQ` (`=1`), `MUNUNU_YOSYS_SETUNDEF_ANYCONST` (`=1`) | the lift's init policy for undefined bits: one free input per cycle (`anyseq`), or one nondeterministic constant per bit (`anyconst`); `ANYSEQ` wins if both are set; default `-zero` (which can mask bugs). |

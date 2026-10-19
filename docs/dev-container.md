@@ -20,6 +20,8 @@ docker build -f docker/Dockerfile.dev -t mununu-dev .
 
 ## Cargo cache volume
 
+> Source of truth: [`docker/Dockerfile.dev`](../docker/Dockerfile.dev) (`ENV CARGO_TARGET_DIR=/cargo-target`) — surface: CLI-only — a build-environment setting, not a mununu verb
+
 Create a named volume once so subsequent runs stay warm. The container writes to `/cargo-target` (set by `CARGO_TARGET_DIR` in the image), **not** to the host's `target/`. Host and container caches stay independent.
 
 ```bash
@@ -27,6 +29,8 @@ docker volume create mununu-target
 ```
 
 If you skip this volume, the container compiles from scratch every run (no cache survives `--rm`). The host's `target/` is never written to by the container, so host-side `cargo` and container-side `make` do not contend for the same artifacts.
+
+**One volume per tree.** Cargo judges a target fresh when no source file is newer than the target's dep-info; it does not hash contents. Two checkouts mounted at the same `/work` (a worktree and the main tree, two branches) that share one volume therefore hand each other their binaries: the tree whose files are OLDER than the other tree's last build runs the OTHER tree's `mununu-core` — silently, with no `Compiling` line. Measured twice (2026-10-09 `../mununu-634`; 2026-10-19 a PR gate ran three full-IP e2e passes on a sibling branch's library and reported its verdicts). Either name a volume per tree (`docker volume create mununu-target-<branch>`, the convention monono uses with `mununu-target-<sha>`), or, after switching the tree mounted at `/work`, touch one library source (`touch crates/mununu-core/src/lib.rs`) so the next build is honest. A release binary and a test binary have separate fingerprints: a correct `cargo build --release` says nothing about the test-profile library beside it.
 
 ## Incremental compilation
 

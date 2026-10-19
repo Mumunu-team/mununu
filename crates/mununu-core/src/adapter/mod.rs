@@ -62,6 +62,7 @@ pub mod promela;
 pub mod reach_portfolio;
 pub mod reach_rescue;
 pub mod recoverability;
+pub mod ric3;
 pub mod run_budget;
 pub mod sidecar;
 pub mod slang;
