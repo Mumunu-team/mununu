@@ -187,6 +187,7 @@ pub(crate) fn member_options(
     base: &VerifyAutoOptions,
     op: &EngineOp,
     index: usize,
+    skip_rows: std::collections::HashSet<String>,
 ) -> VerifyAutoOptions {
     let mut o = base.clone();
     o.portfolio = None;
@@ -194,7 +195,23 @@ pub(crate) fn member_options(
     o.exact_symbolic = op.exact_symbolic;
     o.replan_defer = true;
     o.breadcrumb_append = index > 0;
+    o.skip_rows = skip_rows;
     o
+}
+
+/// Plan 4 / PR D3 (mununu#733) — the rows a merged report has decided: what the next sequential
+/// member leaves alone. The merge keeps the FIRST definite verdict, so a later member's work on
+/// these rows could never change a verdict — it was pure cost (the census design `keymgr_ctrl`:
+/// 256 s → 1 092 s once the cube's SMT image ran on rows the exact engine decides). Trade-off,
+/// recorded: the runtime contradiction alarm of the merge no longer fires in sequential mode on a
+/// row a member skipped; the parallel mode and the census stay the differential check.
+pub(crate) fn decided_rows(report: &AutoVerifyReport) -> std::collections::HashSet<String> {
+    report
+        .properties
+        .iter()
+        .filter(|p| outcome_definite(&p.outcome).is_some())
+        .map(|p| p.name.clone())
+        .collect()
 }
 
 /// Plan 2 / PR C — the ⊥ re-plan ONCE per run, on the merged report: exactly the rows no engine
@@ -242,6 +259,52 @@ fn replan_once(
     merged
 }
 
+/// PR D3 — the final verdict of every property as a `merged` breadcrumb record (append mode: the
+/// members' own records precede it), so a consumer's "take the last record per property" reads the
+/// verdict that ships. No-op when `MUNUNU_VERIFY_AUTO_PARTIAL_JSON` is unset.
+fn record_merged_breadcrumb(report: &AutoVerifyReport) {
+    let mut crumb = crate::adapter::partial_json::Breadcrumb::from_env_with_append(true);
+    if !crumb.is_active() {
+        return;
+    }
+    for (i, p) in report.properties.iter().enumerate() {
+        crumb.record(i, &p.name, p.outcome.label(), "merged", None);
+    }
+}
+
+/// PR D3 — telemetry: how many rows each later sequential member left to an earlier one's verdict
+/// (never a verdict change).
+fn with_skip_note(
+    mut rep: AutoVerifyReport,
+    skipped: &[(&'static str, usize)],
+) -> AutoVerifyReport {
+    let total: usize = skipped.iter().map(|(_, n)| n).sum();
+    if total == 0 {
+        return rep;
+    }
+    rep.notes.push(VerificationNote {
+        kind: "portfolio-skip".to_string(),
+        level: NoteLevel::Info,
+        summary: format!(
+            "{total} row-run(s) skipped: a later portfolio member does not re-run a row an earlier \
+             one decided"
+        ),
+        detail: "The sequential portfolio merges after each member and keeps the FIRST definite \
+                 verdict, so a later member's work on a decided row could never change it. Since \
+                 mununu#733 the member records those rows as `not-attempted` and spends nothing on \
+                 them (measured: `keymgr_ctrl` 1 092 s → the exact engine's time alone). Trade-off: \
+                 the merge's contradiction alarm no longer fires in sequential mode on a row a member \
+                 skipped; the parallel mode and the census remain the differential check."
+            .to_string(),
+        items: skipped
+            .iter()
+            .map(|(label, n)| format!("{label}: {n} row(s) left to an earlier member"))
+            .collect(),
+        property: None,
+    });
+    rep
+}
+
 pub(crate) fn execute(
     plan: &PhysicalPlan,
     prepared: &PreparedModel,
@@ -263,31 +326,46 @@ pub(crate) fn execute(
     };
 
     // PR C — the merged report gets the ⊥ re-plan once, then the rationale (so `plan-accuracy`
-    // judges the verdicts that ship).
+    // judges the verdicts that ship). PR D3 — and one `merged` breadcrumb record per property: the
+    // members' records are theirs alone (a later member writes `unknown` for every row it left to
+    // an earlier one), so the LAST record of a property is the verdict that ships only once this
+    // one is written.
     let finish = |merged: Result<AutoVerifyReport, AdapterError>| {
-        merged.map(|r| attach(replan_once(r, prepared, task.opts)))
+        merged.map(|r| {
+            let r = attach(replan_once(r, prepared, task.opts));
+            record_merged_breadcrumb(&r);
+            r
+        })
     };
 
     match plan.mode {
         PortfolioMode::Sequential => {
             let mut runs: Vec<(&str, Result<AutoVerifyReport, AdapterError>)> = Vec::new();
+            // PR D3 — the rows the merge-so-far decided; the next member leaves them alone.
+            let mut decided: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut skipped: Vec<(&'static str, usize)> = Vec::new();
             for (i, op) in plan.ops.iter().enumerate() {
-                let o = member_options(task.opts, op, i);
+                if i > 0 {
+                    skipped.push((op.label, decided.len()));
+                }
+                let o = member_options(task.opts, op, i, decided.clone());
                 let run =
                     verify_auto_impl(task.sources, task.yosys_opts, &o, Some(prepared.clone()));
                 runs.push((op.label, run));
                 // Early-exit as soon as the MERGE so far leaves no ⊥ property (the budget win).
                 let merged = merge_portfolio_reports(&runs, plan.mode);
-                if let Ok(rep) = &merged
-                    && rep
+                if let Ok(rep) = &merged {
+                    decided = decided_rows(rep);
+                    if rep
                         .properties
                         .iter()
                         .all(|p| outcome_definite(&p.outcome).is_some())
-                {
-                    return finish(merged);
+                    {
+                        return finish(merged).map(|r| with_skip_note(r, &skipped));
+                    }
                 }
             }
-            finish(merge_portfolio_reports(&runs, plan.mode))
+            finish(merge_portfolio_reports(&runs, plan.mode)).map(|r| with_skip_note(r, &skipped))
         }
         PortfolioMode::Parallel => {
             // Scoped threads borrow the task's sources / yosys_opts; each owns its option clone
@@ -305,7 +383,8 @@ pub(crate) fn execute(
                         .iter()
                         .enumerate()
                         .map(|(i, op)| {
-                            let o = member_options(task.opts, op, i);
+                            // Parallel members have no merge-so-far: nothing to skip.
+                            let o = member_options(task.opts, op, i, Default::default());
                             let pm = prepared.clone();
                             let b = parent_budget.clone();
                             (
@@ -1009,8 +1088,15 @@ mod tests {
             !base.replan_defer,
             "a single-engine run re-plans its own rows"
         );
+        assert!(base.skip_rows.is_empty());
         for (i, op) in PRECISION_LADDER.iter().enumerate() {
-            let o = member_options(&base, op, i);
+            // PR D3 — the rows the merge-so-far decided travel to every later member.
+            let decided: std::collections::HashSet<String> = (i > 0)
+                .then(|| "p_decided".to_string())
+                .into_iter()
+                .collect();
+            let o = member_options(&base, op, i, decided.clone());
+            assert_eq!(o.skip_rows, decided, "{}", op.label);
             assert!(o.replan_defer, "{}", op.label);
             assert_eq!(o.breadcrumb_append, i > 0, "{}", op.label);
             assert!(o.portfolio.is_none(), "{}", op.label);
@@ -1021,6 +1107,47 @@ mod tests {
                 op.label
             );
         }
+    }
+
+    /// PR D3 (mununu#733) — the merge-so-far's DEFINITE rows are what a later member leaves alone;
+    /// an `Unknown` or `Skipped` row is still everyone's to try.
+    #[test]
+    fn decided_rows_lists_the_definite_rows() {
+        use super::decided_rows;
+        use crate::adapter::slang::verify_auto::{BottomReason, PropertyVerdict};
+        let row = |name: &str, outcome: VerifyOutcome| PropertyVerdict {
+            name: name.to_string(),
+            label: None,
+            kind: crate::adapter::slang::translate::SvaKind::Assert,
+            formula: "nu X. ((q == 0) && [] X)".to_string(),
+            outcome,
+            seeded_predicates: Vec::new(),
+            counterexample: None,
+            bottom_reason: None,
+            decided_by: None,
+            vacuity: None,
+        };
+        let rep = AutoVerifyReport {
+            properties: vec![
+                row("h", VerifyOutcome::Holds),
+                row("v", VerifyOutcome::Violated { false_cells: 1 }),
+                row("u", VerifyOutcome::Unknown { unknown_cells: 1 }),
+                row(
+                    "s",
+                    VerifyOutcome::Skipped {
+                        reason: "atom not cube-bindable".to_string(),
+                    },
+                ),
+            ],
+            ..Default::default()
+        };
+        let d = decided_rows(&rep);
+        assert_eq!(
+            d,
+            ["h".to_string(), "v".to_string()].into_iter().collect(),
+            "{d:?}"
+        );
+        let _ = BottomReason::NotAttempted; // the variant the skipped rows carry
     }
 
     #[test]

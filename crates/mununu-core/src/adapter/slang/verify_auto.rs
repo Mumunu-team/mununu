@@ -1966,6 +1966,13 @@ pub struct VerifyAutoOptions {
     /// PR C — open the `MUNUNU_VERIFY_AUTO_PARTIAL_JSON` breadcrumb in APPEND mode (a later
     /// portfolio member; the first truncates). Set by the planner only.
     pub breadcrumb_append: bool,
+    /// Plan 4 / PR D3 (mununu#733) — property names an EARLIER sequential portfolio member already
+    /// decided: this member pushes them as `Unknown { NotAttempted }` without running an engine (the
+    /// merge keeps the first definite verdict, so the work was pure cost — measured on the census
+    /// design `keymgr_ctrl`: 256 s → 1 092 s once the cube's SMT image started running on rows the
+    /// exact engine decides). Set by the sequential planner only; empty on a single-engine or
+    /// parallel run.
+    pub skip_rows: std::collections::HashSet<String>,
     /// #468 — apply a NAMED structural mutation to the prepared BTOR2 before
     /// verification (`prepare_model`), so `sv mutate` can assert the property
     /// verdicts FLIP (property adequacy). `None` (default) ⇒ no mutation, the model
@@ -2066,6 +2073,7 @@ impl Default for VerifyAutoOptions {
             rescue_bottom_recoverability: true,
             replan_defer: false,
             breadcrumb_append: false,
+            skip_rows: std::collections::HashSet::new(),
             mutation: None,
             antecedent_shadow: true,
             antecedent_propagate: true,
@@ -3405,7 +3413,8 @@ pub(crate) fn merge_portfolio_reports(
         detail: format!(
             "portfolio-{mode_str}: {} engine(s) ran ({}); {n_decided}/{n_props} properties decided. \
              Each property took the definite verdict from the first engine IN THE ORDER SHOWN \
-             ABOVE to decide it; a ⊥ means every engine left it undecided. Since mununu#543 (W1) \
+             ABOVE to decide it; a ⊥ means no engine decided it (since mununu#733 a later \
+             sequential member does not re-run a row an earlier one decided). Since mununu#543 (W1) \
              that order is the planner's own per-property prediction, most-predicted-decider \
              first, with the precision ladder (exact → symbolic → explicit) as the tiebreak — so \
              it is no longer fixed, and `ran:` lists what actually ran.",
@@ -4681,6 +4690,16 @@ pub(crate) fn verify_auto_impl(
                 .map(|p| (p.name.as_str(), p.outcome.label())),
             "main",
         );
+        // Plan 4 / PR D3 (mununu#733) — an earlier sequential member decided this row; the merge
+        // keeps that verdict, so this member records "not attempted" and spends nothing on it —
+        // before the budget sentinels (no budget consumed, never mislabelled `BudgetExpired`) and as
+        // `Unknown`, not `Skipped` (the cube-skip rescue and the over-cap notes act on `Skipped`).
+        if opts.skip_rows.contains(&t.name) {
+            report
+                .properties
+                .push(abstained(t, BottomReason::NotAttempted));
+            continue;
+        }
         // Once EITHER budget has been hit, every remaining property abstains without work.
         if memory_budget_hit.is_some() || time_budget_hit {
             // Not "never attempted" — a budget already stopped the run. WHICH budget is known
@@ -7429,6 +7448,58 @@ mod tests {
         assert!(
             short.properties[0].counterexample.is_some(),
             "the violated chain carries its trace"
+        );
+    }
+
+    /// PR D3 (mununu#733) — a later member's `Unknown { NotAttempted }` row (it left the row to an
+    /// earlier member) never displaces that member's definite verdict in the merge, keeps its
+    /// attribution, and leaves no stale ⊥ reason behind.
+    #[test]
+    fn a_not_attempted_row_never_displaces_an_earlier_definite() {
+        let row = |outcome: VerifyOutcome, reason: Option<BottomReason>| PropertyVerdict {
+            name: "p".to_string(),
+            label: None,
+            kind: crate::adapter::slang::translate::SvaKind::Assert,
+            formula: "nu X. ((q == 0) && [] X)".to_string(),
+            outcome,
+            seeded_predicates: Vec::new(),
+            counterexample: None,
+            bottom_reason: reason,
+            decided_by: None,
+            vacuity: None,
+        };
+        let first = AutoVerifyReport {
+            properties: vec![row(VerifyOutcome::Holds, None)],
+            ..Default::default()
+        };
+        let later = AutoVerifyReport {
+            properties: vec![row(
+                VerifyOutcome::Unknown { unknown_cells: 0 },
+                Some(BottomReason::NotAttempted),
+            )],
+            ..Default::default()
+        };
+        let merged = merge_portfolio_reports(
+            &[("exact-symbolic", Ok(first)), ("explicit", Ok(later))],
+            PortfolioMode::Sequential,
+        )
+        .expect("merges");
+        let p = &merged.properties[0];
+        assert!(matches!(p.outcome, VerifyOutcome::Holds), "{:?}", p.outcome);
+        assert_eq!(p.decided_by.as_deref(), Some("exact-symbolic"));
+        assert!(p.bottom_reason.is_none(), "{:?}", p.bottom_reason);
+        let portfolio = merged
+            .notes
+            .iter()
+            .find(|n| n.kind == "portfolio")
+            .expect("portfolio note");
+        assert!(
+            portfolio
+                .items
+                .iter()
+                .any(|i| i == "decided-by:exact-symbolic=1"),
+            "{:?}",
+            portfolio.items
         );
     }
 

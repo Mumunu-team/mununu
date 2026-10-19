@@ -217,5 +217,5 @@ The full table is [`docs/env-vars.md`](docs/env-vars.md). Three to know before r
 | variable | why it matters |
 |---|---|
 | `MUNUNU_BDD_TIME_BUDGET_MS` | off by default (`0`): a wall clock makes the **verdict** host-dependent, and that ⊥ is indistinguishable from a real one. |
-| `MUNUNU_VERIFY_AUTO_PARTIAL_JSON` | a SIGKILL-survivable breadcrumb, **not** authoritative for a portfolio run — the planner's merge writes nothing, so a `main`-phase `unknown` can end the run decided. |
+| `MUNUNU_VERIFY_AUTO_PARTIAL_JSON` | a SIGKILL-survivable breadcrumb; under a portfolio the LAST record per property (`phase: "merged"`, written by the planner after the merge) is the verdict that ships — a `main`-phase `unknown` is a member's view, not the run's (mununu#733). |
 | `MUNUNU_SHADOW_BTOR2_DUMP` | the BTOR2 the engine runs, **excluding** the inputs-in-the-state lift (per property, inside the engine); the header says so. |

@@ -4378,6 +4378,7 @@ fn sv_verify_auto(args: SvVerifyAutoArgs) -> Result<(), String> {
         // PR C — planner-only fields: the CLI run re-plans its own rows and truncates
         replan_defer: false,
         breadcrumb_append: false,
+        skip_rows: std::collections::HashSet::new(),
         assume_mode: match args.assumes {
             AssumesArg::Precondition => {
                 mununu_core::adapter::slang::verify_auto::AssumeMode::Precondition
