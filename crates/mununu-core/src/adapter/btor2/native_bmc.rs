@@ -39,7 +39,7 @@
 
 use std::collections::HashMap;
 
-use crate::adapter::btor2::ast::{Btor2File, Nid, Node};
+use crate::adapter::btor2::ast::{Btor2File, Nid, Node, Operand};
 use crate::adapter::sidecar::predicate_image::btor2_encode::{
     Btor2SmtView, EncodeError, encode_design,
 };
@@ -122,9 +122,11 @@ impl std::fmt::Display for BmcError {
     }
 }
 
-/// The property / init / assumption node references extracted from a BTOR2 file:
-/// `(bad operands, (state, init-value) pairs, constraint operands)`.
-type Props = (Vec<Nid>, Vec<(Nid, Nid)>, Vec<Nid>);
+/// The property / init / assumption operands extracted from a BTOR2 file:
+/// `(bad operands, (state, init-value) pairs, constraint operands)`. Operands keep their
+/// SIGN (PR A5 — `bad -N` is BTOR2's bit-not shorthand; reading it as `bad N` checked the
+/// opposite property).
+type Props = (Vec<Operand>, Vec<(Nid, Operand)>, Vec<Operand>);
 
 fn extract_props(file: &Btor2File) -> Props {
     let mut bad_ops = Vec::new();
@@ -132,13 +134,31 @@ fn extract_props(file: &Btor2File) -> Props {
     let mut constraint_ops = Vec::new();
     for l in &file.lines {
         match &l.node {
-            Node::Bad { signal } => bad_ops.push(signal.nid()),
-            Node::Init { state, value, .. } => init_pairs.push((*state, value.nid())),
-            Node::Constraint { signal } => constraint_ops.push(signal.nid()),
+            Node::Bad { signal } => bad_ops.push(*signal),
+            Node::Init { state, value, .. } => init_pairs.push((*state, *value)),
+            Node::Constraint { signal } => constraint_ops.push(*signal),
             _ => {}
         }
     }
     (bad_ops, init_pairs, constraint_ops)
+}
+
+/// A design signal's current-cycle BV by OPERAND: resolved through `signal_bvs` (Op/Const
+/// nodes), then `state_curr`, then `inputs` — so a property, constraint or `init` value that
+/// names a state cell or an input directly is not lost (mununu#741) — with BTOR2's `-N`
+/// bit-not applied when the operand is negated (PR A5).
+pub(crate) fn operand_bv(view: &Btor2SmtView, op: &Operand) -> Option<BV> {
+    let nid = op.nid();
+    let bv = view
+        .signal_bvs
+        .get(&nid)
+        .or_else(|| view.state_curr.get(&nid))
+        .or_else(|| view.inputs.get(&nid))?;
+    Some(if op.is_negated() {
+        bv.bvnot()
+    } else {
+        bv.clone()
+    })
 }
 
 /// Build `Nid → symbol` maps for the NAMED state cells and inputs — the cells the
@@ -174,8 +194,8 @@ fn symbol_maps(file: &Btor2File) -> (HashMap<Nid, String>, HashMap<Nid, String>)
 /// per run inside a [`z3::with_z3_config`] scope; BMC and k-induction both drive it.
 struct Unroller<'a> {
     view: &'a Btor2SmtView,
-    bad_ops: &'a [Nid],
-    constraint_ops: &'a [Nid],
+    bad_ops: &'a [Operand],
+    constraint_ops: &'a [Operand],
     /// `frame_state[j][nid]` — state cell `nid`'s value at frame `j`.
     frame_state: Vec<HashMap<Nid, BV>>,
     /// `frame_input[j][nid]` — input `nid`'s value at frame `j`.
@@ -188,8 +208,8 @@ impl<'a> Unroller<'a> {
     /// Build fresh frame variables for depths `0..=n`.
     fn build(
         view: &'a Btor2SmtView,
-        bad_ops: &'a [Nid],
-        constraint_ops: &'a [Nid],
+        bad_ops: &'a [Operand],
+        constraint_ops: &'a [Operand],
         n: usize,
     ) -> Self {
         let fresh = |src: &HashMap<Nid, BV>, prefix: &str| -> HashMap<Nid, BV> {
@@ -207,15 +227,9 @@ impl<'a> Unroller<'a> {
         }
     }
 
-    /// Current-cycle BV of a `bad`/`constraint` operand, falling back through
-    /// `state_curr`/`inputs` so a property referencing a state cell or input
-    /// directly (`bad = q`) is not dropped.
-    fn curr_bv(&self, nid: &Nid) -> Option<&BV> {
-        self.view
-            .signal_bvs
-            .get(nid)
-            .or_else(|| self.view.state_curr.get(nid))
-            .or_else(|| self.view.inputs.get(nid))
+    /// Current-cycle BV of a `bad` / `constraint` / `init`-value operand — see [`operand_bv`].
+    fn curr_bv(&self, op: &Operand) -> Option<BV> {
+        operand_bv(self.view, op)
     }
 
     /// `(state_curr → frame j) ∪ (inputs → frame j)` — instantiates a current-cycle
@@ -272,14 +286,18 @@ impl<'a> Unroller<'a> {
     }
 
     /// Assert the design's `init` values on frame 0 into `solver` (init-less state
-    /// cells stay free — BTOR2's nondeterministic-init semantics).
-    fn assert_init(&self, solver: &z3::Solver, init_pairs: &[(Nid, Nid)]) {
-        for (state, value_nid) in init_pairs {
-            if let (Some(s0), Some(vbv)) = (
-                self.frame_state[0].get(state),
-                self.view.signal_bvs.get(value_nid),
-            ) {
-                solver.assert(s0.eq(vbv));
+    /// cells stay free — BTOR2's nondeterministic-init semantics). The value is read AT
+    /// FRAME 0 (mununu#741): an `init` whose value is an input, another state, or an
+    /// expression over them (BTOR2 permits it — a shared nondeterministic initial value) pins
+    /// the cell to the frame-0 variable; on the base view it was either dropped (input /
+    /// state, not in `signal_bvs`) or tied to a constant unrelated to the frame — both leave
+    /// the cell free, an over-approximation of the initial states and a spurious
+    /// counterexample.
+    fn assert_init(&self, solver: &z3::Solver, init_pairs: &[(Nid, Operand)]) {
+        let subs = self.curr_subs(0);
+        for (state, value) in init_pairs {
+            if let (Some(s0), Some(vbv)) = (self.frame_state[0].get(state), self.curr_bv(value)) {
+                solver.assert(s0.eq(vbv.substitute(&subs)));
             }
         }
     }
@@ -961,5 +979,85 @@ mod tests {
                 "the exact engine must abstain (over-cap) at W={w}"
             );
         }
+    }
+
+    // ---- mununu#741 / PR A5 — init values and operand signs the z3 encoders used to lose ----
+
+    // mununu#741 — two states initialised from the SAME input `v`: `s == t` forever, so
+    // `bad = (s != t)` is unreachable (rIC3 UNSAT, the exact engine unreachable). An `init`
+    // whose value is an input is not an Op/Const node, so `signal_bvs` cannot resolve it —
+    // dropping the pair left the cell FREE: an over-approximation of the initial states and
+    // a spurious depth-0 counterexample.
+    const INIT_FROM_INPUT: &str = "1 sort bitvec 1\n2 input 1 v\n3 state 1 s\n4 init 1 3 2\n\
+                                   5 next 1 3 3\n6 state 1 t\n7 init 1 6 2\n8 next 1 6 6\n\
+                                   9 neq 1 3 6\n10 bad 9\n";
+    // `t` initialised from `¬v` (an Op OVER the input), `bad = (s == t)`: the Op resolves, but
+    // its value must be read at FRAME 0 — on the base view the input is a constant unrelated
+    // to the frame-0 input `s` was pinned to.
+    const INIT_FROM_INPUT_OP: &str = "1 sort bitvec 1\n2 input 1 v\n3 state 1 s\n4 init 1 3 2\n\
+                                      5 next 1 3 3\n6 not 1 2\n7 state 1 t\n8 init 1 7 6\n\
+                                      9 next 1 7 7\n10 eq 1 3 7\n11 bad 10\n";
+    // `t` initialised from the STATE `s` (BTOR2 permits it — a shared nondeterministic
+    // initial value): `s == t` forever.
+    const INIT_FROM_STATE: &str = "1 sort bitvec 1\n2 state 1 s\n3 next 1 2 2\n4 state 1 t\n\
+                                   5 init 1 4 2\n6 next 1 4 4\n7 neq 1 2 4\n8 bad 7\n";
+
+    #[test]
+    fn an_init_from_an_input_or_a_state_pins_the_cell() {
+        use std::sync::atomic::AtomicBool;
+        let far = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let never = AtomicBool::new(false);
+        for (name, src) in [
+            ("input", INIT_FROM_INPUT),
+            ("op-over-input", INIT_FROM_INPUT_OP),
+            ("state", INIT_FROM_STATE),
+        ] {
+            assert_eq!(
+                bmc(src, 5),
+                BmcOutcome::NoCexWithin { k: 5 },
+                "bmc: init from {name}"
+            );
+            assert!(
+                matches!(safety(src, 10), SafetyVerdict::Safe { .. }),
+                "k-induction: init from {name}"
+            );
+            let file = parser::parse(src).expect("parse");
+            assert_eq!(
+                bmc_cex_until(&file, 32, 5_000, far, &never),
+                None,
+                "deep cex: init from {name}"
+            );
+        }
+    }
+
+    // PR A5 — a NEGATED operand (`-N`, BTOR2's bit-not shorthand) on `bad`, `constraint` and
+    // an `init` value. Reading the operand by its absolute id checked the OPPOSITE property:
+    // `bad -2` with `s` stuck at 1 (`bad = ¬s`, unreachable) became `bad = s`.
+    const NEGATED_BAD: &str = "1 sort bitvec 1\n2 state 1 s\n3 one 1\n4 init 1 2 3\n\
+                               5 next 1 2 2\n6 bad -2\n";
+    // `constraint ¬in` pins the input to 0; `next s = in` keeps `s` at 0; `bad = s` unreachable.
+    const NEGATED_CONSTRAINT: &str = "1 sort bitvec 1\n2 input 1 in\n3 state 1 s\n4 zero 1\n\
+                                      5 init 1 3 4\n6 next 1 3 2\n7 constraint -2\n8 bad 3\n";
+    // `init s = ¬0 = 1`, `bad = s`: violated at depth 0 — reading `init 0` made it SAFE.
+    const NEGATED_INIT: &str = "1 sort bitvec 1\n2 zero 1\n3 state 1 s\n4 init 1 3 -2\n\
+                                5 next 1 3 3\n6 bad 3\n";
+
+    #[test]
+    fn a_negated_operand_keeps_its_sign() {
+        assert_eq!(bmc(NEGATED_BAD, 5), BmcOutcome::NoCexWithin { k: 5 });
+        assert!(matches!(
+            safety(NEGATED_BAD, 10),
+            SafetyVerdict::Safe { .. }
+        ));
+        assert_eq!(bmc(NEGATED_CONSTRAINT, 5), BmcOutcome::NoCexWithin { k: 5 });
+        assert!(matches!(
+            safety(NEGATED_CONSTRAINT, 10),
+            SafetyVerdict::Safe { .. }
+        ));
+        assert_eq!(bmc(NEGATED_INIT, 5), BmcOutcome::Violated { depth: 0 });
+        assert_eq!(
+            safety(NEGATED_INIT, 10),
+            SafetyVerdict::Violated { depth: 0 }
+        );
     }
 }

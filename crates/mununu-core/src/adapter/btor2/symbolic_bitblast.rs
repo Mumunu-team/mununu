@@ -631,9 +631,12 @@ impl BddBitBlaster {
         // the last between-op check. At that occupancy the next slightly-wider cone does not
         // abstain, it exhausts the arena inside one apply and takes the uncatchable SIGABRT path.
         // Measured cost of the raise: ~160 MB of baseline RSS (190 → 350 MB on a real lift).
-        let arena_nodes: usize = std::env::var("MUNUNU_BDD_ARENA_NODES")
-            .ok()
-            .and_then(|s| s.parse().ok())
+        let arena_nodes: usize = arena_nodes_override()
+            .or_else(|| {
+                std::env::var("MUNUNU_BDD_ARENA_NODES")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+            })
             .unwrap_or(if total_bits <= 40 {
                 1 << 24 // 16M nodes — the raster-wrap cone (20 bits, 2.06M) sits at 15% of its budget
             } else {
@@ -1031,7 +1034,9 @@ impl BddBitBlaster {
             .get(&op.nid())
             .ok_or_else(|| format!("operand {} unevaluated", op.nid()))?;
         if op.is_negated() {
-            Ok(v.iter().map(|b| b.not().unwrap()).collect())
+            v.iter()
+                .map(|b| oom(b.not()))
+                .collect::<Result<BitVec, String>>()
         } else {
             Ok(v.clone())
         }
@@ -2247,6 +2252,26 @@ impl AbstractRelation {
     }
 }
 
+// Test-only: overrides `MUNUNU_BDD_ARENA_NODES` on the current thread. The env var is
+// process-global, so a test setting it would race every other test in the binary; the
+// mununu#730 reproducer needs an arena a single apply can exhaust.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static ARENA_NODES_OVERRIDE: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn arena_nodes_override() -> Option<usize> {
+    #[cfg(test)]
+    {
+        ARENA_NODES_OVERRIDE.with(|c| c.get())
+    }
+    #[cfg(not(test))]
+    {
+        None
+    }
+}
+
 /// Map an OxiDD apply result (arena-full ⇒ `OutOfMemory`) to the engine's `String` error, so a wide
 /// BDD op ABSTAINS (`Err` → the caller routes to `--engine explicit`) instead of `.unwrap()`-panicking.
 /// A panic here aborts the process (SIGABRT) on the unwind of the exhausted manager — `catch_unwind`
@@ -3217,7 +3242,7 @@ impl Squarer {
         }
         let input_cube = inputs
             .iter()
-            .fold(tt.clone(), |acc, v| acc.and(&to_s0[v]).unwrap());
+            .try_fold(tt.clone(), |acc, v| oom(acc.and(&to_s0[v])))?;
         // Early-quantification schedule: a quantifiable variable (an `s` copy or an input) is
         // eliminated right after the LAST part that reads it (index 0 = `base`, j + 1 = part j).
         let quantifiable: std::collections::HashSet<VarNo> = (0..n)
@@ -3260,8 +3285,8 @@ impl Squarer {
             (0..n).map(|j| 3 * j as VarNo + 2).collect::<Vec<_>>(),
             s1.clone(),
         );
-        let cube_s1 = s1.iter().fold(tt.clone(), |acc, v| acc.and(v).unwrap());
-        let cube_s0 = s0.iter().fold(tt.clone(), |acc, v| acc.and(v).unwrap());
+        let cube_s1 = s1.iter().try_fold(tt.clone(), |acc, v| oom(acc.and(v)))?;
+        let cube_s0 = s0.iter().try_fold(tt.clone(), |acc, v| oom(acc.and(v)))?;
         let s1_to_s0 = Subst::new(
             (0..n).map(|j| 3 * j as VarNo + 1).collect::<Vec<_>>(),
             s0.clone(),
@@ -4177,11 +4202,13 @@ impl BddBitBlaster {
     ///
     /// `Holds` iff EVERY initial state satisfies the property.
     pub fn initial_state_bdd(&self, file: &Btor2File) -> Result<BDDFunction, String> {
-        // State-line nid → the value operand of its `init` line (if any).
-        let mut init_value_nid: HashMap<Nid, Nid> = HashMap::new();
+        // State-line nid → the value OPERAND of its `init` line (if any) — the operand, not
+        // its bare nid: `init s -N` is BTOR2's bit-not shorthand (PR A5 — read by its absolute
+        // id, `init s = ¬0` pinned `s` to 0 and a violated design was proved safe).
+        let mut init_value: HashMap<Nid, Operand> = HashMap::new();
         for line in &file.lines {
             if let Node::Init { state, value, .. } = &line.node {
-                init_value_nid.insert(*state, value.nid());
+                init_value.insert(*state, *value);
             }
         }
         // State-line nid → the symbol `build()` assigned it. AR-S1 / #242 drift
@@ -4222,13 +4249,13 @@ impl BddBitBlaster {
             // unconstrained, so contribute NO conjunct and leave its bits free.
             // (Pinning them to all-zero here was the mununu#498 sibling
             // under-approximation — see this method's doc comment.)
-            let Some(value_bits) = init_value_nid
-                .get(&line.nid)
-                .and_then(|vn| self.env.get(vn))
-                .cloned()
-            else {
+            let Some(op) = init_value.get(&line.nid) else {
                 continue;
             };
+            if !self.env.contains_key(&op.nid()) {
+                continue; // the value node is outside the kept cone — leave the bits free
+            }
+            let value_bits = self.resolve(*op)?;
             for (var, val) in cell.vars.iter().zip(value_bits.iter()) {
                 // state_bit ⟺ value_bit  =  ¬(state_bit XOR value_bit)
                 let iff = oom(self.xor(var, val)?.not())?;
@@ -4326,9 +4353,9 @@ impl ExactModel {
     /// such states (a state with no admissible input is a dead end), so callers
     /// conjoin this into a *target* set (e.g. `bad`) to require the target itself
     /// be constraint-consistent. `tt` when unconstrained.
-    pub fn constraint_satisfiable(&self) -> BDDFunction {
+    pub fn constraint_satisfiable(&self) -> Result<BDDFunction, String> {
         use oxidd::BooleanFunctionQuant;
-        self.constraint.exists(&self.input_cube).unwrap()
+        oom(self.constraint.exists(&self.input_cube))
     }
 
     /// `⟨⟩φ` — some **constraint-respecting** successor satisfies `φ`:
@@ -4352,7 +4379,7 @@ impl ExactModel {
         let l = if self.constraint == self.tt {
             self.tt.clone()
         } else {
-            self.to_next(&self.constraint_satisfiable())?
+            self.to_next(&self.constraint_satisfiable()?)?
         };
         Ok(self.legal_next.get_or_init(|| l))
     }
@@ -4720,11 +4747,13 @@ impl ExactModel {
         self.restriction()
     }
 
-    /// `x ∧ Reach` when the restriction is installed, else `x`.
-    fn restrict(&self, x: BDDFunction) -> BDDFunction {
+    /// `x ∧ Reach` when the restriction is installed, else `x`. Fallible (mununu#730): the
+    /// conjunction is an OxiDD apply that can exhaust the arena — an `Err` is the NODE-budget
+    /// abstention, never a panic.
+    fn restrict(&self, x: BDDFunction) -> Result<BDDFunction, String> {
         match self.restriction() {
-            Some(r) => x.and(&r).unwrap(),
-            None => x,
+            Some(r) => oom(x.and(&r)),
+            None => Ok(x),
         }
     }
 
@@ -4886,33 +4915,38 @@ impl ExactModel {
         // (`true`, atoms), the complement and the modal results are conjoined with it; `∧`, `∨`
         // and the fixpoints are closed under `⊆ Reach` on their own.
         Ok(match f.node(id) {
-            MuNode::True => self.restrict(self.tt.clone()),
+            MuNode::True => self.restrict(self.tt.clone())?,
             MuNode::False => self.ff.clone(),
             MuNode::Predicate(name) => self.restrict(
                 atoms
                     .get(name.as_str())
                     .cloned()
                     .unwrap_or_else(|| self.ff.clone()),
-            ),
+            )?,
             MuNode::Variable(v) => bindings
                 .get(v)
                 .cloned()
                 .ok_or_else(|| format!("unbound fixpoint variable {v:?}"))?,
             MuNode::Not(n) => {
                 self.tick(1);
-                self.restrict(self.eval_node(f, *n, atoms, bindings, ctx)?.not().unwrap())
+                // mununu#730 — `not` copies the operand's DAG (no complement edges), so it can
+                // exhaust the arena like any apply: `oom` turns that into the NODE-budget
+                // abstention the classifier attributes (`arena-overflow`); an `unwrap` here
+                // panicked on a reach-portfolio member thread twice in the OpenTitan census.
+                let inner = self.eval_node(f, *n, atoms, bindings, ctx)?;
+                self.restrict(oom(inner.not())?)?
             }
             MuNode::And(a, b) => {
                 let av = self.eval_node(f, *a, atoms, bindings, ctx)?;
                 let bv = self.eval_node(f, *b, atoms, bindings, ctx)?;
                 self.tick(1);
-                av.and(&bv).unwrap()
+                oom(av.and(&bv))?
             }
             MuNode::Or(a, b) => {
                 let av = self.eval_node(f, *a, atoms, bindings, ctx)?;
                 let bv = self.eval_node(f, *b, atoms, bindings, ctx)?;
                 self.tick(1);
-                av.or(&bv).unwrap()
+                oom(av.or(&bv))?
             }
             MuNode::Modal {
                 kind,
@@ -4947,7 +4981,7 @@ impl ExactModel {
                     Control::Controllable => self.cpre_controllable(&phi)?,
                     Control::Environment => self.cpre_environment(&phi)?,
                 };
-                self.restrict(pre)
+                self.restrict(pre)?
             }
             MuNode::Mu { var, body } => {
                 self.fixpoint(f, id, *var, *body, atoms, bindings, ctx, false)?
@@ -5096,7 +5130,7 @@ impl ExactModel {
         // produces a new approximant. Opt out with `MUNUNU_BDD_FIXPOINT_REUSE=0` (legacy evaluation).
         // Lever A — a ν starts from `Reach`, not `⊤`, when the restriction is installed.
         let seed = if greatest {
-            self.restrict(self.tt.clone())
+            self.restrict(self.tt.clone())?
         } else {
             self.ff.clone()
         };
@@ -5139,7 +5173,10 @@ impl ExactModel {
             {
                 squaring_tried = true;
                 let p = self.eval_node(f, p_node, atoms, bindings, ctx)?;
-                match self.squared_reach(&p, greatest).map(|c| self.restrict(c)) {
+                match self
+                    .squared_reach(&p, greatest)
+                    .and_then(|c| self.restrict(c))
+                {
                     Ok(closed) => {
                         bindings.remove(&var);
                         if ctx.reuse {
@@ -5171,7 +5208,7 @@ impl ExactModel {
                 );
                 match self
                     .fair_cycle_by_closure(&literals)
-                    .map(|c| self.restrict(c))
+                    .and_then(|c| self.restrict(c))
                 {
                     Ok(sat) => {
                         tracing::debug!(
@@ -5289,7 +5326,7 @@ impl ExactModel {
             // `target ∨ ◇x` — the monotone `EF(target)` step. Saturation `next == x` is exact
             // (ROBDDs are canonical), and the depth at saturation IS the reach diameter.
             let pre = self.diamond_pre(&x)?;
-            let next = target.or(&pre).unwrap();
+            let next = oom(target.or(&pre))?;
             if next == x {
                 return Ok(DiameterEstimate::Saturated(depth));
             }
@@ -5466,7 +5503,7 @@ pub fn exact_bad_reachable(btor2_content: &str) -> Result<bool, String> {
             .into_iter()
             .next()
             .ok_or_else(|| "exact bad-reachability: a `bad` signal has zero width".to_string())?;
-        bad = bad.or(&b).unwrap();
+        bad = oom(bad.or(&b))?;
     }
 
     let model = bb.exact_model();
@@ -5476,14 +5513,14 @@ pub fn exact_bad_reachable(btor2_content: &str) -> Result<bool, String> {
     // constraint-satisfiable states leaves an unconstrained design unchanged
     // (`constraint_satisfiable() = tt`). The constrained `◇` (`diamond_pre`)
     // already restricts every intermediate step.
-    let bad = bad.and(&model.constraint_satisfiable()).unwrap();
+    let bad = oom(bad.and(&model.constraint_satisfiable()?))?;
     let formula = mu_parser::parse("mu Y. (BAD or <> Y)").expect("EF(bad) formula parses");
     let mut atoms: HashMap<&str, BDDFunction> = HashMap::new();
     atoms.insert("BAD", bad);
     // Built BEFORE the fixpoint: see the ordering hazard on `check_node_budget`.
     let init = bb.initial_state_bdd(&file)?;
     let reach = model.evaluate(&formula, &atoms)?;
-    let reachable = init.and(&reach).unwrap() != bb.ff;
+    let reachable = oom(init.and(&reach))? != bb.ff;
 
     // BOTH directions are sound since mununu#498's sibling fix: `initial_state_bdd`
     // models the design's initial set EXACTLY (a state with no `init` line is left
@@ -6554,7 +6591,7 @@ impl ExactSession {
         // → …)`. The same filter is right for the register-only model (`exact_bad_reachable`
         // already conjoins it into `bad`); it was unobservable there because `∃i. c(s, i)` is
         // almost always satisfiable at a register valuation.
-        let init = init.and(&exact.constraint_satisfiable()).unwrap();
+        let init = oom(init.and(&exact.constraint_satisfiable()?))?;
         Ok(ExactSession {
             file,
             formula: formula.clone(),
@@ -6625,7 +6662,7 @@ impl ExactSession {
         }
         let sat = exact.evaluate(formula, &atoms)?;
         // Holds iff init ⊆ sat, i.e. no legal initial state violates φ.
-        let violating = self.init.and(&sat.not().unwrap()).unwrap();
+        let violating = oom(self.init.and(&oom(sat.not())?))?;
         if violating == *exact.ff() {
             return Ok((ExactVerdict::Holds, None));
         }
@@ -6989,15 +7026,14 @@ pub fn exact_env_strategy(btor2_content: &str, good: &str) -> Result<EnvStrategy
     // initial state no input can satisfy starts no valid trace. Read unfiltered, such a state has
     // no constraint-respecting successor, lies outside every maintained region, and "escapes" —
     // a spurious NotMaintainable on a design the environment maintains from every legal start.
-    let init = bb
+    let init = oom(bb
         .initial_state_bdd(&file)?
-        .and(&exact.constraint_satisfiable())
-        .unwrap();
+        .and(&exact.constraint_satisfiable()?))?;
 
     let r = exact.ef_region(&good_bdd)?;
     let s = exact.env_maintain_region(&r)?;
     // init ⊆ S ⟺ init ∧ ¬S is empty.
-    let escaping = init.and(&s.not().unwrap()).unwrap();
+    let escaping = oom(init.and(&oom(s.not())?))?;
     if escaping == *exact.ff() {
         // NON-VACUITY (strategy-intrinsic): the maintained region must let the environment LEAVE
         // `good` — else `S ⊆ good` and the "strategy" vacuously sits on `good` forever (AG EF good is
@@ -15214,5 +15250,108 @@ mod open_items_tests {
             "the rescue replaces the peel: {}",
             rescued.iteration_count()
         );
+    }
+
+    // mununu#730 — an OxiDD apply that exhausts the arena INSIDE the evaluator (here the `¬` of a
+    // predicate whose BDD fills half the arena) must be the attributed NODE-budget abstention,
+    // not a panic. The design compares a 10-bit register with the bit-REVERSE of another through
+    // one `eq`: under the interleaved order every pair `(a[i], b[9-i])` straddles the middle, so
+    // the BDD is Θ(2^10) nodes — large enough that its complement does not fit beside it in a
+    // small arena, small enough that the build does. The arena is scanned because the exact node
+    // counts are OxiDD's: the test asserts that NO size panics and that at least one size
+    // abstains at EVALUATION time (the build is left outside the unwind guard — it has its own).
+    #[test]
+    fn an_arena_exhausted_inside_the_evaluator_abstains_instead_of_panicking() {
+        const REVERSED_EQ: &str = "\
+1 sort bitvec 10
+2 state 1 a
+3 state 1 b
+4 next 1 2 2
+5 next 1 3 3
+6 sort bitvec 1
+7 slice 6 3 0 0
+8 slice 6 3 1 1
+9 slice 6 3 2 2
+10 slice 6 3 3 3
+11 slice 6 3 4 4
+12 slice 6 3 5 5
+13 slice 6 3 6 6
+14 slice 6 3 7 7
+15 slice 6 3 8 8
+16 slice 6 3 9 9
+17 sort bitvec 2
+18 concat 17 7 8
+19 sort bitvec 3
+20 concat 19 18 9
+21 sort bitvec 4
+22 concat 21 20 10
+23 sort bitvec 5
+24 concat 23 22 11
+25 sort bitvec 6
+26 concat 25 24 12
+27 sort bitvec 7
+28 concat 27 26 13
+29 sort bitvec 8
+30 concat 29 28 14
+31 sort bitvec 9
+32 concat 31 30 15
+33 concat 1 32 16
+34 eq 6 2 33 big
+35 bad 34
+";
+        let file = crate::adapter::btor2::parser::parse(REVERSED_EQ).expect("parse");
+        let formula = crate::mu_calculus::parser::parse("!BIG").expect("formula");
+        let mut evaluation_abstained = Vec::new();
+        let mut evaluated = Vec::new();
+        let mut build_did_not_fit = Vec::new();
+        for arena in (1_024..=24_576).step_by(512) {
+            ARENA_NODES_OVERRIDE.with(|c| c.set(Some(arena)));
+            let bb = match BddBitBlaster::build(&file) {
+                Ok(bb) => bb,
+                Err(_) => {
+                    ARENA_NODES_OVERRIDE.with(|c| c.set(None));
+                    build_did_not_fit.push(arena);
+                    continue;
+                }
+            };
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let big = bb.resolve(Operand(34))?.into_iter().next().expect("1-bit");
+                let model = bb.exact_model();
+                let mut atoms: HashMap<&str, BDDFunction> = HashMap::new();
+                atoms.insert("BIG", big);
+                model.evaluate(&formula, &atoms).map(|_| ())
+            }));
+            ARENA_NODES_OVERRIDE.with(|c| c.set(None));
+            match outcome {
+                Err(_) => panic!("arena {arena}: the evaluator PANICKED instead of abstaining"),
+                Ok(Err(msg)) if msg.contains("arena exhausted") => evaluation_abstained.push(arena),
+                Ok(Err(msg)) => panic!("arena {arena}: unexpected error: {msg}"),
+                Ok(Ok(())) => evaluated.push(arena),
+            }
+        }
+        assert!(
+            !evaluated.is_empty(),
+            "no arena in the scan fit the design — widen the scan (build failed at {build_did_not_fit:?})"
+        );
+        assert!(
+            !evaluation_abstained.is_empty(),
+            "no arena in the scan exhausted inside the `¬` — the reproducer did not reach the \
+             defect (built at {build_did_not_fit:?}, evaluated at {evaluated:?})"
+        );
+    }
+
+    // PR A5 — `init s = -zero` (BTOR2's bit-not shorthand on the init value) is `s = 1`, so
+    // `bad = s` is reachable at step 0 (rIC3 SAT, native BMC depth 0). Read by its absolute id
+    // the init pinned `s` to 0 and the exact engine answered UNREACHABLE — the portfolio's
+    // contradiction alarm was the only symptom.
+    #[test]
+    fn a_negated_init_value_keeps_its_sign_in_the_initial_state() {
+        const NEGATED_INIT: &str =
+            "1 sort bitvec 1\n2 zero 1\n3 state 1 s\n4 init 1 3 -2\n5 next 1 3 3\n6 bad 3\n";
+        assert_eq!(exact_bad_reachable(NEGATED_INIT), Ok(true));
+        // The un-negated twin is the safe one.
+        const PLAIN_INIT: &str =
+            "1 sort bitvec 1\n2 zero 1\n3 state 1 s\n4 init 1 3 2\n5 next 1 3 3\n6 bad 3\n";
+        assert_eq!(exact_bad_reachable(PLAIN_INIT), Ok(false));
     }
 }

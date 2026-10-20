@@ -80,7 +80,18 @@ pub(crate) fn init_valuation(file: &Btor2File) -> BTreeMap<String, u128> {
             && let Some(cl) = file.lookup(value.nid())
             && let Node::Const { sort, value: cv } = &cl.node
         {
-            init_of.insert(*state, const_to_u128(file, *sort, cv));
+            let mut v = const_to_u128(file, *sort, cv);
+            if value.is_negated() {
+                // PR A5 — `init s -N` is the constant's bit-not within its width.
+                let w = bv_width(file, *sort).unwrap_or(0);
+                let mask = if w == 0 || w >= 128 {
+                    u128::MAX
+                } else {
+                    (1u128 << w) - 1
+                };
+                v = !v & mask;
+            }
+            init_of.insert(*state, v);
         }
     }
     let mut out = BTreeMap::new();
@@ -592,5 +603,14 @@ mod tests {
             ag_state_atom(&file, "st_alias", CmpOp::Eq, 0, 64, 8, false).unwrap(),
             AgOracle::Holds
         );
+    }
+
+    // PR A5 — the cube lift's pinned initial valuation honours BTOR2's `-N` on an init value.
+    #[test]
+    fn init_valuation_applies_a_negated_init_operand() {
+        let file =
+            parser::parse("1 sort bitvec 2\n2 zero 1\n3 state 1 s\n4 init 1 3 -2\n5 next 1 3 3\n")
+                .unwrap();
+        assert_eq!(init_valuation(&file).get("s"), Some(&0b11u128));
     }
 }

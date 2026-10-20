@@ -1640,7 +1640,7 @@ pub(crate) fn detect_enum_states(file: &Btor2File) -> Vec<EnumStateMeta> {
         // up an out-of-set value — conservatively skip). Its popcount is irrelevant:
         // any constant is a valid enum member.
         let Some(init_v) =
-            init_value_of(file, state_nid).and_then(|op| resolve_btor2_constant(file, op.nid()))
+            init_value_of(file, state_nid).and_then(|op| resolve_btor2_constant_operand(file, op))
         else {
             continue;
         };
@@ -5342,7 +5342,7 @@ fn apply_btor2_init_smart_defaults(
         if cell_domains.contains_key(state) {
             continue;
         }
-        let Some(init_value) = resolve_btor2_constant(file, value.nid()) else {
+        let Some(init_value) = resolve_btor2_constant_operand(file, *value) else {
             continue;
         };
         let Some(width) = nid_to_width.get(state) else {
@@ -5437,7 +5437,7 @@ fn apply_btor2_init_seeding(
             continue;
         }
         // Resolve the init value's constant via the value operand's NID.
-        let Some(init_value) = resolve_btor2_constant(file, value.nid()) else {
+        let Some(init_value) = resolve_btor2_constant_operand(file, *value) else {
             continue;
         };
         // Mask to the cell's bit-width.
@@ -5966,6 +5966,23 @@ pub(crate) fn apply_vcd_trace_seeding(
 ///
 /// Returns `None` for any non-constant NID (operations on other
 /// signals, references to inputs, etc.).
+/// [`resolve_btor2_constant`] by OPERAND: BTOR2's `-N` bit-not shorthand applied within the
+/// constant's width (PR A5 — an `init s -N` read by its absolute id pinned the register to the
+/// opposite value: a proved-safe design that is violated at step 0).
+pub(crate) fn resolve_btor2_constant_operand(file: &Btor2File, op: Operand) -> Option<u64> {
+    let v = resolve_btor2_constant(file, op.nid())?;
+    if !op.is_negated() {
+        return Some(v);
+    }
+    let width = parser::node_bv_width(file, op.nid())?;
+    let mask = if width >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << width) - 1
+    };
+    Some(!v & mask)
+}
+
 pub(crate) fn resolve_btor2_constant(file: &Btor2File, nid: Nid) -> Option<u64> {
     for line in &file.lines {
         if line.nid != nid {
@@ -7207,8 +7224,8 @@ mod tests {
             if !in_cone {
                 continue;
             }
-            let init =
-                init_value_of(&file, m.nid).and_then(|op| resolve_btor2_constant(&file, op.nid()));
+            let init = init_value_of(&file, m.nid)
+                .and_then(|op| resolve_btor2_constant_operand(&file, op));
             let re_bits = match init {
                 Some(v) if v >= 1 => 64 - v.leading_zeros(), // ⌈log₂(v+1)⌉ for a 0..v range
                 Some(_) => 1,
@@ -7405,8 +7422,8 @@ mod tests {
                 log2_tight += l;
                 c_regs.push((s, w, l, "enum"));
             } else if counter_nids.contains(&s) {
-                let init =
-                    init_value_of(&file, s).and_then(|op| resolve_btor2_constant(&file, op.nid()));
+                let init = init_value_of(&file, s)
+                    .and_then(|op| resolve_btor2_constant_operand(&file, op));
                 let range = init
                     .map(|v| v.saturating_add(1))
                     .unwrap_or(1u64 << w.min(63));
@@ -7771,7 +7788,7 @@ mod tests {
             .iter()
             .map(|c| {
                 let range = init_value_of(&file, c.nid)
-                    .and_then(|op| resolve_btor2_constant(&file, op.nid()))
+                    .and_then(|op| resolve_btor2_constant_operand(&file, op))
                     .map(|v| v.saturating_add(1))
                     .unwrap_or(1u64 << c.width.min(63));
                 (c.width, range)
@@ -9581,8 +9598,9 @@ mod tests {
 3 ones 1
 4 state 1 q
 5 next 1 4 4
-6 eq 1 4 3
+6 eq 8 4 3
 7 bad 6
+8 sort bitvec 1
 "#;
         let out = translate(src, &AdapterOptions::default()).expect("translate");
         let soundness_warning = out
@@ -9612,8 +9630,9 @@ mod tests {
 3 ones 1
 4 state 1 q
 5 next 1 4 4
-6 eq 1 4 3
+6 eq 8 4 3
 7 bad 6
+8 sort bitvec 1
 "#;
         let sidecar = serde_json::json!({
             "$schema": "mununu_sv_annotation_v1",
@@ -9668,8 +9687,9 @@ mod tests {
 3 state 1 q
 4 init 1 3 2
 5 next 1 3 3
-6 eq 1 3 2
+6 eq 8 3 2
 7 bad 6
+8 sort bitvec 1
 "#;
         let sidecar = serde_json::json!({
             "$schema": "mununu_sv_annotation_v1",
@@ -9757,8 +9777,9 @@ mod tests {
 3 state 1 q
 4 init 1 3 2
 5 next 1 3 3
-6 eq 1 3 2
+6 eq 8 3 2
 7 bad 6
+8 sort bitvec 1
 "#;
         let sidecar = serde_json::json!({
             "$schema": "mununu_sv_annotation_v1",
@@ -9795,8 +9816,9 @@ mod tests {
 3 state 1 q
 4 init 1 3 2
 5 next 1 3 3
-6 eq 1 3 2
+6 eq 8 3 2
 7 bad 6
+8 sort bitvec 1
 "#;
         // No sidecar → full bit-blast over 2 bits = 4 states.
         let out = translate(src, &AdapterOptions::default()).expect("translate");
@@ -9815,8 +9837,9 @@ mod tests {
 3 state 1 q
 4 init 1 3 2
 5 next 1 3 3
-6 eq 1 3 2
+6 eq 8 3 2
 7 bad 6
+8 sort bitvec 1
 "#;
         let sidecar = serde_json::json!({
             "$schema": "mununu_sv_annotation_v1",
@@ -10203,8 +10226,9 @@ mod tests {
 7 next 1 3 6
 8 input 1 rst_n
 9 ones 1
-10 eq 1 3 9
+10 eq 12 3 9
 11 bad 10
+12 sort bitvec 1
 "#;
         let out = translate(src, &AdapterOptions::default()).expect("translate");
         // Single init state (q=0), exactly 1 "initial" marker.
@@ -10230,8 +10254,9 @@ mod tests {
 8 ite 1 7 6 2
 9 next 1 3 8
 10 ones 1
-11 eq 1 3 10
+11 eq 13 3 10
 12 bad 11
+13 sort bitvec 1
 "#;
         let sidecar = serde_json::json!({
             "$schema": "mununu_sv_annotation_v1",
@@ -10268,8 +10293,9 @@ mod tests {
 7 next 1 3 6
 8 input 1 rst_n
 9 ones 1
-10 eq 1 3 9
+10 eq 12 3 9
 11 bad 10
+12 sort bitvec 1
 "#;
         let sidecar = serde_json::json!({
             "$schema": "mununu_sv_annotation_v1",
@@ -10310,8 +10336,9 @@ mod tests {
 6 add 1 3 5
 7 next 1 3 6
 8 ones 1
-9 eq 1 3 8
+9 eq 11 3 8
 10 bad 9
+11 sort bitvec 1
 "#;
         let sidecar = serde_json::json!({
             "$schema": "mununu_sv_annotation_v1",
@@ -10528,8 +10555,9 @@ mod tests {
 3 ones 1
 4 state 1 q
 5 next 1 4 4
-6 eq 1 4 3
+6 eq 8 4 3
 7 bad 6
+8 sort bitvec 1
 "#;
         let sidecar = serde_json::json!({
             "$schema": "mununu_sv_annotation_v1",
@@ -10567,8 +10595,9 @@ mod tests {
 3 ones 1
 4 state 1 q
 5 next 1 4 4
-6 eq 1 4 3
+6 eq 8 4 3
 7 bad 6
+8 sort bitvec 1
 "#;
         let sidecar = serde_json::json!({
             "$schema": "mununu_sv_annotation_v1",
@@ -10606,8 +10635,9 @@ mod tests {
 4 state 1 q
 5 init 1 4 2
 6 next 1 4 4
-7 eq 1 4 3
+7 eq 9 4 3
 8 bad 7
+9 sort bitvec 1
 "#;
         let sidecar = serde_json::json!({
             "$schema": "mununu_sv_annotation_v1",
@@ -10642,8 +10672,9 @@ mod tests {
 3 state 1 q
 4 init 1 3 2
 5 next 1 3 3
-6 eq 1 3 2
+6 eq 8 3 2
 7 bad 6
+8 sort bitvec 1
 "#;
         let out = translate(src, &AdapterOptions::default()).expect("translate");
         assert_eq!(out.source_info.state_count, 4);
@@ -10658,8 +10689,9 @@ mod tests {
 3 state 1 q
 4 init 1 3 2
 5 next 1 3 3
-6 eq 1 3 2
+6 eq 8 3 2
 7 bad 6
+8 sort bitvec 1
 "#;
         let opts = AdapterOptions {
             smart_init_defaults: true,
@@ -10695,8 +10727,9 @@ mod tests {
 3 state 1 q
 4 init 1 3 2
 5 next 1 3 3
-6 eq 1 3 2
+6 eq 8 3 2
 7 bad 6
+8 sort bitvec 1
 "#;
         let sidecar = serde_json::json!({
             "$schema": "mununu_sv_annotation_v1",
@@ -10724,8 +10757,9 @@ mod tests {
 2 state 1 q
 3 next 1 2 2
 4 zero 1
-5 eq 1 2 4
+5 eq 7 2 4
 6 bad 5
+7 sort bitvec 1
 "#;
         let opts = AdapterOptions {
             smart_init_defaults: true,
@@ -10748,8 +10782,9 @@ mod tests {
 3 ones 1
 4 state 1 q
 5 next 1 4 4
-6 eq 1 4 3
+6 eq 8 4 3
 7 bad 6
+8 sort bitvec 1
 "#;
         let out = translate(src, &AdapterOptions::default()).expect("translate");
         assert_eq!(out.source_info.state_count, 4);
@@ -10771,8 +10806,9 @@ mod tests {
 3 ones 1
 4 state 1 q
 5 next 1 4 4
-6 eq 1 4 3
+6 eq 8 4 3
 7 bad 6
+8 sort bitvec 1
 "#;
         let sidecar = serde_json::json!({
             "$schema": "mununu_sv_annotation_v1",
@@ -11930,5 +11966,24 @@ mod tests {
             step("1 sort bitvec 200\n2 state 1 x\n3 constd 1 300\n4 sll 1 2 3\n5 next 1 2 4\n"),
             0
         );
+    }
+
+    // PR A5 — `init s -2` where node 2 is `zero` (2 bits) is `s = 0b11`, BTOR2's bit-not
+    // shorthand; read by its absolute id the detectors (enum / counter / smart-init) took `0`.
+    #[test]
+    fn a_negated_init_constant_resolves_to_its_bit_not() {
+        let neg = crate::adapter::btor2::parser::parse(
+            "1 sort bitvec 2\n2 zero 1\n3 state 1 s\n4 init 1 3 -2\n5 next 1 3 3\n",
+        )
+        .unwrap();
+        let op = init_value_of(&neg, 3).expect("init operand");
+        assert!(op.is_negated());
+        assert_eq!(resolve_btor2_constant_operand(&neg, op), Some(0b11));
+        let plain = crate::adapter::btor2::parser::parse(
+            "1 sort bitvec 2\n2 zero 1\n3 state 1 s\n4 init 1 3 2\n5 next 1 3 3\n",
+        )
+        .unwrap();
+        let op = init_value_of(&plain, 3).expect("init operand");
+        assert_eq!(resolve_btor2_constant_operand(&plain, op), Some(0));
     }
 }

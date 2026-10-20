@@ -34,7 +34,8 @@ use std::collections::BTreeMap;
 
 use z3::ast::{Ast, BV, Bool};
 
-use crate::adapter::btor2::ast::{Btor2File, Nid, Node};
+use crate::adapter::btor2::ast::{Btor2File, Nid, Node, Operand};
+use crate::adapter::btor2::native_bmc;
 use crate::adapter::sidecar::predicate_image::btor2_encode::{Btor2SmtView, encode_design};
 
 /// Controlled-name interface variables for a one-step interpolation query.
@@ -113,11 +114,12 @@ impl Interface {
     }
 }
 
-/// The design's `bad` / `init` / `constraint` operands (BTOR2 NIDs).
+/// The design's `bad` / `init` / `constraint` operands, sign kept (PR A5 — `bad -N` is
+/// BTOR2's bit-not shorthand; reading it by its absolute id checked the opposite property).
 struct Props {
-    bad: Vec<Nid>,
-    init: Vec<(Nid, Nid)>,
-    constraint: Vec<Nid>,
+    bad: Vec<Operand>,
+    init: Vec<(Nid, Operand)>,
+    constraint: Vec<Operand>,
 }
 
 fn extract_props(file: &Btor2File) -> Props {
@@ -128,22 +130,19 @@ fn extract_props(file: &Btor2File) -> Props {
     };
     for l in &file.lines {
         match &l.node {
-            Node::Bad { signal } => props.bad.push(signal.nid()),
-            Node::Init { state, value, .. } => props.init.push((*state, value.nid())),
-            Node::Constraint { signal } => props.constraint.push(signal.nid()),
+            Node::Bad { signal } => props.bad.push(*signal),
+            Node::Init { state, value, .. } => props.init.push((*state, *value)),
+            Node::Constraint { signal } => props.constraint.push(*signal),
             _ => {}
         }
     }
     props
 }
 
-/// A design signal's current-cycle BV, falling back through `state_curr`/`inputs`
-/// so a property/init that references a state cell or input directly is not lost.
-fn curr_bv<'a>(view: &'a Btor2SmtView, nid: &Nid) -> Option<&'a BV> {
-    view.signal_bvs
-        .get(nid)
-        .or_else(|| view.state_curr.get(nid))
-        .or_else(|| view.inputs.get(nid))
+/// A design signal's current-cycle BV by operand — `signal_bvs` → `state_curr` → `inputs`,
+/// sign applied; shared with the native BMC and SPACER ([`native_bmc::operand_bv`]).
+fn curr_bv(view: &Btor2SmtView, op: &Operand) -> Option<BV> {
+    native_bmc::operand_bv(view, op)
 }
 
 /// `bad` as a z3 `Bool` over a chosen substitution: OR over all `bad` operands of

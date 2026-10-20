@@ -29,6 +29,13 @@ pub fn parse(content: &str) -> Result<Btor2File, AdapterError> {
         }
 
         let nid = parse_nid(tokens[0], source_line)?;
+        // mununu#743 — ids are positive (btor2tools: `expected positive id`).
+        if nid < 1 {
+            return Err(parse_err(
+                source_line,
+                format!("NID must be positive, got {nid}"),
+            ));
+        }
         let kw = tokens[1];
 
         let node = parse_node(kw, &tokens[2..], source_line)?;
@@ -240,10 +247,41 @@ fn collect_immediates(
 }
 
 fn validate(file: &Btor2File) -> Result<(), AdapterError> {
-    // Cross-reference check: every operand and sort reference must exist.
+    // Cross-reference check: every operand and sort reference must exist. Ids need NOT
+    // increase along the file: mununu's own rewrites (`enum_reencode`, `counter_may_abstract`)
+    // append a sort after the nodes that use it and the exact engine re-parses the emitted
+    // text; btor2tools consumers get `emit_btor2_for_subprocess`. What every engine needs is
+    // that the COMBINATIONAL references form a DAG — `check_combinational_acyclic` below
+    // (mununu#743).
     let known: std::collections::HashSet<Nid> = file.by_nid.keys().copied().collect();
 
     for line in &file.lines {
+        // mununu#743 — a property operand (`bad` / `constraint` / `fair` / `justice`) must be
+        // a 1-bit bit-vector (btor2tools: `expected bitvec of size 1 for bad but got 4`);
+        // every engine used to improvise on a wider one (the exact engine took bit 0, the z3
+        // engines panicked on the sort mismatch, the portfolio read the panics as abstentions).
+        let property_operand = |what: &str, op: &Operand| -> Result<(), AdapterError> {
+            check_ref(op.nid(), &known, line.source_line)?;
+            match node_bv_width(file, op.nid()) {
+                Some(1) => Ok(()),
+                Some(w) => Err(parse_err(
+                    line.source_line,
+                    format!(
+                        "`{what}` operand (node {}) is {w} bit(s); BTOR2 requires a 1-bit \
+                         property operand",
+                        op.nid()
+                    ),
+                )),
+                None => Err(parse_err(
+                    line.source_line,
+                    format!(
+                        "`{what}` operand (node {}) is not a bit-vector; BTOR2 requires a 1-bit \
+                         property operand",
+                        op.nid()
+                    ),
+                )),
+            }
+        };
         match &line.node {
             Node::Input { sort, .. } | Node::State { sort, .. } | Node::Const { sort, .. } => {
                 check_ref(*sort, &known, line.source_line)?;
@@ -259,15 +297,15 @@ fn validate(file: &Btor2File) -> Result<(), AdapterError> {
                 check_ref(*state, &known, line.source_line)?;
                 check_ref(value.nid(), &known, line.source_line)?;
             }
-            Node::Bad { signal }
-            | Node::Constraint { signal }
-            | Node::Fair { signal }
-            | Node::Output { signal, .. } => {
+            Node::Bad { signal } => property_operand("bad", signal)?,
+            Node::Constraint { signal } => property_operand("constraint", signal)?,
+            Node::Fair { signal } => property_operand("fair", signal)?,
+            Node::Output { signal, .. } => {
                 check_ref(signal.nid(), &known, line.source_line)?;
             }
             Node::Justice { signals } => {
                 for s in signals {
-                    check_ref(s.nid(), &known, line.source_line)?;
+                    property_operand("justice", s)?;
                 }
             }
             Node::Sort { sort } => {
@@ -278,7 +316,7 @@ fn validate(file: &Btor2File) -> Result<(), AdapterError> {
             }
         }
     }
-    Ok(())
+    check_combinational_acyclic(file)
 }
 
 fn check_ref(
@@ -293,6 +331,78 @@ fn check_ref(
         ));
     }
     Ok(())
+}
+
+/// The operands of an operator node; empty for every other node kind (a state, an input, a
+/// constant — the leaves of the combinational graph).
+fn op_args(file: &Btor2File, nid: Nid) -> &[Operand] {
+    match file.lookup(nid).map(|l| &l.node) {
+        Some(Node::Op { args, .. }) => args.as_slice(),
+        _ => &[],
+    }
+}
+
+/// mununu#743 — an operator whose operand chain leads back to itself. BTOR2 forbids a
+/// forward reference, so a conforming file cannot express one, but this parser does not
+/// police line order (see [`validate`]) and the z3 encoder evaluates operands by recursion
+/// with a NID cache and no cycle check: a cycle overflowed the stack — an abort, not a
+/// refusal. `init` / `next` edges are not combinational (a state's next value may read the
+/// state), so only operator operands are walked.
+fn check_combinational_acyclic(file: &Btor2File) -> Result<(), AdapterError> {
+    // `false` = on the DFS stack, `true` = finished.
+    let mut state: HashMap<Nid, bool> = HashMap::with_capacity(file.lines.len());
+    for root in &file.lines {
+        if !matches!(root.node, Node::Op { .. }) || state.contains_key(&root.nid) {
+            continue;
+        }
+        let mut stack: Vec<(Nid, usize)> = vec![(root.nid, 0)];
+        state.insert(root.nid, false);
+        while let Some(&(nid, idx)) = stack.last() {
+            let args = op_args(file, nid);
+            if idx == args.len() {
+                state.insert(nid, true);
+                stack.pop();
+                continue;
+            }
+            stack.last_mut().expect("non-empty").1 += 1;
+            let child = args[idx].nid();
+            match state.get(&child) {
+                Some(false) => {
+                    let path: Vec<String> = stack.iter().map(|(n, _)| n.to_string()).collect();
+                    let source_line = file.lookup(nid).map(|l| l.source_line).unwrap_or(0);
+                    return Err(parse_err(
+                        source_line,
+                        format!(
+                            "combinational cycle through NID {child} ({} -> {child})",
+                            path.join(" -> ")
+                        ),
+                    ));
+                }
+                Some(true) => {}
+                None => {
+                    if op_args(file, child).is_empty() {
+                        state.insert(child, true);
+                    } else {
+                        state.insert(child, false);
+                        stack.push((child, 0));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The bit-vector width of a value node (`input` / `state` / `const` / an operator); `None`
+/// for a sort line, an `init` / `next` / property line, or an array-sorted node.
+pub fn node_bv_width(file: &Btor2File, nid: Nid) -> Option<u32> {
+    match &file.lookup(nid)?.node {
+        Node::Input { sort, .. }
+        | Node::State { sort, .. }
+        | Node::Const { sort, .. }
+        | Node::Op { sort, .. } => bv_width(file, *sort),
+        _ => None,
+    }
 }
 
 fn parse_nid(s: &str, source_line: usize) -> Result<Nid, AdapterError> {
@@ -1203,18 +1313,32 @@ pub fn find_next_value_operand(
 /// surface as an index-out-of-bounds panic deep in the bit-blaster, or not at all.
 pub fn check_sorts(file: &Btor2File) -> Result<(), String> {
     use crate::adapter::btor2::ast::Op;
-    let width = |nid: Nid| -> Option<u32> {
-        match &file.lookup(nid)?.node {
-            Node::Input { sort, .. }
-            | Node::State { sort, .. }
-            | Node::Const { sort, .. }
-            | Node::Op { sort, .. } => bv_width(file, *sort),
-            _ => None,
-        }
-    };
+    let width = |nid: Nid| -> Option<u32> { node_bv_width(file, nid) };
     let bad = |nid: Nid, what: String| Err(format!("btor2 sort check: node {nid}: {what}"));
     for line in &file.lines {
+        // mununu#743 — a property operand that is not 1 bit (the parser refuses the text; this
+        // catches a file assembled in memory).
+        let property = |what: &str, op: &Operand| -> Result<(), String> {
+            match width(op.nid()) {
+                Some(1) | None => Ok(()),
+                Some(w) => bad(
+                    line.nid,
+                    format!(
+                        "`{what}` operand (node {}) is {w} bit(s), must be 1",
+                        op.nid()
+                    ),
+                ),
+            }
+        };
         match &line.node {
+            Node::Bad { signal } => property("bad", signal)?,
+            Node::Constraint { signal } => property("constraint", signal)?,
+            Node::Fair { signal } => property("fair", signal)?,
+            Node::Justice { signals } => {
+                for s in signals {
+                    property("justice", s)?;
+                }
+            }
             Node::Op { op, sort, args, .. } => {
                 let Some(res) = bv_width(file, *sort) else {
                     continue;
@@ -1847,5 +1971,82 @@ mod tests {
         );
         assert!(signal_reaches_anonymous_input(&file, "q_out"));
         assert!(!signal_reaches_anonymous_input(&file, "r_out"));
+    }
+
+    // mununu#743 — the property operands: btor2tools refuses a `bad` / `constraint` / `fair` /
+    // `justice` operand that is not 1 bit wide (`expected bitvec of size 1 for bad but got 4`);
+    // mununu's parser accepted it and every engine improvised (the exact engine took bit 0,
+    // the z3 engines panicked on a sort mismatch, the portfolio read the panics as abstentions).
+    #[test]
+    fn rejects_a_property_operand_wider_than_one_bit() {
+        let wide_bad = "1 sort bitvec 4\n2 zero 1\n3 state 1 cnt\n4 init 1 3 2\n5 one 1\n\
+                        6 add 1 3 5\n7 next 1 3 6\n8 and 1 5 3\n9 bad 8\n";
+        let err = parse(wide_bad).unwrap_err();
+        assert_eq!(err.kind, AdapterErrorKind::ParseError);
+        assert!(
+            err.message.contains("bad") && err.message.contains("4 bit"),
+            "{}",
+            err.message
+        );
+        for src in [
+            "1 sort bitvec 4\n2 input 1 x\n3 constraint 2\n",
+            "1 sort bitvec 4\n2 input 1 x\n3 fair 2\n",
+            "1 sort bitvec 4\n2 input 1 x\n3 justice 1 2\n",
+        ] {
+            let err = parse(src).unwrap_err();
+            assert_eq!(err.kind, AdapterErrorKind::ParseError, "{src:?}");
+            assert!(err.message.contains("4 bit"), "{src:?}: {}", err.message);
+        }
+        // A 1-bit operand of any node kind is fine — a state, an input, a constant, an op.
+        parse("1 sort bitvec 1\n2 state 1 s\n3 bad 2\n").expect("1-bit state");
+        parse("1 sort bitvec 1\n2 input 1 i\n3 constraint 2\n").expect("1-bit input");
+        parse("1 sort bitvec 1\n2 one 1\n3 bad 2\n").expect("1-bit const");
+        parse("1 sort bitvec 1\n2 input 1 i\n3 not 1 2\n4 bad -3\n").expect("1-bit negated op");
+    }
+
+    // mununu#743 — a combinational cycle, expressible through a forward reference, used to
+    // overflow the z3 encoder's recursion (an abort, not a parse error). Line ORDER is not
+    // policed: mununu's own rewrites append a sort after its users and re-parse the text.
+    #[test]
+    fn rejects_a_combinational_cycle_and_non_positive_ids() {
+        // A cycle through a forward reference (the abort shape).
+        let cycle = "1 sort bitvec 1\n2 state 1 s\n3 and 1 2 4\n4 not 1 3\n5 bad 4\n";
+        let err = parse(cycle).unwrap_err();
+        assert_eq!(err.kind, AdapterErrorKind::ParseError);
+        assert!(
+            err.message.contains("combinational cycle"),
+            "{}",
+            err.message
+        );
+        // A self-loop.
+        let err = parse("1 sort bitvec 1\n2 state 1 s\n3 and 1 2 3\n4 bad 3\n").unwrap_err();
+        assert!(
+            err.message.contains("combinational cycle"),
+            "{}",
+            err.message
+        );
+        // Acyclic forward references parse: a sort after its user (what `enum_reencode`
+        // emits), a property before its operand, the issue's `14 bad 15` after `17 next`.
+        parse("2 zero 1\n1 sort bitvec 1\n").expect("sort after its user");
+        parse("1 sort bitvec 1\n2 bad 3\n3 one 1\n").expect("acyclic forward reference");
+        parse("1 sort bitvec 1\n2 zero 1\n3 state 1 s\n17 next 1 3 2\n15 not 1 3\n14 bad 15\n")
+            .expect("out-of-order but acyclic");
+        // `next` may read its own state — a sequential edge, not a combinational cycle.
+        parse("1 sort bitvec 1\n2 state 1 s\n3 next 1 2 2\n").expect("next self-reference");
+        // Ids are positive.
+        assert!(parse("0 sort bitvec 1\n").is_err());
+        assert!(parse("-1 sort bitvec 1\n").is_err());
+    }
+
+    /// `check_sorts` names a property operand that is not 1 bit — for a file built in memory
+    /// without the parser (the parser itself now refuses the text).
+    #[test]
+    fn check_sorts_reports_a_wide_property_operand() {
+        let mut file =
+            parse("1 sort bitvec 4\n2 sort bitvec 1\n3 state 1 s\n4 state 2 q\n5 bad 4\n").unwrap();
+        let idx = file.by_nid[&5];
+        file.lines[idx].node = Node::Bad { signal: Operand(3) };
+        let e = check_sorts(&file).unwrap_err();
+        assert!(e.contains("node 5") && e.contains("4 bit"), "{e}");
     }
 }

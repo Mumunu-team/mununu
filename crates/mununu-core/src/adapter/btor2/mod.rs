@@ -242,7 +242,9 @@ mod tests {
                                               4 state 3 rf_reg\n\
                                               5 input 1 raddr\n\
                                               6 read 2 4 5\n\
-                                              7 bad 6\n";
+                                              7 sort bitvec 1\n\
+                                              8 redor 7 6\n\
+                                              9 bad 8\n";
 
     #[test]
     fn requires_uf_routing_returns_false_when_no_sidecar() {

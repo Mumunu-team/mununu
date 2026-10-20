@@ -31,8 +31,8 @@
 //! SPACER gives no natural counterexample *depth* or inductive *k*, so those
 //! fields carry `0` here (the verdict, not the witness, is the product).
 
-use crate::adapter::btor2::ast::{Btor2File, Nid, Node};
-use crate::adapter::btor2::native_bmc::SafetyVerdict;
+use crate::adapter::btor2::ast::{Btor2File, Nid, Node, Operand};
+use crate::adapter::btor2::native_bmc::{self, SafetyVerdict};
 use crate::adapter::sidecar::predicate_image::btor2_encode::{EncodeError, encode_design};
 use z3::ast::{Ast, BV, Bool};
 use z3::{FuncDecl, Sort};
@@ -70,14 +70,15 @@ pub fn decide_bad_safety_spacer(
     file: &Btor2File,
     timeout_ms: Option<u32>,
 ) -> Result<SafetyVerdict, EncodeError> {
-    let mut bad_ops: Vec<Nid> = Vec::new();
-    let mut init_pairs: Vec<(Nid, Nid)> = Vec::new();
-    let mut constraint_ops: Vec<Nid> = Vec::new();
+    // Operands keep their sign (PR A5 — `bad -N` is BTOR2's bit-not shorthand).
+    let mut bad_ops: Vec<Operand> = Vec::new();
+    let mut init_pairs: Vec<(Nid, Operand)> = Vec::new();
+    let mut constraint_ops: Vec<Operand> = Vec::new();
     for l in &file.lines {
         match &l.node {
-            Node::Bad { signal } => bad_ops.push(signal.nid()),
-            Node::Init { state, value, .. } => init_pairs.push((*state, value.nid())),
-            Node::Constraint { signal } => constraint_ops.push(signal.nid()),
+            Node::Bad { signal } => bad_ops.push(*signal),
+            Node::Init { state, value, .. } => init_pairs.push((*state, *value)),
+            Node::Constraint { signal } => constraint_ops.push(*signal),
             _ => {}
         }
     }
@@ -90,15 +91,12 @@ pub fn decide_bad_safety_spacer(
     z3::with_z3_config(&cfg, || {
         let view = encode_design(file)?;
 
-        // Deterministic state-cell ordering for the `Inv` relation's argument list.
+        // Deterministic state-cell ordering for the `Inv` relation's argument list. A
+        // stateless design (mununu#742's reproducer: `bad` IS an input) gets a 0-ary `Inv`
+        // — the rules below quantify over the inputs, so `Err` is derivable iff some input
+        // valuation satisfies `bad` under the constraints.
         let mut states: Vec<Nid> = view.state_curr.keys().copied().collect();
         states.sort();
-        if states.is_empty() {
-            // A purely combinational design: `Inv` has no state; fall back is a
-            // single-step check — but SPACER needs a state relation, so defer such
-            // designs to BMC (return Unknown here rather than mis-encode).
-            return Ok(SafetyVerdict::Unknown { k: 0 });
-        }
 
         let sorts: Vec<Sort> = states
             .iter()
@@ -146,12 +144,9 @@ pub fn decide_bad_safety_spacer(
         let err_app = err.apply(&[]).as_bool().expect("Err is a Bool relation");
 
         let one1 = BV::from_u64(1, 1);
-        let curr_bv = |nid: &Nid| -> Option<&BV> {
-            view.signal_bvs
-                .get(nid)
-                .or_else(|| view.state_curr.get(nid))
-                .or_else(|| view.inputs.get(nid))
-        };
+        // Resolved through `signal_bvs` → `state_curr` → `inputs`, sign applied
+        // (mununu#741 / PR A5 — shared with the native BMC).
+        let curr_bv = |op: &Operand| -> Option<BV> { native_bmc::operand_bv(&view, op) };
         // Constraints (over the current state / inputs) — asserted on every rule.
         let constr: Vec<Bool> = constraint_ops
             .iter()
@@ -160,14 +155,15 @@ pub fn decide_bad_safety_spacer(
         let constr_conj = and_all(&constr);
 
         // Init(s): the design's `init` values pin the initialised cells; init-less
-        // cells stay free (BTOR2 nondeterministic-init semantics).
+        // cells stay free (BTOR2 nondeterministic-init semantics). An `init` whose value is
+        // an input or another state (mununu#741) resolves like any operand — it is the
+        // step-0 input / state variable, bound by Rule 1 — instead of being dropped (which
+        // left the cell free: a spurious counterexample).
         let init_conj: Vec<Bool> = init_pairs
             .iter()
             .filter_map(|(state, val)| {
-                match (view.state_curr.get(state), view.signal_bvs.get(val)) {
-                    (Some(sc), Some(vbv)) => Some(sc.eq(vbv)),
-                    _ => None,
-                }
+                let sc = view.state_curr.get(state)?;
+                Some(sc.eq(&curr_bv(val)?))
             })
             .collect();
         let init_pred = and_all(&init_conj);
@@ -183,23 +179,28 @@ pub fn decide_bad_safety_spacer(
             Bool::or(&bad_disj.iter().collect::<Vec<_>>())
         };
 
-        // Quantifier bounds.
-        let curr_bounds: Vec<&dyn Ast> = states
+        // Quantifier bounds. mununu#742 — `C` and `Bad` are combinational over the current
+        // state AND the inputs (`bad = in ∧ ¬s`, `init s = v`), so Rules 1 and 3 bind the
+        // inputs too: an input left as a free 0-ary constant shared across the rules made
+        // z3 give up (`unknown`) on every input-dependent monitor. (A combinational `bad`
+        // is ∃ input at the current state, i.e. ∀-quantified in the clause body, exactly as
+        // the transition's inputs are in Rule 2.)
+        let mut curr_bounds: Vec<&dyn Ast> = states
             .iter()
             .map(|n| &view.state_curr[n] as &dyn Ast)
             .collect();
-        let mut all_bounds: Vec<&dyn Ast> = curr_bounds.clone();
         for bv in view.inputs.values() {
-            all_bounds.push(bv as &dyn Ast);
+            curr_bounds.push(bv as &dyn Ast);
         }
+        let mut all_bounds: Vec<&dyn Ast> = curr_bounds.clone();
         for n in &states {
             all_bounds.push(&view.state_next[n] as &dyn Ast);
         }
 
-        // Rule 1: Init(s) ∧ C(s) ⟹ Inv(s).
+        // Rule 1: Init(s, i) ∧ C(s, i) ⟹ Inv(s).
         let body1 = implies(&and_all(&[init_pred, constr_conj.clone()]), &inv_curr);
         fp.add_rule(&z3::ast::forall_const(&curr_bounds, &[], &body1), None);
-        // Rule 2: Inv(s) ∧ T(s,i,s') ∧ C(s) ⟹ Inv(s').
+        // Rule 2: Inv(s) ∧ T(s,i,s') ∧ C(s, i) ⟹ Inv(s').
         let body2 = implies(
             &and_all(&[
                 inv_curr.clone(),
@@ -209,8 +210,8 @@ pub fn decide_bad_safety_spacer(
             &inv_next,
         );
         fp.add_rule(&z3::ast::forall_const(&all_bounds, &[], &body2), None);
-        // Rule 3: Inv(s) ∧ Bad(s) ⟹ Err.
-        let body3 = implies(&and_all(&[inv_curr, bad_pred]), &err_app);
+        // Rule 3: Inv(s) ∧ C(s, i) ∧ Bad(s, i) ⟹ Err.
+        let body3 = implies(&and_all(&[inv_curr, constr_conj, bad_pred]), &err_app);
         fp.add_rule(&z3::ast::forall_const(&curr_bounds, &[], &body3), None);
 
         // SPACER query semantics over the *exact* Horn encoding of the concrete
@@ -281,5 +282,77 @@ mod tests {
 
         // SPACER decides it Safe via invariant discovery.
         assert_eq!(spacer(stall), SafetyVerdict::Safe { k: 0 });
+    }
+
+    // ---- mununu#741 / #742 / PR A5 ----
+
+    // mununu#742 — a `bad` that depends on an INPUT: `in ∧ ¬s` (reachable at step 0 with
+    // `in = 1`) and its safe twin `in ∧ s` (`s` stays 0). Rules 1 and 3 used to quantify over
+    // the states only, leaving the input a free constant shared across the rules — z3 gave
+    // up (`unknown`) on every input-dependent monitor.
+    const INPUT_BAD_REACH: &str = "1 sort bitvec 1\n2 input 1 in\n3 state 1 s\n4 zero 1\n\
+                                   5 init 1 3 4\n6 next 1 3 3\n7 not 1 3\n8 and 1 2 7\n9 bad 8\n";
+    const INPUT_BAD_SAFE: &str = "1 sort bitvec 1\n2 input 1 in\n3 state 1 s\n4 zero 1\n\
+                                  5 init 1 3 4\n6 next 1 3 3\n7 and 1 2 3\n8 bad 7\n";
+    // The issue's stateless reproducer: `bad` IS the input (reachable at step 0).
+    const STATELESS_BAD: &str = "1 sort bitvec 1\n2 input 1 in\n3 bad 2\n";
+    // An input-dependent CONSTRAINT: `constraint ¬in` pins `in` to 0, `next s = in` keeps `s`
+    // at 0, `bad = s` is unreachable.
+    const INPUT_CONSTRAINT_SAFE: &str = "1 sort bitvec 1\n2 input 1 in\n3 state 1 s\n4 zero 1\n\
+                                         5 init 1 3 4\n6 next 1 3 2\n7 not 1 2\n8 constraint 7\n\
+                                         9 bad 3\n";
+
+    #[test]
+    fn spacer_decides_an_input_dependent_bad_or_constraint() {
+        assert_eq!(
+            spacer(INPUT_BAD_REACH),
+            SafetyVerdict::Violated { depth: 0 }
+        );
+        assert_eq!(spacer(INPUT_BAD_SAFE), SafetyVerdict::Safe { k: 0 });
+        assert_eq!(spacer(STATELESS_BAD), SafetyVerdict::Violated { depth: 0 });
+        assert_eq!(spacer(INPUT_CONSTRAINT_SAFE), SafetyVerdict::Safe { k: 0 });
+    }
+
+    // mununu#741 — see `native_bmc::tests`: an `init` whose value is an input, an Op over an
+    // input, or another state must pin the cell (dropping the pair is a spurious
+    // counterexample — the cell is left free).
+    const INIT_FROM_INPUT: &str = "1 sort bitvec 1\n2 input 1 v\n3 state 1 s\n4 init 1 3 2\n\
+                                   5 next 1 3 3\n6 state 1 t\n7 init 1 6 2\n8 next 1 6 6\n\
+                                   9 neq 1 3 6\n10 bad 9\n";
+    const INIT_FROM_INPUT_OP: &str = "1 sort bitvec 1\n2 input 1 v\n3 state 1 s\n4 init 1 3 2\n\
+                                      5 next 1 3 3\n6 not 1 2\n7 state 1 t\n8 init 1 7 6\n\
+                                      9 next 1 7 7\n10 eq 1 3 7\n11 bad 10\n";
+    const INIT_FROM_STATE: &str = "1 sort bitvec 1\n2 state 1 s\n3 next 1 2 2\n4 state 1 t\n\
+                                   5 init 1 4 2\n6 next 1 4 4\n7 neq 1 2 4\n8 bad 7\n";
+
+    #[test]
+    fn spacer_init_from_an_input_or_a_state_pins_the_cell() {
+        assert_eq!(spacer(INIT_FROM_INPUT), SafetyVerdict::Safe { k: 0 });
+        assert_eq!(spacer(INIT_FROM_INPUT_OP), SafetyVerdict::Safe { k: 0 });
+        assert_eq!(spacer(INIT_FROM_STATE), SafetyVerdict::Safe { k: 0 });
+    }
+
+    // PR A5 — negated operands keep their sign (see `native_bmc::tests`).
+    const NEGATED_BAD: &str = "1 sort bitvec 1\n2 state 1 s\n3 one 1\n4 init 1 2 3\n\
+                               5 next 1 2 2\n6 bad -2\n";
+    const NEGATED_CONSTRAINT: &str = "1 sort bitvec 1\n2 input 1 in\n3 state 1 s\n4 zero 1\n\
+                                      5 init 1 3 4\n6 next 1 3 2\n7 constraint -2\n8 bad 3\n";
+    const NEGATED_INIT: &str = "1 sort bitvec 1\n2 zero 1\n3 state 1 s\n4 init 1 3 -2\n\
+                                5 next 1 3 3\n6 bad 3\n";
+
+    #[test]
+    fn spacer_negated_operands_keep_their_sign() {
+        assert_eq!(spacer(NEGATED_BAD), SafetyVerdict::Safe { k: 0 });
+        assert_eq!(spacer(NEGATED_CONSTRAINT), SafetyVerdict::Safe { k: 0 });
+        assert_eq!(spacer(NEGATED_INIT), SafetyVerdict::Violated { depth: 0 });
+    }
+
+    // mununu#743 — a `bad` operand wider than 1 bit is refused by the PARSER, so no engine
+    // reaches z3's `eq` with mismatched sorts (the `SortDiffers` panic this engine had).
+    #[test]
+    fn a_wide_bad_operand_is_refused_before_spacer_sees_it() {
+        let wide = "1 sort bitvec 4\n2 zero 1\n3 state 1 cnt\n4 init 1 3 2\n5 one 1\n6 add 1 3 5\n\
+                    7 next 1 3 6\n8 and 1 5 3\n9 bad 8\n";
+        assert!(parser::parse(wide).is_err());
     }
 }
