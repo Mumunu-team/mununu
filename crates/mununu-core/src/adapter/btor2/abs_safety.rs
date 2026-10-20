@@ -1020,7 +1020,16 @@ fn seed_predicates(file: &Btor2File) -> Vec<PredicateExpr> {
         if let Node::Init { state, value, .. } = &l.node
             && let (Some(name), Some(v)) = (sym.get(state), const_vals.get(&value.nid()))
         {
-            push(name, *v);
+            // PR A5 — `init s -N` is the constant's bit-not within its width.
+            let v = if value.is_negated() {
+                let w =
+                    crate::adapter::btor2::parser::node_bv_width(file, value.nid()).unwrap_or(64);
+                let mask = if w >= 64 { u64::MAX } else { (1u64 << w) - 1 };
+                !*v & mask
+            } else {
+                *v
+            };
+            push(name, v);
         }
     }
     // (2) comparison atoms in the design — any `eq(state_register, const)` (the

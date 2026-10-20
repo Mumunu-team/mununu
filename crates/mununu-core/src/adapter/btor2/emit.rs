@@ -351,8 +351,8 @@ mod tests {
     fn roundtrip_constraint_fair_justice_consts() {
         assert_roundtrip(
             "1 sort bitvec 4\n2 input 1 c\n3 state 1 s\n4 const 1 1010\n\
-             5 constd 1 -3\n6 consth 1 a\n7 fair 2\n8 constraint 2\n\
-             9 justice 2 2 3\n",
+             5 constd 1 -3\n6 consth 1 a\n7 sort bitvec 1\n8 input 7 f\n\
+             9 state 7 g\n10 fair 8\n11 constraint 8\n12 justice 2 8 9\n",
         );
     }
 
