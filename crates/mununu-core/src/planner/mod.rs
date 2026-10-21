@@ -422,7 +422,9 @@ pub(crate) fn execute(
 ///
 /// - **safety** `AG`-invariant → the reachability portfolio (reduce to a `bad`-monitor);
 /// - **box-AF response** `AG(a→AF b)` → liveness-to-safety (l2s) → the portfolio;
-/// - **νμ recoverability** `AG EF good` → exact+COI (reset-pinned) or cube+`smt-hyper-must`.
+/// - **νμ recoverability** `AG EF good` → a trap certificate first (a reachable value of `good`'s
+///   register closed under every transition refutes it — VIOLATED only,
+///   [`crate::adapter::trap_certificate`]), then exact+COI (reset-pinned) or cube+`smt-hyper-must`.
 ///
 /// P2.1b routes the re-plan **entry** through the planner (so both halves of the
 /// orchestration — main-path [`plan`]/[`execute`] and this reactive step — are planner-owned)

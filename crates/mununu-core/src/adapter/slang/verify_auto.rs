@@ -5721,6 +5721,19 @@ pub(crate) fn escalate_bottom_with_slice(
     use crate::mu_calculus::{PropertyClass, parser as mu_parser};
     use crate::verdict::PropertyVerdict;
 
+    // Trap-certificate candidates the report already establishes: every row that HOLDS the
+    // terminal idiom `AG (R == v → AG R == v)`. They only order the search below — its closure is
+    // re-checked there — so harvesting them before the loop cannot import a stale verdict.
+    let sibling_traps: Vec<(String, crate::adapter::liveness_rescue::Atom)> = report
+        .properties
+        .iter()
+        .filter(|p| matches!(p.outcome, VerifyOutcome::Holds))
+        .filter_map(|p| {
+            let f = mu_parser::parse(&p.formula).ok()?;
+            crate::adapter::liveness_rescue::reduce_terminal_state(&f).map(|t| (p.name.clone(), t))
+        })
+        .collect();
+
     let mut notes = Vec::new();
     for prop in report.properties.iter_mut() {
         if !matches!(prop.outcome, VerifyOutcome::Unknown { .. }) {
@@ -5910,6 +5923,55 @@ pub(crate) fn escalate_bottom_with_slice(
                         }
                         LivenessVerdict::Inconclusive => {}
                     }
+                }
+                if !handled
+                    && opts.rescue_bottom_recoverability
+                    && let Some(good) = reduce_ag_ef_target(&formula)
+                    && good.op == CmpOp::Eq
+                {
+                    // The trap certificate first: a reachable set closed under every transition and
+                    // disjoint from `good` refutes `AG EF good` with two safety queries, in seconds,
+                    // where the ladder below spends its budget and abstains on a wide cone (OpenTitan
+                    // edn's three `AG EF Idle` rows). It only refutes, so a failed search changes
+                    // nothing and the ladder runs as before. Its own slice, so a search that runs
+                    // out of time is reported in its note, not read as the ladder's budget abstain.
+                    // SOUNDNESS: both checks are on the model as given, and the search is withheld
+                    // when the target register's cone holds a free leaf (see trap_certificate).
+                    lane = "trap-certificate";
+                    let mut trap_slice_expired = false;
+                    let trap = under_rescue_slice(slice_ms, &mut trap_slice_expired, || {
+                        let candidates = crate::adapter::trap_certificate::trap_candidates(
+                            design_btor2,
+                            &good,
+                            reset_pinned,
+                            &sibling_traps,
+                        );
+                        crate::adapter::trap_certificate::search_trap(
+                            design_btor2,
+                            &good,
+                            &candidates,
+                            reset_pinned,
+                        )
+                    });
+                    if let Some(cert) = &trap.certificate {
+                        prop.outcome = VerifyOutcome::Violated { false_cells: 0 };
+                        prop.decided_by = Some(TRAP_CERTIFICATE_DECIDED_BY.to_string());
+                        prop.counterexample = cert.witness.clone().map(safety_counterexample);
+                        notes.push(trap_certificate_note(&prop.name, &good, cert));
+                        handled = true;
+                    } else if !trap.withheld_by.is_empty() {
+                        notes.push(trap_certificate_withheld_note(&prop.name, &good, &trap));
+                    } else if !trap.tried.is_empty() {
+                        notes.push(trap_certificate_search_note(
+                            &prop.name,
+                            &good,
+                            &trap,
+                            trap_slice_expired,
+                        ));
+                    }
+                    // A search the slice cut short may have missed the trap: a residual ⊥ is then
+                    // (also) a budget abstention, attributed after the arm like the other lanes'.
+                    slice_expired |= trap_slice_expired && trap.certificate.is_none();
                 }
                 if !handled
                     && opts.rescue_bottom_recoverability
@@ -6866,6 +6928,130 @@ fn recoverability_rescue_note(
             .into(),
         items: Vec::new(),
         property: None,
+    }
+}
+
+/// `decided_by` of an `AG EF` row refuted by a trap certificate.
+pub const TRAP_CERTIFICATE_DECIDED_BY: &str = "trap-certificate";
+
+/// Provenance for an `AG EF good` row refuted by a trap certificate: the trap, where the candidate
+/// came from, and which engines decided the two checks.
+fn trap_certificate_note(
+    name: &str,
+    good: &crate::adapter::liveness_rescue::Atom,
+    cert: &crate::adapter::trap_certificate::TrapCertificate,
+) -> VerificationNote {
+    let list = |e: &[&str]| {
+        if e.is_empty() {
+            "—".to_string()
+        } else {
+            e.join(", ")
+        }
+    };
+    let depth = cert
+        .witness
+        .as_ref()
+        .map(|w| w.states.len().saturating_sub(1).to_string())
+        .unwrap_or_else(|| "beyond the witness bound".to_string());
+    VerificationNote {
+        kind: "trap-certificate".into(),
+        level: NoteLevel::Info,
+        summary: format!(
+            "`{name}`: VIOLATED by a trap certificate — `{s} == {v}` is reachable from reset (depth \
+             {depth}; {reach}) and closed under every transition ({closure}), and the target \
+             `{s} == {g}` lies outside it, so from that state the target is never reached again",
+            s = cert.signal,
+            v = cert.value,
+            g = good.value,
+            reach = list(&cert.reach_engines),
+            closure = list(&cert.closure_engines),
+        ),
+        detail: "`AG EF p` fails iff some reachable state satisfies `AG ¬p`. A set T that is \
+                 reachable (EF T, decided on its dual AG ¬T), closed over the reachable states \
+                 (AG (T → [] T), the `|=>` monitor bad = T(prev) ∧ ¬T) and disjoint from p (the \
+                 same register at another value) is such a state set. Both checks run on the model \
+                 as given — nothing is approximated — and the certificate only ever refutes. The \
+                 counterexample is the path into T; it ends there because T never lets the target \
+                 back in."
+            .into(),
+        items: vec![
+            format!("trap: {} == {}", cert.signal, cert.value),
+            format!("source: {}", cert.source.label()),
+            format!("closure: {}", list(&cert.closure_engines)),
+            format!("reach: {}", list(&cert.reach_engines)),
+            format!("depth: {depth}"),
+        ],
+        property: Some(name.to_string()),
+    }
+}
+
+/// The trap search ran and certified nothing: what each candidate turned out to be, so the ladder's
+/// own ⊥ explanation is not the only trail.
+fn trap_certificate_search_note(
+    name: &str,
+    good: &crate::adapter::liveness_rescue::Atom,
+    search: &crate::adapter::trap_certificate::TrapSearch,
+    slice_expired: bool,
+) -> VerificationNote {
+    VerificationNote {
+        kind: "trap-certificate-search".into(),
+        level: NoteLevel::Info,
+        summary: format!(
+            "`{name}`: no trap certified for `{} == {}` ({} candidate(s) tried{})",
+            good.signal,
+            good.value,
+            search.tried.len(),
+            if slice_expired {
+                "; the rescue slice ran out"
+            } else {
+                ""
+            }
+        ),
+        detail: "A trap is a value of the target's register that is reachable and closed under \
+                 every transition. A candidate that is reachable but open, or closed but never \
+                 entered, refutes nothing; an undecided one may still be a trap the budget did not \
+                 reach. The recoverability ladder ran afterwards, unchanged."
+            .into(),
+        items: search
+            .tried
+            .iter()
+            .map(|(c, o)| {
+                format!(
+                    "{} == {} ({}): {}",
+                    good.signal,
+                    c.value,
+                    c.source.label(),
+                    o.tag()
+                )
+            })
+            .collect(),
+        property: Some(name.to_string()),
+    }
+}
+
+/// The trap search was not run: the target register's sequential cone holds a free leaf, so a path
+/// into a trap could be one the real driver never takes.
+fn trap_certificate_withheld_note(
+    name: &str,
+    good: &crate::adapter::liveness_rescue::Atom,
+    search: &crate::adapter::trap_certificate::TrapSearch,
+) -> VerificationNote {
+    VerificationNote {
+        kind: "trap-certificate-withheld".into(),
+        level: NoteLevel::ScopeCaveat,
+        summary: format!(
+            "`{name}`: no trap certificate attempted — `{}`'s cone reads {} free leaf(s) (an \
+             undriven net, a cut point or a black-boxed output)",
+            good.signal,
+            search.withheld_by.len()
+        ),
+        detail: "A trap certificate refutes `AG EF p` by a path into a closed set. On a cone with a \
+                 free leaf the model over-approximates the RTL: the closure would transfer, but the \
+                 path could be one the real driver never takes. Vendor the module, drop the cut \
+                 point, or provide the driver, and the search runs."
+            .into(),
+        items: search.withheld_by.clone(),
+        property: Some(name.to_string()),
     }
 }
 
@@ -8487,6 +8673,186 @@ mod tests {
         assert!(
             notes.iter().any(|n| n.kind == "recoverability-rescue"),
             "a recoverability-rescue provenance note should be recorded"
+        );
+    }
+
+    /// `st` cycles 0 → 1 → 2 → 0; the input `esc` sends it to 3, which is absorbing.
+    /// `AG EF (st == 0)` is VIOLATED; `st == 3` is the trap, entered at depth 1. The BTOR2 twin of
+    /// `TRAP_FSM_SV` (`tests/differential_oracle_e2e.rs`).
+    const TRAP_FSM: &str = "1 sort bitvec 2\n2 sort bitvec 1\n3 input 2 esc\n4 state 1 st\n\
+                            5 zero 1\n6 init 1 4 5\n7 one 1\n8 constd 1 2\n9 constd 1 3\n\
+                            10 eq 2 4 9\n11 eq 2 4 8\n12 add 1 4 7\n13 ite 1 11 5 12\n\
+                            14 ite 1 10 9 13\n15 ite 1 3 9 14\n16 next 1 4 15\n";
+
+    fn recover_row(name: &str, formula: &str, outcome: VerifyOutcome) -> PropertyVerdict {
+        PropertyVerdict {
+            name: name.to_string(),
+            label: None,
+            kind: crate::adapter::slang::translate::SvaKind::Assert,
+            formula: formula.to_string(),
+            outcome,
+            seeded_predicates: Vec::new(),
+            counterexample: None,
+            bottom_reason: None,
+            decided_by: None,
+            vacuity: None,
+        }
+    }
+
+    /// The trap certificate refutes `AG EF (st == 0)` before the ladder runs: VIOLATED, decided by
+    /// `trap-certificate`, with the reset → trap path as the counterexample and a note naming the
+    /// trap and the engines. On the parent the ladder decided this row too (exact+COI with the reset
+    /// pinned, the cube ladder without), but with no counterexample and no certificate — the
+    /// outcome-level reproducer is the OpenTitan edn row the ladder leaves ⊥ (image e2e).
+    #[test]
+    fn a_trap_certificate_refutes_recoverability_with_the_path_into_the_trap() {
+        for reset_pinned in [true, false] {
+            let mut report = AutoVerifyReport {
+                properties: vec![recover_row(
+                    "recover_idle",
+                    "nu Y. ((mu X. ((st == 0) || <> X)) && [] Y)",
+                    VerifyOutcome::Unknown { unknown_cells: 1 },
+                )],
+                ..Default::default()
+            };
+            let notes = escalate_bottom(
+                &mut report,
+                TRAP_FSM,
+                reset_pinned,
+                &VerifyAutoOptions::default(),
+                &[],
+            );
+            let p = &report.properties[0];
+            assert!(
+                matches!(p.outcome, VerifyOutcome::Violated { .. }),
+                "reset_pinned={reset_pinned}: {:?}",
+                p.outcome
+            );
+            assert_eq!(p.decided_by.as_deref(), Some(TRAP_CERTIFICATE_DECIDED_BY));
+            let cex = p.counterexample.as_ref().expect("the path into the trap");
+            assert!(cex.cycle.is_empty(), "a prefix, never a fabricated lasso");
+            let last = cex.prefix.last().expect("a state");
+            assert!(
+                last.iter().any(|(k, v)| k == "st" && v.as_u64() == Some(3)),
+                "the path ends in the trap: {last:?}"
+            );
+            let note = notes
+                .iter()
+                .find(|n| n.kind == "trap-certificate")
+                .expect("the certificate note");
+            assert_eq!(note.property.as_deref(), Some("recover_idle"));
+            assert!(note.items.iter().any(|i| i == "trap: st == 3"), "{note:?}");
+            assert!(
+                !notes.iter().any(|n| n.kind == "recoverability-rescue"),
+                "the ladder does not run once the row is refuted"
+            );
+        }
+    }
+
+    /// A row of the same report that HOLDS the terminal idiom is tried first, and named.
+    #[test]
+    fn a_sibling_terminal_row_is_the_first_candidate() {
+        let mut report = AutoVerifyReport {
+            properties: vec![
+                recover_row(
+                    "st_trap_is_terminal",
+                    "nu X. ((!(st == 3) || nu Y. ((st == 3) && [] Y)) && [] X)",
+                    VerifyOutcome::Holds,
+                ),
+                recover_row(
+                    "recover_idle",
+                    "nu Y. ((mu X. ((st == 0) || <> X)) && [] Y)",
+                    VerifyOutcome::Unknown { unknown_cells: 1 },
+                ),
+            ],
+            ..Default::default()
+        };
+        let notes = escalate_bottom(
+            &mut report,
+            TRAP_FSM,
+            true,
+            &VerifyAutoOptions::default(),
+            &[],
+        );
+        let note = notes
+            .iter()
+            .find(|n| n.kind == "trap-certificate")
+            .expect("certified");
+        assert!(
+            note.items
+                .iter()
+                .any(|i| i == "source: sibling:st_trap_is_terminal"),
+            "{note:?}"
+        );
+    }
+
+    /// Control — a recoverable design (every reachable state returns to 0): the search certifies
+    /// nothing, says why per candidate, and the ladder still decides HOLDS.
+    #[test]
+    fn a_failed_trap_search_leaves_the_ladder_its_verdict() {
+        let mut report = AutoVerifyReport {
+            properties: vec![recover_row(
+                "recover_idle",
+                "nu Y. ((mu X. ((st == 0) || <> X)) && [] Y)",
+                VerifyOutcome::Unknown { unknown_cells: 1 },
+            )],
+            ..Default::default()
+        };
+        let notes = escalate_bottom(
+            &mut report,
+            RESPONDER_LIVE,
+            true,
+            &VerifyAutoOptions::default(),
+            &[],
+        );
+        assert!(
+            matches!(report.properties[0].outcome, VerifyOutcome::Holds),
+            "{:?}",
+            report.properties[0].outcome
+        );
+        assert_ne!(
+            report.properties[0].decided_by.as_deref(),
+            Some(TRAP_CERTIFICATE_DECIDED_BY)
+        );
+        let search = notes
+            .iter()
+            .find(|n| n.kind == "trap-certificate-search")
+            .expect("the search note");
+        assert!(
+            !search.items.is_empty() && search.items.iter().all(|i| !i.ends_with(": certified")),
+            "{search:?}"
+        );
+    }
+
+    /// A spent rescue slice runs no trap check; the row the ladder then leaves ⊥ (here the ladder
+    /// decides, so the outcome is the ladder's) is never refuted without its two checks.
+    #[test]
+    fn a_spent_slice_runs_no_trap_check() {
+        let mut report = AutoVerifyReport {
+            properties: vec![recover_row(
+                "recover_idle",
+                "nu Y. ((mu X. ((st == 0) || <> X)) && [] Y)",
+                VerifyOutcome::Unknown { unknown_cells: 1 },
+            )],
+            ..Default::default()
+        };
+        let notes = escalate_bottom_with_slice(
+            &mut report,
+            TRAP_FSM,
+            true,
+            &VerifyAutoOptions::default(),
+            &[],
+            Some(0),
+        );
+        assert_ne!(
+            report.properties[0].decided_by.as_deref(),
+            Some(TRAP_CERTIFICATE_DECIDED_BY),
+            "{:?}",
+            report.properties[0]
+        );
+        assert!(
+            !notes.iter().any(|n| n.kind.starts_with("trap-certificate")),
+            "no candidate was checked, so no trap note: {notes:?}"
         );
     }
 

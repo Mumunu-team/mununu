@@ -40,6 +40,7 @@ no bound (historical behaviour).
 | `btor2 check-fsm` (auto illegal-encoding per FSM reg) | `fsm_encoding_scan` → **reach portfolio** per register | **none** (legal set auto-derived from the design) |
 | `sv verify-auto` (default `portfolio-sequential`) | **exact-symbolic → symbolic → explicit**, early-exit | exact leg none; cube legs **auto-seeded** |
 | `sv verify-auto` safety ⊥ | escalate → reduce → **reach portfolio** | none |
+| `sv verify-auto` recoverability ⊥ (`AG EF good`) | escalate → **trap certificate** (closure `R == v \|=> R == v` + reach `EF R == v`, both on the **reach portfolio**; VIOLATED only) → else exact+COI / cube + `smt-hyper-must` ladder | none (candidates: sibling terminal rows, the register's value domain) |
 | `sv verify-auto` cube-**SKIPPED** (atom-less modal, e.g. no-deadlock `nu X.(<> true && [] X)`) | escalate → **exact-symbolic** rescue | none (exact needs no seeding) |
 | `btor2 cegar` (explicit) | `cegar_refine_loop` → **cube** | hand-`--predicate` unless auto-seeded upstream |
 

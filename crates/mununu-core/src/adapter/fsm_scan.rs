@@ -345,7 +345,7 @@ fn reaches_cell_through_width_adjust(file: &Btor2File, nid: Nid, aliases: &HashS
 /// - constants it is **assigned** (constant `ite`-branch leaves in its next-state cone)
 ///   — the enum values transitions write, including states a `case` folds into
 ///   `default` and so never compares against.
-fn legal_encodings(
+pub(crate) fn legal_encodings(
     file: &Btor2File,
     state_nid: Nid,
     symbols: &HashMap<Nid, String>,

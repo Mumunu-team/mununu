@@ -72,6 +72,7 @@ pub mod sv_verify;
 pub mod systemverilog;
 pub mod templates;
 pub mod tlsf;
+pub mod trap_certificate;
 pub mod vcd;
 pub mod verilator;
 pub mod xstate;

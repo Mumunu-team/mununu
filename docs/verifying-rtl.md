@@ -340,6 +340,35 @@ the branching reading fails (`[] a || [] b` can be false at a state although eve
 satisfies one of them). The monitor's history latches (`mununu_wit_…`) appear in the states beside
 the design's registers. Liveness keeps its stall lasso; a bare `EF p` its unreachable target.
 
+### A recoverability row refuted by a trap certificate (2026-10-21)
+
+> Source of truth: [`search_trap`](../crates/mununu-core/src/adapter/trap_certificate.rs#L294) + [`TRAP_CERTIFICATE_DECIDED_BY`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L6935) — surface: (CLI+API) — `sv verify-auto` / `POST /api/v1/sv/verify-auto`, every `AG EF` row the main pass leaves ⊥
+
+`AG EF p` (recoverability) is false iff some reachable state can never reach `p` again. When the
+main pass leaves such a row ⊥, the re-plan first looks for a **trap**: a value `v` of `p`'s own
+register that is reachable from reset and closed under every transition. Both are safety
+questions on the model as given, decided by the reach portfolio: closure is the `|=>` monitor
+`R == v |=> R == v` (native k-induction proves a genuine trap at depth 1), reachability is the dual
+of `EF (R == v)`. A certified trap makes the row **VIOLATED**, `decided_by: "trap-certificate"`, with
+the reset → trap path as the counterexample and a `trap-certificate` note naming the trap, where the
+candidate came from and which engines decided each half. The CLI prints the path under the heading
+`counterexample (reset -> trap; the trap is closed, the target is never reached again)`.
+
+Candidates are tried cheapest first: a row of the same report that already HOLDS the terminal idiom
+`AG (R == v → AG R == v)` (the `*_error_is_terminal` system properties), then the register's value
+domain (its enum values, else the constants it is initialised to, compared against or assigned), at
+most 16, each check under a 10-s budget inside the row's rescue slice. The certificate **only
+refutes**: a search that certifies nothing leaves a `trap-certificate-search` note (each candidate
+`reachable-but-open`, `closed-but-unreachable` or undecided) and the recoverability ladder runs as
+before. It is **withheld** — `trap-certificate-withheld` (ScopeCaveat) — when the register's
+sequential cone reads a free leaf (an undriven net, a `--cutpoint`, a black-boxed output): the
+closure would transfer to the RTL, the path into the trap might not. `--no-rescue` turns it off with
+the rest of the re-plan.
+
+On the full OpenTitan `edn` IP this is how the three `AG EF Idle` rows decide: each FSM's SEC_CM
+`Error` state is reachable (a software `ERR_CODE_TEST` write) and terminal, so none of them recovers
+under `rst_ni=1` ([the full-IP section](#running-a-full-ip-opentitan-edn--block-to-ip-scale-measured) below).
+
 ### Asserting the verdicts you claim: `--expect-*` (mununu#537)
 
 > Source of truth: [`adapter::slang::expectations::evaluate`](../crates/mununu-core/src/adapter/slang/expectations.rs) — surface: (CLI+API)
@@ -544,7 +573,7 @@ set empty — the script writes it), the bus and the endpoint requests stay free
 | `EdnFatalAlertNoRsp_A` ×8 | | **8** (each 6 cycles from reset, trace attached) | | | the reach rescue's native BMC after the cube's ⊥, 20–30 s a row — a software-triggerable fatal error through the free bus in the cycle an endpoint acks: a spec gap in the assertion, not a design bug (before mununu#726 the rescue's fixed 5-s query timeout let one to three rows decide per run) |
 | `EdnDataStableDisable_A` ×8 | **8** | | | | the reach rescue's bounded-chain monitor (2026-10-18), native k-induction, 1–2 s a row — the 32-bit bus cone is over the exact cap, so the cube left it ⊥ |
 | `EdnDataStable_A` ×8 | **8** | | | | translates since 2026-10-18 (`throughout b[->1]` as a weak-until); the same monitor with the weak-until block judged by a pending latch, native k-induction, 3–5 s a row; SymbiYosys `abc pdr` proves both families for all eight endpoints in 18 s |
-| `@mununu_guarantee` system properties ×15 | **12** | | 3 | | `explicit` / `symbolic` cube: Error terminal / recorded / sticky (FSM → core → register block), endpoint 0 the same, the SWPortMode entry condition; the reach rescue: the fatal-alert-has-a-source invariant (k-induction, 0.5 s) and the four `EF` twins decided on their dual (2026-10-18); `constant` for the no-deadlock row; ⊥ = the three `AG EF` rows (FSM cone over the cap, no MUST path) |
+| `@mununu_guarantee` system properties ×15 | **12** | **3** | | | `explicit` / `symbolic` cube: Error terminal / recorded / sticky (FSM → core → register block), endpoint 0 the same, the SWPortMode entry condition; the reach rescue: the fatal-alert-has-a-source invariant (k-induction, 0.5 s) and the four `EF` twins decided on their dual (2026-10-18); `constant` for the no-deadlock row; VIOLATED = the three `AG EF Idle` rows, refuted by a trap certificate (2026-10-21): each FSM's `Error` state is reachable and terminal, so it never returns to `Idle` — they were ⊥ before (FSM cone over the cap, no MUST path into the trap) |
 
 `pattgen` (87 registers) decides 14 of 14 — its four functional assertions on the **exact** engine;
 `csrng` (208 registers, `aes_cipher_core` black-boxed) 34 of 34 translated rows (3 more are unsupported

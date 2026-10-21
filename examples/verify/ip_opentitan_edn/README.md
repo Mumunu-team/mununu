@@ -43,9 +43,9 @@ To re-vendor at another commit: `python3 ../../../scripts/vendor_opentitan_ip.py
 | · `EdnFatalAlertNoRsp_A` ×8: `alert[1] |-> edn_o[i].edn_ack == 0` | | **8**, each 6 cycles from reset with its trace (the reach rescue's native BMC, 16–33 s a row under the 60-s `MUNUNU_RESCUE_SLICE_MS`; before mununu#726 the rescue ran under a fixed 5-s query timeout and one to three rows decided per run) | | |
 | · `EdnDataStableDisable_A` ×8 (`!enable |=> ##1 $stable(bus)`, 32-bit bus stable while disabled) | **8** — the reach rescue's bounded-chain monitor, native k-induction, 1–2 s a row (2026-10-18) | | | |
 | · `EdnDataStable_A` ×8 (`$stable(bus) throughout (req \|\| !enable)[->1]`, lowered as a weak-until since 2026-10-18) | **8** — the same monitor with the weak-until block judged by a pending latch, native k-induction, 3–5 s a row. SymbiYosys `abc pdr` proves both families for all eight endpoints in 18 s; a deliberately false control over the same pending latch fails at step 8 (the obligation is exercised) | | | |
-| system-level properties (`mununu_properties.sv`, 15 rows, below) | **12** | 0 | 3 | — |
+| system-level properties (`mununu_properties.sv`, 15 rows, below) | **12** | **3** | 0 | — |
 
-Total: 67 properties, **56 HOLDS / 8 VIOLATED / 3 ⊥ / 0 unsupported**; `e2e_opentitan_ip_edn_full` pins them in 1 127 s (the IP's own 52 rows alone run in 556 s under `run.sh`; the three ⊥ rows are the `AG EF` recoverability rows, each paying one 60-s rescue slice; every rescued row waits at least the 10 s of z3 SPACER's uncancellable in-process query — `MUNUNU_SELF_EXE` makes SPACER a cancellable child).
+Total: 67 properties, **56 HOLDS / 11 VIOLATED / 0 ⊥ / 0 unsupported**; `e2e_opentitan_ip_edn_full` pins them in 851 s (2026-10-21; the IP's own 52 rows alone run in 556 s under `run.sh`; the three `AG EF` recoverability rows are refuted by a trap certificate in 1–11 s each, where each used to pay a 60-s rescue slice and stay ⊥).
 
 Lift (sv2v + yosys): ≈ 10 s. Main pass: ≈ 1 min per engine. The ⊥ re-plan runs once on the merged report and spends at most the 60-s rescue slice per undecided row. Engines:
 `constant` (atom-less formulas), the `explicit` predicate-cube KMTS (every cross-block invariant), the
@@ -73,18 +73,23 @@ logic. They read the flattened names of the lifted model and the sparse FSM enco
 | `edn_ack_sm_0_error_is_terminal` / `_is_recorded` | endpoint FSM → register block | **HOLDS** / **HOLDS** |
 | `edn_fatal_alert_has_a_source` — a fatal alert request is recorded next cycle, or is a FIFO integrity error, or was asked for | core → register block | **VIOLATED in 7 s** (reach rescue) — and rightly so: the first form listed six of the eight `ERR_CODE` bits; the trace is a software `ERR_CODE_TEST` write that records `sfifo_rescmd_err`. Before the budget plumbing of mununu#726/#728 this row ran 26 min without a verdict. The corrected form (all eight `ERR_CODE` bits, the one in `mununu_properties.sv`) **HOLDS in 0.5 s** by the same rescue (k-induction) — the fact SymbiYosys's PDR proved |
 | `edn_no_deadlock` — every state has a successor (sanity) | — | **HOLDS** (`constant`) |
-| `edn_main_sm_recover_idle` (`AG EF Idle`) | the FSM | ⊥ |
+| `edn_main_sm_recover_idle` (`AG EF Idle`) | the FSM | **VIOLATED** — trap certificate: `Error` (382) is reachable and terminal |
 | its two `EF` twins (`Error`, `SWPortMode` reachable) | the FSM | **HOLDS** ×2 — decided on the dual by the reach rescue (SymbiYosys `cover` reaches both at step 4) |
-| `edn_ack_sm_{0,7}_recover_idle` | endpoint FSMs | ⊥ ×2 |
+| `edn_ack_sm_{0,7}_recover_idle` | endpoint FSMs | **VIOLATED** ×2 — trap certificate: `Error` (465) is reachable and terminal |
 | their `EF DataWait` twins | endpoint FSMs | **HOLDS** ×2 (`cover`: step 6) |
 
 The invariant "in SWPortMode the boot-request control is off" was written first and is **VIOLATED** —
 software may rewrite `CTRL` while the FSM stays in SWPortMode (`edn_main_sm.sv` reads the mode only in
 Idle); the property above is the entry-condition form the RTL actually implements. The recoverability rows
-are ⊥: the FSM state's cone is over the exact engine's cap and the predicate cube certifies no MUST path;
-they are kept as pinned abstentions so an engine improvement breaks the pin loudly. The `EF` twins are true
-(SymbiYosys `cover` reaches each target within six cycles of reset), so a HOLDS on the `AG EF` rows would not
-be vacuous — the rows are an engine gap, not a property gap. A mutation smoke
+are **false** under `rst_ni=1`, not an engine gap as this page said until 2026-10-21: each FSM's SEC_CM
+`Error` state is reachable (a software `ERR_CODE_TEST` write raises `fatal_loc_events`, which the main FSM
+and every endpoint FSM read as `local_escalate_i`) and terminal (the `*_error_is_terminal` rows HOLD), so
+from `Error` the FSM never returns to `Idle` — the designed behaviour, only reset escapes it. The ⊥ re-plan
+now refutes each with a trap certificate: closure of `state_q == Error` by native k-induction, the path
+into it by native BMC, both on the reach portfolio (`sv verify-auto` prints the path; the note names the
+trap). The main FSM and endpoint 0 take the trap from their `*_error_is_terminal` sibling row; endpoint 7
+from its register's value domain. A recoverability property that is meant to hold here must exclude the
+fatal path (e.g. as an assumption), or be asked of the reset-recovering model. A mutation smoke
 (`stick:u_reg.u_err_code_edn_main_sm_err.q`, through the API — `sv mutate` lacks the lift flags, mununu#725;
 `e2e_opentitan_ip_edn_stick_flips_the_error_record`): freezing the `ERR_CODE` record flips
 `edn_main_sm_error_is_recorded` HOLDS → VIOLATED while `edn_main_sm_error_is_terminal` stays HOLDS — the invariant
