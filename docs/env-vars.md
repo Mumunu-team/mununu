@@ -105,7 +105,7 @@ Design notes: [`docs/design/bdd-variable-ordering.md`](design/bdd-variable-order
 
 | variable | purpose |
 |---|---|
-| `MUNUNU_HWMCC_DIR`, `MUNUNU_HWMCC_FLAT`, `MUNUNU_HWMCC_GT`, `MUNUNU_HWMCC_MAXBYTES`, `MUNUNU_HWMCC_LIVE_DIR` | user-downloaded HWMCC corpora (bv track, flat BTOR2, ground truth `basename safe\|unsafe`, size cap, the LIVE set for `scripts/hwmcc_live_study.sh`). |
+| `MUNUNU_HWMCC_DIR`, `MUNUNU_HWMCC_FLAT`, `MUNUNU_HWMCC_GT`, `MUNUNU_HWMCC_MAXBYTES`, `MUNUNU_HWMCC_LIVE_DIR`, `MUNUNU_HWMCC_SKIP` | user-downloaded HWMCC corpora (bv track, flat BTOR2, ground truth `basename safe\|unsafe`, size cap, the LIVE set for `scripts/hwmcc_live_study.sh`); `MUNUNU_HWMCC_SKIP` = comma-separated name substrings the adjudication harness skips, and `MUNUNU_HWMCC_TIMEOUT_MS` (default 300 000) its per-instance run budget, so one crashing or hanging instance does not void the table (mununu#738). |
 | `MUNUNU_DISCOVER_DIR`, `MUNUNU_DISCOVER_MAXBYTES`, `MUNUNU_SPCR_PROBE_DIR`, `MUNUNU_INTERP_PROBE` | external BTOR2 directories / files for the predicate-discovery, SPCR and interpolation sweeps. |
 | `MUNUNU_NATIVE_MAXK`, `MUNUNU_NATIVE_MS`, `MUNUNU_CENSUS_EXPLICIT` (`=1`), `MUNUNU_PARITY_ONLY` | the census / adjudication tests' bound, per-check budget, opt-in explicit-engine fallback, and name filter. |
 | `MUNUNU_PROBE_BTOR`, `MUNUNU_PROBE_BTOR2`, `MUNUNU_PROBE_ATOMS`, `MUNUNU_PROBE_GOOD`, `MUNUNU_PROBE_OP`, `MUNUNU_PROBE_DEPTH`, `MUNUNU_PROBE_RASTER`, `MUNUNU_PROBE_SECOND_SHADOW`, `MUNUNU_E1_ARM` | one-process-per-case reproduction probes (stack-depth, raster size, apply-call arms); exit 0 = survived, 101/134 = reproduced. |

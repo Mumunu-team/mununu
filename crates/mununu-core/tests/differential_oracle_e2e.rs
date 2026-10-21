@@ -330,6 +330,20 @@ fn native_engine_adjudication_over_btor2tools_suite() {
 ///   hwmcc_adjudication_over_user_dir -- --ignored --nocapture
 /// ```
 ///
+/// mununu#738 — one instance must not void the table: `MUNUNU_HWMCC_SKIP=<substr>[,<substr>…]`
+/// skips every file whose name contains a listed substring (printed as `SKIPPED`), and every
+/// instance runs under a run budget of `MUNUNU_HWMCC_TIMEOUT_MS` (default 300 000) — the
+/// members poll it, so an instance no member decides abstains at the deadline. Measured
+/// 2026-10-20 on `vis_arrays_bufferAlloc` member by member in `mununu-sva`: the in-process z3
+/// Fixedpoint SIGSEGVs in 4 s (the crash the isolated child contains); no other member crashes;
+/// `--owned-only --owned-timeout-ms 120000` abstains at 120 s; rIC3, btormc and pono give no
+/// answer in 120 s; the UNBUDGETED full portfolio never returns (this harness sat on it for
+/// over two hours). The run budget bounds every member that polls it — NOT the exact engine's
+/// bit-blast phase, which the full portfolio runs on the calling thread with no clock (a
+/// 120-s budget sat on `vis_arrays_bufferAlloc` for two hours again on 2026-10-21, and so did
+/// `MUNUNU_BDD_TIME_BUDGET_MS=60000`), so the skip list is the containment for that one. Both
+/// are harness knobs — the shipped verdicts never depend on them.
+///
 /// Two HARD gates: (1) a [`ReachVerdict::Contradiction`] — two sound engines
 /// disagreeing — is a soundness alarm; (2) a definite portfolio verdict that
 /// contradicts the benchmark's `-sat`/`-unsat` filename label is a bug. It also
@@ -371,9 +385,27 @@ fn hwmcc_adjudication_over_user_dir() {
         "\n===== HWMCC adjudication: full portfolio over {} =====",
         dir.display()
     );
+    let budget_ms: u64 = std::env::var("MUNUNU_HWMCC_TIMEOUT_MS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(300_000);
+    let skip: Vec<String> = std::env::var("MUNUNU_HWMCC_SKIP")
+        .ok()
+        .map(|s| {
+            s.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
     for path in &files {
-        total += 1;
         let fname = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        if skip.iter().any(|s| fname.contains(s.as_str())) {
+            eprintln!("  {fname:44} SKIPPED (MUNUNU_HWMCC_SKIP)");
+            continue;
+        }
+        total += 1;
         let Ok(content) = std::fs::read_to_string(path) else {
             continue;
         };
@@ -384,7 +416,13 @@ fn hwmcc_adjudication_over_user_dir() {
                 continue;
             }
         };
-        let out = decide_reach_portfolio(&file);
+        // mununu#738 — a per-instance run budget the members poll (the exact engine between its
+        // stages, the z3 members per query, the subprocesses as a wall limit).
+        let budget = mununu_core::adapter::run_budget::Budget::with_ms(budget_ms);
+        let out = {
+            let _g = mununu_core::adapter::run_budget::enter(&budget);
+            decide_reach_portfolio(&file)
+        };
         // Ground truth from the -sat/-unsat filename convention.
         let label = if fname.contains("-sat") {
             Some(true)

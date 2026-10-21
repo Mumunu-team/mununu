@@ -36,11 +36,14 @@
 //! - **two DEFINITE verdicts that DISAGREE raise a soundness alarm** ([`ReachVerdict::Contradiction`])
 //!   rather than a guess. Since all engines are sound, a disagreement can only mean
 //!   a real bug — exactly what the differential oracle exists to catch;
-//! - **a SPACER-only `Reachable` is not trusted without corroboration** — SPACER
-//!   decides from a Horn *derivation* over mununu's btor2→CHC encoding (which has a
-//!   demonstrated spurious-counterexample bug on a pure-BV design), whereas every
-//!   other member exhibits a concrete witness. A sole-decider spacer-reachable is
-//!   therefore dropped to a sound `Unknown` rather than emitted (see [`collect`]).
+//! - **SPACER corroborates, never decides alone** (mununu#740, both directions): a lone
+//!   SPACER `reachable` was already dropped (a Horn *derivation* over mununu's btor2→CHC
+//!   encoding, with a demonstrated spurious counterexample on a pure-BV design), and a
+//!   lone SPACER `unreachable` is dropped too since libz3 4.13.3's SPACER proved HWMCC'20
+//!   `vis_arrays_am2901` safe — violated at depth 16 (rIC3 witness, six competition
+//!   solvers; z3 4.16 answers `unknown` on the same CHC). A sole-decider SPACER verdict is
+//!   a sound `Unknown`; a SPACER verdict another member shares stays attributed to both,
+//!   and a SPACER-vs-other disagreement stays a `Contradiction` (see [`collect`]).
 //!
 //! One driver, [`decide_reach_portfolio`] (and its explicit-budget form
 //! [`decide_reach_portfolio_parallel_with_timeout`]): every member — the two
@@ -239,7 +242,17 @@ fn run_spacer(
     timed("spacer", || match std::env::var_os("MUNUNU_SELF_EXE") {
         Some(exe) => run_spacer_isolated(std::path::Path::new(&exe), file, isolated_ms, cancel),
         // The in-process engine has no cancellation point (z3's Fixedpoint runs to its own
-        // timeout); it is the test-only fallback, so the flag is simply not honoured here.
+        // timeout). mununu#740 — a corroborate-only member must not hold a cancellable
+        // portfolio for its whole 10-s query (every rescued row waited ≥ 10.2 s with rIC3
+        // answering in 2 s), so with a cancellation flag and no isolated child it is skipped;
+        // it still runs for a caller that asked for it uncancellably.
+        None if cancel.is_some() => {
+            tracing::debug!(
+                "spacer: no isolated child (MUNUNU_SELF_EXE unset) — the corroborate-only \
+                 member is skipped rather than run uncancellably"
+            );
+            Ok(None)
+        }
         None => run_spacer_in_process(file, in_process_ms),
     })
 }
@@ -448,6 +461,21 @@ fn collect(m: Members) -> ReachOutcome {
     if reachable_by == ["spacer"] && unreachable_by.is_empty() {
         reachable_by.clear();
     }
+    // mununu#740 — the `unreachable` direction is not trusted alone either: libz3 4.13.3's
+    // SPACER (the one `mununu-sva` / `mununu-sva-pono` link) proved HWMCC'20
+    // `vis_arrays_am2901` safe — the property is violated at depth 16 (the official table has
+    // six solvers `sat`, rIC3 prints the 17-step witness in 0.2 s), and the SAME CHC on z3
+    // 4.16.0 is `unknown`. The encoding was cleared (the native BMC on the same `encode_design`
+    // view, with the inputs pinned to the witness, finds the violation in 0 s), so the proof is
+    // a wrong `unsat` from that z3 build. SPACER is corroborate-only in BOTH directions until a
+    // newer libz3 is pinned and the 67 + 33 adjudication rows re-run clean. Measured cost on the
+    // HWMCC'20 bv adjudication (2026-10-21): ONE row — `h_RCU` (ground-truth safe) moves to
+    // `unknown` where rIC3 has no answer within the budget; `gen31` / `gen35` / `gen44`, SPACER-
+    // alone the day before, stay decided as proofs SHARED with rIC3, because a SPACER answer no
+    // longer cancels the members whose corroboration it needs.
+    if unreachable_by == ["spacer"] && reachable_by.is_empty() {
+        unreachable_by.clear();
+    }
     let mut out = ReachOutcome::from_sets(reachable_by, unreachable_by);
     // The refusals arrive in FINISHING order (each member on its own thread); report them in the
     // fixed engine order so two runs of one design produce one outcome (the drivers' equality
@@ -555,10 +583,10 @@ pub fn decide_reach_portfolio_cancellable(
     // cross-checked, exactly as in the owned-only driver; every member is individually
     // sound, so the decision itself is.
     //
-    // "Trusted" excludes a lone SPACER `reachable`: `collect` drops that verdict as
-    // uncorroborated (see its soundness guard), so it must not cancel the members whose
-    // corroboration it needs — a spacer-reachable that cancelled everything else would
-    // always end `Unknown`.
+    // "Trusted" excludes SPACER altogether (mununu#740): `collect` drops a lone SPACER verdict
+    // in either direction as uncorroborated, so SPACER must never cancel the members whose
+    // corroboration it needs — a SPACER answer that cancelled everything else would always
+    // end `Unknown`.
     let decided = AtomicBool::new(false);
     let decided = &decided;
     let finished = AtomicBool::new(false);
@@ -652,7 +680,8 @@ pub fn decide_reach_portfolio_cancellable(
         });
         let spacer_h = scope.spawn(move || {
             let _g = crate::adapter::run_budget::enter(budget);
-            let v = settle(
+            // mununu#740 — corroborate-only: a SPACER verdict cancels nothing.
+            settle(
                 refused,
                 "spacer",
                 run_spacer(
@@ -661,11 +690,7 @@ pub fn decide_reach_portfolio_cancellable(
                     t.spacer_isolated_ms,
                     t.spacer_in_process_ms,
                 ),
-            );
-            if v == Some(false) {
-                decided.store(true, Relaxed);
-            }
-            v
+            )
         });
         // Owned McMillan interpolation — now a FIRST-CLASS concurrent member (was
         // last-resort). Polls `decided` and bails out early once a faster member decides.
@@ -1060,6 +1085,49 @@ mod tests {
         );
     }
 
+    /// mununu#740 — the mirror guard: a SPACER-only `unreachable` is NOT a proof either.
+    /// libz3 4.13.3's SPACER proved HWMCC'20 `vis_arrays_am2901` safe although the property is
+    /// violated at depth 16 (rIC3 witness; six competition solvers), and the portfolio shipped
+    /// `holds` with `unreachable_by: ["spacer"]`. A sole-decider SPACER proof abstains; one
+    /// another member shares stays attributed to both; a disagreement stays an alarm.
+    #[test]
+    fn uncorroborated_spacer_proof_abstains() {
+        let out = collect(Members {
+            spacer: Some(false),
+            ..Default::default()
+        });
+        assert_eq!(
+            out.verdict,
+            ReachVerdict::Unknown,
+            "sole-decider spacer-unreachable must abstain: {out:?}"
+        );
+        assert!(
+            out.unreachable_by.is_empty(),
+            "the uncorroborated spacer proof is dropped: {out:?}"
+        );
+        let out = collect(Members {
+            ric3: Some(McVerdict::Safe),
+            spacer: Some(false),
+            ..Default::default()
+        });
+        assert_eq!(out.verdict, ReachVerdict::Unreachable);
+        assert_eq!(
+            out.unreachable_by,
+            vec!["spacer", "ric3"],
+            "a corroborated spacer proof keeps both names: {out:?}"
+        );
+        assert_eq!(
+            collect(Members {
+                native: Some(true),
+                spacer: Some(false),
+                ..Default::default()
+            })
+            .verdict,
+            ReachVerdict::Contradiction,
+            "native-reachable vs spacer-safe must still raise the alarm"
+        );
+    }
+
     #[test]
     fn portfolio_decides_reachable_without_subprocess() {
         // With no btormc/pono on PATH the two subprocess members abstain (Err),
@@ -1160,25 +1228,40 @@ mod tests {
     }
 
     #[test]
-    fn spacer_decides_beyond_native_k_induction_in_portfolio() {
+    fn a_design_only_spacer_decides_is_unknown_under_the_demotion() {
         // An 300-bit counter that STALLS at 0 (init 0, next = (c==0)?0:c+1), bad = (c==MAX).
         // Reachable set is {0} ⇒ SAFE, but:
         //   - the exact BDD engine abstains (300-bit > its auto-cap ceiling of 192);
         //   - native k-induction abstains — the property is not provable by *simple*
         //     k-induction: an unreachable free path MAX-k → … → MAX stays ¬bad until
         //     the last step at every depth, so it never closes below depth 2^80-1.
-        // Only SPACER's invariant discovery (`c == 0`) decides it, so the portfolio
-        // verdict is carried uniquely by "spacer". (btormc/pono absent in make-ci.)
+        // Only SPACER's invariant discovery (`c == 0`) decides it — and since mununu#740 a
+        // lone SPACER proof decides NOTHING (libz3 4.13.3 proved a violated HWMCC design safe),
+        // so with no bit-level IC3 on PATH (btormc / pono / rIC3 absent in `make ci`) the
+        // portfolio answers `Unknown`: the measured cost of the demotion (`h_RCU` on the
+        // HWMCC'20 sweep), paid for the am2901 class of wrong `holds`. In `mununu-sva` rIC3
+        // proves this design.
         const WIDE_STALL: &str = "1 sort bitvec 300\n2 zero 1\n3 one 1\n4 state 1 c\n5 init 1 4 2\n\
              6 sort bitvec 1\n7 eq 6 4 2\n8 add 1 4 3\n9 ite 1 7 2 8\n\
              10 next 1 4 9\n11 ones 1\n12 eq 6 4 11\n13 bad 12\n";
         let file = parser::parse(WIDE_STALL).expect("parse");
         let out = decide_reach_portfolio(&file);
-        assert_eq!(out.verdict, ReachVerdict::Unreachable, "outcome: {out:?}");
-        assert!(
-            out.unreachable_by.contains(&"spacer"),
-            "SPACER must carry the beyond-k-induction verdict: {out:?}"
+        // Whoever is on PATH (cvc5 lets the interpolation member prove it; rIC3 / btormc / pono
+        // in the image), the attribution is never SPACER alone — and without such a member the
+        // verdict is `Unknown`, the demotion's cost.
+        assert_ne!(
+            out.unreachable_by,
+            vec!["spacer"],
+            "a lone SPACER proof must not decide (mununu#740): {out:?}"
         );
+        match out.verdict {
+            ReachVerdict::Unreachable => assert!(
+                out.unreachable_by.iter().any(|m| *m != "spacer"),
+                "a proof is carried by a member other than SPACER: {out:?}"
+            ),
+            ReachVerdict::Unknown => {}
+            other => panic!("unexpected {other:?}: {out:?}"),
+        }
         assert!(
             !out.unreachable_by.contains(&"native"),
             "native k-induction must abstain on the non-simple-inductive design: {out:?}"

@@ -103,6 +103,14 @@ state, so the model is both wide (Category A) and semantically array-heavy.
   other engine (native BMC, btormc BMC to depth 200/300) could corroborate the claimed CEX.
   Preponderance of evidence: a **spurious counterexample from mununu's btor2→CHC encoding**
   (Z3's SPACER itself is sound; the suspect is the encoding). Flagged, not 100 % confirmed.
+- **The second one (2026-10-19, mununu#740):** `vis_arrays_am2901` — SPACER (libz3 4.13.3, the
+  build the images link) returned **`safe`** where the HWMCC ground truth is **violated at depth
+  16** (six competition solvers; rIC3 prints the witness in 0.2 s). This time the ENCODING was
+  cleared: the native BMC on the same `encode_design` view, with the inputs pinned to the
+  witness, finds the violation in 0 s, and the same CHC on z3 4.16.0 is `unknown` — a wrong
+  `unsat` from that z3 build. Since 2026-10-20 a lone SPACER verdict in EITHER direction
+  decides nothing (`reach_portfolio::collect`); it corroborates, and the re-promotion criterion
+  is a newer libz3 in the images plus a clean re-adjudication of the 67 + 33 rows.
 
 **Why it fails:** BDDs for large memories blow the 40-bit cap immediately, and mununu's
 own array→CHC lowering is where the one soundness-bug candidate lives. External tools carry
