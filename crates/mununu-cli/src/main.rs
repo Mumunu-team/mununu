@@ -3961,10 +3961,22 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
         use mununu_core::adapter::btor2::native_bmc::{BmcOutcome, bmc_bad_reachable_witness};
         match bmc_bad_reachable_witness(&file, args.witness_max_k) {
             Ok((BmcOutcome::Violated { depth }, Some(trace))) => {
-                let frame_obj = |f: &Vec<(String, u64)>| -> serde_json::Value {
+                // mununu#723 — a value that fits 64 bits stays a JSON number (unchanged for every
+                // cell listed before); a wider one is its `0x…` hex string instead of being dropped.
+                let frame_obj = |f: &Vec<(
+                    String,
+                    mununu_core::adapter::btor2::cex_value::CexValue,
+                )>|
+                 -> serde_json::Value {
                     serde_json::Value::Object(
                         f.iter()
-                            .map(|(k, v)| (k.clone(), serde_json::json!(v)))
+                            .map(|(k, v)| {
+                                let value = match v.as_u64() {
+                                    Some(n) => serde_json::json!(n),
+                                    None => serde_json::json!(v.to_hex()),
+                                };
+                                (k.clone(), value)
+                            })
                             .collect(),
                     )
                 };
@@ -4597,12 +4609,13 @@ fn render_verify_auto_text(report: &mununu_core::adapter::slang::verify_auto::Au
                 // A safety violation: the finite path from reset to the failing cycle, with the
                 // inputs each cycle read (`inputs[i]` belongs to state `i`).
                 println!("        counterexample (reset -> violation):");
-                let render = |st: &[(String, u64)]| {
-                    st.iter()
-                        .map(|(k, v)| format!("{k}={v}"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                };
+                let render =
+                    |st: &[(String, mununu_core::adapter::btor2::cex_value::CexValue)]| {
+                        st.iter()
+                            .map(|(k, v)| format!("{k}={v}"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    };
                 for (i, st) in cex.prefix.iter().enumerate() {
                     println!("          [{i}] {}", render(st));
                     if let Some(inp) = cex.inputs.get(i).filter(|inp| !inp.is_empty()) {
@@ -4611,12 +4624,13 @@ fn render_verify_auto_text(report: &mununu_core::adapter::slang::verify_auto::Au
                 }
             } else {
                 println!("        counterexample (stall lasso):");
-                let render_state = |st: &[(String, u64)]| {
-                    st.iter()
-                        .map(|(k, v)| format!("{k}={v}"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                };
+                let render_state =
+                    |st: &[(String, mununu_core::adapter::btor2::cex_value::CexValue)]| {
+                        st.iter()
+                            .map(|(k, v)| format!("{k}={v}"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    };
                 for st in &cex.prefix {
                     println!("          -> {}", render_state(st));
                 }

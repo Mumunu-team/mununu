@@ -562,7 +562,7 @@ after it are still attempted; `MUNUNU_RESCUE_SLICE_MS`, 60 s, bounds each rescue
 `MUNUNU_VERIFY_AUTO_PARTIAL_JSON`; carry the `@mununu_guarantee`
 annotations in a source of their own (an empty `package` or an empty `module` — a bodiless module nothing
 instantiates is no longer reported as a black box, mununu#724);
-and read the trace's `inputs` knowing values wider than 64 bits are not listed (mununu#723).
+and read the trace's cells knowing a value wider than 64 bits is carried as `hex` with `value: null` (mununu#723 — it used to be absent).
 
 ### The cone of influence is bit-level (mununu#602)
 

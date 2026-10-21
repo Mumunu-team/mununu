@@ -1692,7 +1692,22 @@ fn p3_verilator_replays_ag_ef_trap_counterexample() {
 
     // 2. Build the replay trace: the witness inputs (drive esc_i to reach the trap), then a few
     //    esc_i=0 cycles to confirm the trap PERSISTS (terminal) at RTL.
-    let mut trace: Vec<Vec<(String, u64)>> = cx.inputs.clone();
+    // The Verilator replay drives `u64` values; every cell of this witness fits (a wider one
+    // would be refused here rather than truncated — mununu#723).
+    let mut trace: Vec<Vec<(String, u64)>> = cx
+        .inputs
+        .iter()
+        .map(|f| {
+            f.iter()
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        v.as_u64().expect("a replayable value fits 64 bits"),
+                    )
+                })
+                .collect()
+        })
+        .collect();
     for _ in 0..5 {
         trace.push(vec![("esc_i".to_string(), 0)]);
     }
@@ -2216,6 +2231,23 @@ fn e2e_opentitan_ip_edn_full() {
     // per-query timeout one to three of them decided per run, load-dependent).
     let fatal = rows("EdnFatalAlertNoRsp_A");
     assert_eq!(fatal.len(), 8);
+    // mununu#723 — the 109-bit `tl_i` (the bus write that raises the fatal alert) is listed in
+    // the trace at its full width; it used to be the one input missing, silently.
+    assert!(
+        report
+            .properties
+            .iter()
+            .filter(|p| p.label.as_deref() == Some("EdnFatalAlertNoRsp_A"))
+            .any(|p| {
+                p.counterexample.as_ref().is_some_and(|cx| {
+                    cx.inputs
+                        .iter()
+                        .flatten()
+                        .any(|(k, v)| k == "tl_i" && v.bits() == 109)
+                })
+            }),
+        "a violated row's trace must list `tl_i` at 109 bits"
+    );
     assert!(
         fatal
             .iter()

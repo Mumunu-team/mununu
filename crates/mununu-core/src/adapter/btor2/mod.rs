@@ -29,6 +29,7 @@ pub mod bit_blast;
 pub mod bit_interaction;
 pub mod bv;
 pub mod cegar;
+pub mod cex_value;
 pub mod concrete_oracle;
 pub mod dep_graph;
 pub mod emit;

@@ -227,6 +227,7 @@ mod tests {
     /// serializer emitting a field the schema never mentioned.
     #[test]
     fn a_serialized_report_conforms_to_the_published_response_schema() {
+        use crate::adapter::btor2::cex_value::CexValue;
         use crate::adapter::slang::translate::SvaKind;
         use crate::adapter::slang::verify_auto::{
             AutoVerifyReport, ExactCounterexample, ModelDiagnostics, NoteLevel, PropertyVerdict,
@@ -258,9 +259,9 @@ mod tests {
                     outcome: VerifyOutcome::Violated { false_cells: 3 },
                     seeded_predicates: vec![],
                     counterexample: Some(ExactCounterexample {
-                        prefix: vec![vec![("q".into(), 0)]],
-                        cycle: vec![vec![("q".into(), 1)]],
-                        inputs: vec![vec![("d".into(), 1)]],
+                        prefix: vec![vec![("q".into(), CexValue::from_u64(0, 1))]],
+                        cycle: vec![vec![("q".into(), CexValue::from_u64(1, 1))]],
+                        inputs: vec![vec![("d".into(), CexValue::from_u64(1, 1))]],
                         unreachable_target: vec!["b".into()],
                     }),
                     bottom_reason: None,

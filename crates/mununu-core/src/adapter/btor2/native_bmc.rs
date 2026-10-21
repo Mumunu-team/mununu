@@ -40,6 +40,7 @@
 use std::collections::HashMap;
 
 use crate::adapter::btor2::ast::{Btor2File, Nid, Node, Operand};
+use crate::adapter::btor2::cex_value::CexValue;
 use crate::adapter::sidecar::predicate_image::btor2_encode::{
     Btor2SmtView, EncodeError, encode_design,
 };
@@ -73,11 +74,12 @@ pub enum BmcOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BmcTrace {
     /// State-register valuations, frame 0 (reset) .. frame k (the bad state), each a
-    /// sorted `(symbol, value)` list (only named state cells).
-    pub states: Vec<Vec<(String, u64)>>,
+    /// sorted `(symbol, value)` list (only named state cells). A value is carried at its full
+    /// width (mununu#723 — a cell wider than 64 bits used to be dropped from the frame).
+    pub states: Vec<Vec<(String, CexValue)>>,
     /// Input valuations at each frame, 0 .. k: `inputs[j]` drives the transition out of frame
     /// `j`, and `inputs[k]` is what the `bad` condition read at the last frame.
-    pub inputs: Vec<Vec<(String, u64)>>,
+    pub inputs: Vec<Vec<(String, CexValue)>>,
 }
 
 /// A complete safety verdict from the k-induction driver
@@ -315,19 +317,34 @@ impl<'a> Unroller<'a> {
         state_syms: &HashMap<Nid, String>,
         input_syms: &HashMap<Nid, String>,
     ) -> BmcTrace {
-        let eval_frame =
-            |frame: &HashMap<Nid, BV>, syms: &HashMap<Nid, String>| -> Vec<(String, u64)> {
-                let mut out: Vec<(String, u64)> = frame
+        let eval_frame = |frame: &HashMap<Nid, BV>,
+                          syms: &HashMap<Nid, String>|
+         -> Vec<(String, CexValue)> {
+            let mut out: Vec<(String, CexValue)> = frame
                     .iter()
                     .filter_map(|(nid, bv)| {
                         let sym = syms.get(nid)?;
-                        let val = model.eval(bv, true)?.as_u64()?;
-                        Some((sym.clone(), val))
+                        let val = model.eval(bv, true)?;
+                        let bits = bv.get_size();
+                        // mununu#723 — `as_u64` is only the fast path: a cell wider than 64
+                        // bits (OpenTitan's 109-bit `tl_i`) is read from the numeral z3 prints
+                        // instead of being dropped from the frame.
+                        let value = match val.as_u64() {
+                            Some(v) => CexValue::from_u64(v, bits),
+                            None => match CexValue::from_smt_numeral(&val.to_string(), bits) {
+                                Some(v) => v,
+                                None => {
+                                    tracing::warn!(cell = %sym, bits, "witness: unreadable model value");
+                                    return None;
+                                }
+                            },
+                        };
+                        Some((sym.clone(), value))
                     })
                     .collect();
-                out.sort();
-                out
-            };
+            out.sort();
+            out
+        };
         let states = (0..=k)
             .map(|j| eval_frame(&self.frame_state[j], state_syms))
             .collect();
@@ -735,8 +752,9 @@ mod tests {
         let (outcome, trace) = bmc_bad_reachable_witness(&file, 5).expect("bmc runs");
         assert_eq!(outcome, BmcOutcome::Violated { depth: 3 });
         let trace = trace.expect("a Violated verdict carries the witness trace");
+        let states = crate::adapter::btor2::cex_value::u64_frames(&trace.states);
         assert_eq!(
-            trace.states,
+            states,
             vec![
                 vec![("cnt".to_string(), 0)],
                 vec![("cnt".to_string(), 1)],
@@ -747,7 +765,12 @@ mod tests {
         );
         // The last state satisfies the `bad` condition (cnt == 3) — the trace really
         // ends in a violating state.
-        assert_eq!(trace.states.last().unwrap(), &vec![("cnt".to_string(), 3)]);
+        assert_eq!(states.last().unwrap(), &vec![("cnt".to_string(), 3)]);
+        assert_eq!(
+            trace.states[0][0].1.bits(),
+            2,
+            "the value carries the cell's width"
+        );
         // One input frame per state (the last one is what `bad` read); no named inputs ⇒ empty.
         assert_eq!(trace.inputs.len(), 4);
         assert!(trace.inputs.iter().all(Vec::is_empty));
@@ -1059,5 +1082,37 @@ mod tests {
             safety(NEGATED_INIT, 10),
             SafetyVerdict::Violated { depth: 0 }
         );
+    }
+
+    // mununu#723 — a cell wider than 64 bits appears in the witness at its full width. Before,
+    // `extract_trace` did `as_u64()?` inside a `filter_map`: the 109-bit `tl_i` that carries
+    // the register write behind OpenTitan edn's fatal alert was the one input missing from the
+    // trace, and nothing said so. A 65-bit input `bad` compares against 2^64 + 5, and a
+    // 100-bit state initialised to 2^99: both must be listed, with their value and width.
+    #[test]
+    fn a_witness_lists_cells_wider_than_64_bits() {
+        const WIDE: &str = "1 sort bitvec 65\n2 input 1 wide_in\n3 sort bitvec 1\n\
+                            4 constd 1 18446744073709551621\n5 eq 3 2 4\n6 bad 5\n\
+                            7 sort bitvec 100\n8 consth 7 8000000000000000000000000\n\
+                            9 state 7 wide_st\n10 init 7 9 8\n11 next 7 9 9\n";
+        let file = parser::parse(WIDE).expect("parse btor2");
+        let (outcome, trace) = bmc_bad_reachable_witness(&file, 2).expect("bmc runs");
+        assert_eq!(outcome, BmcOutcome::Violated { depth: 0 });
+        let trace = trace.expect("witness");
+        let input = trace.inputs[0]
+            .iter()
+            .find(|(k, _)| k == "wide_in")
+            .map(|(_, v)| v.clone())
+            .expect("the 65-bit input is listed");
+        assert_eq!(input.bits(), 65);
+        assert_eq!(input.as_u64(), None);
+        assert_eq!(input.to_hex(), "0x10000000000000005");
+        let state = trace.states[0]
+            .iter()
+            .find(|(k, _)| k == "wide_st")
+            .map(|(_, v)| v.clone())
+            .expect("the 100-bit state is listed");
+        assert_eq!(state.bits(), 100);
+        assert_eq!(state.to_hex(), "0x8000000000000000000000000");
     }
 }

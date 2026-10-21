@@ -2015,13 +2015,15 @@ impl From<&crate::adapter::slang::verify_auto::AutoVerifyReport> for SvVerifyAut
         use crate::adapter::slang::translate::SvaKind;
         use crate::adapter::slang::verify_auto::{NoteLevel, VerifyOutcome};
 
-        let cells = |v: &[Vec<(String, u64)>]| -> Vec<Vec<CexCellView>> {
+        let cells = |v: &[Vec<(String, crate::adapter::btor2::cex_value::CexValue)>]| -> Vec<Vec<CexCellView>> {
             v.iter()
                 .map(|st| {
                     st.iter()
                         .map(|(register, value)| CexCellView {
                             register: register.clone(),
-                            value: *value,
+                            value: value.as_u64(),
+                            hex: value.to_hex(),
+                            bits: value.bits(),
                         })
                         .collect()
                 })
@@ -2537,11 +2539,19 @@ pub struct CounterexampleView {
     pub inputs: Vec<Vec<CexCellView>>,
 }
 
-/// One register's concrete value in a counterexample state.
+/// One register's concrete value in a counterexample state. mununu#723 — a cell wider than 64
+/// bits was silently absent from the trace (OpenTitan edn's 109-bit `tl_i`, the bus write behind
+/// the fatal alert). `value` is unchanged for every cell that fits 64 bits — exactly the cells
+/// that were listed before — and `null` for a wider value; `hex` and `bits` are always present.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct CexCellView {
     pub register: String,
-    pub value: u64,
+    /// The value when it fits 64 bits, else `null` (read `hex`).
+    pub value: Option<u64>,
+    /// `0x` + the value zero-padded to the cell's width — the form that always holds it.
+    pub hex: String,
+    /// The cell's width in bits.
+    pub bits: u32,
 }
 
 /// U.0 — CEGAR refinement trace, JSON-shaped for the refinement-trace
