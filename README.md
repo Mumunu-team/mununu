@@ -224,7 +224,7 @@ search (whether linked in-process, like Z3's SPACER, or a subprocess, like btorm
 | Exact BDD reachability | **mununu** (OxiDD, in-process) | exact up to the 192-bit auto-cap (40 by default), shape-bound within it; refuses an unsound "safe" on free init |
 | Native BMC + k-induction | **mununu** (drives the unroll; z3 answers per-depth SAT) | word-level counterexample + inductive proof |
 | Native McMillan interpolation | **mununu** (drives the forward-reach k-schedule; cvc5 answers per-interpolant queries) | last-resort; uniquely decides HWMCC `gen12/14/39` |
-| SPACER (IC3/PDR) via CHC | **external algorithm — Z3's SPACER** (in-process); mununu owns only the btor2→CHC *encoding* | Z3 solves the Horn-clause problem end-to-end |
+| SPACER (IC3/PDR) via CHC | **external algorithm — Z3's SPACER** (an isolated child); mununu owns only the btor2→CHC *encoding* | Z3 solves the Horn-clause problem end-to-end; corroborate-only since mununu#740 (a lone SPACER verdict decides nothing) |
 | btormc | **external** (subprocess) | BMC + k-induction |
 | Pono | **external** (subprocess) | IC3/PDR (`ic3bits`) |
 | rIC3 | **external** (subprocess) | bit-level IC3/PDR (`-e ic3`) — the member that proves the inductive-invariant safety class (OpenTitan's duplicated-counter fault-flag chains) |

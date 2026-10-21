@@ -134,7 +134,7 @@ decides every justice line of the design with two sound rungs — `--rung exact|
   resumes the iteration where it was.
 - **l2s** — liveness-to-safety: the response monitor with antecedent `true`, consequent `false`
   and the literals as fairness atoms is exactly "a reachable cycle that visits every literal";
-  the reachability portfolio (native BMC/k-induction ⊕ spacer ⊕ btormc ⊕ Pono ⊕ rIC3) decides the `bad`.
+  the reachability portfolio (native BMC/k-induction ⊕ spacer (corroborate-only, mununu#740) ⊕ btormc ⊕ Pono ⊕ rIC3) decides the `bad`.
 
 Before either rung runs, the literals are exposed as `output`s (`mununu_j<i>_<k>`, `mununu_f<m>`,
 `mununu_true`, `mununu_false`) — observation only, the design is otherwise untouched.
