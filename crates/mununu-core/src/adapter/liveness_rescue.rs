@@ -339,6 +339,54 @@ pub fn reduce_ag_ef_target(formula: &Formula) -> Option<Atom> {
     predicate_atom(formula, good_id)
 }
 
+/// Recognize the **terminal-state** idiom `AG (T → AG T)` =
+/// `ν X. ((¬T ∨ ν Y. (T ∧ [] Y)) ∧ [] X)` with `T` a single `reg == value` atom, returning `T`.
+///
+/// A row of this shape that HOLDS says the set `T` is closed under every transition from every
+/// reachable `T`-state — exactly the closure half of a trap certificate for an `AG EF p` row over
+/// the same register ([`crate::adapter::trap_certificate`]). The trap search uses such rows only to
+/// ORDER its candidates; it re-checks the closure itself, so a stale sibling verdict cannot become a
+/// certificate. `None` for every other shape: a guarded box, two different atoms, a relational or
+/// compound atom, or an operator other than `==`.
+pub fn reduce_terminal_state(formula: &Formula) -> Option<Atom> {
+    // ν X. (core ∧ [] X)
+    let Node::Nu { var: x, body } = formula.node(formula.root()) else {
+        return None;
+    };
+    let Node::And(l, r) = formula.node(*body) else {
+        return None;
+    };
+    let (core_id, _box_x) = split_and_box_to_var(formula, *l, *r, *x)?;
+    // core = ¬T ∨ ν Y. (T ∧ [] Y)
+    let Node::Or(a, b) = formula.node(core_id) else {
+        return None;
+    };
+    let is_not = |id: NodeId| matches!(formula.node(id), Node::Not(_));
+    let is_nu = |id: NodeId| matches!(formula.node(id), Node::Nu { .. });
+    let (not_id, nu_id) = match (is_not(*a) && is_nu(*b), is_not(*b) && is_nu(*a)) {
+        (true, false) => (*a, *b),
+        (false, true) => (*b, *a),
+        _ => return None,
+    };
+    let Node::Not(guard_id) = formula.node(not_id) else {
+        return None;
+    };
+    let entry = predicate_atom(formula, *guard_id)?;
+    let Node::Nu {
+        var: y,
+        body: nbody,
+    } = formula.node(nu_id)
+    else {
+        return None;
+    };
+    let Node::And(nl, nr) = formula.node(*nbody) else {
+        return None;
+    };
+    let (stay_id, _box_y) = split_and_box_to_var(formula, *nl, *nr, *y)?;
+    let stay = predicate_atom(formula, stay_id)?;
+    (entry == stay && entry.op == CmpOp::Eq).then_some(entry)
+}
+
 /// Parse a `Predicate` node as a single register-comparison atom. `None` for a
 /// relational (`reg ⋈ reg`), compound, or unparseable atom.
 ///
@@ -637,6 +685,41 @@ mod tests {
 
     fn parse(s: &str) -> Formula {
         mu_parser::parse(s).unwrap_or_else(|e| panic!("parse `{s}`: {e:?}"))
+    }
+
+    /// The terminal-state idiom the OpenTitan system properties use (`edn_main_sm_error_is_terminal`),
+    /// with the flattened dotted / `$`-generate names the lift produces.
+    #[test]
+    fn terminal_state_idiom_yields_its_atom() {
+        let f = parse(
+            "nu X. ((!(u_edn_core.gen_ep_blk$0.u_edn_ack_sm_ep.state_q == 465) || nu Y. \
+             ((u_edn_core.gen_ep_blk$0.u_edn_ack_sm_ep.state_q == 465) && [] Y)) && [] X)",
+        );
+        let t = reduce_terminal_state(&f).expect("the terminal idiom");
+        assert_eq!(t.signal, "u_edn_core.gen_ep_blk$0.u_edn_ack_sm_ep.state_q");
+        assert_eq!(t.op, CmpOp::Eq);
+        assert_eq!(t.value, 465);
+        // operand order inside the disjunction and the conjunctions does not matter
+        let g = parse("nu X. ([] X && ((nu Y. ([] Y && (st == 3))) || !(st == 3)))");
+        assert_eq!(reduce_terminal_state(&g).map(|a| a.value), Some(3));
+    }
+
+    #[test]
+    fn terminal_state_declines_every_other_shape() {
+        for s in [
+            // two different atoms: entry into 3, stay in 2 — not a closure statement about one set
+            "nu X. ((!(st == 3) || nu Y. ((st == 2) && [] Y)) && [] X)",
+            // not an equality
+            "nu X. ((!(st != 3) || nu Y. ((st != 3) && [] Y)) && [] X)",
+            // a least fixpoint inside (`AF`-shaped), not the `AG` of the idiom
+            "nu X. ((!(st == 3) || mu Y. ((st == 3) || [] Y)) && [] X)",
+            // a plain implies-next (`|=>`), which states one step only
+            "nu X. ((!(st == 3) || [] (st == 3)) && [] X)",
+            // a recoverability row
+            "nu Y. ((mu X. ((st == 0) || <> X)) && [] Y)",
+        ] {
+            assert!(reduce_terminal_state(&parse(s)).is_none(), "{s}");
+        }
     }
 
     // The canonical response shape, both atom orders inside the inner Or.

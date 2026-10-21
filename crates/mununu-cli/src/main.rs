@@ -4607,8 +4607,18 @@ fn render_verify_auto_text(report: &mununu_core::adapter::slang::verify_auto::Au
                 );
             } else if cex.cycle.is_empty() {
                 // A safety violation: the finite path from reset to the failing cycle, with the
-                // inputs each cycle read (`inputs[i]` belongs to state `i`).
-                println!("        counterexample (reset -> violation):");
+                // inputs each cycle read (`inputs[i]` belongs to state `i`). A trap certificate
+                // (`AG EF` refuted) reads the same way: the path ends in a closed set the target is
+                // outside of, so no cycle is drawn.
+                if p.decided_by.as_deref()
+                    == Some(mununu_core::adapter::slang::verify_auto::TRAP_CERTIFICATE_DECIDED_BY)
+                {
+                    println!(
+                        "        counterexample (reset -> trap; the trap is closed, the target is never reached again):"
+                    );
+                } else {
+                    println!("        counterexample (reset -> violation):");
+                }
                 let render =
                     |st: &[(String, mununu_core::adapter::btor2::cex_value::CexValue)]| {
                         st.iter()

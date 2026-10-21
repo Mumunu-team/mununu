@@ -21,6 +21,7 @@ use mununu_core::adapter::recoverability::{
     verify_recoverability, verify_recoverability_scalable,
     verify_recoverability_scalable_with_source, verify_recoverability_spcr_only,
 };
+use mununu_core::adapter::trap_certificate::trap_certificate_verdict;
 use mununu_core::planner::solve_recoverability_combined;
 use mununu_core::verdict::PropertyVerdict;
 
@@ -625,15 +626,16 @@ fn decides(r: &Result<PropertyVerdict, String>, want: PropertyVerdict) -> bool {
 fn wall_class_matrix() {
     let mathsat = std::env::var_os("MUNUNU_MATHSAT_PATH").is_some();
     println!(
-        "\n{:32} {:26} {:>6} {:>6} {:>6} {:>6} {:>7}",
-        "case", "class", "dflt", "wp", "craig", "spcr", "comb"
+        "\n{:32} {:26} {:>6} {:>6} {:>6} {:>6} {:>7} {:>6}",
+        "case", "class", "dflt", "wp", "craig", "spcr", "comb", "trap"
     );
-    println!("{}", "-".repeat(98));
+    println!("{}", "-".repeat(105));
 
     let mut soundness_violations = Vec::new();
     let mut craig_unique = Vec::new();
     let mut spcr_decided = Vec::new(); // array-content cases the SPCR pre-pass decides (its reach)
     let mut combined_fullspace = Vec::new(); // ⊥-singletons → combined decides with NO pins (transfers)
+    let mut trap_unique = Vec::new(); // every other lever non-VIOLATED → the trap certificate refutes
 
     let mut rtl_classes = std::collections::BTreeSet::new();
     let mut synthetic_classes = std::collections::BTreeSet::new();
@@ -671,15 +673,20 @@ fn wall_class_matrix() {
         // transferable levers (the earlier unsound auto-input-pinning was removed — see
         // `solve_recoverability_combined`), so its verdict is full-space and oracle-comparable.
         let combined = solve_recoverability_combined(&model, c.target);
+        // The trap certificate (a reachable closed set disjoint from the target) — VIOLATED-only by
+        // construction: it never produces Holds. `reset_pinned` = the case pins its reset, so a
+        // `state_q` alias behind the async-reset mux resolves to its state cell.
+        let trap = trap_certificate_verdict(&model, c.target, !c.pin.is_empty());
         println!(
-            "{:32} {:26} {:>6} {:>6} {:>6} {:>6} {:>7}",
+            "{:32} {:26} {:>6} {:>6} {:>6} {:>6} {:>7} {:>6}",
             c.name,
             c.class,
             v(&dflt),
             v(&wp),
             v(&craig),
             v(&spcr),
-            v(&combined)
+            v(&combined),
+            v(&trap)
         );
 
         // SOUNDNESS invariant — no lever may contradict the oracle. The `combined` plan is included:
@@ -691,6 +698,7 @@ fn wall_class_matrix() {
             ("cube-craig", &craig),
             ("spcr", &spcr),
             ("combined", &combined),
+            ("trap", &trap),
         ] {
             let bad = match c.oracle {
                 Oracle::Holds => is_viol(r),
@@ -748,13 +756,34 @@ fn wall_class_matrix() {
         if all_singletons_bottom && combined_decides {
             combined_fullspace.push(c.name);
         }
+
+        // The trap certificate's MARGINAL reach: a case no other lever refutes that it refutes.
+        if is_viol(&trap)
+            && ![&dflt, &wp, &craig, &spcr, &combined]
+                .iter()
+                .any(|r| is_viol(r))
+        {
+            trap_unique.push(c.name);
+        }
     }
 
-    println!("{}", "-".repeat(92));
+    println!("{}", "-".repeat(105));
     assert!(
         soundness_violations.is_empty(),
         "SOUNDNESS VIOLATIONS (a lever contradicted the oracle): {soundness_violations:?}"
     );
+
+    if trap_unique.is_empty() {
+        println!(
+            "MEASURED: the trap certificate refutes no case the other levers leave non-VIOLATED on \
+             this set (it corroborates their VIOLATED verdicts); its reach is the IP-scale row whose \
+             exact cone is over the cap (OpenTitan edn's `AG EF Idle`, ledger §3.18)."
+        );
+    } else {
+        println!(
+            "trap certificate UNIQUELY refuted (every other lever non-VIOLATED): {trap_unique:?}"
+        );
+    }
 
     // The COMBINE-MECHANISMS hypothesis (the planner's raison d'être) — measured, not assumed. The
     // composed plan is the union of its SOUND component levers (exact-first ∪ scalable-cube), so a

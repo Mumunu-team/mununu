@@ -2359,23 +2359,84 @@ fn e2e_opentitan_ip_edn_full() {
     ] {
         assert!(holds(l), "{l}: {:?}", rows(l));
     }
-    // Pinned abstentions: the `AG EF` rows — the FSM state's cone is over the exact cap and the
-    // cube certifies no MUST path. An engine that decides one breaks the pin — re-measure, then
-    // move the pin.
-    for l in ["edn_main_sm_recover_idle", "edn_ack_sm_0_recover_idle"] {
+    // The `AG EF Idle` rows are FALSE under `rst_ni=1`. Each FSM's SEC_CM `Error` state is reachable
+    // (a software ERR_CODE_TEST write raises `fatal_loc_events`, which the main FSM's and every
+    // endpoint FSM's `local_escalate_i` read) and terminal (the `*_error_is_terminal` rows above), so
+    // from `Error` the FSM never returns to `Idle`. The trap certificate refutes them (ledger §3.18,
+    // 2026-10-21) with the path into `Error`; until then they were pinned ⊥ — the state's cone is over
+    // the exact cap and the cube certified no MUST path into the trap.
+    for (l, trap) in [
+        (
+            "edn_main_sm_recover_idle",
+            "u_edn_core.u_edn_main_sm.state_q == 382",
+        ),
+        (
+            "edn_ack_sm_0_recover_idle",
+            "u_edn_core.gen_ep_blk$0.u_edn_ack_sm_ep.state_q == 465",
+        ),
+        (
+            "edn_ack_sm_7_recover_idle",
+            "u_edn_core.gen_ep_blk$7.u_edn_ack_sm_ep.state_q == 465",
+        ),
+    ] {
+        let p = report
+            .properties
+            .iter()
+            .find(|p| p.label.as_deref() == Some(l))
+            .unwrap_or_else(|| panic!("{l}: no row"));
         assert!(
-            matches!(rows(l)[0], VerifyOutcome::Unknown { .. }),
+            matches!(p.outcome, VerifyOutcome::Violated { .. }),
             "{l}: {:?}",
-            rows(l)
+            p.outcome
+        );
+        assert_eq!(p.decided_by.as_deref(), Some("trap-certificate"), "{l}");
+        let want = format!("trap: {trap}");
+        assert!(
+            report.notes.iter().any(|n| n.kind == "trap-certificate"
+                && n.property.as_deref() == Some(p.name.as_str())
+                && n.items.contains(&want)),
+            "{l}: the certificate note names `{trap}`"
+        );
+        // The trace names state CELLS, not the `state_q` alias: the main FSM's 9-bit state shows as
+        // `u_edn_core.edn_main_sm_state`, an endpoint FSM's as a cell inside its `u_state_regs`. The
+        // last state holds the trap value in a 9-bit cell of the core (2026-10-21 measurement).
+        let val: u64 = trap
+            .rsplit(" == ")
+            .next()
+            .and_then(|v| v.parse().ok())
+            .expect("a value");
+        let last = p
+            .counterexample
+            .as_ref()
+            .and_then(|cx| cx.prefix.last())
+            .unwrap_or_else(|| panic!("{l}: the path into the trap"));
+        assert!(
+            last.iter().any(|(k, v)| k.starts_with("u_edn_core.")
+                && v.bits() == 9
+                && v.as_u64() == Some(val)),
+            "{l}: the path ends in the trap: {last:?}"
         );
     }
-    // Floors (2026-10-19, rIC3): 44 own + 8 system + 4 `EF` twins HOLDS, 8 VIOLATED.
+    // Floors (2026-10-21): 44 own + 8 system + 4 `EF` twins HOLDS; 8 + 3 VIOLATED; nothing ⊥.
     let n_holds = report
         .properties
         .iter()
         .filter(|p| matches!(p.outcome, VerifyOutcome::Holds))
         .count();
     assert!(n_holds >= 56, "holds = {n_holds}");
+    let n_violated = report
+        .properties
+        .iter()
+        .filter(|p| matches!(p.outcome, VerifyOutcome::Violated { .. }))
+        .count();
+    assert_eq!(n_violated, 11, "violated");
+    assert!(
+        report
+            .properties
+            .iter()
+            .all(|p| !matches!(p.outcome, VerifyOutcome::Unknown { .. })),
+        "no row is left ⊥"
+    );
 }
 
 /// Diagnostic probe, not a gate: the reach portfolio under a 60-s budget (the rescue slice's
