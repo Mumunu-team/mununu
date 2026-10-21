@@ -685,7 +685,7 @@ mod tests {
                     .filter(|(k, _)| {
                         !k.starts_with(crate::adapter::btor2::bad_monitor::WITNESS_LATCH_PREFIX)
                     })
-                    .cloned()
+                    .map(|(k, v)| (k.clone(), v.as_u64().expect("narrow")))
                     .collect()
             })
             .collect()
@@ -717,7 +717,7 @@ mod tests {
             trace.inputs[j]
                 .iter()
                 .find(|(k, _)| k == n)
-                .map(|(_, v)| *v)
+                .map(|(_, v)| v.as_u64().expect("narrow"))
         };
         assert_eq!(at(0, "a"), Some(1));
         assert_eq!(at(1, "b"), Some(0));

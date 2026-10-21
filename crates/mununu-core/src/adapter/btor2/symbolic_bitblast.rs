@@ -7854,7 +7854,8 @@ impl BddBitBlaster {
         // The lasso / trap representation carries a cell's value as `u128`: a state cell wider than
         // that (reachable since the cap ladder bit-blasts cones the 192-bit cap used to refuse)
         // has no faithful witness here — `None`, never a wrapped shift into a wrong minterm.
-        if let Some(wide) = self.cells.iter().find(|c| c.is_state && c.vars.len() > 128) {
+        // mununu#723 — INPUT cells too: `pick_assignment` shifts `1u128 << b` for every cell.
+        if let Some(wide) = self.cells.iter().find(|c| c.vars.len() > 128) {
             tracing::warn!(
                 cell = %wide.symbol,
                 width = wide.vars.len(),
@@ -7945,7 +7946,8 @@ impl BddBitBlaster {
         // The lasso / trap representation carries a cell's value as `u128`: a state cell wider than
         // that (reachable since the cap ladder bit-blasts cones the 192-bit cap used to refuse)
         // has no faithful witness here — `None`, never a wrapped shift into a wrong minterm.
-        if let Some(wide) = self.cells.iter().find(|c| c.is_state && c.vars.len() > 128) {
+        // mununu#723 — INPUT cells too: `pick_assignment` shifts `1u128 << b` for every cell.
+        if let Some(wide) = self.cells.iter().find(|c| c.vars.len() > 128) {
             tracing::warn!(
                 cell = %wide.symbol,
                 width = wide.vars.len(),

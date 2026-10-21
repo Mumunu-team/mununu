@@ -115,20 +115,35 @@
       "type": "object"
     },
     "CexCellView": {
-      "description": "One register's concrete value in a counterexample state.",
+      "description": "One register's concrete value in a counterexample state. mununu#723 — a cell wider than 64 bits was silently absent from the trace (OpenTitan edn's 109-bit `tl_i`, the bus write behind the fatal alert). `value` is unchanged for every cell that fits 64 bits — exactly the cells that were listed before — and `null` for a wider value; `hex` and `bits` are always present.",
       "properties": {
+        "bits": {
+          "description": "The cell's width in bits.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "hex": {
+          "description": "`0x` + the value zero-padded to the cell's width — the form that always holds it.",
+          "type": "string"
+        },
         "register": {
           "type": "string"
         },
         "value": {
+          "description": "The value when it fits 64 bits, else `null` (read `hex`).",
           "format": "uint64",
           "minimum": 0.0,
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "required": [
-        "register",
-        "value"
+        "bits",
+        "hex",
+        "register"
       ],
       "type": "object"
     },

@@ -75,6 +75,7 @@ use boolector::option::{BtorOption, ModelGen};
 use boolector::{BV, Btor, SolverResult};
 
 use crate::adapter::btor2::ast::{Btor2File, ConstValue, Nid, Node, Op, Operand, Sort};
+use crate::adapter::btor2::cex_value::CexValue;
 use crate::adapter::btor2::native_bmc::{BmcOutcome, BmcTrace};
 
 /// Portfolio-facing depth cap — well above [`super::native_bmc::DEFAULT_MAX_K`] so a
@@ -359,12 +360,20 @@ fn bad_condition(env: &Env, bad_ops: &[Operand]) -> Result<Bv, BoolectorError> {
     acc.ok_or(BoolectorError::NoBadProperty)
 }
 
-/// Read a NAMED cell list's model values from the current (SAT) Boolector model,
-/// dropping any cell wider than 64 bits (`as_u64` → `None`); sorted for stability.
-fn eval_named(frame: &[(String, Bv)]) -> Vec<(String, u64)> {
-    let mut out: Vec<(String, u64)> = frame
+/// Read a NAMED cell list's model values from the current (SAT) Boolector model at their full
+/// width (mununu#723 — a cell wider than 64 bits was dropped); sorted for stability.
+fn eval_named(frame: &[(String, Bv)]) -> Vec<(String, CexValue)> {
+    let mut out: Vec<(String, CexValue)> = frame
         .iter()
-        .filter_map(|(sym, bv)| bv.get_a_solution().as_u64().map(|v| (sym.clone(), v)))
+        .map(|(sym, bv)| {
+            let sol = bv.get_a_solution();
+            let bits = bv.get_width();
+            let value = match sol.as_u64() {
+                Some(v) => CexValue::from_u64(v, bits),
+                None => CexValue::from_binary_str(sol.as_01x_str(), bits),
+            };
+            (sym.clone(), value)
+        })
         .collect();
     out.sort();
     out
@@ -581,7 +590,12 @@ mod tests {
         );
         let trace = trace.expect("witness");
         assert_eq!(trace.states.len(), 38, "frames 0..=37");
-        assert_eq!(trace.states.last().unwrap(), &vec![("cnt".to_string(), 37)]);
+        assert_eq!(
+            crate::adapter::btor2::cex_value::u64_frames(&trace.states)
+                .last()
+                .unwrap(),
+            &vec![("cnt".to_string(), 37)]
+        );
     }
 
     #[test]
@@ -620,7 +634,7 @@ mod tests {
         assert_eq!(outcome, BmcOutcome::Violated { depth: 3 });
         let trace = trace.expect("a Violated verdict carries the witness");
         assert_eq!(
-            trace.states,
+            crate::adapter::btor2::cex_value::u64_frames(&trace.states),
             vec![
                 vec![("cnt".to_string(), 0)],
                 vec![("cnt".to_string(), 1)],

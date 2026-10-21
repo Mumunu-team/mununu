@@ -60,6 +60,7 @@
 
 use std::collections::HashSet;
 
+use crate::adapter::btor2::cex_value::CexValue;
 use crate::adapter::btor2::kmts_lift::{MayEdgeInference, MustEdgeInference, PredicateSpec};
 use crate::adapter::btor2::predicate_expr::{CmpOp, PredicateExpr, parse_predicate_expr};
 use crate::adapter::slang::extract::extract_sva_with_params;
@@ -283,13 +284,14 @@ impl VacuityKind {
 /// ending at the failing cycle with an empty `cycle` for a safety one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExactCounterexample {
-    /// States from the reset state up to (excluding) the cycle entry.
-    pub prefix: Vec<Vec<(String, u64)>>,
+    /// States from the reset state up to (excluding) the cycle entry. A cell's value is carried
+    /// at its full width (mununu#723 — a cell wider than 64 bits used to be dropped or truncated).
+    pub prefix: Vec<Vec<(String, CexValue)>>,
     /// The repeating stall cycle; the last state steps back to `cycle[0]`.
-    pub cycle: Vec<Vec<(String, u64)>>,
+    pub cycle: Vec<Vec<(String, CexValue)>>,
     /// P3 — the INPUT assignment driving each transition of `prefix ++ cycle` (`inputs[i]` is
     /// the input at path-state `i`), for RTL replay. Empty when the engine did not record inputs.
-    pub inputs: Vec<Vec<(String, u64)>>,
+    pub inputs: Vec<Vec<(String, CexValue)>>,
     /// A.4 — the UNREACHABLE-target witness for a `Violated` bare `EF p` (reachability):
     /// there is no trace (`prefix`/`cycle` empty), because the target `p` is never reached
     /// from reset. These are the predicate-atom strings comprising `p` — the actionable
@@ -300,15 +302,27 @@ pub struct ExactCounterexample {
 
 /// Convert an engine [`StallLasso`](crate::adapter::btor2::symbolic_bitblast::StallLasso)
 /// (register→value maps, `u128`) into the surface [`ExactCounterexample`] (ordered
-/// `(name, u64)` pairs; state-register values fit in `u64` under the exact engine's
-/// bit-blast cap).
+/// `(name, value)` pairs). `widths` (from [`cell_widths_of`]) gives each cell its real width;
+/// a cell it does not name gets the narrowest width that holds the value. mununu#723 — the
+/// `u128` used to be narrowed to `u64`, silently, for every cell.
 fn exact_counterexample_from_lasso(
     lasso: crate::adapter::btor2::symbolic_bitblast::StallLasso,
+    widths: &std::collections::HashMap<String, u32>,
 ) -> ExactCounterexample {
     let conv = |states: Vec<std::collections::BTreeMap<String, u128>>| {
         states
             .into_iter()
-            .map(|st| st.into_iter().map(|(k, v)| (k, v as u64)).collect())
+            .map(|st| {
+                st.into_iter()
+                    .map(|(k, v)| {
+                        let bits = widths
+                            .get(&k)
+                            .copied()
+                            .unwrap_or_else(|| (128 - v.leading_zeros()).max(1));
+                        (k, CexValue::from_u128(v, bits))
+                    })
+                    .collect()
+            })
             .collect()
     };
     ExactCounterexample {
@@ -317,6 +331,14 @@ fn exact_counterexample_from_lasso(
         inputs: conv(lasso.inputs),
         unreachable_target: Vec::new(),
     }
+}
+
+/// The width of every named cell of a model's BTOR2 text (empty when it does not parse) — the
+/// widths a lasso's values are reported at.
+fn cell_widths_of(btor2: &str) -> std::collections::HashMap<String, u32> {
+    crate::adapter::btor2::parser::parse(btor2)
+        .map(|f| crate::adapter::btor2::cex_value::cell_widths(&f))
+        .unwrap_or_default()
 }
 
 /// A.4 — build the UNREACHABLE-target counterexample for a `Violated` bare `EF p`
@@ -5026,7 +5048,7 @@ pub(crate) fn verify_auto_impl(
                     (
                         VerifyOutcome::Violated { false_cells: 1 },
                         witness
-                            .map(exact_counterexample_from_lasso)
+                            .map(|w| exact_counterexample_from_lasso(w, &cell_widths_of(&btor2)))
                             .or_else(|| ef_unreachable_counterexample(&formula)),
                     )
                 }
@@ -6621,7 +6643,7 @@ pub(crate) fn rescue_skipped_via_exact(
             Ok((ExactVerdict::Violated, witness)) => {
                 prop.outcome = VerifyOutcome::Violated { false_cells: 1 };
                 prop.counterexample = witness
-                    .map(exact_counterexample_from_lasso)
+                    .map(|w| exact_counterexample_from_lasso(w, &cell_widths_of(design_btor2)))
                     .or_else(|| ef_unreachable_counterexample(&formula));
                 prop.decided_by = Some(stage.to_string());
                 notes.push(exact_skip_rescue_note(&prop.name, "VIOLATED"));
@@ -7239,9 +7261,9 @@ mod tests {
 
     fn cx_stub() -> ExactCounterexample {
         ExactCounterexample {
-            prefix: vec![vec![("st".to_string(), 0)]],
-            cycle: vec![vec![("st".to_string(), 3)]],
-            inputs: vec![vec![("esc".to_string(), 1)]],
+            prefix: vec![vec![("st".to_string(), CexValue::from_u64(0, 2))]],
+            cycle: vec![vec![("st".to_string(), CexValue::from_u64(3, 2))]],
+            inputs: vec![vec![("esc".to_string(), CexValue::from_u64(1, 1))]],
             unreachable_target: Vec::new(),
         }
     }
@@ -7908,7 +7930,7 @@ mod tests {
                 .last()
                 .unwrap()
                 .iter()
-                .any(|(sig, v)| sig == "cnt" && *v == 3),
+                .any(|(sig, v)| sig == "cnt" && v.as_u64() == Some(3)),
             "the witness's final state must satisfy the violated bad condition (cnt == 3); got {:?}",
             cx.prefix.last().unwrap()
         );
@@ -12099,9 +12121,9 @@ module uart_tx(); endmodule"#;
         assert!(cx.cycle.is_empty());
         assert_eq!(cx.inputs.len(), cx.prefix.len());
         assert!(
-            cx.prefix
-                .last()
-                .is_some_and(|st| st.iter().any(|(k, v)| k == "u_s.q" && *v == 1)),
+            cx.prefix.last().is_some_and(|st| st
+                .iter()
+                .any(|(k, v)| k == "u_s.q" && v.as_u64() == Some(1))),
             "the trace ends with `u_s.q` high: {cx:?}"
         );
     }
