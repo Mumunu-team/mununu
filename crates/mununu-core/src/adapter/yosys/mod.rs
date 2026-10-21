@@ -828,15 +828,9 @@ pub fn sv_to_btor2_with_blackboxes(
     yopts: &YosysOptions,
 ) -> Result<SvLiftResult, AdapterError> {
     let artifacts = run_sv_flatten_btor2(content, yopts)?;
-    let mut names: std::collections::BTreeSet<String> =
-        parse_blackbox_modules(&artifacts.hier_json)
-            .into_iter()
-            .map(|b| b.name)
-            .collect();
-    names.extend(parse_undefined_module_cells(&artifacts.hier_json));
     Ok(SvLiftResult {
         btor2: artifacts.btor2,
-        blackboxed_modules: names.into_iter().collect(),
+        blackboxed_modules: blackboxed_module_names(&artifacts.hier_json),
         frontend_used: artifacts.frontend_used,
         fallback_reason: artifacts.fallback_reason,
     })
@@ -870,7 +864,26 @@ fn parse_undefined_module_cells(hier_json: &str) -> Vec<String> {
         return Vec::new();
     };
     let defined: std::collections::HashSet<&str> = modules.keys().map(String::as_str).collect();
-    let mut undefined: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    instantiated_cell_types(hier_json)
+        .iter()
+        .filter(|ty| !defined.contains(ty.as_str()))
+        .map(|ty| strip_sv2v_mangle(ty).to_string())
+        .collect::<std::collections::BTreeSet<String>>()
+        .into_iter()
+        .collect()
+}
+
+/// Every non-built-in cell TYPE instantiated anywhere in the elaborated design (`modules[*].cells
+/// [*].type`, `$…` Yosys primitives excluded), raw (sv2v-mangled) names.
+fn instantiated_cell_types(hier_json: &str) -> std::collections::BTreeSet<String> {
+    let mut types = std::collections::BTreeSet::new();
+    let root: serde_json::Value = match serde_json::from_str(hier_json) {
+        Ok(v) => v,
+        Err(_) => return types,
+    };
+    let Some(modules) = root.get("modules").and_then(|m| m.as_object()) else {
+        return types;
+    };
     for body in modules.values() {
         let Some(cells) = body.get("cells").and_then(|c| c.as_object()) else {
             continue;
@@ -878,13 +891,28 @@ fn parse_undefined_module_cells(hier_json: &str) -> Vec<String> {
         for cell in cells.values() {
             if let Some(ty) = cell.get("type").and_then(|t| t.as_str())
                 && !ty.starts_with('$')
-                && !defined.contains(ty)
             {
-                undefined.insert(strip_sv2v_mangle(ty).to_string());
+                types.insert(ty.to_string());
             }
         }
     }
-    undefined.into_iter().collect()
+    types
+}
+
+/// The modules the lift could not model, for `verify_auto`'s `blackboxed_modules` diagnostic:
+/// the `(* blackbox *)`-marked modules that are actually INSTANTIATED under the top (mununu#724
+/// — yosys marks any bodiless module blackbox, including an empty `module` that only carries
+/// `@mununu_guarantee` comments and nothing instantiates; reporting it was a false soundness
+/// caveat), plus the instantiated cell types with no definition at all. Sorted, deduped.
+pub(crate) fn blackboxed_module_names(hier_json: &str) -> Vec<String> {
+    let instantiated = instantiated_cell_types(hier_json);
+    let mut names: std::collections::BTreeSet<String> = parse_blackbox_modules(hier_json)
+        .into_iter()
+        .map(|b| b.name)
+        .filter(|name| instantiated.contains(name))
+        .collect();
+    names.extend(parse_undefined_module_cells(hier_json));
+    names.into_iter().collect()
 }
 
 /// Strip sv2v's parameter-specialisation suffix (`_<HEX>_<HEX>`, two trailing
@@ -3502,6 +3530,41 @@ endmodule
             }
         }"#;
         assert!(parse_blackbox_modules(hier).is_empty());
+    }
+
+    /// mununu#724 — a bodiless module nothing instantiates (an empty `module` carrying only
+    /// `@mununu_guarantee` comments) is NOT reported as black-boxed: yosys marks it
+    /// `(* blackbox *)`, but no cell of that type exists under the top. A marked module that
+    /// IS instantiated, and an instantiated module with no definition, still are.
+    #[test]
+    fn blackboxed_module_names_keep_only_instantiated_modules() {
+        let hier = r#"{
+            "modules": {
+                "top": {
+                    "attributes": { "top": "00000000000000000000000000000001" },
+                    "ports": {},
+                    "cells": {
+                        "u_x": { "type": "prim_x" },
+                        "u_dff": { "type": "$dff" },
+                        "u_ghost": { "type": "prim_sparse_fsm_flop_B4CDB_707CE" }
+                    }
+                },
+                "prim_x": {
+                    "attributes": { "blackbox": "00000000000000000000000000000001" },
+                    "ports": {}
+                },
+                "empty_props": {
+                    "attributes": { "blackbox": "00000000000000000000000000000001" },
+                    "ports": {}
+                }
+            }
+        }"#;
+        assert_eq!(
+            blackboxed_module_names(hier),
+            vec!["prim_sparse_fsm_flop".to_string(), "prim_x".to_string()]
+        );
+        // The sidecar emission path still lists every marked module (contract discovery).
+        assert_eq!(parse_blackbox_modules(hier).len(), 2);
     }
 
     #[test]

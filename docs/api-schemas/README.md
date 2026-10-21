@@ -20,6 +20,8 @@ Each `*.schema.json` file is a JSON Schema (Draft-07) derived directly from the 
 |------|----------|-----------|
 | [`sv-verify-auto-request.schema.json`](sv-verify-auto-request.schema.json) | `POST /api/v1/sv/verify-auto` | Request body |
 | [`sv-verify-auto-response.schema.json`](sv-verify-auto-response.schema.json) | `POST /api/v1/sv/verify-auto` | Response body |
+| [`sv-mutate-request.schema.json`](sv-mutate-request.schema.json) | `POST /api/v1/sv/mutate` | Request body (mununu#725) |
+| [`sv-mutate-response.schema.json`](sv-mutate-response.schema.json) | `POST /api/v1/sv/mutate` | Response body |
 
 ### `sv` property verbs — CLI reports (mununu#541)
 

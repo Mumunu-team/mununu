@@ -3740,8 +3740,10 @@ pub(crate) fn lift_sv(
 
 /// Apply [`VerifyAutoOptions::lift_overrides`]: the primary's content and the lift's additional
 /// sources with every same-named file replaced. Errors on an override that names no source, and on
-/// a name given twice — a typo must not silently lift the real file.
-fn apply_lift_overrides(
+/// a name given twice — a typo must not silently lift the real file. Public since mununu#725: the
+/// `sv mutate --list` discovery lift (CLI and API) goes through it too — it lifts directly, not
+/// through `verify_auto`, and the real OpenTitan `prim_assert.sv` dies in yosys without the shim.
+pub fn apply_lift_overrides(
     primary_name: &str,
     primary_content: &str,
     yosys_opts: &YosysOptions,

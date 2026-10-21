@@ -560,7 +560,8 @@ cap once the register block's bus datapath is in the design. Three things to kno
 run: set `MUNUNU_PROPERTY_BUDGET_MS` (a row that hits it carries `bottom_reason: budget-expired` and the rows
 after it are still attempted; `MUNUNU_RESCUE_SLICE_MS`, 60 s, bounds each rescue step) and
 `MUNUNU_VERIFY_AUTO_PARTIAL_JSON`; carry the `@mununu_guarantee`
-annotations in an empty `package`, not an empty `module` (a bodiless module is reported as a black box, mununu#724);
+annotations in a source of their own (an empty `package` or an empty `module` — a bodiless module nothing
+instantiates is no longer reported as a black box, mununu#724);
 and read the trace's `inputs` knowing values wider than 64 bits are not listed (mununu#723).
 
 ### The cone of influence is bit-level (mununu#602)

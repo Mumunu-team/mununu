@@ -1562,11 +1562,45 @@ pub async fn sv_mutate_handler(
     blocking(move || sv_mutate_handler_impl(request)).await
 }
 
+/// `config_values` entries (`"signal=value"`) → the pinned inputs, shared by `sv/verify-auto`
+/// and `sv/mutate` (mununu#725). H.J.b / mununu#459: a malformed entry is a 400 (mirrors
+/// `params`), never a silent drop; a value that is not a decimal u64 (e.g. hex `0x1`) is rejected
+/// by name. An unknown / non-input signal is caught downstream in `verify_auto` against the
+/// model's real primary inputs.
+fn parse_config_values(
+    entries: &[String],
+) -> Result<std::collections::HashMap<String, u64>, ApiError> {
+    entries
+        .iter()
+        .map(|e| {
+            let (name, val) = e.split_once('=').ok_or_else(|| ApiError::BadRequest {
+                message: format!("malformed config_values entry '{e}'"),
+                details: Some("expected \"SIGNAL=VALUE\"".into()),
+            })?;
+            let (name, val) = (name.trim(), val.trim());
+            if name.is_empty() {
+                return Err(ApiError::BadRequest {
+                    message: format!("malformed config_values entry '{e}'"),
+                    details: Some("SIGNAL must be non-empty".into()),
+                });
+            }
+            let value = val.parse::<u64>().map_err(|_| ApiError::BadRequest {
+                message: format!("malformed config_values entry '{e}'"),
+                details: Some(format!(
+                    "VALUE must be a decimal u64 (got '{val}'); hex/0x, signed, \
+                     and non-numeric values are not accepted"
+                )),
+            })?;
+            Ok((name.to_string(), value))
+        })
+        .collect()
+}
+
 fn sv_mutate_handler_impl(request: SvMutateRequest) -> ApiResult<Json<SvMutateResponse>> {
     use crate::adapter::btor2::kmts_lift::MustEdgeInference;
     use crate::adapter::btor2::mutate::{Mutation, list_targets};
     use crate::adapter::slang::verify_auto::{
-        VerifyAutoOptions, engine_selection, mutate_and_compare,
+        VerifyAutoOptions, apply_lift_overrides, engine_selection, mutate_and_compare,
     };
     use crate::adapter::yosys::{SvFrontend, YosysOptions, sv_to_btor2};
 
@@ -1608,6 +1642,8 @@ fn sv_mutate_handler_impl(request: SvMutateRequest) -> ApiResult<Json<SvMutateRe
             .map(|f| (f.name.clone(), f.content.clone()))
             .collect(),
         use_sv2v: request.use_sv2v,
+        // mununu#725 — the lift-posture fields of `sv/verify-auto`.
+        cutpoint_signals: request.cutpoint.clone(),
         frontend: if request.use_slang {
             SvFrontend::Slang
         } else {
@@ -1616,10 +1652,24 @@ fn sv_mutate_handler_impl(request: SvMutateRequest) -> ApiResult<Json<SvMutateRe
         params,
         ..Default::default()
     };
+    let config_values = parse_config_values(&request.config_values)?;
+    let lift_overrides: Vec<(String, String)> = request
+        .lift_overrides
+        .iter()
+        .map(|f| (f.name.clone(), f.content.clone()))
+        .collect();
 
-    // `list` mode — lift once and enumerate the targets (no verification).
+    // `list` mode — lift once and enumerate the targets (no verification). The discovery lift
+    // honours `lift_overrides` too (mununu#725 — it does not go through `verify_auto`).
     if request.list {
-        let btor2 = sv_to_btor2(&request.source, &yopts).map_err(|e| ApiError::BadRequest {
+        let (primary, yopts) =
+            apply_lift_overrides("top.sv", &request.source, &yopts, &lift_overrides).map_err(
+                |e| ApiError::BadRequest {
+                    message: format!("sv mutate --list: {}", e.message),
+                    details: None,
+                },
+            )?;
+        let btor2 = sv_to_btor2(&primary, &yopts).map_err(|e| ApiError::BadRequest {
             message: format!("sv mutate --list: {}", e.message),
             details: None,
         })?;
@@ -1671,6 +1721,8 @@ fn sv_mutate_handler_impl(request: SvMutateRequest) -> ApiResult<Json<SvMutateRe
         symbolic_engine: engine_symbolic,
         exact_symbolic: engine_exact,
         portfolio: engine_portfolio,
+        config_values,
+        lift_overrides,
         ..Default::default()
     };
 
@@ -1896,36 +1948,7 @@ fn sv_verify_auto_handler_impl(
         Some("smt-hyper-must") => MustEdgeInference::SmtHyperMust,
         _ => MustEdgeInference::Off,
     };
-    // H.J.b — parse `"signal=value"` config concretization entries. mununu#459: a
-    // malformed entry is a 400 (mirrors `params` above), never a silent drop; a
-    // value that is not a decimal u64 (e.g. hex `0x1`) is rejected by name. An
-    // unknown / non-input signal is caught downstream in `verify_auto` against the
-    // model's real primary inputs.
-    let config_values: std::collections::HashMap<String, u64> = request
-        .config_values
-        .iter()
-        .map(|e| {
-            let (name, val) = e.split_once('=').ok_or_else(|| ApiError::BadRequest {
-                message: format!("malformed config_values entry '{e}'"),
-                details: Some("expected \"SIGNAL=VALUE\"".into()),
-            })?;
-            let (name, val) = (name.trim(), val.trim());
-            if name.is_empty() {
-                return Err(ApiError::BadRequest {
-                    message: format!("malformed config_values entry '{e}'"),
-                    details: Some("SIGNAL must be non-empty".into()),
-                });
-            }
-            let value = val.parse::<u64>().map_err(|_| ApiError::BadRequest {
-                message: format!("malformed config_values entry '{e}'"),
-                details: Some(format!(
-                    "VALUE must be a decimal u64 (got '{val}'); hex/0x, signed, \
-                     and non-numeric values are not accepted"
-                )),
-            })?;
-            Ok((name.to_string(), value))
-        })
-        .collect::<Result<std::collections::HashMap<_, _>, ApiError>>()?;
+    let config_values = parse_config_values(&request.config_values)?;
     // H.H — parse `"signal<=value"` (or `"signal=value"`) counter-bound entries;
     // both spellings mean the inclusive upper bound `signal <= value`.
     let counter_bounds: std::collections::HashMap<String, u64> = request
@@ -4819,6 +4842,33 @@ members = ["x"]
         .expect("request deserializes");
         let err = sv_verify_auto_handler_impl(request)
             .expect_err("a hex config_values value must be rejected, not silently dropped");
+        match err {
+            ApiError::BadRequest { details, .. } => assert!(
+                details.as_deref().is_some_and(|d| d.contains("decimal")),
+                "the 400 must explain the value is not a decimal u64: {details:?}"
+            ),
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    /// mununu#725 — `POST /api/v1/sv/mutate` carries the lift-posture fields of
+    /// `sv/verify-auto` (`lift_overrides`, `config_values`, `cutpoint`); a hex
+    /// `config_values` value is a 400 BEFORE the lift, through the same parser.
+    #[test]
+    fn sv_mutate_handler_accepts_the_lift_posture_fields_and_rejects_hex_config_value() {
+        use crate::api::models::SvMutateRequest;
+        let request: SvMutateRequest = serde_json::from_value(serde_json::json!({
+            "source": "module m(input logic clk, input logic rst_ni); endmodule\n",
+            "mutation": "stick:q",
+            "lift_overrides": [{"name": "prim_assert.sv", "content": "// shim\n"}],
+            "config_values": ["rst_ni=0x1"],
+            "cutpoint": ["must_refresh"],
+        }))
+        .expect("request deserializes");
+        assert_eq!(request.cutpoint, vec!["must_refresh".to_string()]);
+        assert_eq!(request.lift_overrides.len(), 1);
+        let err = sv_mutate_handler_impl(request)
+            .expect_err("a hex config_values value must be rejected before the lift");
         match err {
             ApiError::BadRequest { details, .. } => assert!(
                 details.as_deref().is_some_and(|d| d.contains("decimal")),

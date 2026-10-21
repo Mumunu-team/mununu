@@ -2460,6 +2460,24 @@ struct SvMutateArgs {
     /// apply — never a silent drop.
     #[arg(long = "param", value_name = "NAME=VALUE")]
     params: Vec<String>,
+    /// mununu#725 — lift-only source override, `NAME=PATH` (repeatable), as `sv
+    /// verify-auto --lift-override`: the file at PATH replaces the source named NAME
+    /// for the SV → BTOR2 lift of BOTH the baseline and the mutant; SVA extraction
+    /// still reads the original. Every OpenTitan IP lifts only with the
+    /// `prim_assert.sv` shim. Mirrored on the API as `lift_overrides`.
+    #[arg(long = "lift-override", value_name = "NAME=PATH")]
+    lift_override: Vec<String>,
+    /// mununu#725 — config concretization, `SIGNAL=VALUE` (repeatable), as `sv
+    /// verify-auto --config-value`: pins a config input to a constant for the
+    /// baseline and the mutant (e.g. `--config-value rst_ni=1`). Mirrored on the API
+    /// as `config_values`.
+    #[arg(long = "config-value", value_name = "SIGNAL=VALUE")]
+    config_value: Vec<String>,
+    /// mununu#725 — control-slice cut point (repeatable), as `sv verify-auto
+    /// --cutpoint`: replace a net with a free input in the lift. Mirrored on the API
+    /// as `cutpoint`.
+    #[arg(long = "cutpoint", value_name = "SIGNAL")]
+    cutpoint: Vec<String>,
     #[command(flatten)]
     ci: CiArgs,
 }
@@ -4223,6 +4241,55 @@ fn render_extract_sva_json(report: &mununu_core::adapter::slang::translate::Tran
 
 /// XL.6b — `mununu sv verify-auto`: extract SVA, lift, and verify each property
 /// against the model with no sidecar.
+/// `--config-value SIGNAL=VALUE` entries → the pinned inputs (shared by `sv verify-auto` and
+/// `sv mutate`, mununu#725). H.J.b / mununu#459: a malformed entry is a HARD error, never a
+/// silent drop; a value that is not a decimal u64 (e.g. hex `0x1`) is rejected with a message
+/// naming the value. An unknown / non-input SIGNAL is caught downstream in `verify_auto`
+/// against the model's real primary inputs.
+fn parse_config_values(
+    entries: &[String],
+) -> Result<std::collections::HashMap<String, u64>, String> {
+    entries
+        .iter()
+        .map(|e| {
+            let (name, val) = e
+                .split_once('=')
+                .ok_or_else(|| format!("malformed --config-value '{e}': expected SIGNAL=VALUE"))?;
+            let (name, val) = (name.trim(), val.trim());
+            if name.is_empty() {
+                return Err(format!(
+                    "malformed --config-value '{e}': SIGNAL must be non-empty"
+                ));
+            }
+            let value = val.parse::<u64>().map_err(|_| {
+                format!(
+                    "malformed --config-value '{e}': VALUE must be a decimal u64 \
+                     (got '{val}'); hex/0x, signed, and non-numeric values are not accepted"
+                )
+            })?;
+            Ok((name.to_string(), value))
+        })
+        .collect()
+}
+
+/// `--lift-override NAME=PATH` entries → `(name, file content)` pairs (shared by `sv verify-auto`
+/// and `sv mutate`, mununu#725). A malformed entry or an unreadable PATH is a hard error; a NAME
+/// matching no source is refused inside `verify_auto`.
+fn read_lift_overrides(entries: &[String]) -> Result<Vec<(String, String)>, String> {
+    entries
+        .iter()
+        .map(|e| {
+            let (name, path) = e
+                .split_once('=')
+                .filter(|(n, p)| !n.trim().is_empty() && !p.trim().is_empty())
+                .ok_or_else(|| format!("malformed --lift-override '{e}': expected NAME=PATH"))?;
+            let body = std::fs::read_to_string(path.trim())
+                .map_err(|err| format!("Failed to read --lift-override '{e}': {err}"))?;
+            Ok((name.trim().to_string(), body))
+        })
+        .collect()
+}
+
 fn sv_verify_auto(args: SvVerifyAutoArgs) -> Result<(), String> {
     use mununu_core::adapter::btor2::kmts_lift::MustEdgeInference;
     use mununu_core::adapter::slang::verify_auto::{PortfolioMode, VerifyAutoOptions, verify_auto};
@@ -4288,33 +4355,7 @@ fn sv_verify_auto(args: SvVerifyAutoArgs) -> Result<(), String> {
         MustEdgeInferenceArg::SmtPerTargetStandard => MustEdgeInference::SmtPerTargetStandard,
         MustEdgeInferenceArg::SmtHyperMust => MustEdgeInference::SmtHyperMust,
     };
-    // H.J.b — parse `SIGNAL=VALUE` config concretization entries. mununu#459: a
-    // malformed entry is a HARD error here (mirrors `--param` above), never a
-    // silent drop; a value that is not a decimal u64 (e.g. hex `0x1`) is rejected
-    // with a message naming the value. An unknown / non-input SIGNAL is caught
-    // downstream in `verify_auto` against the model's real primary inputs.
-    let config_values: std::collections::HashMap<String, u64> = args
-        .config_value
-        .iter()
-        .map(|e| {
-            let (name, val) = e
-                .split_once('=')
-                .ok_or_else(|| format!("malformed --config-value '{e}': expected SIGNAL=VALUE"))?;
-            let (name, val) = (name.trim(), val.trim());
-            if name.is_empty() {
-                return Err(format!(
-                    "malformed --config-value '{e}': SIGNAL must be non-empty"
-                ));
-            }
-            let value = val.parse::<u64>().map_err(|_| {
-                format!(
-                    "malformed --config-value '{e}': VALUE must be a decimal u64 \
-                     (got '{val}'); hex/0x, signed, and non-numeric values are not accepted"
-                )
-            })?;
-            Ok((name.to_string(), value))
-        })
-        .collect::<Result<std::collections::HashMap<_, _>, String>>()?;
+    let config_values = parse_config_values(&args.config_value)?;
     // H.H — parse `SIGNAL<=VALUE` (or `SIGNAL=VALUE`) counter-bound entries; both
     // spellings mean the inclusive upper bound `SIGNAL <= VALUE`.
     let counter_bounds: std::collections::HashMap<String, u64> = args
@@ -4325,21 +4366,7 @@ fn sv_verify_auto(args: SvVerifyAutoArgs) -> Result<(), String> {
             Some((name.trim().to_string(), val.trim().parse::<u64>().ok()?))
         })
         .collect();
-    // `--lift-override NAME=PATH` — a malformed entry or an unreadable PATH is a hard error;
-    // a NAME matching no source is refused inside `verify_auto`.
-    let lift_overrides: Vec<(String, String)> = args
-        .lift_override
-        .iter()
-        .map(|e| {
-            let (name, path) = e
-                .split_once('=')
-                .filter(|(n, p)| !n.trim().is_empty() && !p.trim().is_empty())
-                .ok_or_else(|| format!("malformed --lift-override '{e}': expected NAME=PATH"))?;
-            let body = std::fs::read_to_string(path.trim())
-                .map_err(|err| format!("Failed to read --lift-override '{e}': {err}"))?;
-            Ok((name.trim().to_string(), body))
-        })
-        .collect::<Result<_, String>>()?;
+    let lift_overrides = read_lift_overrides(&args.lift_override)?;
     let opts = VerifyAutoOptions {
         max_iterations: args.max_iterations,
         must_edge_inference,
@@ -6682,7 +6709,7 @@ fn sv_mutate(args: SvMutateArgs) -> Result<(), String> {
     use mununu_core::adapter::btor2::kmts_lift::MustEdgeInference;
     use mununu_core::adapter::btor2::mutate::{Mutation, list_targets};
     use mununu_core::adapter::slang::verify_auto::{
-        PortfolioMode, VerifyAutoOptions, mutate_and_compare,
+        PortfolioMode, VerifyAutoOptions, apply_lift_overrides, mutate_and_compare,
     };
     use mununu_core::adapter::yosys::{YosysOptions, sv_to_btor2};
 
@@ -6693,7 +6720,7 @@ fn sv_mutate(args: SvMutateArgs) -> Result<(), String> {
         .and_then(|s| s.to_str())
         .map(str::to_string)
         .unwrap_or_else(|| "top.sv".to_string());
-    let mut sources: Vec<(String, String)> = vec![(primary_name, lift.source.clone())];
+    let mut sources: Vec<(String, String)> = vec![(primary_name.clone(), lift.source.clone())];
     sources.extend(lift.additional_sources.iter().cloned());
     // mununu#475 item 4 — --param parity with `sv verify-auto`. Matches the parsing
     // shape at the verify-auto handler (`NAME=VALUE` or `MODULE.NAME=VALUE`, both
@@ -6715,19 +6742,29 @@ fn sv_mutate(args: SvMutateArgs) -> Result<(), String> {
             Ok((lhs.to_string(), val.to_string()))
         })
         .collect::<Result<Vec<_>, String>>()?;
+    // mununu#725 — the lift-posture flags of `sv verify-auto`, parsed by the same functions.
+    let config_values = parse_config_values(&args.config_value)?;
+    let lift_overrides = read_lift_overrides(&args.lift_override)?;
     let yopts = YosysOptions {
         top: lift.top.clone(),
         additional_sources: lift.additional_sources.clone(),
+        primary_source_path: args.lift.file.as_ref().map(|p| p.display().to_string()),
         use_sv2v: lift.use_sv2v,
+        cutpoint_signals: args.cutpoint.clone(),
         extra_include_dirs: lift.include_dirs.clone(),
         frontend: lift.frontend,
         params,
         ..Default::default()
     };
 
-    // `--list` — lift once and enumerate the mutation targets (no verification).
+    // `--list` — lift once and enumerate the mutation targets (no verification). The discovery
+    // lift honours `--lift-override` too (mununu#725): it does not go through `verify_auto`, and
+    // the real OpenTitan `prim_assert.sv` dies in yosys (a topological loop) without the shim.
     if args.list {
-        let btor2 = sv_to_btor2(&lift.source, &yopts)
+        let (primary, yopts) =
+            apply_lift_overrides(&primary_name, &lift.source, &yopts, &lift_overrides)
+                .map_err(|e| format!("sv mutate --list: {}", e.message))?;
+        let btor2 = sv_to_btor2(&primary, &yopts)
             .map_err(|e| format!("sv mutate --list: {}", e.message))?;
         let t = list_targets(&btor2)?;
         let summary = serde_json::json!({
@@ -6770,6 +6807,8 @@ fn sv_mutate(args: SvMutateArgs) -> Result<(), String> {
             EngineArg::PortfolioParallel => Some(PortfolioMode::Parallel),
             _ => None,
         },
+        config_values,
+        lift_overrides,
         ..Default::default()
     };
 
@@ -9751,6 +9790,42 @@ mod build_identity_tests {
         assert_eq!(
             inner.ends_with("-dirty"),
             option_env!("MUNUNU_BUILD_DIRTY") == Some("1")
+        );
+    }
+}
+
+#[cfg(test)]
+mod sv_mutate_lift_flag_tests {
+    use super::*;
+
+    /// mununu#725 — `sv mutate` accepts the lift-posture flags `sv verify-auto` has
+    /// (`--lift-override`, `--config-value`, `--cutpoint`). Every OpenTitan IP lifts only with
+    /// the `prim_assert.sv` shim and `rst_ni=1`, so without them a real design could not be
+    /// mutated from the CLI at all (the full-IP mutation smoke had to go through the Rust API).
+    #[test]
+    fn sv_mutate_accepts_the_lift_posture_flags() {
+        use clap::Parser;
+        let argv = [
+            "mununu",
+            "sv",
+            "mutate",
+            "edn.sv",
+            "--top",
+            "edn",
+            "--mutation",
+            "stick:u_reg.q",
+            "--lift-override",
+            "prim_assert.sv=shim/prim_assert.sv",
+            "--config-value",
+            "rst_ni=1",
+            "--cutpoint",
+            "must_refresh",
+        ];
+        let parsed = Cli::try_parse_from(argv);
+        assert!(
+            parsed.is_ok(),
+            "`sv mutate` must accept the lift-posture flags (mununu#725): {:?}",
+            parsed.err().map(|e| e.to_string())
         );
     }
 }

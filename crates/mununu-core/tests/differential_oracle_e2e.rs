@@ -2163,8 +2163,8 @@ fn e2e_opentitan_ip_edn_full() {
             }
         }
     }
-    // The whole closure is modelled: nothing black-boxed (the properties file is an empty PACKAGE —
-    // an empty module would be reported here), the register block and the core both present.
+    // The whole closure is modelled: nothing black-boxed (the properties file is an empty PACKAGE;
+    // an empty module would also pass since mununu#724), the register block and the core both present.
     assert!(
         report.diagnostics.blackboxed_modules.is_empty(),
         "{:?}",

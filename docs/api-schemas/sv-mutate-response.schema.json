@@ -1,0 +1,120 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "SvMutatePropertyFlip": {
+      "description": "One property's baseline-vs-mutant verdict in a [`SvMutateResponse`].",
+      "properties": {
+        "baseline": {
+          "description": "Canonical verdict on the design as-lifted.",
+          "type": "string"
+        },
+        "flipped": {
+          "description": "`baseline != mutant` — the mutation was caught by this property.",
+          "type": "boolean"
+        },
+        "mutant": {
+          "description": "Canonical verdict on the mutated design.",
+          "type": "string"
+        },
+        "name": {
+          "description": "The property (assertion) name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "baseline",
+        "flipped",
+        "mutant",
+        "name"
+      ],
+      "type": "object"
+    },
+    "SvMutateTargets": {
+      "description": "The mutation targets available in a design (the `list` response payload).",
+      "properties": {
+        "drop_reset": {
+          "description": "Every named register whose next is a reset mux — a `drop-reset:<reg>` target.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "invert_cond": {
+          "description": "Every named 1-bit signal — an `invert-cond:<sig>` target.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "off_by_one": {
+          "description": "Every named register compared against a constant — an `off-by-one:<reg>` target.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "stick": {
+          "description": "Every named register — a `stick:<reg>` target.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "drop_reset",
+        "invert_cond",
+        "off_by_one",
+        "stick"
+      ],
+      "type": "object"
+    }
+  },
+  "description": "Response for `POST /api/v1/sv/mutate`. Pinned by `docs/api-schemas/sv-mutate-response.schema.json` (mununu#725).",
+  "properties": {
+    "flipped": {
+      "description": "Count of properties the mutation flipped (caught it).",
+      "format": "uint",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "mutation": {
+      "description": "The applied mutation's label (null on a `list` request).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "properties": {
+      "description": "Per-property flips (empty on a `list` request).",
+      "items": {
+        "$ref": "#/definitions/SvMutatePropertyFlip"
+      },
+      "type": "array"
+    },
+    "targets": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/SvMutateTargets"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Available targets (present on a `list` request, null otherwise)."
+    },
+    "unflipped": {
+      "description": "Count the mutation did NOT flip — the property-adequacy finding.",
+      "format": "uint",
+      "minimum": 0.0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "flipped",
+    "properties",
+    "unflipped"
+  ],
+  "title": "SvMutateResponse",
+  "type": "object"
+}
