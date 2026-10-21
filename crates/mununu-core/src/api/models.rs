@@ -1449,8 +1449,9 @@ pub struct SvLintResponse {
 
 /// Request for `POST /api/v1/sv/mutate` (#468) — apply a NAMED structural mutation
 /// and re-verify to check the property verdicts flip (property adequacy). Surface
-/// peer of the CLI `mununu sv mutate`.
-#[derive(Debug, Deserialize)]
+/// peer of the CLI `mununu sv mutate`. Pinned by `docs/api-schemas/sv-mutate-request.schema.json`
+/// (mununu#725).
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SvMutateRequest {
     /// SystemVerilog primary source content.
     pub source: String,
@@ -1503,10 +1504,28 @@ pub struct SvMutateRequest {
     /// downstream on a parameter it cannot apply — never a silent drop.
     #[serde(default)]
     pub params: Vec<String>,
+    /// mununu#725 — config concretization for the baseline AND the mutant, as
+    /// `sv/verify-auto`'s `config_values`: each entry `"signal=value"` pins a config
+    /// input to a constant (e.g. `"rst_ni=1"`). A malformed entry or a non-decimal
+    /// value is a 400 before the lift. Mirrors the CLI `--config-value`. Default empty.
+    #[serde(default)]
+    pub config_values: Vec<String>,
+    /// mununu#725 — control-slice cut points for the lift, as `sv/verify-auto`'s
+    /// `cutpoint`: bare net names replaced with a free input. Mirrors the CLI
+    /// `--cutpoint`. Default empty.
+    #[serde(default)]
+    pub cutpoint: Vec<String>,
+    /// mununu#725 — lift-only source overrides, as `sv/verify-auto`'s `lift_overrides`:
+    /// each entry REPLACES the same-named source (`top.sv` names `source`) for the SV →
+    /// BTOR2 lift of the baseline and the mutant while SVA extraction reads the
+    /// originals — OpenTitan's `prim_assert.sv` shim. A name matching no source is a
+    /// 400. Mirrors the CLI `--lift-override NAME=PATH`. Default empty.
+    #[serde(default)]
+    pub lift_overrides: Vec<FileContent>,
 }
 
 /// The mutation targets available in a design (the `list` response payload).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct SvMutateTargets {
     /// Every named register — a `stick:<reg>` target.
     pub stick: Vec<String>,
@@ -1519,7 +1538,7 @@ pub struct SvMutateTargets {
 }
 
 /// One property's baseline-vs-mutant verdict in a [`SvMutateResponse`].
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct SvMutatePropertyFlip {
     /// The property (assertion) name.
     pub name: String,
@@ -1531,8 +1550,9 @@ pub struct SvMutatePropertyFlip {
     pub flipped: bool,
 }
 
-/// Response for `POST /api/v1/sv/mutate`.
-#[derive(Debug, Serialize)]
+/// Response for `POST /api/v1/sv/mutate`. Pinned by
+/// `docs/api-schemas/sv-mutate-response.schema.json` (mununu#725).
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct SvMutateResponse {
     /// The applied mutation's label (null on a `list` request).
     pub mutation: Option<String>,

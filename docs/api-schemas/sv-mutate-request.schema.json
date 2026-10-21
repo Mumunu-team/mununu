@@ -1,0 +1,128 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "FileContent": {
+      "description": "File content with optional name",
+      "properties": {
+        "content": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "content",
+        "name"
+      ],
+      "type": "object"
+    }
+  },
+  "description": "Request for `POST /api/v1/sv/mutate` (#468) — apply a NAMED structural mutation and re-verify to check the property verdicts flip (property adequacy). Surface peer of the CLI `mununu sv mutate`. Pinned by `docs/api-schemas/sv-mutate-request.schema.json` (mununu#725).",
+  "properties": {
+    "additional_sources": {
+      "default": [],
+      "description": "Additional SV sources (packages / includes).",
+      "items": {
+        "$ref": "#/definitions/FileContent"
+      },
+      "type": "array"
+    },
+    "config_values": {
+      "default": [],
+      "description": "mununu#725 — config concretization for the baseline AND the mutant, as `sv/verify-auto`'s `config_values`: each entry `\"signal=value\"` pins a config input to a constant (e.g. `\"rst_ni=1\"`). A malformed entry or a non-decimal value is a 400 before the lift. Mirrors the CLI `--config-value`. Default empty.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "cutpoint": {
+      "default": [],
+      "description": "mununu#725 — control-slice cut points for the lift, as `sv/verify-auto`'s `cutpoint`: bare net names replaced with a free input. Mirrors the CLI `--cutpoint`. Default empty.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "engine": {
+      "default": null,
+      "description": "Engine selector (as `verify-auto`): `\"explicit\"` | `\"symbolic\"` | `\"exact-symbolic\"` | `\"portfolio-sequential\"` | `\"portfolio-parallel\"`. Default (unspecified) ⇒ `portfolio-sequential`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "gate_reset": {
+      "default": null,
+      "description": "Reset-gating (pin the reset inactive + inject the post-reset init). Default `true`.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "lift_overrides": {
+      "default": [],
+      "description": "mununu#725 — lift-only source overrides, as `sv/verify-auto`'s `lift_overrides`: each entry REPLACES the same-named source (`top.sv` names `source`) for the SV → BTOR2 lift of the baseline and the mutant while SVA extraction reads the originals — OpenTitan's `prim_assert.sv` shim. A name matching no source is a 400. Mirrors the CLI `--lift-override NAME=PATH`. Default empty.",
+      "items": {
+        "$ref": "#/definitions/FileContent"
+      },
+      "type": "array"
+    },
+    "list": {
+      "default": false,
+      "description": "When true, ignore `mutation` and return the available mutation TARGETS (the `--list` discovery mode) instead of running a mutation.",
+      "type": "boolean"
+    },
+    "must_edge_inference": {
+      "default": null,
+      "description": "Must-edge inference (`\"smt-hyper-must\"` gives sound νμ verdicts for a recoverability property under `drop-reset`). Default (absent or `\"auto\"`, mununu#663): per-target must for Liveness/Mixed-class properties, may-only for the rest; `\"off\"` = may-only everywhere.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "mutation": {
+      "default": null,
+      "description": "The mutation to apply, one of four kinds (mununu#635): `\"stick:<reg>\"` (freeze a register), `\"drop-reset:<reg>\"` (remove a register's reset arm), `\"off-by-one:<reg>[@<const_nid>][:±1]\"` (shift a constant the register is compared against), `\"invert-cond:<sig>\"` (negate a 1-bit signal). The `_` spellings the `list` response uses as keys are accepted as aliases. Required unless `list` is true.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "params": {
+      "default": [],
+      "description": "mununu#475 item 4 — parity with `POST /api/v1/sv/verify-auto`'s `params`. Override module parameters BEFORE elaboration. Each entry is `\"NAME=VALUE\"` (top-module scope) or `\"MODULE.NAME=VALUE\"` (submodule scope; slang applies it top-level by bare name). Shrinks a parameterised design so its counters fit the bit-blast cap during the baseline + mutant re-verify; blocks that need `params` to verify at all could not previously be mutated via the API. A malformed entry is a HARD `BadRequest`; yosys errors downstream on a parameter it cannot apply — never a silent drop.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "source": {
+      "description": "SystemVerilog primary source content.",
+      "type": "string"
+    },
+    "top": {
+      "default": null,
+      "description": "Top module for the lift (auto-detect when omitted).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "use_slang": {
+      "default": false,
+      "description": "Force the slang RTL front-end (`read_slang`). Default `false`.",
+      "type": "boolean"
+    },
+    "use_sv2v": {
+      "default": false,
+      "description": "Run sv2v before Yosys. Default `false`.",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "source"
+  ],
+  "title": "SvMutateRequest",
+  "type": "object"
+}

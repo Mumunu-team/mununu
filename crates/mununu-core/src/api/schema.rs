@@ -32,9 +32,10 @@ use super::models::{
     Btor2VerifyLivenessRequest, Btor2VerifyLivenessResponse,
     Btor2VerifyLivenessUnderFairnessRequest, Btor2VerifyRecoverabilityRequest,
     Btor2VerifyRecoverabilityResponse, Btor2VerifyRequest, Btor2VerifyResponse, SvCheckFsmRequest,
-    SvVerifyAutoRequest, SvVerifyAutoResponse, SvVerifyLivenessAllReport,
-    SvVerifyLivenessAllRequest, SvVerifyLivenessReport, SvVerifyLivenessRequest,
-    SvVerifyRecoverabilityReport, SvVerifyRecoverabilityRequest, SvVerifyRequest,
+    SvMutateRequest, SvMutateResponse, SvVerifyAutoRequest, SvVerifyAutoResponse,
+    SvVerifyLivenessAllReport, SvVerifyLivenessAllRequest, SvVerifyLivenessReport,
+    SvVerifyLivenessRequest, SvVerifyRecoverabilityReport, SvVerifyRecoverabilityRequest,
+    SvVerifyRequest,
 };
 
 /// JSON Schema (Draft 2019-09) for `POST /api/v1/sv/verify-auto` request bodies.
@@ -47,6 +48,18 @@ pub fn sv_verify_auto_request_schema() -> serde_json::Value {
 pub fn sv_verify_auto_response_schema() -> serde_json::Value {
     serde_json::to_value(schema_for!(SvVerifyAutoResponse))
         .expect("SvVerifyAutoResponse schema must serialise as JSON")
+}
+
+/// mununu#725 — JSON Schema for `POST /api/v1/sv/mutate` request bodies.
+pub fn sv_mutate_request_schema() -> serde_json::Value {
+    serde_json::to_value(schema_for!(SvMutateRequest))
+        .expect("SvMutateRequest schema must serialise as JSON")
+}
+
+/// mununu#725 — JSON Schema for `POST /api/v1/sv/mutate` responses.
+pub fn sv_mutate_response_schema() -> serde_json::Value {
+    serde_json::to_value(schema_for!(SvMutateResponse))
+        .expect("SvMutateResponse schema must serialise as JSON")
 }
 
 /// mununu#541 — JSON Schema for the `sv verify-recoverability` CLI report (`--json`).
@@ -486,6 +499,22 @@ mod tests {
         drift_check(
             "docs/api-schemas/sv-verify-auto-response.schema.json",
             &sv_verify_auto_response_schema(),
+        );
+    }
+
+    #[test]
+    fn api_schema_drift_sv_mutate_request() {
+        drift_check(
+            "docs/api-schemas/sv-mutate-request.schema.json",
+            &sv_mutate_request_schema(),
+        );
+    }
+
+    #[test]
+    fn api_schema_drift_sv_mutate_response() {
+        drift_check(
+            "docs/api-schemas/sv-mutate-response.schema.json",
+            &sv_mutate_response_schema(),
         );
     }
 

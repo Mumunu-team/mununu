@@ -1,8 +1,8 @@
 // System-level properties for OpenTitan `edn` (lowRISC/opentitan 558921c), checked by `sv verify-auto`
 // beside the IP's own SVA (`sh run.sh --json --source mununu_properties.sv`). This file carries no logic:
-// the empty package keeps it a legal compilation unit for slang / sv2v / yosys (an empty MODULE would be
-// reported as a black box); the properties are the `@mununu_guarantee` annotations below, scanned from
-// every `--source` file.
+// the empty package keeps it a legal compilation unit for slang / sv2v / yosys (an empty MODULE works too
+// since mununu#724 — a bodiless module nothing instantiates is no longer reported as a black box); the
+// properties are the `@mununu_guarantee` annotations below, scanned from every `--source` file.
 //
 // Names are the flattened ones of the lifted model (`MUNUNU_SHADOW_BTOR2_DUMP` lists them; a `for`-generate
 // iteration is spelled `gen_ep_blk$k`); state encodings are the sparse ones of `edn_pkg::state_e`
