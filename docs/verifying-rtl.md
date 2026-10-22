@@ -875,6 +875,22 @@ the coverage summary is what governs a violation under a cut.
 
 The remedy is to supply an `init` via a sidecar. Retrying is never the answer.
 
+### A violation through an undriven net: `violation-over-free-leaves` (mununu#750)
+
+> Source of truth: [`BottomReason::ViolationOverFreeLeaves`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) + [`withhold_violated_over_free_leaves`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) — surface: (CLI+API)
+
+The second withheld VIOLATED. A module missing from the source set is not modelled: the lift
+leaves its outputs as undriven nets, free at every cycle, and so is any unconnected wire. A
+`HOLDS` over such a model transfers to the RTL; a `VIOLATED` does not — the trace may need values
+the real module never produces. On the OpenTitan census, four rows violated over a missing
+`prim_diff_decode` / `prim_sec_anchor_*` HOLD once those modules are vendored. So a `violated` row
+whose cone reads an undriven net becomes `unknown` with
+`bottom_reason.kind = "violation-over-free-leaves"`, the nets named in `detail`, and the trace kept
+in `counterexample` as a may-trace. Three things keep their verdict: a refuted `EF p` (the target
+is unreachable even on the freer model), a `HOLDS`, and a **deliberate** cut — a `--cutpoint` or a
+`(* blackbox *)` stub (mununu#578: a cut you asked for does not change a verdict; its
+`control-slice` / `blackbox-cut` caveat stands). The remedy is to add the missing module's source.
+
 ### An init-less register is free at cycle 0 on every path: `unestablished-initial-cubes` (mununu#579, #609)
 
 > Source of truth: [`BottomReason::UnestablishedInitialCubes`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) + [`kmts_lift::initial_cube_indices`](../crates/mununu-core/src/adapter/btor2/kmts_lift.rs) — surface: (CLI+API)

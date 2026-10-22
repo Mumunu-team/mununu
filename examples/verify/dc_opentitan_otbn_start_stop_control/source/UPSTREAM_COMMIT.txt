@@ -1,1 +1,8 @@
 558921ccc8aeefab652b45c1402c10bceb63accc
+# mununu#750 (2026-10-21): the submodules this block lacked, vendored from the same commit by
+# scripts/vendor_opentitan_ip.py — before them the lift left prim_mubi4_sender's outputs undriven.
+prim_buf.sv  hw/ip/prim_generic/rtl/prim_buf.sv
+prim_flop.sv  hw/ip/prim_generic/rtl/prim_flop.sv
+prim_mubi4_sender.sv  hw/ip/prim/rtl/prim_mubi4_sender.sv
+prim_sec_anchor_buf.sv  hw/ip/prim/rtl/prim_sec_anchor_buf.sv
+prim_sparse_fsm_flop.sv  hw/ip/prim/rtl/prim_sparse_fsm_flop.sv

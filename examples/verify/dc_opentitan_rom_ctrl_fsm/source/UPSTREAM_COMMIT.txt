@@ -1,1 +1,11 @@
 558921ccc8aeefab652b45c1402c10bceb63accc
+# mununu#750 (2026-10-21): the submodules the census blocks lacked, vendored from the same commit by
+# scripts/vendor_opentitan_ip.py (closure under slang, prim_generic implementations) — before
+# them the lift black-boxed these modules and four rows shipped a VIOLATED that HOLDS on the full closure.
+prim_count.sv  hw/ip/prim/rtl/prim_count.sv
+prim_count_pkg.sv  hw/ip/prim/rtl/prim_count_pkg.sv
+prim_flop.sv  hw/ip/prim_generic/rtl/prim_flop.sv
+prim_mubi4_sender.sv  hw/ip/prim/rtl/prim_mubi4_sender.sv
+prim_sparse_fsm_flop.sv  hw/ip/prim/rtl/prim_sparse_fsm_flop.sv
+rom_ctrl_compare.sv  hw/ip/rom_ctrl/rtl/rom_ctrl_compare.sv
+rom_ctrl_counter.sv  hw/ip/rom_ctrl/rtl/rom_ctrl_counter.sv

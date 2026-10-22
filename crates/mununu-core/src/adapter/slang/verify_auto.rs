@@ -1518,6 +1518,61 @@ fn downgrade_violated_on_unestablished_init(report: &mut AutoVerifyReport, model
     }
 }
 
+/// mununu#750 — withhold a `Violated` whose cone reads an undriven net.
+///
+/// An undriven net — an unconnected wire, or the output of a module missing from the source set,
+/// which the lift leaves as an anonymous BTOR2 `input` — over-approximates the RTL: a HOLDS over it
+/// transfers, a refutation is only a may-trace. The combinational guard in the per-property loop
+/// refuses an ATOM bound to one; nothing looked at the SEQUENTIAL cone, so a violation driven
+/// through one shipped as definite (four OpenTitan census rows, which HOLD on the full closure).
+/// Runs after [`attach_safety_witnesses`], so the may-trace stays on the row.
+///
+/// Not withheld: a pure reachability refutation (`EF p` violated = `p` unreachable even on the
+/// freer model, hence on the RTL), and a DELIBERATE cut — a `--cutpoint` or a `(* blackbox *)`
+/// stub, a state with no `next` (mununu#578: a cut asked for keeps its verdict, under its
+/// `control-slice` / `blackbox-cut` caveat). Measured: requested cuts lift as symbol-less
+/// next-less states, so telling them apart by name is not possible; by kind it is exact.
+fn withhold_violated_over_free_leaves(report: &mut AutoVerifyReport, model_btor2: &str) {
+    if !report
+        .properties
+        .iter()
+        .any(|p| matches!(p.outcome, VerifyOutcome::Violated { .. }))
+    {
+        return;
+    }
+    let Ok(file) = crate::adapter::btor2::parser::parse(model_btor2) else {
+        return;
+    };
+    for p in report.properties.iter_mut() {
+        if !matches!(p.outcome, VerifyOutcome::Violated { .. }) {
+            continue;
+        }
+        let Ok(formula) = crate::mu_calculus::parser::parse(&p.formula) else {
+            continue;
+        };
+        // SOUNDNESS: an existential refutation (target unreachable) is STRONGER on a freer model.
+        if formula.property_class() == crate::mu_calculus::PropertyClass::Reachability {
+            continue;
+        }
+        let mut leaves: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for atom in crate::adapter::btor2::symbolic_bitblast::formula_seed_atoms(&formula) {
+            if let Some(found) =
+                crate::adapter::trap_certificate::undriven_nets_in_cone(&file, &atom)
+            {
+                leaves.extend(found);
+            }
+        }
+        if leaves.is_empty() {
+            continue;
+        }
+        // SOUNDNESS: the refutation rests on values the real driver may never produce.
+        p.outcome = VerifyOutcome::Unknown { unknown_cells: 0 };
+        p.bottom_reason = Some(BottomReason::ViolationOverFreeLeaves {
+            leaves: leaves.into_iter().collect(),
+        });
+    }
+}
+
 fn drop_stale_bottom_reasons(report: &mut AutoVerifyReport) {
     let decided: std::collections::HashSet<&str> = report
         .properties
@@ -3537,6 +3592,7 @@ pub(crate) fn replan_merged(
     }
     downgrade_violated_on_unestablished_init(report, design_btor2);
     attach_safety_witnesses(report, design_btor2, reset_pinned);
+    withhold_violated_over_free_leaves(report, design_btor2);
     report.notes.extend(notes);
     refresh_coverage_summary(report);
     drop_stale_bottom_reasons(report);
@@ -5575,6 +5631,8 @@ pub(crate) fn verify_auto_impl(
     downgrade_violated_on_unestablished_init(&mut report, &btor2);
     // The trace for every safety VIOLATED the report ships, whichever engine decided it.
     attach_safety_witnesses(&mut report, &btor2, reset_pinned);
+    // mununu#750 — after the witness, so a withheld violation keeps its trace as a may-trace.
+    withhold_violated_over_free_leaves(&mut report, &btor2);
     // mununu#579 — last of the verdict post-passes: everything above may still CHANGE a verdict, and
     // a self-contradiction must be judged on the verdicts the report actually ships.
     flag_self_contradictory_verdicts(&mut report);
@@ -5737,6 +5795,14 @@ pub(crate) fn escalate_bottom_with_slice(
     let mut notes = Vec::new();
     for prop in report.properties.iter_mut() {
         if !matches!(prop.outcome, VerifyOutcome::Unknown { .. }) {
+            continue;
+        }
+        // mununu#750 — a violation already found over a free leaf: every engine re-finds the same
+        // may-trace on this model, so a rescue would spend its slice to be withheld again.
+        if matches!(
+            prop.bottom_reason,
+            Some(BottomReason::ViolationOverFreeLeaves { .. })
+        ) {
             continue;
         }
         // mununu#490 — same ceiling guard as the main per-property loop: if the
@@ -6268,6 +6334,17 @@ pub enum BottomReason {
         /// The resets pinned inactive, which is what removed the reset path.
         gated_resets: Vec<String>,
     },
+    /// mununu#750 — the property was refuted on a model that is FREER than the RTL: its cone reads
+    /// an undriven net (an anonymous BTOR2 `input`: an unconnected wire, or the output of a module
+    /// missing from the source set). The trace is a may-trace: the real driver may never produce
+    /// the values it needs. Measured on the OpenTitan census: four rows VIOLATED over a missing
+    /// `prim_diff_decode` / `prim_sec_anchor_*` HOLD on the full closure. A deliberate cut — a
+    /// `--cutpoint` or a `(* blackbox *)` stub — is NOT counted (mununu#578). Reproducible — a
+    /// property of the model; vendoring the module or providing the driver decides it.
+    ViolationOverFreeLeaves {
+        /// The undriven nets in the property's cone, `input_<nid>`.
+        leaves: Vec<String>,
+    },
     /// mununu#579 — the cube path's initial cube set could not be read. Every predicate bit with
     /// no established cycle-0 truth (a free input, or a predicate over a register with no `init`
     /// line) is a free initial dimension and the initial cube set is their product; past
@@ -6378,6 +6455,7 @@ impl BottomReason {
             | Self::NoStateModelNonSafety
             | Self::EngineContradiction { .. }
             | Self::UnestablishedInitialState { .. }
+            | Self::ViolationOverFreeLeaves { .. }
             | Self::UnestablishedInitialCubes { .. }
             | Self::ReportSelfContradiction { .. }
             | Self::NotAttempted => BottomDeterminism::Reproducible,
@@ -6396,6 +6474,7 @@ impl BottomReason {
             Self::BudgetExpired => "budget-expired",
             Self::MemoryCeilingExceeded => "memory-ceiling-exceeded",
             Self::UnestablishedInitialState { .. } => "unestablished-initial-state",
+            Self::ViolationOverFreeLeaves { .. } => "violation-over-free-leaves",
             Self::UnestablishedInitialCubes { .. } => "unestablished-initial-cubes",
             Self::ReportSelfContradiction { .. } => "report-self-contradiction",
             Self::NotAttempted => "not-attempted",
@@ -6446,6 +6525,16 @@ impl BottomReason {
                  (`next = ite(rst, d, q)`). Supply an `init` for it via a sidecar to decide this \
                  property; a `--cutpoint` is deliberately free and is NOT counted here.",
                 gated_resets.join(", ")
+            ),
+            Self::ViolationOverFreeLeaves { leaves } => format!(
+                "the violation was found on a model FREER than the RTL: the property's cone reads \
+                 {} undriven net(s) ({}) — an unconnected wire or the output of a module \
+                 missing from the source set, free at every cycle. The trace is kept as a MAY-trace: the real \
+                 driver may never produce the values it needs, so the violation is withheld \
+                 rather than reported. Vendor the missing module or provide the driver to decide \
+                 this property; a HOLDS over the same model would have transferred.",
+                leaves.len(),
+                leaves.join(", ")
             ),
             Self::UnestablishedInitialCubes {
                 free_dimensions,
@@ -9394,6 +9483,105 @@ mod tests {
         assert!(
             matches!(by("hold").outcome, VerifyOutcome::Holds),
             "a HOLDS is sound under a freer start set and must not be touched"
+        );
+    }
+
+    /// mununu#750 — a violation found through an undriven net is a may-trace: it is withheld as ⊥
+    /// (`violation-over-free-leaves`, the nets named) and keeps its trace. On the parent these rows
+    /// shipped VIOLATED (four OpenTitan census rows that HOLD on the full closure). A deliberate cut
+    /// (a state with no `next`), an `EF` refutation and a clean cone keep their verdict.
+    #[test]
+    fn a_violation_over_an_undriven_net_is_withheld_with_its_trace() {
+        // `bb_out` is a deliberate cut (a state with no `next`: a `--cutpoint` or a `(* blackbox *)`
+        // stub's output); `q` copies it.
+        // `anon` is an undriven net (an anonymous input) feeding `r`. `c` is a clean counter.
+        const DESIGN: &str = "\
+1 sort bitvec 1
+2 state 1 bb_out
+3 state 1 q
+4 zero 1
+5 init 1 3 4
+6 next 1 3 2
+7 input 1
+8 state 1 r
+9 init 1 8 4
+10 next 1 8 7
+11 state 1 c
+12 init 1 11 4
+13 not 1 11
+14 next 1 11 13
+";
+        let cex = || ExactCounterexample {
+            prefix: vec![Vec::new(), Vec::new()],
+            cycle: Vec::new(),
+            inputs: Vec::new(),
+            unreachable_target: Vec::new(),
+        };
+        let mk = |name: &str, formula: &str| PropertyVerdict {
+            name: name.into(),
+            label: None,
+            kind: SvaKind::Assert,
+            formula: formula.into(),
+            outcome: VerifyOutcome::Violated { false_cells: 1 },
+            seeded_predicates: Vec::new(),
+            counterexample: Some(cex()),
+            bottom_reason: None,
+            decided_by: Some("exact-symbolic".into()),
+            vacuity: None,
+        };
+        let fresh = || AutoVerifyReport {
+            properties: vec![
+                mk("over_black_box", "nu X. ((q == 0) && [] X)"),
+                mk("over_undriven_net", "nu X. ((r == 0) && [] X)"),
+                mk("clean", "nu X. ((c == 0) && [] X)"),
+                mk("ef_refuted", "mu X. ((q == 1) || <> X)"),
+            ],
+            ..Default::default()
+        };
+        let mut report = fresh();
+        withhold_violated_over_free_leaves(&mut report, DESIGN);
+        let by = |r: &AutoVerifyReport, n: &str| {
+            r.properties.iter().find(|p| p.name == n).unwrap().clone()
+        };
+        {
+            let (row, leaf) = ("over_undriven_net", "input_7");
+            let p = by(&report, row);
+            assert!(
+                matches!(p.outcome, VerifyOutcome::Unknown { .. }),
+                "{row}: {:?}",
+                p.outcome
+            );
+            assert_eq!(
+                p.bottom_reason,
+                Some(BottomReason::ViolationOverFreeLeaves {
+                    leaves: vec![leaf.to_string()]
+                }),
+                "{row}"
+            );
+            assert_eq!(
+                p.bottom_reason.as_ref().map(BottomReason::tag),
+                Some("violation-over-free-leaves")
+            );
+            assert!(p.counterexample.is_some(), "{row}: the may-trace is kept");
+        }
+        assert!(matches!(
+            by(&report, "clean").outcome,
+            VerifyOutcome::Violated { .. }
+        ));
+        assert!(
+            matches!(
+                by(&report, "over_black_box").outcome,
+                VerifyOutcome::Violated { .. }
+            ),
+            "a deliberate cut (a state with no `next`: `--cutpoint`, `(* blackbox *)`) keeps its \
+             verdict (mununu#578)"
+        );
+        assert!(
+            matches!(
+                by(&report, "ef_refuted").outcome,
+                VerifyOutcome::Violated { .. }
+            ),
+            "an unreachable target on a freer model is unreachable on the RTL"
         );
     }
 
