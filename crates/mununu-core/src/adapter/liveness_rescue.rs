@@ -879,9 +879,12 @@ mod tests {
                 response_liveness_rescue_formula(RESPONDER, &f, &[], false).expect("reducible");
             assert_eq!(v, want_l2s, "l2s on {formula}: {out:?}");
         }
-        // A relational leaf cannot be compiled by the monitor — still abstains.
+        // A relational leaf compiles into the monitor since plan C (2026-10-21), so the shape
+        // reduces; an addend leaf still has no encoding and still abstains.
         let rel = parse("nu X. ((!(st == 1) || mu Y. ((x == y) || [] Y)) && [] X)");
-        assert!(reduce_response_shape(&rel).is_none());
+        assert!(reduce_response_shape(&rel).is_some());
+        let add = parse("nu X. ((!(st == 1) || mu Y. ((x == y + 1) || [] Y)) && [] X)");
+        assert!(reduce_response_shape(&add).is_none());
     }
 
     /// A primary input in the request — what the exact engine refuses on this path — is a leaf
