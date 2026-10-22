@@ -222,6 +222,19 @@ fn register_domain(file: &Btor2File, nid: Nid) -> BTreeSet<u64> {
 /// Named primary inputs are the environment, not a free leaf. `None` when `signal` names nothing in
 /// the file.
 pub fn free_leaves_in_cone(file: &Btor2File, signal: &str) -> Option<Vec<String>> {
+    leaves_in_cone(file, signal, true)
+}
+
+/// The undriven nets (anonymous BTOR2 `input`s, rendered `input_<nid>`) in the sequential cone of
+/// `signal` — the free leaves nobody asked for: an unconnected wire, or the output of a module
+/// missing from the source set. Unlike [`free_leaves_in_cone`] a deliberate cut (a `--cutpoint`,
+/// a `(* blackbox *)` stub — a state with no `next`) is not counted. `None` when `signal` names
+/// nothing in the file.
+pub fn undriven_nets_in_cone(file: &Btor2File, signal: &str) -> Option<Vec<String>> {
+    leaves_in_cone(file, signal, false)
+}
+
+fn leaves_in_cone(file: &Btor2File, signal: &str, with_cuts: bool) -> Option<Vec<String>> {
     let start = file.lines.iter().find_map(|l| match &l.node {
         Node::State {
             symbol: Some(s), ..
@@ -271,9 +284,10 @@ pub fn free_leaves_in_cone(file: &Btor2File, signal: &str) -> Option<Vec<String>
             Node::State { symbol, .. } => {
                 match next_of.get(&nid) {
                     Some(v) => stack.push(v.nid()),
-                    None => {
+                    None if with_cuts => {
                         leaves.insert(symbol.clone().unwrap_or_else(|| format!("state_{nid}")));
                     }
+                    None => {}
                 }
                 if let Some(v) = init_of.get(&nid) {
                     stack.push(v.nid());
@@ -567,6 +581,13 @@ mod tests {
         assert_eq!(
             free_leaves_in_cone(&p, "st"),
             Some(vec!["esc_cut".to_string()])
+        );
+        // …but not an undriven net: a deliberate cut is excluded from that narrower walk
+        assert_eq!(undriven_nets_in_cone(&p, "st"), Some(Vec::new()));
+        let p = parser::parse(&havoc).expect("parses");
+        assert_eq!(
+            undriven_nets_in_cone(&p, "st"),
+            Some(vec!["input_3".to_string()])
         );
         // a named primary input is the environment, not a free leaf
         let p = parser::parse(TRAP_FSM).expect("parses");

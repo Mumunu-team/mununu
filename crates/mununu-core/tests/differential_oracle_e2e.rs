@@ -891,6 +891,12 @@ const CORPUS: &[CorpusDesign] = &[
             "prim_count.sv",
             "prim_count_pkg.sv",
             "prim_util_pkg.sv",
+            "prim_buf.sv",
+            "prim_diff_decode.sv",
+            "prim_flop.sv",
+            "prim_sec_anchor_buf.sv",
+            "prim_sec_anchor_flop.sv",
+            "prim_xnor2.sv",
         ],
         top: "prim_esc_receiver",
         annotations: &["nu Y. ((mu X. ((state_q == 0) or <> X)) and [] Y)"], // Idle = 0
@@ -927,6 +933,13 @@ const CORPUS: &[CorpusDesign] = &[
             "rom_ctrl_pkg.sv",
             "prim_mubi_pkg.sv",
             "prim_util_pkg.sv",
+            "prim_count.sv",
+            "prim_count_pkg.sv",
+            "prim_flop.sv",
+            "prim_mubi4_sender.sv",
+            "prim_sparse_fsm_flop.sv",
+            "rom_ctrl_compare.sv",
+            "rom_ctrl_counter.sv",
         ],
         top: "rom_ctrl_fsm",
         annotations: &["nu Y. ((mu X. ((state_q == 518) or <> X)) and [] Y)"], // Done = 518
@@ -994,15 +1007,24 @@ const CORPUS: &[CorpusDesign] = &[
     CorpusDesign {
         name: "prim_esc_sender",
         dir: "dc_opentitan_prim_esc_sender",
-        files: &["prim_esc_sender.sv", "prim_assert.sv", "prim_esc_pkg.sv"],
+        files: &[
+            "prim_esc_sender.sv",
+            "prim_assert.sv",
+            "prim_esc_pkg.sv",
+            "prim_buf.sv",
+            "prim_diff_decode.sv",
+            "prim_sec_anchor_buf.sv",
+            "prim_xnor2.sv",
+        ],
         top: "prim_esc_sender",
         annotations: &["nu Y. ((mu X. ((state_q == 0) or <> X)) and [] Y)"], // Idle = 0
         config: &[("rst_ni", 1)],
         ledger: &[("(state_q == 0)", LedgerVerdict::True)], // HOLDS (esc_sender recovers to Idle)
     },
     // prim_alert_sender — 7-state alert-sender FSM (Idle=0), the alert-path sibling of
-    // prim_esc_sender. Instantiated prim_diff_decode / prim_sec_anchor_* submodules are
-    // blackboxed (chaotic-stub), so the closure is DUT + pkg + the prim_assert shim.
+    // prim_esc_sender. Since mununu#750 the instantiated prim_diff_decode / prim_sec_anchor_* /
+    // prim_flop_2sync submodules are vendored (upstream 558921c); before, they were black-boxed and
+    // `AlertTest1_A` shipped a VIOLATED that HOLDS on the full closure.
     // AG EF Idle recoverability HOLDS, as for esc_sender (see the mununu#651 note on the
     // ledger row: the earlier VIOLATED reading was a two-player argument). Reset is gated
     // (rst_ni=1) and Idle=0 is the real idle state, not a vacuous atom.
@@ -1013,6 +1035,13 @@ const CORPUS: &[CorpusDesign] = &[
             "prim_alert_sender.sv",
             "prim_assert.sv",
             "prim_alert_pkg.sv",
+            "prim_buf.sv",
+            "prim_diff_decode.sv",
+            "prim_flop.sv",
+            "prim_flop_2sync.sv",
+            "prim_sec_anchor_buf.sv",
+            "prim_sec_anchor_flop.sv",
+            "prim_util_pkg.sv",
         ],
         top: "prim_alert_sender",
         annotations: &["nu Y. ((mu X. ((state_q == 0) or <> X)) and [] Y)"], // Idle = 0
@@ -1072,6 +1101,11 @@ const CORPUS: &[CorpusDesign] = &[
             "prim_secded_pkg.sv",
             "prim_trivium_pkg.sv",
             "prim_util_pkg.sv",
+            "prim_buf.sv",
+            "prim_flop.sv",
+            "prim_mubi4_sender.sv",
+            "prim_sec_anchor_buf.sv",
+            "prim_sparse_fsm_flop.sv",
         ],
         top: "otbn_start_stop_control",
         // Halt = 8'b00000001 = 1 (the idle/done state; reset state is Initial=167). AG EF Halt
@@ -1187,7 +1221,12 @@ const CORPUS: &[CorpusDesign] = &[
         // SEC_CM sparse-FSM pattern as csrng/edn — an EXPECTED violation, not a finding).
         // Non-spurious: reset gated (rst_ni=1), StCtrlReset=865 is the real reset state.
         // Decidable only after the > 128-bit binary-constant bit-blast fix (256-bit key-state).
-        ledger: &[("(state_q == 865)", LedgerVerdict::False)],
+        // mununu#750 (2026-10-21) — RECORDED ⊥, was False. The VIOLATED came from the exact engine
+        // on a model whose seven missing modules (keymgr_err, keymgr_op_state_ctrl, prim_count, …)
+        // left undriven nets in the FSM's cone: a may-trace, now withheld as
+        // `violation-over-free-leaves`. On the vendored closure (scripts/vendor_opentitan_ip.py, no
+        // black boxes) the row did not decide within 30 min, so its truth is not established here.
+        ledger: &[("(state_q == 865)", LedgerVerdict::Indefinite)],
     },
 ];
 
