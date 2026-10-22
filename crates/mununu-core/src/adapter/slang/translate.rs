@@ -65,7 +65,8 @@
 //! | `[->n]` goto with n ≥ 2, `[=n]` non-consecutive repetition, a bare `b[->1]` consequent (weak-vacuous without `throughout`) | needs a sequence automaton — Tier-3b |
 //! | `[*m:n]` as a consequent, repetition inside a CONSEQUENT chain element, a nested sub-sequence in an antecedent, `[*0…]`, an antecedent past 64 alternatives | length composition / the size guard |
 //! | `e throughout S` with `S` unbounded or a repetition inside its chain; a non-boolean `e` | needs a sequence automaton / length composition |
-//! | `sig[idx]` dynamic, `mem[i]` array content, an enum- or otherwise opaque-typed base | distinct refusals (mununu#514; the index cannot be mapped to a bit) |
+//! | `sig[idx]` dynamic, `mem[i]` array content (a non-port unpacked array — a memory), an enum- or otherwise opaque-typed base | distinct refusals (mununu#514; the index cannot be mapped to a bit) |
+//! | a named `sequence` / `property` with local variables or recursion; a repetition of a named sequence that is not a plain boolean | out of fragment / length composition |
 //! | `/ % **`, `*` wider than 32 bits, X/Z constants, a dynamic index that can leave the range, `>>>` of a signed operand in an unsigned context, a function body other than one `return` | the expression compiler's refusals (`expr_ir`) |
 //! | `x[i +: w]`, `x[i -: w]` | indexed part-select: slang gives base-and-WIDTH, declined rather than mis-sliced (mununu#565) |
 //! | `$countones` over more than 64 bits; other system calls | the count cap / not supported |
@@ -78,6 +79,10 @@
 //! `<->`, 1-bit bitwise operators, slang-folded constants and bare sequence properties.
 //! `e throughout b[->1]` (2026-10-18) is the one goto in the fragment — a weak-until, no automaton;
 //! goto with n ≥ 2, `[=n]` and unbounded antecedents stay out.
+//! Plan C (2026-10-21, `assertion_rewrite`) inlines named `sequence` / `property` instances (slang
+//! binds the actuals), splits a sequence `or` antecedent into one implication per disjunct, and reads an
+//! unpacked PORT's element as its flattened slice — a constant index directly, a variable one by a
+//! per-element case split when every selector value is an index.
 //!
 //! **Instances (mununu#709).** Every assertion is translated once per instance it sits in, over
 //! the signals as the flattened design names them (`u_rx.state_q`), with that instance's
@@ -374,6 +379,8 @@ pub fn translate_ast_json_with_source(
     let enum_values = ConstantValues::collect(&root);
 
     let type_aliases = collect_type_aliases(&root);
+    // Unpacked ports, keyed by the symbol a `NamedValue` carries — read before `scope_refs` renames.
+    let unpacked_ports = super::assertion_rewrite::collect_unpacked_ports(&root);
     // Phase 3: user functions the expression compiler may inline, typedefs resolved like specs.
     let subroutines: std::collections::HashMap<String, Value> =
         super::expr_ir::collect_subroutines(&root)
@@ -417,8 +424,23 @@ pub fn translate_ast_json_with_source(
             });
             continue;
         };
+        // Named sequence / property instances → their bound bodies; then an unpacked PORT's
+        // element → its flattened slice or a per-element case split (`assertion_rewrite`). Both
+        // read the raw slang symbols, so they run before `scope_refs` renames them.
+        let spec = match super::assertion_rewrite::inline_assertion_instances(spec) {
+            Ok(spec) => spec,
+            Err(reason) => {
+                report.unsupported.push(UnsupportedAssertion {
+                    name,
+                    kind: Some(kind),
+                    reason,
+                });
+                continue;
+            }
+        };
+        let spec = super::assertion_rewrite::rewrite_unpacked_port_selects(&spec, &unpacked_ports);
         // Rewrite enum-member references to integer literals before translating.
-        let spec = resolve_enum_refs(spec, &enum_values);
+        let spec = resolve_enum_refs(&spec, &enum_values);
         // Then name every signal as the flattened design does: `state_q` in instance `u_rx` is
         // `u_rx.state_q` there, and a hierarchical reference `u_rx.state_q` from the top too.
         let refs = RefContext {
@@ -1954,7 +1976,7 @@ fn property_body(
                 "NonOverlappedImplication" => format!("[] {conseq}"),
                 other => return Err(format!("unsupported property operator: {other}")),
             };
-            antecedent_implies(child(spec, "left")?, &conseq)
+            antecedent_implies_any(child(spec, "left")?, &conseq)
         }
         "Simple" => bool_expr(child(spec, "expr")?),
         // `assert property (s_eventually b)`, `(always b)`, `(nexttime b)`, `strong(…)`: a
@@ -2449,6 +2471,20 @@ fn nest_boxes(n: u32, f: &str) -> String {
 /// position under boxes evaluated ∀-may; the whole is an ordinary mu-calculus formula the KMTS
 /// evaluator decides soundly. Size is the PRODUCT of the alternatives across links, guarded at
 /// [`MAX_ANTECEDENT_ALTERNATIVES`], and the total span at [`MAX_SEQ_UNROLL`].
+/// `(S1 or S2) |-> C` ≡ `(S1 |-> C) and (S2 |-> C)`: every match of either sequence triggers the
+/// consequent (IEEE 1800 16.9.7, sequence `or`). Exact; each disjunct is an antecedent the
+/// single-sequence lowering accepts, or the whole implication is refused with its reason.
+fn antecedent_implies_any(left: &Value, conseq: &str) -> Result<String, String> {
+    if left.get("kind").and_then(Value::as_str) == Some("Binary")
+        && left.get("op").and_then(Value::as_str) == Some("Or")
+    {
+        let l = antecedent_implies_any(child(left, "left")?, conseq)?;
+        let r = antecedent_implies_any(child(left, "right")?, conseq)?;
+        return Ok(format!("({l} && {r})"));
+    }
+    antecedent_implies(left, conseq)
+}
+
 fn antecedent_implies(left: &Value, conseq: &str) -> Result<String, String> {
     let links = antecedent_links(left)?;
     let mut acc = conseq.to_string();
@@ -6212,6 +6248,56 @@ mod tests {
         assert_eq!(w.width, 7, "the shadow is over the whole 7-bit struct");
     }
 
+    /// mununu#750 plan C — the shapes `assertion_rewrite` lands, from real slang JSON
+    /// (`testdata/sva_instance_forms.{sv,ast.json}`). Before it all four were unsupported
+    /// (`AssertionInstance`, a `Binary` antecedent, the unpacked-array comparison ×2) — the census's
+    /// unsupported set on prim_alert_sender and the prim_arbiter blocks. The local-variable
+    /// property stays refused, now with its own reason.
+    #[test]
+    fn instance_or_and_port_element_forms_translate_from_real_slang_json() {
+        let report = translate_ast_json(include_str!("testdata/sva_instance_forms.ast.json"))
+            .expect("the fixture parses");
+        let formula = |l: &str| {
+            report
+                .translated
+                .iter()
+                .find(|t| t.label.as_deref() == Some(l))
+                .map(|t| t.formula.clone())
+                .unwrap_or_else(|| panic!("`{l}` did not translate: {:#?}", report.unsupported))
+        };
+        // `##1 PingSigInt_S |-> ##[3:4] …` with `PingSigInt_S = ping_p == ping_n [*2]`.
+        let ping = formula("SigIntPing_A");
+        assert!(
+            ping.contains("ping_p") && ping.contains("alert_p"),
+            "{ping}"
+        );
+        // `PingSigInt_S or AckSigInt_S |-> …` — one implication per disjunct, conjoined.
+        let inband = formula("InBandInit_A");
+        assert!(
+            inband.contains("ping_p") && inband.contains("ack_p"),
+            "{inband}"
+        );
+        // `data_o == data_i[idx_o]` — eight guarded slices of the flattened 32-bit port.
+        let flow = formula("DataFlow_A");
+        assert!(
+            flow.contains("data_i__bits31_28") && flow.contains("data_i__bits3_0"),
+            "{flow}"
+        );
+        assert_eq!(flow.matches("idx_o").count(), 8, "{flow}");
+        // `data_o == data_i[3]` — the one slice, bits 19:16 (element 0 at the top, measured).
+        let k = formula("DataFlowK_A");
+        assert!(k.contains("data_i__bits19_16"), "{k}");
+        // the local-variable property stays out, saying why
+        let linear = report
+            .unsupported
+            .iter()
+            .find(|u| u.name.contains("forms_sva"))
+            .map(|u| u.reason.clone())
+            .unwrap_or_default();
+        assert_eq!(report.unsupported.len(), 1, "{:#?}", report.unsupported);
+        assert!(linear.contains("local variables"), "{linear}");
+    }
+
     /// OpenTitan coverage, Phases 2 + 3 — the real slang 11.0.448 shapes
     /// (`testdata/sva_expr_forms.{sv,ast.json}`): every form translates, and the minted IR of
     /// prim_count's counter checks computes what the SVA means (`$past` pushed to the leaves,
@@ -6376,11 +6462,12 @@ mod tests {
                 ),
                 Some((true, 0)),
             ),
-            // The recorded gap: the monitor compiles register comparisons, not `reg == reg`.
+            // Plan C (2026-10-21) closed the recorded gap: the monitor compiles `reg == reg` (same
+            // width) too, so the relational consequent reaches the l2s rescue.
             (
                 "a |-> s_eventually (x == y)",
                 imp(ov, simple(sig("a")), sev(simple(rel))),
-                None,
+                Some((true, 0)),
             ),
         ];
         for (what, spec, want) in rows {

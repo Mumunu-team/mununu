@@ -24,6 +24,7 @@ use std::process::Command;
 
 use crate::adapter::{AdapterError, AdapterErrorKind};
 
+pub mod assertion_rewrite;
 pub mod assume_guarantee;
 pub mod expectations;
 pub mod expr_ir;

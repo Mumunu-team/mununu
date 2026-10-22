@@ -9065,8 +9065,8 @@ mod tests {
     /// a `bottom-reason` note classifying it as `safety-shape-not-reducible`.
     #[test]
     fn bottom_reason_safety_shape_not_reducible_gets_classified() {
-        // `AG(a == 1 && b == c)` — the b==c leaf is CmpReg, out of the compilable
-        // set for the compound emitter.
+        // `AG(a == 1 && b == c + 1)` — the addend leaf is out of the compilable set for the
+        // compound emitter (a plain `b == c` relational leaf compiles since plan C, 2026-10-21).
         let design = "\
 1 sort bitvec 1
 2 input 1 a
@@ -9078,7 +9078,7 @@ mod tests {
                 name: "compound_with_relational_leaf".to_string(),
                 label: None,
                 kind: crate::adapter::slang::translate::SvaKind::Assert,
-                formula: "nu X. (((a == 1) && (b == c)) && [] X)".to_string(),
+                formula: "nu X. (((a == 1) && (b == c + 1)) && [] X)".to_string(),
                 outcome: VerifyOutcome::Unknown { unknown_cells: 1 },
                 seeded_predicates: Vec::new(),
                 counterexample: None,
@@ -9097,7 +9097,7 @@ mod tests {
         );
         assert!(
             matches!(report.properties[0].outcome, VerifyOutcome::Unknown { .. }),
-            "the CmpReg leaf must stay ⊥ (out of the compilable set)"
+            "the addend leaf must stay ⊥ (out of the compilable set)"
         );
         let br = notes
             .iter()
@@ -11661,6 +11661,14 @@ module uart_tx(); endmodule"#;
             ("nu X. ((q__popcount <= 1) && [] X)", Class::Simple),
             // `!$isunknown(x)` folds to `false` in the 2-state model: no atom at all.
             ("nu X. ((!(false)) && [] X)", Class::Simple),
+            // Plan C (2026-10-21) — an unpacked port's element, case-split on its selector: a
+            // guard `sel != k` per element and a RELATIONAL compare against the flattened slice.
+            // The guard over a free input is a dimension; the relational compare of two
+            // input-dependent signals is a derived relational label.
+            (
+                "nu X. (((!(wdata != 3)) || (wdata__popcount == wdata__bits7_0)) && [] X)",
+                Class::Simple,
+            ),
         ];
 
         // The mununu#565 discrepancy this comment used to record — `q == wdata__past__bits7_0`
@@ -12269,6 +12277,7 @@ module uart_tx(); endmodule"#;
             include_str!("testdata/sva_fragment_forms.ast.json"),
             include_str!("testdata/sva_phase1_forms.ast.json"),
             include_str!("testdata/sva_expr_forms.ast.json"),
+            include_str!("testdata/sva_instance_forms.ast.json"),
         ] {
             let report = crate::adapter::slang::translate::translate_ast_json(json).unwrap();
             for t in &report.translated {

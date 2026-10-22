@@ -378,7 +378,7 @@ pub(crate) fn is_compilable_boolean_body(formula: &Formula, id: NodeId) -> bool 
         Node::Predicate(atom) => {
             matches!(
                 crate::adapter::btor2::predicate_expr::parse_predicate_atom_bool(atom),
-                Ok(PredicateExpr::Cmp { .. })
+                Ok(PredicateExpr::Cmp { .. } | PredicateExpr::CmpReg { .. })
             )
         }
         _ => false,
@@ -689,6 +689,26 @@ mod tests {
                     .collect()
             })
             .collect()
+    }
+
+    /// Plan C (2026-10-21) — a relational leaf `r == s` (two signals, same width) compiles into the
+    /// safety monitor, so the reach portfolio decides it: HOLDS when both registers load the same
+    /// input, VIOLATED when one loads its complement; mixed widths are refused, not guessed. On the
+    /// parent the reducer declined every relational leaf (`SafetyShapeNotReducible`).
+    #[test]
+    fn a_relational_leaf_is_decided_by_the_safety_monitor() {
+        const SAME: &str = "1 sort bitvec 4\n2 sort bitvec 1\n3 input 1 d\n4 state 1 r\n\
+                            5 next 1 4 3\n6 state 1 s\n7 next 1 6 3\n8 zero 1\n9 init 1 4 8\n\
+                            10 init 1 6 8\n";
+        let f = parse("nu X. ((r == s) && [] X)");
+        let (v, _) = reach_portfolio_rescue_diagnosed(SAME, &f, false).expect("reduces");
+        assert_eq!(v, RescueVerdict::Holds);
+        let apart = SAME.replace("7 next 1 6 3", "11 not 1 3\n7 next 1 6 11");
+        let (v, _) = reach_portfolio_rescue_diagnosed(&apart, &f, false).expect("reduces");
+        assert_eq!(v, RescueVerdict::Violated);
+        let mixed = "1 sort bitvec 4\n2 sort bitvec 1\n3 state 1 r\n4 state 2 s\n";
+        let why = reach_portfolio_rescue_diagnosed(mixed, &f, false).unwrap_err();
+        assert!(why.to_string().contains("widths"), "{why}");
     }
 
     /// A two-step consequent (`cnt == 1 |-> ##2 cnt != 3`, which the counter breaks): the witness
@@ -1078,14 +1098,18 @@ mod tests {
     }
 
     #[test]
-    /// The relaxation must not widen what else is accepted: a relational leaf (`CmpReg`) is
-    /// still rejected, because the compound monitor cannot compile it.
-    fn relational_leaves_are_still_rejected() {
+    /// What the gate accepts is exactly what the compiler compiles: a relational leaf (`CmpReg`)
+    /// since plan C (2026-10-21); an addend leaf (`lhs == rhs + k`) still has no monitor encoding
+    /// and stays rejected.
+    fn relational_leaves_are_accepted_and_addend_leaves_are_not() {
         let f = crate::mu_calculus::parser::parse("nu X. ((cnt_q >= cnt_q__past) && [] X)")
             .expect("formula parses");
+        assert!(reduce_ag_boolean_body(&f).is_some());
+        let g = crate::mu_calculus::parser::parse("nu X. ((cnt_q == cnt_q__past + 1) && [] X)")
+            .expect("formula parses");
         assert!(
-            reduce_ag_boolean_body(&f).is_none(),
-            "a reg-vs-reg relational leaf has no compound-monitor encoding and must stay rejected"
+            reduce_ag_boolean_body(&g).is_none(),
+            "an addend leaf has no compound-monitor encoding and must stay rejected"
         );
     }
 
@@ -1115,11 +1139,12 @@ mod tests {
     }
 
     #[test]
-    fn compound_reducer_rejects_relational_leaf() {
-        // A `CmpReg` leaf (register-vs-register) is out of the compilable set;
-        // the compound emitter would reject it, so the reducer must too.
+    fn compound_reducer_accepts_a_relational_leaf() {
+        // Plan C (2026-10-21) — a `CmpReg` leaf (register-vs-register) compiles into the monitor
+        // now (same-width operands; mixed widths fail at emission with a named reason), so the
+        // gate accepts it: gate and compiler must agree (mununu#503).
         let f = parse("nu X. (((a == 1) && (b == c)) && [] X)");
-        assert!(reduce_ag_boolean_body(&f).is_none());
+        assert!(reduce_ag_boolean_body(&f).is_some());
     }
 
     #[test]

@@ -651,9 +651,40 @@ pub(crate) fn compile_boolean_subtree(
                 appended.push(format!("{n} {cmp_kw} {bool_sort} {sig_nid} {const_nid}"));
                 Ok(n)
             }
+            // Plan C (2026-10-21) — `lhs OP rhs` over two signals of the SAME width (the
+            // relational compare an unpacked port's case split emits, `data_o == data_i__bits31_28`).
+            // Exact: the monitor compares the two nets as the RTL does. Mixed widths are refused —
+            // SV would extend the narrower operand, and which extension is not decided here.
+            Ok(PredicateExpr::CmpReg { lhs, op, rhs }) => {
+                let leaf = |name: &str| {
+                    resolve_leaf(file, name, reset_pinned).ok_or_else(|| {
+                        err(format!(
+                            "adapter/btor2/bad_monitor: leaf atom `{name}` does not resolve to a \
+                             state cell, output port, primary input, or named internal net"
+                        ))
+                    })
+                };
+                let (l_nid, l_sort) = leaf(&lhs)?;
+                let (r_nid, r_sort) = leaf(&rhs)?;
+                let (lw, rw) = (
+                    parser::bv_width(file, l_sort),
+                    parser::bv_width(file, r_sort),
+                );
+                if lw.is_none() || lw != rw {
+                    return Err(err(format!(
+                        "adapter/btor2/bad_monitor: relational leaf `{atom}` compares widths \
+                         {lw:?} and {rw:?}; only same-width operands are compiled"
+                    )));
+                }
+                let cmp_kw = btor2_cmp_keyword(op);
+                let n = *next_nid;
+                *next_nid += 1;
+                appended.push(format!("{n} {cmp_kw} {bool_sort} {l_nid} {r_nid}"));
+                Ok(n)
+            }
             Ok(_) => Err(err(format!(
-                "adapter/btor2/bad_monitor: leaf atom `{atom}` uses a relational / addend / \
-                 select shape not supported by the compound monitor"
+                "adapter/btor2/bad_monitor: leaf atom `{atom}` uses an addend / select shape not \
+                 supported by the compound monitor"
             ))),
             Err(e) => Err(err(format!(
                 "adapter/btor2/bad_monitor: leaf atom `{atom}` did not parse as a predicate \

@@ -1169,7 +1169,7 @@ works when you want the intermediate BTOR2.)
 
 ### 3. Coverage is a fragment, and verdicts are honest
 
-> Source of truth: [`property_body`](../crates/mununu-core/src/adapter/slang/translate.rs#L1490) + [`bool_expr`](../crates/mununu-core/src/adapter/slang/translate.rs#L2173) (the translator `sv verify-auto` runs; the executable table `the_shipped_fragment_truth_table` in the same file has one row per supported and per rejected form, against the real slang 11.0.448 shapes in `adapter/slang/testdata/sva_fragment_forms.{sv,ast.json}`) — surface: (CLI+API)
+> Source of truth: [`property_body`](../crates/mununu-core/src/adapter/slang/translate.rs#L1926) + [`bool_expr`](../crates/mununu-core/src/adapter/slang/translate.rs#L2642) (the translator `sv verify-auto` runs; the executable table `the_shipped_fragment_truth_table` in the same file has one row per supported and per rejected form, against the real slang 11.0.448 shapes in `adapter/slang/testdata/sva_fragment_forms.{sv,ast.json}`) — surface: (CLI+API)
 
 The SVA translator supports a defined fragment; assertions outside it come back in the `unsupported`
 list **with a reason**, never dropped. Since 2026-10-14 the fragment is an executable table in the
@@ -1241,13 +1241,22 @@ many match ends), goto `[->n]` / non-consecutive `[=n]` (a sequence automaton); 
 sub-sequence inside an antecedent, an antecedent past 64 alternatives, and `[*m:n]` as a consequent
 or inside a consequent chain; `s_eventually` or `##[m:$]` over a sequence; a `cover` of an
 eventuality; ranged `nexttime [k]` / `always [m:n]`; `weak()` of an unbounded sequence;
-`throughout` over an unbounded sequence; dynamic `sig[idx]` and array content `mem[i]`; indexed
+`throughout` over an unbounded sequence; dynamic `sig[idx]` and the content `mem[i]` of an unpacked
+array that is not a port (a memory); a named `sequence` / `property` with local variables; indexed
 part-selects `x[i +: w]` (#565); `$countones` past 64 bits; `/ % **` and a multiplication wider
 than 32 bits; a dynamic select whose index can leave the declared range (SV reads X there, and the
 model has no X); an X/Z constant; a function body other than one `return`; `>>>` of a signed
 operand in an unsigned context (the standard fills with 0, Verilator / iverilog / yosys with the
 sign — the design's lift follows the tools, so neither reading is assumed). Goto / `[=n]` /
 unbounded antecedents / PSL stay out.
+
+**Since 2026-10-21 these translate** (`assertion_rewrite`): an instance of a named `sequence` or
+`property` (`##1 PingSigInt_S |-> …` — slang binds the actuals, the body is inlined); a sequence `or`
+in an antecedent (`S1 or S2 |-> C` is checked as `S1 |-> C` and `S2 |-> C`); and an element of an
+unpacked **port** — `data_i[3]` is the slice sv2v flattens it to (the range's left bound at the top:
+`logic [3:0] data_i [8]` puts `data_i[0]` at bits 31:28), and `data_o == data_i[idx_o]` is checked
+per element (`idx_o != k || data_o == data_i[k]` for every `k`) when every value of `idx_o` is an
+index.
 
 **The expression compiler** (`adapter/slang/expr_ir.rs`, emitted by
 `adapter/btor2/minted_expr.rs`) takes over where the atom lowering refuses. It follows slang's
