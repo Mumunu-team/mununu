@@ -99,6 +99,11 @@
       "description": "When true, ignore `mutation` and return the available mutation TARGETS (the `--list` discovery mode) instead of running a mutation.",
       "type": "boolean"
     },
+    "merge_clock_domains": {
+      "default": false,
+      "description": "Lift a multi-clock design onto the model's one implicit clock instead of refusing it. An UNDER-approximation: the domains only ever tick together, so a HOLDS does not transfer (the `clock-domains-merged` soundness caveat). Default `false` (refused at lift time).",
+      "type": "boolean"
+    },
     "must_edge_inference": {
       "default": null,
       "description": "Must-edge inference (`\"smt-hyper-must\"` gives sound νμ verdicts for a recoverability property under `drop-reset`). Default (absent or `\"auto\"`, mununu#663): per-target must for Liveness/Mixed-class properties, may-only for the rest; `\"off\"` = may-only everywhere.",

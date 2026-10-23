@@ -442,6 +442,12 @@ pub struct ModelDiagnostics {
     /// cells — so this is Info (the `lift-retry` note), not a scope caveat. `None` when the first
     /// run succeeded (every lift that succeeded before 2026-10-22 is byte-identical).
     pub lift_retry: Option<String>,
+    /// The clock domains the lift MERGED onto the model's one implicit clock, each
+    /// `"<net> (<edge>, <n> cells)"` — non-empty only when the design has more than one domain
+    /// and `--merge-clock-domains` let it through (otherwise the lift refuses it). Every verdict
+    /// then holds only for runs where all domains tick together (the `clock-domains-merged`
+    /// soundness caveat).
+    pub merged_clock_domains: Vec<String>,
     /// mununu#536 — config inputs pinned to constants for this run, each
     /// `"<signal>=<value>"` (the `--config-value` / API `config_values` operands that were
     /// actually APPLIED, not those merely requested).
@@ -1719,6 +1725,26 @@ fn build_notes(
     // The lift rerun its yosys script with `opt_clean` after the BTOR backend reported a
     // topological loop (2026-10-22, OpenTitan csrng through yosys-slang's `$buf` cells). Info:
     // the model is the same design, and a reader diffing two runs wants to know the script moved.
+    if d.merged_clock_domains.len() > 1 {
+        notes.push(VerificationNote {
+            kind: "clock-domains-merged".into(),
+            level: NoteLevel::SoundnessCaveat,
+            summary: format!(
+                "lift: {} clock domains merged onto one clock — every verdict assumes they tick \
+                 together.",
+                d.merged_clock_domains.len()
+            ),
+            detail: "`--merge-clock-domains` lifted a multi-clock design onto the model's one \
+                     implicit clock. That is an UNDER-approximation of the real interleavings: a \
+                     crossing defect that needs one domain to tick while another does not (a \
+                     lost pulse, an incoherent multi-bit bus) cannot occur in this model, so a \
+                     HOLDS does not transfer to the design. A VIOLATED is a run of the design in \
+                     which the domains happen to tick together."
+                .to_string(),
+            items: d.merged_clock_domains.clone(),
+            property: None,
+        });
+    }
     if let Some(reason) = &d.lift_retry {
         notes.push(VerificationNote {
             kind: "lift-retry".into(),
@@ -3800,6 +3826,8 @@ pub(crate) struct PreLift {
     /// `Some(reason)` when the lift rerun its script with `opt_clean` after a BTOR-backend
     /// topological-loop error (`ModelDiagnostics::lift_retry`).
     pub backend_retry: Option<String>,
+    /// The clock domains the lift merged (more than one only under `--merge-clock-domains`).
+    pub clock_domains: Vec<crate::adapter::yosys::ClockDomain>,
 }
 
 /// Run the SV → BTOR2 lift (yosys) with the `auto_stub_flops` re-lift. Pure function of
@@ -3865,6 +3893,7 @@ pub(crate) fn lift_sv(
         frontend_used: lift.frontend_used,
         fallback_reason: lift.fallback_reason,
         backend_retry: lift.backend_retry,
+        clock_domains: lift.clock_domains,
     })
 }
 
@@ -4163,7 +4192,14 @@ pub(crate) fn prepare_model(
         frontend_used,
         fallback_reason,
         backend_retry,
+        clock_domains,
     } = lift_sv(sources, yosys_opts, opts)?;
+    if clock_domains.len() > 1 {
+        report.diagnostics.merged_clock_domains = clock_domains
+            .iter()
+            .map(|d| crate::adapter::yosys::describe_clock_domains(std::slice::from_ref(d)))
+            .collect();
+    }
     report.diagnostics.blackboxed_modules = blackboxed_modules;
     report.diagnostics.auto_provided_stubs = auto_provided_stubs;
     // #466 — record which RTL front end produced this lift (and any auto-fallback)

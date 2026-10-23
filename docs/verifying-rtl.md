@@ -492,6 +492,27 @@ error (a typo must not silently lift the real file), and so is a name given twic
 changes nothing about what is checked: the assertions are the real ones, and the model is the RTL
 with its assertion code compiled out, which is what the shim is for.
 
+### One clock per model: multi-clock designs are refused, `--merge-clock-domains` (mununu#758)
+
+> Source of truth: [`clock_domains`](../crates/mununu-core/src/adapter/yosys/mod.rs) — surface: (CLI+API) — every SV verb that lifts (`sv verify-auto`, `sv verify`, `sv verify-liveness*`, `sv verify-recoverability`, `sv check-fsm`, `sv lint`, `sv mutate`); API `merge_clock_domains`
+
+The BTOR2 model has one implicit clock: every register steps on it. After `flatten` the lift writes
+a netlist snapshot and counts the clock domains — every distinct (clock net, edge) that a flop or
+a clocked memory port fires on. More than one domain is refused, naming them:
+
+```text
+adapter/yosys: the design has 2 clock domains (clk_dst (posedge, 2 cells), clk_src (posedge, 1 cell)); …
+```
+
+Lifting such a design onto one clock steps every domain together, which is an
+UNDER-approximation of the real interleavings: a crossing defect that needs one domain to tick
+while another does not (a lost pulse, an incoherent multi-bit bus) cannot happen in that model,
+so a HOLDS does not transfer. Until 2026-10 the lift did exactly that, silently, for any clock
+not named like `clk` / `clk_i` (mununu#758). `--merge-clock-domains` (API `merge_clock_domains`)
+keeps that reading as an explicit choice: `diagnostics.merged_clock_domains` lists the domains and
+the `clock-domains-merged` soundness caveat says what a verdict is worth. A design clocked on a
+single edge of a single net, falling edge included, is one domain and lifts as before.
+
 ### Shrinking a parameterised design: `--param`
 
 > Source of truth: [`build_chparam_passes`](../crates/mununu-core/src/adapter/yosys/mod.rs) — surface: (CLI+API+UI)

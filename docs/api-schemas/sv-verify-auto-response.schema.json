@@ -347,6 +347,13 @@
             "null"
           ]
         },
+        "merged_clock_domains": {
+          "description": "The clock domains `merge_clock_domains` lifted onto one clock, each `\"<net> (<edge>, <n> cells)\"`; empty for a single-clock design. Non-empty means every verdict assumes the domains tick together (the `clock-domains-merged` note).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "state_register_count": {
           "description": "Number of state register lines in the lifted model.",
           "format": "uint",
