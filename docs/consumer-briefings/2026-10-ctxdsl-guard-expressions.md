@@ -37,7 +37,7 @@
 | `a_compound_guard_constrains_its_transition_instead_of_disabling_it` | `Open` unreachable on the parent (`a >= 2 && b == 0` never fired), reachable here; `make verify-repro` CONFIRMED |
 | `realize_marks_uncontrollable_transitions` | the `guard is_controllable` loop (variable `true`) did not exist on the parent; it exists and is controllable here (the test no longer hedges on it) |
 | `cargo test -p mununu-core --no-fail-fast` | all 55 test binaries pass |
-| compound guards in the shipped models (`examples/**`, mununu-ui `public/examples`) | none (30 guards, all single comparisons) — no shipped verdict changes |
+| compound guards in the shipped models (`examples/**`, mununu-ui `public/examples`) | none: 23 guard lines, every one a single comparison, no bare boolean-variable guard — no shipped verdict changes |
 
 ## Provenance
 
