@@ -303,6 +303,7 @@ mod tests {
                 auto_provided_stubs: vec![],
                 frontend: Some("read_verilog + sv2v".into()),
                 frontend_fallback_reason: Some("slang errored".into()),
+                lift_retry: Some("the BTOR backend reported a topological loop".into()),
                 applied_config_values: vec!["cfg=7".into()],
                 cutpoint_signals: vec!["fits".into()],
             },

@@ -10,6 +10,10 @@
 `define ASSERT_DEFAULT_RST !rst_ni
 `endif
 `define _SEC_CM_ALERT_MAX_CYC 30
+// INC_ASSERT is defined so the RTL's assertion-support logic (the sparse-FSM flop's
+// `unused_err_o`, prim_count's `fpv_err_present`) is in the lift; the assertion statements
+// themselves still expand to nothing.
+`define INC_ASSERT
 `define PRIM_STRINGIFY(__x)
 `define ASSERT_STATIC_LINT_ERROR(__name, __prop)
 `define ASSERT_STATIC_IN_PACKAGE(__name, __prop)
@@ -19,7 +23,11 @@
 `define ASSUME_FPV(__name, __prop, __clk = `ASSERT_DEFAULT_CLK, __rst = `ASSERT_DEFAULT_RST)
 `define ASSUME_I_FPV(__name, __prop)
 `define COVER_FPV(__name, __prop, __clk = `ASSERT_DEFAULT_CLK, __rst = `ASSERT_DEFAULT_RST)
-`define ASSERT_FPV_LINEAR_FSM(__name, __state, __type, __clk = `ASSERT_DEFAULT_CLK, __rst = `ASSERT_DEFAULT_RST)
+`define ASSERT_FPV_LINEAR_FSM(__name, __state, __type, __clk = `ASSERT_DEFAULT_CLK, __rst = `ASSERT_DEFAULT_RST) \
+  (* keep *) logic __name``_cond; \
+  always_ff @(posedge __clk) begin \
+    if (__rst) __name``_cond <= 1'b0; else __name``_cond <= 1'b1; \
+  end
 `define ASSERT_I(__name, __prop)
 `define ASSERT_INIT(__name, __prop)
 `define ASSERT_INIT_NET(__name, __prop)

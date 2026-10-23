@@ -9,3 +9,4 @@ prim_flop_2sync.sv  hw/ip/prim_generic/rtl/prim_flop_2sync.sv
 prim_sec_anchor_buf.sv  hw/ip/prim/rtl/prim_sec_anchor_buf.sv
 prim_sec_anchor_flop.sv  hw/ip/prim/rtl/prim_sec_anchor_flop.sv
 prim_util_pkg.sv  hw/ip/prim/rtl/prim_util_pkg.sv
+prim_alert_sender_lift.sv  LOCAL: prim_alert_sender.sv without its `ifdef INC_ASSERT` regions (lift only, scripts/vendor_opentitan_ip.py --strip-inc-assert)

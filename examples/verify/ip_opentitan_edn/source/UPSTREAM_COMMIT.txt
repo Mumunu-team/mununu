@@ -25,7 +25,7 @@ edn_core.sv  hw/ip/edn/rtl/edn_core.sv
 edn_field_en.sv  hw/ip/edn/rtl/edn_field_en.sv
 edn_main_sm.sv  hw/ip/edn/rtl/edn_main_sm.sv
 edn_reg_top.sv  hw/ip/edn/rtl/edn_reg_top.sv
-prim_alert_sender.sv  hw/ip/prim/rtl/prim_alert_sender.sv
+prim_alert_sender.sv  hw/ip/_mununu_prim_alert_sender/rtl/prim_alert_sender.sv
 prim_arbiter_ppc.sv  hw/ip/prim/rtl/prim_arbiter_ppc.sv
 prim_buf.sv  hw/ip/prim_generic/rtl/prim_buf.sv
 prim_count.sv  hw/ip/prim/rtl/prim_count.sv
@@ -59,4 +59,6 @@ tlul_err.sv  hw/ip/tlul/rtl/tlul_err.sv
 tlul_rsp_intg_gen.sv  hw/ip/tlul/rtl/tlul_rsp_intg_gen.sv
 edn.sv  hw/ip/edn/rtl/edn.sv
 prim_assert_shim.sv  LOCAL: generated from hw/ip/prim/rtl/prim_assert*.{sv,svh} (lift only)
+prim_alert_sender_lift.sv  LOCAL: prim_alert_sender.sv without its `ifdef INC_ASSERT` regions (lift only, scripts/vendor_opentitan_ip.py --strip-inc-assert)
+prim_sparse_fsm_flop_lift.sv  LOCAL: prim_sparse_fsm_flop.sv without its `ifdef INC_ASSERT` regions (lift only, scripts/vendor_opentitan_ip.py --strip-inc-assert)
 # LOCAL: edn_core.sv — 1 line(s): `'{default: 1'b0}` -> `'{default: '0}`

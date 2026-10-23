@@ -24,11 +24,24 @@ Run inside the `mununu-sva` image (it needs `slang`; `git` and Python 3 only oth
    `prim_assert` set declares (so the lift compiles the assertions out, as OpenTitan's own
    `prim_assert_dummy_macros.svh` does), with `ASSERT_DEFAULT_CLK/RST`, `_SEC_CM_ALERT_MAX_CYC`
    and the `prim_flop_macros.sv` include kept so `PRIM_FLOP_SPARSE_FSM` still instantiates
-   `prim_sparse_fsm_flop` (its `unused_err_o` is what the FSM error → alert checks read).
+   `prim_sparse_fsm_flop`. `INC_ASSERT` IS defined (2026-10-22): the RTL's assertion-SUPPORT
+   logic — the sparse-FSM flop's `unused_err_o` (what the FSM error → alert checks read),
+   prim_count's `fpv_err_present` — is in the lift, while the assertion statements are not;
+   before, those flags were constant 0 and the checks held vacuously. `ASSERT_FPV_LINEAR_FSM`
+   keeps its `<name>_cond` flop (synchronous form) and drops its local-variable property.
    Extraction reads the real macros; only the lift sees the shim (`--lift-override`).
-5. `sources.txt` (compile order: packages by dependency, the macro set, `.svh`, modules, primary
-   last), `UPSTREAM_COMMIT.txt` (commit + `<file>  <upstream path>` per source + the local stubs
-   and rewrites), and `run.sh` — the exact `sv verify-auto` command.
+5. `--strip-inc-assert FILE` writes `FILE_lift.sv`: the vendored file with every `ifdef INC_ASSERT`
+   region removed (its `else` branch kept), wired as `--lift-override FILE=FILE_lift.sv`. Exact
+   for assertion-only regions, and the only way to lift two upstream files once `INC_ASSERT` is
+   defined: `prim_alert_sender.sv` declares `sequence` blocks (sv2v has no lowering, yosys-slang
+   reports "unimplemented"), and `prim_sparse_fsm_flop.sv`'s `is_undefined_state` walks the enum
+   with `t.first()/t.num()/t.next()` (yosys-slang: "unsupported system task 'next'"; sv2v leaves
+   the calls and yosys cannot resolve them; measured 2026-10-22). The sparse flop's `else` branch
+   is `unused_err_o = 1'b0`, so with the strip that flag stays constant in the lift — recorded in
+   the IP's README; the fault posture mints it from the enum domain instead.
+6. `sources.txt` (compile order: packages by dependency, the macro set, `.svh`, modules, primary
+   last), `UPSTREAM_COMMIT.txt` (commit + `<file>  <upstream path>` per source + the local stubs,
+   lift variants and rewrites), and `run.sh` — the exact `sv verify-auto` command.
 
 Standard library only.
 """
@@ -159,14 +172,82 @@ def make_shim(real_dir: Path) -> str:
         "`ifndef ASSERT_DEFAULT_CLK\n`define ASSERT_DEFAULT_CLK clk_i\n`endif\n"
         "`ifndef ASSERT_DEFAULT_RST\n`define ASSERT_DEFAULT_RST !rst_ni\n`endif\n"
         "`define _SEC_CM_ALERT_MAX_CYC 30\n"
+        # INC_ASSERT is defined: the RTL's assertion-SUPPORT logic (prim_sparse_fsm_flop's\n
+        # `unused_err_o`, prim_count's `fpv_err_present`, the mubi sampling flop) enters the lift,\n
+        # while every assertion STATEMENT above still expands to nothing. Without it the sec_cm\n
+        # fault flags are constant 0 in the model and the error -> alert checks hold vacuously.\n
+        "// INC_ASSERT is defined so the RTL's assertion-support logic (the sparse-FSM flop's\n"
+        "// `unused_err_o`, prim_count's `fpv_err_present`) is in the lift; the assertion statements\n"
+        "// themselves still expand to nothing.\n"
+        "`define INC_ASSERT\n"
     )
     tail = (
         "// The real prim_assert.sv includes the flop macros; a per-file compilation unit (read_slang)\n"
         "// sees PRIM_FLOP_SPARSE_FSM only through this include.\n"
         '`include "prim_flop_macros.sv"\n'
     )
+    # ASSERT_FPV_LINEAR_FSM: keep the macro's `<name>_cond` flop (synthesizable, reads only clk and
+    # rst, drives nothing - the reachable states are unchanged) and drop its local-variable property;
+    # the translator expands that property over the state's enum domain from the real macro.
+    # Synchronous form: `posedge !rst_ni` is the construct the lift rejects.
+    linear = (
+        "`define ASSERT_FPV_LINEAR_FSM(__name, __state, __type, __clk = `ASSERT_DEFAULT_CLK, "
+        "__rst = `ASSERT_DEFAULT_RST) \\\n"
+        "  (* keep *) logic __name``_cond; \\\n"
+        "  always_ff @(posedge __clk) begin \\\n"
+        "    if (__rst) __name``_cond <= 1'b0; else __name``_cond <= 1'b1; \\\n"
+        "  end"
+    )
+    add = [linear if a.startswith("`define ASSERT_FPV_LINEAR_FSM(") else a for a in add]
     body = "\n".join(a for a in add if not a.startswith("`define _SEC_CM_ALERT_MAX_CYC"))
     return head + body + "\n" + tail
+
+
+PP_RE = re.compile(r"^\s*`(ifdef|ifndef|elsif|else|endif)\b\s*(\w+)?")
+
+
+def strip_inc_assert(name: str, text: str) -> str:
+    """`NAME_lift.sv`: the vendored file with every `ifdef INC_ASSERT` region removed, `else` kept.
+
+    A line-level preprocessor walk: an `ifdef INC_ASSERT` / `ifndef INC_ASSERT` opens a region
+    whose directive lines are dropped; its `else` flips which branch is kept; every other
+    conditional passes through verbatim (its directives too) and only nests for matching. The
+    removed line ranges are named in the header so a reader can diff against the vendored file."""
+    out, stack, removed = [], [], []  # stack entries: [is_inc_region, keeping, start_line]
+    for ln, line in enumerate(text.splitlines(keepends=True), 1):
+        m = PP_RE.match(line)
+        if m:
+            d, sym = m.group(1), m.group(2)
+            if d in ("ifdef", "ifndef"):
+                inc = sym == "INC_ASSERT"
+                stack.append([inc, d == "ifndef" if inc else True, ln])
+                if inc:
+                    continue
+            elif d == "else" and stack and stack[-1][0]:
+                stack[-1][1] = not stack[-1][1]
+                continue
+            elif d == "elsif" and stack and stack[-1][0]:
+                sys.exit(f"--strip-inc-assert {name}:{ln}: `elsif` inside an INC_ASSERT region")
+            elif d == "endif" and stack:
+                inc, _, start = stack.pop()
+                if inc:
+                    removed.append((start, ln))
+                    continue
+        if all(keep for _, keep, _ in stack):
+            out.append(line)
+    if stack:
+        sys.exit(f"--strip-inc-assert {name}: unbalanced conditional opened at line {stack[-1][2]}")
+    if not removed:
+        sys.exit(f"--strip-inc-assert {name}: no `ifdef INC_ASSERT` region")
+    ranges = ", ".join(f"{s}-{e}" for s, e in removed)
+    head = (
+        f"// LOCAL (mununu): lift-only variant of OpenTitan {name} — every `ifdef INC_ASSERT` region\n"
+        f"// removed (lines {ranges} of the vendored file; an `else` branch is kept). Those regions hold\n"
+        "// assertion-side logic the lift cannot compile (`sequence` blocks, the enum-method loop of\n"
+        "// `is_undefined_state`); every other line is byte-identical. Extraction reads the vendored\n"
+        f"// file; this one replaces it for the lift only (`--lift-override {name}={Path(name).stem}_lift.sv`).\n"
+    )
+    return head + "".join(out)
 
 
 def order_sources(files, primary, texts):
@@ -219,6 +300,8 @@ def main():
     ap.add_argument("--blackbox", action="append", default=[], help="module left out as a (* blackbox *) stub")
     ap.add_argument("--rewrite", action="append", default=[], metavar="FILE|FROM|TO",
                     help="one-line local rewrite, recorded in UPSTREAM_COMMIT.txt")
+    ap.add_argument("--strip-inc-assert", action="append", default=[], metavar="FILE",
+                    help="write FILE_lift.sv without its `ifdef INC_ASSERT` regions, for the lift only")
     ap.add_argument("--slang", default="slang")
     a = ap.parse_args()
 
@@ -297,6 +380,14 @@ def main():
         p.write_text(t.replace(src, f"{dst} /* LOCAL (mununu): was {src} */"))
         rewrites.append(f"# LOCAL: {fname} — {n} line(s): `{src}` -> `{dst}`")
 
+    lifts = []
+    for fname in a.strip_inc_assert:
+        if fname not in names:
+            sys.exit(f"--strip-inc-assert {fname}: not in the closure ({len(names)} sources)")
+        lift = f"{Path(fname).stem}_lift.sv"
+        (a.out / lift).write_text(strip_inc_assert(fname, (a.out / fname).read_text()))
+        lifts.append((fname, lift))
+
     (a.out / "prim_assert_shim.sv").write_text(make_shim(root / "hw/ip/prim/rtl"))
     (a.out / "sources.txt").write_text("".join(f.name + "\n" for f in ordered))
     lines = [f"# lowRISC/opentitan @ {a.commit}",
@@ -307,19 +398,24 @@ def main():
         else:
             lines.append(f"{f.name}  {f.relative_to(root)}")
     lines.append("prim_assert_shim.sv  LOCAL: generated from hw/ip/prim/rtl/prim_assert*.{sv,svh} (lift only)")
+    for fname, lift in lifts:
+        lines.append(f"{lift}  LOCAL: {fname} without its `ifdef INC_ASSERT` regions (lift only, "
+                     "scripts/vendor_opentitan_ip.py --strip-inc-assert)")
     lines += rewrites
     (a.out / "UPSTREAM_COMMIT.txt").write_text("\n".join(lines) + "\n")
     srcs = " ".join(f"--source {f.name}" for f in ordered if f != primary)
     (a.out / "run.sh").write_text(
         "#!/bin/sh\n"
         f"# `sv verify-auto` on the full {a.ip} IP (lowRISC/opentitan {a.commit[:9]}); run in mununu-sva, cwd = this dir.\n"
-        "# Extraction reads the real prim_assert macros; the lift sees the synthesis shim (assertions compiled out).\n"
+        "# Extraction reads the real prim_assert macros; the lift sees the synthesis shim (assertions compiled\n"
+        "# out, INC_ASSERT defined) and, for each `--strip-inc-assert` file, its `_lift.sv` variant.\n"
         "# Add `--source mununu_properties.sv` for the system-level @mununu_guarantee properties.\n"
         f"exec mununu sv verify-auto {primary.name} --top {top} --preprocess-sv2v {srcs} \\\n"
         "  --lift-override prim_assert.sv=prim_assert_shim.sv \\\n"
         "  --lift-override prim_assert_standard_macros.svh=/dev/null \\\n"
         "  --lift-override prim_assert_sec_cm.svh=/dev/null \\\n"
-        "  --config-value rst_ni=1 \"$@\"\n"
+        + "".join(f"  --lift-override {fname}={lift} \\\n" for fname, lift in lifts)
+        + "  --config-value rst_ni=1 \"$@\"\n"
     )
     print(f"{len(ordered)} sources -> {a.out}; unresolved: {sorted(unresolved) or 'none'}; slang rc={rc}")
 

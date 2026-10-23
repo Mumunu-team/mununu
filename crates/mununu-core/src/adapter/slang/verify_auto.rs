@@ -428,6 +428,13 @@ pub struct ModelDiagnostics {
     /// the one used succeeded), the prior attempt's error. `None` when there was no
     /// fallback (an explicit front end, or the first attempt succeeded).
     pub frontend_fallback_reason: Option<String>,
+    /// `Some(reason)` when the lift's first yosys run died in the BTOR backend with a
+    /// "topological loop" (`check` sees none: yosys-slang's `$buf` cells chain wide vectors
+    /// through other cells) and the script succeeded rerun with `opt_clean` before `write_btor`.
+    /// The model is the same design — `opt_clean` folds buffers into connections and drops unused
+    /// cells — so this is Info (the `lift-retry` note), not a scope caveat. `None` when the first
+    /// run succeeded (every lift that succeeded before 2026-10-22 is byte-identical).
+    pub lift_retry: Option<String>,
     /// mununu#536 — config inputs pinned to constants for this run, each
     /// `"<signal>=<value>"` (the `--config-value` / API `config_values` operands that were
     /// actually APPLIED, not those merely requested).
@@ -1690,6 +1697,25 @@ fn build_notes(
             level,
             summary,
             detail,
+            items: Vec::new(),
+            property: None,
+        });
+    }
+    // The lift rerun its yosys script with `opt_clean` after the BTOR backend reported a
+    // topological loop (2026-10-22, OpenTitan csrng through yosys-slang's `$buf` cells). Info:
+    // the model is the same design, and a reader diffing two runs wants to know the script moved.
+    if let Some(reason) = &d.lift_retry {
+        notes.push(VerificationNote {
+            kind: "lift-retry".into(),
+            level: NoteLevel::Info,
+            summary: format!("lift: retried — {reason}."),
+            detail: "The yosys BTOR backend walks the netlist cell by cell and can report a \
+                     topological loop where `check` finds none (wide `$buf` cells from \
+                     yosys-slang chained bit-wise through other cells). `opt_clean` folds the \
+                     buffers into connections and drops unused cells; it removes nothing the \
+                     design reads, so the verdicts are over the same design. The retry runs \
+                     only on that error."
+                .to_string(),
             items: Vec::new(),
             property: None,
         });
@@ -3749,6 +3775,9 @@ pub(crate) struct PreLift {
     /// `Some(reason)` when `--frontend auto` fell back after an earlier front end
     /// errored (#466).
     pub fallback_reason: Option<String>,
+    /// `Some(reason)` when the lift rerun its script with `opt_clean` after a BTOR-backend
+    /// topological-loop error (`ModelDiagnostics::lift_retry`).
+    pub backend_retry: Option<String>,
 }
 
 /// Run the SV → BTOR2 lift (yosys) with the `auto_stub_flops` re-lift. Pure function of
@@ -3813,6 +3842,7 @@ pub(crate) fn lift_sv(
         auto_provided_stubs,
         frontend_used: lift.frontend_used,
         fallback_reason: lift.fallback_reason,
+        backend_retry: lift.backend_retry,
     })
 }
 
@@ -4108,6 +4138,7 @@ pub(crate) fn prepare_model(
         auto_provided_stubs,
         frontend_used,
         fallback_reason,
+        backend_retry,
     } = lift_sv(sources, yosys_opts, opts)?;
     report.diagnostics.blackboxed_modules = blackboxed_modules;
     report.diagnostics.auto_provided_stubs = auto_provided_stubs;
@@ -4115,6 +4146,7 @@ pub(crate) fn prepare_model(
     // so verify-auto can report it (the `lift-frontend` note in `build_notes`).
     report.diagnostics.frontend = Some(frontend_used.lift_label().to_string());
     report.diagnostics.frontend_fallback_reason = fallback_reason;
+    report.diagnostics.lift_retry = backend_retry;
 
     // mununu#709 — a reset named inside a sub-instance (`u_rx.rst_ni`) is an alias of the input
     // connected to it; pin that input. A name that is no input's alias stays as it was (unpinned).
@@ -11317,6 +11349,62 @@ module uart_tx(); endmodule"#;
                 .any(|n| n.kind == "config-concretization"
                     || n.kind == "counter-bound"
                     || n.kind == "control-slice")
+        );
+    }
+
+    #[test]
+    fn lift_retry_note_is_info_and_names_the_backend_loop() {
+        let with = AutoVerifyReport {
+            assumptions: Default::default(),
+            properties: Vec::new(),
+            unsupported: Vec::new(),
+            diagnostics: ModelDiagnostics {
+                frontend: Some("yosys-slang (read_slang)".into()),
+                lift_retry: Some(
+                    "the BTOR backend reported a topological loop (ERROR: Found topological loop \
+                     while processing cell $6638. Active cells:); the lift succeeded with \
+                     `opt_clean` before `write_btor`"
+                        .into(),
+                ),
+                ..Default::default()
+            },
+            notes: Vec::new(),
+        };
+        let notes = build_notes(
+            &with,
+            must_edge_posture_label(MustEdgeInference::Off, false),
+            &[],
+            &[],
+            &[],
+            &[],
+            &NotePosture::Cube,
+        );
+        let note = notes
+            .iter()
+            .find(|n| n.kind == "lift-retry")
+            .expect("a retried lift carries the lift-retry note");
+        assert_eq!(note.level, NoteLevel::Info, "the model is the same design");
+        assert!(note.summary.contains("topological loop") && note.summary.contains("opt_clean"));
+        let without = AutoVerifyReport {
+            diagnostics: ModelDiagnostics {
+                frontend: Some("yosys-slang (read_slang)".into()),
+                ..Default::default()
+            },
+            ..with
+        };
+        assert!(
+            !build_notes(
+                &without,
+                must_edge_posture_label(MustEdgeInference::Off, false),
+                &[],
+                &[],
+                &[],
+                &[],
+                &NotePosture::Cube,
+            )
+            .iter()
+            .any(|n| n.kind == "lift-retry"),
+            "no retry, no note"
         );
     }
 

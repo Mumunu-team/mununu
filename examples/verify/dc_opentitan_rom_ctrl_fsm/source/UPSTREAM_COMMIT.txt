@@ -9,3 +9,4 @@ prim_mubi4_sender.sv  hw/ip/prim/rtl/prim_mubi4_sender.sv
 prim_sparse_fsm_flop.sv  hw/ip/prim/rtl/prim_sparse_fsm_flop.sv
 rom_ctrl_compare.sv  hw/ip/rom_ctrl/rtl/rom_ctrl_compare.sv
 rom_ctrl_counter.sv  hw/ip/rom_ctrl/rtl/rom_ctrl_counter.sv
+prim_sparse_fsm_flop_lift.sv  LOCAL: prim_sparse_fsm_flop.sv without its `ifdef INC_ASSERT` regions (lift only, scripts/vendor_opentitan_ip.py --strip-inc-assert)

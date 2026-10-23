@@ -25,7 +25,7 @@ use mununu_core::adapter::slang::verify_auto::{
 };
 use mununu_core::adapter::yosys::YosysOptions;
 use mununu_core::mu_calculus::parser;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// A register that LOADS a nonzero value (10) from a free input `ld`, whose user-visible
 /// name `reg` survives only on a `uext` alias of an UNNAMED state — the flattened-yosys shape
@@ -755,11 +755,54 @@ fn corpus_report(
     // no hard bit cap) vs the multi-engine portfolio — selected by `engine.apply`.
     let mut opts = VerifyAutoOptions {
         config_values,
+        // the block's own `prim_assert.sv` stub defines INC_ASSERT; the files that cannot be
+        // lifted under it carry a `_lift.sv` variant (see `lift_variants`)
+        lift_overrides: lift_variants(&root.join(d.dir).join("source")),
         ..Default::default()
     };
     engine.apply(&mut opts);
     verify_auto(&sources, &yopts, &opts)
         .unwrap_or_else(|e| panic!("{}: verify_auto failed: {}", d.name, e.message))
+}
+
+/// `<stem>_lift.sv` beside a source replaces `<stem>.sv` for the LIFT only
+/// (`VerifyAutoOptions::lift_overrides`); extraction keeps reading the vendored file. Written by
+/// `scripts/vendor_opentitan_ip.py --strip-inc-assert` for the two upstream files whose
+/// `ifdef INC_ASSERT` region no frontend lifts — the alert sender's `sequence` blocks, the
+/// sparse-FSM flop's enum-method loop — now that the synthesis shims define `INC_ASSERT`
+/// (2026-10-22) so the assertion-support logic (`fpv_err_present`) is in the model.
+fn lift_variants(dir: &Path) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if let Some(stem) = name.strip_suffix("_lift.sv") {
+            let text = std::fs::read_to_string(e.path())
+                .unwrap_or_else(|err| panic!("{}: {err}", e.path().display()));
+            out.push((format!("{stem}.sv"), text));
+        }
+    }
+    out.sort();
+    out
+}
+
+/// The lift of a vendored OpenTitan IP (`examples/verify/ip_opentitan_*/source`): the generated
+/// synthesis shim in place of the real `prim_assert.sv`, the real `.svh` macro files blanked,
+/// plus every `_lift.sv` variant — exactly what the IP's `run.sh` passes as `--lift-override`.
+fn ip_lift_overrides(dir: &Path) -> Vec<(String, String)> {
+    let read = |f: &str| {
+        std::fs::read_to_string(dir.join(f))
+            .unwrap_or_else(|e| panic!("{}: {e}", dir.join(f).display()))
+    };
+    let mut v = vec![
+        ("prim_assert.sv".to_string(), read("prim_assert_shim.sv")),
+        ("prim_assert_standard_macros.svh".to_string(), String::new()),
+        ("prim_assert_sec_cm.svh".to_string(), String::new()),
+    ];
+    v.extend(lift_variants(dir));
+    v
 }
 
 fn run_corpus_verdicts(
@@ -2038,7 +2081,8 @@ fn e2e_sv_mutate_off_by_one_flips_a_threshold_property() {
 /// which holds trivially and must not be counted as a decided check. SVA extraction reads the real
 /// OpenTitan macros. The lift reads them too — assertion-side logic (`fpv_err_present`, `err_d`)
 /// exists only then — unless that lift FAILS (`ASSERT_FPV_LINEAR_FSM`, the senders' sequence
-/// blocks): then it is retried on the design's own synthesis shim through
+/// blocks): then it is retried on the design's own synthesis shim (which defines `INC_ASSERT`
+/// too, with a `_lift.sv` variant for each file that cannot be lifted under it) through
 /// `VerifyAutoOptions::lift_overrides`, and the design's `census:` line says `lift=shim`.
 #[test]
 #[ignore = "census: requires slang + sv2v + yosys (mununu-sva image); run with --ignored --nocapture"]
@@ -2080,7 +2124,7 @@ fn e2e_opentitan_sva_census() {
         // The lift sees exactly the corpus's own sources: its `prim_assert.sv` shim in place of
         // the real one, and the real macro files the corpus never carried blanked — staged, they
         // would re-define the `ASSERT` macros the shim compiles out.
-        let lift_overrides: Vec<(String, String)> = sources
+        let mut lift_overrides: Vec<(String, String)> = sources
             .iter()
             .filter_map(|(name, _)| {
                 if d.files.contains(&name.as_str()) {
@@ -2090,6 +2134,7 @@ fn e2e_opentitan_sva_census() {
                 }
             })
             .collect();
+        lift_overrides.extend(lift_variants(&root.join(d.dir).join("source")));
         let opts = VerifyAutoOptions {
             config_values: d.config.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
             portfolio: Some(PortfolioMode::Sequential),
@@ -2214,11 +2259,7 @@ fn e2e_opentitan_ip_edn_full() {
     let opts = VerifyAutoOptions {
         config_values: [("rst_ni".to_string(), 1u64)].into_iter().collect(),
         portfolio: Some(PortfolioMode::Sequential),
-        lift_overrides: vec![
-            ("prim_assert.sv".to_string(), read("prim_assert_shim.sv")),
-            ("prim_assert_standard_macros.svh".to_string(), String::new()),
-            ("prim_assert_sec_cm.svh".to_string(), String::new()),
-        ],
+        lift_overrides: ip_lift_overrides(&dir),
         ..Default::default()
     };
     let t0 = std::time::Instant::now();
@@ -2509,6 +2550,193 @@ fn probe_reach_portfolio_on_env_btor2() {
     );
 }
 
+/// The second FULL OpenTitan IP — `csrng` (`examples/verify/ip_opentitan_csrng`, lowRISC/opentitan
+/// 558921c, 67 files), its AES cipher core black-boxed (`aes_cipher_core_bbox.sv`: the block's
+/// outputs are free inputs, a declared over-approximation). The IP's own assertions through
+/// `sv verify-auto` exactly as the example's `run.sh` does — the SVA extracted from the real
+/// `prim_assert` macros, the lift under the generated shim (`INC_ASSERT` defined, the two
+/// `_lift.sv` variants), `rst_ni` pinned inactive, the bus free. The three
+/// `gen_aes_cipher_control_fsm_svas` rows reference the black box's hierarchy and are
+/// `unsupported` by construction. The pins are the 2026-10-22 measurement (the README table); a
+/// definite verdict that moves is a finding, not a re-baseline.
+#[test]
+#[ignore = "requires slang + sv2v + Yosys + z3 (use the mununu-sva docker image); run with --ignored --nocapture"]
+fn e2e_opentitan_ip_csrng_full() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/verify/ip_opentitan_csrng/source");
+    let read = |f: &str| {
+        std::fs::read_to_string(dir.join(f))
+            .unwrap_or_else(|e| panic!("{}: {e}", dir.join(f).display()))
+    };
+    let order: Vec<String> = read("sources.txt")
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    let mut sources: Vec<(String, String)> = vec![("csrng.sv".to_string(), read("csrng.sv"))];
+    sources.extend(
+        order
+            .iter()
+            .filter(|f| *f != "csrng.sv")
+            .map(|f| (f.clone(), read(f))),
+    );
+    let yopts = YosysOptions {
+        top: Some("csrng".to_string()),
+        use_sv2v: true,
+        additional_sources: sources[1..].to_vec(),
+        ..Default::default()
+    };
+    let opts = VerifyAutoOptions {
+        config_values: [("rst_ni".to_string(), 1u64)].into_iter().collect(),
+        portfolio: Some(PortfolioMode::Sequential),
+        lift_overrides: ip_lift_overrides(&dir),
+        ..Default::default()
+    };
+    let t0 = std::time::Instant::now();
+    let report = verify_auto(&sources, &yopts, &opts).expect("the full IP lifts and runs");
+    eprintln!(
+        "csrng full IP: {} properties, {} unsupported, {} registers, {:.0}s",
+        report.properties.len(),
+        report.unsupported.len(),
+        report.diagnostics.state_register_count,
+        t0.elapsed().as_secs_f64()
+    );
+    for p in &report.properties {
+        let reason = p
+            .bottom_reason
+            .as_ref()
+            .map(|r| format!(" [{}]", r.one_line()))
+            .unwrap_or_default();
+        eprintln!(
+            "  {:<44} {:<10} {}{reason}",
+            p.label.as_deref().unwrap_or(&p.name),
+            p.outcome.label(),
+            p.decided_by.as_deref().unwrap_or("-")
+        );
+    }
+    for (name, reason) in &report.unsupported {
+        eprintln!("  unsupported {name}: {reason}");
+    }
+    // Exactly the one declared cut.
+    assert_eq!(
+        report.diagnostics.blackboxed_modules,
+        vec!["aes_cipher_core".to_string()]
+    );
+    // The lift: `--frontend auto`'s read_verilog + sv2v attempt fails on sv2v's output, the
+    // slang attempt dies in the BTOR backend's cell-level topological sort (yosys-slang's
+    // `$buf` cells) and succeeds on the retry with `opt_clean` — this IP is the retry's e2e.
+    assert_eq!(
+        report.diagnostics.frontend.as_deref(),
+        Some("yosys-slang (read_slang)")
+    );
+    assert!(
+        report
+            .diagnostics
+            .lift_retry
+            .as_deref()
+            .is_some_and(|r| r.contains("topological loop")),
+        "{:?}",
+        report.diagnostics.lift_retry
+    );
+    assert!(
+        report.notes.iter().any(|n| n.kind == "lift-retry"),
+        "the retry is reported as a note"
+    );
+    assert!(
+        report.diagnostics.state_register_count >= 200,
+        "{}",
+        report.diagnostics.state_register_count
+    );
+    assert!(
+        report
+            .unsupported
+            .iter()
+            .all(|(n, _)| n.contains("gen_aes_cipher_control_fsm_svas")),
+        "only the black box's own FSM rows may be unsupported; got {:?}",
+        report.unsupported
+    );
+    assert_eq!(report.unsupported.len(), 3, "{:?}", report.unsupported);
+    // --- the pins: (label, rows, outcome) ---
+    let count = |label: &str, outcome: &str| {
+        report
+            .properties
+            .iter()
+            .filter(|p| p.label.as_deref() == Some(label) && p.outcome.label() == outcome)
+            .count()
+    };
+    let total = |label: &str| {
+        report
+            .properties
+            .iter()
+            .filter(|p| p.label.as_deref() == Some(label))
+            .count()
+    };
+    for (label, rows, outcome) in CSRNG_PINS {
+        assert_eq!(
+            total(label),
+            *rows,
+            "{label}: expected {rows} row(s), got {}",
+            total(label)
+        );
+        assert_eq!(
+            count(label, outcome),
+            *rows,
+            "{label}: expected every row {outcome}; got {:?}",
+            report
+                .properties
+                .iter()
+                .filter(|p| p.label.as_deref() == Some(label))
+                .map(|p| (p.outcome.label(), p.decided_by.clone()))
+                .collect::<Vec<_>>()
+        );
+    }
+    let pinned: usize = CSRNG_PINS.iter().map(|(_, n, _)| n).sum();
+    assert_eq!(
+        pinned,
+        report.properties.len(),
+        "every row is pinned; unpinned: {:?}",
+        report
+            .properties
+            .iter()
+            .filter(|p| !CSRNG_PINS
+                .iter()
+                .any(|(l, _, _)| p.label.as_deref() == Some(l)))
+            .map(|p| p.label.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// `e2e_opentitan_ip_csrng_full`'s pins — the 2026-10-22 measurement, one entry per assertion
+/// label: (label, number of rows, the outcome every row decides).
+const CSRNG_PINS: &[(&str, usize, &str)] = &[
+    // `ASSERT_KNOWN`: 20 rows fold to a constant (2-state model), the four
+    // `CsrngGenbits{Fips,Bus}KnownO_A` rows carry an enable and decide on the `explicit` cube.
+    ("TlDValidKnownO_A", 1, "holds"),
+    ("TlAReadyKnownO_A", 1, "holds"),
+    ("EsReqKnownO_A", 1, "holds"),
+    ("CsrngReqReadyKnownO_A", 2, "holds"),
+    ("CsrngRspAckKnownO_A", 2, "holds"),
+    ("CsrngRspStsKnownO_A", 2, "holds"),
+    ("CsrngGenbitsValidKnownO_A", 2, "holds"),
+    ("CsrngGenbitsFipsKnownO_AKnownEnable", 2, "holds"),
+    ("CsrngGenbitsFipsKnownO_A", 2, "holds"),
+    ("CsrngGenbitsBusKnownO_AKnownEnable", 2, "holds"),
+    ("CsrngGenbitsBusKnownO_A", 2, "holds"),
+    ("AlertTxKnownO_A", 1, "holds"),
+    ("IntrCsCmdReqDoneKnownO_A", 1, "holds"),
+    ("IntrCsEntropyReqKnownO_A", 1, "holds"),
+    ("IntrCsHwInstExcKnownO_A", 1, "holds"),
+    ("IntrCsFatalErrKnownO_A", 1, "holds"),
+    // error → alert: the four `prim_count` chains through the reach rescue (bounded-chain
+    // monitor + rIC3), the five FSM rows and the one-hot row on the `explicit` cube. The FSM
+    // rows are vacuous on this model (`unused_err_o` is the synthesis constant, README).
+    ("FpvSecCmCtrDrbgGenAlertCheck_A", 1, "holds"),
+    ("FpvSecCmCntAlertCheck_A", 3, "holds"),
+    ("FpvSecCmDrbgCmdFsmCheck_A", 3, "holds"),
+    ("FpvSecCmCtrlMainFsmCheck_A", 1, "holds"),
+    ("FpvSecCmDrbgGenFsmCheck_A", 1, "holds"),
+    ("FpvSecCmRegWeOnehotCheck_A", 1, "holds"),
+];
+
 /// The full-IP system properties are not invariants in disguise: freezing the sticky `ERR_CODE`
 /// record (`stick:u_reg.u_err_code_edn_main_sm_err.q`, the model's alias of the register) flips
 /// `edn_main_sm_error_is_recorded` HOLDS → VIOLATED — the main FSM still reaches `Error` (software
@@ -2554,11 +2782,7 @@ fn e2e_opentitan_ip_edn_stick_flips_the_error_record() {
     let base_opts = VerifyAutoOptions {
         config_values: [("rst_ni".to_string(), 1u64)].into_iter().collect(),
         portfolio: Some(PortfolioMode::Sequential),
-        lift_overrides: vec![
-            ("prim_assert.sv".to_string(), read("prim_assert_shim.sv")),
-            ("prim_assert_standard_macros.svh".to_string(), String::new()),
-            ("prim_assert_sec_cm.svh".to_string(), String::new()),
-        ],
+        lift_overrides: ip_lift_overrides(&dir),
         ..Default::default()
     };
     let report = mutate_and_compare(

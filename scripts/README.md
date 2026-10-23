@@ -95,7 +95,8 @@ context SimpleProcess {
 
 ```bash
 # in mununu-sva (needs slang); git + Python 3 otherwise
-python3 scripts/vendor_opentitan_ip.py --ip edn --commit 558921ccc8aeefab652b45c1402c10bceb63accc   --checkout /tmp/ot --out examples/verify/ip_opentitan_edn/source   --rewrite "edn_core.sv|'{default: 1'b0}|'{default: '0}"
+python3 scripts/vendor_opentitan_ip.py --ip edn --commit 558921ccc8aeefab652b45c1402c10bceb63accc   --checkout /tmp/ot --out examples/verify/ip_opentitan_edn/source   --rewrite "edn_core.sv|'{default: 1'b0}|'{default: '0}"   --strip-inc-assert prim_alert_sender.sv --strip-inc-assert prim_sparse_fsm_flop.sv
+python3 scripts/vendor_opentitan_ip.py --ip csrng --commit 558921ccc8aeefab652b45c1402c10bceb63accc   --checkout /tmp/ot --out examples/verify/ip_opentitan_csrng/source   --blackbox aes_cipher_core   --strip-inc-assert prim_alert_sender.sv --strip-inc-assert prim_sparse_fsm_flop.sv
 ```
 
 Sparse-checks out lowRISC/opentitan at the commit, then grows the IP's `rtl/` directory into a
@@ -103,11 +104,20 @@ closure by asking slang what is missing (`unknown module` / `unknown package` / 
 adding the defining file from `hw/ip/*/rtl`, `hw/ip/prim_generic/rtl` (preferred for `prim_*`),
 `hw/top_earlgrey/{ip_autogen/*/rtl,rtl}`, until slang is clean. Writes `sources.txt` (compile order),
 `UPSTREAM_COMMIT.txt` (every file's upstream path, byte-exact; the local stubs and rewrites named),
-`prim_assert_shim.sv` (an empty definition for every macro of the real `prim_assert` set, for the
-lift only — extraction reads the real macros) and `run.sh` (the `sv verify-auto` command).
-`--blackbox NAME` leaves a module out as a `(* blackbox *)` stub with its upstream port list
-(csrng's `aes_cipher_core`); `--rewrite FILE|FROM|TO` applies and records a one-line local change
-(sv2v keeps the sized `'{default: 1'b0}` on an unpacked-array port and yosys's Verilog frontend rejects it; the unsized `'{default: '0}` is the same value and both frontends accept it).
+`prim_assert_shim.sv` (an empty definition for every assertion macro of the real `prim_assert` set
+with `INC_ASSERT` defined, so the RTL's assertion-support logic — `prim_count`'s `fpv_err_present`,
+the `ASSERT_FPV_LINEAR_FSM` `<name>_cond` flop — is in the lift while the assertion statements are
+not; for the lift only — extraction reads the real macros) and `run.sh` (the `sv verify-auto`
+command). `--blackbox NAME` leaves a module out as a `(* blackbox *)` stub with its upstream port
+list (csrng's `aes_cipher_core`); `--rewrite FILE|FROM|TO` applies and records a one-line local
+change (sv2v keeps the sized `'{default: 1'b0}` on an unpacked-array port and yosys's Verilog
+frontend rejects it; the unsized `'{default: '0}` is the same value and both frontends accept it);
+`--strip-inc-assert FILE` writes `FILE_lift.sv` — the file with every `ifdef INC_ASSERT` region
+removed, its `else` branch kept — wired as `--lift-override FILE=FILE_lift.sv`, for the two
+upstream files no frontend lifts with that region in: `prim_alert_sender.sv` (`sequence` blocks)
+and `prim_sparse_fsm_flop.sv` (the enum-method loop of `is_undefined_state`; its `else` branch
+leaves `unused_err_o` constant 0 in the lift). The e2e harnesses apply every `_lift.sv` beside a
+source automatically (`lift_variants` in `differential_oracle_e2e.rs`).
 
 ## ab_time.py — before/after timing with noise control
 

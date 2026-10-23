@@ -317,6 +317,10 @@ struct SvFlattenArtifacts {
     /// When `Auto` fell back (an earlier front end errored before this one
     /// succeeded), the prior attempt's error — else `None`. (#466)
     fallback_reason: Option<String>,
+    /// `Some(reason)` when the first yosys run died in the BTOR backend with a
+    /// topological loop and the script succeeded on a second run with `opt_clean`
+    /// before `write_btor` (see [`backend_loop_retry_script`]).
+    backend_retry: Option<String>,
 }
 
 /// Run sv2v (optional) + the flattened Yosys script and return the
@@ -593,36 +597,61 @@ fn run_sv_flatten_btor2_concrete(
         &yopts.params,
     );
 
-    let mut yosys_cmd = Command::new(&yosys);
-    if let Some(plugin) = &slang_plugin {
-        yosys_cmd.arg("-m").arg(plugin);
-    }
-    yosys_cmd.arg("-q").arg("-p").arg(&script);
-    // mununu#504 — bounded. This ran as a bare `.output()`, i.e. forever. The lift precedes every
-    // property, so a hung yosys emits ZERO output and the whole run reads as absent — one of the
-    // two ways a consumer loses a full gate run. `run_yosys` 700 lines below has used this same
-    // helper for the per-module path all along.
-    let outcome = match crate::adapter::lift_timeout() {
-        Some(t) => crate::adapter::run_with_timeout(&mut yosys_cmd, None, t),
-        None => yosys_cmd.output().map(|o| {
-            Some((
-                o.status,
-                String::from_utf8_lossy(&o.stdout).into_owned(),
-                String::from_utf8_lossy(&o.stderr).into_owned(),
-            ))
-        }),
-    }
-    .map_err(|e| AdapterError {
-        kind: AdapterErrorKind::ParseError,
-        message: format!("adapter/yosys: failed to spawn yosys: {e}"),
-        location: None,
-    })?;
-    let (status, stdout_s, stderr_s) = lift_timeout_outcome(outcome, "yosys")?;
-    let output = std::process::Output {
-        status,
-        stdout: stdout_s.into_bytes(),
-        stderr: stderr_s.into_bytes(),
+    let run_script = |script: &str| -> Result<std::process::Output, AdapterError> {
+        let mut yosys_cmd = Command::new(&yosys);
+        if let Some(plugin) = &slang_plugin {
+            yosys_cmd.arg("-m").arg(plugin);
+        }
+        yosys_cmd.arg("-q").arg("-p").arg(script);
+        // mununu#504 — bounded. This ran as a bare `.output()`, i.e. forever. The lift precedes
+        // every property, so a hung yosys emits ZERO output and the whole run reads as absent —
+        // one of the two ways a consumer loses a full gate run. `run_yosys` 700 lines below has
+        // used this same helper for the per-module path all along.
+        let outcome = match crate::adapter::lift_timeout() {
+            Some(t) => crate::adapter::run_with_timeout(&mut yosys_cmd, None, t),
+            None => yosys_cmd.output().map(|o| {
+                Some((
+                    o.status,
+                    String::from_utf8_lossy(&o.stdout).into_owned(),
+                    String::from_utf8_lossy(&o.stderr).into_owned(),
+                ))
+            }),
+        }
+        .map_err(|e| AdapterError {
+            kind: AdapterErrorKind::ParseError,
+            message: format!("adapter/yosys: failed to spawn yosys: {e}"),
+            location: None,
+        })?;
+        let (status, stdout_s, stderr_s) = lift_timeout_outcome(outcome, "yosys")?;
+        Ok(std::process::Output {
+            status,
+            stdout: stdout_s.into_bytes(),
+            stderr: stderr_s.into_bytes(),
+        })
     };
+    let mut output = run_script(&script)?;
+    let mut backend_retry = None;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        // The BTOR backend walks the netlist cell by cell and reports a "topological loop" where
+        // `check` sees none: yosys-slang's `$buf` cells chain wide vectors bit-wise through
+        // other cells (OpenTitan csrng, 2026-10-22: 4,035 `$buf` cells, the loop through the
+        // command arbiter's grant vector). `opt_clean` folds the buffers into connections and
+        // the backend's walk terminates; it removes nothing the design reads, so the model is
+        // the same design. Retried once, and only on that error, so every lift that succeeds
+        // today is byte-identical.
+        if let Some(retry) = backend_loop_retry_script(&script, &stderr) {
+            let second = run_script(&retry)?;
+            if second.status.success() {
+                backend_retry = Some(format!(
+                    "the BTOR backend reported a topological loop ({}); the lift succeeded with \
+                     `opt_clean` before `write_btor`",
+                    first_line(&stderr)
+                ));
+                output = second;
+            }
+        }
+    }
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -656,7 +685,31 @@ fn run_sv_flatten_btor2_concrete(
         staged_primary: primary.to_string_lossy().into_owned(),
         frontend_used,
         fallback_reason: None,
+        backend_retry,
     })
+}
+
+/// The yosys BTOR backend's loop diagnostic, as its first line reads (the "Active cells" list
+/// that follows is yosys-internal cell names, useless to a reader).
+fn first_line(stderr: &str) -> &str {
+    stderr
+        .lines()
+        .find(|l| l.contains("topological loop"))
+        .unwrap_or("")
+        .trim()
+}
+
+/// The lift script with `opt_clean` spliced in before `write_btor`, when `stderr` is the BTOR
+/// backend's `Found topological loop` error — `None` for any other failure (those are not
+/// retried). `opt_clean` only folds `$buf` cells into connections and drops unused cells, so the
+/// retried model is the same design; the splice is textual on the one `write_btor` command the
+/// script ends with.
+fn backend_loop_retry_script(script: &str, stderr: &str) -> Option<String> {
+    if !stderr.contains("Found topological loop") {
+        return None;
+    }
+    let idx = script.rfind("; write_btor ")?;
+    Some(format!("{}; opt_clean{}", &script[..idx], &script[idx..]))
 }
 
 /// A named state cell discovered in a flattened SV design — the
@@ -833,6 +886,7 @@ pub fn sv_to_btor2_with_blackboxes(
         blackboxed_modules: blackboxed_module_names(&artifacts.hier_json),
         frontend_used: artifacts.frontend_used,
         fallback_reason: artifacts.fallback_reason,
+        backend_retry: artifacts.backend_retry,
     })
 }
 
@@ -846,6 +900,9 @@ pub struct SvLiftResult {
     pub frontend_used: SvFrontend,
     /// `Some(reason)` when `Auto` fell back after an earlier front end errored.
     pub fallback_reason: Option<String>,
+    /// `Some(reason)` when the BTOR backend's topological-loop error made the lift rerun its
+    /// script with `opt_clean` before `write_btor` (the model is the same design).
+    pub backend_retry: Option<String>,
 }
 
 /// Scan the pre-flatten hierarchy JSON for cells whose `type` references a
@@ -2428,6 +2485,30 @@ mod tests {
     #[test]
     /// mununu#504 — a lift-subprocess timeout must produce an ACTIONABLE error naming the cap,
     /// not a bare failure. Pure mapper, so this runs without spawning anything.
+    fn backend_loop_error_retries_with_opt_clean_before_write_btor_only() {
+        let script = "read_slang --top t a.sv; hierarchy -top t; proc; write_json h.json; \
+                      cutpoint -blackbox; memory_collect; flatten; async2sync; chformal -lower; \
+                      dffunmap; setundef -zero; write_btor d.btor";
+        let loop_err =
+            "ERROR: Found topological loop while processing cell $6638. Active cells:\n    $6602\n";
+        let retried = backend_loop_retry_script(script, loop_err).expect("the loop error retries");
+        assert!(
+            retried.ends_with("; setundef -zero; opt_clean; write_btor d.btor"),
+            "{retried}"
+        );
+        assert_eq!(retried.matches("opt_clean").count(), 1);
+        assert_eq!(
+            backend_loop_retry_script(script, "ERROR: syntax error, unexpected TOK_DEFAULT"),
+            None,
+            "any other yosys error is not retried"
+        );
+        assert_eq!(
+            first_line(loop_err),
+            "ERROR: Found topological loop while processing cell $6638. Active cells:"
+        );
+    }
+
+    #[test]
     fn lift_timeout_outcome_maps_a_kill_to_an_actionable_error() {
         let err = lift_timeout_outcome(None, "yosys").expect_err("timeout is an error");
         assert!(

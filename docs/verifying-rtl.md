@@ -556,15 +556,25 @@ IP is the top with its TL-UL register block and every sub-block: `edn` (lowRISC/
 # vendor the closure without fusesoc (needs slang; run in mununu-sva)
 python3 scripts/vendor_opentitan_ip.py --ip edn --commit 558921ccc8aeefab652b45c1402c10bceb63accc \
     --checkout /tmp/ot --out examples/verify/ip_opentitan_edn/source \
-    --rewrite "edn_core.sv|'{default: 1'b0}|'{default: '0}"
+    --rewrite "edn_core.sv|'{default: 1'b0}|'{default: '0}" \
+    --strip-inc-assert prim_alert_sender.sv --strip-inc-assert prim_sparse_fsm_flop.sv
 cd examples/verify/ip_opentitan_edn/source && sh run.sh --json --source mununu_properties.sv
 ```
 
 `run.sh` is `sv verify-auto edn.sv --top edn --preprocess-sv2v --source … --lift-override
 prim_assert.sv=prim_assert_shim.sv --lift-override prim_assert_standard_macros.svh=/dev/null
---lift-override prim_assert_sec_cm.svh=/dev/null --config-value rst_ni=1`: the SVA is extracted from the
-**real** `prim_assert` macros, the lift sees the **generated synthesis shim** (every macro of the real
-set empty — the script writes it), the bus and the endpoint requests stay free inputs.
+--lift-override prim_assert_sec_cm.svh=/dev/null --lift-override prim_alert_sender.sv=prim_alert_sender_lift.sv
+--lift-override prim_sparse_fsm_flop.sv=prim_sparse_fsm_flop_lift.sv --config-value rst_ni=1`: the SVA is
+extracted from the **real** `prim_assert` macros, the lift sees the **generated synthesis shim** (every
+assertion macro of the real set empty, `INC_ASSERT` defined so the assertion-support logic —
+`prim_count`'s `fpv_err_present`, the `ASSERT_FPV_LINEAR_FSM` `<name>_cond` flop — is in the model;
+2026-10-22), the bus and the endpoint requests stay free inputs. Two upstream files cannot be lifted
+with their `ifdef INC_ASSERT` region in (`prim_alert_sender.sv`: `sequence` blocks;
+`prim_sparse_fsm_flop.sv`: the enum-method loop of `is_undefined_state` — yosys-slang "unsupported
+system task 'next'", sv2v leaves the calls unresolved), so the script writes a `_lift.sv` variant of
+each with that region removed, for the lift only. The sparse-FSM flop's `unused_err_o` is therefore the
+synthesis constant `1'b0` in the lift: the nine FSM error → alert rows hold with an antecedent the model
+cannot raise (the fault-injection posture mints that flag from the state's enum domain — planned).
 
 | rows (edn) | holds | violated | ⊥ | unsupported | decided by |
 |---|---|---|---|---|---|
@@ -576,8 +586,9 @@ set empty — the script writes it), the bus and the endpoint requests stay free
 | `@mununu_guarantee` system properties ×15 | **12** | **3** | | | `explicit` / `symbolic` cube: Error terminal / recorded / sticky (FSM → core → register block), endpoint 0 the same, the SWPortMode entry condition; the reach rescue: the fatal-alert-has-a-source invariant (k-induction, 0.5 s) and the four `EF` twins decided on their dual (2026-10-18); `constant` for the no-deadlock row; VIOLATED = the three `AG EF Idle` rows, refuted by a trap certificate (2026-10-21): each FSM's `Error` state is reachable and terminal, so it never returns to `Idle` — they were ⊥ before (FSM cone over the cap, no MUST path into the trap) |
 
 `pattgen` (87 registers) decides 14 of 14 — its four functional assertions on the **exact** engine;
-`csrng` (208 registers, `aes_cipher_core` black-boxed) 34 of 34 translated rows (3 more are unsupported
-behind the black box): the `ASSERT_KNOWN` rows and its six FSM / one-hot error → alert checks (`explicit`
+`csrng` (216 registers, `aes_cipher_core` black-boxed; vendored and pinned since 2026-10-23 as
+[`examples/verify/ip_opentitan_csrng`](../examples/verify/ip_opentitan_csrng/README.md),
+`e2e_opentitan_ip_csrng_full`) 34 of 34 translated rows (3 more are unsupported behind the black box): the `ASSERT_KNOWN` rows and its six FSM / one-hot error → alert checks (`explicit`
 cube — until 2026-10-18 the native SMT encoder refused the whole design over a constant wider than 64 bits,
 and every one of them was ⊥), and its four `prim_count` fault-flag chains through the reach portfolio's rIC3
 member (42–61 s a row under portfolio load — at the edge of the 60-s rescue slice, where
@@ -1141,6 +1152,16 @@ choice between them can be green about a different question than the one asked. 
 **reports which front end produced the verdicts** as a `lift-frontend` note — Info when there was no
 choice, and a **ScopeCaveat naming the fallback reason** when `auto` fell back. Note also that SVA in
 a `bind`-ed file cannot be parsed by `read_verilog`, so `auto` **always** ends on slang there.
+
+**The BTOR backend's "topological loop".** yosys's `write_btor` walks the netlist cell by cell and can
+report `Found topological loop while processing cell $N` on a design `check` finds loop-free: yosys-slang
+emits thousands of `$buf` cells, and a wide buffer chained bit-wise through another wide cell reads as a
+cycle at cell granularity (OpenTitan `csrng`, 2026-10-22: 4,035 `$buf` cells, the loop through the command
+arbiter's grant vector; the sv2v path showed it too). On exactly that error the lift reruns its script
+once with `opt_clean` before `write_btor` — the pass folds the buffers into connections and drops unused
+cells, so the verdicts are over the same design — and reports it as the `lift-retry` note and
+`diagnostics.lift_retry`. Any other yosys error is not retried, and a lift that succeeds on the first run
+is unchanged.
 
 > Source of truth: [`slang_frontend_selection`](../crates/mununu-core/src/adapter/yosys/mod.rs#L1672) — surface: (CLI+API+UI)
 > Source of truth: [`SvFrontend::lift_label`](../crates/mununu-core/src/adapter/yosys/mod.rs) + the `lift-frontend` note in [`build_notes`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) — surface: (CLI+API+UI)

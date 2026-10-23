@@ -287,6 +287,13 @@
           },
           "type": "array"
         },
+        "lift_retry": {
+          "description": "The lift rerun its yosys script with `opt_clean` before `write_btor` after the BTOR backend reported a topological loop (yosys-slang `$buf` cells; the model is the same design) — the reason, else `None`. The `lift-retry` note carries the same text.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "state_register_count": {
           "description": "Number of state register lines in the lifted model.",
           "format": "uint",
