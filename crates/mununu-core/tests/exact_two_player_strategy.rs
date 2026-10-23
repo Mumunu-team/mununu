@@ -228,3 +228,25 @@ fn sound_posture_removes_the_reset_hold_artifact() {
         "sound posture (reset released): the controller forces st=1 ⇒ realizable"
     );
 }
+
+/// PR C (2026-10-23) — the strategy path and the verdict must agree on what "the controller wins
+/// from the initial state" means: EVERY initial state is in the winning region. `st` has no `init`
+/// (free at cycle 0, the mununu#505 / #579 reading) and `st' = st & c`: from `st = 1` the controller
+/// keeps it (it is already `good`), from `st = 0` nothing reaches `good`. The verdict is therefore
+/// unrealizable; the strategy path used to test `init ∩ winning ≠ ∅` and returned a controller
+/// strategy for a game the controller does not win.
+#[test]
+fn the_strategy_and_the_verdict_agree_when_only_some_initial_states_win() {
+    use mununu_core::adapter::btor2::symbolic_bitblast::exact_two_player_reach_realizable;
+    const PARTIAL_INIT: &str =
+        "1 sort bitvec 1\n2 input 1 c\n3 state 1 st\n4 and 1 3 2\n5 next 1 3 4\n";
+    let realizable =
+        exact_two_player_reach_realizable(PARTIAL_INIT, "st == 1", &["c"]).expect("decides");
+    assert!(!realizable, "from st = 0 the goal is unreachable");
+    let s = exact_two_player_strategy(PARTIAL_INIT, "st == 1", &["c"]).expect("extracts");
+    assert_eq!(
+        s.realizable(),
+        realizable,
+        "the strategy must agree with the verdict: {s:?}"
+    );
+}

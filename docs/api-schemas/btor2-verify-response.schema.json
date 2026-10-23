@@ -1,10 +1,60 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "FaultEventView": {
+      "description": "One injection of an attack witness (`attack[]`).",
+      "properties": {
+        "cycle": {
+          "description": "The frame the fault input was set in.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "hex": {
+          "description": "The value in hexadecimal, at any width.",
+          "type": "string"
+        },
+        "site": {
+          "description": "The register overwritten.",
+          "type": "string"
+        },
+        "value": {
+          "description": "The value written, when it fits 64 bits.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "cycle",
+        "hex",
+        "site"
+      ],
+      "type": "object"
+    }
+  },
   "description": "Response for `POST /api/v1/btor2/verify` — the merged portfolio verdict plus which engines reached each definite conclusion. Mirrors [`crate::adapter::reach_portfolio::ReachOutcome`].",
   "properties": {
+    "attack": {
+      "description": "With a `target` and a `violated` verdict: the injections of the shallowest attack found (cycle, site, value). Empty otherwise.",
+      "items": {
+        "$ref": "#/definitions/FaultEventView"
+      },
+      "type": "array"
+    },
     "contradiction": {
       "description": "`true` when two sound engines disagree — a soundness alarm, not a guess.",
       "type": "boolean"
+    },
+    "fault": {
+      "description": "The fault posture the design was decided under (`faults`), as one label; absent without one.",
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "reachable_by": {
       "description": "Engines that found `bad` reachable (a real counterexample).",
@@ -12,6 +62,13 @@
         "type": "string"
       },
       "type": "array"
+    },
+    "target": {
+      "description": "The k-fault adversary's target (`target`); absent without one.",
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "unreachable_by": {
       "description": "Engines that proved `bad` unreachable (a real safety proof).",

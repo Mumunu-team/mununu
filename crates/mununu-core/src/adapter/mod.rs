@@ -47,6 +47,7 @@ pub mod domain;
 pub mod emit;
 pub mod engine_isolate;
 pub mod extraction;
+pub mod fault_adversary;
 pub mod fsm_scan;
 pub mod gr1_synth;
 pub mod ir;

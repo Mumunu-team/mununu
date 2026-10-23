@@ -43,6 +43,8 @@ no bound (historical behaviour).
 | `sv verify-auto` recoverability ⊥ (`AG EF good`) | escalate → **trap certificate** (closure `R == v \|=> R == v` + reach `EF R == v`, both on the **reach portfolio**; VIOLATED only) → else exact+COI / cube + `smt-hyper-must` ladder | none (candidates: sibling terminal rows, the register's value domain) |
 | `sv verify-auto` cube-**SKIPPED** (atom-less modal, e.g. no-deadlock `nu X.(<> true && [] X)`) | escalate → **exact-symbolic** rescue | none (exact needs no seeding) |
 | `btor2 cegar` (explicit) | `cegar_refine_loop` → **cube** | hand-`--predicate` unless auto-seeded upstream |
+| `btor2 verify --fault … [--target ATOM]` (k-fault adversary, one player — the attacker also drives every input) | `fault::inject_faults` (structural budget, topological order) → with a target: `AG !target` through the reach rescue + `safety_witness`; else `decide_reach_portfolio` + BMC witness → **reach portfolio** | none |
+| `btor2 game --fault …` (k-fault adversary, two players — fault inputs controllable, the design's inputs the environment) | `inject_faults` after `game_sound_posture_model` → `exact_two_player_reach_realizable` / strategy → **exact-symbolic** (`cpre_controllable`, ∀env ∃ctrl; cap 40 → 192, 1024 by hand) | none |
 
 > Source of truth: [`engine_selection`](../../crates/mununu-core/src/adapter/slang/verify_auto.rs#L2024) + [`verify_auto_portfolio`](../../crates/mununu-core/src/adapter/slang/verify_auto.rs#L1469) (the 3-engine sequential/parallel portfolio) — surface: CLI+API.
 

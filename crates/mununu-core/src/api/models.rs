@@ -939,6 +939,24 @@ pub struct Btor2VerifyRequest {
     /// Cycles before the first injection may fire (default 10). Mirrors `--fault-warmup`.
     #[serde(default)]
     pub fault_warmup: Option<u32>,
+    /// The k-fault adversary's goal (with `faults`): a boolean atom the attacker tries to reach
+    /// instead of the design's own `bad` lines. Mirrors the CLI `--target`. A `target` without
+    /// `faults` is a 400.
+    #[serde(default)]
+    pub target: Option<String>,
+}
+
+/// One injection of an attack witness (`attack[]`).
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct FaultEventView {
+    /// The frame the fault input was set in.
+    pub cycle: usize,
+    /// The register overwritten.
+    pub site: String,
+    /// The value written, when it fits 64 bits.
+    pub value: Option<u64>,
+    /// The value in hexadecimal, at any width.
+    pub hex: String,
 }
 
 /// Response for `POST /api/v1/btor2/verify` — the merged portfolio verdict plus
@@ -957,6 +975,16 @@ pub struct Btor2VerifyResponse {
     pub unreachable_by: Vec<String>,
     /// `true` when two sound engines disagree — a soundness alarm, not a guess.
     pub contradiction: bool,
+    /// The fault posture the design was decided under (`faults`), as one label; absent without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fault: Option<String>,
+    /// The k-fault adversary's target (`target`); absent without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// With a `target` and a `violated` verdict: the injections of the shallowest attack found
+    /// (cycle, site, value). Empty otherwise.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attack: Vec<FaultEventView>,
 }
 
 /// Request for the response-liveness endpoint
@@ -1224,6 +1252,14 @@ pub struct Btor2GameRequest {
     /// Mirrors the CLI `--assume-clock-reset`.
     #[serde(default)]
     pub assume_clock_reset: bool,
+    /// The k-fault adversary as a game: these fault sites' inputs (`"REG[:k]"`, one global budget,
+    /// default 1) join the controllable side, so `realizable` means an attack wins against every
+    /// environment behaviour. Mirrors the CLI `--fault`. Default empty (no change).
+    #[serde(default)]
+    pub faults: Vec<String>,
+    /// Cycles before the first injection may fire (default 10). Mirrors `--fault-warmup`.
+    #[serde(default)]
+    pub fault_warmup: Option<u32>,
 }
 
 /// Response for `POST /api/v1/btor2/game`.
@@ -1262,6 +1298,16 @@ pub struct Btor2GameResponse {
     /// or a subtler co-Büchi with no such region.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stall_lasso: Option<crate::adapter::btor2::symbolic_bitblast::StallLassoView>,
+    /// Why `strategy` is absent when the verdict is known: the extraction's own error (e.g. a goal
+    /// over no state register). Absent when a strategy was extracted or none was asked for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy_error: Option<String>,
+    /// With `faults`: the posture, as one label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fault: Option<String>,
+    /// With `faults`: `realizable` read as "an attack wins against every environment behaviour".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attack_exists: Option<bool>,
 }
 
 /// The SV → BTOR2 lift inputs shared by the SV-direct verb endpoints

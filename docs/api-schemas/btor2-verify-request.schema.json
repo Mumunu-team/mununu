@@ -23,6 +23,14 @@
         "type": "string"
       },
       "type": "array"
+    },
+    "target": {
+      "default": null,
+      "description": "The k-fault adversary's goal (with `faults`): a boolean atom the attacker tries to reach instead of the design's own `bad` lines. Mirrors the CLI `--target`. A `target` without `faults` is a 400.",
+      "type": [
+        "string",
+        "null"
+      ]
     }
   },
   "required": [

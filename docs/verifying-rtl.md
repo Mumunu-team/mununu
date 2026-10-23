@@ -725,6 +725,37 @@ encoding: `--config-value alert_rx_i=85` (`ALERT_RX_DEFAULT`). And `prim_count`'
 `fpv_force` are FPV hooks that leave an anonymous input the lift cannot drive — the posture corrupts the
 counter copies themselves, which is what the FPV force stands for.
 
+### The k-fault adversary — `btor2 verify --fault … --target`, `btor2 game --fault` (2026-10-23)
+
+> Source of truth: [`verify_fault_reach`](../crates/mununu-core/src/adapter/fault_adversary.rs) + [`btor2_game`](../crates/mununu-cli/src/main.rs) — surface: (CLI+API) — `POST /api/v1/btor2/verify` (`faults`, `target`), `POST /api/v1/btor2/game` (`faults`)
+
+The posture above asks whether a countermeasure RESPONDS to a corruption. The adversary asks whether
+corruptions can ACHIEVE something — reach a state the design must never reach, such as a key-producing
+state after the FSM was disabled:
+
+```bash
+# one player: can at most one injection on state_q (after 10 cycles) reach the target?
+mununu btor2 verify keymgr.btor2 --fault state_q:1 --target "state_q == 894 && state_intg_err_q == 0"
+# two players: can the attacker win against EVERY environment behaviour?
+mununu btor2 game keymgr.btor2 --fault state_q:1 --good "state_q == 680" --assume-clock-reset
+```
+
+| question | engine | `violated` means | `holds` means |
+|---|---|---|---|
+| `btor2 verify --fault … --target ATOM` | the reach portfolio on the injected model (`AG !target` through the reach rescue; the witness through native BMC) | an attack exists for the **strongest** attacker — it also drives every design input; the JSON's `attack.faults[]` lists `{cycle, site, value}` | for every input behaviour and every schedule of at most `k` injections after the warm-up, the target is never reached |
+| `btor2 game --fault … --good ATOM` | the exact engine's two-player fixpoint (`μX. good ∨ ⟨ctrl⟩X`, fault inputs controllable) | `realizable` — an attack wins against every environment behaviour (`attack_exists: true`; the strategy is the attack) | unrealizable — a positional environment counterstrategy blocks every attack (the counterstrategy is the defence) |
+
+The game's CI verdict is flipped under `--fault`: `realizable` → `violated` (the controller is the
+attacker). Without `--fault` nothing changes. `btor2 verify … --target` unreachable implies the game is
+unrealizable; `btor2 verify … --target` reachable with the game unrealizable means the attack needs the
+environment's cooperation. The game's strategy is indexed by the goal's register alone, so a
+state-dependent forced input can be left out of an entry (a recorded follow-up); `strategy_error`
+reports an extraction that failed instead of dropping it. The exact engine's cap applies to the game
+(40 bits, auto-raised to 192, `MUNUNU_BDD_MAX_BITS` up to 1024 by hand); the one-player question has no
+bit cap. The two-player strategy and verdict now agree on what "the controller wins" means — every
+initial state is winning (a free initial value used to yield a controller strategy for an unrealizable
+game, PR C).
+
 ### What decides at what width — the measured frontier (2026-10-14)
 
 > Source of truth: [`default_cap_for_cone`](../crates/mununu-core/src/adapter/btor2/symbolic_bitblast.rs#L254) + [`scripts/bitcap_frontier.py`](../scripts/bitcap_frontier.py) + [`experiments/EXP-0031-bitcap-frontier/`](../experiments/EXP-0031-bitcap-frontier/) — surface: (CLI+API) — the `engine` / `exact_abstention` fields of `btor2 verify-recoverability` and `sv verify-recoverability` (mununu#682) are what the sweep reads.
