@@ -733,7 +733,66 @@ fn btor2_verify_handler_impl(request: Btor2VerifyRequest) -> ApiResult<Json<Btor
             details: None,
         }
     })?;
+    // `faults` + `target`: the k-fault adversary (the CLI `--fault … --target`).
+    if let Some(target) = &request.target {
+        if request.faults.is_empty() {
+            return Err(ApiError::BadRequest {
+                message: "target: needs `faults`".into(),
+                details: None,
+            });
+        }
+        let bad = |message: String| ApiError::BadRequest {
+            message,
+            details: None,
+        };
+        let spec = crate::adapter::btor2::fault::FaultSpec::parse_many(
+            &request.faults,
+            request.fault_warmup.unwrap_or(10),
+        )
+        .map_err(bad)?;
+        let o = crate::adapter::fault_adversary::verify_fault_reach(
+            &request.content,
+            &spec,
+            Some(target),
+            200,
+        )
+        .map_err(bad)?;
+        return Ok(Json(Btor2VerifyResponse {
+            verdict: o.verdict.to_string(),
+            reachable_by: if o.verdict == "violated" {
+                o.decided_by.clone()
+            } else {
+                Vec::new()
+            },
+            unreachable_by: if o.verdict == "holds" {
+                o.decided_by.clone()
+            } else {
+                Vec::new()
+            },
+            contradiction: false,
+            fault: Some(o.fault),
+            target: o.target,
+            attack: o
+                .attack
+                .iter()
+                .map(|e| crate::api::models::FaultEventView {
+                    cycle: e.cycle,
+                    site: e.site.clone(),
+                    value: e.value.as_u64(),
+                    hex: e.value.to_hex(),
+                })
+                .collect(),
+        }));
+    }
     // `faults`: the fault-injection rewrite before any engine (the CLI `--fault`).
+    let fault_label = (!request.faults.is_empty()).then(|| {
+        crate::adapter::btor2::fault::FaultSpec::parse_many(
+            &request.faults,
+            request.fault_warmup.unwrap_or(10),
+        )
+        .map(|s| s.as_label())
+        .unwrap_or_default()
+    });
     let file = if request.faults.is_empty() {
         file
     } else {
@@ -763,6 +822,9 @@ fn btor2_verify_handler_impl(request: Btor2VerifyRequest) -> ApiResult<Json<Btor
             .map(|s| s.to_string())
             .collect(),
         contradiction: outcome.verdict == ReachVerdict::Contradiction,
+        fault: fault_label,
+        target: None,
+        attack: Vec::new(),
     }))
 }
 
@@ -1141,7 +1203,34 @@ fn btor2_game_handler_impl(request: Btor2GameRequest) -> ApiResult<Json<Btor2Gam
     } else {
         request.content.clone()
     };
-    let controllable: Vec<&str> = request.controllable.iter().map(String::as_str).collect();
+    // `faults`: inject after the posture; the fault inputs join the controllable side.
+    let (content, fault_inputs, fault_label) = if request.faults.is_empty() {
+        (content, Vec::new(), None)
+    } else {
+        let bad = |message: String| ApiError::BadRequest {
+            message,
+            details: None,
+        };
+        let spec = crate::adapter::btor2::fault::FaultSpec::parse_many(
+            &request.faults,
+            request.fault_warmup.unwrap_or(10),
+        )
+        .map_err(bad)?;
+        let file = crate::adapter::btor2::parser::parse(&content)
+            .map_err(|e| bad(format!("BTOR2 parse error: {e}")))?;
+        let (out, _) = crate::adapter::btor2::fault::inject_faults(&file, &spec).map_err(bad)?;
+        (
+            crate::adapter::btor2::emit::emit_btor2(&out),
+            spec.input_names(),
+            Some(spec.as_label()),
+        )
+    };
+    let controllable: Vec<&str> = request
+        .controllable
+        .iter()
+        .map(String::as_str)
+        .chain(fault_inputs.iter().map(String::as_str))
+        .collect();
     let recurrence = request.objective == GameObjective::Recurrence;
     // The VERDICT works on any resolvable target (state cell, combinational output, relation) for both
     // objectives and validates the partition. `reach` = force `good` once; `recurrence` = force `good`
@@ -1160,12 +1249,16 @@ fn btor2_game_handler_impl(request: Btor2GameRequest) -> ApiResult<Json<Btor2Gam
     // reachability attractor strategy (controller Mealy, or the env positional counterstrategy when
     // unrealizable); `recurrence` = the CONTROLLER's Büchi strategy when realizable (`null` when
     // unrealizable — the `stall_lasso` below is that case's witness).
-    let strategy = if recurrence {
-        exact_two_player_buchi_strategy(&content, &request.good, &controllable)
-            .ok()
-            .flatten()
+    let (strategy, strategy_error) = if recurrence {
+        match exact_two_player_buchi_strategy(&content, &request.good, &controllable) {
+            Ok(s) => (s, None),
+            Err(e) => (None, Some(e)),
+        }
     } else {
-        exact_two_player_strategy(&content, &request.good, &controllable).ok()
+        match exact_two_player_strategy(&content, &request.good, &controllable) {
+            Ok(s) => (Some(s), None),
+            Err(e) => (None, Some(e)),
+        }
     };
     // Assumption discovery: for `reach` a SAFETY hold / conjunction (`A ⇒ G`); for `recurrence` a
     // FAIRNESS assumption `GF a → GF good` (the GR(1) 1-pair objective).
@@ -1206,6 +1299,9 @@ fn btor2_game_handler_impl(request: Btor2GameRequest) -> ApiResult<Json<Btor2Gam
         holds_under,
         strategy,
         stall_lasso,
+        strategy_error,
+        attack_exists: fault_label.as_ref().map(|_| realizable),
+        fault: fault_label,
     }))
 }
 
@@ -1260,6 +1356,9 @@ fn sv_verify_handler_impl(request: SvVerifyRequest) -> ApiResult<Json<Btor2Verif
             .map(|s| s.to_string())
             .collect(),
         contradiction: outcome.verdict == ReachVerdict::Contradiction,
+        fault: None,
+        target: None,
+        attack: Vec::new(),
     }))
 }
 
@@ -5155,6 +5254,7 @@ members = ["x"]
             content: btor2.to_string(),
             faults: vec![],
             fault_warmup: None,
+            target: None,
         };
         let Json(out) = btor2_verify_handler(Json(request))
             .await
@@ -5180,6 +5280,7 @@ members = ["x"]
             content: "this is not btor2".to_string(),
             faults: vec![],
             fault_warmup: None,
+            target: None,
         };
         let err = btor2_verify_handler(Json(request))
             .await
@@ -5469,6 +5570,8 @@ members = ["x"]
             discover_assumptions: false,
             objective: crate::api::models::GameObjective::Reach,
             assume_clock_reset: false,
+            faults: vec![],
+            fault_warmup: None,
         };
         let Json(out) = btor2_game_handler(Json(raw)).await.expect("game runs");
         assert!(
@@ -5482,6 +5585,8 @@ members = ["x"]
             discover_assumptions: false,
             objective: crate::api::models::GameObjective::Reach,
             assume_clock_reset: true,
+            faults: vec![],
+            fault_warmup: None,
         };
         let Json(out) = btor2_game_handler(Json(posture)).await.expect("game runs");
         assert!(
@@ -5500,6 +5605,8 @@ members = ["x"]
             discover_assumptions: false,
             objective: crate::api::models::GameObjective::Reach,
             assume_clock_reset: false,
+            faults: vec![],
+            fault_warmup: None,
         };
         let Json(out) = btor2_game_handler(Json(request)).await.expect("game runs");
         assert!(out.realizable, "st'=c: the controller wins");
@@ -5519,6 +5626,8 @@ members = ["x"]
             discover_assumptions: false,
             objective: crate::api::models::GameObjective::Reach,
             assume_clock_reset: false,
+            faults: vec![],
+            fault_warmup: None,
         };
         let Json(out) = btor2_game_handler(Json(request)).await.expect("game runs");
         assert!(!out.realizable, "st'=c&¬e: the environment wins");
@@ -5539,6 +5648,8 @@ members = ["x"]
             discover_assumptions: true,
             objective: crate::api::models::GameObjective::Reach,
             assume_clock_reset: false,
+            faults: vec![],
+            fault_warmup: None,
         };
         let Json(out) = btor2_game_handler(Json(request)).await.expect("game runs");
         assert!(
@@ -5567,6 +5678,8 @@ members = ["x"]
             discover_assumptions: false,
             objective: crate::api::models::GameObjective::Recurrence,
             assume_clock_reset: false,
+            faults: vec![],
+            fault_warmup: None,
         };
         let Json(out) = btor2_game_handler(Json(request)).await.expect("game runs");
         assert!(out.realizable, "st'=c: the controller forces st=1 i.o.");
@@ -5596,6 +5709,8 @@ members = ["x"]
             discover_assumptions: true,
             objective: crate::api::models::GameObjective::Recurrence,
             assume_clock_reset: false,
+            faults: vec![],
+            fault_warmup: None,
         };
         let Json(out) = btor2_game_handler(Json(request)).await.expect("game runs");
         assert!(
@@ -5623,6 +5738,8 @@ members = ["x"]
             discover_assumptions: true,
             objective: crate::api::models::GameObjective::Recurrence,
             assume_clock_reset: false,
+            faults: vec![],
+            fault_warmup: None,
         };
         let Json(out) = btor2_game_handler(Json(request)).await.expect("game runs");
         assert!(!out.realizable, "no single fairness rescues TWOGATE");
@@ -5644,6 +5761,8 @@ members = ["x"]
             discover_assumptions: false,
             objective: crate::api::models::GameObjective::Reach,
             assume_clock_reset: false,
+            faults: vec![],
+            fault_warmup: None,
         };
         let err = btor2_game_handler(Json(request))
             .await

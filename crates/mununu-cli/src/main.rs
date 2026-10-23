@@ -1011,6 +1011,14 @@ struct Btor2VerifyArgs {
     /// `fault_warmup`.
     #[arg(long = "fault-warmup", value_name = "CYCLES", default_value_t = 10)]
     fault_warmup: u32,
+    /// The k-fault adversary's goal (with `--fault`): a boolean atom (`state_q == 680`,
+    /// `a == 1 && b == 3`) the attacker tries to reach instead of the design's own `bad` lines.
+    /// `violated` = an attack within the budget reaches it (the attacker also drives every
+    /// input — the strongest attacker; the JSON lists the injections under `attack`), `holds` =
+    /// no schedule of at most `k` injections after the warm-up does. Mirrored on the API as
+    /// `target`.
+    #[arg(long = "target", value_name = "ATOM", requires = "fault")]
+    target: Option<String>,
     #[command(flatten)]
     ci: CiArgs,
 }
@@ -1230,6 +1238,18 @@ struct Btor2GameArgs {
     /// functional one. Recommended for real RTL.
     #[arg(long = "assume-clock-reset")]
     assume_clock_reset: bool,
+    /// The k-fault adversary as a GAME: the fault inputs of `--fault REG[:k]` (one global budget,
+    /// default 1) are added to the CONTROLLABLE inputs, so "the controller" is the attacker and
+    /// the environment is the honest design's inputs. `realizable` then means an attack wins
+    /// against EVERY environment behaviour (the strategy is the attack) and the CI verdict is
+    /// `violated`; unrealizable means a positional environment counterstrategy blocks every
+    /// attack (the counterstrategy is the defence) and the verdict is `holds`. Without
+    /// `--fault` nothing changes. Mirrored on the API as `faults`.
+    #[arg(long = "fault", value_name = "REG[:k]")]
+    fault: Vec<String>,
+    /// Cycles before the first injection may fire (default 10).
+    #[arg(long = "fault-warmup", value_name = "CYCLES", default_value_t = 10)]
+    fault_warmup: u32,
     #[command(flatten)]
     ci: CiArgs,
 }
@@ -3499,7 +3519,28 @@ fn btor2_game(args: Btor2GameArgs) -> Result<(), String> {
     } else {
         raw
     };
-    let controllable: Vec<&str> = args.controllable.iter().map(String::as_str).collect();
+    // `--fault`: inject AFTER the posture (the fault mux outermost on the final `next`; the warm-up
+    // counts from the posture's init); the fault inputs join the controllable side.
+    let (content, fault_inputs, fault_label) = if args.fault.is_empty() {
+        (content, Vec::new(), None)
+    } else {
+        use mununu_core::adapter::btor2::fault::{FaultSpec, inject_faults};
+        let spec = FaultSpec::parse_many(&args.fault, args.fault_warmup)?;
+        let file = mununu_core::adapter::btor2::parser::parse(&content)
+            .map_err(|e| format!("BTOR2 parse error: {e}"))?;
+        let (out, _) = inject_faults(&file, &spec).map_err(|m| format!("--fault: {m}"))?;
+        (
+            mununu_core::adapter::btor2::emit::emit_btor2(&out),
+            spec.input_names(),
+            Some(spec.as_label()),
+        )
+    };
+    let controllable: Vec<&str> = args
+        .controllable
+        .iter()
+        .map(String::as_str)
+        .chain(fault_inputs.iter().map(String::as_str))
+        .collect();
     let recurrence = args.objective == GameObjective::Recurrence;
     // The VERDICT works on any resolvable target (state cell, combinational output, relation) for both
     // objectives; it also validates the controllable partition. `reach` = force `good` once; `recurrence`
@@ -3514,12 +3555,17 @@ fn btor2_game(args: Btor2GameArgs) -> Result<(), String> {
     // strategy (controller Mealy, or the env positional counterstrategy when unrealizable); `recurrence`
     // = the CONTROLLER's Büchi strategy when realizable (`None` when unrealizable — the env starvation
     // lasso below is that case's witness).
-    let strategy = if recurrence {
-        exact_two_player_buchi_strategy(&content, &args.good, &controllable)
-            .ok()
-            .flatten()
+    // A strategy that could not be extracted is reported (`strategy_error`), never dropped silently.
+    let (strategy, strategy_error) = if recurrence {
+        match exact_two_player_buchi_strategy(&content, &args.good, &controllable) {
+            Ok(s) => (s, None),
+            Err(e) => (None, Some(e)),
+        }
     } else {
-        exact_two_player_strategy(&content, &args.good, &controllable).ok()
+        match exact_two_player_strategy(&content, &args.good, &controllable) {
+            Ok(s) => (Some(s), None),
+            Err(e) => (None, Some(e)),
+        }
     };
 
     let mut summary = serde_json::json!({
@@ -3530,6 +3576,13 @@ fn btor2_game(args: Btor2GameArgs) -> Result<(), String> {
         "assume_clock_reset": args.assume_clock_reset,
         "realizable": realizable,
     });
+    if let Some(e) = &strategy_error {
+        summary["strategy_error"] = serde_json::Value::String(e.clone());
+    }
+    if let Some(label) = &fault_label {
+        summary["fault"] = serde_json::Value::String(label.clone());
+        summary["attack_exists"] = serde_json::Value::Bool(realizable);
+    }
     if let Some(s) = &strategy {
         summary["strategy"] =
             serde_json::to_value(s).map_err(|e| format!("serialize strategy: {e}"))?;
@@ -3573,7 +3626,11 @@ fn btor2_game(args: Btor2GameArgs) -> Result<(), String> {
     print_json_summary(&summary)?;
 
     // realizable == the controller wins (`holds`); unrealizable == no controller works (`violated`).
-    let verdict = if realizable { "holds" } else { "violated" };
+    // Under `--fault` the controller IS the attacker: realizable == an attack exists (`violated`).
+    let verdict = match (fault_label.is_some(), realizable) {
+        (false, true) | (true, false) => "holds",
+        (false, false) | (true, true) => "violated",
+    };
     ci_gate_exit(verdict, args.ci.fail_on);
     Ok(())
 }
@@ -4015,6 +4072,41 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
 
     let content = std::fs::read_to_string(&args.file)
         .map_err(|e| format!("Failed to read BTOR2 '{}': {e}", args.file.display()))?;
+    // `--fault … --target ATOM`: the k-fault adversary (`fault_adversary::verify_fault_reach`).
+    if let Some(target) = &args.target {
+        use mununu_core::adapter::btor2::fault::FaultSpec;
+        let spec = FaultSpec::parse_many(&args.fault, args.fault_warmup)?;
+        let o = mununu_core::adapter::fault_adversary::verify_fault_reach(
+            &content,
+            &spec,
+            Some(target),
+            args.witness_max_k,
+        )?;
+        let summary = serde_json::json!({
+            "file": args.file.display().to_string(),
+            "engines": "fault-adversary(reach portfolio)",
+            "fault": o.fault,
+            "target": o.target,
+            "verdict": o.verdict,
+            "decided_by": o.decided_by,
+            "attack": {
+                "depth": o.depth,
+                "faults": o.attack.iter().map(|e| serde_json::json!({
+                    "cycle": e.cycle,
+                    "site": e.site,
+                    "value": e.value.as_u64(),
+                    "hex": e.value.to_hex(),
+                })).collect::<Vec<_>>(),
+            },
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&summary)
+                .map_err(|e| format!("serialize summary: {e}"))?
+        );
+        ci_gate_exit(o.verdict, args.ci.fail_on);
+        return Ok(());
+    }
     let file = mununu_core::adapter::btor2::parser::parse(&content)
         .map_err(|e| format!("BTOR2 parse error in '{}': {e}", args.file.display()))?;
     // `--fault`: the fault-injection rewrite before any engine (what `btor2 inject-fault`
@@ -9983,6 +10075,39 @@ mod sv_mutate_lift_flag_tests {
             parsed.is_ok(),
             "`sv mutate` must accept the lift-posture flags (mununu#725): {:?}",
             parsed.err().map(|e| e.to_string())
+        );
+    }
+
+    /// PR C — the k-fault adversary flags: `btor2 verify --fault … --target`, `btor2 game --fault`;
+    /// `--target` needs `--fault`.
+    #[test]
+    fn fault_adversary_flags_parse() {
+        for argv in [
+            vec![
+                "mununu",
+                "btor2",
+                "verify",
+                "d.btor2",
+                "--fault",
+                "state_q:1",
+                "--target",
+                "state_q == 680",
+            ],
+            vec![
+                "mununu", "btor2", "game", "d.btor2", "--good", "st == 2", "--fault", "st:1",
+            ],
+        ] {
+            let parsed = Cli::try_parse_from(&argv);
+            assert!(
+                parsed.is_ok(),
+                "{argv:?}: {:?}",
+                parsed.err().map(|e| e.to_string())
+            );
+        }
+        assert!(
+            Cli::try_parse_from(["mununu", "btor2", "verify", "d.btor2", "--target", "x == 1"])
+                .is_err(),
+            "--target without --fault"
         );
     }
 

@@ -8597,7 +8597,8 @@ impl BddBitBlaster {
             w = attr;
         }
         let init = self.initial_state_bdd(file).ok()?;
-        if init.and(&w).unwrap() == self.ff {
+        // Realizable iff EVERY initial state is winning (the verdict's reading; PR C, 2026-10-23).
+        if init.and(&w.not().unwrap()).unwrap() != self.ff {
             return None; // unrealizable Büchi → the env starvation lasso is the witness, not a strategy
         }
         // Attractor layers to the recur set R = good ∧ CPre_ctrl W (L_0 = R, …, L_last = W).
@@ -8672,7 +8673,11 @@ impl BddBitBlaster {
             return None;
         }
         let init = self.initial_state_bdd(file).ok()?;
-        let realizable = init.and(&winning).unwrap() != self.ff;
+        // The controller wins iff EVERY initial state is in the attractor — the verdict's reading
+        // (`exact_two_player_verdict`: Holds ⇔ the formula holds at every initial state). Testing
+        // `init ∩ winning ≠ ∅` instead returned a controller strategy for a game whose verdict is
+        // unrealizable when the initial value is free (PR C, 2026-10-23).
+        let realizable = init.and(&winning.not().unwrap()).unwrap() == self.ff;
         // The winner's region: the controller lives inside the attractor; the environment lives outside it
         // (by determinacy of the reachability game, ¬attractor is the environment's winning region).
         let region = if realizable {
