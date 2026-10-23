@@ -66,7 +66,9 @@
 //! | `[*m:n]` as a consequent, repetition inside a CONSEQUENT chain element, a nested sub-sequence in an antecedent, `[*0…]`, an antecedent past 64 alternatives | length composition / the size guard |
 //! | `e throughout S` with `S` unbounded or a repetition inside its chain; a non-boolean `e` | needs a sequence automaton / length composition |
 //! | `sig[idx]` dynamic, `mem[i]` array content (a non-port unpacked array — a memory), an enum- or otherwise opaque-typed base | distinct refusals (mununu#514; the index cannot be mapped to a bit) |
-//! | a named `sequence` / `property` with local variables or recursion; a repetition of a named sequence that is not a plain boolean | out of fragment / length composition |
+//! | a named `sequence` with local variables; a recursive `property`; a repetition of a named sequence that is not a plain boolean | out of fragment / length composition |
+//! | a property's local variable assigned twice, assigned from another local variable, read in the antecedent, assigned inside a `##` chain antecedent, or of a type that is not an enum or a packed vector of ≤ 6 bits | `expand_local_vars` enumerates one shape only (below); each refusal names the variable |
+//! | `until` / `s_until` / `until_with` / `s_until_with` over a sequence operand; `disable iff` of a constant that is always true | the operands must be booleans; a property that can never be checked is refused, not proved |
 //! | `/ % **`, `*` wider than 32 bits, X/Z constants, a dynamic index that can leave the range, `>>>` of a signed operand in an unsigned context, a function body other than one `return` | the expression compiler's refusals (`expr_ir`) |
 //! | `x[i +: w]`, `x[i -: w]` | indexed part-select: slang gives base-and-WIDTH, declined rather than mis-sliced (mununu#565) |
 //! | `$countones` over more than 64 bits; other system calls | the count cap / not supported |
@@ -79,6 +81,14 @@
 //! `<->`, 1-bit bitwise operators, slang-folded constants and bare sequence properties.
 //! `e throughout b[->1]` (2026-10-18) is the one goto in the fragment — a weak-until, no automaton;
 //! goto with n ≥ 2, `[=n]` and unbounded antecedents stay out.
+//! PR B (2026-10-23) expands a property's LOCAL VARIABLES over their domain — OpenTitan's
+//! `ASSERT_FPV_LINEAR_FSM`: `(ante, v = E) |-> C(v)` with `v` of the state's enum type becomes
+//! `∧_{d ∈ members} [(ante && E == d) |-> C(d)]` plus the coverage implication `ante |-> ∨_d E == d`
+//! (a packed `logic [W-1:0]` local ranges over `2^W`, no coverage conjunct; both capped at 64
+//! cases) — and lowers the `until` family over booleans (`p until q` as the pending-latch block
+//! `nu Z. ((q || p) && (q || [] Z))`, `until_with` as `nu Z. (p && (q || [] Z))`, the `s_` forms as
+//! the μ duals, exact-engine only), a property-position `and`, and a constant `disable iff`
+//! (`(0) !== '0`, OpenTitan's `ASSERT(…, clk, 0)`: no guard).
 //! Plan C (2026-10-21, `assertion_rewrite`) inlines named `sequence` / `property` instances (slang
 //! binds the actuals), splits a sequence `or` antecedent into one implication per disjunct, and reads an
 //! unpacked PORT's element as its flattened slice — a constant index directly, a variable one by a
@@ -379,6 +389,11 @@ pub fn translate_ast_json_with_source(
     let enum_values = ConstantValues::collect(&root);
 
     let type_aliases = collect_type_aliases(&root);
+    // The domains a property's local variables range over (`assertion_rewrite::expand_local_vars`).
+    let local_var_domains = super::assertion_rewrite::LocalVarDomains {
+        aliases: type_aliases.clone(),
+        enums: collect_enum_members(&root),
+    };
     // Unpacked ports, keyed by the symbol a `NamedValue` carries — read before `scope_refs` renames.
     let unpacked_ports = super::assertion_rewrite::collect_unpacked_ports(&root);
     // Phase 3: user functions the expression compiler may inline, typedefs resolved like specs.
@@ -427,17 +442,18 @@ pub fn translate_ast_json_with_source(
         // Named sequence / property instances → their bound bodies; then an unpacked PORT's
         // element → its flattened slice or a per-element case split (`assertion_rewrite`). Both
         // read the raw slang symbols, so they run before `scope_refs` renames them.
-        let spec = match super::assertion_rewrite::inline_assertion_instances(spec) {
-            Ok(spec) => spec,
-            Err(reason) => {
-                report.unsupported.push(UnsupportedAssertion {
-                    name,
-                    kind: Some(kind),
-                    reason,
-                });
-                continue;
-            }
-        };
+        let spec =
+            match super::assertion_rewrite::inline_assertion_instances(spec, &local_var_domains) {
+                Ok(spec) => spec,
+                Err(reason) => {
+                    report.unsupported.push(UnsupportedAssertion {
+                        name,
+                        kind: Some(kind),
+                        reason,
+                    });
+                    continue;
+                }
+            };
         let spec = super::assertion_rewrite::rewrite_unpacked_port_selects(&spec, &unpacked_ports);
         // Rewrite enum-member references to integer literals before translating.
         let spec = resolve_enum_refs(&spec, &enum_values);
@@ -1403,6 +1419,49 @@ fn resolve_enum_refs(node: &Value, enums: &ConstantValues) -> Value {
     }
 }
 
+/// Every `EnumType` in the AST, `addr → members (name, value)` — the domain a local variable of
+/// that type ranges over (`assertion_rewrite::expand_local_vars`). slang folds each member's
+/// initialiser to a literal (`10'd201` for rom_ctrl's `{6'b001100, MuBi4False}`); an enum with a
+/// member that does not parse (an X/Z digit) is left out, so such a variable is refused rather
+/// than expanded over a hole.
+fn collect_enum_members(root: &Value) -> std::collections::HashMap<String, Vec<(String, i64)>> {
+    fn walk(n: &Value, out: &mut std::collections::HashMap<String, Vec<(String, i64)>>) {
+        match n {
+            Value::Object(m) => {
+                if m.get("kind").and_then(Value::as_str) == Some("EnumType")
+                    && let (Some(addr), Some(members)) = (
+                        m.get("addr").and_then(Value::as_u64),
+                        m.get("members").and_then(Value::as_array),
+                    )
+                {
+                    let parsed: Option<Vec<(String, i64)>> = members
+                        .iter()
+                        .map(|mem| {
+                            let name = mem.get("name").and_then(Value::as_str)?.to_string();
+                            let value =
+                                parse_sv_literal(mem.get("value").and_then(Value::as_str)?)?;
+                            Some((name, value))
+                        })
+                        .collect();
+                    if let Some(parsed) = parsed
+                        && !parsed.is_empty()
+                    {
+                        out.insert(addr.to_string(), parsed);
+                    }
+                }
+                for v in m.values() {
+                    walk(v, out);
+                }
+            }
+            Value::Array(a) => a.iter().for_each(|v| walk(v, out)),
+            _ => {}
+        }
+    }
+    let mut out = std::collections::HashMap::new();
+    walk(root, &mut out);
+    out
+}
+
 /// Every `TypeAlias` in the AST, `addr → target type string` (`"logic[7:0]"`,
 /// `"struct packed{…}…"`). slang writes a typedef'd signal's `type` as `"<addr> <scope>.<name>"`,
 /// which says nothing about its declared range; the alias node, found by address, does. Chains
@@ -1944,6 +2003,19 @@ fn property_body(
         // regardless of gating.
         "DisableIff" => {
             let cond_node = child(spec, "condition")?;
+            // `disable iff ((0) !== '0)` — OpenTitan's `ASSERT(name, prop, clk, 0)`: a constant
+            // disable. False: no guard and no reset recorded (the body is checked at every cycle,
+            // as written). True: the property can never be checked — refused, not "proved".
+            if let Some(always) = constant_disable(cond_node) {
+                if always {
+                    return Err(
+                        "`disable iff` is constantly true: the property can never be \
+                                checked"
+                            .into(),
+                    );
+                }
+                return property_body(child(spec, "expr")?, opts, reset_signals);
+            }
             let inner = property_body(child(spec, "expr")?, opts, reset_signals)?;
             if let Some(rs) = extract_reset_signal(cond_node) {
                 if !reset_signals.contains(&rs) {
@@ -1966,6 +2038,13 @@ fn property_body(
         // `##` chain of booleans or a fixed `[*n]` repetition (XL.5, `antecedent_implies`);
         // the consequent is a boolean or a bounded sequence (XL.4, `consequent_expr`). Ranged
         // or unbounded antecedents are rejected there with their reason.
+        // `P1 and P2` in property position (IEEE 1800 16.12.8): both hold at the start — the
+        // conjunction. (`expand_local_vars` chains its per-member implications with it.)
+        "Binary" if spec.get("op").and_then(Value::as_str) == Some("And") => {
+            let l = property_body(child(spec, "left")?, opts, reset_signals)?;
+            let r = property_body(child(spec, "right")?, opts, reset_signals)?;
+            Ok(format!("({l} && {r})"))
+        }
         "Binary" => {
             let op = spec.get("op").and_then(Value::as_str).unwrap_or("?");
             let conseq = consequent_expr(child(spec, "right")?)?;
@@ -2055,6 +2134,42 @@ fn consequent_expr(spec: &Value) -> Result<String, String> {
             }
             let e = bool_expr(child(e_spec, "expr")?)?;
             throughout_consequent(child(spec, "right")?, &e)
+        }
+        // The `until` family over two booleans (2026-10-23, the `ASSERT_FPV_LINEAR_FSM`
+        // consequent `(s != init) until !cond`). IEEE 1800 16.12.9 — `p until q`: `p` at every
+        // cycle strictly before the first `q` (weak: forever if `q` never comes); `until_with`:
+        // also at that cycle; `s_…`: `q` must come. The weak forms are ν (safety); spelled as
+        // `nu Z. (E && (B || [] Z))` so the bounded-chain monitor's pending latch judges them
+        // (`bad_monitor::weak_until_parts`): `p until q` ≡ `nu Z. ((q || p) && (q || [] Z))`.
+        // The strong forms are μ with an unguarded box (the universal reading, every path): Mixed
+        // class, the exact engine only — the rows say so through their class.
+        Some("Binary")
+            if matches!(
+                spec.get("op").and_then(Value::as_str),
+                Some("Until" | "SUntil" | "UntilWith" | "SUntilWith")
+            ) =>
+        {
+            let op = spec.get("op").and_then(Value::as_str).unwrap_or("");
+            let operand = |key: &str| -> Result<String, String> {
+                let o = child(spec, key)?;
+                if o.get("kind").and_then(Value::as_str) != Some("Simple")
+                    || o.get("repetition").is_some()
+                {
+                    return Err(format!(
+                        "the operands of `{}` must be booleans (a sequence operand needs a \
+                         sequence automaton — Tier-3b)",
+                        until_spelling(op)
+                    ));
+                }
+                bool_expr(child(o, "expr")?)
+            };
+            let (p, q) = (operand("left")?, operand("right")?);
+            Ok(match op {
+                "Until" => format!("(nu Z. (({q} || {p}) && ({q} || [] Z)))"),
+                "UntilWith" => format!("(nu Z. ({p} && ({q} || [] Z)))"),
+                "SUntil" => format!("(mu Z. ({q} || ({p} && [] Z)))"),
+                _ => format!("(mu Z. ({p} && ({q} || [] Z)))"),
+            })
         }
         Some("StrongWeak") => {
             let inner = child(spec, "expr")?;
@@ -4093,6 +4208,35 @@ fn sv_integer(expr: &Value) -> Option<i64> {
         .or_else(|| expr.get("value"))
         .and_then(Value::as_str)?;
     parse_sv_literal(raw)
+}
+
+/// The SVA spelling of an `until` operator's slang name.
+fn until_spelling(op: &str) -> &'static str {
+    match op {
+        "Until" => "until",
+        "SUntil" => "s_until",
+        "UntilWith" => "until_with",
+        _ => "s_until_with",
+    }
+}
+
+/// A `disable iff` condition that is a constant: `Some(true)` when the property is always
+/// disabled, `Some(false)` when never — `(0) !== '0` (OpenTitan's `ASSERT(…, clk, 0)`), a bare
+/// literal, or an (in)equality of two literals. `None` for anything with a signal in it.
+fn constant_disable(cond: &Value) -> Option<bool> {
+    if let Some(v) = sv_integer(cond) {
+        return Some(v != 0);
+    }
+    let c = unwrap(cond);
+    if c.get("kind").and_then(Value::as_str) != Some("BinaryOp") {
+        return None;
+    }
+    let (l, r) = (sv_integer(c.get("left")?)?, sv_integer(c.get("right")?)?);
+    match c.get("op").and_then(Value::as_str)? {
+        "Equality" | "CaseEquality" => Some(l == r),
+        "Inequality" | "CaseInequality" => Some(l != r),
+        _ => None,
+    }
 }
 
 /// Parse SystemVerilog integer-literal text. `"8"`→8, `"8'd5"`→5, `"1'b0"`→0,
@@ -6287,15 +6431,94 @@ mod tests {
         // `data_o == data_i[3]` — the one slice, bits 19:16 (element 0 at the top, measured).
         let k = formula("DataFlowK_A");
         assert!(k.contains("data_i__bits19_16"), "{k}");
-        // the local-variable property stays out, saying why
-        let linear = report
-            .unsupported
-            .iter()
-            .find(|u| u.name.contains("forms_sva"))
-            .map(|u| u.reason.clone())
-            .unwrap_or_default();
-        assert_eq!(report.unsupported.len(), 1, "{:#?}", report.unsupported);
-        assert!(linear.contains("local variables"), "{linear}");
+        // the local-variable property (a packed `logic [2:0]` local, 2026-10-23) expands over
+        // its eight values: one weak-until block per value, no coverage conjunct
+        let linear = formula("Linear_A");
+        assert_eq!(linear.matches("nu Z.").count(), 8, "{linear}");
+        assert!(linear.contains("idx_o__past == 3"), "{linear}");
+        assert!(report.unsupported.is_empty(), "{:#?}", report.unsupported);
+    }
+
+    /// The local-variable forms as slang 11.0.448 serialises them
+    /// (`testdata/sva_local_var_forms.{sv,ast.json}`, captured 2026-10-23): the
+    /// `ASSERT_FPV_LINEAR_FSM` expansion over an enum (rom_ctrl's seven members, concatenation
+    /// initialisers folded by slang), over a packed vector, the `until` family in a consequent,
+    /// a property-position `and`, the constant `disable iff ((0) !== '0)`, and the three refusals.
+    #[test]
+    fn local_variable_and_until_forms_translate_from_real_slang_json() {
+        let report = translate_ast_json(include_str!("testdata/sva_local_var_forms.ast.json"))
+            .expect("the fixture parses");
+        let formula = |l: &str| {
+            report
+                .translated
+                .iter()
+                .find(|t| t.label.as_deref() == Some(l))
+                .map(|t| t.formula.clone())
+                .unwrap_or_else(|| panic!("`{l}` did not translate: {:#?}", report.unsupported))
+        };
+        // (i) seven member cases, each `(… && state_q__past == d) |-> nu Z. …`, plus the coverage
+        // conjunct `… |-> (state_q__past == 201 || … )`; the constant disable adds no guard.
+        let lin = formula("SecCmCFILinear_A");
+        assert_eq!(lin.matches("nu Z.").count(), 7, "{lin}");
+        for d in [201, 185, 921, 633, 345, 518, 297] {
+            assert!(lin.contains(&format!("state_q__past == {d}")), "{d}: {lin}");
+        }
+        assert!(
+            lin.contains("state_q != 201") && lin.contains("state_q != 518"),
+            "{lin}"
+        );
+        assert!(!lin.contains("initial_state"), "{lin}");
+        assert!(
+            !lin.contains("|| (nu X") && !lin.contains("(0 "),
+            "no disable guard: {lin}"
+        );
+        // (ii) the packed local: 2^3 cases, no coverage disjunction
+        let packed = formula("LinearPacked_A");
+        assert_eq!(packed.matches("nu Z.").count(), 8, "{packed}");
+        // (iii) the until family — under `disable iff (!rst_ni)` without reset gating, so the
+        // guard is woven into every boolean block (mununu#705); the exact spellings are pinned
+        // guard-free by `the_shipped_fragment_truth_table`.
+        let weak = formula("UntilWeak_A");
+        assert!(
+            weak.contains("nu Z.") && weak.contains("stop_i || ready_i") && weak.contains("[] Z"),
+            "{weak}"
+        );
+        let strong = formula("UntilStrong_A");
+        assert!(
+            strong.contains("mu Z.") && strong.contains("ready_i") && strong.contains("[] Z"),
+            "{strong}"
+        );
+        let with = formula("UntilWith_A");
+        assert!(
+            with.contains("nu Z.") && with.contains("ready_i") && with.contains("[] Z"),
+            "{with}"
+        );
+        let swith = formula("UntilWithS_A");
+        assert!(swith.contains("mu Z.") && swith.contains("[] Z"), "{swith}");
+        // (iv) property-position `and`
+        let both = formula("Both_A");
+        assert!(
+            both.contains("step_i") && both.contains("stop_i") && both.contains(" && "),
+            "{both}"
+        );
+        // (v) the refusals name the variable and the reason
+        let reason = |needle: &str| {
+            report
+                .unsupported
+                .iter()
+                .find(|u| u.reason.contains(needle))
+                .map(|u| u.reason.clone())
+                .unwrap_or_else(|| {
+                    panic!(
+                        "no refusal mentioning `{needle}`: {:#?}",
+                        report.unsupported
+                    )
+                })
+        };
+        assert!(reason("assigned twice").contains("`v`"));
+        assert!(reason("read in the antecedent").contains("`v`"));
+        assert!(reason("another local variable").contains("`b`"));
+        assert_eq!(report.unsupported.len(), 3, "{:#?}", report.unsupported);
     }
 
     /// OpenTitan coverage, Phases 2 + 3 — the real slang 11.0.448 shapes
@@ -6935,8 +7158,83 @@ mod tests {
         let nov = "NonOverlappedImplication";
 
         // ---- property level: (what it is in SVA, the slang shape, the contract)
+        let until = |op: &str, p: Value, q: Value| serde_json::json!({"kind": "Binary", "op": op, "left": p, "right": q});
         let props: Vec<(&str, Value, Want)> = vec![
             ("assert property (b)", simple(sig("b")), Translates("b")),
+            // the `until` family (2026-10-23) — weak forms as the pending-latch block, strong as μ
+            (
+                "a |-> b until c",
+                imp(
+                    ov,
+                    simple(sig("a")),
+                    until("Until", simple(sig("b")), simple(sig("c"))),
+                ),
+                Translates("(nu Z. ((c || b) && (c || [] Z)))"),
+            ),
+            (
+                "a |-> b until_with c",
+                imp(
+                    ov,
+                    simple(sig("a")),
+                    until("UntilWith", simple(sig("b")), simple(sig("c"))),
+                ),
+                Translates("(nu Z. (b && (c || [] Z)))"),
+            ),
+            (
+                "a |-> b s_until c",
+                imp(
+                    ov,
+                    simple(sig("a")),
+                    until("SUntil", simple(sig("b")), simple(sig("c"))),
+                ),
+                Translates("(mu Z. (c || (b && [] Z)))"),
+            ),
+            (
+                "a |-> b s_until_with c",
+                imp(
+                    ov,
+                    simple(sig("a")),
+                    until("SUntilWith", simple(sig("b")), simple(sig("c"))),
+                ),
+                Translates("(mu Z. (b && (c || [] Z)))"),
+            ),
+            (
+                "a |-> (b ##1 c) until d — a sequence operand",
+                imp(
+                    ov,
+                    simple(sig("a")),
+                    until(
+                        "Until",
+                        concat(vec![
+                            (simple(sig("b")), n(0), n(0)),
+                            (simple(sig("c")), n(1), n(1)),
+                        ]),
+                        simple(sig("d")),
+                    ),
+                ),
+                Rejected("operands of `until` must be booleans"),
+            ),
+            (
+                "(a |-> b) and (c |-> d) — property-position and",
+                serde_json::json!({"kind": "Binary", "op": "And",
+                    "left": imp(ov, simple(sig("a")), simple(sig("b"))),
+                    "right": imp(ov, simple(sig("c")), simple(sig("d")))}),
+                Translates("((!(a) || b) && (!(c) || d))"),
+            ),
+            (
+                "disable iff ((0) !== '0) (a |-> b) — a constant disable, no guard",
+                serde_json::json!({"kind": "DisableIff",
+                    "condition": cmp("CaseInequality", lit("0"), serde_json::json!({"kind": "UnbasedUnsizedIntegerLiteral", "type": "bit[31:0]", "value": "32'd0"})),
+                    "expr": imp(ov, simple(sig("a")), simple(sig("b")))}),
+                Translates("(!(a) || b)"),
+            ),
+            (
+                "disable iff ((1) !== '0) P — always disabled, never checked",
+                serde_json::json!({"kind": "DisableIff",
+                    "condition": cmp("CaseInequality", lit("1"), serde_json::json!({"kind": "UnbasedUnsizedIntegerLiteral", "type": "bit[31:0]", "value": "32'd0"})),
+                    "expr": imp(ov, simple(sig("a")), simple(sig("b")))}),
+                Rejected("constantly true"),
+            ),
             (
                 "assert property (##1 b) — a bare sequence (holds iff it matches from each start)",
                 concat(vec![(simple(sig("b")), n(1), n(1))]),

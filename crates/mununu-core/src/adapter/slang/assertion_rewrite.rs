@@ -17,38 +17,146 @@
 //!   on the selector). An unpacked array that is NOT a port is a memory in the lifted model and
 //!   stays refused (mununu#514).
 //!
-//! Both are exact; neither approximates.
+//! - **Local variables of a property instance** ([`expand_local_vars`], 2026-10-23). The
+//!   `ASSERT_FPV_LINEAR_FSM` shape — `(ante, v = E) |-> C(v)` with `v` assigned exactly once, in
+//!   the antecedent's one match item, from an expression `E` free of local variables, and read
+//!   only in the consequent — is the finite conjunction over the variable's DOMAIN `D`:
+//!   `∧_{d ∈ D} [ (ante && E == d) |-> C(d) ]`, plus, for an enum domain, the coverage conjunct
+//!   `ante |-> ∨_{d ∈ D} E == d` so a HOLDS never rests on `E` leaving its encoding (IEEE 1800
+//!   16.10: the match item samples `E` at the antecedent's match; the conjunction enumerates that
+//!   sample). `D` is the members of the variable's enum type (through any `typedef` chain), or
+//!   `0..2^W` for a packed `logic [W-1:0]`; both capped at [`MAX_PORT_CASE_SPLIT`] values. A
+//!   variable assigned twice, assigned from another local variable, read in the antecedent, or
+//!   assigned inside a `##` chain antecedent stays refused, each with its reason.
+//!
+//! All three are exact; none approximates.
 
 use std::collections::HashMap;
 
 use serde_json::{Value, json};
 
-/// The largest number of elements a variable-index case split expands to.
+/// The largest number of elements a variable-index case split expands to — and the largest
+/// local-variable domain [`expand_local_vars`] enumerates.
 pub const MAX_PORT_CASE_SPLIT: u64 = 64;
 
-/// Replace every `AssertionInstance` by its bound `body`, recursively.
+/// What a local variable's type ranges over, read off the slang AST once per translation.
+#[derive(Debug, Default, Clone)]
+pub struct LocalVarDomains {
+    /// Every `TypeAlias` addr → its target type text (`"logic[7:0]"`, `"<addr> pkg::sts_e"`), and
+    /// every `EnumType` addr → its packed base type (`collect_type_aliases` in `translate`).
+    pub aliases: HashMap<String, String>,
+    /// Every `EnumType` addr → its members `(name, value)` (`collect_enum_members`).
+    pub enums: HashMap<String, Vec<(String, i64)>>,
+}
+
+/// A resolved local-variable domain: the values, and whether they are an enum's members (which
+/// gets the coverage conjunct) or the full range of a packed vector (which needs none).
+struct Domain {
+    values: Vec<i64>,
+    is_enum: bool,
+    /// The packed type text the substituted literals carry (`"logic[9:0]"`).
+    packed: String,
+}
+
+impl LocalVarDomains {
+    /// The values a local variable of slang type text `ty` ranges over.
+    fn domain(&self, ty: &str) -> Result<Domain, String> {
+        let mut ty = ty.to_string();
+        for _ in 0..8 {
+            // `"<addr> pkg::name"` — an alias or an enum, by address
+            if let Some((addr, _)) = ty.split_once(' ')
+                && addr.chars().all(|c| c.is_ascii_digit())
+            {
+                if let Some(members) = self.enums.get(addr) {
+                    let packed = self.aliases.get(addr).cloned().unwrap_or_default();
+                    return Ok(Domain {
+                        values: members.iter().map(|(_, v)| *v).collect(),
+                        is_enum: true,
+                        packed,
+                    });
+                }
+                match self.aliases.get(addr) {
+                    Some(target) => {
+                        ty = target.clone();
+                        continue;
+                    }
+                    None => {
+                        return Err(format!("its type `{ty}` is not an enum or a packed vector"));
+                    }
+                }
+            }
+            // `logic[hi:lo]` / `bit[hi:lo]` / `logic` / `bit`
+            let width = packed_width(&ty)
+                .ok_or_else(|| format!("its type `{ty}` is not an enum or a packed vector"))?;
+            if width > MAX_PORT_CASE_SPLIT.trailing_zeros() as u64 {
+                return Err(format!(
+                    "its type `{ty}` has 2^{width} values, over the {MAX_PORT_CASE_SPLIT}-value \
+                     expansion cap"
+                ));
+            }
+            return Ok(Domain {
+                values: (0..(1i64 << width)).collect(),
+                is_enum: false,
+                packed: ty,
+            });
+        }
+        Err(format!("its type `{ty}` aliases too deeply"))
+    }
+}
+
+/// The bit width of a packed scalar/vector type text: `logic[9:0]` → 10, `bit` → 1; `None` for
+/// anything else (unpacked, struct, real, …).
+fn packed_width(ty: &str) -> Option<u64> {
+    let ty = ty.trim();
+    let (base, range) = match ty.find('[') {
+        Some(i) => (&ty[..i], Some(&ty[i..])),
+        None => (ty, None),
+    };
+    if !matches!(base.trim(), "logic" | "bit" | "reg") {
+        return None;
+    }
+    let Some(range) = range else {
+        return Some(1);
+    };
+    let inner = range.strip_prefix('[')?.strip_suffix(']')?;
+    let (hi, lo) = inner.split_once(':')?;
+    let (hi, lo): (i64, i64) = (hi.trim().parse().ok()?, lo.trim().parse().ok()?);
+    Some((hi - lo).unsigned_abs() + 1)
+}
+
+/// Replace every `AssertionInstance` by its bound `body`, recursively; a property instance with
+/// local variables is expanded over their domains ([`expand_local_vars`]).
 ///
-/// `Err` (the reason) for an instance with local variables or a recursive property, and for a
-/// repetition applied to an instance whose body is not a plain boolean.
-pub fn inline_assertion_instances(node: &Value) -> Result<Value, String> {
-    let out = inline(node)?;
+/// `Err` (the reason) for a sequence instance with local variables, a recursive property, a
+/// local variable outside the expandable shape, and for a repetition applied to an instance
+/// whose body is not a plain boolean.
+pub fn inline_assertion_instances(
+    node: &Value,
+    domains: &LocalVarDomains,
+) -> Result<Value, String> {
+    let out = inline(node, domains)?;
     Ok(splice_concats(&out))
 }
 
-fn instance_body(inst: &Value) -> Result<&Value, String> {
-    let name = inst
-        .get("symbol")
+fn instance_name(inst: &Value) -> &str {
+    inst.get("symbol")
         .and_then(Value::as_str)
         .and_then(|s| s.split_whitespace().last())
-        .unwrap_or("<instance>");
-    if inst
-        .get("localVars")
+        .unwrap_or("<instance>")
+}
+
+fn has_local_vars(inst: &Value) -> bool {
+    inst.get("localVars")
         .and_then(Value::as_array)
         .is_some_and(|v| !v.is_empty())
-    {
+}
+
+fn instance_body(inst: &Value) -> Result<&Value, String> {
+    let name = instance_name(inst);
+    if has_local_vars(inst) {
         return Err(format!(
-            "`{name}` declares local variables (a match-item assignment) — local-variable \
-             sequences are out of fragment"
+            "`{name}` declares local variables (a match-item assignment) in sequence position — \
+             only a property instance's local variables are expanded"
         ));
     }
     if inst.get("isRecursiveProperty").and_then(Value::as_bool) == Some(true) {
@@ -60,7 +168,7 @@ fn instance_body(inst: &Value) -> Result<&Value, String> {
         .ok_or_else(|| format!("`{name}`: the instance carries no body"))
 }
 
-fn inline(node: &Value) -> Result<Value, String> {
+fn inline(node: &Value, domains: &LocalVarDomains) -> Result<Value, String> {
     match node {
         Value::Object(map) => {
             // A sequence instance in sequence position: `Simple { expr: AssertionInstance }`.
@@ -68,7 +176,15 @@ fn inline(node: &Value) -> Result<Value, String> {
                 && let Some(inst) = map.get("expr")
                 && inst.get("kind").and_then(Value::as_str) == Some("AssertionInstance")
             {
-                let body = inline(instance_body(inst)?)?;
+                // slang wraps a PROPERTY instance in `Simple` too (`type: "property"`, no
+                // repetition); with local variables it is expanded, the wrapper dropped.
+                if inst.get("type").and_then(Value::as_str) == Some("property")
+                    && has_local_vars(inst)
+                    && map.get("repetition").is_none()
+                {
+                    return inline(&expand_local_vars(inst, domains)?, domains);
+                }
+                let body = inline(instance_body(inst)?, domains)?;
                 return match map.get("repetition") {
                     None => Ok(body),
                     Some(rep) => {
@@ -86,21 +202,323 @@ fn inline(node: &Value) -> Result<Value, String> {
                     }
                 };
             }
-            // A property instance in property position.
+            // A property instance in property position; with local variables, expanded over
+            // their domains first (the expansion's body may hold further instances).
             if map.get("kind").and_then(Value::as_str) == Some("AssertionInstance") {
-                return inline(instance_body(node)?);
+                if has_local_vars(node) {
+                    return inline(&expand_local_vars(node, domains)?, domains);
+                }
+                return inline(instance_body(node)?, domains);
             }
             let mut out = serde_json::Map::new();
             for (k, v) in map {
-                out.insert(k.clone(), inline(v)?);
+                out.insert(k.clone(), inline(v, domains)?);
             }
             Ok(Value::Object(out))
         }
         Value::Array(a) => Ok(Value::Array(
-            a.iter().map(inline).collect::<Result<_, _>>()?,
+            a.iter()
+                .map(|v| inline(v, domains))
+                .collect::<Result<_, _>>()?,
         )),
         other => Ok(other.clone()),
     }
+}
+
+/// One local variable of a property declaration, as slang lists it under `localVars`.
+struct LocalVar {
+    name: String,
+    /// The address every `NamedValue` of the variable carries in its `symbol` (`"<addr> <name>"`).
+    addr: String,
+    ty: String,
+}
+
+/// Does `node` reference (as a `NamedValue`) any local variable whose addr is in `vars`?
+/// Returns the first such variable's name.
+fn references_local(node: &Value, vars: &[LocalVar]) -> Option<String> {
+    match node {
+        Value::Object(m) => {
+            if m.get("kind").and_then(Value::as_str) == Some("NamedValue")
+                && let Some(sym) = m.get("symbol").and_then(Value::as_str)
+                && let Some(addr) = sym.split_whitespace().next()
+                && let Some(v) = vars.iter().find(|v| v.addr == addr)
+            {
+                return Some(v.name.clone());
+            }
+            m.values().find_map(|v| references_local(v, vars))
+        }
+        Value::Array(a) => a.iter().find_map(|v| references_local(v, vars)),
+        _ => None,
+    }
+}
+
+/// `node` with every `NamedValue` of the local variable `addr` replaced by the integer literal
+/// `value` (typed `packed`, as `resolve_enum_refs` types an enum member: the expression compiler
+/// sizes the literal by it).
+fn substitute_local(node: &Value, addr: &str, value: i64, packed: &str) -> Value {
+    match node {
+        Value::Object(m) => {
+            if m.get("kind").and_then(Value::as_str) == Some("NamedValue")
+                && m.get("symbol")
+                    .and_then(Value::as_str)
+                    .and_then(|s| s.split_whitespace().next())
+                    == Some(addr)
+            {
+                let mut lit = json!({
+                    "kind": "IntegerLiteral",
+                    "constant": value.to_string(),
+                    "value": value.to_string(),
+                });
+                if !packed.is_empty() {
+                    lit["type"] = json!(packed);
+                } else if let Some(ty) = m.get("type") {
+                    lit["type"] = ty.clone();
+                }
+                return lit;
+            }
+            Value::Object(
+                m.iter()
+                    .map(|(k, v)| (k.clone(), substitute_local(v, addr, value, packed)))
+                    .collect(),
+            )
+        }
+        Value::Array(a) => Value::Array(
+            a.iter()
+                .map(|v| substitute_local(v, addr, value, packed))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+fn eq_literal(expr: &Value, value: i64, packed: &str) -> Value {
+    let mut lit = json!({"kind": "IntegerLiteral", "constant": value.to_string(),
+                         "value": value.to_string()});
+    if !packed.is_empty() {
+        lit["type"] = json!(packed);
+    } else if let Some(ty) = expr.get("type") {
+        lit["type"] = ty.clone();
+    }
+    json!({"kind": "BinaryOp", "op": "Equality", "type": "logic", "left": expr.clone(), "right": lit})
+}
+
+fn logical(op: &str, a: Value, b: Value) -> Value {
+    json!({"kind": "BinaryOp", "op": op, "type": "logic", "left": a, "right": b})
+}
+
+/// A property instance whose declaration has local variables, expanded over their domains — the
+/// module doc's "Local variables of a property instance". The result is a property `Binary{And}`
+/// chain of implications (plus the coverage implication for each enum-typed variable); `Err`
+/// names the variable and why its shape is not the expandable one.
+pub fn expand_local_vars(inst: &Value, domains: &LocalVarDomains) -> Result<Value, String> {
+    let name = instance_name(inst);
+    if inst.get("isRecursiveProperty").and_then(Value::as_bool) == Some(true) {
+        return Err(format!(
+            "`{name}` is a recursive property — out of fragment"
+        ));
+    }
+    let vars: Vec<LocalVar> = inst
+        .get("localVars")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .map(|v| LocalVar {
+                    name: v
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("?")
+                        .to_string(),
+                    addr: v.get("addr").map(|a| a.to_string()).unwrap_or_default(),
+                    ty: v
+                        .get("type")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let body = inst
+        .get("body")
+        .ok_or_else(|| format!("`{name}`: the instance carries no body"))?;
+    let refuse = |what: &str| -> String {
+        format!(
+            "`{name}` declares local variables and {what} — only `(ante, v = E) |-> C(v)` \
+                 with `v` assigned once, from an expression free of local variables, and read \
+                 only in the consequent, expands over `v`'s domain"
+        )
+    };
+    // The shape: an implication whose antecedent is one match-item block over a boolean.
+    let op = body.get("op").and_then(Value::as_str).unwrap_or("");
+    if body.get("kind").and_then(Value::as_str) != Some("Binary")
+        || !matches!(op, "OverlappedImplication" | "NonOverlappedImplication")
+    {
+        return Err(refuse("its body is not an implication"));
+    }
+    let (left, right) = (
+        body.get("left")
+            .ok_or_else(|| refuse("the implication has no antecedent"))?,
+        body.get("right")
+            .ok_or_else(|| refuse("the implication has no consequent"))?,
+    );
+    // Every assignment anywhere in the antecedent, per variable.
+    let mut assigned: HashMap<String, Vec<Value>> = HashMap::new();
+    fn collect_assignments(node: &Value, out: &mut HashMap<String, Vec<Value>>) {
+        match node {
+            Value::Object(m) => {
+                if m.get("kind").and_then(Value::as_str) == Some("SequenceWithMatch")
+                    && let Some(items) = m.get("matchItems").and_then(Value::as_array)
+                {
+                    for it in items {
+                        if it.get("kind").and_then(Value::as_str) == Some("Assignment")
+                            && let Some(addr) = it
+                                .get("left")
+                                .and_then(|l| l.get("symbol"))
+                                .and_then(Value::as_str)
+                                .and_then(|s| s.split_whitespace().next())
+                            && let Some(rhs) = it.get("right")
+                        {
+                            out.entry(addr.to_string()).or_default().push(rhs.clone());
+                        }
+                    }
+                }
+                m.values().for_each(|v| collect_assignments(v, out));
+            }
+            Value::Array(a) => a.iter().for_each(|v| collect_assignments(v, out)),
+            _ => {}
+        }
+    }
+    collect_assignments(left, &mut assigned);
+    for v in &vars {
+        match assigned.get(&v.addr).map(Vec::len).unwrap_or(0) {
+            0 => {
+                return Err(refuse(&format!(
+                    "`{}` is never assigned in the antecedent",
+                    v.name
+                )));
+            }
+            1 => {}
+            _ => return Err(refuse(&format!("`{}` is assigned twice", v.name))),
+        }
+        if let Some(other) = references_local(&assigned[&v.addr][0], &vars) {
+            return Err(refuse(&format!(
+                "`{}` is assigned from another local variable (`{other}`)",
+                v.name
+            )));
+        }
+    }
+    // A local variable read anywhere in the antecedent outside the match items (its own
+    // assignments) is a value the expansion cannot pin — refused before the shape check so the
+    // reason names it.
+    fn reads_outside_assignments(node: &Value, vars: &[LocalVar]) -> Option<String> {
+        match node {
+            Value::Object(m) => {
+                if m.get("kind").and_then(Value::as_str) == Some("NamedValue") {
+                    return references_local(node, vars);
+                }
+                m.iter()
+                    .filter(|(k, _)| k.as_str() != "matchItems")
+                    .find_map(|(_, v)| reads_outside_assignments(v, vars))
+            }
+            Value::Array(a) => a.iter().find_map(|v| reads_outside_assignments(v, vars)),
+            _ => None,
+        }
+    }
+    if let Some(v) = reads_outside_assignments(left, &vars) {
+        return Err(refuse(&format!("`{v}` is read in the antecedent")));
+    }
+    // The antecedent must be exactly one match-item block over a boolean …
+    let (ante_expr, items) = match (
+        left.get("kind").and_then(Value::as_str),
+        left.get("expr"),
+        left.get("matchItems").and_then(Value::as_array),
+    ) {
+        (Some("SequenceWithMatch"), Some(e), Some(items))
+            if e.get("kind").and_then(Value::as_str) == Some("Simple")
+                && e.get("repetition").is_none() =>
+        {
+            (
+                e.get("expr")
+                    .ok_or_else(|| refuse("the antecedent has no expression"))?,
+                items,
+            )
+        }
+        _ => {
+            return Err(refuse(
+                "a local variable is assigned inside a sequence antecedent",
+            ));
+        }
+    };
+    if items.len() != vars.len() {
+        return Err(refuse("a match item is not a local-variable assignment"));
+    }
+    // The domains, and the expansion size.
+    let doms: Vec<Domain> = vars
+        .iter()
+        .map(|v| {
+            domains
+                .domain(&v.ty)
+                .map_err(|why| refuse(&format!("`{}`: {why}", v.name)))
+        })
+        .collect::<Result<_, _>>()?;
+    let total = doms
+        .iter()
+        .try_fold(1u64, |acc, d| acc.checked_mul(d.values.len() as u64))
+        .unwrap_or(u64::MAX);
+    if total == 0 || total > MAX_PORT_CASE_SPLIT {
+        return Err(refuse(&format!(
+            "the expansion would have {total} cases, over the {MAX_PORT_CASE_SPLIT}-case cap"
+        )));
+    }
+    // Every assignment of values to variables (the product of the domains).
+    let mut tuples: Vec<Vec<i64>> = vec![Vec::new()];
+    for d in &doms {
+        tuples = tuples
+            .iter()
+            .flat_map(|t| {
+                d.values.iter().map(move |v| {
+                    let mut t2 = t.clone();
+                    t2.push(*v);
+                    t2
+                })
+            })
+            .collect();
+    }
+    let mut conjuncts: Vec<Value> = Vec::with_capacity(tuples.len() + vars.len());
+    for tuple in &tuples {
+        let mut ante = ante_expr.clone();
+        let mut cons = right.clone();
+        for ((v, d), value) in vars.iter().zip(&doms).zip(tuple) {
+            ante = logical(
+                "LogicalAnd",
+                ante,
+                eq_literal(&assigned[&v.addr][0], *value, &d.packed),
+            );
+            cons = substitute_local(&cons, &v.addr, *value, &d.packed);
+        }
+        conjuncts.push(json!({"kind": "Binary", "op": op,
+                              "left": {"kind": "Simple", "expr": ante}, "right": cons}));
+    }
+    // Coverage: for an enum-typed variable, `E` is one of the members at the match — a HOLDS
+    // never rests on `E` leaving its encoding (a violation here is a domain escape).
+    for (v, d) in vars.iter().zip(&doms) {
+        if !d.is_enum {
+            continue;
+        }
+        let e = &assigned[&v.addr][0];
+        let mut any = eq_literal(e, d.values[0], &d.packed);
+        for value in &d.values[1..] {
+            any = logical("LogicalOr", any, eq_literal(e, *value, &d.packed));
+        }
+        conjuncts.push(json!({"kind": "Binary", "op": op,
+                              "left": {"kind": "Simple", "expr": ante_expr.clone()},
+                              "right": {"kind": "Simple", "expr": any}}));
+    }
+    let mut out = conjuncts.remove(0);
+    for c in conjuncts {
+        out = json!({"kind": "Binary", "op": "And", "left": out, "right": c});
+    }
+    Ok(out)
 }
 
 /// `##a (x ##b y)` → `##a x ##b y`: an element of a `SequenceConcat` whose sequence is itself a
@@ -419,7 +837,8 @@ mod tests {
         let concat = json!({"kind": "SequenceConcat", "elements": [
             {"sequence": {"kind": "Simple", "expr": instance("9 PingSigInt_S", json!([]))},
              "min": 1, "max": 1}]});
-        let out = inline_assertion_instances(&concat).expect("inlines");
+        let out =
+            inline_assertion_instances(&concat, &LocalVarDomains::default()).expect("inlines");
         let el = &out["elements"][0];
         assert_eq!(el["min"], 1);
         assert_eq!(el["sequence"]["kind"], "Simple");
@@ -429,15 +848,163 @@ mod tests {
     }
 
     #[test]
-    fn local_variables_and_recursion_stay_refused() {
+    fn sequence_position_local_variables_and_recursion_stay_refused() {
+        let d = LocalVarDomains::default();
         let with_local = json!({"kind": "Simple",
                                 "expr": instance("9 Linear_P", json!([{"name": "init_s"}]))});
-        let e = inline_assertion_instances(&with_local).unwrap_err();
-        assert!(e.contains("local variables"), "{e}");
+        let e = inline_assertion_instances(&with_local, &d).unwrap_err();
+        assert!(e.contains("sequence position"), "{e}");
         let mut rec = instance("9 R", json!([]));
         rec["isRecursiveProperty"] = json!(true);
-        let e = inline_assertion_instances(&rec).unwrap_err();
+        let e = inline_assertion_instances(&rec, &d).unwrap_err();
         assert!(e.contains("recursive"), "{e}");
+    }
+
+    /// The `ASSERT_FPV_LINEAR_FSM` property as slang 11 serialises it (captured 2026-10-23 in
+    /// `testdata/sva_local_var_forms.ast.json`): `(!$stable(s) & cond, init = $past(s)) |->
+    /// (s != init) until !cond`, `init` of the state's enum type.
+    fn linear(local_vars: Value, ante_extra: Option<Value>, cons_reads: &str) -> Value {
+        let s = named("50 state_q", "60 pkg::fsm_state_e");
+        let past = json!({"kind": "Call", "subroutine": "$past", "type": "60 pkg::fsm_state_e",
+                          "arguments": [s.clone()]});
+        let mut ante = json!({"kind": "BinaryOp", "op": "BinaryAnd", "type": "logic",
+                              "left": {"kind": "UnaryOp", "op": "LogicalNot", "type": "bit",
+                                       "operand": {"kind": "Call", "subroutine": "$stable",
+                                                   "type": "bit", "arguments": [s.clone()]}},
+                              "right": named("51 cond", "bit")});
+        if let Some(x) = ante_extra {
+            ante = json!({"kind": "BinaryOp", "op": "LogicalAnd", "type": "logic", "left": ante,
+                          "right": x});
+        }
+        json!({"kind": "AssertionInstance", "type": "property", "symbol": "70 Linear_P",
+               "isRecursiveProperty": false, "localVars": local_vars,
+               "body": {"kind": "Binary", "op": "OverlappedImplication",
+                        "left": {"kind": "SequenceWithMatch",
+                                 "expr": {"kind": "Simple", "expr": ante},
+                                 "matchItems": [{"kind": "Assignment", "type": "60 pkg::fsm_state_e",
+                                                 "left": named("80 initial_state", "60 pkg::fsm_state_e"),
+                                                 "right": past}]},
+                        "right": {"kind": "Binary", "op": "Until",
+                                  "left": {"kind": "Simple", "expr": {"kind": "BinaryOp",
+                                           "op": "Inequality", "type": "logic", "left": s,
+                                           "right": named(cons_reads, "60 pkg::fsm_state_e")}},
+                                  "right": {"kind": "Simple", "expr": {"kind": "UnaryOp",
+                                            "op": "LogicalNot", "type": "logic",
+                                            "operand": named("51 cond", "bit")}}}}})
+    }
+
+    fn enum_domains() -> LocalVarDomains {
+        let mut d = LocalVarDomains::default();
+        d.aliases.insert("60".into(), "logic[9:0]".into());
+        d.enums.insert(
+            "60".into(),
+            vec![("A".into(), 201), ("B".into(), 185), ("C".into(), 921)],
+        );
+        d
+    }
+
+    #[test]
+    fn a_local_variable_over_an_enum_expands_to_one_implication_per_member_plus_coverage() {
+        let inst = linear(
+            json!([{"name": "initial_state", "addr": 80, "type": "60 pkg::fsm_state_e"}]),
+            None,
+            "80 initial_state",
+        );
+        let out = inline_assertion_instances(&inst, &enum_domains()).expect("expands");
+        let s = out.to_string();
+        assert!(
+            !s.contains("AssertionInstance") && !s.contains("initial_state"),
+            "{s}"
+        );
+        // three member cases + the coverage conjunct = four implications under three `And`s
+        assert_eq!(s.matches("\"op\":\"And\"").count(), 3, "{s}");
+        assert_eq!(s.matches("OverlappedImplication").count(), 4, "{s}");
+        // each case pins `$past(state_q) == d` in the antecedent and substitutes `d` in the body
+        for d in ["201", "185", "921"] {
+            assert!(
+                s.contains(&format!("\"constant\":\"{d}\"")),
+                "{d} missing in {s}"
+            );
+        }
+        assert!(
+            s.contains("\"type\":\"logic[9:0]\""),
+            "the literal carries the packed type: {s}"
+        );
+        assert!(
+            s.contains("LogicalOr"),
+            "the coverage disjunction is present: {s}"
+        );
+    }
+
+    #[test]
+    fn a_packed_local_variable_expands_over_its_range_without_coverage() {
+        let mut inst = linear(
+            json!([{"name": "init_s", "addr": 80, "type": "logic[1:0]"}]),
+            None,
+            "80 init_s",
+        );
+        inst["body"]["left"]["matchItems"][0]["left"] = named("80 init_s", "logic[1:0]");
+        let out = inline_assertion_instances(&inst, &LocalVarDomains::default()).expect("expands");
+        let s = out.to_string();
+        assert_eq!(
+            s.matches("OverlappedImplication").count(),
+            4,
+            "2^2 cases, no coverage: {s}"
+        );
+        assert!(!s.contains("LogicalOr"), "{s}");
+    }
+
+    #[test]
+    fn local_variable_shapes_outside_the_expansion_are_refused_with_their_reason() {
+        let d = enum_domains();
+        // read in the antecedent
+        let inst = linear(
+            json!([{"name": "initial_state", "addr": 80, "type": "60 pkg::fsm_state_e"}]),
+            Some(named("80 initial_state", "60 pkg::fsm_state_e")),
+            "80 initial_state",
+        );
+        let e = inline_assertion_instances(&inst, &d).unwrap_err();
+        assert!(e.contains("read in the antecedent"), "{e}");
+        // assigned twice (a second match block in a chain antecedent)
+        let mut inst = linear(
+            json!([{"name": "initial_state", "addr": 80, "type": "60 pkg::fsm_state_e"}]),
+            None,
+            "80 initial_state",
+        );
+        let first = inst["body"]["left"].clone();
+        inst["body"]["left"] = json!({"kind": "SequenceConcat", "elements": [
+            {"sequence": first.clone(), "min": 0, "max": 0},
+            {"sequence": first, "min": 1, "max": 1}]});
+        let e = inline_assertion_instances(&inst, &d).unwrap_err();
+        assert!(e.contains("assigned twice"), "{e}");
+        // assigned from another local variable
+        let mut inst = linear(
+            json!([{"name": "a", "addr": 80, "type": "logic[1:0]"},
+                                     {"name": "b", "addr": 81, "type": "logic[1:0]"}]),
+            None,
+            "81 b",
+        );
+        inst["body"]["left"]["matchItems"] = json!([
+            {"kind": "Assignment", "left": named("80 a", "logic[1:0]"), "right": named("1 x", "logic[1:0]")},
+            {"kind": "Assignment", "left": named("81 b", "logic[1:0]"), "right": named("80 a", "logic[1:0]")}]);
+        let e = inline_assertion_instances(&inst, &d).unwrap_err();
+        assert!(e.contains("another local variable"), "{e}");
+        // a domain over the cap
+        let inst = linear(
+            json!([{"name": "init_s", "addr": 80, "type": "logic[9:0]"}]),
+            None,
+            "80 init_s",
+        );
+        let e = inline_assertion_instances(&inst, &d).unwrap_err();
+        assert!(e.contains("2^10") || e.contains("cap"), "{e}");
+        // an unknown type
+        let inst = linear(
+            json!([{"name": "init_s", "addr": 80, "type": "real"}]),
+            None,
+            "80 init_s",
+        );
+        let e = inline_assertion_instances(&inst, &d).unwrap_err();
+        assert!(e.contains("not an enum or a packed vector"), "{e}");
     }
 
     #[test]
@@ -450,7 +1017,7 @@ mod tests {
                           "body": body, "isRecursiveProperty": false, "localVars": []});
         let outer = json!({"kind": "SequenceConcat", "elements": [
             {"sequence": {"kind": "Simple", "expr": inst}, "min": 2, "max": 2}]});
-        let out = inline_assertion_instances(&outer).expect("inlines");
+        let out = inline_assertion_instances(&outer, &LocalVarDomains::default()).expect("inlines");
         let els = out["elements"].as_array().expect("elements");
         assert_eq!(els.len(), 2);
         assert_eq!(

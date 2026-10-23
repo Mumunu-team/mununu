@@ -1226,6 +1226,11 @@ repo, so the lists below cannot drift from the code without a red test.
 | a hierarchical reference, `u_rx.state_q`, `u_core.u_fifo.gen_normal_fifo.u_cnt.err_o` — into any instance, however many times its module is instantiated, written directly or through a macro argument (OpenTitan's `ASSERT_PRIM_*_ERROR_TRIGGER_ALERT`) | that instance's flattened signal: the unit is preprocessed (`slang -E`) and the AST dumped with source positions, so the path is read as written and walked over the instance tree (generate blocks, `gen[i]` through the genvar, `$root.`) | 2026-10-16 (#709), any instance 2026-10-17 (mununu#722) |
 | a member of an element of a packed array of structs (`edn_o[i].edn_ack`, `alert_tx_o[1].alert_p`) | the member's slice of the right element | 2026-10-17 (mununu#722) |
 | `e throughout b[->1]` — a boolean held until and including the first `b` (OpenTitan's `EdnDataStable_A`: `$stable(bus) throughout (req \|\| !enable)[->1]`) | `nu Z. (e && (b \|\| [] Z))`, the weak reading: `e` forever if `b` never comes — not vacuous, `e` constrains every cycle; a bare `b[->1]` consequent, `[->n]` with n ≥ 2 and `[=n]` stay Tier-3b | 2026-10-18 |
+| a property's **local variable** assigned once in the antecedent's match item and read in the consequent — OpenTitan's `ASSERT_FPV_LINEAR_FSM` (`(!$stable(s) & cond, init = $past(s)) \|-> (s != init) until !cond`, `init` of the state's enum type) | one implication per value of the variable's domain, `E == d` conjoined to the antecedent and `d` substituted in the consequent — the enum's members (rom_ctrl 7, keymgr 11) or `0..2^W` for a packed `logic [W-1:0]`, capped at 64 — plus, for an enum, the coverage implication `ante \|-> (E == d₁ \|\| … \|\| E == dₙ)` so a HOLDS never rests on the register leaving its encoding | 2026-10-23 |
+| `p until q`, `p until_with q` (booleans) | `nu Z. ((q \|\| p) && (q \|\| [] Z))` / `nu Z. (p && (q \|\| [] Z))` — the weak readings, `p` forever if `q` never comes; several such blocks conjoined (one per enum member) are judged by one pending latch each in the bounded-chain monitor, so the reach portfolio decides them | 2026-10-23 |
+| `p s_until q`, `p s_until_with q` (booleans) | `mu Z. (q \|\| (p && [] Z))` / `mu Z. (p && (q \|\| [] Z))` — the strong readings over every path; Mixed class, the exact engine only | 2026-10-23 |
+| `P1 and P2` in property position | `(P1 && P2)` | 2026-10-23 |
+| `disable iff ((0) !== '0)` — OpenTitan's `ASSERT(name, prop, clk, 0)`, a constant disable | no guard, no reset recorded (a constantly TRUE disable is refused: the property can never be checked) | 2026-10-23 |
 | an assertion inside a `for` generate, or in an instance a `for` generate elaborates (`csrng_cmd_stage`, `prim_alert_sender`) | checked once per iteration; the iteration `gen[k]` is spelled **`gen$k`** in formulas, counterexamples and the model (`[` opens a box in the μ-calculus) — `g_ch$1.r`, `u_core.gen_cmd_stage$0.u_cmd_stage.state_q` | 2026-10-17 (mununu#713) |
 
 Each definite verdict transfers exactly as in the plain `|=>` case — the lowerings add boxes,
@@ -1263,7 +1268,10 @@ sub-sequence inside an antecedent, an antecedent past 64 alternatives, and `[*m:
 or inside a consequent chain; `s_eventually` or `##[m:$]` over a sequence; a `cover` of an
 eventuality; ranged `nexttime [k]` / `always [m:n]`; `weak()` of an unbounded sequence;
 `throughout` over an unbounded sequence; dynamic `sig[idx]` and the content `mem[i]` of an unpacked
-array that is not a port (a memory); a named `sequence` / `property` with local variables; indexed
+array that is not a port (a memory); a named `sequence` with local variables, a recursive `property`, and
+a property local variable outside the one expanded shape (assigned twice, assigned from another local,
+read in the antecedent, assigned inside a `##` chain antecedent, or of a type that is not an enum or a
+packed vector of at most 6 bits); the `until` family over a sequence operand; indexed
 part-selects `x[i +: w]` (#565); `$countones` past 64 bits; `/ % **` and a multiplication wider
 than 32 bits; a dynamic select whose index can leave the declared range (SV reads X there, and the
 model has no X); an X/Z constant; a function body other than one `return`; `>>>` of a signed
