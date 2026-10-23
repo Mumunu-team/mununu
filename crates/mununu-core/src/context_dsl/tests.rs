@@ -1082,3 +1082,76 @@ fn parses_complex_ltl_formula() {
         FormulaExpr::MuCalculus(_) => panic!("Expected LTL formula"),
     }
 }
+
+/// A guard with `&&`, `||` or `!` constrains its transition instead of disabling it. It used to
+/// be lowered to one string and split at its first comparison operator (`(a` vs `1)&&(b==0)`),
+/// whose mangled variable no state knew, so the transition silently never fired and `Open` was
+/// unreachable.
+#[test]
+fn a_compound_guard_constrains_its_transition_instead_of_disabling_it() {
+    let doc = parse_context(
+        r#"
+context guards {
+    alphabet { label tick; label open; label shut; }
+    automata {
+        automaton Valve {
+            alphabet { label tick; label open; label shut; }
+            variables { var a : i64 = 0; var b : i64 = 0; }
+            states { state Closed initial; state Open; state Never; }
+            transitions {
+                transition Closed -> Closed on label tick guard a < 3 effects { a = a + 1; };
+                transition Closed -> Open on label open guard a >= 2 && b == 0;
+                transition Closed -> Never on label shut guard a > 5 || !(b == 0);
+                transition Open -> Closed on label shut;
+            }
+        }
+    }
+}
+"#,
+    );
+    let realized = crate::context_dsl::realize::realize(&doc, &[]).expect("realizes");
+    let clts = realized.context.clts("Valve").expect("the automaton");
+    let names: Vec<String> = clts
+        .states()
+        .filter_map(|s| clts.state_name(s).map(str::to_string))
+        .collect();
+    assert!(
+        names.iter().any(|n| n.starts_with("Open")),
+        "`a >= 2 && b == 0` holds once `a` reaches 2: `Open` must be reachable, got {names:?}"
+    );
+    assert!(
+        !names.iter().any(|n| n.starts_with("Never")),
+        "`a > 5 || !(b == 0)` never holds (`a` stops at 3, `b` stays 0), got {names:?}"
+    );
+}
+
+/// A guard over a name that is no declared variable cannot be decided; unrolling refuses it
+/// instead of dropping the transition silently.
+#[test]
+fn a_guard_over_an_undeclared_name_is_refused() {
+    let doc = parse_context(
+        r#"
+context typo {
+    alphabet { label go; }
+    automata {
+        automaton A {
+            alphabet { label go; }
+            variables { var count : i64 = 0; }
+            states { state S initial; state T; }
+            transitions {
+                transition S -> T on label go guard cuont >= 1;
+            }
+        }
+    }
+}
+"#,
+    );
+    let err = crate::context_dsl::realize::realize(&doc, &[])
+        .err()
+        .expect("an undecidable guard is an error");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("cannot be decided") && msg.contains("cuont"),
+        "{msg}"
+    );
+}
