@@ -523,6 +523,27 @@ fn viability_variable_automaton_guard_sync() {
 
                         additional_targets: Vec::new(),
                     },
+                    // Test-and-set as ONE action: `Machine`'s `{tick, test_counter_0,
+                    // set_counter_1}` is a synchronisation vector, which pairs only with a
+                    // partner edge projecting to the same set `{test_counter_0, set_counter_1}`
+                    // (mununu#570). With separate test and set edges alone, `Machine` froze in
+                    // `Working` and realization now refuses that composition.
+                    TransitionSpec {
+                        source: "counter_0".to_string(),
+                        target: "counter_1".to_string(),
+                        labels: vec!["test_counter_0".to_string(), "set_counter_1".to_string()],
+                        modality: mununu_core::context_dsl::ast::TransitionModalitySpec::Sharp,
+
+                        additional_targets: Vec::new(),
+                    },
+                    TransitionSpec {
+                        source: "counter_1".to_string(),
+                        target: "counter_2".to_string(),
+                        labels: vec!["test_counter_1".to_string(), "set_counter_2".to_string()],
+                        modality: mununu_core::context_dsl::ast::TransitionModalitySpec::Sharp,
+
+                        additional_targets: Vec::new(),
+                    },
                     // test transitions: self-loops (guard checks)
                     TransitionSpec {
                         source: "counter_0".to_string(),
@@ -615,6 +636,15 @@ fn viability_variable_automaton_guard_sync() {
     assert!(
         composed.state_count() > 0,
         "Composed system should have states"
+    );
+    // The counter steps 0 → 1 → 2 under `tick`, so `finish` (guarded by `test_counter_2`)
+    // reaches `Done` — the behaviour the frozen encoding lost.
+    assert!(
+        composed
+            .states()
+            .filter_map(|s| composed.state_name(s))
+            .any(|n| n.contains("Done")),
+        "`Done` must be reachable once the counter reaches 2"
     );
 
     // Evaluate safety on composition

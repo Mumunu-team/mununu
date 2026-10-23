@@ -310,6 +310,9 @@ pub struct Composition {
     pub meta: Meta,
     pub kind: CompositionKind,
     pub members: Vec<MemberRef>,
+    /// `allow_dead_vectors;` — a compound action no partner can match is a warning, not a
+    /// realization error (mununu#570).
+    pub allow_dead_vectors: bool,
     pub span: Span,
 }
 

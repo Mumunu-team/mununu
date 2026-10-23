@@ -393,6 +393,7 @@ mod tests {
                     },
                     kind: CompositionKind::Asynchronous,
                     members: vec![member("C"), member("A"), member("B")],
+                    allow_dead_vectors: false,
                     span: Span::new(0, 0, 0, 0),
                 },
                 Composition {
@@ -403,6 +404,7 @@ mod tests {
                     },
                     kind: CompositionKind::Synchronous,
                     members: vec![member("Y"), member("X")],
+                    allow_dead_vectors: false,
                     span: Span::new(0, 0, 0, 0),
                 },
             ],
@@ -1320,6 +1322,7 @@ mod tests {
                     },
                     kind: CompositionKind::Superset,
                     members: vec![member("A")],
+                    allow_dead_vectors: false,
                     span: Span::new(0, 0, 0, 0),
                 },
                 Composition {
@@ -1330,6 +1333,7 @@ mod tests {
                     },
                     kind: CompositionKind::Asynchronous,
                     members: vec![member("A")],
+                    allow_dead_vectors: false,
                     span: Span::new(0, 0, 0, 0),
                 },
                 Composition {
@@ -1340,6 +1344,7 @@ mod tests {
                     },
                     kind: CompositionKind::Synchronous,
                     members: vec![member("A")],
+                    allow_dead_vectors: false,
                     span: Span::new(0, 0, 0, 0),
                 },
             ],

@@ -166,6 +166,13 @@ automaton Multi {
 | `U0->U0 on a;` only | `{a}` | `{a}` | `{a}` | HOLDS |
 | `U0->U0 on a, label b;` | `{a,b}` | `{a,b}` | `{a,b}` | HOLDS |
 
+**Row 1 is now refused.** Realizing a CTXDSL composition in which a compound action has no
+set-identical partner projection is an error that names the vector and the partner
+([`dead_compound_actions`](../crates/mununu-core/src/composition/mod.rs)); before 2026-10 it was a
+log warning `--quiet` suppressed. A composition that disables the action on purpose says
+`allow_dead_vectors;` after its `members` clause and keeps the warning. Compositions the adapters
+build (the yosys multi-module path, `verify.toml` assembly) still warn.
+
 **Row 1 is the trap, and it is not monotone.** Its partner permits strictly *more* behaviour than
 row 2's, yet the composition permits strictly *less* — it cannot move at all. That is because
 adding `a` to the partner does not merely grant a capability, it **enlarges the shared alphabet**,

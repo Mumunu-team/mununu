@@ -1432,7 +1432,8 @@ fn compose_and_register(
             }
         }
         let options = CompositionOptions::new(semantics)
-            .with_sync_vectors(sync_vectors.into_iter().collect());
+            .with_sync_vectors(sync_vectors.into_iter().collect())
+            .with_dead_vectors_as_errors(!composition.allow_dead_vectors);
 
         // Compose members left-associatively.
         // Members can be base automata (from context) or previously realized compositions.

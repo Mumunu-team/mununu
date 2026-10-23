@@ -236,6 +236,22 @@ impl<'a> Parser<'a> {
 
         self.expect_keyword(Keyword::Members)?;
         let members = self.parse_members_clause()?;
+        // Composition options, one statement each.
+        let mut allow_dead_vectors = false;
+        while !self.check_symbol(Symbol::RBrace) {
+            let option = self.expect_ident()?;
+            match option.name.as_str() {
+                "allow_dead_vectors" => allow_dead_vectors = true,
+                _ => {
+                    return Err(ParseError::UnexpectedToken {
+                        found: TokenKind::Identifier(option.name.clone()),
+                        expected: "composition option (`allow_dead_vectors;`)",
+                        span: option.span,
+                    });
+                }
+            }
+            self.expect_symbol(Symbol::Semicolon)?;
+        }
         let end = self.expect_symbol(Symbol::RBrace)?.span;
         let span = join_span(&start_span, &end);
 
@@ -244,6 +260,7 @@ impl<'a> Parser<'a> {
             meta,
             kind,
             members,
+            allow_dead_vectors,
             span,
         })
     }
