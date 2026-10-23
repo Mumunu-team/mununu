@@ -1,0 +1,2120 @@
+{
+  "design": {
+    "name": "$root",
+    "kind": "Root",
+    "addr": 93825657131616,
+    "members": [
+      {
+        "name": "",
+        "kind": "CompilationUnit",
+        "addr": 93825657200400,
+        "members": [
+          {
+            "name": "forms_pkg",
+            "kind": "Package",
+            "addr": 93825657200672,
+            "members": [
+              {
+                "name": "MuBi4True",
+                "kind": "Parameter",
+                "addr": 93825657200816,
+                "type": "logic[3:0]",
+                "initializer": {
+                  "kind": "Conversion",
+                  "type": "logic[3:0]",
+                  "operand": {
+                    "kind": "IntegerLiteral",
+                    "type": "bit[3:0]",
+                    "value": "4'b110",
+                    "constant": "4'b110"
+                  },
+                  "constant": "4'b110"
+                },
+                "value": "4'b110",
+                "isLocal": true,
+                "isPort": false,
+                "isBody": true
+              },
+              {
+                "name": "MuBi4False",
+                "kind": "Parameter",
+                "addr": 93825657200984,
+                "type": "logic[3:0]",
+                "initializer": {
+                  "kind": "Conversion",
+                  "type": "logic[3:0]",
+                  "operand": {
+                    "kind": "IntegerLiteral",
+                    "type": "bit[3:0]",
+                    "value": "4'b1001",
+                    "constant": "4'b1001"
+                  },
+                  "constant": "4'b1001"
+                },
+                "value": "4'b1001",
+                "isLocal": true,
+                "isPort": false,
+                "isBody": true
+              },
+              {
+                "name": "fsm_state_e",
+                "kind": "EnumType",
+                "addr": 93825657210264,
+                "members": [
+                  {
+                    "name": "ReadingLow",
+                    "kind": "EnumValue",
+                    "addr": 93825657210408,
+                    "initializer": {
+                      "kind": "Concatenation",
+                      "type": "logic[9:0]",
+                      "operands": [
+                        {
+                          "kind": "IntegerLiteral",
+                          "type": "bit[5:0]",
+                          "value": "6'b1100",
+                          "constant": "6'b1100"
+                        },
+                        {
+                          "kind": "NamedValue",
+                          "type": "logic[3:0]",
+                          "symbol": "93825657200984 MuBi4False",
+                          "constant": "4'b1001"
+                        }
+                      ],
+                      "constant": "10'd201"
+                    },
+                    "value": "10'd201"
+                  },
+                  {
+                    "name": "ReadingHigh",
+                    "kind": "EnumValue",
+                    "addr": 93825657211384,
+                    "initializer": {
+                      "kind": "Concatenation",
+                      "type": "logic[9:0]",
+                      "operands": [
+                        {
+                          "kind": "IntegerLiteral",
+                          "type": "bit[5:0]",
+                          "value": "6'b1011",
+                          "constant": "6'b1011"
+                        },
+                        {
+                          "kind": "NamedValue",
+                          "type": "logic[3:0]",
+                          "symbol": "93825657200984 MuBi4False",
+                          "constant": "4'b1001"
+                        }
+                      ],
+                      "constant": "10'd185"
+                    },
+                    "value": "10'd185"
+                  },
+                  {
+                    "name": "RomAhead",
+                    "kind": "EnumValue",
+                    "addr": 93825657211800,
+                    "initializer": {
+                      "kind": "Concatenation",
+                      "type": "logic[9:0]",
+                      "operands": [
+                        {
+                          "kind": "IntegerLiteral",
+                          "type": "bit[5:0]",
+                          "value": "6'b111001",
+                          "constant": "6'b111001"
+                        },
+                        {
+                          "kind": "NamedValue",
+                          "type": "logic[3:0]",
+                          "symbol": "93825657200984 MuBi4False",
+                          "constant": "4'b1001"
+                        }
+                      ],
+                      "constant": "10'd921"
+                    },
+                    "value": "10'd921"
+                  },
+                  {
+                    "name": "KmacAhead",
+                    "kind": "EnumValue",
+                    "addr": 93825657219744,
+                    "initializer": {
+                      "kind": "Concatenation",
+                      "type": "logic[9:0]",
+                      "operands": [
+                        {
+                          "kind": "IntegerLiteral",
+                          "type": "bit[5:0]",
+                          "value": "6'b100111",
+                          "constant": "6'b100111"
+                        },
+                        {
+                          "kind": "NamedValue",
+                          "type": "logic[3:0]",
+                          "symbol": "93825657200984 MuBi4False",
+                          "constant": "4'b1001"
+                        }
+                      ],
+                      "constant": "10'd633"
+                    },
+                    "value": "10'd633"
+                  },
+                  {
+                    "name": "Checking",
+                    "kind": "EnumValue",
+                    "addr": 93825657220160,
+                    "initializer": {
+                      "kind": "Concatenation",
+                      "type": "logic[9:0]",
+                      "operands": [
+                        {
+                          "kind": "IntegerLiteral",
+                          "type": "bit[5:0]",
+                          "value": "6'b10101",
+                          "constant": "6'b10101"
+                        },
+                        {
+                          "kind": "NamedValue",
+                          "type": "logic[3:0]",
+                          "symbol": "93825657200984 MuBi4False",
+                          "constant": "4'b1001"
+                        }
+                      ],
+                      "constant": "10'd345"
+                    },
+                    "value": "10'd345"
+                  },
+                  {
+                    "name": "Done",
+                    "kind": "EnumValue",
+                    "addr": 93825657220576,
+                    "initializer": {
+                      "kind": "Concatenation",
+                      "type": "logic[9:0]",
+                      "operands": [
+                        {
+                          "kind": "IntegerLiteral",
+                          "type": "bit[5:0]",
+                          "value": "6'b100000",
+                          "constant": "6'b100000"
+                        },
+                        {
+                          "kind": "NamedValue",
+                          "type": "logic[3:0]",
+                          "symbol": "93825657200816 MuBi4True",
+                          "constant": "4'b110"
+                        }
+                      ],
+                      "constant": "10'd518"
+                    },
+                    "value": "10'd518"
+                  },
+                  {
+                    "name": "Invalid",
+                    "kind": "EnumValue",
+                    "addr": 93825657221288,
+                    "initializer": {
+                      "kind": "Concatenation",
+                      "type": "logic[9:0]",
+                      "operands": [
+                        {
+                          "kind": "IntegerLiteral",
+                          "type": "bit[5:0]",
+                          "value": "6'b10010",
+                          "constant": "6'b10010"
+                        },
+                        {
+                          "kind": "NamedValue",
+                          "type": "logic[3:0]",
+                          "symbol": "93825657200984 MuBi4False",
+                          "constant": "4'b1001"
+                        }
+                      ],
+                      "constant": "10'd297"
+                    },
+                    "value": "10'd297"
+                  }
+                ],
+                "baseType": "logic[9:0]"
+              },
+              {
+                "name": "fsm_state_e",
+                "kind": "TypeAlias",
+                "addr": 93825657201216,
+                "target": "93825657210264 forms_pkg::fsm_state_e"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "forms",
+        "kind": "Instance",
+        "addr": 93825657209896,
+        "body": {
+          "name": "forms",
+          "kind": "InstanceBody",
+          "addr": 93825657201360,
+          "members": [
+            {
+              "name": "",
+              "kind": "WildcardImport",
+              "addr": 93825657201536,
+              "package": "93825657200672 forms_pkg"
+            },
+            {
+              "name": "clk_i",
+              "kind": "Port",
+              "addr": 93825657221976,
+              "type": "logic",
+              "direction": "In",
+              "internalSymbol": "93825657222096 clk_i"
+            },
+            {
+              "name": "clk_i",
+              "kind": "Net",
+              "addr": 93825657222096,
+              "type": "logic",
+              "netType": {
+                "name": "wire",
+                "kind": "NetType",
+                "addr": 93825657058464,
+                "type": "logic"
+              }
+            },
+            {
+              "name": "rst_ni",
+              "kind": "Port",
+              "addr": 93825657222256,
+              "type": "logic",
+              "direction": "In",
+              "internalSymbol": "93825657222376 rst_ni"
+            },
+            {
+              "name": "rst_ni",
+              "kind": "Net",
+              "addr": 93825657222376,
+              "type": "logic",
+              "netType": {
+                "name": "wire",
+                "kind": "NetType",
+                "addr": 93825657058464,
+                "type": "logic"
+              }
+            },
+            {
+              "name": "step_i",
+              "kind": "Port",
+              "addr": 93825657222536,
+              "type": "logic",
+              "direction": "In",
+              "internalSymbol": "93825657222656 step_i"
+            },
+            {
+              "name": "step_i",
+              "kind": "Net",
+              "addr": 93825657222656,
+              "type": "logic",
+              "netType": {
+                "name": "wire",
+                "kind": "NetType",
+                "addr": 93825657058464,
+                "type": "logic"
+              }
+            },
+            {
+              "name": "stop_i",
+              "kind": "Port",
+              "addr": 93825657222816,
+              "type": "logic",
+              "direction": "In",
+              "internalSymbol": "93825657222936 stop_i"
+            },
+            {
+              "name": "stop_i",
+              "kind": "Net",
+              "addr": 93825657222936,
+              "type": "logic",
+              "netType": {
+                "name": "wire",
+                "kind": "NetType",
+                "addr": 93825657058464,
+                "type": "logic"
+              }
+            },
+            {
+              "name": "ready_i",
+              "kind": "Port",
+              "addr": 93825657223096,
+              "type": "logic",
+              "direction": "In",
+              "internalSymbol": "93825657223216 ready_i"
+            },
+            {
+              "name": "ready_i",
+              "kind": "Net",
+              "addr": 93825657223216,
+              "type": "logic",
+              "netType": {
+                "name": "wire",
+                "kind": "NetType",
+                "addr": 93825657058464,
+                "type": "logic"
+              }
+            },
+            {
+              "name": "idx_i",
+              "kind": "Port",
+              "addr": 93825657223376,
+              "type": "logic[2:0]",
+              "direction": "In",
+              "internalSymbol": "93825657223496 idx_i"
+            },
+            {
+              "name": "idx_i",
+              "kind": "Net",
+              "addr": 93825657223496,
+              "type": "logic[2:0]",
+              "netType": {
+                "name": "wire",
+                "kind": "NetType",
+                "addr": 93825657058464,
+                "type": "logic"
+              }
+            },
+            {
+              "name": "state_o",
+              "kind": "Port",
+              "addr": 93825657223656,
+              "type": "logic[9:0]",
+              "direction": "Out",
+              "internalSymbol": "93825657223856 state_o"
+            },
+            {
+              "name": "state_o",
+              "kind": "Variable",
+              "addr": 93825657223856,
+              "type": "logic[9:0]",
+              "lifetime": "Static"
+            },
+            {
+              "name": "state_q",
+              "kind": "Variable",
+              "addr": 93825657221704,
+              "type": "93825657201216 forms_pkg::fsm_state_e",
+              "lifetime": "Static"
+            },
+            {
+              "name": "state_d",
+              "kind": "Variable",
+              "addr": 93825657221840,
+              "type": "93825657201216 forms_pkg::fsm_state_e",
+              "lifetime": "Static"
+            },
+            {
+              "name": "",
+              "kind": "ProceduralBlock",
+              "addr": 93825657201752,
+              "procedureKind": "AlwaysComb",
+              "body": {
+                "kind": "Block",
+                "blockKind": "Sequential",
+                "body": {
+                  "kind": "List",
+                  "list": [
+                    {
+                      "kind": "ExpressionStatement",
+                      "expr": {
+                        "kind": "Assignment",
+                        "type": "93825657201216 forms_pkg::fsm_state_e",
+                        "left": {
+                          "kind": "NamedValue",
+                          "type": "93825657201216 forms_pkg::fsm_state_e",
+                          "symbol": "93825657221840 state_d"
+                        },
+                        "right": {
+                          "kind": "NamedValue",
+                          "type": "93825657201216 forms_pkg::fsm_state_e",
+                          "symbol": "93825657221704 state_q"
+                        },
+                        "isNonBlocking": false
+                      }
+                    },
+                    {
+                      "kind": "Conditional",
+                      "conditions": [
+                        {
+                          "expr": {
+                            "kind": "NamedValue",
+                            "type": "logic",
+                            "symbol": "93825657222656 step_i"
+                          }
+                        }
+                      ],
+                      "check": "None",
+                      "ifTrue": {
+                        "kind": "Block",
+                        "blockKind": "Sequential",
+                        "body": {
+                          "kind": "Case",
+                          "condition": "Normal",
+                          "check": "Unique",
+                          "expr": {
+                            "kind": "NamedValue",
+                            "type": "93825657201216 forms_pkg::fsm_state_e",
+                            "symbol": "93825657221704 state_q"
+                          },
+                          "items": [
+                            {
+                              "expressions": [
+                                {
+                                  "kind": "NamedValue",
+                                  "type": "93825657210264 forms_pkg::fsm_state_e",
+                                  "symbol": "93825657210408 ReadingLow"
+                                }
+                              ],
+                              "stmt": {
+                                "kind": "ExpressionStatement",
+                                "expr": {
+                                  "kind": "Assignment",
+                                  "type": "93825657201216 forms_pkg::fsm_state_e",
+                                  "left": {
+                                    "kind": "NamedValue",
+                                    "type": "93825657201216 forms_pkg::fsm_state_e",
+                                    "symbol": "93825657221840 state_d"
+                                  },
+                                  "right": {
+                                    "kind": "NamedValue",
+                                    "type": "93825657210264 forms_pkg::fsm_state_e",
+                                    "symbol": "93825657211384 ReadingHigh"
+                                  },
+                                  "isNonBlocking": false
+                                }
+                              }
+                            },
+                            {
+                              "expressions": [
+                                {
+                                  "kind": "NamedValue",
+                                  "type": "93825657210264 forms_pkg::fsm_state_e",
+                                  "symbol": "93825657211384 ReadingHigh"
+                                }
+                              ],
+                              "stmt": {
+                                "kind": "ExpressionStatement",
+                                "expr": {
+                                  "kind": "Assignment",
+                                  "type": "93825657201216 forms_pkg::fsm_state_e",
+                                  "left": {
+                                    "kind": "NamedValue",
+                                    "type": "93825657201216 forms_pkg::fsm_state_e",
+                                    "symbol": "93825657221840 state_d"
+                                  },
+                                  "right": {
+                                    "kind": "NamedValue",
+                                    "type": "93825657210264 forms_pkg::fsm_state_e",
+                                    "symbol": "93825657211800 RomAhead"
+                                  },
+                                  "isNonBlocking": false
+                                }
+                              }
+                            },
+                            {
+                              "expressions": [
+                                {
+                                  "kind": "NamedValue",
+                                  "type": "93825657210264 forms_pkg::fsm_state_e",
+                                  "symbol": "93825657211800 RomAhead"
+                                }
+                              ],
+                              "stmt": {
+                                "kind": "ExpressionStatement",
+                                "expr": {
+                                  "kind": "Assignment",
+                                  "type": "93825657201216 forms_pkg::fsm_state_e",
+                                  "left": {
+                                    "kind": "NamedValue",
+                                    "type": "93825657201216 forms_pkg::fsm_state_e",
+                                    "symbol": "93825657221840 state_d"
+                                  },
+                                  "right": {
+                                    "kind": "NamedValue",
+                                    "type": "93825657210264 forms_pkg::fsm_state_e",
+                                    "symbol": "93825657220160 Checking"
+                                  },
+                                  "isNonBlocking": false
+                                }
+                              }
+                            },
+                            {
+                              "expressions": [
+                                {
+                                  "kind": "NamedValue",
+                                  "type": "93825657210264 forms_pkg::fsm_state_e",
+                                  "symbol": "93825657219744 KmacAhead"
+                                }
+                              ],
+                              "stmt": {
+                                "kind": "ExpressionStatement",
+                                "expr": {
+                                  "kind": "Assignment",
+                                  "type": "93825657201216 forms_pkg::fsm_state_e",
+                                  "left": {
+                                    "kind": "NamedValue",
+                                    "type": "93825657201216 forms_pkg::fsm_state_e",
+                                    "symbol": "93825657221840 state_d"
+                                  },
+                                  "right": {
+                                    "kind": "NamedValue",
+                                    "type": "93825657210264 forms_pkg::fsm_state_e",
+                                    "symbol": "93825657220160 Checking"
+                                  },
+                                  "isNonBlocking": false
+                                }
+                              }
+                            },
+                            {
+                              "expressions": [
+                                {
+                                  "kind": "NamedValue",
+                                  "type": "93825657210264 forms_pkg::fsm_state_e",
+                                  "symbol": "93825657220160 Checking"
+                                }
+                              ],
+                              "stmt": {
+                                "kind": "ExpressionStatement",
+                                "expr": {
+                                  "kind": "Assignment",
+                                  "type": "93825657201216 forms_pkg::fsm_state_e",
+                                  "left": {
+                                    "kind": "NamedValue",
+                                    "type": "93825657201216 forms_pkg::fsm_state_e",
+                                    "symbol": "93825657221840 state_d"
+                                  },
+                                  "right": {
+                                    "kind": "NamedValue",
+                                    "type": "93825657210264 forms_pkg::fsm_state_e",
+                                    "symbol": "93825657220576 Done"
+                                  },
+                                  "isNonBlocking": false
+                                }
+                              }
+                            }
+                          ],
+                          "defaultCase": {
+                            "kind": "ExpressionStatement",
+                            "expr": {
+                              "kind": "Assignment",
+                              "type": "93825657201216 forms_pkg::fsm_state_e",
+                              "left": {
+                                "kind": "NamedValue",
+                                "type": "93825657201216 forms_pkg::fsm_state_e",
+                                "symbol": "93825657221840 state_d"
+                              },
+                              "right": {
+                                "kind": "NamedValue",
+                                "type": "93825657210264 forms_pkg::fsm_state_e",
+                                "symbol": "93825657221288 Invalid"
+                              },
+                              "isNonBlocking": false
+                            }
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "name": "",
+              "kind": "ProceduralBlock",
+              "addr": 93825657201856,
+              "procedureKind": "AlwaysFF",
+              "body": {
+                "kind": "Timed",
+                "timing": {
+                  "kind": "EventList",
+                  "events": [
+                    {
+                      "kind": "SignalEvent",
+                      "expr": {
+                        "kind": "NamedValue",
+                        "type": "logic",
+                        "symbol": "93825657222096 clk_i"
+                      },
+                      "edge": "PosEdge"
+                    },
+                    {
+                      "kind": "SignalEvent",
+                      "expr": {
+                        "kind": "NamedValue",
+                        "type": "logic",
+                        "symbol": "93825657222376 rst_ni"
+                      },
+                      "edge": "NegEdge"
+                    }
+                  ]
+                },
+                "stmt": {
+                  "kind": "Block",
+                  "blockKind": "Sequential",
+                  "body": {
+                    "kind": "Conditional",
+                    "conditions": [
+                      {
+                        "expr": {
+                          "kind": "UnaryOp",
+                          "type": "logic",
+                          "op": "LogicalNot",
+                          "operand": {
+                            "kind": "NamedValue",
+                            "type": "logic",
+                            "symbol": "93825657222376 rst_ni"
+                          }
+                        }
+                      }
+                    ],
+                    "check": "None",
+                    "ifTrue": {
+                      "kind": "ExpressionStatement",
+                      "expr": {
+                        "kind": "Assignment",
+                        "type": "93825657201216 forms_pkg::fsm_state_e",
+                        "left": {
+                          "kind": "NamedValue",
+                          "type": "93825657201216 forms_pkg::fsm_state_e",
+                          "symbol": "93825657221704 state_q"
+                        },
+                        "right": {
+                          "kind": "NamedValue",
+                          "type": "93825657210264 forms_pkg::fsm_state_e",
+                          "symbol": "93825657210408 ReadingLow"
+                        },
+                        "isNonBlocking": true
+                      }
+                    },
+                    "ifFalse": {
+                      "kind": "ExpressionStatement",
+                      "expr": {
+                        "kind": "Assignment",
+                        "type": "93825657201216 forms_pkg::fsm_state_e",
+                        "left": {
+                          "kind": "NamedValue",
+                          "type": "93825657201216 forms_pkg::fsm_state_e",
+                          "symbol": "93825657221704 state_q"
+                        },
+                        "right": {
+                          "kind": "NamedValue",
+                          "type": "93825657201216 forms_pkg::fsm_state_e",
+                          "symbol": "93825657221840 state_d"
+                        },
+                        "isNonBlocking": true
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "name": "",
+              "kind": "ContinuousAssign",
+              "addr": 93825657224048,
+              "assignment": {
+                "kind": "Assignment",
+                "type": "logic[9:0]",
+                "left": {
+                  "kind": "NamedValue",
+                  "type": "logic[9:0]",
+                  "symbol": "93825657223856 state_o"
+                },
+                "right": {
+                  "kind": "Conversion",
+                  "type": "logic[9:0]",
+                  "operand": {
+                    "kind": "NamedValue",
+                    "type": "93825657201216 forms_pkg::fsm_state_e",
+                    "symbol": "93825657221704 state_q"
+                  }
+                },
+                "isNonBlocking": false
+              }
+            },
+            {
+              "name": "SecCmCFILinear_A_cond",
+              "kind": "Variable",
+              "addr": 93825657202024,
+              "type": "bit",
+              "lifetime": "Static"
+            },
+            {
+              "name": "",
+              "kind": "ProceduralBlock",
+              "addr": 93825657202160,
+              "procedureKind": "AlwaysFF",
+              "body": {
+                "kind": "Timed",
+                "timing": {
+                  "kind": "EventList",
+                  "events": [
+                    {
+                      "kind": "SignalEvent",
+                      "expr": {
+                        "kind": "NamedValue",
+                        "type": "logic",
+                        "symbol": "93825657222096 clk_i"
+                      },
+                      "edge": "PosEdge"
+                    },
+                    {
+                      "kind": "SignalEvent",
+                      "expr": {
+                        "kind": "UnaryOp",
+                        "type": "logic",
+                        "op": "LogicalNot",
+                        "operand": {
+                          "kind": "NamedValue",
+                          "type": "logic",
+                          "symbol": "93825657222376 rst_ni"
+                        }
+                      },
+                      "edge": "PosEdge"
+                    }
+                  ]
+                },
+                "stmt": {
+                  "kind": "Block",
+                  "blockKind": "Sequential",
+                  "body": {
+                    "kind": "Conditional",
+                    "conditions": [
+                      {
+                        "expr": {
+                          "kind": "UnaryOp",
+                          "type": "logic",
+                          "op": "LogicalNot",
+                          "operand": {
+                            "kind": "NamedValue",
+                            "type": "logic",
+                            "symbol": "93825657222376 rst_ni"
+                          }
+                        }
+                      }
+                    ],
+                    "check": "None",
+                    "ifTrue": {
+                      "kind": "Block",
+                      "blockKind": "Sequential",
+                      "body": {
+                        "kind": "ExpressionStatement",
+                        "expr": {
+                          "kind": "Assignment",
+                          "type": "bit",
+                          "left": {
+                            "kind": "NamedValue",
+                            "type": "bit",
+                            "symbol": "93825657202024 SecCmCFILinear_A_cond"
+                          },
+                          "right": {
+                            "kind": "Conversion",
+                            "type": "bit",
+                            "operand": {
+                              "kind": "IntegerLiteral",
+                              "type": "int",
+                              "value": "0",
+                              "constant": "0"
+                            },
+                            "constant": "1'b0"
+                          },
+                          "isNonBlocking": true
+                        }
+                      }
+                    },
+                    "ifFalse": {
+                      "kind": "Block",
+                      "blockKind": "Sequential",
+                      "body": {
+                        "kind": "ExpressionStatement",
+                        "expr": {
+                          "kind": "Assignment",
+                          "type": "bit",
+                          "left": {
+                            "kind": "NamedValue",
+                            "type": "bit",
+                            "symbol": "93825657202024 SecCmCFILinear_A_cond"
+                          },
+                          "right": {
+                            "kind": "Conversion",
+                            "type": "bit",
+                            "operand": {
+                              "kind": "IntegerLiteral",
+                              "type": "int",
+                              "value": "1",
+                              "constant": "1"
+                            },
+                            "constant": "1'b1"
+                          },
+                          "isNonBlocking": true
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "name": "SecCmCFILinear_A_p",
+              "kind": "Property",
+              "addr": 93825657202264
+            },
+            {
+              "name": "SecCmCFILinear_A",
+              "kind": "StatementBlock",
+              "addr": 93825657202496
+            },
+            {
+              "name": "",
+              "kind": "ProceduralBlock",
+              "addr": 93825657202392,
+              "procedureKind": "Always",
+              "body": {
+                "kind": "Block",
+                "blockKind": "Sequential",
+                "block": "93825657202496 SecCmCFILinear_A",
+                "body": {
+                  "kind": "ConcurrentAssertion",
+                  "propertySpec": {
+                    "kind": "Clocking",
+                    "clocking": {
+                      "kind": "SignalEvent",
+                      "expr": {
+                        "kind": "NamedValue",
+                        "type": "logic",
+                        "symbol": "93825657222096 clk_i"
+                      },
+                      "edge": "PosEdge"
+                    },
+                    "expr": {
+                      "kind": "DisableIff",
+                      "condition": {
+                        "kind": "BinaryOp",
+                        "type": "bit",
+                        "op": "CaseInequality",
+                        "left": {
+                          "kind": "Conversion",
+                          "type": "bit[31:0]",
+                          "operand": {
+                            "kind": "IntegerLiteral",
+                            "type": "int",
+                            "value": "0",
+                            "constant": "0"
+                          },
+                          "constant": "32'd0"
+                        },
+                        "right": {
+                          "kind": "UnbasedUnsizedIntegerLiteral",
+                          "type": "bit[31:0]",
+                          "value": "32'd0"
+                        }
+                      },
+                      "expr": {
+                        "kind": "Simple",
+                        "expr": {
+                          "kind": "AssertionInstance",
+                          "type": "property",
+                          "symbol": "93825657202264 SecCmCFILinear_A_p",
+                          "body": {
+                            "kind": "Binary",
+                            "op": "OverlappedImplication",
+                            "left": {
+                              "kind": "SequenceWithMatch",
+                              "expr": {
+                                "kind": "Simple",
+                                "expr": {
+                                  "kind": "BinaryOp",
+                                  "type": "bit",
+                                  "op": "BinaryAnd",
+                                  "left": {
+                                    "kind": "UnaryOp",
+                                    "type": "bit",
+                                    "op": "LogicalNot",
+                                    "operand": {
+                                      "kind": "Call",
+                                      "type": "bit",
+                                      "subroutine": "$stable",
+                                      "arguments": [
+                                        {
+                                          "kind": "NamedValue",
+                                          "type": "93825657201216 forms_pkg::fsm_state_e",
+                                          "symbol": "93825657221704 state_q"
+                                        }
+                                      ]
+                                    }
+                                  },
+                                  "right": {
+                                    "kind": "NamedValue",
+                                    "type": "bit",
+                                    "symbol": "93825657202024 SecCmCFILinear_A_cond"
+                                  }
+                                }
+                              },
+                              "matchItems": [
+                                {
+                                  "kind": "Assignment",
+                                  "type": "93825657201216 forms_pkg::fsm_state_e",
+                                  "left": {
+                                    "kind": "NamedValue",
+                                    "type": "93825657201216 forms_pkg::fsm_state_e",
+                                    "symbol": "93825657236240 initial_state"
+                                  },
+                                  "right": {
+                                    "kind": "Call",
+                                    "type": "93825657201216 forms_pkg::fsm_state_e",
+                                    "subroutine": "$past",
+                                    "arguments": [
+                                      {
+                                        "kind": "NamedValue",
+                                        "type": "93825657201216 forms_pkg::fsm_state_e",
+                                        "symbol": "93825657221704 state_q"
+                                      }
+                                    ]
+                                  },
+                                  "isNonBlocking": false
+                                }
+                              ]
+                            },
+                            "right": {
+                              "kind": "Binary",
+                              "op": "Until",
+                              "left": {
+                                "kind": "Simple",
+                                "expr": {
+                                  "kind": "BinaryOp",
+                                  "type": "logic",
+                                  "op": "Inequality",
+                                  "left": {
+                                    "kind": "NamedValue",
+                                    "type": "93825657201216 forms_pkg::fsm_state_e",
+                                    "symbol": "93825657221704 state_q"
+                                  },
+                                  "right": {
+                                    "kind": "NamedValue",
+                                    "type": "93825657201216 forms_pkg::fsm_state_e",
+                                    "symbol": "93825657236240 initial_state"
+                                  }
+                                }
+                              },
+                              "right": {
+                                "kind": "Simple",
+                                "expr": {
+                                  "kind": "UnaryOp",
+                                  "type": "bit",
+                                  "op": "LogicalNot",
+                                  "operand": {
+                                    "kind": "NamedValue",
+                                    "type": "bit",
+                                    "symbol": "93825657202024 SecCmCFILinear_A_cond"
+                                  }
+                                }
+                              }
+                            }
+                          },
+                          "isRecursiveProperty": false,
+                          "localVars": [
+                            {
+                              "name": "initial_state",
+                              "kind": "LocalAssertionVar",
+                              "addr": 93825657236240,
+                              "type": "93825657201216 forms_pkg::fsm_state_e",
+                              "lifetime": "Automatic"
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  },
+                  "ifTrue": {
+                    "kind": "Empty"
+                  },
+                  "assertionKind": "Assert"
+                }
+              }
+            },
+            {
+              "name": "LinearPacked_P",
+              "kind": "Property",
+              "addr": 93825657202648
+            },
+            {
+              "name": "LinearPacked_A",
+              "kind": "StatementBlock",
+              "addr": 93825657202880
+            },
+            {
+              "name": "",
+              "kind": "ProceduralBlock",
+              "addr": 93825657202776,
+              "procedureKind": "Always",
+              "body": {
+                "kind": "Block",
+                "blockKind": "Sequential",
+                "block": "93825657202880 LinearPacked_A",
+                "body": {
+                  "kind": "ConcurrentAssertion",
+                  "propertySpec": {
+                    "kind": "Clocking",
+                    "clocking": {
+                      "kind": "SignalEvent",
+                      "expr": {
+                        "kind": "NamedValue",
+                        "type": "logic",
+                        "symbol": "93825657222096 clk_i"
+                      },
+                      "edge": "PosEdge"
+                    },
+                    "expr": {
+                      "kind": "DisableIff",
+                      "condition": {
+                        "kind": "UnaryOp",
+                        "type": "logic",
+                        "op": "LogicalNot",
+                        "operand": {
+                          "kind": "NamedValue",
+                          "type": "logic",
+                          "symbol": "93825657222376 rst_ni"
+                        }
+                      },
+                      "expr": {
+                        "kind": "Simple",
+                        "expr": {
+                          "kind": "AssertionInstance",
+                          "type": "property",
+                          "symbol": "93825657202648 LinearPacked_P",
+                          "body": {
+                            "kind": "Binary",
+                            "op": "OverlappedImplication",
+                            "left": {
+                              "kind": "SequenceWithMatch",
+                              "expr": {
+                                "kind": "Simple",
+                                "expr": {
+                                  "kind": "UnaryOp",
+                                  "type": "bit",
+                                  "op": "LogicalNot",
+                                  "operand": {
+                                    "kind": "Call",
+                                    "type": "bit",
+                                    "subroutine": "$stable",
+                                    "arguments": [
+                                      {
+                                        "kind": "NamedValue",
+                                        "type": "logic[2:0]",
+                                        "symbol": "93825657223496 idx_i"
+                                      }
+                                    ]
+                                  }
+                                }
+                              },
+                              "matchItems": [
+                                {
+                                  "kind": "Assignment",
+                                  "type": "logic[2:0]",
+                                  "left": {
+                                    "kind": "NamedValue",
+                                    "type": "logic[2:0]",
+                                    "symbol": "93825657240568 init_s"
+                                  },
+                                  "right": {
+                                    "kind": "Call",
+                                    "type": "logic[2:0]",
+                                    "subroutine": "$past",
+                                    "arguments": [
+                                      {
+                                        "kind": "NamedValue",
+                                        "type": "logic[2:0]",
+                                        "symbol": "93825657223496 idx_i"
+                                      }
+                                    ]
+                                  },
+                                  "isNonBlocking": false
+                                }
+                              ]
+                            },
+                            "right": {
+                              "kind": "Binary",
+                              "op": "Until",
+                              "left": {
+                                "kind": "Simple",
+                                "expr": {
+                                  "kind": "BinaryOp",
+                                  "type": "logic",
+                                  "op": "Inequality",
+                                  "left": {
+                                    "kind": "NamedValue",
+                                    "type": "logic[2:0]",
+                                    "symbol": "93825657223496 idx_i"
+                                  },
+                                  "right": {
+                                    "kind": "NamedValue",
+                                    "type": "logic[2:0]",
+                                    "symbol": "93825657240568 init_s"
+                                  }
+                                }
+                              },
+                              "right": {
+                                "kind": "Simple",
+                                "expr": {
+                                  "kind": "UnaryOp",
+                                  "type": "logic",
+                                  "op": "LogicalNot",
+                                  "operand": {
+                                    "kind": "NamedValue",
+                                    "type": "logic",
+                                    "symbol": "93825657223216 ready_i"
+                                  }
+                                }
+                              }
+                            }
+                          },
+                          "isRecursiveProperty": false,
+                          "localVars": [
+                            {
+                              "name": "init_s",
+                              "kind": "LocalAssertionVar",
+                              "addr": 93825657240568,
+                              "type": "logic[2:0]",
+                              "lifetime": "Automatic"
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  },
+                  "ifTrue": {
+                    "kind": "Empty"
+                  },
+                  "assertionKind": "Assert"
+                }
+              }
+            },
+            {
+              "name": "UntilWeak_A",
+              "kind": "StatementBlock",
+              "addr": 93825657203136
+            },
+            {
+              "name": "",
+              "kind": "ProceduralBlock",
+              "addr": 93825657203032,
+              "procedureKind": "Always",
+              "body": {
+                "kind": "Block",
+                "blockKind": "Sequential",
+                "block": "93825657203136 UntilWeak_A",
+                "body": {
+                  "kind": "ConcurrentAssertion",
+                  "propertySpec": {
+                    "kind": "Clocking",
+                    "clocking": {
+                      "kind": "SignalEvent",
+                      "expr": {
+                        "kind": "NamedValue",
+                        "type": "logic",
+                        "symbol": "93825657222096 clk_i"
+                      },
+                      "edge": "PosEdge"
+                    },
+                    "expr": {
+                      "kind": "DisableIff",
+                      "condition": {
+                        "kind": "UnaryOp",
+                        "type": "logic",
+                        "op": "LogicalNot",
+                        "operand": {
+                          "kind": "NamedValue",
+                          "type": "logic",
+                          "symbol": "93825657222376 rst_ni"
+                        }
+                      },
+                      "expr": {
+                        "kind": "Binary",
+                        "op": "OverlappedImplication",
+                        "left": {
+                          "kind": "Simple",
+                          "expr": {
+                            "kind": "NamedValue",
+                            "type": "logic",
+                            "symbol": "93825657222656 step_i"
+                          }
+                        },
+                        "right": {
+                          "kind": "Binary",
+                          "op": "Until",
+                          "left": {
+                            "kind": "Simple",
+                            "expr": {
+                              "kind": "NamedValue",
+                              "type": "logic",
+                              "symbol": "93825657223216 ready_i"
+                            }
+                          },
+                          "right": {
+                            "kind": "Simple",
+                            "expr": {
+                              "kind": "NamedValue",
+                              "type": "logic",
+                              "symbol": "93825657222936 stop_i"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "ifTrue": {
+                    "kind": "Empty"
+                  },
+                  "assertionKind": "Assert"
+                }
+              }
+            },
+            {
+              "name": "UntilStrong_A",
+              "kind": "StatementBlock",
+              "addr": 93825657203392
+            },
+            {
+              "name": "",
+              "kind": "ProceduralBlock",
+              "addr": 93825657203288,
+              "procedureKind": "Always",
+              "body": {
+                "kind": "Block",
+                "blockKind": "Sequential",
+                "block": "93825657203392 UntilStrong_A",
+                "body": {
+                  "kind": "ConcurrentAssertion",
+                  "propertySpec": {
+                    "kind": "Clocking",
+                    "clocking": {
+                      "kind": "SignalEvent",
+                      "expr": {
+                        "kind": "NamedValue",
+                        "type": "logic",
+                        "symbol": "93825657222096 clk_i"
+                      },
+                      "edge": "PosEdge"
+                    },
+                    "expr": {
+                      "kind": "DisableIff",
+                      "condition": {
+                        "kind": "UnaryOp",
+                        "type": "logic",
+                        "op": "LogicalNot",
+                        "operand": {
+                          "kind": "NamedValue",
+                          "type": "logic",
+                          "symbol": "93825657222376 rst_ni"
+                        }
+                      },
+                      "expr": {
+                        "kind": "Binary",
+                        "op": "OverlappedImplication",
+                        "left": {
+                          "kind": "Simple",
+                          "expr": {
+                            "kind": "NamedValue",
+                            "type": "logic",
+                            "symbol": "93825657222656 step_i"
+                          }
+                        },
+                        "right": {
+                          "kind": "Binary",
+                          "op": "SUntil",
+                          "left": {
+                            "kind": "Simple",
+                            "expr": {
+                              "kind": "NamedValue",
+                              "type": "logic",
+                              "symbol": "93825657223216 ready_i"
+                            }
+                          },
+                          "right": {
+                            "kind": "Simple",
+                            "expr": {
+                              "kind": "NamedValue",
+                              "type": "logic",
+                              "symbol": "93825657222936 stop_i"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "ifTrue": {
+                    "kind": "Empty"
+                  },
+                  "assertionKind": "Assert"
+                }
+              }
+            },
+            {
+              "name": "UntilWith_A",
+              "kind": "StatementBlock",
+              "addr": 93825657203648
+            },
+            {
+              "name": "",
+              "kind": "ProceduralBlock",
+              "addr": 93825657203544,
+              "procedureKind": "Always",
+              "body": {
+                "kind": "Block",
+                "blockKind": "Sequential",
+                "block": "93825657203648 UntilWith_A",
+                "body": {
+                  "kind": "ConcurrentAssertion",
+                  "propertySpec": {
+                    "kind": "Clocking",
+                    "clocking": {
+                      "kind": "SignalEvent",
+                      "expr": {
+                        "kind": "NamedValue",
+                        "type": "logic",
+                        "symbol": "93825657222096 clk_i"
+                      },
+                      "edge": "PosEdge"
+                    },
+                    "expr": {
+                      "kind": "DisableIff",
+                      "condition": {
+                        "kind": "UnaryOp",
+                        "type": "logic",
+                        "op": "LogicalNot",
+                        "operand": {
+                          "kind": "NamedValue",
+                          "type": "logic",
+                          "symbol": "93825657222376 rst_ni"
+                        }
+                      },
+                      "expr": {
+                        "kind": "Binary",
+                        "op": "OverlappedImplication",
+                        "left": {
+                          "kind": "Simple",
+                          "expr": {
+                            "kind": "NamedValue",
+                            "type": "logic",
+                            "symbol": "93825657222656 step_i"
+                          }
+                        },
+                        "right": {
+                          "kind": "Binary",
+                          "op": "UntilWith",
+                          "left": {
+                            "kind": "Simple",
+                            "expr": {
+                              "kind": "NamedValue",
+                              "type": "logic",
+                              "symbol": "93825657223216 ready_i"
+                            }
+                          },
+                          "right": {
+                            "kind": "Simple",
+                            "expr": {
+                              "kind": "NamedValue",
+                              "type": "logic",
+                              "symbol": "93825657222936 stop_i"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "ifTrue": {
+                    "kind": "Empty"
+                  },
+                  "assertionKind": "Assert"
+                }
+              }
+            },
+            {
+              "name": "UntilWithS_A",
+              "kind": "StatementBlock",
+              "addr": 93825657208208
+            },
+            {
+              "name": "",
+              "kind": "ProceduralBlock",
+              "addr": 93825657203800,
+              "procedureKind": "Always",
+              "body": {
+                "kind": "Block",
+                "blockKind": "Sequential",
+                "block": "93825657208208 UntilWithS_A",
+                "body": {
+                  "kind": "ConcurrentAssertion",
+                  "propertySpec": {
+                    "kind": "Clocking",
+                    "clocking": {
+                      "kind": "SignalEvent",
+                      "expr": {
+                        "kind": "NamedValue",
+                        "type": "logic",
+                        "symbol": "93825657222096 clk_i"
+                      },
+                      "edge": "PosEdge"
+                    },
+                    "expr": {
+                      "kind": "DisableIff",
+                      "condition": {
+                        "kind": "UnaryOp",
+                        "type": "logic",
+                        "op": "LogicalNot",
+                        "operand": {
+                          "kind": "NamedValue",
+                          "type": "logic",
+                          "symbol": "93825657222376 rst_ni"
+                        }
+                      },
+                      "expr": {
+                        "kind": "Binary",
+                        "op": "OverlappedImplication",
+                        "left": {
+                          "kind": "Simple",
+                          "expr": {
+                            "kind": "NamedValue",
+                            "type": "logic",
+                            "symbol": "93825657222656 step_i"
+                          }
+                        },
+                        "right": {
+                          "kind": "Binary",
+                          "op": "SUntilWith",
+                          "left": {
+                            "kind": "Simple",
+                            "expr": {
+                              "kind": "NamedValue",
+                              "type": "logic",
+                              "symbol": "93825657223216 ready_i"
+                            }
+                          },
+                          "right": {
+                            "kind": "Simple",
+                            "expr": {
+                              "kind": "NamedValue",
+                              "type": "logic",
+                              "symbol": "93825657222936 stop_i"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "ifTrue": {
+                    "kind": "Empty"
+                  },
+                  "assertionKind": "Assert"
+                }
+              }
+            },
+            {
+              "name": "BothP",
+              "kind": "Property",
+              "addr": 93825657208360
+            },
+            {
+              "name": "Both_A",
+              "kind": "StatementBlock",
+              "addr": 93825657208592
+            },
+            {
+              "name": "",
+              "kind": "ProceduralBlock",
+              "addr": 93825657208488,
+              "procedureKind": "Always",
+              "body": {
+                "kind": "Block",
+                "blockKind": "Sequential",
+                "block": "93825657208592 Both_A",
+                "body": {
+                  "kind": "ConcurrentAssertion",
+                  "propertySpec": {
+                    "kind": "Clocking",
+                    "clocking": {
+                      "kind": "SignalEvent",
+                      "expr": {
+                        "kind": "NamedValue",
+                        "type": "logic",
+                        "symbol": "93825657222096 clk_i"
+                      },
+                      "edge": "PosEdge"
+                    },
+                    "expr": {
+                      "kind": "DisableIff",
+                      "condition": {
+                        "kind": "UnaryOp",
+                        "type": "logic",
+                        "op": "LogicalNot",
+                        "operand": {
+                          "kind": "NamedValue",
+                          "type": "logic",
+                          "symbol": "93825657222376 rst_ni"
+                        }
+                      },
+                      "expr": {
+                        "kind": "Simple",
+                        "expr": {
+                          "kind": "AssertionInstance",
+                          "type": "property",
+                          "symbol": "93825657208360 BothP",
+                          "body": {
+                            "kind": "Binary",
+                            "op": "And",
+                            "left": {
+                              "kind": "Binary",
+                              "op": "OverlappedImplication",
+                              "left": {
+                                "kind": "Simple",
+                                "expr": {
+                                  "kind": "NamedValue",
+                                  "type": "logic",
+                                  "symbol": "93825657222656 step_i"
+                                }
+                              },
+                              "right": {
+                                "kind": "SequenceConcat",
+                                "elements": [
+                                  {
+                                    "sequence": {
+                                      "kind": "Simple",
+                                      "expr": {
+                                        "kind": "NamedValue",
+                                        "type": "logic",
+                                        "symbol": "93825657223216 ready_i"
+                                      }
+                                    },
+                                    "min": 1,
+                                    "max": 1
+                                  }
+                                ]
+                              }
+                            },
+                            "right": {
+                              "kind": "Binary",
+                              "op": "OverlappedImplication",
+                              "left": {
+                                "kind": "Simple",
+                                "expr": {
+                                  "kind": "NamedValue",
+                                  "type": "logic",
+                                  "symbol": "93825657222936 stop_i"
+                                }
+                              },
+                              "right": {
+                                "kind": "SequenceConcat",
+                                "elements": [
+                                  {
+                                    "sequence": {
+                                      "kind": "Simple",
+                                      "expr": {
+                                        "kind": "UnaryOp",
+                                        "type": "logic",
+                                        "op": "LogicalNot",
+                                        "operand": {
+                                          "kind": "NamedValue",
+                                          "type": "logic",
+                                          "symbol": "93825657223216 ready_i"
+                                        }
+                                      }
+                                    },
+                                    "min": 1,
+                                    "max": 1
+                                  }
+                                ]
+                              }
+                            }
+                          },
+                          "isRecursiveProperty": false,
+                          "localVars": [
+                          ]
+                        }
+                      }
+                    }
+                  },
+                  "ifTrue": {
+                    "kind": "Empty"
+                  },
+                  "assertionKind": "Assert"
+                }
+              }
+            },
+            {
+              "name": "TwiceP",
+              "kind": "Property",
+              "addr": 93825657208744
+            },
+            {
+              "name": "Twice_A",
+              "kind": "StatementBlock",
+              "addr": 93825657208976
+            },
+            {
+              "name": "",
+              "kind": "ProceduralBlock",
+              "addr": 93825657208872,
+              "procedureKind": "Always",
+              "body": {
+                "kind": "Block",
+                "blockKind": "Sequential",
+                "block": "93825657208976 Twice_A",
+                "body": {
+                  "kind": "ConcurrentAssertion",
+                  "propertySpec": {
+                    "kind": "Clocking",
+                    "clocking": {
+                      "kind": "SignalEvent",
+                      "expr": {
+                        "kind": "NamedValue",
+                        "type": "logic",
+                        "symbol": "93825657222096 clk_i"
+                      },
+                      "edge": "PosEdge"
+                    },
+                    "expr": {
+                      "kind": "DisableIff",
+                      "condition": {
+                        "kind": "UnaryOp",
+                        "type": "logic",
+                        "op": "LogicalNot",
+                        "operand": {
+                          "kind": "NamedValue",
+                          "type": "logic",
+                          "symbol": "93825657222376 rst_ni"
+                        }
+                      },
+                      "expr": {
+                        "kind": "Simple",
+                        "expr": {
+                          "kind": "AssertionInstance",
+                          "type": "property",
+                          "symbol": "93825657208744 TwiceP",
+                          "body": {
+                            "kind": "Binary",
+                            "op": "OverlappedImplication",
+                            "left": {
+                              "kind": "SequenceConcat",
+                              "elements": [
+                                {
+                                  "sequence": {
+                                    "kind": "SequenceWithMatch",
+                                    "expr": {
+                                      "kind": "Simple",
+                                      "expr": {
+                                        "kind": "NamedValue",
+                                        "type": "logic",
+                                        "symbol": "93825657222656 step_i"
+                                      }
+                                    },
+                                    "matchItems": [
+                                      {
+                                        "kind": "Assignment",
+                                        "type": "logic[2:0]",
+                                        "left": {
+                                          "kind": "NamedValue",
+                                          "type": "logic[2:0]",
+                                          "symbol": "93825657250696 v"
+                                        },
+                                        "right": {
+                                          "kind": "NamedValue",
+                                          "type": "logic[2:0]",
+                                          "symbol": "93825657223496 idx_i"
+                                        },
+                                        "isNonBlocking": false
+                                      }
+                                    ]
+                                  },
+                                  "min": 0,
+                                  "max": 0
+                                },
+                                {
+                                  "sequence": {
+                                    "kind": "SequenceWithMatch",
+                                    "expr": {
+                                      "kind": "Simple",
+                                      "expr": {
+                                        "kind": "NamedValue",
+                                        "type": "logic",
+                                        "symbol": "93825657223216 ready_i"
+                                      }
+                                    },
+                                    "matchItems": [
+                                      {
+                                        "kind": "Assignment",
+                                        "type": "logic[2:0]",
+                                        "left": {
+                                          "kind": "NamedValue",
+                                          "type": "logic[2:0]",
+                                          "symbol": "93825657250696 v"
+                                        },
+                                        "right": {
+                                          "kind": "NamedValue",
+                                          "type": "logic[2:0]",
+                                          "symbol": "93825657223496 idx_i"
+                                        },
+                                        "isNonBlocking": false
+                                      }
+                                    ]
+                                  },
+                                  "min": 1,
+                                  "max": 1
+                                }
+                              ]
+                            },
+                            "right": {
+                              "kind": "Simple",
+                              "expr": {
+                                "kind": "BinaryOp",
+                                "type": "logic",
+                                "op": "Equality",
+                                "left": {
+                                  "kind": "NamedValue",
+                                  "type": "logic[2:0]",
+                                  "symbol": "93825657223496 idx_i"
+                                },
+                                "right": {
+                                  "kind": "NamedValue",
+                                  "type": "logic[2:0]",
+                                  "symbol": "93825657250696 v"
+                                }
+                              }
+                            }
+                          },
+                          "isRecursiveProperty": false,
+                          "localVars": [
+                            {
+                              "name": "v",
+                              "kind": "LocalAssertionVar",
+                              "addr": 93825657250696,
+                              "type": "logic[2:0]",
+                              "lifetime": "Automatic"
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  },
+                  "ifTrue": {
+                    "kind": "Empty"
+                  },
+                  "assertionKind": "Assert"
+                }
+              }
+            },
+            {
+              "name": "ReadInAnteP",
+              "kind": "Property",
+              "addr": 93825657209128
+            },
+            {
+              "name": "ReadInAnte_A",
+              "kind": "StatementBlock",
+              "addr": 93825657209360
+            },
+            {
+              "name": "",
+              "kind": "ProceduralBlock",
+              "addr": 93825657209256,
+              "procedureKind": "Always",
+              "body": {
+                "kind": "Block",
+                "blockKind": "Sequential",
+                "block": "93825657209360 ReadInAnte_A",
+                "body": {
+                  "kind": "ConcurrentAssertion",
+                  "propertySpec": {
+                    "kind": "Clocking",
+                    "clocking": {
+                      "kind": "SignalEvent",
+                      "expr": {
+                        "kind": "NamedValue",
+                        "type": "logic",
+                        "symbol": "93825657222096 clk_i"
+                      },
+                      "edge": "PosEdge"
+                    },
+                    "expr": {
+                      "kind": "DisableIff",
+                      "condition": {
+                        "kind": "UnaryOp",
+                        "type": "logic",
+                        "op": "LogicalNot",
+                        "operand": {
+                          "kind": "NamedValue",
+                          "type": "logic",
+                          "symbol": "93825657222376 rst_ni"
+                        }
+                      },
+                      "expr": {
+                        "kind": "Simple",
+                        "expr": {
+                          "kind": "AssertionInstance",
+                          "type": "property",
+                          "symbol": "93825657209128 ReadInAnteP",
+                          "body": {
+                            "kind": "Binary",
+                            "op": "OverlappedImplication",
+                            "left": {
+                              "kind": "SequenceConcat",
+                              "elements": [
+                                {
+                                  "sequence": {
+                                    "kind": "SequenceWithMatch",
+                                    "expr": {
+                                      "kind": "Simple",
+                                      "expr": {
+                                        "kind": "NamedValue",
+                                        "type": "logic",
+                                        "symbol": "93825657222656 step_i"
+                                      }
+                                    },
+                                    "matchItems": [
+                                      {
+                                        "kind": "Assignment",
+                                        "type": "logic[2:0]",
+                                        "left": {
+                                          "kind": "NamedValue",
+                                          "type": "logic[2:0]",
+                                          "symbol": "93825657254272 v"
+                                        },
+                                        "right": {
+                                          "kind": "NamedValue",
+                                          "type": "logic[2:0]",
+                                          "symbol": "93825657223496 idx_i"
+                                        },
+                                        "isNonBlocking": false
+                                      }
+                                    ]
+                                  },
+                                  "min": 0,
+                                  "max": 0
+                                },
+                                {
+                                  "sequence": {
+                                    "kind": "Simple",
+                                    "expr": {
+                                      "kind": "BinaryOp",
+                                      "type": "logic",
+                                      "op": "Equality",
+                                      "left": {
+                                        "kind": "NamedValue",
+                                        "type": "logic[2:0]",
+                                        "symbol": "93825657223496 idx_i"
+                                      },
+                                      "right": {
+                                        "kind": "NamedValue",
+                                        "type": "logic[2:0]",
+                                        "symbol": "93825657254272 v"
+                                      }
+                                    }
+                                  },
+                                  "min": 1,
+                                  "max": 1
+                                }
+                              ]
+                            },
+                            "right": {
+                              "kind": "Simple",
+                              "expr": {
+                                "kind": "NamedValue",
+                                "type": "logic",
+                                "symbol": "93825657223216 ready_i"
+                              }
+                            }
+                          },
+                          "isRecursiveProperty": false,
+                          "localVars": [
+                            {
+                              "name": "v",
+                              "kind": "LocalAssertionVar",
+                              "addr": 93825657254272,
+                              "type": "logic[2:0]",
+                              "lifetime": "Automatic"
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  },
+                  "ifTrue": {
+                    "kind": "Empty"
+                  },
+                  "assertionKind": "Assert"
+                }
+              }
+            },
+            {
+              "name": "ChainP",
+              "kind": "Property",
+              "addr": 93825657209512
+            },
+            {
+              "name": "Chain_A",
+              "kind": "StatementBlock",
+              "addr": 93825657209744
+            },
+            {
+              "name": "",
+              "kind": "ProceduralBlock",
+              "addr": 93825657209640,
+              "procedureKind": "Always",
+              "body": {
+                "kind": "Block",
+                "blockKind": "Sequential",
+                "block": "93825657209744 Chain_A",
+                "body": {
+                  "kind": "ConcurrentAssertion",
+                  "propertySpec": {
+                    "kind": "Clocking",
+                    "clocking": {
+                      "kind": "SignalEvent",
+                      "expr": {
+                        "kind": "NamedValue",
+                        "type": "logic",
+                        "symbol": "93825657222096 clk_i"
+                      },
+                      "edge": "PosEdge"
+                    },
+                    "expr": {
+                      "kind": "DisableIff",
+                      "condition": {
+                        "kind": "UnaryOp",
+                        "type": "logic",
+                        "op": "LogicalNot",
+                        "operand": {
+                          "kind": "NamedValue",
+                          "type": "logic",
+                          "symbol": "93825657222376 rst_ni"
+                        }
+                      },
+                      "expr": {
+                        "kind": "Simple",
+                        "expr": {
+                          "kind": "AssertionInstance",
+                          "type": "property",
+                          "symbol": "93825657209512 ChainP",
+                          "body": {
+                            "kind": "Binary",
+                            "op": "OverlappedImplication",
+                            "left": {
+                              "kind": "SequenceWithMatch",
+                              "expr": {
+                                "kind": "Simple",
+                                "expr": {
+                                  "kind": "NamedValue",
+                                  "type": "logic",
+                                  "symbol": "93825657222656 step_i"
+                                }
+                              },
+                              "matchItems": [
+                                {
+                                  "kind": "Assignment",
+                                  "type": "logic[2:0]",
+                                  "left": {
+                                    "kind": "NamedValue",
+                                    "type": "logic[2:0]",
+                                    "symbol": "93825657258872 a"
+                                  },
+                                  "right": {
+                                    "kind": "NamedValue",
+                                    "type": "logic[2:0]",
+                                    "symbol": "93825657223496 idx_i"
+                                  },
+                                  "isNonBlocking": false
+                                },
+                                {
+                                  "kind": "Assignment",
+                                  "type": "logic[2:0]",
+                                  "left": {
+                                    "kind": "NamedValue",
+                                    "type": "logic[2:0]",
+                                    "symbol": "93825657259016 b"
+                                  },
+                                  "right": {
+                                    "kind": "NamedValue",
+                                    "type": "logic[2:0]",
+                                    "symbol": "93825657258872 a"
+                                  },
+                                  "isNonBlocking": false
+                                }
+                              ]
+                            },
+                            "right": {
+                              "kind": "Simple",
+                              "expr": {
+                                "kind": "BinaryOp",
+                                "type": "logic",
+                                "op": "Inequality",
+                                "left": {
+                                  "kind": "NamedValue",
+                                  "type": "logic[2:0]",
+                                  "symbol": "93825657223496 idx_i"
+                                },
+                                "right": {
+                                  "kind": "NamedValue",
+                                  "type": "logic[2:0]",
+                                  "symbol": "93825657259016 b"
+                                }
+                              }
+                            }
+                          },
+                          "isRecursiveProperty": false,
+                          "localVars": [
+                            {
+                              "name": "a",
+                              "kind": "LocalAssertionVar",
+                              "addr": 93825657258872,
+                              "type": "logic[2:0]",
+                              "lifetime": "Automatic"
+                            },
+                            {
+                              "name": "b",
+                              "kind": "LocalAssertionVar",
+                              "addr": 93825657259016,
+                              "type": "logic[2:0]",
+                              "lifetime": "Automatic"
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  },
+                  "ifTrue": {
+                    "kind": "Empty"
+                  },
+                  "assertionKind": "Assert"
+                }
+              }
+            }
+          ],
+          "definition": "93825657073600 forms"
+        },
+        "connections": [
+        ]
+      }
+    ]
+  },
+  "definitions": [
+    {
+      "name": "forms",
+      "kind": "Definition",
+      "addr": 93825657073600,
+      "defaultNetType": "93825657058464 wire",
+      "definitionKind": "Module",
+      "defaultLifetime": "Static",
+      "unconnectedDrive": "None",
+      "cellDefine": false
+    }
+  ]
+}

@@ -826,15 +826,72 @@ mod tests {
         let (v2, _) = reach_portfolio_rescue_diagnosed(RELEASED_EARLY, &f, false).expect("reduces");
         assert_eq!(v2, RescueVerdict::Violated);
         assert!(safety_witness(RELEASED_EARLY, &f, false, 10).is_some());
-        // two weak-until blocks, or one with a deeper box beside it, stay declined
+        // two weak-until blocks in conjunctive position reduce (2026-10-23, one pending latch
+        // each); under an `||` of the two, or with a deeper box beside one, they stay declined
         let two = parse(
             "nu X. (((nu Z. ((q == 1) && ((req == 1) || [] Z))) && (nu W. ((q == 0) && \
              ((req == 1) || [] W)))) && [] X)",
         );
-        assert!(reduce_bounded_chain(&two).is_none());
+        assert!(reduce_bounded_chain(&two).is_some());
+        let either = parse(
+            "nu X. (((nu Z. ((q == 1) && ((req == 1) || [] Z))) || (nu W. ((q == 0) && \
+             ((req == 1) || [] W)))) && [] X)",
+        );
+        assert!(reduce_bounded_chain(&either).is_none());
         let shallower =
             parse("nu X. (((nu Z. ((q == 1) && ((req == 1) || [] Z))) && [] (q == 0)) && [] X)");
         assert!(reduce_bounded_chain(&shallower).is_none());
+    }
+
+    /// Two weak-until blocks, each under its own implication and conjoined — the
+    /// `ASSERT_FPV_LINEAR_FSM` expansion's shape, one block per enum member — decide: the
+    /// obligation of each is carried by its own pending latch. `start` arms the first block
+    /// (`q` held until `req`), `start2` the second (`!q` held until `req`); a design that
+    /// releases the second early is caught on the second latch, the first still passes.
+    #[test]
+    fn bounded_chain_decides_two_conjoined_weak_until_blocks() {
+        // q' = (start | hold) ? q : (start2 | hold2) ? !q … simplified: two independent holds
+        // over `q` and `r`: hold' = start | (hold & !req); hold2' = start2 | (hold2 & !req);
+        // q' = (start | hold) ? q : d; r' = (start2 | hold2) ? r : d2
+        const TWO_HOLDS: &str = "1 sort bitvec 1\n2 input 1 start\n3 input 1 req\n4 input 1 d\n\
+                                 5 zero 1\n6 state 1 q\n7 init 1 6 5\n8 state 1 q__past\n\
+                                 9 init 1 8 5\n10 next 1 8 6\n11 state 1 hold\n12 init 1 11 5\n\
+                                 13 or 1 2 11\n14 ite 1 13 6 4\n15 next 1 6 14\n16 not 1 3\n\
+                                 17 and 1 11 16\n18 or 1 2 17\n19 next 1 11 18\n\
+                                 20 input 1 start2\n21 input 1 d2\n22 state 1 r\n23 init 1 22 5\n\
+                                 24 state 1 r__past\n25 init 1 24 5\n26 next 1 24 22\n\
+                                 27 state 1 hold2\n28 init 1 27 5\n29 or 1 20 27\n\
+                                 30 ite 1 29 22 21\n31 next 1 22 30\n32 and 1 27 16\n\
+                                 33 or 1 20 32\n34 next 1 27 33\n";
+        // the second hold releases one cycle early: hold2' = (start2 | hold2) & !req
+        const SECOND_EARLY: &str = "1 sort bitvec 1\n2 input 1 start\n3 input 1 req\n4 input 1 d\n\
+                                    5 zero 1\n6 state 1 q\n7 init 1 6 5\n8 state 1 q__past\n\
+                                    9 init 1 8 5\n10 next 1 8 6\n11 state 1 hold\n12 init 1 11 5\n\
+                                    13 or 1 2 11\n14 ite 1 13 6 4\n15 next 1 6 14\n16 not 1 3\n\
+                                    17 and 1 11 16\n18 or 1 2 17\n19 next 1 11 18\n\
+                                    20 input 1 start2\n21 input 1 d2\n22 state 1 r\n23 init 1 22 5\n\
+                                    24 state 1 r__past\n25 init 1 24 5\n26 next 1 24 22\n\
+                                    27 state 1 hold2\n28 init 1 27 5\n29 or 1 20 27\n\
+                                    30 ite 1 29 22 21\n31 next 1 22 30\n32 and 1 29 16\n\
+                                    33 next 1 27 32\n";
+        let f = parse(
+            "nu X. ((((!((start == 1))) || [] (nu Z. ((q == q__past) && ((req == 1) || [] Z)))) \
+             && ((!((start2 == 1))) || [] (nu W. ((r == r__past) && ((req == 1) || [] W))))) \
+             && [] X)",
+        );
+        assert!(
+            reduce_bounded_chain(&f).is_some(),
+            "two conjoined blocks reduce"
+        );
+        let (v, _) = reach_portfolio_rescue_diagnosed(TWO_HOLDS, &f, false).expect("reduces");
+        assert_eq!(v, RescueVerdict::Holds);
+        let (v2, _) = reach_portfolio_rescue_diagnosed(SECOND_EARLY, &f, false).expect("reduces");
+        assert_eq!(
+            v2,
+            RescueVerdict::Violated,
+            "the second block's latch catches the early release"
+        );
+        assert!(safety_witness(SECOND_EARLY, &f, false, 10).is_some());
     }
 
     /// mununu#734 — a portfolio contradiction is reported as such, never folded into "undecided".
