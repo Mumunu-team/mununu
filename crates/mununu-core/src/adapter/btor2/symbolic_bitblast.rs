@@ -4179,6 +4179,28 @@ impl BddBitBlaster {
         }
     }
 
+    /// The conjunction of the BDD variables of the STATE cells named in `symbols` (the sampled
+    /// cells of the inputs-in-the-state lift); `None` when no such cell is in the cone.
+    fn state_cube_of(
+        &self,
+        symbols: &std::collections::HashSet<String>,
+    ) -> Result<Option<BDDFunction>, String> {
+        let mut cube: Option<BDDFunction> = None;
+        for cell in self
+            .cells
+            .iter()
+            .filter(|c| c.is_state && symbols.contains(&c.symbol))
+        {
+            for v in &cell.vars {
+                cube = Some(match cube {
+                    Some(c) => oom(c.and(v))?,
+                    None => v.clone(),
+                });
+            }
+        }
+        Ok(cube)
+    }
+
     /// D1.3/D1.5 — the BDD of the design's **initial states**, per the BTOR2 format:
     /// a state with an `init <state> <value>` line is pinned to that value; a state
     /// with **no `init` line is left FREE**, because the format leaves its initial
@@ -6135,6 +6157,10 @@ pub struct ExactSession {
     exact: ExactModel,
     resolved: Vec<(String, BDDFunction)>,
     init: BDDFunction,
+    /// mununu#656 follow-up — the BDD variables of the sampled cells the inputs-in-the-state lift
+    /// introduced (the cycle-0 input lives in the initial state). `None` when nothing was lifted
+    /// and on the two-player path.
+    sampled_input_cube: Option<BDDFunction>,
     /// Plan P5 — what `prepare` decided about the model (the inputs-in-the-state trade: which
     /// inputs were lifted and the cone width that resulted).
     notes: Vec<String>,
@@ -6293,6 +6319,8 @@ impl ExactSession {
         // mununu#661 — the lifted inputs' next-frame names, for the two-player cube partition.
         let mut lifted_env_next: std::collections::HashSet<String> =
             std::collections::HashSet::new();
+        let mut lifted_sampled: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         let mut prepare_notes: Vec<String> = Vec::new();
         let file = {
             let opt_out =
@@ -6314,6 +6342,7 @@ impl ExactSession {
                         lift.lifted.len()
                     );
                     lifted_env_next = lift.lifted.iter().map(|n| format!("{n}$next")).collect();
+                    lifted_sampled = lift.lifted.iter().cloned().collect();
                     prepare_notes.push(format!(
                         "inputs in the state: {} primary input(s) the atoms read were sampled \
                          into state cells ({:?}) — the cone is wider by twice their width; \
@@ -6592,6 +6621,13 @@ impl ExactSession {
         // already conjoins it into `bad`); it was unobservable there because `∃i. c(s, i)` is
         // almost always satisfiable at a register valuation.
         let init = oom(init.and(&exact.constraint_satisfiable()?))?;
+        // One-player only: on the game verbs the cycle-0 environment input is the ADVERSARY's
+        // choice whatever the controller's modality, so the universal reading stands there.
+        let sampled_input_cube = if controllable.is_empty() {
+            bb.state_cube_of(&lifted_sampled)?
+        } else {
+            None
+        };
         Ok(ExactSession {
             file,
             formula: formula.clone(),
@@ -6599,6 +6635,7 @@ impl ExactSession {
             exact,
             resolved,
             init,
+            sampled_input_cube,
             notes: prepare_notes,
         })
     }
@@ -6661,8 +6698,22 @@ impl ExactSession {
             exact.clear_init_hint();
         }
         let sat = exact.evaluate(formula, &atoms)?;
-        // Holds iff init ⊆ sat, i.e. no legal initial state violates φ.
-        let violating = oom(self.init.and(&oom(sat.not())?))?;
+        // Holds iff init ⊆ sat, i.e. no legal initial state violates φ. With inputs in the state
+        // the cycle-0 input is part of the initial state, so `init ⊆ sat` quantifies it
+        // UNIVERSALLY — right for a property over every trace, wrong for one that asks for SOME
+        // trace (a `cover`, an `EF`): there the environment picks the cycle-0 input too, so an
+        // initial register valuation is satisfied when SOME sampled input satisfies φ. Read as
+        // `∀`, a cover relativized to an input-reading assumption (`EF (ok ∧ target)`) failed at
+        // every initial state whose cycle-0 input broke the assumption, and a reachable target
+        // was reported UNREACHABLE.
+        let satisfied = match &self.sampled_input_cube {
+            Some(cube) if first_modalities_existential(formula) => {
+                use oxidd::BooleanFunctionQuant;
+                oom(oom(self.init.and(&sat))?.exists(cube))?
+            }
+            _ => sat,
+        };
+        let violating = oom(self.init.and(&oom(satisfied.not())?))?;
         if violating == *exact.ff() {
             return Ok((ExactVerdict::Holds, None));
         }
@@ -7511,6 +7562,36 @@ pub fn exact_two_player_recurrence_stall_lasso(
     let ctrl: std::collections::HashSet<String> =
         controllable.iter().map(|s| s.to_string()).collect();
     Ok(bb.two_player_recurrence_stall_lasso(&file, &good_bdd, &ctrl))
+}
+
+/// Whether every modality met first on the way down from the root is existential (`<>` under an
+/// even number of negations, `[]` under an odd one): the property asks for SOME trace from the
+/// initial state (`EF p`, `EF AG p`, a `cover`), so the environment's cycle-0 choice is
+/// existential too. `false` when a first modality is universal, when they disagree
+/// (`EF a ∧ AG b`), and for a modality-free formula — those keep the universal reading.
+fn first_modalities_existential(formula: &Formula) -> bool {
+    fn walk(f: &Formula, id: crate::mu_calculus::NodeId, negated: bool, seen: &mut (bool, bool)) {
+        match f.node(id) {
+            MuNode::Not(a) => walk(f, *a, !negated, seen),
+            MuNode::And(a, b) | MuNode::Or(a, b) => {
+                walk(f, *a, negated, seen);
+                walk(f, *b, negated, seen);
+            }
+            MuNode::Mu { body, .. } | MuNode::Nu { body, .. } => walk(f, *body, negated, seen),
+            MuNode::Modal { kind, .. } => {
+                let existential = (*kind == ModalKind::Diamond) != negated;
+                if existential {
+                    seen.0 = true;
+                } else {
+                    seen.1 = true;
+                }
+            }
+            MuNode::True | MuNode::False | MuNode::Predicate(_) | MuNode::Variable(_) => {}
+        }
+    }
+    let mut seen = (false, false);
+    walk(formula, formula.root(), false, &mut seen);
+    seen == (true, false)
 }
 
 /// D1.8b/b-2 — detect a liveness shape and return the node id of its target `p`.
@@ -13027,6 +13108,53 @@ mod tests {
         assert!(
             err.contains("primary input") && err.contains("clr"),
             "diagnostic should name the offending input `clr`: {err}"
+        );
+    }
+
+    /// A property that asks for SOME trace reads the cycle-0 input existentially. The lift samples
+    /// the cycle-0 input into the initial state, and `init ⊆ sat` read it universally: a latch
+    /// that breaks for good on a bad cycle-0 input (`ok = prev ∧ a`, the shape of the assumption
+    /// monitor `mununu_assume_ok`) made `EF ok` fail at the initial states with `a = 0`, and a
+    /// `cover` relativized to an input-reading `assume` came back UNREACHABLE although the
+    /// environment can simply choose `a = 1`. A property over EVERY trace keeps the universal
+    /// reading (`AG ok` is violated by `a = 0`).
+    #[test]
+    fn existential_property_reads_the_cycle0_input_existentially() {
+        const LATCH: &str = r#"
+1 sort bitvec 1
+2 input 1 a
+3 state 1 prev_ok
+4 one 1
+5 init 1 3 4
+6 and 1 3 2 ok
+7 next 1 3 6
+"#;
+        let verdict = |f: &str| {
+            exact_symbolic_verdict(
+                LATCH,
+                &crate::mu_calculus::parser::parse(f).expect("formula"),
+            )
+            .expect("decides")
+        };
+        assert_eq!(
+            verdict("mu X. (ok || <> X)"),
+            ExactVerdict::Holds,
+            "`EF ok`: the environment picks `a = 1` at cycle 0"
+        );
+        assert_eq!(
+            verdict("mu X. ((!(ok)) || <> X)"),
+            ExactVerdict::Holds,
+            "`EF !ok`: and `a = 0` at cycle 0 breaks it"
+        );
+        assert_eq!(
+            verdict("nu X. (ok && [] X)"),
+            ExactVerdict::Violated,
+            "`AG ok` quantifies the cycle-0 input universally"
+        );
+        assert_eq!(
+            verdict("(!(mu X. ((!(ok)) || <> X)))"),
+            ExactVerdict::Violated,
+            "`!EF !ok` is `AG ok` — the negation flips the first modality to universal"
         );
     }
 
