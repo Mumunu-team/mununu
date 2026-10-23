@@ -81,6 +81,23 @@ COI is **exact** (per [`docs/design/native-sv-abstraction.md`](design/native-sv-
 
 **Opt-out.** `PartitionOptions::disabled = true` returns every signal as `Kept` — useful for regression triage but not exposed on the CLI today.
 
+## The fault-injection posture is a declared over-approximation (2026-10-23)
+
+> Source of truth: [`inject_faults`](../crates/mununu-core/src/adapter/btor2/fault.rs) — surface: (CLI+API) — `sv verify-auto --fault` / `--fault-model`, `btor2 verify --fault`, `btor2 inject-fault`
+
+`--fault REG[:k]` / `--fault-model sec-cm[:k]` ADD transitions to the lifted model: at a free cycle after
+the warm-up, within a global budget, a named register takes a free value. The un-faulted design is the
+sub-behaviour with every enable low, so the posture is a plain over-approximation and the 2-valued lattice
+corners apply: a **safety / response HOLDS transfers** to the RTL ("the countermeasure responds for every
+corruption at these sites within the budget"); a **VIOLATED is a real escape** of the declared adversary
+(the fault inputs are named, so it is not withheld as an undriven-net artifact); an **alternating** (νμ)
+property over a corrupted register is **skipped**, not decided — the fault player can restore any state,
+and a recoverability HOLDS there would be the collapse the soundness table warns of. The budget is
+structural (a counter and a warm-up clock in the model, no BTOR2 `constraint`) so every engine — cube,
+exact, native BMC / k-induction, the subprocess members, the game — reads the same total relation. The
+posture is declared on the report (`diagnostics.fault_model`, `fault_sites`, the per-row note) and in the
+dump header. See [`docs/verifying-rtl.md`](verifying-rtl.md) §"The fault-injection posture".
+
 ## Uninterpreted-function abstraction for wide arithmetic
 
 > Source of truth: KMTS lifter post-R.5b; recipe in [`predicate-abstraction-recipe.md`](design/predicate-abstraction-recipe.md) §3b + §6.10 of the architecture doc.

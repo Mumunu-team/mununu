@@ -2737,6 +2737,186 @@ const CSRNG_PINS: &[(&str, usize, &str)] = &[
     ("FpvSecCmRegWeOnehotCheck_A", 1, "holds"),
 ];
 
+/// PR A1 — the fault-injection posture on the `edn` IP's own security-countermeasure checks
+/// (`ASSERT_PRIM_*_ERROR_TRIGGER_ALERT` ×15): first the "before" instrument (`sec-cm:0`,
+/// selection + the antecedent-vacuity check, nothing injected), then the posture proper
+/// (`sec-cm`, one injection after a 10-cycle warm-up, the alert receiver pinned to its idle
+/// encoding `alert_rx_i=85` so the sender's `sigint` logic does not force `alert_p` low).
+///
+/// Predictions, with their hypothesis-false readings in the ledger (§3.23): on the un-faulted
+/// model the nine FSM rows are vacuous (`unused_err_o` is a synthesis constant, PR A0) and the
+/// five counter chains + the one-hot row are not (`err_o` is real logic); under the posture the
+/// nine FSM rows become non-vacuous (a corrupted state takes the `default:` arm → Error →
+/// `*_sm_err` → the fatal alert) and every one of the fifteen HOLDS. The rows are printed
+/// before the pins, so a wrong prediction is diagnosable from the transcript.
+#[test]
+#[ignore = "requires slang + sv2v + Yosys + z3 (use the mununu-sva docker image); run with --ignored --nocapture"]
+fn e2e_opentitan_ip_edn_sec_cm_posture() {
+    use mununu_core::adapter::btor2::fault::{FaultBound, FaultPosture, FaultSelection};
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/verify/ip_opentitan_edn/source");
+    let read = |f: &str| {
+        std::fs::read_to_string(dir.join(f))
+            .unwrap_or_else(|e| panic!("{}: {e}", dir.join(f).display()))
+    };
+    let order: Vec<String> = read("sources.txt")
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    let mut sources: Vec<(String, String)> = vec![("edn.sv".to_string(), read("edn.sv"))];
+    sources.extend(
+        order
+            .iter()
+            .filter(|f| *f != "edn.sv")
+            .map(|f| (f.clone(), read(f))),
+    );
+    let yopts = YosysOptions {
+        top: Some("edn".to_string()),
+        use_sv2v: true,
+        additional_sources: sources[1..].to_vec(),
+        ..Default::default()
+    };
+    let run = |bound: FaultBound, pin_rx: bool| {
+        let mut config: std::collections::HashMap<String, u64> =
+            [("rst_ni".to_string(), 1u64)].into_iter().collect();
+        if pin_rx {
+            config.insert("alert_rx_i".to_string(), 85);
+        }
+        let opts = VerifyAutoOptions {
+            config_values: config,
+            portfolio: Some(PortfolioMode::Sequential),
+            lift_overrides: ip_lift_overrides(&dir),
+            faults: Some(FaultPosture {
+                selection: FaultSelection::SecCm(bound),
+                warmup: 10,
+            }),
+            ..Default::default()
+        };
+        let t0 = std::time::Instant::now();
+        let report = verify_auto(&sources, &yopts, &opts).expect("the IP lifts and runs");
+        eprintln!(
+            "edn sec-cm posture {:?}: {} properties, {} sites, {:.0}s — {}",
+            bound,
+            report.properties.len(),
+            report.diagnostics.fault_sites.len(),
+            t0.elapsed().as_secs_f64(),
+            report.diagnostics.fault_model.as_deref().unwrap_or("-")
+        );
+        for s in &report.diagnostics.fault_sites {
+            eprintln!(
+                "  site {:<60} {:>3} b {:<16} {:?}",
+                s.register, s.width, s.selected_by, s.rows
+            );
+        }
+        for p in &report.properties {
+            let label = p.label.as_deref().unwrap_or(&p.name);
+            if !label.starts_with("FpvSecCm") {
+                continue;
+            }
+            eprintln!(
+                "  {:<34} {:<9} {:<16} vacuity={}",
+                label,
+                p.outcome.label(),
+                p.decided_by.as_deref().unwrap_or("-"),
+                p.vacuity.as_ref().map(|v| v.kind.tag()).unwrap_or("-")
+            );
+        }
+        for n in report
+            .notes
+            .iter()
+            .filter(|n| n.kind.starts_with("antecedent-"))
+        {
+            eprintln!("  note {}: {}", n.kind, n.summary);
+        }
+        report
+    };
+    fn sec_cm(
+        r: &mununu_core::adapter::slang::verify_auto::AutoVerifyReport,
+    ) -> Vec<&mununu_core::adapter::slang::verify_auto::PropertyVerdict> {
+        r.properties
+            .iter()
+            .filter(|p| {
+                p.label
+                    .as_deref()
+                    .is_some_and(|l| l.starts_with("FpvSecCm"))
+            })
+            .collect()
+    }
+    // --- the instrument: sec-cm:0 ---
+    let before = run(FaultBound::AtMost(0), false);
+    let rows = sec_cm(&before);
+    assert_eq!(rows.len(), 15, "the fifteen error → alert chains");
+    // 10 counter copies (`instance-prefix`), the FSM state cells (`fsm-mint`: the lift's flag is a
+    // synthesis constant, re-minted from the state's compared constants), the cells the one-hot
+    // flag's cone reaches (`cone-fallback`) — measured 2026-10-23
+    assert!(
+        before.diagnostics.fault_sites.len() >= 19,
+        "{:?}",
+        before.diagnostics.fault_sites
+    );
+    assert!(
+        before
+            .diagnostics
+            .fault_sites
+            .iter()
+            .any(|s| s.selected_by == "fsm-mint"),
+        "{:?}",
+        before.diagnostics.fault_sites
+    );
+    let vacuous: Vec<&str> = rows
+        .iter()
+        .filter(|p| {
+            p.vacuity
+                .as_ref()
+                .is_some_and(|v| v.kind.tag() == "antecedent-unreachable")
+        })
+        .map(|p| p.label.as_deref().unwrap_or(&p.name))
+        .collect();
+    // On the un-faulted model EVERY chain is vacuous: no fault flag can rise — the FSM flags
+    // because the state never leaves its encoding, the counter flags because the duplicated
+    // copies never disagree (measured 2026-10-23, native k-induction).
+    assert_eq!(vacuous.len(), 15, "{vacuous:?}");
+    // --- the posture: sec-cm, one injection, the receiver pinned ---
+    let after = run(FaultBound::AtMost(1), true);
+    let rows = sec_cm(&after);
+    assert_eq!(rows.len(), 15);
+    assert!(!after.diagnostics.fault_sites.is_empty());
+    // Measured 2026-10-23 (2,754 s): NO countermeasure is escaped under one fault — no row is
+    // violated; the rows that decide hold, several with a reachable antecedent (the response is
+    // exercised); the rest stay ⊥ within the budget (each site widens the cone).
+    let violated: Vec<&str> = rows
+        .iter()
+        .filter(|p| matches!(p.outcome, VerifyOutcome::Violated { .. }))
+        .map(|p| p.label.as_deref().unwrap_or(&p.name))
+        .collect();
+    assert!(
+        violated.is_empty(),
+        "an escape under one fault: {violated:?}"
+    );
+    let holds = rows
+        .iter()
+        .filter(|p| matches!(p.outcome, VerifyOutcome::Holds))
+        .count();
+    assert!(holds >= 10, "{holds} of 15 hold");
+    let reachable = after
+        .notes
+        .iter()
+        .filter(|n| n.kind == "antecedent-reachable")
+        .count();
+    assert!(reachable >= 6, "{reachable} rows shown non-vacuous");
+    // The one-hot row's flag reads the register-write enables, not state: its `cone-fallback`
+    // sites cannot raise it, so it stays vacuous — a site-selection limit, recorded, not hidden.
+    assert!(
+        rows.iter()
+            .filter(|p| p.label.as_deref() == Some("FpvSecCmRegWeOnehotCheck_A"))
+            .all(|p| p
+                .vacuity
+                .as_ref()
+                .is_some_and(|v| v.kind.tag() == "antecedent-unreachable")),
+        "the one-hot row's vacuity is the documented limit"
+    );
+}
+
 /// The full-IP system properties are not invariants in disguise: freezing the sticky `ERR_CODE`
 /// record (`stick:u_reg.u_err_code_edn_main_sm_err.q`, the model's alias of the register) flips
 /// `edn_main_sm_error_is_recorded` HOLDS → VIOLATED — the main FSM still reaches `Error` (software

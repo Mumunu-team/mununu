@@ -52,6 +52,32 @@
         "null"
       ]
     },
+    "fault_model": {
+      "default": null,
+      "description": "Fault-injection posture from the design's countermeasures: `\"sec-cm\"` / `\"sec-cm:k\"` (`\"sec-cm:0\"` selects and runs the antecedent-vacuity check only). Alternative to `faults`; both is a 400. Mirrors the CLI `--fault-model`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "fault_warmup": {
+      "default": null,
+      "description": "Cycles before the first injection may fire (default 10). Mirrors `--fault-warmup`.",
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "faults": {
+      "default": [],
+      "description": "Fault-injection posture: registers the adversary may overwrite (`\"REG\"` / `\"REG:k\"`, one global budget, default 1; `\"REG:unbounded\"`). Mirrors the CLI `--fault`. Default empty.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
     "gate_reset": {
       "default": null,
       "description": "Reset-gating (pin the reset inactive + inject the post-reset init). Default `true`.",

@@ -33,6 +33,7 @@ pub mod cex_value;
 pub mod concrete_oracle;
 pub mod dep_graph;
 pub mod emit;
+pub mod fault;
 pub mod input_state;
 pub mod kmts_lift;
 pub mod l2s_monitor;

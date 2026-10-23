@@ -509,6 +509,14 @@ enum Btor2Command {
     /// `contradiction` means two sound engines disagree — a soundness alarm,
     /// never a silent guess. Engines whose binary is absent simply abstain.
     Verify(Btor2VerifyArgs),
+    /// Apply the fault-injection rewrite to a BTOR2 design and print the result: for each
+    /// `--fault REG[:k]` the register's `next` becomes `ite(fire, mununu_fault_val_i, next)`
+    /// with a named enable input, a global budget counter `mununu_fault_cnt` and a warm-up
+    /// clock. What `sv verify-auto --fault` and `btor2 verify --fault` run on, as a file —
+    /// for reproducing a verdict with another engine.
+    ///
+    /// surface: CLI-only — a file transform; the posture itself is CLI+API on the verify verbs.
+    InjectFault(Btor2InjectFaultArgs),
     /// Internal: run z3-SPACER on a BTOR2 read from stdin, print `safe`/`unsafe`/
     /// `unknown`. The portfolio self-execs this to run SPACER in an isolated child
     /// process (z3's Fixedpoint can flaky-segfault); not a user-facing verb.
@@ -992,8 +1000,37 @@ struct Btor2VerifyArgs {
     /// Step bound for `--bmc-only` (default 20).
     #[arg(long, value_name = "K", default_value_t = 20)]
     bmc_k: u32,
+    /// Fault-injection posture on the BTOR2 (`REG[:k]`, repeatable; the one global budget,
+    /// default 1): the design is rewritten as `btor2 inject-fault` does before the portfolio
+    /// runs. `reachable` then reads "an attack within the budget reaches `bad`" (the attacker
+    /// also drives every input — the strongest attacker); `unreachable` is a proof for every
+    /// input behaviour and every schedule within the budget. Mirrored on the API as `faults`.
+    #[arg(long = "fault", value_name = "REG[:k]")]
+    fault: Vec<String>,
+    /// Cycles before the first injection may fire (default 10). Mirrored on the API as
+    /// `fault_warmup`.
+    #[arg(long = "fault-warmup", value_name = "CYCLES", default_value_t = 10)]
+    fault_warmup: u32,
     #[command(flatten)]
     ci: CiArgs,
+}
+
+/// Arguments for `mununu btor2 inject-fault` — the fault-injection rewrite as a file transform.
+#[derive(Args, Debug)]
+struct Btor2InjectFaultArgs {
+    /// Path to the BTOR2 input file.
+    #[arg(value_name = "BTOR2_FILE")]
+    file: PathBuf,
+    /// A register the adversary may overwrite (`REG[:k]`, repeatable; one global budget,
+    /// default 1; `REG:unbounded` lifts it).
+    #[arg(long = "fault", value_name = "REG[:k]", required = true)]
+    fault: Vec<String>,
+    /// Cycles before the first injection may fire (default 10).
+    #[arg(long = "fault-warmup", value_name = "CYCLES", default_value_t = 10)]
+    fault_warmup: u32,
+    /// Write the injected BTOR2 here instead of standard output.
+    #[arg(short = 'o', long = "output", value_name = "PATH")]
+    output: Option<PathBuf>,
 }
 
 /// Arguments for `mununu btor2 verify-liveness` — the response-liveness reduction.
@@ -2196,6 +2233,29 @@ struct SvVerifyAutoArgs {
     /// state). Surfaced as a `control-slice` scope-caveat note.
     #[arg(long = "cutpoint", value_name = "SIGNAL")]
     cutpoint: Vec<String>,
+    /// Fault-injection posture: a register the adversary may overwrite (`REG` or `REG:k`;
+    /// `k` is the ONE global budget of injections, default 1 — a single-event upset;
+    /// `REG:unbounded` lifts it). Repeatable; `gen[1].q` is read as `gen$1.q`. The
+    /// corruption is a free value at a free cycle after `--fault-warmup`, gated
+    /// structurally (no `constraint`), so every engine sees the same total model. A safety
+    /// HOLDS transfers ("the countermeasure responds for every corruption at these sites
+    /// within the budget"); a VIOLATED is a real escape under the declared sites and budget;
+    /// an alternating (νμ) property over a corrupted register is skipped (the fault player
+    /// could restore any state). Mirrored on the API as `faults`.
+    #[arg(long = "fault", value_name = "REG[:k]")]
+    fault: Vec<String>,
+    /// Fault-injection posture from the design's own countermeasures: `sec-cm[:k]` selects,
+    /// for every `$rose(X.err_o) |-> ##[0:n] alert` chain, the state cells `X` compares (the
+    /// duplicated counters, the sparse-FSM state) as the sites, under one budget `k`
+    /// (default 1). `sec-cm:0` selects without injecting and runs the antecedent-vacuity
+    /// check only — the "before" instrument. Alternative to `--fault`. Mirrored on the API
+    /// as `fault_model`.
+    #[arg(long = "fault-model", value_name = "MODEL[:k]")]
+    fault_model: Option<String>,
+    /// Cycles before the first injection may fire (default 10, OpenTitan's own `[*10]`
+    /// assumption). Mirrored on the API as `fault_warmup`.
+    #[arg(long = "fault-warmup", value_name = "CYCLES", default_value_t = 10)]
+    fault_warmup: u32,
     /// Abstraction-predicate hint: a predicate expression (`reg == value`,
     /// `reg == reg`, `reg >= K`) seeded as a cube dimension for EVERY property,
     /// even when it does not appear in the property formula. The command-line peer
@@ -2478,6 +2538,29 @@ struct SvMutateArgs {
     /// as `cutpoint`.
     #[arg(long = "cutpoint", value_name = "SIGNAL")]
     cutpoint: Vec<String>,
+    /// Fault-injection posture: a register the adversary may overwrite (`REG` or `REG:k`;
+    /// `k` is the ONE global budget of injections, default 1 — a single-event upset;
+    /// `REG:unbounded` lifts it). Repeatable; `gen[1].q` is read as `gen$1.q`. The
+    /// corruption is a free value at a free cycle after `--fault-warmup`, gated
+    /// structurally (no `constraint`), so every engine sees the same total model. A safety
+    /// HOLDS transfers ("the countermeasure responds for every corruption at these sites
+    /// within the budget"); a VIOLATED is a real escape under the declared sites and budget;
+    /// an alternating (νμ) property over a corrupted register is skipped (the fault player
+    /// could restore any state). Mirrored on the API as `faults`.
+    #[arg(long = "fault", value_name = "REG[:k]")]
+    fault: Vec<String>,
+    /// Fault-injection posture from the design's own countermeasures: `sec-cm[:k]` selects,
+    /// for every `$rose(X.err_o) |-> ##[0:n] alert` chain, the state cells `X` compares (the
+    /// duplicated counters, the sparse-FSM state) as the sites, under one budget `k`
+    /// (default 1). `sec-cm:0` selects without injecting and runs the antecedent-vacuity
+    /// check only — the "before" instrument. Alternative to `--fault`. Mirrored on the API
+    /// as `fault_model`.
+    #[arg(long = "fault-model", value_name = "MODEL[:k]")]
+    fault_model: Option<String>,
+    /// Cycles before the first injection may fire (default 10, OpenTitan's own `[*10]`
+    /// assumption). Mirrored on the API as `fault_warmup`.
+    #[arg(long = "fault-warmup", value_name = "CYCLES", default_value_t = 10)]
+    fault_warmup: u32,
     #[command(flatten)]
     ci: CiArgs,
 }
@@ -3344,6 +3427,7 @@ fn handle_btor2(command: Btor2Command) -> Result<(), String> {
         Btor2Command::LiftKmts(args) => btor2_lift_kmts(args),
         Btor2Command::Cegar(args) => btor2_cegar(args),
         Btor2Command::Verify(args) => btor2_verify(args),
+        Btor2Command::InjectFault(args) => btor2_inject_fault(args),
         Btor2Command::SpacerCheck(args) => btor2_spacer_check(args),
         Btor2Command::VerifyLiveness(args) => btor2_verify_liveness(args),
         Btor2Command::VerifyJustice(args) => btor2_verify_justice(args),
@@ -3895,6 +3979,33 @@ fn btor2_spacer_check(args: Btor2SpacerCheckArgs) -> Result<(), String> {
     Ok(())
 }
 
+/// `mununu btor2 inject-fault FILE --fault REG[:k]… [-o PATH]`.
+fn btor2_inject_fault(args: Btor2InjectFaultArgs) -> Result<(), String> {
+    use mununu_core::adapter::btor2::fault::{FaultSpec, inject_faults};
+    let content = std::fs::read_to_string(&args.file)
+        .map_err(|e| format!("Failed to read BTOR2 '{}': {e}", args.file.display()))?;
+    let file = mununu_core::adapter::btor2::parser::parse(&content)
+        .map_err(|e| format!("BTOR2 parse error in '{}': {e}", args.file.display()))?;
+    let spec = FaultSpec::parse_many(&args.fault, args.fault_warmup)?;
+    let (out, injected) = inject_faults(&file, &spec).map_err(|m| format!("inject-fault: {m}"))?;
+    let mut text = format!("; mununu btor2 inject-fault — {}\n", spec.as_label());
+    for i in &injected {
+        text.push_str(&format!(
+            "; site {} ({} bit(s)): enable `{}`, value `{}`\n",
+            i.register, i.width, i.en_input, i.val_input
+        ));
+    }
+    text.push_str(&mununu_core::adapter::btor2::emit::emit_btor2(&out));
+    match &args.output {
+        Some(path) => std::fs::write(path, &text)
+            .map_err(|e| format!("Failed to write '{}': {e}", path.display())),
+        None => {
+            print!("{text}");
+            Ok(())
+        }
+    }
+}
+
 fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
     use mununu_core::adapter::reach_portfolio::{
         decide_reach_owned_only, decide_reach_portfolio,
@@ -3906,6 +4017,16 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
         .map_err(|e| format!("Failed to read BTOR2 '{}': {e}", args.file.display()))?;
     let file = mununu_core::adapter::btor2::parser::parse(&content)
         .map_err(|e| format!("BTOR2 parse error in '{}': {e}", args.file.display()))?;
+    // `--fault`: the fault-injection rewrite before any engine (what `btor2 inject-fault`
+    // prints); the summary names the posture so a `violated` reads as an attack.
+    let (file, fault_label) = if args.fault.is_empty() {
+        (file, None)
+    } else {
+        use mununu_core::adapter::btor2::fault::{FaultSpec, inject_faults};
+        let spec = FaultSpec::parse_many(&args.fault, args.fault_warmup)?;
+        let (out, _) = inject_faults(&file, &spec).map_err(|m| format!("--fault: {m}"))?;
+        (out, Some(spec.as_label()))
+    };
 
     // `--bmc-only`: bounded reachability, no portfolio / no proof. A shallow `bad` ⇒ a sound
     // `violated`; no `bad` within the bound ⇒ a BOUNDED `unknown` (not a safety proof). The
@@ -3920,6 +4041,7 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
         let summary = serde_json::json!({
             "file": args.file.display().to_string(),
             "engines": format!("bmc-only(k={})", args.bmc_k),
+            "fault": fault_label,
             "verdict": verdict,
             "reachable_by": if verdict == "violated" { vec!["native-bmc"] } else { Vec::<&str>::new() },
             "unreachable_by": Vec::<&str>::new(),
@@ -3997,6 +4119,7 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
     let summary = serde_json::json!({
         "file": args.file.display().to_string(),
         "engines": if args.owned_only { "owned-only" } else { "full-portfolio" },
+        "fault": fault_label,
         "verdict": PropertyVerdict::from(outcome.verdict).as_str(),
         "reachable_by": outcome.reachable_by,
         "unreachable_by": outcome.unreachable_by,
@@ -4406,6 +4529,11 @@ fn sv_verify_auto(args: SvVerifyAutoArgs) -> Result<(), String> {
         rescue_bottom_recoverability: !args.no_rescue,
         // `sv verify-auto` verifies the design as-lifted; mutation is the `sv mutate` verb's job.
         mutation: None,
+        faults: mununu_core::adapter::btor2::fault::FaultPosture::parse(
+            &args.fault,
+            args.fault_model.as_deref(),
+            args.fault_warmup,
+        )?,
         // mununu#677 — read by nothing; the shadow synthesis is gone. `--no-input-state` is
         // the refusal switch.
         antecedent_shadow: !args.no_antecedent_shadow,
@@ -6833,6 +6961,11 @@ fn sv_mutate(args: SvMutateArgs) -> Result<(), String> {
         },
         config_values,
         lift_overrides,
+        faults: mununu_core::adapter::btor2::fault::FaultPosture::parse(
+            &args.fault,
+            args.fault_model.as_deref(),
+            args.fault_warmup,
+        )?,
         ..Default::default()
     };
 
@@ -9851,5 +9984,73 @@ mod sv_mutate_lift_flag_tests {
             "`sv mutate` must accept the lift-posture flags (mununu#725): {:?}",
             parsed.err().map(|e| e.to_string())
         );
+    }
+
+    /// PR A1 — the fault-injection posture flags parse on the three verbs and the file
+    /// transform (`--fault` repeatable with `REG[:k]`, `--fault-model MODEL[:k]`,
+    /// `--fault-warmup`); the "one of the two selections" rule is the core's, tested there.
+    #[test]
+    fn fault_posture_flags_parse_on_every_surface() {
+        for argv in [
+            vec![
+                "mununu",
+                "sv",
+                "verify-auto",
+                "t.sv",
+                "--fault",
+                "a",
+                "--fault",
+                "gen[1].q:2",
+                "--fault-warmup",
+                "3",
+            ],
+            vec![
+                "mununu",
+                "sv",
+                "verify-auto",
+                "t.sv",
+                "--fault-model",
+                "sec-cm:0",
+            ],
+            vec![
+                "mununu",
+                "sv",
+                "mutate",
+                "t.sv",
+                "--mutation",
+                "stick:a",
+                "--fault-model",
+                "sec-cm",
+            ],
+            vec![
+                "mununu",
+                "btor2",
+                "verify",
+                "d.btor2",
+                "--fault",
+                "state_q:1",
+                "--fault-warmup",
+                "0",
+            ],
+            vec![
+                "mununu",
+                "btor2",
+                "inject-fault",
+                "d.btor2",
+                "--fault",
+                "state_q",
+                "-o",
+                "out.btor2",
+            ],
+        ] {
+            let parsed = Cli::try_parse_from(&argv);
+            assert!(
+                parsed.is_ok(),
+                "{argv:?}: {:?}",
+                parsed.err().map(|e| e.to_string())
+            );
+        }
+        // `inject-fault` without a site is a usage error
+        assert!(Cli::try_parse_from(["mununu", "btor2", "inject-fault", "d.btor2"]).is_err());
     }
 }

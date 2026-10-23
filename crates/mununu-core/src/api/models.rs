@@ -930,6 +930,15 @@ pub struct Btor2CegarRequest {
 pub struct Btor2VerifyRequest {
     /// BTOR2 source content.
     pub content: String,
+    /// Fault-injection posture (`"REG[:k]"`, one global budget, default 1): the design is
+    /// rewritten as `btor2 inject-fault` does before the portfolio runs; `"violated"` then
+    /// reads "an attack within the budget reaches `bad`". Mirrors the CLI `--fault`. Default
+    /// empty.
+    #[serde(default)]
+    pub faults: Vec<String>,
+    /// Cycles before the first injection may fire (default 10). Mirrors `--fault-warmup`.
+    #[serde(default)]
+    pub fault_warmup: Option<u32>,
 }
 
 /// Response for `POST /api/v1/btor2/verify` — the merged portfolio verdict plus
@@ -1522,6 +1531,18 @@ pub struct SvMutateRequest {
     /// 400. Mirrors the CLI `--lift-override NAME=PATH`. Default empty.
     #[serde(default)]
     pub lift_overrides: Vec<FileContent>,
+    /// Fault-injection posture: registers the adversary may overwrite (`"REG"` / `"REG:k"`,
+    /// one global budget, default 1; `"REG:unbounded"`). Mirrors the CLI `--fault`. Default empty.
+    #[serde(default)]
+    pub faults: Vec<String>,
+    /// Fault-injection posture from the design's countermeasures: `"sec-cm"` / `"sec-cm:k"`
+    /// (`"sec-cm:0"` selects and runs the antecedent-vacuity check only). Alternative to
+    /// `faults`; both is a 400. Mirrors the CLI `--fault-model`.
+    #[serde(default)]
+    pub fault_model: Option<String>,
+    /// Cycles before the first injection may fire (default 10). Mirrors `--fault-warmup`.
+    #[serde(default)]
+    pub fault_warmup: Option<u32>,
 }
 
 /// The mutation targets available in a design (the `list` response payload).
@@ -1832,6 +1853,18 @@ pub struct SvVerifyAutoRequest {
     /// source is a 400. Mirrors the CLI's `--lift-override NAME=PATH`. Default empty.
     #[serde(default)]
     pub lift_overrides: Vec<FileContent>,
+    /// Fault-injection posture: registers the adversary may overwrite (`"REG"` / `"REG:k"`,
+    /// one global budget, default 1; `"REG:unbounded"`). Mirrors the CLI `--fault`. Default empty.
+    #[serde(default)]
+    pub faults: Vec<String>,
+    /// Fault-injection posture from the design's countermeasures: `"sec-cm"` / `"sec-cm:k"`
+    /// (`"sec-cm:0"` selects and runs the antecedent-vacuity check only). Alternative to
+    /// `faults`; both is a 400. Mirrors the CLI `--fault-model`.
+    #[serde(default)]
+    pub fault_model: Option<String>,
+    /// Cycles before the first injection may fire (default 10). Mirrors `--fault-warmup`.
+    #[serde(default)]
+    pub fault_warmup: Option<u32>,
     /// How SVA `assume` statements are treated: `"precondition"` (default — the guarantees are
     /// checked on the traces along which every applied assumption has held), `"check"` (each
     /// assumption is checked like an assertion and constrains nothing) or `"ignore"`. Mirrors the
@@ -2180,6 +2213,19 @@ impl From<&crate::adapter::slang::verify_auto::AutoVerifyReport> for SvVerifyAut
                 lift_retry: report.diagnostics.lift_retry.clone(),
                 config_values: report.diagnostics.applied_config_values.clone(),
                 cutpoints: report.diagnostics.cutpoint_signals.clone(),
+                fault_model: report.diagnostics.fault_model.clone(),
+                fault_sites: report
+                    .diagnostics
+                    .fault_sites
+                    .iter()
+                    .map(|s| FaultSiteView {
+                        register: s.register.clone(),
+                        width: s.width,
+                        bound: s.bound.clone(),
+                        selected_by: s.selected_by.clone(),
+                        rows: s.rows.clone(),
+                    })
+                    .collect(),
             },
             // Expectations are not a property of the report — they are the caller's claim about
             // it — so the conversion leaves this None and the caller fills it in.
@@ -2346,6 +2392,31 @@ pub struct ModelDiagnosticsView {
     /// verdicts were reached under.
     #[serde(default)]
     pub cutpoints: Vec<String>,
+    /// The fault-injection posture this run was under (`faults` / `fault_model`), as one label;
+    /// `null` without one. A verdict under a posture is a claim about the design WITH an
+    /// adversary at the listed sites, so the scope ships with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fault_model: Option<String>,
+    /// The registers the adversary may corrupt under the posture. Empty without one.
+    #[serde(default)]
+    pub fault_sites: Vec<FaultSiteView>,
+}
+
+/// One fault site of the posture (`diagnostics.fault_sites[]`).
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct FaultSiteView {
+    /// The register, as the model names it.
+    pub register: String,
+    /// Its width in bits (0 when the posture was not applied — a zero budget).
+    pub width: u32,
+    /// The global budget (`"≤1"`, `"unbounded"`).
+    pub bound: String,
+    /// `"explicit"` (named on the request), `"instance-prefix"` (a `sec-cm` site inside the
+    /// fault flag's own instance) or `"cone-fallback"` (every cell the flag compares).
+    pub selected_by: String,
+    /// The security-countermeasure rows this site serves (`sec-cm` only).
+    #[serde(default)]
+    pub rows: Vec<String>,
 }
 
 /// monono ask 26 — WHY a property is `⊥`, machine-readable.
@@ -2517,6 +2588,7 @@ pub struct VacuityView {
     /// |---|---|
     /// | `invariant-target` | **vacuous.** The target is invariant in this report — `EF(¬P)` VIOLATED or `AG(P)` HOLDS beside `AG EF(P)` HOLDS — so the design never leaves `P` and no recovery is ever exercised. Consistent; the HOLDS stands and says nothing about recovery. |
     /// | `witness-refuted` | **not shown non-vacuous.** A reachability over the guarantee's register at another value (`EF(st_q == S_WAIT)`) is VIOLATED in the same report. It does not make the guarantee false; if that property is the guarantee's non-vacuity witness, the pair is a failed gate, not a pass. |
+    /// | `antecedent-unreachable` | **vacuous.** A security-countermeasure chain (`$rose(X) \|-> ##[0:k] alert`) HOLDS, and under the fault posture the reach portfolio proved `X` never rises on this model (the un-faulted lift's fault flags are synthesis constants). `witness` is the row itself. |
     pub kind: String,
     /// The property (`name`) whose verdict establishes it.
     pub witness: String,

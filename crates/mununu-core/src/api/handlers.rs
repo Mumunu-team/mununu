@@ -733,6 +733,23 @@ fn btor2_verify_handler_impl(request: Btor2VerifyRequest) -> ApiResult<Json<Btor
             details: None,
         }
     })?;
+    // `faults`: the fault-injection rewrite before any engine (the CLI `--fault`).
+    let file = if request.faults.is_empty() {
+        file
+    } else {
+        use crate::adapter::btor2::fault::{FaultSpec, inject_faults};
+        let spec = FaultSpec::parse_many(&request.faults, request.fault_warmup.unwrap_or(10))
+            .map_err(|message| ApiError::BadRequest {
+                message: format!("faults: {message}"),
+                details: None,
+            })?;
+        inject_faults(&file, &spec)
+            .map_err(|message| ApiError::BadRequest {
+                message: format!("faults: {message}"),
+                details: None,
+            })?
+            .0
+    };
 
     let outcome = decide_reach_portfolio(&file);
     Ok(Json(Btor2VerifyResponse {
@@ -1715,6 +1732,15 @@ fn sv_mutate_handler_impl(request: SvMutateRequest) -> ApiResult<Json<SvMutateRe
     // mununu#663 — absent / `"auto"` resolves the policy per property, as on `sv/verify-auto`.
     let must_edge_auto = matches!(request.must_edge_inference.as_deref(), None | Some("auto"));
     let base_opts = VerifyAutoOptions {
+        faults: crate::adapter::btor2::fault::FaultPosture::parse(
+            &request.faults,
+            request.fault_model.as_deref(),
+            request.fault_warmup.unwrap_or(10),
+        )
+        .map_err(|message| ApiError::BadRequest {
+            message: format!("sv mutate: {message}"),
+            details: None,
+        })?,
         must_edge_inference,
         must_edge_auto,
         gate_reset: request.gate_reset.unwrap_or(true),
@@ -2008,6 +2034,15 @@ fn sv_verify_auto_handler_impl(
         breadcrumb_append: false,
         skip_rows: std::collections::HashSet::new(),
         assume_mode,
+        faults: crate::adapter::btor2::fault::FaultPosture::parse(
+            &request.faults,
+            request.fault_model.as_deref(),
+            request.fault_warmup.unwrap_or(10),
+        )
+        .map_err(|message| ApiError::BadRequest {
+            message: format!("sv verify-auto: {message}"),
+            details: None,
+        })?,
     };
 
     let report = verify_auto(&sources, &yopts, &opts).map_err(|e| ApiError::BadRequest {
@@ -5118,6 +5153,8 @@ members = ["x"]
                      10 eq 9 3 8\n11 bad 10\n";
         let request = Btor2VerifyRequest {
             content: btor2.to_string(),
+            faults: vec![],
+            fault_warmup: None,
         };
         let Json(out) = btor2_verify_handler(Json(request))
             .await
@@ -5141,6 +5178,8 @@ members = ["x"]
     async fn btor2_verify_handler_rejects_malformed_btor2() {
         let request = Btor2VerifyRequest {
             content: "this is not btor2".to_string(),
+            faults: vec![],
+            fault_warmup: None,
         };
         let err = btor2_verify_handler(Json(request))
             .await

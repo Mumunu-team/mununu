@@ -5,6 +5,24 @@
     "content": {
       "description": "BTOR2 source content.",
       "type": "string"
+    },
+    "fault_warmup": {
+      "default": null,
+      "description": "Cycles before the first injection may fire (default 10). Mirrors `--fault-warmup`.",
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "faults": {
+      "default": [],
+      "description": "Fault-injection posture (`\"REG[:k]\"`, one global budget, default 1): the design is rewritten as `btor2 inject-fault` does before the portfolio runs; `\"violated\"` then reads \"an attack within the budget reaches `bad`\". Mirrors the CLI `--fault`. Default empty.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
     }
   },
   "required": [
