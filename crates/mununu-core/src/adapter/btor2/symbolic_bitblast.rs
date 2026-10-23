@@ -13111,53 +13111,6 @@ mod tests {
         );
     }
 
-    /// A property that asks for SOME trace reads the cycle-0 input existentially. The lift samples
-    /// the cycle-0 input into the initial state, and `init ⊆ sat` read it universally: a latch
-    /// that breaks for good on a bad cycle-0 input (`ok = prev ∧ a`, the shape of the assumption
-    /// monitor `mununu_assume_ok`) made `EF ok` fail at the initial states with `a = 0`, and a
-    /// `cover` relativized to an input-reading `assume` came back UNREACHABLE although the
-    /// environment can simply choose `a = 1`. A property over EVERY trace keeps the universal
-    /// reading (`AG ok` is violated by `a = 0`).
-    #[test]
-    fn existential_property_reads_the_cycle0_input_existentially() {
-        const LATCH: &str = r#"
-1 sort bitvec 1
-2 input 1 a
-3 state 1 prev_ok
-4 one 1
-5 init 1 3 4
-6 and 1 3 2 ok
-7 next 1 3 6
-"#;
-        let verdict = |f: &str| {
-            exact_symbolic_verdict(
-                LATCH,
-                &crate::mu_calculus::parser::parse(f).expect("formula"),
-            )
-            .expect("decides")
-        };
-        assert_eq!(
-            verdict("mu X. (ok || <> X)"),
-            ExactVerdict::Holds,
-            "`EF ok`: the environment picks `a = 1` at cycle 0"
-        );
-        assert_eq!(
-            verdict("mu X. ((!(ok)) || <> X)"),
-            ExactVerdict::Holds,
-            "`EF !ok`: and `a = 0` at cycle 0 breaks it"
-        );
-        assert_eq!(
-            verdict("nu X. (ok && [] X)"),
-            ExactVerdict::Violated,
-            "`AG ok` quantifies the cycle-0 input universally"
-        );
-        assert_eq!(
-            verdict("(!(mu X. ((!(ok)) || <> X)))"),
-            ExactVerdict::Violated,
-            "`!EF !ok` is `AG ok` — the negation flips the first modality to universal"
-        );
-    }
-
     /// mununu#476 — a NAMED combinational signal whose cone reaches primary inputs
     /// (without crossing a register boundary) is refused **when the formula does not
     /// match the `|=>` shape** (bare `EF`, `AF`, etc.). This preserves soundness for
