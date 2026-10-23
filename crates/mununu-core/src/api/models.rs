@@ -2177,6 +2177,7 @@ impl From<&crate::adapter::slang::verify_auto::AutoVerifyReport> for SvVerifyAut
                 auto_provided_stubs: report.diagnostics.auto_provided_stubs.clone(),
                 frontend: report.diagnostics.frontend.clone(),
                 frontend_fallback_reason: report.diagnostics.frontend_fallback_reason.clone(),
+                lift_retry: report.diagnostics.lift_retry.clone(),
                 config_values: report.diagnostics.applied_config_values.clone(),
                 cutpoints: report.diagnostics.cutpoint_signals.clone(),
             },
@@ -2332,6 +2333,11 @@ pub struct ModelDiagnosticsView {
     /// attempt's error. `None` when there was no fallback.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frontend_fallback_reason: Option<String>,
+    /// The lift rerun its yosys script with `opt_clean` before `write_btor` after the BTOR
+    /// backend reported a topological loop (yosys-slang `$buf` cells; the model is the same
+    /// design) — the reason, else `None`. The `lift-retry` note carries the same text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lift_retry: Option<String>,
     /// mununu#536 — config inputs pinned for this run, each `"<signal>=<value>"`. A verdict
     /// under a pin is a claim about THAT configuration only, so the scope ships with it.
     #[serde(default)]

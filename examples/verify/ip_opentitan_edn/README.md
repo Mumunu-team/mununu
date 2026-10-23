@@ -24,14 +24,26 @@ sh run.sh --json --source mununu_properties.sv     # + the system-level properti
 
 `run.sh` is `sv verify-auto edn.sv --top edn --preprocess-sv2v --source … --lift-override
 prim_assert.sv=prim_assert_shim.sv … --config-value rst_ni=1`: the SVA is **extracted from the real
-`prim_assert` macros**, while the sv2v + yosys lift sees `prim_assert_shim.sv`, which defines every macro
-of the real set as nothing (as OpenTitan's own synthesis macros do). `rst_ni` is pinned inactive and
+`prim_assert` macros**, while the sv2v + yosys lift sees `prim_assert_shim.sv`, which defines every
+assertion macro of the real set as nothing (as OpenTitan's own synthesis macros do) **and defines
+`INC_ASSERT`** (2026-10-22), so the RTL's assertion-support logic is in the model: `prim_count`'s
+`fpv_err_present` and the `ASSERT_FPV_LINEAR_FSM` `<name>_cond` flop. Two upstream files cannot be
+lifted with that region in — `prim_alert_sender.sv` declares `sequence` blocks (no sv2v lowering,
+yosys-slang "unimplemented") and `prim_sparse_fsm_flop.sv` walks its enum with `t.first()/t.next()`
+(yosys-slang "unsupported system task 'next'"; sv2v leaves the calls and yosys cannot resolve them) —
+so `run.sh` lifts them through `prim_alert_sender_lift.sv` / `prim_sparse_fsm_flop_lift.sv`, the same
+files with the `ifdef INC_ASSERT` regions removed (`--strip-inc-assert`; the removed line ranges are in
+each file's header). Consequence: the sparse-FSM flop's `unused_err_o` is still the synthesis constant
+`1'b0` in the lift, so the nine FSM error → alert rows below (`FpvSecCm{Main,Ack}FsmCheck_A`) hold
+with an antecedent the model cannot raise; the fault-injection posture mints that flag from the
+state's enum domain (planned, PR A1). `rst_ni` is pinned inactive and
 every register starts at its reset value; the TL-UL bus, the CSRNG response and the endpoint requests are
 **free inputs** — every HOLDS below holds under an adversarial bus, and every VIOLATED is reachable from
 reset under one. Set `MUNUNU_PROPERTY_BUDGET_MS` on a run this size (see the caveats).
 
 To re-vendor at another commit: `python3 ../../../scripts/vendor_opentitan_ip.py --ip edn --commit <sha>
---checkout <dir> --out source --rewrite "edn_core.sv|'{default: 1'b0}|'{default: '0}"` (needs `slang`).
+--checkout <dir> --out source --rewrite "edn_core.sv|'{default: 1'b0}|'{default: '0}"
+--strip-inc-assert prim_alert_sender.sv --strip-inc-assert prim_sparse_fsm_flop.sv` (needs `slang`).
 
 ## What was measured (2026-10-18, `mununu-sva`, shipped defaults — `MUNUNU_PROPERTY_BUDGET_MS` 15 min, `MUNUNU_RESCUE_SLICE_MS` 60 s)
 
@@ -97,9 +109,9 @@ reads the record path, not just the FSM.
 
 ## Caveats
 
-- One IP, one commit. `csrng` (its AES cipher core black-boxed: 20 HOLDS, all `ASSERT_KNOWN`; its 10
-  error → alert checks ⊥) and `pattgen` (14 of 14 HOLDS) lift the same way; their numbers are in the
-  benchmark ledger, not pinned here.
+- One IP, one commit — two since 2026-10-23: [`csrng`](../ip_opentitan_csrng/README.md) (its AES cipher
+  core black-boxed) is vendored and pinned beside this one (34 / 0 / 0 / 3, its ten error → alert checks
+  HOLD); `pattgen` (14 of 14 HOLDS) lifts the same way and lives in the benchmark ledger only.
 - The bus integrity check (`tlul_cmd_intg_chk`) sees a free bus, so an integrity error is reachable from
   cycle 1; a property that mentions the fatal alert must account for it.
 - Budgets: `MUNUNU_PROPERTY_BUDGET_MS` (15 min) bounds a row, `MUNUNU_RESCUE_SLICE_MS` (60 s) each
@@ -107,6 +119,6 @@ reads the record path, not just the FSM.
   `bottom_reason: budget-expired` and the rows after it are still attempted (mununu#726, #728 — before
   them the fatal-alert invariant ran 26 min under a 5-min budget). Keep `MUNUNU_VERIFY_AUTO_PARTIAL_JSON`
   on so the rows already decided survive a kill from outside.
-- Counterexample traces list only values that fit 64 bits: the 109-bit `tl_i` is missing from the
-  VIOLATED row's trace (mununu#723).
+- Counterexample traces list every cell at its full width since mununu#747 (the 109-bit `tl_i` used to
+  be missing, mununu#723); a value wider than 64 bits is carried as `hex` + `bits` with `value` null.
 - Multi-clock IPs (`sysrst_ctrl`, `aon_timer`: `prim_reg_cdc`) are not modelled — the lift is single-clock.

@@ -1,0 +1,72 @@
+# lowRISC/opentitan @ 558921ccc8aeefab652b45c1402c10bceb63accc
+# <file>  <upstream path>  (vendored byte-exact by scripts/vendor_opentitan_ip.py)
+aes_reg_pkg.sv  hw/ip/aes/rtl/aes_reg_pkg.sv
+prim_util_pkg.sv  hw/ip/prim/rtl/prim_util_pkg.sv
+aes_pkg.sv  hw/ip/aes/rtl/aes_pkg.sv
+csrng_reg_pkg.sv  hw/ip/csrng/rtl/csrng_reg_pkg.sv
+entropy_src_pkg.sv  hw/ip/entropy_src/rtl/entropy_src_pkg.sv
+csrng_pkg.sv  hw/ip/csrng/rtl/csrng_pkg.sv
+edn_pkg.sv  hw/ip/edn/rtl/edn_pkg.sv
+lc_ctrl_reg_pkg.sv  hw/ip/lc_ctrl/rtl/lc_ctrl_reg_pkg.sv
+lc_ctrl_state_pkg.sv  hw/ip/lc_ctrl/rtl/lc_ctrl_state_pkg.sv
+prim_mubi_pkg.sv  hw/ip/prim/rtl/prim_mubi_pkg.sv
+lc_ctrl_pkg.sv  hw/ip/lc_ctrl/rtl/lc_ctrl_pkg.sv
+prim_alert_pkg.sv  hw/ip/prim/rtl/prim_alert_pkg.sv
+prim_count_pkg.sv  hw/ip/prim/rtl/prim_count_pkg.sv
+prim_secded_pkg.sv  hw/ip/prim/rtl/prim_secded_pkg.sv
+prim_subreg_pkg.sv  hw/ip/prim/rtl/prim_subreg_pkg.sv
+top_pkg.sv  hw/top_earlgrey/rtl/top_pkg.sv
+tlul_pkg.sv  hw/ip/tlul/rtl/tlul_pkg.sv
+prim_assert.sv  hw/ip/prim/rtl/prim_assert.sv
+prim_assert_sec_cm.svh  hw/ip/prim/rtl/prim_assert_sec_cm.svh
+prim_assert_standard_macros.svh  hw/ip/prim/rtl/prim_assert_standard_macros.svh
+prim_flop_macros.sv  hw/ip/prim/rtl/prim_flop_macros.sv
+prim_assert_dummy_macros.svh  hw/ip/prim/rtl/prim_assert_dummy_macros.svh
+prim_assert_yosys_macros.svh  hw/ip/prim/rtl/prim_assert_yosys_macros.svh
+prim_fifo_assert.svh  hw/ip/prim/rtl/prim_fifo_assert.svh
+aes_cipher_core_bbox.sv  LOCAL: (* blackbox *) stub, header verbatim, no body
+csrng_block_encrypt.sv  hw/ip/csrng/rtl/csrng_block_encrypt.sv
+csrng_cmd_stage.sv  hw/ip/csrng/rtl/csrng_cmd_stage.sv
+csrng_core.sv  hw/ip/csrng/rtl/csrng_core.sv
+csrng_ctr_drbg.sv  hw/ip/csrng/rtl/csrng_ctr_drbg.sv
+csrng_main_sm.sv  hw/ip/csrng/rtl/csrng_main_sm.sv
+csrng_reg_top.sv  hw/ip/csrng/rtl/csrng_reg_top.sv
+csrng_state_db.sv  hw/ip/csrng/rtl/csrng_state_db.sv
+prim_alert_sender.sv  hw/ip/_mununu_prim_alert_sender/rtl/prim_alert_sender.sv
+prim_arbiter_ppc.sv  hw/ip/prim/rtl/prim_arbiter_ppc.sv
+prim_buf.sv  hw/ip/prim_generic/rtl/prim_buf.sv
+prim_count.sv  hw/ip/prim/rtl/prim_count.sv
+prim_diff_decode.sv  hw/ip/prim/rtl/prim_diff_decode.sv
+prim_edge_detector.sv  hw/ip/prim/rtl/prim_edge_detector.sv
+prim_fifo_sync.sv  hw/ip/prim/rtl/prim_fifo_sync.sv
+prim_fifo_sync_cnt.sv  hw/ip/prim/rtl/prim_fifo_sync_cnt.sv
+prim_flop.sv  hw/ip/prim_generic/rtl/prim_flop.sv
+prim_flop_2sync.sv  hw/ip/prim_generic/rtl/prim_flop_2sync.sv
+prim_intr_hw.sv  hw/ip/prim/rtl/prim_intr_hw.sv
+prim_lc_sync.sv  hw/ip/prim/rtl/prim_lc_sync.sv
+prim_leading_one_ppc.sv  hw/ip/prim/rtl/prim_leading_one_ppc.sv
+prim_mubi4_sync.sv  hw/ip/prim/rtl/prim_mubi4_sync.sv
+prim_mubi8_sync.sv  hw/ip/prim/rtl/prim_mubi8_sync.sv
+prim_onehot_check.sv  hw/ip/prim/rtl/prim_onehot_check.sv
+prim_packer_fifo.sv  hw/ip/prim/rtl/prim_packer_fifo.sv
+prim_reg_we_check.sv  hw/ip/prim/rtl/prim_reg_we_check.sv
+prim_sec_anchor_buf.sv  hw/ip/prim/rtl/prim_sec_anchor_buf.sv
+prim_sec_anchor_flop.sv  hw/ip/prim/rtl/prim_sec_anchor_flop.sv
+prim_secded_inv_39_32_dec.sv  hw/ip/prim/rtl/prim_secded_inv_39_32_dec.sv
+prim_secded_inv_39_32_enc.sv  hw/ip/prim/rtl/prim_secded_inv_39_32_enc.sv
+prim_secded_inv_64_57_dec.sv  hw/ip/prim/rtl/prim_secded_inv_64_57_dec.sv
+prim_secded_inv_64_57_enc.sv  hw/ip/prim/rtl/prim_secded_inv_64_57_enc.sv
+prim_sparse_fsm_flop.sv  hw/ip/prim/rtl/prim_sparse_fsm_flop.sv
+prim_subreg.sv  hw/ip/prim/rtl/prim_subreg.sv
+prim_subreg_arb.sv  hw/ip/prim/rtl/prim_subreg_arb.sv
+prim_subreg_ext.sv  hw/ip/prim/rtl/prim_subreg_ext.sv
+tlul_adapter_reg.sv  hw/ip/tlul/rtl/tlul_adapter_reg.sv
+tlul_cmd_intg_chk.sv  hw/ip/tlul/rtl/tlul_cmd_intg_chk.sv
+tlul_data_integ_dec.sv  hw/ip/tlul/rtl/tlul_data_integ_dec.sv
+tlul_data_integ_enc.sv  hw/ip/tlul/rtl/tlul_data_integ_enc.sv
+tlul_err.sv  hw/ip/tlul/rtl/tlul_err.sv
+tlul_rsp_intg_gen.sv  hw/ip/tlul/rtl/tlul_rsp_intg_gen.sv
+csrng.sv  hw/ip/csrng/rtl/csrng.sv
+prim_assert_shim.sv  LOCAL: generated from hw/ip/prim/rtl/prim_assert*.{sv,svh} (lift only)
+prim_alert_sender_lift.sv  LOCAL: prim_alert_sender.sv without its `ifdef INC_ASSERT` regions (lift only, scripts/vendor_opentitan_ip.py --strip-inc-assert)
+prim_sparse_fsm_flop_lift.sv  LOCAL: prim_sparse_fsm_flop.sv without its `ifdef INC_ASSERT` regions (lift only, scripts/vendor_opentitan_ip.py --strip-inc-assert)
