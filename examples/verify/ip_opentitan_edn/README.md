@@ -35,8 +35,9 @@ so `run.sh` lifts them through `prim_alert_sender_lift.sv` / `prim_sparse_fsm_fl
 files with the `ifdef INC_ASSERT` regions removed (`--strip-inc-assert`; the removed line ranges are in
 each file's header). Consequence: the sparse-FSM flop's `unused_err_o` is still the synthesis constant
 `1'b0` in the lift, so the nine FSM error → alert rows below (`FpvSecCm{Main,Ack}FsmCheck_A`) hold
-with an antecedent the model cannot raise; the fault-injection posture mints that flag from the
-state's enum domain (planned, PR A1). `rst_ni` is pinned inactive and
+with an antecedent the model cannot raise; under `--fault-model sec-cm` the flag is re-minted
+from the state's compared constants and the rows are asked under a fault (`docs/verifying-rtl.md`
+§"The fault-injection posture": 15 of 15 vacuous without a fault, 0 escaped with one). `rst_ni` is pinned inactive and
 every register starts at its reset value; the TL-UL bus, the CSRNG response and the endpoint requests are
 **free inputs** — every HOLDS below holds under an adversarial bus, and every VIOLATED is reachable from
 reset under one. Set `MUNUNU_PROPERTY_BUDGET_MS` on a run this size (see the caveats).

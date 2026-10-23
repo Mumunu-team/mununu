@@ -124,6 +124,32 @@
       ],
       "description": "mununu#537 — assert that this run produces the verdicts the caller claims. Omitted ⇒ no claim, and the response carries no `expectations` block.\n\nThe HTTP peer of the CLI's `--expect-all-hold` / `--expect-count` / `--expect-violated` / `--expect`. A gate driving mununu over HTTP wants the same three assertions a gate driving it on the command line does."
     },
+    "fault_model": {
+      "default": null,
+      "description": "Fault-injection posture from the design's countermeasures: `\"sec-cm\"` / `\"sec-cm:k\"` (`\"sec-cm:0\"` selects and runs the antecedent-vacuity check only). Alternative to `faults`; both is a 400. Mirrors the CLI `--fault-model`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "fault_warmup": {
+      "default": null,
+      "description": "Cycles before the first injection may fire (default 10). Mirrors `--fault-warmup`.",
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "faults": {
+      "default": [],
+      "description": "Fault-injection posture: registers the adversary may overwrite (`\"REG\"` / `\"REG:k\"`, one global budget, default 1; `\"REG:unbounded\"`). Mirrors the CLI `--fault`. Default empty.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
     "gate_reset": {
       "default": null,
       "description": "Reset-gating: drop recognized `disable iff (reset)` guards and pin the reset input inactive at the model level (default `true`). Set `false` to keep the guard and leave the reset free.",

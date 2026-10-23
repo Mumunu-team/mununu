@@ -306,6 +306,14 @@ mod tests {
                 lift_retry: Some("the BTOR backend reported a topological loop".into()),
                 applied_config_values: vec!["cfg=7".into()],
                 cutpoint_signals: vec!["fits".into()],
+                fault_model: Some("fault: a (≤1, warm-up 10)".into()),
+                fault_sites: vec![crate::adapter::btor2::fault::FaultSiteReport {
+                    register: "a".into(),
+                    width: 2,
+                    bound: "≤1".into(),
+                    selected_by: "explicit".into(),
+                    rows: vec![],
+                }],
             },
             notes: vec![VerificationNote {
                 kind: "coverage-summary".into(),

@@ -231,6 +231,44 @@
       ],
       "type": "object"
     },
+    "FaultSiteView": {
+      "description": "One fault site of the posture (`diagnostics.fault_sites[]`).",
+      "properties": {
+        "bound": {
+          "description": "The global budget (`\"≤1\"`, `\"unbounded\"`).",
+          "type": "string"
+        },
+        "register": {
+          "description": "The register, as the model names it.",
+          "type": "string"
+        },
+        "rows": {
+          "default": [],
+          "description": "The security-countermeasure rows this site serves (`sec-cm` only).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "selected_by": {
+          "description": "`\"explicit\"` (named on the request), `\"instance-prefix\"` (a `sec-cm` site inside the fault flag's own instance) or `\"cone-fallback\"` (every cell the flag compares).",
+          "type": "string"
+        },
+        "width": {
+          "description": "Its width in bits (0 when the posture was not applied — a zero budget).",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "bound",
+        "register",
+        "selected_by",
+        "width"
+      ],
+      "type": "object"
+    },
     "ModelDiagnosticsView": {
       "description": "Model-level lift diagnostics (mirrors [`crate::adapter::slang::verify_auto::ModelDiagnostics`]).",
       "properties": {
@@ -261,6 +299,21 @@
           "description": "mununu#536 — signals cut to free inputs by `--cutpoint`: the control slice these verdicts were reached under.",
           "items": {
             "type": "string"
+          },
+          "type": "array"
+        },
+        "fault_model": {
+          "description": "The fault-injection posture this run was under (`faults` / `fault_model`), as one label; `null` without one. A verdict under a posture is a claim about the design WITH an adversary at the listed sites, so the scope ships with it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "fault_sites": {
+          "default": [],
+          "description": "The registers the adversary may corrupt under the posture. Empty without one.",
+          "items": {
+            "$ref": "#/definitions/FaultSiteView"
           },
           "type": "array"
         },
@@ -453,7 +506,7 @@
           "type": "string"
         },
         "kind": {
-          "description": "Machine-stable tag:\n\n| `kind` | meaning | |---|---| | `invariant-target` | **vacuous.** The target is invariant in this report — `EF(¬P)` VIOLATED or `AG(P)` HOLDS beside `AG EF(P)` HOLDS — so the design never leaves `P` and no recovery is ever exercised. Consistent; the HOLDS stands and says nothing about recovery. | | `witness-refuted` | **not shown non-vacuous.** A reachability over the guarantee's register at another value (`EF(st_q == S_WAIT)`) is VIOLATED in the same report. It does not make the guarantee false; if that property is the guarantee's non-vacuity witness, the pair is a failed gate, not a pass. |",
+          "description": "Machine-stable tag:\n\n| `kind` | meaning | |---|---| | `invariant-target` | **vacuous.** The target is invariant in this report — `EF(¬P)` VIOLATED or `AG(P)` HOLDS beside `AG EF(P)` HOLDS — so the design never leaves `P` and no recovery is ever exercised. Consistent; the HOLDS stands and says nothing about recovery. | | `witness-refuted` | **not shown non-vacuous.** A reachability over the guarantee's register at another value (`EF(st_q == S_WAIT)`) is VIOLATED in the same report. It does not make the guarantee false; if that property is the guarantee's non-vacuity witness, the pair is a failed gate, not a pass. | | `antecedent-unreachable` | **vacuous.** A security-countermeasure chain (`$rose(X) \\|-> ##[0:k] alert`) HOLDS, and under the fault posture the reach portfolio proved `X` never rises on this model (the un-faulted lift's fault flags are synthesis constants). `witness` is the row itself. |",
           "type": "string"
         },
         "witness": {

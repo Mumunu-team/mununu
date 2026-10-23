@@ -64,8 +64,8 @@ in the JSON: `diagnostics.frontend`, `frontend_fallback_reason`, `lift_retry`.
 - **The FSM error → alert checks hold with an antecedent the model cannot raise.** The sparse-FSM flop's
   `unused_err_o` is computed only under `INC_ASSERT` by an enum-method loop neither sv2v + yosys nor
   yosys-slang compiles, so the lift uses the file's synthesis branch (`unused_err_o = 1'b0`). The
-  `*FsmCheck_A` rows are therefore vacuous HOLDS on this model; the fault-injection posture mints that
-  flag from the state's enum domain (planned). `prim_count`'s `fpv_err_present` is in the model and is the
+  `*FsmCheck_A` rows are therefore vacuous HOLDS on this model; under `--fault-model sec-cm` the
+  flag is re-minted from the state's compared constants (`docs/verifying-rtl.md` §\"The fault-injection posture\"). `prim_count`'s `fpv_err_present` is in the model and is the
   synthesis constant too (`PrimCountFpv` is not defined); its `err_o` is real logic, so the counter chains
   are not vacuous.
 - The black box frees every cipher output: a HOLDS that depends on the cipher's data transfers to the

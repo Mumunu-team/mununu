@@ -230,6 +230,9 @@ fn replan_once(
             .filter(|p| outcome_definite(&p.outcome).is_none())
             .count()
     };
+    // PR A1 — the fault posture's post-pass runs on the merged report whether or not a row is
+    // undecided (every row may be definite and still vacuous).
+    crate::adapter::slang::verify_auto::finish_fault_posture(&mut merged, prepared);
     let before = undecided(&merged);
     if before == 0 {
         return merged;
@@ -240,6 +243,9 @@ fn replan_once(
         prepared.fairness_assumes(),
         opts,
     );
+    // …and again after it: the rows the re-plan decided (the counter chains, by the reach
+    // rescue) are HOLDS only now. Idempotent.
+    crate::adapter::slang::verify_auto::finish_fault_posture(&mut merged, prepared);
     let decided = before - undecided(&merged);
     merged.notes.push(VerificationNote {
         kind: "portfolio-replan".to_string(),

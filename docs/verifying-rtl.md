@@ -45,6 +45,7 @@ guess. `verdict` is the property reading (`bad` unreachable = `holds`, reachable
 
 ```bash
 mununu btor2 verify design.btor2
+mununu btor2 verify design.btor2 --fault state_q:1   # under the fault-injection posture (below): `violated` = an attack within the budget reaches `bad`
 ```
 
 ### `btor2 verify-liveness` — response liveness `AG(request → AF grant)`
@@ -574,7 +575,7 @@ with their `ifdef INC_ASSERT` region in (`prim_alert_sender.sv`: `sequence` bloc
 system task 'next'", sv2v leaves the calls unresolved), so the script writes a `_lift.sv` variant of
 each with that region removed, for the lift only. The sparse-FSM flop's `unused_err_o` is therefore the
 synthesis constant `1'b0` in the lift: the nine FSM error → alert rows hold with an antecedent the model
-cannot raise (the fault-injection posture mints that flag from the state's enum domain — planned).
+cannot raise (under `--fault-model sec-cm` the flag is re-minted from the state's compared constants — see the posture section below).
 
 | rows (edn) | holds | violated | ⊥ | unsupported | decided by |
 |---|---|---|---|---|---|
@@ -651,6 +652,78 @@ A cone that reaches an array stays signal-level (the memory havoc applies). `MUN
 restores the signal-level cone for a differential run; the verdict is identical wherever both
 decide (the wall-class matrix is identical at both granularities, and the `crossed_vector_field`
 class decides only at bit level).
+
+### The fault-injection posture — `--fault`, `--fault-model sec-cm`, `btor2 inject-fault` (2026-10-23)
+
+> Source of truth: [`inject_faults`](../crates/mununu-core/src/adapter/btor2/fault.rs) + [`apply_fault_posture`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) — surface: (CLI+API) — `sv verify-auto` / `sv mutate` / `btor2 verify` and their `POST /api/v1/…` peers; `btor2 inject-fault` is CLI-only (a file transform)
+
+OpenTitan's security-countermeasure checks ask what happens AFTER a corruption:
+`$rose(u_x.u_state_regs.unused_err_o) |-> ##[0:30] alert_tx_o[1].alert_p`. On the lifted design
+nothing ever corrupts a register, the fault flag never rises, and the row holds with an antecedent the
+model cannot raise — a vacuous HOLDS (the `edn` IP's fifteen such rows, the OpenTitan Phase 1 finding
+of 2026-10-22). The posture puts the adversary the check was written for into the model:
+
+```bash
+# the countermeasures' own sites: for every error → alert chain, the cells its flag compares
+mununu sv verify-auto edn.sv --top edn … --fault-model sec-cm --config-value rst_ni=1 --config-value alert_rx_i=85
+# the "before" instrument: select the sites, inject nothing, run the antecedent-vacuity check
+mununu sv verify-auto edn.sv --top edn … --fault-model sec-cm:0
+# named sites, one global budget of two injections after a 10-cycle warm-up
+mununu sv verify-auto top.sv --top top --fault state_q --fault cnt_q:2 --fault-warmup 10
+# the rewrite as a file, for another engine
+mununu btor2 inject-fault design.btor2 --fault state_q:1 -o faulted.btor2
+mununu btor2 verify design.btor2 --fault state_q:1          # `violated` = an attack reaches `bad`
+```
+
+**The rewrite** (`crates/mununu-core/src/adapter/btor2/fault.rs`). For each site `r_i` two named inputs,
+`mununu_fault_en_i` and `mununu_fault_val_i`, and `next(r_i) := ite(fire_i, val_i, next_i)`. A saturating
+warm-up clock (`mununu_fault_warm`, true from `--fault-warmup` cycles on) and a global budget counter
+(`mununu_fault_cnt`) gate the firing **structurally**: `fire_i = en_i ∧ warm ∧ (cnt + popcount(en) ≤ k)`,
+`cnt' = cnt + popcount(fire)` — the comparison one bit wider than the counter so it cannot wrap for any
+counter value an inductive engine considers. No BTOR2 `constraint` is used: the cube engines never read
+one, and in a game a constraint over an environment input would sit inside the controller's `∃`; the
+gating keeps the transition relation total and every engine sees the same model. The budget is global
+(two sites fired in one cycle cost two); `REG:unbounded` lifts it; `:0` injects nothing.
+
+**Site selection.** `--fault REG[:k]` names them (`gen[1].q` is read as `gen$1.q`; a cut register, one
+with no `next`, is an error — corrupting a free cell is already every value). `--fault-model sec-cm[:k]`
+finds them: every row that is a bounded chain whose predicates hold a fault flag ending in `err_o` /
+`unused_err_o` together with its `__past` shadow is a countermeasure chain; the flag's combinational
+cone is walked to the state cells it compares (one step back through `next` when the flag is itself a
+register); the cells inside the flag's own instance are preferred (`selected_by: instance-prefix`),
+else every cell (`cone-fallback`); a flag over inputs only yields no site. A sparse-FSM flag the lift left constant (`prim_sparse_fsm_flop.unused_err_o`, see the `edn` README) is **re-minted** from the model — `state ∉ {every constant the design compares the state against}`, read through the async-reset mux — and its state cell becomes the site (`fsm-mint`); a member the design never compares against is over-flagged (it takes the FSM's `default:` arm on OpenTitan's FSMs). The sites, their width, budget
+and rows ship in `diagnostics.fault_sites`, the posture's label in `diagnostics.fault_model` and the
+dump header (`MUNUNU_SHADOW_BTOR2_DUMP`: `; FAULT MODEL: …`).
+
+**Reading a verdict under the posture — SOUNDNESS.** The injected design over-approximates the
+un-faulted one (`en ≡ 0` is one input sequence). A safety / response **HOLDS transfers** to the RTL and
+reads "the countermeasure responds for every corruption at these sites within the budget". A
+**VIOLATED is a real escape** under the declared sites, budget and warm-up — the fault inputs are named,
+so the undriven-net withholding of mununu#751 does not apply; read `mununu_fault_en_i` /
+`mununu_fault_val_i` in the trace to see where and what was injected. An **alternating** (νμ) row whose
+cone holds a site is **skipped** with a reason: the fault player can restore any state, so `AG EF Idle`
+would hold trivially (decide it without `--fault`). A non-countermeasure row whose cone holds a site may
+flip to VIOLATED (a corrupted ack FSM against a bus-stability row): sound, labelled per row by the
+posture note.
+
+**The antecedent-vacuity check.** Under any posture, every countermeasure chain row that HOLDS is asked
+whether its flag can rise at all: `EF (X && !X__past)` on the reach portfolio under the rescue slice.
+Proved unreachable ⇒ the row carries `vacuity.kind = "antecedent-unreachable"` and a `vacuous-guarantee`
+note; reachable ⇒ an Info `antecedent-reachable` note naming the deciding engines; inconclusive ⇒
+nothing. `--fault-model sec-cm:0` is the instrument on the un-faulted model: on OpenTitan's lifts the
+FSM fault flags are synthesis constants (`prim_sparse_fsm_flop.unused_err_o`, see the `edn` README), so
+those rows read vacuous there and non-vacuous only once the posture mints a corruption they detect
+through the `default:` arm. Measured on `edn` (2026-10-23, `e2e_opentitan_ip_edn_sec_cm_posture`): under `sec-cm:0` all 15 rows
+are `antecedent-unreachable`; under `sec-cm` with one injection none is violated, 10 hold (6 with the
+antecedent shown reachable), 5 stay ⊥ within the budget, and the register-write one-hot row stays vacuous
+— its flag reads the write enables, which corrupting the selected cells cannot make non-one-hot.
+
+**Two facts the OpenTitan rows need.** The alert sender's `sigint` logic forces `alert_p` low while the
+receiver's `ping_p == ping_n` (`prim_alert_sender.sv:259-262`, from the free `alert_rx_i`), so under a
+posture every chain row is VIOLATED as a model artifact unless the receiver is pinned to its idle
+encoding: `--config-value alert_rx_i=85` (`ALERT_RX_DEFAULT`). And `prim_count`'s `fpv_err_present` /
+`fpv_force` are FPV hooks that leave an anonymous input the lift cannot drive — the posture corrupts the
+counter copies themselves, which is what the FPV force stands for.
 
 ### What decides at what width — the measured frontier (2026-10-14)
 

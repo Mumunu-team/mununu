@@ -266,6 +266,12 @@ pub enum VacuityKind {
     /// shown it non-vacuous — the shape mununu#599 met (`EF(st_q == S_WAIT)` VIOLATED beside
     /// `AG EF(st_q == S_IDLE)` HOLDS under the same cut points).
     WitnessRefuted,
+    /// A security-countermeasure chain (`$rose(X) |-> ##[0:k] alert`) HOLDS, and under the
+    /// fault posture's selection the reach portfolio proved `X` can never rise on this model:
+    /// the antecedent is unreachable, the HOLDS says nothing about the response. The "before"
+    /// instrument of the posture (`--fault-model sec-cm:0`): on the un-faulted lift the fault
+    /// flags are synthesis constants, so every such row reads this way.
+    AntecedentUnreachable,
 }
 
 impl VacuityKind {
@@ -274,6 +280,7 @@ impl VacuityKind {
         match self {
             Self::InvariantTarget => "invariant-target",
             Self::WitnessRefuted => "witness-refuted",
+            Self::AntecedentUnreachable => "antecedent-unreachable",
         }
     }
 }
@@ -449,6 +456,12 @@ pub struct ModelDiagnostics {
     /// an over-approximation that shapes every verdict in the report, and it was reachable
     /// only as `control-slice` note prose.
     pub cutpoint_signals: Vec<String>,
+    /// The fault-injection posture this run was under (`--fault` / `--fault-model`), as one
+    /// label; `None` when none. The sites are in [`Self::fault_sites`].
+    pub fault_model: Option<String>,
+    /// The registers the adversary may corrupt under the posture, with their width, the budget,
+    /// why each was selected and the rows it serves. Empty without a posture.
+    pub fault_sites: Vec<crate::adapter::btor2::fault::FaultSiteReport>,
 }
 
 /// Severity of a [`VerificationNote`] — how it bears on the verdict's trust.
@@ -1377,6 +1390,8 @@ fn refresh_vacuity_notes(report: &mut AutoVerifyReport) {
                         VacuityKind::InvariantTarget => "its target is invariant here — vacuous",
                         VacuityKind::WitnessRefuted =>
                             "a same-register reachability is refuted — not shown non-vacuous",
+                        VacuityKind::AntecedentUnreachable =>
+                            "its antecedent can never fire on this model — vacuous",
                     },
                     v.witness
                 ),
@@ -2083,6 +2098,12 @@ pub struct VerifyAutoOptions {
     /// `verify-auto` surfaces never populate it. See
     /// [`crate::adapter::btor2::mutate`].
     pub mutation: Option<crate::adapter::btor2::mutate::Mutation>,
+    /// The fault-injection posture (PR A1, 2026-10-23): named registers, or the security
+    /// countermeasures' own fault sites (`sec-cm`), that an adversary may overwrite under a
+    /// global budget after a warm-up — applied to the prepared model right after `mutation`
+    /// (so `sv mutate` and `--fault` compose) and before the dump. `None` (the default): no
+    /// posture, every verdict unchanged. See [`crate::adapter::btor2::fault`].
+    pub faults: Option<crate::adapter::btor2::fault::FaultPosture>,
     /// mununu#476 item 4 — whether antecedent shadow-register synthesis is
     /// enabled for the exact-symbolic engine. **Read by nothing since mununu#677** — the
     /// mununu#476 shadow synthesis was removed (it checked a `|=>` consequent one cycle late);
@@ -2178,6 +2199,7 @@ impl Default for VerifyAutoOptions {
             breadcrumb_append: false,
             skip_rows: std::collections::HashSet::new(),
             mutation: None,
+            faults: None,
             antecedent_shadow: true,
             antecedent_propagate: true,
             input_state: true,
@@ -3959,6 +3981,8 @@ pub(crate) struct PreparedModel {
     ann_scan: AnnotationScan,
     /// The config inputs actually pinned (`--config-value`), for the per-property substitution + note.
     applied_config_values: Vec<(String, u64)>,
+    /// The fault posture as applied (`--fault` / `--fault-model`), `None` without one.
+    fault: Option<crate::adapter::btor2::fault::FaultApplied>,
 }
 
 impl PreparedModel {
@@ -4425,6 +4449,21 @@ pub(crate) fn prepare_model(
         None => btor2,
     };
 
+    // PR A1 (2026-10-23) — the fault-injection posture: the LAST whole-design rewrite, after the
+    // mutation (so `sv mutate` and `--fault` compose) and before the dump. SOUNDNESS: the
+    // injected model over-approximates the un-faulted one (`en ≡ 0` is one input sequence) — a
+    // safety HOLDS transfers, a VIOLATED is a real escape under the declared sites and budget,
+    // an alternating row whose cone holds a site is skipped in the per-row loop.
+    let (btor2, fault) = match &opts.faults {
+        Some(posture) => {
+            let (b, applied) = apply_fault_posture(&btor2, &extraction, posture)?;
+            report.diagnostics.fault_model = Some(applied.label.clone());
+            report.diagnostics.fault_sites = applied.sites.clone();
+            (b, Some(applied))
+        }
+        None => (btor2, None),
+    };
+
     // mununu#552 — dump here, at the LAST whole-design rewrite, so what lands on disk is what the
     // engine is handed. The formulas carry the same `--config-value` substitution the per-property
     // loop applies, so the pair is self-consistent.
@@ -4439,7 +4478,7 @@ pub(crate) fn prepare_model(
                 )
             })
             .collect();
-        dump_prepared_model(&btor2, &dumped);
+        dump_prepared_model(&btor2, &dumped, fault.as_ref().map(|f| f.label.as_str()));
     }
 
     Ok(Prepared::Model(Box::new(PreparedModel {
@@ -4449,7 +4488,424 @@ pub(crate) fn prepare_model(
         predicate_hints,
         ann_scan,
         applied_config_values,
+        fault,
     })))
+}
+
+/// The signals a formula's atoms read: the leading identifier of every predicate
+/// (`u_x.state_q == 3` → `u_x.state_q`, `err_o__past` → `err_o__past`).
+fn formula_atom_registers(formula: &crate::mu_calculus::Formula) -> Vec<String> {
+    use crate::mu_calculus::Node as MuNode;
+    fn collect(
+        f: &crate::mu_calculus::Formula,
+        id: crate::mu_calculus::NodeId,
+        out: &mut std::collections::BTreeSet<String>,
+    ) {
+        match f.node(id) {
+            MuNode::Predicate(a) => {
+                let lead: String = a
+                    .trim_start_matches(['(', '!', ' '])
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | '$'))
+                    .collect();
+                if !lead.is_empty() && !lead.chars().all(|c| c.is_ascii_digit()) {
+                    out.insert(lead);
+                }
+            }
+            MuNode::Not(a) => collect(f, *a, out),
+            MuNode::And(a, b) | MuNode::Or(a, b) => {
+                collect(f, *a, out);
+                collect(f, *b, out);
+            }
+            MuNode::Modal { target, .. } => collect(f, *target, out),
+            MuNode::Nu { body, .. } | MuNode::Mu { body, .. } => collect(f, *body, out),
+            _ => {}
+        }
+    }
+    let mut out = std::collections::BTreeSet::new();
+    collect(formula, formula.root(), &mut out);
+    out.into_iter().collect()
+}
+
+/// PR A1 — the antecedent-vacuity check of the fault posture: for every security-countermeasure
+/// chain row (`$rose(X) |-> ##[0:k] alert`) that HOLDS, decide whether `X` can rise at all on
+/// this model — the invariant `AG !(X && !X__past)` on the reach portfolio (the dual of
+/// `EF rose`), under the rescue slice. Proved (the flag never rises) ⇒ the row's HOLDS is vacuous
+/// (`VacuityKind::AntecedentUnreachable`, a
+/// `vacuous-guarantee` note); reachable ⇒ an Info `antecedent-reachable` note naming the
+/// deciding engines; inconclusive ⇒ nothing. Runs only under a posture (`--fault-model sec-cm:0`
+/// is the "before" instrument), on the model the rows were decided on.
+fn check_antecedent_vacuity(
+    report: &mut AutoVerifyReport,
+    model_btor2: &str,
+    reset_pinned: bool,
+    rows: &[(String, String)],
+) {
+    use crate::adapter::reach_rescue::{RescueVerdict, reach_portfolio_rescue_diagnosed};
+    let slice_ms = crate::adapter::run_budget::rescue_slice_ms();
+    let mut notes = Vec::new();
+    for (name, atom) in rows {
+        let Some(idx) = report
+            .properties
+            .iter()
+            .position(|p| &p.name == name && matches!(p.outcome, VerifyOutcome::Holds))
+        else {
+            continue;
+        };
+        // Idempotent: a member's report may have been checked before the merge.
+        if report.properties[idx].vacuity.is_some()
+            || report.notes.iter().any(|n| {
+                n.property.as_deref() == Some(name.as_str()) && n.kind.starts_with("antecedent-")
+            })
+        {
+            continue;
+        }
+        // The rescue decides the AG invariant `nu Z. (!rose && [] Z)`: HOLDS ⇔ the flag never
+        // rises, VIOLATED ⇔ a path raises it (the `EF rose` reading, through its dual).
+        let dual = format!("nu Z. ((!(({atom}) && (!({atom}__past)))) && [] Z)");
+        let Ok(f) = crate::mu_calculus::parser::parse(&dual) else {
+            continue;
+        };
+        let mut expired = false;
+        let rescued = under_rescue_slice(slice_ms, &mut expired, || {
+            reach_portfolio_rescue_diagnosed(model_btor2, &f, reset_pinned)
+        });
+        match rescued {
+            Ok((RescueVerdict::Holds, outcome)) => {
+                // the dual `AG !(rose)` holds: the antecedent never fires
+                let engines = outcome.unreachable_by.join(", ");
+                let detail = format!(
+                    "VACUOUS — `{atom}` can never rise on this model (`EF ({atom} && !{atom}__past)` \
+                     refuted by {engines}), so the chain's consequent is never checked. On the \
+                     un-faulted lift the fault flag is a synthesis constant; run under \
+                     `--fault-model sec-cm` to ask the question the check was written for."
+                );
+                report.properties[idx].vacuity = Some(VacuityFinding {
+                    kind: VacuityKind::AntecedentUnreachable,
+                    witness: name.clone(),
+                    detail,
+                });
+            }
+            Ok((RescueVerdict::Violated, outcome)) => {
+                notes.push(VerificationNote {
+                    kind: "antecedent-reachable".into(),
+                    level: NoteLevel::Info,
+                    summary: format!(
+                        "`{name}`: its antecedent `$rose({atom})` is reachable ({}) — the HOLDS is \
+                         not vacuous.",
+                        outcome.reachable_by.join(", ")
+                    ),
+                    detail: "The fault posture's instrument: the reach portfolio found a path on \
+                             which the countermeasure's fault flag rises, so the response the \
+                             chain demands was actually checked."
+                        .into(),
+                    items: vec![atom.clone()],
+                    property: Some(name.clone()),
+                });
+            }
+            Ok((other, _)) => {
+                notes.push(VerificationNote {
+                    kind: "antecedent-check-inconclusive".into(),
+                    level: NoteLevel::Info,
+                    summary: format!(
+                        "`{name}`: the antecedent-vacuity check did not decide whether `$rose({atom})` \
+                         is reachable ({other:?})."
+                    ),
+                    detail: "The reach portfolio neither proved the flag never rises nor found a path \
+                             raising it within the rescue slice; the row's HOLDS is neither shown \
+                             vacuous nor non-vacuous."
+                        .into(),
+                    items: vec![atom.clone()],
+                    property: Some(name.clone()),
+                });
+            }
+            Err(decline) => {
+                notes.push(VerificationNote {
+                    kind: "antecedent-check-declined".into(),
+                    level: NoteLevel::Info,
+                    summary: format!(
+                        "`{name}`: the antecedent-vacuity check could not run on `$rose({atom})` \
+                         ({decline:?})."
+                    ),
+                    detail:
+                        "The reach rescue declined the reachability question (a leaf it cannot \
+                             compile, or the slice was spent); the row's HOLDS is neither shown \
+                             vacuous nor non-vacuous."
+                            .into(),
+                    items: vec![atom.clone()],
+                    property: Some(name.clone()),
+                });
+            }
+        }
+    }
+    report.notes.extend(notes);
+    refresh_vacuity_notes(report);
+}
+
+#[cfg(test)]
+mod fault_posture_debug {
+    //! `MUNUNU_DEBUG_DUMP=<dumped model> cargo test … debug_antecedent_check_on_dump -- --ignored
+    //! --nocapture`: run the antecedent-vacuity question on a dumped model for two flags.
+    #[test]
+    #[ignore = "a hand-run probe on a `MUNUNU_SHADOW_BTOR2_DUMP` file"]
+    fn debug_antecedent_check_on_dump() {
+        let Ok(path) = std::env::var("MUNUNU_DEBUG_DUMP") else {
+            return;
+        };
+        let model = std::fs::read_to_string(&path).expect("the dump reads");
+        {
+            let mut file = crate::adapter::btor2::parser::parse(&model).expect("parses");
+            let flag = "u_edn_core.u_edn_main_sm.u_state_regs.unused_err_o";
+            let line = file.lines.iter().find(|l| matches!(&l.node, crate::adapter::btor2::ast::Node::Op { symbol: Some(s), .. } if s == flag)).map(|l| format!("{} {:?}", l.nid, l.node));
+            eprintln!("flag line: {line:?}");
+            let so = "u_edn_core.u_edn_main_sm.u_state_regs.state_o";
+            let line = file.lines.iter().find(|l| matches!(&l.node, crate::adapter::btor2::ast::Node::Op { symbol: Some(s), .. } if s == so)).map(|l| format!("{} {:?}", l.nid, l.node));
+            eprintln!("state_o line: {line:?}");
+            let m = crate::adapter::btor2::fault::mint_undefined_state_flag(&mut file, flag);
+            eprintln!("mint: {:?}", m.map(|m| (m.state, m.width, m.legal)));
+        }
+        for atom in [
+            "u_edn_core.u_edn_main_sm.u_state_regs.unused_err_o",
+            "u_edn_core.u_prim_count_max_reqs_cntr.err_o",
+        ] {
+            let dual = format!("nu Z. ((!(({atom}) && (!({atom}__past)))) && [] Z)");
+            let f = crate::mu_calculus::parser::parse(&dual).expect("parses");
+            let t0 = std::time::Instant::now();
+            let r =
+                crate::adapter::reach_rescue::reach_portfolio_rescue_diagnosed(&model, &f, true);
+            eprintln!(
+                "{atom}: {:?} in {:.1}s",
+                r.as_ref()
+                    .map(|(v, o)| (*v, o.reachable_by.clone(), o.unreachable_by.clone())),
+                t0.elapsed().as_secs_f64()
+            );
+        }
+    }
+}
+
+/// PR A1 — the fault posture's post-pass on a MERGED portfolio report (the planner's path): the
+/// antecedent-vacuity check over the prepared model. The single-engine path runs it at the end
+/// of `verify_auto_impl`; the check is idempotent, so a member's earlier pass costs nothing here.
+pub(crate) fn finish_fault_posture(report: &mut AutoVerifyReport, prepared: &PreparedModel) {
+    if let Some(applied) = prepared.fault.as_ref() {
+        let reset_pinned = !report.diagnostics.gated_resets.is_empty();
+        check_antecedent_vacuity(report, &prepared.btor2, reset_pinned, &applied.sec_cm_rows);
+    }
+}
+
+/// The `$rose(X)` atom of a security-countermeasure chain — a bounded chain
+/// (`reach_rescue::reduce_bounded_chain`) whose predicates hold a fault flag `X` ending in
+/// `err_o` / `unused_err_o` together with its `X__past` shadow (the `$rose` lowering). `None`
+/// for any other row.
+fn sec_cm_rose_atom(formula: &crate::mu_calculus::Formula) -> Option<String> {
+    use crate::mu_calculus::Node as MuNode;
+    crate::adapter::reach_rescue::reduce_bounded_chain(formula)?;
+    fn collect(
+        f: &crate::mu_calculus::Formula,
+        id: crate::mu_calculus::NodeId,
+        out: &mut std::collections::BTreeSet<String>,
+    ) {
+        match f.node(id) {
+            MuNode::Predicate(a) => {
+                out.insert(a.clone());
+            }
+            MuNode::Not(a) => collect(f, *a, out),
+            MuNode::And(a, b) | MuNode::Or(a, b) => {
+                collect(f, *a, out);
+                collect(f, *b, out);
+            }
+            MuNode::Modal { target, .. } => collect(f, *target, out),
+            MuNode::Nu { body, .. } | MuNode::Mu { body, .. } => collect(f, *body, out),
+            _ => {}
+        }
+    }
+    let mut atoms: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    collect(formula, formula.root(), &mut atoms);
+    atoms
+        .iter()
+        .find(|a| {
+            (a.ends_with("err_o") || a.ends_with(".err_o") || a.ends_with("unused_err_o"))
+                && atoms.contains(&format!("{a}__past"))
+        })
+        .cloned()
+}
+
+/// Apply the fault posture to the prepared model: select the sites (named, or from the
+/// security-countermeasure chains' own fault flags), inject them unless the budget is zero, and
+/// report what was done. See [`crate::adapter::btor2::fault`].
+fn apply_fault_posture(
+    btor2: &str,
+    extraction: &crate::adapter::slang::translate::TranslationReport,
+    posture: &crate::adapter::btor2::fault::FaultPosture,
+) -> Result<(String, crate::adapter::btor2::fault::FaultApplied), AdapterError> {
+    use crate::adapter::btor2::fault::{
+        FaultApplied, FaultBound, FaultSelection, FaultSite, FaultSiteReport, FaultSpec,
+        cells_compared_by, inject_faults,
+    };
+    let err = |message: String| AdapterError {
+        kind: AdapterErrorKind::UnsupportedConstruct,
+        message: format!("fault posture: {message}"),
+        location: None,
+    };
+    let mut file = crate::adapter::btor2::parser::parse(btor2).map_err(|e| err(e.message))?;
+    // The security-countermeasure rows are found whichever selection runs: the explicit sites
+    // need them for the vacuity check too.
+    let sec_cm_rows: Vec<(String, String)> = extraction
+        .translated
+        .iter()
+        .filter_map(|t| {
+            let f = crate::mu_calculus::parser::parse(&t.formula).ok()?;
+            Some((t.name.clone(), sec_cm_rose_atom(&f)?))
+        })
+        .collect();
+    let describe = |b: FaultBound| match b {
+        FaultBound::Unbounded => "unbounded".to_string(),
+        FaultBound::AtMost(k) => format!("≤{k}"),
+    };
+    let (spec, mut sites, rows_without_site, label) = match &posture.selection {
+        FaultSelection::Explicit(spec) => {
+            let sites = spec
+                .sites
+                .iter()
+                .map(|s| FaultSiteReport {
+                    register: s.register.clone(),
+                    width: 0,
+                    bound: describe(spec.bound),
+                    selected_by: "explicit".into(),
+                    rows: Vec::new(),
+                })
+                .collect::<Vec<_>>();
+            (spec.clone(), sites, Vec::new(), spec.as_label())
+        }
+        FaultSelection::SecCm(bound) => {
+            let mut by_register: std::collections::BTreeMap<String, (String, Vec<String>)> =
+                std::collections::BTreeMap::new();
+            let mut without = Vec::new();
+            for (row, atom) in &sec_cm_rows {
+                let mut cells = cells_compared_by(&file, atom);
+                // A sparse-FSM flag the lift left constant (A0's strip of the enum-method loop):
+                // re-mint it from the state's compared constants, so the state cell is the site
+                // and a corruption outside the encoding raises the flag as the RTL's would.
+                if cells.is_empty()
+                    && atom.ends_with("unused_err_o")
+                    && let Some(minted) =
+                        crate::adapter::btor2::fault::mint_undefined_state_flag(&mut file, atom)
+                {
+                    let nid = crate::adapter::btor2::parser::resolve_state_alias(
+                        &file,
+                        &minted.state,
+                        true,
+                    )
+                    .unwrap_or(0);
+                    let e = by_register
+                        .entry(minted.state.clone())
+                        .or_insert_with(|| ("fsm-mint".to_string(), Vec::new()));
+                    e.1.push(row.clone());
+                    let _ = nid;
+                    cells = cells_compared_by(&file, atom);
+                    if !cells.is_empty() {
+                        continue;
+                    }
+                }
+                if cells.is_empty() {
+                    without.push(row.clone());
+                    continue;
+                }
+                // prefer the cells inside the flag's own instance
+                let prefix = atom
+                    .rsplit_once('.')
+                    .map(|(p, _)| format!("{p}."))
+                    .unwrap_or_default();
+                let inside: Vec<&(crate::adapter::btor2::ast::Nid, String, u32)> = cells
+                    .iter()
+                    .filter(|(_, name, _)| !prefix.is_empty() && name.starts_with(&prefix))
+                    .collect();
+                let (chosen, how): (Vec<&(crate::adapter::btor2::ast::Nid, String, u32)>, &str) =
+                    if inside.is_empty() {
+                        (cells.iter().collect(), "cone-fallback")
+                    } else {
+                        (inside, "instance-prefix")
+                    };
+                for (_, name, _) in chosen {
+                    let e = by_register
+                        .entry(name.clone())
+                        .or_insert_with(|| (how.to_string(), Vec::new()));
+                    e.1.push(row.clone());
+                }
+            }
+            let sites: Vec<FaultSiteReport> = by_register
+                .into_iter()
+                .map(|(register, (selected_by, rows))| FaultSiteReport {
+                    register,
+                    width: 0,
+                    bound: describe(*bound),
+                    selected_by,
+                    rows,
+                })
+                .collect();
+            let spec = FaultSpec {
+                sites: sites
+                    .iter()
+                    .map(|s| FaultSite {
+                        register: s.register.clone(),
+                    })
+                    .collect(),
+                bound: *bound,
+                warmup: posture.warmup,
+            };
+            let label = format!(
+                "fault-model sec-cm ({}, warm-up {}): {} site(s) from {} chain row(s){}",
+                describe(*bound),
+                posture.warmup,
+                sites.len(),
+                sec_cm_rows.len(),
+                if *bound == FaultBound::AtMost(0) {
+                    " — selection and vacuity only, nothing injected"
+                } else {
+                    ""
+                }
+            );
+            (spec, sites, without, label)
+        }
+    };
+    // With no site nothing is rewritten — unless a flag was re-minted, which the model keeps.
+    let minted_model = || crate::adapter::btor2::emit::emit_btor2(&file);
+    if spec.sites.is_empty() {
+        return Ok((
+            minted_model(),
+            FaultApplied {
+                label,
+                sites,
+                injected: Vec::new(),
+                sec_cm_rows,
+                rows_without_site,
+            },
+        ));
+    }
+    let zero_budget = spec.bound == FaultBound::AtMost(0);
+    let (out, injected) = inject_faults(&file, &spec).map_err(err)?;
+    for s in sites.iter_mut() {
+        if let Some(i) = injected.iter().find(|i| i.register == s.register) {
+            s.width = i.width;
+        }
+    }
+    // A zero budget: the sites are known (and validated by the rewrite), the model is NOT
+    // rewritten — every verdict is the un-faulted one, the vacuity check is the instrument.
+    let (model, injected) = if zero_budget {
+        (minted_model(), Vec::new())
+    } else {
+        (crate::adapter::btor2::emit::emit_btor2(&out), injected)
+    };
+    Ok((
+        model,
+        FaultApplied {
+            label,
+            sites,
+            injected,
+            sec_cm_rows,
+            rows_without_site,
+        },
+    ))
 }
 
 /// mununu#552 — the env var naming the post-shadow BTOR2 dump.
@@ -4482,7 +4938,7 @@ const SHADOW_DUMP_ENV: &str = "MUNUNU_SHADOW_BTOR2_DUMP";
 ///
 /// Diagnostic only: every failure is swallowed after one warning, mirroring
 /// [`crate::adapter::partial_json`]. A dump must never be able to change a verdict.
-fn dump_prepared_model(btor2: &str, properties: &[(String, String)]) {
+fn dump_prepared_model(btor2: &str, properties: &[(String, String)], fault_model: Option<&str>) {
     let Ok(path) = std::env::var(SHADOW_DUMP_ENV) else {
         return;
     };
@@ -4492,7 +4948,15 @@ fn dump_prepared_model(btor2: &str, properties: &[(String, String)]) {
     let mut out = String::new();
     out.push_str("; mununu#552 — the BTOR2 the engine runs, dumped after model preparation.\n");
     out.push_str("; INCLUDES: the SV lift, `$past` shadow registers, reset pinning,\n");
-    out.push_str(";           `--config-value` pins, and any `sv mutate` fault.\n");
+    out.push_str(
+        ";           `--config-value` pins, any `sv mutate` fault, and the fault-injection\n",
+    );
+    out.push_str(
+        ";           posture's inputs / budget counter when one is on (see FAULT MODEL).\n",
+    );
+    if let Some(label) = fault_model {
+        out.push_str(&format!("; FAULT MODEL: {label}\n"));
+    }
     out.push_str(
         "; EXCLUDES: the inputs-in-the-state lift (mununu#656: a sampled state cell per\n",
     );
@@ -4586,6 +5050,7 @@ pub(crate) fn verify_auto_impl(
         predicate_hints,
         ann_scan,
         applied_config_values,
+        fault,
     } = match prepared {
         Some(m) => m,
         None => match prepare_model(sources, yosys_opts, opts)? {
@@ -4791,6 +5256,11 @@ pub(crate) fn verify_auto_impl(
     // `MUNUNU_VERIFY_AUTO_PARTIAL_JSON=<path>`; disabled and zero-cost otherwise.
     let mut breadcrumb =
         crate::adapter::partial_json::Breadcrumb::from_env_with_append(opts.breadcrumb_append);
+    // PR A1 — the injected model, parsed once, for the per-row cone test below.
+    let fault_file = fault
+        .as_ref()
+        .filter(|f| !f.injected.is_empty())
+        .and_then(|_| crate::adapter::btor2::parser::parse(&btor2).ok());
     for t in &extraction.translated {
         // Flush whatever the PREVIOUS iteration decided, before this one starts its (possibly
         // very long, possibly fatal) work. One call here covers all nine `properties.push` sites
@@ -4884,6 +5354,45 @@ pub(crate) fn verify_auto_impl(
                 continue;
             }
         };
+        // PR A1 — under the fault posture an ALTERNATING property (νμ: `AG EF good`) whose cone
+        // holds a corrupted register is not asked: the fault player can restore any state, so it
+        // would hold trivially (and the trap certificate would stop refuting). Decided without
+        // the posture only; the row says so.
+        if let (Some(applied), Some(file)) = (fault.as_ref(), fault_file.as_ref())
+            && !applied.injected.is_empty()
+            && formula.alternation_depth() >= 2
+        {
+            let atoms = formula_atom_registers(&formula);
+            let coi = crate::adapter::btor2::fault::coi_states(file, &atoms);
+            let hit: Vec<&str> = applied
+                .injected
+                .iter()
+                .filter(|i| coi.contains(&i.register))
+                .map(|i| i.register.as_str())
+                .collect();
+            if !hit.is_empty() {
+                report.properties.push(PropertyVerdict {
+                    name: t.name.clone(),
+                    label: t.label.clone(),
+                    kind: t.kind,
+                    formula: formula_str.clone(),
+                    outcome: VerifyOutcome::Skipped {
+                        reason: format!(
+                            "fault posture: an alternating (νμ) property over a corrupted register \
+                             ({}) would hold trivially — the fault player can restore any state; \
+                             decide it without `--fault`",
+                            hit.join(", ")
+                        ),
+                    },
+                    seeded_predicates: Vec::new(),
+                    counterexample: None,
+                    bottom_reason: None,
+                    decided_by: None,
+                    vacuity: None,
+                });
+                continue;
+            }
+        }
 
         // mununu#722 — an atom-less formula (`AG true`: an `ASSERT_KNOWN` once `$isunknown` folds)
         // is decided here. It has no atom to restrict its cone, so the engines saw the WHOLE design
@@ -5661,6 +6170,10 @@ pub(crate) fn verify_auto_impl(
     // established. Runs as a post-pass, after the rescue/escalation ladder, so it catches every
     // path that can produce one rather than nine push sites.
     downgrade_violated_on_unestablished_init(&mut report, &btor2);
+    // PR A1 — under a fault posture, the antecedent-vacuity check of every sec_cm chain row.
+    if let Some(applied) = fault.as_ref() {
+        check_antecedent_vacuity(&mut report, &btor2, reset_pinned, &applied.sec_cm_rows);
+    }
     // The trace for every safety VIOLATED the report ships, whichever engine decided it.
     attach_safety_witnesses(&mut report, &btor2, reset_pinned);
     // mununu#750 — after the witness, so a withheld violation keeps its trace as a may-trace.
@@ -10258,7 +10771,7 @@ mod tests {
 
         let btor2 = "1 sort bitvec 4\n2 state 1 s\n";
         let props = vec![("p0".to_string(), "nu X. ((s == 1) && [] X)".to_string())];
-        dump_prepared_model(btor2, &props);
+        dump_prepared_model(btor2, &props, None);
         unsafe { std::env::remove_var(SHADOW_DUMP_ENV) };
 
         let got = std::fs::read_to_string(&path).expect("dump written");
@@ -10291,15 +10804,15 @@ mod tests {
     fn shadow_dump_is_diagnostic_only_and_cannot_fail_a_run() {
         // Unset — no panic, no file, nothing.
         unsafe { std::env::remove_var(SHADOW_DUMP_ENV) };
-        dump_prepared_model("1 sort bitvec 1\n", &[]);
+        dump_prepared_model("1 sort bitvec 1\n", &[], None);
 
         // Empty — treated as unset, not as the path "".
         unsafe { std::env::set_var(SHADOW_DUMP_ENV, "   ") };
-        dump_prepared_model("1 sort bitvec 1\n", &[]);
+        dump_prepared_model("1 sort bitvec 1\n", &[], None);
 
         // Unwritable — warns, does not propagate.
         unsafe { std::env::set_var(SHADOW_DUMP_ENV, "/nonexistent-dir-552/x.btor2") };
-        dump_prepared_model("1 sort bitvec 1\n", &[]);
+        dump_prepared_model("1 sort bitvec 1\n", &[], None);
         unsafe { std::env::remove_var(SHADOW_DUMP_ENV) };
     }
 
@@ -11351,6 +11864,151 @@ module uart_tx(); endmodule"#;
                     || n.kind == "control-slice")
         );
     }
+
+    /// PR A1 — the security-countermeasure chain classifier reads the `$rose` flag off the
+    /// translator's own shape (edn's `FpvSecCmMainFsmCheck_A`), and nothing else.
+    #[test]
+    fn sec_cm_rose_atom_reads_the_fault_flag_of_a_chain_row() {
+        let chain = "nu X. (((!(((u_sm.u_state_regs.unused_err_o && (!(u_sm.u_state_regs.unused_err_o__past))) && (!(false)))) || (alert || [] (alert || [] alert)))) && [] X)";
+        let f = crate::mu_calculus::parser::parse(chain).expect("parses");
+        assert_eq!(
+            sec_cm_rose_atom(&f).as_deref(),
+            Some("u_sm.u_state_regs.unused_err_o")
+        );
+        let plain =
+            crate::mu_calculus::parser::parse("nu X. (((!(a)) || [] b) && [] X)").expect("parses");
+        assert_eq!(
+            sec_cm_rose_atom(&plain),
+            None,
+            "no fault flag, no chain row"
+        );
+        let recover =
+            crate::mu_calculus::parser::parse("nu Y. ((mu Z. ((err_o == 0) || <> Z)) && [] Y)")
+                .expect("parses");
+        assert_eq!(
+            sec_cm_rose_atom(&recover),
+            None,
+            "an alternating row is not a chain"
+        );
+    }
+
+    /// PR A1 — `--fault-model sec-cm` on an inline model: the chain row's flag `err_q` compares
+    /// the two counter copies, so both become sites (`cone-fallback`: the flag has no instance
+    /// prefix); a zero budget selects without rewriting; a budget of one rewrites both `next`s
+    /// and names the inputs; the antecedent-vacuity post-pass reads the un-faulted model as
+    /// vacuous and the injected one as reachable.
+    #[test]
+    fn the_sec_cm_posture_selects_the_compared_cells_and_the_vacuity_check_reads_both_models() {
+        use crate::adapter::btor2::fault::{FaultBound, FaultPosture, FaultSelection};
+        const WIRED: &str = "1 sort bitvec 1\n2 sort bitvec 2\n3 zero 2\n4 one 2\n5 zero 1\n\
+                             6 input 1 inc\n7 state 2 a\n8 init 2 7 3\n9 state 2 b\n10 init 2 9 3\n\
+                             11 add 2 7 4\n12 ite 2 6 11 7\n13 next 2 7 12\n14 add 2 9 4\n\
+                             15 ite 2 6 14 9\n16 next 2 9 15\n17 neq 1 7 9\n18 state 1 err_o\n\
+                             19 init 1 18 5\n20 next 1 18 17\n21 state 1 err_o__past\n22 init 1 21 5\n\
+                             23 next 1 21 18\n24 state 1 alert_q\n25 init 1 24 5\n26 next 1 24 18\n";
+        let chain = "nu X. (((!((err_o && (!(err_o__past))))) || (alert_q || [] (alert_q || [] alert_q))) && [] X)";
+        let extraction = crate::adapter::slang::translate::TranslationReport {
+            translated: vec![crate::adapter::slang::translate::TranslatedAssertion {
+                name: "chain".into(),
+                label: Some("CntAlertCheck_A".into()),
+                kind: SvaKind::Assert,
+                formula: chain.into(),
+                recoverability_companion: None,
+            }],
+            ..Default::default()
+        };
+        // selection only
+        let (model0, applied0) = apply_fault_posture(
+            WIRED,
+            &extraction,
+            &FaultPosture {
+                selection: FaultSelection::SecCm(FaultBound::AtMost(0)),
+                warmup: 2,
+            },
+        )
+        .expect("applies");
+        assert_eq!(model0, WIRED, "a zero budget rewrites nothing");
+        let regs: Vec<&str> = applied0.sites.iter().map(|s| s.register.as_str()).collect();
+        assert_eq!(regs, vec!["a", "b"]);
+        assert!(
+            applied0
+                .sites
+                .iter()
+                .all(|s| s.selected_by == "cone-fallback" && s.rows == vec!["chain"])
+        );
+        assert!(applied0.injected.is_empty());
+        assert_eq!(
+            applied0.sec_cm_rows,
+            vec![("chain".to_string(), "err_o".to_string())]
+        );
+        // budget one
+        let (model1, applied1) = apply_fault_posture(
+            WIRED,
+            &extraction,
+            &FaultPosture {
+                selection: FaultSelection::SecCm(FaultBound::AtMost(1)),
+                warmup: 2,
+            },
+        )
+        .expect("applies");
+        assert_eq!(applied1.injected.len(), 2);
+        assert!(
+            model1.contains("mununu_fault_en_0") && model1.contains("mununu_fault_cnt"),
+            "{model1}"
+        );
+        assert_eq!(applied1.sites[0].width, 2);
+        // the vacuity post-pass: a HOLDS row on each model
+        let row = |model: &str| {
+            AutoVerifyReport {
+                assumptions: Default::default(),
+                properties: vec![PropertyVerdict {
+                    name: "chain".into(),
+                    label: Some("CntAlertCheck_A".into()),
+                    kind: SvaKind::Assert,
+                    formula: chain.into(),
+                    outcome: VerifyOutcome::Holds,
+                    seeded_predicates: Vec::new(),
+                    counterexample: None,
+                    bottom_reason: None,
+                    decided_by: Some("explicit".into()),
+                    vacuity: None,
+                }],
+                unsupported: Vec::new(),
+                diagnostics: ModelDiagnostics::default(),
+                notes: Vec::new(),
+            }
+            .pipe(|mut r| {
+                check_antecedent_vacuity(&mut r, model, false, &applied0.sec_cm_rows);
+                r
+            })
+        };
+        let before = row(&model0);
+        assert_eq!(
+            before.properties[0].vacuity.as_ref().map(|v| v.kind),
+            Some(VacuityKind::AntecedentUnreachable),
+            "{:?}",
+            before.properties[0].vacuity
+        );
+        assert!(before.notes.iter().any(|n| n.kind == "vacuous-guarantee"));
+        let after = row(&model1);
+        assert_eq!(
+            after.properties[0].vacuity, None,
+            "{:?}",
+            after.properties[0].vacuity
+        );
+        assert!(
+            after.notes.iter().any(|n| n.kind == "antecedent-reachable"),
+            "{:?}",
+            after.notes
+        );
+    }
+
+    trait Pipe: Sized {
+        fn pipe<R>(self, f: impl FnOnce(Self) -> R) -> R {
+            f(self)
+        }
+    }
+    impl<T> Pipe for T {}
 
     #[test]
     fn lift_retry_note_is_info_and_names_the_backend_loop() {
