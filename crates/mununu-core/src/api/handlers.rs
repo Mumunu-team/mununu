@@ -881,18 +881,8 @@ fn btor2_verify_handler_impl(request: Btor2VerifyRequest) -> ApiResult<Json<Btor
     }))
 }
 
-/// Decide the response-liveness property `AG(request → AF grant)` at scale
-/// (`POST /api/v1/btor2/verify-liveness`). Surface peer of the CLI
-/// `mununu btor2 verify-liveness`: reduces the property to a single
-/// `bad`-reachability query (Biere–Artho–Schuppan liveness-to-safety) the portfolio
-/// decides, returning the canonical `"holds"` / `"violated"` / `"unknown"` verdict.
-/// A malformed atom or unparseable BTOR2 is a `BadRequest`.
-pub async fn btor2_verify_justice_handler(
-    Json(request): Json<crate::api::models::Btor2VerifyJusticeRequest>,
-) -> ApiResult<Json<crate::api::models::Btor2VerifyJusticeResponse>> {
-    blocking(move || btor2_verify_justice_handler_impl(request)).await
-}
-
+/// The `justice` form of `POST /api/v1/btor2/verify-liveness`: every `justice` line of the
+/// design (BTOR2 or ASCII AIGER), decided by the exact fair-cycle fixpoint and/or l2s.
 fn btor2_verify_justice_handler_impl(
     request: crate::api::models::Btor2VerifyJusticeRequest,
 ) -> ApiResult<Json<crate::api::models::Btor2VerifyJusticeResponse>> {
@@ -972,8 +962,64 @@ fn btor2_verify_liveness_handler_impl(
         message,
         details: None,
     };
-    let ante = parse_response_atom(&request.request).map_err(bad_req)?;
-    let cons = parse_response_atom(&request.grant).map_err(bad_req)?;
+    // 0.5 — one liveness route: justice lines, a conjunction, a fairness-assumed response, or
+    // one response.
+    if request.justice {
+        if request.request.is_some()
+            || !request.responses.is_empty()
+            || !request.fairness.is_empty()
+        {
+            return Err(bad_req(
+                "justice decides the design's own justice lines; it takes no request / grant / \
+                 responses / fairness"
+                    .to_string(),
+            ));
+        }
+        let Json(r) =
+            btor2_verify_justice_handler_impl(crate::api::models::Btor2VerifyJusticeRequest {
+                content: request.content,
+                rung: request.rung,
+                timeout_ms: request.timeout_ms,
+                parallel_rungs: request.parallel_rungs,
+            })?;
+        return Ok(Json(Btor2VerifyLivenessResponse {
+            outcome: r.outcome,
+            property: format!("justice ({} set(s))", r.justice.len()),
+            decided_by: Vec::new(),
+            justice: r.justice,
+            converted_from_aiger: Some(r.converted_from_aiger),
+        }));
+    }
+    if !request.responses.is_empty() {
+        if request.request.is_some() || !request.fairness.is_empty() {
+            return Err(bad_req(
+                "responses is a conjunction of its own; it takes no request / grant / fairness"
+                    .to_string(),
+            ));
+        }
+        return btor2_verify_liveness_all_handler_impl(Btor2VerifyLivenessAllRequest {
+            content: request.content,
+            responses: request.responses,
+        });
+    }
+    let (Some(req_atom), Some(grant_atom)) = (request.request.clone(), request.grant.clone())
+    else {
+        return Err(bad_req(
+            "give request and grant, responses, or justice".to_string(),
+        ));
+    };
+    if !request.fairness.is_empty() {
+        return btor2_verify_liveness_under_fairness_handler_impl(
+            Btor2VerifyLivenessUnderFairnessRequest {
+                content: request.content,
+                request: req_atom,
+                grant: grant_atom,
+                fairness: request.fairness,
+            },
+        );
+    }
+    let ante = parse_response_atom(&req_atom).map_err(bad_req)?;
+    let cons = parse_response_atom(&grant_atom).map_err(bad_req)?;
 
     let (verdict, outcome) = response_liveness_rescue_atoms(&request.content, &ante, &cons, false)
         .ok_or_else(|| {
@@ -987,28 +1033,20 @@ fn btor2_verify_liveness_handler_impl(
         outcome: crate::verdict::PropertyVerdict::from(verdict)
             .as_str()
             .to_string(),
-        property: format!("AG(({}) -> AF ({}))", request.request, request.grant),
+        property: format!("AG(({req_atom}) -> AF ({grant_atom}))"),
         decided_by: outcome
             .reachable_by
             .iter()
             .chain(outcome.unreachable_by.iter())
             .map(|s| s.to_string())
             .collect(),
+        justice: Vec::new(),
+        converted_from_aiger: None,
     }))
 }
 
-/// Decide the conjunction of response-liveness properties `⋀ᵢ AG(aᵢ → AF bᵢ)`
-/// (`POST /api/v1/btor2/verify-liveness-all`). Surface peer of the CLI
-/// `mununu btor2 verify-liveness-all`: reduces each `"ANTE => CONS"` conjunct to its
-/// own `bad`-reachability query, returning the combined `"holds"` / `"violated"` /
-/// `"unknown"` verdict. A malformed response (missing `=>` or a non-atom side) or
-/// unparseable BTOR2 is a `BadRequest`.
-pub async fn btor2_verify_liveness_all_handler(
-    Json(request): Json<Btor2VerifyLivenessAllRequest>,
-) -> ApiResult<Json<Btor2VerifyLivenessResponse>> {
-    blocking(move || btor2_verify_liveness_all_handler_impl(request)).await
-}
-
+/// The `responses` form of `POST /api/v1/btor2/verify-liveness`: the conjunction
+/// `⋀ᵢ AG(aᵢ → AF bᵢ)`, one l2s query per conjunct.
 fn btor2_verify_liveness_all_handler_impl(
     request: Btor2VerifyLivenessAllRequest,
 ) -> ApiResult<Json<Btor2VerifyLivenessResponse>> {
@@ -1042,20 +1080,13 @@ fn btor2_verify_liveness_all_handler_impl(
             .flat_map(|o| o.reachable_by.iter().chain(o.unreachable_by.iter()))
             .map(|s| s.to_string())
             .collect(),
+        justice: Vec::new(),
+        converted_from_aiger: None,
     }))
 }
 
-/// mununu#477 Option B — decide `(⋀ⱼ GF fairⱼ) → AG(request → AF grant)`
-/// (`POST /api/v1/btor2/verify-liveness-under-fairness`) via the Emerson–Lei
-/// fair-cycle l2s + the reachability portfolio. Surface peer of the CLI
-/// `mununu btor2 verify-liveness-under-fairness`. A malformed atom is a
-/// `BadRequest`; empty `fairness` recovers `verify-liveness` exactly.
-pub async fn btor2_verify_liveness_under_fairness_handler(
-    Json(request): Json<Btor2VerifyLivenessUnderFairnessRequest>,
-) -> ApiResult<Json<Btor2VerifyLivenessResponse>> {
-    blocking(move || btor2_verify_liveness_under_fairness_handler_impl(request)).await
-}
-
+/// The `fairness` form of `POST /api/v1/btor2/verify-liveness` (mununu#477 Option B):
+/// `(⋀ⱼ GF fairⱼ) → AG(request → AF grant)` via the Emerson–Lei fair-cycle l2s.
 fn btor2_verify_liveness_under_fairness_handler_impl(
     request: Btor2VerifyLivenessUnderFairnessRequest,
 ) -> ApiResult<Json<Btor2VerifyLivenessResponse>> {
@@ -1107,6 +1138,8 @@ fn btor2_verify_liveness_under_fairness_handler_impl(
             .chain(outcome.unreachable_by.iter())
             .map(|s| s.to_string())
             .collect(),
+        justice: Vec::new(),
+        converted_from_aiger: None,
     }))
 }
 
@@ -1432,17 +1465,46 @@ pub async fn sv_verify_liveness_handler(
 fn sv_verify_liveness_handler_impl(
     request: SvVerifyLivenessRequest,
 ) -> ApiResult<Json<Btor2VerifyLivenessResponse>> {
-    use crate::adapter::sv_verify::sv_verify_liveness;
+    use crate::adapter::sv_verify::{sv_verify_liveness, sv_verify_liveness_under_fairness};
 
-    let property = format!("AG(({}) -> AF ({}))", request.request, request.grant);
+    let bad_req = |message: String| ApiError::BadRequest {
+        message,
+        details: None,
+    };
+    if !request.responses.is_empty() {
+        if request.request.is_some() || !request.fairness.is_empty() {
+            return Err(bad_req(
+                "responses is a conjunction of its own; it takes no request / grant / fairness"
+                    .to_string(),
+            ));
+        }
+        return sv_verify_liveness_all_handler_impl(SvVerifyLivenessAllRequest {
+            lift: request.lift,
+            responses: request.responses,
+        });
+    }
+    let (Some(req_atom), Some(grant_atom)) = (request.request.as_deref(), request.grant.as_deref())
+    else {
+        return Err(bad_req("give request and grant, or responses".to_string()));
+    };
+    let base = format!("AG(({req_atom}) -> AF ({grant_atom}))");
+    let property = if request.fairness.is_empty() {
+        base
+    } else {
+        let gf: Vec<String> = request
+            .fairness
+            .iter()
+            .map(|f| format!("GF ({f})"))
+            .collect();
+        format!("({}) -> {base}", gf.join(" && "))
+    };
     let lift = sv_lift_of(&request.lift)?;
-    let (verdict, outcome) =
-        sv_verify_liveness(&lift, &request.request, &request.grant).map_err(|message| {
-            ApiError::BadRequest {
-                message,
-                details: None,
-            }
-        })?;
+    let (verdict, outcome) = if request.fairness.is_empty() {
+        sv_verify_liveness(&lift, req_atom, grant_atom)
+    } else {
+        sv_verify_liveness_under_fairness(&lift, req_atom, grant_atom, &request.fairness)
+    }
+    .map_err(bad_req)?;
     Ok(Json(Btor2VerifyLivenessResponse {
         outcome: crate::verdict::PropertyVerdict::from(verdict)
             .as_str()
@@ -1454,18 +1516,12 @@ fn sv_verify_liveness_handler_impl(
             .chain(outcome.unreachable_by.iter())
             .map(|s| s.to_string())
             .collect(),
+        justice: Vec::new(),
+        converted_from_aiger: None,
     }))
 }
 
-/// `POST /api/v1/sv/verify-liveness-all` — lift SV and decide the conjunction
-/// `⋀ᵢ AG(aᵢ → AF bᵢ)` from `"ANTE => CONS"` response pairs. SV-direct peer of the
-/// CLI `sv verify-liveness-all`; reuses the [`Btor2VerifyLivenessResponse`] shape.
-pub async fn sv_verify_liveness_all_handler(
-    Json(request): Json<SvVerifyLivenessAllRequest>,
-) -> ApiResult<Json<Btor2VerifyLivenessResponse>> {
-    blocking(move || sv_verify_liveness_all_handler_impl(request)).await
-}
-
+/// The `responses` form of `POST /api/v1/sv/verify-liveness`: the conjunction after the lift.
 fn sv_verify_liveness_all_handler_impl(
     request: SvVerifyLivenessAllRequest,
 ) -> ApiResult<Json<Btor2VerifyLivenessResponse>> {
@@ -1491,6 +1547,8 @@ fn sv_verify_liveness_all_handler_impl(
             .flat_map(|o| o.reachable_by.iter().chain(o.unreachable_by.iter()))
             .map(|s| s.to_string())
             .collect(),
+        justice: Vec::new(),
+        converted_from_aiger: None,
     }))
 }
 
@@ -5404,8 +5462,9 @@ members = ["x"]
     async fn btor2_verify_liveness_handler_decides_violated_staller() {
         let request = Btor2VerifyLivenessRequest {
             content: LIVENESS_STALLER.to_string(),
-            request: "st == 1".to_string(),
-            grant: "st == 2".to_string(),
+            request: Some("st == 1".to_string()),
+            grant: Some("st == 2".to_string()),
+            ..Default::default()
         };
         let Json(out) = btor2_verify_liveness_handler(Json(request))
             .await
@@ -5418,8 +5477,9 @@ members = ["x"]
     async fn btor2_verify_liveness_handler_rejects_relational_atom() {
         let request = Btor2VerifyLivenessRequest {
             content: LIVENESS_STALLER.to_string(),
-            request: "st == 1".to_string(),
-            grant: "x == y".to_string(), // relational — out of the response fragment
+            request: Some("st == 1".to_string()),
+            grant: Some("x == y".to_string()), // relational — out of the response fragment
+            ..Default::default()
         };
         let err = btor2_verify_liveness_handler(Json(request))
             .await
@@ -5431,27 +5491,69 @@ members = ["x"]
     async fn btor2_verify_liveness_all_handler_decides_violated_conjunction() {
         // The staller violates `st == 1 => st == 2`; a conjunction containing it is
         // violated regardless of the second (trivially-holding) conjunct.
-        let request = Btor2VerifyLivenessAllRequest {
+        let request = Btor2VerifyLivenessRequest {
             content: LIVENESS_STALLER.to_string(),
             responses: vec![
                 "st == 1 => st == 2".to_string(),
                 "st == 0 => st == 0".to_string(),
             ],
+            ..Default::default()
         };
-        let Json(out) = btor2_verify_liveness_all_handler(Json(request))
+        let Json(out) = btor2_verify_liveness_handler(Json(request))
             .await
-            .expect("verify-liveness-all runs");
+            .expect("verify-liveness --response runs");
         assert_eq!(out.outcome, "violated", "response: {out:?}");
         assert!(out.property.contains("&&"), "conjunction echoed: {out:?}");
     }
 
+    /// 0.5 — one liveness route: a fairness-assumed response and the conflicting combinations.
+    #[tokio::test]
+    async fn the_merged_liveness_route_takes_fairness_and_refuses_conflicts() {
+        let fair = Btor2VerifyLivenessRequest {
+            content: LIVENESS_STALLER.to_string(),
+            request: Some("st == 1".to_string()),
+            grant: Some("st == 2".to_string()),
+            fairness: vec!["st == 0".to_string()],
+            ..Default::default()
+        };
+        let Json(out) = btor2_verify_liveness_handler(Json(fair))
+            .await
+            .expect("fairness runs");
+        assert!(out.property.starts_with("(GF (st == 0))"), "{out:?}");
+        let both = Btor2VerifyLivenessRequest {
+            content: LIVENESS_STALLER.to_string(),
+            request: Some("st == 1".to_string()),
+            grant: Some("st == 2".to_string()),
+            responses: vec!["st == 1 => st == 2".to_string()],
+            ..Default::default()
+        };
+        assert!(btor2_verify_liveness_handler(Json(both)).await.is_err());
+        let justice_with_atoms = Btor2VerifyLivenessRequest {
+            content: LIVENESS_STALLER.to_string(),
+            request: Some("st == 1".to_string()),
+            justice: true,
+            ..Default::default()
+        };
+        assert!(
+            btor2_verify_liveness_handler(Json(justice_with_atoms))
+                .await
+                .is_err()
+        );
+        let none = Btor2VerifyLivenessRequest {
+            content: LIVENESS_STALLER.to_string(),
+            ..Default::default()
+        };
+        assert!(btor2_verify_liveness_handler(Json(none)).await.is_err());
+    }
+
     #[tokio::test]
     async fn btor2_verify_liveness_all_handler_rejects_missing_arrow() {
-        let request = Btor2VerifyLivenessAllRequest {
+        let request = Btor2VerifyLivenessRequest {
             content: LIVENESS_STALLER.to_string(),
             responses: vec!["st == 1 st == 2".to_string()], // no `=>`
+            ..Default::default()
         };
-        let err = btor2_verify_liveness_all_handler(Json(request))
+        let err = btor2_verify_liveness_handler(Json(request))
             .await
             .expect_err("a response without `=>` must be rejected");
         assert!(matches!(err, ApiError::BadRequest { .. }));
@@ -5876,8 +5978,9 @@ members = ["x"]
                 source: "module m; endmodule".to_string(),
                 ..Default::default()
             },
-            request: "x == y".to_string(), // relational — rejected before the lift
-            grant: "st == 1".to_string(),
+            request: Some("x == y".to_string()), // relational — rejected before the lift
+            grant: Some("st == 1".to_string()),
+            ..Default::default()
         };
         let err = sv_verify_liveness_handler(Json(request))
             .await

@@ -545,7 +545,7 @@ pub fn response_liveness_rescue_under_fairness_cancellable(
 }
 
 /// Parse repeatable `"REG op VALUE"` fairness-atom strings (the
-/// `verify-liveness-under-fairness` surface) into [`Atom`]s. Reuses
+/// `verify-liveness --fairness` surface) into [`Atom`]s. Reuses
 /// [`parse_response_atom`] so the grammar matches the request / grant atoms
 /// exactly; each entry must be a single register-comparison.
 pub fn parse_fairness_atoms(specs: &[String]) -> Result<Vec<Atom>, String> {
@@ -631,7 +631,7 @@ pub fn parse_response_atom(s: &str) -> Result<Atom, String> {
     }
 }
 
-/// Parse repeatable `"ANTE => CONS"` response strings (the `verify-liveness-all`
+/// Parse repeatable `"ANTE => CONS"` response strings (the `verify-liveness --response`
 /// surface) into `(ante, cons)` [`Atom`] pairs for
 /// [`response_liveness_rescue_conjunction`]. Each string is split on the first literal
 /// `=>`; both sides are trimmed and parsed with [`parse_response_atom`]. Errors if a
@@ -659,7 +659,7 @@ pub fn parse_response_pairs(responses: &[String]) -> Result<Vec<(Atom, Atom)>, S
 
 /// Render a list of `"ANTE => CONS"` response strings as the display property
 /// `AG((a) -> AF (b)) && AG((c) -> AF (d))`, echoed for provenance across the
-/// `verify-liveness-all` surfaces. Splits each string on the first `=>` (falling back
+/// `verify-liveness --response` surfaces. Splits each string on the first `=>` (falling back
 /// to the raw trimmed text when absent — a malformed entry is caught by
 /// [`parse_response_pairs`], so this is display-only).
 pub fn response_conjunction_property(responses: &[String]) -> String {

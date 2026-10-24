@@ -1,24 +1,78 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
   "description": "Request for the response-liveness endpoint (`POST /api/v1/btor2/verify-liveness`). Mirrors the CLI `mununu btor2 verify-liveness`: decides `AG(request → AF grant)` via the l2s reduction + the portfolio. `request` / `grant` are register-comparison atom strings (`\"st == 1\"`).",
   "properties": {
     "content": {
-      "description": "BTOR2 source content.",
+      "description": "BTOR2 source content (with `justice`, ASCII AIGER 1.9 `aag …` is accepted too).",
       "type": "string"
+    },
+    "fairness": {
+      "default": [],
+      "description": "Fairness atoms assumed to hold infinitely often, with `request` / `grant` (0.5 merges `/verify-liveness` here).",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
     },
     "grant": {
+      "default": null,
       "description": "The grant atom that must eventually follow on every path.",
-      "type": "string"
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "justice": {
+      "default": false,
+      "description": "Decide the design's own `justice` lines (HWMCC semantics) instead of a response property (0.5 merges `/verify-liveness` here).",
+      "type": "boolean"
+    },
+    "parallel_rungs": {
+      "default": null,
+      "description": "With `justice` and `rung: \"both\"`: run both rungs concurrently.",
+      "type": [
+        "boolean",
+        "null"
+      ]
     },
     "request": {
-      "description": "The request atom (`\"REG op VALUE\"`).",
-      "type": "string"
+      "default": null,
+      "description": "The request atom (`\"REG op VALUE\"`) of `AG(request → AF grant)`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "responses": {
+      "default": [],
+      "description": "Response pairs `\"ANTE => CONS\"`: the conjunction `⋀ AG(aᵢ → AF gᵢ)` instead of one request / grant (0.5 merges `/verify-liveness` here).",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "rung": {
+      "default": null,
+      "description": "With `justice`: `\"exact\"`, `\"l2s\"` or `\"both\"` (default).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "timeout_ms": {
+      "default": null,
+      "description": "With `justice`: wall-clock budget per justice set in milliseconds.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": [
+        "integer",
+        "null"
+      ]
     }
   },
   "required": [
-    "content",
-    "grant",
-    "request"
+    "content"
   ],
   "title": "Btor2VerifyLivenessRequest",
   "type": "object"

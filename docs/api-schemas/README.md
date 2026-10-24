@@ -34,7 +34,7 @@ type behind them — a schema-less document is the transcript in a different fon
 |------|---------|-----------|
 | [`sv-verify-recoverability-report.schema.json`](sv-verify-recoverability-report.schema.json) | `mununu sv verify-recoverability --json` | stdout |
 | [`sv-verify-liveness-report.schema.json`](sv-verify-liveness-report.schema.json) | `mununu sv verify-liveness --json` | stdout |
-| [`sv-verify-liveness-all-report.schema.json`](sv-verify-liveness-all-report.schema.json) | `mununu sv verify-liveness-all --json` | stdout |
+| [`sv-verify-liveness-all-report.schema.json`](sv-verify-liveness-all-report.schema.json) | `mununu sv verify-liveness --response --json` | stdout |
 
 ⚠️ An **error** is also a JSON document under `--json` (`{verb, file, error}`) and is deliberately
 not schema-pinned: it is a failure envelope, not a report, and pinning it would invite a consumer to
@@ -47,9 +47,7 @@ branch on its shape instead of on the exit code.
 | [`btor2-verify-request.schema.json`](btor2-verify-request.schema.json) | `POST /api/v1/btor2/verify` | Request body |
 | [`btor2-verify-response.schema.json`](btor2-verify-response.schema.json) | `POST /api/v1/btor2/verify` | Response body |
 | [`btor2-verify-liveness-request.schema.json`](btor2-verify-liveness-request.schema.json) | `POST /api/v1/btor2/verify-liveness` | Request body |
-| [`btor2-verify-liveness-response.schema.json`](btor2-verify-liveness-response.schema.json) | `POST /api/v1/btor2/verify-liveness` (also `-all`) | Response body |
-| [`btor2-verify-liveness-all-request.schema.json`](btor2-verify-liveness-all-request.schema.json) | `POST /api/v1/btor2/verify-liveness-all` | Request body |
-| [`btor2-verify-liveness-under-fairness-request.schema.json`](btor2-verify-liveness-under-fairness-request.schema.json) | `POST /api/v1/btor2/verify-liveness-under-fairness` | Request body (response = `btor2-verify-liveness-response.schema.json`) |
+| [`btor2-verify-liveness-response.schema.json`](btor2-verify-liveness-response.schema.json) | `POST /api/v1/btor2/verify-liveness` (every form: response, `responses`, `fairness`, `justice`) | Response body |
 | [`btor2-verify-recoverability-request.schema.json`](btor2-verify-recoverability-request.schema.json) | `POST /api/v1/btor2/verify-recoverability` | Request body |
 | [`btor2-verify-recoverability-response.schema.json`](btor2-verify-recoverability-response.schema.json) | `POST /api/v1/btor2/verify-recoverability` | Response body |
 | [`btor2-check-fsm-request.schema.json`](btor2-check-fsm-request.schema.json) | `POST /api/v1/btor2/check-fsm` | Request body |
@@ -61,7 +59,6 @@ branch on its shape instead of on the exit code.
 |------|----------|-----------|-----------------|
 | [`sv-verify-request.schema.json`](sv-verify-request.schema.json) | `POST /api/v1/sv/verify-bad` | Request body | `btor2-verify-response.schema.json` |
 | [`sv-verify-liveness-request.schema.json`](sv-verify-liveness-request.schema.json) | `POST /api/v1/sv/verify-liveness` | Request body | `btor2-verify-liveness-response.schema.json` |
-| [`sv-verify-liveness-all-request.schema.json`](sv-verify-liveness-all-request.schema.json) | `POST /api/v1/sv/verify-liveness-all` | Request body | `btor2-verify-liveness-response.schema.json` |
 | [`sv-verify-recoverability-request.schema.json`](sv-verify-recoverability-request.schema.json) | `POST /api/v1/sv/verify-recoverability` | Request body | `btor2-verify-recoverability-response.schema.json` |
 | [`sv-check-fsm-request.schema.json`](sv-check-fsm-request.schema.json) | `POST /api/v1/sv/check-fsm` | Request body | `btor2-check-fsm-response.schema.json` |
 

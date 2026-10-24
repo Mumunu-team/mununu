@@ -2,7 +2,7 @@
 
 > Source of truth: [`crates/mununu-core/src/api/models.rs`](../../crates/mununu-core/src/api/models.rs) — surface: API. Machine-readable schemas live alongside as [`*.schema.json`](.) files; this document is the prose you read *before* wiring a consumer to them.
 
-The BTOR2-direct property verbs (`verify`, `verify-liveness`, `verify-liveness-all`, `verify-recoverability`, `check-fsm`) and their SV-wrapped siblings (`sv/verify`, `sv/verify-liveness`, `sv/verify-liveness-all`, `sv/verify-recoverability`, `sv/check-fsm`) all end in the same canonical `PropertyVerdict` vocabulary — `holds` / `violated` / `unknown` / `skipped`. What differs across verbs is *which structured detail* accompanies that verdict.
+The BTOR2-direct property verbs (`verify`, `verify-liveness`, `verify-recoverability`, `check-fsm`) and their SV-wrapped siblings (`sv/verify-bad`, `sv/verify-liveness`, `sv/verify-recoverability`, `sv/check-fsm`) all end in the same canonical `PropertyVerdict` vocabulary — `holds` / `violated` / `unknown` / `skipped`. What differs across verbs is *which structured detail* accompanies that verdict.
 
 ## The axis map
 
@@ -10,8 +10,9 @@ The BTOR2-direct property verbs (`verify`, `verify-liveness`, `verify-liveness-a
 |-----------|---------------|---------------|-------------|
 | `btor2 verify` / `sv verify-bad` | Safety (`bad` unreachable) | `Btor2VerifyResponse` | Per-engine breakdown, soundness-alarm flag |
 | `btor2 verify-liveness` / `sv verify-liveness` | Response `AG(a → AF b)` | `Btor2VerifyLivenessResponse` | Reduced-property echo, deciding engines |
-| `btor2 verify-liveness-all` / `sv verify-liveness-all` | Conjunctive `⋀ᵢ AG(aᵢ → AF bᵢ)` | `Btor2VerifyLivenessResponse` | Same as `-liveness` — one merged verdict |
-| `btor2 verify-liveness-under-fairness` (mununu#477) | Response under fairness `(⋀ⱼ GF fairⱼ) → AG(a → AF b)` | `Btor2VerifyLivenessResponse` | Same shape as `-liveness`; empty `fairness` reduces to `-liveness` exactly |
+| `btor2 verify-liveness --response` / `sv verify-liveness --response` (API `responses`) | Conjunctive `⋀ᵢ AG(aᵢ → AF bᵢ)` | `Btor2VerifyLivenessResponse` | Same as the single response — one merged verdict |
+| `btor2 verify-liveness --fairness` / `sv verify-liveness --fairness` (API `fairness`, mununu#477) | Response under fairness `(⋀ⱼ GF fairⱼ) → AG(a → AF b)` | `Btor2VerifyLivenessResponse` | Same shape; empty `fairness` reduces to the plain response exactly |
+| `btor2 verify-liveness --justice` (API `justice: true`) | The design's own HWMCC justice lines | `Btor2VerifyLivenessResponse` | `justice[]` per set (`index`, `size`, `outcome`, `decided_by`, `notes`), `converted_from_aiger` |
 | `btor2 verify-recoverability` / `sv verify-recoverability` | Recoverability `AG EF good` | `Btor2VerifyRecoverabilityResponse` | Optional `VerdictRefinement` tree (vacuous / config-partition / holds-under / ⊥-hint) |
 | `btor2 check-fsm` / `sv check-fsm` | Auto-scan of illegal FSM encodings | `Btor2CheckFsmResponse` | Per-register findings + counts |
 
@@ -25,20 +26,20 @@ Runs every available sound reach-portfolio engine (native BMC / k-induction, McM
 
 ```json
 {
-  "verdict": "holds",
+  "outcome": "holds",
   "reachable_by": [],
   "unreachable_by": ["native_kind", "mcmillan_interp"],
   "contradiction": false
 }
 ```
 
-- `verdict` — the merged canonical answer.
+- `outcome` — the merged canonical answer.
 - `reachable_by` / `unreachable_by` — the deciding engines. An `unreachable_by` list of length ≥ 1 is a sound safety proof; a `reachable_by` list of length ≥ 1 is a real counterexample.
 - `contradiction` — TRUE only when two sound engines disagree. **Treat this as a soundness alarm**, not a verdict-selection hint: raise it to a human and cross-check the input BTOR2 rather than picking a side.
 
-## `POST /btor2/verify-liveness-under-fairness` — response properties under a fairness assumption (mununu#477 Option B)
+## `POST /btor2/verify-liveness` — response properties under a fairness assumption (mununu#477 Option B)
 
-Schema: [`btor2-verify-liveness-under-fairness-request.schema.json`](btor2-verify-liveness-under-fairness-request.schema.json) (response reuses `btor2-verify-liveness-response.schema.json`)
+Schema: [`btor2-verify-liveness-request.schema.json`](btor2-verify-liveness-request.schema.json) with `fairness` set (response: `btor2-verify-liveness-response.schema.json`). Since 0.5 one route serves every liveness form: `request` / `grant`, `responses`, `fairness`, or `justice`.
 
 Decides `(⋀ⱼ GF fairⱼ) → AG(request → AF grant)` via the Emerson–Lei fair-cycle extension of the plain l2s. The BTOR2 monitor gains one `fairⱼ_seen` latch per fairness atom (each mirroring the existing `b_seen`); `bad = looped ∧ ¬b_seen ∧ ⋀ⱼ fairⱼ_seen`. A reachable `bad` ⇒ a lasso exists that satisfies EVERY fairness constraint AND leaves a request forever ungranted ⇒ VIOLATED. An unreachable `bad` ⇒ HOLDS. Empty `fairness` recovers `verify-liveness` exactly.
 
@@ -57,7 +58,7 @@ Response:
 
 ```json
 {
-  "verdict": "holds",
+  "outcome": "holds",
   "property": "(GF (grant_cpu == 1)) -> AG((req == 1) -> AF (ack == 1))",
   "decided_by": ["native_kind"]
 }
@@ -74,7 +75,7 @@ Decides `AG(request → AF grant)` via the standard l2s (liveness-to-safety) red
 
 ```json
 {
-  "verdict": "unknown",
+  "outcome": "unknown",
   "property": "AG((st == 1) -> AF (st == 3))",
   "decided_by": []
 }
@@ -93,7 +94,7 @@ Decides `AG EF good` — "from every reachable state, can the design get back to
 
 ```json
 {
-  "verdict": "unknown",
+  "outcome": "unknown",
   "property": "AG EF (state_q == 3)",
   "refinement": {
     "vacuous": null,
@@ -115,11 +116,11 @@ Decides `AG EF good` — "from every reachable state, can the design get back to
 }
 ```
 
-- `verdict` — the CANONICAL (unconditional) answer. A `config_partition` or a non-empty `holds_under` never changes this — a refinement is a diagnostic, not a verdict.
+- `outcome` — the CANONICAL (unconditional) answer. A `config_partition` or a non-empty `holds_under` never changes this — a refinement is a diagnostic, not a verdict.
 - `property` — the checked formula echoed for provenance.
 - `refinement` — present only when the request set `refine`, `config_values`, or `discover_assumptions`. Structured detail:
   - `vacuous` — the recovery target `good` was never reachable from the initial state. Bare `AG EF good` is degenerate then; the plain verdict is misleading.
-  - `config_partition` — per-config decided verdicts when `config_values` was requested, every named value included: a single value (`"rst_n=1"`) is a scoped pin, reported as its one cell (mununu#634). Each row is `[(name, u64)]`. `exhaustive: true` means the enumerated cells cover the entire reachable config space. The bare `refine` auto-partitions over the detected reset and reports only a partition the verdict genuinely depends on (two or more non-empty cells).
+  - `config_partition` — per-config decided verdicts when `partitions` was requested, every named value included: a single value (`"rst_n=1"`) is a scoped pin, reported as its one cell (mununu#634). Each row is `[(name, u64)]`. `exhaustive: true` means the enumerated cells cover the entire reachable config space. The bare `refine` auto-partitions over the detected reset and reports only a partition the verdict genuinely depends on (two or more non-empty cells).
   - `holds_under` — CONDITIONAL results: the property holds under environment assumption `φ`. `kind` names the shape (`InputHold`, `InputConjunction`, `InputFairness`, …). `non_vacuous: true` means the non-vacuity gate passed — `good` is actually reached under `φ`, not just trivially satisfied.
   - `bot_diagnosis` — best-effort structural "why ⊥" hint. `uncertified_counters` names counters gating recovery without a ranking certificate; `wide_influences` names wide state/inputs the predicate cube cannot enumerate.
 - `engine` — which rung of the recoverability ladder produced the canonical verdict: `"exact"` (the exact-symbolic ROBDD engine), `"exact-reach-restricted"` (its reach-restricted stage — the usual label when the exact run took longer than the ladder's first 2 s slice; the verdict is identical by construction) or `"cube-ladder"` (the predicate-cube ladder, run after the exact engine abstained). Absent only when no engine ran (the target did not parse). Same key on the CLI `btor2 verify-recoverability` document and the `sv verify-recoverability` report.
@@ -142,21 +143,21 @@ Auto-discovers the design's FSM-like state registers (state registers narrower t
       "register": "ctrl_state",
       "kind": "fsm",
       "legal_encodings": [0, 1, 2, 3],
-      "verdict": "violated",
+      "outcome": "violated",
       "illegal_encoding_reachable": true
     },
     {
       "register": "retry_cnt_q",
       "kind": "counter",
       "legal_encodings": [],
-      "verdict": "skipped",
+      "outcome": "skipped",
       "illegal_encoding_reachable": false
     }
   ]
 }
 ```
 
-- `verdict` per register is the same canonical vocabulary. `illegal_encoding_reachable` is a convenience alias for `verdict == "violated"`.
+- `outcome` per register is the same canonical vocabulary. `illegal_encoding_reachable` is a convenience alias for `outcome == "violated"`.
 - `register` is the cell's own symbol or a **value-identical** alias of it (`state_q`, the port that mirrors it) — never a next-value wire such as `beat_cnt_d` ([`parser::canonical_register_names`](../../crates/mununu-core/src/adapter/btor2/parser.rs); mununu#633).
 - `kind` (mununu#633): `"fsm"` is an enumeration-valued register the scan checked; `"counter"` is a register its own next-state logic steps by ±1 (`cnt + 1`, `cnt - 1`) — its values are a range, not an enumeration, so it is listed with no `legal_encodings` and `"skipped"`, and does not count toward `fsm_registers_checked`. Arithmetic by any other step (`st + 3`) stays `"fsm"`: a computed out-of-enum value is the bug class the scan exists for.
 - Wider registers are treated as datapath and skipped (see `default_fsm_max_width` in the source).
@@ -182,10 +183,10 @@ Verb-specific fields (`request` / `grant` / `target` / `responses` / `max_width`
 
 Same as [`verdict.md`](verdict.md):
 
-- Treat `verdict` as the source of truth; parse structured detail only when the verb ships it.
-- Tolerate unknown enum-shaped strings (`AssumptionKind`, `verdict`, `terminated_with`). mununu's stability contract allows additive expansion.
+- Treat `outcome` as the source of truth; parse structured detail only when the verb ships it.
+- Tolerate unknown enum-shaped strings (`AssumptionKind`, `outcome`, `terminated_with`). mununu's stability contract allows additive expansion.
 - A `contradiction: true` on `/btor2/verify` is a soundness alarm, not a hint; escalate rather than picking a side.
-- `refinement` on `/btor2/verify-recoverability` is optional. Only ask for it (`refine: true`, `config_values: […]`, or `discover_assumptions: true`) when the consumer knows what to do with it — the default path stays minimal.
+- `refinement` on `/btor2/verify-recoverability` is optional. Only ask for it (`refine: true`, `partitions: […]`, or `discover_assumptions: true`) when the consumer knows what to do with it — the default path stays minimal.
 
 ## Not covered here
 
