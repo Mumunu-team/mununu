@@ -1146,9 +1146,9 @@ context typo {
 }
 "#,
     );
-    let err = crate::context_dsl::realize::realize(&doc, &[])
-        .err()
-        .expect("an undecidable guard is an error");
+    let Err(err) = crate::context_dsl::realize::realize(&doc, &[]) else {
+        panic!("an undecidable guard is an error");
+    };
     let msg = err.to_string();
     assert!(
         msg.contains("cannot be decided") && msg.contains("cuont"),
