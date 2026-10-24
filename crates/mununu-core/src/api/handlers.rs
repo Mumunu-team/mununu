@@ -775,16 +775,8 @@ fn btor2_verify_handler_impl(request: Btor2VerifyRequest) -> ApiResult<Json<Btor
             contradiction: false,
             fault: Some(o.fault),
             target: o.target,
-            attack: o
-                .attack
-                .iter()
-                .map(|e| crate::api::models::FaultEventView {
-                    cycle: e.cycle,
-                    site: e.site.clone(),
-                    value: e.value.as_u64(),
-                    hex: e.value.to_hex(),
-                })
-                .collect(),
+            trace: (o.verdict == "violated").then(|| Trace::attack(o.depth, &o.attack)),
+            trace_unavailable_within_k: None,
         }));
     }
     // `faults`: the fault-injection rewrite before any engine (the CLI `--fault`).
@@ -814,6 +806,19 @@ fn btor2_verify_handler_impl(request: Btor2VerifyRequest) -> ApiResult<Json<Btor
     };
 
     let outcome = decide_reach_portfolio(&file);
+    // `witness`: on a violation, the shallowest reset → `bad` path, re-derived by native BMC.
+    let (trace, trace_unavailable_within_k) =
+        if request.witness && outcome.verdict == ReachVerdict::Reachable {
+            let k = request.witness_max_k.unwrap_or(200);
+            match crate::adapter::btor2::native_bmc::bmc_bad_reachable_witness(&file, k) {
+                Ok((crate::adapter::btor2::native_bmc::BmcOutcome::Violated { .. }, Some(t))) => {
+                    (Some(Trace::from_bmc(&t)), None)
+                }
+                _ => (None, Some(k)),
+            }
+        } else {
+            (None, None)
+        };
     Ok(Json(Btor2VerifyResponse {
         outcome: crate::verdict::PropertyVerdict::from(outcome.verdict)
             .as_str()
@@ -827,7 +832,8 @@ fn btor2_verify_handler_impl(request: Btor2VerifyRequest) -> ApiResult<Json<Btor
         contradiction: outcome.verdict == ReachVerdict::Contradiction,
         fault: fault_label,
         target: None,
-        attack: Vec::new(),
+        trace,
+        trace_unavailable_within_k,
     }))
 }
 
@@ -1309,7 +1315,7 @@ fn btor2_game_handler_impl(request: Btor2GameRequest) -> ApiResult<Json<Btor2Gam
         exact_two_player_recurrence_stall_lasso(&content, &request.good, &controllable)
             .ok()
             .flatten()
-            .map(|l| l.to_view())
+            .map(|l| Trace::from_stall_lasso(&l))
     } else {
         None
     };
@@ -1324,7 +1330,7 @@ fn btor2_game_handler_impl(request: Btor2GameRequest) -> ApiResult<Json<Btor2Gam
         controllable: request.controllable,
         holds_under,
         strategy,
-        stall_lasso,
+        trace: stall_lasso,
         strategy_error,
         attack_exists: fault_label.as_ref().map(|_| realizable),
         fault: fault_label,
@@ -1366,7 +1372,8 @@ fn sv_verify_handler_impl(request: SvVerifyRequest) -> ApiResult<Json<Btor2Verif
         contradiction: outcome.verdict == ReachVerdict::Contradiction,
         fault: None,
         target: None,
-        attack: Vec::new(),
+        trace: None,
+        trace_unavailable_within_k: None,
     }))
 }
 
@@ -1987,12 +1994,17 @@ fn attach_testbenches(
             reset: reset.as_ref().map(|(n, a)| (n.as_str(), *a)),
             sources: &sources,
         };
-        row.testbench = counterexample_testbench(&design, cex).map(|b| TestbenchView {
+        let testbench = counterexample_testbench(&design, cex).map(|b| TestbenchView {
             tb_cpp: b.tb_cpp,
             makefile: b.makefile,
             checks: b.checks,
             skipped: b.skipped,
         });
+        if let (Some(trace), Some(tb)) = (row.trace.as_mut(), testbench) {
+            trace.replay = Some(TraceReplay {
+                testbench: Some(tb),
+            });
+        }
     }
     Ok(())
 }
@@ -2234,7 +2246,7 @@ fn run_symbolic_cegar_response(
         ],
         violating_cells: Vec::new(),
         undecided_cells: Vec::new(),
-        counterexample: None,
+        trace: None,
         refinement_candidates: Vec::new(),
         ctxdsl: None,
     })
@@ -2443,12 +2455,7 @@ fn run_cegar_build_response(params: CegarRunParams<'_>) -> Result<Btor2CegarResp
             .collect(),
         // Track I.1 (trace slice) — the reachability countertrace for a
         // violated verdict (None when not violated at the initial cell).
-        counterexample: trace.counterexample.as_ref().map(|ct| {
-            crate::api::models::CounterTraceView {
-                steps: ct.steps.iter().map(&cell_view).collect(),
-                ends_in_trap: ct.ends_in_trap,
-            }
-        }),
+        trace: trace.counterexample.as_ref().map(Trace::from_cegar),
         // Track I.1 (undecided-explanation) — registers the failure subgame
         // flagged as load-bearing for the remaining ⊥ cells (empty ⇒ omitted).
         refinement_candidates: trace.init_refinement_candidates.clone(),
@@ -5253,6 +5260,8 @@ members = ["x"]
             faults: vec![],
             fault_warmup: None,
             target: None,
+            witness: false,
+            witness_max_k: None,
         };
         let Json(out) = btor2_verify_handler(Json(request))
             .await
@@ -5279,6 +5288,8 @@ members = ["x"]
             faults: vec![],
             fault_warmup: None,
             target: None,
+            witness: false,
+            witness_max_k: None,
         };
         let err = btor2_verify_handler(Json(request))
             .await

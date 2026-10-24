@@ -147,53 +147,6 @@
       ],
       "type": "object"
     },
-    "CounterexampleView": {
-      "description": "A counterexample for the API (mirrors `ExactCounterexample`): reset → `prefix` → repeating `cycle` (D1.8b stall lasso), or reset → `prefix` with an empty `cycle` (a safety violation, ending at the failing cycle), each state an ordered list of register cells.",
-      "properties": {
-        "cycle": {
-          "description": "The repeating stall cycle; the last state steps back to `cycle[0]`.",
-          "items": {
-            "items": {
-              "$ref": "#/definitions/CexCellView"
-            },
-            "type": "array"
-          },
-          "type": "array"
-        },
-        "inputs": {
-          "description": "P3 / mununu#536 — the per-cycle INPUT assignment that drives the trace (`inputs[i]` belongs to state `i` of `prefix ++ cycle`), so the counterexample can be replayed against the RTL. Present on the core report all along; both wire shapes dropped it, which made a trace readable but not runnable.",
-          "items": {
-            "items": {
-              "$ref": "#/definitions/CexCellView"
-            },
-            "type": "array"
-          },
-          "type": "array"
-        },
-        "prefix": {
-          "description": "States from the reset state up to (excluding) the cycle entry.",
-          "items": {
-            "items": {
-              "$ref": "#/definitions/CexCellView"
-            },
-            "type": "array"
-          },
-          "type": "array"
-        },
-        "unreachable_target": {
-          "description": "A.4 — for a `Violated` bare `EF p` (reachability): the target predicate atoms that are UNREACHABLE from reset (\"the design never reaches these\"). Empty for the stall-lasso / trap-path (liveness) counterexamples, which carry `prefix`/`cycle`.",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        }
-      },
-      "required": [
-        "cycle",
-        "prefix"
-      ],
-      "type": "object"
-    },
     "ExpectationFailureView": {
       "description": "mununu#537 — one unmet claim. `property` is absent for a run-level claim (the count).",
       "properties": {
@@ -383,17 +336,6 @@
           ],
           "description": "monono ask 26 — why an `unknown` (⊥) property was not decided. `None` for a definite outcome. See [`BottomReasonView`]."
         },
-        "counterexample": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/CounterexampleView"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "A concrete counterexample for a Violated property: for safety, the reset → violation path (empty `cycle`) native BMC re-derives whichever engine decided it (absent when none lies within the bound); D1.8b — a stall lasso for a bare `AF p` decided by the exact engine; A.4 — the unreachable target of a bare `EF p`."
-        },
         "decided_by": {
           "description": "Which portfolio engine produced this property's DEFINITE verdict. `None` for `⊥`.\n\n**A verdict's PROVENANCE, per property.** The companion to `bottom_reason`: that says why a `⊥` happened, this says who answered when one did not.\n\n**Why a gate should read it even when the verdict is `holds`.** Measured: at high arena occupancy a run still returned `holds`, but the exact engine dropped out and an abstracting engine supplied the verdict — sound under that engine's posture, but the **precision tier moved silently**. A gate pinning `holds` sees `holds` either way. Comparing this field against the previous run is how a consumer notices.\n\nPreviously available only as `decided-by:<engine>=<count>` in a report-level note: an AGGREGATE, which cannot say WHICH property changed tier, and filterable besides.",
           "type": [
@@ -453,16 +395,16 @@
             "null"
           ]
         },
-        "testbench": {
+        "trace": {
           "anyOf": [
             {
-              "$ref": "#/definitions/TestbenchView"
+              "$ref": "#/definitions/Trace"
             },
             {
               "type": "null"
             }
           ],
-          "description": "The Verilator replay testbench for this property's counterexample, when `emit_testbench` was requested and the counterexample carries a path (`sv verify-auto --emit-testbench`)."
+          "description": "The counterexample ([`Trace`]) of a Violated property: for safety, the reset → violation path (empty `cycle`) native BMC re-derives whichever engine decided it (absent when none lies within the bound); D1.8b — a stall lasso for a bare `AF p` decided by the exact engine; A.4 — the unreachable target of a bare `EF p`."
         },
         "unknown_cells": {
           "description": "mununu#536 — the cell count behind an `unknown` (⊥) verdict, machine-readable. `None` for every other outcome.\n\nThis is the \"cell/budget figure that accompanies a ⊥\" the issue asks for: a ⊥ is a statement about how much of the cube space stayed undecided, and a consumer tracking whether refinement is helping needs the number, not a sentence containing it.",
@@ -524,6 +466,184 @@
         "makefile",
         "skipped",
         "tb_cpp"
+      ],
+      "type": "object"
+    },
+    "Trace": {
+      "description": "The one counterexample shape of 0.5, shared by every verb that returns a path: RTL rows fill `state` / `inputs` / `faults`, CTXDSL rows fill `state_name` / `labels`. A two-player strategy stays its own object, and the counterstrategy graph stays a view.",
+      "properties": {
+        "kind": {
+          "$ref": "#/definitions/TraceKind"
+        },
+        "loop_start": {
+          "description": "For a `lasso`: the index into `steps` the last step loops back to.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "replay": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TraceReplay"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "steps": {
+          "items": {
+            "$ref": "#/definitions/TraceStep"
+          },
+          "type": "array"
+        },
+        "unreachable_target": {
+          "description": "For `unreachable`: the target atoms no path reaches.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "kind",
+        "steps"
+      ],
+      "type": "object"
+    },
+    "TraceFault": {
+      "description": "One fault injection on a [`TraceStep`].",
+      "properties": {
+        "hex": {
+          "description": "The value in hexadecimal, at any width.",
+          "type": "string"
+        },
+        "site": {
+          "description": "The register overwritten.",
+          "type": "string"
+        },
+        "value": {
+          "description": "The value written, when it fits 64 bits.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "hex",
+        "site"
+      ],
+      "type": "object"
+    },
+    "TraceKind": {
+      "description": "What a [`Trace`] shows.",
+      "oneOf": [
+        {
+          "description": "Reset → the failing step (a safety violation).",
+          "enum": [
+            "finite"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Reset → a prefix → a cycle repeated forever (`loop_start` marks it): a liveness stall.",
+          "enum": [
+            "lasso"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Reset → a closed trap the target is never reached from again (a refuted `AG EF`).",
+          "enum": [
+            "trap"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "No path: the `unreachable_target` atoms are never reached from reset (a refuted `EF`).",
+          "enum": [
+            "unreachable"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Reset → the injections of a fault attack that reaches its target (`steps[].faults`).",
+          "enum": [
+            "attack"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "TraceReplay": {
+      "description": "Replay artefacts attached to a [`Trace`].",
+      "properties": {
+        "testbench": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TestbenchView"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The Verilator testbench (`--emit-testbench` / `emit_testbench`)."
+        }
+      },
+      "type": "object"
+    },
+    "TraceStep": {
+      "description": "One step of a [`Trace`]: the state at `cycle` and what drives the step out of it.",
+      "properties": {
+        "cycle": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "faults": {
+          "description": "Faults injected in this cycle.",
+          "items": {
+            "$ref": "#/definitions/TraceFault"
+          },
+          "type": "array"
+        },
+        "inputs": {
+          "description": "The input assignment of this cycle (RTL), so the trace can be replayed.",
+          "items": {
+            "$ref": "#/definitions/CexCellView"
+          },
+          "type": "array"
+        },
+        "labels": {
+          "description": "The labels of the transition out of this step (CTXDSL).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "state": {
+          "description": "Register cells (RTL); empty for a CTXDSL step, which names its state in `state_name`.",
+          "items": {
+            "$ref": "#/definitions/CexCellView"
+          },
+          "type": "array"
+        },
+        "state_name": {
+          "description": "The CTXDSL state's name.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "cycle"
       ],
       "type": "object"
     },

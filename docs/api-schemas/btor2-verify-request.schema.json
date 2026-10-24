@@ -31,6 +31,21 @@
         "string",
         "null"
       ]
+    },
+    "witness": {
+      "default": false,
+      "description": "On a `violated` verdict, re-derive the shallowest reset → `bad` path with native BMC and return it as `trace` (the CLI's `--witness`). Default `false`.",
+      "type": "boolean"
+    },
+    "witness_max_k": {
+      "default": null,
+      "description": "The BMC bound for `witness` (the CLI's `--witness-max-k`, default 200).",
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": [
+        "integer",
+        "null"
+      ]
     }
   },
   "required": [

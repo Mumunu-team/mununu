@@ -44,7 +44,7 @@ Read the figures from the structured fields, not from prose:
 1. [PropertyVerdict — the four canonical outcomes](#propertyverdict--the-four-canonical-outcomes)
 2. [SvVerifyAutoResponse — top-level shape](#svverifyautoresponse--top-level-shape)
 3. [PropertyVerdictView — per-property](#propertyverdictview--per-property)
-4. [Counterexample — CexCellView / CounterexampleView](#counterexample--cexcellview--counterexampleview)
+4. [Trace](#trace)
 5. [Model diagnostics + notes](#model-diagnostics--notes)
 6. [Unsupported assertions](#unsupported-assertions)
 7. [DiscoveredAssumption — refinement-lane fields](#discoveredassumption--refinement-lane-fields)
@@ -97,7 +97,7 @@ Rust source: [`PropertyVerdictView`](../../crates/mununu-core/src/api/models.rs#
   "outcome":            "holds",               // canonical PropertyVerdict as-string
   "detail":             "cube: 0 false / 12 unknown", // optional; skip reason, cell counts
   "seeded_predicates":  ["req == 1", "grant == 1"],   // atoms auto-seeded for this property
-  "counterexample":     null                   // present only for exact-symbolic Violated on AF-shape
+  "trace":              null                   // a Trace on a violated row that carries a path
 }
 ```
 
@@ -117,39 +117,29 @@ Rust source: [`PropertyVerdictView`](../../crates/mununu-core/src/api/models.rs#
 - `outcome` — one of the four canonical `PropertyVerdict` values. This is the field to gate on.
 - `detail` — human-facing extra: `"cube: <false> false / <unknown> unknown"` for cube verdicts; `"skip-<reason>"` for skips (see the skip-reason catalog below). Optional.
 - `seeded_predicates` — the abstraction-cube atom strings seeded for this property. Empty for engines that don't use a cube.
-- `counterexample` — see [Counterexample](#counterexample--cexcellview--counterexampleview) below. Only present for `Violated` on bare `AF p` / `AG EF p` / `AG AF p` decided by the exact-symbolic engine; `null`/absent otherwise.
+- `trace` — see [Trace](#trace) below. Present on a `violated` row that carries a path (safety via native BMC, liveness lassos, trap paths, unreachable `EF` targets); absent otherwise.
 
-## Counterexample — CexCellView / CounterexampleView
+## Trace
 
-Rust source: [`CounterexampleView`](../../crates/mununu-core/src/api/models.rs#L2490) + [`CexCellView`](../../crates/mununu-core/src/api/models.rs#L2510).
-
-Two shapes co-exist in one field:
-
-**(1) Stall-lasso / trap-path** — for liveness/recoverability failures. Reset → `prefix` → repeating `cycle`; each state is an ordered list of register cells.
+Rust source: [`Trace`](../../crates/mununu-core/src/api/models.rs) + [`CexCellView`](../../crates/mununu-core/src/api/models.rs). The one counterexample shape since 0.5, on every verb that returns a path (`sv verify-auto` rows, `btor2 verify` with `--witness` / a fault `--target`, cegar, the `btor2 game` starvation lasso):
 
 ```jsonc
 {
-  "prefix": [
-    [ { "register": "st_q",     "value": 0 }, { "register": "cnt_q", "value": 0 } ],
-    [ { "register": "st_q",     "value": 1 }, { "register": "cnt_q", "value": 1 } ]
+  "kind": "lasso",                 // finite | lasso | trap | unreachable | attack
+  "steps": [
+    { "cycle": 0, "state":  [ { "register": "st_q", "value": 0, "hex": "0x0", "bits": 2 } ],
+                  "inputs": [ { "register": "req",  "value": 1, "hex": "0x1", "bits": 1 } ] },
+    { "cycle": 1, "state":  [ { "register": "st_q", "value": 1, "hex": "0x1", "bits": 2 } ] }
   ],
-  "cycle": [
-    [ { "register": "st_q",     "value": 3 }, { "register": "cnt_q", "value": 5 } ]
-  ]
+  "loop_start": 1,                 // lasso only: the step the last one loops back to
+  "unreachable_target": [],        // unreachable only: the atoms no path reaches
+  "replay": { "testbench": { … } } // when a Verilator testbench was requested
 }
 ```
 
-**(2) Unreachable-target witness** — for a `Violated` bare `EF p` (reachability). The target atoms are simply never reached from reset; no state trace.
-
-```jsonc
-{
-  "prefix": [],
-  "cycle":  [],
-  "unreachable_target": ["st_q == 7", "err_q == 1"]
-}
-```
-
-`unreachable_target` is omitted (or empty) for shape (1). `prefix`/`cycle` are empty for shape (2). Consumers should treat either `unreachable_target.length > 0` or `cycle.length > 0` as valid — never both non-empty.
+- `finite` — reset → the failing step (a safety violation). `lasso` — a prefix and a cycle repeated forever (a liveness stall). `trap` — reset → a closed trap the target is never reached from again (a refuted `AG EF` decided by the trap certificate). `unreachable` — no steps; `unreachable_target` lists the atoms. `attack` — one step per cycle with the fault injections on `steps[].faults` (`{site, value, hex}`); the adversary records injections, not states.
+- `state` / `inputs` are register cells: `value` when it fits 64 bits (else `null`), `hex` and `bits` always. A CTXDSL step names its state in `state_name` and the transition's labels in `labels`.
+- A cegar counter-trace lists each step's predicates as 1-bit cells; a game starvation lasso's cells carry the value's bit length in `bits` (the lasso records no widths).
 
 ## Model diagnostics + notes
 
