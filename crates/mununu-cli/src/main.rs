@@ -2963,7 +2963,7 @@ fn parse_cli_controller_mode(
         return ControllerMode::from_normalized_name(name).map_err(|other| {
             format!(
                 "unknown controller mode '{other}' \
-                (valid: projection, functional, permissive, signature-memory, product-game, parity-game)"
+                (valid: projection, functional, permissive, signature-memory, product-game, parity-game, gr1)"
             )
         });
     }

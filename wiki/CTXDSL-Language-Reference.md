@@ -239,7 +239,7 @@ Variables are used in guard expressions and updated via effects on transitions.
 Three behaviours are load-bearing and easy to get wrong:
 
 - **`effects` are simultaneous and read the pre-state** -- non-blocking-assignment semantics. `effects { a = b; b = a; }` swaps; effects in one transition never see each other's writes.
-- **A `guard` is a boolean expression over comparisons** — `&&`, `||`, `!` and parentheses (`guard a >= 2 && b == 0`). A guard the variables cannot decide (a name that is no declared `i64` variable) is a realization error naming the transition, not a transition that silently never fires (changed 2026-10; see [`docs/ctxdsl-modelling-guide.md` §1](../docs/ctxdsl-modelling-guide.md)).
+- **A `guard` is a boolean expression over comparisons** — `&&`, `||`, `!` and parentheses (`guard a >= 2 && b == 0`). A guard the variables cannot decide (a name that is no declared `i64` variable) is a realization error naming the transition, not a transition that silently never fires (changed 2026-10; see [`docs/ctxdsl-modelling-guide.md` §1](https://github.com/Mumunu-team/mununu/blob/main/docs/ctxdsl-modelling-guide.md)).
 - **Only `i64` variables bind in formula atoms.** An atom naming a `bool` variable -- or a misspelled name -- evaluates to *true* at every state, with no warning, which makes the property vacuous.
 
 Bound every variable with a guard on the transition that increments it; an unbounded variable enumerates until it hits the state cap.
@@ -324,7 +324,7 @@ transition Active -> Done on label tick
 
 ## Composition
 
-Compositions combine automata into larger systems. See the dedicated [Composition](Composition) page for full details.
+Compositions combine automata into larger systems with one of three semantics — `synchronous` (lock-step), `asynchronous` (interleaving) and `superset` (interleaving plus joint steps). See the dedicated [Composition](Composition) page for full details.
 
 ```
 composition {
@@ -335,8 +335,14 @@ composition {
     asynchronous sensor_network {
         members [SensorA, SensorB, Monitor];
     }
+
+    superset mixed {
+        members [SensorA, Monitor];
+    }
 }
 ```
+
+After `members`, a composition may carry options, one statement each: `allow_dead_vectors;` keeps a compound action no partner can match as a warning instead of an error, and `fairness weak;` (asynchronous only) reads `ltl` bodies over the composition's fair paths.
 
 When using parameterized automata, member references can include an index to select a specific instance:
 

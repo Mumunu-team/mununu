@@ -148,7 +148,7 @@ The `safety_invariant` formula (`nu X. ([] X)`) is realizable -- the controller 
 **Synthesis output** (via CLI):
 
 ```bash
-mununu context synth tutorial/examples/06_controllability.ctxdsl \
+mununu context synth examples/wiki/robot_arm.ctxdsl \
     --formula safety_invariant --automaton RobotArm
 ```
 

@@ -31,8 +31,21 @@ use crate::mu_calculus::Formula;
 
 /// Translate `ltl` under its path (universal) semantics; see the module doc for the fragment.
 pub fn translate_universal(ltl: &LtlFormula) -> Result<Formula, TranslationError> {
+    translate_universal_fair(ltl, &[])
+}
+
+/// [`translate_universal`] over the FAIR paths only — those satisfying every `fairness`
+/// constraint infinitely often (an asynchronous composition's `fairness weak;`). `F b` becomes the
+/// fair `AF b` (`¬ E_C G ¬b`, [`crate::verify::fairness::fair_af`]) and `b U c` becomes
+/// `(b W c) ∧ fair AF c`; `G` and `W` are unchanged, because weak fairness is machine-closed —
+/// every finite prefix extends to a fair path, so a safety property over every path and over the
+/// fair ones agree.
+pub fn translate_universal_fair(
+    ltl: &LtlFormula,
+    fairness: &[crate::verify::fairness::Assumption],
+) -> Result<Formula, TranslationError> {
     let mut fresh = 0usize;
-    let text = universal(&nnf(ltl, false), &mut fresh)?;
+    let text = universal(&nnf(ltl, false), &mut fresh, fairness)?;
     crate::mu_calculus::parser::parse(&text).map_err(|e| TranslationError::Translation {
         message: format!("internal: the universal translation `{text}` does not parse: {e:?}"),
     })
@@ -151,7 +164,11 @@ fn outside(f: &LtlFormula, why: &str) -> TranslationError {
     }
 }
 
-fn universal(f: &LtlFormula, fresh: &mut usize) -> Result<String, TranslationError> {
+fn universal(
+    f: &LtlFormula,
+    fresh: &mut usize,
+    fairness: &[crate::verify::fairness::Assumption],
+) -> Result<String, TranslationError> {
     use LtlFormula as L;
     if is_propositional(f) {
         return Ok(prop(f));
@@ -161,19 +178,30 @@ fn universal(f: &LtlFormula, fresh: &mut usize) -> Result<String, TranslationErr
         format!("{p}{}", *fresh)
     };
     Ok(match f {
-        L::And(x, y) => format!("({} && {})", universal(x, fresh)?, universal(y, fresh)?),
-        L::Or(x, y) if is_propositional(x) => format!("({} || {})", prop(x), universal(y, fresh)?),
-        L::Or(x, y) if is_propositional(y) => format!("({} || {})", universal(x, fresh)?, prop(y)),
+        L::And(x, y) => format!(
+            "({} && {})",
+            universal(x, fresh, fairness)?,
+            universal(y, fresh, fairness)?
+        ),
+        L::Or(x, y) if is_propositional(x) => {
+            format!("({} || {})", prop(x), universal(y, fresh, fairness)?)
+        }
+        L::Or(x, y) if is_propositional(y) => {
+            format!("({} || {})", universal(x, fresh, fairness)?, prop(y))
+        }
         L::Or(..) => {
             return Err(outside(
                 f,
                 "a disjunction of two temporal formulas holds path by path, not state by state",
             ));
         }
-        L::Next(a) => format!("([] {})", universal(a, fresh)?),
+        L::Next(a) => format!("([] {})", universal(a, fresh, fairness)?),
         L::Always(a) => {
             let x = var("G");
-            format!("(nu {x}. ({} && [] {x}))", universal(a, fresh)?)
+            format!("(nu {x}. ({} && [] {x}))", universal(a, fresh, fairness)?)
+        }
+        L::Eventually(a) if is_propositional(a) && !fairness.is_empty() => {
+            crate::verify::fairness::fair_af(&prop(a), fairness)
         }
         L::Eventually(a) if is_propositional(a) => {
             let x = var("F");
@@ -181,6 +209,17 @@ fn universal(f: &LtlFormula, fresh: &mut usize) -> Result<String, TranslationErr
         }
         L::Eventually(_) => {
             return Err(outside(f, "`F` applies to a propositional formula here"));
+        }
+        L::Until { left, right }
+            if is_propositional(left) && is_propositional(right) && !fairness.is_empty() =>
+        {
+            let x = var("W");
+            format!(
+                "((nu {x}. ({} || ({} && ([] {x})))) && {})",
+                prop(right),
+                prop(left),
+                crate::verify::fairness::fair_af(&prop(right), fairness)
+            )
         }
         L::Until { left, right } if is_propositional(left) && is_propositional(right) => {
             let x = var("U");

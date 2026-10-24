@@ -1,0 +1,52 @@
+context robot_arm {
+    alphabet {
+        label extend; label retract; label grip; label release;
+        label object_detected; label obstacle_detected; label idle;
+    }
+
+    automata {
+        automaton RobotArm {
+            controllable {
+                label extend; label retract;
+                label grip;   label release;
+            }
+
+            states {
+                state Home initial;
+                state Extended; state Gripping;
+                state Retracting; state Blocked;
+            }
+
+            transitions {
+                transition Home -> Extended on label extend;
+                transition Extended -> Gripping on label grip;
+                transition Gripping -> Retracting on label retract;
+                transition Retracting -> Home on label release;
+                transition Extended -> Gripping on label object_detected;
+                transition Extended -> Blocked on label obstacle_detected;
+                transition Blocked -> Home on label retract;
+                transition Home -> Home on label idle;
+                transition Extended -> Extended on label idle;
+            }
+        }
+    }
+
+    mu_formulas {
+        formula safety_invariant {
+            over RobotArm;
+            body = nu X. ([] X);
+        }
+
+        formula ctrl_return_home {
+            over RobotArm;
+            body = mu X. (Home || [ (ctrl = controllable) ] X);
+        }
+    }
+
+    controllers {
+        controller safe_robot {
+            source RobotArm;
+            satisfying safety_invariant;
+        }
+    }
+}

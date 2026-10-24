@@ -125,7 +125,7 @@ mununu context synth <CONTEXT> [options]
 
 ```bash
 # Synthesize a safety controller for the robot arm
-mununu context synth tutorial/examples/06_controllability.ctxdsl \
+mununu context synth examples/wiki/robot_arm.ctxdsl \
     --formula safety_invariant --automaton RobotArm
 
 # Synthesize with minimization and JSON output
@@ -148,7 +148,7 @@ mununu context synth examples/elevator_gr1.ctxdsl \
 
 ```bash
 # Synthesize an impossible specification with full diagnostics
-mununu context synth tutorial/examples/09_unrealizable.ctxdsl \
+mununu context synth examples/wiki/unrealizable_valve.ctxdsl \
     --formula impossible_spec --automaton Valve \
     --counterexample --deadlock-traces
 

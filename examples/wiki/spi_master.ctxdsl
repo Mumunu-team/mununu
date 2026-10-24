@@ -1,0 +1,45 @@
+// SPI master (single-label transitions): the wiki's Hardware Verification Patterns example, complete.
+context spi_master {
+    alphabet {
+        label cs_assert;
+        label cs_deassert;
+        label sclk_tick;
+        label mosi_write;
+        label done;
+    }
+
+    automata {
+        automaton SpiMaster {
+            controllable {
+                label cs_assert; label cs_deassert;
+                label sclk_tick; label mosi_write; label done;
+            }
+            states {
+                state Idle initial; state Selected;
+                state Shifting; state Complete;
+            }
+            transitions {
+                transition Idle -> Selected on label cs_assert;
+                transition Selected -> Shifting on label mosi_write;
+                transition Shifting -> Shifting on label sclk_tick;
+                transition Shifting -> Complete on label done;
+                transition Complete -> Idle on label cs_deassert;
+            }
+        }
+    }
+
+    mu_formulas {
+        formula transfer_completes {
+            over SpiMaster;
+            body = mu X. (Complete || <> X);
+        }
+        formula cs_leads_to_selected {
+            over SpiMaster;
+            body = (! Idle) || < labels = { cs_assert } > Selected;
+        }
+        formula returns_to_idle {
+            over SpiMaster;
+            body = mu X. (Idle || <> X);
+        }
+    }
+}

@@ -171,7 +171,7 @@ automaton RvAdapter {
 
 ## 5. SPI Master (Single-Label Transitions)
 
-**Source**: `tutorial/examples/02a_single_label.ctxdsl`
+**Source**: [`examples/wiki/spi_master.ctxdsl`](https://github.com/Mumunu-team/mununu/blob/main/examples/wiki/spi_master.ctxdsl)
 
 A serial peripheral interface master controller. Each transition carries exactly one signal event, modeling the sequential SPI protocol: assert chip-select, clock data bits, deassert chip-select.
 
@@ -213,7 +213,7 @@ automaton SpiMaster {
 
 ## 6. AXI Bus Transaction (Multi-Label Transitions)
 
-**Source**: `tutorial/examples/02b_multi_label.ctxdsl`
+**Source**: [`examples/wiki/axi_transaction.ctxdsl`](https://github.com/Mumunu-team/mununu/blob/main/examples/wiki/axi_transaction.ctxdsl)
 
 An AXI-like bus transaction controller where multiple signals fire simultaneously. Multi-label transitions model parallel signal assertion: address, data, and control signals assert together in one clock cycle.
 
@@ -367,8 +367,8 @@ A FIFO controller mixing an explicit `typedef enum` FSM (for the control interfa
 | Round-Robin Arbiter | 3 | grants | Mutual Exclusion + Reachability | `examples/hw/arbiter.ctxdsl` |
 | Traffic Light | 4 | timer_expire | Phase Ordering (labeled modality) | `examples/hw/traffic_light.ctxdsl` |
 | Ready/Valid Adapter | 2 | push, drain, passthrough | Completeness (drain/push) | `examples/hw/rv_adapter.ctxdsl` |
-| SPI Master | 4 | all (full control) | Labeled Modality | `tutorial/examples/02a_single_label.ctxdsl` |
-| AXI Bus Transaction | 4 | master signals | Game-Theoretic Reachability | `tutorial/examples/02b_multi_label.ctxdsl` |
+| SPI Master | 4 | all (full control) | Labeled Modality | `examples/wiki/spi_master.ctxdsl` |
+| AXI Bus Transaction | 4 | master signals | Game-Theoretic Reachability | `examples/wiki/axi_transaction.ctxdsl` |
 | AMBA Bus Arbiter | 3+3+3 (composed) | grants, idle | GR(1) No-Starvation | `examples/amba_arbiter_gr1.ctxdsl` |
 | ALU with Accumulator | 192 max | acc | Kripke + value-mapped enum | `examples/systemverilog/alu.sv` |
 | FIFO Controller | 20 | (control) | Kripke + bounded counter | `examples/systemverilog/fifo.sv` |

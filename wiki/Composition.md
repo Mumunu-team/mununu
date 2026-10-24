@@ -2,7 +2,7 @@
 
 > **Alpha Software** — Mununu is under active development. APIs, syntax, and behavior may change. We welcome feedback and bug reports via [GitHub Issues](https://github.com/Mumunu-team/mununu/issues).
 
-Composition is how you build larger systems from smaller automata. Mununu supports two modes -- synchronous and asynchronous -- and lets you nest them for hierarchical, cross-domain designs.
+Composition is how you build larger systems from smaller automata. Mununu supports three modes -- `synchronous`, `asynchronous` and `superset` (see [Superset Composition](#superset-composition)) -- and lets you nest them for hierarchical, cross-domain designs.
 
 ## Synchronous Composition
 
@@ -98,6 +98,20 @@ composition {
 
 No skip labels are needed because members are not forced to move on every step.
 
+### Liveness over interleavings, and `fairness weak;`
+
+> Source of truth: [`translate_universal_fair`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/ltl/universal.rs) + [`Assumption::WeakEdges`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/verify/fairness.rs) — surface: CLI+API+UI
+
+The asynchronous product contains every scheduling, including unfair ones where one member is starved while another moves forever. A property over every path that holds (`AG`, `ltl F b`) therefore holds under any scheduler, but a liveness property can come back violated only because of starvation: `ltl F a_done` fails on a composition where `B` may loop on its own label forever while `A` waits. Declaring the composition weakly fair reads `ltl` bodies over the fair paths only — every member whose moves stay enabled eventually takes one:
+
+```
+composition {
+    asynchronous Sys { members [A, B]; fairness weak; }
+}
+```
+
+Under it the starvation path no longer counts, and a genuine violation (a branch of `A` that never reaches `A1`) still does. The constraint is one weak-fairness condition per member over that member's labels. It applies to `ltl` bodies whose formula targets the composition alone; `eltl` and raw mu-calculus bodies are evaluated as written (use `verify::fairness` encodings there). `fairness weak;` on a `synchronous` composition is a parse error.
+
 ### Example: Sensor Network
 
 Two vibration sensors operate independently. A central monitor receives their reports.
@@ -190,13 +204,25 @@ context cross_domain_adc {
 }
 ```
 
-The full example is in `tutorial/examples/04_cross_domain.ctxdsl`.
+The full example is [`examples/wiki/cross_domain_adc.ctxdsl`](https://github.com/Mumunu-team/mununu/blob/main/examples/wiki/cross_domain_adc.ctxdsl).
+
+## Superset Composition
+
+> Source of truth: [`CompositionSemantics::Superset`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/composition/mod.rs) — surface: CLI+API+UI
+
+`superset` combines both: independent actions may interleave in either order **and** step jointly in one product step, and shared labels still fire together. Use it when the real system may or may not perform two independent actions in the same cycle and the model must cover both.
+
+```
+composition {
+    superset Mixed { members [A, B]; }
+}
+```
 
 ## Synchronous vs. Asynchronous: When to Use Each
 
 | | Synchronous | Asynchronous |
 |---|---|---|
-| **Execution model** | Lock-step; all members move every cycle | Interleaved; one member moves per step |
+| **Execution model** | Lock-step; all members move every cycle | Interleaved; one member moves per step, except two independent actions that together complete a declared synchronisation vector (mununu#589) |
 | **Shared labels** | Must fire simultaneously | Must fire simultaneously (when chosen) |
 | **Skip labels** | Required (per-automaton) | Not needed |
 | **Typical use** | Components on the same clock domain | Independent subsystems, different clocks |
@@ -207,7 +233,7 @@ The full example is in `tutorial/examples/04_cross_domain.ctxdsl`.
 
 - **Shared idle labels force mutual idling.** In synchronous mode, if two automata share the same skip/idle label, they can only idle together. Always use per-automaton skip labels (e.g., `p_skip`, `c_skip`).
 - **Skip labels are only needed for synchronous composition.** In asynchronous mode, members are not required to step, so self-loop skip labels are unnecessary.
-- **Hierarchical composition is order-sensitive.** Inner compositions must be declared before the outer composition that references them.
+- **Hierarchical composition does not depend on declaration order.** Compositions are realized in dependency order (an outer composition may be declared before the inner one it references); a cycle of compositions referencing each other is an error.
 - **Formulas can target any level.** You can write mu-calculus properties over individual automata, inner compositions, or the outermost system -- just set the `over` field accordingly.
 - **A shared label the component cannot take is a label the environment cannot emit — silently.** In synchronous composition, if only one side declares a transition on a shared label, the composed system can only fire it when *both* sides are ready. From the component's point of view this makes an unmodelled state look like "the environment does not act here" — but in the real system the environment *does* act; the event just gets dropped by the component. That is a common protocol-modelling footgun: an omitted transition constrains the environment rather than the component, and a liveness property that should have failed will hold vacuously. If the environment can act anyway and you lose the event, model the loss explicitly — a self-loop or a discard transition on the receiving side is the difference between *cannot happen* (a spec claim) and *happens and is lost* (a real bug). Filed against a real monono debug in mununu#477.
 - **An action modelled as one transition asserts that every resource it uses is held, unchanged, for exactly that step.** A `fill` label meaning "land this row into the stage" is one transition, so nothing can happen *during* it — a payload that changes mid-fill is not a behaviour the model failed to explore, it is one the model declared impossible. **If the RTL can do anything between the start and the end of your label, your label is wrong.** The remedy is a pattern, not a feature: any resource with a handshake wants `acquire → use* → release` as separate labels, with the payload's identity carried in the automaton's *state* across the `use*`. Worked contrast: [`docs/ctxdsl-modelling-guide.md`](https://github.com/Mumunu-team/mununu/blob/main/docs/ctxdsl-modelling-guide.md) Part II §A. Filed against a real monono debug in mununu#497.

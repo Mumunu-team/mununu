@@ -1534,10 +1534,65 @@ fn compose_and_register(
     Ok((context, composition_members))
 }
 
+/// The labels a composition member moves on: an automaton's declared alphabet and transition
+/// labels, or the union over a nested composition's members.
+fn member_labels(
+    name: &str,
+    docs: &[&ContextDoc],
+    depth: usize,
+) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    if depth > 16 {
+        return out; // cyclic references are rejected elsewhere
+    }
+    for doc in docs {
+        for a in doc.automata.iter().filter(|a| a.name.name == name) {
+            out.extend(a.alphabet.iter().map(|l| l.name.name.clone()));
+            for t in &a.transitions {
+                for l in std::iter::once(&t.label).chain(t.additional_labels.iter()) {
+                    if let TransitionLabel::Named { name, .. } = l {
+                        out.insert(name.name.clone());
+                    }
+                }
+            }
+        }
+        for c in doc.compositions.iter().filter(|c| c.name.name == name) {
+            for m in &c.members {
+                out.extend(member_labels(&m.name.name, docs, depth + 1));
+            }
+        }
+    }
+    out
+}
+
+/// The fairness constraints of every asynchronous composition that declares `fairness weak;`:
+/// one weak-fairness constraint per member, over that member's labels.
+fn composition_fairness(
+    docs: &[&ContextDoc],
+) -> HashMap<String, Vec<crate::verify::fairness::Assumption>> {
+    let mut out = HashMap::new();
+    for doc in docs {
+        for c in doc.compositions.iter().filter(|c| c.fairness_weak) {
+            let constraints = c
+                .members
+                .iter()
+                .map(|m| member_labels(&m.name.name, docs, 0))
+                .filter(|labels| !labels.is_empty())
+                .map(|labels| crate::verify::fairness::Assumption::WeakEdges {
+                    labels: labels.into_iter().collect(),
+                })
+                .collect();
+            out.insert(c.name.name.clone(), constraints);
+        }
+    }
+    out
+}
+
 /// Collects and parses all μ-calculus formulas from the main document and sidecars.
 fn collect_formulas(
     docs: &[&ContextDoc],
 ) -> Result<HashMap<String, RealizedFormula>, RealizationError> {
+    let fairness = composition_fairness(docs);
     let mut formulas: HashMap<String, RealizedFormula> = HashMap::new();
     for doc in docs {
         AstTraverser::visit_formulas(doc, |formula| {
@@ -1565,11 +1620,44 @@ fn collect_formulas(
                     (parsed, parse_error, mu_expr.raw.clone())
                 }
                 FormulaExpr::Ltl(ltl_expr) => {
-                    // Translate LTL to μ-calculus: every path (`ltl`) or some path (`eltl`).
+                    // Translate LTL to μ-calculus: every path (`ltl`) or some path (`eltl`); an
+                    // `ltl` over a `fairness weak;` composition is read over its fair paths.
+                    let named: Vec<&str> = match &formula.targets {
+                        FormulaTargets::Named(list) => {
+                            list.iter().map(|i| i.name.as_str()).collect()
+                        }
+                        FormulaTargets::All(_) => Vec::new(),
+                    };
+                    let fair_targets: Vec<&str> = named
+                        .iter()
+                        .copied()
+                        .filter(|t| fairness.contains_key(*t))
+                        .collect();
+                    if !fair_targets.is_empty() && named.len() > 1 {
+                        return Err(RealizationError::InvalidFormula {
+                            name,
+                            error: format!(
+                                "it targets the fair composition `{}` together with other \
+                                 automata; a formula over a `fairness weak;` composition is read \
+                                 over its fair paths and must target it alone",
+                                fair_targets[0]
+                            ),
+                        });
+                    }
                     let (keyword, translated) = if ltl_expr.existential {
                         (
                             "eltl",
                             ltl::translator::translate_existential(&ltl_expr.formula),
+                        )
+                    } else if let Some(constraints) =
+                        fair_targets.first().and_then(|t| fairness.get(*t))
+                    {
+                        (
+                            "ltl (fair)",
+                            ltl::universal::translate_universal_fair(
+                                &ltl_expr.formula,
+                                constraints,
+                            ),
                         )
                     } else {
                         ("ltl", ltl::translator::translate(&ltl_expr.formula))

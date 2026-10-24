@@ -1,0 +1,47 @@
+// The water tank of the wiki's Counterstrategy page: the controller starts filling, fills and
+// opens the drain; the environment may stay idle while the tank is empty and drains it.
+context water_tank {
+    alphabet {
+        label start;
+        label fill;
+        label open_drain;
+        label idle;
+        label drain;
+    }
+
+    automata {
+        automaton Tank {
+            controllable {
+                label start;
+                label fill;
+                label open_drain;
+            }
+            states {
+                state Empty initial;
+                state Filling;
+                state Full;
+                state Draining;
+            }
+            transitions {
+                transition Empty -> Filling on label start;
+                transition Empty -> Empty on label idle;
+                transition Filling -> Full on label fill;
+                transition Full -> Draining on label open_drain;
+                transition Draining -> Empty on label drain;
+            }
+        }
+    }
+
+    mu_formulas {
+        // States from which the controller can force reaching Full.
+        formula ctrl_reaches_full {
+            over Tank;
+            body = mu X. (Full || [ (ctrl = controllable) ] X);
+        }
+        // The environment's winning region: it can keep the tank away from Full forever.
+        formula env_avoids_full {
+            over Tank;
+            body = nu X. (!Full && < (ctrl = environment) > X);
+        }
+    }
+}
