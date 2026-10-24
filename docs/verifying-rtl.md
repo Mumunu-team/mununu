@@ -443,7 +443,11 @@ mununu sv verify-auto prim_arbiter_ppc.sv --top prim_arbiter_ppc --preprocess-sv
 assumption has held at every cycle so far (a latch: once broken, false for good). Each boolean
 block of a guarantee is guarded by it — `(!ok || B)` where the guarantee quantifies universally,
 `(ok && B)` inside a `cover` or the `EF` of a recoverability check — so every engine evaluates the
-same relativized formula and the safety and liveness rescue lanes still reduce it.
+same relativized formula and the safety and liveness rescue lanes still reduce it. The cycle-0
+input is the environment's choice: a property whose first temporal operator is existential (a
+`cover`, an `EF …`) is satisfied when SOME cycle-0 input satisfies it, so a bad input at reset
+cannot make a reachable cover look unreachable (mununu#757); universal properties quantify that
+input universally.
 
 **Applied:** `assume property (B)` and `A |=> B` over booleans (expressions included), each with
 an optional `disable iff`. Any other shape is reported under `unapplied` with the reason, and the

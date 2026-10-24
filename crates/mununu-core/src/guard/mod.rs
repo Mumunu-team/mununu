@@ -610,9 +610,139 @@ pub fn parse_guard(expr: &str) -> (String, GuardExpr) {
     (normalized.clone(), GuardExpr::Predicate(normalized))
 }
 
+/// A guard with its boolean structure: `&&`, `||`, `!` and parentheses over the comparison /
+/// predicate leaves [`parse_guard`] reads. `parse_guard` alone splits at the first comparison
+/// operator, so `a >= 1 && b == 0` came back as one mangled comparison whose variable no state
+/// knew, and the transition silently never fired.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GuardTree {
+    Leaf(GuardExpr),
+    And(Box<GuardTree>, Box<GuardTree>),
+    Or(Box<GuardTree>, Box<GuardTree>),
+    Not(Box<GuardTree>),
+}
+
+impl GuardTree {
+    /// Every leaf, left to right.
+    pub fn leaves(&self) -> Vec<&GuardExpr> {
+        match self {
+            GuardTree::Leaf(e) => vec![e],
+            GuardTree::And(a, b) | GuardTree::Or(a, b) => {
+                let mut v = a.leaves();
+                v.extend(b.leaves());
+                v
+            }
+            GuardTree::Not(a) => a.leaves(),
+        }
+    }
+
+    /// `Some(value)` when every leaf the result depends on is constant ([`is_static_guard`]).
+    pub fn static_value(&self) -> Option<bool> {
+        match self {
+            GuardTree::Leaf(e) => is_static_guard(e),
+            GuardTree::Not(a) => a.static_value().map(|v| !v),
+            GuardTree::And(a, b) => match (a.static_value(), b.static_value()) {
+                (Some(false), _) | (_, Some(false)) => Some(false),
+                (Some(true), Some(true)) => Some(true),
+                _ => None,
+            },
+            GuardTree::Or(a, b) => match (a.static_value(), b.static_value()) {
+                (Some(true), _) | (_, Some(true)) => Some(true),
+                (Some(false), Some(false)) => Some(false),
+                _ => None,
+            },
+        }
+    }
+}
+
+/// The byte offset of the first `op` (`"&&"` / `"||"`) outside any parentheses.
+fn find_top_level(expr: &str, op: &str) -> Option<usize> {
+    let bytes = expr.as_bytes();
+    let mut depth = 0i32;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            _ if depth == 0 && expr[i..].starts_with(op) => return Some(i),
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Parse a guard into its boolean structure. `||` binds loosest, then `&&`, then `!`; a leaf is
+/// read by [`parse_guard`]. `!=` is a comparison, not a negation.
+pub fn parse_guard_tree(expr: &str) -> GuardTree {
+    let trimmed = expr.trim();
+    for (op, mk) in [
+        (
+            "||",
+            GuardTree::Or as fn(Box<GuardTree>, Box<GuardTree>) -> GuardTree,
+        ),
+        ("&&", GuardTree::And),
+    ] {
+        if let Some(i) = find_top_level(trimmed, op) {
+            return mk(
+                Box::new(parse_guard_tree(&trimmed[..i])),
+                Box::new(parse_guard_tree(&trimmed[i + op.len()..])),
+            );
+        }
+    }
+    if let Some(rest) = trimmed.strip_prefix('!')
+        && !rest.starts_with('=')
+    {
+        return GuardTree::Not(Box::new(parse_guard_tree(rest)));
+    }
+    let inner = strip_outer_parens(trimmed);
+    if inner.len() != trimmed.len() {
+        return parse_guard_tree(inner);
+    }
+    GuardTree::Leaf(parse_guard(trimmed).1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guard_tree_reads_conjunction_disjunction_and_negation() {
+        let leaf = |l: &str, op, r: &str| {
+            GuardTree::Leaf(GuardExpr::Comparison {
+                left: l.into(),
+                op,
+                right: r.into(),
+            })
+        };
+        assert_eq!(
+            parse_guard_tree("((a>=1)&&(b==0))"),
+            GuardTree::And(
+                Box::new(leaf("a", ComparisonOp::Ge, "1")),
+                Box::new(leaf("b", ComparisonOp::Eq, "0"))
+            )
+        );
+        // `||` binds loosest; `!=` stays a comparison; `!(…)` negates.
+        assert_eq!(
+            parse_guard_tree("a != 2 || !(b < 3) && c == 1"),
+            GuardTree::Or(
+                Box::new(leaf("a", ComparisonOp::Ne, "2")),
+                Box::new(GuardTree::And(
+                    Box::new(GuardTree::Not(Box::new(leaf("b", ComparisonOp::Lt, "3")))),
+                    Box::new(leaf("c", ComparisonOp::Eq, "1"))
+                ))
+            )
+        );
+        assert_eq!(
+            parse_guard_tree("1 == 1 && 2 > 3").static_value(),
+            Some(false)
+        );
+        assert_eq!(
+            parse_guard_tree("1 == 1 || x > 3").static_value(),
+            Some(true)
+        );
+        assert_eq!(parse_guard_tree("x > 3 && 1 == 1").static_value(), None);
+    }
 
     #[test]
     fn test_sanitize_identifier() {

@@ -484,4 +484,45 @@ mod tests {
             "nothing to lift when the only input reached is controllable"
         );
     }
+
+    /// mununu#757 — a property that asks for SOME trace reads the cycle-0 input existentially.
+    /// The lift samples the cycle-0 input into the initial state, and the exact engine read a
+    /// verdict as `init ⊆ sat`, quantifying that input universally: a latch that breaks for good
+    /// on a bad cycle-0 input (`ok = prev ∧ a`, the shape of the assumption monitor
+    /// `mununu_assume_ok`) made `EF ok` fail at the initial states with `a = 0`, so a `cover`
+    /// relativized to an input-reading `assume` came back UNREACHABLE although the environment
+    /// can choose `a = 1`. A property over EVERY trace keeps the universal reading.
+    #[test]
+    fn an_existential_property_reads_the_sampled_cycle0_input_existentially() {
+        use crate::adapter::btor2::symbolic_bitblast::{ExactVerdict, exact_symbolic_verdict};
+        const LATCH: &str = "1 sort bitvec 1\n2 input 1 a\n3 state 1 prev_ok\n4 one 1\n\
+                             5 init 1 3 4\n6 and 1 3 2 ok\n7 next 1 3 6\n";
+        let verdict = |f: &str| {
+            exact_symbolic_verdict(
+                LATCH,
+                &crate::mu_calculus::parser::parse(f).expect("formula"),
+            )
+            .expect("decides")
+        };
+        assert_eq!(
+            verdict("mu X. (ok || <> X)"),
+            ExactVerdict::Holds,
+            "`EF ok`: the environment picks `a = 1` at cycle 0"
+        );
+        assert_eq!(
+            verdict("mu X. ((!(ok)) || <> X)"),
+            ExactVerdict::Holds,
+            "`EF !ok`: and `a = 0` breaks it"
+        );
+        assert_eq!(
+            verdict("nu X. (ok && [] X)"),
+            ExactVerdict::Violated,
+            "`AG ok` quantifies the cycle-0 input universally"
+        );
+        assert_eq!(
+            verdict("(!(mu X. ((!(ok)) || <> X)))"),
+            ExactVerdict::Violated,
+            "`!EF !ok` is `AG ok` — the negation flips the first modality to universal"
+        );
+    }
 }

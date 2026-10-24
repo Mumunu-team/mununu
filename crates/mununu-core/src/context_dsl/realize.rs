@@ -2713,8 +2713,7 @@ fn build_automaton(
         // Static false guards are filtered here
         if let Some(ref guard) = transition.guard {
             let guard_str = expr_to_string(guard);
-            let (_, parsed_guard) = crate::guard::parse_guard(&guard_str);
-            let static_value = crate::guard::is_static_guard(&parsed_guard);
+            let static_value = crate::guard::parse_guard_tree(&guard_str).static_value();
 
             // Filter static false guards
             if static_value == Some(false) {
@@ -2890,10 +2889,11 @@ fn has_dynamic_guards(automaton: &Automaton) -> Result<bool, RealizationError> {
     for transition in &automaton.transitions {
         if let Some(ref guard) = transition.guard {
             let guard_str = expr_to_string(guard);
-            let (_, parsed_guard) = crate::guard::parse_guard(&guard_str);
+            let tree = crate::guard::parse_guard_tree(&guard_str);
 
-            // Check if this guard references variables (requires unrolling)
-            let requires_unrolling = match &parsed_guard {
+            // Check if this guard references variables (requires unrolling): any leaf of its
+            // boolean structure that does.
+            let requires_unrolling = tree.leaves().into_iter().any(|leaf| match leaf {
                 GuardExpr::True | GuardExpr::False => false, // Static - no unrolling needed
                 GuardExpr::Predicate(_) => false, // Predicate - evaluated via environment, no unrolling needed
                 GuardExpr::Comparison { left, right, .. } => {
@@ -2904,7 +2904,7 @@ fn has_dynamic_guards(automaton: &Automaton) -> Result<bool, RealizationError> {
                     // If at least one side is not a constant, it references a variable
                     !left_is_const || !right_is_const
                 }
-            };
+            });
 
             if requires_unrolling {
                 return Ok(true);
@@ -4365,8 +4365,11 @@ context test {
             })
         });
 
-        // If action transition exists, verify it's controllable
-        if let Some(trans) = trans_with_action {
+        // The bool-variable guard `is_controllable` (true) now reads the variable; it used to be
+        // an undecidable predicate and the transition silently never existed.
+        let trans =
+            trans_with_action.expect("`guard is_controllable` holds: the action loop fires");
+        {
             // Transition with is_controllable guard should be controllable
             assert!(
                 trans.is_controllable(clts),
