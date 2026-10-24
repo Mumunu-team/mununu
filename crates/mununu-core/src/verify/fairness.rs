@@ -48,6 +48,11 @@ pub enum Assumption {
     Edges { labels: Vec<String> },
     /// Weak fairness of `l`: taken infinitely often, or disabled infinitely often.
     Weak { label: String },
+    /// Weak fairness of a SET of labels — one composition member's moves: some label of the set
+    /// is taken infinitely often, or none of them is enabled infinitely often. Not the
+    /// conjunction of per-label weak fairness: a member that alternates two labels is fair even
+    /// though neither label is continuously enabled.
+    WeakEdges { labels: Vec<String> },
 }
 
 /// The k-th conjunct `C_k(Z, q)` of `E_C G q`.
@@ -79,6 +84,12 @@ fn constraint(k: usize, a: &Assumption, z: &str, q: &str) -> String {
         Assumption::Weak { label } => format!(
             "(mu {y}. (< labels = {{ {label} }} > {z} || < > ({z} && !(< labels = {{ {label} }} > true)) || < > (({q}) && {y})))"
         ),
+        Assumption::WeakEdges { labels } => {
+            let set = labels.join(", ");
+            format!(
+                "(mu {y}. (< labels = {{ {set} }} > {z} || < > ({z} && !(< labels = {{ {set} }} > true)) || < > (({q}) && {y})))"
+            )
+        }
     }
 }
 

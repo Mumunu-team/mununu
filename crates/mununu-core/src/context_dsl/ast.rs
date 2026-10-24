@@ -313,6 +313,9 @@ pub struct Composition {
     /// `allow_dead_vectors;` — a compound action no partner can match is a warning, not a
     /// realization error (mununu#570).
     pub allow_dead_vectors: bool,
+    /// `fairness weak;` (asynchronous compositions): every member is weakly fair — a member whose
+    /// moves stay enabled eventually takes one. Applies to `ltl` bodies over the composition.
+    pub fairness_weak: bool,
     pub span: Span,
 }
 

@@ -2339,6 +2339,66 @@ mod tests {
 
     type TestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 
+    /// `fairness weak;` on an asynchronous composition reads `ltl` over the fair paths. `B` loops
+    /// on its own label forever while `A` waits to take `a`: over every interleaving `F a_done`
+    /// is violated by that starvation path alone; under weak fairness `A`'s continuously enabled
+    /// move must eventually be taken and it holds. A genuine violation — `A` may take `a` into a
+    /// dead end that never reaches `A1` — survives fairness.
+    #[test]
+    fn weak_fairness_removes_starvation_but_not_a_genuine_violation() -> TestResult {
+        let src = |extra_branch: &str, fairness: &str| {
+            format!(
+                r#"
+context fair {{
+    alphabet {{ label a; label a_idle; label b; }}
+    automata {{
+        automaton A {{
+            states {{ state A0 initial; state A1; state A2; }}
+            transitions {{
+                transition A0 -> A1 on label a;
+                {extra_branch}
+                transition A1 -> A1 on label a_idle;
+                transition A2 -> A2 on label a_idle;
+            }}
+            predicates {{ predicate a_done = state A1; }}
+        }}
+        automaton B {{
+            states {{ state B0 initial; }}
+            transitions {{ transition B0 -> B0 on label b; }}
+        }}
+    }}
+    composition {{ asynchronous Sys {{ members [A, B]; {fairness} }} }}
+    mu_formulas {{ formula done {{ over Sys; body = ltl F a_done; }} }}
+}}
+"#
+            )
+        };
+        let holds_at_init = |extra: &str, fairness: &str| -> TestResult<bool> {
+            let doc = parse(&src(extra, fairness))?;
+            let realized = crate::context_dsl::realize::realize(&doc, &[])?;
+            let f = realized.formulas.get("done").ok_or("formula")?;
+            let env = realized.environment_for("Sys");
+            let sat = realized
+                .context
+                .evaluate_mu("Sys", &f.formula, &env, None)?;
+            let clts = realized.context.clts("Sys").ok_or("composition")?;
+            Ok(clts.initial_states().iter().all(|s| sat[s.index()]))
+        };
+        assert!(
+            !holds_at_init("", "")?,
+            "without fairness, `B` looping forever starves `A`"
+        );
+        assert!(
+            holds_at_init("", "fairness weak;")?,
+            "under weak fairness `A` eventually takes `a`"
+        );
+        assert!(
+            !holds_at_init("transition A0 -> A2 on label a;", "fairness weak;")?,
+            "fairness does not hide the dead-end branch"
+        );
+        Ok(())
+    }
+
     /// An `ltl` formula holds when it holds on EVERY path. `F Goal` was translated to `EF Goal`
     /// (some path), so on a model where the environment may also loop in `Stuck` forever it came
     /// back satisfied at the initial state. It is now violated there; the some-path reading

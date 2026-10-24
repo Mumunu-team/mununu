@@ -536,14 +536,19 @@ pub enum CompositionSemantics {
     /// Shared alphabet elements must fire together; independent actions are
     /// collapsed into a single joint step.
     Synchronous,
-    /// Shared alphabet elements fire together; independent actions may
-    /// interleave in either order as well as proceed jointly.
+    /// Shared alphabet elements fire together; independent actions interleave, one member at a
+    /// time. Two independent actions step jointly only when together they complete a declared
+    /// synchronisation vector (mununu#589); `Superset` adds the joint step for every independent
+    /// pair.
     ///
-    /// SOUNDNESS: over-approx — independent labels can fire freely without
-    /// fairness constraints. One side can idle indefinitely while the other
-    /// progresses. Sound for safety (extra interleavings are conservative),
-    /// unsound for liveness (apparent progress may not exist in reality if
-    /// fairness is assumed but not enforced).
+    /// SOUNDNESS: the product carries every scheduling, including unfair ones in which one member
+    /// is starved while another moves forever. A property over EVERY path (`AG`, a universal
+    /// `AF` / `ltl F`) that HOLDS therefore holds under any scheduler; starvation can only make a
+    /// universal liveness property come back VIOLATED spuriously (a completeness gap, not a
+    /// soundness one). A property over SOME path (`EF`, `EG`, `eltl F`) can be witnessed by a
+    /// starving path, which a fair scheduler would never run. `fairness weak;` on the composition
+    /// restricts `ltl` bodies to the fair paths. Interleaving also visits intermediate states a
+    /// lockstep implementation never occupies; verdicts are relative to an interleaving reality.
     Asynchronous,
     /// Superset semantics combine the union step with both permutations even
     /// when actions are independent.
