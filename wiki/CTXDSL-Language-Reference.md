@@ -268,7 +268,12 @@ Prefer the braced form. A comma reads like "or" to most people, and that misread
 harmless: under composition a compound action pairs only with a partner transition whose
 shared-alphabet projection is **set-identical**, so a compound nobody can match makes the
 automaton freeze. A real 7-automaton model collapsed to one reachable state that way, with a
-safety property holding vacuously (mununu#570). mununu now warns when it detects one.
+safety property holding vacuously (mununu#570). Realizing a composition that contains one is an
+error naming the vector and the partner; a composition that means to disable the action declares it:
+
+```
+synchronous Sys { members [Owner, Partner]; allow_dead_vectors; }
+```
 
 **Alternation** -- N independent alternatives, any ONE of which fires the same step. This is what
 you want for an "I ignore the other automata's labels" self-loop:

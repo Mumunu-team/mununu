@@ -1083,6 +1083,57 @@ fn parses_complex_ltl_formula() {
     }
 }
 
+/// mununu#570 — a synchronisation vector no partner transition can match freezes its automaton
+/// (the model loses every behaviour behind it, and safety verdicts over it hold vacuously). It was
+/// a log warning `--quiet` hid; realizing such a composition is now an error, and
+/// `allow_dead_vectors;` keeps the old reading for an action that is meant to be disabled.
+#[test]
+fn an_unmatched_synchronisation_vector_is_a_realization_error() {
+    let model = |opt: &str| {
+        format!(
+            r#"
+context dead {{
+    alphabet {{ label a; label b; label c; }}
+    automata {{
+        automaton Owner {{
+            alphabet {{ label a; label b; label c; }}
+            controllable {{ label a; label b; label c; }}
+            states {{ state S initial; state T; }}
+            transitions {{
+                transition S -> T on {{label a, label b}};
+                transition T -> S on label c;
+            }}
+        }}
+        automaton Partner {{
+            alphabet {{ label a; label b; label c; }}
+            controllable {{ }}
+            states {{ state P initial; }}
+            transitions {{
+                transition P -> P on label a;
+                transition P -> P on label b;
+                transition P -> P on label c;
+            }}
+        }}
+    }}
+    composition {{
+        synchronous Sys {{ members [Owner, Partner]; {opt} }}
+    }}
+}}
+"#
+        )
+    };
+    let Err(err) = crate::context_dsl::realize::realize(&parse_context(&model("")), &[]) else {
+        panic!("the vector {{a, b}} has no partner: an error");
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("mununu#570") && msg.contains("{a, b}"),
+        "{msg}"
+    );
+    crate::context_dsl::realize::realize(&parse_context(&model("allow_dead_vectors;")), &[])
+        .expect("the explicit opt-in realizes it");
+}
+
 /// A guard with `&&`, `||` or `!` constrains its transition instead of disabling it. It used to
 /// be lowered to one string and split at its first comparison operator (`(a` vs `1)&&(b==0)`),
 /// whose mangled variable no state knew, so the transition silently never fired and `Open` was

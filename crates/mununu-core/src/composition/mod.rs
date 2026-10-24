@@ -559,6 +559,10 @@ pub struct CompositionOptions {
     /// joint step before the vector's owner is folded in. See [`synchronisation_vectors`] and
     /// the rendezvous rule in [`compose`].
     pub sync_vectors: Vec<BTreeSet<String>>,
+    /// mununu#570 — refuse a compound action no partner transition can match
+    /// ([`dead_compound_actions`]) instead of warning. Set by CTXDSL realization unless the
+    /// composition declares `allow_dead_vectors;`; the adapter-built compositions keep the warning.
+    pub dead_vectors_are_errors: bool,
 }
 
 impl CompositionOptions {
@@ -568,7 +572,14 @@ impl CompositionOptions {
         Self {
             semantics,
             sync_vectors: Vec::new(),
+            dead_vectors_are_errors: false,
         }
+    }
+
+    /// mununu#570 — refuse dead compound actions instead of warning (see the field).
+    pub fn with_dead_vectors_as_errors(mut self, deny: bool) -> Self {
+        self.dead_vectors_are_errors = deny;
+        self
     }
 
     /// mununu#589 — the composition's synchronisation vectors, collected over every member it
@@ -676,7 +687,30 @@ pub fn compose(
     // mununu#570 — a compound action no partner transition can match can NEVER fire, and its
     // automaton is frozen at that state. Warn at composition time; this is a static check over
     // the two label sets, with no state-space exploration.
-    for side in dead_compound_actions(left, right, &shared_alphabet) {
+    let dead = dead_compound_actions(left, right, &shared_alphabet);
+    if options.dead_vectors_are_errors && !dead.is_empty() {
+        let listed = dead
+            .iter()
+            .map(|d| {
+                format!(
+                    "{{{}}} (shared with the partner: {{{}}})",
+                    d.labels.join(", "),
+                    d.shared_projection.join(", ")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(crate::clts::CltsError::CompositionError(format!(
+            "[mununu#570] compound action(s) {listed} can never fire: no transition in the \
+             partner automaton projects to the same set over the shared alphabet, so the \
+             automaton freezes where it would take one. A multi-label transition is a \
+             SYNCHRONISATION VECTOR — it fires on the whole set together. Write independent \
+             alternatives as `on label a | label b`, give the partner the matching joint action, \
+             or declare `allow_dead_vectors;` in the composition if the action is meant to be \
+             disabled."
+        )));
+    }
+    for side in dead {
         tracing::warn!(
             "[mununu#570] compound action {{{}}} can never fire: no transition in the partner \
              automaton projects to the same set over the shared alphabet {{{}}}. A multi-label \
