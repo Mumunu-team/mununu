@@ -12,7 +12,7 @@ Every verdict is one of `holds` / `violated` / `unknown` / `skipped`; a definite
 
 > **Source of truth:** [`FailOn` / `ci_exit_code` / `worst_verdict`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-cli/src/main.rs) — surface: CLI.
 
-Every verify verb — `btor2 verify` / `verify-liveness` / `verify-recoverability`, the SV-direct `sv verify` / `verify-liveness` / `verify-recoverability`, and `sv verify-auto` — maps its verdict to a **process exit code**, so a workflow step fails on a real violation with no JSON parsing.
+Every verify verb — `btor2 verify` / `verify-liveness` / `verify-recoverability`, the SV-direct `sv verify` / `verify-liveness` / `verify-recoverability`, `sv verify-auto`, the structural checks `sv lint` / `check-fsm` / `cdc-lint`, and `context eval` (since 0.5: `holds` iff every initial state satisfies the formula, `--sanity` findings count as `unknown`) — maps its verdict to a **process exit code**, so a workflow step fails on a real violation with no JSON parsing.
 
 | Exit code | Meaning |
 |-----------|---------|
@@ -20,7 +20,8 @@ Every verify verb — `btor2 verify` / `verify-liveness` / `verify-recoverabilit
 | `2` | a property is **violated** — the step fails |
 | `3` | a property is **unknown** *and* `--fail-on unknown` was passed |
 | `4` | **an expectation was not met** (mununu#537) — the run worked and disagreed with a `--expect-*` claim. Distinct from `1` (the run failed) on purpose, and it SUPERSEDES `--fail-on`: under `--expect-violated`, `2` would fire on the very violation you asked for. |
-| `1` | tool / usage error (missing file, unparseable atom, missing toolchain) |
+| `1` | tool error (missing file, unparseable atom, missing toolchain) |
+| `64` | **usage error** — the command line itself was rejected (an unknown flag, a missing argument, a bad value), `EX_USAGE`. Until 0.5 this was clap's `2`, the same code as VIOLATED. |
 
 - **`--fail-on <violated \| unknown \| none>`** picks the gate policy (default `violated`). An undecided `unknown` does **not** fail the build by default — it is "not decided," not "broken." Use `--fail-on unknown` for a strict gate that also fails on `⊥`, or `--fail-on none` for report-only (always exit `0`).
 - **`--quiet`** (global) suppresses the `logs/mununu.log` workspace file and the startup banner — errors only to stderr, so the workspace stays clean and stdout is the JSON.

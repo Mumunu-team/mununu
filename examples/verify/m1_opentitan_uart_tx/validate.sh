@@ -52,7 +52,7 @@ echo
 
 cd "${SRC}"
 echo "--- step 1/1: mununu context eval (R.2 KMTS lifter end-to-end) ---"
-LIBRARY_PATH=/usr/local/opt/z3/lib "${MUNUNU}" context eval \
+LIBRARY_PATH=/usr/local/opt/z3/lib "${MUNUNU}" context eval --fail-on none \
   --adapter sv-yosys --preprocessor sv2v \
   --formula idle_reachable_from_every_state \
   --automaton Circuit \
