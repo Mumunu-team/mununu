@@ -146,6 +146,34 @@ mununu templates --json
 
 `--template` and `--formula` are mutually exclusive. When `--template` is provided, the template is instantiated and injected as an ad-hoc formula.
 
+### On RTL: `sv verify-auto --template`
+
+> Source of truth: [`template_guarantees`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/adapter/slang/verify_auto.rs) — surface: CLI+API (`templates: [{template, args}]` on `POST /api/v1/sv/verify-auto`)
+
+The `rtl_*` templates take **RTL conditions** as arguments (`param_type: rtl_atom`): boolean expressions over the design's signals in the `@mununu_guarantee` atom syntax, where an enum member or parameter on the right of `==` / `!=` resolves to its value (`state_q == SCRAM`). Each template is checked beside the design's own assertions, with the same engines, and reported as a row labelled `tmpl.<instance>`:
+
+```bash
+mununu sv verify-auto rod.sv --top rod --frontend slang \
+  --template rtl_never        --template-arg 'rtl_never.BAD=state_q == 5' \
+  --template rtl_response     --template-arg 'rtl_response.TRIGGER=trip == 1 && state_q != FAULT' \
+                              --template-arg 'rtl_response.RESPONSE=state_q == SCRAM' \
+  --template rtl_recoverable  --template-arg 'rtl_recoverable.TARGET=state_q == IDLE'
+```
+
+With a single `--template`, the `ID.` prefix on `--template-arg` keys may be dropped.
+
+| template | checks | reading |
+|---|---|---|
+| `rtl_never(BAD)` | `AG !BAD` | safety |
+| `rtl_invariant(P)` | `AG P` | safety |
+| `rtl_mutex(A, B)` | `AG !(A && B)` | safety |
+| `rtl_hold_until(HOLD, RELEASE)` | `AG (HOLD && !RELEASE -> AX HOLD)` | the latch pattern |
+| `rtl_response(TRIGGER, RESPONSE)` | `AG (TRIGGER -> AF RESPONSE)` | inevitability on every path |
+| `rtl_recoverable(TARGET)` | `AG EF TARGET` | recoverability; pin the reset inactive, or reset recovers everything |
+| `rtl_reachable(TARGET)` | `EF TARGET` | a cover |
+
+Bounded response (`within K cycles`) stays with SVA (`a |-> ##[1:K] b`), which verify-auto translates.
+
 ### In `verify.toml`
 
 > Source of truth: [`PropertySpec`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/verify/config.rs#L307) — surface: CLI+API.

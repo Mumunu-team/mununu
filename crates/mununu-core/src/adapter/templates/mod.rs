@@ -102,6 +102,10 @@ pub enum ParamType {
     Label,
     /// Free-form mu-calculus sub-expression.
     Expression,
+    /// A boolean condition over RTL signals — `state_q == 3`, `state_q == SCRAM && !rst`,
+    /// `trip_o` — as the `@mununu_guarantee` atom syntax reads it (an enum member or parameter name
+    /// on the right of a comparison resolves to its value). Substituted in parentheses.
+    RtlAtom,
 }
 
 /// Definition of a template parameter.
@@ -166,6 +170,7 @@ fn default_standalone() -> String {
 /// Used in `.espec.json`, `.mununu.json`, XState `__mununu`, CLI, and API
 /// requests as an alternative to a raw formula string.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "api", derive(schemars::JsonSchema))]
 pub struct TemplateRef {
     /// Template ID to instantiate.
     pub template: String,
@@ -416,10 +421,20 @@ impl TemplateRegistry {
             }
         }
 
-        // Substitute ${PARAM} placeholders in the formula pattern
+        // Substitute ${PARAM} placeholders in the formula pattern; an RTL condition goes in
+        // parentheses so `!${BAD}` negates the whole of `a && b`.
         let mut formula = template.formula_pattern.clone();
         for (name, value) in &effective_args {
-            formula = formula.replace(&format!("${{{name}}}"), value);
+            let is_atom = template
+                .params
+                .iter()
+                .any(|p| &p.name == name && matches!(p.param_type, ParamType::RtlAtom));
+            let value = if is_atom {
+                format!("({value})")
+            } else {
+                value.clone()
+            };
+            formula = formula.replace(&format!("${{{name}}}"), &value);
         }
 
         // Derive PropertyKind and PropertyRole from template metadata
@@ -510,6 +525,28 @@ fn validate_param_value(param: &TemplateParam, value: &str) -> Result<(), Templa
                 return Err(TemplateError::InvalidParamType {
                     param: param.name.clone(),
                     expected: "non-empty expression".to_string(),
+                    got: value.to_string(),
+                });
+            }
+        }
+        ParamType::RtlAtom => {
+            // A boolean condition: it parses, and it has no fixpoint or modality of its own.
+            fn boolean(f: &crate::mu_calculus::Formula, id: crate::mu_calculus::NodeId) -> bool {
+                use crate::mu_calculus::Node;
+                match f.node(id) {
+                    Node::True | Node::False | Node::Predicate(_) => true,
+                    Node::Not(a) => boolean(f, *a),
+                    Node::And(a, b) | Node::Or(a, b) => boolean(f, *a) && boolean(f, *b),
+                    _ => false,
+                }
+            }
+            let ok = crate::mu_calculus::parser::parse(value)
+                .map(|f| boolean(&f, f.root()))
+                .unwrap_or(false);
+            if !ok {
+                return Err(TemplateError::InvalidParamType {
+                    param: param.name.clone(),
+                    expected: "a boolean RTL condition (`state_q == 3`, `a && !b`)".to_string(),
                     got: value.to_string(),
                 });
             }

@@ -1882,6 +1882,12 @@ pub struct SvVerifyAutoRequest {
     /// definite verdict never flips; an unclassifiable hint is dropped). Default empty.
     #[serde(default)]
     pub predicate: Vec<String>,
+    /// Property templates to check besides the design's assertions, each `{template, args}`
+    /// (`{"template": "rtl_response", "args": {"TRIGGER": "trip == 1", "RESPONSE": "state_q ==
+    /// SCRAM"}}`), instantiated against the server's catalog. Each becomes a row labelled
+    /// `tmpl.<instance>`. Default empty.
+    #[serde(default)]
+    pub templates: Vec<crate::adapter::templates::TemplateRef>,
     /// Engine selector, mirroring the CLI `--engine`: `"explicit"`, `"symbolic"`,
     /// `"exact-symbolic"`, `"portfolio-sequential"`, `"portfolio-parallel"`.
     /// **Unspecified ⇒ the default `"portfolio-sequential"`** (2026-07-06): run

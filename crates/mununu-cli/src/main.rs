@@ -2299,6 +2299,24 @@ struct SvVerifyAutoArgs {
     /// (e.g. `--predicate "c_state == 0" --predicate "wptr == rptr"`).
     #[arg(long = "predicate", value_name = "EXPR")]
     predicate: Vec<String>,
+    /// A property template to check besides the design's assertions (`mununu templates --domain
+    /// rtl` lists them): `--template rtl_response --template-arg 'TRIGGER=trip_o == 1'
+    /// --template-arg 'RESPONSE=state_q == SCRAM'`. Repeatable; each becomes a row labelled
+    /// `tmpl.<instance>`.
+    #[arg(long = "template", value_name = "ID")]
+    template: Vec<String>,
+    /// A template argument, `KEY=VALUE`; with more than one `--template`, prefix the key with the
+    /// template's ID (`rtl_never.BAD=…`). Repeatable.
+    #[arg(
+        long = "template-arg",
+        value_name = "[ID.]KEY=VALUE",
+        requires = "template"
+    )]
+    template_args: Vec<String>,
+    /// A project template pack (`TemplateCatalog` JSON) layered over the built-in catalog and the
+    /// deployment's packs. Repeatable.
+    #[arg(long = "templates-file", value_name = "FILE")]
+    templates_files: Vec<PathBuf>,
     /// Print a JSON report instead of the human-readable summary.
     #[arg(long)]
     json: bool,
@@ -4649,6 +4667,8 @@ fn sv_verify_auto(args: SvVerifyAutoArgs) -> Result<(), String> {
         config_values,
         counter_bounds,
         predicate_hints: args.predicate.clone(),
+        templates: template_refs(&args.template, &args.template_args)?,
+        templates_files: args.templates_files.clone(),
         // R-F5.5d — `--engine symbolic` routes every property through the R-F5
         // BDD CEGAR loop (no per-cube-pair SMT).
         symbolic_engine: args.engine == EngineArg::Symbolic,
@@ -4822,6 +4842,9 @@ fn render_verify_auto_text(report: &mununu_core::adapter::slang::verify_auto::Au
             p.name,
             verify_outcome_str(&p.outcome)
         );
+        if let Some(label) = p.label.as_deref().filter(|l| *l != p.name) {
+            println!("        label: {label}");
+        }
         println!("        formula: {}", p.formula);
         // monono ask 26 — WHY this property is ⊥, on the property's own lines rather than in a
         // note. A consumer that filters notes (monono's formal lane did, wholesale) still sees
@@ -9312,6 +9335,46 @@ fn list_templates(args: TemplatesArgs) -> Result<(), String> {
     Ok(())
 }
 
+/// `--template ID` / `--template-arg [ID.]KEY=VALUE` → template references. A key is bound to its
+/// template by the `ID.` prefix; an unprefixed key needs exactly one `--template`.
+fn template_refs(
+    templates: &[String],
+    args: &[String],
+) -> Result<Vec<mununu_core::adapter::templates::TemplateRef>, String> {
+    let mut refs: Vec<mununu_core::adapter::templates::TemplateRef> = templates
+        .iter()
+        .map(|t| mununu_core::adapter::templates::TemplateRef {
+            template: t.clone(),
+            args: HashMap::new(),
+        })
+        .collect();
+    for arg in args {
+        let (key, value) = arg
+            .split_once('=')
+            .ok_or_else(|| format!("invalid --template-arg '{arg}': expected [ID.]KEY=VALUE"))?;
+        let (target, key) = match key.split_once('.') {
+            Some((id, k)) if templates.iter().any(|t| t == id) => (Some(id), k),
+            _ => (None, key),
+        };
+        let idx = match target {
+            Some(id) => refs.iter().position(|r| r.template == id),
+            None if refs.len() == 1 => Some(0),
+            None => {
+                return Err(format!(
+                    "--template-arg '{arg}': with several --template flags, prefix the key with \
+                     the template's id (`{}.{key}=…`)",
+                    templates.first().cloned().unwrap_or_default()
+                ));
+            }
+        };
+        let idx = idx.ok_or_else(|| format!("--template-arg '{arg}': no such --template"))?;
+        refs[idx]
+            .args
+            .insert(key.trim().to_string(), value.trim().to_string());
+    }
+    Ok(refs)
+}
+
 /// Resolve the formula name for eval/synth: either from `--formula` or from `--template`.
 ///
 /// When `--template` is provided, instantiates the template and injects a sidecar
@@ -10248,5 +10311,29 @@ mod sv_mutate_lift_flag_tests {
         }
         // `inject-fault` without a site is a usage error
         assert!(Cli::try_parse_from(["mununu", "btor2", "inject-fault", "d.btor2"]).is_err());
+    }
+
+    /// `--template-arg` binds by the `ID.` prefix; unprefixed needs a single `--template`.
+    #[test]
+    fn template_args_group_by_their_template() {
+        let one = template_refs(&["rtl_never".into()], &["BAD=state_q == 5".into()]).unwrap();
+        assert_eq!(one[0].args["BAD"], "state_q == 5");
+        let two = template_refs(
+            &["rtl_never".into(), "rtl_reachable".into()],
+            &[
+                "rtl_never.BAD=a == 1".into(),
+                "rtl_reachable.TARGET=b == 2".into(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(two[0].args["BAD"], "a == 1");
+        assert_eq!(two[1].args["TARGET"], "b == 2");
+        assert!(
+            template_refs(
+                &["rtl_never".into(), "rtl_reachable".into()],
+                &["BAD=a == 1".into()]
+            )
+            .is_err()
+        );
     }
 }

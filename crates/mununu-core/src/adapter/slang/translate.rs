@@ -271,6 +271,10 @@ pub struct TranslationReport {
     /// the expression compiler's output (`expr_ir`). The BTOR2 augmentation
     /// (`btor2::minted_expr::augment_with_expressions`) mints one named node per entry.
     pub required_expressions: Vec<MintedExpression>,
+    /// Every enum member and `parameter` / `localparam` name whose value all its declarations agree
+    /// on, with that value. `@mununu_guarantee` and template atoms resolve a constant named on the
+    /// right of a comparison (`state_q == SCRAM`) through it.
+    pub named_constants: std::collections::BTreeMap<String, i64>,
 }
 
 /// An expression a formula reads as the atom `name` (= `expr.minted_name()`).
@@ -550,6 +554,11 @@ pub fn translate_ast_json_with_source(
     // once from the whole AST rather than per-assertion.
     collect_parameter_names(&root, &mut report.parameter_names);
     collect_parameter_values(&root, &mut report.parameter_values);
+    report.named_constants = enum_values
+        .by_name
+        .iter()
+        .map(|(k, v)| (k.clone(), *v))
+        .collect();
     Ok(report)
 }
 

@@ -53,6 +53,27 @@
         "name"
       ],
       "type": "object"
+    },
+    "TemplateRef": {
+      "description": "A concrete template reference (template ID + bound arguments).\n\nUsed in `.espec.json`, `.mununu.json`, XState `__mununu`, CLI, and API requests as an alternative to a raw formula string.",
+      "properties": {
+        "args": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Argument bindings: param_name → value.",
+          "type": "object"
+        },
+        "template": {
+          "description": "Template ID to instantiate.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "template"
+      ],
+      "type": "object"
     }
   },
   "description": "XL.6b — automated SVA verification endpoint (`POST /api/v1/sv/verify-auto`). Mirrors the CLI `mununu sv verify-auto`: extract the design's SVA, lift, and verify each property against the model with no sidecar. slang parses SV directly, but the verify lift uses sv2v + Yosys, so `top` / `use_sv2v` apply.",
@@ -256,6 +277,14 @@
     "source": {
       "description": "SystemVerilog primary source content.",
       "type": "string"
+    },
+    "templates": {
+      "default": [],
+      "description": "Property templates to check besides the design's assertions, each `{template, args}` (`{\"template\": \"rtl_response\", \"args\": {\"TRIGGER\": \"trip == 1\", \"RESPONSE\": \"state_q == SCRAM\"}}`), instantiated against the server's catalog. Each becomes a row labelled `tmpl.<instance>`. Default empty.",
+      "items": {
+        "$ref": "#/definitions/TemplateRef"
+      },
+      "type": "array"
     },
     "top": {
       "default": null,
