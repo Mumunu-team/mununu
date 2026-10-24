@@ -18,7 +18,7 @@
       "type": "object"
     },
     "SvFrontendName": {
-      "description": "The RTL front end of a lift: `auto` (the environment's default), `verilog` (yosys `read_verilog`), `slang` (the yosys-slang plugin) or `sv2v` (sv2v, then `read_verilog`). The CLI's `--frontend` takes the same four values.",
+      "description": "The RTL front end of a lift: `auto` (the environment's default), `verilog` (yosys `read_verilog`), `slang` (the yosys-slang plugin) or `sv2v` (sv2v first, then the `auto` order with its slang fallback). The CLI's `--frontend` takes the same four values.",
       "enum": [
         "auto",
         "verilog",
