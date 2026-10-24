@@ -238,14 +238,34 @@ impl<'a> Parser<'a> {
         let members = self.parse_members_clause()?;
         // Composition options, one statement each.
         let mut allow_dead_vectors = false;
+        let mut fairness_weak = false;
         while !self.check_symbol(Symbol::RBrace) {
             let option = self.expect_ident()?;
             match option.name.as_str() {
                 "allow_dead_vectors" => allow_dead_vectors = true,
+                "fairness" => {
+                    let level = self.expect_ident()?;
+                    if level.name != "weak" {
+                        return Err(ParseError::UnexpectedToken {
+                            found: TokenKind::Identifier(level.name.clone()),
+                            expected: "fairness level (`fairness weak;`)",
+                            span: level.span,
+                        });
+                    }
+                    if kind != CompositionKind::Asynchronous {
+                        return Err(ParseError::InvalidExpr {
+                            span: option.span,
+                            message: "`fairness weak;` applies to an `asynchronous` composition: \
+                                      a synchronous one steps every member together"
+                                .to_string(),
+                        });
+                    }
+                    fairness_weak = true;
+                }
                 _ => {
                     return Err(ParseError::UnexpectedToken {
                         found: TokenKind::Identifier(option.name.clone()),
-                        expected: "composition option (`allow_dead_vectors;`)",
+                        expected: "composition option (`allow_dead_vectors;`, `fairness weak;`)",
                         span: option.span,
                     });
                 }
@@ -261,6 +281,7 @@ impl<'a> Parser<'a> {
             kind,
             members,
             allow_dead_vectors,
+            fairness_weak,
             span,
         })
     }
