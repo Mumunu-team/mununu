@@ -368,6 +368,8 @@ pub struct MuExpr {
 #[derive(Debug, Clone)]
 pub struct LtlExpr {
     pub formula: LtlFormula,
+    /// `eltl`: the some-path reading (`F` / `U` existential) instead of LTL's every-path one.
+    pub existential: bool,
     pub span: Span,
 }
 
