@@ -22,7 +22,7 @@
     },
     "predicates": {
       "default": [],
-      "description": "Extra abstraction predicate(s) for the cube-path escalation, each `\"NAME:REGISTER=VALUE\"` (P2 Slice 1). Used only when the exact engine abstains (over the bit cap — 40 by default, auto-raised to 192); the escalation is automatic even with none.",
+      "description": "Extra abstraction predicate(s) for the cube-path escalation, each `\"[NAME:]REG == VALUE\"` (P2 Slice 1). Used only when the exact engine abstains (over the bit cap — 40 by default, auto-raised to 192); the escalation is automatic even with none.",
       "items": {
         "type": "string"
       },

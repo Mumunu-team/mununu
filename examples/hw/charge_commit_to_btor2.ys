@@ -6,7 +6,7 @@
 #
 #   $ yosys charge_commit_to_btor2.ys
 #   $ mununu btor2 cegar charge_commit.yosys.btor2 \
-#       --formula 'nu X. ([] X)' --predicate 'committed:phase=3' --predicate-source wp
+#       --formula 'nu X. ([] X)' --predicate 'committed:phase == 3' --predicate-source wp
 #
 # Tested with Yosys 0.59 (oss-cad-suite). sv2v is not required: yosys reads the
 # SystemVerilog directly with `-sv`. The dffunmap / async2sync / chformal -lower

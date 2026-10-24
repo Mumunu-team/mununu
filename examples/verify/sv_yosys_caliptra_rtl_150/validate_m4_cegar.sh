@@ -76,7 +76,7 @@ echo "upstream: chipsalliance/caliptra-rtl @ (see source/, issue #150 bug/fix pa
 echo "property: <> (p5 || p6 || p7)   [boot_fsm_ns transitions into an unmatched encoding]"
 echo
 
-PREDS=(--predicate p5:boot_fsm_ns=5 --predicate p6:boot_fsm_ns=6 --predicate p7:boot_fsm_ns=7
+PREDS=(--predicate 'p5:boot_fsm_ns == 5' --predicate 'p6:boot_fsm_ns == 6' --predicate 'p7:boot_fsm_ns == 7'
        --init-values 'boot_fsm_ns=0,1,2,3,4,5,6,7' --must-edge-inference smt-per-target)
 
 # Generate BTOR2 + run CEGAR for one variant; echoes the T cell count.

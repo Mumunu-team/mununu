@@ -3257,24 +3257,45 @@ fn reset_cube_verdict(
     }
 }
 
-/// Parse an extra-abstraction-predicate triple `NAME:REGISTER=VALUE` (the surface
-/// syntax shared by `btor2 verify-recoverability --predicate` and the API
-/// `predicates` field) into a [`PredicateSpec`]. Same shape as `btor2 cegar`.
+/// Parse an abstraction predicate `[NAME:]REG == VALUE` (the 0.5 spelling shared by every
+/// `--predicate` flag and the API `predicates` strings) into a [`PredicateSpec`]. The name is
+/// optional and defaults to the expression's normalised text (`state_q == 3`). These verbs'
+/// cube ladder takes register-equals-constant predicates only, so any other expression is an
+/// error that says so (relational and compound predicates are `sv verify-auto`'s `--predicate`),
+/// and the pre-0.5 `NAME:REG=VALUE` spelling is an error naming the new one.
 pub fn parse_extra_predicate(raw: &str) -> Result<PredicateSpec, String> {
-    let (name, rest) = raw.split_once(':').ok_or_else(|| {
-        format!("predicate spec '{raw}' missing ':' separator (expected NAME:REGISTER=VALUE)")
-    })?;
-    let (register, value_str) = rest.split_once('=').ok_or_else(|| {
-        format!("predicate spec '{raw}' missing '=' separator (expected NAME:REGISTER=VALUE)")
-    })?;
-    let value: u64 = value_str
-        .parse()
-        .map_err(|e| format!("predicate spec '{raw}' has non-numeric value: {e}"))?;
-    Ok(PredicateSpec {
-        name: name.to_string(),
-        register: register.to_string(),
-        value,
-    })
+    let is_name = |n: &str| {
+        let n = n.trim();
+        !n.is_empty() && n.chars().all(|c| c.is_alphanumeric() || c == '_')
+    };
+    let (name, expr) = match raw.split_once(':') {
+        Some((n, e)) if is_name(n) => (Some(n.trim().to_string()), e.trim()),
+        _ => (None, raw.trim()),
+    };
+    if expr.contains('=') && !["==", "!=", "<=", ">="].iter().any(|op| expr.contains(op)) {
+        return Err(format!(
+            "predicate '{raw}': the spelling is `[NAME:]REG == VALUE` since 0.5 \
+             (e.g. `{}`)",
+            expr.replacen('=', " == ", 1)
+        ));
+    }
+    match parse_predicate_expr(expr) {
+        Ok(PredicateExpr::Cmp {
+            register,
+            op: CmpOp::Eq,
+            value,
+        }) => Ok(PredicateSpec {
+            name: name.unwrap_or_else(|| format!("{register} == {value}")),
+            register,
+            value,
+        }),
+        Ok(_) => Err(format!(
+            "predicate '{raw}': this verb takes a register-equals-constant predicate \
+             `[NAME:]REG == VALUE`; relational and compound expressions are `sv verify-auto \
+             --predicate`"
+        )),
+        Err(e) => Err(format!("predicate '{raw}': {e}")),
+    }
 }
 
 /// The `AG EF good` formula string this command decides, for provenance / echoing
@@ -4319,7 +4340,7 @@ mod tests {
 
         // PERF GUARD: a CALLER-supplied predicate on a wrapped design abstains (it may force the wide
         // op into the cube successor → the all-pairs-SMT cost). Empty extras (the auto path) runs.
-        let extra = vec![parse_extra_predicate("dz:data=0").expect("parse")];
+        let extra = vec![parse_extra_predicate("dz:data == 0").expect("parse")];
         assert_eq!(
             verify_recoverability_scalable(TRAP_UF_W48, "ctrl == 0", &extra).expect("abstains"),
             PropertyVerdict::Unknown,
@@ -5652,7 +5673,7 @@ mod tests {
     fn scalable_honors_extra_predicates() {
         // Extra abstraction predicates refine the cube without changing the (sound)
         // verdict on a design the seed already decides.
-        let extra = vec![parse_extra_predicate("busy:st=1").expect("parses")];
+        let extra = vec![parse_extra_predicate("busy:st == 1").expect("parses")];
         assert_eq!(
             verify_recoverability_scalable(RESPONDER, "st == 0", &extra).expect("decides"),
             PropertyVerdict::Holds
@@ -5661,17 +5682,32 @@ mod tests {
 
     #[test]
     fn parse_extra_predicate_parses_and_rejects() {
+        let idle = PredicateSpec {
+            name: "idle".into(),
+            register: "state_q".into(),
+            value: 3,
+        };
         assert_eq!(
-            parse_extra_predicate("idle:state_q=3").expect("parses"),
+            parse_extra_predicate("idle:state_q == 3").expect("parses"),
+            idle
+        );
+        // The name is optional: it defaults to the normalised expression.
+        assert_eq!(
+            parse_extra_predicate("state_q==3").expect("parses"),
             PredicateSpec {
-                name: "idle".into(),
-                register: "state_q".into(),
-                value: 3,
+                name: "state_q == 3".into(),
+                ..idle.clone()
             }
         );
+        // The pre-0.5 spelling is refused with the new one in the message.
+        let old = parse_extra_predicate("idle:state_q=3").expect_err("pre-0.5 spelling");
+        assert!(old.contains("state_q == 3"), "{old}");
+        // These verbs take register == constant only; anything else says where it belongs.
+        let rel = parse_extra_predicate("a == b").expect_err("relational");
+        assert!(rel.contains("sv verify-auto"), "{rel}");
+        assert!(parse_extra_predicate("st >= 2").is_err());
         assert!(parse_extra_predicate("no_colon").is_err());
         assert!(parse_extra_predicate("n:reg").is_err());
-        assert!(parse_extra_predicate("n:reg=notanumber").is_err());
     }
 
     // === b2: counter-abstraction recoverability =================================

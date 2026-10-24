@@ -43,7 +43,7 @@ done
 
 OUT="$(mktemp -d -t mununu-v7c-XXXXXX)"
 FORMULA='nu Y. ((mu X. (idle || <> X)) && [] Y)'
-PREDS=(--predicate idle:state_q=55 --predicate err:state_q=41 --must-edge-inference smt-hyper-must)
+PREDS=(--predicate 'idle:state_q == 55' --predicate 'err:state_q == 41' --must-edge-inference smt-hyper-must)
 
 # MainSmIdle = 6'b110111 = 55 ; MainSmError = 6'b101001 = 41 (csrng_pkg.sv).
 sv2v -I"${SRC}" "${SRC}/csrng_pkg.sv" "${SRC}/csrng_main_sm.sv" > "${OUT}/csrng.v" 2>"${OUT}/sv2v.err"

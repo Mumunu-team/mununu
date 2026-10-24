@@ -58,7 +58,7 @@ cube state space + transition relation, independent of the abstraction itself:
   validated cell-for-cell against it. Runs the **CEGAR refinement loop** (WP predicate
   discovery on ⊥, rebuilding the BDD relation each iteration — still no per-cube-pair SMT;
   `--max-iterations 0` = single-shot). **Current scope (R-F5.5a/b/c):** simple
-  `NAME:REG=VALUE` equalities + non-derived `--sidecar` `compound_predicates` (`cnt >= 2`,
+  `[NAME:]REG == VALUE` equalities + non-derived `--sidecar` `compound_predicates` (`cnt >= 2`,
   relational), and the `[]`/`<>` fragment including modalities guarded by
   `req_cur`/`forb_cur`/`req_next`/`forb_next` state predicates (R-F5.5c). Label,
   controllability (`ctrl`), and step-bounded (`steps`) guards remain out-of-fragment over a
@@ -91,9 +91,9 @@ for the full picture (IR layering, may/must edges, over/under/⊥ approximation)
 ```bash
 mununu btor2 cegar <design.btor2> \
   --formula '<> (p5 || p6 || p7)' \        # the mu-calculus property
-  --predicate p5:boot_fsm_ns=5 \           # NAME:REGISTER=VALUE (repeatable)
-  --predicate p6:boot_fsm_ns=6 \
-  --predicate p7:boot_fsm_ns=7 \
+  --predicate 'p5:boot_fsm_ns == 5' \           # [NAME:]REG == VALUE (repeatable)
+  --predicate 'p6:boot_fsm_ns == 6' \
+  --predicate 'p7:boot_fsm_ns == 7' \
   --init-values 'boot_fsm_ns=0,1,2,3,4,5,6,7' \  # admit these power-up values
   --must-edge-inference smt-per-target              # prove must-edges with Z3
 ```
@@ -103,7 +103,7 @@ Key flags:
 | Flag | Purpose |
 |---|---|
 | `--formula` | the mu-calculus property (see [Mu-Calculus Reference](Mu-Calculus-Reference)) |
-| `--predicate NAME:REG=VALUE` | one cube predicate (`REG == VALUE`); repeatable |
+| `--predicate [NAME:]REG == VALUE` | one cube predicate; the name defaults to the expression; repeatable |
 | `--init-values 'REG=v1,v2,…'` | admit an under-constrained register's power-up values (R-Y7 symbolic init) |
 | `--must-edge-inference` | `off` (may-only) \| `smt-per-target` (∀∀, Z3-proved) \| `smt-per-target-standard` (∀∃) \| `smt-hyper-must` (∀∃ over a target set) \| `auto` (accepted; on this verb it means `off` — it is the `sv verify-auto` default, where it resolves per property, mununu#663) |
 | `--may-edge-inference` | `off` (sampling) \| `smt-all-pairs` (sound ∃ over-approximation) |

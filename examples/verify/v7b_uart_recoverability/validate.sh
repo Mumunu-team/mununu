@@ -56,7 +56,7 @@ OUT="$(mktemp -d -t mununu-v7b-XXXXXX)"
 FORMULA='nu Y. ((mu X. (idle || <> X)) && [] Y)'
 # Bootstrap predicate (busy = mid-frame) + the compound idle from the sidecar +
 # SMT hyper-must edges for a clean-sound νμ verdict.
-ARGS=(--predicate busy:bit_cnt_q=10 --sidecar "${SIDECAR}" --must-edge-inference smt-hyper-must)
+ARGS=(--predicate 'busy:bit_cnt_q == 10' --sidecar "${SIDECAR}" --must-edge-inference smt-hyper-must)
 
 # Lift one variant to BTOR2 with tx_enable + rst_ni tied (actively transmitting,
 # no external reset) and run CEGAR.

@@ -63,7 +63,7 @@ echo "--- step 1/2: mununu btor2 cegar w/ R.6.6 controllability-aware lift ---"
 LIBRARY_PATH=/usr/local/opt/z3/lib "${MUNUNU}" btor2 cegar \
   "${BTOR2}" \
   --formula 'nu X. < true > X' \
-  --predicate 'burst_zero:burst=0' \
+  --predicate 'burst_zero:burst == 0' \
   --controllable ctrl_g0 \
   --controllable ctrl_g1 \
   --max-iterations 4 > "${OUT}/cegar_liveness.out" 2>&1
@@ -83,7 +83,7 @@ echo "--- step 2/2: mununu btor2 cegar w/ JSON output ---"
 LIBRARY_PATH=/usr/local/opt/z3/lib "${MUNUNU}" btor2 cegar \
   "${BTOR2}" \
   --formula 'nu X. [ true ] X' \
-  --predicate 'burst_zero:burst=0' \
+  --predicate 'burst_zero:burst == 0' \
   --controllable ctrl_g0 \
   --controllable ctrl_g1 \
   --max-iterations 4 \

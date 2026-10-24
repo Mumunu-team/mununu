@@ -745,7 +745,7 @@ enum EngineArg {
     /// Runs the CEGAR refinement loop (WP predicate discovery on ⊥, rebuilding
     /// the relation each iteration; `--max-iterations 0` = single-shot).
     ///
-    /// **Scope:** simple `--predicate NAME:REG=VALUE` equalities + non-derived
+    /// **Scope:** simple `--predicate [NAME:]REG == VALUE` equalities + non-derived
     /// `--sidecar` `compound_predicates` (`cnt >= 2`, relational); the bare
     /// `[]`/`<>` fragment only (guarded / controllability / step-bounded
     /// modalities error). Derived/combinational (per-cube SMT label) predicates
@@ -870,11 +870,11 @@ struct Btor2CegarArgs {
     /// formula. Wrap in single quotes to avoid shell expansion.
     #[arg(long, value_name = "FORMULA")]
     formula: String,
-    /// Initial predicate set as `name:register=value` triples.
+    /// Initial predicate set, `[NAME:]REG == VALUE` (the name defaults to the expression).
     /// May be repeated. At least one is required to bootstrap
     /// the cube space.
-    /// Example: `--predicate "p_idle:state=0" --predicate "p_busy:state=1"`.
-    #[arg(long = "predicate", value_name = "NAME:REG=VALUE")]
+    /// Example: `--predicate "p_idle:state == 0" --predicate "state == 1"`.
+    #[arg(long = "predicate", value_name = "[NAME:]REG == VALUE")]
     predicates: Vec<String>,
     /// Predicate-discovery source for the CEGAR loop.
     #[arg(long, value_enum, default_value_t = PredicateSourceArg::Wp)]
@@ -1220,10 +1220,10 @@ struct Btor2VerifyRecoverabilityArgs {
     #[arg(long, value_name = "ATOM")]
     target: String,
     /// Extra abstraction predicate(s) for the cube-path escalation,
-    /// `NAME:REGISTER=VALUE` (repeatable, like `btor2 cegar`). Used only when the exact
+    /// `[NAME:]REG == VALUE` (repeatable, like `btor2 cegar`). Used only when the exact
     /// engine abstains (over the bit cap — 40 by default, auto-raised to 192); the escalation is automatic even
     /// with none.
-    #[arg(long = "predicate", value_name = "NAME:REG=VALUE")]
+    #[arg(long = "predicate", value_name = "[NAME:]REG == VALUE")]
     predicate: Vec<String>,
     /// Also emit a structured `refinement` alongside the verdict: a `vacuous` witness when the target
     /// is never reachable (the `AG EF` is degenerate), an auto `config_partition` over the design's
@@ -2141,9 +2141,9 @@ struct SvCegarArgs {
     /// μ-calculus formula evaluated over the lifted KMTS.
     #[arg(long, value_name = "FORMULA")]
     formula: String,
-    /// Initial predicate, repeatable. Format `NAME:REGISTER=VALUE`.
+    /// Initial predicate, repeatable. Format `[NAME:]REG == VALUE`.
     /// At least one is required to bootstrap the `2^|P|` cube space.
-    #[arg(long = "predicate", value_name = "NAME:REG=VALUE")]
+    #[arg(long = "predicate", value_name = "[NAME:]REG == VALUE")]
     predicates: Vec<String>,
     /// Predicate-discovery source on `KleeneBot` refinement.
     #[arg(long, value_enum, default_value_t = PredicateSourceArg::Wp)]
@@ -2521,9 +2521,9 @@ struct SvVerifyRecoverabilityArgs {
     #[arg(long, value_name = "ATOM")]
     target: String,
     /// Extra abstraction predicate(s) for the cube-path escalation,
-    /// `NAME:REGISTER=VALUE` (repeatable). Used only when the exact engine abstains; the
+    /// `[NAME:]REG == VALUE` (repeatable). Used only when the exact engine abstains; the
     /// escalation is automatic even with none.
-    #[arg(long = "predicate", value_name = "NAME:REG=VALUE")]
+    #[arg(long = "predicate", value_name = "[NAME:]REG == VALUE")]
     predicate: Vec<String>,
     /// Also emit a structured `refinement` alongside the verdict: a `vacuous` witness when the target
     /// is never reachable, an auto `config_partition` over the design's detected reset when recovery
@@ -5080,7 +5080,7 @@ fn run_symbolic_cegar_cli(
         SymbolicCegarTermination, symbolic_cegar_refine,
     };
 
-    // The simple `--predicate NAME:REG=VALUE` equalities plus any non-derived
+    // The simple `--predicate [NAME:]REG == VALUE` equalities plus any non-derived
     // `compound_predicates` (e.g. `cnt >= 2`) declared in the `--sidecar`. The
     // sidecar overrides the `--init-values` synthetic one (matches the
     // explicit path). Derived/combinational compounds are rejected downstream.
@@ -5178,27 +5178,15 @@ fn run_cegar_cli(
         }
     }
 
-    // Parse initial predicates from `NAME:REGISTER=VALUE` triples.
-    let mut initial_predicates: Vec<PredicateSpec> = Vec::with_capacity(params.predicates.len());
-    for raw in params.predicates {
-        let (name, rest) = raw.split_once(':').ok_or_else(|| {
-            format!("predicate spec '{raw}' missing ':' separator (expected NAME:REGISTER=VALUE)")
-        })?;
-        let (register, value_str) = rest.split_once('=').ok_or_else(|| {
-            format!("predicate spec '{raw}' missing '=' separator (expected NAME:REGISTER=VALUE)")
-        })?;
-        let value: u64 = value_str
-            .parse()
-            .map_err(|e| format!("predicate spec '{raw}' has non-numeric value: {e}"))?;
-        initial_predicates.push(PredicateSpec {
-            name: name.to_string(),
-            register: register.to_string(),
-            value,
-        });
-    }
+    // Parse initial predicates (`[NAME:]REG == VALUE`, the shared spelling).
+    let initial_predicates: Vec<PredicateSpec> = params
+        .predicates
+        .iter()
+        .map(|raw| mununu_core::adapter::recoverability::parse_extra_predicate(raw))
+        .collect::<Result<_, _>>()?;
     if initial_predicates.is_empty() {
         return Err(
-            "at least one --predicate NAME:REGISTER=VALUE is required to bootstrap the cube space"
+            "at least one --predicate [NAME:]REG == VALUE is required to bootstrap the cube space"
                 .into(),
         );
     }

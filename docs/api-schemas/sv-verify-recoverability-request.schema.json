@@ -130,7 +130,7 @@
     },
     "predicates": {
       "default": [],
-      "description": "Extra abstraction predicate(s) for the cube-path escalation, each `\"NAME:REGISTER=VALUE\"` (P2 Slice 1). Used only when the exact engine abstains.",
+      "description": "Extra abstraction predicate(s) for the cube-path escalation, each `\"[NAME:]REG == VALUE\"` (P2 Slice 1). Used only when the exact engine abstains.",
       "items": {
         "type": "string"
       },
