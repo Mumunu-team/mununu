@@ -1170,10 +1170,31 @@ fn btor2_check_fsm_handler_impl(
         })
         .collect();
 
+    let liveness = if request.liveness {
+        let terminal =
+            crate::api::models::parse_terminal_states(&request.terminal).map_err(|message| {
+                ApiError::BadRequest {
+                    message,
+                    details: None,
+                }
+            })?;
+        crate::adapter::fsm_scan::fsm_liveness_scan(&request.content, request.max_width, &terminal)
+            .map_err(|message| ApiError::BadRequest {
+                message,
+                details: None,
+            })?
+            .iter()
+            .map(crate::api::models::FsmLivenessView::from)
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     Ok(Json(Btor2CheckFsmResponse {
         fsm_registers_checked: findings.iter().filter(|f| f.is_checked()).count(),
         illegal_encodings_found,
         registers,
+        liveness,
     }))
 }
 
@@ -1612,10 +1633,31 @@ fn sv_check_fsm_handler_impl(request: SvCheckFsmRequest) -> ApiResult<Json<Btor2
         })
         .collect();
 
+    let liveness = if request.liveness {
+        let terminal =
+            crate::api::models::parse_terminal_states(&request.terminal).map_err(|message| {
+                ApiError::BadRequest {
+                    message,
+                    details: None,
+                }
+            })?;
+        crate::adapter::sv_verify::sv_check_fsm_liveness(&lift, request.max_width, &terminal)
+            .map_err(|message| ApiError::BadRequest {
+                message,
+                details: None,
+            })?
+            .iter()
+            .map(crate::api::models::FsmLivenessView::from)
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     Ok(Json(Btor2CheckFsmResponse {
         fsm_registers_checked: findings.iter().filter(|f| f.is_checked()).count(),
         illegal_encodings_found,
         registers,
+        liveness,
     }))
 }
 
@@ -5569,6 +5611,8 @@ members = ["x"]
         let request = Btor2CheckFsmRequest {
             content: ILLEGAL_ENCODING_FSM.to_string(),
             max_width: crate::adapter::fsm_scan::DEFAULT_FSM_MAX_WIDTH,
+            liveness: false,
+            terminal: vec![],
         };
         let Json(out) = btor2_check_fsm_handler(Json(request))
             .await
@@ -5587,6 +5631,8 @@ members = ["x"]
         let request = Btor2CheckFsmRequest {
             content: "this is not btor2".to_string(),
             max_width: crate::adapter::fsm_scan::DEFAULT_FSM_MAX_WIDTH,
+            liveness: false,
+            terminal: vec![],
         };
         let err = btor2_check_fsm_handler(Json(request))
             .await

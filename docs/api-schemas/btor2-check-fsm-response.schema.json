@@ -1,6 +1,72 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "definitions": {
+    "FsmLivenessView": {
+      "description": "One register's liveness inventory (`check-fsm --liveness`): out of reset, resets pinned inactive.",
+      "properties": {
+        "absorbing": {
+          "description": "Reachable encodings the register can never leave, not declared intended.",
+          "items": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "expected_terminal": {
+          "description": "Absorbing encodings declared intended with `terminal`.",
+          "items": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "register": {
+          "type": "string"
+        },
+        "reset_value": {
+          "description": "The register's value out of reset, when the reset logic gives one.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "returns_to_reset": {
+          "description": "`AG EF (reg == reset_value)`: `holds | violated | unknown | skipped` (no reset value).",
+          "type": "string"
+        },
+        "undecided": {
+          "description": "Encodings no engine decided.",
+          "items": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "unreachable": {
+          "description": "Legal encodings no path from reset reaches.",
+          "items": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "absorbing",
+        "expected_terminal",
+        "register",
+        "returns_to_reset",
+        "undecided",
+        "unreachable"
+      ],
+      "type": "object"
+    },
     "FsmRegisterFinding": {
       "description": "One state register's illegal-encoding result in a [`Btor2CheckFsmResponse`].",
       "properties": {
@@ -53,6 +119,13 @@
       "format": "uint",
       "minimum": 0.0,
       "type": "integer"
+    },
+    "liveness": {
+      "description": "The liveness inventory, when `liveness` was requested.",
+      "items": {
+        "$ref": "#/definitions/FsmLivenessView"
+      },
+      "type": "array"
     },
     "registers": {
       "description": "Per-register results.",

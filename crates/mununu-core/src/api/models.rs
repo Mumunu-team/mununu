@@ -1180,6 +1180,12 @@ pub struct Btor2CheckFsmRequest {
     /// Max state-register width treated as an FSM (wider = datapath/counter, skipped).
     #[serde(default = "default_fsm_max_width")]
     pub max_width: u32,
+    /// Also run the liveness inventory (`check-fsm --liveness`).
+    #[serde(default)]
+    pub liveness: bool,
+    /// Intended absorbing states, each `"REG=VALUE"` (`--terminal`).
+    #[serde(default)]
+    pub terminal: Vec<String>,
 }
 
 fn default_fsm_max_width() -> u32 {
@@ -1217,6 +1223,61 @@ pub struct Btor2CheckFsmResponse {
     pub illegal_encodings_found: usize,
     /// Per-register results.
     pub registers: Vec<FsmRegisterFinding>,
+    /// The liveness inventory, when `liveness` was requested.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub liveness: Vec<FsmLivenessView>,
+}
+
+/// One register's liveness inventory (`check-fsm --liveness`): out of reset, resets pinned
+/// inactive.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct FsmLivenessView {
+    pub register: String,
+    /// The register's value out of reset, when the reset logic gives one.
+    pub reset_value: Option<u64>,
+    /// Legal encodings no path from reset reaches.
+    pub unreachable: Vec<u64>,
+    /// Reachable encodings the register can never leave, not declared intended.
+    pub absorbing: Vec<u64>,
+    /// Absorbing encodings declared intended with `terminal`.
+    pub expected_terminal: Vec<u64>,
+    /// `AG EF (reg == reset_value)`: `holds | violated | unknown | skipped` (no reset value).
+    pub returns_to_reset: String,
+    /// Encodings no engine decided.
+    pub undecided: Vec<u64>,
+}
+
+impl From<&crate::adapter::fsm_scan::FsmLivenessFinding> for FsmLivenessView {
+    fn from(f: &crate::adapter::fsm_scan::FsmLivenessFinding) -> Self {
+        Self {
+            register: f.register.clone(),
+            reset_value: f.reset_value,
+            unreachable: f.unreachable.clone(),
+            absorbing: f.absorbing.clone(),
+            expected_terminal: f.expected_terminal.clone(),
+            returns_to_reset: f.returns_to_reset.as_str().to_string(),
+            undecided: f.undecided.clone(),
+        }
+    }
+}
+
+/// `"REG=VALUE"` terminal declarations → `(register, value)` (decimal or `0x` hex).
+pub fn parse_terminal_states(specs: &[String]) -> Result<Vec<(String, u64)>, String> {
+    specs
+        .iter()
+        .map(|s| {
+            let (r, v) = s
+                .split_once('=')
+                .ok_or_else(|| format!("terminal state `{s}`: expected REG=VALUE"))?;
+            let v = v.trim();
+            let value = match v.strip_prefix("0x") {
+                Some(h) => u64::from_str_radix(h, 16),
+                None => v.parse::<u64>(),
+            }
+            .map_err(|_| format!("terminal state `{s}`: `{v}` is not an integer"))?;
+            Ok((r.trim().to_string(), value))
+        })
+        .collect()
 }
 
 /// The two-player game winning objective (`objective` field). Mirrors the CLI `--objective`.
@@ -1477,6 +1538,12 @@ pub struct SvCheckFsmRequest {
     /// Max state-register width treated as an FSM (wider = datapath/counter, skipped).
     #[serde(default = "default_fsm_max_width")]
     pub max_width: u32,
+    /// Also run the liveness inventory (`check-fsm --liveness`).
+    #[serde(default)]
+    pub liveness: bool,
+    /// Intended absorbing states, each `"REG=VALUE"` (`--terminal`).
+    #[serde(default)]
+    pub terminal: Vec<String>,
 }
 
 /// Request for `POST /api/v1/sv/lint` — the SV-direct partial-write preflight.

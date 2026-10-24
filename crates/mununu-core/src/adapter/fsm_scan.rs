@@ -199,6 +199,131 @@ pub fn fsm_encoding_scan(btor2: &str, max_width: u32) -> Result<Vec<FsmFinding>,
     Ok(out)
 }
 
+/// One register's liveness inventory ([`fsm_liveness_scan`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FsmLivenessFinding {
+    pub register: String,
+    /// The value the register takes out of reset, when the reset logic gives one.
+    pub reset_value: Option<u64>,
+    /// Legal encodings no path from reset reaches (dead states of the enum).
+    pub unreachable: Vec<u64>,
+    /// Reachable encodings the register can never leave (`AG(reg == v → EF reg ≠ v)` fails), not
+    /// allow-listed with `--terminal`.
+    pub absorbing: Vec<u64>,
+    /// Absorbing encodings the caller declared intended (`--terminal REG=V`).
+    pub expected_terminal: Vec<u64>,
+    /// `AG EF (reg == reset_value)` out of reset: `Violated` lists a state set that never returns
+    /// to the reset value (every absorbing state is in it).
+    pub returns_to_reset: PropertyVerdict,
+    /// Encodings whose reachability or absorption no engine decided.
+    pub undecided: Vec<u64>,
+}
+
+/// Liveness inventory of every FSM register [`fsm_encoding_scan`] would check, out of reset with
+/// the resets pinned inactive: which legal encodings are never reached (the reach portfolio, no
+/// bit cap — a dead enum value is a defect or a leftover), which reachable encodings are
+/// absorbing (the exact engine on `AG(reg == v → EF reg ≠ v)`), and whether the register always
+/// gets back to its reset value (`AG EF`, the recoverability ladder). An absorbing state is often
+/// intended (a `LOCK`, a fatal `ERROR` only reset clears): it is listed, not judged; `terminal`
+/// names the intended ones (`(register, value)`). A raw BTOR2 deadlock is not checked: the
+/// transition relation is total, so "stuck" means absorbing.
+pub fn fsm_liveness_scan(
+    btor2: &str,
+    max_width: u32,
+    terminal: &[(String, u64)],
+) -> Result<Vec<FsmLivenessFinding>, String> {
+    let file = parser::parse(btor2).map_err(|e| format!("parsing BTOR2: {}", e.message))?;
+    let symbols = parser::collect_symbols(&file);
+    let resets = detect_resets(&file, &symbols);
+    let seeded = inject_reset_init(btor2, &resets)
+        .map_err(|e| format!("seeding reset init: {}", e.message))?;
+    let (seeded, _) = pin_inputs_to_constants(&seeded, &resets);
+
+    let names = parser::canonical_register_names(&file);
+    let mut registers: Vec<(Nid, Nid, &String)> = names
+        .iter()
+        .filter_map(|(&nid, name)| match file.lookup(nid).map(|l| &l.node) {
+            Some(Node::State { sort, .. }) => Some((nid, *sort, name)),
+            _ => None,
+        })
+        .collect();
+    registers.sort_by_key(|(nid, _, _)| *nid);
+
+    let mut out = Vec::new();
+    for (cell_nid, sort, name) in registers {
+        let Some(width) = parser::bv_width(&file, sort) else {
+            continue;
+        };
+        if width == 0 || width > max_width || is_counter(&file, cell_nid) {
+            continue;
+        }
+        let legal = legal_encodings(&file, cell_nid, &symbols);
+        if legal.len() < 2 || legal.len() as u128 >= (1u128 << width) {
+            continue;
+        }
+        let reset_value = derive_idle(&file, cell_nid, &symbols);
+        let all: Vec<u64> = (0..(1u64 << width)).collect();
+        let mut f = FsmLivenessFinding {
+            register: name.clone(),
+            reset_value,
+            unreachable: Vec::new(),
+            absorbing: Vec::new(),
+            expected_terminal: Vec::new(),
+            returns_to_reset: PropertyVerdict::Skipped,
+            undecided: Vec::new(),
+        };
+        for &v in &legal {
+            // bad = (reg == v): every other value is "in the set".
+            let others: Vec<u64> = all.iter().copied().filter(|x| *x != v).collect();
+            let monitored = emit_ag_state_in_set_monitor_by_nid(&seeded, cell_nid, sort, &others)
+                .map_err(|e| {
+                format!(
+                    "building the reachability monitor for `{name}`: {}",
+                    e.message
+                )
+            })?;
+            let mfile = parser::parse(&monitored)
+                .map_err(|e| format!("parsing the monitored BTOR2 for `{name}`: {}", e.message))?;
+            match PropertyVerdict::from(decide_reach_portfolio(&mfile).verdict) {
+                PropertyVerdict::Holds => {
+                    f.unreachable.push(v);
+                    continue;
+                }
+                PropertyVerdict::Violated => {}
+                _ => {
+                    f.undecided.push(v);
+                    continue;
+                }
+            }
+            // Reachable: can it always be left? `AG EF (reg != v)` over the post-reset model.
+            let formula = format!("nu X. ((mu Y. (({name} != {v}) || <> Y)) && [] X)");
+            let parsed = crate::mu_calculus::parser::parse(&formula)
+                .map_err(|e| format!("absorption formula for `{name}`: {e:?}"))?;
+            match crate::adapter::btor2::symbolic_bitblast::exact_symbolic_verdict(&seeded, &parsed)
+            {
+                Ok(crate::adapter::btor2::symbolic_bitblast::ExactVerdict::Holds) => {}
+                Ok(crate::adapter::btor2::symbolic_bitblast::ExactVerdict::Violated) => {
+                    if terminal.iter().any(|(r, t)| r == name && *t == v) {
+                        f.expected_terminal.push(v);
+                    } else {
+                        f.absorbing.push(v);
+                    }
+                }
+                Err(_) => f.undecided.push(v),
+            }
+        }
+        if let Some(r) = reset_value {
+            f.returns_to_reset = crate::adapter::recoverability::verify_recoverability(
+                &seeded,
+                &format!("{name} == {r}"),
+            )
+            .unwrap_or(PropertyVerdict::Unknown);
+        }
+        out.push(f);
+    }
+    Ok(out)
+}
+
 /// mununu#633 — does the register's own next-state logic step it by ±1? Walks the
 /// value positions of its `next` cone (`ite` branches, `uext`/`sext`/`slice`
 /// width-adjusts) and answers yes at an `inc`/`dec` of the cell, or an `add`/`sub` of
@@ -883,5 +1008,28 @@ mod tests {
         // A free-running counter (no reset mux) yields no reset to pin.
         const NONE: &str = "1 sort bitvec 2\n2 state 1 st\n3 one 1\n4 add 1 2 3\n5 next 1 2 4\n";
         assert!(detect(NONE).is_empty());
+    }
+
+    /// `st`: 0 -go-> 1 -> 2 (absorbing); the logic compares against 5, which nothing reaches.
+    const LIVENESS_FSM: &str = "1 sort bitvec 1\n2 sort bitvec 3\n3 input 1 rst\n4 input 1 go\n\
+        5 state 2 st\n6 zero 2\n7 constd 2 1\n8 constd 2 2\n9 constd 2 5\n10 eq 1 5 6\n\
+        11 eq 1 5 7\n12 eq 1 5 9\n13 and 1 10 4\n14 ite 2 13 7 5\n15 ite 2 11 8 14\n\
+        16 ite 2 12 6 15\n17 ite 2 3 6 16\n18 next 2 5 17\n";
+
+    #[test]
+    fn the_liveness_inventory_finds_a_dead_value_an_absorbing_state_and_no_return() {
+        let f = fsm_liveness_scan(LIVENESS_FSM, DEFAULT_FSM_MAX_WIDTH, &[]).unwrap();
+        assert_eq!(f.len(), 1, "{f:?}");
+        let st = &f[0];
+        assert_eq!(st.register, "st");
+        assert_eq!(st.reset_value, Some(0));
+        assert_eq!(st.unreachable, vec![5]);
+        assert_eq!(st.absorbing, vec![2]);
+        assert_eq!(st.returns_to_reset, PropertyVerdict::Violated);
+        // Declared intended, the absorbing state moves to `expected_terminal`.
+        let f =
+            fsm_liveness_scan(LIVENESS_FSM, DEFAULT_FSM_MAX_WIDTH, &[("st".into(), 2)]).unwrap();
+        assert!(f[0].absorbing.is_empty());
+        assert_eq!(f[0].expected_terminal, vec![2]);
     }
 }

@@ -1202,6 +1202,15 @@ struct Btor2CheckFsmArgs {
     /// Max state-register width to treat as an FSM (wider = datapath/counter, skipped).
     #[arg(long, value_name = "BITS", default_value_t = mununu_core::adapter::fsm_scan::DEFAULT_FSM_MAX_WIDTH)]
     max_width: u32,
+    /// Also run the liveness inventory: legal encodings never reached, reachable encodings the
+    /// register can never leave (absorbing), and whether it always returns to its reset value.
+    /// Out of reset, resets pinned inactive. Report-only: the exit code is the encoding scan's.
+    #[arg(long)]
+    liveness: bool,
+    /// An intended absorbing state (`REG=VALUE`, decimal or 0x-hex), listed as expected rather
+    /// than absorbing. Repeatable; needs `--liveness`.
+    #[arg(long, value_name = "REG=VALUE", requires = "liveness")]
+    terminal: Vec<String>,
     #[command(flatten)]
     ci: CiArgs,
 }
@@ -2519,6 +2528,15 @@ struct SvCheckFsmArgs {
     /// Max state-register width to treat as an FSM (wider = datapath/counter, skipped).
     #[arg(long, value_name = "BITS", default_value_t = mununu_core::adapter::fsm_scan::DEFAULT_FSM_MAX_WIDTH)]
     max_width: u32,
+    /// Also run the liveness inventory: legal encodings never reached, reachable encodings the
+    /// register can never leave (absorbing), and whether it always returns to its reset value.
+    /// Out of reset, resets pinned inactive. Report-only: the exit code is the encoding scan's.
+    #[arg(long)]
+    liveness: bool,
+    /// An intended absorbing state (`REG=VALUE`, decimal or 0x-hex), listed as expected rather
+    /// than absorbing. Repeatable; needs `--liveness`.
+    #[arg(long, value_name = "REG=VALUE", requires = "liveness")]
+    terminal: Vec<String>,
     #[command(flatten)]
     ci: CiArgs,
 }
@@ -3554,18 +3572,34 @@ fn btor2_check_fsm(args: Btor2CheckFsmArgs) -> Result<(), String> {
             })
         })
         .collect();
-    let summary = serde_json::json!({
+    let mut summary = serde_json::json!({
         "file": args.file.display().to_string(),
         "fsm_registers_checked": findings.iter().filter(|f| f.is_checked()).count(),
         "illegal_encodings_found": findings.iter().filter(|f| f.is_finding()).count(),
         "registers": registers,
     });
+    if args.liveness {
+        let terminal = mununu_core::api::models::parse_terminal_states(&args.terminal)?;
+        let inv =
+            mununu_core::adapter::fsm_scan::fsm_liveness_scan(&content, args.max_width, &terminal)?;
+        summary["liveness"] = liveness_json(&inv);
+    }
     print_json_summary(&summary)?;
 
     // Exit code: the worst verdict across the checked registers.
     let worst = worst_verdict(findings.iter().map(|f| PropertyVerdict::as_str(f.verdict)));
     ci_gate_exit(worst, args.ci.fail_on);
     Ok(())
+}
+
+/// The liveness inventory as JSON — the same shape as the API's `FsmLivenessView`.
+fn liveness_json(inv: &[mununu_core::adapter::fsm_scan::FsmLivenessFinding]) -> serde_json::Value {
+    serde_json::to_value(
+        inv.iter()
+            .map(mununu_core::api::models::FsmLivenessView::from)
+            .collect::<Vec<_>>(),
+    )
+    .unwrap_or_default()
 }
 
 /// `mununu btor2 game` — solve the two-player controllable-reachability game and synthesize the winner's
@@ -6960,12 +6994,21 @@ fn sv_check_fsm(args: SvCheckFsmArgs) -> Result<(), String> {
             })
         })
         .collect();
-    let summary = serde_json::json!({
+    let mut summary = serde_json::json!({
         "file": file,
         "fsm_registers_checked": findings.iter().filter(|f| f.is_checked()).count(),
         "illegal_encodings_found": findings.iter().filter(|f| f.is_finding()).count(),
         "registers": registers,
     });
+    if args.liveness {
+        let terminal = mununu_core::api::models::parse_terminal_states(&args.terminal)?;
+        let inv = mununu_core::adapter::sv_verify::sv_check_fsm_liveness(
+            &read_sv_lift(&args.lift)?,
+            args.max_width,
+            &terminal,
+        )?;
+        summary["liveness"] = liveness_json(&inv);
+    }
     print_json_summary(&summary)?;
 
     let worst = worst_verdict(findings.iter().map(|f| PropertyVerdict::as_str(f.verdict)));

@@ -221,6 +221,17 @@ pub fn sv_check_fsm(
     crate::adapter::fsm_scan::fsm_encoding_scan(&btor2, max_width)
 }
 
+/// `sv check-fsm --liveness` — lift SV and run the FSM liveness inventory
+/// ([`crate::adapter::fsm_scan::fsm_liveness_scan`]).
+pub fn sv_check_fsm_liveness(
+    lift: &SvLift,
+    max_width: u32,
+    terminal: &[(String, u64)],
+) -> Result<Vec<crate::adapter::fsm_scan::FsmLivenessFinding>, String> {
+    let btor2 = lift.lift()?;
+    crate::adapter::fsm_scan::fsm_liveness_scan(&btor2, max_width, terminal)
+}
+
 /// Whether a lint finding names a state register (or its alias) or a
 /// combinational output derived from one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

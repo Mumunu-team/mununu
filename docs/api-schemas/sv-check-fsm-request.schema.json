@@ -28,6 +28,11 @@
       },
       "type": "array"
     },
+    "liveness": {
+      "default": false,
+      "description": "Also run the liveness inventory (`check-fsm --liveness`).",
+      "type": "boolean"
+    },
     "max_width": {
       "default": 8,
       "description": "Max state-register width treated as an FSM (wider = datapath/counter, skipped).",
@@ -43,6 +48,14 @@
     "source": {
       "description": "SystemVerilog primary source content.",
       "type": "string"
+    },
+    "terminal": {
+      "default": [],
+      "description": "Intended absorbing states, each `\"REG=VALUE\"` (`--terminal`).",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
     },
     "top": {
       "default": null,
