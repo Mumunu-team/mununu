@@ -45,30 +45,32 @@ pub async fn health_check() -> Json<serde_json::Value> {
     }))
 }
 
-/// List available property templates.
+/// List the property templates this deployment exposes (built-in, system, deployment packs), each
+/// with its `origin`. `?domain=` keeps that domain's templates and the universal ones; an unknown
+/// domain is a 400, not a silent full catalog.
 pub async fn templates_handler(
     query: axum::extract::Query<TemplatesQuery>,
-) -> Json<serde_json::Value> {
-    let registry = crate::adapter::templates::TemplateRegistry::builtin();
+) -> ApiResult<Json<serde_json::Value>> {
+    let registry = crate::adapter::templates::TemplateRegistry::configured(&[]).map_err(|e| {
+        ApiError::BadRequest {
+            message: format!("the template catalog: {e}"),
+            details: None,
+        }
+    })?;
 
     if let Some(domain_str) = &query.domain {
-        use crate::adapter::templates::TemplateDomain;
-        let domain = match domain_str.as_str() {
-            "rtl" => Some(TemplateDomain::Rtl),
-            "agentic" => Some(TemplateDomain::Agentic),
-            "software" => Some(TemplateDomain::Software),
-            "synthesis" => Some(TemplateDomain::Synthesis),
-            "universal" => Some(TemplateDomain::Universal),
-            _ => None,
-        };
-        if let Some(d) = domain {
-            let filtered: Vec<_> = registry.for_domain(d);
-            return Json(serde_json::to_value(filtered).unwrap_or_default());
-        }
+        let domain: crate::adapter::templates::TemplateDomain =
+            domain_str.parse().map_err(|message| ApiError::BadRequest {
+                message,
+                details: None,
+            })?;
+        let mut filtered = registry.for_domain(domain);
+        filtered.sort_by(|a, b| a.id.cmp(&b.id));
+        return Ok(Json(serde_json::to_value(filtered).unwrap_or_default()));
     }
 
     let catalog = registry.catalog();
-    Json(serde_json::to_value(catalog).unwrap_or_default())
+    Ok(Json(serde_json::to_value(catalog).unwrap_or_default()))
 }
 
 /// Query parameters for the templates endpoint.
@@ -3567,7 +3569,12 @@ fn resolve_template_ref_for_cache(
         None => return Ok((None, None)),
     };
 
-    let registry = crate::adapter::templates::TemplateRegistry::builtin();
+    let registry = crate::adapter::templates::TemplateRegistry::configured(&[]).map_err(|e| {
+        ApiError::BadRequest {
+            message: format!("the template catalog: {e}"),
+            details: None,
+        }
+    })?;
     let inst = registry
         .instantiate(tref)
         .map_err(|e| ApiError::BadRequest {

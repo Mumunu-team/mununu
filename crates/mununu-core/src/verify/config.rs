@@ -106,6 +106,18 @@ pub struct VerifyConfig {
     /// shortest path to a `!phi` state and rarely needs it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub counterexample_max_steps: Option<usize>,
+    /// `[templates]` block — the project's template packs, layered over the built-in catalog and
+    /// the deployment's packs (`files = ["packs/mine.json"]`, relative to `verify.toml`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub templates: Option<TemplatesSection>,
+}
+
+/// `[templates]` block.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct TemplatesSection {
+    /// Template pack files (`TemplateCatalog` JSON), relative to the manifest's directory.
+    #[serde(default)]
+    pub files: Vec<std::path::PathBuf>,
 }
 
 /// `[project]` block.
@@ -614,6 +626,25 @@ const VALID_STRATEGIES: &[&str] = &["direct", "renamings", "register_map"];
 const VALID_SEMANTICS: &[&str] = &["synchronous", "asynchronous", "superset"];
 
 impl VerifyConfig {
+    /// The project's template packs, resolved against the manifest's directory.
+    pub fn template_files(&self, base_dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        self.templates
+            .as_ref()
+            .map(|t| {
+                t.files
+                    .iter()
+                    .map(|f| {
+                        if f.is_absolute() {
+                            f.clone()
+                        } else {
+                            base_dir.join(f)
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Parse a TOML document.
     pub fn from_toml(s: &str) -> Result<Self, toml::de::Error> {
         toml::from_str(s)

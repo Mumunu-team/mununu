@@ -215,7 +215,12 @@ fn to_ir(
     // invalid property is fail-loud, not silently dropped. Previously, template
     // resolution failures emitted a warning but returned an incomplete property
     // list — the property was never checked, leading to false-positive verdicts.
-    let template_registry = super::templates::TemplateRegistry::builtin();
+    let template_registry =
+        super::templates::TemplateRegistry::configured(&[]).map_err(|e| AdapterError {
+            kind: AdapterErrorKind::ParseError,
+            message: format!("the template catalog: {e}"),
+            location: None,
+        })?;
     let mut properties: Vec<PropertySpec> = Vec::new();
     for def in &config.properties {
         if let Some(formula_str) = def.formula_str() {

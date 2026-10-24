@@ -41,6 +41,10 @@ struct Cli {
     /// clean and the output machine-readable.
     #[arg(long, global = true)]
     quiet: bool,
+    /// The deployment configuration (`mununu.toml`: template packs, enabled domains). Overrides
+    /// `MUNUNU_DEPLOYMENT_CONFIG`.
+    #[arg(long = "deployment-config", global = true, value_name = "FILE")]
+    deployment_config: Option<PathBuf>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -455,6 +459,10 @@ enum Commands {
         /// Server address (default: 127.0.0.1:8080)
         #[arg(long, default_value = "127.0.0.1:8080")]
         addr: String,
+        /// The deployment configuration this server exposes (`mununu.toml`); same as the global
+        /// `--deployment-config`.
+        #[arg(long = "config", value_name = "FILE")]
+        config: Option<PathBuf>,
     },
     /// BTOR2-direct analysis tools (Phase A.4 predicate-image discovery).
     Btor2 {
@@ -2599,9 +2607,14 @@ struct SvMutateArgs {
 
 #[derive(Args, Debug)]
 struct TemplatesArgs {
-    /// Filter templates by domain (rtl, agentic, software, synthesis).
+    /// Filter templates by domain (rtl, agentic, software, synthesis, universal); the universal
+    /// templates are always included.
     #[arg(long, value_name = "DOMAIN")]
     domain: Option<String>,
+    /// A project template pack (`TemplateCatalog` JSON) layered over the built-in catalog and the
+    /// deployment's packs. Repeatable.
+    #[arg(long = "templates-file", value_name = "FILE")]
+    templates_file: Vec<PathBuf>,
     /// Show details of a specific template by ID.
     #[arg(long, value_name = "ID")]
     id: Option<String>,
@@ -2720,6 +2733,10 @@ struct ContextEvalArgs {
     /// Template argument bindings (KEY=VALUE). Repeatable.
     #[arg(long = "template-arg", value_name = "KEY=VALUE", requires = "template")]
     template_args: Vec<String>,
+    /// A project template pack (`TemplateCatalog` JSON) layered over the built-in catalog and the
+    /// deployment's packs. Repeatable.
+    #[arg(long = "templates-file", value_name = "FILE")]
+    templates_files: Vec<PathBuf>,
     /// Automaton over which the formula should be evaluated.
     #[arg(long = "automaton", value_name = "NAME")]
     automaton: String,
@@ -2775,6 +2792,10 @@ struct ContextSynthesizeArgs {
     /// Template argument bindings (KEY=VALUE). Repeatable.
     #[arg(long = "template-arg", value_name = "KEY=VALUE", requires = "template")]
     template_args: Vec<String>,
+    /// A project template pack (`TemplateCatalog` JSON) layered over the built-in catalog and the
+    /// deployment's packs. Repeatable.
+    #[arg(long = "templates-file", value_name = "FILE")]
+    templates_files: Vec<PathBuf>,
     /// Automaton over which the controller should be synthesised. (Ignored by
     /// `--controller-mode gr1`, which synthesises directly from the LTL spec —
     /// pass any placeholder there.)
@@ -2891,6 +2912,18 @@ fn main() {
     }
     let cli = Cli::parse();
     init_tracing(cli.quiet);
+    let server_config = match &cli.command {
+        Commands::Server { config, .. } => config.clone(),
+        _ => None,
+    };
+    if let Some(path) = server_config.or(cli.deployment_config.clone()) {
+        let installed = mununu_core::deployment::DeploymentConfig::load(&path)
+            .and_then(mununu_core::deployment::install);
+        if let Err(err) = installed {
+            eprintln!("{err}");
+            std::process::exit(1);
+        }
+    }
     if let Err(err) = dispatch(cli.command) {
         eprintln!("{err}");
         std::process::exit(1);
@@ -3408,7 +3441,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
         Commands::Codesign { command } => handle_codesign(*command),
         Commands::Verify(args) => handle_verify(args),
         Commands::Memory { command } => handle_memory(*command),
-        Commands::Server { addr } => {
+        Commands::Server { addr, .. } => {
             use std::net::SocketAddr;
             let addr: SocketAddr = addr
                 .parse()
@@ -7883,6 +7916,7 @@ fn context_eval(args: ContextEvalArgs) -> Result<(), String> {
         formula: &args.formula,
         template: &args.template,
         template_args: &args.template_args,
+        templates_files: &args.templates_files,
         automaton: &args.automaton,
     })?;
     let formula = realized
@@ -8391,6 +8425,7 @@ fn context_synthesize(args: ContextSynthesizeArgs) -> Result<(), String> {
         formula: &args.formula,
         template: &args.template,
         template_args: &args.template_args,
+        templates_files: &args.templates_files,
         automaton: &args.automaton,
     })?;
     let realized_formula = realized
@@ -9181,7 +9216,17 @@ fn handle_library(command: LibraryCommand) -> Result<(), String> {
 fn list_templates(args: TemplatesArgs) -> Result<(), String> {
     use mununu_core::adapter::templates::{TemplateDomain, TemplateRegistry};
 
-    let registry = TemplateRegistry::builtin();
+    let registry = TemplateRegistry::configured(&args.templates_file).map_err(|e| e.to_string())?;
+    let origin_of = |t: &mununu_core::adapter::templates::PropertyTemplate| -> String {
+        t.origin
+            .as_ref()
+            .map(|o| match (&o.pack, &o.file) {
+                (Some(p), _) => format!("{} ({p})", o.layer),
+                (None, Some(f)) => format!("{} ({f})", o.layer),
+                (None, None) => o.layer.clone(),
+            })
+            .unwrap_or_else(|| "builtin".to_string())
+    };
 
     // Show details for a single template
     if let Some(id) = &args.id {
@@ -9203,6 +9248,10 @@ fn list_templates(args: TemplatesArgs) -> Result<(), String> {
                     .collect::<Vec<_>>()
                     .join(", ")
             );
+            println!("  Origin: {}", origin_of(tmpl));
+            if let Some(e) = tmpl.origin.as_ref().and_then(|o| o.entitlement.as_ref()) {
+                println!("  Entitlement: {e} (declared; not enforced)");
+            }
             if tmpl.params.is_empty() {
                 println!("  Parameters: (none)");
             } else {
@@ -9225,37 +9274,38 @@ fn list_templates(args: TemplatesArgs) -> Result<(), String> {
         return Ok(());
     }
 
-    // Filter by domain
-    let domain_filter: Option<TemplateDomain> = args.domain.as_deref().and_then(|d| match d {
-        "rtl" => Some(TemplateDomain::Rtl),
-        "agentic" => Some(TemplateDomain::Agentic),
-        "software" => Some(TemplateDomain::Software),
-        "synthesis" => Some(TemplateDomain::Synthesis),
-        "universal" => Some(TemplateDomain::Universal),
-        _ => None,
-    });
-
-    let templates = if let Some(domain) = domain_filter {
-        registry.for_domain(domain)
-    } else {
-        registry.for_domain(TemplateDomain::Universal) // universal returns all
+    // Every template, or one domain's plus the universal ones; the JSON follows the same filter.
+    let domain_filter: Option<TemplateDomain> =
+        args.domain.as_deref().map(str::parse).transpose()?;
+    let mut templates = match domain_filter {
+        Some(domain) => registry.for_domain(domain),
+        None => registry
+            .catalog()
+            .templates
+            .iter()
+            .filter_map(|t| registry.get(&t.id))
+            .collect(),
     };
+    templates.sort_by_key(|t| t.id.clone());
 
     if args.json {
-        let catalog = registry.catalog();
-        let json = serde_json::to_string_pretty(&catalog).map_err(|e| e.to_string())?;
+        let json = serde_json::to_string_pretty(&templates).map_err(|e| e.to_string())?;
         println!("{json}");
     } else {
-        let mut sorted: Vec<_> = templates;
-        sorted.sort_by_key(|t| t.id.clone());
-        for tmpl in &sorted {
+        for tmpl in &templates {
             let params = if tmpl.params.is_empty() {
                 String::new()
             } else {
                 let names: Vec<_> = tmpl.params.iter().map(|p| format!("${}", p.name)).collect();
                 format!("({})", names.join(", "))
             };
-            println!("  {}{:<24} {}", tmpl.id, params, tmpl.description);
+            println!(
+                "  {}{:<24} {}  [{}]",
+                tmpl.id,
+                params,
+                tmpl.description,
+                origin_of(tmpl)
+            );
         }
     }
 
@@ -9270,6 +9320,7 @@ fn resolve_formula_name(
     formula: &Option<String>,
     template: &Option<String>,
     template_args: &[String],
+    templates_files: &[PathBuf],
     automaton: &str,
     sidecar_docs: &mut Vec<ContextDoc>,
 ) -> Result<String, String> {
@@ -9290,7 +9341,8 @@ fn resolve_formula_name(
         args_map.insert(key.to_string(), value.to_string());
     }
 
-    let registry = mununu_core::adapter::templates::TemplateRegistry::builtin();
+    let registry = mununu_core::adapter::templates::TemplateRegistry::configured(templates_files)
+        .map_err(|e| e.to_string())?;
     let tref = mununu_core::adapter::templates::TemplateRef {
         template: template_id.clone(),
         args: args_map,
@@ -9711,6 +9763,7 @@ mod gr1_flag_guard_tests {
             formula: None,
             template: None,
             template_args: Vec::new(),
+            templates_files: Vec::new(),
             automaton: "placeholder".into(),
             no_partitions: false,
             minimize: false,
@@ -9755,6 +9808,7 @@ mod gr1_flag_guard_tests {
             formula: None,
             template: None,
             template_args: Vec::new(),
+            templates_files: Vec::new(),
             automaton: "placeholder".into(),
             no_partitions: false,
             minimize: false,

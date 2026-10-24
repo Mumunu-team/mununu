@@ -51,6 +51,38 @@ pub enum TemplateDomain {
     Universal,
 }
 
+impl std::str::FromStr for TemplateDomain {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "rtl" => Ok(Self::Rtl),
+            "agentic" => Ok(Self::Agentic),
+            "software" => Ok(Self::Software),
+            "synthesis" => Ok(Self::Synthesis),
+            "universal" => Ok(Self::Universal),
+            other => Err(format!(
+                "unknown template domain `{other}` (rtl, agentic, software, synthesis, universal)"
+            )),
+        }
+    }
+}
+
+/// Where a template in the registry came from (the last layer that defined its ID).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TemplateOrigin {
+    /// `builtin`, `system`, `deployment` or `project`.
+    pub layer: String,
+    /// The pack's `pack_id`, when the file declares one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pack: Option<String>,
+    /// The file the template was read from (`None` for the built-in catalog).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    /// The pack's declared entitlement. Reported, not enforced (reserved for signed packs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entitlement: Option<String>,
+}
+
 /// Type constraint for a template parameter.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type")]
@@ -120,6 +152,9 @@ pub struct PropertyTemplate {
     /// Tags for search/filtering.
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Set by the registry when it loads the template; ignored in a catalog file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<TemplateOrigin>,
 }
 
 fn default_standalone() -> String {
@@ -139,12 +174,40 @@ pub struct TemplateRef {
     pub args: HashMap<String, String>,
 }
 
-/// The full template catalog (deserialized from JSON).
+/// The full template catalog (deserialized from JSON) — the built-in one, or a template pack.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TemplateCatalog {
     pub version: String,
+    /// A pack's identifier (`rtl-safety`, …); absent on the built-in catalog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pack_id: Option<String>,
+    /// The domains a pack targets (informative; each template still lists its own).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub domains: Vec<TemplateDomain>,
+    /// The entitlement a pack requires. Parsed and reported, NOT enforced yet: signed packs and
+    /// license keys are later work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entitlement: Option<String>,
     pub templates: Vec<PropertyTemplate>,
 }
+
+/// The layers a registry is built from, lowest precedence first; a later layer overrides an
+/// earlier one template by template (by ID).
+#[derive(Debug, Clone, Default)]
+pub struct TemplateSources {
+    /// A directory of system-wide packs (`*.json`, read in name order).
+    pub system_dir: Option<std::path::PathBuf>,
+    /// The deployment's packs (`mununu.toml` `[templates] files`).
+    pub deployment: Vec<std::path::PathBuf>,
+    /// The project's packs (`verify.toml` `[templates] files`, `--templates-file`).
+    pub project: Vec<std::path::PathBuf>,
+    /// The domains to expose (`None` = all). A template is kept when one of its domains is listed
+    /// or it is `universal`.
+    pub enabled_domains: Option<Vec<TemplateDomain>>,
+}
+
+/// The system-wide pack directory read by [`TemplateRegistry::configured`].
+pub const SYSTEM_TEMPLATE_DIR: &str = "/etc/mununu/templates.d";
 
 /// Result of template instantiation — ready to become a `PropertySpec`.
 #[derive(Debug, Clone)]
@@ -204,13 +267,94 @@ impl TemplateRegistry {
 
     /// Load a catalog from a JSON string.
     pub fn from_json(json: &str) -> Result<Self, TemplateError> {
-        let catalog: TemplateCatalog = serde_json::from_str(json)
-            .map_err(|e| TemplateError::CatalogParseError(e.to_string()))?;
+        Self::from_json_in_layer(json, "builtin", None)
+    }
+
+    fn from_json_in_layer(
+        json: &str,
+        layer: &str,
+        file: Option<&std::path::Path>,
+    ) -> Result<Self, TemplateError> {
+        let catalog: TemplateCatalog = serde_json::from_str(json).map_err(|e| {
+            TemplateError::CatalogParseError(match file {
+                Some(f) => format!("{}: {e}", f.display()),
+                None => e.to_string(),
+            })
+        })?;
         let mut templates = HashMap::new();
-        for t in catalog.templates {
+        for mut t in catalog.templates {
+            t.origin = Some(TemplateOrigin {
+                layer: layer.to_string(),
+                pack: catalog.pack_id.clone(),
+                file: file.map(|f| f.display().to_string()),
+                entitlement: catalog.entitlement.clone(),
+            });
             templates.insert(t.id.clone(), t);
         }
         Ok(TemplateRegistry { templates })
+    }
+
+    /// Build a registry from its layers: built-in, then the system directory, the deployment's
+    /// packs and the project's packs, each overriding the previous by template ID; then keep only
+    /// the enabled domains. A pack that does not read or parse is an error naming the file.
+    pub fn load(sources: &TemplateSources) -> Result<Self, TemplateError> {
+        let mut reg = Self::builtin();
+        let read = |path: &std::path::Path, layer: &str| -> Result<Self, TemplateError> {
+            let json = std::fs::read_to_string(path).map_err(|e| {
+                TemplateError::CatalogParseError(format!("{}: {e}", path.display()))
+            })?;
+            Self::from_json_in_layer(&json, layer, Some(path))
+        };
+        if let Some(dir) = &sources.system_dir
+            && dir.is_dir()
+        {
+            let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+                .map_err(|e| TemplateError::CatalogParseError(format!("{}: {e}", dir.display())))?
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.extension().is_some_and(|x| x == "json"))
+                .collect();
+            files.sort();
+            for f in files {
+                reg.merge(read(&f, "system")?);
+            }
+        }
+        for f in &sources.deployment {
+            reg.merge(read(f, "deployment")?);
+        }
+        for f in &sources.project {
+            reg.merge(read(f, "project")?);
+        }
+        if let Some(enabled) = &sources.enabled_domains {
+            reg.templates.retain(|_, t| {
+                t.domains
+                    .iter()
+                    .any(|d| *d == TemplateDomain::Universal || enabled.contains(d))
+            });
+        }
+        Ok(reg)
+    }
+
+    /// The registry this process should use: the built-in catalog, the system pack directory, the
+    /// deployment configuration's packs and domains ([`crate::deployment::current`]) and the
+    /// project's `project_files`.
+    pub fn configured(project_files: &[std::path::PathBuf]) -> Result<Self, TemplateError> {
+        let deployment = crate::deployment::current().map_err(TemplateError::CatalogParseError)?;
+        let enabled_domains = deployment
+            .enabled_domains
+            .as_ref()
+            .map(|ds| {
+                ds.iter()
+                    .map(|d| d.parse::<TemplateDomain>())
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()
+            .map_err(TemplateError::CatalogParseError)?;
+        Self::load(&TemplateSources {
+            system_dir: Some(std::path::PathBuf::from(SYSTEM_TEMPLATE_DIR)),
+            deployment: deployment.template_files,
+            project: project_files.to_vec(),
+            enabled_domains,
+        })
     }
 
     /// Merge another registry's templates into this one (other overrides on conflict).
@@ -233,11 +377,16 @@ impl TemplateRegistry {
         self.templates.get(id)
     }
 
-    /// Return the full catalog (for API serialization).
+    /// Return the full catalog (for API serialization), templates sorted by ID.
     pub fn catalog(&self) -> TemplateCatalog {
+        let mut templates: Vec<PropertyTemplate> = self.templates.values().cloned().collect();
+        templates.sort_by(|a, b| a.id.cmp(&b.id));
         TemplateCatalog {
             version: "1.0".to_string(),
-            templates: self.templates.values().cloned().collect(),
+            pack_id: None,
+            domains: Vec::new(),
+            entitlement: None,
+            templates,
         }
     }
 
@@ -277,13 +426,19 @@ impl TemplateRegistry {
         let kind = parse_property_kind(&template.kind);
         let role = parse_property_role(&template.role);
 
-        // Generate a descriptive property name
+        // A descriptive property name, in the template's parameter order (deterministic: a
+        // `HashMap` walk gave a different name from run to run for two or more parameters).
         let name = if effective_args.is_empty() {
             template.id.clone()
         } else {
-            let args_suffix: Vec<String> = effective_args
+            let args_suffix: Vec<String> = template
+                .params
                 .iter()
-                .map(|(k, v)| format!("{k}_{v}"))
+                .filter_map(|p| {
+                    effective_args
+                        .get(&p.name)
+                        .map(|v| format!("{}_{v}", p.name))
+                })
                 .collect();
             format!("{}_{}", template.id, args_suffix.join("_"))
         };
@@ -724,5 +879,120 @@ mod tests {
         assert!(result.formula.contains("WriteIssued"));
         assert!(result.formula.contains("WritePersisted"));
         assert_eq!(result.kind, PropertyKind::Safety);
+    }
+}
+
+#[cfg(test)]
+mod layer_tests {
+    use super::*;
+
+    fn pack(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
+        let p = dir.join(name);
+        std::fs::write(&p, body).unwrap();
+        p
+    }
+
+    /// A later layer overrides an earlier one by template ID, every template reports where it came
+    /// from, and `enabled_domains` keeps one domain plus the universal templates.
+    #[test]
+    fn layers_override_by_id_report_their_origin_and_filter_by_domain() {
+        let dir = tempfile::tempdir().unwrap();
+        let tmpl = |id: &str, domain: &str, f: &str| {
+            format!(
+                r#"{{"id":"{id}","display_name":"{id}","description":"d","kind":"safety","domains":["{domain}"],"formula_pattern":"{f}"}}"#
+            )
+        };
+        let deployment = pack(
+            dir.path(),
+            "deploy.json",
+            &format!(
+                r#"{{"version":"1","pack_id":"acme-rtl","entitlement":"acme.rtl","templates":[{},{}]}}"#,
+                tmpl("never", "universal", "deployment-never"),
+                tmpl("acme_rtl_only", "rtl", "true")
+            ),
+        );
+        let project = pack(
+            dir.path(),
+            "project.json",
+            &format!(
+                r#"{{"version":"1","templates":[{}]}}"#,
+                tmpl("acme_agentic_only", "agentic", "true")
+            ),
+        );
+        let reg = TemplateRegistry::load(&TemplateSources {
+            system_dir: None,
+            deployment: vec![deployment.clone()],
+            project: vec![project],
+            enabled_domains: Some(vec![TemplateDomain::Rtl]),
+        })
+        .unwrap();
+        let never = reg.get("never").unwrap();
+        assert_eq!(never.formula_pattern, "deployment-never");
+        let origin = never.origin.as_ref().unwrap();
+        assert_eq!(origin.layer, "deployment");
+        assert_eq!(origin.pack.as_deref(), Some("acme-rtl"));
+        assert_eq!(origin.entitlement.as_deref(), Some("acme.rtl"));
+        assert!(reg.get("acme_rtl_only").is_some());
+        assert!(
+            reg.get("acme_agentic_only").is_none(),
+            "an agentic-only template is outside the enabled domains"
+        );
+        assert_eq!(
+            reg.get("reachable").unwrap().origin.as_ref().unwrap().layer,
+            "builtin"
+        );
+    }
+
+    #[test]
+    fn a_pack_that_does_not_parse_is_an_error_naming_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let bad = pack(dir.path(), "bad.json", "{ not json");
+        let err = TemplateRegistry::load(&TemplateSources {
+            project: vec![bad],
+            ..Default::default()
+        })
+        .err()
+        .map(|e| e.to_string())
+        .unwrap_or_default();
+        assert!(err.contains("bad.json"), "{err}");
+    }
+
+    /// The instance name follows the template's parameter order (it used to follow a `HashMap`).
+    #[test]
+    fn instance_names_are_deterministic() {
+        let reg = TemplateRegistry::builtin();
+        let t = reg
+            .catalog()
+            .templates
+            .into_iter()
+            .find(|t| t.params.len() >= 2)
+            .expect("a two-parameter built-in");
+        let args: HashMap<String, String> = t
+            .params
+            .iter()
+            .map(|p| (p.name.clone(), format!("v_{}", p.name.to_lowercase())))
+            .collect();
+        let expected = format!(
+            "{}_{}",
+            t.id,
+            t.params
+                .iter()
+                .map(|p| format!("{}_v_{}", p.name, p.name.to_lowercase()))
+                .collect::<Vec<_>>()
+                .join("_")
+        );
+        for _ in 0..8 {
+            let tref = TemplateRef {
+                template: t.id.clone(),
+                args: args.clone(),
+            };
+            assert_eq!(reg.instantiate(&tref).unwrap().name, expected);
+        }
+    }
+
+    #[test]
+    fn domains_parse_and_unknown_ones_are_refused() {
+        assert_eq!("RTL".parse::<TemplateDomain>(), Ok(TemplateDomain::Rtl));
+        assert!("hardware".parse::<TemplateDomain>().is_err());
     }
 }

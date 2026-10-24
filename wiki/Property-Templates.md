@@ -275,13 +275,50 @@ Templates include domain-specific hints that appear in the UI parameter inputs:
 | `never($BAD)` | overflow, error_state | Unauthorized | NullState |
 | `bounded($OVERFLOW)` | fill_5 | — | count_max |
 
-## Adding Custom Templates
+## Template packs and the deployment configuration
 
-Templates are defined in `crates/mununu-core/src/adapter/templates/builtin_templates.json`. To add a new template:
+> Source of truth: [`TemplateRegistry::load`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/adapter/templates/mod.rs) + [`DeploymentConfig`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/deployment.rs) — surface: CLI+API
+
+The catalog a run sees is built in layers, each overriding the previous by template `id`:
+
+| layer | where | how |
+|---|---|---|
+| built-in | compiled into the binary | always |
+| system | `/etc/mununu/templates.d/*.json` (name order) | when the directory exists |
+| deployment | `mununu.toml` `[templates] files` | `--deployment-config FILE` (global), `mununu server --config FILE`, or `MUNUNU_DEPLOYMENT_CONFIG` |
+| project | `verify.toml` `[templates] files`; `--templates-file FILE` on `templates`, `context eval`, `context synth` | per run |
+
+A pack is a catalog file with optional pack metadata:
+
+```json
+{
+  "version": "1",
+  "pack_id": "acme-rtl-safety",
+  "domains": ["rtl"],
+  "entitlement": "acme.rtl.safety",
+  "templates": [ { "id": "acme_one_hot", "display_name": "…", "description": "…", "kind": "safety",
+                   "domains": ["rtl"], "params": [], "formula_pattern": "…" } ]
+}
+```
+
+The deployment configuration can also restrict what an installation exposes:
+
+```toml
+# mununu.toml
+enabled_domains = ["rtl"]          # keep rtl templates plus the universal ones
+[templates]
+files = ["packs/acme-rtl-safety.json"]   # relative to this file
+```
+
+`mununu templates` and `GET /api/v1/templates` show each template's origin (`builtin`, `system (…)`, `deployment (acme-rtl-safety)`, `project (…)`). `entitlement` is reported, not enforced: signed packs and license keys are later work, and the `[licensing]` table in `mununu.toml` is reserved for them. A pack that does not read or parse, an unknown key in `mununu.toml` and an unknown domain name are errors naming the file or the value.
+
+## Adding Built-in Templates
+
+Built-in templates are defined in `crates/mununu-core/src/adapter/templates/builtin_templates.json`. To add one:
 
 1. Add an entry to the `templates` array with `id`, `display_name`, `description`, `kind`, `role`, `domains`, `params`, `formula_pattern`, `domain_hints`, and `tags`.
 2. Ensure the `formula_pattern` uses `${PARAM_NAME}` placeholders matching the `params` entries.
-3. The template is automatically available in CLI, API, UI, and spec files after rebuild.
+3. The template is automatically available in CLI, API, UI, and spec files after rebuild. A template that belongs to one organisation or vertical goes in a pack instead.
 
 ### Parameter Types
 
@@ -295,6 +332,6 @@ Templates are defined in `crates/mununu-core/src/adapter/templates/builtin_templ
 
 ## Architecture
 
-Templates are compiled into the binary via `include_str!` from the JSON catalog. The `TemplateRegistry` provides lookup, validation, and instantiation. Template resolution happens at the adapter layer (before the emitter/evaluator), producing standard `PropertyFormula::MuCalculus(String)` values.
+The built-in templates are compiled into the binary via `include_str!` from the JSON catalog; packs are layered over them at run time (see above). The `TemplateRegistry` provides lookup, validation, and instantiation; instance names follow the template's parameter order, so they are stable from run to run. Template resolution happens at the adapter layer (before the emitter/evaluator), producing standard `PropertyFormula::MuCalculus(String)` values.
 
 See also: [CLI Reference](CLI-Reference), [API Reference](API-Reference)

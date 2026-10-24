@@ -240,7 +240,11 @@ pub fn verify_project(config: &VerifyConfig, base_dir: &Path) -> Result<VerifyRe
 
     // 5. Resolve properties — turn each `template` into a concrete
     // formula via the builtin registry; pass `formula` through as-is.
-    let template_registry = TemplateRegistry::builtin();
+    let template_registry = TemplateRegistry::configured(&config.template_files(base_dir))
+        .map_err(|e| VerifyError::TemplateInstantiationFailed {
+            property: "(template catalog)".to_string(),
+            message: e.to_string(),
+        })?;
     let mut resolved_properties: Vec<ResolvedProperty> =
         Vec::with_capacity(config.properties.len());
     let mut property_formula_sources: Vec<PropertyFormulaSource> = Vec::new();
@@ -1497,7 +1501,10 @@ impl ClusterCoiInputs {
 /// pass never aborts the verify run. Returns an empty vec when the
 /// manifest declares no properties.
 fn harvest_property_seeds(config: &VerifyConfig) -> Vec<(String, Vec<String>)> {
-    let registry = TemplateRegistry::builtin();
+    // Best-effort (see above): the configured catalog without the project's packs, whose paths
+    // need the manifest directory this pass does not have; a seed it misses only widens a cone.
+    let registry =
+        TemplateRegistry::configured(&[]).unwrap_or_else(|_| TemplateRegistry::builtin());
     config
         .properties
         .iter()
