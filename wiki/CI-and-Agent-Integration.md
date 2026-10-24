@@ -12,7 +12,7 @@ Every verdict is one of `holds` / `violated` / `unknown` / `skipped`; a definite
 
 > **Source of truth:** [`FailOn` / `ci_exit_code` / `worst_verdict`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-cli/src/main.rs) — surface: CLI.
 
-Every verify verb — `btor2 verify` / `verify-liveness` / `verify-recoverability`, the SV-direct `sv verify` / `verify-liveness` / `verify-recoverability`, `sv verify-auto`, the structural checks `sv lint` / `check-fsm` / `cdc-lint`, and `context eval` (since 0.5: `holds` iff every initial state satisfies the formula, `--sanity` findings count as `unknown`) — maps its verdict to a **process exit code**, so a workflow step fails on a real violation with no JSON parsing.
+Every verify verb — `btor2 verify` / `verify-liveness` / `verify-recoverability`, the SV-direct `sv verify-bad` / `verify-liveness` / `verify-recoverability`, `sv verify-auto`, the structural checks `sv lint` / `check-fsm` / `cdc-lint`, and `context eval` (since 0.5: `holds` iff every initial state satisfies the formula, `--sanity` findings count as `unknown`) — maps its verdict to a **process exit code**, so a workflow step fails on a real violation with no JSON parsing.
 
 | Exit code | Meaning |
 |-----------|---------|
@@ -121,7 +121,7 @@ POST /api/v1/sv/verify-recoverability
 // → { "outcome": "holds"|"violated"|"unknown", "property": "AG EF (state_q == 0)" }
 ```
 
-`POST /api/v1/sv/verify` (safety of the module's assertions) and `/api/v1/sv/verify-liveness` (`{request, grant}`) round out the trio. All return the canonical `outcome`, so the agent gates on `outcome === "violated"`. Every `sv` route takes the design as one `lift` object (`source`, `additional_sources`, `top`, `frontend`, `params`, `lift_overrides`, `cutpoints`, `merge_clock_domains`), the API peer of the CLI's shared lift flags.
+`POST /api/v1/sv/verify-bad` (safety of the module's assertions) and `/api/v1/sv/verify-liveness` (`{request, grant}`) round out the trio. All return the canonical `outcome`, so the agent gates on `outcome === "violated"`. Every `sv` route takes the design as one `lift` object (`source`, `additional_sources`, `top`, `frontend`, `params`, `lift_overrides`, `cutpoints`, `merge_clock_domains`), the API peer of the CLI's shared lift flags.
 
 **No property to name?** `POST /api/v1/sv/check-fsm { "lift": { "source": "<sv>", "frontend": "sv2v" } }` lifts the module and auto-scans every FSM register for a reachable illegal encoding, returning `{ fsm_registers_checked, illegal_encodings_found, registers: [{ register, legal_encodings, outcome, illegal_encoding_reachable }] }` — the agent gates on `illegal_encodings_found > 0`. The BTOR2-direct peer is `POST /api/v1/btor2/check-fsm { "content": "<btor2>" }`.
 

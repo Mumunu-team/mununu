@@ -274,7 +274,7 @@ from raw SystemVerilog) and a BTOR2-direct form (`btor2 …`).
 
 | Capability | CLI | API | UI |
 |---|---|---|---|
-| SV / BTOR2 safety (`AG ¬bad`, portfolio) | `sv verify`, `btor2 verify` | `POST /sv/verify`, `/btor2/verify` | ✅ |
+| SV / BTOR2 safety (`AG ¬bad`, portfolio) | `sv verify-bad`, `btor2 verify` | `POST /sv/verify-bad`, `/btor2/verify` | ✅ |
 | **No-sidecar auto SVA verify** | `sv verify-auto` | `POST /sv/verify-auto` | ✅ |
 | Response-liveness `AG(req → AF grant)` | `sv verify-liveness[-all]`, `btor2 …` | `POST /{sv,btor2}/verify-liveness[-all]` | ✅ |
 | **Recoverability `AG EF good`** (branching) | `sv verify-recoverability`, `btor2 …` | `POST /{sv,btor2}/verify-recoverability` | ✅ |
@@ -282,7 +282,7 @@ from raw SystemVerilog) and a BTOR2-direct form (`btor2 …`).
 | μ-calculus eval / CEGAR | `context eval`, `{sv,btor2} cegar` | `POST /context/verify`, `/{sv,btor2}/cegar` | ✅ |
 | Controller synthesis (GR(1) / parity) | `context synth` | `POST /context/synthesize`, `/synth/gr1` | ✅ |
 | N-source project verify (`verify.toml`) | `verify` | `POST /verify` | ✅ |
-| KMTS safety cube (`--engine cube\|ic3`) | `btor2 verify-safety` | — (CLI-only) | — |
+| KMTS safety cube (`--engine cube\|ic3`) | `btor2 verify --engine cube\|ic3` | `POST /btor2/verify` with `engine: "cube"` (ic3 CLI-only) | — |
 
 Full route list: [`api/server.rs`](crates/mununu-core/src/api/server.rs) ·
 [`api/handlers.rs`](crates/mununu-core/src/api/handlers.rs) ·

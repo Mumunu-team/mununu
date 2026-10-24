@@ -168,7 +168,7 @@ Four CLTS-aligned transformations applied at read time (per [`adapter::btor2::bi
 
 ### Yosys SVA support
 
-**Scope: this is the yosys `read_verilog` lift** (`btor2 from-sv`, plain `sv verify`), not mununu's SVA front end. Temporal SVA — `assert property`, `|->` / `|=>`, `##k`, `$past`, `$stable`, … — is verified by `sv verify-auto`, which elaborates the design with slang and translates the assertions itself; its supported fragment is listed in [`docs/verifying-rtl.md` §3](https://github.com/Mumunu-team/mununu/blob/main/docs/verifying-rtl.md#3-coverage-is-a-fragment-and-verdicts-are-honest). Yosys's `read_verilog -formal -sv` is a synthesis frontend, not a full SystemVerilog assertion frontend. It accepts:
+**Scope: this is the yosys `read_verilog` lift** (`btor2 from-sv`, plain `sv verify-bad`), not mununu's SVA front end. Temporal SVA — `assert property`, `|->` / `|=>`, `##k`, `$past`, `$stable`, … — is verified by `sv verify-auto`, which elaborates the design with slang and translates the assertions itself; its supported fragment is listed in [`docs/verifying-rtl.md` §3](https://github.com/Mumunu-team/mununu/blob/main/docs/verifying-rtl.md#3-coverage-is-a-fragment-and-verdicts-are-honest). Yosys's `read_verilog -formal -sv` is a synthesis frontend, not a full SystemVerilog assertion frontend. It accepts:
 
 - Immediate assertions inside `always @(posedge clk)`: `assert (boolean_expr);`
 - Immediate assumes / covers: `assume (...)`, `cover (...)`

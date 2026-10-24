@@ -1000,6 +1000,11 @@ pub struct Btor2VerifyRequest {
     /// `faults` is a 400.
     #[serde(default)]
     pub target: Option<String>,
+    /// Safety engine: `"portfolio"` (default, the bit-level reachability portfolio) or `"cube"`
+    /// (the KMTS 3-valued predicate cube, the CLI's `--engine cube`). `cube` takes none of
+    /// `faults`, `target`, `witness`. (The CLI's experimental `--engine ic3` has no API surface.)
+    #[serde(default)]
+    pub engine: Option<String>,
     /// On a `violated` verdict, re-derive the shallowest reset → `bad` path with native BMC and
     /// return it as `trace` (the CLI's `--witness`). Default `false`.
     #[serde(default)]
@@ -1038,6 +1043,9 @@ pub struct Btor2VerifyResponse {
     pub unreachable_by: Vec<String>,
     /// `true` when two sound engines disagree — a soundness alarm, not a guess.
     pub contradiction: bool,
+    /// The single engine's own diagnosis under `engine: "cube"`, when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
     /// The fault posture the design was decided under (`faults`), as one label; absent without one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fault: Option<String>,

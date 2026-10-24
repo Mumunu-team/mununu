@@ -177,7 +177,7 @@ fn create_router() -> Router {
         // SV-direct verbs — lift SV (sv2v + Yosys) then decide a property in one call
         // (safety / response-liveness / recoverability). Surface peers of the CLI
         // `sv verify` / `verify-liveness` / `verify-recoverability`.
-        .route("/api/v1/sv/verify", post(handlers::sv_verify_handler))
+        .route("/api/v1/sv/verify-bad", post(handlers::sv_verify_handler))
         .route(
             "/api/v1/sv/verify-liveness",
             post(handlers::sv_verify_liveness_handler),

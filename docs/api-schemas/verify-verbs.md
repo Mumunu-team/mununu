@@ -8,7 +8,7 @@ The BTOR2-direct property verbs (`verify`, `verify-liveness`, `verify-liveness-a
 
 | Verb pair | Property class | Response type | Detail axis |
 |-----------|---------------|---------------|-------------|
-| `btor2 verify` / `sv verify` | Safety (`bad` unreachable) | `Btor2VerifyResponse` | Per-engine breakdown, soundness-alarm flag |
+| `btor2 verify` / `sv verify-bad` | Safety (`bad` unreachable) | `Btor2VerifyResponse` | Per-engine breakdown, soundness-alarm flag |
 | `btor2 verify-liveness` / `sv verify-liveness` | Response `AG(a → AF b)` | `Btor2VerifyLivenessResponse` | Reduced-property echo, deciding engines |
 | `btor2 verify-liveness-all` / `sv verify-liveness-all` | Conjunctive `⋀ᵢ AG(aᵢ → AF bᵢ)` | `Btor2VerifyLivenessResponse` | Same as `-liveness` — one merged verdict |
 | `btor2 verify-liveness-under-fairness` (mununu#477) | Response under fairness `(⋀ⱼ GF fairⱼ) → AG(a → AF b)` | `Btor2VerifyLivenessResponse` | Same shape as `-liveness`; empty `fairness` reduces to `-liveness` exactly |
@@ -17,7 +17,7 @@ The BTOR2-direct property verbs (`verify`, `verify-liveness`, `verify-liveness-a
 
 The SV wrappers exist so downstream consumers do not need the intermediate `sv emit-btor2` step. They accept SystemVerilog on the wire, lift it via `sv2v` + Yosys (or `read_slang` with `lift.frontend: "slang"` — the reliable path for modern SV per `docs/verifying-rtl.md`), and return the sibling BTOR2 response shape.
 
-## `POST /btor2/verify` (and `POST /sv/verify`) — safety portfolio
+## `POST /btor2/verify` (and `POST /sv/verify-bad`) — safety portfolio
 
 Schema: [`btor2-verify-response.schema.json`](btor2-verify-response.schema.json)
 

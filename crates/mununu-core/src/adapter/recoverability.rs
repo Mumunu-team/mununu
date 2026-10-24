@@ -3411,6 +3411,57 @@ fn atomic_expr_string(expr: &PredicateExpr) -> Option<String> {
         PredicateExpr::And(..) | PredicateExpr::Or(..) | PredicateExpr::Not(..) => None,
     }
 }
+/// The single-engine safety routes of `btor2 verify --engine` (the default is the bit-level
+/// reachability portfolio, decided elsewhere).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SafetyEngine {
+    /// The KMTS 3-valued predicate cube with emergent-K discovery ([`verify_safety_scalable`]).
+    Cube,
+    /// The experimental IC3ia predicate-abstraction frame ladder; abstains where refinement
+    /// stalls, and without cvc5.
+    Ic3,
+}
+
+impl SafetyEngine {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SafetyEngine::Cube => "cube",
+            SafetyEngine::Ic3 => "ic3",
+        }
+    }
+}
+
+/// Decide `AG !bad` with one [`SafetyEngine`]; the detail is the engine's own diagnosis (the
+/// abstain reason, or the invariant / counterexample size) when it has one.
+pub fn verify_safety_with_engine(
+    btor2_content: &str,
+    engine: SafetyEngine,
+) -> Result<(PropertyVerdict, Option<String>), String> {
+    match engine {
+        SafetyEngine::Cube => Ok((verify_safety_scalable(btor2_content)?, None)),
+        SafetyEngine::Ic3 => {
+            use crate::adapter::btor2::abs_safety::{AbsVerdict, verify_safety_ic3};
+            let file = crate::adapter::btor2::parser::parse(btor2_content)
+                .map_err(|e| format!("verify (ic3): parsing BTOR2: {}", e.message))?;
+            // Budgets mirror the abs_safety unit tests (32 frames, 8 refinements), with a longer
+            // per-query timeout for real inputs.
+            let av = verify_safety_ic3(&file, 32, 8, 10_000);
+            let detail = match &av {
+                AbsVerdict::Safe { predicates } => {
+                    format!("inductive invariant over {predicates} predicates")
+                }
+                AbsVerdict::Unsafe { depth } => format!("counterexample at depth {depth}"),
+                AbsVerdict::Unknown { reason } => reason.clone(),
+            };
+            let verdict = match av {
+                AbsVerdict::Safe { .. } => PropertyVerdict::Holds,
+                AbsVerdict::Unsafe { .. } => PropertyVerdict::Violated,
+                AbsVerdict::Unknown { .. } => PropertyVerdict::Unknown,
+            };
+            Ok((verdict, Some(detail)))
+        }
+    }
+}
 
 pub fn verify_safety_scalable(btor2_content: &str) -> Result<PropertyVerdict, String> {
     let file = crate::adapter::btor2::parser::parse(btor2_content)

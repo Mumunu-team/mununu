@@ -39,7 +39,7 @@ A 3-bit saturating counter with an `assume`-based environment constraint ("rst i
 
 ## Yosys SVA support — what the built-in parser actually accepts
 
-**Scope: the yosys `read_verilog` lift used by this corpus** (`btor2 from-sv`, plain `sv verify`). Temporal SVA is not lost to mununu — `sv verify-auto` elaborates the design with slang and translates `assert property` itself; its fragment is listed in [`docs/verifying-rtl.md` §3](../../docs/verifying-rtl.md#3-coverage-is-a-fragment-and-verdicts-are-honest). What follows is what the **yosys** frontend accepts. Yosys 0.59's `read_verilog -formal -sv` is a synthesis frontend, not a full SystemVerilog assertion frontend. It accepts:
+**Scope: the yosys `read_verilog` lift used by this corpus** (`btor2 from-sv`, plain `sv verify-bad`). Temporal SVA is not lost to mununu — `sv verify-auto` elaborates the design with slang and translates `assert property` itself; its fragment is listed in [`docs/verifying-rtl.md` §3](../../docs/verifying-rtl.md#3-coverage-is-a-fragment-and-verdicts-are-honest). What follows is what the **yosys** frontend accepts. Yosys 0.59's `read_verilog -formal -sv` is a synthesis frontend, not a full SystemVerilog assertion frontend. It accepts:
 
 - **Immediate assertions** inside `always @(posedge clk)`: `assert (boolean_expr);`
 - **Immediate assumes / covers**: `assume (...)`, `cover (...)`

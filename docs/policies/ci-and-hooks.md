@@ -33,7 +33,7 @@ make e2e                                                  # the whole sweep, one
 
 > Source of truth: [`adapter::slang::locate_slang`](../../crates/mununu-core/src/adapter/slang/mod.rs) — surface: CLI+API
 
-The dev host commonly has sv2v + yosys but not slang. With slang absent, `sv verify-auto` / `sv extract-sva` cannot run, so a "green" host run has skipped the real path — and the sv2v-only lift is worse than useless for SVA: sv2v 0.0.13 silently drops `assert property` (concurrent and immediate), so the BTOR2 has 0 `bad` nodes and the plain `sv verify` verb reports a vacuous `holds`. (2026-07-13: an sv-yosys safety-cube wiring looked like a spurious `holds`; the whole chain was the sv2v drop, invisible without slang; root-caused with `MUNUNU_KEEP_YOSYS_TMP=1` — `preprocessed.sv` had 0 asserts.) A bare-host `holds` on SVA is presumed vacuous until reproduced under `mununu-sva`.
+The dev host commonly has sv2v + yosys but not slang. With slang absent, `sv verify-auto` / `sv extract-sva` cannot run, so a "green" host run has skipped the real path — and the sv2v-only lift is worse than useless for SVA: sv2v 0.0.13 silently drops `assert property` (concurrent and immediate), so the BTOR2 has 0 `bad` nodes and the plain `sv verify-bad` verb reports a vacuous `holds`. (2026-07-13: an sv-yosys safety-cube wiring looked like a spurious `holds`; the whole chain was the sv2v drop, invisible without slang; root-caused with `MUNUNU_KEEP_YOSYS_TMP=1` — `preprocessed.sv` had 0 asserts.) A bare-host `holds` on SVA is presumed vacuous until reproduced under `mununu-sva`.
 
 ## Pre-push workspace check (added 2026-06-08)
 

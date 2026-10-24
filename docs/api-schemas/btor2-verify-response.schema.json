@@ -252,6 +252,13 @@
       "description": "`true` when two sound engines disagree — a soundness alarm, not a guess.",
       "type": "boolean"
     },
+    "detail": {
+      "description": "The single engine's own diagnosis under `engine: \"cube\"`, when it has one.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "fault": {
       "description": "The fault posture the design was decided under (`faults`), as one label; absent without one.",
       "type": [
