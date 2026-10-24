@@ -229,21 +229,14 @@ Synthesize a controller for a given automaton and mu-calculus formula. The contr
 |-------|------|-------------|
 | `messages` | `string[]` | Human-readable diagnostic messages. |
 | `violating_initials` | `string[]` | Initial states that violate the formula. |
-| `counterexample_trace` | `string[] \| null` | A trace witnessing a violation (if requested). |
-| `counterstrategy_traces` | `string[][]` | Environment counterstrategy traces. |
-| `deadlock_traces` | `string[][]` | Traces leading to deadlock states. |
-| `lasso_traces` | `LassoTrace[]` | Lasso-format infinite counterexample traces (prefix + cycle). Present for liveness violations. |
+| `counterexample` | `Trace \| null` | The minimal counterexample path (a finite trace over state names), when requested. |
+| `counterstrategy_traces` | `Trace[]` | Environment counterstrategy paths. |
+| `deadlock_traces` | `Trace[]` | Paths from an initial state to a deadlock. |
+| `lasso_traces` | `Trace[]` | Liveness counterexamples: `lasso` traces, `loop_start` marking where the cycle begins. |
 | `minimization` | `MinimizationReport \| null` | Minimization statistics (if `minimize` was `true`). |
 | `proof_obligations` | `ProofObligation[]` | Per-state proof obligations. |
 
-**LassoTrace**
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `prefix` | `string[]` | State names forming the finite prefix. |
-| `cycle` | `string[]` | State names forming the infinitely repeating cycle. |
-| `prefix_labels` | `string[]` | Transition labels between consecutive prefix states. `prefix_labels[i]` is the label from `prefix[i]` to `prefix[i+1]` (or `cycle[0]` for the last). |
-| `cycle_labels` | `string[]` | Transition labels between consecutive cycle states. The last element is the label from the last cycle state back to `cycle[0]`. |
+Every path is a `Trace` (0.5): `{kind, steps: [{cycle, state_name, labels}], loop_start}`, where `steps[i].labels` are the labels of the transition out of `steps[i]` and, in a lasso, the last step's labels close the loop back to `steps[loop_start]`. RTL verbs use the same type with register `state` cells (see [`docs/api-schemas/verdict.md`](https://github.com/Mumunu-team/mununu/blob/main/docs/api-schemas/verdict.md#trace)).
 
 **MinimizationReport**
 
@@ -281,6 +274,7 @@ curl -X POST http://localhost:3000/api/v1/context/synthesize \
 ```json
 {
   "success": true,
+  "outcome": "holds",
   "realizable": true,
   "controller": {
     "name": "arbiter_controller.ctxdsl",
@@ -289,7 +283,7 @@ curl -X POST http://localhost:3000/api/v1/context/synthesize \
   "diagnostics": {
     "messages": [],
     "violating_initials": [],
-    "counterexample_trace": null,
+    "counterexample": null,
     "counterstrategy_traces": [],
     "deadlock_traces": [],
     "minimization": { "removed_states": 3, "removed_transitions": 7, "merged_states": ["s1_s3", "s2_s4"] },
@@ -303,12 +297,15 @@ curl -X POST http://localhost:3000/api/v1/context/synthesize \
 ```json
 {
   "success": true,
+  "outcome": "violated",
   "realizable": false,
   "controller": null,
   "diagnostics": {
     "messages": ["No winning strategy exists from initial state idle"],
     "violating_initials": ["idle"],
-    "counterexample_trace": ["idle", "req1", "grant1", "req2"],
+    "counterexample": { "kind": "finite", "steps": [
+      { "cycle": 0, "state_name": "idle" }, { "cycle": 1, "state_name": "req1" },
+      { "cycle": 2, "state_name": "grant1" }, { "cycle": 3, "state_name": "req2" } ] },
     "counterstrategy_traces": [],
     "deadlock_traces": [],
     "lasso_traces": [],

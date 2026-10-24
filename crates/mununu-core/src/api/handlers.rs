@@ -2889,9 +2889,20 @@ fn convert_diagnostics(
     SynthesisDiagnostics {
         messages: diagnostics.messages.clone(),
         violating_initials: diagnostics.violating_initials.clone(),
-        counterexample_trace: diagnostics.counterexample_trace.clone(),
-        counterstrategy_traces: diagnostics.counterstrategy_traces.clone(),
-        deadlock_traces: diagnostics.deadlock_traces.clone(),
+        counterexample: diagnostics
+            .counterexample_trace
+            .as_ref()
+            .map(|p| Trace::from_states(p, &[], None)),
+        counterstrategy_traces: diagnostics
+            .counterstrategy_traces
+            .iter()
+            .map(|p| Trace::from_states(p, &[], None))
+            .collect(),
+        deadlock_traces: diagnostics
+            .deadlock_traces
+            .iter()
+            .map(|p| Trace::from_states(p, &[], None))
+            .collect(),
         minimization: diagnostics
             .minimization
             .as_ref()
@@ -2911,12 +2922,7 @@ fn convert_diagnostics(
         lasso_traces: diagnostics
             .lasso_traces
             .iter()
-            .map(|lt| LassoTraceApi {
-                prefix: lt.prefix.clone(),
-                cycle: lt.cycle.clone(),
-                prefix_labels: lt.prefix_labels.clone(),
-                cycle_labels: lt.cycle_labels.clone(),
-            })
+            .map(|lt| lt.to_trace())
             .collect(),
     }
 }
