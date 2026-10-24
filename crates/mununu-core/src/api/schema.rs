@@ -449,6 +449,26 @@ mod tests {
     /// `CexCellView`, `VerificationNoteView`, `ModelDiagnosticsView`,
     /// `UnsupportedAssertionView`. Guards against silent removal of a
     /// documented type from the schema tree.
+    /// 0.5.1 — `lift.frontend: "sv2v"` must keep the pre-0.5 `--preprocess-sv2v` semantics: sv2v
+    /// first, then the `auto` attempt order, whose slang fallback lifts what sv2v cannot parse
+    /// (a `bind` checker). 0.5.0 mapped it to a forced `read_verilog` with no fallback, so every
+    /// design with a bound checker failed to lift.
+    #[test]
+    fn the_sv2v_frontend_keeps_the_auto_fallback() {
+        let lift: super::super::models::SvLiftRequest = serde_json::from_value(serde_json::json!({
+            "source": "module m; endmodule",
+            "frontend": "sv2v"
+        }))
+        .expect("parses");
+        let core = lift.to_sv_lift().expect("converts");
+        assert!(core.use_sv2v, "sv2v runs first");
+        assert_eq!(
+            core.frontend,
+            crate::adapter::yosys::SvFrontend::Auto,
+            "the auto order (and its slang fallback) follows"
+        );
+    }
+
     #[test]
     fn response_schema_references_documented_types() {
         let s = sv_verify_auto_response_schema();
