@@ -439,10 +439,6 @@ struct InternalEngineEvalArgs {
     /// The μ-calculus formula to evaluate, as the engine would receive it.
     #[arg(long = "formula", value_name = "MU")]
     formula: String,
-    /// Mirror of `sv verify-auto --no-antecedent-shadow`. Accepted and ignored since mununu#677
-    /// (the shadow synthesis it switched was removed); kept so a parent's argv still parses.
-    #[arg(long = "no-antecedent-shadow")]
-    no_antecedent_shadow: bool,
     /// Mirror of `sv verify-auto --no-antecedent-propagate` (mununu#629).
     #[arg(long = "no-antecedent-propagate")]
     no_antecedent_propagate: bool,
@@ -1042,14 +1038,10 @@ struct Btor2VerifyArgs {
     /// CLI+API+UI path.
     #[arg(long)]
     owned_only: bool,
-    /// Per-engine wall budget (ms) for `--owned-only` (default 60000). Larger values
-    /// let native interpolation and the deep counterexample search reach more designs.
-    #[arg(long, value_name = "MS", default_value_t = 60_000)]
-    owned_timeout_ms: u32,
-    /// Wall budget (ms) for the SUBPROCESS members (btormc / Pono) in the default full
-    /// portfolio (default 60000). A larger value lets the incremental-SAT model checkers
-    /// reach deeper counterexamples — e.g. `krebs.3`'s depth-75 CEX needs ~73000. Ignored
-    /// under `--owned-only` (which has its own `--owned-timeout-ms`).
+    /// Per-engine wall budget (ms), default 60000: the subprocess members (btormc / Pono) of
+    /// the full portfolio, or every engine under `--owned-only`. A larger value lets the
+    /// incremental-SAT model checkers and native interpolation reach deeper — e.g. `krebs.3`'s
+    /// depth-75 counterexample needs ~73000. (0.5: replaces `--owned-timeout-ms` too.)
     #[arg(long, value_name = "MS")]
     timeout_ms: Option<u64>,
     /// On a `violated` verdict, also emit a concrete init→bad counterexample trace
@@ -1133,8 +1125,8 @@ struct Btor2VerifyJusticeArgs {
     #[arg(long, default_value = "both")]
     rung: String,
     /// Wall-clock budget per justice set in milliseconds (default: the engines' own budgets).
-    #[arg(long)]
-    budget_ms: Option<u64>,
+    #[arg(long, value_name = "MS")]
+    timeout_ms: Option<u64>,
     /// Under `--rung both`, run the exact ladder and the l2s rung concurrently; the first
     /// definite verdict wins and the other is cancelled.
     #[arg(long)]
@@ -2233,15 +2225,6 @@ struct SvVerifyAutoArgs {
     /// this to report the cube's ⊥ verdict unchanged for both.
     #[arg(long = "no-rescue")]
     no_rescue: bool,
-    /// mununu#476 item 4 — disable antecedent shadow-register synthesis for
-    /// the exact-symbolic engine. **Accepted and ignored since mununu#677:** the mununu#476
-    /// shadow synthesis it switched off was removed (it checked a `|=>` consequent one cycle
-    /// late — a spurious VIOLATED on every one-shot consequent). An SVA `|=>` whose
-    /// antecedent reaches primary inputs decides by inputs-in-the-state (mununu#656); the
-    /// refusal this flag used to restore is `--no-input-state`. Mirrored on the API as
-    /// `no_antecedent_shadow` (also ignored); `MUNUNU_NO_ANTECEDENT_SHADOW` is read by nothing.
-    #[arg(long = "no-antecedent-shadow")]
-    no_antecedent_shadow: bool,
     /// mununu#629 — disable antecedent constant propagation on the exact-symbolic
     /// engine. By default a same-cycle implication `sig == K |-> C` has `K`
     /// propagated through `C`'s cone (a read mux folds to the selected arm), so a
@@ -3928,7 +3911,7 @@ fn btor2_verify_justice(args: Btor2VerifyJusticeArgs) -> Result<(), String> {
         &btor2,
         &JusticeOptions {
             rung,
-            budget_ms: args.budget_ms,
+            budget_ms: args.timeout_ms,
             parallel_rungs: args.parallel_rungs,
         },
     )?;
@@ -4278,7 +4261,8 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
     // raises the subprocess (btormc/Pono) budget so their incremental SAT reaches
     // deeper counterexamples.
     let outcome = if args.owned_only {
-        decide_reach_owned_only(&file, args.owned_timeout_ms)
+        let ms = args.timeout_ms.unwrap_or(60_000);
+        decide_reach_owned_only(&file, u32::try_from(ms).unwrap_or(u32::MAX))
     } else if let Some(ms) = args.timeout_ms {
         decide_reach_portfolio_parallel_with_timeout(&file, std::time::Duration::from_millis(ms))
     } else {
@@ -4710,7 +4694,7 @@ fn sv_verify_auto(args: SvVerifyAutoArgs) -> Result<(), String> {
         )?,
         // mununu#677 — read by nothing; the shadow synthesis is gone. `--no-input-state` is
         // the refusal switch.
-        antecedent_shadow: !args.no_antecedent_shadow,
+        antecedent_shadow: true,
         // mununu#629 — --no-antecedent-propagate leaves the formula as lifted.
         antecedent_propagate: !args.no_antecedent_propagate,
         // mununu#656 — --no-input-state restores the input refusal.
@@ -10336,7 +10320,7 @@ fn internal_engine_eval(args: InternalEngineEvalArgs) -> Result<(), String> {
     let formula = mununu_core::mu_calculus::parser::parse(&args.formula)
         .map_err(|e| format!("internal-engine-eval: cannot parse the formula: {e:?}"))?;
     let opts = ExactSymbolicOptions {
-        antecedent_shadow_enabled: !args.no_antecedent_shadow,
+        antecedent_shadow_enabled: true,
         antecedent_propagate_enabled: !args.no_antecedent_propagate,
         input_state_enabled: !args.no_input_state,
         ..Default::default()

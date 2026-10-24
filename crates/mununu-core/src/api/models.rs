@@ -1041,7 +1041,7 @@ pub struct Btor2VerifyJusticeRequest {
     pub rung: Option<String>,
     /// Wall-clock budget per justice set in milliseconds (default: the engines' own budgets).
     #[serde(default)]
-    pub budget_ms: Option<u64>,
+    pub timeout_ms: Option<u64>,
     /// Under `both`, run the exact ladder and the l2s rung concurrently (first definite wins).
     #[serde(default)]
     pub parallel_rungs: Option<bool>,
@@ -2019,48 +2019,28 @@ pub struct SvVerifyAutoRequest {
     /// designs `explicit` already decided. Resolved by `verify_auto::engine_selection`.
     #[serde(default)]
     pub engine: Option<String>,
-    /// Safety-⊥ escalation (default `true`): a *safety* property the cube leaves ⊥
-    /// (a reducible AG-invariant) is retried with the multi-engine reachability
-    /// portfolio (exact ⊕ native ⊕ spacer ⊕ btormc ⊕ Pono). Set `false` to report the
-    /// cube's ⊥ unchanged. Only fires on ⊥ reducible AG-invariants.
+    /// The ⊥ escalations (default `true`, the CLI's `--no-rescue` sets `false`): a property the
+    /// cube leaves ⊥ is retried by the lane for its shape — a reducible safety invariant by the
+    /// reachability portfolio, a box-AF response by liveness-to-safety plus the portfolio, an
+    /// `AG EF (REG == VALUE)` recoverability by the cube with `smt-hyper-must`. `false` reports
+    /// the cube's ⊥ unchanged.
     #[serde(default)]
-    pub rescue_bottom_safety: Option<bool>,
-    /// Liveness-⊥ escalation (default `true`): a *box-AF* liveness property `AG(a → AF
-    /// b)` the cube leaves ⊥ is retried via the liveness-to-safety reduction + the
-    /// reachability portfolio. Set `false` to report the cube's ⊥ unchanged. Only fires
-    /// on the l2s-able box-AF shape (diamond-EF recoverability stays on the νμ path).
+    pub rescue: Option<bool>,
+    /// mununu#629 — antecedent constant propagation on the exact-symbolic engine (default
+    /// `true`): a same-cycle implication `sig == K |-> C` has `K` propagated through `C`'s cone
+    /// (a read mux folds to the selected arm), so a property about one field of a wide packed
+    /// record decides instead of skipping on the bit cap. `false` leaves the formula as lifted
+    /// (the differential-oracle / debug knob; the CLI's `--no-antecedent-propagate`,
+    /// `MUNUNU_NO_ANTECEDENT_PROPAGATE=1`).
     #[serde(default)]
-    pub rescue_bottom_liveness: Option<bool>,
-    /// Recoverability-⊥ escalation (default `true`): a νμ recoverability property `AG EF
-    /// good` the cube leaves ⊥ is retried via the cube + `smt-hyper-must` νμ path. Set
-    /// `false` to report the cube's ⊥ unchanged. Only fires on the `AG EF (REG == VALUE)`
-    /// shape.
+    pub antecedent_propagate: Option<bool>,
+    /// mununu#656 — inputs in the state on the exact-symbolic engine (default `true`): a property
+    /// that reads a primary input, or a signal combinationally driven by one, is decided over the
+    /// registers with that input sampled in the same cycle. `false` restores the engine's refusal
+    /// of such atoms (the differential-oracle knob; the CLI's `--no-input-state`,
+    /// `MUNUNU_NO_INPUT_STATE=1`).
     #[serde(default)]
-    pub rescue_bottom_recoverability: Option<bool>,
-    /// **Accepted and ignored since mununu#677.** The mununu#476 antecedent shadow synthesis
-    /// this switched off was removed: it checked an SVA `|=>` consequent one cycle late (a
-    /// spurious VIOLATED on every one-shot consequent). A `|=>` whose antecedent reaches
-    /// primary inputs decides by inputs-in-the-state (mununu#656); the refusal this used to
-    /// restore is `no_input_state: true`. Mirrored on the CLI as `--no-antecedent-shadow`
-    /// (also ignored).
-    #[serde(default)]
-    pub no_antecedent_shadow: Option<bool>,
-    /// mununu#629 — disable antecedent constant propagation on the exact-symbolic engine
-    /// (default `false` ⇒ enabled). With it enabled, a same-cycle implication `sig == K |-> C`
-    /// has `K` propagated through `C`'s cone — a read mux folds to the selected arm — so a
-    /// property about one field of a wide packed record decides instead of skipping on the bit
-    /// cap. Set `true` to leave the formula as lifted (the differential-oracle / debug knob),
-    /// mirrored on the CLI as `--no-antecedent-propagate` and by the process-global
-    /// `MUNUNU_NO_ANTECEDENT_PROPAGATE=1`.
-    #[serde(default)]
-    pub no_antecedent_propagate: Option<bool>,
-    /// mununu#656 — disable inputs-in-the-state on the exact-symbolic engine (default `false` ⇒
-    /// enabled). Enabled, a property that reads a primary input or a signal combinationally
-    /// driven by one is decided over the registers with that input sampled in the same cycle;
-    /// `true` restores the engine's refusal of such atoms (the differential-oracle knob),
-    /// mirrored on the CLI as `--no-input-state` and by `MUNUNU_NO_INPUT_STATE=1`.
-    #[serde(default)]
-    pub no_input_state: Option<bool>,
+    pub input_state: Option<bool>,
     /// Fault-injection posture: registers the adversary may overwrite (`"REG"` / `"REG:k"`,
     /// one global budget, default 1; `"REG:unbounded"`). Mirrors the CLI `--fault`. Default empty.
     #[serde(default)]

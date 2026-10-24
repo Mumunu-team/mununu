@@ -873,7 +873,7 @@ fn btor2_verify_justice_handler_impl(
         &btor2,
         &JusticeOptions {
             rung,
-            budget_ms: request.budget_ms,
+            budget_ms: request.timeout_ms,
             parallel_rungs: request.parallel_rungs.unwrap_or(false),
         },
     )
@@ -2059,18 +2059,17 @@ fn sv_verify_auto_handler_impl(
         symbolic_engine: engine_symbolic,
         exact_symbolic: engine_exact,
         portfolio: engine_portfolio,
-        rescue_bottom_safety: request.rescue_bottom_safety.unwrap_or(true),
-        rescue_bottom_liveness: request.rescue_bottom_liveness.unwrap_or(true),
-        rescue_bottom_recoverability: request.rescue_bottom_recoverability.unwrap_or(true),
+        rescue_bottom_safety: request.rescue.unwrap_or(true),
+        rescue_bottom_liveness: request.rescue.unwrap_or(true),
+        rescue_bottom_recoverability: request.rescue.unwrap_or(true),
         // `verify-auto` verifies the design as-lifted; mutation is the `sv mutate` verb's job.
         mutation: None,
-        // mununu#677 — accepted and ignored: the shadow synthesis is gone;
-        // `no_input_state: true` is the refusal switch.
-        antecedent_shadow: !request.no_antecedent_shadow.unwrap_or(false),
-        // mununu#629 — per-request antecedent constant-propagation opt-out.
-        antecedent_propagate: !request.no_antecedent_propagate.unwrap_or(false),
-        // mununu#656 — per-request inputs-in-the-state opt-out.
-        input_state: !request.no_input_state.unwrap_or(false),
+        // mununu#677 — read by nothing; the 0.5 surface no longer carries the switch.
+        antecedent_shadow: true,
+        // mununu#629 — per-request antecedent constant propagation (default on).
+        antecedent_propagate: request.antecedent_propagate.unwrap_or(true),
+        // mununu#656 — per-request inputs-in-the-state (default on).
+        input_state: request.input_state.unwrap_or(true),
         lift_overrides: lift.lift_overrides.clone(),
         // PR C — planner-only fields: a single API run re-plans its own rows and truncates
         replan_defer: false,

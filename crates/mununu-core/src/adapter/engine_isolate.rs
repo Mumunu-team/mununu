@@ -78,12 +78,12 @@ pub const CHILD_VERB: &str = "internal-engine-eval";
 ///
 /// Never panics and never propagates the child's failure as an error — every path returns an
 /// `Isolated`, because the entire point is that the caller keeps going.
-pub(crate) fn exact_symbolic(btor2: &str, formula_src: &str, antecedent_shadow: bool) -> Isolated {
+pub(crate) fn exact_symbolic(btor2: &str, formula_src: &str) -> Isolated {
     let exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(e) => return Isolated::Unavailable(format!("cannot locate self: {e}")),
     };
-    exact_symbolic_with_exe(&exe, btor2, formula_src, antecedent_shadow)
+    exact_symbolic_with_exe(&exe, btor2, formula_src)
 }
 
 /// The body of [`exact_symbolic`], with the executable INJECTED.
@@ -98,7 +98,6 @@ pub(crate) fn exact_symbolic_with_exe(
     exe: &std::path::Path,
     btor2: &str,
     formula_src: &str,
-    antecedent_shadow: bool,
 ) -> Isolated {
     // The BTOR2 goes through a file rather than argv or stdin: it can be megabytes, and a file is
     // also what a consumer can keep for a reproducer if the child dies.
@@ -119,9 +118,6 @@ pub(crate) fn exact_symbolic_with_exe(
         .arg("--formula")
         .arg(formula_src)
         .env(CHILD_GUARD_ENV, "1");
-    if !antecedent_shadow {
-        cmd.arg("--no-antecedent-shadow");
-    }
     let out = match cmd.output() {
         Ok(o) => o,
         Err(e) => return Isolated::Unavailable(format!("cannot spawn the engine child: {e}")),
@@ -193,7 +189,7 @@ mod tests {
             return; // non-unix or unwritable temp — nothing to assert
         };
         assert_eq!(
-            super::exact_symbolic_with_exe(&stub, "1 sort bitvec 1\n", "true", true),
+            super::exact_symbolic_with_exe(&stub, "1 sort bitvec 1\n", "true"),
             Isolated::Holds,
             "the parent must read the child's verdict line"
         );
@@ -202,7 +198,7 @@ mod tests {
             return;
         };
         assert_eq!(
-            super::exact_symbolic_with_exe(&stub, "1 sort bitvec 1\n", "true", true),
+            super::exact_symbolic_with_exe(&stub, "1 sort bitvec 1\n", "true"),
             Isolated::Abstained("bit cap".into()),
             "an abstention is a RESULT and must carry the engine's own reason, not become a death"
         );
@@ -216,7 +212,7 @@ mod tests {
         let Some(stub) = write_stub("segv", "#!/bin/sh\nkill -SEGV $$\n") else {
             return;
         };
-        match super::exact_symbolic_with_exe(&stub, "1 sort bitvec 1\n", "true", true) {
+        match super::exact_symbolic_with_exe(&stub, "1 sort bitvec 1\n", "true") {
             Isolated::Died(why) => assert!(
                 why.contains("signal"),
                 "a death must name the signal so a stack overflow is distinguishable from an \
@@ -233,7 +229,7 @@ mod tests {
         let Some(stub) = write_stub("nov", "#!/bin/sh\necho oops >&2\nexit 3\n") else {
             return;
         };
-        match super::exact_symbolic_with_exe(&stub, "1 sort bitvec 1\n", "true", true) {
+        match super::exact_symbolic_with_exe(&stub, "1 sort bitvec 1\n", "true") {
             Isolated::Died(why) => assert!(
                 why.contains("exited 3") && why.contains("oops"),
                 "a death must carry the exit status AND the child's own stderr: {why}"

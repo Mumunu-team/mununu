@@ -336,7 +336,7 @@ fn native_engine_adjudication_over_btor2tools_suite() {
 /// members poll it, so an instance no member decides abstains at the deadline. Measured
 /// 2026-10-20 on `vis_arrays_bufferAlloc` member by member in `mununu-sva`: the in-process z3
 /// Fixedpoint SIGSEGVs in 4 s (the crash the isolated child contains); no other member crashes;
-/// `--owned-only --owned-timeout-ms 120000` abstains at 120 s; rIC3, btormc and pono give no
+/// `--owned-only --timeout-ms 120000` abstains at 120 s; rIC3, btormc and pono give no
 /// answer in 120 s; the UNBUDGETED full portfolio never returns (this harness sat on it for
 /// over two hours). The run budget bounds every member that polls it — NOT the exact engine's
 /// bit-blast phase, which the full portfolio runs on the calling thread with no clock (a
