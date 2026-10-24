@@ -314,7 +314,7 @@ fn verify_json_output_round_trips_through_serde() -> Result<(), Box<dyn Error>> 
     // `no_deadlock` because every state has at least one enabled
     // transition under asynchronous composition.
     for v in verdicts {
-        assert_eq!(v["satisfied"], true);
+        assert_eq!(v["outcome"], "holds");
     }
     Ok(())
 }

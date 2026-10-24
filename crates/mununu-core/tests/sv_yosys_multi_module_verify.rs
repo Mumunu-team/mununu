@@ -120,18 +120,21 @@ fn sv_yosys_multi_module_verify_resolves_qualified_atoms() {
     // Reachability holds (state 2 is reachable from the initial state).
     let reachable = verdict("consumer_busy_reachable");
     assert!(
-        reachable.satisfied,
+        reachable.satisfied(),
         "u_consumer__state == 2 is reachable; satisfying {}/{} states, initial {:?}",
-        reachable.satisfying_states, reachable.total_states, reachable.initial_satisfying
+        reachable.satisfying_states,
+        reachable.total_states,
+        reachable.initial_satisfying
     );
 
     // Reachability of an absent value is empty — the contrast with the
     // `== 2` cases confirms the bind is value-sensitive, not a constant.
     let unreachable = verdict("consumer_state5_unreachable");
     assert!(
-        !unreachable.satisfied,
+        !unreachable.satisfied(),
         "u_consumer__state == 5 never holds (value unreachable); satisfying {}/{} states",
-        unreachable.satisfying_states, unreachable.total_states
+        unreachable.satisfying_states,
+        unreachable.total_states
     );
     assert_eq!(
         unreachable.satisfying_states, 0,

@@ -41,7 +41,7 @@ assert_verdicts() {
 import json, sys
 model, expect_ni = sys.argv[2], sys.argv[3]
 r = json.load(open(sys.argv[1]))
-got = {v["name"]: v["satisfied"] for v in r["property_verdicts"]}
+got = {v["name"]: (v["outcome"] == "holds") for v in r["property_verdicts"]}
 ni = (expect_ni == "true")
 want = {
     "deadlock_freedom": True,

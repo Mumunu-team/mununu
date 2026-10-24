@@ -80,7 +80,7 @@ assert verds, "FAIL: no property verdicts"
 for name in ("reach_t1", "reach_t7"):
     v = verds.get(name)
     assert v, f"FAIL: missing verdict {name}"
-    assert v["satisfied"], f"FAIL: {name} not SATISFIED (the spurious-VIOLATED regression)"
+    assert (v["outcome"] == "holds"), f"FAIL: {name} not SATISFIED (the spurious-VIOLATED regression)"
     assert v["total_states"] > 0, f"FAIL: vacuous verdict for {name}"
     assert v["satisfying_states"] > 0, f"FAIL: 0 satisfying states for {name}"
     print(f"verdict {name}: SAT {v['satisfying_states']}/{v['total_states']} over {v['over']}")

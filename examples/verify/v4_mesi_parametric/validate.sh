@@ -39,7 +39,7 @@ import json, sys
 toml = sys.argv[2]
 r = json.load(open(sys.argv[1]))
 want = {"coherence_safety", "deadlock_freedom", "write_visibility"}
-got = {v["name"]: v["satisfied"] for v in r["property_verdicts"]}
+got = {v["name"]: (v["outcome"] == "holds") for v in r["property_verdicts"]}
 missing = want - set(got)
 if missing:
     sys.stderr.write("FAIL ({}): missing verdicts {}\n".format(toml, missing)); sys.exit(1)

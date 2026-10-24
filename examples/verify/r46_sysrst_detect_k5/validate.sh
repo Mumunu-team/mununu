@@ -110,7 +110,7 @@ overs = set()
 for name in ("reach_det0", "reach_det1", "reach_det2", "reach_det3", "reach_det4"):
     v = verds.get(name)
     assert v, f"FAIL: missing verdict {name}"
-    assert v["satisfied"], f"FAIL: {name} not SATISFIED"
+    assert (v["outcome"] == "holds"), f"FAIL: {name} not SATISFIED"
     assert v["total_states"] >= 16, \
         f"FAIL: {name} cluster has only {v['total_states']} states — timer was sliced away, not concretized"
     assert v["over"].startswith("Circuit__cl"), \

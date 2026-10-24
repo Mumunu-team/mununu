@@ -35,7 +35,7 @@ assert_litmus() {
 import json, sys
 model, expect_bz = sys.argv[2], sys.argv[3]
 r = json.load(open(sys.argv[1]))
-got = {v["name"]: v["satisfied"] for v in r["property_verdicts"]}
+got = {v["name"]: (v["outcome"] == "holds") for v in r["property_verdicts"]}
 bz = got.get("both_read_zero_reachable")
 oo = got.get("other_outcome_reachable")
 want_bz = (expect_bz == "true")

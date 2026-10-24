@@ -78,7 +78,7 @@ verds = {v["name"]: v for v in r.get("property_verdicts", [])}
 assert verds, "FAIL: no property verdicts"
 overs = set()
 for name, v in verds.items():
-    assert v["satisfied"], f"FAIL: {name} not SATISFIED"
+    assert (v["outcome"] == "holds"), f"FAIL: {name} not SATISFIED"
     assert v["total_states"] > 0, f"FAIL: vacuous verdict for {name}"
     assert v["over"].startswith("Circuit__cl"), \
         f"FAIL: {name} not routed to a cluster automaton (over={v['over']})"
