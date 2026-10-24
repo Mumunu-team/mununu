@@ -2860,9 +2860,9 @@ module cdc (input logic clk_src, input logic clk_dst, input logic d, output logi
   always_ff @(posedge clk_dst) q <= b;
 endmodule
 ";
-        let err = sv_to_btor2_with_blackboxes(TWO_CLOCKS, &YosysOptions::default())
-            .err()
-            .expect("a two-clock design must not lift as one clock");
+        let Err(err) = sv_to_btor2_with_blackboxes(TWO_CLOCKS, &YosysOptions::default()) else {
+            panic!("a two-clock design must not lift as one clock");
+        };
         assert!(
             err.message.contains("2 clock domains")
                 && err.message.contains("clk_src (posedge, 1 cell)")
