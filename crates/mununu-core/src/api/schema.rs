@@ -103,7 +103,7 @@ pub fn btor2_verify_request_schema() -> serde_json::Value {
 }
 
 /// JSON Schema for `POST /api/v1/btor2/verify` responses. Also the response shape
-/// for `POST /api/v1/sv/verify` (SV → BTOR2 lift then decide).
+/// for `POST /api/v1/sv/verify-bad` (SV → BTOR2 lift then decide).
 pub fn btor2_verify_response_schema() -> serde_json::Value {
     serde_json::to_value(schema_for!(Btor2VerifyResponse))
         .expect("Btor2VerifyResponse schema must serialise as JSON")
@@ -164,7 +164,7 @@ pub fn btor2_check_fsm_response_schema() -> serde_json::Value {
         .expect("Btor2CheckFsmResponse schema must serialise as JSON")
 }
 
-/// JSON Schema for `POST /api/v1/sv/verify` request bodies (SV lift + BTOR2 verify).
+/// JSON Schema for `POST /api/v1/sv/verify-bad` request bodies (SV lift + BTOR2 verify).
 pub fn sv_verify_request_schema() -> serde_json::Value {
     serde_json::to_value(schema_for!(SvVerifyRequest))
         .expect("SvVerifyRequest schema must serialise as JSON")

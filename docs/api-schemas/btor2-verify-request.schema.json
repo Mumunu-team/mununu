@@ -6,6 +6,14 @@
       "description": "BTOR2 source content.",
       "type": "string"
     },
+    "engine": {
+      "default": null,
+      "description": "Safety engine: `\"portfolio\"` (default, the bit-level reachability portfolio) or `\"cube\"` (the KMTS 3-valued predicate cube, the CLI's `--engine cube`). `cube` takes none of `faults`, `target`, `witness`. (The CLI's experimental `--engine ic3` has no API surface.)",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "fault_warmup": {
       "default": null,
       "description": "Cycles before the first injection may fire (default 10). Mirrors `--fault-warmup`.",

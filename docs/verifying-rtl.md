@@ -526,7 +526,7 @@ with its assertion code compiled out, which is what the shim is for.
 
 ### One clock per model: multi-clock designs are refused, `--merge-clock-domains` (mununu#758)
 
-> Source of truth: [`clock_domains`](../crates/mununu-core/src/adapter/yosys/mod.rs) — surface: (CLI+API) — every SV verb that lifts (`sv verify-auto`, `sv verify`, `sv verify-liveness*`, `sv verify-recoverability`, `sv check-fsm`, `sv lint`, `sv mutate`); API `merge_clock_domains`
+> Source of truth: [`clock_domains`](../crates/mununu-core/src/adapter/yosys/mod.rs) — surface: (CLI+API) — every SV verb that lifts (`sv verify-auto`, `sv verify-bad`, `sv verify-liveness*`, `sv verify-recoverability`, `sv check-fsm`, `sv lint`, `sv mutate`); API `merge_clock_domains`
 
 The BTOR2 model has one implicit clock: every register steps on it. After `flatten` the lift writes
 a netlist snapshot and counts the clock domains — every distinct (clock net, edge) that a flop or
@@ -1395,10 +1395,10 @@ module *and* decides one property in one call:
 ```bash
 mununu sv verify-recoverability my_module.sv --target "state_q == 3"
 mununu sv verify-liveness      my_module.sv --request "req == 1" --grant "grant == 1"
-mununu sv verify               my_module.sv                       # safety of its assertions
+mununu sv verify-bad               my_module.sv                       # safety of its assertions
 ```
 
-Same over HTTP: `POST /api/v1/sv/verify` · `/sv/verify-liveness` ·
+Same over HTTP: `POST /api/v1/sv/verify-bad` · `/sv/verify-liveness` ·
 `/sv/verify-recoverability`. These let the agent name *any* property — including the
 branching ones (recoverability) SVA cannot state at all — against raw SV, no BTOR2
 round-trip. (The two-step `sv emit-btor2-per-module` → `btor2 verify-*` path still

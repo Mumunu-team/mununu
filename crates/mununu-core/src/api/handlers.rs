@@ -736,6 +736,48 @@ fn btor2_verify_handler_impl(request: Btor2VerifyRequest) -> ApiResult<Json<Btor
             details: None,
         }
     })?;
+    // `engine: "cube"`: one safety engine instead of the portfolio (the CLI `--engine cube`).
+    match request.engine.as_deref() {
+        None | Some("portfolio") => {}
+        Some("cube") => {
+            use crate::adapter::recoverability::{SafetyEngine, verify_safety_with_engine};
+            if !request.faults.is_empty() || request.target.is_some() || request.witness {
+                return Err(ApiError::BadRequest {
+                    message: "engine \"cube\" takes none of faults, target, witness".into(),
+                    details: None,
+                });
+            }
+            let (verdict, detail) = verify_safety_with_engine(&request.content, SafetyEngine::Cube)
+                .map_err(|message| ApiError::BadRequest {
+                    message,
+                    details: None,
+                })?;
+            let by = |v: crate::verdict::PropertyVerdict| {
+                if verdict == v {
+                    vec!["cube".to_string()]
+                } else {
+                    Vec::new()
+                }
+            };
+            return Ok(Json(Btor2VerifyResponse {
+                outcome: verdict.as_str().to_string(),
+                reachable_by: by(crate::verdict::PropertyVerdict::Violated),
+                unreachable_by: by(crate::verdict::PropertyVerdict::Holds),
+                contradiction: false,
+                detail,
+                fault: None,
+                target: None,
+                trace: None,
+                trace_unavailable_within_k: None,
+            }));
+        }
+        Some(other) => {
+            return Err(ApiError::BadRequest {
+                message: format!("engine: expected \"portfolio\" or \"cube\", got \"{other}\""),
+                details: None,
+            });
+        }
+    }
     // `faults` + `target`: the k-fault adversary (the CLI `--fault … --target`).
     if let Some(target) = &request.target {
         if request.faults.is_empty() {
@@ -773,6 +815,7 @@ fn btor2_verify_handler_impl(request: Btor2VerifyRequest) -> ApiResult<Json<Btor
                 Vec::new()
             },
             contradiction: false,
+            detail: None,
             fault: Some(o.fault),
             target: o.target,
             trace: (o.verdict == "violated").then(|| Trace::attack(o.depth, &o.attack)),
@@ -830,6 +873,7 @@ fn btor2_verify_handler_impl(request: Btor2VerifyRequest) -> ApiResult<Json<Btor
             .map(|s| s.to_string())
             .collect(),
         contradiction: outcome.verdict == ReachVerdict::Contradiction,
+        detail: None,
         fault: fault_label,
         target: None,
         trace,
@@ -1338,11 +1382,11 @@ fn btor2_game_handler_impl(request: Btor2GameRequest) -> ApiResult<Json<Btor2Gam
 }
 
 // --- SV-direct verbs: lift SV (sv2v + Yosys) then decide, in one call. Surface peers
-// of the CLI `sv verify` / `verify-liveness` / `verify-recoverability`; they return
+// of the CLI `sv verify-bad` / `verify-liveness` / `verify-recoverability`; they return
 // the same `Btor2Verify*Response` shapes as the BTOR2-direct verbs. The lift needs
 // sv2v + Yosys on the host (a missing tool → BadRequest). ---
 
-/// `POST /api/v1/sv/verify` — lift SV and decide `bad`-reachability of its assertions
+/// `POST /api/v1/sv/verify-bad` — lift SV and decide `bad`-reachability of its assertions
 /// with the multi-engine safety portfolio.
 pub async fn sv_verify_handler(
     Json(request): Json<SvVerifyRequest>,
@@ -1370,6 +1414,7 @@ fn sv_verify_handler_impl(request: SvVerifyRequest) -> ApiResult<Json<Btor2Verif
             .map(|s| s.to_string())
             .collect(),
         contradiction: outcome.verdict == ReachVerdict::Contradiction,
+        detail: None,
         fault: None,
         target: None,
         trace: None,
@@ -5268,6 +5313,7 @@ members = ["x"]
             target: None,
             witness: false,
             witness_max_k: None,
+            engine: None,
         };
         let Json(out) = btor2_verify_handler(Json(request))
             .await
@@ -5285,6 +5331,36 @@ members = ["x"]
         );
     }
 
+    /// 0.5 — `engine: "cube"` is the former `btor2 verify-safety` route on the same endpoint: the
+    /// cube reports itself as the decider, never `exact`; an unknown engine name is a 400.
+    #[tokio::test]
+    async fn btor2_verify_handler_routes_the_cube_engine() {
+        let btor2 = "1 sort bitvec 3\n2 zero 1\n3 state 1\n4 init 1 3 2\n5 one 1\n\
+                     6 add 1 3 5\n7 next 1 3 6\n8 ones 1\n9 sort bitvec 1\n\
+                     10 eq 9 3 8\n11 bad 10\n";
+        let request = |engine: &str| Btor2VerifyRequest {
+            content: btor2.to_string(),
+            faults: vec![],
+            fault_warmup: None,
+            target: None,
+            witness: false,
+            witness_max_k: None,
+            engine: Some(engine.to_string()),
+        };
+        let Json(out) = btor2_verify_handler(Json(request("cube")))
+            .await
+            .expect("the cube runs");
+        assert_ne!(out.outcome, "holds", "bad is reachable: {out:?}");
+        assert!(!out.reachable_by.contains(&"exact".to_string()), "{out:?}");
+        if out.outcome == "violated" {
+            assert_eq!(out.reachable_by, vec!["cube".to_string()], "{out:?}");
+        }
+        let err = btor2_verify_handler(Json(request("bogus")))
+            .await
+            .expect_err("an unknown engine is refused");
+        assert!(matches!(err, ApiError::BadRequest { .. }));
+    }
+
     /// Malformed BTOR2 is a `BadRequest`, not a 500 — the parse guard runs before
     /// any engine work.
     #[tokio::test]
@@ -5296,6 +5372,7 @@ members = ["x"]
             target: None,
             witness: false,
             witness_max_k: None,
+            engine: None,
         };
         let err = btor2_verify_handler(Json(request))
             .await

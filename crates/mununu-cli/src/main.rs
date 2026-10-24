@@ -295,6 +295,25 @@ mod ci_gate_tests {
     }
 
     #[test]
+    fn the_0_5_verb_merges_parse_and_the_old_verbs_are_usage_errors() {
+        let code = |argv: &[&str]| match Cli::try_parse_from(argv) {
+            Ok(_) => 0,
+            Err(e) => parse_error_exit_code(&e),
+        };
+        assert_eq!(
+            code(&["mununu", "btor2", "verify", "d.btor2", "--engine", "cube"]),
+            0
+        );
+        assert_eq!(
+            code(&["mununu", "btor2", "verify", "d.btor2", "--engine", "ic3"]),
+            0
+        );
+        assert_eq!(code(&["mununu", "btor2", "verify-safety", "d.btor2"]), 64);
+        assert_eq!(code(&["mununu", "sv", "verify-bad", "m.sv"]), 0);
+        assert_eq!(code(&["mununu", "sv", "verify", "m.sv"]), 64);
+    }
+
+    #[test]
     fn context_eval_fails_the_gate_on_a_refuted_formula_and_flags_sanity_findings() {
         assert_eq!(context_eval_outcome(Some(false), true), "violated");
         assert_eq!(context_eval_outcome(Some(false), false), "violated");
@@ -635,15 +654,6 @@ enum Btor2Command {
     /// use `btor2 cegar … --must-edge-inference smt-hyper-must` for wider designs).
     /// `--target` is a single register-comparison atom (`"state_q == 3"`).
     VerifyRecoverability(Btor2VerifyRecoverabilityArgs),
-    /// Decide a `bad`-state safety property with the KMTS 3-valued predicate cube.
-    ///
-    /// Translates the design's `bad` obligation to `AG ¬bad = nu X. ((not bad) and [] X)`, carries
-    /// `bad` as a derived combinational predicate, and seeds the abstraction from the guard atoms plus
-    /// inductive relational-invariant discovery (the emergent-K path). `holds` = safe (`bad`
-    /// unreachable); `violated` = `bad` reachable (downgraded to `unknown` when the design has
-    /// `constraint` lines); `unknown` = the bounded cube abstains. Complements `btor2 verify` (the
-    /// bit-level portfolio); this is the branching-cube route on safety.
-    VerifySafety(Btor2VerifySafetyArgs),
     /// Auto-scan every FSM-like state register for a reachable illegal encoding — no input.
     ///
     /// For each narrow (≤ `--max-width` bit) state register, derive its legal encodings
@@ -702,7 +712,7 @@ enum MayEdgeInferenceArg {
     SmtAllPairs,
 }
 
-/// Safety engine selector for `mununu btor2 verify-safety`.
+/// Safety engine selector for `mununu btor2 verify --engine`.
 ///
 /// surface: CLI-only — the `ic3` engine (IC3ia predicate abstraction,
 /// [`mununu_core::adapter::btor2::abs_safety::verify_safety_ic3`]) is an experimental,
@@ -712,11 +722,14 @@ enum MayEdgeInferenceArg {
 /// real cases competitively with the cube + `native_interp`.
 #[derive(Clone, Debug, Copy, clap::ValueEnum, Default)]
 enum SafetyEngineArg {
-    /// The KMTS 3-valued cube (default) — [`verify_safety_scalable`]. Enumeration +
-    /// emergent-K interpolation discovery; the production safety path.
+    /// The bit-level reachability portfolio (default): exact ⊕ native BMC / k-induction ⊕
+    /// interpolation ⊕ the subprocess model checkers.
+    #[default]
+    Portfolio,
+    /// The KMTS 3-valued cube — [`verify_safety_scalable`]. Enumeration + emergent-K
+    /// interpolation discovery: the branching-cube route on safety (formerly `verify-safety`).
     ///
     /// [`verify_safety_scalable`]: mununu_core::adapter::recoverability::verify_safety_scalable
-    #[default]
     Cube,
     /// Experimental IC3ia predicate-abstraction frame ladder — `verify_safety_ic3`.
     /// Guarded foundation; abstains where refinement stalls. Uses cvc5 for refinement
@@ -1034,10 +1047,16 @@ struct Btor2VerifyArgs {
     /// soundness cross-check.
     ///
     /// surface: CLI-only — a soundness-audit / no-subprocess diagnostic, peer of the
-    /// CLI-only `verify-safety --engine ic3`; the default full portfolio remains the
+    /// CLI-only `btor2 verify --engine ic3`; the default full portfolio remains the
     /// CLI+API+UI path.
     #[arg(long)]
     owned_only: bool,
+    /// Safety engine: `portfolio` (default), `cube` (the KMTS 3-valued predicate cube, the
+    /// branching-cube route; a `violated` is downgraded to `unknown` when the design has
+    /// `constraint` lines) or `ic3` (experimental IC3ia, evaluation only). The single-engine
+    /// routes take none of `--fault`, `--target`, `--witness`, `--owned-only`.
+    #[arg(long, value_enum, default_value_t = SafetyEngineArg::Portfolio)]
+    engine: SafetyEngineArg,
     /// Per-engine wall budget (ms), default 60000: the subprocess members (btormc / Pono) of
     /// the full portfolio, or every engine under `--owned-only`. A larger value lets the
     /// incremental-SAT model checkers and native interpolation reach deeper — e.g. `krebs.3`'s
@@ -1238,21 +1257,6 @@ struct Btor2VerifyRecoverabilityArgs {
     /// Best for a NARROW / few-value config (the cross-product is capped).
     #[arg(long = "partition", value_name = "NAME=v1,v2,...")]
     partition: Vec<String>,
-    #[command(flatten)]
-    ci: CiArgs,
-}
-
-/// Arguments for `mununu btor2 verify-safety` — the `bad` → `AG ¬bad` cube translation.
-#[derive(Args, Debug)]
-struct Btor2VerifySafetyArgs {
-    /// Path to the BTOR2 input file.
-    #[arg(value_name = "BTOR2_FILE")]
-    file: PathBuf,
-    /// Safety engine (default `cube`). `ic3` selects the experimental IC3ia
-    /// predicate-abstraction frame ladder — a guarded foundation for evaluation only;
-    /// it abstains where refinement stalls (see `SafetyEngineArg`).
-    #[arg(long, value_enum, default_value_t = SafetyEngineArg::Cube)]
-    engine: SafetyEngineArg,
     #[command(flatten)]
     ci: CiArgs,
 }
@@ -1955,9 +1959,11 @@ enum SvCommand {
     /// can't bind them) — never given a misleading verdict. Surface peer of
     /// `POST /api/v1/sv/verify-auto` + the extraction-tab verify-auto panel.
     VerifyAuto(Box<SvVerifyAutoArgs>),
-    /// Lift SV (sv2v + Yosys) and decide `bad`-reachability of its assertions with
-    /// the multi-engine safety portfolio — one call, no `emit-btor2` step. Surface
-    /// peer of `POST /api/v1/sv/verify`.
+    /// Lift SV (sv2v + Yosys) and decide `bad`-reachability of the `bad` lines yosys lowers its
+    /// immediate assertions to, with the multi-engine safety portfolio — one call, no
+    /// `emit-btor2` step. Not the SVA property set: that is `sv verify-auto`. (0.5: renamed from
+    /// `sv verify`.) Surface peer of `POST /api/v1/sv/verify-bad`.
+    #[command(name = "verify-bad")]
     Verify(SvVerifyArgs),
     /// Lift SV and decide a response-liveness property `AG(request → AF grant)` — the
     /// SV-direct peer of `btor2 verify-liveness`. `--request` / `--grant` are single
@@ -2349,7 +2355,7 @@ struct SvVerifyAutoArgs {
     expect: ExpectArgs,
 }
 
-/// Shared SV → BTOR2 lift inputs for the SV-direct verbs (`sv verify` /
+/// Shared SV → BTOR2 lift inputs for the SV-direct verbs (`sv verify-bad` /
 /// `verify-liveness` / `verify-recoverability`).
 #[derive(Args, Debug)]
 struct SvLiftArgs {
@@ -2452,7 +2458,7 @@ struct SvLiftArgs {
     cutpoint: Vec<String>,
 }
 
-/// Arguments for `mununu sv verify` — SV-direct safety portfolio.
+/// Arguments for `mununu sv verify-bad` — SV-direct safety portfolio.
 #[derive(Args, Debug)]
 struct SvVerifyArgs {
     #[command(flatten)]
@@ -3549,7 +3555,6 @@ fn handle_btor2(command: Btor2Command) -> Result<(), String> {
             btor2_verify_liveness_under_fairness(args)
         }
         Btor2Command::VerifyRecoverability(args) => btor2_verify_recoverability(args),
-        Btor2Command::VerifySafety(args) => btor2_verify_safety(args),
         Btor2Command::CheckFsm(args) => btor2_check_fsm(args),
         Btor2Command::Game(args) => btor2_game(args),
     }
@@ -3799,59 +3804,6 @@ fn btor2_verify_recoverability(args: Btor2VerifyRecoverabilityArgs) -> Result<()
         }
     }
 
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&summary).map_err(|e| format!("serialize summary: {e}"))?
-    );
-    ci_gate_exit(verdict.as_str(), args.ci.fail_on);
-    Ok(())
-}
-
-/// `mununu btor2 verify-safety` — decide `bad`-unreachability via the KMTS 3-valued cube
-/// (`AG ¬bad`), printing the canonical verdict as JSON. The branching-cube route on a safety
-/// obligation, complementing the bit-level `btor2 verify` portfolio.
-fn btor2_verify_safety(args: Btor2VerifySafetyArgs) -> Result<(), String> {
-    use mununu_core::adapter::recoverability::verify_safety_scalable;
-    use mununu_core::verdict::PropertyVerdict;
-
-    let content = std::fs::read_to_string(&args.file)
-        .map_err(|e| format!("Failed to read BTOR2 '{}': {e}", args.file.display()))?;
-
-    let (verdict, engine, detail) = match args.engine {
-        SafetyEngineArg::Cube => (verify_safety_scalable(&content)?, "cube", None),
-        SafetyEngineArg::Ic3 => {
-            use mununu_core::adapter::btor2::abs_safety::{AbsVerdict, verify_safety_ic3};
-            let file = mununu_core::adapter::btor2::parser::parse(&content)
-                .map_err(|e| format!("verify-safety (ic3): parsing BTOR2: {}", e.message))?;
-            // Budgets mirror the abs_safety unit tests (32 frames, 8 refinements, 5 s/query),
-            // with a longer overall query timeout for the CLI's larger inputs.
-            let av = verify_safety_ic3(&file, 32, 8, 10_000);
-            // Surface the engine's own diagnosis — the abstain *reason* (grammar ceiling,
-            // frame/blocking limit, refinement stall) or the invariant/CEX size — so the
-            // experimental IC3ia path is diagnosable from the CLI, not opaque.
-            let detail = Some(match &av {
-                AbsVerdict::Safe { predicates } => {
-                    format!("inductive invariant over {predicates} predicates")
-                }
-                AbsVerdict::Unsafe { depth } => format!("counterexample at depth {depth}"),
-                AbsVerdict::Unknown { reason } => reason.clone(),
-            });
-            let verdict = match av {
-                AbsVerdict::Safe { .. } => PropertyVerdict::Holds,
-                AbsVerdict::Unsafe { .. } => PropertyVerdict::Violated,
-                AbsVerdict::Unknown { .. } => PropertyVerdict::Unknown,
-            };
-            (verdict, "ic3", detail)
-        }
-    };
-
-    let summary = serde_json::json!({
-        "file": args.file.display().to_string(),
-        "property": "AG !bad",
-        "engine": engine,
-        "outcome": verdict.as_str(),
-        "detail": detail,
-    });
     println!(
         "{}",
         serde_json::to_string_pretty(&summary).map_err(|e| format!("serialize summary: {e}"))?
@@ -4179,6 +4131,41 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
 
     let content = std::fs::read_to_string(&args.file)
         .map_err(|e| format!("Failed to read BTOR2 '{}': {e}", args.file.display()))?;
+    // `--engine cube|ic3`: one safety engine instead of the portfolio (formerly `verify-safety`).
+    if !matches!(args.engine, SafetyEngineArg::Portfolio) {
+        use mununu_core::adapter::recoverability::{SafetyEngine, verify_safety_with_engine};
+        if !args.fault.is_empty() || args.target.is_some() || args.witness || args.owned_only {
+            return Err(
+                "--engine cube|ic3 takes none of --fault, --target, --witness, \
+                        --owned-only (they are portfolio options)"
+                    .to_string(),
+            );
+        }
+        let engine = match args.engine {
+            SafetyEngineArg::Ic3 => SafetyEngine::Ic3,
+            _ => SafetyEngine::Cube,
+        };
+        let (verdict, detail) = verify_safety_with_engine(&content, engine)?;
+        let decided = |v: PropertyVerdict| {
+            if verdict == v {
+                vec![engine.as_str()]
+            } else {
+                Vec::new()
+            }
+        };
+        let summary = serde_json::json!({
+            "file": args.file.display().to_string(),
+            "engines": engine.as_str(),
+            "outcome": verdict.as_str(),
+            "reachable_by": decided(PropertyVerdict::Violated),
+            "unreachable_by": decided(PropertyVerdict::Holds),
+            "contradiction": false,
+            "detail": detail,
+        });
+        print_json_summary(&summary)?;
+        ci_gate_exit(verdict.as_str(), args.ci.fail_on);
+        return Ok(());
+    }
     // `--fault … --target ATOM`: the k-fault adversary (`fault_adversary::verify_fault_reach`).
     if let Some(target) = &args.target {
         use mununu_core::adapter::btor2::fault::FaultSpec;
@@ -6737,7 +6724,7 @@ impl SvLiftArgs {
     }
 }
 
-/// `mununu sv verify` — lift SV and decide `bad`-reachability with the portfolio.
+/// `mununu sv verify-bad` — lift SV and decide `bad`-reachability with the portfolio.
 fn sv_verify(args: SvVerifyArgs) -> Result<(), String> {
     use mununu_core::adapter::sv_verify::sv_verify_safety;
     use mununu_core::verdict::PropertyVerdict;
