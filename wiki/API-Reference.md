@@ -556,7 +556,7 @@ Import an external format (XState, SystemVerilog, TLSF, AIGER, BTOR2, Promela, C
 | `additional_sources` | `FileContent[]` | No | Extra SV source files to compile alongside the primary input (Yosys path). Each entry: `{name, content}`. |
 | `use_sv2v` | `boolean` | No | When `format == "sv-yosys"`, run the `sv2v` preprocessor before Yosys. Required for modern SV dialects. Mirrors the CLI `--preprocessor sv2v`. Defaults to `false`. |
 | `predicates` | `PredicateSpecRequest[]` | No | Predicate set for the controllability-aware predicate-cube lift. Each entry: `{name, register, value}`. When non-empty (with `controllable_inputs`) and `format` produces BTOR2, the predicate-cube lift runs and a KMTS is returned. Mirrors `--predicate NAME:REG=VALUE`. |
-| `controllable_inputs` | `string[]` | No | Names of BTOR2 input symbols the controller drives. Mirrors `--controllable-input`. Enables the controllability-aware lift when combined with `predicates`. |
+| `controllable` | `string[]` | No | Names of BTOR2 input symbols the controller drives. Mirrors `--controllable`. Enables the controllability-aware lift when combined with `predicates`. |
 | `sv_source_path` | `string \| null` | No | Filesystem path to the original SV source. With a `simulate_reset` sidecar block and a discoverable Verilator, runs a short reset simulation. Mirrors `--sv-source`. |
 | `sidecar_path` | `string \| null` | No | Filesystem path to the sidecar JSON, used to resolve relative `vcd_traces` entries. Mirrors `--sidecar`. |
 
@@ -713,12 +713,12 @@ Run the CEGAR predicate-abstraction-refinement loop over a BTOR2 design and retu
 | `content` | `string` | Yes | BTOR2 source content. |
 | `formula` | `string` | Yes | μ-calculus formula evaluated over the lifted KMTS. |
 | `predicates` | `PredicateSpecRequest[]` | Yes | Initial predicate set (bootstraps the `2^|P|` cube space). At least one entry required. Each: `{name, register, value}`. |
-| `controllable_inputs` | `string[]` | No | R.6.6 controllability split — controller-driven input symbols. Mirrors `--controllable-input`. Defaults to `[]`. |
+| `controllable` | `string[]` | No | R.6.6 controllability split — controller-driven input symbols. Mirrors `--controllable`. Defaults to `[]`. |
 | `predicate_source` | `string \| null` | No | Predicate-discovery source: `"wp"` (default) or `"craig"`. |
 | `max_iterations` | `number \| null` | No | Max CEGAR iterations. Defaults to `16`. |
 | `must_edge_inference` | `string \| null` | No | Must-edge inference policy (default `"off"`): `"smt-per-target"`, `"smt-per-target-standard"`, `"smt-hyper-must"`; `"auto"` is accepted and means `"off"` on this endpoint (it resolves per property only on `sv/verify-auto`, mununu#663). |
 | `may_edge_inference` | `string \| null` | No | May-edge inference policy (default `"off"`): `"smt-all-pairs"`. |
-| `config_values` | `string[]` | No | R-S8 symbolic-init values, one entry per register as `"REG=v1,v2,..."`. Seeds the predicate-cube initial states. Defaults to `[]`. |
+| `init_values` | `string[]` | No | R-S8 symbolic-init values, one entry per register as `"REG=v1,v2,..."`. Seeds the predicate-cube initial states. Defaults to `[]`. |
 | `emit_ctxdsl` | `boolean` | No | When `true`, the response `ctxdsl` field carries the final refined cube model + checked formula as a self-contained CTXDSL document. Mirrors `--emit-ctxdsl`. Defaults to `false`. |
 
 ### Response Body
@@ -765,7 +765,7 @@ curl -X POST http://localhost:3000/api/v1/btor2/cegar \
     "content": "... BTOR2 source ...",
     "formula": "nu X. ([] X && mu Y. (done || <> Y))",
     "predicates": [ { "name": "burst_zero", "register": "burst_cnt", "value": 0 } ],
-    "controllable_inputs": ["start"],
+    "controllable": ["start"],
     "max_iterations": 8
   }'
 ```
@@ -780,7 +780,7 @@ SV-direct CEGAR (cegar-extraction Stage 2): lift a SystemVerilog design to a sin
 
 ### Request Body
 
-The CEGAR fields (`formula`, `predicates`, `controllable_inputs`, `predicate_source`, `max_iterations`, `must_edge_inference`, `may_edge_inference`, `config_values`, `emit_ctxdsl`) are identical to [`/api/v1/btor2/cegar`](#post-apiv1btor2cegar). Only the source half differs:
+The CEGAR fields (`formula`, `predicates`, `controllable`, `predicate_source`, `max_iterations`, `must_edge_inference`, `may_edge_inference`, `init_values`, `emit_ctxdsl`) are identical to [`/api/v1/btor2/cegar`](#post-apiv1btor2cegar). Only the source half differs:
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -792,7 +792,7 @@ The CEGAR fields (`formula`, `predicates`, `controllable_inputs`, `predicate_sou
 | `setundef_anyconst` | `boolean` | No | Yosys `setundef -anyconst` (one nondeterministic constant per undefined bit — the Caliptra CWE-1245 power-up policy). Defaults to `false`. |
 | `formula` | `string` | Yes | μ-calculus formula (see `/btor2/cegar`). |
 | `predicates` | `PredicateSpecRequest[]` | Yes | Initial predicate set (see `/btor2/cegar`). |
-| _CEGAR fields…_ | | No | `controllable_inputs`, `predicate_source`, `max_iterations`, `must_edge_inference`, `may_edge_inference`, `config_values`, `emit_ctxdsl` — identical to `/btor2/cegar`. |
+| _CEGAR fields…_ | | No | `controllable`, `predicate_source`, `max_iterations`, `must_edge_inference`, `may_edge_inference`, `init_values`, `emit_ctxdsl` — identical to `/btor2/cegar`. |
 
 ### Response Body
 

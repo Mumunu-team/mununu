@@ -42,7 +42,7 @@ its inactive value so recovery is proved via the design's own logic, not a reset
 
 ```console
 $ mununu sv verify-auto examples/recoverability/compute_engine.sv \
-      --top compute_engine --config-value rst_n=1
+      --top compute_engine --pin rst_n=1
 ```
 
 No `--engine` flag: the default is the **execution planner's portfolio**, which routes this small
@@ -97,7 +97,7 @@ Verified reset-pinned (recovery must be via the design's *own* logic, not the re
 
 ```console
 $ mununu sv verify-auto examples/recoverability/compute_engine_faulty.sv \
-      --top compute_engine_faulty --config-value rst_n=1
+      --top compute_engine_faulty --pin rst_n=1
 ```
 
 ```

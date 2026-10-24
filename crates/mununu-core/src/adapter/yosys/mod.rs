@@ -132,7 +132,7 @@ pub struct YosysOptions {
     /// SOUNDNESS / scope: the verdict is scoped to the overridden parameters
     /// (echoed in the transcript + JSON report). A parameter yosys cannot apply
     /// (not a parameter of the target module) is an ERROR surfaced from the lift —
-    /// never a silent drop (contrast `--config-value`, mununu#459).
+    /// never a silent drop (contrast `--pin`, mununu#459).
     ///
     /// **Default**: empty. Populated from the CLI `--param NAME=VALUE` flag / the
     /// API `params` field. No `read_slang` analog is needed — `chparam` operates
@@ -2223,7 +2223,7 @@ fn locate_sv2v() -> Result<PathBuf, AdapterError> {
 /// the **RTL lift only** (`--ignore-assertions` — SVA is extracted separately by the slang
 /// `extract_sva` path, so no `bad` nodes are needed here). Named registers and ports get
 /// the SAME `instance.signal` BTOR2 names as the `read_verilog` path, so cutpoints /
-/// `--config-value` over named signals resolve unchanged.
+/// `--pin` over named signals resolve unchanged.
 fn locate_slang_plugin() -> Option<String> {
     if let Ok(p) = std::env::var("MUNUNU_YOSYS_SLANG_PLUGIN")
         && Path::new(&p).exists()

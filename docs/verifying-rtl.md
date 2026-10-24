@@ -671,7 +671,7 @@ cd examples/verify/ip_opentitan_edn/source && sh run.sh --json --source mununu_p
 `run.sh` is `sv verify-auto edn.sv --top edn --preprocess-sv2v --source … --lift-override
 prim_assert.sv=prim_assert_shim.sv --lift-override prim_assert_standard_macros.svh=/dev/null
 --lift-override prim_assert_sec_cm.svh=/dev/null --lift-override prim_alert_sender.sv=prim_alert_sender_lift.sv
---lift-override prim_sparse_fsm_flop.sv=prim_sparse_fsm_flop_lift.sv --config-value rst_ni=1`: the SVA is
+--lift-override prim_sparse_fsm_flop.sv=prim_sparse_fsm_flop_lift.sv --pin rst_ni=1`: the SVA is
 extracted from the **real** `prim_assert` macros, the lift sees the **generated synthesis shim** (every
 assertion macro of the real set empty, `INC_ASSERT` defined so the assertion-support logic —
 `prim_count`'s `fpv_err_present`, the `ASSERT_FPV_LINEAR_FSM` `<name>_cond` flop — is in the model;
@@ -771,7 +771,7 @@ of 2026-10-22). The posture puts the adversary the check was written for into th
 
 ```bash
 # the countermeasures' own sites: for every error → alert chain, the cells its flag compares
-mununu sv verify-auto edn.sv --top edn … --fault-model sec-cm --config-value rst_ni=1 --config-value alert_rx_i=85
+mununu sv verify-auto edn.sv --top edn … --fault-model sec-cm --pin rst_ni=1 --pin alert_rx_i=85
 # the "before" instrument: select the sites, inject nothing, run the antecedent-vacuity check
 mununu sv verify-auto edn.sv --top edn … --fault-model sec-cm:0
 # named sites, one global budget of two injections after a 10-cycle warm-up
@@ -827,7 +827,7 @@ antecedent shown reachable), 5 stay ⊥ within the budget, and the register-writ
 **Two facts the OpenTitan rows need.** The alert sender's `sigint` logic forces `alert_p` low while the
 receiver's `ping_p == ping_n` (`prim_alert_sender.sv:259-262`, from the free `alert_rx_i`), so under a
 posture every chain row is VIOLATED as a model artifact unless the receiver is pinned to its idle
-encoding: `--config-value alert_rx_i=85` (`ALERT_RX_DEFAULT`). And `prim_count`'s `fpv_err_present` /
+encoding: `--pin alert_rx_i=85` (`ALERT_RX_DEFAULT`). And `prim_count`'s `fpv_err_present` /
 `fpv_force` are FPV hooks that leave an anonymous input the lift cannot drive — the posture corrupts the
 counter copies themselves, which is what the FPV force stands for.
 
@@ -1122,7 +1122,7 @@ on the predicate-cube path, the explicit lift, the exact engine and the reachabi
 the record. It was not always one: until mununu#579 the cube path silently pinned such a cell to 0
 while the other engines left it free — one portfolio run, two initial states, which is the mechanism
 behind mununu#577's pair of mutually-wrong verdicts — and until mununu#609 the explicit lift started
-from `cube_0` (every predicate false) whenever no `--config-value` was given, a cell no concrete
+from `cube_0` (every predicate false) whenever no `--pin` was given, a cell no concrete
 reset state need inhabit. Now the cube path treats a predicate over an init-less register as a **free
 initial dimension** (the same mechanism as a free input), and the explicit lift's initial set is
 every cube consistent with the `init` lines (config pins still take precedence).
@@ -1135,7 +1135,7 @@ enumerates it only up to **16**; past that the property abstains with
 **nothing was decided and then withheld** — the start set was never read.
 
 The remedy is the same: establish the value — keep reset-gating on (the reset's values are injected
-as `init`), add an `init` through a sidecar, or pin the register with `--config-value`.
+as `init`), add an `init` through a sidecar, or pin the register with `--pin`.
 
 ### A guarantee judged against its witness: `vacuity` (mununu#599) and the report self-check (mununu#579)
 
@@ -1203,7 +1203,7 @@ MUNUNU_MAX_PROCESS_MEMORY_BYTES=0 mununu sv verify-auto design.sv
 
 **Coarse granularity.** The check fires BETWEEN checkpoints (per property + per escalation step). It does NOT catch an allocation that fails within a single BDD blast between checkpoints — a single property's blowup can still crash the process. The ceiling is a graceful-degradation lever for the multi-property `sv verify-auto` lane, not an absolute crash guarantee.
 
-**Complementary to `--config-value`.** The bit cap counts kept cone bits AFTER COI and AFTER pinning, so `--config-value SIG=V` shrinks the real problem and often keeps a property under the memory ceiling that would otherwise trip it. `@mununu_predicate` hints do NOT — they seed cube dimensions, and an alternating νμ formula is decided by the exact engine which does not use them.
+**Complementary to `--pin`.** The bit cap counts kept cone bits AFTER COI and AFTER pinning, so `--pin SIG=V` shrinks the real problem and often keeps a property under the memory ceiling that would otherwise trip it. `@mununu_predicate` hints do NOT — they seed cube dimensions, and an alternating νμ formula is decided by the exact engine which does not use them.
 
 ### Handing over a reproducer: `MUNUNU_SHADOW_BTOR2_DUMP` (mununu#552)
 
@@ -1262,11 +1262,11 @@ MUNUNU_VERIFY_AUTO_PARTIAL_JSON=/tmp/verdicts.ndjson mununu sv verify-auto desig
 
 **Not a substitute for the report.** It carries verdicts only — no counterexamples, notes, or seeded predicates. A run that finishes normally still emits the full report, and consumers should prefer it. This is for the run that does not get to finish.
 
-### Pinning a config input: `--config-value`
+### Pinning a config input: `--pin`
 
 > Source of truth: [`partition_config_pins`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) — surface: (CLI+API+UI)
 
-`--config-value SIGNAL=VALUE` (API `config_values: [...]`) pins a primary input to
+`--pin SIGNAL=VALUE` (API `pins: [...]`) pins a primary input to
 a decimal constant and substitutes it into every formula atom, scoping the verdicts
 to that value (a `config-concretization` note lists the applied pins). A pin that
 mununu **cannot apply** is a hard **error**, never a silent drop that would verify a
@@ -1350,7 +1350,7 @@ and black-boxes the module (all its properties then skip). Set `MUNUNU_YOSYS_FRO
 the yosys-slang `read_slang` plugin is present — `MUNUNU_YOSYS_SLANG_PLUGIN`, or the pinned image's
 `share/yosys/plugins/slang.so`) to lift the RTL with `read_slang` (a complete SV front-end) instead.
 It reads the RTL **only** (`--ignore-assertions` — SVA is extracted separately, so nothing is lost)
-and names named registers/ports **identically** to `read_verilog`, so cutpoints / `--config-value` /
+and names named registers/ports **identically** to `read_verilog`, so cutpoints / `--pin` /
 atoms resolve unchanged. *(Example: the `xgate` coprocessor, whose RISC core has a rejected `while`
 loop, is black-boxed under `read_verilog` but lifts its full 125-register core under `read_slang`.)*
 

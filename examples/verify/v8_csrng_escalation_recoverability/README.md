@@ -1,6 +1,6 @@
 # v8 — csrng assume-guarantee recoverability (exact-symbolic)
 
-> **Source of truth:** [`adapter::btor2::symbolic_bitblast::exact_symbolic_verdict`](../../../crates/mununu-core/src/adapter/btor2/symbolic_bitblast.rs), the `@mununu_guarantee` carrier ([`scan_annotation_properties`](../../../crates/mununu-core/src/adapter/slang/verify_auto.rs)), and `--engine exact-symbolic` / `--config-value` on `mununu sv verify-auto` — surface: CLI+API+UI.
+> **Source of truth:** [`adapter::btor2::symbolic_bitblast::exact_symbolic_verdict`](../../../crates/mununu-core/src/adapter/btor2/symbolic_bitblast.rs), the `@mununu_guarantee` carrier ([`scan_annotation_properties`](../../../crates/mununu-core/src/adapter/slang/verify_auto.rs)), and `--engine exact-symbolic` / `--pin` on `mununu sv verify-auto` — surface: CLI+API+UI.
 
 An **assume-guarantee liveness** showcase on real OpenTitan RTL, decided by the
 [exact-symbolic engine](../../../wiki/Exact-Symbolic-Engine.md). It demonstrates the
@@ -34,7 +34,7 @@ entirely on whether escalation is admitted:
 | **none** — `local_escalate_i` free | **VIOLATED** (definite) — escalation latches the FSM in the `MainSmError` trap; idle unreachable |
 | **`G ¬local_escalate_i`** — no escalation | **HOLDS** (definite) — the FSM always cycles back to idle |
 
-The assumption is applied as an input concretization (`--config-value
+The assumption is applied as an input concretization (`--pin
 local_escalate_i=0`), which the exact engine bakes into the model before checking.
 Both verdicts are 2-valued and definite — the exact engine uses no abstraction, so
 there is no `⊥` and both answers transfer to the modeled design.

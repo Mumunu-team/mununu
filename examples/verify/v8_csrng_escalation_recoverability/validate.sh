@@ -14,7 +14,7 @@
 #       CsrngMainErrorStStable_A), from which idle is unreachable.
 #   * assume  G !local_escalate_i      -> HOLDS (definite): with no escalation the FSM
 #       always cycles back to idle. The assumption is applied as an input
-#       concretization (--config-value local_escalate_i=0).
+#       concretization (--pin local_escalate_i=0).
 #
 # This is the mununu-exclusive wedge: an assume-guarantee liveness verdict on a
 # branching-time property, on real silicon, that flips on the explicit assumption —
@@ -70,8 +70,8 @@ echo "--- no assumption (local_escalate_i free) — expect VIOLATED ---"
 run > "${OUT}/free.out" 2>&1 || true
 grep -E "ann_guarantee" "${OUT}/free.out" || true
 echo
-echo "--- assume G !local_escalate_i (--config-value local_escalate_i=0) — expect HOLDS ---"
-run --config-value local_escalate_i=0 > "${OUT}/assumed.out" 2>&1 || true
+echo "--- assume G !local_escalate_i (--pin local_escalate_i=0) — expect HOLDS ---"
+run --pin local_escalate_i=0 > "${OUT}/assumed.out" 2>&1 || true
 grep -E "ann_guarantee" "${OUT}/assumed.out" || true
 echo
 

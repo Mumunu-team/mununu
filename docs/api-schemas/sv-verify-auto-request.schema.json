@@ -1,5 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
   "definitions": {
     "ExpectationsRequest": {
       "description": "mununu#537 — the caller's claims about a run's verdicts.\n\nThere is deliberately **no** \"tolerate undecided\" field. Naming a property `unknown` in `named` is the sound version of that wish: it pins the abstention as a claim that fails when the property becomes decidable, instead of excusing it. See [`crate::adapter::slang::expectations`] for the incident that settled this.",
@@ -101,14 +102,6 @@
         "boolean",
         "null"
       ]
-    },
-    "config_values": {
-      "default": [],
-      "description": "H.J.b — config concretization: pin wide config inputs to constants so comparisons against them become decidable. Each entry `\"signal=value\"` (e.g. `\"cfg_detect_timer_i=7\"`). The verdicts are then SCOPED to these values (surfaced as a `config-concretization` note). Default empty.",
-      "items": {
-        "type": "string"
-      },
-      "type": "array"
     },
     "counter_bounds": {
       "default": [],
@@ -242,6 +235,14 @@
     "params": {
       "default": [],
       "description": "Module-parameter overrides applied via yosys `chparam -set` before the lift (mirrors the CLI `--param`). Each entry is `\"NAME=VALUE\"` (applied to the top module) or `\"MODULE.NAME=VALUE\"` (scoped to `MODULE`). Shrinks a parameterised timing interval so its counters get smaller — without a wrapper module (which would rename the SVA atoms). A parameter yosys cannot apply is an ERROR (never silently dropped); the verdicts are scoped to the applied values (surfaced as a `parameter-override` note). Default empty.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "pins": {
+      "default": [],
+      "description": "H.J.b — config concretization: pin wide config inputs to constants so comparisons against them become decidable. Each entry `\"signal=value\"` (e.g. `\"cfg_detect_timer_i=7\"`). The verdicts are then SCOPED to these values (surfaced as a `config-concretization` note). Default empty.",
       "items": {
         "type": "string"
       },

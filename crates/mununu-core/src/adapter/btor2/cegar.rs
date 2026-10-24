@@ -2177,9 +2177,9 @@ pub fn sidecar_combinational_predicates(options: &AdapterOptions) -> Vec<Predica
         .collect()
 }
 
-/// Parse `--config-values`-style `REG=v1,v2,...` entries into the synthetic
+/// Parse `--init-values`-style `REG=v1,v2,...` entries into the synthetic
 /// sidecar JSON the predicate-cube lift reads via `sidecar_config_values`
-/// (R-S8). Shared by the CLI (`mununu btor2 cegar --config-values`) and the
+/// (R-S8). Shared by the CLI (`mununu btor2 cegar --init-values`) and the
 /// HTTP API (`POST /api/v1/btor2/cegar` `config_values`) so the entry format
 /// has a single source of truth (no CLI↔API drift). Returns `None` for an
 /// empty input (no synthetic sidecar), `Some(json)` otherwise. Each entry is
@@ -2355,7 +2355,7 @@ mod tests {
     }
 
     // M.6 parity — the shared `REG=v1,v2,...` parse used by both the CLI
-    // `--config-values` flag and the API `config_values` field.
+    // `--init-values` flag and the API `config_values` field.
     #[test]
     fn config_values_to_sidecar_json_empty_is_none() {
         assert_eq!(config_values_to_sidecar_json(&[]).unwrap(), None);

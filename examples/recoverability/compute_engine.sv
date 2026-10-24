@@ -19,7 +19,7 @@
 // reachable in module isolation.
 //
 // The properties are carried as `@mununu_guarantee` mu-calculus annotations (verified by
-// `mununu sv verify-auto`). Run out-of-reset (`--config-value rst_n=1`) — see README.md.
+// `mununu sv verify-auto`). Run out-of-reset (`--pin rst_n=1`) — see README.md.
 
 // AG EF(idle): from every reachable state, the core can return to idle (the recovery).
 // @mununu_guarantee nu Y.((mu X.(busy==0 || <> X)) && [] Y)

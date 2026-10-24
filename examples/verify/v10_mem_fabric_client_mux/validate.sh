@@ -36,7 +36,7 @@ assert_variant() {
   # Run from the repo root, not from inside the variant dir: mununu writes
   # logs/mununu.log relative to CWD, and a stray logs/ would break the
   # regenerate-and-diff check above. Source paths resolve relative to the toml.
-  "${MUNUNU}" verify "${dir}/verify.toml" --json 2>/dev/null >"${jf}"
+  "${MUNUNU}" verify --fail-on none "${dir}/verify.toml" --json 2>/dev/null >"${jf}"
   python3 -c '
 import json, sys
 jf, variant, xdup, xskip, xwedge = sys.argv[1:6]

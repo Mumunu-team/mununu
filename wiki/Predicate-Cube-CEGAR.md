@@ -94,7 +94,7 @@ mununu btor2 cegar <design.btor2> \
   --predicate p5:boot_fsm_ns=5 \           # NAME:REGISTER=VALUE (repeatable)
   --predicate p6:boot_fsm_ns=6 \
   --predicate p7:boot_fsm_ns=7 \
-  --config-values 'boot_fsm_ns=0,1,2,3,4,5,6,7' \  # admit these power-up values
+  --init-values 'boot_fsm_ns=0,1,2,3,4,5,6,7' \  # admit these power-up values
   --must-edge-inference smt-per-target              # prove must-edges with Z3
 ```
 
@@ -104,11 +104,11 @@ Key flags:
 |---|---|
 | `--formula` | the mu-calculus property (see [Mu-Calculus Reference](Mu-Calculus-Reference)) |
 | `--predicate NAME:REG=VALUE` | one cube predicate (`REG == VALUE`); repeatable |
-| `--config-values 'REG=v1,v2,…'` | admit an under-constrained register's power-up values (R-Y7 symbolic init) |
+| `--init-values 'REG=v1,v2,…'` | admit an under-constrained register's power-up values (R-Y7 symbolic init) |
 | `--must-edge-inference` | `off` (may-only) \| `smt-per-target` (∀∀, Z3-proved) \| `smt-per-target-standard` (∀∃) \| `smt-hyper-must` (∀∃ over a target set) \| `auto` (accepted; on this verb it means `off` — it is the `sv verify-auto` default, where it resolves per property, mununu#663) |
 | `--may-edge-inference` | `off` (sampling) \| `smt-all-pairs` (sound ∃ over-approximation) |
 | `--max-iterations` | CEGAR refinement cap (default 16) |
-| `--controllable-input` | mark an input as controller-chosen (synthesis / controllability-aware lift) |
+| `--controllable` | mark an input as controller-chosen (synthesis / controllability-aware lift) |
 | `--emit-ctxdsl <PATH>` | dump the refined cube model as CTXDSL |
 | `--engine` | `explicit` (default, SMT edges + CEGAR) \| `symbolic` (R-F5 BDD relation + CEGAR loop, no per-cube-pair SMT — orders of magnitude faster at large `\|P\|`; handles equality + non-derived sidecar compound predicates) |
 

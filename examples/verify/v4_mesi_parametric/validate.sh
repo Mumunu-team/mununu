@@ -33,7 +33,7 @@ assert_verdicts() {
   # (dropped here). Capture to a file so python reads JSON from argv, not
   # stdin (a `python3 - <<heredoc` would consume the heredoc as the script
   # and leave stdin empty).
-  "${MUNUNU}" verify "${toml}" --json 2>/dev/null >"${jf}"
+  "${MUNUNU}" verify --fail-on none "${toml}" --json 2>/dev/null >"${jf}"
   python3 -c '
 import json, sys
 toml = sys.argv[2]

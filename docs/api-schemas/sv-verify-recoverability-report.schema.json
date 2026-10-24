@@ -29,7 +29,7 @@
       "type": "string"
     },
     "refinement": {
-      "description": "Present only under `--refine` / `--config-values` / `--discover-assumptions`: the refinement record. Free-form because `VerdictRefinement` is its own evolving surface — pinning its internals here would couple two schemas that change for different reasons."
+      "description": "Present only under `--refine` / `--partition` / `--discover-assumptions`: the refinement record. Free-form because `VerdictRefinement` is its own evolving surface — pinning its internals here would couple two schemas that change for different reasons."
     }
   },
   "required": [

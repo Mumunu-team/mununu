@@ -48,7 +48,7 @@ cd "${SRC}"
 # Check 1 — slicing alone (no sidecar) must not rescue the raw design.
 echo "--- (1) no sidecar: raw 72-bit design must be rejected at the cap ---"
 sed 's#sidecar = "three_wide.mununu.json"##' verify.toml > "${OUT}/nosidecar.toml"
-if "${MUNUNU}" verify --base-dir "${SRC}" "${OUT}/nosidecar.toml" > "${OUT}/nosidecar.out" 2>&1; then
+if "${MUNUNU}" verify --fail-on none --base-dir "${SRC}" "${OUT}/nosidecar.toml" > "${OUT}/nosidecar.out" 2>&1; then
   echo "FAIL: raw design verified instead of hitting the cap" >&2
   exit 1
 fi
@@ -62,7 +62,7 @@ echo
 
 # Check 2 — slicing + concretization compose: per-cluster fires, all SAT.
 echo "--- (2) sidecar: per-cluster × concretization compose; all SATISFIED ---"
-"${MUNUNU}" verify --json verify.toml > "${OUT}/verify.json" 2>"${OUT}/verify.err" || {
+"${MUNUNU}" verify --fail-on none --json verify.toml > "${OUT}/verify.json" 2>"${OUT}/verify.err" || {
   echo "FAIL: mununu verify exited non-zero with the sidecar" >&2
   tail -15 "${OUT}/verify.err" >&2
   exit 1

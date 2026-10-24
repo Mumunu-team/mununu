@@ -26,10 +26,10 @@ strip_logs() {
     printf '# composed states. Plan Part 6 item 6.\n\n'
 
     printf '=== mununu verify (human-readable) ===\n'
-    ./target/debug/mununu verify "$DIR/verify.toml" 2>&1 | strip_logs
+    ./target/debug/mununu verify --fail-on none "$DIR/verify.toml" 2>&1 | strip_logs
 
     printf '\n=== mununu verify --print-alphabet (introspection) ===\n'
-    ./target/debug/mununu verify "$DIR/verify.toml" --print-alphabet 2>&1 | strip_logs
+    ./target/debug/mununu verify --fail-on none "$DIR/verify.toml" --print-alphabet 2>&1 | strip_logs
 } > "$TRANSCRIPT"
 
 printf 'wrote transcript to %s (%d lines)\n' \

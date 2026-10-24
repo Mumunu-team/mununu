@@ -38,7 +38,7 @@
 //!   divergence is demonstrated on synthetic fixtures by the
 //!   `r6_3_evaluate_tri_mayonly_diamond_is_unknown_at_source` unit
 //!   test in `mu_calculus/evaluator.rs`.
-//! - CLI invocation via `mununu btor2 cegar --controllable-input`.
+//! - CLI invocation via `mununu btor2 cegar --controllable`.
 //!   The CLI flag for `controllable_inputs` doesn't yet exist on
 //!   the BTOR2 subcommand (R.6.6 lifter reads it from
 //!   `AdapterOptions::controllable_inputs` which today is only

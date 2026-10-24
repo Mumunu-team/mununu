@@ -908,7 +908,7 @@ fn config_partition_over_reset_partitions_opentitan_fsms() {
 }
 
 /// Slice 2b (AUTO config-atom identification) on the SAME OpenTitan RTL — a bare refined verify (NO
-/// `--config-values`) auto-identifies `rst_ni` (the structurally-detected reset) as the config axis and
+/// `--partition`) auto-identifies `rst_ni` (the structurally-detected reset) as the config axis and
 /// reproduces the ConfigDependent partition. Proves the user need not name the reset: the reset-mux scan
 /// ([`detect_resets`]) does it. This is the industrial validation of the 2b auto path — host-runnable,
 /// gates `make ci`.

@@ -415,7 +415,7 @@ def main():
         "  --lift-override prim_assert_standard_macros.svh=/dev/null \\\n"
         "  --lift-override prim_assert_sec_cm.svh=/dev/null \\\n"
         + "".join(f"  --lift-override {fname}={lift} \\\n" for fname, lift in lifts)
-        + "  --config-value rst_ni=1 \"$@\"\n"
+        + "  --pin rst_ni=1 \"$@\"\n"
     )
     print(f"{len(ordered)} sources -> {a.out}; unresolved: {sorted(unresolved) or 'none'}; slang rc={rc}")
 

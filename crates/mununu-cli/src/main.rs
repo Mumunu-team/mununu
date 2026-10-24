@@ -901,16 +901,16 @@ struct Btor2CegarArgs {
     /// repeated. Bridges to the R-Y7 symbolic-init path by
     /// expanding the predicate-cube lifter's initial-state set
     /// to all cubes admissible under the listed values.
-    /// Example: `--config-values 'boot_fsm=0,1,2'
-    /// --config-values 'mode=0,1'`.
+    /// Example: `--init-values 'boot_fsm=0,1,2'
+    /// --init-values 'mode=0,1'`.
     ///
     /// When a sidecar declares `signals[].config_values`, the
     /// sidecar value takes precedence for that register (the CLI
     /// flag's values are merged in; sidecar values override CLI
     /// values per the resolver's last-write-wins for the same
     /// key).
-    #[arg(long = "config-values", value_name = "REG=v1,v2,...")]
-    config_values: Vec<String>,
+    #[arg(long = "init-values", value_name = "REG=v1,v2,...")]
+    init_values: Vec<String>,
     /// Emit the trace summary as JSON on stdout instead of the
     /// human-readable format.
     #[arg(long)]
@@ -936,8 +936,8 @@ struct Btor2CegarArgs {
     /// single-`step` label shape (pre-R.6.6 behaviour, no
     /// controllability axis on labels).
     ///
-    /// Example: `--controllable-input ctrl_g0 --controllable-input ctrl_g1`.
-    #[arg(long = "controllable-input", value_name = "INPUT_NAME")]
+    /// Example: `--controllable ctrl_g0 --controllable ctrl_g1`.
+    #[arg(long = "controllable", value_name = "INPUT")]
     controllable_inputs: Vec<String>,
     /// R-S2b.6 (§Phase 9 §9.1, 2026-06-12) — path to the original
     /// SystemVerilog source for the BTOR2 input. When set AND
@@ -955,14 +955,14 @@ struct Btor2CegarArgs {
     sv_source: Option<PathBuf>,
     /// R-S6.6 (§Phase 9 §9.1, 2026-06-12) — path to a sidecar
     /// JSON file (`.mununu.json`). When set, the file's contents
-    /// override the synthetic sidecar built from `--config-values`,
+    /// override the synthetic sidecar built from `--init-values`,
     /// AND `AdapterOptions::sidecar_path` is populated so the
     /// bit-blaster's `apply_vcd_trace_seeding` orchestration can
     /// resolve relative `vcd_traces` paths against the sidecar's
     /// parent directory.
     ///
     /// Without `--sidecar`, only absolute VCD trace paths in a
-    /// `--config-values`-built sidecar can be read; relative
+    /// `--init-values`-built sidecar can be read; relative
     /// paths emit an `AdapterWarning` and fall through.
     ///
     /// Example: `--sidecar examples/v6_controllability_kmts/source/amba_arbiter.mununu.json`.
@@ -1235,8 +1235,8 @@ struct Btor2VerifyRecoverabilityArgs {
     /// value included: a single value (`rst_n=1`) is a scoped pin, reported as its one cell, and a
     /// violated cell is what `--discover-assumptions` searches under. Implies the refined output.
     /// Best for a NARROW / few-value config (the cross-product is capped).
-    #[arg(long = "config-values", value_name = "NAME=v1,v2,...")]
-    config_values: Vec<String>,
+    #[arg(long = "partition", value_name = "NAME=v1,v2,...")]
+    partition: Vec<String>,
     #[command(flatten)]
     ci: CiArgs,
 }
@@ -1437,17 +1437,17 @@ struct VerifyArgs {
     /// human-readable summary table.
     #[arg(long)]
     json: bool,
-    /// Exit with a non-zero status if any property is unsatisfied.
-    /// Default: exit 0 regardless of verdicts; the report distinguishes.
-    #[arg(long)]
-    strict: bool,
+    /// A `violated` property fails the gate (exit 2 by default); a vacuous conditional verdict
+    /// (its assumptions admit no fair path) counts as `unknown` (exit 3 under `--fail-on
+    /// unknown`).
+    #[command(flatten)]
+    ci: CiArgs,
     /// Skip property evaluation and instead emit an introspection
     /// report: per-automaton alphabet + state names, the composition's
     /// union alphabet, and every declared per-state predicate. Use
     /// this before authoring property formulas to discover what
     /// labels and predicates the realized context actually exposes.
-    /// Mutually exclusive with `--strict` (the report carries no
-    /// verdicts to enforce against).
+    /// It decides nothing, so `--fail-on` has no effect with it.
     #[arg(long = "print-alphabet")]
     print_alphabet: bool,
     /// For every violated property, print the counterexample witness
@@ -2160,19 +2160,19 @@ struct SvCegarArgs {
     /// May-edge inference policy.
     #[arg(long, value_enum, default_value_t = MayEdgeInferenceArg::SmtAllPairs)]
     may_edge_inference: MayEdgeInferenceArg,
-    /// R-S8 symbolic-init config-values, repeatable. Format
+    /// R-S8 symbolic-init values, repeatable. Format
     /// `REG=v1,v2,...` — the register's admissible power-up set.
-    #[arg(long = "config-values", value_name = "REG=v1,v2,...")]
-    config_values: Vec<String>,
+    #[arg(long = "init-values", value_name = "REG=v1,v2,...")]
+    init_values: Vec<String>,
     /// Print a JSON summary instead of the human-readable report.
     #[arg(long)]
     json: bool,
     /// R.6.6 controllability split — controller-driven input symbol,
     /// repeatable.
-    #[arg(long = "controllable-input", value_name = "INPUT_NAME")]
+    #[arg(long = "controllable", value_name = "INPUT")]
     controllable_inputs: Vec<String>,
     /// Sidecar `.mununu.json` path (abstractions / simulate_reset /
-    /// vcd_traces). Overrides any `--config-values` synthetic sidecar.
+    /// vcd_traces). Overrides any `--init-values` synthetic sidecar.
     #[arg(long = "sidecar", value_name = "PATH")]
     sidecar: Option<PathBuf>,
     /// CTXDSL Phase 2 — write the final refined model + formula as
@@ -2324,17 +2324,17 @@ struct SvVerifyAutoArgs {
     assumes: AssumesArg,
     /// H.J.b — config concretization: pin a wide config input to a constant so
     /// comparisons against it become decidable (e.g. a timer threshold).
-    /// Repeatable; format `SIGNAL=VALUE` (e.g. `--config-value
+    /// Repeatable; format `SIGNAL=VALUE` (e.g. `--pin
     /// cfg_detect_timer_i=7`). Verdicts are then SCOPED to these values (shown as
     /// a `config-concretization` note). Only actual inputs are pinned.
-    #[arg(long = "config-value", value_name = "SIGNAL=VALUE")]
-    config_value: Vec<String>,
+    #[arg(long = "pin", value_name = "SIGNAL=VALUE")]
+    pin: Vec<String>,
     /// H.H — counter upper bound: seed a `SIGNAL <= VALUE` cube-partition to refine
     /// a counter-monotonicity property (`cnt_q >= $past(cnt_q)`) whose ⊥ is the
     /// abstract 32-bit wraparound. Repeatable; format `SIGNAL<=VALUE` (e.g.
     /// `--counter-bound cnt_q<=7`; the `SIGNAL=VALUE` spelling is also accepted).
     /// Sound (a partition, not an assumption); needs `--must-edge-inference` on.
-    /// Bounds are also auto-derived from `--config-value`; a manual bound overrides
+    /// Bounds are also auto-derived from `--pin`; a manual bound overrides
     /// the inferred one. Shown as a `counter-bound` note.
     #[arg(long = "counter-bound", value_name = "SIGNAL<=VALUE")]
     counter_bound: Vec<String>,
@@ -2594,8 +2594,8 @@ struct SvVerifyRecoverabilityArgs {
     /// Config-partition (refined-verdicts capability A): name config INPUTS to split the verdict over,
     /// each `NAME=v1,v2,...` (repeatable) → the refinement reports a `config_partition`, decided exactly
     /// per config. Implies the refined output. Best for a narrow / few-value config (cross-product capped).
-    #[arg(long = "config-values", value_name = "NAME=v1,v2,...")]
-    config_values: Vec<String>,
+    #[arg(long = "partition", value_name = "NAME=v1,v2,...")]
+    partition: Vec<String>,
     #[command(flatten)]
     ci: CiArgs,
     #[command(flatten)]
@@ -2697,11 +2697,11 @@ struct SvMutateArgs {
     #[arg(long = "lift-override", value_name = "NAME=PATH")]
     lift_override: Vec<String>,
     /// mununu#725 — config concretization, `SIGNAL=VALUE` (repeatable), as `sv
-    /// verify-auto --config-value`: pins a config input to a constant for the
-    /// baseline and the mutant (e.g. `--config-value rst_ni=1`). Mirrored on the API
+    /// verify-auto --pin`: pins a config input to a constant for the
+    /// baseline and the mutant (e.g. `--pin rst_ni=1`). Mirrored on the API
     /// as `config_values`.
-    #[arg(long = "config-value", value_name = "SIGNAL=VALUE")]
-    config_value: Vec<String>,
+    #[arg(long = "pin", value_name = "SIGNAL=VALUE")]
+    pin: Vec<String>,
     /// mununu#725 — control-slice cut point (repeatable), as `sv verify-auto
     /// --cutpoint`: replace a net with a free input in the lift. Mirrored on the API
     /// as `cutpoint`.
@@ -3259,10 +3259,6 @@ fn handle_verify(args: VerifyArgs) -> Result<(), String> {
     use mununu_core::verify::report::PropertyFormulaSource;
     use mununu_core::verify::{inspect_project, verify_project};
 
-    if args.print_alphabet && args.strict {
-        return Err("--print-alphabet is incompatible with --strict (the introspection report carries no verdicts)".to_string());
-    }
-
     let body = std::fs::read_to_string(&args.config)
         .map_err(|e| format!("failed to read {}: {e}", args.config.display()))?;
     let mut config = VerifyConfig::from_toml(&body)
@@ -3457,22 +3453,19 @@ fn handle_verify(args: VerifyArgs) -> Result<(), String> {
         }
     }
 
-    if args.strict && report.property_verdicts.iter().any(|v| !v.satisfied()) {
-        return Err("one or more properties violated (--strict)".to_string());
-    }
-    // mununu#595 — a vacuous conditional verdict is not a pass either.
-    if args.strict
-        && report
-            .property_verdicts
-            .iter()
-            .any(|v| v.fair_path_exists == Some(false))
+    // mununu#595 — a vacuous conditional verdict is not a pass either: it reads `unknown`.
+    let worst = if report.property_verdicts.iter().any(|v| !v.satisfied()) {
+        "violated"
+    } else if report
+        .property_verdicts
+        .iter()
+        .any(|v| v.fair_path_exists == Some(false))
     {
-        return Err(
-            "one or more conditional properties are VACUOUS — their assumptions admit no fair \
-             path (--strict)"
-                .to_string(),
-        );
-    }
+        "unknown"
+    } else {
+        "holds"
+    };
+    ci_gate_exit(worst, args.ci.fail_on);
     Ok(())
 }
 
@@ -3859,13 +3852,13 @@ fn btor2_verify_recoverability(args: Btor2VerifyRecoverabilityArgs) -> Result<()
         .iter()
         .map(|s| parse_extra_predicate(s))
         .collect::<Result<Vec<_>, _>>()?;
-    let config_specs = parse_config_value_specs(&args.config_values)?;
+    let config_specs = parse_config_value_specs(&args.partition)?;
 
     let mut summary = serde_json::json!({
         "file": args.file.display().to_string(),
         "property": recoverability_property_str(&args.target),
     });
-    // `--refine` / `--config-values` / `--discover-assumptions` (refined-verdicts): the canonical
+    // `--refine` / `--partition` / `--discover-assumptions` (refined-verdicts): the canonical
     // verdict PLUS a structured, diagnostic-only refinement (Vacuous / bot-diagnosis / config-partition
     // / holds_under) — never changes the verdict. Without any, the plain verdict path.
     let (verdict, attribution) =
@@ -4440,7 +4433,7 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
 /// R.5 Item 3 sub-item 3.5 (2026-06-04) — CEGAR refinement
 /// loop CLI handler.
 ///
-/// R-S8 session 2 (2026-06-08) — parse the `--config-values
+/// R-S8 session 2 (2026-06-08) — parse the `--init-values
 /// REG=v1,v2,v3` CLI flag(s) and build an `AdapterOptions` whose
 /// `sidecar_json` declares one `signals[]` entry per flag entry
 /// with the listed `config_values`. The CEGAR loop reads this via
@@ -4455,7 +4448,7 @@ fn build_adapter_options_with_config_values(
     use mununu_core::adapter::AdapterOptions;
     // M.6 parity (2026-06-20) — the `REG=v1,v2,...` parse moved to the shared
     // core helper `adapter::btor2::cegar::config_values_to_sidecar_json` so the
-    // CLI `--config-values` and the API `config_values` field parse identically
+    // CLI `--init-values` and the API `config_values` field parse identically
     // (single source of truth; the format can't drift between surfaces).
     let sidecar_json =
         mununu_core::adapter::btor2::cegar::config_values_to_sidecar_json(config_values_args)?;
@@ -4491,7 +4484,7 @@ fn btor2_cegar(args: Btor2CegarArgs) -> Result<(), String> {
             max_iterations: args.max_iterations,
             must_edge_inference: args.must_edge_inference,
             may_edge_inference: args.may_edge_inference,
-            config_values: &args.config_values,
+            config_values: &args.init_values,
             controllable_inputs: &args.controllable_inputs,
             sv_source: args.sv_source.as_deref(),
             sidecar: args.sidecar.as_deref(),
@@ -4547,7 +4540,7 @@ fn sv_cegar(args: SvCegarArgs) -> Result<(), String> {
             max_iterations: args.max_iterations,
             must_edge_inference: args.must_edge_inference,
             may_edge_inference: args.may_edge_inference,
-            config_values: &args.config_values,
+            config_values: &args.init_values,
             controllable_inputs: &args.controllable_inputs,
             // The SV input itself is the reset-simulation source.
             sv_source: Some(args.file.as_path()),
@@ -4675,7 +4668,7 @@ fn render_extract_sva_json(report: &mununu_core::adapter::slang::translate::Tran
 
 /// XL.6b — `mununu sv verify-auto`: extract SVA, lift, and verify each property
 /// against the model with no sidecar.
-/// `--config-value SIGNAL=VALUE` entries → the pinned inputs (shared by `sv verify-auto` and
+/// `--pin SIGNAL=VALUE` entries → the pinned inputs (shared by `sv verify-auto` and
 /// `sv mutate`, mununu#725). H.J.b / mununu#459: a malformed entry is a HARD error, never a
 /// silent drop; a value that is not a decimal u64 (e.g. hex `0x1`) is rejected with a message
 /// naming the value. An unknown / non-input SIGNAL is caught downstream in `verify_auto`
@@ -4688,16 +4681,14 @@ fn parse_config_values(
         .map(|e| {
             let (name, val) = e
                 .split_once('=')
-                .ok_or_else(|| format!("malformed --config-value '{e}': expected SIGNAL=VALUE"))?;
+                .ok_or_else(|| format!("malformed --pin '{e}': expected SIGNAL=VALUE"))?;
             let (name, val) = (name.trim(), val.trim());
             if name.is_empty() {
-                return Err(format!(
-                    "malformed --config-value '{e}': SIGNAL must be non-empty"
-                ));
+                return Err(format!("malformed --pin '{e}': SIGNAL must be non-empty"));
             }
             let value = val.parse::<u64>().map_err(|_| {
                 format!(
-                    "malformed --config-value '{e}': VALUE must be a decimal u64 \
+                    "malformed --pin '{e}': VALUE must be a decimal u64 \
                      (got '{val}'); hex/0x, signed, and non-numeric values are not accepted"
                 )
             })?;
@@ -4749,7 +4740,7 @@ fn sv_verify_auto(args: SvVerifyAutoArgs) -> Result<(), String> {
     }
 
     // `--param NAME=VALUE` / `MODULE.NAME=VALUE` — parse into (lhs, value).
-    // Unlike `--config-value` (which silently skips malformed / unusable pins,
+    // Unlike `--pin` (which silently skips malformed / unusable pins,
     // mununu#459), a malformed `--param` is a HARD error here, and yosys errors
     // downstream on one it cannot apply — never a silent drop.
     let params: Vec<(String, String)> = args
@@ -4790,7 +4781,7 @@ fn sv_verify_auto(args: SvVerifyAutoArgs) -> Result<(), String> {
         MustEdgeInferenceArg::SmtPerTargetStandard => MustEdgeInference::SmtPerTargetStandard,
         MustEdgeInferenceArg::SmtHyperMust => MustEdgeInference::SmtHyperMust,
     };
-    let config_values = parse_config_values(&args.config_value)?;
+    let config_values = parse_config_values(&args.pin)?;
     // H.H — parse `SIGNAL<=VALUE` (or `SIGNAL=VALUE`) counter-bound entries; both
     // spellings mean the inclusive upper bound `SIGNAL <= VALUE`.
     let counter_bounds: std::collections::HashMap<String, u64> = args
@@ -5210,7 +5201,7 @@ fn run_symbolic_cegar_cli(
 
     // The simple `--predicate NAME:REG=VALUE` equalities plus any non-derived
     // `compound_predicates` (e.g. `cnt >= 2`) declared in the `--sidecar`. The
-    // sidecar overrides the `--config-values` synthetic one (matches the
+    // sidecar overrides the `--init-values` synthetic one (matches the
     // explicit path). Derived/combinational compounds are rejected downstream.
     let mut options = build_adapter_options_with_config_values(config_values)?;
     if let Some(p) = sidecar {
@@ -5430,7 +5421,7 @@ fn run_cegar_cli(
         emit_ctxdsl: params.emit_ctxdsl.is_some(),
     };
 
-    // R-S8 session 2 (2026-06-08) — parse the `--config-values`
+    // R-S8 session 2 (2026-06-08) — parse the `--init-values`
     // CLI flag(s) into a synthetic sidecar JSON that exercises the
     // shipped `sidecar_config_values` resolver bridge end-to-end.
     // Format: `REG=v1,v2,v3`. Builds an `SvAnnotation` with one
@@ -5438,7 +5429,7 @@ fn run_cegar_cli(
     // via the bridge and threads `config_values` into the
     // predicate-cube lift.
     let mut adapter_options = build_adapter_options_with_config_values(params.config_values)?;
-    // R.6.6 / V.6 (2026-06-09) — thread the `--controllable-input`
+    // R.6.6 / V.6 (2026-06-09) — thread the `--controllable`
     // CLI flag values into `AdapterOptions::controllable_inputs`,
     // which the predicate-cube lifter reads to partition boolean
     // inputs into env / ctrl classes + emit per-combo dual-label
@@ -5465,9 +5456,9 @@ fn run_cegar_cli(
     // surfaced by the slot-3 close cadence checkpoint (R-S6.6
     // unreachable from CLI before this wire-in).
     //
-    // When both `--sidecar` and `--config-values` are set, the
+    // When both `--sidecar` and `--init-values` are set, the
     // file-based sidecar wins (the file is the authoritative
-    // schema source; `--config-values` is the synth-sidecar
+    // schema source; `--init-values` is the synth-sidecar
     // convenience flag for hand-tuning).
     if let Some(sidecar_path) = params.sidecar {
         let sidecar_content = std::fs::read_to_string(sidecar_path)
@@ -7038,7 +7029,7 @@ fn sv_verify_recoverability_impl(args: SvVerifyRecoverabilityArgs) -> Result<(),
         .iter()
         .map(|s| parse_extra_predicate(s))
         .collect::<Result<Vec<_>, _>>()?;
-    let config_specs = parse_config_value_specs(&args.config_values)?;
+    let config_specs = parse_config_value_specs(&args.partition)?;
     let lift = read_sv_lift(&args.lift)?;
 
     // mununu#541 — build the TYPED report, not an inline literal. The struct is what `schemars`
@@ -7241,7 +7232,7 @@ fn sv_mutate(args: SvMutateArgs) -> Result<(), String> {
         })
         .collect::<Result<Vec<_>, String>>()?;
     // mununu#725 — the lift-posture flags of `sv verify-auto`, parsed by the same functions.
-    let config_values = parse_config_values(&args.config_value)?;
+    let config_values = parse_config_values(&args.pin)?;
     let lift_overrides = read_lift_overrides(&args.lift_override)?;
     let yopts = YosysOptions {
         top: lift.top.clone(),
@@ -10549,7 +10540,7 @@ mod sv_mutate_lift_flag_tests {
     use super::*;
 
     /// mununu#725 — `sv mutate` accepts the lift-posture flags `sv verify-auto` has
-    /// (`--lift-override`, `--config-value`, `--cutpoint`). Every OpenTitan IP lifts only with
+    /// (`--lift-override`, `--pin`, `--cutpoint`). Every OpenTitan IP lifts only with
     /// the `prim_assert.sv` shim and `rst_ni=1`, so without them a real design could not be
     /// mutated from the CLI at all (the full-IP mutation smoke had to go through the Rust API).
     #[test]
@@ -10566,7 +10557,7 @@ mod sv_mutate_lift_flag_tests {
             "stick:u_reg.q",
             "--lift-override",
             "prim_assert.sv=shim/prim_assert.sv",
-            "--config-value",
+            "--pin",
             "rst_ni=1",
             "--cutpoint",
             "must_refresh",

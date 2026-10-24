@@ -22,7 +22,7 @@
 //     A single failing linear trace cannot state it; only a branching-time engine can. mununu
 //     decides it exactly over the bit-blasted state space (3-valued KMTS mu-calculus), soundly.
 //
-// Verified reset-pinned (`--config-value rst_n=1`) on purpose: recovery must be via the design's
+// Verified reset-pinned (`--pin rst_n=1`) on purpose: recovery must be via the design's
 // OWN logic, not the reset escape. "Can it get unstuck WITHOUT a power-cycle?" — here, no.
 //
 // The properties are carried as `@mununu_guarantee` mu-calculus annotations (verified by

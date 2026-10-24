@@ -60,7 +60,7 @@ cd "${SRC}"
 
 echo "--- (1) no sidecar: raw 172-bit design must be rejected at the cap ---"
 sed 's#sidecar = "sysrst_harness.mununu.json"##' verify.toml > "${OUT}/nosidecar.toml"
-if "${MUNUNU}" verify --base-dir "${SRC}" "${OUT}/nosidecar.toml" > "${OUT}/nosidecar.out" 2>&1; then
+if "${MUNUNU}" verify --fail-on none --base-dir "${SRC}" "${OUT}/nosidecar.toml" > "${OUT}/nosidecar.out" 2>&1; then
   echo "FAIL: raw design verified instead of hitting the cap" >&2; exit 1
 fi
 grep -qiE "state bits|max supported|StateSpaceOverflow|2\^20" "${OUT}/nosidecar.out" || {
@@ -76,7 +76,7 @@ name = "reach_det0"
 formula = "mu X. (det0_o || (<> X))"
 over = "Circuit"
 EOF
-if "${MUNUNU}" verify --base-dir "${SRC}" "${OUT}/single.toml" > "${OUT}/single.out" 2>&1; then
+if "${MUNUNU}" verify --fail-on none --base-dir "${SRC}" "${OUT}/single.toml" > "${OUT}/single.out" 2>&1; then
   echo "FAIL: single-property concretized design verified instead of busting" >&2; exit 1
 fi
 grep -qiE "state bits|max supported|StateSpaceOverflow|2\^20" "${OUT}/single.out" || {
@@ -86,7 +86,7 @@ echo "ok: concretized joint still busts with one cone — per-cluster slicing is
 echo
 
 echo "--- (3) sidecar + five disjoint properties: per-cluster × concretization compose ---"
-"${MUNUNU}" verify --json verify.toml > "${OUT}/verify.json" 2>"${OUT}/verify.err" || {
+"${MUNUNU}" verify --fail-on none --json verify.toml > "${OUT}/verify.json" 2>"${OUT}/verify.err" || {
   echo "FAIL: mununu verify exited non-zero" >&2
   tail -15 "${OUT}/verify.err" >&2; exit 1; }
 

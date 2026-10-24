@@ -9,4 +9,4 @@ exec mununu sv verify-auto edn.sv --top edn --preprocess-sv2v --source csrng_reg
   --lift-override prim_assert_sec_cm.svh=/dev/null \
   --lift-override prim_alert_sender.sv=prim_alert_sender_lift.sv \
   --lift-override prim_sparse_fsm_flop.sv=prim_sparse_fsm_flop_lift.sv \
-  --config-value rst_ni=1 "$@"
+  --pin rst_ni=1 "$@"

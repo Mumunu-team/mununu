@@ -597,7 +597,7 @@
     {
       "id": "rtl_recoverable",
       "display_name": "Recoverable (RTL)",
-      "description": "From every reachable state some path still reaches TARGET: AG EF TARGET. Pin the reset inactive (`--config-value`) or the reset itself recovers everything.",
+      "description": "From every reachable state some path still reaches TARGET: AG EF TARGET. Pin the reset inactive (`--pin`) or the reset itself recovers everything.",
       "kind": "liveness",
       "role": "standalone",
       "domains": [

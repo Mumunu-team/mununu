@@ -19,7 +19,7 @@ After this tutorial you should be able to:
 
 1. Build the mununu CLI.
 2. Lift the hand-authored AMBA arbiter BTOR2 to a controllability-aware KMTS.
-3. Run a CEGAR refinement loop with the `--controllable-input` flag.
+3. Run a CEGAR refinement loop with the `--controllable` flag.
 4. Read the JSON trace + understand what the verdicts mean.
 5. Understand what's NOT yet wired up (UI workflow, full divergence demo).
 
@@ -46,7 +46,7 @@ This produces `./target/debug/mununu`. Sanity check the new flag:
 Expected output (one of the args lines):
 
 ```
---controllable-input <INPUT_NAME>
+--controllable <INPUT_NAME>
     R.6.6 / V.6 (2026-06-09) — name of a BTOR2 input symbol the
     controller drives. Repeated to declare multiple controllable inputs.
 ```
@@ -70,7 +70,7 @@ Notable structure:
 
 ## Step 3 — Run the CEGAR loop with the controllability-aware lift
 
-The `--controllable-input` flag (new in 2026-06-09) tells the
+The `--controllable` flag (new in 2026-06-09) tells the
 predicate-cube lifter which BTOR2 inputs the controller drives. The
 lifter then partitions boolean inputs into env (uncontrollable) + ctrl
 (controllable) classes + emits per-combo dual-label transitions with
@@ -81,8 +81,8 @@ LIBRARY_PATH=/usr/local/opt/z3/lib ./target/debug/mununu btor2 cegar \
   examples/verify/v6_controllability_kmts/source/amba_arbiter.btor2 \
   --formula 'nu X. < true > X' \
   --predicate 'burst_zero:burst=0' \
-  --controllable-input ctrl_g0 \
-  --controllable-input ctrl_g1 \
+  --controllable ctrl_g0 \
+  --controllable ctrl_g1 \
   --max-iterations 4
 ```
 
@@ -126,8 +126,8 @@ LIBRARY_PATH=/usr/local/opt/z3/lib ./target/debug/mununu btor2 cegar \
   examples/verify/v6_controllability_kmts/source/amba_arbiter.btor2 \
   --formula 'nu X. [ true ] X' \
   --predicate 'burst_zero:burst=0' \
-  --controllable-input ctrl_g0 \
-  --controllable-input ctrl_g1 \
+  --controllable ctrl_g0 \
+  --controllable ctrl_g1 \
   --max-iterations 4 \
   --json | python3 -m json.tool
 ```
@@ -183,7 +183,7 @@ edges from the same source. This is the R.6.7 done-criterion (R.6 plan §1).
 ## Web UI integration
 
 **Status: MVP shipped 2026-06-09.** API extension (`/api/v1/context/import`
-accepts `predicates` + `controllable_inputs` for BTOR2 input) + a
+accepts `predicates` + `controllable` for BTOR2 input) + a
 dedicated UI workflow panel mounted at the `/v6` route. SV-direct
 input (UI runs sv2v + Yosys + lift internally) is the next session
 item; today the user runs `mununu sv emit-btor2-per-module` first
@@ -196,7 +196,7 @@ fields:
 
 - `predicates: PredicateSpecRequest[]` — `{name, register, value}`
   triples.
-- `controllable_inputs: string[]` — BTOR2 input symbol names the
+- `controllable: string[]` — BTOR2 input symbol names the
   controller drives.
 
 When both are non-empty AND `format == "btor2"`, the backend routes
@@ -219,7 +219,7 @@ curl -X POST http://localhost:8080/api/v1/context/import \
     "format": "btor2",
     "filename": "amba_arbiter.btor2",
     "predicates": [{"name": "burst_zero", "register": "burst", "value": 0}],
-    "controllable_inputs": ["ctrl_g0", "ctrl_g1"]
+    "controllable": ["ctrl_g0", "ctrl_g1"]
   }'
 ```
 
@@ -290,9 +290,9 @@ curl -X POST http://localhost:8080/api/v1/context/import \
 - Master roadmap §11.4 V.6 sub-item 7: `~/.claude/plans/you-are-a-formal-vast-lake.md`.
 - Surface parity skill: run `/parity-check` to verify the V.6 surface
   ships on CLI + API + UI. As of 2026-06-09 the V.6 surface is:
-  - **CLI**: `mununu btor2 cegar --controllable-input ... --predicate ...` ✓
+  - **CLI**: `mununu btor2 cegar --controllable ... --predicate ...` ✓
   - **API**: `POST /api/v1/context/import` with `predicates` +
-    `controllable_inputs` (BTOR2-only today; SV-direct queued) ✓ MVP
+    `controllable` (BTOR2-only today; SV-direct queued) ✓ MVP
   - **UI**: `V6ControllabilityAwareLiftPanel` at `/v6` ✓ MVP
 
 ## What's NOT in this tutorial (deferred)
