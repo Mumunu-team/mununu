@@ -74,12 +74,12 @@ echo "=== V.10 — nested-counter recoverability on real OpenTitan prim_count (A
 echo
 echo "--- small (OW=8, exact engine) — expect HOLDS ---"
 lift 8 4 6 40 "${OUT}/small.btor2"
-"${MUNUNU}" btor2 verify-recoverability "${OUT}/small.btor2" --target 'outer == 0' 2>/dev/null | grep -iE '"verdict"'
+"${MUNUNU}" btor2 verify-recoverability "${OUT}/small.btor2" --target 'outer == 0' 2>/dev/null | grep -iE '"outcome"'
 SMALL="$("${MUNUNU}" btor2 verify-recoverability "${OUT}/small.btor2" --target 'outer == 0' 2>/dev/null | grep -oiE 'holds|violated|unknown' | head -1)"
 echo
 echo "--- wide (OW=48) — expect HOLDS (the JSON's engine field says which engine decided) ---"
 lift 48 8 100 1099511627776 "${OUT}/wide.btor2"
-"${MUNUNU}" btor2 verify-recoverability "${OUT}/wide.btor2" --target 'outer == 0' 2>/dev/null | grep -iE '"verdict"'
+"${MUNUNU}" btor2 verify-recoverability "${OUT}/wide.btor2" --target 'outer == 0' 2>/dev/null | grep -iE '"outcome"'
 WIDE="$("${MUNUNU}" btor2 verify-recoverability "${OUT}/wide.btor2" --target 'outer == 0' 2>/dev/null | grep -oiE 'holds|violated|unknown' | head -1)"
 echo
 

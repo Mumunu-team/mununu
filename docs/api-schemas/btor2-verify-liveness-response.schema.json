@@ -9,19 +9,19 @@
       },
       "type": "array"
     },
-    "property": {
-      "description": "The reduced property, echoed for provenance: `AG((<request>) -> AF (<grant>))`.",
+    "outcome": {
+      "description": "Canonical property verdict — `\"holds\"` | `\"violated\"` | `\"unknown\"`, via [`crate::verdict::PropertyVerdict`].",
       "type": "string"
     },
-    "verdict": {
-      "description": "Canonical property verdict — `\"holds\"` | `\"violated\"` | `\"unknown\"`, via [`crate::verdict::PropertyVerdict`].",
+    "property": {
+      "description": "The reduced property, echoed for provenance: `AG((<request>) -> AF (<grant>))`.",
       "type": "string"
     }
   },
   "required": [
     "decided_by",
-    "property",
-    "verdict"
+    "outcome",
+    "property"
   ],
   "title": "Btor2VerifyLivenessResponse",
   "type": "object"

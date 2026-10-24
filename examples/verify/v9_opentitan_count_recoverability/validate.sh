@@ -92,15 +92,15 @@ MAX48=281474976710655
 
 echo "--- small counter (Width=8, exact engine) — expect HOLDS both directions ---"
 lift 8 "${OUT}/w8.btor2"
-echo -n "  descent AG EF (cnt == 0):     "; "${MUNUNU}" btor2 verify-recoverability "${OUT}/w8.btor2" --target 'cnt == 0'        2>/dev/null | grep -oiE '"verdict": "[a-z]+"'
-echo -n "  ascent  AG EF (cnt == ${MAX8}):   "; "${MUNUNU}" btor2 verify-recoverability "${OUT}/w8.btor2" --target "cnt == ${MAX8}"  2>/dev/null | grep -oiE '"verdict": "[a-z]+"'
+echo -n "  descent AG EF (cnt == 0):     "; "${MUNUNU}" btor2 verify-recoverability "${OUT}/w8.btor2" --target 'cnt == 0'        2>/dev/null | grep -oiE '"outcome": "[a-z]+"'
+echo -n "  ascent  AG EF (cnt == ${MAX8}):   "; "${MUNUNU}" btor2 verify-recoverability "${OUT}/w8.btor2" --target "cnt == ${MAX8}"  2>/dev/null | grep -oiE '"outcome": "[a-z]+"'
 S_DN="$("${MUNUNU}" btor2 verify-recoverability "${OUT}/w8.btor2" --target 'cnt == 0'       2>/dev/null | grep -oiE 'holds|violated|unknown' | head -1)"
 S_UP="$("${MUNUNU}" btor2 verify-recoverability "${OUT}/w8.btor2" --target "cnt == ${MAX8}" 2>/dev/null | grep -oiE 'holds|violated|unknown' | head -1)"
 echo
 echo "--- wide counter (Width=48) — expect HOLDS both directions (the JSON's engine field says which engine decided) ---"
 lift 48 "${OUT}/w48.btor2"
-echo -n "  descent AG EF (cnt == 0):                  "; "${MUNUNU}" btor2 verify-recoverability "${OUT}/w48.btor2" --target 'cnt == 0'         2>/dev/null | grep -oiE '"verdict": "[a-z]+"'
-echo -n "  ascent  AG EF (cnt == ${MAX48}):   "; "${MUNUNU}" btor2 verify-recoverability "${OUT}/w48.btor2" --target "cnt == ${MAX48}" 2>/dev/null | grep -oiE '"verdict": "[a-z]+"'
+echo -n "  descent AG EF (cnt == 0):                  "; "${MUNUNU}" btor2 verify-recoverability "${OUT}/w48.btor2" --target 'cnt == 0'         2>/dev/null | grep -oiE '"outcome": "[a-z]+"'
+echo -n "  ascent  AG EF (cnt == ${MAX48}):   "; "${MUNUNU}" btor2 verify-recoverability "${OUT}/w48.btor2" --target "cnt == ${MAX48}" 2>/dev/null | grep -oiE '"outcome": "[a-z]+"'
 W_DN="$("${MUNUNU}" btor2 verify-recoverability "${OUT}/w48.btor2" --target 'cnt == 0'          2>/dev/null | grep -oiE 'holds|violated|unknown' | head -1)"
 W_UP="$("${MUNUNU}" btor2 verify-recoverability "${OUT}/w48.btor2" --target "cnt == ${MAX48}" 2>/dev/null | grep -oiE 'holds|violated|unknown' | head -1)"
 echo

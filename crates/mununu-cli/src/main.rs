@@ -3670,7 +3670,7 @@ fn btor2_check_fsm(args: Btor2CheckFsmArgs) -> Result<(), String> {
                 "register": f.register,
                 "kind": f.kind.as_str(),
                 "legal_encodings": f.legal_encodings,
-                "verdict": f.verdict.as_str(),
+                "outcome": f.verdict.as_str(),
                 "illegal_encoding_reachable": f.is_finding(),
             })
         })
@@ -3887,7 +3887,7 @@ fn btor2_verify_recoverability(args: Btor2VerifyRecoverabilityArgs) -> Result<()
             )?;
             (verdict, Some(attribution))
         };
-    summary["verdict"] = serde_json::Value::String(verdict.as_str().to_string());
+    summary["outcome"] = serde_json::Value::String(verdict.as_str().to_string());
     // Who decided, and why the exact engine stepped aside when the cube ladder did — the same two
     // keys the API response carries (`engine`, `exact_abstention`).
     if let Some(a) = &attribution {
@@ -3947,7 +3947,7 @@ fn btor2_verify_safety(args: Btor2VerifySafetyArgs) -> Result<(), String> {
         "file": args.file.display().to_string(),
         "property": "AG !bad",
         "engine": engine,
-        "verdict": verdict.as_str(),
+        "outcome": verdict.as_str(),
         "detail": detail,
     });
     println!(
@@ -4033,11 +4033,11 @@ fn btor2_verify_justice(args: Btor2VerifyJusticeArgs) -> Result<(), String> {
         "converted_from_aiger": converted,
         "rung": args.rung,
         "elapsed_ms": elapsed_ms,
-        "verdict": worst,
+        "outcome": worst,
         "justice": results.iter().map(|r| serde_json::json!({
             "index": r.index,
             "size": r.size,
-            "verdict": r.verdict.as_str(),
+            "outcome": r.verdict.as_str(),
             "decided_by": r.decided_by,
             "notes": r.notes,
         })).collect::<Vec<_>>(),
@@ -4079,7 +4079,7 @@ fn btor2_verify_liveness(args: Btor2VerifyLivenessArgs) -> Result<(), String> {
     let summary = serde_json::json!({
         "file": args.file.display().to_string(),
         "property": format!("AG(({}) -> AF ({}))", args.request, args.grant),
-        "verdict": PropertyVerdict::from(verdict).as_str(),
+        "outcome": PropertyVerdict::from(verdict).as_str(),
         "decided_by": outcome.reachable_by.iter().chain(outcome.unreachable_by.iter())
             .collect::<Vec<_>>(),
     });
@@ -4116,7 +4116,7 @@ fn btor2_verify_liveness_all(args: Btor2VerifyLivenessAllArgs) -> Result<(), Str
     let summary = serde_json::json!({
         "file": args.file.display().to_string(),
         "property": response_conjunction_property(&args.responses),
-        "verdict": PropertyVerdict::from(verdict).as_str(),
+        "outcome": PropertyVerdict::from(verdict).as_str(),
         "responses": per_response_decided_by(&args.responses, &outcomes),
     });
     println!(
@@ -4172,7 +4172,7 @@ fn btor2_verify_liveness_under_fairness(
     let summary = serde_json::json!({
         "file": args.file.display().to_string(),
         "property": property,
-        "verdict": PropertyVerdict::from(verdict).as_str(),
+        "outcome": PropertyVerdict::from(verdict).as_str(),
         "fairness": args.fairness,
         "decided_by": outcome.reachable_by.iter().chain(outcome.unreachable_by.iter())
             .collect::<Vec<_>>(),
@@ -4292,7 +4292,7 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
             "engines": "fault-adversary(reach portfolio)",
             "fault": o.fault,
             "target": o.target,
-            "verdict": o.verdict,
+            "outcome": o.verdict,
             "decided_by": o.decided_by,
             "attack": {
                 "depth": o.depth,
@@ -4339,7 +4339,7 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
             "file": args.file.display().to_string(),
             "engines": format!("bmc-only(k={})", args.bmc_k),
             "fault": fault_label,
-            "verdict": verdict,
+            "outcome": verdict,
             "reachable_by": if verdict == "violated" { vec!["native-bmc"] } else { Vec::<&str>::new() },
             "unreachable_by": Vec::<&str>::new(),
             "contradiction": false,
@@ -4417,7 +4417,7 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
         "file": args.file.display().to_string(),
         "engines": if args.owned_only { "owned-only" } else { "full-portfolio" },
         "fault": fault_label,
-        "verdict": PropertyVerdict::from(outcome.verdict).as_str(),
+        "outcome": PropertyVerdict::from(outcome.verdict).as_str(),
         "reachable_by": outcome.reachable_by,
         "unreachable_by": outcome.unreachable_by,
         "contradiction": outcome.verdict
@@ -6916,7 +6916,7 @@ fn sv_verify(args: SvVerifyArgs) -> Result<(), String> {
     let outcome = sv_verify_safety(&read_sv_lift(&args.lift)?)?;
     let summary = serde_json::json!({
         "file": file,
-        "verdict": PropertyVerdict::from(outcome.verdict).as_str(),
+        "outcome": PropertyVerdict::from(outcome.verdict).as_str(),
         "reachable_by": outcome.reachable_by,
         "unreachable_by": outcome.unreachable_by,
         "contradiction": outcome.verdict
@@ -6956,7 +6956,7 @@ fn sv_verify_liveness_impl(args: SvVerifyLivenessArgs) -> Result<(), String> {
     let report = mununu_core::api::models::SvVerifyLivenessReport {
         file,
         property: format!("AG(({}) -> AF ({}))", args.request, args.grant),
-        verdict: PropertyVerdict::from(verdict).as_str().to_string(),
+        outcome: PropertyVerdict::from(verdict).as_str().to_string(),
         decided_by: outcome
             .reachable_by
             .iter()
@@ -6998,7 +6998,7 @@ fn sv_verify_liveness_all_impl(args: SvVerifyLivenessAllArgs) -> Result<(), Stri
     let report = mununu_core::api::models::SvVerifyLivenessAllReport {
         file,
         property: response_conjunction_property(&args.responses),
-        verdict: PropertyVerdict::from(verdict).as_str().to_string(),
+        outcome: PropertyVerdict::from(verdict).as_str().to_string(),
         responses: per_response_decided_by(&args.responses, &outcomes),
     };
     print_typed_report(&report)?;
@@ -7045,7 +7045,7 @@ fn sv_verify_recoverability_impl(args: SvVerifyRecoverabilityArgs) -> Result<(),
     let mut report = mununu_core::api::models::SvVerifyRecoverabilityReport {
         file: file.clone(),
         property: recoverability_property_str(&args.target),
-        verdict: String::new(),
+        outcome: String::new(),
         refinement: None,
         engine: None,
         exact_abstention: None,
@@ -7069,7 +7069,7 @@ fn sv_verify_recoverability_impl(args: SvVerifyRecoverabilityArgs) -> Result<(),
                 sv_verify_recoverability_explained(&lift, &args.target, &extra)?;
             (verdict, Some(attribution))
         };
-    report.verdict = verdict.as_str().to_string();
+    report.outcome = verdict.as_str().to_string();
     if let Some(a) = &attribution {
         report.engine = Some(a.engine.as_str().to_string());
         report.exact_abstention = a.exact_abstention.map(|k| k.label().to_string());
@@ -7096,7 +7096,7 @@ fn sv_check_fsm(args: SvCheckFsmArgs) -> Result<(), String> {
                 "register": f.register,
                 "kind": f.kind.as_str(),
                 "legal_encodings": f.legal_encodings,
-                "verdict": f.verdict.as_str(),
+                "outcome": f.verdict.as_str(),
                 "illegal_encoding_reachable": f.is_finding(),
             })
         })

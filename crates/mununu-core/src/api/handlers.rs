@@ -760,7 +760,7 @@ fn btor2_verify_handler_impl(request: Btor2VerifyRequest) -> ApiResult<Json<Btor
         )
         .map_err(bad)?;
         return Ok(Json(Btor2VerifyResponse {
-            verdict: o.verdict.to_string(),
+            outcome: o.verdict.to_string(),
             reachable_by: if o.verdict == "violated" {
                 o.decided_by.clone()
             } else {
@@ -814,7 +814,7 @@ fn btor2_verify_handler_impl(request: Btor2VerifyRequest) -> ApiResult<Json<Btor
 
     let outcome = decide_reach_portfolio(&file);
     Ok(Json(Btor2VerifyResponse {
-        verdict: crate::verdict::PropertyVerdict::from(outcome.verdict)
+        outcome: crate::verdict::PropertyVerdict::from(outcome.verdict)
             .as_str()
             .to_string(),
         reachable_by: outcome.reachable_by.iter().map(|s| s.to_string()).collect(),
@@ -891,14 +891,14 @@ fn btor2_verify_justice_handler_impl(
         "holds"
     };
     Ok(Json(Btor2VerifyJusticeResponse {
-        verdict: worst.to_string(),
+        outcome: worst.to_string(),
         converted_from_aiger: converted,
         justice: results
             .into_iter()
             .map(|r| Btor2JusticeEntry {
                 index: r.index,
                 size: r.size,
-                verdict: r.verdict.as_str().to_string(),
+                outcome: r.verdict.as_str().to_string(),
                 decided_by: r.decided_by,
                 notes: r.notes,
             })
@@ -933,7 +933,7 @@ fn btor2_verify_liveness_handler_impl(
         })?;
 
     Ok(Json(Btor2VerifyLivenessResponse {
-        verdict: crate::verdict::PropertyVerdict::from(verdict)
+        outcome: crate::verdict::PropertyVerdict::from(verdict)
             .as_str()
             .to_string(),
         property: format!("AG(({}) -> AF ({}))", request.request, request.grant),
@@ -982,7 +982,7 @@ fn btor2_verify_liveness_all_handler_impl(
         })?;
 
     Ok(Json(Btor2VerifyLivenessResponse {
-        verdict: crate::verdict::PropertyVerdict::from(verdict)
+        outcome: crate::verdict::PropertyVerdict::from(verdict)
             .as_str()
             .to_string(),
         property,
@@ -1046,7 +1046,7 @@ fn btor2_verify_liveness_under_fairness_handler_impl(
     };
 
     Ok(Json(Btor2VerifyLivenessResponse {
-        verdict: crate::verdict::PropertyVerdict::from(verdict)
+        outcome: crate::verdict::PropertyVerdict::from(verdict)
             .as_str()
             .to_string(),
         property,
@@ -1123,7 +1123,7 @@ fn btor2_verify_recoverability_handler_impl(
         };
 
     Ok(Json(Btor2VerifyRecoverabilityResponse {
-        verdict: verdict.as_str().to_string(),
+        outcome: verdict.as_str().to_string(),
         property: recoverability_property_str(&request.target),
         refinement,
         engine: attribution.as_ref().map(|a| a.engine.as_str().to_string()),
@@ -1165,7 +1165,7 @@ fn btor2_check_fsm_handler_impl(
             register: f.register.clone(),
             kind: f.kind.as_str().to_string(),
             legal_encodings: f.legal_encodings.clone(),
-            verdict: f.verdict.as_str().to_string(),
+            outcome: f.verdict.as_str().to_string(),
             illegal_encoding_reachable: f.is_finding(),
         })
         .collect();
@@ -1370,7 +1370,7 @@ fn sv_verify_handler_impl(request: SvVerifyRequest) -> ApiResult<Json<Btor2Verif
         details: None,
     })?;
     Ok(Json(Btor2VerifyResponse {
-        verdict: crate::verdict::PropertyVerdict::from(outcome.verdict)
+        outcome: crate::verdict::PropertyVerdict::from(outcome.verdict)
             .as_str()
             .to_string(),
         reachable_by: outcome.reachable_by.iter().map(|s| s.to_string()).collect(),
@@ -1427,7 +1427,7 @@ fn sv_verify_liveness_handler_impl(
             }
         })?;
     Ok(Json(Btor2VerifyLivenessResponse {
-        verdict: crate::verdict::PropertyVerdict::from(verdict)
+        outcome: crate::verdict::PropertyVerdict::from(verdict)
             .as_str()
             .to_string(),
         property,
@@ -1484,7 +1484,7 @@ fn sv_verify_liveness_all_handler_impl(
             }
         })?;
     Ok(Json(Btor2VerifyLivenessResponse {
-        verdict: crate::verdict::PropertyVerdict::from(verdict)
+        outcome: crate::verdict::PropertyVerdict::from(verdict)
             .as_str()
             .to_string(),
         property,
@@ -1572,7 +1572,7 @@ fn sv_verify_recoverability_handler_impl(
             (v, None, Some(a))
         };
     Ok(Json(Btor2VerifyRecoverabilityResponse {
-        verdict: verdict.as_str().to_string(),
+        outcome: verdict.as_str().to_string(),
         property,
         refinement,
         engine: attribution.as_ref().map(|a| a.engine.as_str().to_string()),
@@ -1628,7 +1628,7 @@ fn sv_check_fsm_handler_impl(request: SvCheckFsmRequest) -> ApiResult<Json<Btor2
             register: f.register.clone(),
             kind: f.kind.as_str().to_string(),
             legal_encodings: f.legal_encodings.clone(),
-            verdict: f.verdict.as_str().to_string(),
+            outcome: f.verdict.as_str().to_string(),
             illegal_encoding_reachable: f.is_finding(),
         })
         .collect();
@@ -5441,7 +5441,7 @@ members = ["x"]
             .expect("verify runs");
         // Canonical verdict: `bad` reachable ⇒ the safety property is VIOLATED. The
         // reachability detail (which engine found it) stays in `reachable_by`.
-        assert_eq!(out.verdict, "violated", "outcome: {out:?}");
+        assert_eq!(out.outcome, "violated", "outcome: {out:?}");
         assert!(
             out.reachable_by.contains(&"exact".to_string()),
             "the exact engine should decide the small reachable counter: {out:?}"
@@ -5498,7 +5498,7 @@ members = ["x"]
         let Json(out) = btor2_verify_liveness_handler(Json(request))
             .await
             .expect("verify-liveness runs");
-        assert_eq!(out.verdict, "violated", "response: {out:?}");
+        assert_eq!(out.outcome, "violated", "response: {out:?}");
         assert!(out.property.contains("AF"), "property echoed: {out:?}");
     }
 
@@ -5529,7 +5529,7 @@ members = ["x"]
         let Json(out) = btor2_verify_liveness_all_handler(Json(request))
             .await
             .expect("verify-liveness-all runs");
-        assert_eq!(out.verdict, "violated", "response: {out:?}");
+        assert_eq!(out.outcome, "violated", "response: {out:?}");
         assert!(out.property.contains("&&"), "conjunction echoed: {out:?}");
     }
 
@@ -5560,7 +5560,7 @@ members = ["x"]
         let Json(out) = btor2_verify_recoverability_handler(Json(request))
             .await
             .expect("verify-recoverability runs");
-        assert_eq!(out.verdict, "violated", "response: {out:?}");
+        assert_eq!(out.outcome, "violated", "response: {out:?}");
         assert_eq!(out.property, "AG EF (st == 0)");
         assert!(out.refinement.is_none(), "no refinement without `refine`");
         // The attribution rides along: a 2-bit trap is the exact engine's, on either ladder stage,
@@ -5590,7 +5590,7 @@ members = ["x"]
         let Json(out) = btor2_verify_recoverability_handler(Json(request))
             .await
             .expect("verify-recoverability --refine runs");
-        assert_ne!(out.verdict, "holds");
+        assert_ne!(out.outcome, "holds");
         let refinement = out.refinement.expect("refine returns a refinement");
         let vac = refinement.vacuous.expect("unreachable target is vacuous");
         assert!(vac.good_unreachable);
@@ -5641,7 +5641,7 @@ members = ["x"]
             .await
             .expect("verify-recoverability --discover-assumptions runs");
         assert_eq!(
-            out.verdict, "violated",
+            out.outcome, "violated",
             "canonical verdict is unchanged (conditional-only)"
         );
         let holds_under = out.refinement.map(|r| r.holds_under).unwrap_or_default();
@@ -5711,7 +5711,7 @@ members = ["x"]
         let st = &out.registers[0];
         assert_eq!(st.register, "st");
         assert_eq!(st.legal_encodings, vec![1, 2, 4]);
-        assert_eq!(st.verdict, "violated");
+        assert_eq!(st.outcome, "violated");
         assert!(st.illegal_encoding_reachable);
     }
 

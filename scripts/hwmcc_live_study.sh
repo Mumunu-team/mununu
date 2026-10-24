@@ -41,7 +41,7 @@ for f in "$DIR"/*.aig; do
   if [ $rc -eq 124 ]; then verdict=timeout; by=-; ms=$((BUDGET*1000))
   elif [ -z "$json" ]; then verdict=error; by=-; ms=$((t1-t0))
   else
-    verdict=$(printf '%s' "$json" | python3 -c 'import json,sys; j=json.load(sys.stdin); print(j["verdict"])' 2>/dev/null || echo error)
+    verdict=$(printf '%s' "$json" | python3 -c 'import json,sys; j=json.load(sys.stdin); print(j["outcome"])' 2>/dev/null || echo error)
     by=$(printf '%s' "$json" | python3 -c 'import json,sys; j=json.load(sys.stdin); print("+".join(j["justice"][0]["decided_by"]) or "-")' 2>/dev/null || echo -)
     ms=$(printf '%s' "$json" | python3 -c 'import json,sys; j=json.load(sys.stdin); print(j["elapsed_ms"])' 2>/dev/null || echo $((t1-t0)))
   fi

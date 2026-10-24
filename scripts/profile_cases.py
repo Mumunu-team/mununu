@@ -59,7 +59,7 @@ WALL_CLASSES = REPO / "crates" / "mununu-core" / "tests" / "fixtures" / "wall_cl
 
 PEAK_RE = re.compile(r"exact fixpoint: peak (\d+) .*? in (\d+) iteration")
 WORK_RE = re.compile(r"work (\d+) BDD ops")
-VERDICT_STR_RE = re.compile(r'"verdict":\s*"([a-z_]+)"')
+VERDICT_STR_RE = re.compile(r'"outcome":\s*"([a-z_]+)"')
 CELLS_RE = re.compile(r'"(true|false|unknown)_cells":\s*(\d+)')
 TERM_RE = re.compile(r'"terminated_with":\s*"([A-Za-z]+)"')
 # Recoverability attribution (both verbs carry it since the engine-attribution change, 2026-10-14):
