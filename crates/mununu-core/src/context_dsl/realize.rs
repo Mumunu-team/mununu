@@ -86,6 +86,9 @@ pub struct RealizedContext {
     predicate_bitsets: HashMap<String, HashMap<String, BitVec<usize, Lsb0>>>,
     /// Maps composition names to their member automaton names
     composition_members: HashMap<String, Vec<String>>,
+    /// Every automaton's declared alphabet (its `alphabet { }` block and transition labels), for
+    /// the checks that need labels no transition takes ([`crate::context::sanity`]).
+    declared_alphabets: HashMap<String, Vec<String>>,
 }
 
 /// Resolved μ-calculus formula with metadata.
@@ -195,6 +198,38 @@ pub enum FormulaTargetsKind {
 }
 
 impl RealizedContext {
+    /// A composition's member automata (transitively expanded), `None` for an automaton.
+    pub fn members_of(&self, name: &str) -> Option<&[String]> {
+        self.composition_members.get(name).map(Vec::as_slice)
+    }
+
+    /// The labels `name` declares — an automaton's alphabet and transition labels, or the union
+    /// over a composition's members.
+    pub fn declared_labels_of(&self, name: &str) -> Vec<String> {
+        let mut out: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        match self.composition_members.get(name) {
+            Some(members) => {
+                for m in members {
+                    out.extend(
+                        self.declared_alphabets
+                            .get(m)
+                            .into_iter()
+                            .flatten()
+                            .cloned(),
+                    );
+                }
+            }
+            None => out.extend(
+                self.declared_alphabets
+                    .get(name)
+                    .into_iter()
+                    .flatten()
+                    .cloned(),
+            ),
+        }
+        out.into_iter().collect()
+    }
+
     /// Returns the set of predicate names associated with `automaton`, if any.
     pub fn predicate_names(&self, automaton: &str) -> Option<&HashSet<String>> {
         self.predicates.get(automaton)
@@ -1790,6 +1825,14 @@ pub fn realize(
         predicate_metadata,
         predicate_bitsets,
         composition_members,
+        declared_alphabets: docs
+            .iter()
+            .flat_map(|d| d.automata.iter())
+            .map(|a| {
+                let labels = member_labels(&a.name.name, &docs, 0);
+                (a.name.name.clone(), labels.into_iter().collect())
+            })
+            .collect(),
     };
 
     register_user_predicates(

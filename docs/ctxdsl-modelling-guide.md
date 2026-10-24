@@ -447,6 +447,10 @@ structural `sv lint` rules in
 
 ## Checklist before trusting a hand-authored model
 
+0. `mununu context eval MODEL --automaton TOP --sanity` reports no unintended deadlock,
+   unreachable state, dead label or internal livelock
+   ([`sanity::check`](../crates/mununu-core/src/context/sanity.rs)). A deadlock you meant (a
+   terminal `Done`) is listed too; decide it with `no_deadlock` or a property.
 1. Every name a `guard` reads is a declared `i64` variable or a constant; realization refuses the rest. (§1)
 2. Every variable appearing in a property is `i64`. (§3)
 3. A positive control atom returns true and a negative control returns false. (§3)

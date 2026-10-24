@@ -125,6 +125,7 @@ impl Drop for Context {
 }
 
 mod diagnostics;
+pub mod sanity;
 
 use crate::context::diagnostics::{
     BfsReachability, bfs_reachable_states, build_unrealizable_initials_synthesis,
