@@ -281,7 +281,7 @@ pub struct ContextImportRequest {
     /// returned. When empty, the import path is unchanged
     /// (legacy CTXDSL emit).
     ///
-    /// Mirrors the CLI's `--predicate NAME:REG=VALUE` flag on
+    /// Mirrors the CLI's `--predicate [NAME:]REG == VALUE` flag on
     /// `mununu btor2 cegar`.
     #[serde(default)]
     pub predicates: Vec<PredicateSpecRequest>,
@@ -324,7 +324,7 @@ pub struct ContextImportRequest {
 }
 
 /// R.6.7 / V.6 (2026-06-09) — predicate-spec request shape. Mirrors
-/// the CLI's `--predicate NAME:REG=VALUE` triple format. Bridges to
+/// the CLI's `--predicate [NAME:]REG == VALUE` triple format. Bridges to
 /// [`crate::adapter::btor2::kmts_lift::PredicateSpec`].
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 pub struct PredicateSpecRequest {
@@ -1135,7 +1135,7 @@ pub struct Btor2VerifyRecoverabilityRequest {
     /// The `good` atom to recover to (`"REG op VALUE"`).
     pub target: String,
     /// Extra abstraction predicate(s) for the cube-path escalation, each
-    /// `"NAME:REGISTER=VALUE"` (P2 Slice 1). Used only when the exact engine abstains
+    /// `"[NAME:]REG == VALUE"` (P2 Slice 1). Used only when the exact engine abstains
     /// (over the bit cap — 40 by default, auto-raised to 192); the escalation is automatic even with none.
     #[serde(default)]
     pub predicates: Vec<String>,
@@ -1485,7 +1485,7 @@ pub struct SvVerifyRecoverabilityRequest {
     /// The `good` atom to recover to (`"REG op VALUE"`).
     pub target: String,
     /// Extra abstraction predicate(s) for the cube-path escalation, each
-    /// `"NAME:REGISTER=VALUE"` (P2 Slice 1). Used only when the exact engine abstains.
+    /// `"[NAME:]REG == VALUE"` (P2 Slice 1). Used only when the exact engine abstains.
     #[serde(default)]
     pub predicates: Vec<String>,
     /// Also compute a structured `refinement` alongside the verdict (mirrors the CLI `--refine`).
