@@ -1,0 +1,480 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "CegarIterationView": {
+      "description": "One CEGAR iteration, viewer-shaped.",
+      "properties": {
+        "cells": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/CegarVerdictSummary"
+            }
+          ],
+          "description": "Cell-count summary of this iteration's 3-valued verdict."
+        },
+        "game_position_evaluations": {
+          "description": "Proxy counter for game-position evaluations (approximant-reuse diagnostics).",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "had_failure_subgame": {
+          "description": "`true` iff this iteration's verdict carried `KleeneBot` cells (a failure subgame drove a refinement).",
+          "type": "boolean"
+        },
+        "iteration": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "predicate_count": {
+          "description": "Predicate-set size at the start of this iteration.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "predicates_added": {
+          "description": "Predicates the source added in response to this iteration.",
+          "items": {
+            "$ref": "#/definitions/PredicateView"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "cells",
+        "game_position_evaluations",
+        "had_failure_subgame",
+        "iteration",
+        "predicate_count",
+        "predicates_added"
+      ],
+      "type": "object"
+    },
+    "CegarVerdictSummary": {
+      "description": "Cell counts of a 3-valued (Kleene) verdict over the cube space.",
+      "properties": {
+        "false_cells": {
+          "description": "KleeneF (definitely-false) cells.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "true_cells": {
+          "description": "KleeneT (definitely-true) cells.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "unknown_cells": {
+          "description": "KleeneBot (unknown — needs refinement) cells.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "unlifted_cells": {
+          "default": 0,
+          "description": "A4 (engine-performance roadmap, 2026-10-07) — cells the lift did not decide: unsatisfiable cells and, under the explicit engine's reachable-only post-image, cells not reachable from the initial cubes. They are ⊥ by construction and are NOT in `unknown_cells`; the three counts above are over the remaining cells. Always 0 on the symbolic engine's summaries.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "false_cells",
+        "true_cells",
+        "unknown_cells"
+      ],
+      "type": "object"
+    },
+    "CexCellView": {
+      "description": "One register's concrete value in a counterexample state. mununu#723 — a cell wider than 64 bits was silently absent from the trace (OpenTitan edn's 109-bit `tl_i`, the bus write behind the fatal alert). `value` is unchanged for every cell that fits 64 bits — exactly the cells that were listed before — and `null` for a wider value; `hex` and `bits` are always present.",
+      "properties": {
+        "bits": {
+          "description": "The cell's width in bits.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "hex": {
+          "description": "`0x` + the value zero-padded to the cell's width — the form that always holds it.",
+          "type": "string"
+        },
+        "register": {
+          "type": "string"
+        },
+        "value": {
+          "description": "The value when it fits 64 bits, else `null` (read `hex`).",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "bits",
+        "hex",
+        "register"
+      ],
+      "type": "object"
+    },
+    "PredicateView": {
+      "description": "A predicate spec, response-shaped.",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "register": {
+          "type": "string"
+        },
+        "value": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "register",
+        "value"
+      ],
+      "type": "object"
+    },
+    "TestbenchView": {
+      "description": "A generated counterexample-replay testbench ([`crate::adapter::verilator::replay`]).",
+      "properties": {
+        "checks": {
+          "description": "(cycle, register) comparisons the testbench makes.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "makefile": {
+          "description": "`Makefile`; it names the sources as the request named them.",
+          "type": "string"
+        },
+        "skipped": {
+          "description": "Cells left out of the comparison, with the reason.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "tb_cpp": {
+          "description": "`tb.cpp`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "checks",
+        "makefile",
+        "skipped",
+        "tb_cpp"
+      ],
+      "type": "object"
+    },
+    "Trace": {
+      "description": "The one counterexample shape of 0.5, shared by every verb that returns a path: RTL rows fill `state` / `inputs` / `faults`, CTXDSL rows fill `state_name` / `labels`. A two-player strategy stays its own object, and the counterstrategy graph stays a view.",
+      "properties": {
+        "kind": {
+          "$ref": "#/definitions/TraceKind"
+        },
+        "loop_start": {
+          "description": "For a `lasso`: the index into `steps` the last step loops back to.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "replay": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TraceReplay"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "steps": {
+          "items": {
+            "$ref": "#/definitions/TraceStep"
+          },
+          "type": "array"
+        },
+        "unreachable_target": {
+          "description": "For `unreachable`: the target atoms no path reaches.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "kind",
+        "steps"
+      ],
+      "type": "object"
+    },
+    "TraceFault": {
+      "description": "One fault injection on a [`TraceStep`].",
+      "properties": {
+        "hex": {
+          "description": "The value in hexadecimal, at any width.",
+          "type": "string"
+        },
+        "site": {
+          "description": "The register overwritten.",
+          "type": "string"
+        },
+        "value": {
+          "description": "The value written, when it fits 64 bits.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "hex",
+        "site"
+      ],
+      "type": "object"
+    },
+    "TraceKind": {
+      "description": "What a [`Trace`] shows.",
+      "oneOf": [
+        {
+          "description": "Reset → the failing step (a safety violation).",
+          "enum": [
+            "finite"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Reset → a prefix → a cycle repeated forever (`loop_start` marks it): a liveness stall.",
+          "enum": [
+            "lasso"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Reset → a closed trap the target is never reached from again (a refuted `AG EF`).",
+          "enum": [
+            "trap"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "No path: the `unreachable_target` atoms are never reached from reset (a refuted `EF`).",
+          "enum": [
+            "unreachable"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Reset → the injections of a fault attack that reaches its target (`steps[].faults`).",
+          "enum": [
+            "attack"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "TraceReplay": {
+      "description": "Replay artefacts attached to a [`Trace`].",
+      "properties": {
+        "testbench": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TestbenchView"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The Verilator testbench (`--emit-testbench` / `emit_testbench`)."
+        }
+      },
+      "type": "object"
+    },
+    "TraceStep": {
+      "description": "One step of a [`Trace`]: the state at `cycle` and what drives the step out of it.",
+      "properties": {
+        "cycle": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "faults": {
+          "description": "Faults injected in this cycle.",
+          "items": {
+            "$ref": "#/definitions/TraceFault"
+          },
+          "type": "array"
+        },
+        "inputs": {
+          "description": "The input assignment of this cycle (RTL), so the trace can be replayed.",
+          "items": {
+            "$ref": "#/definitions/CexCellView"
+          },
+          "type": "array"
+        },
+        "labels": {
+          "description": "The labels of the transition out of this step (CTXDSL).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "state": {
+          "description": "Register cells (RTL); empty for a CTXDSL step, which names its state in `state_name`.",
+          "items": {
+            "$ref": "#/definitions/CexCellView"
+          },
+          "type": "array"
+        },
+        "state_name": {
+          "description": "The CTXDSL state's name.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "cycle"
+      ],
+      "type": "object"
+    },
+    "WitnessCellView": {
+      "description": "Track I.1 — a cube cell witnessing a non-HOLDS verdict, viewer-shaped: the cube index plus the predicate valuation (`name → holds`) at that cell.",
+      "properties": {
+        "cube_index": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "valuation": {
+          "additionalProperties": {
+            "type": "boolean"
+          },
+          "description": "Predicate valuation at the cell (`name → holds`), keyed by predicate name.",
+          "type": "object"
+        }
+      },
+      "required": [
+        "cube_index",
+        "valuation"
+      ],
+      "type": "object"
+    }
+  },
+  "description": "U.0 — CEGAR refinement trace, JSON-shaped for the refinement-trace viewer. Mirrors [`crate::adapter::btor2::cegar::CegarTrace`].",
+  "properties": {
+    "approximant_reuse_enabled": {
+      "description": "Whether prior-iteration approximants were threaded forward.",
+      "type": "boolean"
+    },
+    "cells": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/CegarVerdictSummary"
+        }
+      ],
+      "description": "Cell-count summary of the final 3-valued verdict, over every cell (not only the initial ones), so it carries no single `outcome`."
+    },
+    "ctxdsl": {
+      "description": "CTXDSL Phase 2 (2026-06-22) — the final refined cube model + the checked formula as CTXDSL, present only when the request set `emit_ctxdsl: true`. Omitted from the JSON otherwise.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "final_predicates": {
+      "description": "Predicate set at termination (initial + every added predicate).",
+      "items": {
+        "$ref": "#/definitions/PredicateView"
+      },
+      "type": "array"
+    },
+    "iterations": {
+      "description": "Per-iteration refinement records (iteration 0 = initial evaluation).",
+      "items": {
+        "$ref": "#/definitions/CegarIterationView"
+      },
+      "type": "array"
+    },
+    "lazy_lift_pending": {
+      "description": "`true` when the eager `predicate_cube_lift` was used (R.2.5 MVP).",
+      "type": "boolean"
+    },
+    "refinement_candidates": {
+      "description": "Track I.1 (undecided-explanation slice, 2026-06-24) — when the final verdict still carries ⊥ (unknown) cells, the registers the failure subgame flagged as load-bearing for those indefinite verdicts (deduped, from `CegarTrace::init_refinement_candidates`). The actionable \"why undecided\": adding predicates over these registers — or promoting their init policy — may resolve the abstraction. Omitted when empty.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "success": {
+      "type": "boolean"
+    },
+    "terminated_with": {
+      "description": "Why the loop stopped: `\"converged\"` | `\"bounded-iterations-reached\"` | `\"predicate-source-exhausted\"` | `\"budget-expired\"` (mununu#504 — the wall clock ran out, as opposed to the refinement cap being reached; the verdict is the last completed iteration's and is sound).",
+      "type": "string"
+    },
+    "trace": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Trace"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Track I.1 (trace slice, 2026-06-24) — reachability countertrace for a VIOLATED verdict: a path of definite-False cube cells from an initial cell to a trap (or the farthest reachable failing cell). Omitted from the JSON unless the property is actually violated at the initial cell."
+    },
+    "undecided_cells": {
+      "description": "Track I.1 — cube cells the abstraction **cannot decide** (`Unknown`/⊥), each decoded to its predicate valuation. Capped (`verdict.unknown_cells` is the full total). These are the cells a finer predicate set would need to resolve.",
+      "items": {
+        "$ref": "#/definitions/WitnessCellView"
+      },
+      "type": "array"
+    },
+    "violating_cells": {
+      "description": "Track I.1 (2026-06-24) — cube cells that **falsify** the formula (definite-False), each decoded to its predicate valuation. Capped (the `verdict.false_cells` count is the full total). Empty unless the outcome is VIOLATED. Makes a failing verdict actionable (\"falsified where `idle=false, err=true`\").",
+      "items": {
+        "$ref": "#/definitions/WitnessCellView"
+      },
+      "type": "array"
+    },
+    "warnings": {
+      "description": "Soundness / advisory warnings produced during the run.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "approximant_reuse_enabled",
+    "cells",
+    "final_predicates",
+    "iterations",
+    "lazy_lift_pending",
+    "refinement_candidates",
+    "success",
+    "terminated_with",
+    "undecided_cells",
+    "violating_cells",
+    "warnings"
+  ],
+  "title": "Btor2CegarResponse",
+  "type": "object"
+}

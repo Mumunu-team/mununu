@@ -2,7 +2,7 @@
 //! property is trusted.
 //!
 //! > Source of truth: [`check`] — surface: (CLI+API+UI), `context eval --sanity` and
-//! > `sanity: true` on `POST /api/v1/context/verify`.
+//! > `sanity: true` on `POST /api/v1/context/eval`.
 //!
 //! Every check is an explicit graph computation over the realized automaton or composition, so it
 //! is exact and linear in its size:
@@ -27,11 +27,13 @@ use crate::clts::{Clts, DefaultLabelIdx, DefaultStateIdx, StateId};
 
 /// The findings of [`check`].
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "api", derive(schemars::JsonSchema))]
 pub struct SanityReport {
     pub automaton: String,
     pub reachable_states: usize,
     /// Reachable states with no outgoing transition, each with a shortest path from an initial
     /// state (`[Init, -label->, …]` as alternating state and label names).
+    #[cfg_attr(feature = "api", schemars(with = "Vec<crate::trace::Trace>"))]
     pub deadlocks: Vec<SanityPath>,
     pub unreachable_states: Vec<String>,
     pub labels_never_fired: Vec<String>,

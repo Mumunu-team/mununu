@@ -23,15 +23,15 @@ All request and response bodies use `application/json`. CORS is open by default 
 
 **Context (CTXDSL) endpoints**
 - [POST /api/v1/context/summarize](#post-apiv1contextsummarize)
-- [POST /api/v1/context/synthesize](#post-apiv1contextsynthesize)
-- [POST /api/v1/context/graphs](#post-apiv1contextgraphs)
-- [POST /api/v1/context/verify](#post-apiv1contextverify)
+- [POST /api/v1/context/synth](#post-apiv1contextsynth)
+- [POST /api/v1/context/graph](#post-apiv1contextgraph)
+- [POST /api/v1/context/eval](#post-apiv1contexteval)
 - [POST /api/v1/context/import](#post-apiv1contextimport)
 - [POST /api/v1/context/predicates](#post-apiv1contextpredicates)
 
 **Verification framework (N-source)**
 - [POST /api/v1/verify](#post-apiv1verify)
-- [POST /api/v1/verify/memory-check](#post-apiv1verifymemory-check)
+- [POST /api/v1/memory/check](#post-apiv1memorycheck)
 
 **CEGAR (predicate-abstraction refinement)**
 - [POST /api/v1/btor2/cegar](#post-apiv1btor2cegar)
@@ -94,7 +94,7 @@ Parse a CTXDSL context (with optional sidecar files) and return a summary of all
 
 > Source of truth: [`api::handlers::context_summarize_handler`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API.
 
-> **Adapter formats:** this endpoint accepts CTXDSL only. To summarize an external format (`.xstate.json`, `.sv`, `.tlsf`, `.aag`/`.aig`, `.pml`, `.espec.json`), first translate via [`POST /api/v1/context/import`](#post-apiv1contextimport) and pass the resulting `ctxdsl` field to this endpoint. The CLI command `mununu context summarize <file> --adapter <format>` does this two-step internally; clients of the HTTP API must do it explicitly. The same convention applies to `/context/verify` and `/context/synthesize`.
+> **Adapter formats:** this endpoint accepts CTXDSL only. To summarize an external format (`.xstate.json`, `.sv`, `.tlsf`, `.aag`/`.aig`, `.pml`, `.espec.json`), first translate via [`POST /api/v1/context/import`](#post-apiv1contextimport) and pass the resulting `ctxdsl` field to this endpoint. The CLI command `mununu context summarize <file> --adapter <format>` does this two-step internally; clients of the HTTP API must do it explicitly. The same convention applies to `/context/eval` and `/context/synth`.
 
 ### Request Body
 
@@ -175,7 +175,7 @@ curl -X POST http://localhost:3000/api/v1/context/summarize \
 
 ---
 
-## POST /api/v1/context/synthesize
+## POST /api/v1/context/synth
 
 Synthesize a controller for a given automaton and mu-calculus formula. The controller restricts the system's controllable transitions so that the formula is satisfied. When the specification is realizable, the response includes the controller serialized as CTXDSL source (and, optionally, in a native target format).
 
@@ -221,7 +221,7 @@ Synthesize a controller for a given automaton and mu-calculus formula. The contr
 | `controller` | `FileContent \| null` | Synthesized controller as CTXDSL. `null` when unrealizable. |
 | `controller_native` | `FileContent \| null` | Controller in the requested native format (`output_format`). Omitted unless requested. |
 | `diagnostics` | `SynthesisDiagnostics` | Diagnostic information. |
-| `counterstrategy` | `CounterstrategyResult \| null` | Environment counterstrategy graph for unrealizable cases. Automatically computed when synthesis fails. See the `CounterstrategyResult` table under [POST /api/v1/context/verify](#post-apiv1contextverify). |
+| `counterstrategy` | `CounterstrategyResult \| null` | Environment counterstrategy graph for unrealizable cases. Automatically computed when synthesis fails. See the `CounterstrategyResult` table under [POST /api/v1/context/eval](#post-apiv1contexteval). |
 
 **SynthesisDiagnostics**
 
@@ -256,7 +256,7 @@ Every path is a `Trace` (0.5): `{kind, steps: [{cycle, state_name, labels}], loo
 ### Example
 
 ```bash
-curl -X POST http://localhost:3000/api/v1/context/synthesize \
+curl -X POST http://localhost:3000/api/v1/context/synth \
   -H "Content-Type: application/json" \
   -d '{
     "context": { "name": "arbiter.ctxdsl", "content": "... CTXDSL source ..." },
@@ -326,7 +326,7 @@ curl -X POST http://localhost:3000/api/v1/context/synthesize \
 
 ---
 
-## POST /api/v1/context/graphs
+## POST /api/v1/context/graph
 
 Generate Cytoscape-compatible graph elements for automata, compositions, and (optionally) synthesized controllers. Returns nodes and edges that can be rendered directly in a Cytoscape.js visualization layer.
 
@@ -406,7 +406,7 @@ Generate Cytoscape-compatible graph elements for automata, compositions, and (op
 ### Example
 
 ```bash
-curl -X POST http://localhost:3000/api/v1/context/graphs \
+curl -X POST http://localhost:3000/api/v1/context/graph \
   -H "Content-Type: application/json" \
   -d '{
     "context": { "name": "traffic.ctxdsl", "content": "... CTXDSL source ..." },
@@ -445,7 +445,7 @@ curl -X POST http://localhost:3000/api/v1/context/graphs \
 
 ---
 
-## POST /api/v1/context/verify
+## POST /api/v1/context/eval
 
 Evaluate mu-calculus formulas over automata and report which initial states satisfy or violate each formula. When a formula is not satisfied and `counterstrategy` is requested, the response includes the environment's winning region and a Cytoscape graph of the counterstrategy automaton.
 
@@ -501,7 +501,7 @@ Evaluate mu-calculus formulas over automata and report which initial states sati
 ### Example
 
 ```bash
-curl -X POST http://localhost:3000/api/v1/context/verify \
+curl -X POST http://localhost:3000/api/v1/context/eval \
   -H "Content-Type: application/json" \
   -d '{
     "context": { "name": "arbiter.ctxdsl", "content": "... CTXDSL source ..." },
@@ -668,7 +668,7 @@ curl -X POST http://localhost:3000/api/v1/verify \
 
 ---
 
-## POST /api/v1/verify/memory-check
+## POST /api/v1/memory/check
 
 Analyze a `verify.toml` config's memory posture and return advisory warnings (over-approximation risks, unbounded counters, large enumeration domains). Mirrors `mununu verify memory-check`. The analysis is **pure** (it inspects only the parsed config), so no `base_dir` is required. The handler is **advisory** — warnings appear in the body but never surface as a 4xx; callers decide whether to gate on them.
 
@@ -690,7 +690,7 @@ Supply exactly one of `config` or `config_toml`.
 ### Example
 
 ```bash
-curl -X POST http://localhost:3000/api/v1/verify/memory-check \
+curl -X POST http://localhost:3000/api/v1/memory/check \
   -H "Content-Type: application/json" \
   -d "$(jq -n --arg toml "$(cat verify.toml)" '{config_toml: $toml}')"
 ```
@@ -1249,7 +1249,7 @@ All endpoints return errors in a consistent format:
 | 408 | `REQUEST_TIMEOUT` | The request exceeded the server's 30 s timeout. |
 | 500 | `INTERNAL_ERROR` | Server-side failure during realization, synthesis, or evaluation. |
 
-> Note: `/codesign/reconcile-labels` and `/verify/memory-check` are **advisory** — they return 200 OK with the warning/mismatch in the body rather than a 4xx.
+> Note: `/codesign/reconcile-labels` and `/memory/check` are **advisory** — they return 200 OK with the warning/mismatch in the body rather than a 4xx.
 
 ---
 

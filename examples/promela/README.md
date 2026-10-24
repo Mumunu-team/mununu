@@ -28,7 +28,7 @@ PML=$(cat examples/promela/mutex_simple.pml)
 CTXDSL=$(curl -s -X POST http://127.0.0.1:8080/api/v1/context/import \
     -H 'Content-Type: application/json' \
     -d "$(jq -n --arg c "$PML" '{format:"auto", content:$c}')" | jq -r '.ctxdsl')
-curl -s -X POST http://127.0.0.1:8080/api/v1/context/verify \
+curl -s -X POST http://127.0.0.1:8080/api/v1/context/eval \
     -H 'Content-Type: application/json' \
     -d "$(jq -n --arg c "$CTXDSL" \
         '{context:{name:"mutex_simple", content:$c},

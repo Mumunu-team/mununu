@@ -47,16 +47,15 @@ fn create_router() -> Router {
             post(handlers::context_summarize_handler),
         )
         .route(
-            "/api/v1/context/synthesize",
+            "/api/v1/context/synth",
             post(handlers::context_synthesize_handler),
         )
-        .route("/api/v1/synth/gr1", post(handlers::gr1_synthesize_handler))
         .route(
-            "/api/v1/context/graphs",
+            "/api/v1/context/graph",
             post(handlers::context_graphs_handler),
         )
         .route(
-            "/api/v1/context/verify",
+            "/api/v1/context/eval",
             post(handlers::context_verify_handler),
         )
         .route(
@@ -179,10 +178,7 @@ fn create_router() -> Router {
         // check the property verdicts flip (property adequacy), or list targets.
         // Surface peer of the CLI `sv mutate`.
         .route("/api/v1/sv/mutate", post(handlers::sv_mutate_handler))
-        .route(
-            "/api/v1/verify/memory-check",
-            post(handlers::memory_check_handler),
-        )
+        .route("/api/v1/memory/check", post(handlers::memory_check_handler))
         .route(
             "/api/v1/codesign/reconcile-labels",
             post(handlers::codesign_reconcile_labels_handler),

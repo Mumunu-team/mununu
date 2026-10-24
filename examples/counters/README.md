@@ -35,7 +35,7 @@ mununu context merge \
 The HTTP API takes the main context plus sidecars in the same request:
 
 ```bash
-curl -s -X POST http://127.0.0.1:8080/api/v1/context/verify \
+curl -s -X POST http://127.0.0.1:8080/api/v1/context/eval \
     -H 'Content-Type: application/json' \
     -d "$(jq -n \
         --arg main "$(cat examples/counters/counters.ctxdsl)" \

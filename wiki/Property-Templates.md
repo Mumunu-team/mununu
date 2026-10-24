@@ -280,7 +280,7 @@ curl http://localhost:8080/api/v1/templates
 curl http://localhost:8080/api/v1/templates?domain=rtl
 
 # Verify with template
-curl -X POST http://localhost:8080/api/v1/context/verify \
+curl -X POST http://localhost:8080/api/v1/context/eval \
   -H "Content-Type: application/json" \
   -d '{
     "context": {"name": "model.ctxdsl", "content": "..."},

@@ -39,7 +39,7 @@ mununu context eval <CONTEXT> [options]
 | Flag | Description |
 |------|-------------|
 | `--template-arg <KEY=VALUE>` | Template argument binding (repeatable). Requires `--template`. |
-| `--sanity` | Structural checks on `--automaton` before any formula: reachable deadlocks (with a shortest path), declared states never reached, labels that never fire, internal-only livelocks. Alone (no `--formula` / `--template`), only the checks run. API: `sanity: true` on `POST /api/v1/context/verify`. |
+| `--sanity` | Structural checks on `--automaton` before any formula: reachable deadlocks (with a shortest path), declared states never reached, labels that never fire, internal-only livelocks. Alone (no `--formula` / `--template`), only the checks run. API: `sanity: true` on `POST /api/v1/context/eval`. |
 | `--sidecar <FILE>` | Additional CTXDSL sidecar files to merge (repeatable) |
 | `--adapter <FORMAT>` | Translate from an external format before processing. Supported: `tlsf`, `aiger`, `btor2` (or `btor`), `promela`, `xstate`, `systemverilog` (or `sv`, hand-written parser), `sv-yosys` (or `yosys`, Yosys-driven elaboration), `extraction`, `auto` |
 | `--no-partitions` | Disable guard partitioning during evaluation |

@@ -7202,6 +7202,7 @@ pub fn exact_env_strategy_witness(btor2_content: &str, good: &str) -> Option<Sta
 /// state, as a state-indexed map. It is the reusable object: an environment model, a directed-test seed,
 /// or the environment half of an assume-guarantee contract.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "api", derive(schemars::JsonSchema))]
 pub struct PositionalStrategy {
     /// The state register the strategy is indexed by (the register named in the `good` atom).
     pub state_register: String,
@@ -7211,6 +7212,7 @@ pub struct PositionalStrategy {
 
 /// One control-state row of a [`PositionalStrategy`].
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "api", derive(schemars::JsonSchema))]
 pub struct StrategyEntry {
     /// The value of the strategy's state register in this row.
     pub state_value: u128,
@@ -7260,6 +7262,7 @@ pub fn exact_env_positional_strategy(
 /// ([`ExactModel::cpre_controllable`], `∀env ∃ctrl`) — so the controller's move may depend on the
 /// current environment input. `env_inputs` is empty for an env-independent (Moore) move.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "api", derive(schemars::JsonSchema))]
 pub struct MealyMove {
     /// The environment-input valuation this move responds to; empty = env-independent (holds for every
     /// environment move).
@@ -7270,6 +7273,7 @@ pub struct MealyMove {
 
 /// One control-state row of a [`MealyStrategy`]: the controller's response(s) at that control value.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "api", derive(schemars::JsonSchema))]
 pub struct MealyEntry {
     /// The value of the strategy's state register.
     pub state_value: u128,
@@ -7288,6 +7292,7 @@ pub struct MealyEntry {
 /// `∀env ∃ctrl`) to a rank-decreasing move. Contrast [`PositionalStrategy`], which the ENVIRONMENT
 /// counterstrategy uses (the environment is the first-mover, so its winning strategy is positional).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "api", derive(schemars::JsonSchema))]
 pub struct MealyStrategy {
     /// The state register the strategy is indexed by.
     pub state_register: String,
@@ -7328,6 +7333,7 @@ impl MealyStrategy {
 /// Mealy game (`∀env ∃ctrl`): the environment is the first-mover, so its winning strategy is positional
 /// (state-indexed); the controller responds, so its strategy may depend on the environment input.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "api", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TwoPlayerStrategy {
     /// The controller wins from the initial state (spec realizable) — its Mealy strategy. Serializes as

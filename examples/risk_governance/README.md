@@ -633,8 +633,8 @@ Three layers are useful:
   intentionally and document it).
 
 The HTTP API surface
-([`/api/v1/context/verify`](../../crates/mununu-core/src/api/handlers.rs),
-`/api/v1/context/synthesize`, `/api/v1/context/import`,
+([`/api/v1/context/eval`](../../crates/mununu-core/src/api/handlers.rs),
+`/api/v1/context/synth`, `/api/v1/context/import`,
 `/api/v1/context/summarize`) is what the agent calls. The CLI is what a
 human runs from a terminal. The two are equivalent — they share the
 same realization pipeline — so the agent's verdict is reproducible by

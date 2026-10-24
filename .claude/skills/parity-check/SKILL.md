@@ -81,7 +81,7 @@ Emit a Markdown table. The caller (an agent or a review report) can quote it ver
 |---|---|---|---|---|---|
 | `--extract-strategy` | ✓ main.rs:L | ✓ handlers.rs:L | ✗ | YES | CTXDSL-related: API exposes `extract_strategy`; UI client missing |
 | `--expect-all-hold` | ✓ main.rs:L | ✓ models.rs:L | n/a | none | CI-gate ergonomics — not CTXDSL-related, so no UI is expected |
-| `/context/synthesize` returns `counterstrategy` | ✓ | ✓ models.rs:L | ✓ endpoints.ts:L | none | aligned |
+| `/context/synth` returns `counterstrategy` | ✓ | ✓ models.rs:L | ✓ endpoints.ts:L | none | aligned |
 ```
 
 Each row must cite a file:line reference for any "✓" entry. "✗" entries should explain whether the gap is intentional (with one-line justification) or unintentional (with a recommended fix).
