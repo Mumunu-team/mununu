@@ -1,5 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
   "definitions": {
     "FileContent": {
       "description": "File content with optional name",
@@ -25,14 +26,6 @@
       "description": "Additional SV sources (packages / includes).",
       "items": {
         "$ref": "#/definitions/FileContent"
-      },
-      "type": "array"
-    },
-    "config_values": {
-      "default": [],
-      "description": "mununu#725 — config concretization for the baseline AND the mutant, as `sv/verify-auto`'s `config_values`: each entry `\"signal=value\"` pins a config input to a constant (e.g. `\"rst_ni=1\"`). A malformed entry or a non-decimal value is a 400 before the lift. Mirrors the CLI `--config-value`. Default empty.",
-      "items": {
-        "type": "string"
       },
       "type": "array"
     },
@@ -123,6 +116,14 @@
     "params": {
       "default": [],
       "description": "mununu#475 item 4 — parity with `POST /api/v1/sv/verify-auto`'s `params`. Override module parameters BEFORE elaboration. Each entry is `\"NAME=VALUE\"` (top-module scope) or `\"MODULE.NAME=VALUE\"` (submodule scope; slang applies it top-level by bare name). Shrinks a parameterised design so its counters fit the bit-blast cap during the baseline + mutant re-verify; blocks that need `params` to verify at all could not previously be mutated via the API. A malformed entry is a HARD `BadRequest`; yosys errors downstream on a parameter it cannot apply — never a silent drop.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "pins": {
+      "default": [],
+      "description": "mununu#725 — config concretization for the baseline AND the mutant, as `sv/verify-auto`'s `config_values`: each entry `\"signal=value\"` pins a config input to a constant (e.g. `\"rst_ni=1\"`). A malformed entry or a non-decimal value is a 400 before the lift. Mirrors the CLI `--pin`. Default empty.",
       "items": {
         "type": "string"
       },

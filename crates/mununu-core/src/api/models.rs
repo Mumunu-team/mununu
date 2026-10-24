@@ -244,6 +244,7 @@ pub struct ProofObligation {
 
 /// Request for importing an external format into CTXDSL.
 #[derive(Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ContextImportRequest {
     /// Raw file content in the source format.
     pub content: String,
@@ -285,14 +286,14 @@ pub struct ContextImportRequest {
     #[serde(default)]
     pub predicates: Vec<PredicateSpecRequest>,
     /// R.6.7 / V.6 (2026-06-09) — names of BTOR2 input symbols the
-    /// controller drives. Mirrors the CLI's `--controllable-input`
+    /// controller drives. Mirrors the CLI's `--controllable`
     /// flag. When non-empty AND `predicates` is non-empty, opts the
     /// import path into the R.6.6 controllability-aware lift —
     /// boolean inputs are partitioned into env (uncontrollable) +
     /// ctrl (controllable) classes per-symbol-name + the lift emits
     /// per-combo dual-label transitions.
     #[serde(default)]
-    pub controllable_inputs: Vec<String>,
+    pub controllable: Vec<String>,
 
     /// R-S2b.6 / P3 (§Phase 11 slot-3 close follow-up, 2026-06-12)
     /// — filesystem path to the original SystemVerilog source for
@@ -896,6 +897,7 @@ pub struct ContextPredicatesResponse {
 /// runs the predicate-abstraction-refinement loop over a BTOR2 design and
 /// returns the per-iteration refinement trace the UI viewer renders.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Btor2CegarRequest {
     /// BTOR2 source content.
     pub content: String,
@@ -905,9 +907,9 @@ pub struct Btor2CegarRequest {
     /// one entry is required. Reuses the `PredicateSpecRequest` shape.
     pub predicates: Vec<PredicateSpecRequest>,
     /// Optional R.6.6 controllability split — controller-driven input
-    /// symbols (mirrors `--controllable-input`).
+    /// symbols (mirrors `--controllable`).
     #[serde(default)]
-    pub controllable_inputs: Vec<String>,
+    pub controllable: Vec<String>,
     /// Predicate-discovery source: `"wp"` (default) | `"craig"`.
     #[serde(default)]
     pub predicate_source: Option<String>,
@@ -925,11 +927,11 @@ pub struct Btor2CegarRequest {
     #[serde(default)]
     pub may_edge_inference: Option<String>,
     /// R-S8 symbolic-init config-values, one entry per register as
-    /// `"REG=v1,v2,..."` (mirrors the CLI `--config-values`). Each register's
+    /// `"REG=v1,v2,..."` (mirrors the CLI `--init-values`). Each register's
     /// admissible power-up set seeds the predicate-cube initial states. Empty =
     /// no synthetic init sidecar.
     #[serde(default)]
-    pub config_values: Vec<String>,
+    pub init_values: Vec<String>,
     /// CTXDSL Phase 2 (2026-06-22) — opt-in (default `false`): when set, the
     /// response gains a `ctxdsl` field carrying the final refined cube model
     /// and the checked formula as a self-contained CTXDSL document (the
@@ -1126,6 +1128,7 @@ pub struct Btor2VerifyLivenessUnderFairnessRequest {
 /// reachable state, can the design get back to `target`?". `target` is a single
 /// register-comparison atom string (`"state_q == 3"`).
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Btor2VerifyRecoverabilityRequest {
     /// BTOR2 source content.
     pub content: String,
@@ -1145,9 +1148,9 @@ pub struct Btor2VerifyRecoverabilityRequest {
     /// Config-partition (capability A): config inputs to split the verdict over, each
     /// `"NAME=v1,v2,..."`. The refinement then carries a `config_partition` decided exactly per config,
     /// every named value included — a single value is a scoped pin, reported as its one cell (#634).
-    /// Implies the refined output. Mirrors the CLI `--config-values`.
+    /// Implies the refined output. Mirrors the CLI `--partition`.
     #[serde(default)]
-    pub config_values: Vec<String>,
+    pub partitions: Vec<String>,
     /// Assumption discovery (capability B): when the property does NOT hold, search for an environment
     /// assumption φ under which it becomes a non-vacuous HOLDS → the refinement carries `holds_under`.
     /// CONDITIONAL-only (never changes the canonical verdict). Implies the refined output. Mirrors the
@@ -1530,6 +1533,7 @@ pub struct SvVerifyLivenessAllRequest {
 /// Request for `POST /api/v1/sv/verify-recoverability` — the SV lift fields plus the
 /// recoverability target atom.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SvVerifyRecoverabilityRequest {
     /// SystemVerilog primary source content.
     pub source: String,
@@ -1561,9 +1565,9 @@ pub struct SvVerifyRecoverabilityRequest {
     /// Diagnostic-only — never changes the canonical verdict.
     #[serde(default)]
     pub refine: bool,
-    /// Config-partition config inputs, each `"NAME=v1,v2,..."` (mirrors the CLI `--config-values`).
+    /// Config-partition config inputs, each `"NAME=v1,v2,..."` (mirrors the CLI `--partition`).
     #[serde(default)]
-    pub config_values: Vec<String>,
+    pub partitions: Vec<String>,
     /// Assumption discovery (capability B): search for an enabling φ when the property does not hold →
     /// `holds_under` (conditional-only). Mirrors the CLI `--discover-assumptions`.
     #[serde(default)]
@@ -1771,6 +1775,7 @@ pub struct SvLintResponse {
 /// peer of the CLI `mununu sv mutate`. Pinned by `docs/api-schemas/sv-mutate-request.schema.json`
 /// (mununu#725).
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SvMutateRequest {
     /// SystemVerilog primary source content.
     pub source: String,
@@ -1831,9 +1836,9 @@ pub struct SvMutateRequest {
     /// mununu#725 — config concretization for the baseline AND the mutant, as
     /// `sv/verify-auto`'s `config_values`: each entry `"signal=value"` pins a config
     /// input to a constant (e.g. `"rst_ni=1"`). A malformed entry or a non-decimal
-    /// value is a 400 before the lift. Mirrors the CLI `--config-value`. Default empty.
+    /// value is a 400 before the lift. Mirrors the CLI `--pin`. Default empty.
     #[serde(default)]
-    pub config_values: Vec<String>,
+    pub pins: Vec<String>,
     /// mununu#725 — control-slice cut points for the lift, as `sv/verify-auto`'s
     /// `cutpoint`: bare net names replaced with a free input. Mirrors the CLI
     /// `--cutpoint`. Default empty.
@@ -1911,6 +1916,7 @@ pub struct SvMutateResponse {
 /// [`Btor2CegarRequest`]; only the source half differs (SV + Yosys
 /// options instead of raw BTOR2 `content`).
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SvCegarRequest {
     /// SystemVerilog primary source content.
     pub source: String,
@@ -1944,7 +1950,7 @@ pub struct SvCegarRequest {
     pub predicates: Vec<PredicateSpecRequest>,
     /// R.6.6 controllability split — controller-driven input symbols.
     #[serde(default)]
-    pub controllable_inputs: Vec<String>,
+    pub controllable: Vec<String>,
     /// Predicate-discovery source: `"wp"` (default) | `"craig"`.
     #[serde(default)]
     pub predicate_source: Option<String>,
@@ -1959,7 +1965,7 @@ pub struct SvCegarRequest {
     pub may_edge_inference: Option<String>,
     /// R-S8 symbolic-init config-values (`"REG=v1,v2,..."`).
     #[serde(default)]
-    pub config_values: Vec<String>,
+    pub init_values: Vec<String>,
     /// CTXDSL Phase 2 — opt-in CTXDSL of the final refined model + formula.
     #[serde(default)]
     pub emit_ctxdsl: bool,
@@ -2028,6 +2034,7 @@ pub struct ShadowSignalView {
 /// verify each property against the model with no sidecar. slang parses SV
 /// directly, but the verify lift uses sv2v + Yosys, so `top` / `use_sv2v` apply.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SvVerifyAutoRequest {
     /// SystemVerilog primary source content.
     pub source: String,
@@ -2085,7 +2092,7 @@ pub struct SvVerifyAutoRequest {
     /// (e.g. `"cfg_detect_timer_i=7"`). The verdicts are then SCOPED to these
     /// values (surfaced as a `config-concretization` note). Default empty.
     #[serde(default)]
-    pub config_values: Vec<String>,
+    pub pins: Vec<String>,
     /// H.H — counter upper bounds: seed a `signal <= value` cube-partition to
     /// refine a counter-monotonicity property (`cnt_q >= $past(cnt_q)`) whose ⊥ is
     /// caused by the abstract 32-bit wraparound. Each entry `"signal<=value"` (the
@@ -2607,7 +2614,7 @@ pub struct SvVerifyRecoverabilityReport {
     pub property: String,
     /// `holds` | `violated` | `unknown` | `skipped`, the same vocabulary `sv verify-auto` uses.
     pub outcome: String,
-    /// Present only under `--refine` / `--config-values` / `--discover-assumptions`: the
+    /// Present only under `--refine` / `--partition` / `--discover-assumptions`: the
     /// refinement record. Free-form because `VerdictRefinement` is its own evolving surface —
     /// pinning its internals here would couple two schemas that change for different reasons.
     #[serde(default, skip_serializing_if = "Option::is_none")]

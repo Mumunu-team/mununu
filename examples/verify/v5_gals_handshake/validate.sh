@@ -62,17 +62,17 @@ for v in report["property_verdicts"]:
     printf '# pipeline; CADP cross-check is a manual follow-up.\n\n'
 
     printf '=== verify.toml — 4-phase handshake — human-readable ===\n'
-    ./target/debug/mununu verify "$DIR/verify.toml" 2>&1 | strip_logs
+    ./target/debug/mununu verify --fail-on none "$DIR/verify.toml" 2>&1 | strip_logs
 
     printf '\n=== verify.toml — JSON verdict shape ===\n'
-    ./target/debug/mununu verify "$DIR/verify.toml" --json 2>&1 \
+    ./target/debug/mununu verify --fail-on none "$DIR/verify.toml" --json 2>&1 \
         | strip_logs | summarise_json
 
     printf '\n=== verify_mutex.toml — 3-input mutex — human-readable ===\n'
-    ./target/debug/mununu verify "$DIR/verify_mutex.toml" 2>&1 | strip_logs
+    ./target/debug/mununu verify --fail-on none "$DIR/verify_mutex.toml" 2>&1 | strip_logs
 
     printf '\n=== verify_mutex.toml — JSON verdict shape ===\n'
-    ./target/debug/mununu verify "$DIR/verify_mutex.toml" --json 2>&1 \
+    ./target/debug/mununu verify --fail-on none "$DIR/verify_mutex.toml" --json 2>&1 \
         | strip_logs | summarise_json
 } > "$TRANSCRIPT"
 

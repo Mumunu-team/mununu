@@ -1283,7 +1283,7 @@ pub fn verify_recoverability_refined_explained(
     let mut refinement = VerdictRefinement::default();
 
     // Config-partition (capability A) — partition the verdict over the config the recovery rides on.
-    // When the caller NAMES config inputs (`--config-values`), partition over their values; otherwise
+    // When the caller NAMES config inputs (`--partition`), partition over their values; otherwise
     // (bare `--refine`) AUTO-identify the config axis (the detected reset). Either way it is a concrete
     // decide per config, so it composes with any canonical verdict (it can even reveal a config that
     // breaks a HOLDS). Named inputs are reported as asked, one cell included (#634); the auto axis
@@ -1352,7 +1352,7 @@ pub fn verify_recoverability_refined_explained(
     (verdict, refinement, attribution)
 }
 
-/// Parse `--config-values`-style entries `"NAME=v1,v2,…"` into config-partition specs
+/// Parse `--partition`-style entries `"NAME=v1,v2,…"` into config-partition specs
 /// `(input_name, [values])`. Reuses the decimal-value convention; a malformed entry is an error.
 pub fn parse_config_value_specs(entries: &[String]) -> Result<Vec<(String, Vec<u64>)>, String> {
     entries
@@ -1360,21 +1360,21 @@ pub fn parse_config_value_specs(entries: &[String]) -> Result<Vec<(String, Vec<u
         .map(|e| {
             let (name, vals) = e
                 .split_once('=')
-                .ok_or_else(|| format!("--config-values `{e}`: expected `NAME=v1,v2,...`"))?;
+                .ok_or_else(|| format!("--partition `{e}`: expected `NAME=v1,v2,...`"))?;
             let name = name.trim();
             if name.is_empty() {
-                return Err(format!("--config-values `{e}`: empty signal name"));
+                return Err(format!("--partition `{e}`: empty signal name"));
             }
             let values = vals
                 .split(',')
                 .map(|v| {
                     v.trim()
                         .parse::<u64>()
-                        .map_err(|_| format!("--config-values `{e}`: `{v}` is not a decimal value"))
+                        .map_err(|_| format!("--partition `{e}`: `{v}` is not a decimal value"))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             if values.is_empty() {
-                return Err(format!("--config-values `{e}`: no values listed"));
+                return Err(format!("--partition `{e}`: no values listed"));
             }
             Ok((name.to_string(), values))
         })
@@ -2129,7 +2129,7 @@ fn discover_game_env_conjunction(
 /// spec) PIN those inputs to constants and decide the CONCRETE pinned model with the exact engine —
 /// which is 2-valued SOUND per cell (a pinned config is a constant, so the νµ is over a concrete
 /// design). Returns the [`ConfigPartition`] the caller asked for — every enumerated cell, including a
-/// ONE-cell partition (mununu#634: `--config-values rst_n=1` is a scoped verdict, "under this pin the
+/// ONE-cell partition (mununu#634: `--partition rst_n=1` is a scoped verdict, "under this pin the
 /// property is violated", and it is what `--discover-assumptions` keys off; collapsing it to `None`
 /// hid exactly the cell the user named). Whether the property genuinely DEPENDS on config is
 /// [`depends_on_config`]; the AUTO reset axis ([`auto_config_partition`]) applies it, because there
@@ -4844,7 +4844,7 @@ mod tests {
         );
     }
 
-    /// mununu#634 — `--config-values mode=3`, ONE value: the scoped verdict the user asked for ("under
+    /// mununu#634 — `--partition mode=3`, ONE value: the scoped verdict the user asked for ("under
     /// this pin the property is violated"), reported as a one-cell partition. It used to collapse to
     /// `None` as "config-independent", so the pinned run showed an empty refinement and nothing for
     /// `--discover-assumptions` to key off.
@@ -4938,12 +4938,12 @@ mod tests {
 
     /// Slice 2b control — no reset input, no reset mux ⇒ nothing to auto-identify. (The `mode`-gated
     /// MODE_DEP IS config-dependent, but on a config REGISTER auto cannot name; the user must pass
-    /// `--config-values mode=…`. This asserts auto stays silent rather than guessing.)
+    /// `--partition mode=…`. This asserts auto stays silent rather than guessing.)
     #[test]
     fn auto_config_partition_none_without_a_reset() {
         assert!(
             auto_config_partition(MODE_DEP, "busy == 0").is_none(),
-            "no reset detected ⇒ auto abstains (mode is a config register, named via --config-values)"
+            "no reset detected ⇒ auto abstains (mode is a config register, named via --partition)"
         );
     }
 

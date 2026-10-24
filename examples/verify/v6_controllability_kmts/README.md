@@ -151,7 +151,7 @@ All 5 PASS.
   would require either a `--evaluate-modality-blind` CLI flag or a
   feature-flagged restore of the pre-R.6.3 path — a strict-additive
   follow-up.
-- **CLI invocation** via `mununu btor2 cegar --controllable-input`.
+- **CLI invocation** via `mununu btor2 cegar --controllable`.
   The CLI flag for `controllable_inputs` doesn't yet exist on the
   BTOR2 subcommand (R.6.6 lifter reads it from
   `AdapterOptions::controllable_inputs` which today is only

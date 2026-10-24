@@ -1,5 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
   "definitions": {
     "FileContent": {
       "description": "File content with optional name",
@@ -28,14 +29,6 @@
       },
       "type": "array"
     },
-    "config_values": {
-      "default": [],
-      "description": "Config-partition config inputs, each `\"NAME=v1,v2,...\"` (mirrors the CLI `--config-values`).",
-      "items": {
-        "type": "string"
-      },
-      "type": "array"
-    },
     "discover_assumptions": {
       "default": false,
       "description": "Assumption discovery (capability B): search for an enabling φ when the property does not hold → `holds_under` (conditional-only). Mirrors the CLI `--discover-assumptions`.",
@@ -45,6 +38,14 @@
       "default": false,
       "description": "Lift a multi-clock design onto the model's one implicit clock instead of refusing it. An UNDER-approximation: the domains only ever tick together, so a HOLDS does not transfer (the `clock-domains-merged` soundness caveat). Default `false` (refused at lift time).",
       "type": "boolean"
+    },
+    "partitions": {
+      "default": [],
+      "description": "Config-partition config inputs, each `\"NAME=v1,v2,...\"` (mirrors the CLI `--partition`).",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
     },
     "predicates": {
       "default": [],

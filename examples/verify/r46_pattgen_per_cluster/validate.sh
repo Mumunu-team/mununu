@@ -61,7 +61,7 @@ cd "${SRC}"
 # Check 1 — raw real RTL must be rejected (concretization load-bearing).
 echo "--- (1) no sidecar: raw 338-bit design must be rejected at the cap ---"
 sed 's#sidecar = "pattgen_harness.mununu.json"##' verify.toml > "${OUT}/nosidecar.toml"
-if "${MUNUNU}" verify --base-dir "${SRC}" "${OUT}/nosidecar.toml" > "${OUT}/nosidecar.out" 2>&1; then
+if "${MUNUNU}" verify --fail-on none --base-dir "${SRC}" "${OUT}/nosidecar.toml" > "${OUT}/nosidecar.out" 2>&1; then
   echo "FAIL: raw design verified instead of hitting the cap" >&2
   exit 1
 fi
@@ -80,7 +80,7 @@ name = "reach_done0"
 formula = "mu X. (done0_o || (<> X))"
 over = "Circuit"
 EOF
-if "${MUNUNU}" verify --base-dir "${SRC}" "${OUT}/single.toml" > "${OUT}/single.out" 2>&1; then
+if "${MUNUNU}" verify --fail-on none --base-dir "${SRC}" "${OUT}/single.toml" > "${OUT}/single.out" 2>&1; then
   echo "FAIL: single-property concretized design verified instead of busting" >&2
   exit 1
 fi
@@ -92,7 +92,7 @@ echo
 
 # Check 3 — both primitives compose: per-cluster + concretization → all SAT.
 echo "--- (3) sidecar + two disjoint properties: per-cluster × concretization compose ---"
-"${MUNUNU}" verify --json verify.toml > "${OUT}/verify.json" 2>"${OUT}/verify.err" || {
+"${MUNUNU}" verify --fail-on none --json verify.toml > "${OUT}/verify.json" 2>"${OUT}/verify.err" || {
   echo "FAIL: mununu verify exited non-zero" >&2
   tail -15 "${OUT}/verify.err" >&2; exit 1; }
 

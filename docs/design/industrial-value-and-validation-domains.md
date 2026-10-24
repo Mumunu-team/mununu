@@ -280,7 +280,7 @@ The path that *would* connect to the public TLSF corpus — TLSF → controller-
 
 ### Realistic assessment
 
-The newest and least-proven domain. V.6 partial-shipped 2026-06-09: R.6.3–R.6.6 evaluator stack closed, V.6 Option B fixture demonstrates end-to-end controllability-aware lift + R.2.5 MayOnly emission on RTL semantics (5 integration tests pass; `validate.sh` runs the CLI invocation end-to-end with the new `--controllable-input` flag). Remaining: mu-calc safety/liveness property authoring + verdict-divergence demonstration + mununu-ui SV-source workflow + tutorial. The honest-state claim today is *partial demonstration of the controllability-aware verdict-divergence pattern on a hand-authored RTL fixture*, not yet a full SYNTCOMP-corpus AMBA result. Its strategic value remains unique: it is the only V.x that exercises mununu as a *synthesis* tool over abstraction, which no incumbent does.
+The newest and least-proven domain. V.6 partial-shipped 2026-06-09: R.6.3–R.6.6 evaluator stack closed, V.6 Option B fixture demonstrates end-to-end controllability-aware lift + R.2.5 MayOnly emission on RTL semantics (5 integration tests pass; `validate.sh` runs the CLI invocation end-to-end with the new `--controllable` flag). Remaining: mu-calc safety/liveness property authoring + verdict-divergence demonstration + mununu-ui SV-source workflow + tutorial. The honest-state claim today is *partial demonstration of the controllability-aware verdict-divergence pattern on a hand-authored RTL fixture*, not yet a full SYNTCOMP-corpus AMBA result. Its strategic value remains unique: it is the only V.x that exercises mununu as a *synthesis* tool over abstraction, which no incumbent does.
 
 ---
 

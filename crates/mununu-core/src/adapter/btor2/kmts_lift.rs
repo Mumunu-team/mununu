@@ -651,7 +651,7 @@ fn combinational_reset_truth(
 ///   carrying an array `Select`. Bounded by the cube space, never by a product over concrete
 ///   free bits. Until this the set was `cube_0` (every predicate false), which on the i2c lift
 ///   is a cell no concrete reset state inhabits, so every `btor2 cegar` verdict without
-///   `--config-value` pins was a verdict at a fictitious initial state.
+///   `--pin` pins was a verdict at a fictitious initial state.
 ///
 /// `cube_0` remains the defensive fallback when neither rule yields a cube, so the Clts never
 /// has zero initial states (an evaluator-time error).

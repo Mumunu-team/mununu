@@ -50,14 +50,14 @@ echo
 
 cd "${SRC}"
 echo "--- mununu verify (sv2v + flatten + bit-blast + clustered COI) ---"
-LIBRARY_PATH=/usr/local/opt/z3/lib "${MUNUNU}" verify --json verify.toml > "${OUT}/verify.json" 2>"${OUT}/verify.err" || {
+LIBRARY_PATH=/usr/local/opt/z3/lib "${MUNUNU}" verify --fail-on none --json verify.toml > "${OUT}/verify.json" 2>"${OUT}/verify.err" || {
   echo "FAIL: mununu verify exited non-zero" >&2
   tail -15 "${OUT}/verify.err" >&2
   exit 1
 }
 
 echo "(verify finished; clustered-COI comparison + verdicts:)"
-LIBRARY_PATH=/usr/local/opt/z3/lib "${MUNUNU}" verify verify.toml 2>/dev/null | grep -iE "clustered-COI|SATISFIED|VIOLATED" || true
+LIBRARY_PATH=/usr/local/opt/z3/lib "${MUNUNU}" verify --fail-on none verify.toml 2>/dev/null | grep -iE "clustered-COI|SATISFIED|VIOLATED" || true
 echo
 
 # Done-criterion 1: a clustered-COI comparison is present with a real

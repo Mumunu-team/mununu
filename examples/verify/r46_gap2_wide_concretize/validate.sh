@@ -52,7 +52,7 @@ cd "${SRC}"
 # Check 1 — without the sidecar the raw 24-bit design must be REJECTED.
 echo "--- (1) raw 24-bit (no sidecar) must hit the state-bit cap ---"
 sed 's#sidecar = "wide7.mununu.json"##' verify.toml > "${OUT}/nosidecar.toml"
-if "${MUNUNU}" verify --base-dir "${SRC}" "${OUT}/nosidecar.toml" > "${OUT}/nosidecar.out" 2>&1; then
+if "${MUNUNU}" verify --fail-on none --base-dir "${SRC}" "${OUT}/nosidecar.toml" > "${OUT}/nosidecar.out" 2>&1; then
   echo "FAIL: raw 24-bit design verified instead of hitting the cap" >&2
   exit 1
 fi
@@ -66,7 +66,7 @@ echo
 
 # Check 2 + 3 — with the sidecar, the design fits and both properties are SAT.
 echo "--- (2,3) concretized (bound=7) lifts; reachable targets SATISFIED ---"
-"${MUNUNU}" verify --json verify.toml > "${OUT}/verify.json" 2>"${OUT}/verify.err" || {
+"${MUNUNU}" verify --fail-on none --json verify.toml > "${OUT}/verify.json" 2>"${OUT}/verify.err" || {
   echo "FAIL: mununu verify exited non-zero with the sidecar" >&2
   tail -15 "${OUT}/verify.err" >&2
   exit 1

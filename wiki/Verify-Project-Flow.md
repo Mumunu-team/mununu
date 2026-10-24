@@ -179,7 +179,7 @@ with `E_C G q = nu Z. (q && ⋀ C(Z, q))`, `A_C F p = !E_C G !p`, and the two te
 | `fair_response` | `TRIGGER`, `RESPONSE` | `AG(TRIGGER -> A_C F RESPONSE)` — every trigger is followed by the response on every fair path |
 | `fair_always_eventually` | `TARGET` | `AG(A_C F TARGET)` — from every reachable state, every fair path reaches the target |
 
-**Conditional verdicts, never a bare `holds`.** A property with `assumptions` reports `assumptions` (the names) and `fair_path_exists`, the **non-vacuity gate** `E_C G true` evaluated at the initial states: an assumption no path can satisfy (an edge that fires at most once, say) makes `A_C F p` true for nothing. The CLI prints `SATISFIED under {…}` / `VIOLATED under {…}`, or **`VACUOUS under {…}`** when the gate fails — and `--strict` fails on a vacuous verdict too.
+**Conditional verdicts, never a bare `holds`.** A property with `assumptions` reports `assumptions` (the names) and `fair_path_exists`, the **non-vacuity gate** `E_C G true` evaluated at the initial states: an assumption no path can satisfy (an edge that fires at most once, say) makes `A_C F p` true for nothing. The CLI prints `SATISFIED under {…}` / `VIOLATED under {…}`, or **`VACUOUS under {…}`** when the gate fails — and it counts as `unknown` for the exit code, so `--fail-on unknown` fails on it.
 
 **Rules.** Only `fair_response` and `fair_always_eventually` take `assumptions`, and they require at least one (with none they are `response` / `always_eventually`; the validator says so). An inline `formula` encodes its own fairness — the conjuncts above are plain mu-calculus. Note the quantifier: `always_eventually` is `AG EF` (the existential reading this tool uses for `F`, see [LTL Properties](LTL-Properties.md)), while `fair_always_eventually` is `AG A_C F` — universal over the fair paths — which is what "under a fair environment the system keeps recovering" means.
 
@@ -264,7 +264,7 @@ For `BoolDom` (legacy adapters, Sharp-everywhere KMTSes), `verdict` is always `K
 ```bash
 mununu verify <verify.toml>                # human-readable verdict table
 mununu verify <verify.toml> --json         # machine-readable VerifyReport
-mununu verify <verify.toml> --strict       # exits non-zero on any violated property
+mununu verify <verify.toml>                # exits 2 on any violated property (--fail-on none: report only)
 ```
 
 Relative paths in the manifest resolve against the `verify.toml`'s parent directory.

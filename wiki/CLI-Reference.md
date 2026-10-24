@@ -309,7 +309,7 @@ mununu verify <CONFIG> [options]
 
 **Optional flags**:
 - `--json` — emit the report as JSON instead of the default human-readable verdict table
-- `--strict` — exit non-zero on any violated property (default: exit 0 with the report even if some properties fail)
+- `--fail-on <violated|unknown|none>` — the shared CI gate (default `violated`: exit 2 on any violated property; a vacuous conditional verdict counts as `unknown`). Replaces `--strict` (0.5).
 
 **Examples**:
 
@@ -321,7 +321,7 @@ mununu verify examples/verify/crewai_handoff/verify.toml
 mununu verify examples/verify/langgraph_workflow/verify.toml --json
 
 # Fail the build when any property doesn't hold
-mununu verify examples/verify/uart_codesign_chaotic/verify.toml --strict
+mununu verify examples/verify/uart_codesign_chaotic/verify.toml
 ```
 
 **See also**: every entry in [`examples/verify/`](https://github.com/Mumunu-team/mununu/tree/main/examples/verify/) ships a `validate.sh` script that calls `mununu verify` and diffs against a checked-in `transcript.txt` — useful copy-paste starting points.

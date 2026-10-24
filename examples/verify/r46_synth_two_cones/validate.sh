@@ -44,7 +44,7 @@ echo
 
 cd "${SRC}"
 echo "--- mununu verify (joint busts cap → automatic per-cluster) ---"
-LIBRARY_PATH="${LIBRARY_PATH:-/usr/local/opt/z3/lib}" "${MUNUNU}" verify --json verify.toml \
+LIBRARY_PATH="${LIBRARY_PATH:-/usr/local/opt/z3/lib}" "${MUNUNU}" verify --fail-on none --json verify.toml \
   > "${OUT}/verify.json" 2>"${OUT}/verify.err" || {
   echo "FAIL: mununu verify exited non-zero" >&2
   tail -15 "${OUT}/verify.err" >&2
@@ -52,7 +52,7 @@ LIBRARY_PATH="${LIBRARY_PATH:-/usr/local/opt/z3/lib}" "${MUNUNU}" verify --json 
 }
 
 # Human-readable lines (for the log).
-LIBRARY_PATH="${LIBRARY_PATH:-/usr/local/opt/z3/lib}" "${MUNUNU}" verify verify.toml 2>/dev/null \
+LIBRARY_PATH="${LIBRARY_PATH:-/usr/local/opt/z3/lib}" "${MUNUNU}" verify --fail-on none verify.toml 2>/dev/null \
   | grep -iE "clustered-COI|per-cluster verification|SATISFIED|VIOLATED" || true
 echo
 

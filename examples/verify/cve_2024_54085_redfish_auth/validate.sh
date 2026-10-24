@@ -41,13 +41,13 @@ strip_logs() {
     ./target/debug/mununu memory check "$DIR/verify_vulnerable.toml" 2>&1 | strip_logs
 
     printf '\n=== mununu verify (vulnerable) ===\n'
-    ./target/debug/mununu verify --print-counterexample "$DIR/verify_vulnerable.toml" 2>&1 | strip_logs
+    ./target/debug/mununu verify --fail-on none --print-counterexample "$DIR/verify_vulnerable.toml" 2>&1 | strip_logs
 
     printf '\n=== mununu memory check (fixed) ===\n'
     ./target/debug/mununu memory check "$DIR/verify_fixed.toml" 2>&1 | strip_logs
 
     printf '\n=== mununu verify (fixed) ===\n'
-    ./target/debug/mununu verify --print-counterexample "$DIR/verify_fixed.toml" 2>&1 | strip_logs
+    ./target/debug/mununu verify --fail-on none --print-counterexample "$DIR/verify_fixed.toml" 2>&1 | strip_logs
 } > "$TRANSCRIPT"
 
 printf 'wrote transcript to %s (%d lines)\n' \

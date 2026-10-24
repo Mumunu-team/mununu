@@ -32,10 +32,10 @@ strip_logs() {
     printf '# property templates (reachable + mutual_exclusion).\n\n'
 
     printf '=== mununu verify (human-readable) ===\n'
-    ./target/debug/mununu verify "$DIR/verify.toml" 2>&1 | strip_logs
+    ./target/debug/mununu verify --fail-on none "$DIR/verify.toml" 2>&1 | strip_logs
 
     printf '\n=== mununu verify --json (subset: project + verdict shape) ===\n'
-    ./target/debug/mununu verify "$DIR/verify.toml" --json 2>&1 \
+    ./target/debug/mununu verify --fail-on none "$DIR/verify.toml" --json 2>&1 \
         | strip_logs \
         | python3 -c '
 import json, sys

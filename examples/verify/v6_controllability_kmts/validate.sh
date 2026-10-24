@@ -7,7 +7,7 @@
 # demonstrates that mununu's R.2.5 predicate-cube lifter + R.6.6
 # controllability-aware label dispatch + R.6.3 modality-aware modal
 # step all run end-to-end against the AMBA-arbiter BTOR2 fixture
-# via the CLI's R.6.6 `--controllable-input` flag (shipped same
+# via the CLI's R.6.6 `--controllable` flag (shipped same
 # session as this script).
 #
 # Scope today:
@@ -58,14 +58,14 @@ echo "fixture:  ${BTOR2}"
 echo
 
 # --- Step 1: CEGAR refinement on the trivial liveness probe with the ---
-# --- controllability-aware lift (R.6.6 --controllable-input flag).   ---
+# --- controllability-aware lift (R.6.6 --controllable flag).   ---
 echo "--- step 1/2: mununu btor2 cegar w/ R.6.6 controllability-aware lift ---"
 LIBRARY_PATH=/usr/local/opt/z3/lib "${MUNUNU}" btor2 cegar \
   "${BTOR2}" \
   --formula 'nu X. < true > X' \
   --predicate 'burst_zero:burst=0' \
-  --controllable-input ctrl_g0 \
-  --controllable-input ctrl_g1 \
+  --controllable ctrl_g0 \
+  --controllable ctrl_g1 \
   --max-iterations 4 > "${OUT}/cegar_liveness.out" 2>&1
 
 echo "(stdout tail:)"
@@ -84,8 +84,8 @@ LIBRARY_PATH=/usr/local/opt/z3/lib "${MUNUNU}" btor2 cegar \
   "${BTOR2}" \
   --formula 'nu X. [ true ] X' \
   --predicate 'burst_zero:burst=0' \
-  --controllable-input ctrl_g0 \
-  --controllable-input ctrl_g1 \
+  --controllable ctrl_g0 \
+  --controllable ctrl_g1 \
   --max-iterations 4 \
   --json > "${OUT}/cegar_safety.json" 2>&1
 

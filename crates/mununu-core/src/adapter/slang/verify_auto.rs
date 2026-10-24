@@ -449,7 +449,7 @@ pub struct ModelDiagnostics {
     /// soundness caveat).
     pub merged_clock_domains: Vec<String>,
     /// mununu#536 — config inputs pinned to constants for this run, each
-    /// `"<signal>=<value>"` (the `--config-value` / API `config_values` operands that were
+    /// `"<signal>=<value>"` (the `--pin` / API `pins` operands that were
     /// actually APPLIED, not those merely requested).
     ///
     /// These already reach a human through the `config-concretization` note, but a note is
@@ -1029,7 +1029,7 @@ enum NotePosture {
     Cube,
 }
 
-/// mununu#459 — partition user `--config-value` pins into (applied, unusable).
+/// mununu#459 — partition user `--pin` pins into (applied, unusable).
 ///
 /// A pin is **applied** if the config pass pinned it (`pinned_configs`) or reset-gating already
 /// pinned it to the SAME value (`reset_pinned`). It is **unusable** if its name is not a primary
@@ -4123,7 +4123,7 @@ pub(crate) struct PreparedModel {
     predicate_hints: Vec<String>,
     /// The `@mununu_*` annotation scan (drives the annotation note).
     ann_scan: AnnotationScan,
-    /// The config inputs actually pinned (`--config-value`), for the per-property substitution + note.
+    /// The config inputs actually pinned (`--pin`), for the per-property substitution + note.
     applied_config_values: Vec<(String, u64)>,
     /// The fault posture as applied (`--fault` / `--fault-model`), `None` without one.
     fault: Option<crate::adapter::btor2::fault::FaultApplied>,
@@ -4188,7 +4188,7 @@ pub(crate) fn prepare_model(
     // (from the slang AST). The read_verilog lift's `chparam` errors on an unknown
     // name, but the slang lift's `-G` override SILENTLY ignores it — so an
     // unapplicable `--param` is caught here, uniformly, as a hard error rather than
-    // a silent drop (contrast `--config-value`, mununu#459). A `MODULE.NAME`
+    // a silent drop (contrast `--pin`, mununu#459). A `MODULE.NAME`
     // override is validated on its bare `NAME`.
     if !yosys_opts.params.is_empty() {
         for (lhs, value) in &yosys_opts.params {
@@ -4505,7 +4505,7 @@ pub(crate) fn prepare_model(
     };
 
     // mununu#459 — snapshot the model's real primary-input names BEFORE any pinning
-    // rewrites them to constants, so a user `--config-value` can be validated
+    // rewrites them to constants, so a user `--pin` can be validated
     // against them below. A `<nid> input <sid> <symbol>` line names a pinnable
     // input; a bare `<nid> input <sid>` (no symbol) or a comment cannot be pinned.
     let model_input_names: std::collections::HashSet<String> = btor2
@@ -4576,7 +4576,7 @@ pub(crate) fn prepare_model(
             kind: AdapterErrorKind::UnsupportedConstruct,
             location: None,
             message: format!(
-                "--config-value: {} pin(s) could not be applied — a config pin must name a \
+                "--pin: {} pin(s) could not be applied — a config pin must name a \
                  real primary input and take effect, it is never silently dropped (mununu#459). \
                  {}. ({hint})",
                 unusable.len(),
@@ -4616,7 +4616,7 @@ pub(crate) fn prepare_model(
     };
 
     // mununu#552 — dump here, at the LAST whole-design rewrite, so what lands on disk is what the
-    // engine is handed. The formulas carry the same `--config-value` substitution the per-property
+    // engine is handed. The formulas carry the same `--pin` substitution the per-property
     // loop applies, so the pair is self-consistent.
     {
         let dumped: Vec<(String, String)> = extraction
@@ -5099,9 +5099,7 @@ fn dump_prepared_model(btor2: &str, properties: &[(String, String)], fault_model
     let mut out = String::new();
     out.push_str("; mununu#552 — the BTOR2 the engine runs, dumped after model preparation.\n");
     out.push_str("; INCLUDES: the SV lift, `$past` shadow registers, reset pinning,\n");
-    out.push_str(
-        ";           `--config-value` pins, any `sv mutate` fault, and the fault-injection\n",
-    );
+    out.push_str(";           `--pin` pins, any `sv mutate` fault, and the fault-injection\n");
     out.push_str(
         ";           posture's inputs / budget counter when one is on (see FAULT MODEL).\n",
     );
@@ -5118,7 +5116,7 @@ fn dump_prepared_model(btor2: &str, properties: &[(String, String)], fault_model
     out.push_str(";           If you are reproducing a property whose atoms read an input, that\n");
     out.push_str(";           rewrite is not in this file.\n");
     out.push_str(";\n");
-    out.push_str("; Properties, as the engine parses them (post `--config-value` substitution).\n");
+    out.push_str("; Properties, as the engine parses them (post `--pin` substitution).\n");
     out.push_str(
         "; Shadow atoms appear here as `<base>__past`; bit-slices as `<base>__bits<hi>_<lo>`.\n",
     );

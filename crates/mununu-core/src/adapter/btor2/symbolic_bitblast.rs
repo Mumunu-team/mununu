@@ -9674,7 +9674,7 @@ mod tests {
 
         // mununu#543 — PIN THE RESETS FIRST. The first version of this probe omitted them, and
         // monono's measured comparison caught it: their lift keeps `rst_src_n` / `rst_dst_n` as
-        // FREE inputs (lines 7-8 of the bundle's design.btor), because `--config-value` is applied
+        // FREE inputs (lines 7-8 of the bundle's design.btor), because `--pin` is applied
         // after the lift by `pin::pin_inputs_to_constants` (verify_auto.rs:2667), not by yosys.
         // A free reset lets the design reset at every step, which widens the reachable space
         // enormously — so the un-pinned probe exhausted the arena 10/10 while the real run

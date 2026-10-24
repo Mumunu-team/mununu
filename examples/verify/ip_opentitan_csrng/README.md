@@ -21,7 +21,7 @@ sh run.sh --json          # the IP's own assertions
 ```
 
 `run.sh` is `sv verify-auto csrng.sv --top csrng --preprocess-sv2v --source … --lift-override
-prim_assert.sv=prim_assert_shim.sv … --config-value rst_ni=1`: the SVA is **extracted from the real
+prim_assert.sv=prim_assert_shim.sv … --pin rst_ni=1`: the SVA is **extracted from the real
 `prim_assert` macros**, while the sv2v + yosys lift sees `prim_assert_shim.sv` (every assertion macro of the
 real set empty, `INC_ASSERT` defined so the assertion-support logic is in the model) and the two
 `_lift.sv` variants, `prim_alert_sender_lift.sv` / `prim_sparse_fsm_flop_lift.sv`, the upstream files with

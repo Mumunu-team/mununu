@@ -522,13 +522,13 @@ pub fn rescue_skipped(
 /// The **key fact** (P2.2b, measure-first 2026-07-26) is the *residual* — the register bits
 /// that remain even after pinning **every** in-cone free input
 /// (`residual = cone_bits − Σ pinnable_input_widths`). This is what decides whether
-/// `--config-value` pinning can actually help:
+/// `--pin` pinning can actually help:
 ///
 /// - `residual ≤ cap` — **input-inflated** cone: pinning the in-cone inputs drops the cone to
-///   ~`residual` bits ≤ cap, so `--config-value SIGNAL=VALUE` (a scoped verdict) decides it.
+///   ~`residual` bits ≤ cap, so `--pin SIGNAL=VALUE` (a scoped verdict) decides it.
 ///   The note lists the pinnable inputs and how far pinning gets.
 /// - `residual > cap` — **register-dominated** cone: even pinning ALL in-cone inputs leaves
-///   `residual` register bits over the cap, so `--config-value` **cannot** decide it. The note
+///   `residual` register bits over the cap, so `--pin` **cannot** decide it. The note
 ///   says so and points at the real levers (structural compression: one-hot re-encode /
 ///   counter abstraction; or cutpoint, posture-permitting).
 ///
@@ -605,7 +605,7 @@ fn skip_over_cap_notes(report: &AutoVerifyReport, design_btor2: &str) -> Vec<Ver
                 "The exact engine bit-blasts a property's cone-of-influence; this cone exceeds \
                  the bit cap, so it bailed to Skipped. The cone is INPUT-inflated: pinning the \
                  {} in-cone free input(s) below ({input_bits} bits) to representative constants \
-                 (`--config-value SIGNAL=VALUE`) drops the cone to ~{residual} register bits (≤ \
+                 (`--pin SIGNAL=VALUE`) drops the cone to ~{residual} register bits (≤ \
                  the {cap}-bit cap), so exact decides — a verdict scoped to the pinned \
                  configuration.",
                 inputs.len()
@@ -616,7 +616,7 @@ fn skip_over_cap_notes(report: &AutoVerifyReport, design_btor2: &str) -> Vec<Ver
                 "The exact engine bit-blasts a property's cone-of-influence; this cone exceeds \
                  the bit cap, so it bailed to Skipped. This cone is REGISTER-dominated: even \
                  pinning ALL {} in-cone free input(s) ({input_bits} bits) leaves ~{residual} \
-                 register bits (still > the {cap}-bit cap), so `--config-value` CANNOT bring it \
+                 register bits (still > the {cap}-bit cap), so `--pin` CANNOT bring it \
                  under the cap. The decidable lever here is sound register reduction — \
                  structural compression (one-hot re-encode, counter abstraction) or a cutpoint \
                  (safety-posture only; unsound for νμ) — not input concretization.",
@@ -1255,7 +1255,7 @@ mod tests {
     #[test]
     fn skip_note_input_inflated_points_at_config_value() {
         // A 300-bit INPUT feeding a 1-bit register: cone = 301 (1 register + 300 input), so
-        // residual = 1 ≤ the 192-bit cap — pinning the input via --config-value decides it.
+        // residual = 1 ≤ the 192-bit cap — pinning the input via --pin decides it.
         let btor2 = "\
 1 sort bitvec 300
 2 sort bitvec 1
@@ -1279,8 +1279,8 @@ mod tests {
             n.summary
         );
         assert!(
-            n.detail.contains("--config-value") && n.detail.contains("INPUT-inflated"),
-            "detail must point at --config-value on an input-inflated cone: {}",
+            n.detail.contains("--pin") && n.detail.contains("INPUT-inflated"),
+            "detail must point at --pin on an input-inflated cone: {}",
             n.detail
         );
     }

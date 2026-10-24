@@ -23,7 +23,7 @@ sh run.sh --json --source mununu_properties.sv     # + the system-level properti
 ```
 
 `run.sh` is `sv verify-auto edn.sv --top edn --preprocess-sv2v --source … --lift-override
-prim_assert.sv=prim_assert_shim.sv … --config-value rst_ni=1`: the SVA is **extracted from the real
+prim_assert.sv=prim_assert_shim.sv … --pin rst_ni=1`: the SVA is **extracted from the real
 `prim_assert` macros**, while the sv2v + yosys lift sees `prim_assert_shim.sv`, which defines every
 assertion macro of the real set as nothing (as OpenTitan's own synthesis macros do) **and defines
 `INC_ASSERT`** (2026-10-22), so the RTL's assertion-support logic is in the model: `prim_count`'s

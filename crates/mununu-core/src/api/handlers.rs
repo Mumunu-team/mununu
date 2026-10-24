@@ -543,12 +543,11 @@ fn context_import_handler_impl(
     // sv2v+Yosys output — queued as a V.6 follow-up).
     //
     // Per CLAUDE.md §Surface Parity, this API surface mirrors the
-    // CLI's `--controllable-input` + `--predicate` flags on
+    // CLI's `--controllable` + `--predicate` flags on
     // `mununu btor2 cegar`. The UI consumer (mununu-ui) renders
     // the lift summary in its dedicated workflow page.
     let is_btor2_format = matches!(request.format.as_str(), "btor2" | "btor");
-    if !request.predicates.is_empty() && !request.controllable_inputs.is_empty() && is_btor2_format
-    {
+    if !request.predicates.is_empty() && !request.controllable.is_empty() && is_btor2_format {
         return run_controllability_aware_lift(&request);
     }
 
@@ -596,7 +595,7 @@ fn run_controllability_aware_lift(
         .collect();
 
     let adapter_options = AdapterOptions {
-        controllable_inputs: request.controllable_inputs.clone(),
+        controllable_inputs: request.controllable.clone(),
         ..Default::default()
     };
 
@@ -702,12 +701,12 @@ fn btor2_cegar_handler_impl(request: Btor2CegarRequest) -> ApiResult<Json<Btor2C
         btor2_content: &request.content,
         formula: &request.formula,
         predicates: &request.predicates,
-        controllable_inputs: &request.controllable_inputs,
+        controllable_inputs: &request.controllable,
         predicate_source: request.predicate_source.as_deref(),
         max_iterations: request.max_iterations,
         must_edge_inference: request.must_edge_inference.as_deref(),
         may_edge_inference: request.may_edge_inference.as_deref(),
-        config_values: &request.config_values,
+        config_values: &request.init_values,
         emit_ctxdsl: request.emit_ctxdsl,
         engine: request.engine.as_deref(),
     };
@@ -1091,12 +1090,11 @@ fn btor2_verify_recoverability_handler_impl(
             message,
             details: None,
         })?;
-    let config_specs = parse_config_value_specs(&request.config_values).map_err(|message| {
-        ApiError::BadRequest {
+    let config_specs =
+        parse_config_value_specs(&request.partitions).map_err(|message| ApiError::BadRequest {
             message,
             details: None,
-        }
-    })?;
+        })?;
     // `refine`/`config_values`/`discover_assumptions` (refined-verdicts): canonical verdict PLUS a
     // diagnostic-only refinement. Either way the attribution rides along: who decided, and the
     // exact engine's abstention when the cube ladder was what did.
@@ -1528,12 +1526,11 @@ fn sv_verify_recoverability_handler_impl(
             message,
             details: None,
         })?;
-    let config_specs = parse_config_value_specs(&request.config_values).map_err(|message| {
-        ApiError::BadRequest {
+    let config_specs =
+        parse_config_value_specs(&request.partitions).map_err(|message| ApiError::BadRequest {
             message,
             details: None,
-        }
-    })?;
+        })?;
     let lift = SvLift {
         source: request.source,
         additional_sources: request
@@ -1858,7 +1855,7 @@ fn sv_mutate_handler_impl(request: SvMutateRequest) -> ApiResult<Json<SvMutateRe
         params,
         ..Default::default()
     };
-    let config_values = parse_config_values(&request.config_values)?;
+    let config_values = parse_config_values(&request.pins)?;
     let lift_overrides: Vec<(String, String)> = request
         .lift_overrides
         .iter()
@@ -2015,12 +2012,12 @@ fn sv_cegar_handler_impl(request: SvCegarRequest) -> ApiResult<Json<Btor2CegarRe
         btor2_content: &btor2,
         formula: &request.formula,
         predicates: &request.predicates,
-        controllable_inputs: &request.controllable_inputs,
+        controllable_inputs: &request.controllable,
         predicate_source: request.predicate_source.as_deref(),
         max_iterations: request.max_iterations,
         must_edge_inference: request.must_edge_inference.as_deref(),
         may_edge_inference: request.may_edge_inference.as_deref(),
-        config_values: &request.config_values,
+        config_values: &request.init_values,
         emit_ctxdsl: request.emit_ctxdsl,
         engine: request.engine.as_deref(),
     };
@@ -2216,7 +2213,7 @@ fn sv_verify_auto_handler_impl(
         Some("smt-hyper-must") => MustEdgeInference::SmtHyperMust,
         _ => MustEdgeInference::Off,
     };
-    let config_values = parse_config_values(&request.config_values)?;
+    let config_values = parse_config_values(&request.pins)?;
     // H.H — parse `"signal<=value"` (or `"signal=value"`) counter-bound entries;
     // both spellings mean the inclusive upper bound `signal <= value`.
     let counter_bounds: std::collections::HashMap<String, u64> = request
@@ -4843,7 +4840,7 @@ members = ["x"]
                 register: "burst".to_string(),
                 value: 0,
             }],
-            controllable_inputs: vec!["ctrl_g0".to_string(), "ctrl_g1".to_string()],
+            controllable: vec!["ctrl_g0".to_string(), "ctrl_g1".to_string()],
             sv_source_path: None,
             sidecar_path: None,
         };
@@ -4920,12 +4917,12 @@ members = ["x"]
                 register: "burst".to_string(),
                 value: 0,
             }],
-            controllable_inputs: vec!["ctrl_g0".to_string(), "ctrl_g1".to_string()],
+            controllable: vec!["ctrl_g0".to_string(), "ctrl_g1".to_string()],
             predicate_source: None,
             max_iterations: Some(4),
             must_edge_inference: None,
             may_edge_inference: None,
-            config_values: vec![],
+            init_values: vec![],
             emit_ctxdsl: false,
             engine: None,
         };
@@ -4995,12 +4992,12 @@ members = ["x"]
                 register: "cnt".to_string(),
                 value: 0,
             }],
-            controllable_inputs: vec![],
+            controllable: vec![],
             predicate_source: None,
             max_iterations: None,
             must_edge_inference: None,
             may_edge_inference: None,
-            config_values: vec![],
+            init_values: vec![],
             emit_ctxdsl: false,
             engine: Some("symbolic".to_string()),
         };
@@ -5049,12 +5046,12 @@ members = ["x"]
                 register: "burst".to_string(),
                 value: 0,
             }],
-            controllable_inputs: vec![],
+            controllable: vec![],
             predicate_source: None,
             max_iterations: Some(2),
             must_edge_inference: None,
             may_edge_inference: None,
-            config_values: vec![],
+            init_values: vec![],
             emit_ctxdsl: true,
             engine: None,
         };
@@ -5103,12 +5100,12 @@ members = ["x"]
                 register: "burst".to_string(),
                 value: 0,
             }],
-            controllable_inputs: vec![],
+            controllable: vec![],
             predicate_source: None,
             max_iterations: Some(4),
             must_edge_inference: None,
             may_edge_inference: Some("smt-all-pairs".to_string()),
-            config_values: vec!["burst=0,1,2,3".to_string()],
+            init_values: vec!["burst=0,1,2,3".to_string()],
             emit_ctxdsl: false,
             engine: None,
         };
@@ -5132,12 +5129,12 @@ members = ["x"]
                 register: "r".to_string(),
                 value: 0,
             }],
-            controllable_inputs: vec![],
+            controllable: vec![],
             predicate_source: None,
             max_iterations: Some(2),
             must_edge_inference: None,
             may_edge_inference: None,
-            config_values: vec!["this is not valid".to_string()],
+            init_values: vec!["this is not valid".to_string()],
             emit_ctxdsl: false,
             engine: None,
         };
@@ -5152,12 +5149,25 @@ members = ["x"]
     /// silent drop that verifies a different question than the one asked. (Unknown / non-input
     /// SIGNAL names are caught downstream against the model's real inputs; see
     /// `verify_auto::tests::config_pins_partition_applied_vs_unusable`.)
+    /// 0.5 renamed `config_values` to `pins`. A client still sending the old key must get an
+    /// error, not a run with its pins silently ignored (the mununu#459 class).
+    #[test]
+    fn an_sv_verify_auto_request_with_the_pre_0_5_key_is_refused() {
+        use crate::api::models::SvVerifyAutoRequest;
+        let err = serde_json::from_value::<SvVerifyAutoRequest>(serde_json::json!({
+            "source": "module m(input logic clk); endmodule\n",
+            "config_values": ["rst=1"],
+        }))
+        .expect_err("an unknown key is refused");
+        assert!(err.to_string().contains("config_values"), "{err}");
+    }
+
     #[test]
     fn sv_verify_auto_handler_rejects_hex_config_value() {
         use crate::api::models::SvVerifyAutoRequest;
         let request: SvVerifyAutoRequest = serde_json::from_value(serde_json::json!({
             "source": "module m(input logic clk, input logic rst); endmodule\n",
-            "config_values": ["rst=0x1"],
+            "pins": ["rst=0x1"],
         }))
         .expect("request deserializes");
         let err = sv_verify_auto_handler_impl(request)
@@ -5181,7 +5191,7 @@ members = ["x"]
             "source": "module m(input logic clk, input logic rst_ni); endmodule\n",
             "mutation": "stick:q",
             "lift_overrides": [{"name": "prim_assert.sv", "content": "// shim\n"}],
-            "config_values": ["rst_ni=0x1"],
+            "pins": ["rst_ni=0x1"],
             "cutpoint": ["must_refresh"],
         }))
         .expect("request deserializes");
@@ -5212,12 +5222,12 @@ members = ["x"]
             setundef_anyconst: false,
             formula: "nu X. < true > X".to_string(),
             predicates: vec![],
-            controllable_inputs: vec![],
+            controllable: vec![],
             predicate_source: None,
             max_iterations: Some(2),
             must_edge_inference: None,
             may_edge_inference: None,
-            config_values: vec![],
+            init_values: vec![],
             emit_ctxdsl: false,
             engine: None,
         };
@@ -5267,12 +5277,12 @@ endmodule
                 register: "burst".to_string(),
                 value: 0,
             }],
-            controllable_inputs: vec![],
+            controllable: vec![],
             predicate_source: None,
             max_iterations: Some(4),
             must_edge_inference: None,
             may_edge_inference: None,
-            config_values: vec![],
+            init_values: vec![],
             emit_ctxdsl: false,
             engine: None,
         };
@@ -5310,7 +5320,7 @@ endmodule
                 register: "reg_a".to_string(),
                 value: 0,
             }],
-            controllable_inputs: Vec::new(), // <-- empty disables V.6 path
+            controllable: Vec::new(), // <-- empty disables V.6 path
             sv_source_path: None,
             sidecar_path: None,
         };
@@ -5560,7 +5570,7 @@ members = ["x"]
             target: "st == 0".to_string(),
             predicates: Vec::new(),
             refine: false,
-            config_values: Vec::new(),
+            partitions: Vec::new(),
             discover_assumptions: false,
         };
         let Json(out) = btor2_verify_recoverability_handler(Json(request))
@@ -5590,7 +5600,7 @@ members = ["x"]
             target: "flag == 1".to_string(),
             predicates: Vec::new(),
             refine: true,
-            config_values: Vec::new(),
+            partitions: Vec::new(),
             discover_assumptions: false,
         };
         let Json(out) = btor2_verify_recoverability_handler(Json(request))
@@ -5614,12 +5624,12 @@ members = ["x"]
             target: "busy == 0".to_string(),
             predicates: Vec::new(),
             refine: false,
-            config_values: vec!["mode=0,1,2,3".to_string()],
+            partitions: vec!["mode=0,1,2,3".to_string()],
             discover_assumptions: false,
         };
         let Json(out) = btor2_verify_recoverability_handler(Json(request))
             .await
-            .expect("verify-recoverability --config-values runs");
+            .expect("verify-recoverability --partition runs");
         let part = out
             .refinement
             .and_then(|r| r.config_partition)
@@ -5640,7 +5650,7 @@ members = ["x"]
             target: "st == 0".to_string(),
             predicates: Vec::new(),
             refine: false,
-            config_values: Vec::new(),
+            partitions: Vec::new(),
             discover_assumptions: true,
         };
         let Json(out) = btor2_verify_recoverability_handler(Json(request))
@@ -5666,7 +5676,7 @@ members = ["x"]
             target: "definitely not an atom".to_string(),
             predicates: Vec::new(),
             refine: false,
-            config_values: Vec::new(),
+            partitions: Vec::new(),
             discover_assumptions: false,
         };
         let err = btor2_verify_recoverability_handler(Json(request))
@@ -5993,7 +6003,7 @@ members = ["x"]
             target: "not an atom !!".to_string(),
             predicates: Vec::new(),
             refine: false,
-            config_values: Vec::new(),
+            partitions: Vec::new(),
             discover_assumptions: false,
         };
         let err = sv_verify_recoverability_handler(Json(request))

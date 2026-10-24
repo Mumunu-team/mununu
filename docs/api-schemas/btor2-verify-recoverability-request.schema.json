@@ -1,15 +1,8 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
   "description": "Request for the recoverability endpoint (`POST /api/v1/btor2/verify-recoverability`). Mirrors the CLI `mununu btor2 verify-recoverability`: decides `AG EF target` — \"from every reachable state, can the design get back to `target`?\". `target` is a single register-comparison atom string (`\"state_q == 3\"`).",
   "properties": {
-    "config_values": {
-      "default": [],
-      "description": "Config-partition (capability A): config inputs to split the verdict over, each `\"NAME=v1,v2,...\"`. The refinement then carries a `config_partition` decided exactly per config, every named value included — a single value is a scoped pin, reported as its one cell (#634). Implies the refined output. Mirrors the CLI `--config-values`.",
-      "items": {
-        "type": "string"
-      },
-      "type": "array"
-    },
     "content": {
       "description": "BTOR2 source content.",
       "type": "string"
@@ -18,6 +11,14 @@
       "default": false,
       "description": "Assumption discovery (capability B): when the property does NOT hold, search for an environment assumption φ under which it becomes a non-vacuous HOLDS → the refinement carries `holds_under`. CONDITIONAL-only (never changes the canonical verdict). Implies the refined output. Mirrors the CLI `--discover-assumptions`.",
       "type": "boolean"
+    },
+    "partitions": {
+      "default": [],
+      "description": "Config-partition (capability A): config inputs to split the verdict over, each `\"NAME=v1,v2,...\"`. The refinement then carries a `config_partition` decided exactly per config, every named value included — a single value is a scoped pin, reported as its one cell (#634). Implies the refined output. Mirrors the CLI `--partition`.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
     },
     "predicates": {
       "default": [],

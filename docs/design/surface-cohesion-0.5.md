@@ -87,7 +87,7 @@ RTL rows fill `state`/`inputs`/`faults`; CTXDSL rows fill `state` (state names) 
 | F5 | `--json` is absent on `sv verify`, `check-fsm`, `lint`, `mutate`, most `btor2` verbs, `context eval` | `main.rs:86` |
 | F6 | `--expect-*` / `--fail-on` only on verify-auto; `verify` uses `--strict` | `main.rs:2308,1363` |
 | F7 | timeouts: `--timeout-ms`, `--owned-timeout-ms`, `--budget-ms`, otherwise env vars | `main.rs:968,973,1056` |
-| F8 | `--controllable` (game) vs `--controllable-input` (cegar) | `main.rs:1226,869` |
+| F8 | `--controllable` (game) vs `--controllable` (cegar) | `main.rs:1226,869` |
 | F9 | API spellings drift from the CLI: `gate_reset` vs `--no-gate-reset`, three `rescue_bottom_*` keys vs `--no-rescue`, `cutpoint` (singular) beside `counter_bounds` (plural), `lift_overrides` carries file contents where the CLI takes paths | `models.rs:1762-1930` |
 
 **Proposal (Decide).**

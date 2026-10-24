@@ -36,7 +36,7 @@ assert_verdicts() {
   local model="$1" expect_ni="$2"
   local jf
   jf="$(mktemp)"
-  "${MUNUNU}" verify "${DIR}/${model}/verify.toml" --json 2>/dev/null >"${jf}"
+  "${MUNUNU}" verify --fail-on none "${DIR}/${model}/verify.toml" --json 2>/dev/null >"${jf}"
   python3 -c '
 import json, sys
 model, expect_ni = sys.argv[2], sys.argv[3]

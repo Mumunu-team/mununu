@@ -37,7 +37,7 @@ strip_logs() {
     printf '# across the synchronous composition (composed automaton = Circuit).\n\n'
 
     printf '=== mununu verify (human-readable) ===\n'
-    ./target/debug/mununu verify "$DIR/verify.toml" 2>&1 | strip_logs
+    ./target/debug/mununu verify --fail-on none "$DIR/verify.toml" 2>&1 | strip_logs
 } > "$TRANSCRIPT"
 
 printf 'wrote transcript to %s (%d lines)\n' \
