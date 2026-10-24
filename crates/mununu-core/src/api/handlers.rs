@@ -2825,10 +2825,41 @@ fn context_verify_handler_impl(
 
     let all_satisfied = results.iter().all(|r| r.satisfied);
 
+    let mut sanity = Vec::new();
+    if request.sanity {
+        let mut targets: Vec<String> = match &request.automaton {
+            Some(a) => vec![a.clone()],
+            None => pairs.iter().map(|(_, a)| a.clone()).collect(),
+        };
+        targets.sort();
+        targets.dedup();
+        for a in targets {
+            let Some(clts) = realized.context.clts(&a) else {
+                return Err(ApiError::BadRequest {
+                    message: format!("Unknown automaton '{a}'"),
+                    details: None,
+                });
+            };
+            let members: Vec<(String, &crate::clts::Clts<_, _>)> = realized
+                .members_of(&a)
+                .unwrap_or(&[])
+                .iter()
+                .filter_map(|m| realized.context.clts(m).map(|c| (m.clone(), c)))
+                .collect();
+            sanity.push(crate::context::sanity::check(
+                &a,
+                clts,
+                &realized.declared_labels_of(&a),
+                &members,
+            ));
+        }
+    }
+
     Ok(Json(ContextVerifyResponse {
         success: true,
         all_satisfied,
         results,
+        sanity,
     }))
 }
 
@@ -5828,5 +5859,27 @@ members = ["x"]
             .await
             .expect_err("malformed target must be rejected pre-lift");
         assert!(matches!(err, ApiError::BadRequest { .. }));
+    }
+}
+
+#[cfg(test)]
+mod context_sanity_tests {
+    use super::*;
+
+    /// `sanity: true` on `/context/verify` returns the structural report beside the verdicts.
+    #[test]
+    fn context_verify_reports_sanity_on_request() {
+        let content = "context m {\n  alphabet { label go; label unused; }\n  automata {\n    automaton A {\n      alphabet { label go; label unused; }\n      states { state Init initial; state Done; }\n      transitions { transition Init -> Done on label go; }\n    }\n  }\n  mu_formulas { formula r { over A; body = mu X. (Done || <> X); } }\n}\n";
+        let request: ContextVerifyRequest = serde_json::from_value(serde_json::json!({
+            "context": { "name": "m.ctxdsl", "content": content },
+            "sanity": true
+        }))
+        .expect("request");
+        let Json(resp) = context_verify_handler_impl(request).expect("verifies");
+        assert_eq!(resp.sanity.len(), 1);
+        let rep = &resp.sanity[0];
+        assert_eq!(rep.automaton, "A");
+        assert_eq!(rep.deadlocks.len(), 1, "{rep}");
+        assert_eq!(rep.labels_never_fired, vec!["unused".to_string()]);
     }
 }

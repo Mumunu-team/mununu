@@ -529,6 +529,11 @@ pub struct ContextVerifyRequest {
     /// Stub .espec.json content to compose as sidecars (interface automata).
     #[serde(default)]
     pub stubs: Vec<SidecarFile>,
+    /// Run the structural checks (`context eval --sanity`) on `automaton`, or on every automaton
+    /// the evaluated formulas target: deadlocks with a path, unreachable states, labels that never
+    /// fire, internal livelocks.
+    #[serde(default)]
+    pub sanity: bool,
 }
 
 /// Response from context verification
@@ -537,6 +542,9 @@ pub struct ContextVerifyResponse {
     pub success: bool,
     pub all_satisfied: bool,
     pub results: Vec<FormulaVerificationResult>,
+    /// One structural report per checked automaton, when `sanity` was requested.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sanity: Vec<crate::context::sanity::SanityReport>,
 }
 
 /// Verification result for a single formula–automaton pair

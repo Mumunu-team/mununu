@@ -2751,6 +2751,11 @@ struct ContextEvalArgs {
     /// Template argument bindings (KEY=VALUE). Repeatable.
     #[arg(long = "template-arg", value_name = "KEY=VALUE", requires = "template")]
     template_args: Vec<String>,
+    /// Structural checks before any property: reachable deadlocks (with a path), unreachable
+    /// declared states, labels that never fire, internal-only livelocks. With no `--formula` /
+    /// `--template`, only the checks run.
+    #[arg(long)]
+    sanity: bool,
     /// A project template pack (`TemplateCatalog` JSON) layered over the built-in catalog and the
     /// deployment's packs. Repeatable.
     #[arg(long = "templates-file", value_name = "FILE")]
@@ -7941,7 +7946,30 @@ fn context_eval(args: ContextEvalArgs) -> Result<(), String> {
         template_args: &args.template_args,
         templates_files: &args.templates_files,
         automaton: &args.automaton,
+        allow_no_formula: args.sanity,
     })?;
+    if args.sanity {
+        let clts = realized
+            .context
+            .clts(&args.automaton)
+            .ok_or_else(|| format!("unknown automaton '{}' in realised context", args.automaton))?;
+        let members: Vec<(String, &mununu_core::clts::Clts<_, _>)> = realized
+            .members_of(&args.automaton)
+            .unwrap_or(&[])
+            .iter()
+            .filter_map(|m| realized.context.clts(m).map(|c| (m.clone(), c)))
+            .collect();
+        let report = mununu_core::context::sanity::check(
+            &args.automaton,
+            clts,
+            &realized.declared_labels_of(&args.automaton),
+            &members,
+        );
+        print!("{report}");
+        if formula_name.is_empty() {
+            return Ok(());
+        }
+    }
     let formula = realized
         .formulas
         .get(&formula_name)
@@ -8450,6 +8478,7 @@ fn context_synthesize(args: ContextSynthesizeArgs) -> Result<(), String> {
         template_args: &args.template_args,
         templates_files: &args.templates_files,
         automaton: &args.automaton,
+        allow_no_formula: false,
     })?;
     let realized_formula = realized
         .formulas

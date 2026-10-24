@@ -497,6 +497,9 @@ pub(crate) struct EvalContextParams<'a> {
     /// Project template packs (`--templates-file`).
     pub(crate) templates_files: &'a [PathBuf],
     pub(crate) automaton: &'a str,
+    /// `context eval --sanity` alone: no formula is evaluated, so none is required
+    /// (`formula_name` comes back empty).
+    pub(crate) allow_no_formula: bool,
 }
 
 /// Execute the shared preamble for `context eval` and `context synthesize`.
@@ -529,14 +532,18 @@ pub(crate) fn prepare_eval_context(
     }
 
     // Resolve formula: either --formula NAME or --template ID [--template-arg K=V]
-    let formula_name = crate::resolve_formula_name(
-        p.formula,
-        p.template,
-        p.template_args,
-        p.templates_files,
-        p.automaton,
-        &mut sidecar_docs,
-    )?;
+    let formula_name = if p.allow_no_formula && p.formula.is_none() && p.template.is_none() {
+        String::new()
+    } else {
+        crate::resolve_formula_name(
+            p.formula,
+            p.template,
+            p.template_args,
+            p.templates_files,
+            p.automaton,
+            &mut sidecar_docs,
+        )?
+    };
 
     let realized = realize_documents(&context_doc, &sidecar_docs)?;
     Ok(PreparedEvalContext {
