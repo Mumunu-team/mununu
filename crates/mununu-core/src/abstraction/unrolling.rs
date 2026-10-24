@@ -9,7 +9,6 @@ use super::heuristics::{HeuristicConfig, StateSpaceStats, VariableContext, selec
 use super::state::AbstractState;
 use super::value::AbstractValue;
 use crate::context_dsl::ast::TransitionModalitySpec;
-use crate::guard::parse_guard;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Represents a transition in the original model before unrolling.
@@ -238,6 +237,13 @@ pub enum UnrollingError {
         limit: usize,
         location: Option<String>,
     },
+    /// A guard the variables cannot decide at a state: it reads a name that is no declared
+    /// variable, or a shape refinement cannot split.
+    UndecidableGuard {
+        location: String,
+        label: String,
+        guard: String,
+    },
 }
 
 /// Error indicating a conflict between realized valuations and explicit variable assignments.
@@ -283,6 +289,16 @@ impl std::fmt::Display for UnrollingError {
             Self::ParseError { expression, error } => {
                 write!(f, "parse error in expression '{}': {}", expression, error)
             }
+            Self::UndecidableGuard {
+                location,
+                label,
+                guard,
+            } => write!(
+                f,
+                "the guard `{guard}` on `{location}` --{label}--> cannot be decided from the \
+                 automaton's variables (a name that is no declared `i64` variable, or a shape \
+                 refinement cannot split); the transition would never fire"
+            ),
             Self::Conflict(conflict) => {
                 if let Some(msg) = &conflict.message {
                     write!(f, "{}", msg)
@@ -484,7 +500,10 @@ impl UnrollingPipeline {
             // Find transitions from this location
             for transition in transitions_from_location(&transitions, &state.location) {
                 // Parse guard expression
-                let guard_expr = parse_guard_expr(transition.guard.as_deref())?;
+                let guard_expr = bind_variable_predicates(
+                    parse_guard_expr(transition.guard.as_deref())?,
+                    &state,
+                );
 
                 // Evaluate guard
                 let predicates = HashMap::new(); // No predicates for now
@@ -722,6 +741,17 @@ impl UnrollingPipeline {
                             &variables,
                             options.heuristic_config.as_ref(),
                         )?;
+                        // A refinement that returns the state unchanged cannot decide the guard
+                        // (it reads a name no variable carries, or a shape refinement does not
+                        // split): retrying would revisit the same state and the transition would
+                        // silently never fire. Refuse instead.
+                        if refined.len() == 1 && refined[0].state_name() == state.state_name() {
+                            return Err(UnrollingError::UndecidableGuard {
+                                location: transition.from.clone(),
+                                label: transition.label.clone(),
+                                guard: transition.guard.clone().unwrap_or_default(),
+                            });
+                        }
                         for refined_state in refined {
                             let refined_key = refined_state.state_name();
                             state_map.insert(refined_key.clone(), refined_state);
@@ -1093,10 +1123,51 @@ fn parse_guard_expr(guard_str: Option<&str>) -> Result<GuardExpr, UnrollingError
             // Parse the guard using the existing parser
             // parse_guard returns (normalized_string, GuardExpr) - it doesn't fail on parse errors
             // but may produce invalid expressions. We'll handle evaluation errors during guard evaluation.
-            let (_, parsed) = parse_guard(s);
-            convert_guard_expr(&parsed)
+            convert_guard_tree(&crate::guard::parse_guard_tree(s))
         }
     }
+}
+
+/// A bare name in a guard (`guard ready`) that is one of the state's variables reads that
+/// variable (`ready == true`). Left as a predicate it looked up an environment the unroller passes
+/// empty, so the guard was undecidable and the transition never fired, whatever the variable held.
+fn bind_variable_predicates(guard: GuardExpr, state: &AbstractState) -> GuardExpr {
+    match guard {
+        GuardExpr::Predicate(name) if state.get_variable(&name).is_some() => GuardExpr::comparison(
+            Expr::var(name),
+            crate::guard::ComparisonOp::Eq,
+            Expr::Bool(true),
+        ),
+        GuardExpr::And(a, b) => GuardExpr::And(
+            Box::new(bind_variable_predicates(*a, state)),
+            Box::new(bind_variable_predicates(*b, state)),
+        ),
+        GuardExpr::Or(a, b) => GuardExpr::Or(
+            Box::new(bind_variable_predicates(*a, state)),
+            Box::new(bind_variable_predicates(*b, state)),
+        ),
+        GuardExpr::Not(a) => GuardExpr::Not(Box::new(bind_variable_predicates(*a, state))),
+        other => other,
+    }
+}
+
+/// Converts a guard's boolean structure ([`crate::guard::GuardTree`]) to our GuardExpr, leaf by
+/// leaf through [`convert_guard_expr`].
+#[allow(clippy::result_large_err)]
+fn convert_guard_tree(tree: &crate::guard::GuardTree) -> Result<GuardExpr, UnrollingError> {
+    use crate::guard::GuardTree;
+    Ok(match tree {
+        GuardTree::Leaf(e) => convert_guard_expr(e)?,
+        GuardTree::And(a, b) => GuardExpr::And(
+            Box::new(convert_guard_tree(a)?),
+            Box::new(convert_guard_tree(b)?),
+        ),
+        GuardTree::Or(a, b) => GuardExpr::Or(
+            Box::new(convert_guard_tree(a)?),
+            Box::new(convert_guard_tree(b)?),
+        ),
+        GuardTree::Not(a) => GuardExpr::Not(Box::new(convert_guard_tree(a)?)),
+    })
 }
 
 /// Converts a parsed GuardExpr from the guard module to our abstraction GuardExpr.
