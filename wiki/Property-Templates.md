@@ -55,7 +55,7 @@ to any response-shape guarantee** (`AG(a → AF b)`) via the Emerson–Lei fair-
 each `GF` assume adds a `fair_seen` monitor latch, and a `holds` verdict under fairness means the guarantee
 holds against every environment schedule satisfying the assumption infinitely often. For assumptions that
 don't fit `GF <REG op VALUE>` — a state predicate, a non-response guarantee, or coupled multi-guarantee
-fairness — use `mununu btor2 verify-liveness-under-fairness` on the emitted BTOR2, or model in CTXDSL where
+fairness — use `mununu btor2 verify-liveness --fairness` on the emitted BTOR2, or model in CTXDSL where
 the GR(1) game engine `(⋀ GF envᵢ) → (⋀ GF sysⱼ)` discharges multi-pair assume-guarantee liveness directly.
 When unsure and staying on `sv verify-auto` without a matching `@mununu_assume GF`, prefer `EF`.
 

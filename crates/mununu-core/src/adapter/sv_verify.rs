@@ -176,7 +176,29 @@ pub fn sv_verify_liveness(
     })
 }
 
-/// `sv verify-liveness-all` — lift SV and decide the **conjunction** of
+/// `sv verify-liveness --fairness` — lift SV and decide `AG(request → AF grant)` under the
+/// fairness assumptions `⋀ GF fairᵢ` (the Emerson–Lei fair-cycle l2s + the portfolio). Every
+/// atom is parsed before the lift.
+pub fn sv_verify_liveness_under_fairness(
+    lift: &SvLift,
+    request: &str,
+    grant: &str,
+    fairness: &[String],
+) -> Result<(LivenessVerdict, ReachOutcome), String> {
+    let ante: Atom = parse_response_atom(request)?;
+    let cons: Atom = parse_response_atom(grant)?;
+    let fair = crate::adapter::liveness_rescue::parse_fairness_atoms(fairness)?;
+    let btor2 = lift.lift()?;
+    crate::adapter::liveness_rescue::response_liveness_rescue_under_fairness(
+        &btor2, &ante, &cons, &fair, false,
+    )
+    .ok_or_else(|| {
+        "could not build the fair-cycle monitor — an atom likely binds no signal in the design"
+            .to_string()
+    })
+}
+
+/// `sv verify-liveness --response` — lift SV and decide the **conjunction** of
 /// response-liveness properties `⋀ᵢ AG(aᵢ → AF bᵢ)` via the l2s reduction + the
 /// portfolio (one lift, one `bad`-reachability query per response). Each `responses`
 /// entry is a `"ANTE => CONS"` pair; every pair is parsed first, so a malformed

@@ -63,7 +63,7 @@ Cross-checked against the exact engine.
 mununu btor2 verify-liveness design.btor2 --request "st == 1" --grant "st == 2"
 ```
 
-### `btor2 verify-liveness-under-fairness` — response liveness under a `GF` fairness assumption (mununu#477)
+### `btor2 verify-liveness --fairness` — response liveness under a `GF` fairness assumption (mununu#477)
 
 > Source of truth: [`response_liveness_rescue_under_fairness`](../crates/mununu-core/src/adapter/liveness_rescue.rs#L329) — surface: (CLI+API+UI)
 
@@ -72,12 +72,12 @@ Decides `(⋀ⱼ GF fairⱼ) → AG(request → AF grant)` via the Emerson–Lei
 Use when a block cannot own its liveness on its own — its grant comes from an arbiter it does not control — and you can express the arbiter's obligation as a `GF <signal>` on a primary input. See [`design/emerson-lei-fair-cycle.md`](design/emerson-lei-fair-cycle.md) for the construction and soundness argument (module-level docs in [`crates/mununu-core/src/adapter/btor2/l2s_monitor.rs`](../crates/mununu-core/src/adapter/btor2/l2s_monitor.rs)).
 
 ```bash
-mununu btor2 verify-liveness-under-fairness design.btor2 \
+mununu btor2 verify-liveness --fairness design.btor2 \
     --request "req == 1" --grant "ack == 1" \
     --fairness "grant_cpu == 1"
 
 # Multiple fairness constraints — conjunctive `GF fair_1 ∧ GF fair_2` — repeat --fairness.
-mununu btor2 verify-liveness-under-fairness design.btor2 \
+mununu btor2 verify-liveness --fairness design.btor2 \
     --request "req == 1" --grant "ack == 1" \
     --fairness "fair_1 == 1" --fairness "fair_2 == 1"
 ```
@@ -112,13 +112,13 @@ path (validated on real OpenTitan `csrng` RTL — see `recoverability-vs-sva.md`
 
 ---
 
-### `btor2 verify-justice` — HWMCC-style justice (liveness) sets, and `btor2 from-aiger`
+### `btor2 verify-liveness --justice` — HWMCC-style justice (liveness) sets, and `btor2 from-aiger`
 
-> Source of truth: [`adapter::justice::verify_justice`](../crates/mununu-core/src/adapter/justice.rs) · [`adapter::aiger::to_btor2::circuit_to_btor2`](../crates/mununu-core/src/adapter/aiger/to_btor2.rs) · [`adapter::aiger::parser::parse_bytes`](../crates/mununu-core/src/adapter/aiger/parser.rs) — surface: CLI (`btor2 verify-justice`, `btor2 from-aiger`) + API (`POST /api/v1/btor2/verify-justice`)
+> Source of truth: [`adapter::justice::verify_justice`](../crates/mununu-core/src/adapter/justice.rs) · [`adapter::aiger::to_btor2::circuit_to_btor2`](../crates/mununu-core/src/adapter/aiger/to_btor2.rs) · [`adapter::aiger::parser::parse_bytes`](../crates/mununu-core/src/adapter/aiger/parser.rs) — surface: CLI (`btor2 verify-liveness --justice`, `btor2 from-aiger`) + API (`POST /api/v1/btor2/verify-liveness`)
 
 A BTOR2 `justice n l₁ … lₙ` (the AIGER 1.9 justice set HWMCC's liveness tracks use) is **violated**
 iff an infinite path exists that respects every `constraint` at every step and visits every `lₖ`
-and every `fair` literal infinitely often; it **holds** iff no such path exists. `verify-justice`
+and every `fair` literal infinitely often; it **holds** iff no such path exists. `verify-liveness --justice`
 decides every justice line of the design with two sound rungs — `--rung exact|l2s|both`
 (default `both`: exact first, l2s when it abstains):
 
@@ -147,8 +147,8 @@ BTOR2 on the fly (`btor2 from-aiger` prints that lowering): `input`, `state` + `
 `read_aiger` rejects the binary 1.9 justice sections, which is why the lowering is in-house.
 
 ```bash
-mununu btor2 verify-justice design.aig --json        # HWMCC sat = violated, uns = holds
-mununu btor2 verify-justice design.btor2 --rung l2s
+mununu btor2 verify-liveness --justice design.aig --json        # HWMCC sat = violated, uns = holds
+mununu btor2 verify-liveness --justice design.btor2 --rung l2s
 mununu btor2 from-aiger design.aig -o design.btor2
 ```
 
@@ -158,7 +158,7 @@ vendored) and adjudicates every verdict against the competition's `live.csv`. Fi
 39 VIOLATED) with 0 disagreements against the published verdicts; the exact rung decided 28 at a
 median of 0.10 s, the l2s rung 24 at a median of 58 s. The open rows are the exact rung's νμ
 iterates over the unreachable state space (arena bound) and long chains (iteration budget) — see
-[the consumer briefing](consumer-briefings/2026-10-btor2-verify-justice-from-aiger.md) for the
+[the consumer briefing](consumer-briefings/2026-10-btor2-verify-liveness --justice-from-aiger.md) for the
 per-instance evidence.
 
 The levers that measurement pointed at are applied by the exact engine's **ladder**
@@ -183,7 +183,7 @@ A `// @mununu_assume GF <REG op VALUE>` inline annotation is **auto-applied to a
 
 Multiple `// @mununu_assume GF <atom>` in one source accumulate as a conjunction `(⋀ⱼ GF fairⱼ)`. The scanner records the applied assume in the `annotation-properties` verification note; each fair-cycle rescue emits a `fair-cycle-rescue` note naming the assumption(s) applied.
 
-Assumes that don't fit `GF <REG op VALUE>` — a state predicate, a non-response guarantee shape, or coupled multi-guarantee fairness — remain recorded rather than auto-applied. Route those through `mununu btor2 verify-liveness-under-fairness` on the emitted BTOR2, or model in CTXDSL where the GR(1) game engine handles multi-pair coupled fairness directly.
+Assumes that don't fit `GF <REG op VALUE>` — a state predicate, a non-response guarantee shape, or coupled multi-guarantee fairness — remain recorded rather than auto-applied. Route those through `mununu btor2 verify-liveness --fairness` on the emitted BTOR2, or model in CTXDSL where the GR(1) game engine handles multi-pair coupled fairness directly.
 
 ```systemverilog
 // @mununu_assume GF grant_cpu == 1
@@ -1009,7 +1009,7 @@ do not retry-loop."*
 
 > Source of truth: [`JsonArgs`](../crates/mununu-cli/src/main.rs) + [`exit_with_json_error`](../crates/mununu-cli/src/main.rs) — surface: (CLI+API)
 
-`sv verify-recoverability`, `sv verify-liveness` and `sv verify-liveness-all` **already print JSON on
+`sv verify-recoverability`, `sv verify-liveness` and `sv verify-liveness --response` **already print JSON on
 success** — they always did. What they lacked was the `--json` flag `sv verify-auto` established, so
 passing it failed argument parsing with exit 2, which reads exactly like "this verb has no structured
 output":

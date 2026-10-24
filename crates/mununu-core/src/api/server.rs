@@ -120,25 +120,6 @@ fn create_router() -> Router {
             "/api/v1/btor2/verify-liveness",
             post(handlers::btor2_verify_liveness_handler),
         )
-        // HWMCC-style justice (liveness) sets: the exact fair-cycle fixpoint + liveness-to-safety
-        // over the portfolio. Surface peer of the CLI `mununu btor2 verify-justice`.
-        .route(
-            "/api/v1/btor2/verify-justice",
-            post(handlers::btor2_verify_justice_handler),
-        )
-        // Conjunctive response-liveness — ⋀ᵢ AG(aᵢ → AF bᵢ) via N liveness-to-safety
-        // queries + the portfolio. Surface peer of `mununu btor2 verify-liveness-all`.
-        .route(
-            "/api/v1/btor2/verify-liveness-all",
-            post(handlers::btor2_verify_liveness_all_handler),
-        )
-        // mununu#477 Option B — response-liveness UNDER a conjunctive `GF` fairness
-        // assumption on primary-input (or state) atoms, via the Emerson–Lei fair-cycle
-        // l2s + the portfolio. Surface peer of `mununu btor2 verify-liveness-under-fairness`.
-        .route(
-            "/api/v1/btor2/verify-liveness-under-fairness",
-            post(handlers::btor2_verify_liveness_under_fairness_handler),
-        )
         // P2 recoverability — AG EF good ("can it always get back?"), the branching
         // property SVA cannot state. Surface peer of `mununu btor2 verify-recoverability`.
         .route(
@@ -181,10 +162,6 @@ fn create_router() -> Router {
         .route(
             "/api/v1/sv/verify-liveness",
             post(handlers::sv_verify_liveness_handler),
-        )
-        .route(
-            "/api/v1/sv/verify-liveness-all",
-            post(handlers::sv_verify_liveness_all_handler),
         )
         .route(
             "/api/v1/sv/verify-recoverability",

@@ -1068,18 +1068,42 @@ pub struct Btor2VerifyResponse {
 /// `mununu btor2 verify-liveness`: decides `AG(request → AF grant)` via the l2s
 /// reduction + the portfolio. `request` / `grant` are register-comparison atom
 /// strings (`"st == 1"`).
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
+#[serde(deny_unknown_fields)]
 pub struct Btor2VerifyLivenessRequest {
-    /// BTOR2 source content.
+    /// BTOR2 source content (with `justice`, ASCII AIGER 1.9 `aag …` is accepted too).
     pub content: String,
-    /// The request atom (`"REG op VALUE"`).
-    pub request: String,
+    /// The request atom (`"REG op VALUE"`) of `AG(request → AF grant)`.
+    #[serde(default)]
+    pub request: Option<String>,
     /// The grant atom that must eventually follow on every path.
-    pub grant: String,
+    #[serde(default)]
+    pub grant: Option<String>,
+    /// Response pairs `"ANTE => CONS"`: the conjunction `⋀ AG(aᵢ → AF gᵢ)` instead of one
+    /// request / grant (0.5 merges `/verify-liveness` here).
+    #[serde(default)]
+    pub responses: Vec<String>,
+    /// Fairness atoms assumed to hold infinitely often, with `request` / `grant` (0.5 merges
+    /// `/verify-liveness` here).
+    #[serde(default)]
+    pub fairness: Vec<String>,
+    /// Decide the design's own `justice` lines (HWMCC semantics) instead of a response property
+    /// (0.5 merges `/verify-liveness` here).
+    #[serde(default)]
+    pub justice: bool,
+    /// With `justice`: `"exact"`, `"l2s"` or `"both"` (default).
+    #[serde(default)]
+    pub rung: Option<String>,
+    /// With `justice`: wall-clock budget per justice set in milliseconds.
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+    /// With `justice` and `rung: "both"`: run both rungs concurrently.
+    #[serde(default)]
+    pub parallel_rungs: Option<bool>,
 }
 
-/// Request for `POST /api/v1/btor2/verify-justice` — the HTTP peer of `mununu btor2
-/// verify-justice`: every `justice` line of the design (BTOR2 text, or ASCII AIGER 1.9 — the
+/// Request for `POST /api/v1/btor2/verify-liveness` — the HTTP peer of `mununu btor2
+/// verify-liveness --justice`: every `justice` line of the design (BTOR2 text, or ASCII AIGER 1.9 — the
 /// binary `.aig` form must be converted with `btor2 from-aiger` first) decided by the exact
 /// fair-cycle fixpoint and/or liveness-to-safety + the reachability portfolio.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -1113,7 +1137,7 @@ pub struct Btor2JusticeEntry {
     pub notes: Vec<String>,
 }
 
-/// Response for `POST /api/v1/btor2/verify-justice`.
+/// Response for `POST /api/v1/btor2/verify-liveness`.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct Btor2VerifyJusticeResponse {
     /// Worst verdict over the sets: `"violated"` if any, else `"unknown"` if any, else `"holds"`.
@@ -1135,11 +1159,17 @@ pub struct Btor2VerifyLivenessResponse {
     pub property: String,
     /// Portfolio engines that decided the reduced `bad`-reachability query.
     pub decided_by: Vec<String>,
+    /// With `justice`: one entry per justice line (`decided_by` above is empty then).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub justice: Vec<Btor2JusticeEntry>,
+    /// With `justice`: whether the content was ASCII AIGER lowered to BTOR2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub converted_from_aiger: Option<bool>,
 }
 
 /// Request for the conjunctive response-liveness endpoint
-/// (`POST /api/v1/btor2/verify-liveness-all`). Mirrors the CLI
-/// `mununu btor2 verify-liveness-all`: decides `⋀ᵢ AG(aᵢ → AF bᵢ)`. Each `responses`
+/// (`POST /api/v1/btor2/verify-liveness`). Mirrors the CLI
+/// `mununu btor2 verify-liveness --response`: decides `⋀ᵢ AG(aᵢ → AF bᵢ)`. Each `responses`
 /// entry is a `"ANTE => CONS"` pair of register-comparison atoms. At least one
 /// required. Reuses [`Btor2VerifyLivenessResponse`] for the reply.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -1151,8 +1181,8 @@ pub struct Btor2VerifyLivenessAllRequest {
 }
 
 /// Request for the fair-cycle response-liveness endpoint
-/// (`POST /api/v1/btor2/verify-liveness-under-fairness`, mununu#477 Option B).
-/// Mirrors the CLI `mununu btor2 verify-liveness-under-fairness`: decides
+/// (`POST /api/v1/btor2/verify-liveness`, mununu#477 Option B).
+/// Mirrors the CLI `mununu btor2 verify-liveness --fairness`: decides
 /// `(⋀ GF fair) → AG(request → AF grant)` via the Emerson–Lei fair-cycle l2s
 /// (see [`crate::adapter::btor2::l2s_monitor::emit_response_l2s_monitor_under_fairness`])
 /// plus the reachability portfolio. Empty `fairness` recovers
@@ -1504,19 +1534,28 @@ pub struct SvVerifyRequest {
 
 /// Request for `POST /api/v1/sv/verify-liveness` — the SV lift fields plus the
 /// response-liveness atoms.
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
 pub struct SvVerifyLivenessRequest {
     /// The SV design and how to lift it (the CLI's shared lift flags).
     pub lift: SvLiftRequest,
-    /// The request atom (`"REG op VALUE"`).
-    pub request: String,
+    /// The request atom (`"REG op VALUE"`) of `AG(request → AF grant)`.
+    #[serde(default)]
+    pub request: Option<String>,
     /// The grant atom that must eventually follow on every path.
-    pub grant: String,
+    #[serde(default)]
+    pub grant: Option<String>,
+    /// Response pairs `"ANTE => CONS"`: the conjunction instead of one request / grant (0.5
+    /// merges `/sv/verify-liveness` here).
+    #[serde(default)]
+    pub responses: Vec<String>,
+    /// Fairness atoms assumed to hold infinitely often, with `request` / `grant`.
+    #[serde(default)]
+    pub fairness: Vec<String>,
 }
 
-/// Request for `POST /api/v1/sv/verify-liveness-all` — the SV lift fields plus the
+/// Request for `POST /api/v1/sv/verify-liveness` — the SV lift fields plus the
 /// conjunction's `"ANTE => CONS"` response pairs. Mirrors the CLI
-/// `mununu sv verify-liveness-all`; reuses [`Btor2VerifyLivenessResponse`].
+/// `mununu sv verify-liveness --response`; reuses [`Btor2VerifyLivenessResponse`].
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SvVerifyLivenessAllRequest {
     /// The SV design and how to lift it (the CLI's shared lift flags).
@@ -2545,7 +2584,7 @@ pub struct SvVerifyLivenessReport {
     pub decided_by: Vec<String>,
 }
 
-/// mununu#541 — the `sv verify-liveness-all` CLI report, schema-pinned.
+/// mununu#541 — the `sv verify-liveness --response` CLI report, schema-pinned.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct SvVerifyLivenessAllReport {
     /// The design file as given on the command line.
@@ -2559,7 +2598,7 @@ pub struct SvVerifyLivenessAllReport {
     pub responses: Vec<SvLivenessResponseView>,
 }
 
-/// One response of a `verify-liveness-all` conjunction (mununu#541).
+/// One response of a `verify-liveness --response` conjunction (mununu#541).
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct SvLivenessResponseView {
     /// The response as written on the command line (`"req == 1 => ack == 1"`).

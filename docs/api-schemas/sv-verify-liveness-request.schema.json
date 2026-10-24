@@ -106,9 +106,21 @@
   },
   "description": "Request for `POST /api/v1/sv/verify-liveness` — the SV lift fields plus the response-liveness atoms.",
   "properties": {
+    "fairness": {
+      "default": [],
+      "description": "Fairness atoms assumed to hold infinitely often, with `request` / `grant`.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
     "grant": {
+      "default": null,
       "description": "The grant atom that must eventually follow on every path.",
-      "type": "string"
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "lift": {
       "allOf": [
@@ -119,14 +131,24 @@
       "description": "The SV design and how to lift it (the CLI's shared lift flags)."
     },
     "request": {
-      "description": "The request atom (`\"REG op VALUE\"`).",
-      "type": "string"
+      "default": null,
+      "description": "The request atom (`\"REG op VALUE\"`) of `AG(request → AF grant)`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "responses": {
+      "default": [],
+      "description": "Response pairs `\"ANTE => CONS\"`: the conjunction instead of one request / grant (0.5 merges `/sv/verify-liveness` here).",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
     }
   },
   "required": [
-    "grant",
-    "lift",
-    "request"
+    "lift"
   ],
   "title": "SvVerifyLivenessRequest",
   "type": "object"

@@ -311,6 +311,100 @@ mod ci_gate_tests {
         assert_eq!(code(&["mununu", "btor2", "verify-safety", "d.btor2"]), 64);
         assert_eq!(code(&["mununu", "sv", "verify-bad", "m.sv"]), 0);
         assert_eq!(code(&["mununu", "sv", "verify", "m.sv"]), 64);
+        // The liveness family is one verb.
+        assert_eq!(
+            code(&[
+                "mununu",
+                "btor2",
+                "verify-liveness",
+                "d",
+                "--response",
+                "a == 1 => b == 1"
+            ]),
+            0
+        );
+        assert_eq!(
+            code(&[
+                "mununu",
+                "btor2",
+                "verify-liveness",
+                "d",
+                "--request",
+                "a == 1",
+                "--grant",
+                "b == 1",
+                "--fairness",
+                "c == 1"
+            ]),
+            0
+        );
+        assert_eq!(
+            code(&[
+                "mununu",
+                "btor2",
+                "verify-liveness",
+                "d.aag",
+                "--justice",
+                "--rung",
+                "exact"
+            ]),
+            0
+        );
+        assert_eq!(
+            code(&[
+                "mununu",
+                "btor2",
+                "verify-liveness",
+                "d",
+                "--justice",
+                "--request",
+                "a == 1"
+            ]),
+            64
+        );
+        assert_eq!(
+            code(&["mununu", "btor2", "verify-liveness", "d", "--rung", "exact"]),
+            64,
+            "--rung needs --justice"
+        );
+        assert_eq!(
+            code(&[
+                "mununu",
+                "btor2",
+                "verify-liveness-all",
+                "d",
+                "--response",
+                "a => b"
+            ]),
+            64
+        );
+        assert_eq!(code(&["mununu", "btor2", "verify-justice", "d"]), 64);
+        assert_eq!(
+            code(&[
+                "mununu",
+                "sv",
+                "verify-liveness",
+                "m.sv",
+                "--request",
+                "a == 1",
+                "--grant",
+                "b == 1",
+                "--fairness",
+                "c == 1"
+            ]),
+            0
+        );
+        assert_eq!(
+            code(&[
+                "mununu",
+                "sv",
+                "verify-liveness-all",
+                "m.sv",
+                "--response",
+                "a => b"
+            ]),
+            64
+        );
     }
 
     #[test]
@@ -608,43 +702,25 @@ enum Btor2Command {
     /// process (z3's Fixedpoint can flaky-segfault); not a user-facing verb.
     #[command(hide = true)]
     SpacerCheck(Btor2SpacerCheckArgs),
-    /// Decide a response-liveness property `AG(request → AF grant)` at scale.
+    /// Decide liveness: the one liveness verb (0.5 merges `-all`, `-under-fairness` and
+    /// `verify-justice` into it).
     ///
-    /// "Whenever `request` holds, `grant` is eventually reached on every path"
-    /// — the canonical request/grant liveness property. Reduces it to a single
-    /// `bad`-reachability query (Biere–Artho–Schuppan liveness-to-safety) that
-    /// the multi-engine portfolio decides symbolically on wide designs, then
-    /// prints the verdict (`holds` / `violated` / `unknown`). `--request`
-    /// and `--grant` are single register-comparison atoms (`"st == 1"`).
+    /// - `--request A --grant G`: the response property `AG(A → AF G)`, reduced to one
+    ///   `bad`-reachability query (Biere–Artho–Schuppan liveness-to-safety) the portfolio decides.
+    /// - repeatable `--response "A => G"`: the conjunction `⋀ᵢ AG(aᵢ → AF gᵢ)`, one query per
+    ///   conjunct (`violated` if any conjunct is, else `unknown` if any is, else `holds`).
+    /// - repeatable `--fairness F` (with `--request` / `--grant`): the same property under the
+    ///   fairness assumptions `⋀ⱼ GF fⱼ` (the Emerson–Lei fair-cycle l2s).
+    /// - `--justice`: HWMCC-style justice properties — every `justice` line of the design (BTOR2,
+    ///   or AIGER 1.9 converted first), decided by the exact fair-cycle fixpoint and/or l2s
+    ///   (`--rung`, `--timeout-ms`, `--parallel-rungs`).
+    ///
+    /// Atoms are single register comparisons (`"st == 1"`). Surface peer of
+    /// `POST /api/v1/btor2/verify-liveness`.
     VerifyLiveness(Btor2VerifyLivenessArgs),
-    /// HWMCC-style justice (liveness) properties: decide every `justice` line of a BTOR2 — or of
-    /// an AIGER 1.9 file (`.aig` binary / `.aag`), converted first — with the exact fair-cycle
-    /// fixpoint and/or liveness-to-safety + the reachability portfolio.
-    VerifyJustice(Btor2VerifyJusticeArgs),
     /// Convert an AIGER 1.9 file (`.aig` binary or `.aag` ASCII; bad / constraint / justice /
     /// fairness) to BTOR2 text.
     FromAiger(Btor2FromAigerArgs),
-    /// Decide a conjunction of response-liveness properties `⋀ᵢ AG(aᵢ → AF bᵢ)`.
-    ///
-    /// The multi-guarantee peer of `verify-liveness`: pass a repeatable
-    /// `--response "ANTE => CONS"` (each a request/grant pair of register-comparison
-    /// atoms). Every conjunct is reduced to its own `bad`-reachability query; the
-    /// combined verdict is `violated` if any conjunct is (a real ungranted-request
-    /// lasso), else `unknown` if any is, else `holds`. Surface peer of
-    /// `POST /api/v1/btor2/verify-liveness-all`.
-    VerifyLivenessAll(Btor2VerifyLivenessAllArgs),
-    /// Decide the response-liveness property `AG(request → AF grant)` UNDER a
-    /// conjunction of environment fairness assumptions `⋀ⱼ GF fairⱼ`
-    /// (mununu#477 Option B).
-    ///
-    /// The Emerson–Lei fair-cycle extension of `verify-liveness`: adds one
-    /// `fairⱼ_seen` latch per fairness atom and requires each on the closed
-    /// loop, so `bad` fires only on a lasso that satisfies EVERY fairness
-    /// constraint AND leaves a request forever ungranted. Empty `--fairness`
-    /// recovers `verify-liveness` exactly. `--request` / `--grant` / each
-    /// `--fairness` is a single register-comparison atom (`"grant_cpu == 1"`).
-    /// Surface peer of `POST /api/v1/btor2/verify-liveness-under-fairness`.
-    VerifyLivenessUnderFairness(Btor2VerifyLivenessUnderFairnessArgs),
     /// Decide recoverability `AG EF good` — the branching property SVA cannot state.
     ///
     /// "From every reachable state, can the design still get back to a `good`
@@ -1133,6 +1209,44 @@ struct Btor2InjectFaultArgs {
 }
 
 /// Arguments for `mununu btor2 verify-liveness` — the response-liveness reduction.
+/// Arguments for `mununu btor2 verify-liveness` — the merged liveness verb.
+#[derive(Args, Debug)]
+struct Btor2VerifyLivenessArgs {
+    /// Path to the BTOR2 input (or, with `--justice`, an AIGER 1.9 file).
+    #[arg(value_name = "FILE")]
+    file: PathBuf,
+    /// The request atom of `AG(request → AF grant)`.
+    #[arg(long, value_name = "ATOM", requires = "grant", conflicts_with_all = ["responses", "justice"])]
+    request: Option<String>,
+    /// The grant atom that must eventually follow on every path.
+    #[arg(long, value_name = "ATOM", requires = "request")]
+    grant: Option<String>,
+    /// A response pair `"ANTE => CONS"` of the conjunction (repeatable).
+    #[arg(long = "response", value_name = "ANTE => CONS", conflicts_with_all = ["fairness", "justice"])]
+    responses: Vec<String>,
+    /// A fairness atom assumed to hold infinitely often (repeatable; with `--request` / `--grant`).
+    #[arg(long = "fairness", value_name = "ATOM", requires = "request")]
+    fairness: Vec<String>,
+    /// Decide the design's own `justice` lines (HWMCC semantics) instead of a response property.
+    #[arg(long, conflicts_with_all = ["request", "responses"])]
+    justice: bool,
+    /// `--justice`: `exact`, `l2s` or `both` (the default: the exact ladder for 30 s, then l2s,
+    /// then the exact ladder with the remainder).
+    #[arg(long, default_value = "both", requires = "justice")]
+    rung: String,
+    /// `--justice`: wall-clock budget per justice set in milliseconds.
+    #[arg(long, value_name = "MS", requires = "justice")]
+    timeout_ms: Option<u64>,
+    /// `--justice` with `--rung both`: run both rungs concurrently, first definite verdict wins.
+    #[arg(long, requires = "justice")]
+    parallel_rungs: bool,
+    /// `--justice`: emit the per-set report as JSON only.
+    #[arg(long, requires = "justice")]
+    json: bool,
+    #[command(flatten)]
+    ci: CiArgs,
+}
+
 #[derive(Args, Debug)]
 struct Btor2VerifyJusticeArgs {
     /// BTOR2 file, or an AIGER 1.9 file (`.aig` binary / `.aag`) converted on the fly.
@@ -1168,7 +1282,7 @@ struct Btor2FromAigerArgs {
 }
 
 #[derive(Parser, Debug)]
-struct Btor2VerifyLivenessArgs {
+struct Btor2LivenessOneArgs {
     /// Path to the BTOR2 input file.
     #[arg(value_name = "BTOR2_FILE")]
     file: PathBuf,
@@ -1182,7 +1296,7 @@ struct Btor2VerifyLivenessArgs {
     ci: CiArgs,
 }
 
-/// Arguments for `mununu btor2 verify-liveness-all` — a conjunction of
+/// Arguments for `mununu btor2 verify-liveness --response` — a conjunction of
 /// response-liveness properties, each a repeatable `--response "ANTE => CONS"`.
 #[derive(Args, Debug)]
 struct Btor2VerifyLivenessAllArgs {
@@ -1198,7 +1312,7 @@ struct Btor2VerifyLivenessAllArgs {
     ci: CiArgs,
 }
 
-/// Arguments for `mununu btor2 verify-liveness-under-fairness` — the fair-cycle
+/// Arguments for `mununu btor2 verify-liveness --fairness` — the fair-cycle
 /// l2s (Emerson–Lei) extension of `verify-liveness` (mununu#477 Option B).
 #[derive(Args, Debug)]
 struct Btor2VerifyLivenessUnderFairnessArgs {
@@ -1965,15 +2079,12 @@ enum SvCommand {
     /// `sv verify`.) Surface peer of `POST /api/v1/sv/verify-bad`.
     #[command(name = "verify-bad")]
     Verify(SvVerifyArgs),
-    /// Lift SV and decide a response-liveness property `AG(request → AF grant)` — the
-    /// SV-direct peer of `btor2 verify-liveness`. `--request` / `--grant` are single
-    /// register-comparison atoms. Surface peer of `POST /api/v1/sv/verify-liveness`.
+    /// Lift SV and decide liveness — the SV-direct peer of `btor2 verify-liveness`:
+    /// `--request A --grant G` (`AG(A → AF G)`), with repeatable `--fairness F` (under
+    /// `⋀ GF F`), or repeatable `--response "A => G"` (the conjunction; 0.5 merges
+    /// `sv verify-liveness-all` here). Atoms are single register comparisons. Surface peer of
+    /// `POST /api/v1/sv/verify-liveness`.
     VerifyLiveness(SvVerifyLivenessArgs),
-    /// Lift SV and decide a conjunction of response-liveness properties
-    /// `⋀ᵢ AG(aᵢ → AF bᵢ)` from repeatable `--response "ANTE => CONS"` pairs — the
-    /// SV-direct peer of `btor2 verify-liveness-all`. Surface peer of
-    /// `POST /api/v1/sv/verify-liveness-all`.
-    VerifyLivenessAll(SvVerifyLivenessAllArgs),
     /// Lift SV and decide recoverability `AG EF good` — the branching property SVA
     /// cannot state, checked directly against raw SV in one call. `--target` is a
     /// single register-comparison atom. Surface peer of
@@ -2473,18 +2584,35 @@ struct SvVerifyLivenessArgs {
     #[command(flatten)]
     lift: SvLiftArgs,
     /// The request atom — a register comparison, e.g. `"st == 1"`.
-    #[arg(long, value_name = "ATOM")]
-    request: String,
+    #[arg(
+        long,
+        value_name = "ATOM",
+        requires = "grant",
+        conflicts_with = "responses"
+    )]
+    request: Option<String>,
     /// The grant atom that must eventually follow on every path, e.g. `"st == 2"`.
-    #[arg(long, value_name = "ATOM")]
-    grant: String,
+    #[arg(long, value_name = "ATOM", requires = "request")]
+    grant: Option<String>,
+    /// A response pair `"ANTE => CONS"` of a conjunction (repeatable; 0.5 merges
+    /// `sv verify-liveness-all` into this verb).
+    #[arg(
+        long = "response",
+        value_name = "ANTE => CONS",
+        conflicts_with = "fairness"
+    )]
+    responses: Vec<String>,
+    /// A fairness atom assumed to hold infinitely often (repeatable; with `--request` /
+    /// `--grant`): the property is decided under `⋀ GF fairᵢ`.
+    #[arg(long = "fairness", value_name = "ATOM", requires = "request")]
+    fairness: Vec<String>,
     #[command(flatten)]
     ci: CiArgs,
     #[command(flatten)]
     json: JsonArgs,
 }
 
-/// Arguments for `mununu sv verify-liveness-all` — SV-direct conjunction of
+/// Arguments for `mununu sv verify-liveness --response` — SV-direct conjunction of
 /// response-liveness properties.
 #[derive(Args, Debug)]
 struct SvVerifyLivenessAllArgs {
@@ -3547,13 +3675,8 @@ fn handle_btor2(command: Btor2Command) -> Result<(), String> {
         Btor2Command::Verify(args) => btor2_verify(args),
         Btor2Command::InjectFault(args) => btor2_inject_fault(args),
         Btor2Command::SpacerCheck(args) => btor2_spacer_check(args),
-        Btor2Command::VerifyLiveness(args) => btor2_verify_liveness(args),
-        Btor2Command::VerifyJustice(args) => btor2_verify_justice(args),
+        Btor2Command::VerifyLiveness(args) => btor2_verify_liveness_merged(args),
         Btor2Command::FromAiger(args) => btor2_from_aiger(args),
-        Btor2Command::VerifyLivenessAll(args) => btor2_verify_liveness_all(args),
-        Btor2Command::VerifyLivenessUnderFairness(args) => {
-            btor2_verify_liveness_under_fairness(args)
-        }
         Btor2Command::VerifyRecoverability(args) => btor2_verify_recoverability(args),
         Btor2Command::CheckFsm(args) => btor2_check_fsm(args),
         Btor2Command::Game(args) => btor2_game(args),
@@ -3911,7 +4034,50 @@ fn btor2_verify_justice(args: Btor2VerifyJusticeArgs) -> Result<(), String> {
     Ok(())
 }
 
-fn btor2_verify_liveness(args: Btor2VerifyLivenessArgs) -> Result<(), String> {
+/// `mununu btor2 verify-liveness` — dispatch the merged verb to the response, conjunction,
+/// fairness or justice form.
+fn btor2_verify_liveness_merged(a: Btor2VerifyLivenessArgs) -> Result<(), String> {
+    if a.justice {
+        return btor2_verify_justice(Btor2VerifyJusticeArgs {
+            file: a.file,
+            rung: a.rung,
+            timeout_ms: a.timeout_ms,
+            parallel_rungs: a.parallel_rungs,
+            json: a.json,
+            ci: a.ci,
+        });
+    }
+    if !a.responses.is_empty() {
+        return btor2_verify_liveness_all(Btor2VerifyLivenessAllArgs {
+            file: a.file,
+            responses: a.responses,
+            ci: a.ci,
+        });
+    }
+    let (Some(request), Some(grant)) = (a.request, a.grant) else {
+        return Err(
+            "verify-liveness: give --request and --grant, one or more --response, or --justice"
+                .to_string(),
+        );
+    };
+    if !a.fairness.is_empty() {
+        return btor2_verify_liveness_under_fairness(Btor2VerifyLivenessUnderFairnessArgs {
+            file: a.file,
+            request,
+            grant,
+            fairness: a.fairness,
+            ci: a.ci,
+        });
+    }
+    btor2_verify_liveness(Btor2LivenessOneArgs {
+        file: a.file,
+        request,
+        grant,
+        ci: a.ci,
+    })
+}
+
+fn btor2_verify_liveness(args: Btor2LivenessOneArgs) -> Result<(), String> {
     use mununu_core::adapter::liveness_rescue::{
         parse_response_atom, response_liveness_rescue_atoms,
     };
@@ -3945,10 +4111,10 @@ fn btor2_verify_liveness(args: Btor2VerifyLivenessArgs) -> Result<(), String> {
     Ok(())
 }
 
-/// `mununu btor2 verify-liveness-all` — decide the conjunction of response-liveness
+/// `mununu btor2 verify-liveness --response` — decide the conjunction of response-liveness
 /// properties `⋀ᵢ AG(aᵢ → AF bᵢ)` from repeatable `--response "ANTE => CONS"` pairs,
 /// via the l2s reduction + the portfolio, printing the combined verdict + per-response
-/// `decided_by` as JSON. Surface peer of `POST /api/v1/btor2/verify-liveness-all`.
+/// `decided_by` as JSON. Surface peer of `POST /api/v1/btor2/verify-liveness`.
 fn btor2_verify_liveness_all(args: Btor2VerifyLivenessAllArgs) -> Result<(), String> {
     use mununu_core::adapter::liveness_rescue::{
         parse_response_pairs, response_conjunction_property, response_liveness_rescue_conjunction,
@@ -3981,10 +4147,10 @@ fn btor2_verify_liveness_all(args: Btor2VerifyLivenessAllArgs) -> Result<(), Str
     Ok(())
 }
 
-/// `mununu btor2 verify-liveness-under-fairness` (mununu#477 Option B) — decide
+/// `mununu btor2 verify-liveness --fairness` (mununu#477 Option B) — decide
 /// `(⋀ GF fair) → AG(request → AF grant)` via the fair-cycle l2s (Emerson–Lei)
 /// plus the reachability portfolio, printing the verdict as JSON. Surface peer
-/// of `POST /api/v1/btor2/verify-liveness-under-fairness`.
+/// of `POST /api/v1/btor2/verify-liveness`.
 fn btor2_verify_liveness_under_fairness(
     args: Btor2VerifyLivenessUnderFairnessArgs,
 ) -> Result<(), String> {
@@ -4040,7 +4206,7 @@ fn btor2_verify_liveness_under_fairness(
 }
 
 /// Build the per-response `[{ response, decided_by }]` JSON for the
-/// `verify-liveness-all` summaries (BTOR2- and SV-direct), pairing each `"ANTE => CONS"`
+/// `verify-liveness --response` summaries (BTOR2- and SV-direct), pairing each `"ANTE => CONS"`
 /// input with the engines that decided its `bad`-reachability query.
 fn per_response_decided_by(
     responses: &[String],
@@ -6547,7 +6713,6 @@ fn handle_sv(command: SvCommand) -> Result<(), String> {
         SvCommand::VerifyAuto(args) => sv_verify_auto(*args),
         SvCommand::Verify(args) => sv_verify(args),
         SvCommand::VerifyLiveness(args) => sv_verify_liveness(args),
-        SvCommand::VerifyLivenessAll(args) => sv_verify_liveness_all(args),
         SvCommand::VerifyRecoverability(args) => sv_verify_recoverability(args),
         SvCommand::CheckFsm(args) => sv_check_fsm(args),
         SvCommand::Lint(args) => sv_lint(args),
@@ -6754,6 +6919,14 @@ fn sv_verify(args: SvVerifyArgs) -> Result<(), String> {
 /// consumer had to parse two formats and choose by exit code. The wrapper is deliberately thin —
 /// all the work stays in `sv_verify_liveness_impl`, so the only thing this adds is the output contract.
 fn sv_verify_liveness(args: SvVerifyLivenessArgs) -> Result<(), String> {
+    if !args.responses.is_empty() {
+        return sv_verify_liveness_all(SvVerifyLivenessAllArgs {
+            lift: args.lift,
+            responses: args.responses,
+            ci: args.ci,
+            json: args.json,
+        });
+    }
     let as_json = args.json.json;
     let file = args.lift.primary_display();
     match sv_verify_liveness_impl(args) {
@@ -6768,11 +6941,31 @@ fn sv_verify_liveness_impl(args: SvVerifyLivenessArgs) -> Result<(), String> {
     use mununu_core::verdict::PropertyVerdict;
 
     let file = args.lift.primary_display();
-    let (verdict, outcome) =
-        core_sv_verify_liveness(&read_sv_lift(&args.lift)?, &args.request, &args.grant)?;
+    let (Some(request), Some(grant)) = (args.request.as_deref(), args.grant.as_deref()) else {
+        return Err(
+            "sv verify-liveness: give --request and --grant, or one or more --response".to_string(),
+        );
+    };
+    let lift = read_sv_lift(&args.lift)?;
+    let (verdict, outcome) = if args.fairness.is_empty() {
+        core_sv_verify_liveness(&lift, request, grant)?
+    } else {
+        mununu_core::adapter::sv_verify::sv_verify_liveness_under_fairness(
+            &lift,
+            request,
+            grant,
+            &args.fairness,
+        )?
+    };
+    let property = format!("AG(({request}) -> AF ({grant}))");
     let report = mununu_core::api::models::SvVerifyLivenessReport {
         file,
-        property: format!("AG(({}) -> AF ({}))", args.request, args.grant),
+        property: if args.fairness.is_empty() {
+            property
+        } else {
+            let gf: Vec<String> = args.fairness.iter().map(|f| format!("GF ({f})")).collect();
+            format!("({}) -> {property}", gf.join(" && "))
+        },
         outcome: PropertyVerdict::from(verdict).as_str().to_string(),
         decided_by: outcome
             .reachable_by
@@ -6786,9 +6979,9 @@ fn sv_verify_liveness_impl(args: SvVerifyLivenessArgs) -> Result<(), String> {
     Ok(())
 }
 
-/// `mununu sv verify-liveness-all` — lift SV and decide the conjunction
+/// `mununu sv verify-liveness --response` — lift SV and decide the conjunction
 /// `⋀ᵢ AG(aᵢ → AF bᵢ)` from repeatable `--response "ANTE => CONS"` pairs. SV-direct
-/// peer of `btor2 verify-liveness-all`; same JSON summary + CI exit.
+/// peer of `btor2 verify-liveness --response`; same JSON summary + CI exit.
 /// mununu#541 — `--json` makes an ERROR machine-readable too.
 ///
 /// The success path already printed JSON; a failure printed prose to stderr, so a subprocess
@@ -6799,7 +6992,7 @@ fn sv_verify_liveness_all(args: SvVerifyLivenessAllArgs) -> Result<(), String> {
     let file = args.lift.primary_display();
     match sv_verify_liveness_all_impl(args) {
         Ok(()) => Ok(()),
-        Err(e) if as_json => exit_with_json_error("sv-verify-liveness-all", &file, &e),
+        Err(e) if as_json => exit_with_json_error("sv-verify-liveness", &file, &e),
         Err(e) => Err(e),
     }
 }
@@ -9847,7 +10040,7 @@ mod json_output_contract_tests {
             vec![
                 "mununu",
                 "sv",
-                "verify-liveness-all",
+                "verify-liveness",
                 "d.sv",
                 "--response",
                 "a == 1 => b == 1",

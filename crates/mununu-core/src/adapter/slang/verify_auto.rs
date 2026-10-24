@@ -2892,7 +2892,7 @@ fn annotation_note(scan: &AnnotationScan) -> Option<VerificationNote> {
                  environment schedule satisfying the assumption infinitely often. For \
                  assumptions that do not fit `GF <REG op VALUE>` — a state predicate, a \
                  non-response guarantee shape, or a multi-guarantee-coupled fairness — the \
-                 assume is recorded here; use `mununu btor2 verify-liveness-under-fairness` \
+                 assume is recorded here; use `mununu btor2 verify-liveness --fairness` \
                  on the emitted BTOR2 or model in CTXDSL where the GR(1) game engine \
                  `(⋀ GF envᵢ) → (⋀ GF sysⱼ)` discharges multi-pair assume-guarantee liveness \
                  directly."

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# HWMCC'17 LIVE study — `mununu btor2 verify-justice` over the competition's AIGER-1.9 justice
+# HWMCC'17 LIVE study — `mununu btor2 verify-liveness --justice` over the competition's AIGER-1.9 justice
 # benchmarks, adjudicated against the published per-instance results (`live.csv`: abclive, aigbmc,
 # iimc, nuxmvlive; sat = a fair cycle exists = our VIOLATED, uns = our HOLDS).
 #
@@ -36,7 +36,7 @@ for f in "$DIR"/*.aig; do
   [ "$L" -ge "$MIN_LATCHES" ] && [ "$L" -le "$MAX_LATCHES" ] || continue
   t0=$(date +%s%3N 2>/dev/null || python3 -c 'import time;print(int(time.time()*1000))')
   # shellcheck disable=SC2086
-  json=$(timeout "$BUDGET" "$BIN" btor2 verify-justice "$f" --rung "$RUNG" --json ${EXTRA_ARGS:-} 2>/dev/null); rc=$?
+  json=$(timeout "$BUDGET" "$BIN" btor2 verify-liveness --justice "$f" --rung "$RUNG" --json ${EXTRA_ARGS:-} 2>/dev/null); rc=$?
   t1=$(date +%s%3N 2>/dev/null || python3 -c 'import time;print(int(time.time()*1000))')
   if [ $rc -eq 124 ]; then verdict=timeout; by=-; ms=$((BUDGET*1000))
   elif [ -z "$json" ]; then verdict=error; by=-; ms=$((t1-t0))

@@ -66,7 +66,7 @@ module pulse_cdc_sva (
     // So the property comes out, but for a precise reason rather than a shrug:
     // the environment constraint that would rescue it is not of a shape this path
     // can apply. The engine named two routes that can —
-    // `mununu btor2 verify-liveness-under-fairness` on the emitted BTOR2, or a
+    // `mununu btor2 verify-liveness --fairness` on the emitted BTOR2, or a
     // CTXDSL model where the GR(1) game engine discharges it — and neither is
     // worth a block this size.
     //
