@@ -98,6 +98,20 @@ composition {
 
 No skip labels are needed because members are not forced to move on every step.
 
+### Liveness over interleavings, and `fairness weak;`
+
+> Source of truth: [`translate_universal_fair`](../crates/mununu-core/src/ltl/universal.rs) + [`Assumption::WeakEdges`](../crates/mununu-core/src/verify/fairness.rs) — surface: CLI+API+UI
+
+The asynchronous product contains every scheduling, including unfair ones where one member is starved while another moves forever. A property over every path that holds (`AG`, `ltl F b`) therefore holds under any scheduler, but a liveness property can come back violated only because of starvation: `ltl F a_done` fails on a composition where `B` may loop on its own label forever while `A` waits. Declaring the composition weakly fair reads `ltl` bodies over the fair paths only — every member whose moves stay enabled eventually takes one:
+
+```
+composition {
+    asynchronous Sys { members [A, B]; fairness weak; }
+}
+```
+
+Under it the starvation path no longer counts, and a genuine violation (a branch of `A` that never reaches `A1`) still does. The constraint is one weak-fairness condition per member over that member's labels. It applies to `ltl` bodies whose formula targets the composition alone; `eltl` and raw mu-calculus bodies are evaluated as written (use `verify::fairness` encodings there). `fairness weak;` on a `synchronous` composition is a parse error.
+
 ### Example: Sensor Network
 
 Two vibration sensors operate independently. A central monitor receives their reports.
