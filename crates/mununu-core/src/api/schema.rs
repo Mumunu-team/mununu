@@ -433,7 +433,7 @@ mod tests {
         assert_eq!(doc["diagnostics"]["config_values"][0], "cfg=7");
         assert_eq!(doc["diagnostics"]["cutpoints"][0], "fits");
         assert_eq!(
-            doc["properties"][1]["counterexample"]["inputs"][0][0]["register"],
+            doc["properties"][1]["trace"]["steps"][0]["inputs"][0]["register"],
             "d"
         );
         // `holds` carries no cell count, and the optional fields are OMITTED rather than null —
@@ -451,7 +451,8 @@ mod tests {
         let s_str = serde_json::to_string(&s).expect("schema serialises");
         for name in [
             "PropertyVerdictView",
-            "CounterexampleView",
+            "Trace",
+            "TraceStep",
             "CexCellView",
             "VerificationNoteView",
             "ModelDiagnosticsView",

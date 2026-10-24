@@ -317,10 +317,10 @@ mununu --quiet sv verify-auto design.sv --json | jq '[.notes[] | select(.level==
 
 > Source of truth: [`attach_safety_witnesses`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L1385) — surface: (CLI+API)
 
-Every VIOLATED safety property carries `counterexample` — whichever engine decided it: native BMC
-re-derives the **shallowest** reset → violation path on a one-path monitor of the formula, with the
-inputs of every cycle (`inputs[i]` belongs to `prefix[i]`; the last one is what tripped the
-assertion) and an empty `cycle`. The CLI prints it under the property:
+Every VIOLATED safety property carries a `trace` (`kind: "finite"`) — whichever engine decided it:
+native BMC re-derives the **shallowest** reset → violation path on a one-path monitor of the
+formula, one `steps[]` entry per cycle with its register `state` and the `inputs` that drive it
+(the last step's inputs are what tripped the assertion). The CLI prints it under the property:
 
 ```text
   [assert] u_s.hs_sub_sva_0: VIOLATED (1 cell(s))
@@ -339,7 +339,11 @@ A path BMC finds is a genuine counterexample, so the trace also cross-checks the
 absent when the shortest path is deeper than 60 cycles plus the property's own depth, or when only
 the branching reading fails (`[] a || [] b` can be false at a state although every single path
 satisfies one of them). The monitor's history latches (`mununu_wit_…`) appear in the states beside
-the design's registers. Liveness keeps its stall lasso; a bare `EF p` its unreachable target.
+the design's registers. Liveness carries a `lasso` trace (`loop_start` marks where the last step
+loops back), a refuted `AG EF` decided by a trap certificate a `trap` trace, and a bare `EF p` an
+`unreachable` trace listing `unreachable_target`. Every verb that returns a path uses this one
+`Trace` shape since 0.5 (`btor2 verify` with `--witness` or a fault `--target`, cegar, the game's
+starvation lasso); see [`docs/api-schemas/verdict.md`](api-schemas/verdict.md).
 
 ### Replaying a counterexample under Verilator: `--emit-testbench` (2026-10-24)
 
@@ -365,7 +369,7 @@ make -C tb/p_no_fault      # in mununu-sva
 ```
 
 Over HTTP, `emit_testbench: true` (and optionally `tb_clock`) on `POST /api/v1/sv/verify-auto` puts
-the same files in each row's `testbench` field (`tb_cpp`, `makefile`, `checks`, `skipped`); the
+the same files in each row's `trace.replay.testbench` (`tb_cpp`, `makefile`, `checks`, `skipped`); the
 Makefile's `SOURCES` names `<top>.sv` and the additional sources as the request named them.
 
 ### A recoverability row refuted by a trap certificate (2026-10-21)
@@ -1107,7 +1111,7 @@ the real module never produces. On the OpenTitan census, four rows violated over
 `prim_diff_decode` / `prim_sec_anchor_*` HOLD once those modules are vendored. So a `violated` row
 whose cone reads an undriven net becomes `unknown` with
 `bottom_reason.kind = "violation-over-free-leaves"`, the nets named in `detail`, and the trace kept
-in `counterexample` as a may-trace. Three things keep their verdict: a refuted `EF p` (the target
+in `trace` as a may-trace. Three things keep their verdict: a refuted `EF p` (the target
 is unreachable even on the freer model), a `HOLDS`, and a **deliberate** cut — a `--cutpoint` or a
 `(* blackbox *)` stub (mununu#578: a cut you asked for does not change a verdict; its
 `control-slice` / `blackbox-cut` caveat stands). The remedy is to add the missing module's source.

@@ -3709,8 +3709,9 @@ fn btor2_game(args: Btor2GameArgs) -> Result<(), String> {
         && let Some(lasso) =
             exact_two_player_recurrence_stall_lasso(&content, &args.good, &controllable)?
     {
-        summary["stall_lasso"] = serde_json::to_value(lasso.to_view())
-            .map_err(|e| format!("serialize stall_lasso: {e}"))?;
+        summary["trace"] =
+            serde_json::to_value(mununu_core::api::models::Trace::from_stall_lasso(&lasso))
+                .map_err(|e| format!("serialize stall_lasso: {e}"))?;
     }
     // --discover-assumptions: when the game is unrealizable, search for an environment assumption under
     // which the controller wins (CONDITIONAL — never flips `realizable`). For `reach` this is a SAFETY
@@ -4195,15 +4196,8 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
             "target": o.target,
             "outcome": o.verdict,
             "decided_by": o.decided_by,
-            "attack": {
-                "depth": o.depth,
-                "faults": o.attack.iter().map(|e| serde_json::json!({
-                    "cycle": e.cycle,
-                    "site": e.site,
-                    "value": e.value.as_u64(),
-                    "hex": e.value.to_hex(),
-                })).collect::<Vec<_>>(),
-            },
+            "trace": (o.verdict == "violated")
+                .then(|| mununu_core::api::models::Trace::attack(o.depth, &o.attack)),
         });
         println!(
             "{}",
@@ -4276,43 +4270,20 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
     // refinement loop consumes. Bounded to `--witness-max-k`; if the bound doesn't
     // reach the `bad` node (a very deep CEX another engine found), the witness is
     // simply omitted (null) rather than fabricated.
-    let witness_json = if args.witness
+    let (trace, trace_unavailable_within_k) = if args.witness
         && outcome.verdict == mununu_core::adapter::reach_portfolio::ReachVerdict::Reachable
     {
         use mununu_core::adapter::btor2::native_bmc::{BmcOutcome, bmc_bad_reachable_witness};
         match bmc_bad_reachable_witness(&file, args.witness_max_k) {
-            Ok((BmcOutcome::Violated { depth }, Some(trace))) => {
-                // mununu#723 — a value that fits 64 bits stays a JSON number (unchanged for every
-                // cell listed before); a wider one is its `0x…` hex string instead of being dropped.
-                let frame_obj = |f: &Vec<(
-                    String,
-                    mununu_core::adapter::btor2::cex_value::CexValue,
-                )>|
-                 -> serde_json::Value {
-                    serde_json::Value::Object(
-                        f.iter()
-                            .map(|(k, v)| {
-                                let value = match v.as_u64() {
-                                    Some(n) => serde_json::json!(n),
-                                    None => serde_json::json!(v.to_hex()),
-                                };
-                                (k.clone(), value)
-                            })
-                            .collect(),
-                    )
-                };
-                serde_json::json!({
-                    "depth": depth,
-                    "states": trace.states.iter().map(frame_obj).collect::<Vec<_>>(),
-                    "inputs": trace.inputs.iter().map(frame_obj).collect::<Vec<_>>(),
-                })
+            Ok((BmcOutcome::Violated { .. }, Some(t))) => {
+                (Some(mununu_core::api::models::Trace::from_bmc(&t)), None)
             }
             // Reachable per the portfolio but the bounded native re-derivation didn't
             // reach it within `--witness-max-k` — report the bound honestly.
-            _ => serde_json::json!({ "unavailable_within_k": args.witness_max_k }),
+            _ => (None, Some(args.witness_max_k)),
         }
     } else {
-        serde_json::Value::Null
+        (None, None)
     };
 
     let summary = serde_json::json!({
@@ -4324,7 +4295,8 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
         "unreachable_by": outcome.unreachable_by,
         "contradiction": outcome.verdict
             == mununu_core::adapter::reach_portfolio::ReachVerdict::Contradiction,
-        "witness": witness_json,
+        "trace": trace,
+        "trace_unavailable_within_k": trace_unavailable_within_k,
     });
     println!(
         "{}",
@@ -5412,10 +5384,10 @@ fn run_cegar_cli(
             "undecided_cells": cegar_cells_json(&undecided_cells),
             // Track I.1 (trace slice) — reachability countertrace for a
             // violated verdict (null when the property is not violated at init).
-            "counterexample": trace.counterexample.as_ref().map(|ct| serde_json::json!({
-                "steps": cegar_cells_json(&ct.steps),
-                "ends_in_trap": ct.ends_in_trap,
-            })),
+            "trace": trace
+                .counterexample
+                .as_ref()
+                .map(mununu_core::api::models::Trace::from_cegar),
             // Track I.1 (undecided-explanation) — load-bearing registers for ⊥ cells.
             "refinement_candidates": trace.init_refinement_candidates,
             "approximant_reuse_enabled": trace.approximant_reuse_enabled,
