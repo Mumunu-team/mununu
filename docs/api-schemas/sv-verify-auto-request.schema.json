@@ -55,6 +55,92 @@
       ],
       "type": "object"
     },
+    "SvFrontendName": {
+      "description": "The RTL front end of a lift: `auto` (the environment's default), `verilog` (yosys `read_verilog`), `slang` (the yosys-slang plugin) or `sv2v` (sv2v, then `read_verilog`). The CLI's `--frontend` takes the same four values.",
+      "enum": [
+        "auto",
+        "verilog",
+        "slang",
+        "sv2v"
+      ],
+      "type": "string"
+    },
+    "SvLiftRequest": {
+      "additionalProperties": false,
+      "description": "The SV design and how to lift it, shared by every `sv` route: the API peer of the CLI's lift flags (`SV_FILE` / `--source`, `--top`, `--frontend`, `--param`, `--lift-override`, `--cutpoint`, `--merge-clock-domains`). Unknown keys are refused.",
+      "properties": {
+        "additional_sources": {
+          "default": [],
+          "description": "Additional SV sources (packages, includes, submodules).",
+          "items": {
+            "$ref": "#/definitions/FileContent"
+          },
+          "type": "array"
+        },
+        "cutpoints": {
+          "default": [],
+          "description": "Control-slice cut points: each named net becomes a free input (an over-approximation).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "frontend": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/SvFrontendName"
+            }
+          ],
+          "default": "auto",
+          "description": "The RTL front end (default `auto`)."
+        },
+        "lift_overrides": {
+          "default": [],
+          "description": "Lift-only replacements of a source by file name (an assertion-macro shim, a synthesis variant). `sv verify-auto` still extracts its SVA from the original sources.",
+          "items": {
+            "$ref": "#/definitions/FileContent"
+          },
+          "type": "array"
+        },
+        "merge_clock_domains": {
+          "default": false,
+          "description": "Lift a multi-clock design onto the model's one implicit clock instead of refusing it. An UNDER-approximation: the domains only ever tick together, so a HOLDS does not transfer.",
+          "type": "boolean"
+        },
+        "params": {
+          "default": [],
+          "description": "Parameter overrides, `NAME=VALUE` or `MODULE.NAME=VALUE`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "source": {
+          "description": "The primary SystemVerilog source.",
+          "type": "string"
+        },
+        "source_name": {
+          "default": null,
+          "description": "The primary source's file name, which `lift_overrides` match (default `<top>.sv`, or `top.sv` without a `top`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "top": {
+          "default": null,
+          "description": "Top module (auto-detected when omitted).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "source"
+      ],
+      "type": "object"
+    },
     "TemplateRef": {
       "description": "A concrete template reference (template ID + bound arguments).\n\nUsed in `.espec.json`, `.mununu.json`, XState `__mununu`, CLI, and API requests as an alternative to a raw formula string.",
       "properties": {
@@ -79,14 +165,6 @@
   },
   "description": "XL.6b — automated SVA verification endpoint (`POST /api/v1/sv/verify-auto`). Mirrors the CLI `mununu sv verify-auto`: extract the design's SVA, lift, and verify each property against the model with no sidecar. slang parses SV directly, but the verify lift uses sv2v + Yosys, so `top` / `use_sv2v` apply.",
   "properties": {
-    "additional_sources": {
-      "default": [],
-      "description": "Additional SV sources (packages / `include` targets).",
-      "items": {
-        "$ref": "#/definitions/FileContent"
-      },
-      "type": "array"
-    },
     "assumes": {
       "default": null,
       "description": "How SVA `assume` statements are treated: `\"precondition\"` (default — the guarantees are checked on the traces along which every applied assumption has held), `\"check\"` (each assumption is checked like an assertion and constrains nothing) or `\"ignore\"`. Mirrors the CLI's `--assumes`. Any other value is a 400.",
@@ -106,14 +184,6 @@
     "counter_bounds": {
       "default": [],
       "description": "H.H — counter upper bounds: seed a `signal <= value` cube-partition to refine a counter-monotonicity property (`cnt_q >= $past(cnt_q)`) whose ⊥ is caused by the abstract 32-bit wraparound. Each entry `\"signal<=value\"` (the `\"signal=value\"` spelling is also accepted, same meaning). Sound (a partition, not an assumption — the must-edges verify it); requires `must_edge_inference` on. Bounds are also auto-derived from `config_values`; a manual entry here overrides the inferred one. Surfaced as a `counter-bound` note. Default empty.",
-      "items": {
-        "type": "string"
-      },
-      "type": "array"
-    },
-    "cutpoint": {
-      "default": [],
-      "description": "Control-slice cut points, mirroring the CLI `--cutpoint`: net names to replace with a free `$anyseq` input in the SV → BTOR2 lift (Yosys `cutpoint w:<net>`), so the FSM's datapath guards drop out of the cone via cone-of-influence — the sound, netlist-level way to fit `\"exact-symbolic\"` on a wide control FSM. Each entry is a bare net name (e.g. `\"must_refresh\"`). OVER-APPROXIMATION: a definite HOLDS transfers for a SAFETY / universal property (safety + over-approx); for an ALTERNATING (νμ) recoverability property (`AG EF`) a HOLDS is sound for the abstract model only (νμ collapses under approximation) — decide those on the un-cutpointed cone. A definite VIOLATED is sound only when guard-independent (an orphaned FSM state). Surfaced as a `control-slice` note. Default empty.",
       "items": {
         "type": "string"
       },
@@ -177,13 +247,13 @@
         "null"
       ]
     },
-    "lift_overrides": {
-      "default": [],
-      "description": "Lift-only source overrides: each entry REPLACES the same-named source (`top.sv` names `source`; otherwise an `additional_sources` name) for the SV → BTOR2 lift only, while SVA extraction still reads the originals — e.g. OpenTitan's synthesis `prim_assert.sv` shim for the lift beside the real assertion macros for extraction. A name that matches no source is a 400. Mirrors the CLI's `--lift-override NAME=PATH`. Default empty.",
-      "items": {
-        "$ref": "#/definitions/FileContent"
-      },
-      "type": "array"
+    "lift": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/SvLiftRequest"
+        }
+      ],
+      "description": "The SV design and how to lift it (the CLI's shared lift flags)."
     },
     "max_iterations": {
       "default": null,
@@ -194,11 +264,6 @@
         "integer",
         "null"
       ]
-    },
-    "merge_clock_domains": {
-      "default": false,
-      "description": "Lift a multi-clock design onto the model's one implicit clock instead of refusing it. An UNDER-approximation: the domains only ever tick together, so a HOLDS does not transfer (the `clock-domains-merged` soundness caveat). Default `false` (refused at lift time).",
-      "type": "boolean"
     },
     "must_edge_inference": {
       "default": null,
@@ -231,14 +296,6 @@
         "boolean",
         "null"
       ]
-    },
-    "params": {
-      "default": [],
-      "description": "Module-parameter overrides applied via yosys `chparam -set` before the lift (mirrors the CLI `--param`). Each entry is `\"NAME=VALUE\"` (applied to the top module) or `\"MODULE.NAME=VALUE\"` (scoped to `MODULE`). Shrinks a parameterised timing interval so its counters get smaller — without a wrapper module (which would rename the SVA atoms). A parameter yosys cannot apply is an ERROR (never silently dropped); the verdicts are scoped to the applied values (surfaced as a `parameter-override` note). Default empty.",
-      "items": {
-        "type": "string"
-      },
-      "type": "array"
     },
     "pins": {
       "default": [],
@@ -280,10 +337,6 @@
         "null"
       ]
     },
-    "source": {
-      "description": "SystemVerilog primary source content.",
-      "type": "string"
-    },
     "tb_clock": {
       "default": null,
       "description": "The clock port the testbench toggles (default: the first of `clk`, `clk_i`, `clock`, `i_clk`, `aclk`, `clk_sys` the source declares).",
@@ -299,28 +352,10 @@
         "$ref": "#/definitions/TemplateRef"
       },
       "type": "array"
-    },
-    "top": {
-      "default": null,
-      "description": "Top module for the SV → BTOR2 lift (auto-detect when omitted).",
-      "type": [
-        "string",
-        "null"
-      ]
-    },
-    "use_slang": {
-      "default": false,
-      "description": "Force the slang RTL front-end (`read_slang`) for modern-SV constructs yosys/sv2v reject. Mirrors `--frontend slang`. Requires the yosys-slang plugin. Default `false`.",
-      "type": "boolean"
-    },
-    "use_sv2v": {
-      "default": false,
-      "description": "Run sv2v before Yosys (modern SV). Mirrors `--preprocess-sv2v`.",
-      "type": "boolean"
     }
   },
   "required": [
-    "source"
+    "lift"
   ],
   "title": "SvVerifyAutoRequest",
   "type": "object"

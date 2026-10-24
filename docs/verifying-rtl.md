@@ -255,13 +255,13 @@ field:
 > Source of truth: [`sv_verify_auto_handler`](../crates/mununu-core/src/api/handlers.rs#L846) — surface: API
 
 ```bash
-mununu sv verify-auto my_module.sv --preprocess-sv2v
+mununu sv verify-auto my_module.sv --frontend sv2v
 ```
 
 ```jsonc
 // POST /api/v1/sv/verify-auto
-{ "source": "module m(...); ... assert property (...); endmodule",
-  "use_sv2v": true,
+{ "lift": { "source": "module m(...); ... assert property (...); endmodule",
+            "frontend": "sv2v" },
   "must_edge_inference": "smt-hyper-must" }   // all fields optional; absent = "auto" (mununu#663): per-target must for
                                                // AG EF / AG AF-class properties, may-only for the rest
 // → { "properties": [ { "name": ..., "outcome": "holds" | "violated" | ... } ], "unsupported": [...] }
@@ -461,7 +461,7 @@ so far. Under `check` each assumption is instead checked like an assertion and c
 (the behaviour before 2026-10-15); `ignore` drops them.
 
 ```bash
-mununu sv verify-auto prim_arbiter_ppc.sv --top prim_arbiter_ppc --preprocess-sv2v ... --json \
+mununu sv verify-auto prim_arbiter_ppc.sv --top prim_arbiter_ppc --frontend sv2v ... --json \
   | jq '.assumptions'
 # {"mode":"precondition","applied":["ReqStaysHighUntilGranted0_M"],"unapplied":[],
 #  "unguarded":[],"consistency":"consistent"}
@@ -503,7 +503,7 @@ but leaves slang nothing to extract. `--lift-override NAME=PATH` replaces the so
 for the **lift only**; extraction still reads the original:
 
 ```bash
-mununu sv verify-auto prim_esc_sender.sv --top prim_esc_sender --preprocess-sv2v \
+mununu sv verify-auto prim_esc_sender.sv --top prim_esc_sender --frontend sv2v \
   --source prim_assert.sv --source prim_assert_standard_macros.svh \
   --lift-override prim_assert.sv=shim/prim_assert.sv \
   --lift-override prim_assert_standard_macros.svh=/dev/null
@@ -668,7 +668,7 @@ python3 scripts/vendor_opentitan_ip.py --ip edn --commit 558921ccc8aeefab652b45c
 cd examples/verify/ip_opentitan_edn/source && sh run.sh --json --source mununu_properties.sv
 ```
 
-`run.sh` is `sv verify-auto edn.sv --top edn --preprocess-sv2v --source … --lift-override
+`run.sh` is `sv verify-auto edn.sv --top edn --frontend sv2v --source … --lift-override
 prim_assert.sv=prim_assert_shim.sv --lift-override prim_assert_standard_macros.svh=/dev/null
 --lift-override prim_assert_sec_cm.svh=/dev/null --lift-override prim_alert_sender.sv=prim_alert_sender_lift.sv
 --lift-override prim_sparse_fsm_flop.sv=prim_sparse_fsm_flop_lift.sv --pin rst_ni=1`: the SVA is
@@ -1973,11 +1973,11 @@ jobs:
       - uses: actions/checkout@v4
       - run: |
           mununu --quiet sv verify-recoverability rtl/fsm.sv \
-            --preprocess-sv2v --target "state_q == 0"   # exit 2 ⇒ step fails
+            --frontend sv2v --target "state_q == 0"   # exit 2 ⇒ step fails
 ```
 
 For a whole module's assertions in one gate, `mununu --quiet sv verify-auto rtl/mod.sv
---preprocess-sv2v --json` exits non-zero iff any property is violated; the JSON on
+--frontend sv2v --json` exits non-zero iff any property is violated; the JSON on
 stdout carries the per-property detail for a summary step. `verify-auto` also
 **auto-escalates** a *safety* property the cube abstraction leaves `⊥` to the
 multi-engine reachability portfolio (`--no-rescue` opts out), recording a

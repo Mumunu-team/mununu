@@ -2383,7 +2383,7 @@ fn undriven_via_partial_write_concat(
 /// cannot parse `assert property`, and verify-auto has no `--define`, so an `ifdef`
 /// guard would hide them from the verifier too. And sv2v 0.0.13 cannot parse `bind`
 /// at all (verified 2026-09-06: `Parse error: unexpected token 'bind'`). So the
-/// `--frontend verilog --preprocess-sv2v` remedy is not merely awkward for such a
+/// `--frontend sv2v` remedy is not merely awkward for such a
 /// design — it cannot run, and recommending it sends the reader into a parse error.
 fn sources_use_bind(sources: &[(String, String)]) -> bool {
     sources.iter().any(|(_, body)| {
@@ -5626,10 +5626,10 @@ pub(crate) fn verify_auto_impl(
             // is no `--define` to guard an `ifdef` with.
             let remedy = if partial_write && !sources_use_bind(sources) {
                 " Re-lift with the read_verilog / sv2v front-end \
-                 (`--frontend verilog --preprocess-sv2v`), which models the register faithfully."
+                 (`--frontend sv2v`), which models the register faithfully."
                     .to_string()
             } else if partial_write {
-                " The usual remedy (`--frontend verilog --preprocess-sv2v`) is NOT available \
+                " The usual remedy (`--frontend sv2v`) is NOT available \
                  here: these sources use `bind`, which sv2v cannot parse. Rewriting the \
                  assignment to write the register whole is the route that works."
                     .to_string()

@@ -1214,18 +1214,17 @@ endmodule
             )
         };
         let run = |src: String| {
-            sv_cdc_lint(
-                &SvLift {
-                    source: src,
-                    additional_sources: Vec::new(),
-                    top: Some("cdc".to_string()),
-                    use_sv2v: false,
-                    include_dirs: Vec::new(),
-                    frontend: crate::adapter::yosys::SvFrontend::Verilog,
-                    merge_clock_domains: false,
-                },
-                "cdc.sv",
-            )
+            sv_cdc_lint(&SvLift {
+                primary_name: "cdc.sv".to_string(),
+                source: src,
+                additional_sources: Vec::new(),
+                top: Some("cdc".to_string()),
+                use_sv2v: false,
+                include_dirs: Vec::new(),
+                frontend: crate::adapter::yosys::SvFrontend::Verilog,
+                merge_clock_domains: false,
+                ..Default::default()
+            })
             .expect("the lint runs")
         };
         let row = |r: &CdcReport, kind: CrossingKind| {

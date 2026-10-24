@@ -1346,28 +1346,9 @@ pub async fn sv_verify_handler(
 
 fn sv_verify_handler_impl(request: SvVerifyRequest) -> ApiResult<Json<Btor2VerifyResponse>> {
     use crate::adapter::reach_portfolio::ReachVerdict;
-    use crate::adapter::sv_verify::{SvLift, sv_verify_safety};
+    use crate::adapter::sv_verify::sv_verify_safety;
 
-    let lift = SvLift {
-        source: request.source,
-        additional_sources: request
-            .additional_sources
-            .into_iter()
-            .map(|f| (f.name, f.content))
-            .collect(),
-        top: request.top,
-        use_sv2v: request.use_sv2v,
-        // No API analog: the request carries source *content* by name, so an
-        // on-disk include-search dir is a local (CLI) concept; the flat
-        // name-staging of `additional_sources` already resolves includes here.
-        include_dirs: Vec::new(),
-        frontend: if request.use_slang {
-            crate::adapter::yosys::SvFrontend::Slang
-        } else {
-            crate::adapter::yosys::SvFrontend::Auto
-        },
-        merge_clock_domains: request.merge_clock_domains,
-    };
+    let lift = sv_lift_of(&request.lift)?;
     let outcome = sv_verify_safety(&lift).map_err(|message| ApiError::BadRequest {
         message,
         details: None,
@@ -1399,29 +1380,10 @@ pub async fn sv_verify_liveness_handler(
 fn sv_verify_liveness_handler_impl(
     request: SvVerifyLivenessRequest,
 ) -> ApiResult<Json<Btor2VerifyLivenessResponse>> {
-    use crate::adapter::sv_verify::{SvLift, sv_verify_liveness};
+    use crate::adapter::sv_verify::sv_verify_liveness;
 
     let property = format!("AG(({}) -> AF ({}))", request.request, request.grant);
-    let lift = SvLift {
-        source: request.source,
-        additional_sources: request
-            .additional_sources
-            .into_iter()
-            .map(|f| (f.name, f.content))
-            .collect(),
-        top: request.top,
-        use_sv2v: request.use_sv2v,
-        // No API analog: the request carries source *content* by name, so an
-        // on-disk include-search dir is a local (CLI) concept; the flat
-        // name-staging of `additional_sources` already resolves includes here.
-        include_dirs: Vec::new(),
-        frontend: if request.use_slang {
-            crate::adapter::yosys::SvFrontend::Slang
-        } else {
-            crate::adapter::yosys::SvFrontend::Auto
-        },
-        merge_clock_domains: request.merge_clock_domains,
-    };
+    let lift = sv_lift_of(&request.lift)?;
     let (verdict, outcome) =
         sv_verify_liveness(&lift, &request.request, &request.grant).map_err(|message| {
             ApiError::BadRequest {
@@ -1456,29 +1418,10 @@ fn sv_verify_liveness_all_handler_impl(
     request: SvVerifyLivenessAllRequest,
 ) -> ApiResult<Json<Btor2VerifyLivenessResponse>> {
     use crate::adapter::liveness_rescue::response_conjunction_property;
-    use crate::adapter::sv_verify::{SvLift, sv_verify_liveness_all};
+    use crate::adapter::sv_verify::sv_verify_liveness_all;
 
     let property = response_conjunction_property(&request.responses);
-    let lift = SvLift {
-        source: request.source,
-        additional_sources: request
-            .additional_sources
-            .into_iter()
-            .map(|f| (f.name, f.content))
-            .collect(),
-        top: request.top,
-        use_sv2v: request.use_sv2v,
-        // No API analog: the request carries source *content* by name, so an
-        // on-disk include-search dir is a local (CLI) concept; the flat
-        // name-staging of `additional_sources` already resolves includes here.
-        include_dirs: Vec::new(),
-        frontend: if request.use_slang {
-            crate::adapter::yosys::SvFrontend::Slang
-        } else {
-            crate::adapter::yosys::SvFrontend::Auto
-        },
-        merge_clock_domains: request.merge_clock_domains,
-    };
+    let lift = sv_lift_of(&request.lift)?;
     let (verdict, outcomes) =
         sv_verify_liveness_all(&lift, &request.responses).map_err(|message| {
             ApiError::BadRequest {
@@ -1513,7 +1456,7 @@ fn sv_verify_recoverability_handler_impl(
         parse_config_value_specs, parse_extra_predicate, recoverability_property_str,
     };
     use crate::adapter::sv_verify::{
-        SvLift, sv_verify_recoverability_explained, sv_verify_recoverability_refined_explained,
+        sv_verify_recoverability_explained, sv_verify_recoverability_refined_explained,
     };
 
     let property = recoverability_property_str(&request.target);
@@ -1531,26 +1474,7 @@ fn sv_verify_recoverability_handler_impl(
             message,
             details: None,
         })?;
-    let lift = SvLift {
-        source: request.source,
-        additional_sources: request
-            .additional_sources
-            .into_iter()
-            .map(|f| (f.name, f.content))
-            .collect(),
-        top: request.top,
-        use_sv2v: request.use_sv2v,
-        // No API analog: the request carries source *content* by name, so an
-        // on-disk include-search dir is a local (CLI) concept; the flat
-        // name-staging of `additional_sources` already resolves includes here.
-        include_dirs: Vec::new(),
-        frontend: if request.use_slang {
-            crate::adapter::yosys::SvFrontend::Slang
-        } else {
-            crate::adapter::yosys::SvFrontend::Auto
-        },
-        merge_clock_domains: request.merge_clock_domains,
-    };
+    let lift = sv_lift_of(&request.lift)?;
     let (verdict, refinement, attribution) =
         if request.refine || !config_specs.is_empty() || request.discover_assumptions {
             let (v, r, a) = sv_verify_recoverability_refined_explained(
@@ -1595,28 +1519,9 @@ pub async fn sv_check_fsm_handler(
 }
 
 fn sv_check_fsm_handler_impl(request: SvCheckFsmRequest) -> ApiResult<Json<Btor2CheckFsmResponse>> {
-    use crate::adapter::sv_verify::{SvLift, sv_check_fsm};
+    use crate::adapter::sv_verify::sv_check_fsm;
 
-    let lift = SvLift {
-        source: request.source,
-        additional_sources: request
-            .additional_sources
-            .into_iter()
-            .map(|f| (f.name, f.content))
-            .collect(),
-        top: request.top,
-        use_sv2v: request.use_sv2v,
-        // No API analog: the request carries source *content* by name, so an
-        // on-disk include-search dir is a local (CLI) concept; the flat
-        // name-staging of `additional_sources` already resolves includes here.
-        include_dirs: Vec::new(),
-        frontend: if request.use_slang {
-            crate::adapter::yosys::SvFrontend::Slang
-        } else {
-            crate::adapter::yosys::SvFrontend::Auto
-        },
-        merge_clock_domains: request.merge_clock_domains,
-    };
+    let lift = sv_lift_of(&request.lift)?;
     let findings =
         sv_check_fsm(&lift, request.max_width).map_err(|message| ApiError::BadRequest {
             message,
@@ -1663,32 +1568,23 @@ fn sv_check_fsm_handler_impl(request: SvCheckFsmRequest) -> ApiResult<Json<Btor2
     }))
 }
 
+/// The core lift of an `sv` request's `lift` object; a malformed entry is a 400.
+fn sv_lift_of(lift: &SvLiftRequest) -> ApiResult<crate::adapter::sv_verify::SvLift> {
+    lift.to_sv_lift().map_err(|message| ApiError::BadRequest {
+        message,
+        details: None,
+    })
+}
+
 /// `sv cdc-lint` over HTTP — lift SV with merged clock domains and classify every clock-domain
 /// crossing ([`crate::adapter::cdc_lint`]). Surface peer of the CLI `mununu sv cdc-lint`.
 pub async fn sv_cdc_lint_handler(
     Json(request): Json<SvCdcLintRequest>,
 ) -> ApiResult<Json<SvCdcLintResponse>> {
     blocking(move || {
-        use crate::adapter::sv_verify::{SvLift, sv_cdc_lint};
-        let primary_name = format!("{}.sv", request.top.as_deref().unwrap_or("top"));
-        let lift = SvLift {
-            source: request.source,
-            additional_sources: request
-                .additional_sources
-                .into_iter()
-                .map(|f| (f.name, f.content))
-                .collect(),
-            top: request.top,
-            use_sv2v: request.use_sv2v,
-            include_dirs: Vec::new(),
-            frontend: if request.use_slang {
-                crate::adapter::yosys::SvFrontend::Slang
-            } else {
-                crate::adapter::yosys::SvFrontend::Auto
-            },
-            merge_clock_domains: true,
-        };
-        let report = sv_cdc_lint(&lift, &primary_name).map_err(|message| ApiError::BadRequest {
+        use crate::adapter::sv_verify::sv_cdc_lint;
+        let lift = sv_lift_of(&request.lift)?;
+        let report = sv_cdc_lint(&lift).map_err(|message| ApiError::BadRequest {
             message,
             details: None,
         })?;
@@ -1707,27 +1603,9 @@ pub async fn sv_lint_handler(
 }
 
 fn sv_lint_handler_impl(request: SvLintRequest) -> ApiResult<Json<SvLintResponse>> {
-    use crate::adapter::sv_verify::{SvLift, SvLintSignalKind, sv_lint_registers};
+    use crate::adapter::sv_verify::{SvLintSignalKind, sv_lint_registers};
 
-    let lift = SvLift {
-        source: request.source,
-        additional_sources: request
-            .additional_sources
-            .into_iter()
-            .map(|f| (f.name, f.content))
-            .collect(),
-        top: request.top,
-        use_sv2v: request.use_sv2v,
-        // As with the other SV-direct handlers: the request stages include content
-        // by name, so an on-disk include-search dir is a CLI-only concept here.
-        include_dirs: Vec::new(),
-        frontend: if request.use_slang {
-            crate::adapter::yosys::SvFrontend::Slang
-        } else {
-            crate::adapter::yosys::SvFrontend::Auto
-        },
-        merge_clock_domains: request.merge_clock_domains,
-    };
+    let lift = sv_lift_of(&request.lift)?;
 
     let findings = sv_lint_registers(&lift).map_err(|message| ApiError::BadRequest {
         message,
@@ -1802,76 +1680,26 @@ fn sv_mutate_handler_impl(request: SvMutateRequest) -> ApiResult<Json<SvMutateRe
     use crate::adapter::btor2::kmts_lift::MustEdgeInference;
     use crate::adapter::btor2::mutate::{Mutation, list_targets};
     use crate::adapter::slang::verify_auto::{
-        VerifyAutoOptions, apply_lift_overrides, engine_selection, mutate_and_compare,
+        VerifyAutoOptions, engine_selection, mutate_and_compare,
     };
-    use crate::adapter::yosys::{SvFrontend, YosysOptions, sv_to_btor2};
+    use crate::adapter::yosys::sv_to_btor2;
 
-    let mut sources: Vec<(String, String)> = vec![("top.sv".to_string(), request.source.clone())];
-    for f in &request.additional_sources {
-        sources.push((f.name.clone(), f.content.clone()));
-    }
-    // mununu#475 item 4 — --param API parity. Same parse shape as the CLI
-    // + as `sv verify-auto`'s params: `NAME=VALUE` or `MODULE.NAME=VALUE`,
-    // both sides non-empty. A malformed entry is a HARD BadRequest here;
-    // yosys errors downstream on a parameter it cannot apply.
-    let params: Vec<(String, String)> = request
-        .params
-        .iter()
-        .map(|e| {
-            let (lhs, val) = e.split_once('=').ok_or_else(|| ApiError::BadRequest {
-                message: format!(
-                    "malformed `params` entry '{e}': expected NAME=VALUE or MODULE.NAME=VALUE"
-                ),
-                details: None,
-            })?;
-            let (lhs, val) = (lhs.trim(), val.trim());
-            if lhs.is_empty() || val.is_empty() {
-                return Err(ApiError::BadRequest {
-                    message: format!(
-                        "malformed `params` entry '{e}': NAME and VALUE must both be non-empty"
-                    ),
-                    details: None,
-                });
-            }
-            Ok((lhs.to_string(), val.to_string()))
-        })
-        .collect::<Result<Vec<_>, ApiError>>()?;
-    let yopts = YosysOptions {
-        top: request.top.clone(),
-        additional_sources: request
-            .additional_sources
-            .iter()
-            .map(|f| (f.name.clone(), f.content.clone()))
-            .collect(),
-        use_sv2v: request.use_sv2v,
-        merge_clock_domains: request.merge_clock_domains,
-        // mununu#725 — the lift-posture fields of `sv/verify-auto`.
-        cutpoint_signals: request.cutpoint.clone(),
-        frontend: if request.use_slang {
-            SvFrontend::Slang
-        } else {
-            SvFrontend::Auto
-        },
-        params,
-        ..Default::default()
-    };
+    let lift = sv_lift_of(&request.lift)?;
+    let mut sources: Vec<(String, String)> = vec![(lift.primary_name.clone(), lift.source.clone())];
+    sources.extend(lift.additional_sources.iter().cloned());
+    // The overrides go to `mutate_and_compare` as verify-auto's own option (the lift only); the
+    // yosys options carry the plain sources.
+    let yopts = lift.yosys_options();
     let config_values = parse_config_values(&request.pins)?;
-    let lift_overrides: Vec<(String, String)> = request
-        .lift_overrides
-        .iter()
-        .map(|f| (f.name.clone(), f.content.clone()))
-        .collect();
+    let lift_overrides = lift.lift_overrides.clone();
 
     // `list` mode — lift once and enumerate the targets (no verification). The discovery lift
     // honours `lift_overrides` too (mununu#725 — it does not go through `verify_auto`).
     if request.list {
-        let (primary, yopts) =
-            apply_lift_overrides("top.sv", &request.source, &yopts, &lift_overrides).map_err(
-                |e| ApiError::BadRequest {
-                    message: format!("sv mutate --list: {}", e.message),
-                    details: None,
-                },
-            )?;
+        let (primary, yopts) = lift.staged().map_err(|message| ApiError::BadRequest {
+            message: format!("sv mutate --list: {message}"),
+            details: None,
+        })?;
         let btor2 = sv_to_btor2(&primary, &yopts).map_err(|e| ApiError::BadRequest {
             message: format!("sv mutate --list: {}", e.message),
             details: None,
@@ -1991,19 +1819,19 @@ fn sv_cegar_handler_impl(request: SvCegarRequest) -> ApiResult<Json<Btor2CegarRe
     // SV → single flattened BTOR2 (sv2v optional + Yosys). The per-module
     // split is for composition; CEGAR's predicate-cube lift wants one
     // transition system, so the flattened shape is the right input.
+    let (source, yopts) =
+        sv_lift_of(&request.lift)?
+            .staged()
+            .map_err(|message| ApiError::BadRequest {
+                message,
+                details: None,
+            })?;
     let yopts = YosysOptions {
-        top: request.top.clone(),
-        additional_sources: request
-            .additional_sources
-            .iter()
-            .map(|f| (f.name.clone(), f.content.clone()))
-            .collect(),
-        use_sv2v: request.use_sv2v,
         setundef_anyseq: request.setundef_anyseq,
         setundef_anyconst: request.setundef_anyconst,
-        ..Default::default()
+        ..yopts
     };
-    let btor2 = sv_to_btor2(&request.source, &yopts).map_err(|e| ApiError::BadRequest {
+    let btor2 = sv_to_btor2(&source, &yopts).map_err(|e| ApiError::BadRequest {
         message: format!("SV → BTOR2 (sv2v + Yosys): {}", e.message),
         details: None,
     })?;
@@ -2114,6 +1942,7 @@ fn attach_testbenches(
             .iter()
             .find(|c| {
                 request
+                    .lift
                     .source
                     .split(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
                     .any(|w| w == **c)
@@ -2129,9 +1958,24 @@ fn attach_testbenches(
         let inactive: u64 = inactive.trim().parse().ok()?;
         Some((name.trim().to_string(), u64::from(inactive == 0)))
     });
-    let top = request.top.clone().unwrap_or_else(|| "top".to_string());
-    let sources: Vec<String> = std::iter::once(format!("{top}.sv"))
-        .chain(request.additional_sources.iter().map(|f| f.name.clone()))
+    let top = request
+        .lift
+        .top
+        .clone()
+        .unwrap_or_else(|| "top".to_string());
+    let primary = request
+        .lift
+        .source_name
+        .clone()
+        .unwrap_or_else(|| format!("{top}.sv"));
+    let sources: Vec<String> = std::iter::once(primary)
+        .chain(
+            request
+                .lift
+                .additional_sources
+                .iter()
+                .map(|f| f.name.clone()),
+        )
         .collect();
     for (row, p) in response.properties.iter_mut().zip(report.properties.iter()) {
         let Some(cex) = &p.counterexample else {
@@ -2158,52 +2002,13 @@ fn sv_verify_auto_handler_impl(
 ) -> ApiResult<Json<SvVerifyAutoResponse>> {
     use crate::adapter::btor2::kmts_lift::MustEdgeInference;
     use crate::adapter::slang::verify_auto::{VerifyAutoOptions, verify_auto};
-    use crate::adapter::yosys::YosysOptions;
 
-    let mut sources: Vec<(String, String)> = vec![("top.sv".to_string(), request.source.clone())];
-    for f in &request.additional_sources {
-        sources.push((f.name.clone(), f.content.clone()));
-    }
-    // `"NAME=VALUE"` / `"MODULE.NAME=VALUE"` module-parameter overrides. Unlike
-    // `config_values` (which silently skips malformed entries), a malformed
-    // `params` entry is a 400 (and yosys errors on one it cannot apply) — never a
-    // silent drop.
-    let params: Vec<(String, String)> = request
-        .params
-        .iter()
-        .map(|e| {
-            let (lhs, val) = e.split_once('=').ok_or_else(|| ApiError::BadRequest {
-                message: format!("malformed params entry '{e}'"),
-                details: Some("expected NAME=VALUE or MODULE.NAME=VALUE".into()),
-            })?;
-            let (lhs, val) = (lhs.trim(), val.trim());
-            if lhs.is_empty() || val.is_empty() {
-                return Err(ApiError::BadRequest {
-                    message: format!("malformed params entry '{e}'"),
-                    details: Some("NAME and VALUE must both be non-empty".into()),
-                });
-            }
-            Ok((lhs.to_string(), val.to_string()))
-        })
-        .collect::<Result<Vec<_>, ApiError>>()?;
-    let yopts = YosysOptions {
-        top: request.top.clone(),
-        additional_sources: request
-            .additional_sources
-            .iter()
-            .map(|f| (f.name.clone(), f.content.clone()))
-            .collect(),
-        use_sv2v: request.use_sv2v,
-        merge_clock_domains: request.merge_clock_domains,
-        cutpoint_signals: request.cutpoint.clone(),
-        frontend: if request.use_slang {
-            crate::adapter::yosys::SvFrontend::Slang
-        } else {
-            crate::adapter::yosys::SvFrontend::Auto
-        },
-        params,
-        ..Default::default()
-    };
+    let lift = sv_lift_of(&request.lift)?;
+    let mut sources: Vec<(String, String)> = vec![(lift.primary_name.clone(), lift.source.clone())];
+    sources.extend(lift.additional_sources.iter().cloned());
+    // The overrides are verify-auto's own option (they replace sources for the lift only, while
+    // the SVA is extracted from the originals), so the yosys options carry the plain sources.
+    let yopts = lift.yosys_options();
     // mununu#663 — absent / `"auto"` resolves the policy per property (per-target must for
     // Liveness/Mixed-class formulas); an explicit `"off"` switches that resolution off.
     let must_edge_auto = matches!(request.must_edge_inference.as_deref(), None | Some("auto"));
@@ -2266,11 +2071,7 @@ fn sv_verify_auto_handler_impl(
         antecedent_propagate: !request.no_antecedent_propagate.unwrap_or(false),
         // mununu#656 — per-request inputs-in-the-state opt-out.
         input_state: !request.no_input_state.unwrap_or(false),
-        lift_overrides: request
-            .lift_overrides
-            .iter()
-            .map(|f| (f.name.clone(), f.content.clone()))
-            .collect(),
+        lift_overrides: lift.lift_overrides.clone(),
         // PR C — planner-only fields: a single API run re-plans its own rows and truncates
         replan_defer: false,
         breadcrumb_append: false,
@@ -5155,7 +4956,7 @@ members = ["x"]
     fn an_sv_verify_auto_request_with_the_pre_0_5_key_is_refused() {
         use crate::api::models::SvVerifyAutoRequest;
         let err = serde_json::from_value::<SvVerifyAutoRequest>(serde_json::json!({
-            "source": "module m(input logic clk); endmodule\n",
+            "lift": {"source": "module m(input logic clk); endmodule\n"},
             "config_values": ["rst=1"],
         }))
         .expect_err("an unknown key is refused");
@@ -5166,7 +4967,7 @@ members = ["x"]
     fn sv_verify_auto_handler_rejects_hex_config_value() {
         use crate::api::models::SvVerifyAutoRequest;
         let request: SvVerifyAutoRequest = serde_json::from_value(serde_json::json!({
-            "source": "module m(input logic clk, input logic rst); endmodule\n",
+            "lift": {"source": "module m(input logic clk, input logic rst); endmodule\n"},
             "pins": ["rst=0x1"],
         }))
         .expect("request deserializes");
@@ -5188,15 +4989,17 @@ members = ["x"]
     fn sv_mutate_handler_accepts_the_lift_posture_fields_and_rejects_hex_config_value() {
         use crate::api::models::SvMutateRequest;
         let request: SvMutateRequest = serde_json::from_value(serde_json::json!({
-            "source": "module m(input logic clk, input logic rst_ni); endmodule\n",
+            "lift": {
+                "source": "module m(input logic clk, input logic rst_ni); endmodule\n",
+                "lift_overrides": [{"name": "prim_assert.sv", "content": "// shim\n"}],
+                "cutpoints": ["must_refresh"],
+            },
             "mutation": "stick:q",
-            "lift_overrides": [{"name": "prim_assert.sv", "content": "// shim\n"}],
             "pins": ["rst_ni=0x1"],
-            "cutpoint": ["must_refresh"],
         }))
         .expect("request deserializes");
-        assert_eq!(request.cutpoint, vec!["must_refresh".to_string()]);
-        assert_eq!(request.lift_overrides.len(), 1);
+        assert_eq!(request.lift.cutpoints, vec!["must_refresh".to_string()]);
+        assert_eq!(request.lift.lift_overrides.len(), 1);
         let err = sv_mutate_handler_impl(request)
             .expect_err("a hex config_values value must be rejected before the lift");
         match err {
@@ -5214,10 +5017,10 @@ members = ["x"]
     #[tokio::test]
     async fn sv_cegar_handler_rejects_empty_predicates() {
         let request = SvCegarRequest {
-            source: "module m(input logic clk); endmodule\n".to_string(),
-            additional_sources: vec![],
-            top: None,
-            use_sv2v: false,
+            lift: SvLiftRequest {
+                source: "module m(input logic clk); endmodule\n".to_string(),
+                ..Default::default()
+            },
             setundef_anyseq: false,
             setundef_anyconst: false,
             formula: "nu X. < true > X".to_string(),
@@ -5265,10 +5068,10 @@ module ctr (input logic clk, input logic rst);
 endmodule
 ";
         let request = SvCegarRequest {
-            source: sv.to_string(),
-            additional_sources: vec![],
-            top: Some("ctr".to_string()),
-            use_sv2v: false,
+            lift: SvLiftRequest {
+                source: sv.to_string(),
+                ..Default::default()
+            },
             setundef_anyseq: false,
             setundef_anyconst: false,
             formula: "nu X. < true > X".to_string(),
@@ -5976,12 +5779,10 @@ members = ["x"]
     #[tokio::test]
     async fn sv_verify_liveness_handler_rejects_malformed_atom_before_lift() {
         let request = SvVerifyLivenessRequest {
-            source: "module m; endmodule".to_string(),
-            additional_sources: vec![],
-            top: None,
-            use_sv2v: false,
-            use_slang: false,
-            merge_clock_domains: false,
+            lift: SvLiftRequest {
+                source: "module m; endmodule".to_string(),
+                ..Default::default()
+            },
             request: "x == y".to_string(), // relational — rejected before the lift
             grant: "st == 1".to_string(),
         };
@@ -5994,12 +5795,10 @@ members = ["x"]
     #[tokio::test]
     async fn sv_verify_recoverability_handler_rejects_malformed_target_before_lift() {
         let request = SvVerifyRecoverabilityRequest {
-            source: "module m; endmodule".to_string(),
-            additional_sources: vec![],
-            top: None,
-            use_sv2v: false,
-            use_slang: false,
-            merge_clock_domains: false,
+            lift: SvLiftRequest {
+                source: "module m; endmodule".to_string(),
+                ..Default::default()
+            },
             target: "not an atom !!".to_string(),
             predicates: Vec::new(),
             refine: false,

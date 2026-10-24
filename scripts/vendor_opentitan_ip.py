@@ -410,7 +410,7 @@ def main():
         "# Extraction reads the real prim_assert macros; the lift sees the synthesis shim (assertions compiled\n"
         "# out, INC_ASSERT defined) and, for each `--strip-inc-assert` file, its `_lift.sv` variant.\n"
         "# Add `--source mununu_properties.sv` for the system-level @mununu_guarantee properties.\n"
-        f"exec mununu sv verify-auto {primary.name} --top {top} --preprocess-sv2v {srcs} \\\n"
+        f"exec mununu sv verify-auto {primary.name} --top {top} --frontend sv2v {srcs} \\\n"
         "  --lift-override prim_assert.sv=prim_assert_shim.sv \\\n"
         "  --lift-override prim_assert_standard_macros.svh=/dev/null \\\n"
         "  --lift-override prim_assert_sec_cm.svh=/dev/null \\\n"

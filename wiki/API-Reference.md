@@ -784,10 +784,7 @@ The CEGAR fields (`formula`, `predicates`, `controllable`, `predicate_source`, `
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `source` | `string` | Yes | SystemVerilog primary source content. |
-| `additional_sources` | `FileContent[]` | No | Additional SV source files (multi-file designs / packages / include targets). Defaults to `[]`. |
-| `top` | `string \| null` | No | Top module name. Recommended for multi-module designs; `null` lets Yosys auto-detect. |
-| `use_sv2v` | `boolean` | No | Run sv2v before Yosys (required for modern SV). Mirrors `--preprocess-sv2v`. Defaults to `false`. |
+| `lift` | `SvLiftRequest` | Yes | The design and how to lift it: `source` (required), `source_name`, `additional_sources`, `top`, `frontend` (`auto` \| `verilog` \| `slang` \| `sv2v`), `params`, `lift_overrides`, `cutpoints`, `merge_clock_domains` — shared by every `sv` route (0.5). |
 | `setundef_anyseq` | `boolean` | No | Yosys `setundef -anyseq` (per-cycle havoc on undefined nets). Defaults to `false`. |
 | `setundef_anyconst` | `boolean` | No | Yosys `setundef -anyconst` (one nondeterministic constant per undefined bit — the Caliptra CWE-1245 power-up policy). Defaults to `false`. |
 | `formula` | `string` | Yes | μ-calculus formula (see `/btor2/cegar`). |
@@ -804,9 +801,7 @@ Identical to [`/api/v1/btor2/cegar`](#post-apiv1btor2cegar) (`Btor2CegarResponse
 curl -X POST http://localhost:3000/api/v1/sv/cegar \
   -H "Content-Type: application/json" \
   -d '{
-    "source": "module counter(...); ... endmodule",
-    "top": "counter",
-    "use_sv2v": true,
+    "lift": { "source": "module counter(...); ... endmodule", "top": "counter", "frontend": "sv2v" },
     "formula": "nu X. ([] X && mu Y. (done || <> Y))",
     "predicates": [ { "name": "burst_zero", "register": "burst_cnt", "value": 0 } ]
   }'

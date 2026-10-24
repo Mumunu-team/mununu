@@ -28,8 +28,12 @@ use crate::adapter::reach_portfolio::{ReachOutcome, decide_reach_portfolio};
 use crate::adapter::yosys::{SvFrontend, YosysOptions, sv_to_btor2, sv_to_btor2_with_blackboxes};
 use crate::verdict::PropertyVerdict;
 
-/// The SV → BTOR2 lift inputs shared by every SV-direct verb.
+/// The SV → BTOR2 lift inputs shared by every SV-direct verb: the CLI's `SvLiftArgs` and the
+/// API's `lift` object both become one of these.
+#[derive(Debug, Clone, Default)]
 pub struct SvLift {
+    /// The primary source's file name (`top.sv` when unknown), the name `lift_overrides` match.
+    pub primary_name: String,
     /// Primary SystemVerilog source.
     pub source: String,
     /// Additional SV sources (packages / includes) as `(name, content)`.
@@ -50,10 +54,18 @@ pub struct SvLift {
     /// Lift a multi-clock design onto the one implicit clock instead of refusing it
     /// ([`YosysOptions::merge_clock_domains`] — an under-approximation).
     pub merge_clock_domains: bool,
+    /// Parameter overrides, `(NAME | MODULE.NAME, VALUE)` ([`YosysOptions::params`]).
+    pub params: Vec<(String, String)>,
+    /// Control-slice cut points ([`YosysOptions::cutpoint_signals`], an over-approximation).
+    pub cutpoints: Vec<String>,
+    /// Lift-only source replacements `(file name, content)`, applied by name to the primary or
+    /// an additional source before the lift (an assertion-macro shim, a synthesis variant).
+    pub lift_overrides: Vec<(String, String)>,
 }
 
 impl SvLift {
-    fn yosys_options(&self) -> YosysOptions {
+    /// The yosys options this lift describes (before `lift_overrides` are applied).
+    pub fn yosys_options(&self) -> YosysOptions {
         YosysOptions {
             top: self.top.clone(),
             additional_sources: self.additional_sources.clone(),
@@ -61,31 +73,65 @@ impl SvLift {
             extra_include_dirs: self.include_dirs.clone(),
             frontend: self.frontend,
             merge_clock_domains: self.merge_clock_domains,
+            params: self.params.clone(),
+            cutpoint_signals: self.cutpoints.clone(),
             ..Default::default()
         }
     }
 
+    /// The primary source and yosys options the lift runs on, `lift_overrides` applied.
+    pub fn staged(&self) -> Result<(String, YosysOptions), String> {
+        crate::adapter::slang::verify_auto::apply_lift_overrides(
+            &self.primary_name,
+            &self.source,
+            &self.yosys_options(),
+            &self.lift_overrides,
+        )
+        .map_err(|e| e.message)
+    }
+
     /// Lift to a single flattened BTOR2 string (sv2v optional + Yosys).
     fn lift(&self) -> Result<String, String> {
-        sv_to_btor2(&self.source, &self.yosys_options())
+        let (source, yopts) = self.staged()?;
+        sv_to_btor2(&source, &yopts)
             .map_err(|e| format!("SV → BTOR2 (sv2v + Yosys): {}", e.message))
     }
+}
+
+/// Parse `NAME=VALUE` / `MODULE.NAME=VALUE` parameter overrides (the CLI's `--param`, the API's
+/// `lift.params`). A malformed entry is an error, never a silent drop; yosys errors downstream on
+/// a parameter it cannot apply.
+pub fn parse_params(entries: &[String]) -> Result<Vec<(String, String)>, String> {
+    entries
+        .iter()
+        .map(|e| {
+            let (lhs, val) = e.split_once('=').ok_or_else(|| {
+                format!("malformed --param '{e}': expected NAME=VALUE or MODULE.NAME=VALUE")
+            })?;
+            let (lhs, val) = (lhs.trim(), val.trim());
+            if lhs.is_empty() || val.is_empty() {
+                return Err(format!(
+                    "malformed --param '{e}': NAME and VALUE must both be non-empty"
+                ));
+            }
+            Ok((lhs.to_string(), val.to_string()))
+        })
+        .collect()
 }
 
 /// `sv cdc-lint` — lift SV with its clock domains merged (the lint needs the multi-clock design
 /// the plain lift refuses) and classify every clock-domain crossing of the flattened netlist
 /// ([`cdc_lint`](crate::adapter::cdc_lint::cdc_lint)). The merged BTOR2 serves only the gray-step
 /// query on a bus's source register, which is exact there (see `gray_step_verdict`). The lift
-/// stages the primary source as `work.sv`; path locations name it `primary_name` instead.
-pub fn sv_cdc_lint(
-    lift: &SvLift,
-    primary_name: &str,
-) -> Result<crate::adapter::cdc_lint::CdcReport, String> {
+/// stages the primary source as `work.sv`; path locations name it `lift.primary_name` instead.
+pub fn sv_cdc_lint(lift: &SvLift) -> Result<crate::adapter::cdc_lint::CdcReport, String> {
+    let primary_name = lift.primary_name.as_str();
+    let (source, yopts) = lift.staged()?;
     let yopts = YosysOptions {
         merge_clock_domains: true,
-        ..lift.yosys_options()
+        ..yopts
     };
-    let lifted = sv_to_btor2_with_blackboxes(&lift.source, &yopts)
+    let lifted = sv_to_btor2_with_blackboxes(&source, &yopts)
         .map_err(|e| format!("SV → BTOR2 (sv2v + Yosys): {}", e.message))?;
     let mut report =
         crate::adapter::cdc_lint::cdc_lint(&lifted.flat_netlist_json, Some(&lifted.btor2))?;
@@ -916,6 +962,7 @@ mod tests {
             include_dirs: Vec::new(),
             frontend: SvFrontend::Auto,
             merge_clock_domains: false,
+            ..Default::default()
         }
     }
 
@@ -1463,6 +1510,7 @@ mod tests {
             include_dirs: Vec::new(),
             frontend: SvFrontend::Auto,
             merge_clock_domains: false,
+            ..Default::default()
         };
         let verdict = sv_verify_recoverability(&lift, "aes_cipher_ctrl_cs == 9")
             .expect("recoverability decides on the AES cipher-control FSM");
@@ -1518,6 +1566,7 @@ endmodule
             include_dirs: Vec::new(),
             frontend: SvFrontend::Slang,
             merge_clock_domains: false,
+            ..Default::default()
         };
         let btor2 = lift.lift().expect("the slang lift runs");
         // An anonymous free input is an `input` line with no symbol — the design's
@@ -1599,6 +1648,7 @@ endmodule
             include_dirs: Vec::new(),
             frontend: SvFrontend::Slang,
             merge_clock_domains: false,
+            ..Default::default()
         };
 
         let bad = sv_lint_registers(&lift_of(BAD, "rom_bad")).expect("lint lifts rom_bad");
@@ -1716,6 +1766,7 @@ endmodule
             include_dirs: Vec::new(),
             frontend: SvFrontend::Slang,
             merge_clock_domains: false,
+            ..Default::default()
         };
         let findings = sv_check_fsm(&lift, DEFAULT_FSM_MAX_WIDTH).expect("sv check-fsm runs");
         for f in &findings {
@@ -1794,6 +1845,7 @@ endmodule
             include_dirs: Vec::new(),
             frontend: SvFrontend::Slang,
             merge_clock_domains: false,
+            ..Default::default()
         };
         let cell = |v: u64| vec![("rst_n".to_string(), v)];
         // Run A — the two-value spec: the branching pair.
