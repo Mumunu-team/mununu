@@ -1930,6 +1930,15 @@ enum SvCommand {
     /// "found a bad register" from "could not lift" should pass `--fail-on none`
     /// and inspect the JSON/text output for findings (mununu#475 item 5).
     Lint(SvLintArgs),
+    /// Structural clock-domain-crossing lint: lift SV with its clock domains merged and classify
+    /// every flop that samples another domain's flop — a 2-FF (or deeper) synchroniser
+    /// (`holds`), logic before the first stage or a capture read by logic (`violated`), a
+    /// multi-bit bus through parallel synchronisers (its gray step decided by a reach query on
+    /// the source register), a qualified-data capture, a reconvergence point or a dual-clock
+    /// memory (`unknown`, with the functional condition named). Pulse width across the crossing
+    /// is not structural: `scripts/cdc_formal_sby.sh` checks it functionally. Surface peer of
+    /// `POST /api/v1/sv/cdc-lint`. Exit codes follow `--fail-on` (default: 2 on a violated row).
+    CdcLint(SvCdcLintArgs),
     /// Apply a NAMED structural mutation to the design and re-verify, checking that
     /// the property verdicts FLIP (property adequacy). A flip confirms a property
     /// constrains the mutated behaviour; a property that does NOT flip is the
@@ -2558,6 +2567,17 @@ struct SvLintArgs {
     lift: SvLiftArgs,
     #[command(flatten)]
     ci: CiArgs,
+}
+
+/// Arguments for `mununu sv cdc-lint` — the structural clock-domain-crossing lint.
+#[derive(Args, Debug)]
+struct SvCdcLintArgs {
+    #[command(flatten)]
+    lift: SvLiftArgs,
+    #[command(flatten)]
+    ci: CiArgs,
+    #[command(flatten)]
+    json: JsonArgs,
 }
 
 /// Arguments for `mununu sv mutate` — apply a named structural mutation + re-verify.
@@ -6653,6 +6673,7 @@ fn handle_sv(command: SvCommand) -> Result<(), String> {
         SvCommand::VerifyRecoverability(args) => sv_verify_recoverability(args),
         SvCommand::CheckFsm(args) => sv_check_fsm(args),
         SvCommand::Lint(args) => sv_lint(args),
+        SvCommand::CdcLint(args) => sv_cdc_lint(args),
         SvCommand::Mutate(args) => sv_mutate(args),
     }
 }
@@ -7074,6 +7095,32 @@ fn sv_lint(args: SvLintArgs) -> Result<(), String> {
     };
     ci_gate_exit(worst, args.ci.fail_on);
     Ok(())
+}
+
+/// `mununu sv cdc-lint` — classify every clock-domain crossing; the JSON is
+/// [`SvCdcLintResponse`](mununu_core::api::models::SvCdcLintResponse), shared with the API. The
+/// worst row drives the `--fail-on` gate.
+fn sv_cdc_lint(args: SvCdcLintArgs) -> Result<(), String> {
+    let as_json = args.json.json;
+    let file = args.lift.primary_display();
+    let run = || -> Result<(), String> {
+        let primary_name = std::path::Path::new(&file)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("top.sv");
+        let report =
+            mununu_core::adapter::sv_verify::sv_cdc_lint(&read_sv_lift(&args.lift)?, primary_name)?;
+        let mut view = mununu_core::api::models::SvCdcLintResponse::from(&report);
+        view.file = Some(file.clone());
+        print_typed_report(&view)?;
+        ci_gate_exit(&view.outcome, args.ci.fail_on);
+        Ok(())
+    };
+    match run() {
+        Ok(()) => Ok(()),
+        Err(e) if as_json => exit_with_json_error("sv-cdc-lint", &file, &e),
+        Err(e) => Err(e),
+    }
 }
 
 /// `mununu sv mutate` — apply a named structural mutation + re-verify, checking the

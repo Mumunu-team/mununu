@@ -332,6 +332,8 @@ struct SvFlattenArtifacts {
     /// The clock domains of the flattened design ([`clock_domains`]); more than one only when
     /// [`YosysOptions::merge_clock_domains`] let the lift through.
     clock_domains: Vec<ClockDomain>,
+    /// The flattened, `opt_clean`ed netlist the clock-domain scan read (yosys `write_json`).
+    flat_netlist_json: String,
 }
 
 /// Run sv2v (optional) + the flattened Yosys script and return the
@@ -693,17 +695,18 @@ fn run_sv_flatten_btor2_concrete(
     // The BTOR2 model has ONE implicit clock: every `next` fires on it. A design whose flops sit
     // in two domains was lifted as if they ticked together — silently, because the old refusal
     // matched clock-shaped input NAMES (`clk`, `clk_i`, …) and `clk_src`/`clk_dst` passed.
-    let clock_domains = std::fs::read_to_string(clock_json_path(&btor_path))
-        .map(|j| clock_domains(&j))
-        .unwrap_or_default();
+    let flat_netlist_json =
+        std::fs::read_to_string(clock_json_path(&btor_path)).unwrap_or_default();
+    let clock_domains = clock_domains(&flat_netlist_json);
     if clock_domains.len() > 1 && !yopts.merge_clock_domains {
         return Err(AdapterError {
             kind: AdapterErrorKind::UnsupportedConstruct,
             message: format!(
                 "adapter/yosys: the design has {} clock domains ({}); the model has one implicit \
                  clock, so lifting it would step every domain together and hide every crossing \
-                 defect. Verify each domain on its own, \
-                 or pass `--merge-clock-domains` to accept that under-approximation explicitly.",
+                 defect. Run `mununu sv cdc-lint` to classify the crossings, verify each domain \
+                 on its own, or pass `--merge-clock-domains` to accept that under-approximation \
+                 explicitly.",
                 clock_domains.len(),
                 describe_clock_domains(&clock_domains)
             ),
@@ -719,6 +722,7 @@ fn run_sv_flatten_btor2_concrete(
         fallback_reason: None,
         backend_retry,
         clock_domains,
+        flat_netlist_json,
     })
 }
 
@@ -921,6 +925,7 @@ pub fn sv_to_btor2_with_blackboxes(
         fallback_reason: artifacts.fallback_reason,
         backend_retry: artifacts.backend_retry,
         clock_domains: artifacts.clock_domains,
+        flat_netlist_json: artifacts.flat_netlist_json,
     })
 }
 
@@ -940,6 +945,9 @@ pub struct SvLiftResult {
     /// The flattened design's clock domains; more than one only under
     /// [`YosysOptions::merge_clock_domains`].
     pub clock_domains: Vec<ClockDomain>,
+    /// The flattened netlist (yosys `write_json`, after `flatten` + `opt_clean`, before
+    /// `async2sync`): every storage cell still carries its own clock, which `sv cdc-lint` reads.
+    pub flat_netlist_json: String,
 }
 
 /// One clock domain of a flattened design: a clock net and the edge its storage cells fire on.
@@ -974,6 +982,36 @@ fn clock_json_path(btor_out: &Path) -> PathBuf {
     btor_out.with_file_name("clocks.json")
 }
 
+/// Bit id → a net name for one module of a yosys `write_json` netlist, public names preferred
+/// over `hide_name` ones; a bit of a multi-bit net is `name[i]`.
+pub(crate) fn net_names(body: &serde_json::Value) -> HashMap<i64, String> {
+    let mut names: HashMap<i64, (bool, String)> = HashMap::new();
+    if let Some(nets) = body.get("netnames").and_then(|n| n.as_object()) {
+        for (name, net) in nets {
+            let hidden = net.get("hide_name").and_then(|h| h.as_i64()) == Some(1);
+            let Some(bits) = net.get("bits").and_then(|b| b.as_array()) else {
+                continue;
+            };
+            for (i, bit) in bits.iter().enumerate() {
+                let Some(id) = bit.as_i64() else { continue };
+                let label = if bits.len() == 1 {
+                    name.clone()
+                } else {
+                    format!("{name}[{i}]")
+                };
+                let better = match names.get(&id) {
+                    None => true,
+                    Some((was_hidden, _)) => *was_hidden && !hidden,
+                };
+                if better {
+                    names.insert(id, (hidden, label));
+                }
+            }
+        }
+    }
+    names.into_iter().map(|(id, (_, n))| (id, n)).collect()
+}
+
 /// The clock domains of a flattened design, from a `write_json` snapshot taken after `flatten`
 /// and before `async2sync`, on a copy cleaned by `opt_clean` (`design -save` / `-load` around it,
 /// so the lifted model is untouched). The cleaning matters: right after `flatten` a sub-instance's
@@ -998,37 +1036,13 @@ pub fn clock_domains(flat_json: &str) -> Vec<ClockDomain> {
     };
     let mut count: std::collections::BTreeMap<(String, bool), usize> = Default::default();
     for body in modules.values() {
-        // Bit id → a net name, public names preferred.
-        let mut names: HashMap<i64, (bool, String)> = HashMap::new();
-        if let Some(nets) = body.get("netnames").and_then(|n| n.as_object()) {
-            for (name, net) in nets {
-                let hidden = net.get("hide_name").and_then(|h| h.as_i64()) == Some(1);
-                let Some(bits) = net.get("bits").and_then(|b| b.as_array()) else {
-                    continue;
-                };
-                for (i, bit) in bits.iter().enumerate() {
-                    let Some(id) = bit.as_i64() else { continue };
-                    let label = if bits.len() == 1 {
-                        name.clone()
-                    } else {
-                        format!("{name}[{i}]")
-                    };
-                    let better = match names.get(&id) {
-                        None => true,
-                        Some((was_hidden, _)) => *was_hidden && !hidden,
-                    };
-                    if better {
-                        names.insert(id, (hidden, label));
-                    }
-                }
-            }
-        }
+        let names = net_names(body);
         let net_of = |bit: &serde_json::Value| -> Option<String> {
             let id = bit.as_i64()?; // "0" / "1" / "x" are constants, not nets
             Some(
                 names
                     .get(&id)
-                    .map(|(_, n)| n.clone())
+                    .cloned()
                     .unwrap_or_else(|| format!("net#{id}")),
             )
         };

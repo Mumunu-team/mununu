@@ -1,0 +1,59 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "FileContent": {
+      "description": "File content with optional name",
+      "properties": {
+        "content": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "content",
+        "name"
+      ],
+      "type": "object"
+    }
+  },
+  "description": "Request for `POST /api/v1/sv/cdc-lint` — the structural clock-domain-crossing lint. Lifts SystemVerilog with its clock domains merged and classifies every crossing of the flattened netlist. Surface peer of the CLI `mununu sv cdc-lint`.",
+  "properties": {
+    "additional_sources": {
+      "default": [],
+      "description": "Additional SV sources (packages / includes).",
+      "items": {
+        "$ref": "#/definitions/FileContent"
+      },
+      "type": "array"
+    },
+    "source": {
+      "description": "SystemVerilog primary source content.",
+      "type": "string"
+    },
+    "top": {
+      "default": null,
+      "description": "Top module for the lift (auto-detect when omitted).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "use_slang": {
+      "default": false,
+      "description": "Force the slang RTL front-end (`read_slang`). Default `false`.",
+      "type": "boolean"
+    },
+    "use_sv2v": {
+      "default": false,
+      "description": "Run sv2v before Yosys. Default `false`.",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "source"
+  ],
+  "title": "SvCdcLintRequest",
+  "type": "object"
+}

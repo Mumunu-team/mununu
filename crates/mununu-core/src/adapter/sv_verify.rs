@@ -25,7 +25,7 @@ use crate::adapter::liveness_rescue::{
     response_liveness_rescue_atoms, response_liveness_rescue_conjunction,
 };
 use crate::adapter::reach_portfolio::{ReachOutcome, decide_reach_portfolio};
-use crate::adapter::yosys::{SvFrontend, YosysOptions, sv_to_btor2};
+use crate::adapter::yosys::{SvFrontend, YosysOptions, sv_to_btor2, sv_to_btor2_with_blackboxes};
 use crate::verdict::PropertyVerdict;
 
 /// The SV → BTOR2 lift inputs shared by every SV-direct verb.
@@ -53,9 +53,8 @@ pub struct SvLift {
 }
 
 impl SvLift {
-    /// Lift to a single flattened BTOR2 string (sv2v optional + Yosys).
-    fn lift(&self) -> Result<String, String> {
-        let yopts = YosysOptions {
+    fn yosys_options(&self) -> YosysOptions {
+        YosysOptions {
             top: self.top.clone(),
             additional_sources: self.additional_sources.clone(),
             use_sv2v: self.use_sv2v,
@@ -63,10 +62,46 @@ impl SvLift {
             frontend: self.frontend,
             merge_clock_domains: self.merge_clock_domains,
             ..Default::default()
-        };
-        sv_to_btor2(&self.source, &yopts)
+        }
+    }
+
+    /// Lift to a single flattened BTOR2 string (sv2v optional + Yosys).
+    fn lift(&self) -> Result<String, String> {
+        sv_to_btor2(&self.source, &self.yosys_options())
             .map_err(|e| format!("SV → BTOR2 (sv2v + Yosys): {}", e.message))
     }
+}
+
+/// `sv cdc-lint` — lift SV with its clock domains merged (the lint needs the multi-clock design
+/// the plain lift refuses) and classify every clock-domain crossing of the flattened netlist
+/// ([`cdc_lint`](crate::adapter::cdc_lint::cdc_lint)). The merged BTOR2 serves only the gray-step
+/// query on a bus's source register, which is exact there (see `gray_step_verdict`). The lift
+/// stages the primary source as `work.sv`; path locations name it `primary_name` instead.
+pub fn sv_cdc_lint(
+    lift: &SvLift,
+    primary_name: &str,
+) -> Result<crate::adapter::cdc_lint::CdcReport, String> {
+    let yopts = YosysOptions {
+        merge_clock_domains: true,
+        ..lift.yosys_options()
+    };
+    let lifted = sv_to_btor2_with_blackboxes(&lift.source, &yopts)
+        .map_err(|e| format!("SV → BTOR2 (sv2v + Yosys): {}", e.message))?;
+    let mut report =
+        crate::adapter::cdc_lint::cdc_lint(&lifted.flat_netlist_json, Some(&lifted.btor2))?;
+    for c in &mut report.crossings {
+        for step in &mut c.path {
+            *step = step.replace("(work.sv:", &format!("({primary_name}:"));
+        }
+    }
+    if !lifted.blackboxed_modules.is_empty() {
+        report.notes.push(format!(
+            "black-boxed modules ({}): their outputs are unclocked, so crossings inside or through \
+             them are not seen",
+            lifted.blackboxed_modules.join(", ")
+        ));
+    }
+    Ok(report)
 }
 
 /// `sv verify` — lift SV and decide `bad`-reachability of its assertions with the

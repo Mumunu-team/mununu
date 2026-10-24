@@ -1661,6 +1661,40 @@ fn sv_check_fsm_handler_impl(request: SvCheckFsmRequest) -> ApiResult<Json<Btor2
     }))
 }
 
+/// `sv cdc-lint` over HTTP — lift SV with merged clock domains and classify every clock-domain
+/// crossing ([`crate::adapter::cdc_lint`]). Surface peer of the CLI `mununu sv cdc-lint`.
+pub async fn sv_cdc_lint_handler(
+    Json(request): Json<SvCdcLintRequest>,
+) -> ApiResult<Json<SvCdcLintResponse>> {
+    blocking(move || {
+        use crate::adapter::sv_verify::{SvLift, sv_cdc_lint};
+        let primary_name = format!("{}.sv", request.top.as_deref().unwrap_or("top"));
+        let lift = SvLift {
+            source: request.source,
+            additional_sources: request
+                .additional_sources
+                .into_iter()
+                .map(|f| (f.name, f.content))
+                .collect(),
+            top: request.top,
+            use_sv2v: request.use_sv2v,
+            include_dirs: Vec::new(),
+            frontend: if request.use_slang {
+                crate::adapter::yosys::SvFrontend::Slang
+            } else {
+                crate::adapter::yosys::SvFrontend::Auto
+            },
+            merge_clock_domains: true,
+        };
+        let report = sv_cdc_lint(&lift, &primary_name).map_err(|message| ApiError::BadRequest {
+            message,
+            details: None,
+        })?;
+        Ok(Json(SvCdcLintResponse::from(&report)))
+    })
+    .await
+}
+
 /// monono#partsel preflight (#469) — lift SV and report the partial-write
 /// registers the verifier cannot keep faithfully, with no model checking. Surface
 /// peer of the CLI `mununu sv lint`; read-only, changes no verdict.

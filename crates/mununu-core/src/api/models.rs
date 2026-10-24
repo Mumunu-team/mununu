@@ -1574,6 +1574,105 @@ pub struct SvLintRequest {
     pub merge_clock_domains: bool,
 }
 
+/// Request for `POST /api/v1/sv/cdc-lint` — the structural clock-domain-crossing lint. Lifts
+/// SystemVerilog with its clock domains merged and classifies every crossing of the flattened
+/// netlist. Surface peer of the CLI `mununu sv cdc-lint`.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SvCdcLintRequest {
+    /// SystemVerilog primary source content.
+    pub source: String,
+    /// Additional SV sources (packages / includes).
+    #[serde(default)]
+    pub additional_sources: Vec<FileContent>,
+    /// Top module for the lift (auto-detect when omitted).
+    #[serde(default)]
+    pub top: Option<String>,
+    /// Run sv2v before Yosys. Default `false`.
+    #[serde(default)]
+    pub use_sv2v: bool,
+    /// Force the slang RTL front-end (`read_slang`). Default `false`.
+    #[serde(default)]
+    pub use_slang: bool,
+}
+
+/// One clock domain: a clock net, its edge and how many storage cells fire on it.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct ClockDomainView {
+    pub net: String,
+    pub posedge: bool,
+    pub cells: usize,
+}
+
+/// One `sv cdc-lint` row: a crossing, a dual-clock memory or a reconvergence point.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct CdcCrossingView {
+    /// `combinational-before-sync` | `unsynchronized` | `multi-bit-bus` | `qualified-data` |
+    /// `reconvergence` | `dual-clock-memory` | `synchronized`.
+    pub kind: String,
+    /// `holds` (a safe crossing) | `violated` (an unsafe one) | `unknown` (safe only under the
+    /// functional condition `detail` names).
+    pub outcome: String,
+    pub source: String,
+    pub source_clock: String,
+    pub destination: String,
+    pub destination_clock: String,
+    /// Synchroniser depth (`synchronized`, `multi-bit-bus`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stages: Option<usize>,
+    /// The combinational cells between source and destination, with source locations.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub path: Vec<String>,
+    pub detail: String,
+}
+
+/// Response of `POST /api/v1/sv/cdc-lint` and the JSON of `mununu sv cdc-lint`.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct SvCdcLintResponse {
+    /// The primary source file (CLI only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    /// The worst row outcome (`holds` when there is no crossing).
+    pub outcome: String,
+    pub domains: Vec<ClockDomainView>,
+    pub crossings: Vec<CdcCrossingView>,
+    /// What the lint does not see (primary inputs, asynchronous pins, black boxes).
+    pub notes: Vec<String>,
+}
+
+impl From<&crate::adapter::cdc_lint::CdcReport> for SvCdcLintResponse {
+    fn from(r: &crate::adapter::cdc_lint::CdcReport) -> Self {
+        SvCdcLintResponse {
+            file: None,
+            outcome: r.worst().as_str().to_string(),
+            domains: r
+                .domains
+                .iter()
+                .map(|d| ClockDomainView {
+                    net: d.net.clone(),
+                    posedge: d.posedge,
+                    cells: d.cells,
+                })
+                .collect(),
+            crossings: r
+                .crossings
+                .iter()
+                .map(|c| CdcCrossingView {
+                    kind: c.kind.as_str().to_string(),
+                    outcome: c.outcome.as_str().to_string(),
+                    source: c.source.clone(),
+                    source_clock: c.source_clock.clone(),
+                    destination: c.destination.clone(),
+                    destination_clock: c.destination_clock.clone(),
+                    stages: c.stages,
+                    path: c.path.clone(),
+                    detail: c.detail.clone(),
+                })
+                .collect(),
+            notes: r.notes.clone(),
+        }
+    }
+}
+
 /// One `sv lint` finding — a named signal a structural check flagged. Element of
 /// [`SvLintResponse`].
 #[derive(Debug, Serialize)]
