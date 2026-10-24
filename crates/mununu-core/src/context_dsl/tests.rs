@@ -1122,9 +1122,9 @@ context dead {{
 "#
         )
     };
-    let err = crate::context_dsl::realize::realize(&parse_context(&model("")), &[])
-        .err()
-        .expect("the vector {a, b} has no partner: an error");
+    let Err(err) = crate::context_dsl::realize::realize(&parse_context(&model("")), &[]) else {
+        panic!("the vector {{a, b}} has no partner: an error");
+    };
     let msg = err.to_string();
     assert!(
         msg.contains("mununu#570") && msg.contains("{a, b}"),
