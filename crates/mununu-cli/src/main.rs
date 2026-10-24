@@ -904,7 +904,10 @@ impl From<SvFrontendArg> for mununu_core::adapter::yosys::SvFrontend {
     fn from(a: SvFrontendArg) -> Self {
         match a {
             SvFrontendArg::Auto => Self::Auto,
-            SvFrontendArg::Verilog | SvFrontendArg::Sv2v => Self::Verilog,
+            SvFrontendArg::Verilog => Self::Verilog,
+            // sv2v first (`sv2v()`), then the `auto` order and its slang fallback — what the
+            // pre-0.5 `--preprocess-sv2v` did; a forced `Verilog` loses the fallback.
+            SvFrontendArg::Sv2v => Self::Auto,
             SvFrontendArg::Slang => Self::Slang,
         }
     }
@@ -3160,6 +3163,9 @@ mod sv_frontend_arg_tests {
             SvFrontend::Verilog
         );
         assert_eq!(SvFrontend::from(SvFrontendArg::Slang), SvFrontend::Slang);
+        // 0.5.1: `--frontend sv2v` keeps the `auto` fallback (sv2v cannot parse `bind`).
+        assert_eq!(SvFrontend::from(SvFrontendArg::Sv2v), SvFrontend::Auto);
+        assert!(SvFrontendArg::Sv2v.sv2v());
     }
 
     #[test]

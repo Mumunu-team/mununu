@@ -1622,7 +1622,8 @@ pub struct SvCheckFsmRequest {
 }
 
 /// The RTL front end of a lift: `auto` (the environment's default), `verilog` (yosys
-/// `read_verilog`), `slang` (the yosys-slang plugin) or `sv2v` (sv2v, then `read_verilog`).
+/// `read_verilog`), `slang` (the yosys-slang plugin) or `sv2v` (sv2v first, then the `auto`
+/// order with its slang fallback).
 /// The CLI's `--frontend` takes the same four values.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema,
@@ -1681,7 +1682,10 @@ impl SvLiftRequest {
             SvFrontendName::Auto => (SvFrontend::Auto, false),
             SvFrontendName::Verilog => (SvFrontend::Verilog, false),
             SvFrontendName::Slang => (SvFrontend::Slang, false),
-            SvFrontendName::Sv2v => (SvFrontend::Verilog, true),
+            // sv2v first, then the `auto` order (read_verilog, slang fallback): the pre-0.5
+            // `--preprocess-sv2v` semantics. A forced `Verilog` loses the fallback that lifts what
+            // sv2v cannot parse (a `bind` checker).
+            SvFrontendName::Sv2v => (SvFrontend::Auto, true),
         };
         Ok(crate::adapter::sv_verify::SvLift {
             primary_name: self
