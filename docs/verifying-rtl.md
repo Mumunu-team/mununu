@@ -166,7 +166,7 @@ The levers that measurement pointed at are applied by the exact engine's **ladde
 `ExactSession` per property (bit-blast once), then an unrestricted attempt for a short slice, the
 reachable-state restriction with a 5 s probe on a retryable abstention, and the unrestricted
 remainder. Under `--rung both` the verb runs the ladder for 30 s, then l2s, then the ladder with
-what `--budget-ms` leaves; `--parallel-rungs` runs both at once and cancels the loser. The root
+what `--timeout-ms` leaves; `--parallel-rungs` runs both at once and cancels the loser. The root
 fixpoint's early exit is on for every verdict path. Measured: `cucab09` (91 bits) from an arena
 abstention at 137 s to HOLDS in 2.6 s, `cuabq2mfro` from 105 s to 4.3 s, verdict-identical by
 gate — see [the levers briefing](consumer-briefings/2026-10-exact-reachable-restriction.md) and
@@ -749,7 +749,7 @@ engine refused the input atom. The "flags swapped" twin is rewritten the same wa
 refutation is an equality between **misaligned** bits of one register, which is exponential under
 the fixed interleaved variable order (the arena exhausts): the ordering wall of
 [`docs/design/bdd-variable-ordering.md`](design/bdd-variable-ordering.md), not a cone question.
-`--no-antecedent-propagate` / `no_antecedent_propagate: true` / `MUNUNU_NO_ANTECEDENT_PROPAGATE=1`
+`--no-antecedent-propagate` / API `antecedent_propagate: false` / `MUNUNU_NO_ANTECEDENT_PROPAGATE=1`
 disable the pass for a differential run; the wall-class matrix is identical with it on and off.
 
 > Source of truth: [`antecedent_propagation::propagate`](../crates/mununu-core/src/adapter/btor2/antecedent_propagation.rs) — surface: (CLI+API)
@@ -1290,7 +1290,7 @@ input's name, every reader of the input is redirected to it, and the input line 
 the free next-cycle choice `name$next`. The antecedent reads the same sampled value the
 transition consumes, and `[] C` reads the next state — exactly the SVA sampling
 semantics. Definite verdicts transfer at every alternation depth (nothing is abstracted).
-`--no-input-state` / `no_input_state: true` / `MUNUNU_NO_INPUT_STATE` restore the
+`--no-input-state` / API `input_state: false` / `MUNUNU_NO_INPUT_STATE` restore the
 refusal (a definite `Skipped` naming the input).
 
 **History (mununu#476 → mununu#677).** From 2026-08 to 2026-10-14 this shape went through
@@ -1299,8 +1299,8 @@ implementation kept the `[] C` after the rename, which checks the consequent one
 late (`A@N → C@N+2`); invisible on a sticky consequent (`done_q |=> done_q`), it refuted
 every one-shot one (monono `dram_preload`: `waddr_q == 0 |=> waddr_q == 1`), and was masked
 until the lift removed the refusal that had routed those properties to the cube engine.
-The shadow is removed; `--no-antecedent-shadow` / `no_antecedent_shadow` /
-`MUNUNU_NO_ANTECEDENT_SHADOW` are accepted and ignored. Design note kept as history:
+The shadow is removed; its switches (`--no-antecedent-shadow`, API `no_antecedent_shadow`) were
+removed in 0.5, and `MUNUNU_NO_ANTECEDENT_SHADOW` is read by nothing. Design note kept as history:
 [`docs/design/antecedent-shadow-synthesis.md`](design/antecedent-shadow-synthesis.md).
 
 **Still refused by both:** an antecedent whose cone reaches an *anonymous* input (a

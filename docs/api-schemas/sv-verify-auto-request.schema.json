@@ -165,6 +165,14 @@
   },
   "description": "XL.6b — automated SVA verification endpoint (`POST /api/v1/sv/verify-auto`). Mirrors the CLI `mununu sv verify-auto`: extract the design's SVA, lift, and verify each property against the model with no sidecar. slang parses SV directly, but the verify lift uses sv2v + Yosys, so `top` / `use_sv2v` apply.",
   "properties": {
+    "antecedent_propagate": {
+      "default": null,
+      "description": "mununu#629 — antecedent constant propagation on the exact-symbolic engine (default `true`): a same-cycle implication `sig == K |-> C` has `K` propagated through `C`'s cone (a read mux folds to the selected arm), so a property about one field of a wide packed record decides instead of skipping on the bit cap. `false` leaves the formula as lifted (the differential-oracle / debug knob; the CLI's `--no-antecedent-propagate`, `MUNUNU_NO_ANTECEDENT_PROPAGATE=1`).",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
     "assumes": {
       "default": null,
       "description": "How SVA `assume` statements are treated: `\"precondition\"` (default — the guarantees are checked on the traces along which every applied assumption has held), `\"check\"` (each assumption is checked like an assertion and constrains nothing) or `\"ignore\"`. Mirrors the CLI's `--assumes`. Any other value is a 400.",
@@ -247,6 +255,14 @@
         "null"
       ]
     },
+    "input_state": {
+      "default": null,
+      "description": "mununu#656 — inputs in the state on the exact-symbolic engine (default `true`): a property that reads a primary input, or a signal combinationally driven by one, is decided over the registers with that input sampled in the same cycle. `false` restores the engine's refusal of such atoms (the differential-oracle knob; the CLI's `--no-input-state`, `MUNUNU_NO_INPUT_STATE=1`).",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
     "lift": {
       "allOf": [
         {
@@ -273,30 +289,6 @@
         "null"
       ]
     },
-    "no_antecedent_propagate": {
-      "default": null,
-      "description": "mununu#629 — disable antecedent constant propagation on the exact-symbolic engine (default `false` ⇒ enabled). With it enabled, a same-cycle implication `sig == K |-> C` has `K` propagated through `C`'s cone — a read mux folds to the selected arm — so a property about one field of a wide packed record decides instead of skipping on the bit cap. Set `true` to leave the formula as lifted (the differential-oracle / debug knob), mirrored on the CLI as `--no-antecedent-propagate` and by the process-global `MUNUNU_NO_ANTECEDENT_PROPAGATE=1`.",
-      "type": [
-        "boolean",
-        "null"
-      ]
-    },
-    "no_antecedent_shadow": {
-      "default": null,
-      "description": "**Accepted and ignored since mununu#677.** The mununu#476 antecedent shadow synthesis this switched off was removed: it checked an SVA `|=>` consequent one cycle late (a spurious VIOLATED on every one-shot consequent). A `|=>` whose antecedent reaches primary inputs decides by inputs-in-the-state (mununu#656); the refusal this used to restore is `no_input_state: true`. Mirrored on the CLI as `--no-antecedent-shadow` (also ignored).",
-      "type": [
-        "boolean",
-        "null"
-      ]
-    },
-    "no_input_state": {
-      "default": null,
-      "description": "mununu#656 — disable inputs-in-the-state on the exact-symbolic engine (default `false` ⇒ enabled). Enabled, a property that reads a primary input or a signal combinationally driven by one is decided over the registers with that input sampled in the same cycle; `true` restores the engine's refusal of such atoms (the differential-oracle knob), mirrored on the CLI as `--no-input-state` and by `MUNUNU_NO_INPUT_STATE=1`.",
-      "type": [
-        "boolean",
-        "null"
-      ]
-    },
     "pins": {
       "default": [],
       "description": "H.J.b — config concretization: pin wide config inputs to constants so comparisons against them become decidable. Each entry `\"signal=value\"` (e.g. `\"cfg_detect_timer_i=7\"`). The verdicts are then SCOPED to these values (surfaced as a `config-concretization` note). Default empty.",
@@ -313,25 +305,9 @@
       },
       "type": "array"
     },
-    "rescue_bottom_liveness": {
+    "rescue": {
       "default": null,
-      "description": "Liveness-⊥ escalation (default `true`): a *box-AF* liveness property `AG(a → AF b)` the cube leaves ⊥ is retried via the liveness-to-safety reduction + the reachability portfolio. Set `false` to report the cube's ⊥ unchanged. Only fires on the l2s-able box-AF shape (diamond-EF recoverability stays on the νμ path).",
-      "type": [
-        "boolean",
-        "null"
-      ]
-    },
-    "rescue_bottom_recoverability": {
-      "default": null,
-      "description": "Recoverability-⊥ escalation (default `true`): a νμ recoverability property `AG EF good` the cube leaves ⊥ is retried via the cube + `smt-hyper-must` νμ path. Set `false` to report the cube's ⊥ unchanged. Only fires on the `AG EF (REG == VALUE)` shape.",
-      "type": [
-        "boolean",
-        "null"
-      ]
-    },
-    "rescue_bottom_safety": {
-      "default": null,
-      "description": "Safety-⊥ escalation (default `true`): a *safety* property the cube leaves ⊥ (a reducible AG-invariant) is retried with the multi-engine reachability portfolio (exact ⊕ native ⊕ spacer ⊕ btormc ⊕ Pono). Set `false` to report the cube's ⊥ unchanged. Only fires on ⊥ reducible AG-invariants.",
+      "description": "The ⊥ escalations (default `true`, the CLI's `--no-rescue` sets `false`): a property the cube leaves ⊥ is retried by the lane for its shape — a reducible safety invariant by the reachability portfolio, a box-AF response by liveness-to-safety plus the portfolio, an `AG EF (REG == VALUE)` recoverability by the cube with `smt-hyper-must`. `false` reports the cube's ⊥ unchanged.",
       "type": [
         "boolean",
         "null"

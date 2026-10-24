@@ -5688,11 +5688,7 @@ pub(crate) fn verify_auto_impl(
             // lane runs (62%) to that abort.
             if crate::adapter::engine_isolate::enabled() {
                 use crate::adapter::engine_isolate::Isolated;
-                let iso = crate::adapter::engine_isolate::exact_symbolic(
-                    &btor2,
-                    &formula_str,
-                    opts.antecedent_shadow,
-                );
+                let iso = crate::adapter::engine_isolate::exact_symbolic(&btor2, &formula_str);
                 // `Unavailable` falls THROUGH to the in-process path: isolation could not be
                 // attempted, which is our problem and not a reason to abstain on the property.
                 if !matches!(iso, Isolated::Unavailable(_)) {

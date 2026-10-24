@@ -137,7 +137,7 @@ def gen_exact_forward_twocount(m: int):
     src = (f"1 sort bitvec 1\n2 sort bitvec {w}\n3 input 1 turn\n4 zero 2\n5 state 2 a\n6 state 2 b\n"
            "7 init 2 5 4\n8 init 2 6 4\n9 one 2\n10 add 2 5 9\n11 add 2 6 9\n12 ite 2 3 5 10\n13 ite 2 -3 6 11\n"
            f"14 next 2 5 12\n15 next 2 6 13\n16 constd 2 {m - 1}\n17 eq 1 5 16\n18 eq 1 6 16\n19 and 1 17 18\n20 bad 19\n")
-    return src, ["--owned-only", "--owned-timeout-ms", "900000"], {}, f"forward twocount m={m} (w={w}), bad at (m-1,m-1), owned-only portfolio"
+    return src, ["--owned-only", "--timeout-ms", "900000"], {}, f"forward twocount m={m} (w={w}), bad at (m-1,m-1), owned-only portfolio"
 
 
 def gen_exact_relational(n: int):
