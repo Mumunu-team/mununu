@@ -140,6 +140,8 @@ pub struct DiagnosticsOptions {
 #[derive(Debug, Serialize, PartialEq)]
 pub struct ContextSynthesizeResponse {
     pub success: bool,
+    /// The verdict envelope: `holds` iff a controller exists (`realizable`), else `violated`.
+    pub outcome: String,
     pub realizable: bool,
     pub controller: Option<FileContent>,
     /// Controller in the requested native format (xstate, systemverilog).
@@ -169,6 +171,8 @@ pub struct Gr1SynthesizeRequest {
 /// Response from GR(1) controller synthesis.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct Gr1SynthesizeResponse {
+    /// The verdict envelope: `holds` iff the spec is realizable, else `violated`.
+    pub outcome: String,
     /// Whether the spec is realizable (sound GR(1) verdict).
     pub realizable: bool,
     /// The synthesized controller as SystemVerilog, if realizable and a strategy
@@ -540,7 +544,9 @@ pub struct ContextVerifyRequest {
 #[derive(Debug, Serialize, PartialEq)]
 pub struct ContextVerifyResponse {
     pub success: bool,
-    pub all_satisfied: bool,
+    /// The worst `outcome` over `results`, with a sanity finding counting as `unknown` when no
+    /// formula is `violated` (the same reading as `context eval`'s exit code).
+    pub outcome: String,
     pub results: Vec<FormulaVerificationResult>,
     /// One structural report per checked automaton, when `sanity` was requested.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -552,7 +558,8 @@ pub struct ContextVerifyResponse {
 pub struct FormulaVerificationResult {
     pub formula_name: String,
     pub automaton: String,
-    pub satisfied: bool,
+    /// `holds` iff every initial state satisfies the formula, else `violated`.
+    pub outcome: String,
     pub total_states: usize,
     pub satisfying_states: usize,
     pub initial_states: Vec<String>,
@@ -580,6 +587,15 @@ pub struct CounterstrategyResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_game_under_faults_reads_realizable_as_an_attack_that_violates_resistance() {
+        assert_eq!(game_outcome(false, true).0, "holds");
+        assert_eq!(game_outcome(false, false).0, "violated");
+        assert_eq!(game_outcome(true, true).0, "violated");
+        assert_eq!(game_outcome(true, false).0, "holds");
+        assert!(game_outcome(true, true).1.contains("attack"));
+    }
 
     #[test]
     fn test_file_content_serialization() {
@@ -1331,9 +1347,53 @@ pub struct Btor2GameRequest {
     pub fault_warmup: Option<u32>,
 }
 
+/// The verdict envelope of a game: the `outcome` of the property the verb decides and a `detail`
+/// naming whose objective that is. Without faults the property is the controller's objective
+/// (`holds` iff realizable). With faults the controller is the attacker and the property is the
+/// design's resistance, so a realizable game (an attack wins against every environment) is
+/// `violated`. The CLI exit code reads the same `outcome`.
+pub fn game_outcome(under_fault: bool, realizable: bool) -> (&'static str, String) {
+    let outcome = if realizable != under_fault {
+        "holds"
+    } else {
+        "violated"
+    };
+    let detail = match (under_fault, realizable) {
+        (false, true) => "the controller forces the objective against every environment move",
+        (false, false) => "the environment can prevent the objective (no controller wins)",
+        (true, true) => {
+            "an attack within the fault budget wins against every environment behaviour; the \
+             design does not resist it"
+        }
+        (true, false) => "no attack within the fault budget wins; the design resists it",
+    };
+    (outcome, detail.to_string())
+}
+
+/// The verdict of a CTXDSL evaluation (`context eval`, `/context/verify`): the formulas' (`holds`
+/// iff every initial state satisfies every one), else the sanity checks' (`unknown` when they found
+/// something, a finding being a model defect to review rather than a refuted property).
+/// `formula_holds` is `None` when only the sanity checks ran.
+pub fn context_outcome(formula_holds: Option<bool>, sanity_clean: bool) -> &'static str {
+    match formula_holds {
+        Some(false) => "violated",
+        _ if !sanity_clean => "unknown",
+        _ => "holds",
+    }
+}
+
+/// `holds` / `violated` for a realizability verdict (synthesis, GR(1)): the controller exists.
+pub fn realizable_outcome(realizable: bool) -> &'static str {
+    if realizable { "holds" } else { "violated" }
+}
+
 /// Response for `POST /api/v1/btor2/game`.
 #[derive(Debug, Serialize)]
 pub struct Btor2GameResponse {
+    /// The verdict envelope: `holds` | `violated` for the property [`game_outcome`] describes.
+    pub outcome: String,
+    /// Whose objective `outcome` is about, in words (the `--fault` polarity is stated here).
+    pub detail: String,
     /// `true` = the controller can force `good` against every environment move (the spec is realizable);
     /// `false` = the environment can prevent it (unrealizable). For `objective = "recurrence"` this is
     /// "force `good` infinitely often" (the Büchi game).
@@ -2944,8 +3004,9 @@ pub struct Btor2CegarResponse {
     /// `"budget-expired"` (mununu#504 — the wall clock ran out, as opposed to the refinement
     /// cap being reached; the verdict is the last completed iteration's and is sound).
     pub terminated_with: String,
-    /// Cell-count summary of the final 3-valued verdict.
-    pub verdict: CegarVerdictSummary,
+    /// Cell-count summary of the final 3-valued verdict, over every cell (not only the initial
+    /// ones), so it carries no single `outcome`.
+    pub cells: CegarVerdictSummary,
     /// `true` when the eager `predicate_cube_lift` was used (R.2.5 MVP).
     pub lazy_lift_pending: bool,
     /// Whether prior-iteration approximants were threaded forward.
@@ -3017,7 +3078,7 @@ pub struct CegarIterationView {
     /// diagnostics).
     pub game_position_evaluations: usize,
     /// Cell-count summary of this iteration's 3-valued verdict.
-    pub verdict: CegarVerdictSummary,
+    pub cells: CegarVerdictSummary,
 }
 
 /// Cell counts of a 3-valued (Kleene) verdict over the cube space.

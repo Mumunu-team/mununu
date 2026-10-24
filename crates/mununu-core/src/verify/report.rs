@@ -121,9 +121,10 @@ pub struct PropertyVerdict {
     pub formula: String,
     /// Target automaton/composition name.
     pub over: String,
-    /// `true` if every initial state of the target satisfies the
-    /// formula. Mirrors the CLI verdict convention.
-    pub satisfied: bool,
+    /// The verdict envelope: `holds` if every initial state of the target satisfies the formula,
+    /// else `violated`. Under `assumptions`, read it together with `fair_path_exists` (a `holds`
+    /// with `fair_path_exists: false` is vacuous).
+    pub outcome: String,
     /// Total number of states in the target automaton/composition.
     pub total_states: usize,
     /// Number of states satisfying the formula.
@@ -161,6 +162,13 @@ pub struct PropertyVerdict {
     /// SATISFIED. `None` for an unconditional property.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fair_path_exists: Option<bool>,
+}
+
+impl PropertyVerdict {
+    /// Whether every initial state satisfies the formula (`outcome == "holds"`).
+    pub fn satisfied(&self) -> bool {
+        self.outcome == "holds"
+    }
 }
 
 /// A short witness path from a violating initial state to either a

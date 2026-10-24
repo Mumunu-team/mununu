@@ -2899,6 +2899,10 @@ struct ContextEvalArgs {
     /// `--sanity` findings count as `unknown`. Exit codes follow the shared gate.
     #[command(flatten)]
     ci: CiArgs,
+    /// Print the verdict as JSON instead of text: the `ContextVerifyResponse` that
+    /// `POST /api/v1/context/verify` returns (`outcome`, `results[]`, `sanity[]`).
+    #[command(flatten)]
+    json: JsonArgs,
 }
 
 #[derive(Args, Debug)]
@@ -3374,7 +3378,7 @@ fn handle_verify(args: VerifyArgs) -> Result<(), String> {
             // mununu#595 — a conditional verdict is never a bare SATISFIED: it says what it
             // holds UNDER, and when the assumptions admit no path at all it says VACUOUS
             // instead, because the formula is then true for nothing.
-            let verdict = match (v.satisfied, v.fair_path_exists) {
+            let verdict = match (v.satisfied(), v.fair_path_exists) {
                 (true, Some(false)) => format!(
                     "VACUOUS under {{{}}} — the assumptions admit no fair path from the initial \
                      state(s); the formula is trivially true",
@@ -3453,7 +3457,7 @@ fn handle_verify(args: VerifyArgs) -> Result<(), String> {
         }
     }
 
-    if args.strict && report.property_verdicts.iter().any(|v| !v.satisfied) {
+    if args.strict && report.property_verdicts.iter().any(|v| !v.satisfied()) {
         return Err("one or more properties violated (--strict)".to_string());
     }
     // mununu#595 — a vacuous conditional verdict is not a pass either.
@@ -3773,8 +3777,12 @@ fn btor2_game(args: Btor2GameArgs) -> Result<(), String> {
         }
     };
 
+    let (outcome, detail) =
+        mununu_core::api::models::game_outcome(fault_label.is_some(), realizable);
     let mut summary = serde_json::json!({
         "file": args.file.display().to_string(),
+        "outcome": outcome,
+        "detail": detail,
         "good": args.good,
         "objective": if recurrence { "recurrence" } else { "reach" },
         "controllable": args.controllable,
@@ -3830,13 +3838,7 @@ fn btor2_game(args: Btor2GameArgs) -> Result<(), String> {
     }
     print_json_summary(&summary)?;
 
-    // realizable == the controller wins (`holds`); unrealizable == no controller works (`violated`).
-    // Under `--fault` the controller IS the attacker: realizable == an attack exists (`violated`).
-    let verdict = match (fault_label.is_some(), realizable) {
-        (false, true) | (true, false) => "holds",
-        (false, false) | (true, true) => "violated",
-    };
-    ci_gate_exit(verdict, args.ci.fail_on);
+    ci_gate_exit(outcome, args.ci.fail_on);
     Ok(())
 }
 
@@ -5255,7 +5257,7 @@ fn run_symbolic_cegar_cli(
             "terminated_with": terminated,
             "final_predicate_count": v.num_predicates,
             "feasible_cube_count": v.cube_verdicts.len(),
-            "verdict": {
+            "cells": {
                 "true_cells": t,
                 "false_cells": f,
                 "unknown_cells": b,
@@ -5555,7 +5557,7 @@ fn run_cegar_cli(
             "iterations": trace.iterations.len(),
             "terminated_with": format!("{:?}", trace.terminated_with),
             "final_predicate_count": trace.final_predicates.len(),
-            "verdict": {
+            "cells": {
                 "true_cells": t_cells,
                 "false_cells": f_cells,
                 "unknown_cells": bot_cells,
@@ -6253,14 +6255,14 @@ fn codesign_verify(args: CodesignVerifyArgs) -> Result<(), String> {
                 "peripheral_automaton": composed.peripheral_automaton,
                 "firmware_members": composed.firmware_members,
             },
-            "verdict": {
+            "outcome": if all_initials_satisfying { "holds" } else { "violated" },
+            "property": {
                 "formula": args.formula,
                 "automaton": automaton_name,
                 "total_states": total_states,
                 "satisfying_states": satisfying_count,
                 "initial_states": initial_states,
                 "initial_satisfying": initial_satisfying,
-                "satisfied": all_initials_satisfying,
             },
         });
         println!(
@@ -8105,6 +8107,38 @@ fn context_predicates(args: ContextPredicatesArgs) -> Result<(), String> {
 }
 
 fn context_eval(args: ContextEvalArgs) -> Result<(), String> {
+    let as_json = args.json.json;
+    let file = args.context.display().to_string();
+    match context_eval_impl(args) {
+        Ok(()) => Ok(()),
+        Err(e) if as_json => exit_with_json_error("context-eval", &file, &e),
+        Err(e) => Err(e),
+    }
+}
+
+/// Print `context eval`'s JSON document and apply the CI gate.
+fn print_context_eval_json(
+    results: Vec<mununu_core::api::models::FormulaVerificationResult>,
+    sanity: Vec<mununu_core::context::sanity::SanityReport>,
+    fail_on: FailOn,
+) -> Result<(), String> {
+    let holds = results.iter().all(|r| r.outcome == "holds");
+    let formula_holds = (!results.is_empty()).then_some(holds);
+    let outcome = context_eval_outcome(formula_holds, sanity.iter().all(|r| r.is_clean()));
+    let doc = serde_json::json!({
+        "success": true,
+        "outcome": outcome,
+        "results": results,
+        "sanity": sanity,
+    });
+    print_json_summary(&doc)?;
+    ci_gate_exit(outcome, fail_on);
+    Ok(())
+}
+
+fn context_eval_impl(args: ContextEvalArgs) -> Result<(), String> {
+    let as_json = args.json.json;
+    let mut sanity_reports = Vec::new();
     let preprocessor = validate_preprocessor(args.preprocessor.as_deref())?;
     let PreparedEvalContext {
         realized,
@@ -8142,9 +8176,15 @@ fn context_eval(args: ContextEvalArgs) -> Result<(), String> {
             &realized.declared_labels_of(&args.automaton),
             &members,
         );
-        print!("{report}");
         sanity_clean = report.is_clean();
+        if !as_json {
+            print!("{report}");
+        }
+        sanity_reports.push(report);
         if formula_name.is_empty() {
+            if as_json {
+                return print_context_eval_json(Vec::new(), sanity_reports, args.ci.fail_on);
+            }
             ci_gate_exit(context_eval_outcome(None, sanity_clean), args.ci.fail_on);
             return Ok(());
         }
@@ -8318,6 +8358,26 @@ fn context_eval(args: ContextEvalArgs) -> Result<(), String> {
     if let Some(msg) = vacuity_warning_for_state_count(eval_clts.state_count()) {
         eprintln!("{msg}");
     }
+    if as_json {
+        let result = mununu_core::api::models::FormulaVerificationResult {
+            formula_name: formula_name.clone(),
+            automaton: args.automaton.clone(),
+            outcome: if initial_satisfying.len() == initial_states.len() {
+                "holds"
+            } else {
+                "violated"
+            }
+            .to_string(),
+            total_states: eval_clts.state_count(),
+            satisfying_states: satisfying.len(),
+            initial_states: initial_states.clone(),
+            initial_satisfying: initial_satisfying.clone(),
+            initial_violating: initial_violating.iter().map(|(n, _)| n.clone()).collect(),
+            satisfying_state_names: satisfying.clone(),
+            counterstrategy: None,
+        };
+        return print_context_eval_json(vec![result], sanity_reports, args.ci.fail_on);
+    }
 
     println!(
         "Formula '{}' over automaton '{}':",
@@ -8422,16 +8482,7 @@ fn context_eval(args: ContextEvalArgs) -> Result<(), String> {
     Ok(())
 }
 
-/// The CI verdict of a `context eval` run: the formula's (`holds` iff every initial state
-/// satisfies it), else the sanity checks' (`unknown` when they found something, a finding being
-/// a model defect to review rather than a refuted property).
-fn context_eval_outcome(formula_holds: Option<bool>, sanity_clean: bool) -> &'static str {
-    match formula_holds {
-        Some(false) => "violated",
-        _ if !sanity_clean => "unknown",
-        _ => "holds",
-    }
-}
+use mununu_core::api::models::context_outcome as context_eval_outcome;
 
 /// GR(1) controller synthesis path (`--controller-mode gr1`): read the source,
 /// translate it to the adapter IR, run the sound GR(1) synthesizer, print the
@@ -9073,6 +9124,8 @@ fn ensure_parent_dir(path: &Path) -> io::Result<()> {
 struct ControllerSynthesisJson {
     automaton: String,
     formula: String,
+    /// The verdict envelope: `holds` iff a controller exists.
+    outcome: &'static str,
     realizable: bool,
     controller: ControllerJson,
     diagnostics: Value,
@@ -9171,6 +9224,7 @@ fn write_controller_json(
     let payload = ControllerSynthesisJson {
         automaton: automaton.to_owned(),
         formula: formula.to_owned(),
+        outcome: mununu_core::api::models::realizable_outcome(synthesis.realizable),
         realizable: synthesis.realizable,
         controller: ControllerJson {
             state_count: controller.state_count(),

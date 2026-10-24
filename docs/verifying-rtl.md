@@ -849,7 +849,7 @@ mununu btor2 game keymgr.btor2 --fault state_q:1 --good "state_q == 680" --assum
 | question | engine | `violated` means | `holds` means |
 |---|---|---|---|
 | `btor2 verify --fault … --target ATOM` | the reach portfolio on the injected model (`AG !target` through the reach rescue; the witness through native BMC) | an attack exists for the **strongest** attacker — it also drives every design input; the JSON's `attack.faults[]` lists `{cycle, site, value}` | for every input behaviour and every schedule of at most `k` injections after the warm-up, the target is never reached |
-| `btor2 game --fault … --good ATOM` | the exact engine's two-player fixpoint (`μX. good ∨ ⟨ctrl⟩X`, fault inputs controllable) | `realizable` — an attack wins against every environment behaviour (`attack_exists: true`; the strategy is the attack) | unrealizable — a positional environment counterstrategy blocks every attack (the counterstrategy is the defence) |
+| `btor2 game --fault … --good ATOM` | the exact engine's two-player fixpoint (`μX. good ∨ ⟨ctrl⟩X`, fault inputs controllable) | `realizable` — an attack wins against every environment behaviour (`outcome: violated`, `attack_exists: true`; the strategy is the attack; `detail` says so) | unrealizable — a positional environment counterstrategy blocks every attack (the counterstrategy is the defence) |
 
 The game's CI verdict is flipped under `--fault`: `realizable` → `violated` (the controller is the
 attacker). Without `--fault` nothing changes. `btor2 verify … --target` unreachable implies the game is

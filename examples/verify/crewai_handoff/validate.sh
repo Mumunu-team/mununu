@@ -46,7 +46,7 @@ print("composition.name = " + report["composition"]["name"])
 print("composition.semantics = " + report["composition"]["semantics"])
 for v in report["property_verdicts"]:
     src = v["formula_source"]["kind"]
-    sat = v["satisfied"]
+    sat = (v["outcome"] == "holds")
     print("  property `" + v["name"] + "`: satisfied = " + str(sat) + ", source = " + src)
 '
 } > "$TRANSCRIPT"

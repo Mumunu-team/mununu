@@ -116,7 +116,7 @@ overs = set()
 for name in ("reach_done0", "reach_done1"):
     v = verds.get(name)
     assert v, f"FAIL: missing verdict {name}"
-    assert v["satisfied"], f"FAIL: {name} not SATISFIED"
+    assert (v["outcome"] == "holds"), f"FAIL: {name} not SATISFIED"
     # Non-vacuous: the cluster must carry the concretized wide cells, i.e.
     # many states (2^7 = 128 real + OOB), not a degenerate sliced-away cone.
     assert v["total_states"] >= 64, \

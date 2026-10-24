@@ -137,6 +137,7 @@ Parse a CTXDSL context (with optional sidecar files) and return a summary of all
 | `name` | `string` | Controller identifier. |
 | `source` | `string` | Source automaton name. |
 | `formula` | `string` | Formula used for synthesis. |
+| `outcome` | `string` | The verdict envelope: `holds` iff a controller exists, else `violated` (since 0.5). |
 | `realizable` | `boolean` | Whether a winning strategy exists. |
 | `states_count` | `number` | Controller state count (0 if unrealizable). |
 | `transitions_count` | `number` | Controller transition count (0 if unrealizable). |
@@ -215,6 +216,7 @@ Synthesize a controller for a given automaton and mu-calculus formula. The contr
 | Field | Type | Description |
 |-------|------|-------------|
 | `success` | `boolean` | `true` on success. |
+| `outcome` | `string` | The verdict envelope: `holds` iff a controller exists, else `violated` (since 0.5). |
 | `realizable` | `boolean` | Whether a winning controller exists. |
 | `controller` | `FileContent \| null` | Synthesized controller as CTXDSL. `null` when unrealizable. |
 | `controller_native` | `FileContent \| null` | Controller in the requested native format (`output_format`). Omitted unless requested. |
@@ -472,7 +474,7 @@ Evaluate mu-calculus formulas over automata and report which initial states sati
 | Field | Type | Description |
 |-------|------|-------------|
 | `success` | `boolean` | `true` on success. |
-| `all_satisfied` | `boolean` | `true` if every formula is satisfied on every target. |
+| `outcome` | `string` | `holds` if every formula is satisfied on every target, `violated` if one is not, `unknown` when they all are but a `sanity` check found something. |
 | `results` | `FormulaVerificationResult[]` | One entry per formula-automaton pair. |
 
 **FormulaVerificationResult**
@@ -481,7 +483,7 @@ Evaluate mu-calculus formulas over automata and report which initial states sati
 |-------|------|-------------|
 | `formula_name` | `string` | Formula identifier. |
 | `automaton` | `string` | Automaton evaluated against. |
-| `satisfied` | `boolean` | `true` if all initial states satisfy the formula. |
+| `outcome` | `string` | `holds` if all initial states satisfy the formula, else `violated`. |
 | `total_states` | `number` | Total states in the automaton. |
 | `satisfying_states` | `number` | Number of states satisfying the formula. |
 | `initial_states` | `string[]` | All initial state names. |
@@ -518,12 +520,12 @@ curl -X POST http://localhost:3000/api/v1/context/verify \
 ```json
 {
   "success": true,
-  "all_satisfied": true,
+  "outcome": "holds",
   "results": [
     {
       "formula_name": "mutual_exclusion",
       "automaton": "arbiter",
-      "satisfied": true,
+      "outcome": "holds",
       "total_states": 6,
       "satisfying_states": 6,
       "initial_states": ["idle"],
@@ -654,7 +656,7 @@ Supply exactly one of `config` (pre-parsed) or `config_toml` (raw verify.toml te
 | `composition` | `CompositionInfo` | `semantics`, resolved composition `name`, resolved member names. |
 | `property_verdicts` | `PropertyVerdict[]` | One verdict per `[[properties]]` entry. |
 
-`PropertyVerdict` carries `name`, `formula_source` (`Inline` or `Template { id, args }`), the concrete `formula` text, the `over` target, `satisfied`, state counts, and the initial-state breakdown.
+`PropertyVerdict` carries `name`, `formula_source` (`Inline` or `Template { id, args }`), the concrete `formula` text, the `over` target, `outcome` (`holds` / `violated`), state counts, and the initial-state breakdown.
 
 ### Example
 
@@ -1069,7 +1071,7 @@ HW/SW codesign verification (Document C task C4). Compose firmware CTXDSL with a
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `satisfied` | `boolean` | Whether every initial state satisfies the formula. |
+| `outcome` | `string` | `holds` if every initial state satisfies the formula, else `violated`. |
 | `total_states` | `number` | States in the composed automaton/composition. |
 | `satisfying_states` | `number` | States satisfying the formula. |
 | `initial_states` | `string[]` | Initial state names. |

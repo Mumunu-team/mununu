@@ -378,7 +378,7 @@ pub fn verify_project(config: &VerifyConfig, base_dir: &Path) -> Result<VerifyRe
                 0,
             )?;
             verdict.assumptions = property_assumptions[idx].clone();
-            verdict.fair_path_exists = Some(gate_verdict.satisfied);
+            verdict.fair_path_exists = Some(gate_verdict.satisfied());
         }
         property_verdicts.push(verdict);
     }
@@ -1763,7 +1763,7 @@ fn evaluate_one_property(
         formula_source,
         formula: formula_text.to_string(),
         over: over.to_string(),
-        satisfied,
+        outcome: if satisfied { "holds" } else { "violated" }.to_string(),
         total_states,
         satisfying_states,
         initial_states,
@@ -2501,7 +2501,7 @@ over = "Sys"
             "the default cap rides the report"
         );
         let v = &report.property_verdicts[0];
-        assert!(!v.satisfied, "Bad is reachable");
+        assert!(!v.satisfied(), "Bad is reachable");
         let w = v.counterexample.as_ref().expect("a witness");
         assert_eq!(w.steps.len(), 20, "cut at the default cap");
         assert!(matches!(w.termination, TraceTermination::LengthLimit));
@@ -2614,7 +2614,7 @@ assumptions = ["go_weakly_fair"]
         // `GF go` is unsatisfiable: the property holds for nothing, and the gate says so.
         let under_go = by("under_go");
         assert_eq!(under_go.assumptions, vec!["env_takes_go".to_string()]);
-        assert!(under_go.satisfied, "A_C F Goal is vacuously true");
+        assert!(under_go.satisfied(), "A_C F Goal is vacuously true");
         assert_eq!(
             under_go.fair_path_exists,
             Some(false),
@@ -2627,12 +2627,12 @@ assumptions = ["go_weakly_fair"]
         );
         // `GF b` is satisfiable and the fair cycle avoids Goal: a GENUINE violation.
         let under_b = by("under_b");
-        assert!(!under_b.satisfied);
+        assert!(!under_b.satisfied());
         assert_eq!(under_b.fair_path_exists, Some(true));
         // Weak fairness of `go` on M: the cycle disables `go` at S1 infinitely often, so a weakly
         // fair path avoids Goal — violated, non-vacuously.
         let resp = by("resp_under_weak_go");
-        assert!(!resp.satisfied);
+        assert!(!resp.satisfied());
         assert_eq!(resp.fair_path_exists, Some(true));
         assert!(
             matches!(&resp.formula_source, PropertyFormulaSource::Template { id, .. } if id == "fair_response"),
@@ -2702,7 +2702,7 @@ over = "Pool"
                 .find(|v| v.name == "busy_reachable")
                 .expect("the property is evaluated");
             assert!(
-                v.satisfied,
+                v.satisfied(),
                 "members = {members}: Busy is reachable in the pool"
             );
         }
@@ -2916,7 +2916,7 @@ over = "S"
         // automaton in the composition came from `primary.xstate.json`.
         assert_eq!(report.sources[0].id, "x");
         let v = &report.property_verdicts[0];
-        assert!(v.satisfied);
+        assert!(v.satisfied());
         // IR-track P3.1 — the 3-valued summary mirrors the 2-valued
         // result on the bit-blast path: every initial state is a
         // definite KleeneT (satisfying `true`), no KleeneBot.
@@ -3030,7 +3030,7 @@ over = "cube_ctr"
             always.initial_verdict_summary.unknown_cells, 0,
             "definite verdict on the modal property"
         );
-        assert!(!always.satisfied);
+        assert!(!always.satisfied());
     }
 
     #[test]
@@ -3082,13 +3082,13 @@ members = ["light"]
             vec!["Light".to_string(), "Gate".to_string()]
         );
         assert_eq!(report.property_verdicts.len(), 2);
-        // `true` is satisfied everywhere; verdict.satisfied should be true.
+        // `true` is satisfied everywhere; verdict.satisfied() should be true.
         let reach = report
             .property_verdicts
             .iter()
             .find(|v| v.name == "reach_self")
             .unwrap();
-        assert!(reach.satisfied);
+        assert!(reach.satisfied());
         assert!(reach.total_states > 0);
         match &reach.formula_source {
             PropertyFormulaSource::Inline => {}
@@ -3295,7 +3295,7 @@ over = "Sys"
         let report = verify_project(&config, temp.path()).expect("pipeline runs");
         assert_eq!(report.property_verdicts.len(), 1);
         let v = &report.property_verdicts[0];
-        assert!(!v.satisfied, "expected VIOLATED");
+        assert!(!v.satisfied(), "expected VIOLATED");
         let witness = v
             .counterexample
             .as_ref()
@@ -3318,7 +3318,7 @@ over = "Sys"
         let config = build_two_source_config(temp.path());
         let report = verify_project(&config, temp.path()).expect("pipeline runs");
         for v in &report.property_verdicts {
-            assert!(v.satisfied);
+            assert!(v.satisfied());
             assert!(
                 v.counterexample.is_none(),
                 "satisfied verdicts should not carry a counterexample"

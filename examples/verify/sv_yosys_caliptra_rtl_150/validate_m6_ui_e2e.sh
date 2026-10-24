@@ -107,7 +107,7 @@ PY
   python3 - "${OUT}/${variant}.resp.json" <<'PY'
 import json, sys
 r = json.load(open(sys.argv[1]))
-v = r["verdict"]
+v = r["cells"]
 print(f'{v["true_cells"]} {v["unknown_cells"]}')  # "T ⊥" to stdout for the caller
 import sys as _s; _s.stderr.write(
   f'  verdict T={v["true_cells"]} F={v["false_cells"]} ⊥={v["unknown_cells"]} '

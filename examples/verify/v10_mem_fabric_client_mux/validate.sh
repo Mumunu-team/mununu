@@ -41,7 +41,7 @@ assert_variant() {
 import json, sys
 jf, variant, xdup, xskip, xwedge = sys.argv[1:6]
 r = json.load(open(jf))
-got = {v["name"]: v["satisfied"] for v in r["property_verdicts"]}
+got = {v["name"]: (v["outcome"] == "holds") for v in r["property_verdicts"]}
 want = {
     "duplicate_issue_reachable":  xdup   == "true",
     "skipped_word_reachable":     xskip  == "true",

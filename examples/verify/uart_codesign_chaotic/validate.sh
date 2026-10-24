@@ -47,7 +47,7 @@ print("composition.name = " + report["composition"]["name"])
 print("composition.semantics = " + report["composition"]["semantics"])
 print("composition.members = " + ", ".join(report["composition"]["members"]))
 for v in report["property_verdicts"]:
-    sat = v["satisfied"]
+    sat = (v["outcome"] == "holds")
     line = "  " + v["name"] + ": "
     line += "SATISFIED" if sat else "VIOLATED"
     line += " (" + str(v["satisfying_states"]) + "/" + str(v["total_states"]) + " states, "

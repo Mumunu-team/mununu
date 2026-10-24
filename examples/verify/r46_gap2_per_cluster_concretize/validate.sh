@@ -89,7 +89,7 @@ overs = set()
 for name in ("reach_a7", "reach_b7", "reach_c7"):
     v = verds.get(name)
     assert v, f"FAIL: missing verdict {name}"
-    assert v["satisfied"], f"FAIL: {name} not SATISFIED (the spurious-VIOLATED regression)"
+    assert (v["outcome"] == "holds"), f"FAIL: {name} not SATISFIED (the spurious-VIOLATED regression)"
     assert v["total_states"] > 0, f"FAIL: vacuous verdict for {name}"
     assert v["over"].startswith("Circuit__cl"), \
         f"FAIL: {name} not routed to a cluster automaton (over={v['over']})"

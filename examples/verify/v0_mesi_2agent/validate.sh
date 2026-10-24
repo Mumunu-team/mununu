@@ -52,7 +52,7 @@ print("composition.semantics = " + report["composition"]["semantics"])
 print("composition.members = " + ", ".join(report["composition"]["members"]))
 for v in report["property_verdicts"]:
     name = v["name"]
-    sat = v["satisfied"]
+    sat = (v["outcome"] == "holds")
     print(f"property[{name}] satisfied = {sat}")
 '
 } > "$TRANSCRIPT"

@@ -371,6 +371,7 @@ fn context_synthesize_handler_impl(
 
     Ok(Json(ContextSynthesizeResponse {
         success: true,
+        outcome: realizable_outcome(synthesis.realizable).to_string(),
         realizable: synthesis.realizable,
         controller: controller_content,
         controller_native,
@@ -415,6 +416,7 @@ fn gr1_synthesize_handler_impl(
         }
     })?;
     Ok(Json(Gr1SynthesizeResponse {
+        outcome: realizable_outcome(synth.realizable).to_string(),
         realizable: synth.realizable,
         controller_sv: synth.controller_sv,
         game_states: synth.n_game_states,
@@ -1314,7 +1316,10 @@ fn btor2_game_handler_impl(request: Btor2GameRequest) -> ApiResult<Json<Btor2Gam
         None
     };
 
+    let (outcome, detail) = game_outcome(fault_label.is_some(), realizable);
     Ok(Json(Btor2GameResponse {
+        outcome: outcome.to_string(),
+        detail,
         realizable,
         good: request.good,
         objective: request.objective,
@@ -2387,7 +2392,7 @@ fn run_symbolic_cegar_response(
             // The symbolic MVP does not track which predicate closed each ⊥.
             predicates_added: Vec::new(),
             game_position_evaluations: 0,
-            verdict: CegarVerdictSummary {
+            cells: CegarVerdictSummary {
                 true_cells: it.definite_true,
                 false_cells: it.definite_false,
                 unknown_cells: it.bottom,
@@ -2417,7 +2422,7 @@ fn run_symbolic_cegar_response(
             })
             .collect(),
         terminated_with,
-        verdict: CegarVerdictSummary {
+        cells: CegarVerdictSummary {
             true_cells: v.definite_true,
             false_cells: v.definite_false,
             unknown_cells: v.bottom,
@@ -2605,7 +2610,7 @@ fn run_cegar_build_response(params: CegarRunParams<'_>) -> Result<Btor2CegarResp
             had_failure_subgame: it.failure_subgame.is_some(),
             predicates_added: it.predicates_added.iter().map(&pred_view).collect(),
             game_position_evaluations: it.game_position_evaluations,
-            verdict: summarize(&it.verdict, &it.unlifted_cells),
+            cells: summarize(&it.verdict, &it.unlifted_cells),
         })
         .collect();
 
@@ -2624,7 +2629,7 @@ fn run_cegar_build_response(params: CegarRunParams<'_>) -> Result<Btor2CegarResp
             CegarTermination::BudgetExpired => "budget-expired",
         }
         .to_string(),
-        verdict: summarize(&trace.final_verdict, &trace.unlifted_cells),
+        cells: summarize(&trace.final_verdict, &trace.unlifted_cells),
         lazy_lift_pending: trace.lazy_lift_pending,
         approximant_reuse_enabled: trace.approximant_reuse_enabled,
         warnings: trace.warnings.iter().map(|w| w.message.clone()).collect(),
@@ -2931,7 +2936,7 @@ fn context_verify_handler_impl(
         results.push(FormulaVerificationResult {
             formula_name: formula_name.clone(),
             automaton: automaton_name.clone(),
-            satisfied,
+            outcome: realizable_outcome(satisfied).to_string(),
             total_states: clts.state_count(),
             satisfying_states: satisfying_state_names.len(),
             initial_states,
@@ -2954,7 +2959,7 @@ fn context_verify_handler_impl(
         "verify: complete"
     );
 
-    let all_satisfied = results.iter().all(|r| r.satisfied);
+    let all_satisfied = results.iter().all(|r| r.outcome == "holds");
 
     let mut sanity = Vec::new();
     if request.sanity {
@@ -2986,9 +2991,10 @@ fn context_verify_handler_impl(
         }
     }
 
+    let outcome = context_outcome(Some(all_satisfied), sanity.iter().all(|r| r.is_clean()));
     Ok(Json(ContextVerifyResponse {
         success: true,
-        all_satisfied,
+        outcome: outcome.to_string(),
         results,
         sanity,
     }))
@@ -3997,8 +4003,8 @@ pub struct CodesignVerifyRequest {
 /// Response body for `POST /api/v1/codesign/verify`.
 #[derive(Debug, serde::Serialize)]
 pub struct CodesignVerifyResponse {
-    /// Whether every initial state satisfies the formula.
-    pub satisfied: bool,
+    /// The verdict envelope: `holds` iff every initial state satisfies the formula.
+    pub outcome: String,
     /// Total number of states in the composed automaton/composition.
     pub total_states: usize,
     /// Number of states satisfying the formula.
@@ -4115,7 +4121,7 @@ fn codesign_verify_handler_impl(
     let satisfied = !initial_states.is_empty() && initial_satisfying.len() == initial_states.len();
 
     Ok(Json(CodesignVerifyResponse {
-        satisfied,
+        outcome: realizable_outcome(satisfied).to_string(),
         total_states,
         satisfying_states,
         initial_states,
@@ -4696,7 +4702,7 @@ over = "Sys"
             .expect("verify_project should succeed");
         assert_eq!(report.project, "ConfigTomlPath");
         assert_eq!(report.property_verdicts.len(), 1);
-        assert!(report.property_verdicts[0].satisfied);
+        assert!(report.property_verdicts[0].satisfied());
     }
 
     #[tokio::test]
@@ -4944,7 +4950,7 @@ members = ["x"]
             out.terminated_with
         );
         // Single predicate ⇒ 2 cubes; the verdict summary covers every cube.
-        let total = out.verdict.true_cells + out.verdict.false_cells + out.verdict.unknown_cells;
+        let total = out.cells.true_cells + out.cells.false_cells + out.cells.unknown_cells;
         assert_eq!(
             total, 2,
             "verdict summary must cover both cubes; got {total}"
@@ -5009,11 +5015,11 @@ members = ["x"]
         assert_eq!(out.iterations[0].iteration, 0);
         // Definite everywhere ⇒ converged, no ⊥.
         assert_eq!(out.terminated_with, "converged");
-        assert_eq!(out.verdict.unknown_cells, 0);
+        assert_eq!(out.cells.unknown_cells, 0);
         // One predicate (cnt==0) ⇒ 2 feasible cubes ({cnt==0}, {cnt!=0}).
-        let total = out.verdict.true_cells + out.verdict.false_cells + out.verdict.unknown_cells;
+        let total = out.cells.true_cells + out.cells.false_cells + out.cells.unknown_cells;
         assert_eq!(total, 2, "verdict covers both feasible cubes; got {total}");
-        assert!(out.verdict.true_cells >= 1);
+        assert!(out.cells.true_cells >= 1);
         assert!(
             out.warnings.iter().any(|w| w.contains("symbolic")),
             "symbolic path surfaces its caveat"
@@ -5280,7 +5286,7 @@ endmodule
         );
         assert_eq!(out.iterations[0].iteration, 0);
         // Single predicate ⇒ 2 cubes; the verdict covers every cube.
-        let total = out.verdict.true_cells + out.verdict.false_cells + out.verdict.unknown_cells;
+        let total = out.cells.true_cells + out.cells.false_cells + out.cells.unknown_cells;
         assert_eq!(total, 2, "verdict must cover both cubes; got {total}");
         assert!(!out.final_predicates.is_empty());
     }

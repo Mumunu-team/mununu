@@ -811,7 +811,11 @@ fn handle_verify(args: VerifyArgs) -> Result<(), String> {
                 PropertyFormulaSource::Inline => "inline".to_string(),
                 PropertyFormulaSource::Template { id, .. } => format!("template `{id}`"),
             };
-            let verdict = if v.satisfied { "SATISFIED" } else { "VIOLATED" };
+            let verdict = if v.satisfied() {
+                "SATISFIED"
+            } else {
+                "VIOLATED"
+            };
             println!(
                 "    {}: {} ({}/{} states, {}/{} initial) [{}, over = {}]",
                 v.name,
@@ -826,7 +830,7 @@ fn handle_verify(args: VerifyArgs) -> Result<(), String> {
         }
     }
 
-    if args.strict && report.property_verdicts.iter().any(|v| !v.satisfied) {
+    if args.strict && report.property_verdicts.iter().any(|v| !v.satisfied()) {
         return Err("one or more properties violated (--strict)".to_string());
     }
     Ok(())
