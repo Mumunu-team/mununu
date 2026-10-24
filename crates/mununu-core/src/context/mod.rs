@@ -1445,14 +1445,27 @@ pub struct ControllerDiagnostics {
     /// Initial states that failed to satisfy the requested formula.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub violating_initials: Vec<String>,
-    /// Minimal counterexample trace expressed as state names (if available).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Minimal counterexample trace expressed as state names (if available). Serialized as a
+    /// [`Trace`](crate::trace::Trace) under `counterexample`.
+    #[serde(
+        rename = "counterexample",
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::trace::ser::state_path_opt"
+    )]
     pub counterexample_trace: Option<Vec<String>>,
-    /// Deadlock traces (initial-to-deadlock paths) collected during synthesis.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    /// Deadlock traces (initial-to-deadlock paths) collected during synthesis, serialized as
+    /// traces.
+    #[serde(
+        skip_serializing_if = "Vec::is_empty",
+        serialize_with = "crate::trace::ser::state_paths"
+    )]
     pub deadlock_traces: Vec<Vec<String>>,
-    /// Minimal counterstrategy paths (environment choices) covering each violating initial.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    /// Minimal counterstrategy paths (environment choices) covering each violating initial,
+    /// serialized as traces.
+    #[serde(
+        skip_serializing_if = "Vec::is_empty",
+        serialize_with = "crate::trace::ser::state_paths"
+    )]
     pub counterstrategy_traces: Vec<Vec<String>>,
     /// Summary of controller minimisation, when enabled.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1470,8 +1483,9 @@ pub struct ControllerDiagnostics {
 }
 
 /// A lasso trace: finite prefix followed by an infinitely repeating cycle.
-/// Represents an infinite counterexample path: `prefix ++ cycle^ω`.
-#[derive(Debug, Clone, Default, serde::Serialize)]
+/// Represents an infinite counterexample path: `prefix ++ cycle^ω`. Serialized as a `lasso`
+/// [`Trace`](crate::trace::Trace) (`loop_start` = `prefix.len()`).
+#[derive(Debug, Clone, Default)]
 pub struct LassoTrace {
     pub prefix: Vec<String>,
     pub cycle: Vec<String>,
@@ -1479,13 +1493,31 @@ pub struct LassoTrace {
     /// `prefix_labels[i]` is the label on the edge from `prefix[i]` to `prefix[i+1]`
     /// (or to `cycle[0]` for the last element). Length = `prefix.len()` when a
     /// successor exists, otherwise empty.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub prefix_labels: Vec<String>,
     /// Transition labels between consecutive cycle states.
     /// `cycle_labels[i]` is the label on the edge from `cycle[i]` to `cycle[i+1]`.
     /// The last element is the label from the last cycle state back to `cycle[0]`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cycle_labels: Vec<String>,
+}
+
+impl LassoTrace {
+    /// The lasso as a [`Trace`](crate::trace::Trace).
+    pub fn to_trace(&self) -> crate::trace::Trace {
+        let states: Vec<String> = self.prefix.iter().chain(&self.cycle).cloned().collect();
+        let labels: Vec<String> = self
+            .prefix_labels
+            .iter()
+            .chain(&self.cycle_labels)
+            .cloned()
+            .collect();
+        crate::trace::Trace::from_states(&states, &labels, Some(self.prefix.len()))
+    }
+}
+
+impl serde::Serialize for LassoTrace {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        self.to_trace().serialize(s)
+    }
 }
 
 /// Prototype counterstrategy definition exposed in diagnostics.
@@ -2913,7 +2945,12 @@ context paths {{
         let json_file = NamedTempFile::new()?;
         diagnostics.write_json(json_file.path())?;
         let written_json = std::fs::read_to_string(json_file.path())?;
-        assert!(written_json.contains("\"counterexample_trace\""));
+        // 0.5: the path is a `Trace` under `counterexample`.
+        let written: serde_json::Value = serde_json::from_str(&written_json)?;
+        assert_eq!(
+            written["counterexample"]["kind"], "finite",
+            "{written_json}"
+        );
         assert!(written_json.contains("\"proof_obligations\""));
         assert!(written_json.contains("\"counterstrategy\""));
 

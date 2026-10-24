@@ -50,6 +50,7 @@ pub mod bench_support;
 
 #[cfg(feature = "api")]
 pub mod api;
+pub mod trace;
 
 /// Temporary placeholder to ensure the crate builds.
 pub fn init() {}

@@ -39,11 +39,18 @@ pub struct SanityReport {
     pub internal_livelocks: Vec<Vec<String>>,
 }
 
-/// A path through the model: `states[0] -labels[0]-> states[1] …`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+/// A path through the model: `states[0] -labels[0]-> states[1] …`. Serialized as a finite
+/// [`Trace`](crate::trace::Trace).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SanityPath {
     pub states: Vec<String>,
     pub labels: Vec<String>,
+}
+
+impl Serialize for SanityPath {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        crate::trace::Trace::from_states(&self.states, &self.labels, None).serialize(s)
+    }
 }
 
 impl SanityReport {

@@ -23,7 +23,7 @@ The winning-region / realizability verdict is always correct **for the model** a
 
 ## Lasso traces
 
-Counterexample traces for liveness use lasso format `prefix -> (cycle)^ω` with transition labels (`prefix_labels`, `cycle_labels`). The cycle detection uses DFS in the losing region. The last `cycle_labels` entry is the closing edge back to `cycle[0]`.
+Counterexample traces for liveness use lasso format `prefix -> (cycle)^ω` with transition labels; on the wire each lasso is a `Trace` (`kind: "lasso"`, `steps[].labels`, `loop_start`, 0.5). The cycle detection uses DFS in the losing region. The last `cycle_labels` entry is the closing edge back to `cycle[0]`.
 
 ## Counterstrategy in synthesis response
 

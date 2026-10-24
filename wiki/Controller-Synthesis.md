@@ -300,7 +300,7 @@ lasso trace #0: Red -[timer_tick]-> PedWaiting -[ped_wait]-> (PedWaiting)^ω
 
 The prefix shows the path to the cycle entry, each arrow is annotated with the transition label taken, and the cycle repeats infinitely. The last label in the cycle is the transition from the last cycle state back to the first (the closing edge of the omega loop).
 
-Use `--counterexample` with synthesis to see lasso traces. In the API, the `LassoTrace` object includes `prefix_labels` and `cycle_labels` arrays parallel to the `prefix` and `cycle` state arrays.
+Use `--counterexample` with synthesis to see lasso traces. In the JSON (the API and `--dump-json`), each lasso is a `Trace` with `kind: "lasso"`: `steps[i].state_name` and `steps[i].labels` (the transition out of that step), and `loop_start` marking where the cycle begins (0.5).
 
 ## See Also
 
