@@ -147,6 +147,7 @@ pub fn codesign_to_verify(codesign: &CodesignProjectConfig) -> VerifyConfig {
         assumptions: Vec::new(),
 
         counterexample_max_steps: None,
+        templates: None,
     }
 }
 

@@ -494,6 +494,8 @@ pub(crate) struct EvalContextParams<'a> {
     pub(crate) formula: &'a Option<String>,
     pub(crate) template: &'a Option<String>,
     pub(crate) template_args: &'a [String],
+    /// Project template packs (`--templates-file`).
+    pub(crate) templates_files: &'a [PathBuf],
     pub(crate) automaton: &'a str,
 }
 
@@ -531,6 +533,7 @@ pub(crate) fn prepare_eval_context(
         p.formula,
         p.template,
         p.template_args,
+        p.templates_files,
         p.automaton,
         &mut sidecar_docs,
     )?;
