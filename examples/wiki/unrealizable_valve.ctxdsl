@@ -1,0 +1,32 @@
+context unrealizable_valve {
+    automata {
+        automaton Valve {
+            controllable { label open_valve; label close_valve; }
+            states { state Closed initial; state Open; }
+            transitions {
+                transition Closed -> Open on label open_valve;
+                transition Open -> Closed on label close_valve;
+                transition Closed -> Closed on label pressure_drop;
+                transition Open -> Open on label pressure_rise;
+            }
+        }
+    }
+
+    mu_formulas {
+        formula impossible_spec {
+            over Valve;
+            body = Open && Closed;
+        }
+    }
+
+    controllers {
+        controller impossible_valve {
+            source Valve;
+            satisfying impossible_spec;
+            diagnostics {
+                counterexample = true;
+                deadlock_traces = true;
+            }
+        }
+    }
+}

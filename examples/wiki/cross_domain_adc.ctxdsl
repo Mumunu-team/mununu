@@ -1,0 +1,26 @@
+context cross_domain_adc {
+    automata {
+        // Fast domain: ADC and SampleBuffer (each with skip labels)
+        automaton ADC { /* ... */ }
+        automaton SampleBuffer { /* ... */ }
+
+        // Slow domain: Processor and ResultStore (each with skip labels)
+        automaton Processor { /* ... */ }
+        automaton ResultStore { /* ... */ }
+    }
+
+    composition {
+        // Step 1: compose each clock domain synchronously
+        synchronous fast_domain {
+            members [ADC, SampleBuffer];
+        }
+        synchronous slow_domain {
+            members [Processor, ResultStore];
+        }
+
+        // Step 2: compose the two domains asynchronously
+        asynchronous system {
+            members [fast_domain, slow_domain];
+        }
+    }
+}
