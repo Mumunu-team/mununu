@@ -5580,6 +5580,8 @@ members = ["x"]
         let request = Btor2CheckFsmRequest {
             content: ILLEGAL_ENCODING_FSM.to_string(),
             max_width: crate::adapter::fsm_scan::DEFAULT_FSM_MAX_WIDTH,
+            liveness: false,
+            terminal: vec![],
         };
         let Json(out) = btor2_check_fsm_handler(Json(request))
             .await
@@ -5598,6 +5600,8 @@ members = ["x"]
         let request = Btor2CheckFsmRequest {
             content: "this is not btor2".to_string(),
             max_width: crate::adapter::fsm_scan::DEFAULT_FSM_MAX_WIDTH,
+            liveness: false,
+            terminal: vec![],
         };
         let err = btor2_check_fsm_handler(Json(request))
             .await
