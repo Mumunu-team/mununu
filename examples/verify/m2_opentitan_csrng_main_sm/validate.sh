@@ -59,7 +59,7 @@ echo
 
 cd "${SRC}"
 echo "--- step 1/1: mununu context eval (R.2 + R.3 end-to-end) ---"
-LIBRARY_PATH=/usr/local/opt/z3/lib "${MUNUNU}" context eval \
+LIBRARY_PATH=/usr/local/opt/z3/lib "${MUNUNU}" context eval --fail-on none \
   --adapter sv-yosys --preprocessor sv2v \
   --sidecar prim_assert.sv \
   --sidecar csrng_pkg.sv \

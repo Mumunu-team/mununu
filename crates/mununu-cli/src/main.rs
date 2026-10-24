@@ -213,9 +213,14 @@ impl ExpectArgs {
 /// asked for. So when expectations are declared they SUPERSEDE `--fail-on`.
 const EXPECTATIONS_UNMET_EXIT: i32 = 4;
 
+/// Exit code for a command line the parser rejects (an unknown flag, a missing argument, a bad
+/// value): `EX_USAGE` from `sysexits.h`. Clap's default is `2`, which here means VIOLATED, and
+/// rosf read a mistyped flag as a violation that way (mununu#541).
+const USAGE_EXIT: i32 = 64;
+
 /// Map a single property verdict + the `--fail-on` policy to a process exit code.
-/// `0` = pass, `2` = violated, `3` = unknown. (`1` is reserved for tool/usage errors
-/// via `main`.) `holds` / `skipped` / any definite-good verdict is always `0`.
+/// `0` = pass, `2` = violated, `3` = unknown. (`1` is a tool error, `4` unmet expectations and
+/// `64` a usage error, all via `main`.) `holds` / `skipped` / any definite-good verdict is always `0`.
 fn ci_exit_code(verdict: &str, fail_on: FailOn) -> i32 {
     match verdict {
         "violated" if matches!(fail_on, FailOn::Violated | FailOn::Unknown) => 2,
@@ -251,6 +256,27 @@ fn ci_gate_exit(verdict: &str, fail_on: FailOn) {
 #[cfg(test)]
 mod ci_gate_tests {
     use super::*;
+
+    #[test]
+    fn context_eval_fails_the_gate_on_a_refuted_formula_and_flags_sanity_findings() {
+        assert_eq!(context_eval_outcome(Some(false), true), "violated");
+        assert_eq!(context_eval_outcome(Some(false), false), "violated");
+        assert_eq!(context_eval_outcome(Some(true), false), "unknown");
+        assert_eq!(context_eval_outcome(None, false), "unknown");
+        assert_eq!(context_eval_outcome(Some(true), true), "holds");
+        assert_eq!(
+            ci_exit_code(context_eval_outcome(Some(false), true), FailOn::Violated),
+            2
+        );
+        assert_eq!(
+            ci_exit_code(context_eval_outcome(None, false), FailOn::Violated),
+            0
+        );
+        assert_eq!(
+            ci_exit_code(context_eval_outcome(None, false), FailOn::Unknown),
+            3
+        );
+    }
 
     // ---- mununu#537: expectation flag parsing --------------------------------------
 
@@ -2832,6 +2858,10 @@ struct ContextEvalArgs {
     /// Print a per-property soundness summary after evaluation.
     #[arg(long = "soundness-report")]
     soundness_report: bool,
+    /// The formula `holds` when every initial state satisfies it and is `violated` otherwise;
+    /// `--sanity` findings count as `unknown`. Exit codes follow the shared gate.
+    #[command(flatten)]
+    ci: CiArgs,
 }
 
 #[derive(Args, Debug)]
@@ -2981,7 +3011,21 @@ fn main() {
         // SAFETY: single-threaded at process start; no other thread reads/writes env yet.
         unsafe { std::env::set_var("MUNUNU_SELF_EXE", exe) };
     }
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) => {
+            // Help and version requests are not errors. Every other parse failure is a usage
+            // error and exits 64 (EX_USAGE), never clap's default 2, which is VIOLATED here.
+            if matches!(
+                e.kind(),
+                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+            ) {
+                e.exit();
+            }
+            let _ = e.print();
+            std::process::exit(USAGE_EXIT);
+        }
+    };
     init_tracing(cli.quiet);
     let server_config = match &cli.command {
         Commands::Server { config, .. } => config.clone(),
@@ -8051,6 +8095,7 @@ fn context_eval(args: ContextEvalArgs) -> Result<(), String> {
         automaton: &args.automaton,
         allow_no_formula: args.sanity,
     })?;
+    let mut sanity_clean = true;
     if args.sanity {
         let clts = realized
             .context
@@ -8069,7 +8114,9 @@ fn context_eval(args: ContextEvalArgs) -> Result<(), String> {
             &members,
         );
         print!("{report}");
+        sanity_clean = report.is_clean();
         if formula_name.is_empty() {
+            ci_gate_exit(context_eval_outcome(None, sanity_clean), args.ci.fail_on);
             return Ok(());
         }
     }
@@ -8338,7 +8385,23 @@ fn context_eval(args: ContextEvalArgs) -> Result<(), String> {
         print_context_structure(&realized.context, output_path)?;
     }
 
+    let holds = initial_satisfying.len() == initial_states.len();
+    ci_gate_exit(
+        context_eval_outcome(Some(holds), sanity_clean),
+        args.ci.fail_on,
+    );
     Ok(())
+}
+
+/// The CI verdict of a `context eval` run: the formula's (`holds` iff every initial state
+/// satisfies it), else the sanity checks' (`unknown` when they found something, a finding being
+/// a model defect to review rather than a refuted property).
+fn context_eval_outcome(formula_holds: Option<bool>, sanity_clean: bool) -> &'static str {
+    match formula_holds {
+        Some(false) => "violated",
+        _ if !sanity_clean => "unknown",
+        _ => "holds",
+    }
 }
 
 /// GR(1) controller synthesis path (`--controller-mode gr1`): read the source,

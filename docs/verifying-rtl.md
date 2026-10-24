@@ -437,7 +437,8 @@ rules matched the positional name only, and a label-pinned violated claim always
 |---|---|
 | `0` | expectations met |
 | `4` | **a verdict was not what you claimed** |
-| `1` | the run failed (tool/usage error) — including a malformed `NAME=VERDICT` |
+| `1` | the run failed (tool error) — including a malformed `NAME=VERDICT` |
+| `64` | the command line was rejected (usage error) |
 
 `2` / `3` remain the ordinary verdict gate for runs that declare no expectations.
 
@@ -1952,7 +1953,8 @@ JSON.
 | `2` | a property is **violated** — the step fails |
 | `3` | a property is **unknown** *and* `--fail-on unknown` was set |
 | `4` | **an expectation was not met** (mununu#537) — the run worked and disagreed with a `--expect-*` claim. Distinct from `1` (the run failed) on purpose, and it SUPERSEDES `--fail-on`: under `--expect-violated`, `2` would fire on the very violation you asked for. |
-| `1` | tool / usage error (bad file, unparseable atom, missing toolchain) |
+| `1` | tool error (bad file, unparseable atom, missing toolchain) |
+| `64` | **usage error** — the command line itself was rejected (an unknown flag, a missing argument, a bad value), `EX_USAGE`. Until 0.5 this was clap's `2`, the same code as VIOLATED. |
 
 - `--fail-on <violated\|unknown\|none>` picks the gate policy. Default `violated`:
   an undecided `unknown` does **not** fail the build (it is "not decided," not

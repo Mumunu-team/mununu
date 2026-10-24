@@ -154,7 +154,7 @@ mununu --quiet sv verify-auto rtl/mod.sv --json | jq '.diagnostics | {frontend, 
 
 **`properties[]` is the verdict record; the `notes` are commentary and must not be counted.** A property that is absent from `properties[]` is not being checked — look for it in `unsupported[]`, which says why.
 
-Exit codes are the usual gate (`0` pass, `2` violated, `3` unknown under `--fail-on unknown`, `1` tool error); `1` implies empty stdout, while `2`/`3` still emit the full document.
+Exit codes are the usual gate (`0` pass, `2` violated, `3` unknown under `--fail-on unknown`, `1` tool error, `64` usage error); `1` implies empty stdout, while `2`/`3` still emit the full document.
 
 ### Assert the verdicts you claim (mununu#537)
 
