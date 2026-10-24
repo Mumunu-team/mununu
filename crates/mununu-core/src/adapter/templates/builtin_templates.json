@@ -443,6 +443,206 @@
         "software": { "TASK_STARTED": "e.g., JobQueued", "TASK_DONE": "e.g., JobSettled" }
       },
       "tags": ["liveness", "completion", "agentic", "termination", "workflow"]
+    },
+    {
+      "id": "rtl_never",
+      "display_name": "Never (RTL)",
+      "description": "A bad condition over the design's signals never holds in any reachable cycle: AG !BAD.",
+      "kind": "safety",
+      "role": "standalone",
+      "domains": [
+        "rtl"
+      ],
+      "params": [
+        {
+          "name": "BAD",
+          "description": "the condition that must never hold, e.g. `trip_o == 1 && rods_out == 1`",
+          "param_type": {
+            "type": "rtl_atom"
+          },
+          "required": true
+        }
+      ],
+      "formula_pattern": "nu X. ((!${BAD}) && [] X)",
+      "tags": [
+        "rtl",
+        "safety"
+      ]
+    },
+    {
+      "id": "rtl_invariant",
+      "display_name": "Invariant (RTL)",
+      "description": "A condition holds in every reachable cycle: AG P.",
+      "kind": "safety",
+      "role": "standalone",
+      "domains": [
+        "rtl"
+      ],
+      "params": [
+        {
+          "name": "P",
+          "description": "the invariant",
+          "param_type": {
+            "type": "rtl_atom"
+          },
+          "required": true
+        }
+      ],
+      "formula_pattern": "nu X. (${P} && [] X)",
+      "tags": [
+        "rtl",
+        "safety"
+      ]
+    },
+    {
+      "id": "rtl_mutex",
+      "display_name": "Mutual exclusion (RTL)",
+      "description": "Two conditions never hold in the same cycle: AG !(A && B).",
+      "kind": "safety",
+      "role": "standalone",
+      "domains": [
+        "rtl"
+      ],
+      "params": [
+        {
+          "name": "A",
+          "description": "first condition",
+          "param_type": {
+            "type": "rtl_atom"
+          },
+          "required": true
+        },
+        {
+          "name": "B",
+          "description": "second condition",
+          "param_type": {
+            "type": "rtl_atom"
+          },
+          "required": true
+        }
+      ],
+      "formula_pattern": "nu X. ((!(${A} && ${B})) && [] X)",
+      "tags": [
+        "rtl",
+        "safety"
+      ]
+    },
+    {
+      "id": "rtl_hold_until",
+      "display_name": "Hold until (RTL)",
+      "description": "Once HOLD holds it keeps holding in the next cycle unless RELEASE holds: AG (HOLD && !RELEASE -> AX HOLD). The latch pattern (a trip that stays until reset).",
+      "kind": "safety",
+      "role": "standalone",
+      "domains": [
+        "rtl"
+      ],
+      "params": [
+        {
+          "name": "HOLD",
+          "description": "the latched condition",
+          "param_type": {
+            "type": "rtl_atom"
+          },
+          "required": true
+        },
+        {
+          "name": "RELEASE",
+          "description": "the only condition that may release it",
+          "param_type": {
+            "type": "rtl_atom"
+          },
+          "required": true
+        }
+      ],
+      "formula_pattern": "nu X. (((!${HOLD}) || ${RELEASE} || ([] ${HOLD})) && [] X)",
+      "tags": [
+        "rtl",
+        "safety",
+        "latch"
+      ]
+    },
+    {
+      "id": "rtl_response",
+      "display_name": "Response (RTL)",
+      "description": "Every cycle where TRIGGER holds is followed, on every path, by a cycle where RESPONSE holds: AG (TRIGGER -> AF RESPONSE). Inevitability, not reachability.",
+      "kind": "liveness",
+      "role": "standalone",
+      "domains": [
+        "rtl"
+      ],
+      "params": [
+        {
+          "name": "TRIGGER",
+          "description": "the request",
+          "param_type": {
+            "type": "rtl_atom"
+          },
+          "required": true
+        },
+        {
+          "name": "RESPONSE",
+          "description": "what must inevitably follow",
+          "param_type": {
+            "type": "rtl_atom"
+          },
+          "required": true
+        }
+      ],
+      "formula_pattern": "nu X. (((!${TRIGGER}) || (mu Y. (${RESPONSE} || [] Y))) && [] X)",
+      "tags": [
+        "rtl",
+        "liveness"
+      ]
+    },
+    {
+      "id": "rtl_recoverable",
+      "display_name": "Recoverable (RTL)",
+      "description": "From every reachable state some path still reaches TARGET: AG EF TARGET. Pin the reset inactive (`--config-value`) or the reset itself recovers everything.",
+      "kind": "liveness",
+      "role": "standalone",
+      "domains": [
+        "rtl"
+      ],
+      "params": [
+        {
+          "name": "TARGET",
+          "description": "the state to recover to, e.g. `state_q == IDLE`",
+          "param_type": {
+            "type": "rtl_atom"
+          },
+          "required": true
+        }
+      ],
+      "formula_pattern": "nu X. ((mu Y. (${TARGET} || <> Y)) && [] X)",
+      "tags": [
+        "rtl",
+        "recoverability"
+      ]
+    },
+    {
+      "id": "rtl_reachable",
+      "display_name": "Reachable (RTL)",
+      "description": "Some path from reset reaches a cycle where TARGET holds: EF TARGET (a cover).",
+      "kind": "liveness",
+      "role": "standalone",
+      "domains": [
+        "rtl"
+      ],
+      "params": [
+        {
+          "name": "TARGET",
+          "description": "the condition to reach",
+          "param_type": {
+            "type": "rtl_atom"
+          },
+          "required": true
+        }
+      ],
+      "formula_pattern": "mu Y. (${TARGET} || <> Y)",
+      "tags": [
+        "rtl",
+        "cover"
+      ]
     }
   ]
 }

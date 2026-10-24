@@ -1297,11 +1297,13 @@ is unchanged.
 
 ### 2. Properties come from the module's own assertions
 
-`sv verify-auto` checks the SVA the design *carries*; it takes no formula. An agent
-that emits RTL **with** `assert property` statements gets those checked automatically.
-An agent that emits assertion-free RTL gets zero properties back — it names the
-property it cares about with an **SV-direct verb**, which lifts the module *and*
-decides the property in one call:
+`sv verify-auto` checks the SVA the design *carries*. An agent that emits RTL **with**
+`assert property` statements gets those checked automatically. Properties the design does not
+carry are added with **templates** — `--template rtl_response --template-arg 'TRIGGER=req == 1'
+--template-arg 'RESPONSE=gnt == 1'` (API `templates: [{template, args}]`; the `rtl_*` catalog and
+its readings are in [`wiki/Property-Templates.md`](../wiki/Property-Templates.md) §"On RTL"), each
+reported as a row labelled `tmpl.<instance>` — or with an **SV-direct verb**, which lifts the
+module *and* decides one property in one call:
 
 > Source of truth: [`sv_verify::sv_verify_recoverability`](../crates/mununu-core/src/adapter/sv_verify.rs#L84) — surface: (CLI+API+UI)
 

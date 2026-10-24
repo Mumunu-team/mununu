@@ -2053,6 +2053,12 @@ pub struct VerifyAutoOptions {
     /// cube (a ⊥ can become definite; a definite verdict never flips; a hint that
     /// fails classification is dropped). Default empty ⇒ no behaviour change.
     pub predicate_hints: Vec<String>,
+    /// Property templates to check besides the design's own assertions (`--template`, API
+    /// `templates`), each instantiated against the configured catalog and checked like an
+    /// `@mununu_guarantee` named `tmpl.<instance>`.
+    pub templates: Vec<crate::adapter::templates::TemplateRef>,
+    /// Project template packs (`--templates-file`) layered over the configured catalog.
+    pub templates_files: Vec<std::path::PathBuf>,
     /// R-F5.5d (2026-07-03) — run each property through the R-F5 **symbolic**
     /// predicate-cube engine (BDD relation + WP CEGAR loop; no per-cube-pair
     /// SMT) instead of the explicit `cegar_refine_loop`. Default `false`
@@ -2215,6 +2221,8 @@ impl Default for VerifyAutoOptions {
             config_values: std::collections::HashMap::new(),
             counter_bounds: std::collections::HashMap::new(),
             predicate_hints: Vec::new(),
+            templates: Vec::new(),
+            templates_files: Vec::new(),
             symbolic_engine: false,
             exact_symbolic: false,
             portfolio: None,
@@ -3973,7 +3981,15 @@ pub(crate) fn extract_front(
         },
         params,
     )?;
-    let ann_scan = scan_annotation_properties(sources);
+    // Templates become annotations of a synthetic source the lift never reads, so they go
+    // through the same parse, naming and duplicate check as a hand-written `@mununu_guarantee`.
+    let template_source = template_guarantees(&opts.templates, &opts.templates_files)?;
+    let scan_sources: Vec<(String, String)> =
+        sources.iter().cloned().chain(template_source).collect();
+    let mut ann_scan = scan_annotation_properties(&scan_sources);
+    for g in &mut ann_scan.guarantees {
+        g.formula = resolve_named_constants(&g.formula, &extraction.named_constants);
+    }
     let predicate_hints: Vec<String> = ann_scan
         .predicates
         .iter()
@@ -3988,6 +4004,105 @@ pub(crate) fn extract_front(
         ann_scan,
         predicate_hints,
     })
+}
+
+/// The `@mununu_guarantee` lines for the requested templates, as one synthetic source (`None` when
+/// no template is requested). Each instance is named `tmpl.<instance name>`, sanitised to the
+/// annotation-name alphabet (`rtl_never.BAD-state_q_eq_5`).
+fn template_guarantees(
+    templates: &[crate::adapter::templates::TemplateRef],
+    files: &[std::path::PathBuf],
+) -> Result<Option<(String, String)>, AdapterError> {
+    if templates.is_empty() {
+        return Ok(None);
+    }
+    let err = |message: String| AdapterError {
+        kind: AdapterErrorKind::ParseError,
+        message,
+        location: None,
+    };
+    let registry = crate::adapter::templates::TemplateRegistry::configured(files)
+        .map_err(|e| err(format!("verify_auto: the template catalog: {e}")))?;
+    let mut text = String::new();
+    for tref in templates {
+        let inst = registry
+            .instantiate(tref)
+            .map_err(|e| err(format!("verify_auto: template `{}`: {e}", tref.template)))?;
+        let name: String = inst
+            .name
+            .replace("==", "eq")
+            .replace("!=", "ne")
+            .replace("<=", "le")
+            .replace(">=", "ge")
+            .replace("&&", "and")
+            .replace("||", "or")
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>()
+            .split('_')
+            .filter(|p| !p.is_empty())
+            .collect::<Vec<_>>()
+            .join("_");
+        text.push_str(&format!(
+            "// @mununu_guarantee(tmpl.{name}) {}\n",
+            inst.formula
+        ));
+    }
+    Ok(Some(("__mununu_templates.sv".to_string(), text)))
+}
+
+/// Rewrite `x == NAME` / `x != NAME` where `NAME` is an enum member or parameter of the design
+/// ([`TranslationReport::named_constants`]) to its value: an annotation or template atom names the
+/// FSM's states the way the RTL does, and the engine resolves registers, not enum members.
+fn resolve_named_constants(
+    formula: &str,
+    constants: &std::collections::BTreeMap<String, i64>,
+) -> String {
+    if constants.is_empty() {
+        return formula.to_string();
+    }
+    let b = formula.as_bytes();
+    let mut out = String::with_capacity(formula.len());
+    let mut i = 0;
+    while i < b.len() {
+        let op = (i + 1 < b.len()) && ((b[i] == b'=' || b[i] == b'!') && b[i + 1] == b'=');
+        if !op {
+            out.push(b[i] as char);
+            i += 1;
+            continue;
+        }
+        out.push_str(&formula[i..i + 2]);
+        i += 2;
+        let mut j = i;
+        while j < b.len() && b[j] == b' ' {
+            j += 1;
+        }
+        let start = j;
+        while j < b.len() && (b[j].is_ascii_alphanumeric() || b[j] == b'_') {
+            j += 1;
+        }
+        let ident = &formula[start..j];
+        let continues = j < b.len() && (b[j] == b'.' || b[j] == b'[');
+        let is_ident = ident
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+        match constants.get(ident) {
+            Some(v) if is_ident && !continues => {
+                out.push_str(&formula[i..start]);
+                out.push_str(&v.to_string());
+            }
+            _ => out.push_str(&formula[i..j]),
+        }
+        i = j;
+    }
+    out
 }
 
 /// P-3b/P-4 (common-IR hub) — the operator-INDEPENDENT prepared model: the fully-prepared BTOR2
@@ -18287,5 +18402,58 @@ endmodule
             !hyper.is_empty() && hyper.iter().all(|t| *t == Trit::True),
             "hyper-must decides the arbiter recoverability HOLDS too — got {hyper:?}"
         );
+    }
+
+    /// Templates become `@mununu_guarantee(tmpl.<instance>)` lines with an atom in parentheses, and
+    /// the annotation scan picks them up as guarantees under that label.
+    #[test]
+    fn a_template_becomes_a_named_guarantee() {
+        use crate::adapter::templates::TemplateRef;
+        let tref = TemplateRef {
+            template: "rtl_never".to_string(),
+            args: [("BAD".to_string(), "state_q == FAULT".to_string())]
+                .into_iter()
+                .collect(),
+        };
+        let (_, text) = template_guarantees(&[tref], &[]).unwrap().unwrap();
+        assert_eq!(
+            text,
+            "// @mununu_guarantee(tmpl.rtl_never_BAD_state_q_eq_FAULT) nu X. ((!(state_q == FAULT)) && [] X)\n"
+        );
+        let scan = scan_annotation_properties(&[("t.sv".to_string(), text)]);
+        assert_eq!(scan.guarantees.len(), 1, "{:?}", scan.skipped);
+        assert_eq!(
+            scan.guarantees[0].label.as_deref(),
+            Some("tmpl.rtl_never_BAD_state_q_eq_FAULT")
+        );
+        let bad = TemplateRef {
+            template: "rtl_never".to_string(),
+            args: [("BAD".to_string(), "mu X. (a || <> X)".to_string())]
+                .into_iter()
+                .collect(),
+        };
+        assert!(
+            template_guarantees(&[bad], &[]).is_err(),
+            "an RTL atom argument must be a boolean condition"
+        );
+    }
+
+    /// `x == NAME` resolves an enum member / parameter; registers, dotted names, ordering
+    /// comparisons and unknown names are left alone.
+    #[test]
+    fn named_constants_resolve_on_the_right_of_equalities_only() {
+        let c: std::collections::BTreeMap<String, i64> =
+            [("SCRAM".to_string(), 4), ("IDLE".to_string(), 0)]
+                .into_iter()
+                .collect();
+        assert_eq!(
+            resolve_named_constants("nu X. ((state_q == SCRAM || state_q != IDLE) && [] X)", &c),
+            "nu X. ((state_q == 4 || state_q != 0) && [] X)"
+        );
+        assert_eq!(
+            resolve_named_constants("(a == b) && (u.SCRAM == 1) && (x <= SCRAM)", &c),
+            "(a == b) && (u.SCRAM == 1) && (x <= SCRAM)"
+        );
+        assert_eq!(resolve_named_constants("q == SCRAM.x", &c), "q == SCRAM.x");
     }
 }
