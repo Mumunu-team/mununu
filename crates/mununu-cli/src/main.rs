@@ -798,19 +798,28 @@ enum SvFrontendArg {
     /// Env-driven default: `MUNUNU_YOSYS_FRONTEND=slang` → slang, else read_verilog.
     #[default]
     Auto,
-    /// Force yosys `read_verilog` (+ sv2v per `--preprocess-sv2v`).
+    /// Force yosys `read_verilog`.
     Verilog,
     /// Force the yosys-slang plugin (`read_slang`) — lifts modern-SV constructs
     /// `read_verilog`/sv2v reject (`while` loops, `module M import pkg::*;`).
     /// Requires the yosys-slang plugin (present in the `mununu-sva` image).
     Slang,
+    /// Run sv2v first, then yosys `read_verilog` (replaces `--frontend sv2v`, 0.5).
+    Sv2v,
+}
+
+impl SvFrontendArg {
+    /// Whether the lift runs sv2v before yosys.
+    fn sv2v(self) -> bool {
+        matches!(self, SvFrontendArg::Sv2v)
+    }
 }
 
 impl From<SvFrontendArg> for mununu_core::adapter::yosys::SvFrontend {
     fn from(a: SvFrontendArg) -> Self {
         match a {
             SvFrontendArg::Auto => Self::Auto,
-            SvFrontendArg::Verilog => Self::Verilog,
+            SvFrontendArg::Verilog | SvFrontendArg::Sv2v => Self::Verilog,
             SvFrontendArg::Slang => Self::Slang,
         }
     }
@@ -1953,7 +1962,7 @@ enum SvCommand {
     /// non-state signals (combinational/IO) are reported skipped (the cube path
     /// can't bind them) — never given a misleading verdict. Surface peer of
     /// `POST /api/v1/sv/verify-auto` + the extraction-tab verify-auto panel.
-    VerifyAuto(SvVerifyAutoArgs),
+    VerifyAuto(Box<SvVerifyAutoArgs>),
     /// Lift SV (sv2v + Yosys) and decide `bad`-reachability of its assertions with
     /// the multi-engine safety portfolio — one call, no `emit-btor2` step. Surface
     /// peer of `POST /api/v1/sv/verify`.
@@ -2034,11 +2043,9 @@ struct SvDiscoverArgs {
     /// flattens from the right root.
     #[arg(long)]
     top: Option<String>,
-    /// Run sv2v before Yosys. Required for modern SV (module-header
-    /// `import pkg::*;`, structs, interfaces) — i.e. essentially all real
-    /// OpenTitan / Caliptra / ibex RTL.
-    #[arg(long)]
-    preprocess_sv2v: bool,
+    /// RTL front end: `auto`, `verilog`, `slang`, or `sv2v` (sv2v, then read_verilog).
+    #[arg(long = "frontend", value_enum, default_value_t = SvFrontendArg::Auto)]
+    frontend: SvFrontendArg,
     /// Write the skeleton sidecar here instead of stdout.
     #[arg(long, value_name = "FILE")]
     output: Option<PathBuf>,
@@ -2080,13 +2087,9 @@ struct SvEmitBtor2PerModuleArgs {
     /// to the directory of the primary input.
     #[arg(long = "output-dir", value_name = "DIR")]
     output_dir: Option<PathBuf>,
-    /// Run sv2v as a preprocessor pass before Yosys. Required for
-    /// SV-2017 constructs Yosys's built-in parser cannot accept (most
-    /// notably the module-header `import pkg::*;` form). Same
-    /// behaviour as the legacy `--preprocessor sv2v` flag on the
-    /// single-BTOR2 path.
-    #[arg(long = "preprocess-sv2v")]
-    preprocess_sv2v: bool,
+    /// RTL front end: `auto`, `verilog`, `slang`, or `sv2v` (sv2v, then read_verilog).
+    #[arg(long = "frontend", value_enum, default_value_t = SvFrontendArg::Auto)]
+    frontend: SvFrontendArg,
     /// Use Yosys's `setundef -anyseq` instead of the default
     /// `setundef -zero`. Preserves CWE-1245-class semantics at the
     /// cost of introducing `$anyseq` state cells.
@@ -2121,11 +2124,9 @@ struct SvCegarArgs {
     /// flattens from the right root; omitted lets Yosys auto-detect.
     #[arg(long = "top", value_name = "NAME")]
     top: Option<String>,
-    /// Run sv2v before Yosys. Required for modern SV (module-header
-    /// `import pkg::*;`, structs, interfaces) — essentially all real
-    /// OpenTitan / Caliptra / ibex RTL.
-    #[arg(long = "preprocess-sv2v")]
-    preprocess_sv2v: bool,
+    /// RTL front end: `auto`, `verilog`, `slang`, or `sv2v` (sv2v, then read_verilog).
+    #[arg(long = "frontend", value_enum, default_value_t = SvFrontendArg::Auto)]
+    frontend: SvFrontendArg,
     /// Use Yosys's `setundef -anyseq` instead of the default
     /// `setundef -zero` (per-cycle havoc on undefined nets).
     #[arg(long = "setundef-anyseq")]
@@ -2204,55 +2205,8 @@ struct SvExtractSvaArgs {
 
 #[derive(Args, Debug)]
 struct SvVerifyAutoArgs {
-    /// Primary SystemVerilog source file (.sv / .v).
-    #[arg(value_name = "SV_FILE")]
-    file: PathBuf,
-    /// Additional SV sources (packages, `include` targets), staged alongside
-    /// the primary input. Repeatable.
-    #[arg(long = "source", value_name = "FILE")]
-    sources: Vec<PathBuf>,
-    /// Top module for the SV → BTOR2 Yosys lift (auto-detect when omitted).
-    #[arg(long = "top", value_name = "NAME")]
-    top: Option<String>,
-    /// Run sv2v before Yosys. Required for modern SV (`import pkg::*;`, structs,
-    /// interfaces) — essentially all real OpenTitan / Caliptra / ibex RTL.
-    #[arg(long = "preprocess-sv2v")]
-    preprocess_sv2v: bool,
-    /// Lift a multi-clock design onto the model's one implicit clock instead of refusing it.
-    /// An UNDER-approximation: the domains only ever tick together, so a crossing defect cannot
-    /// occur and a HOLDS does not transfer (reported as the `clock-domains-merged` soundness
-    /// caveat).
-    #[arg(long = "merge-clock-domains")]
-    merge_clock_domains: bool,
-    /// Extra include-search directory (`-I<dir>`), repeatable. Resolves
-    /// `` `include "frag.vh" `` against the original source tree so include
-    /// fragments need NOT be passed as standalone `--source` compilation units.
-    ///
-    /// surface: CLI-only — the API/UI pass source content by name, so an
-    /// on-disk include-search directory has no analog there.
-    #[arg(long = "include-dir", value_name = "DIR")]
-    include_dirs: Vec<PathBuf>,
-    /// RTL front-end for the lift. `slang` forces the yosys-slang plugin
-    /// (`read_slang`), which lifts modern-SV constructs `read_verilog`/sv2v
-    /// reject (`while` loops, `module M import pkg::*;`). Requires the
-    /// yosys-slang plugin (present in the mununu-sva image).
-    #[arg(long = "frontend", value_enum, default_value_t = SvFrontendArg::Auto)]
-    frontend: SvFrontendArg,
-    /// Override a module parameter before the SV → BTOR2 lift — so it sizes the
-    /// design before elaboration (yosys `chparam -set` on the read_verilog
-    /// frontend; slang `-G` on the slang frontend, which elaborates at read time).
-    /// Format `NAME=VALUE` (applied to the top module) or `MODULE.NAME=VALUE`
-    /// (scoped to `MODULE`; slang applies it top-level by bare name). Repeatable.
-    /// Shrinks a
-    /// parameterised timing interval so its counters get smaller —
-    /// `--param INIT_WAIT=4` turns a 20000-cycle wait's 15-bit counter into a
-    /// ~3-bit one — without a wrapper module (which would rename the SVA atoms).
-    /// VALUE is a decimal integer, or any other token (emitted as a quoted string
-    /// literal). A parameter yosys cannot apply is an ERROR (never silently
-    /// dropped); the applied parameters are echoed in the report as a scope note —
-    /// the verdicts are scoped to them.
-    #[arg(long = "param", value_name = "NAME=VALUE")]
-    params: Vec<String>,
+    #[command(flatten)]
+    lift: SvLiftArgs,
     /// Max CEGAR iterations per property.
     #[arg(long, default_value_t = 16)]
     max_iterations: usize,
@@ -2305,15 +2259,6 @@ struct SvVerifyAutoArgs {
     /// the API as `no_input_state: true` and by `MUNUNU_NO_INPUT_STATE=1`.
     #[arg(long = "no-input-state")]
     no_input_state: bool,
-    /// Lift-only source override, `NAME=PATH` (repeatable): the file at PATH
-    /// REPLACES the source named NAME (the primary's or a `--source`'s file name)
-    /// for the SV → BTOR2 lift only; SVA extraction still reads the original. Use
-    /// it when the real assertion macros do not lift but must be extracted —
-    /// e.g. `--lift-override prim_assert.sv=shim/prim_assert.sv` beside the
-    /// real OpenTitan `prim_assert.sv`. A NAME that matches no source is an
-    /// error. Mirrored on the API as `lift_overrides: [{name, content}]`.
-    #[arg(long = "lift-override", value_name = "NAME=PATH")]
-    lift_override: Vec<String>,
     /// How SVA `assume` statements are treated. `precondition` (default): each
     /// supported assumption (`assume property (B)`, `A |=> B` over booleans)
     /// restricts the traces the guarantees are checked on; the report says
@@ -2338,16 +2283,6 @@ struct SvVerifyAutoArgs {
     /// the inferred one. Shown as a `counter-bound` note.
     #[arg(long = "counter-bound", value_name = "SIGNAL<=VALUE")]
     counter_bound: Vec<String>,
-    /// Control-slice cut point: replace a net with a free `$anyseq` input in the
-    /// SV → BTOR2 lift (Yosys `cutpoint w:<net>`), so its datapath fanin drops out
-    /// via cone-of-influence. The sound, netlist-level way to shrink a wide FSM's
-    /// cone so `--engine exact-symbolic` fits — cut the FSM's datapath *guards*
-    /// (e.g. `--cutpoint must_refresh --cutpoint precharge_done`). Repeatable.
-    /// OVER-APPROXIMATION: a definite HOLDS transfers (safety + over-approx); a
-    /// definite VIOLATED is sound only when guard-independent (an orphaned FSM
-    /// state). Surfaced as a `control-slice` scope-caveat note.
-    #[arg(long = "cutpoint", value_name = "SIGNAL")]
-    cutpoint: Vec<String>,
     /// Fault-injection posture: a register the adversary may overwrite (`REG` or `REG:k`;
     /// `k` is the ONE global budget of injections, default 1 — a single-event upset;
     /// `REG:unbounded` lifts it). Repeatable; `gen[1].q` is read as `gen$1.q`. The
@@ -2493,10 +2428,6 @@ struct SvLiftArgs {
     /// Top module for the SV → BTOR2 Yosys lift (auto-detect when omitted).
     #[arg(long = "top", value_name = "NAME")]
     top: Option<String>,
-    /// Run sv2v before Yosys. Required for modern SV (`import pkg::*;`, structs,
-    /// interfaces) — essentially all real OpenTitan / Caliptra / ibex RTL.
-    #[arg(long = "preprocess-sv2v")]
-    preprocess_sv2v: bool,
     /// Lift a multi-clock design onto the model's one implicit clock instead of refusing it.
     /// An UNDER-approximation: the domains only ever tick together, so a crossing defect cannot
     /// occur and a HOLDS does not transfer (reported as the `clock-domains-merged` soundness
@@ -2518,9 +2449,24 @@ struct SvLiftArgs {
     /// (`read_slang`), which lifts modern-SV constructs `read_verilog` and sv2v
     /// reject (`while` loops, `module M import pkg::*;`). Requires the
     /// yosys-slang plugin (present in the mununu-sva image). `auto` (default)
-    /// keeps the env-driven behaviour; `verilog` forces read_verilog.
+    /// keeps the env-driven behaviour; `verilog` forces read_verilog; `sv2v` runs sv2v first
+    /// (modern SV the plain `read_verilog` refuses: `import pkg::*;`, structs, interfaces).
     #[arg(long = "frontend", value_enum, default_value_t = SvFrontendArg::Auto)]
     frontend: SvFrontendArg,
+    /// Override a module parameter, `NAME=VALUE` or `MODULE.NAME=VALUE` (repeatable). Shrinks a
+    /// parameterised design (a FIFO depth, a counter width) to a decidable size. A malformed
+    /// entry is an error. API: `lift.params`.
+    #[arg(long = "param", value_name = "NAME=VALUE")]
+    params: Vec<String>,
+    /// Replace a source for the LIFT only, `NAME=PATH` (repeatable): an assertion-macro shim or a
+    /// synthesis variant. `sv verify-auto` still extracts its SVA from the original sources. A
+    /// name that matches no source is an error. API: `lift.lift_overrides`.
+    #[arg(long = "lift-override", value_name = "NAME=PATH")]
+    lift_override: Vec<String>,
+    /// Control-slice cut point (repeatable): the named net becomes a free input, an
+    /// over-approximation that drops its fan-in cone. API: `lift.cutpoints`.
+    #[arg(long = "cutpoint", value_name = "SIGNAL")]
+    cutpoint: Vec<String>,
 }
 
 /// Arguments for `mununu sv verify` — SV-direct safety portfolio.
@@ -2678,35 +2624,12 @@ struct SvMutateArgs {
     /// (mununu#663): per-target must for Liveness/Mixed-class properties, may-only for the rest.
     #[arg(long, value_enum, default_value_t = MustEdgeInferenceArg::Auto)]
     must_edge_inference: MustEdgeInferenceArg,
-    /// mununu#475 item 4 — override a module parameter BEFORE elaboration
-    /// (parity with `sv verify-auto`'s `--param`). Format `NAME=VALUE`
-    /// (top-module scope) or `MODULE.NAME=VALUE` (submodule scope; slang
-    /// applies it top-level by bare name). Repeatable. Shrinks a
-    /// parameterised design so its counters fit the bit-blast cap during
-    /// the baseline + mutant re-verify; blocks that need `--param` to
-    /// verify at all could not previously be mutated. A malformed `--param`
-    /// is a HARD error; yosys errors downstream on a parameter it cannot
-    /// apply — never a silent drop.
-    #[arg(long = "param", value_name = "NAME=VALUE")]
-    params: Vec<String>,
-    /// mununu#725 — lift-only source override, `NAME=PATH` (repeatable), as `sv
-    /// verify-auto --lift-override`: the file at PATH replaces the source named NAME
-    /// for the SV → BTOR2 lift of BOTH the baseline and the mutant; SVA extraction
-    /// still reads the original. Every OpenTitan IP lifts only with the
-    /// `prim_assert.sv` shim. Mirrored on the API as `lift_overrides`.
-    #[arg(long = "lift-override", value_name = "NAME=PATH")]
-    lift_override: Vec<String>,
     /// mununu#725 — config concretization, `SIGNAL=VALUE` (repeatable), as `sv
     /// verify-auto --pin`: pins a config input to a constant for the
     /// baseline and the mutant (e.g. `--pin rst_ni=1`). Mirrored on the API
     /// as `config_values`.
     #[arg(long = "pin", value_name = "SIGNAL=VALUE")]
     pin: Vec<String>,
-    /// mununu#725 — control-slice cut point (repeatable), as `sv verify-auto
-    /// --cutpoint`: replace a net with a free input in the lift. Mirrored on the API
-    /// as `cutpoint`.
-    #[arg(long = "cutpoint", value_name = "SIGNAL")]
-    cutpoint: Vec<String>,
     /// Fault-injection posture: a register the adversary may overwrite (`REG` or `REG:k`;
     /// `k` is the ONE global budget of injections, default 1 — a single-event upset;
     /// `REG:unbounded` lifts it). Repeatable; `gen[1].q` is read as `gen$1.q`. The
@@ -4519,7 +4442,8 @@ fn sv_cegar(args: SvCegarArgs) -> Result<(), String> {
         top: args.top.clone(),
         additional_sources: additional.into_iter().collect(),
         primary_source_path: Some(args.file.display().to_string()),
-        use_sv2v: args.preprocess_sv2v,
+        use_sv2v: args.frontend.sv2v(),
+        frontend: args.frontend.into(),
         setundef_anyseq: args.setundef_anyseq,
         setundef_anyconst: args.setundef_anyconst,
         ..Default::default()
@@ -4719,58 +4643,15 @@ fn sv_verify_auto(args: SvVerifyAutoArgs) -> Result<(), String> {
     use mununu_core::adapter::btor2::kmts_lift::MustEdgeInference;
     use mununu_core::adapter::slang::verify_auto::{PortfolioMode, VerifyAutoOptions, verify_auto};
 
-    let primary_name = args
-        .file
-        .file_name()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| format!("Invalid SV source path: {}", args.file.display()))?;
-    let primary = std::fs::read_to_string(&args.file)
-        .map_err(|e| format!("Failed to read SV source '{}': {e}", args.file.display()))?;
-    let mut sources: Vec<(String, String)> = vec![(primary_name.to_string(), primary)];
-    let mut additional: Vec<(String, String)> = Vec::new();
-    for src in &args.sources {
-        let name = src
-            .file_name()
-            .and_then(|s| s.to_str())
-            .ok_or_else(|| format!("Invalid additional source path: {}", src.display()))?;
-        let body = std::fs::read_to_string(src)
-            .map_err(|e| format!("Failed to read additional source '{}': {e}", src.display()))?;
-        sources.push((name.to_string(), body.clone()));
-        additional.push((name.to_string(), body));
-    }
-
-    // `--param NAME=VALUE` / `MODULE.NAME=VALUE` — parse into (lhs, value).
-    // Unlike `--pin` (which silently skips malformed / unusable pins,
-    // mununu#459), a malformed `--param` is a HARD error here, and yosys errors
-    // downstream on one it cannot apply — never a silent drop.
-    let params: Vec<(String, String)> = args
-        .params
-        .iter()
-        .map(|e| {
-            let (lhs, val) = e.split_once('=').ok_or_else(|| {
-                format!("malformed --param '{e}': expected NAME=VALUE or MODULE.NAME=VALUE")
-            })?;
-            let (lhs, val) = (lhs.trim(), val.trim());
-            if lhs.is_empty() || val.is_empty() {
-                return Err(format!(
-                    "malformed --param '{e}': NAME and VALUE must both be non-empty"
-                ));
-            }
-            Ok((lhs.to_string(), val.to_string()))
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-
+    let lift = read_sv_lift(&args.lift)?;
+    let primary_name = lift.primary_name.clone();
+    let mut sources: Vec<(String, String)> = vec![(primary_name.clone(), lift.source.clone())];
+    sources.extend(lift.additional_sources.iter().cloned());
+    // The overrides are verify-auto's own option (they replace sources for the lift only, while
+    // the SVA is extracted from the originals), so the yosys options carry the plain sources.
     let yopts = mununu_core::adapter::yosys::YosysOptions {
-        top: args.top.clone(),
-        additional_sources: additional,
-        primary_source_path: Some(args.file.display().to_string()),
-        use_sv2v: args.preprocess_sv2v,
-        merge_clock_domains: args.merge_clock_domains,
-        cutpoint_signals: args.cutpoint.clone(),
-        extra_include_dirs: args.include_dirs.clone(),
-        frontend: args.frontend.into(),
-        params: params.clone(),
-        ..Default::default()
+        primary_source_path: Some(args.lift.primary_display()),
+        ..lift.yosys_options()
     };
     // mununu#663 — `auto` (the default) resolves the policy per property; an explicit `off`
     // switches that resolution off and keeps the cube may-only.
@@ -4792,7 +4673,7 @@ fn sv_verify_auto(args: SvVerifyAutoArgs) -> Result<(), String> {
             Some((name.trim().to_string(), val.trim().parse::<u64>().ok()?))
         })
         .collect();
-    let lift_overrides = read_lift_overrides(&args.lift_override)?;
+    let lift_overrides = lift.lift_overrides.clone();
     let opts = VerifyAutoOptions {
         max_iterations: args.max_iterations,
         must_edge_inference,
@@ -6732,7 +6613,7 @@ fn handle_sv(command: SvCommand) -> Result<(), String> {
         SvCommand::Discover(args) => sv_discover(args),
         SvCommand::Cegar(args) => sv_cegar(args),
         SvCommand::ExtractSva(args) => sv_extract_sva(args),
-        SvCommand::VerifyAuto(args) => sv_verify_auto(args),
+        SvCommand::VerifyAuto(args) => sv_verify_auto(*args),
         SvCommand::Verify(args) => sv_verify(args),
         SvCommand::VerifyLiveness(args) => sv_verify_liveness(args),
         SvCommand::VerifyLivenessAll(args) => sv_verify_liveness_all(args),
@@ -6802,13 +6683,17 @@ fn read_sv_lift(args: &SvLiftArgs) -> Result<mununu_core::adapter::sv_verify::Sv
             }
         }
         return Ok(mununu_core::adapter::sv_verify::SvLift {
+            primary_name: a.primary.0.clone(),
             source: a.primary.1,
             additional_sources,
             top,
-            use_sv2v: args.preprocess_sv2v,
+            use_sv2v: args.frontend.sv2v(),
             merge_clock_domains: args.merge_clock_domains,
             include_dirs,
             frontend: args.frontend.into(),
+            params: mununu_core::adapter::sv_verify::parse_params(&args.params)?,
+            cutpoints: args.cutpoint.clone(),
+            lift_overrides: read_lift_overrides(&args.lift_override)?,
         });
     }
     let file = args
@@ -6878,13 +6763,21 @@ fn read_sv_lift(args: &SvLiftArgs) -> Result<mununu_core::adapter::sv_verify::Sv
         }
     }
     Ok(mununu_core::adapter::sv_verify::SvLift {
+        primary_name: file
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("top.sv")
+            .to_string(),
         source,
         additional_sources,
         top: args.top.clone(),
-        use_sv2v: args.preprocess_sv2v,
+        use_sv2v: args.frontend.sv2v(),
         merge_clock_domains: args.merge_clock_domains,
         include_dirs: args.include_dirs.clone(),
         frontend: args.frontend.into(),
+        params: mununu_core::adapter::sv_verify::parse_params(&args.params)?,
+        cutpoints: args.cutpoint.clone(),
+        lift_overrides: read_lift_overrides(&args.lift_override)?,
     })
 }
 
@@ -7170,12 +7063,7 @@ fn sv_cdc_lint(args: SvCdcLintArgs) -> Result<(), String> {
     let as_json = args.json.json;
     let file = args.lift.primary_display();
     let run = || -> Result<(), String> {
-        let primary_name = std::path::Path::new(&file)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("top.sv");
-        let report =
-            mununu_core::adapter::sv_verify::sv_cdc_lint(&read_sv_lift(&args.lift)?, primary_name)?;
+        let report = mununu_core::adapter::sv_verify::sv_cdc_lint(&read_sv_lift(&args.lift)?)?;
         let mut view = mununu_core::api::models::SvCdcLintResponse::from(&report);
         view.file = Some(file.clone());
         print_typed_report(&view)?;
@@ -7198,62 +7086,31 @@ fn sv_mutate(args: SvMutateArgs) -> Result<(), String> {
     use mununu_core::adapter::btor2::kmts_lift::MustEdgeInference;
     use mununu_core::adapter::btor2::mutate::{Mutation, list_targets};
     use mununu_core::adapter::slang::verify_auto::{
-        PortfolioMode, VerifyAutoOptions, apply_lift_overrides, mutate_and_compare,
+        PortfolioMode, VerifyAutoOptions, mutate_and_compare,
     };
     use mununu_core::adapter::yosys::{YosysOptions, sv_to_btor2};
 
     let file = args.lift.primary_display();
     let lift = read_sv_lift(&args.lift)?;
-    let primary_name = std::path::Path::new(&file)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .map(str::to_string)
-        .unwrap_or_else(|| "top.sv".to_string());
+    let primary_name = lift.primary_name.clone();
     let mut sources: Vec<(String, String)> = vec![(primary_name.clone(), lift.source.clone())];
     sources.extend(lift.additional_sources.iter().cloned());
-    // mununu#475 item 4 — --param parity with `sv verify-auto`. Matches the parsing
-    // shape at the verify-auto handler (`NAME=VALUE` or `MODULE.NAME=VALUE`, both
-    // sides non-empty). A malformed --param is a HARD error here; yosys errors
-    // downstream on a parameter it cannot apply.
-    let params: Vec<(String, String)> = args
-        .params
-        .iter()
-        .map(|e| {
-            let (lhs, val) = e.split_once('=').ok_or_else(|| {
-                format!("malformed --param '{e}': expected NAME=VALUE or MODULE.NAME=VALUE")
-            })?;
-            let (lhs, val) = (lhs.trim(), val.trim());
-            if lhs.is_empty() || val.is_empty() {
-                return Err(format!(
-                    "malformed --param '{e}': NAME and VALUE must both be non-empty"
-                ));
-            }
-            Ok((lhs.to_string(), val.to_string()))
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-    // mununu#725 — the lift-posture flags of `sv verify-auto`, parsed by the same functions.
     let config_values = parse_config_values(&args.pin)?;
-    let lift_overrides = read_lift_overrides(&args.lift_override)?;
+    // The overrides go to `mutate_and_compare` as verify-auto's own option (the lift only); the
+    // yosys options carry the plain sources.
+    let lift_overrides = lift.lift_overrides.clone();
     let yopts = YosysOptions {
-        top: lift.top.clone(),
-        additional_sources: lift.additional_sources.clone(),
         primary_source_path: args.lift.file.as_ref().map(|p| p.display().to_string()),
-        use_sv2v: lift.use_sv2v,
-        merge_clock_domains: lift.merge_clock_domains,
-        cutpoint_signals: args.cutpoint.clone(),
-        extra_include_dirs: lift.include_dirs.clone(),
-        frontend: lift.frontend,
-        params,
-        ..Default::default()
+        ..lift.yosys_options()
     };
 
     // `--list` — lift once and enumerate the mutation targets (no verification). The discovery
     // lift honours `--lift-override` too (mununu#725): it does not go through `verify_auto`, and
     // the real OpenTitan `prim_assert.sv` dies in yosys (a topological loop) without the shim.
     if args.list {
-        let (primary, yopts) =
-            apply_lift_overrides(&primary_name, &lift.source, &yopts, &lift_overrides)
-                .map_err(|e| format!("sv mutate --list: {}", e.message))?;
+        let (primary, yopts) = lift
+            .staged()
+            .map_err(|e| format!("sv mutate --list: {e}"))?;
         let btor2 = sv_to_btor2(&primary, &yopts)
             .map_err(|e| format!("sv mutate --list: {}", e.message))?;
         let t = list_targets(&btor2)?;
@@ -7422,7 +7279,8 @@ fn sv_discover(args: SvDiscoverArgs) -> Result<(), String> {
         top: args.top.clone(),
         additional_sources,
         primary_source_path: Some(primary.display().to_string()),
-        use_sv2v: args.preprocess_sv2v,
+        use_sv2v: args.frontend.sv2v(),
+        frontend: args.frontend.into(),
         ..Default::default()
     };
 
@@ -7539,7 +7397,8 @@ fn sv_emit_btor2_per_module(args: SvEmitBtor2PerModuleArgs) -> Result<(), String
         top: args.top.clone(),
         additional_sources: additional.into_iter().collect(),
         primary_source_path: Some(args.file.display().to_string()),
-        use_sv2v: args.preprocess_sv2v,
+        use_sv2v: args.frontend.sv2v(),
+        frontend: args.frontend.into(),
         setundef_anyseq: args.setundef_anyseq,
         setundef_anyconst: args.setundef_anyconst,
         per_module_btor: true,
@@ -9632,13 +9491,17 @@ fn emit_replay_testbenches(
         let inactive: u64 = inactive.trim().parse().ok()?;
         Some((name.trim().to_string(), u64::from(inactive == 0)))
     });
-    let paths: Vec<String> = std::iter::once(args.file.clone())
-        .chain(args.sources.iter().cloned())
+    let file = args
+        .lift
+        .file
+        .clone()
+        .ok_or("--emit-testbench needs SV_FILE (the Makefile names the source files)")?;
+    let paths: Vec<String> = std::iter::once(file.clone())
+        .chain(args.lift.sources.iter().cloned())
         .map(|p| std::fs::canonicalize(&p).unwrap_or(p).display().to_string())
         .collect();
-    let top = args.top.clone().unwrap_or_else(|| {
-        args.file
-            .file_stem()
+    let top = args.lift.top.clone().unwrap_or_else(|| {
+        file.file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("top")
             .to_string()
@@ -10286,10 +10149,12 @@ mod sv_lift_search_path_tests {
             search_paths,
             sources,
             top: None,
-            preprocess_sv2v: false,
             merge_clock_domains: false,
             include_dirs: Vec::new(),
             frontend: SvFrontendArg::Auto,
+            params: Vec::new(),
+            lift_override: Vec::new(),
+            cutpoint: Vec::new(),
         }
     }
 

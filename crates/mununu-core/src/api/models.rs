@@ -1448,53 +1448,16 @@ pub struct Btor2GameResponse {
 /// returning the same `Btor2Verify*Response` shapes — one call, no `emit-btor2` step.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SvVerifyRequest {
-    /// SystemVerilog primary source content.
-    pub source: String,
-    /// Additional SV sources (packages / includes).
-    #[serde(default)]
-    pub additional_sources: Vec<FileContent>,
-    /// Top module for the lift (auto-detect when omitted).
-    #[serde(default)]
-    pub top: Option<String>,
-    /// Run sv2v before Yosys (modern SV). Default `false`.
-    #[serde(default)]
-    pub use_sv2v: bool,
-    /// Force the slang RTL front-end (`read_slang`) for modern-SV constructs
-    /// yosys/sv2v reject (`while` loops, `import pkg::*;`). Requires the
-    /// yosys-slang plugin. Default `false`.
-    #[serde(default)]
-    pub use_slang: bool,
-    /// Lift a multi-clock design onto the model's one implicit clock instead of refusing it.
-    /// An UNDER-approximation: the domains only ever tick together, so a HOLDS does not transfer
-    /// (the `clock-domains-merged` soundness caveat). Default `false` (refused at lift time).
-    #[serde(default)]
-    pub merge_clock_domains: bool,
+    /// The SV design and how to lift it (the CLI's shared lift flags).
+    pub lift: SvLiftRequest,
 }
 
 /// Request for `POST /api/v1/sv/verify-liveness` — the SV lift fields plus the
 /// response-liveness atoms.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SvVerifyLivenessRequest {
-    /// SystemVerilog primary source content.
-    pub source: String,
-    /// Additional SV sources (packages / includes).
-    #[serde(default)]
-    pub additional_sources: Vec<FileContent>,
-    /// Top module for the lift (auto-detect when omitted).
-    #[serde(default)]
-    pub top: Option<String>,
-    /// Run sv2v before Yosys. Default `false`.
-    #[serde(default)]
-    pub use_sv2v: bool,
-    /// Force the slang RTL front-end (`read_slang`). Requires the yosys-slang
-    /// plugin. Default `false`.
-    #[serde(default)]
-    pub use_slang: bool,
-    /// Lift a multi-clock design onto the model's one implicit clock instead of refusing it.
-    /// An UNDER-approximation: the domains only ever tick together, so a HOLDS does not transfer
-    /// (the `clock-domains-merged` soundness caveat). Default `false` (refused at lift time).
-    #[serde(default)]
-    pub merge_clock_domains: bool,
+    /// The SV design and how to lift it (the CLI's shared lift flags).
+    pub lift: SvLiftRequest,
     /// The request atom (`"REG op VALUE"`).
     pub request: String,
     /// The grant atom that must eventually follow on every path.
@@ -1506,26 +1469,8 @@ pub struct SvVerifyLivenessRequest {
 /// `mununu sv verify-liveness-all`; reuses [`Btor2VerifyLivenessResponse`].
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SvVerifyLivenessAllRequest {
-    /// SystemVerilog primary source content.
-    pub source: String,
-    /// Additional SV sources (packages / includes).
-    #[serde(default)]
-    pub additional_sources: Vec<FileContent>,
-    /// Top module for the lift (auto-detect when omitted).
-    #[serde(default)]
-    pub top: Option<String>,
-    /// Run sv2v before Yosys. Default `false`.
-    #[serde(default)]
-    pub use_sv2v: bool,
-    /// Force the slang RTL front-end (`read_slang`). Requires the yosys-slang
-    /// plugin. Default `false`.
-    #[serde(default)]
-    pub use_slang: bool,
-    /// Lift a multi-clock design onto the model's one implicit clock instead of refusing it.
-    /// An UNDER-approximation: the domains only ever tick together, so a HOLDS does not transfer
-    /// (the `clock-domains-merged` soundness caveat). Default `false` (refused at lift time).
-    #[serde(default)]
-    pub merge_clock_domains: bool,
+    /// The SV design and how to lift it (the CLI's shared lift flags).
+    pub lift: SvLiftRequest,
     /// The response pairs, each `"ANTE => CONS"`. At least one required.
     pub responses: Vec<String>,
 }
@@ -1535,26 +1480,8 @@ pub struct SvVerifyLivenessAllRequest {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SvVerifyRecoverabilityRequest {
-    /// SystemVerilog primary source content.
-    pub source: String,
-    /// Additional SV sources (packages / includes).
-    #[serde(default)]
-    pub additional_sources: Vec<FileContent>,
-    /// Top module for the lift (auto-detect when omitted).
-    #[serde(default)]
-    pub top: Option<String>,
-    /// Run sv2v before Yosys. Default `false`.
-    #[serde(default)]
-    pub use_sv2v: bool,
-    /// Force the slang RTL front-end (`read_slang`). Requires the yosys-slang
-    /// plugin. Default `false`.
-    #[serde(default)]
-    pub use_slang: bool,
-    /// Lift a multi-clock design onto the model's one implicit clock instead of refusing it.
-    /// An UNDER-approximation: the domains only ever tick together, so a HOLDS does not transfer
-    /// (the `clock-domains-merged` soundness caveat). Default `false` (refused at lift time).
-    #[serde(default)]
-    pub merge_clock_domains: bool,
+    /// The SV design and how to lift it (the CLI's shared lift flags).
+    pub lift: SvLiftRequest,
     /// The `good` atom to recover to (`"REG op VALUE"`).
     pub target: String,
     /// Extra abstraction predicate(s) for the cube-path escalation, each
@@ -1579,26 +1506,8 @@ pub struct SvVerifyRecoverabilityRequest {
 /// encoding (no property to name). Returns a [`Btor2CheckFsmResponse`].
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SvCheckFsmRequest {
-    /// SystemVerilog primary source content.
-    pub source: String,
-    /// Additional SV sources (packages / includes).
-    #[serde(default)]
-    pub additional_sources: Vec<FileContent>,
-    /// Top module for the lift (auto-detect when omitted).
-    #[serde(default)]
-    pub top: Option<String>,
-    /// Run sv2v before Yosys. Default `false`.
-    #[serde(default)]
-    pub use_sv2v: bool,
-    /// Force the slang RTL front-end (`read_slang`). Requires the yosys-slang
-    /// plugin. Default `false`.
-    #[serde(default)]
-    pub use_slang: bool,
-    /// Lift a multi-clock design onto the model's one implicit clock instead of refusing it.
-    /// An UNDER-approximation: the domains only ever tick together, so a HOLDS does not transfer
-    /// (the `clock-domains-merged` soundness caveat). Default `false` (refused at lift time).
-    #[serde(default)]
-    pub merge_clock_domains: bool,
+    /// The SV design and how to lift it (the CLI's shared lift flags).
+    pub lift: SvLiftRequest,
     /// Max state-register width treated as an FSM (wider = datapath/counter, skipped).
     #[serde(default = "default_fsm_max_width")]
     pub max_width: u32,
@@ -1610,32 +1519,103 @@ pub struct SvCheckFsmRequest {
     pub terminal: Vec<String>,
 }
 
+/// The RTL front end of a lift: `auto` (the environment's default), `verilog` (yosys
+/// `read_verilog`), `slang` (the yosys-slang plugin) or `sv2v` (sv2v, then `read_verilog`).
+/// The CLI's `--frontend` takes the same four values.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum SvFrontendName {
+    #[default]
+    Auto,
+    Verilog,
+    Slang,
+    Sv2v,
+}
+
+/// The SV design and how to lift it, shared by every `sv` route: the API peer of the CLI's
+/// lift flags (`SV_FILE` / `--source`, `--top`, `--frontend`, `--param`, `--lift-override`,
+/// `--cutpoint`, `--merge-clock-domains`). Unknown keys are refused.
+#[derive(Debug, Clone, Default, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SvLiftRequest {
+    /// The primary SystemVerilog source.
+    pub source: String,
+    /// The primary source's file name, which `lift_overrides` match (default `<top>.sv`, or
+    /// `top.sv` without a `top`).
+    #[serde(default)]
+    pub source_name: Option<String>,
+    /// Additional SV sources (packages, includes, submodules).
+    #[serde(default)]
+    pub additional_sources: Vec<FileContent>,
+    /// Top module (auto-detected when omitted).
+    #[serde(default)]
+    pub top: Option<String>,
+    /// The RTL front end (default `auto`).
+    #[serde(default)]
+    pub frontend: SvFrontendName,
+    /// Parameter overrides, `NAME=VALUE` or `MODULE.NAME=VALUE`.
+    #[serde(default)]
+    pub params: Vec<String>,
+    /// Lift-only replacements of a source by file name (an assertion-macro shim, a synthesis
+    /// variant). `sv verify-auto` still extracts its SVA from the original sources.
+    #[serde(default)]
+    pub lift_overrides: Vec<FileContent>,
+    /// Control-slice cut points: each named net becomes a free input (an over-approximation).
+    #[serde(default)]
+    pub cutpoints: Vec<String>,
+    /// Lift a multi-clock design onto the model's one implicit clock instead of refusing it.
+    /// An UNDER-approximation: the domains only ever tick together, so a HOLDS does not transfer.
+    #[serde(default)]
+    pub merge_clock_domains: bool,
+}
+
+impl SvLiftRequest {
+    /// The core lift this request describes; a malformed `params` entry is an error.
+    pub fn to_sv_lift(&self) -> Result<crate::adapter::sv_verify::SvLift, String> {
+        use crate::adapter::yosys::SvFrontend;
+        let (frontend, use_sv2v) = match self.frontend {
+            SvFrontendName::Auto => (SvFrontend::Auto, false),
+            SvFrontendName::Verilog => (SvFrontend::Verilog, false),
+            SvFrontendName::Slang => (SvFrontend::Slang, false),
+            SvFrontendName::Sv2v => (SvFrontend::Verilog, true),
+        };
+        Ok(crate::adapter::sv_verify::SvLift {
+            primary_name: self
+                .source_name
+                .clone()
+                .unwrap_or_else(|| format!("{}.sv", self.top.as_deref().unwrap_or("top"))),
+            source: self.source.clone(),
+            additional_sources: self
+                .additional_sources
+                .iter()
+                .map(|f| (f.name.clone(), f.content.clone()))
+                .collect(),
+            top: self.top.clone(),
+            use_sv2v,
+            include_dirs: Vec::new(),
+            frontend,
+            merge_clock_domains: self.merge_clock_domains,
+            params: crate::adapter::sv_verify::parse_params(&self.params)?,
+            cutpoints: self.cutpoints.clone(),
+            lift_overrides: self
+                .lift_overrides
+                .iter()
+                .map(|f| (f.name.clone(), f.content.clone()))
+                .collect(),
+        })
+    }
+}
+
 /// Request for `POST /api/v1/sv/lint` — the SV-direct partial-write preflight.
 /// Lifts SystemVerilog and reports every register whose partial-write lift the
 /// verifier cannot keep faithfully (monono#partsel), with no model checking.
 /// Surface peer of the CLI `mununu sv lint`.
 #[derive(Debug, Deserialize)]
 pub struct SvLintRequest {
-    /// SystemVerilog primary source content.
-    pub source: String,
-    /// Additional SV sources (packages / includes).
-    #[serde(default)]
-    pub additional_sources: Vec<FileContent>,
-    /// Top module for the lift (auto-detect when omitted).
-    #[serde(default)]
-    pub top: Option<String>,
-    /// Run sv2v before Yosys. Default `false`.
-    #[serde(default)]
-    pub use_sv2v: bool,
-    /// Force the slang RTL front-end (`read_slang`). Requires the yosys-slang
-    /// plugin. Default `false`.
-    #[serde(default)]
-    pub use_slang: bool,
-    /// Lift a multi-clock design onto the model's one implicit clock instead of refusing it.
-    /// An UNDER-approximation: the domains only ever tick together, so a HOLDS does not transfer
-    /// (the `clock-domains-merged` soundness caveat). Default `false` (refused at lift time).
-    #[serde(default)]
-    pub merge_clock_domains: bool,
+    /// The SV design and how to lift it (the CLI's shared lift flags).
+    pub lift: SvLiftRequest,
 }
 
 /// Request for `POST /api/v1/sv/cdc-lint` — the structural clock-domain-crossing lint. Lifts
@@ -1643,20 +1623,8 @@ pub struct SvLintRequest {
 /// netlist. Surface peer of the CLI `mununu sv cdc-lint`.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SvCdcLintRequest {
-    /// SystemVerilog primary source content.
-    pub source: String,
-    /// Additional SV sources (packages / includes).
-    #[serde(default)]
-    pub additional_sources: Vec<FileContent>,
-    /// Top module for the lift (auto-detect when omitted).
-    #[serde(default)]
-    pub top: Option<String>,
-    /// Run sv2v before Yosys. Default `false`.
-    #[serde(default)]
-    pub use_sv2v: bool,
-    /// Force the slang RTL front-end (`read_slang`). Default `false`.
-    #[serde(default)]
-    pub use_slang: bool,
+    /// The SV design and how to lift it (the CLI's shared lift flags).
+    pub lift: SvLiftRequest,
 }
 
 /// One clock domain: a clock net, its edge and how many storage cells fire on it.
@@ -1777,25 +1745,8 @@ pub struct SvLintResponse {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SvMutateRequest {
-    /// SystemVerilog primary source content.
-    pub source: String,
-    /// Additional SV sources (packages / includes).
-    #[serde(default)]
-    pub additional_sources: Vec<FileContent>,
-    /// Top module for the lift (auto-detect when omitted).
-    #[serde(default)]
-    pub top: Option<String>,
-    /// Run sv2v before Yosys. Default `false`.
-    #[serde(default)]
-    pub use_sv2v: bool,
-    /// Force the slang RTL front-end (`read_slang`). Default `false`.
-    #[serde(default)]
-    pub use_slang: bool,
-    /// Lift a multi-clock design onto the model's one implicit clock instead of refusing it.
-    /// An UNDER-approximation: the domains only ever tick together, so a HOLDS does not transfer
-    /// (the `clock-domains-merged` soundness caveat). Default `false` (refused at lift time).
-    #[serde(default)]
-    pub merge_clock_domains: bool,
+    /// The SV design and how to lift it (the CLI's shared lift flags).
+    pub lift: SvLiftRequest,
     /// The mutation to apply, one of four kinds (mununu#635): `"stick:<reg>"`
     /// (freeze a register), `"drop-reset:<reg>"` (remove a register's reset arm),
     /// `"off-by-one:<reg>[@<const_nid>][:±1]"` (shift a constant the register is
@@ -1822,35 +1773,12 @@ pub struct SvMutateRequest {
     /// rest; `"off"` = may-only everywhere.
     #[serde(default)]
     pub must_edge_inference: Option<String>,
-    /// mununu#475 item 4 — parity with `POST /api/v1/sv/verify-auto`'s
-    /// `params`. Override module parameters BEFORE elaboration. Each entry
-    /// is `"NAME=VALUE"` (top-module scope) or `"MODULE.NAME=VALUE"`
-    /// (submodule scope; slang applies it top-level by bare name).
-    /// Shrinks a parameterised design so its counters fit the bit-blast
-    /// cap during the baseline + mutant re-verify; blocks that need
-    /// `params` to verify at all could not previously be mutated via the
-    /// API. A malformed entry is a HARD `BadRequest`; yosys errors
-    /// downstream on a parameter it cannot apply — never a silent drop.
-    #[serde(default)]
-    pub params: Vec<String>,
     /// mununu#725 — config concretization for the baseline AND the mutant, as
     /// `sv/verify-auto`'s `config_values`: each entry `"signal=value"` pins a config
     /// input to a constant (e.g. `"rst_ni=1"`). A malformed entry or a non-decimal
     /// value is a 400 before the lift. Mirrors the CLI `--pin`. Default empty.
     #[serde(default)]
     pub pins: Vec<String>,
-    /// mununu#725 — control-slice cut points for the lift, as `sv/verify-auto`'s
-    /// `cutpoint`: bare net names replaced with a free input. Mirrors the CLI
-    /// `--cutpoint`. Default empty.
-    #[serde(default)]
-    pub cutpoint: Vec<String>,
-    /// mununu#725 — lift-only source overrides, as `sv/verify-auto`'s `lift_overrides`:
-    /// each entry REPLACES the same-named source (`top.sv` names `source`) for the SV →
-    /// BTOR2 lift of the baseline and the mutant while SVA extraction reads the
-    /// originals — OpenTitan's `prim_assert.sv` shim. A name matching no source is a
-    /// 400. Mirrors the CLI `--lift-override NAME=PATH`. Default empty.
-    #[serde(default)]
-    pub lift_overrides: Vec<FileContent>,
     /// Fault-injection posture: registers the adversary may overwrite (`"REG"` / `"REG:k"`,
     /// one global budget, default 1; `"REG:unbounded"`). Mirrors the CLI `--fault`. Default empty.
     #[serde(default)]
@@ -1918,21 +1846,8 @@ pub struct SvMutateResponse {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SvCegarRequest {
-    /// SystemVerilog primary source content.
-    pub source: String,
-    /// Additional SV source files (multi-file designs / packages /
-    /// `include` targets), staged alongside the primary source.
-    #[serde(default)]
-    pub additional_sources: Vec<FileContent>,
-    /// Top module name. Recommended for multi-module designs so Yosys
-    /// flattens from the right root; `None` lets Yosys auto-detect.
-    #[serde(default)]
-    pub top: Option<String>,
-    /// Run sv2v before Yosys (required for modern SV: module-header
-    /// `import pkg::*;`, structs, interfaces). Mirrors the CLI
-    /// `--preprocess-sv2v`.
-    #[serde(default)]
-    pub use_sv2v: bool,
+    /// The SV design and how to lift it (the CLI's shared lift flags).
+    pub lift: SvLiftRequest,
     /// Yosys `setundef -anyseq` (per-cycle havoc on undefined nets).
     /// Mirrors the CLI `--setundef-anyseq`.
     #[serde(default)]
@@ -2036,36 +1951,8 @@ pub struct ShadowSignalView {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SvVerifyAutoRequest {
-    /// SystemVerilog primary source content.
-    pub source: String,
-    /// Additional SV sources (packages / `include` targets).
-    #[serde(default)]
-    pub additional_sources: Vec<FileContent>,
-    /// Top module for the SV → BTOR2 lift (auto-detect when omitted).
-    #[serde(default)]
-    pub top: Option<String>,
-    /// Run sv2v before Yosys (modern SV). Mirrors `--preprocess-sv2v`.
-    #[serde(default)]
-    pub use_sv2v: bool,
-    /// Force the slang RTL front-end (`read_slang`) for modern-SV constructs
-    /// yosys/sv2v reject. Mirrors `--frontend slang`. Requires the yosys-slang
-    /// plugin. Default `false`.
-    #[serde(default)]
-    pub use_slang: bool,
-    /// Lift a multi-clock design onto the model's one implicit clock instead of refusing it.
-    /// An UNDER-approximation: the domains only ever tick together, so a HOLDS does not transfer
-    /// (the `clock-domains-merged` soundness caveat). Default `false` (refused at lift time).
-    #[serde(default)]
-    pub merge_clock_domains: bool,
-    /// Module-parameter overrides applied via yosys `chparam -set` before the lift
-    /// (mirrors the CLI `--param`). Each entry is `"NAME=VALUE"` (applied to the
-    /// top module) or `"MODULE.NAME=VALUE"` (scoped to `MODULE`). Shrinks a
-    /// parameterised timing interval so its counters get smaller — without a
-    /// wrapper module (which would rename the SVA atoms). A parameter yosys cannot
-    /// apply is an ERROR (never silently dropped); the verdicts are scoped to the
-    /// applied values (surfaced as a `parameter-override` note). Default empty.
-    #[serde(default)]
-    pub params: Vec<String>,
+    /// The SV design and how to lift it (the CLI's shared lift flags).
+    pub lift: SvLiftRequest,
     /// Max CEGAR iterations per property (default 16).
     #[serde(default)]
     pub max_iterations: Option<usize>,
@@ -2103,18 +1990,6 @@ pub struct SvVerifyAutoRequest {
     /// note. Default empty.
     #[serde(default)]
     pub counter_bounds: Vec<String>,
-    /// Control-slice cut points, mirroring the CLI `--cutpoint`: net names to replace
-    /// with a free `$anyseq` input in the SV → BTOR2 lift (Yosys `cutpoint w:<net>`), so
-    /// the FSM's datapath guards drop out of the cone via cone-of-influence — the sound,
-    /// netlist-level way to fit `"exact-symbolic"` on a wide control FSM. Each entry is a
-    /// bare net name (e.g. `"must_refresh"`). OVER-APPROXIMATION: a definite HOLDS
-    /// transfers for a SAFETY / universal property (safety + over-approx); for an
-    /// ALTERNATING (νμ) recoverability property (`AG EF`) a HOLDS is sound for the
-    /// abstract model only (νμ collapses under approximation) — decide those on the
-    /// un-cutpointed cone. A definite VIOLATED is sound only when guard-independent (an
-    /// orphaned FSM state). Surfaced as a `control-slice` note. Default empty.
-    #[serde(default)]
-    pub cutpoint: Vec<String>,
     /// Abstraction-predicate hints, mirroring the CLI `--predicate` and the in-source
     /// `// @mununu_predicate <expr>` annotation (all three are merged). Each entry is a
     /// predicate expression (`"reg == value"`, `"reg == reg"`, `"reg >= K"`) seeded as a
@@ -2186,13 +2061,6 @@ pub struct SvVerifyAutoRequest {
     /// mirrored on the CLI as `--no-input-state` and by `MUNUNU_NO_INPUT_STATE=1`.
     #[serde(default)]
     pub no_input_state: Option<bool>,
-    /// Lift-only source overrides: each entry REPLACES the same-named source (`top.sv` names
-    /// `source`; otherwise an `additional_sources` name) for the SV → BTOR2 lift only, while SVA
-    /// extraction still reads the originals — e.g. OpenTitan's synthesis `prim_assert.sv` shim
-    /// for the lift beside the real assertion macros for extraction. A name that matches no
-    /// source is a 400. Mirrors the CLI's `--lift-override NAME=PATH`. Default empty.
-    #[serde(default)]
-    pub lift_overrides: Vec<FileContent>,
     /// Fault-injection posture: registers the adversary may overwrite (`"REG"` / `"REG:k"`,
     /// one global budget, default 1; `"REG:unbounded"`). Mirrors the CLI `--fault`. Default empty.
     #[serde(default)]

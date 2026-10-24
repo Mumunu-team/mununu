@@ -15,7 +15,7 @@ The BTOR2-direct property verbs (`verify`, `verify-liveness`, `verify-liveness-a
 | `btor2 verify-recoverability` / `sv verify-recoverability` | Recoverability `AG EF good` | `Btor2VerifyRecoverabilityResponse` | Optional `VerdictRefinement` tree (vacuous / config-partition / holds-under / ⊥-hint) |
 | `btor2 check-fsm` / `sv check-fsm` | Auto-scan of illegal FSM encodings | `Btor2CheckFsmResponse` | Per-register findings + counts |
 
-The SV wrappers exist so downstream consumers do not need the intermediate `sv emit-btor2` step. They accept SystemVerilog on the wire, lift it via `sv2v` + Yosys (or `read_slang` when `use_slang` is set — the reliable path for modern SV per `docs/verifying-rtl.md`), and return the sibling BTOR2 response shape.
+The SV wrappers exist so downstream consumers do not need the intermediate `sv emit-btor2` step. They accept SystemVerilog on the wire, lift it via `sv2v` + Yosys (or `read_slang` with `lift.frontend: "slang"` — the reliable path for modern SV per `docs/verifying-rtl.md`), and return the sibling BTOR2 response shape.
 
 ## `POST /btor2/verify` (and `POST /sv/verify`) — safety portfolio
 
@@ -163,15 +163,20 @@ Auto-discovers the design's FSM-like state registers (state registers narrower t
 
 ## The SV request shapes
 
-All five SV wrappers share the same lift-input core:
+Every `sv` route takes the design as one `lift` object (`SvLiftRequest`, since 0.5), the API peer
+of the CLI's shared lift flags; unknown keys are refused:
 
-- `source` — the primary SystemVerilog module content.
-- `additional_sources` — extra packages / includes as `FileContent` records.
+- `source` — the primary SystemVerilog module content; `source_name` — its file name (default
+  `<top>.sv`), which `lift_overrides` match.
+- `additional_sources` — extra packages / includes / submodules as `FileContent` records.
 - `top` — top module for the lift (auto-detected when omitted).
-- `use_sv2v` — run `sv2v` before Yosys (needed for modern SV constructs Yosys refuses).
-- `use_slang` — force the `read_slang` frontend (needed for `while` loops, `import pkg::*;`, and other constructs `sv2v` silently drops — see the CLAUDE.md "slang-gated" note under `SVA-verification e2e validation`).
+- `frontend` — `auto` (default), `verilog`, `slang` (the yosys-slang plugin: `while` loops,
+  `import pkg::*;` and other constructs `sv2v` silently drops) or `sv2v` (sv2v, then
+  `read_verilog`). Replaces the `use_sv2v` / `use_slang` booleans.
+- `params` (`NAME=VALUE`), `lift_overrides` (lift-only source replacements), `cutpoints`,
+  `merge_clock_domains`.
 
-Verb-specific fields (`request` / `grant` / `target` / `responses` / `max_width` / `predicates` / `refine` / `config_values` / `discover_assumptions`) match the BTOR2 sibling's non-`content` fields one-for-one. A downstream consumer that already parses the BTOR2 verbs adds the SV wrappers cheaply.
+Verb-specific fields (`request` / `grant` / `target` / `responses` / `max_width` / `predicates` / `refine` / `partitions` / `discover_assumptions`) match the BTOR2 sibling's non-`content` fields one-for-one. A downstream consumer that already parses the BTOR2 verbs adds the SV wrappers cheaply.
 
 ## Consumer guidance
 

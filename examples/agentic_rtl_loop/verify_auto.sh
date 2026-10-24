@@ -9,6 +9,6 @@ set -euo pipefail
 cd "$(dirname "$0")"
 cat master.sv system_checked.sv gr1_controller.sv > _checked.sv
 docker run --rm -v mununu-target:/cargo-target -v "$PWD":/demo mununu-sva \
-  /cargo-target/debug/mununu sv verify-auto /demo/_checked.sv --top system_checked --preprocess-sv2v \
+  /cargo-target/debug/mununu sv verify-auto /demo/_checked.sv --top system_checked --frontend sv2v \
   2>&1 | grep -E 'verify-auto:|assert\]|HOLDS|VIOLATED|state register'
 rm -f _checked.sv

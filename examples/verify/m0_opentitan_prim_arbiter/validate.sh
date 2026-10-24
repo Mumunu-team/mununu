@@ -84,7 +84,7 @@ echo "--- step 2/2: mununu sv emit-btor2-per-module (R.0b) ---"
 "${MUNUNU}" sv emit-btor2-per-module "${SRC}/prim_arbiter_fixed_m0_wrapper.sv" \
   --source "${SRC}/prim_arbiter_fixed.sv" \
   --top prim_arbiter_fixed_m0_wrapper \
-  --preprocess-sv2v \
+  --frontend sv2v \
   --output-dir "${OUT}/btor2" 2>&1 | tail -8
 N_BTOR="$(find "${OUT}/btor2" -name '*.btor2' 2>/dev/null | wc -l | tr -d ' ')"
 if [[ "${N_BTOR}" -lt 1 ]]; then

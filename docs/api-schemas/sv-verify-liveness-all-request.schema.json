@@ -16,22 +16,103 @@
         "name"
       ],
       "type": "object"
+    },
+    "SvFrontendName": {
+      "description": "The RTL front end of a lift: `auto` (the environment's default), `verilog` (yosys `read_verilog`), `slang` (the yosys-slang plugin) or `sv2v` (sv2v, then `read_verilog`). The CLI's `--frontend` takes the same four values.",
+      "enum": [
+        "auto",
+        "verilog",
+        "slang",
+        "sv2v"
+      ],
+      "type": "string"
+    },
+    "SvLiftRequest": {
+      "additionalProperties": false,
+      "description": "The SV design and how to lift it, shared by every `sv` route: the API peer of the CLI's lift flags (`SV_FILE` / `--source`, `--top`, `--frontend`, `--param`, `--lift-override`, `--cutpoint`, `--merge-clock-domains`). Unknown keys are refused.",
+      "properties": {
+        "additional_sources": {
+          "default": [],
+          "description": "Additional SV sources (packages, includes, submodules).",
+          "items": {
+            "$ref": "#/definitions/FileContent"
+          },
+          "type": "array"
+        },
+        "cutpoints": {
+          "default": [],
+          "description": "Control-slice cut points: each named net becomes a free input (an over-approximation).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "frontend": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/SvFrontendName"
+            }
+          ],
+          "default": "auto",
+          "description": "The RTL front end (default `auto`)."
+        },
+        "lift_overrides": {
+          "default": [],
+          "description": "Lift-only replacements of a source by file name (an assertion-macro shim, a synthesis variant). `sv verify-auto` still extracts its SVA from the original sources.",
+          "items": {
+            "$ref": "#/definitions/FileContent"
+          },
+          "type": "array"
+        },
+        "merge_clock_domains": {
+          "default": false,
+          "description": "Lift a multi-clock design onto the model's one implicit clock instead of refusing it. An UNDER-approximation: the domains only ever tick together, so a HOLDS does not transfer.",
+          "type": "boolean"
+        },
+        "params": {
+          "default": [],
+          "description": "Parameter overrides, `NAME=VALUE` or `MODULE.NAME=VALUE`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "source": {
+          "description": "The primary SystemVerilog source.",
+          "type": "string"
+        },
+        "source_name": {
+          "default": null,
+          "description": "The primary source's file name, which `lift_overrides` match (default `<top>.sv`, or `top.sv` without a `top`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "top": {
+          "default": null,
+          "description": "Top module (auto-detected when omitted).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "source"
+      ],
+      "type": "object"
     }
   },
   "description": "Request for `POST /api/v1/sv/verify-liveness-all` — the SV lift fields plus the conjunction's `\"ANTE => CONS\"` response pairs. Mirrors the CLI `mununu sv verify-liveness-all`; reuses [`Btor2VerifyLivenessResponse`].",
   "properties": {
-    "additional_sources": {
-      "default": [],
-      "description": "Additional SV sources (packages / includes).",
-      "items": {
-        "$ref": "#/definitions/FileContent"
-      },
-      "type": "array"
-    },
-    "merge_clock_domains": {
-      "default": false,
-      "description": "Lift a multi-clock design onto the model's one implicit clock instead of refusing it. An UNDER-approximation: the domains only ever tick together, so a HOLDS does not transfer (the `clock-domains-merged` soundness caveat). Default `false` (refused at lift time).",
-      "type": "boolean"
+    "lift": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/SvLiftRequest"
+        }
+      ],
+      "description": "The SV design and how to lift it (the CLI's shared lift flags)."
     },
     "responses": {
       "description": "The response pairs, each `\"ANTE => CONS\"`. At least one required.",
@@ -39,33 +120,11 @@
         "type": "string"
       },
       "type": "array"
-    },
-    "source": {
-      "description": "SystemVerilog primary source content.",
-      "type": "string"
-    },
-    "top": {
-      "default": null,
-      "description": "Top module for the lift (auto-detect when omitted).",
-      "type": [
-        "string",
-        "null"
-      ]
-    },
-    "use_slang": {
-      "default": false,
-      "description": "Force the slang RTL front-end (`read_slang`). Requires the yosys-slang plugin. Default `false`.",
-      "type": "boolean"
-    },
-    "use_sv2v": {
-      "default": false,
-      "description": "Run sv2v before Yosys. Default `false`.",
-      "type": "boolean"
     }
   },
   "required": [
-    "responses",
-    "source"
+    "lift",
+    "responses"
   ],
   "title": "SvVerifyLivenessAllRequest",
   "type": "object"

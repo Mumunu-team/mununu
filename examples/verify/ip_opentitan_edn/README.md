@@ -1,6 +1,6 @@
 # OpenTitan `edn` — a full IP through `sv verify-auto`
 
-> Source of truth: [`scripts/vendor_opentitan_ip.py`](../../../scripts/vendor_opentitan_ip.py) (how `source/` was produced) + [`e2e_opentitan_ip_edn_full`](../../../crates/mununu-core/tests/differential_oracle_e2e.rs) (the pinned verdicts) — surface: CLI-only — a vendored example; the same call runs over `POST /api/v1/sv/verify-auto` with the files as `additional_sources`
+> Source of truth: [`scripts/vendor_opentitan_ip.py`](../../../scripts/vendor_opentitan_ip.py) (how `source/` was produced) + [`e2e_opentitan_ip_edn_full`](../../../crates/mununu-core/tests/differential_oracle_e2e.rs) (the pinned verdicts) — surface: CLI-only — a vendored example; the same call runs over `POST /api/v1/sv/verify-auto` with the files as `lift.additional_sources`
 
 The Entropy Distribution Network IP of lowRISC/opentitan at `558921ccc8aeefab652b45c1402c10bceb63accc`:
 the TL-UL register block (`edn_reg_top`), the core, the main FSM, eight endpoint FSMs
@@ -22,7 +22,7 @@ sh run.sh --json                                   # the IP's own 52 assertions
 sh run.sh --json --source mununu_properties.sv     # + the system-level properties below
 ```
 
-`run.sh` is `sv verify-auto edn.sv --top edn --preprocess-sv2v --source … --lift-override
+`run.sh` is `sv verify-auto edn.sv --top edn --frontend sv2v --source … --lift-override
 prim_assert.sv=prim_assert_shim.sv … --pin rst_ni=1`: the SVA is **extracted from the real
 `prim_assert` macros**, while the sv2v + yosys lift sees `prim_assert_shim.sv`, which defines every
 assertion macro of the real set as nothing (as OpenTitan's own synthesis macros do) **and defines

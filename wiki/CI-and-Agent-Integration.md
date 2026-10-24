@@ -44,11 +44,11 @@ jobs:
       - name: recoverability gate
         run: |
           mununu --quiet sv verify-recoverability rtl/fsm.sv \
-            --preprocess-sv2v --target "state_q == 0"
+            --frontend sv2v --target "state_q == 0"
       # Verify the module's own assertions; fail on any violation, allow ⊥.
       - name: assertion gate
         run: |
-          mununu --quiet sv verify-auto rtl/fsm.sv --preprocess-sv2v --json \
+          mununu --quiet sv verify-auto rtl/fsm.sv --frontend sv2v --json \
             | tee verify-auto.json
 ```
 
@@ -62,7 +62,7 @@ Every verb above needs a property or a target atom. **`btor2 check-fsm` needs ne
 
 ```bash
 # SV-direct: lift + auto-scan in one call. Exit 2 on any reachable illegal encoding.
-mununu --quiet sv check-fsm rtl/fsm.sv --preprocess-sv2v   # --fail-on / --quiet / exit codes as above
+mununu --quiet sv check-fsm rtl/fsm.sv --frontend sv2v   # --fail-on / --quiet / exit codes as above
 
 # Or on a BTOR2 you already have (or lifted with `sv emit-btor2-per-module`):
 mununu --quiet btor2 check-fsm fsm.btor2
@@ -107,9 +107,8 @@ An RTL-writing agent has two request styles:
 
 ```jsonc
 POST /api/v1/sv/verify-auto
-{ "source": "module m(...); ... assert property (...); endmodule",
-  "use_sv2v": true,
-  "must_edge_inference": "smt-hyper-must" }   // sound νμ verdicts; all fields optional
+{ "lift": { "source": "module m(...); ... assert property (...); endmodule", "frontend": "sv2v" },
+  "must_edge_inference": "smt-hyper-must" }   // sound νμ verdicts; every field but lift.source optional
 // → { "properties": [ { "name": "...", "outcome": "holds"|"violated"|"unknown"|"skipped" } ],
 //     "unsupported": [ ... ], "notes": [ ... ] }
 ```
@@ -118,13 +117,13 @@ POST /api/v1/sv/verify-auto
 
 ```jsonc
 POST /api/v1/sv/verify-recoverability
-{ "source": "module m(...); endmodule", "use_sv2v": true, "target": "state_q == 0" }
+{ "lift": { "source": "module m(...); endmodule", "frontend": "sv2v" }, "target": "state_q == 0" }
 // → { "outcome": "holds"|"violated"|"unknown", "property": "AG EF (state_q == 0)" }
 ```
 
-`POST /api/v1/sv/verify` (safety of the module's assertions) and `/api/v1/sv/verify-liveness` (`{request, grant}`) round out the trio. All return the canonical `verdict`, so the agent gates on `verdict === "violated"`.
+`POST /api/v1/sv/verify` (safety of the module's assertions) and `/api/v1/sv/verify-liveness` (`{request, grant}`) round out the trio. All return the canonical `outcome`, so the agent gates on `outcome === "violated"`. Every `sv` route takes the design as one `lift` object (`source`, `additional_sources`, `top`, `frontend`, `params`, `lift_overrides`, `cutpoints`, `merge_clock_domains`), the API peer of the CLI's shared lift flags.
 
-**No property to name?** `POST /api/v1/sv/check-fsm { "source": "<sv>", "use_sv2v": true }` lifts the module and auto-scans every FSM register for a reachable illegal encoding, returning `{ fsm_registers_checked, illegal_encodings_found, registers: [{ register, legal_encodings, verdict, illegal_encoding_reachable }] }` — the agent gates on `illegal_encodings_found > 0`. The BTOR2-direct peer is `POST /api/v1/btor2/check-fsm { "content": "<btor2>" }`.
+**No property to name?** `POST /api/v1/sv/check-fsm { "lift": { "source": "<sv>", "frontend": "sv2v" } }` lifts the module and auto-scans every FSM register for a reachable illegal encoding, returning `{ fsm_registers_checked, illegal_encodings_found, registers: [{ register, legal_encodings, outcome, illegal_encoding_reachable }] }` — the agent gates on `illegal_encodings_found > 0`. The BTOR2-direct peer is `POST /api/v1/btor2/check-fsm { "content": "<btor2>" }`.
 
 The agent can skip the SV lift entirely and post pre-lifted BTOR2 to `/api/v1/btor2/verify{,-liveness,-recoverability}` — same responses.
 
