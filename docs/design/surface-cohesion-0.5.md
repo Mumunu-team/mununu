@@ -1,6 +1,8 @@
 # Surface cohesion review for 0.5 — verbs, flags, verdicts, traces
 
 > Status: planning — APPROVED as written by the maintainer on 2026-10-23 (every **Decide** below is accepted); the HTTP API stays under `/api/v1`. Nothing here is shipped until each cluster lands.
+>
+> **Shipped in mununu 0.5.0 (2026-10-24)**, PRs #774 – #785; the consumer cheat sheet is [`docs/consumer-briefings/2026-10-mununu-0.5-migration.md`](../consumer-briefings/2026-10-mununu-0.5-migration.md). Two recorded deviations: `decided_by` keeps its per-verb type (a list on the portfolio verbs, where several engines can agree), and cegar's power-up-value flag is `--init-values` (its meaning is not a verdict partition).
 
 **Audience:** the maintainer deciding the 0.5 break, and the engineers implementing it in mununu, rosf, monono and mununu-ui.
 

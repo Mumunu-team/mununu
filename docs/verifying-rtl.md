@@ -1011,8 +1011,8 @@ do not retry-loop."*
 
 `sv verify-recoverability`, `sv verify-liveness` and `sv verify-liveness --response` **already print JSON on
 success** — they always did. What they lacked was the `--json` flag `sv verify-auto` established, so
-passing it failed argument parsing with exit 2, which reads exactly like "this verb has no structured
-output":
+passing it failed argument parsing (exit 2 then, the usage-error code 64 since 0.5), which reads
+exactly like "this verb has no structured output":
 
 ```console
 $ mununu sv verify-recoverability design.sv --target "state == 0" --json
@@ -1037,10 +1037,11 @@ the prose still goes to stderr for a human watching the same run. `verb` and `fi
 because a CI lane runs many invocations into one log and an error saying only `error` cannot be
 attributed.
 
-⚠️ **The success document is not schema-pinned yet.** `sv verify-auto`'s response has a JSON-schema
-drift detector; these three summaries are still built ad-hoc, so treat the field set as stable-by-
-convention rather than guaranteed. Pinning it is the remaining half of
-[mununu#541](https://github.com/Mumunu-team/mununu/issues/541).
+The success documents are schema-pinned and drift-tested like `sv verify-auto`'s:
+[`sv-verify-recoverability-report`](api-schemas/sv-verify-recoverability-report.schema.json),
+[`sv-verify-liveness-report`](api-schemas/sv-verify-liveness-report.schema.json) and
+[`sv-verify-liveness-all-report`](api-schemas/sv-verify-liveness-all-report.schema.json) (the
+`--response` form).
 
 ### The withheld VIOLATED: `unestablished-initial-state` (mununu#577)
 
