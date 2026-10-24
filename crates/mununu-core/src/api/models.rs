@@ -1963,6 +1963,13 @@ pub struct SvVerifyAutoRequest {
     /// `tmpl.<instance>`. Default empty.
     #[serde(default)]
     pub templates: Vec<crate::adapter::templates::TemplateRef>,
+    /// Return a Verilator replay testbench with every counterexample (`--emit-testbench`).
+    #[serde(default)]
+    pub emit_testbench: bool,
+    /// The clock port the testbench toggles (default: the first of `clk`, `clk_i`, `clock`,
+    /// `i_clk`, `aclk`, `clk_sys` the source declares).
+    #[serde(default)]
+    pub tb_clock: Option<String>,
     /// Engine selector, mirroring the CLI `--engine`: `"explicit"`, `"symbolic"`,
     /// `"exact-symbolic"`, `"portfolio-sequential"`, `"portfolio-parallel"`.
     /// **Unspecified ⇒ the default `"portfolio-sequential"`** (2026-07-06): run
@@ -2333,6 +2340,7 @@ impl From<&crate::adapter::slang::verify_auto::AutoVerifyReport> for SvVerifyAut
                         unreachable_target: c.unreachable_target.clone(),
                         inputs: cells(&c.inputs),
                     }),
+                    testbench: None,
                 }
             })
             .collect();
@@ -2750,6 +2758,23 @@ pub struct PropertyVerdictView {
     /// — a vacuous HOLDS is a true HOLDS on the model — the field says what it is worth.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vacuity: Option<VacuityView>,
+    /// The Verilator replay testbench for this property's counterexample, when `emit_testbench`
+    /// was requested and the counterexample carries a path (`sv verify-auto --emit-testbench`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub testbench: Option<TestbenchView>,
+}
+
+/// A generated counterexample-replay testbench ([`crate::adapter::verilator::replay`]).
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct TestbenchView {
+    /// `tb.cpp`.
+    pub tb_cpp: String,
+    /// `Makefile`; it names the sources as the request named them.
+    pub makefile: String,
+    /// (cycle, register) comparisons the testbench makes.
+    pub checks: usize,
+    /// Cells left out of the comparison, with the reason.
+    pub skipped: Vec<String>,
 }
 
 /// mununu#599 — how a recoverability guarantee that HOLDS stands against the rest of its report.

@@ -126,6 +126,11 @@
       },
       "type": "array"
     },
+    "emit_testbench": {
+      "default": false,
+      "description": "Return a Verilator replay testbench with every counterexample (`--emit-testbench`).",
+      "type": "boolean"
+    },
     "engine": {
       "default": null,
       "description": "Engine selector, mirroring the CLI `--engine`: `\"explicit\"`, `\"symbolic\"`, `\"exact-symbolic\"`, `\"portfolio-sequential\"`, `\"portfolio-parallel\"`. **Unspecified ⇒ the default `\"portfolio-sequential\"`** (2026-07-06): run exact → symbolic → explicit, stopping when every property is decided — the most precise sound choice, no slower than the former `explicit` default on designs `explicit` already decided. Resolved by `verify_auto::engine_selection`.",
@@ -277,6 +282,14 @@
     "source": {
       "description": "SystemVerilog primary source content.",
       "type": "string"
+    },
+    "tb_clock": {
+      "default": null,
+      "description": "The clock port the testbench toggles (default: the first of `clk`, `clk_i`, `clock`, `i_clk`, `aclk`, `clk_sys` the source declares).",
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "templates": {
       "default": [],

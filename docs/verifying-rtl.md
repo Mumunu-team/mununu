@@ -341,6 +341,33 @@ the branching reading fails (`[] a || [] b` can be false at a state although eve
 satisfies one of them). The monitor's history latches (`mununu_wit_…`) appear in the states beside
 the design's registers. Liveness keeps its stall lasso; a bare `EF p` its unreachable target.
 
+### Replaying a counterexample under Verilator: `--emit-testbench` (2026-10-24)
+
+> Source of truth: [`counterexample_testbench`](../crates/mununu-core/src/adapter/verilator/replay.rs#L69) — surface: (CLI+API)
+
+`--emit-testbench DIR` writes, for every property that carries a counterexample, a Verilator
+testbench under `DIR/<property>/` (`tb.cpp` and a `Makefile`). The testbench is built from the RTL
+sources, not from the lifted netlist, so it is an independent cross-check of the engine's trace in
+the sense of the [claims policy](policies/claims-integrity.md). It holds the reset active for one
+cycle (the reset and its polarity come from `diagnostics.gated_resets`), drives the inputs of every
+cycle from the trace, compares every design register the trace names against its value and prints
+`MATCH` or the first `MISMATCH`, then clocks one more cycle so that the bound SVA, compiled with
+`--assert`, fires on the violating state. Internal registers are read through `--public-flat-rw`;
+synthetic cells (`__past` shadows, inputs-in-the-state cells, monitor latches) have no RTL
+counterpart and are listed as skipped. The clock is the first port named `clk`, `clk_i`, `clock`,
+`i_clk`, `aclk` or `clk_sys`; `--tb-clock PORT` names another.
+
+```bash
+mununu sv verify-auto rod.sv --source rod_sva.sv --top rod --frontend slang --emit-testbench tb
+make -C tb/p_no_fault      # in mununu-sva
+# MATCH
+# [0] %Error: rod_sva.sv:2: Assertion failed in TOP.rod.u_sva.p_no_fault
+```
+
+Over HTTP, `emit_testbench: true` (and optionally `tb_clock`) on `POST /api/v1/sv/verify-auto` puts
+the same files in each row's `testbench` field (`tb_cpp`, `makefile`, `checks`, `skipped`); the
+Makefile's `SOURCES` names `<top>.sv` and the additional sources as the request named them.
+
 ### A recoverability row refuted by a trap certificate (2026-10-21)
 
 > Source of truth: [`search_trap`](../crates/mununu-core/src/adapter/trap_certificate.rs#L294) + [`TRAP_CERTIFICATE_DECIDED_BY`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L6935) — surface: (CLI+API) — `sv verify-auto` / `POST /api/v1/sv/verify-auto`, every `AG EF` row the main pass leaves ⊥

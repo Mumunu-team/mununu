@@ -2326,6 +2326,16 @@ struct SvVerifyAutoArgs {
     /// deployment's packs. Repeatable.
     #[arg(long = "templates-file", value_name = "FILE")]
     templates_files: Vec<PathBuf>,
+    /// Write a Verilator replay testbench for every counterexample to DIR/<property>/
+    /// (`tb.cpp` + `Makefile`; `make -C DIR/<property>` builds and runs it). It resets the design,
+    /// drives the trace's inputs, compares every register the trace names after each clock edge,
+    /// and runs the design's assertions under `--assert`.
+    #[arg(long = "emit-testbench", value_name = "DIR")]
+    emit_testbench: Option<PathBuf>,
+    /// The clock port the replay testbench toggles (default: the first of `clk`, `clk_i`,
+    /// `clock`, `i_clk`, `aclk`, `clk_sys` the primary source declares).
+    #[arg(long = "tb-clock", value_name = "PORT", requires = "emit_testbench")]
+    tb_clock: Option<String>,
     /// Print a JSON report instead of the human-readable summary.
     #[arg(long)]
     json: bool,
@@ -4766,6 +4776,9 @@ fn sv_verify_auto(args: SvVerifyAutoArgs) -> Result<(), String> {
             &expectations,
         ))
     };
+    if let Some(dir) = &args.emit_testbench {
+        emit_replay_testbenches(dir, &args, &sources, &report)?;
+    }
     if args.json {
         render_verify_auto_json(&report, &expectation_result)?;
     } else {
@@ -9404,6 +9417,95 @@ fn list_templates(args: TemplatesArgs) -> Result<(), String> {
         }
     }
 
+    Ok(())
+}
+
+/// `--emit-testbench DIR`: one Verilator replay testbench per counterexample
+/// ([`mununu_core::adapter::verilator::replay`]), under DIR/<property label or name>/.
+fn emit_replay_testbenches(
+    dir: &Path,
+    args: &SvVerifyAutoArgs,
+    sources: &[(String, String)],
+    report: &mununu_core::adapter::slang::verify_auto::AutoVerifyReport,
+) -> Result<(), String> {
+    use mununu_core::adapter::verilator::replay::{ReplayDesign, counterexample_testbench};
+    let clock = match &args.tb_clock {
+        Some(c) => c.clone(),
+        None => ["clk", "clk_i", "clock", "i_clk", "aclk", "clk_sys"]
+            .iter()
+            .find(|c| {
+                sources[0]
+                    .1
+                    .split(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
+                    .any(|w| w == **c)
+            })
+            .map(|c| c.to_string())
+            .ok_or("--emit-testbench: no clock port found; name it with --tb-clock")?,
+    };
+    // `rst_n=1` is the reset pinned INACTIVE: active is the other value.
+    let reset = report.diagnostics.gated_resets.first().and_then(|g| {
+        let (name, inactive) = g.split_once('=')?;
+        let inactive: u64 = inactive.trim().parse().ok()?;
+        Some((name.trim().to_string(), u64::from(inactive == 0)))
+    });
+    let paths: Vec<String> = std::iter::once(args.file.clone())
+        .chain(args.sources.iter().cloned())
+        .map(|p| std::fs::canonicalize(&p).unwrap_or(p).display().to_string())
+        .collect();
+    let top = args.top.clone().unwrap_or_else(|| {
+        args.file
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("top")
+            .to_string()
+    });
+    let mut written = 0usize;
+    for p in &report.properties {
+        let Some(cex) = &p.counterexample else {
+            continue;
+        };
+        let design = ReplayDesign {
+            top: &top,
+            clock: &clock,
+            reset: reset.as_ref().map(|(n, a)| (n.as_str(), *a)),
+            sources: &paths,
+        };
+        let Some(bench) = counterexample_testbench(&design, cex) else {
+            continue;
+        };
+        let label: String = p
+            .label
+            .as_deref()
+            .unwrap_or(&p.name)
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let out = dir.join(&label);
+        std::fs::create_dir_all(&out).map_err(|e| format!("{}: {e}", out.display()))?;
+        std::fs::write(out.join("tb.cpp"), &bench.tb_cpp).map_err(|e| e.to_string())?;
+        std::fs::write(out.join("Makefile"), &bench.makefile).map_err(|e| e.to_string())?;
+        eprintln!(
+            "replay testbench: {} ({} checks{})",
+            out.display(),
+            bench.checks,
+            if bench.skipped.is_empty() {
+                String::new()
+            } else {
+                format!(", {} cell(s) not compared", bench.skipped.len())
+            }
+        );
+        written += 1;
+    }
+    if written == 0 {
+        eprintln!("replay testbench: no counterexample with a path to replay");
+    }
+    let _ = sources;
     Ok(())
 }
 
