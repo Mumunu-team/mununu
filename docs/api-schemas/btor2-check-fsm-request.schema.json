@@ -6,12 +6,25 @@
       "description": "BTOR2 source content.",
       "type": "string"
     },
+    "liveness": {
+      "default": false,
+      "description": "Also run the liveness inventory (`check-fsm --liveness`).",
+      "type": "boolean"
+    },
     "max_width": {
       "default": 8,
       "description": "Max state-register width treated as an FSM (wider = datapath/counter, skipped).",
       "format": "uint32",
       "minimum": 0.0,
       "type": "integer"
+    },
+    "terminal": {
+      "default": [],
+      "description": "Intended absorbing states, each `\"REG=VALUE\"` (`--terminal`).",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
     }
   },
   "required": [

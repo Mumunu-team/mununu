@@ -75,7 +75,18 @@ Why this and not recoverability? Because reset makes recoverability tautological
                    "verdict": "holds", "illegal_encoding_reachable": false } ] }
 ```
 
-A `holds` register provably stays within its encoding (validated on the real OpenTitan csrng: `state_q`'s 8 sparse encodings auto-derived, no illegal value reachable). `--max-width <bits>` (default `8`) bounds which registers count as "FSM-like" — a wider register is a datapath / counter and is skipped. A register whose legal set is fewer than 2 values, or already covers every value of its width, has no illegal encoding to reach and is skipped; the portfolio abstains (`unknown`) only when no engine decides.
+A `holds` register provably stays within its encoding (validated on the real OpenTitan csrng: `state_q`'s 8 sparse encodings auto-derived, no illegal value reachable).
+
+**`--liveness`: the liveness inventory.** With `--liveness` (API `liveness: true`), each scanned register also gets, out of reset with the resets pinned inactive: the legal encodings **no path reaches** (`unreachable` — decided by the reach portfolio, no bit cap; a dead enum value is a defect or a leftover), the reachable encodings it can **never leave** (`absorbing` — `AG(reg == v → EF reg ≠ v)` fails, decided by the exact engine), and whether it always gets back to its reset value (`returns_to_reset`, `AG EF`). An absorbing state is often intended — a `LOCK` or a fatal `ERROR` only reset clears — so it is listed, not judged; `--terminal state_q=4` (API `terminal: ["state_q=4"]`) moves an intended one to `expected_terminal`. The inventory is report-only: the exit code stays the encoding scan's. Scope: single-register FSMs with a recognisable reset (one-hot FSMs split across cells and coupled FSMs are not covered); a raw BTOR2 deadlock is not a question here, since the transition relation is total — "stuck" means absorbing.
+
+```bash
+mununu --quiet sv check-fsm rod.sv --top rod --frontend slang --liveness --terminal state_q=4
+```
+
+```jsonc
+"liveness": [ { "register": "state_q", "reset_value": 0, "unreachable": [], "absorbing": [],
+                "expected_terminal": [4], "returns_to_reset": "violated", "undecided": [] } ]
+``` `--max-width <bits>` (default `8`) bounds which registers count as "FSM-like" — a wider register is a datapath / counter and is skipped. A register whose legal set is fewer than 2 values, or already covers every value of its width, has no illegal encoding to reach and is skipped; the portfolio abstains (`unknown`) only when no engine decides.
 
 ---
 
