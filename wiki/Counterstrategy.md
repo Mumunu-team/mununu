@@ -53,7 +53,7 @@ This is the dual of `[ctrl=controllable]`, which requires all uncontrollable tra
 
 ## Example: Water Tank
 
-Consider the water tank from Tutorial 05 with states: Empty, Filling, Full, Draining. The environment controls the `idle` label (which loops Empty back to Empty).
+Consider the water tank of [`examples/wiki/water_tank.ctxdsl`](https://github.com/Mumunu-team/mununu/blob/main/examples/wiki/water_tank.ctxdsl) with states: Empty, Filling, Full, Draining. The controller starts filling, fills and opens the drain; the environment controls `idle` (which loops Empty back to Empty) and `drain`.
 
 **Controller's formula** (controllable reachability of Full):
 

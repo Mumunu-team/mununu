@@ -30,9 +30,9 @@ The binary is at `target/release/mununu`.
 
 ## First Example: Industrial Door Lock
 
-The tutorial ships with a door lock controller that tracks failed unlock attempts and enters lockout after three bad codes.
+The repository ships with a door lock controller that tracks failed unlock attempts and enters lockout after three bad codes.
 
-Here is the CTXDSL file (abbreviated -- see `tutorial/examples/01_basic_modeling.ctxdsl` for the full version):
+Here is the CTXDSL file ([`examples/wiki/door_lock.ctxdsl`](https://github.com/Mumunu-team/mununu/blob/main/examples/wiki/door_lock.ctxdsl)):
 
 ```
 context door_lock {
@@ -61,7 +61,6 @@ context door_lock {
                 transition Strike1 -> Strike2 on label bad_code;
                 transition Strike2 -> Lockout on label bad_code;
                 transition Lockout -> Locked on label reset;
-                // ... more transitions in the full file
             }
         }
     }
@@ -85,7 +84,7 @@ context door_lock {
 Check whether the safety invariant holds over the DoorLock automaton:
 
 ```bash
-mununu context eval tutorial/examples/01_basic_modeling.ctxdsl \
+mununu context eval examples/wiki/door_lock.ctxdsl \
     --formula safety_invariant \
     --automaton DoorLock
 ```
@@ -95,7 +94,7 @@ mununu context eval tutorial/examples/01_basic_modeling.ctxdsl \
 Get a JSON overview of all automata, formulas, and controllers in the file:
 
 ```bash
-mununu context summarize tutorial/examples/01_basic_modeling.ctxdsl
+mununu context summarize examples/wiki/door_lock.ctxdsl
 ```
 
 ## Start the API Server

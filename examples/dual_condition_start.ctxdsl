@@ -54,8 +54,8 @@ context dual_condition_start {
                 state Running;
             }
             transitions {
-                // In the Rust CLTS example this transition label is the set {gate_closed, operator_ready}.
-                transition Idle -> Running on label gate_closed;
+                // One joint action: the gate closes and the operator marks ready together.
+                transition Idle -> Running on {label gate_closed, label operator_ready};
                 transition Running -> Idle on label stop;
             }
         }

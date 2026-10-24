@@ -1,0 +1,42 @@
+context door_lock {
+    alphabet {
+        label unlock;
+        label lock;
+        label bad_code;
+        label timeout;
+        label reset;
+    }
+
+    automata {
+        automaton DoorLock {
+            states {
+                state Locked initial;
+                state Unlocked;
+                state Strike1;
+                state Strike2;
+                state Lockout;
+            }
+
+            transitions {
+                transition Locked -> Unlocked on label unlock;
+                transition Unlocked -> Locked on label lock;
+                transition Locked -> Strike1 on label bad_code;
+                transition Strike1 -> Strike2 on label bad_code;
+                transition Strike2 -> Lockout on label bad_code;
+                transition Lockout -> Locked on label reset;
+            }
+        }
+    }
+
+    mu_formulas {
+        formula safety_invariant {
+            over DoorLock;
+            body = nu X. ([] X);
+        }
+
+        formula lockout_reachable {
+            over DoorLock;
+            body = mu X. (Lockout || <> X);
+        }
+    }
+}

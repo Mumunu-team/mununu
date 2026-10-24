@@ -1,0 +1,49 @@
+// AXI-like bus transaction (multi-label transitions): the wiki's Hardware Verification Patterns example, complete.
+context axi_transaction {
+    alphabet {
+        label addr_valid;
+        label data_valid;
+        label ctrl_write;
+        label ctrl_read;
+        label ack;
+        label idle;
+    }
+
+    automata {
+        automaton BusController {
+            controllable {
+                label addr_valid; label data_valid;
+                label ctrl_write; label ctrl_read; label idle;
+            }
+            states {
+                state Idle initial; state WritePhase;
+                state ReadPhase; state Acknowledged;
+            }
+            transitions {
+                // Multi-label: three signals fire together
+                transition Idle -> WritePhase
+                    on label addr_valid, label data_valid, label ctrl_write;
+                transition Idle -> ReadPhase
+                    on label addr_valid, label ctrl_read;
+                transition WritePhase -> Acknowledged on label ack;
+                transition ReadPhase -> Acknowledged on label ack;
+                transition Acknowledged -> Idle on label idle;
+            }
+        }
+    }
+
+    mu_formulas {
+        formula ack_reachable {
+            over BusController;
+            body = mu X. (Acknowledged || <> X);
+        }
+        formula write_reachable {
+            over BusController;
+            body = mu X. (WritePhase || <> X);
+        }
+        formula master_can_reach_ack {
+            over BusController;
+            body = mu X. (Acknowledged || [ (ctrl = controllable) ] X);
+        }
+    }
+}
