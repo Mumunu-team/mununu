@@ -23,53 +23,31 @@ control state, or generate the model — do **not** write `&&` in a guard.
 
 ---
 
-## 1. `&&`, `||` and `!` in a guard silently disable the transition
+## 1. Guards take `&&`, `||`, `!` and parentheses; an undecidable guard is an error
 
-> Source of truth: [`GuardExpr`](../crates/mununu-core/src/guard/mod.rs#L281),
-> [`split_comparison`](../crates/mununu-core/src/guard/mod.rs#L292) — surface:
-> CLI+API+UI (every path that realizes a CTXDSL automaton with variables).
+> Source of truth: [`parse_guard_tree`](../crates/mununu-core/src/guard/mod.rs) and
+> [`UnrollingError::UndecidableGuard`](../crates/mununu-core/src/abstraction/unrolling.rs) —
+> surface: CLI+API+UI (every path that realizes a CTXDSL automaton).
 
-The guard parser the unroll path uses
-([`parse_guard_expr`](../crates/mununu-core/src/abstraction/unrolling.rs#L1088))
-targets a `GuardExpr` with only `True | False | Predicate | Comparison` — no
-`And`, `Or` or `Not`. `split_comparison` finds the **first** comparison
-operator and takes everything after it as the right-hand side, so
+A guard is a boolean expression over comparisons: `||` binds loosest, then `&&`, then `!`, and
+parentheses group. Each comparison is `<expr> op <expr>` over the automaton's `i64` variables and
+constants (`==`, `!=`, `<`, `<=`, `>`, `>=`).
 
 ```
-guard a == b && a == 2
+transition Closed -> Open on label open guard a >= 2 && b == 0;
+transition Closed -> Trip on label shut guard a > 5 || !(b == 0);
 ```
 
-becomes the comparison `a == "b && a == 2"`, which no state satisfies. The
-transition is never enabled. There is no error and no warning.
+Until 2026-10 the guard was split at its first comparison operator, so `a == b && a == 2` became
+the comparison `a == "b && a == 2"`, no state satisfied it, and the transition silently never
+fired — an under-approximation that turns a reachable bug into "unreachable". The guard now keeps
+its structure, and the unroller refines a variable's abstract value against the whole expression.
 
-```
-// WRONG — this transition never fires
-transition S -> S on label g guard (a == b) && (a == 2) effects { h = 1; };
-
-// RIGHT — one comparison per guard
-transition S -> S on label g guard a == 2 effects { h = 1; };
-```
-
-**Why it matters more than it looks.** A silently-dropped transition is an
-*under-approximation*: the model has fewer behaviours than the system. Safety
-and reachability verdicts computed on it are unsound in the direction that
-hurts — the model reports "not reachable" for a bug that is reachable.
-
-**The three ways out**, in order of preference:
-
-1. **Put the conjunction in the property.** Formulas support `&&`, `||`, `!`,
-   variable-to-variable comparison and labelled modalities (§6). This is
-   usually possible and always the cheapest.
-2. **Encode one conjunct in the control state.** `state Busy` / `state Idle`
-   makes "we are in `Busy`" structural, leaving one comparison for the guard.
-3. **Generate the model.** Enumerate the semantics in a script and emit
-   explicit states — the idiom every shipped memory-domain example uses (§8).
-
-Note that `crate::abstraction::expression::GuardExpr`
-([expression.rs:52](../crates/mununu-core/src/abstraction/expression.rs#L52))
-*does* have `And`/`Or`/`Not` variants. They are unreachable from CTXDSL source
-because the conversion goes through the lossy `crate::guard::GuardExpr` first.
-Widening the parser is the natural fix; until then, this page is the contract.
+**An undecidable guard is refused.** When the unroller cannot decide a guard at a state — it reads
+a name that is no declared variable (`guard cuont >= 1` for `count`), or a shape the refinement
+cannot split — realization fails naming the transition and the guard, instead of dropping the
+transition. Without `variables` at all, a guard over an undeclared name is refused as before
+(`DynamicGuardsRequireUnrolling`).
 
 ## 2. `effects` are simultaneous and read the pre-state
 
@@ -469,7 +447,7 @@ structural `sv lint` rules in
 
 ## Checklist before trusting a hand-authored model
 
-1. No `&&` / `||` / `!` inside any `guard`. (§1)
+1. Every name a `guard` reads is a declared `i64` variable or a constant; realization refuses the rest. (§1)
 2. Every variable appearing in a property is `i64`. (§3)
 3. A positive control atom returns true and a negative control returns false. (§3)
 4. Every variable is bounded by a guard, or encoded structurally. (§10)
