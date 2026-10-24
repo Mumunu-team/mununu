@@ -6,7 +6,8 @@
 pub mod ast;
 pub mod parser;
 pub mod translator;
+pub mod universal;
 
 pub use ast::LtlFormula;
 pub use parser::{ParseError, parse};
-pub use translator::{TranslationError, translate};
+pub use translator::{TranslationError, translate, translate_existential};

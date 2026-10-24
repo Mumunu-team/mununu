@@ -469,6 +469,8 @@ pub enum RealizationError {
     UnknownAutomaton(String),
     #[error("unknown formula '{0}' referenced by controller")]
     UnknownFormula(String),
+    #[error("formula '{name}' cannot be evaluated: {error}")]
+    InvalidFormula { name: String, error: String },
     #[error("failed to build automaton '{name}': {error}")]
     AutomatonBuild {
         name: String,
@@ -1563,11 +1565,19 @@ fn collect_formulas(
                     (parsed, parse_error, mu_expr.raw.clone())
                 }
                 FormulaExpr::Ltl(ltl_expr) => {
-                    // Translate LTL to μ-calculus.
-                    match ltl::translator::translate(&ltl_expr.formula) {
+                    // Translate LTL to μ-calculus: every path (`ltl`) or some path (`eltl`).
+                    let (keyword, translated) = if ltl_expr.existential {
+                        (
+                            "eltl",
+                            ltl::translator::translate_existential(&ltl_expr.formula),
+                        )
+                    } else {
+                        ("ltl", ltl::translator::translate(&ltl_expr.formula))
+                    };
+                    match translated {
                         Ok(translated) => {
-                            // Format the translated formula for display.
-                            let raw = format!("ltl {:?}", ltl_expr.formula);
+                            let raw =
+                                format!("{keyword} {}", ltl::universal::show(&ltl_expr.formula));
                             (translated, None, raw)
                         }
                         Err(error) => {
@@ -1588,6 +1598,13 @@ fn collect_formulas(
                     FormulaTargetsKind::Named(list.iter().map(|ident| ident.name.clone()).collect())
                 }
             };
+            // A formula that does not parse or translate used to be stored as `true` with the
+            // error beside it, and nothing downstream read the error: it was evaluated as `true`
+            // and came back HOLDS. Refuse it.
+            if let Some(error) = parse_error {
+                return Err(RealizationError::InvalidFormula { name, error });
+            }
+            let parse_error: Option<String> = None;
             let property_class = parsed.property_class();
             let alternation_depth = parsed.alternation_depth();
             formulas.insert(
@@ -3661,7 +3678,7 @@ context tri_formula {
     mu_formulas {
         formula holds_idle {
             over M;
-            body = "boot_idle";
+            body = boot_idle;
         }
     }
 }
@@ -4120,14 +4137,15 @@ context test {
         )
         .expect("context parses");
 
-        let realized = realize(&doc, &[]).expect("realization succeeds with fallback");
-        let formula = realized.formulas.get("bad").expect("formula exists");
-        assert!(formula.parse_error.is_some());
-        // Should have fallback to "true"
-        assert!(matches!(
-            formula.formula.node(formula.formula.root()),
-            crate::mu_calculus::Node::True
-        ));
+        // A formula that does not parse is refused: it used to be stored as `true` with the
+        // error beside it, which nothing read, so it was evaluated as `true` and held.
+        let Err(err) = realize(&doc, &[]) else {
+            panic!("an unparseable formula must not realize");
+        };
+        assert!(
+            matches!(&err, RealizationError::InvalidFormula { name, .. } if name == "bad"),
+            "{err}"
+        );
     }
 
     #[test]

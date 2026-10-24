@@ -87,11 +87,12 @@ pub enum Keyword {
     Enums, // "enums" section keyword
     Enum,  // "enum" declaration keyword
     // Formula syntax markers
-    Ltl, // Explicit LTL syntax marker
-    Mu,  // Explicit μ-calculus syntax marker (optional, for clarity)
-         // Note: LTL operators (G, F, X, U, W, R) are not DSL keywords
-         // because they can be used as identifiers. The LTL parser recognizes
-         // them directly from raw strings.
+    Ltl,  // Explicit LTL syntax marker
+    Eltl, // LTL syntax, some-path (branching) reading
+    Mu,   // Explicit μ-calculus syntax marker (optional, for clarity)
+          // Note: LTL operators (G, F, X, U, W, R) are not DSL keywords
+          // because they can be used as identifiers. The LTL parser recognizes
+          // them directly from raw strings.
 }
 
 impl Keyword {
@@ -162,6 +163,7 @@ impl Keyword {
             "enums" => Enums,
             "enum" => Enum,
             "ltl" => Ltl,
+            "eltl" => Eltl,
             "mu" => Mu,
             // Note: LTL operators are not keywords - they're recognized by the LTL parser
             _ => return None,

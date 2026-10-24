@@ -830,6 +830,7 @@ fn test_formula_expr_enum() {
     let ltl_formula = LtlFormula::Always(Box::new(LtlFormula::Predicate("safe".to_string())));
     let ltl_expr = LtlExpr {
         formula: ltl_formula.clone(),
+        existential: false,
         span: Span::new(0, 10, 1, 1),
     };
     let formula_expr_ltl = FormulaExpr::Ltl(ltl_expr.clone());
@@ -856,6 +857,7 @@ fn test_mu_formula_with_ltl() {
     let ltl_formula = LtlFormula::Always(Box::new(LtlFormula::Predicate("safe".to_string())));
     let ltl_expr = LtlExpr {
         formula: ltl_formula,
+        existential: false,
         span: Span::new(0, 10, 1, 1),
     };
 

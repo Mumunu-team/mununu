@@ -2339,6 +2339,53 @@ mod tests {
 
     type TestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 
+    /// An `ltl` formula holds when it holds on EVERY path. `F Goal` was translated to `EF Goal`
+    /// (some path), so on a model where the environment may also loop in `Stuck` forever it came
+    /// back satisfied at the initial state. It is now violated there; the some-path reading
+    /// stays available as `eltl`.
+    #[test]
+    fn an_ltl_eventually_must_hold_on_every_path() -> TestResult {
+        let src = |kw: &str| {
+            format!(
+                r#"
+context paths {{
+    alphabet {{ label go; label stall; label stay; }}
+    automata {{
+        automaton A {{
+            states {{ state Init initial; state Goal; state Stuck; }}
+            transitions {{
+                transition Init -> Goal on label go;
+                transition Init -> Stuck on label stall;
+                transition Goal -> Goal on label stay;
+                transition Stuck -> Stuck on label stay;
+            }}
+        }}
+    }}
+    mu_formulas {{ formula reach {{ over A; body = {kw} F Goal; }} }}
+}}
+"#
+            )
+        };
+        let holds_at_init = |kw: &str| -> TestResult<bool> {
+            let doc = parse(&src(kw))?;
+            let realized = crate::context_dsl::realize::realize(&doc, &[])?;
+            let f = realized.formulas.get("reach").ok_or("formula")?;
+            let env = realized.environment_for("A");
+            let sat = realized.context.evaluate_mu("A", &f.formula, &env, None)?;
+            let clts = realized.context.clts("A").ok_or("automaton")?;
+            Ok(clts.initial_states().iter().all(|s| sat[s.index()]))
+        };
+        assert!(
+            !holds_at_init("ltl")?,
+            "`ltl F Goal`: the path through `Stuck` never reaches `Goal`"
+        );
+        assert!(
+            holds_at_init("eltl")?,
+            "`eltl F Goal`: some path reaches `Goal`"
+        );
+        Ok(())
+    }
+
     #[test]
     fn registers_clts_instances() -> TestResult {
         let mut builder = Clts::builder();

@@ -15,15 +15,32 @@ use super::ast::LtlFormula;
 /// performance degradation on non-trivial state spaces.
 const ALTERNATION_DEPTH_WARN_THRESHOLD: usize = 3;
 
-/// Translates an LTL formula to a μ-calculus formula.
+/// Translates an LTL formula (`body = ltl …;`) under its path semantics: it holds when it holds
+/// on every path. Exact over the fragment [`super::universal`] documents; a formula outside it is
+/// an error naming the subformula.
+pub fn translate(ltl: &LtlFormula) -> Result<Formula, TranslationError> {
+    let formula = super::universal::translate_universal(ltl)?;
+    warn_on_alternation(&formula);
+    Ok(formula)
+}
+
+/// The branching, SOME-path reading (`body = eltl …;`): `G` and `X` over every successor, `F` and
+/// `U` over some (`F p` ↦ `EF p`, `G (p → F q)` ↦ `AG (p → EF q)`), negation passed through. It is
+/// not LTL's semantics — kept for models where "the goal stays reachable" is the intended claim
+/// (mununu#593).
 ///
 /// Emits a `[mununu] WARN` line on stderr when the produced formula has
 /// alternation depth ≥ 4 — verification will be slow because the fixpoint
 /// engine's worst-case complexity is `O(|S|^k)` (Emerson-Jutla 1991). priority_roadmap §3.4 / Tier A4.
-pub fn translate(ltl: &LtlFormula) -> Result<Formula, TranslationError> {
+pub fn translate_existential(ltl: &LtlFormula) -> Result<Formula, TranslationError> {
     let mut translator = Translator::new();
     let root = translator.translate_formula(ltl)?;
     let formula = translator.builder.into_formula(root);
+    warn_on_alternation(&formula);
+    Ok(formula)
+}
+
+fn warn_on_alternation(formula: &Formula) {
     let depth = formula.alternation_depth();
     if depth > ALTERNATION_DEPTH_WARN_THRESHOLD {
         eprintln!(
@@ -33,7 +50,6 @@ pub fn translate(ltl: &LtlFormula) -> Result<Formula, TranslationError> {
             depth, depth
         );
     }
-    Ok(formula)
 }
 
 /// Errors that can occur during LTL to μ-calculus translation.
@@ -275,7 +291,7 @@ mod tests {
 
     fn translate_ltl(ltl_str: &str) -> Formula {
         let ltl = parse_ltl(ltl_str).expect("LTL should parse");
-        translate(&ltl).expect("Translation should succeed")
+        translate_existential(&ltl).expect("Translation should succeed")
     }
 
     fn parse_mu_str(mu_str: &str) -> Formula {

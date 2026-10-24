@@ -1218,10 +1218,12 @@ impl<'a> Parser<'a> {
 
     fn parse_formula_body(&mut self) -> Result<FormulaExpr, ParseError> {
         // Check for explicit syntax markers
-        if self.check_keyword(Keyword::Ltl) {
-            // Parse as LTL
-            self.advance(); // consume "ltl"
-            let ltl_body = self.parse_ltl_body()?;
+        if self.check_keyword(Keyword::Ltl) || self.check_keyword(Keyword::Eltl) {
+            // Parse as LTL; `eltl` selects the some-path reading.
+            let existential = self.check_keyword(Keyword::Eltl);
+            self.advance(); // consume "ltl" / "eltl"
+            let mut ltl_body = self.parse_ltl_body()?;
+            ltl_body.existential = existential;
             return Ok(FormulaExpr::Ltl(ltl_body));
         }
 
@@ -1291,6 +1293,7 @@ impl<'a> Parser<'a> {
 
         Ok(LtlExpr {
             formula,
+            existential: false,
             span: Span::new(start, end, start_token.line, start_token.column),
         })
     }

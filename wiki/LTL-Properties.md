@@ -4,21 +4,23 @@
 
 ## What is LTL?
 
-Linear Temporal Logic (LTL) is a specification language for describing properties of reactive systems over infinite execution traces. For hardware verification engineers, LTL provides a concise way to express timing relationships between signals -- "every request is eventually acknowledged," "the arbiter never grants both clients simultaneously," or "the bus always returns to idle." Mununu compiles LTL formulas into mu-calculus fixpoints and evaluates them over Compositional Labeled Transition Systems (CLTS), so you get the readability of LTL with the full power of mu-calculus model checking.
+> Source of truth: [`ltl::universal::translate_universal`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/ltl/universal.rs) (`ltl`) and [`ltl::translator::translate_existential`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/ltl/translator.rs) (`eltl`) — surface: CLI+API+UI.
+
+Linear Temporal Logic (LTL) describes properties of reactive systems over infinite execution traces: "every request is eventually acknowledged", "the arbiter never grants both clients", "the bus always returns to idle". An LTL formula **holds on a model when it holds on every path** from the initial states. Mununu translates it into a mu-calculus fixpoint and evaluates that over the CLTS; the translation is exact over the fragment below and refuses the rest rather than check a different property.
 
 ## Operator Reference
 
-| Operator | Name | Syntax | Meaning |
+| Operator | Name | Syntax | Meaning (on a path) |
 |----------|------|--------|---------|
-| `G` | Globally / Always | `G phi` or `G(phi)` | `phi` holds in every state along every path |
-| `F` | Eventually / Finally | `F phi` or `F(phi)` | `phi` is reachable: some path leads to a state where `phi` holds (the Skolem reading — see below; this is **not** "along every path") |
-| `X` | Next | `X phi` or `X(phi)` | `phi` holds in the immediate next state |
-| `U` | Until | `phi U psi` | some path keeps `phi` until it reaches `psi` (the same existential reading as `F`) |
-| `W` | Weak Until | `phi W psi` | `phi` holds until `psi` becomes true, or `phi` holds forever |
-| `R` | Release | `phi R psi` | `psi` holds until `phi` releases it (dual of Until) |
+| `G` | Globally / Always | `G phi` | `phi` holds at every step |
+| `F` | Eventually / Finally | `F phi` | `phi` holds at some step |
+| `X` | Next | `X phi` | `phi` holds at the next step |
+| `U` | Until | `phi U psi` | `psi` holds at some step and `phi` holds at every step before it |
+| `W` | Weak Until | `phi W psi` | `phi U psi`, or `phi` holds forever |
+| `R` | Release | `phi R psi` | `psi` holds up to and including the step where `phi` holds, or forever |
 | `->` | Implies | `phi -> psi` | If `phi` then `psi` |
-| `&&` | And | `phi && psi` | Both `phi` and `psi` hold |
-| `\|\|` | Or | `phi \|\| psi` | At least one of `phi` or `psi` holds |
+| `&&` | And | `phi && psi` | Both hold |
+| `\|\|` | Or | `phi \|\| psi` | At least one holds |
 | `!` | Not | `!phi` | `phi` does not hold |
 
 **Operator precedence** (highest to lowest): `!` > `G`, `F`, `X` > `U`, `W`, `R` > `&&` > `||` > `->`
@@ -27,24 +29,45 @@ Alternative keywords are also accepted: `always` for `G`, `eventually` for `F`, 
 
 ## CTXDSL Syntax
 
-LTL formulas are written inside `mu_formulas` blocks using the `body = ltl ...;` prefix:
-
 ```
 mu_formulas {
     formula my_property {
         over MyAutomaton;
-        body = ltl G(p -> F(q));
+        body = ltl G(p -> F(q));      // every path
+    }
+    formula still_reachable {
+        over MyAutomaton;
+        body = eltl G(p -> F(q));     // some-path reading (see below)
     }
 }
 ```
 
-The `ltl` keyword tells the parser to interpret the formula body as LTL rather than mu-calculus. The formula is automatically translated to an equivalent mu-calculus expression before evaluation.
+### `ltl`: the fragment checked over every path
+
+The formula is brought to negation normal form (`!G p` = `F !p`, `!(p U q)` = `!q W (!p && !q)`) and must then fall in this fragment, where `b` is a propositional formula (atoms with `!`, `&&`, `||`, `->`):
+
+```
+phi ::= b | phi && phi | b || phi | X phi | G phi | F b | b U b | b W b | b R b
+```
+
+Safety (`G b`), response (`G(b -> F b')`), recurrence (`G F b`), bounded steps (`G(b -> X b')`) and until/weak-until over propositions are all inside it. Outside it, the formula has no exact every-path fixpoint in this form and realization fails naming the subformula:
+
+| refused | why | write instead |
+|---|---|---|
+| `F G p` (persistence) | eventually-forever is path-wise, not state-wise | mu-calculus, or `eltl F G p` for "some path stabilises" |
+| `G p \|\| G q` | a disjunction of two temporal formulas holds path by path | split it, or mu-calculus |
+| `F (p && X q)`, `(G p) U q` | `F` / `U` over a temporal formula | mu-calculus |
+| `(G F a) -> (G F b)` | after NNF, a temporal disjunction — and it is a fairness assumption, not a property | the fairness templates on the `verify` path (mununu#595) |
+
+`F` and `U` also require a successor at every step, so a path that ends in a deadlock does not reach its goal.
+
+### `eltl`: the some-path reading
+
+`eltl` keeps the branching translation used before 2026-10: `G` and `X` over every successor, `F` and `U` over **some** successor, negation passed through. `eltl F Goal` is `EF Goal` ("`Goal` is reachable"), `eltl G(p -> F q)` is `AG(p -> EF q)` ("the response stays reachable"). This is not LTL's semantics — on a model where the environment may go to `Goal` or loop in `Stuck`, `eltl F Goal` holds and `ltl F Goal` does not — but it is the right claim when "can still get there" is what is meant (mununu#593).
 
 ## Property Patterns
 
 ### Safety: "Nothing bad ever happens"
-
-A safety property asserts that some condition holds in every reachable state. If violated, there exists a finite counterexample trace.
 
 ```
 formula ltl_safety {
@@ -53,11 +76,9 @@ formula ltl_safety {
 }
 ```
 
-The pattern `G safe` asserts that `safe` is an invariant -- it holds at every step of every execution.
+`G safe` asserts that `safe` holds at every step of every execution.
 
 ### Liveness (Response): "Every request is eventually granted"
-
-A liveness property asserts that something good eventually happens. The response pattern `G(p -> F(q))` says that whenever trigger `p` holds, response `q` **can still be reached** — `F` is the diamond fixpoint in this front-end (see [LTL to Mu-Calculus Equivalence](#ltl-to-mu-calculus-equivalence)), so this is `AG(p -> EF q)`, the Skolem reading. For "`q` is inevitable on every path" write the box form given there.
 
 ```
 formula ltl_liveness {
@@ -66,37 +87,9 @@ formula ltl_liveness {
 }
 ```
 
-This says: whenever the tank is `Filling`, `Full` stays reachable from there (a controller can always still get the tank to `Full`).
-
-### GR(1) Fairness Response: "Repeated stimulus yields repeated response"
-
-Generalized Reactivity(1) properties combine liveness guarantees under fairness assumptions. The pattern `G(p -> F(q))` also serves as a GR(1) response when both `p` and `q` recur.
-
-```
-formula ltl_response {
-    over Tank;
-    body = ltl G (Full -> F Empty);
-}
-```
-
-This says: every time the tank reaches `Full`, `Empty` stays reachable -- the system can always cycle back.
-
-**`(GF a) -> (GF b)` is not the path implication here (mununu#595).** The translator is state-wise: `ltl (GF a) -> (GF b)` becomes `!(nu..mu..) || (nu..mu..)` — "a does not recur from here, or b does" — evaluated at a state, not "on every path where `a` recurs, `b` recurs". To verify a liveness property **under an environment assumption**, declare the assumption and use the fairness templates on the `verify` path: `[[assumptions]]` (`kind = "state" | "edge" | "edges" | "weak"`) with `fair_response` / `fair_always_eventually`, which expand to the fair-`EG` encoding and report a conditional verdict with a non-vacuity gate — see [Verify Project Flow](Verify-Project-Flow.md#environment-assumptions--fairness-on-the-verify-path-mununu595). In a hand-written formula, the same encoding is plain mu-calculus (`verify::fairness`).
-
-### Persistence: "Eventually stable forever"
-
-The persistence pattern `F G phi` asserts that `phi` eventually becomes true and remains true for all subsequent states. Useful for convergence properties.
-
-```
-formula eventually_stable {
-    over MySystem;
-    body = ltl F G stable;
-}
-```
+On every path, every step where the tank is `Filling` is followed by a step where it is `Full`. A path that stalls in `Filling` forever violates it. For "`Full` stays reachable" use `eltl`.
 
 ### Recurrence: "Infinitely often"
-
-The recurrence pattern `G F phi` asserts that `phi` holds infinitely often -- the system keeps revisiting a condition. Useful for heartbeat, watchdog, and liveness checks.
 
 ```
 formula heartbeat_check {
@@ -105,33 +98,32 @@ formula heartbeat_check {
 }
 ```
 
+`heartbeat` holds infinitely often on every path (`AG AF heartbeat`).
+
+### Liveness under an environment assumption
+
+`ltl (G F a) -> (G F b)` is refused (see the table): an assumption about the environment is not a property of the model. Declare it on the `verify` path — `[[assumptions]]` (`kind = "state" | "edge" | "edges" | "weak"`) with `fair_response` / `fair_always_eventually`, which expand to the fair-`EG` encoding — see [Verify Project Flow](Verify-Project-Flow.md#environment-assumptions--fairness-on-the-verify-path-mununu595).
+
 ## LTL to Mu-Calculus Equivalence
 
-When Mununu compiles an LTL formula, it produces an equivalent mu-calculus fixpoint expression. The translation rules are:
+| LTL (`ltl`, every path) | Mu-calculus |
+|-----|-------------|
+| `G phi` | `nu X. (phi && [] X)` |
+| `F b` | `mu X. (b \|\| ([] X && <> true))` |
+| `X phi` | `[] phi` |
+| `b U c` | `mu X. (c \|\| (b && [] X && <> true))` |
+| `b W c` | `nu X. (c \|\| (b && [] X))` |
+| `b R c` | `c W (b && c)` |
+| `G F b` | `nu Y. ((mu X. (b \|\| ([] X && <> true))) && [] Y)` |
+| `G(p -> F q)` | `nu Y. ((!p \|\| mu X. (q \|\| ([] X && <> true))) && [] Y)` |
 
-| LTL | Mu-Calculus | Fixpoint Type |
-|-----|-------------|---------------|
-| `G phi` | `nu X. (phi && [] X)` | Greatest fixpoint (nu), **box** — every path |
-| `F phi` | `mu X. (phi \|\| <> X)` | Least fixpoint (mu), **diamond** — some path |
-| `X phi` | `[] phi` | Box modality (one step) |
-| `phi U psi` | `mu X. (psi \|\| (phi && <> X))` | Least fixpoint (mu), diamond |
-| `phi W psi` | `(phi U psi) \|\| G phi` | Mu + Nu combined |
-| `phi R psi` | `!((!phi) U (!psi))` | Negated least fixpoint |
-| `G F phi` | `nu Y. (mu X. (phi \|\| <> X) && [] Y)` | Nested nu-mu — `AG EF phi` |
-| `F G phi` | `mu Y. (nu X. (phi && [] X) \|\| <> Y)` | Nested mu-nu |
-| `G(p -> F(q))` | `nu X. ((!p \|\| mu Y. (q \|\| <> Y)) && [] X)` | Nested nu-mu — `AG(p -> EF q)` |
+| `eltl` (some-path reading) | Mu-calculus |
+|-----|-------------|
+| `F phi` | `mu X. (phi \|\| <> X)` |
+| `phi U psi` | `mu X. (psi \|\| (phi && <> X))` |
+| `G`, `X` | as above |
 
-> Source of truth: [`ltl/translator.rs`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/ltl/translator.rs) (`translate_eventually_internal`, `translate_until_internal`) — surface: CLI+API+UI.
-
-**`F` and `U` are existential — the Skolem reading, and it is deliberate (mununu#593).** `G` and `X` quantify over every successor (`[]`); `F` and `U` quantify over *some* successor (`<>`). So `ltl F Goal` is `EF Goal` — "the controller can find a path to `Goal`" — and `ltl G(p -> F q)` is `AG(p -> EF q)`: the response **stays reachable**, which is strictly weaker than "the response is inevitable". On a model where the environment may go to `Goal` or to a `Stuck` loop, `ltl F Goal` holds and the box form does not. This is the reading a synthesis tool wants: under the Skolem paradigm the controller picks the successor, so reachability on the model is realizability for the controller. Verification wants inevitability along every path, which LTL semantics over traces means — and the mu-calculus spells it directly:
-
-| you mean | write |
-|---|---|
-| `phi` is inevitable on every path (CTL `AF phi`) | `mu X. (phi \|\| [] X)` — and note a deadlocked state satisfies it vacuously (`[] X` over no successors is true); add `<> true` to require a successor |
-| every `p` is inevitably followed by `q` (CTL `AG(p -> AF q)`) | `nu X. ((!p \|\| mu Y. (q \|\| [] Y)) && [] X)` |
-| `phi` stays reachable (what `ltl F` / `ltl G(p -> F q)` give you) | `ltl F phi` / `ltl G(p -> F q)`, or the diamond forms above |
-
-Key insight: `G` (safety, invariance) maps to **nu** (greatest fixpoint -- start with everything, shrink). `F` (liveness, reachability) maps to **mu** (least fixpoint -- start with nothing, grow). The alternation depth of nested fixpoints determines the complexity class of the property. A path implication such as `(GF a) -> (GF b)` is NOT a fairness assumption under this translation either — it is the Boolean implication of two state-set formulas; see mununu#595 for environment assumptions.
+Key insight: `G` (safety, invariance) maps to **nu** (greatest fixpoint — start with everything, shrink); `F` (liveness) maps to **mu** (least fixpoint — start with nothing, grow).
 
 ## When to Use LTL vs. Mu-Calculus
 
