@@ -119,6 +119,17 @@ mununu --quiet sv lint rtl/mod.sv --frontend slang --fail-on none
 
 The JSON on stdout lists each flagged `signal` with a `kind` of `"register"` (the root — the register itself) or `"output"` (a downstream combinational output of one). See [`docs/verifying-rtl.md`](verifying-rtl.md) for the soundness background (the monono#partsel guard).
 
+## Lint the clock-domain crossings of a multi-clock design
+
+> Source of truth: [`sv_cdc_lint`](../crates/mununu-core/src/adapter/sv_verify.rs) — surface: (CLI+API)
+
+`mununu sv cdc-lint` classifies every flop that samples another clock's flop (synchronised, logic before the first stage, a capture read by logic, a multi-bit bus with its gray step decided, qualified data, reconvergence, dual-clock memories). The worst row drives `--fail-on`, so an unsafe crossing exits 2. Pulse survival across clocks is functional and runs through SymbiYosys instead; both are described in [`docs/verifying-rtl.md`](verifying-rtl.md) §"Clock-domain crossings".
+
+```bash
+mununu --quiet sv cdc-lint rtl/top.sv --top top --frontend slang
+scripts/cdc_formal_sby.sh --top top --mode bmc --depth 20 rtl/top.sv
+```
+
 ## Gate CI on a SystemVerilog design's own assertions (machine-readable)
 
 > Source of truth: [`impl From<&AutoVerifyReport> for SvVerifyAutoResponse`](../crates/mununu-core/src/api/models.rs) — surface: (CLI+API)

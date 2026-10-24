@@ -1,0 +1,122 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "CdcCrossingView": {
+      "description": "One `sv cdc-lint` row: a crossing, a dual-clock memory or a reconvergence point.",
+      "properties": {
+        "destination": {
+          "type": "string"
+        },
+        "destination_clock": {
+          "type": "string"
+        },
+        "detail": {
+          "type": "string"
+        },
+        "kind": {
+          "description": "`combinational-before-sync` | `unsynchronized` | `multi-bit-bus` | `qualified-data` | `reconvergence` | `dual-clock-memory` | `synchronized`.",
+          "type": "string"
+        },
+        "outcome": {
+          "description": "`holds` (a safe crossing) | `violated` (an unsafe one) | `unknown` (safe only under the functional condition `detail` names).",
+          "type": "string"
+        },
+        "path": {
+          "description": "The combinational cells between source and destination, with source locations.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "source": {
+          "type": "string"
+        },
+        "source_clock": {
+          "type": "string"
+        },
+        "stages": {
+          "description": "Synchroniser depth (`synchronized`, `multi-bit-bus`).",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "destination",
+        "destination_clock",
+        "detail",
+        "kind",
+        "outcome",
+        "source",
+        "source_clock"
+      ],
+      "type": "object"
+    },
+    "ClockDomainView": {
+      "description": "One clock domain: a clock net, its edge and how many storage cells fire on it.",
+      "properties": {
+        "cells": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "net": {
+          "type": "string"
+        },
+        "posedge": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "cells",
+        "net",
+        "posedge"
+      ],
+      "type": "object"
+    }
+  },
+  "description": "Response of `POST /api/v1/sv/cdc-lint` and the JSON of `mununu sv cdc-lint`.",
+  "properties": {
+    "crossings": {
+      "items": {
+        "$ref": "#/definitions/CdcCrossingView"
+      },
+      "type": "array"
+    },
+    "domains": {
+      "items": {
+        "$ref": "#/definitions/ClockDomainView"
+      },
+      "type": "array"
+    },
+    "file": {
+      "description": "The primary source file (CLI only).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "notes": {
+      "description": "What the lint does not see (primary inputs, asynchronous pins, black boxes).",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "outcome": {
+      "description": "The worst row outcome (`holds` when there is no crossing).",
+      "type": "string"
+    }
+  },
+  "required": [
+    "crossings",
+    "domains",
+    "notes",
+    "outcome"
+  ],
+  "title": "SvCdcLintResponse",
+  "type": "object"
+}

@@ -31,11 +31,11 @@ use super::models::{
     Btor2CheckFsmRequest, Btor2CheckFsmResponse, Btor2VerifyLivenessAllRequest,
     Btor2VerifyLivenessRequest, Btor2VerifyLivenessResponse,
     Btor2VerifyLivenessUnderFairnessRequest, Btor2VerifyRecoverabilityRequest,
-    Btor2VerifyRecoverabilityResponse, Btor2VerifyRequest, Btor2VerifyResponse, SvCheckFsmRequest,
-    SvMutateRequest, SvMutateResponse, SvVerifyAutoRequest, SvVerifyAutoResponse,
-    SvVerifyLivenessAllReport, SvVerifyLivenessAllRequest, SvVerifyLivenessReport,
-    SvVerifyLivenessRequest, SvVerifyRecoverabilityReport, SvVerifyRecoverabilityRequest,
-    SvVerifyRequest,
+    Btor2VerifyRecoverabilityResponse, Btor2VerifyRequest, Btor2VerifyResponse, SvCdcLintRequest,
+    SvCdcLintResponse, SvCheckFsmRequest, SvMutateRequest, SvMutateResponse, SvVerifyAutoRequest,
+    SvVerifyAutoResponse, SvVerifyLivenessAllReport, SvVerifyLivenessAllRequest,
+    SvVerifyLivenessReport, SvVerifyLivenessRequest, SvVerifyRecoverabilityReport,
+    SvVerifyRecoverabilityRequest, SvVerifyRequest,
 };
 
 /// JSON Schema (Draft 2019-09) for `POST /api/v1/sv/verify-auto` request bodies.
@@ -50,7 +50,19 @@ pub fn sv_verify_auto_response_schema() -> serde_json::Value {
         .expect("SvVerifyAutoResponse schema must serialise as JSON")
 }
 
-/// mununu#725 — JSON Schema for `POST /api/v1/sv/mutate` request bodies.
+/// JSON Schema for [`SvCdcLintRequest`].
+pub fn sv_cdc_lint_request_schema() -> serde_json::Value {
+    serde_json::to_value(schema_for!(SvCdcLintRequest))
+        .expect("SvCdcLintRequest schema must serialise as JSON")
+}
+
+/// JSON Schema for [`SvCdcLintResponse`] (also the CLI `sv cdc-lint` output).
+pub fn sv_cdc_lint_response_schema() -> serde_json::Value {
+    serde_json::to_value(schema_for!(SvCdcLintResponse))
+        .expect("SvCdcLintResponse schema must serialise as JSON")
+}
+
+/// JSON Schema for [`SvMutateRequest`].
 pub fn sv_mutate_request_schema() -> serde_json::Value {
     serde_json::to_value(schema_for!(SvMutateRequest))
         .expect("SvMutateRequest schema must serialise as JSON")
@@ -513,6 +525,22 @@ mod tests {
         drift_check(
             "docs/api-schemas/sv-verify-auto-response.schema.json",
             &sv_verify_auto_response_schema(),
+        );
+    }
+
+    #[test]
+    fn api_schema_drift_sv_cdc_lint_request() {
+        drift_check(
+            "docs/api-schemas/sv-cdc-lint-request.schema.json",
+            &sv_cdc_lint_request_schema(),
+        );
+    }
+
+    #[test]
+    fn api_schema_drift_sv_cdc_lint_response() {
+        drift_check(
+            "docs/api-schemas/sv-cdc-lint-response.schema.json",
+            &sv_cdc_lint_response_schema(),
         );
     }
 

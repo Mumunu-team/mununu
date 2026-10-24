@@ -540,6 +540,59 @@ keeps that reading as an explicit choice: `diagnostics.merged_clock_domains` lis
 the `clock-domains-merged` soundness caveat says what a verdict is worth. A design clocked on a
 single edge of a single net, falling edge included, is one domain and lifts as before.
 
+### Clock-domain crossings: `sv cdc-lint` and the functional recipe (2026-10-24)
+
+> Source of truth: [`cdc_lint`](../crates/mununu-core/src/adapter/cdc_lint.rs#L129) — surface: (CLI+API) — `mununu sv cdc-lint`, `POST /api/v1/sv/cdc-lint`; the functional recipe is [`scripts/cdc_formal_sby.sh`](../scripts/cdc_formal_sby.sh)
+
+A design that the lift refuses for its clock domains still has two questions to answer: whether
+every crossing is built as a synchroniser (structural), and whether the behaviour across the
+clocks is right (functional). `sv cdc-lint` answers the first one inside mununu. It lifts with the
+domains merged, reads the flattened netlist in which every flop keeps its own clock, and
+classifies each flop that samples a flop of another clock net:
+
+| `kind` | `outcome` | meaning |
+|---|---|---|
+| `synchronized` | `holds` | a chain of two or more destination flops, the first read only by the second (`stages` gives the depth) |
+| `combinational-before-sync` | `violated` | logic between the source flop and the first destination flop (`path` lists the cells with `file:line`) |
+| `unsynchronized` | `violated` | the capturing flop's output, which can be metastable, is read by logic |
+| `multi-bit-bus` | decided | several bits of one source register through parallel synchronisers; a reach query decides whether the source changes at most one bit per source cycle (gray step): `holds` if so, `violated` with the reason otherwise |
+| `qualified-data` | `unknown` | data captured directly, under an enable or mux select synchronised from the source domain; safe if the data holds while the qualifier is asserted |
+| `reconvergence` | `unknown` | one destination flop combines two separately synchronised signals from the same source domain |
+| `dual-clock-memory` | `unknown` | a memory written on one clock and read on another (an asynchronous FIFO); its pointers appear as ordinary rows |
+
+The gray-step query runs on the merged model, which is exact for the source register when its
+whole sequential cone lies in its own domain; when the cone reaches another domain the row stays
+`unknown` and says so. The reset is pinned inactive after the post-reset state, as in
+`check-fsm`. The report's `notes` state what the lint does not see: primary inputs carry no clock,
+so a crossing that starts at an input port is not checked, and asynchronous set / reset pins,
+latches and black-boxed modules are not analysed. The worst row drives `--fail-on` (exit 2 on a
+`violated` row by default); the JSON is `SvCdcLintResponse`, the same type the API returns.
+
+```bash
+mununu sv cdc-lint rps_top.sv --top rps_top --frontend slang | jq '.crossings[] | {kind, outcome, source, destination}'
+```
+
+A synchroniser passes levels, and whether a pulse survives the crossing depends on the clock
+ratio, which no structural check sees. That question is functional, and SymbiYosys answers it with
+`multiclock on`: yosys `clk2fflogic` turns each clock into a free input sampled on a global step,
+so the engines explore every interleaving of clock edges, every ratio included unless an `assume`
+constrains it. `scripts/cdc_formal_sby.sh` writes the `.sby` file and runs it, directly when
+`sby` is on the PATH and otherwise in the `mununu-sva` image:
+
+```bash
+scripts/cdc_formal_sby.sh --top pulse --mode bmc --depth 12 pulse.sv
+# … Assert failed in pulse: pulse.sv:12 …
+# cdc_formal_sby: FAIL — trace under cdc_sby/cdc/engine_0/
+```
+
+The design's assertions are read with `read -formal` (`ifdef FORMAL`, `always @($global_clock)`,
+immediate `assert` / `assume`); `--slang` reads SystemVerilog concurrent assertions through the
+yosys-slang plugin. The check runs outside mununu's engines, on abc `pdr` for `prove` and
+`smtbmc` for `bmc` by default, and its verdicts carry SymbiYosys's guarantees, not mununu's.
+`clk2fflogic` does not model metastability (a flop sampling a changing input takes the old value),
+which is why incoherent multi-bit samples are the lint's gray-step question rather than this one.
+A native multi-clock lift (a per-domain enable rewrite with ratio constraints) is on the roadmap.
+
 ### Shrinking a parameterised design: `--param`
 
 > Source of truth: [`build_chparam_passes`](../crates/mununu-core/src/adapter/yosys/mod.rs) — surface: (CLI+API+UI)

@@ -341,6 +341,52 @@ pub fn emit_ag_state_in_set_monitor_by_nid(
     Ok(format!("{}\n{}\n", content.trim_end(), appended.join("\n")))
 }
 
+/// Append a `bad` monitor for "the register changes at most one bit per step" (a gray-coded
+/// sequence). A history copy `prev`, whose `next` is the register, and a valid latch that starts
+/// at 0 and then holds 1 give `bad = valid && (x & (x - 1)) != 0` with `x = reg ^ prev`; the final
+/// `and` carries [`BAD_COND_SYMBOL`]. `bad` is reachable iff some step flips two or more bits.
+/// `sig_nid` must be a state of the bit-vector sort `sig_sort`.
+pub fn emit_ag_gray_step_monitor_by_nid(
+    content: &str,
+    sig_nid: Nid,
+    sig_sort: Nid,
+) -> Result<String, AdapterError> {
+    let file = parser::parse(content).map_err(|mut e| {
+        e.message = format!("adapter/btor2/bad_monitor: {}", e.message);
+        e
+    })?;
+    let mut next_nid: Nid = file.lines.iter().map(|l| l.nid).max().unwrap_or(0) + 1;
+    let mut appended: Vec<String> = Vec::new();
+    let bool_sort = find_or_make_bool_sort(&file, &mut next_nid, &mut appended);
+    let mut fresh = |line: String, appended: &mut Vec<String>| -> Nid {
+        let nid = next_nid;
+        next_nid += 1;
+        appended.push(format!("{nid} {line}"));
+        nid
+    };
+    let b_zero = fresh(format!("zero {bool_sort}"), &mut appended);
+    let b_one = fresh(format!("one {bool_sort}"), &mut appended);
+    let valid = fresh(
+        format!("state {bool_sort} mununu_gray_valid"),
+        &mut appended,
+    );
+    fresh(format!("init {bool_sort} {valid} {b_zero}"), &mut appended);
+    fresh(format!("next {bool_sort} {valid} {b_one}"), &mut appended);
+    let prev = fresh(format!("state {sig_sort} mununu_gray_prev"), &mut appended);
+    fresh(format!("next {sig_sort} {prev} {sig_nid}"), &mut appended);
+    let x = fresh(format!("xor {sig_sort} {sig_nid} {prev}"), &mut appended);
+    let one = fresh(format!("one {sig_sort}"), &mut appended);
+    let xm1 = fresh(format!("sub {sig_sort} {x} {one}"), &mut appended);
+    let both = fresh(format!("and {sig_sort} {x} {xm1}"), &mut appended);
+    let two_bits = fresh(format!("redor {bool_sort} {both}"), &mut appended);
+    let cond = fresh(
+        format!("and {bool_sort} {valid} {two_bits} {BAD_COND_SYMBOL}"),
+        &mut appended,
+    );
+    fresh(format!("bad {cond}"), &mut appended);
+    Ok(format!("{}\n{}\n", content.trim_end(), appended.join("\n")))
+}
+
 /// H.O.1b — append a `bad` monitor for `ante |=> cons` (= `AG (ante → AX cons)`).
 ///
 /// `cons` must resolve to a state register; `ante` may be a state register OR a
