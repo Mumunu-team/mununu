@@ -47,6 +47,9 @@ pub struct SvLift {
     /// lifts modern-SV constructs `read_verilog`/sv2v reject. Feeds
     /// [`YosysOptions::frontend`]; `Auto` by default.
     pub frontend: SvFrontend,
+    /// Lift a multi-clock design onto the one implicit clock instead of refusing it
+    /// ([`YosysOptions::merge_clock_domains`] — an under-approximation).
+    pub merge_clock_domains: bool,
 }
 
 impl SvLift {
@@ -58,6 +61,7 @@ impl SvLift {
             use_sv2v: self.use_sv2v,
             extra_include_dirs: self.include_dirs.clone(),
             frontend: self.frontend,
+            merge_clock_domains: self.merge_clock_domains,
             ..Default::default()
         };
         sv_to_btor2(&self.source, &yopts)
@@ -865,6 +869,7 @@ mod tests {
             use_sv2v: false,
             include_dirs: Vec::new(),
             frontend: SvFrontend::Auto,
+            merge_clock_domains: false,
         }
     }
 
@@ -1411,6 +1416,7 @@ mod tests {
             use_sv2v: true,
             include_dirs: Vec::new(),
             frontend: SvFrontend::Auto,
+            merge_clock_domains: false,
         };
         let verdict = sv_verify_recoverability(&lift, "aes_cipher_ctrl_cs == 9")
             .expect("recoverability decides on the AES cipher-control FSM");
@@ -1465,6 +1471,7 @@ endmodule
             use_sv2v: false,
             include_dirs: Vec::new(),
             frontend: SvFrontend::Slang,
+            merge_clock_domains: false,
         };
         let btor2 = lift.lift().expect("the slang lift runs");
         // An anonymous free input is an `input` line with no symbol — the design's
@@ -1545,6 +1552,7 @@ endmodule
             use_sv2v: false,
             include_dirs: Vec::new(),
             frontend: SvFrontend::Slang,
+            merge_clock_domains: false,
         };
 
         let bad = sv_lint_registers(&lift_of(BAD, "rom_bad")).expect("lint lifts rom_bad");
@@ -1661,6 +1669,7 @@ endmodule
             use_sv2v: true,
             include_dirs: Vec::new(),
             frontend: SvFrontend::Slang,
+            merge_clock_domains: false,
         };
         let findings = sv_check_fsm(&lift, DEFAULT_FSM_MAX_WIDTH).expect("sv check-fsm runs");
         for f in &findings {
@@ -1738,6 +1747,7 @@ endmodule
             use_sv2v: true,
             include_dirs: Vec::new(),
             frontend: SvFrontend::Slang,
+            merge_clock_domains: false,
         };
         let cell = |v: u64| vec![("rst_n".to_string(), v)];
         // Run A — the two-value spec: the branching pair.

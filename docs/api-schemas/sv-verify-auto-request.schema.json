@@ -176,6 +176,11 @@
         "null"
       ]
     },
+    "merge_clock_domains": {
+      "default": false,
+      "description": "Lift a multi-clock design onto the model's one implicit clock instead of refusing it. An UNDER-approximation: the domains only ever tick together, so a HOLDS does not transfer (the `clock-domains-merged` soundness caveat). Default `false` (refused at lift time).",
+      "type": "boolean"
+    },
     "must_edge_inference": {
       "default": null,
       "description": "Must-edge inference per property. Default (absent or `\"auto\"`, mununu#663): a Liveness/Mixed-class formula — a μ under a ν, `AG EF` / `AG AF` — runs its cube member with `\"smt-per-target-standard\"` (its 3-valued `◇` turns true only through must edges; may-only is structurally ⊥ there), the rest may-only. `\"off\"` switches that resolution off; `\"smt-per-target\"`, `\"smt-per-target-standard\"`, `\"smt-hyper-must\"` apply to every property.",

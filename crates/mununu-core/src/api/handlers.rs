@@ -1340,6 +1340,7 @@ fn sv_verify_handler_impl(request: SvVerifyRequest) -> ApiResult<Json<Btor2Verif
         } else {
             crate::adapter::yosys::SvFrontend::Auto
         },
+        merge_clock_domains: request.merge_clock_domains,
     };
     let outcome = sv_verify_safety(&lift).map_err(|message| ApiError::BadRequest {
         message,
@@ -1393,6 +1394,7 @@ fn sv_verify_liveness_handler_impl(
         } else {
             crate::adapter::yosys::SvFrontend::Auto
         },
+        merge_clock_domains: request.merge_clock_domains,
     };
     let (verdict, outcome) =
         sv_verify_liveness(&lift, &request.request, &request.grant).map_err(|message| {
@@ -1449,6 +1451,7 @@ fn sv_verify_liveness_all_handler_impl(
         } else {
             crate::adapter::yosys::SvFrontend::Auto
         },
+        merge_clock_domains: request.merge_clock_domains,
     };
     let (verdict, outcomes) =
         sv_verify_liveness_all(&lift, &request.responses).map_err(|message| {
@@ -1521,6 +1524,7 @@ fn sv_verify_recoverability_handler_impl(
         } else {
             crate::adapter::yosys::SvFrontend::Auto
         },
+        merge_clock_domains: request.merge_clock_domains,
     };
     let (verdict, refinement, attribution) =
         if request.refine || !config_specs.is_empty() || request.discover_assumptions {
@@ -1586,6 +1590,7 @@ fn sv_check_fsm_handler_impl(request: SvCheckFsmRequest) -> ApiResult<Json<Btor2
         } else {
             crate::adapter::yosys::SvFrontend::Auto
         },
+        merge_clock_domains: request.merge_clock_domains,
     };
     let findings =
         sv_check_fsm(&lift, request.max_width).map_err(|message| ApiError::BadRequest {
@@ -1641,6 +1646,7 @@ fn sv_lint_handler_impl(request: SvLintRequest) -> ApiResult<Json<SvLintResponse
         } else {
             crate::adapter::yosys::SvFrontend::Auto
         },
+        merge_clock_domains: request.merge_clock_domains,
     };
 
     let findings = sv_lint_registers(&lift).map_err(|message| ApiError::BadRequest {
@@ -1758,6 +1764,7 @@ fn sv_mutate_handler_impl(request: SvMutateRequest) -> ApiResult<Json<SvMutateRe
             .map(|f| (f.name.clone(), f.content.clone()))
             .collect(),
         use_sv2v: request.use_sv2v,
+        merge_clock_domains: request.merge_clock_domains,
         // mununu#725 — the lift-posture fields of `sv/verify-auto`.
         cutpoint_signals: request.cutpoint.clone(),
         frontend: if request.use_slang {
@@ -2055,6 +2062,7 @@ fn sv_verify_auto_handler_impl(
             .map(|f| (f.name.clone(), f.content.clone()))
             .collect(),
         use_sv2v: request.use_sv2v,
+        merge_clock_domains: request.merge_clock_domains,
         cutpoint_signals: request.cutpoint.clone(),
         frontend: if request.use_slang {
             crate::adapter::yosys::SvFrontend::Slang
@@ -5781,6 +5789,7 @@ members = ["x"]
             top: None,
             use_sv2v: false,
             use_slang: false,
+            merge_clock_domains: false,
             request: "x == y".to_string(), // relational — rejected before the lift
             grant: "st == 1".to_string(),
         };
@@ -5798,6 +5807,7 @@ members = ["x"]
             top: None,
             use_sv2v: false,
             use_slang: false,
+            merge_clock_domains: false,
             target: "not an atom !!".to_string(),
             predicates: Vec::new(),
             refine: false,

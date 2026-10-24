@@ -281,6 +281,14 @@ pub struct YosysOptions {
     /// interpolated into the Yosys `-p` script (no injection). Default:
     /// empty (no cut points).
     pub cutpoint_signals: Vec<String>,
+    /// When `true`, a design whose flops sit in more than one clock domain (distinct clock nets,
+    /// or both edges of one net) is lifted anyway, every domain stepping on the one implicit
+    /// clock of the BTOR2 model. **SOUNDNESS — an UNDER-approximation of the interleavings:**
+    /// the domains only ever tick together, so a crossing defect that needs one domain to tick
+    /// while the other does not (a lost pulse, an incoherent multi-bit bus) is invisible and a
+    /// HOLDS does not transfer. Default `false`: such a design is refused at lift time
+    /// ([`clock_domains`]). verify-auto reports the merged domains as a soundness caveat.
+    pub merge_clock_domains: bool,
 }
 
 /// SV-via-Yosys adapter — wraps the BTOR2 path with a Yosys subprocess.
@@ -321,6 +329,9 @@ struct SvFlattenArtifacts {
     /// topological loop and the script succeeded on a second run with `opt_clean`
     /// before `write_btor` (see [`backend_loop_retry_script`]).
     backend_retry: Option<String>,
+    /// The clock domains of the flattened design ([`clock_domains`]); more than one only when
+    /// [`YosysOptions::merge_clock_domains`] let the lift through.
+    clock_domains: Vec<ClockDomain>,
 }
 
 /// Run sv2v (optional) + the flattened Yosys script and return the
@@ -679,6 +690,27 @@ fn run_sv_flatten_btor2_concrete(
     // empty when Yosys did not emit it.
     let hier_json = std::fs::read_to_string(&hier_json_path).unwrap_or_default();
 
+    // The BTOR2 model has ONE implicit clock: every `next` fires on it. A design whose flops sit
+    // in two domains was lifted as if they ticked together — silently, because the old refusal
+    // matched clock-shaped input NAMES (`clk`, `clk_i`, …) and `clk_src`/`clk_dst` passed.
+    let clock_domains = std::fs::read_to_string(clock_json_path(&btor_path))
+        .map(|j| clock_domains(&j))
+        .unwrap_or_default();
+    if clock_domains.len() > 1 && !yopts.merge_clock_domains {
+        return Err(AdapterError {
+            kind: AdapterErrorKind::UnsupportedConstruct,
+            message: format!(
+                "adapter/yosys: the design has {} clock domains ({}); the model has one implicit \
+                 clock, so lifting it would step every domain together and hide every crossing \
+                 defect. Verify each domain on its own, \
+                 or pass `--merge-clock-domains` to accept that under-approximation explicitly.",
+                clock_domains.len(),
+                describe_clock_domains(&clock_domains)
+            ),
+            location: None,
+        });
+    }
+
     Ok(SvFlattenArtifacts {
         btor2,
         hier_json,
@@ -686,6 +718,7 @@ fn run_sv_flatten_btor2_concrete(
         frontend_used,
         fallback_reason: None,
         backend_retry,
+        clock_domains,
     })
 }
 
@@ -887,6 +920,7 @@ pub fn sv_to_btor2_with_blackboxes(
         frontend_used: artifacts.frontend_used,
         fallback_reason: artifacts.fallback_reason,
         backend_retry: artifacts.backend_retry,
+        clock_domains: artifacts.clock_domains,
     })
 }
 
@@ -903,6 +937,149 @@ pub struct SvLiftResult {
     /// `Some(reason)` when the BTOR backend's topological-loop error made the lift rerun its
     /// script with `opt_clean` before `write_btor` (the model is the same design).
     pub backend_retry: Option<String>,
+    /// The flattened design's clock domains; more than one only under
+    /// [`YosysOptions::merge_clock_domains`].
+    pub clock_domains: Vec<ClockDomain>,
+}
+
+/// One clock domain of a flattened design: a clock net and the edge its storage cells fire on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClockDomain {
+    /// The net's name (a public name when the net has one).
+    pub net: String,
+    pub posedge: bool,
+    /// How many storage cells (flops and memory ports) fire on it.
+    pub cells: usize,
+}
+
+/// `clk_a (posedge, 3 cells), clk_b (posedge, 1 cell)`.
+pub fn describe_clock_domains(domains: &[ClockDomain]) -> String {
+    domains
+        .iter()
+        .map(|d| {
+            format!(
+                "{} ({}, {} cell{})",
+                d.net,
+                if d.posedge { "posedge" } else { "negedge" },
+                d.cells,
+                if d.cells == 1 { "" } else { "s" }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The post-flatten netlist snapshot the clock-domain scan reads, beside the BTOR2 output.
+fn clock_json_path(btor_out: &Path) -> PathBuf {
+    btor_out.with_file_name("clocks.json")
+}
+
+/// The clock domains of a flattened design, from a `write_json` snapshot taken after `flatten`
+/// and before `async2sync`, on a copy cleaned by `opt_clean` (`design -save` / `-load` around it,
+/// so the lifted model is untouched). The cleaning matters: right after `flatten` a sub-instance's
+/// clock port is still its own wire connected to the parent's (`u_dec.clk_i` beside `clk_i`), and
+/// yosys-slang routes nets through `$buf` cells; uncleaned, one clock reads as two domains
+/// (OpenTitan `prim_esc_sender`, measured 2026-10-23). A domain is a distinct (clock net, edge)
+/// a storage cell fires on — the `CLK` pin of a flop (`$dff`, `$adff`, `$dffe`, `$sdff`, `$aldff`, `$dffsr`, … with `CLK_POLARITY`)
+/// and every clocked port of a memory (`$mem_v2` `RD_CLK` / `WR_CLK` where the port's
+/// `*_CLK_ENABLE` bit is set). A constant clock bit is not a domain. Sorted by net, then edge.
+pub fn clock_domains(flat_json: &str) -> Vec<ClockDomain> {
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(flat_json) else {
+        return Vec::new();
+    };
+    let Some(modules) = root.get("modules").and_then(|m| m.as_object()) else {
+        return Vec::new();
+    };
+    // A yosys parameter is a binary string, most significant bit first.
+    let param_bit = |cell: &serde_json::Value, name: &str, i: usize| -> Option<bool> {
+        let bits = cell.get("parameters")?.get(name)?.as_str()?;
+        let b = bits.as_bytes();
+        (i < b.len()).then(|| b[b.len() - 1 - i] == b'1')
+    };
+    let mut count: std::collections::BTreeMap<(String, bool), usize> = Default::default();
+    for body in modules.values() {
+        // Bit id → a net name, public names preferred.
+        let mut names: HashMap<i64, (bool, String)> = HashMap::new();
+        if let Some(nets) = body.get("netnames").and_then(|n| n.as_object()) {
+            for (name, net) in nets {
+                let hidden = net.get("hide_name").and_then(|h| h.as_i64()) == Some(1);
+                let Some(bits) = net.get("bits").and_then(|b| b.as_array()) else {
+                    continue;
+                };
+                for (i, bit) in bits.iter().enumerate() {
+                    let Some(id) = bit.as_i64() else { continue };
+                    let label = if bits.len() == 1 {
+                        name.clone()
+                    } else {
+                        format!("{name}[{i}]")
+                    };
+                    let better = match names.get(&id) {
+                        None => true,
+                        Some((was_hidden, _)) => *was_hidden && !hidden,
+                    };
+                    if better {
+                        names.insert(id, (hidden, label));
+                    }
+                }
+            }
+        }
+        let net_of = |bit: &serde_json::Value| -> Option<String> {
+            let id = bit.as_i64()?; // "0" / "1" / "x" are constants, not nets
+            Some(
+                names
+                    .get(&id)
+                    .map(|(_, n)| n.clone())
+                    .unwrap_or_else(|| format!("net#{id}")),
+            )
+        };
+        let Some(cells) = body.get("cells").and_then(|c| c.as_object()) else {
+            continue;
+        };
+        for cell in cells.values() {
+            let ty = cell.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            let conns = cell.get("connections");
+            if ty.starts_with("$mem") {
+                for (clk, en, pol) in [
+                    ("RD_CLK", "RD_CLK_ENABLE", "RD_CLK_POLARITY"),
+                    ("WR_CLK", "WR_CLK_ENABLE", "WR_CLK_POLARITY"),
+                ] {
+                    let Some(bits) = conns.and_then(|c| c.get(clk)).and_then(|b| b.as_array())
+                    else {
+                        continue;
+                    };
+                    for (i, bit) in bits.iter().enumerate() {
+                        if param_bit(cell, en, i) != Some(true) {
+                            continue;
+                        }
+                        if let Some(net) = net_of(bit) {
+                            let edge = param_bit(cell, pol, i).unwrap_or(true);
+                            *count.entry((net, edge)).or_default() += 1;
+                        }
+                    }
+                }
+                continue;
+            }
+            let Some(bit) = conns
+                .and_then(|c| c.get("CLK"))
+                .and_then(|b| b.as_array())
+                .and_then(|b| b.first())
+            else {
+                continue;
+            };
+            if let Some(net) = net_of(bit) {
+                let edge = param_bit(cell, "CLK_POLARITY", 0).unwrap_or(true);
+                *count.entry((net, edge)).or_default() += 1;
+            }
+        }
+    }
+    count
+        .into_iter()
+        .map(|((net, posedge), cells)| ClockDomain {
+            net,
+            posedge,
+            cells,
+        })
+        .collect()
 }
 
 /// Scan the pre-flatten hierarchy JSON for cells whose `type` references a
@@ -2390,9 +2567,10 @@ fn build_script(
     // The explicit control-slice cut points splice in just before `cutpoint -blackbox`
     // (both after `write_json`, before `memory_collect`/`flatten`).
     format!(
-        "{}; {hier}; {per_signal}proc; write_json {}; {cutpoints}cutpoint -blackbox; memory_collect; flatten; async2sync; chformal -lower; dffunmap; {setundef_pass}; write_btor {}",
+        "{}; {hier}; {per_signal}proc; write_json {}; {cutpoints}cutpoint -blackbox; memory_collect; flatten; design -save mununu_pre_clocks; opt_clean; write_json {}; design -load mununu_pre_clocks; async2sync; chformal -lower; dffunmap; {setundef_pass}; write_btor {}",
         read_cmds.join("; "),
         hier_json_out.display(),
+        clock_json_path(btor_out).display(),
         btor_out.display()
     )
 }
@@ -2477,6 +2655,69 @@ impl Drop for TempDir {
 
 #[cfg(test)]
 mod tests {
+    /// Two flops on two clock nets are two domains; constant clock bits are none; a `$mem_v2`
+    /// port counts only when its clock is enabled; a hidden name loses to a public one.
+    #[test]
+    fn clock_domains_counts_distinct_clock_nets_and_edges() {
+        let json = r#"{"modules": {"top": {
+            "netnames": {
+                "clk_a": {"hide_name": 0, "bits": [2]},
+                "$auto$x": {"hide_name": 1, "bits": [3]},
+                "clk_b": {"hide_name": 0, "bits": [3]}
+            },
+            "cells": {
+                "q1": {"type": "$dff", "parameters": {"CLK_POLARITY": "1"},
+                       "connections": {"CLK": [2], "D": [5], "Q": [6]}},
+                "q2": {"type": "$adff", "parameters": {"CLK_POLARITY": "00000001"},
+                       "connections": {"CLK": [3], "D": [6], "Q": [7]}},
+                "q3": {"type": "$dff", "parameters": {"CLK_POLARITY": "0"},
+                       "connections": {"CLK": [2], "D": [7], "Q": [8]}},
+                "k":  {"type": "$dff", "parameters": {"CLK_POLARITY": "1"},
+                       "connections": {"CLK": ["0"], "D": [7], "Q": [9]}},
+                "m":  {"type": "$mem_v2",
+                       "parameters": {"RD_CLK_ENABLE": "0", "RD_CLK_POLARITY": "1",
+                                      "WR_CLK_ENABLE": "1", "WR_CLK_POLARITY": "1"},
+                       "connections": {"RD_CLK": [3], "WR_CLK": [2]}},
+                "g":  {"type": "$and", "parameters": {}, "connections": {"A": [2], "B": [3], "Y": [10]}}
+            }
+        }}}"#;
+        let d = clock_domains(json);
+        assert_eq!(
+            d,
+            vec![
+                ClockDomain {
+                    net: "clk_a".into(),
+                    posedge: false,
+                    cells: 1
+                },
+                ClockDomain {
+                    net: "clk_a".into(),
+                    posedge: true,
+                    cells: 2
+                },
+                ClockDomain {
+                    net: "clk_b".into(),
+                    posedge: true,
+                    cells: 1
+                },
+            ]
+        );
+        assert_eq!(
+            describe_clock_domains(&d[1..]),
+            "clk_a (posedge, 2 cells), clk_b (posedge, 1 cell)"
+        );
+    }
+
+    /// One clock is one domain, and a snapshot that does not parse reports none.
+    #[test]
+    fn clock_domains_single_clock_and_garbage() {
+        let json = r#"{"modules": {"top": {"netnames": {"clk": {"hide_name": 0, "bits": [2]}},
+            "cells": {"q": {"type": "$sdff", "parameters": {"CLK_POLARITY": "1"},
+                            "connections": {"CLK": [2]}}}}}}"#;
+        assert_eq!(clock_domains(json).len(), 1);
+        assert!(clock_domains("not json").is_empty());
+    }
+
     use super::*;
     use crate::controllability::BoundaryDirection;
 
@@ -2602,6 +2843,48 @@ mod tests {
             frontend_attempt_order(true, true),
             vec![SvFrontend::Slang, SvFrontend::Verilog]
         );
+    }
+
+    /// A design whose flops sit on two clock nets is refused at lift time; it used to lift as if
+    /// both domains ticked together, and only clock-shaped input NAMES were refused, so
+    /// `clk_src` / `clk_dst` passed silently. `merge_clock_domains` lifts it and reports the
+    /// domains; a one-clock design is untouched. Needs yosys ⇒ mununu-sva image.
+    #[test]
+    #[ignore = "requires yosys (mununu-sva image)"]
+    fn e2e_two_clock_design_is_refused_at_lift() {
+        const TWO_CLOCKS: &str = "\
+module cdc (input logic clk_src, input logic clk_dst, input logic d, output logic q);
+  logic a, b;
+  always_ff @(posedge clk_src) a <= d;
+  always_ff @(posedge clk_dst) b <= a;
+  always_ff @(posedge clk_dst) q <= b;
+endmodule
+";
+        let Err(err) = sv_to_btor2_with_blackboxes(TWO_CLOCKS, &YosysOptions::default()) else {
+            panic!("a two-clock design must not lift as one clock");
+        };
+        assert!(
+            err.message.contains("2 clock domains")
+                && err.message.contains("clk_src (posedge, 1 cell)")
+                && err.message.contains("clk_dst (posedge, 2 cells)"),
+            "{}",
+            err.message
+        );
+        let merged = sv_to_btor2_with_blackboxes(
+            TWO_CLOCKS,
+            &YosysOptions {
+                merge_clock_domains: true,
+                ..Default::default()
+            },
+        )
+        .expect("the explicit opt-in lifts it");
+        assert_eq!(merged.clock_domains.len(), 2);
+        let one = sv_to_btor2_with_blackboxes(
+            &TWO_CLOCKS.replace("clk_dst)", "clk_src)"),
+            &YosysOptions::default(),
+        )
+        .expect("one clock lifts");
+        assert_eq!(one.clock_domains.len(), 1);
     }
 
     // P1.1 — the Auto-frontend fallback, end-to-end. `read_verilog` rejects a module-header

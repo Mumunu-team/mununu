@@ -28,6 +28,11 @@
       },
       "type": "array"
     },
+    "merge_clock_domains": {
+      "default": false,
+      "description": "Lift a multi-clock design onto the model's one implicit clock instead of refusing it. An UNDER-approximation: the domains only ever tick together, so a HOLDS does not transfer (the `clock-domains-merged` soundness caveat). Default `false` (refused at lift time).",
+      "type": "boolean"
+    },
     "responses": {
       "description": "The response pairs, each `\"ANTE => CONS\"`. At least one required.",
       "items": {

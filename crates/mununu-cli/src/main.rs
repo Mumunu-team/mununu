@@ -2129,6 +2129,12 @@ struct SvVerifyAutoArgs {
     /// interfaces) — essentially all real OpenTitan / Caliptra / ibex RTL.
     #[arg(long = "preprocess-sv2v")]
     preprocess_sv2v: bool,
+    /// Lift a multi-clock design onto the model's one implicit clock instead of refusing it.
+    /// An UNDER-approximation: the domains only ever tick together, so a crossing defect cannot
+    /// occur and a HOLDS does not transfer (reported as the `clock-domains-merged` soundness
+    /// caveat).
+    #[arg(long = "merge-clock-domains")]
+    merge_clock_domains: bool,
     /// Extra include-search directory (`-I<dir>`), repeatable. Resolves
     /// `` `include "frag.vh" `` against the original source tree so include
     /// fragments need NOT be passed as standalone `--source` compilation units.
@@ -2374,6 +2380,12 @@ struct SvLiftArgs {
     /// interfaces) — essentially all real OpenTitan / Caliptra / ibex RTL.
     #[arg(long = "preprocess-sv2v")]
     preprocess_sv2v: bool,
+    /// Lift a multi-clock design onto the model's one implicit clock instead of refusing it.
+    /// An UNDER-approximation: the domains only ever tick together, so a crossing defect cannot
+    /// occur and a HOLDS does not transfer (reported as the `clock-domains-merged` soundness
+    /// caveat).
+    #[arg(long = "merge-clock-domains")]
+    merge_clock_domains: bool,
     /// Extra include-search directory (`-I<dir>`), repeatable. Resolves
     /// `` `include "frag.vh" `` against the original source tree so include
     /// fragments need NOT be passed as standalone `--source` compilation units
@@ -4567,6 +4579,7 @@ fn sv_verify_auto(args: SvVerifyAutoArgs) -> Result<(), String> {
         additional_sources: additional,
         primary_source_path: Some(args.file.display().to_string()),
         use_sv2v: args.preprocess_sv2v,
+        merge_clock_domains: args.merge_clock_domains,
         cutpoint_signals: args.cutpoint.clone(),
         extra_include_dirs: args.include_dirs.clone(),
         frontend: args.frontend.into(),
@@ -6598,6 +6611,7 @@ fn read_sv_lift(args: &SvLiftArgs) -> Result<mununu_core::adapter::sv_verify::Sv
             additional_sources,
             top,
             use_sv2v: args.preprocess_sv2v,
+            merge_clock_domains: args.merge_clock_domains,
             include_dirs,
             frontend: args.frontend.into(),
         });
@@ -6673,6 +6687,7 @@ fn read_sv_lift(args: &SvLiftArgs) -> Result<mununu_core::adapter::sv_verify::Sv
         additional_sources,
         top: args.top.clone(),
         use_sv2v: args.preprocess_sv2v,
+        merge_clock_domains: args.merge_clock_domains,
         include_dirs: args.include_dirs.clone(),
         frontend: args.frontend.into(),
     })
@@ -6994,6 +7009,7 @@ fn sv_mutate(args: SvMutateArgs) -> Result<(), String> {
         additional_sources: lift.additional_sources.clone(),
         primary_source_path: args.lift.file.as_ref().map(|p| p.display().to_string()),
         use_sv2v: lift.use_sv2v,
+        merge_clock_domains: lift.merge_clock_domains,
         cutpoint_signals: args.cutpoint.clone(),
         extra_include_dirs: lift.include_dirs.clone(),
         frontend: lift.frontend,
@@ -9796,6 +9812,7 @@ mod sv_lift_search_path_tests {
             sources,
             top: None,
             preprocess_sv2v: false,
+            merge_clock_domains: false,
             include_dirs: Vec::new(),
             frontend: SvFrontendArg::Auto,
         }

@@ -304,6 +304,10 @@ mod tests {
                 frontend: Some("read_verilog + sv2v".into()),
                 frontend_fallback_reason: Some("slang errored".into()),
                 lift_retry: Some("the BTOR backend reported a topological loop".into()),
+                merged_clock_domains: vec![
+                    "clk_a (posedge, 3 cells)".into(),
+                    "clk_b (posedge, 1 cell)".into(),
+                ],
                 applied_config_values: vec!["cfg=7".into()],
                 cutpoint_signals: vec!["fits".into()],
                 fault_model: Some("fault: a (≤1, warm-up 10)".into()),

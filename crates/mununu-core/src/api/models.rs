@@ -1332,6 +1332,11 @@ pub struct SvVerifyRequest {
     /// yosys-slang plugin. Default `false`.
     #[serde(default)]
     pub use_slang: bool,
+    /// Lift a multi-clock design onto the model's one implicit clock instead of refusing it.
+    /// An UNDER-approximation: the domains only ever tick together, so a HOLDS does not transfer
+    /// (the `clock-domains-merged` soundness caveat). Default `false` (refused at lift time).
+    #[serde(default)]
+    pub merge_clock_domains: bool,
 }
 
 /// Request for `POST /api/v1/sv/verify-liveness` — the SV lift fields plus the
@@ -1353,6 +1358,11 @@ pub struct SvVerifyLivenessRequest {
     /// plugin. Default `false`.
     #[serde(default)]
     pub use_slang: bool,
+    /// Lift a multi-clock design onto the model's one implicit clock instead of refusing it.
+    /// An UNDER-approximation: the domains only ever tick together, so a HOLDS does not transfer
+    /// (the `clock-domains-merged` soundness caveat). Default `false` (refused at lift time).
+    #[serde(default)]
+    pub merge_clock_domains: bool,
     /// The request atom (`"REG op VALUE"`).
     pub request: String,
     /// The grant atom that must eventually follow on every path.
@@ -1379,6 +1389,11 @@ pub struct SvVerifyLivenessAllRequest {
     /// plugin. Default `false`.
     #[serde(default)]
     pub use_slang: bool,
+    /// Lift a multi-clock design onto the model's one implicit clock instead of refusing it.
+    /// An UNDER-approximation: the domains only ever tick together, so a HOLDS does not transfer
+    /// (the `clock-domains-merged` soundness caveat). Default `false` (refused at lift time).
+    #[serde(default)]
+    pub merge_clock_domains: bool,
     /// The response pairs, each `"ANTE => CONS"`. At least one required.
     pub responses: Vec<String>,
 }
@@ -1402,6 +1417,11 @@ pub struct SvVerifyRecoverabilityRequest {
     /// plugin. Default `false`.
     #[serde(default)]
     pub use_slang: bool,
+    /// Lift a multi-clock design onto the model's one implicit clock instead of refusing it.
+    /// An UNDER-approximation: the domains only ever tick together, so a HOLDS does not transfer
+    /// (the `clock-domains-merged` soundness caveat). Default `false` (refused at lift time).
+    #[serde(default)]
+    pub merge_clock_domains: bool,
     /// The `good` atom to recover to (`"REG op VALUE"`).
     pub target: String,
     /// Extra abstraction predicate(s) for the cube-path escalation, each
@@ -1441,6 +1461,11 @@ pub struct SvCheckFsmRequest {
     /// plugin. Default `false`.
     #[serde(default)]
     pub use_slang: bool,
+    /// Lift a multi-clock design onto the model's one implicit clock instead of refusing it.
+    /// An UNDER-approximation: the domains only ever tick together, so a HOLDS does not transfer
+    /// (the `clock-domains-merged` soundness caveat). Default `false` (refused at lift time).
+    #[serde(default)]
+    pub merge_clock_domains: bool,
     /// Max state-register width treated as an FSM (wider = datapath/counter, skipped).
     #[serde(default = "default_fsm_max_width")]
     pub max_width: u32,
@@ -1467,6 +1492,11 @@ pub struct SvLintRequest {
     /// plugin. Default `false`.
     #[serde(default)]
     pub use_slang: bool,
+    /// Lift a multi-clock design onto the model's one implicit clock instead of refusing it.
+    /// An UNDER-approximation: the domains only ever tick together, so a HOLDS does not transfer
+    /// (the `clock-domains-merged` soundness caveat). Default `false` (refused at lift time).
+    #[serde(default)]
+    pub merge_clock_domains: bool,
 }
 
 /// One `sv lint` finding — a named signal a structural check flagged. Element of
@@ -1522,6 +1552,11 @@ pub struct SvMutateRequest {
     /// Force the slang RTL front-end (`read_slang`). Default `false`.
     #[serde(default)]
     pub use_slang: bool,
+    /// Lift a multi-clock design onto the model's one implicit clock instead of refusing it.
+    /// An UNDER-approximation: the domains only ever tick together, so a HOLDS does not transfer
+    /// (the `clock-domains-merged` soundness caveat). Default `false` (refused at lift time).
+    #[serde(default)]
+    pub merge_clock_domains: bool,
     /// The mutation to apply, one of four kinds (mununu#635): `"stick:<reg>"`
     /// (freeze a register), `"drop-reset:<reg>"` (remove a register's reset arm),
     /// `"off-by-one:<reg>[@<const_nid>][:±1]"` (shift a constant the register is
@@ -1776,6 +1811,11 @@ pub struct SvVerifyAutoRequest {
     /// plugin. Default `false`.
     #[serde(default)]
     pub use_slang: bool,
+    /// Lift a multi-clock design onto the model's one implicit clock instead of refusing it.
+    /// An UNDER-approximation: the domains only ever tick together, so a HOLDS does not transfer
+    /// (the `clock-domains-merged` soundness caveat). Default `false` (refused at lift time).
+    #[serde(default)]
+    pub merge_clock_domains: bool,
     /// Module-parameter overrides applied via yosys `chparam -set` before the lift
     /// (mirrors the CLI `--param`). Each entry is `"NAME=VALUE"` (applied to the
     /// top module) or `"MODULE.NAME=VALUE"` (scoped to `MODULE`). Shrinks a
@@ -2257,6 +2297,7 @@ impl From<&crate::adapter::slang::verify_auto::AutoVerifyReport> for SvVerifyAut
                 frontend: report.diagnostics.frontend.clone(),
                 frontend_fallback_reason: report.diagnostics.frontend_fallback_reason.clone(),
                 lift_retry: report.diagnostics.lift_retry.clone(),
+                merged_clock_domains: report.diagnostics.merged_clock_domains.clone(),
                 config_values: report.diagnostics.applied_config_values.clone(),
                 cutpoints: report.diagnostics.cutpoint_signals.clone(),
                 fault_model: report.diagnostics.fault_model.clone(),
@@ -2430,6 +2471,11 @@ pub struct ModelDiagnosticsView {
     /// design) — the reason, else `None`. The `lift-retry` note carries the same text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lift_retry: Option<String>,
+    /// The clock domains `merge_clock_domains` lifted onto one clock, each
+    /// `"<net> (<edge>, <n> cells)"`; empty for a single-clock design. Non-empty means every
+    /// verdict assumes the domains tick together (the `clock-domains-merged` note).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub merged_clock_domains: Vec<String>,
     /// mununu#536 — config inputs pinned for this run, each `"<signal>=<value>"`. A verdict
     /// under a pin is a claim about THAT configuration only, so the scope ships with it.
     #[serde(default)]
