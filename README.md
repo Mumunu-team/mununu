@@ -279,8 +279,8 @@ from raw SystemVerilog) and a BTOR2-direct form (`btor2 …`).
 | Response-liveness `AG(req → AF grant)` | `sv verify-liveness[-all]`, `btor2 …` | `POST /{sv,btor2}/verify-liveness[-all]` | ✅ |
 | **Recoverability `AG EF good`** (branching) | `sv verify-recoverability`, `btor2 …` | `POST /{sv,btor2}/verify-recoverability` | ✅ |
 | FSM illegal-encoding auto-scan | `sv check-fsm`, `btor2 check-fsm` | `POST /{sv,btor2}/check-fsm` | ✅ |
-| μ-calculus eval / CEGAR | `context eval`, `{sv,btor2} cegar` | `POST /context/verify`, `/{sv,btor2}/cegar` | ✅ |
-| Controller synthesis (GR(1) / parity) | `context synth` | `POST /context/synthesize`, `/synth/gr1` | ✅ |
+| μ-calculus eval / CEGAR | `context eval`, `{sv,btor2} cegar` | `POST /context/eval`, `/{sv,btor2}/cegar` | ✅ |
+| Controller synthesis (GR(1) / parity) | `context synth` | `POST /context/synth` (GR(1): `controller_mode: "gr1"`) | ✅ |
 | N-source project verify (`verify.toml`) | `verify` | `POST /verify` | ✅ |
 | KMTS safety cube (`--engine cube\|ic3`) | `btor2 verify --engine cube\|ic3` | `POST /btor2/verify` with `engine: "cube"` (ic3 CLI-only) | — |
 

@@ -190,7 +190,7 @@ Same as [`verdict.md`](verdict.md):
 
 ## Not covered here
 
-- **`POST /btor2/cegar`** and **`POST /sv/cegar`** — the CEGAR refinement-trace endpoint (viewer-shaped). Follows in a subsequent PR alongside `/context/synthesize` and `/synth/gr1`.
+- **`POST /btor2/cegar`** and **`POST /sv/cegar`** — the CEGAR refinement-trace endpoint (viewer-shaped); its schema is [`cegar-response.schema.json`](cegar-response.schema.json) (0.5).
 - **`POST /sv/verify-auto`** — the flagship BTOR2-free entry with its own richer response tree. Covered in [`verdict.md`](verdict.md).
 
 ## See also

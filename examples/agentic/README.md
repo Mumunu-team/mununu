@@ -63,7 +63,7 @@ mununu context eval examples/agentic/handoff_protocol.ctxdsl \
 
 ## API
 
-For adapter formats (XState JSON), call `/api/v1/context/import` first to translate to CTXDSL, then call `/api/v1/context/verify` or `/api/v1/context/summarize`. For native CTXDSL files, send the content directly to the analysis endpoints.
+For adapter formats (XState JSON), call `/api/v1/context/import` first to translate to CTXDSL, then call `/api/v1/context/eval` or `/api/v1/context/summarize`. For native CTXDSL files, send the content directly to the analysis endpoints.
 
 ```bash
 # Translate XState then verify
@@ -71,7 +71,7 @@ CT=$(cat examples/agentic/support_pipeline.xstate.json)
 CTXDSL=$(curl -s -X POST http://127.0.0.1:8080/api/v1/context/import \
     -H 'Content-Type: application/json' \
     -d "$(jq -n --arg c "$CT" '{format:"auto", content:$c}')" | jq -r '.ctxdsl')
-curl -s -X POST http://127.0.0.1:8080/api/v1/context/verify \
+curl -s -X POST http://127.0.0.1:8080/api/v1/context/eval \
     -H 'Content-Type: application/json' \
     -d "$(jq -n --arg c "$CTXDSL" \
         '{context: {name:"support_pipeline", content:$c},

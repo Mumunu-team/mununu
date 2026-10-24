@@ -1,0 +1,605 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "AssumptionKind": {
+      "description": "The shape of a discovered environment assumption.",
+      "oneOf": [
+        {
+          "description": "An input held at a constant value (`en = 1`).",
+          "enum": [
+            "InputHold"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A CONJUNCTION of environment-input holds (`ack == 1 && escalate == 0`) — the minimal set of environment inputs that must be constrained for a two-player game to become realizable, when no single hold suffices (the design has multiple independent adversarial blockers).",
+          "enum": [
+            "InputConjunction"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A finite input schedule (a command sequence).",
+          "enum": [
+            "InputSchedule"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "\"Reset is eventually asserted.\"",
+          "enum": [
+            "ResetEventually"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A synthesized positional environment strategy (1-player: the environment owns all inputs).",
+          "enum": [
+            "EnvStrategy"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A LIVENESS / fairness environment assumption `GF(in == v)` — the environment input holds `v` INFINITELY OFTEN — under which an unrealizable RECURRENCE (Büchi) game `GF good` becomes realizable (`GF a → GF good`, the GR(1) 1-pair objective). Distinct from `InputHold` (a SAFETY hold `G(a)`): fairness is strictly weaker (the environment may violate `a` finitely often).",
+          "enum": [
+            "InputFairness"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A CONJUNCTION of fairness assumptions `GF(e_1 == v_1) ∧ … ∧ GF(e_k == v_k)` — the minimal set of environment liveness assumptions under which an unrealizable RECURRENCE game becomes realizable (`(⋀_i GF a_i) → GF good`, the MULTI-pair GR(1) objective), when no SINGLE fairness assumption suffices (multiple independent liveness blockers). The fairness analog of `InputConjunction`.",
+          "enum": [
+            "InputFairnessConjunction"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "CexCellView": {
+      "description": "One register's concrete value in a counterexample state. mununu#723 — a cell wider than 64 bits was silently absent from the trace (OpenTitan edn's 109-bit `tl_i`, the bus write behind the fatal alert). `value` is unchanged for every cell that fits 64 bits — exactly the cells that were listed before — and `null` for a wider value; `hex` and `bits` are always present.",
+      "properties": {
+        "bits": {
+          "description": "The cell's width in bits.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "hex": {
+          "description": "`0x` + the value zero-padded to the cell's width — the form that always holds it.",
+          "type": "string"
+        },
+        "register": {
+          "type": "string"
+        },
+        "value": {
+          "description": "The value when it fits 64 bits, else `null` (read `hex`).",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "bits",
+        "hex",
+        "register"
+      ],
+      "type": "object"
+    },
+    "DiscoveredAssumption": {
+      "description": "See [`VerdictRefinement::holds_under`]. A CONDITIONAL result: the property holds under `phi`. (Populated in Phase 2.)",
+      "properties": {
+        "engine": {
+          "description": "The engine that discovered it, for provenance.",
+          "type": "string"
+        },
+        "kind": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AssumptionKind"
+            }
+          ],
+          "description": "The assumption's shape."
+        },
+        "non_vacuous": {
+          "description": "True iff `good` is genuinely reached under `phi` (the non-vacuity gate passed).",
+          "type": "boolean"
+        },
+        "phi": {
+          "description": "A human-readable predicate over named inputs (Phase 2b may carry a typed schedule/strategy).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "engine",
+        "kind",
+        "non_vacuous",
+        "phi"
+      ],
+      "type": "object"
+    },
+    "GameObjective": {
+      "description": "The two-player game winning objective (`objective` field). Mirrors the CLI `--objective`.",
+      "oneOf": [
+        {
+          "description": "Force `good` at least ONCE — the reachability game `μX. good ∨ ⟨ctrl⟩X`.",
+          "enum": [
+            "reach"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Force `good` INFINITELY OFTEN — the Büchi game `νZ.μY. (good ∧ ⟨ctrl⟩Z) ∨ ⟨ctrl⟩Y`.",
+          "enum": [
+            "recurrence"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "MealyEntry": {
+      "description": "One control-state row of a [`MealyStrategy`]: the controller's response(s) at that control value.",
+      "properties": {
+        "complete": {
+          "description": "`false` = the reactive-move enumeration hit its bound and `moves` is a partial cover (only for wide-environment reactive states; never for the Moore fast-path). No silent truncation.",
+          "type": "boolean"
+        },
+        "moves": {
+          "description": "The controller's move(s). A single `env_inputs`-empty move = a Moore (env-independent) response; several moves = a genuinely reactive response, one per environment input valuation.",
+          "items": {
+            "$ref": "#/definitions/MealyMove"
+          },
+          "type": "array"
+        },
+        "rank": {
+          "description": "The attractor rank (distance to `good`); 0 = already `good` (no move needed).",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "state_value": {
+          "description": "The value of the strategy's state register.",
+          "format": "uint128",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "complete",
+        "moves",
+        "rank",
+        "state_value"
+      ],
+      "type": "object"
+    },
+    "MealyMove": {
+      "description": "One `(environment-input guard → forced controllable inputs)` move of a Mealy controller ([`MealyStrategy`]). The game is Mealy — the environment moves and the controller RESPONDS ([`ExactModel::cpre_controllable`], `∀env ∃ctrl`) — so the controller's move may depend on the current environment input. `env_inputs` is empty for an env-independent (Moore) move.",
+      "properties": {
+        "env_inputs": {
+          "additionalProperties": {
+            "format": "uint128",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "description": "The environment-input valuation this move responds to; empty = env-independent (holds for every environment move).",
+          "type": "object"
+        },
+        "forced_ctrl": {
+          "additionalProperties": {
+            "format": "uint128",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "description": "The controllable inputs the controller forces in response.",
+          "type": "object"
+        }
+      },
+      "required": [
+        "env_inputs",
+        "forced_ctrl"
+      ],
+      "type": "object"
+    },
+    "StrategyEntry": {
+      "description": "One control-state row of a [`PositionalStrategy`].",
+      "properties": {
+        "forced_inputs": {
+          "additionalProperties": {
+            "format": "uint128",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "description": "The inputs the strategy FORCES in this state (name → value). An input that some rank-decreasing move leaves free is omitted, so a nonempty map is the minimal driving discipline. The SAME input appearing with DIFFERENT forced values across rows is the positional obligation, made explicit as a map rather than read off a single trace.",
+          "type": "object"
+        },
+        "rank": {
+          "description": "Attractor distance to `good` (`0` = the state already satisfies `good`).",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "state_value": {
+          "description": "The value of the strategy's state register in this row.",
+          "format": "uint128",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "forced_inputs",
+        "rank",
+        "state_value"
+      ],
+      "type": "object"
+    },
+    "TestbenchView": {
+      "description": "A generated counterexample-replay testbench ([`crate::adapter::verilator::replay`]).",
+      "properties": {
+        "checks": {
+          "description": "(cycle, register) comparisons the testbench makes.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "makefile": {
+          "description": "`Makefile`; it names the sources as the request named them.",
+          "type": "string"
+        },
+        "skipped": {
+          "description": "Cells left out of the comparison, with the reason.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "tb_cpp": {
+          "description": "`tb.cpp`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "checks",
+        "makefile",
+        "skipped",
+        "tb_cpp"
+      ],
+      "type": "object"
+    },
+    "Trace": {
+      "description": "The one counterexample shape of 0.5, shared by every verb that returns a path: RTL rows fill `state` / `inputs` / `faults`, CTXDSL rows fill `state_name` / `labels`. A two-player strategy stays its own object, and the counterstrategy graph stays a view.",
+      "properties": {
+        "kind": {
+          "$ref": "#/definitions/TraceKind"
+        },
+        "loop_start": {
+          "description": "For a `lasso`: the index into `steps` the last step loops back to.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "replay": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TraceReplay"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "steps": {
+          "items": {
+            "$ref": "#/definitions/TraceStep"
+          },
+          "type": "array"
+        },
+        "unreachable_target": {
+          "description": "For `unreachable`: the target atoms no path reaches.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "kind",
+        "steps"
+      ],
+      "type": "object"
+    },
+    "TraceFault": {
+      "description": "One fault injection on a [`TraceStep`].",
+      "properties": {
+        "hex": {
+          "description": "The value in hexadecimal, at any width.",
+          "type": "string"
+        },
+        "site": {
+          "description": "The register overwritten.",
+          "type": "string"
+        },
+        "value": {
+          "description": "The value written, when it fits 64 bits.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "hex",
+        "site"
+      ],
+      "type": "object"
+    },
+    "TraceKind": {
+      "description": "What a [`Trace`] shows.",
+      "oneOf": [
+        {
+          "description": "Reset → the failing step (a safety violation).",
+          "enum": [
+            "finite"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Reset → a prefix → a cycle repeated forever (`loop_start` marks it): a liveness stall.",
+          "enum": [
+            "lasso"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Reset → a closed trap the target is never reached from again (a refuted `AG EF`).",
+          "enum": [
+            "trap"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "No path: the `unreachable_target` atoms are never reached from reset (a refuted `EF`).",
+          "enum": [
+            "unreachable"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Reset → the injections of a fault attack that reaches its target (`steps[].faults`).",
+          "enum": [
+            "attack"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "TraceReplay": {
+      "description": "Replay artefacts attached to a [`Trace`].",
+      "properties": {
+        "testbench": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TestbenchView"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The Verilator testbench (`--emit-testbench` / `emit_testbench`)."
+        }
+      },
+      "type": "object"
+    },
+    "TraceStep": {
+      "description": "One step of a [`Trace`]: the state at `cycle` and what drives the step out of it.",
+      "properties": {
+        "cycle": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "faults": {
+          "description": "Faults injected in this cycle.",
+          "items": {
+            "$ref": "#/definitions/TraceFault"
+          },
+          "type": "array"
+        },
+        "inputs": {
+          "description": "The input assignment of this cycle (RTL), so the trace can be replayed.",
+          "items": {
+            "$ref": "#/definitions/CexCellView"
+          },
+          "type": "array"
+        },
+        "labels": {
+          "description": "The labels of the transition out of this step (CTXDSL).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "state": {
+          "description": "Register cells (RTL); empty for a CTXDSL step, which names its state in `state_name`.",
+          "items": {
+            "$ref": "#/definitions/CexCellView"
+          },
+          "type": "array"
+        },
+        "state_name": {
+          "description": "The CTXDSL state's name.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "cycle"
+      ],
+      "type": "object"
+    },
+    "TwoPlayerStrategy": {
+      "description": "P2.5-F — a synthesized TWO-PLAYER strategy for the controllable-reachability game `μX. (good ∨ ⟨ctrl⟩X)`: the CONTROLLER's Mealy strategy when it is realizable, or the ENVIRONMENT's positional COUNTERSTRATEGY when it is not (by determinacy, exactly one holds). The asymmetry is intrinsic to the Mealy game (`∀env ∃ctrl`): the environment is the first-mover, so its winning strategy is positional (state-indexed); the controller responds, so its strategy may depend on the environment input.",
+      "oneOf": [
+        {
+          "description": "The controller wins from the initial state (spec realizable) — its Mealy strategy. Serializes as `{\"kind\": \"controller_strategy\", \"state_register\": …, \"entries\": […]}`.",
+          "properties": {
+            "entries": {
+              "description": "One row per reachable control-state value, sorted by rank then value.",
+              "items": {
+                "$ref": "#/definitions/MealyEntry"
+              },
+              "type": "array"
+            },
+            "kind": {
+              "enum": [
+                "controller_strategy"
+              ],
+              "type": "string"
+            },
+            "state_register": {
+              "description": "The state register the strategy is indexed by.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "entries",
+            "kind",
+            "state_register"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The environment wins (unrealizable) — its positional counterstrategy, forcing environment inputs (robust to every controllable move) to keep the play out of the controller's winning region. Serializes as `{\"kind\": \"environment_counterstrategy\", \"state_register\": …, \"entries\": […]}`.",
+          "properties": {
+            "entries": {
+              "description": "One row per reachable value of `state_register`, ordered by rank then value.",
+              "items": {
+                "$ref": "#/definitions/StrategyEntry"
+              },
+              "type": "array"
+            },
+            "kind": {
+              "enum": [
+                "environment_counterstrategy"
+              ],
+              "type": "string"
+            },
+            "state_register": {
+              "description": "The state register the strategy is indexed by (the register named in the `good` atom).",
+              "type": "string"
+            }
+          },
+          "required": [
+            "entries",
+            "kind",
+            "state_register"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "description": "Response for `POST /api/v1/btor2/game`.",
+  "properties": {
+    "attack_exists": {
+      "description": "With `faults`: `realizable` read as \"an attack wins against every environment behaviour\".",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "controllable": {
+      "description": "The controller-owned inputs, echoed for provenance.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "detail": {
+      "description": "Whose objective `outcome` is about, in words (the `--fault` polarity is stated here).",
+      "type": "string"
+    },
+    "fault": {
+      "description": "With `faults`: the posture, as one label.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "good": {
+      "description": "The `good` atom, echoed for provenance.",
+      "type": "string"
+    },
+    "holds_under": {
+      "description": "Discovered environment assumption(s) under which the (unrealizable) game becomes realizable — each a CONDITIONAL `HoldsUnder(φ)` (never flips `realizable`). Only when `discover_assumptions` was requested and the game is unrealizable; empty otherwise.",
+      "items": {
+        "$ref": "#/definitions/DiscoveredAssumption"
+      },
+      "type": "array"
+    },
+    "objective": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/GameObjective"
+        }
+      ],
+      "description": "The winning objective decided, echoed for provenance (`reach` or `recurrence`)."
+    },
+    "outcome": {
+      "description": "The verdict envelope: `holds` | `violated` for the property [`game_outcome`] describes.",
+      "type": "string"
+    },
+    "realizable": {
+      "description": "`true` = the controller can force `good` against every environment move (the spec is realizable); `false` = the environment can prevent it (unrealizable). For `objective = \"recurrence\"` this is \"force `good` infinitely often\" (the Büchi game).",
+      "type": "boolean"
+    },
+    "strategy": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/TwoPlayerStrategy"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The winner's strategy: a `controller_strategy` (Mealy) or an `environment_counterstrategy` (positional) — the [`crate::adapter::btor2::symbolic_bitblast::TwoPlayerStrategy`] serialized with a `\"kind\"` tag. For `objective = \"reach\"` it is the controller's attractor strategy when realizable, else the environment's positional counterstrategy. For `objective = \"recurrence\"` it is the CONTROLLER's Büchi strategy (force `good` infinitely often) when realizable, and `null` when not — the unrealizable recurrence witness is `stall_lasso` below. **Present only for a STATE-register `good`**: the strategy is state-indexed, so it is omitted (`null`) for a combinational-output / relational target (a FIFO's `full_o`), where `realizable` + `holds_under` still apply."
+    },
+    "strategy_error": {
+      "description": "Why `strategy` is absent when the verdict is known: the extraction's own error (e.g. a goal over no state register). Absent when a strategy was extracted or none was asked for.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "trace": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Trace"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "P2.5-F (b) — the ENVIRONMENT STARVATION LASSO (a `lasso` [`Trace`]) for an unrealizable RECURRENCE game: a concrete play (reset → repeating `¬good` `cycle`, with the env's per-step `inputs`) proving the environment can starve `good` forever — the actionable Büchi counterpart of `realizable = false`. Present only for `objective = \"recurrence\"` when unrealizable AND a simple reachable force-`¬good`-forever region exists; `null` for realizable games, the `reach` objective (whose witness is `strategy`), or a subtler co-Büchi with no such region."
+    }
+  },
+  "required": [
+    "controllable",
+    "detail",
+    "good",
+    "holds_under",
+    "objective",
+    "outcome",
+    "realizable"
+  ],
+  "title": "Btor2GameResponse",
+  "type": "object"
+}

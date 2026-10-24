@@ -2940,7 +2940,7 @@ struct ContextEvalArgs {
     #[command(flatten)]
     ci: CiArgs,
     /// Print the verdict as JSON instead of text: the `ContextVerifyResponse` that
-    /// `POST /api/v1/context/verify` returns (`outcome`, `results[]`, `sanity[]`).
+    /// `POST /api/v1/context/eval` returns (`outcome`, `results[]`, `sanity[]`).
     #[command(flatten)]
     json: JsonArgs,
 }

@@ -40,7 +40,7 @@ AAG=$(cat examples/aiger/alarm.aag)
 CTXDSL=$(curl -s -X POST http://127.0.0.1:8080/api/v1/context/import \
     -H 'Content-Type: application/json' \
     -d "$(jq -n --arg c "$AAG" '{format:"auto", content:$c}')" | jq -r '.ctxdsl')
-curl -s -X POST http://127.0.0.1:8080/api/v1/context/verify \
+curl -s -X POST http://127.0.0.1:8080/api/v1/context/eval \
     -H 'Content-Type: application/json' \
     -d "$(jq -n --arg c "$CTXDSL" \
         '{context:{name:"alarm", content:$c},

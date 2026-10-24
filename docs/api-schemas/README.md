@@ -62,7 +62,14 @@ branch on its shape instead of on the exit code.
 | [`sv-verify-recoverability-request.schema.json`](sv-verify-recoverability-request.schema.json) | `POST /api/v1/sv/verify-recoverability` | Request body | `btor2-verify-recoverability-response.schema.json` |
 | [`sv-check-fsm-request.schema.json`](sv-check-fsm-request.schema.json) | `POST /api/v1/sv/check-fsm` | Request body | `btor2-check-fsm-response.schema.json` |
 
-More endpoints will land in additive PRs (CEGAR + synth) — see the roadmap in `docs/consumer-briefings/`.
+### Games, synthesis, CTXDSL evaluation and CEGAR (0.5)
+
+| File | Endpoint | Direction |
+|------|----------|-----------|
+| [`btor2-game-response.schema.json`](btor2-game-response.schema.json) | `POST /api/v1/btor2/game` | Response body |
+| [`cegar-response.schema.json`](cegar-response.schema.json) | `POST /api/v1/btor2/cegar`, `/sv/cegar` | Response body |
+| [`context-eval-response.schema.json`](context-eval-response.schema.json) | `POST /api/v1/context/eval`, `mununu context eval --json` | Response body / stdout |
+| [`context-synth-response.schema.json`](context-synth-response.schema.json) | `POST /api/v1/context/synth` (every `controller_mode`, `gr1` included) | Response body |
 
 Narrative companion: [`verify-verbs.md`](verify-verbs.md) walks the BTOR2 + SV verb responses field-by-field and explains where each verb sits on the safety / liveness / recoverability / FSM axes.
 

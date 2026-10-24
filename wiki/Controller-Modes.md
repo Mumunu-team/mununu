@@ -86,7 +86,7 @@ The legacy `--extract-strategy` flag still works (equivalent to `--controller-mo
 
 ## API usage
 
-`POST /api/v1/context/synthesize`:
+`POST /api/v1/context/synth`:
 
 ```json
 {

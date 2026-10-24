@@ -214,6 +214,45 @@ pub async fn context_synthesize_handler(
 fn context_synthesize_handler_impl(
     request: ContextSynthesizeRequest,
 ) -> ApiResult<Json<ContextSynthesizeResponse>> {
+    // 0.5 — `controller_mode: "gr1"` is the sound GR(1) pipeline over an LTL spec (formerly
+    // `/context/synth`), answered in this route's response shape.
+    if request.options.controller_mode.as_deref() == Some("gr1") {
+        let module = request
+            .module
+            .clone()
+            .unwrap_or_else(|| "gr1_controller".to_string());
+        let Json(g) = gr1_synthesize_handler_impl(Gr1SynthesizeRequest {
+            context: request.context,
+            adapter: request.adapter,
+            module: Some(module.clone()),
+        })?;
+        let mut diagnostics = SynthesisDiagnostics {
+            messages: g.notes,
+            ..Default::default()
+        };
+        diagnostics.messages.push(format!(
+            "GR(1) game: {} states, {} monitor bits",
+            g.game_states, g.monitor_bits
+        ));
+        return Ok(Json(ContextSynthesizeResponse {
+            success: true,
+            outcome: g.outcome,
+            realizable: g.realizable,
+            controller: None,
+            controller_native: g.controller_sv.map(|content| FileContent {
+                name: format!("{module}.sv"),
+                content,
+            }),
+            diagnostics,
+            counterstrategy: None,
+        }));
+    }
+    if request.automaton.is_empty() {
+        return Err(ApiError::BadRequest {
+            message: "automaton is required (except with controller_mode \"gr1\")".to_string(),
+            details: None,
+        });
+    }
     let handler_start = Instant::now();
 
     // Resolve formula name + synthesized template sidecar BEFORE cache lookup,
@@ -380,16 +419,9 @@ fn context_synthesize_handler_impl(
     }))
 }
 
-/// Sound GR(1) controller synthesis (`POST /api/v1/synth/gr1`). Translates the
-/// source to the adapter IR, runs the sound GR(1) synthesizer on the structured
-/// LTL spec, and returns the realizability verdict plus (when realizable) the
-/// controller SystemVerilog. See `crate::mu_calculus::gr1_build`.
-pub async fn gr1_synthesize_handler(
-    Json(request): Json<Gr1SynthesizeRequest>,
-) -> ApiResult<Json<Gr1SynthesizeResponse>> {
-    blocking(move || gr1_synthesize_handler_impl(request)).await
-}
-
+/// The `controller_mode: "gr1"` form of `POST /api/v1/context/synth`: the sound GR(1)
+/// synthesizer on the structured LTL spec, returning the realizability verdict plus (when
+/// realizable) the controller SystemVerilog. See `crate::mu_calculus::gr1_build`.
 fn gr1_synthesize_handler_impl(
     request: Gr1SynthesizeRequest,
 ) -> ApiResult<Json<Gr1SynthesizeResponse>> {
@@ -4152,7 +4184,7 @@ fn verify_project_handler_impl(
 // Memory-check (B2b)
 // ============================================================================
 
-/// Request body for `POST /api/v1/verify/memory-check`.
+/// Request body for `POST /api/v1/memory/check`.
 ///
 /// Mirrors [`VerifyProjectRequest`] in shape — either `config` or
 /// `config_toml`, never both. The analysis is pure (it inspects only
@@ -4382,24 +4414,36 @@ mod contract_handler_tests {
         assert!(matches!(verdict, DischargeVerdict::Circular { .. }));
     }
 
+    /// 0.5 — GR(1) synthesis is `controller_mode: "gr1"` on the synthesis route (formerly
+    /// `/context/synth`), answered in that route's response shape.
     #[tokio::test]
-    async fn gr1_synthesize_handler_request_grant_realizable() {
-        let req = Gr1SynthesizeRequest {
-            context: FileContent {
-                name: "rg.tlsf".to_string(),
-                content: "INFO { TITLE: \"rg\"; DESCRIPTION: \"rg\"; SEMANTICS: Mealy; \
-                          TARGET: Mealy; }\nMAIN { INPUTS { req; } OUTPUTS { grant; } \
-                          ASSUMPTIONS { G F req; } GUARANTEES { G (req -> F grant); \
-                          G (grant -> X !grant); } }"
-                    .to_string(),
+    async fn gr1_synthesis_runs_on_the_synth_route() {
+        let req: ContextSynthesizeRequest = serde_json::from_value(serde_json::json!({
+            "context": {
+                "name": "rg.tlsf",
+                "content": "INFO { TITLE: \"rg\"; DESCRIPTION: \"rg\"; SEMANTICS: Mealy; \
+                            TARGET: Mealy; }\nMAIN { INPUTS { req; } OUTPUTS { grant; } \
+                            ASSUMPTIONS { G F req; } GUARANTEES { G (req -> F grant); \
+                            G (grant -> X !grant); } }"
             },
-            adapter: None,
-            module: None,
-        };
-        let Json(resp) = gr1_synthesize_handler(Json(req)).await.unwrap();
+            "options": { "controller_mode": "gr1" }
+        }))
+        .expect("request deserializes without an automaton");
+        let Json(resp) = context_synthesize_handler(Json(req)).await.unwrap();
         assert!(resp.realizable, "request_grant realizable via the API");
-        assert_eq!(resp.monitor_bits, 2);
-        let sv = resp.controller_sv.expect("controller SV emitted");
+        assert_eq!(resp.outcome, "holds");
+        assert!(
+            resp.diagnostics
+                .messages
+                .iter()
+                .any(|m| m.contains("2 monitor bits")),
+            "{:?}",
+            resp.diagnostics.messages
+        );
+        let sv = resp
+            .controller_native
+            .expect("controller SV emitted")
+            .content;
         assert!(sv.contains("module gr1_controller"));
     }
 }
@@ -6012,7 +6056,7 @@ members = ["x"]
 mod context_sanity_tests {
     use super::*;
 
-    /// `sanity: true` on `/context/verify` returns the structural report beside the verdicts.
+    /// `sanity: true` on `/context/eval` returns the structural report beside the verdicts.
     #[test]
     fn context_verify_reports_sanity_on_request() {
         let content = "context m {\n  alphabet { label go; label unused; }\n  automata {\n    automaton A {\n      alphabet { label go; label unused; }\n      states { state Init initial; state Done; }\n      transitions { transition Init -> Done on label go; }\n    }\n  }\n  mu_formulas { formula r { over A; body = mu X. (Done || <> X); } }\n}\n";

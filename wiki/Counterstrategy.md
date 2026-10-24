@@ -107,7 +107,7 @@ The counterstrategy can be visualized as an automaton in **mununu-ui**. The grap
 The graph is available from two places:
 
 1. **Verification tab**: Click **Counterstrategy** next to any unsatisfied formula to expand the graph inline.
-2. **Synthesis API**: The `/api/v1/context/synthesize` response includes a `counterstrategy` field with Cytoscape-compatible graph elements when the result is unrealizable.
+2. **Synthesis API**: The `/api/v1/context/synth` response includes a `counterstrategy` field with Cytoscape-compatible graph elements when the result is unrealizable.
 
 ### Reachability Filtering
 

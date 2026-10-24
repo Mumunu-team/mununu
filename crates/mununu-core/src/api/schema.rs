@@ -28,10 +28,11 @@
 use schemars::schema_for;
 
 use super::models::{
-    Btor2CheckFsmRequest, Btor2CheckFsmResponse, Btor2VerifyLivenessRequest,
-    Btor2VerifyLivenessResponse, Btor2VerifyRecoverabilityRequest,
-    Btor2VerifyRecoverabilityResponse, Btor2VerifyRequest, Btor2VerifyResponse, SvCdcLintRequest,
-    SvCdcLintResponse, SvCheckFsmRequest, SvMutateRequest, SvMutateResponse, SvVerifyAutoRequest,
+    Btor2CegarResponse, Btor2CheckFsmRequest, Btor2CheckFsmResponse, Btor2GameResponse,
+    Btor2VerifyLivenessRequest, Btor2VerifyLivenessResponse, Btor2VerifyRecoverabilityRequest,
+    Btor2VerifyRecoverabilityResponse, Btor2VerifyRequest, Btor2VerifyResponse,
+    ContextSynthesizeResponse, ContextVerifyResponse, SvCdcLintRequest, SvCdcLintResponse,
+    SvCheckFsmRequest, SvMutateRequest, SvMutateResponse, SvVerifyAutoRequest,
     SvVerifyAutoResponse, SvVerifyLivenessAllReport, SvVerifyLivenessReport,
     SvVerifyLivenessRequest, SvVerifyRecoverabilityReport, SvVerifyRecoverabilityRequest,
     SvVerifyRequest,
@@ -59,6 +60,30 @@ pub fn sv_cdc_lint_request_schema() -> serde_json::Value {
 pub fn sv_cdc_lint_response_schema() -> serde_json::Value {
     serde_json::to_value(schema_for!(SvCdcLintResponse))
         .expect("SvCdcLintResponse schema must serialise as JSON")
+}
+
+/// JSON Schema for `POST /api/v1/context/eval` responses and `mununu context eval --json` ([`ContextVerifyResponse`], 0.5).
+pub fn context_eval_response_schema() -> serde_json::Value {
+    serde_json::to_value(schema_for!(ContextVerifyResponse))
+        .expect("ContextVerifyResponse schema must serialise as JSON")
+}
+
+/// JSON Schema for `POST /api/v1/context/synth` responses ([`ContextSynthesizeResponse`], 0.5).
+pub fn context_synth_response_schema() -> serde_json::Value {
+    serde_json::to_value(schema_for!(ContextSynthesizeResponse))
+        .expect("ContextSynthesizeResponse schema must serialise as JSON")
+}
+
+/// JSON Schema for `POST /api/v1/btor2/game` responses ([`Btor2GameResponse`], 0.5).
+pub fn btor2_game_response_schema() -> serde_json::Value {
+    serde_json::to_value(schema_for!(Btor2GameResponse))
+        .expect("Btor2GameResponse schema must serialise as JSON")
+}
+
+/// JSON Schema for `POST /api/v1/btor2/cegar` and `/sv/cegar` responses ([`Btor2CegarResponse`], 0.5).
+pub fn cegar_response_schema() -> serde_json::Value {
+    serde_json::to_value(schema_for!(Btor2CegarResponse))
+        .expect("Btor2CegarResponse schema must serialise as JSON")
 }
 
 /// JSON Schema for [`SvMutateRequest`].
@@ -521,6 +546,38 @@ mod tests {
         drift_check(
             "docs/api-schemas/sv-cdc-lint-response.schema.json",
             &sv_cdc_lint_response_schema(),
+        );
+    }
+
+    #[test]
+    fn api_schema_drift_context_eval_response() {
+        drift_check(
+            "docs/api-schemas/context-eval-response.schema.json",
+            &context_eval_response_schema(),
+        );
+    }
+
+    #[test]
+    fn api_schema_drift_context_synth_response() {
+        drift_check(
+            "docs/api-schemas/context-synth-response.schema.json",
+            &context_synth_response_schema(),
+        );
+    }
+
+    #[test]
+    fn api_schema_drift_btor2_game_response() {
+        drift_check(
+            "docs/api-schemas/btor2-game-response.schema.json",
+            &btor2_game_response_schema(),
+        );
+    }
+
+    #[test]
+    fn api_schema_drift_cegar_response() {
+        drift_check(
+            "docs/api-schemas/cegar-response.schema.json",
+            &cegar_response_schema(),
         );
     }
 

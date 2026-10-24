@@ -96,7 +96,18 @@ pub struct ContextSynthesizeRequest {
     pub context: FileContent,
     #[serde(default)]
     pub sidecars: Vec<SidecarFile>,
+    /// The automaton to synthesise over (not used by `controller_mode: "gr1"`, which reads an
+    /// LTL assume/guarantee spec).
+    #[serde(default)]
     pub automaton: String,
+    /// With `controller_mode: "gr1"`: the adapter reading `context` (default `"tlsf"`). 0.5 folds
+    /// `/context/synth` into this route.
+    #[serde(default)]
+    pub adapter: Option<String>,
+    /// With `controller_mode: "gr1"`: the module name of the emitted SystemVerilog controller
+    /// (default `gr1_controller`).
+    #[serde(default)]
+    pub module: Option<String>,
     /// Formula name to synthesise (mutually exclusive with `template_ref`).
     pub formula: Option<String>,
     /// Template reference to instantiate (mutually exclusive with `formula`).
@@ -141,7 +152,7 @@ pub struct DiagnosticsOptions {
 }
 
 /// Response from controller synthesis
-#[derive(Debug, Serialize, PartialEq)]
+#[derive(Debug, Serialize, PartialEq, schemars::JsonSchema)]
 pub struct ContextSynthesizeResponse {
     pub success: bool,
     /// The verdict envelope: `holds` iff a controller exists (`realizable`), else `violated`.
@@ -158,7 +169,7 @@ pub struct ContextSynthesizeResponse {
 }
 
 /// Request for sound GR(1) controller synthesis from an LTL assume/guarantee
-/// spec (TLSF today). Unlike `/context/synthesize`, this runs the sound GR(1)
+/// spec (TLSF today). Unlike `/context/synth`, this runs the sound GR(1)
 /// pipeline (`ControllerMode::Gr1`) directly on the structured LTL spec.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct Gr1SynthesizeRequest {
@@ -192,7 +203,7 @@ pub struct Gr1SynthesizeResponse {
 }
 
 /// Synthesis diagnostics (matches ControllerDiagnostics structure)
-#[derive(Debug, Clone, Serialize, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Default, PartialEq, Eq, schemars::JsonSchema)]
 pub struct SynthesisDiagnostics {
     #[serde(default)]
     pub messages: Vec<String>,
@@ -213,7 +224,7 @@ pub struct SynthesisDiagnostics {
 }
 
 /// Minimization report
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct MinimizationReport {
     pub removed_states: usize,
     pub removed_transitions: usize,
@@ -222,7 +233,7 @@ pub struct MinimizationReport {
 }
 
 /// Proof obligation
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ProofObligation {
     pub state: String,
     pub detail: Option<String>,
@@ -431,7 +442,7 @@ pub struct GraphMetadata {
 }
 
 /// Graph element (node or edge) for visualization
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
 pub struct GraphElement {
     pub data: GraphElementData,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -441,7 +452,7 @@ pub struct GraphElement {
 }
 
 /// Graph element data (node or edge)
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum GraphElementData {
     Node {
@@ -485,7 +496,7 @@ pub enum GraphElementData {
 }
 
 /// Graph position coordinates
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
 pub struct GraphPosition {
     pub x: f64,
     pub y: f64,
@@ -532,7 +543,7 @@ pub struct ContextVerifyRequest {
 }
 
 /// Response from context verification
-#[derive(Debug, Serialize, PartialEq)]
+#[derive(Debug, Serialize, PartialEq, schemars::JsonSchema)]
 pub struct ContextVerifyResponse {
     pub success: bool,
     /// The worst `outcome` over `results`, with a sanity finding counting as `unknown` when no
@@ -545,7 +556,7 @@ pub struct ContextVerifyResponse {
 }
 
 /// Verification result for a single formula–automaton pair
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, schemars::JsonSchema)]
 pub struct FormulaVerificationResult {
     pub formula_name: String,
     pub automaton: String,
@@ -563,7 +574,7 @@ pub struct FormulaVerificationResult {
 }
 
 /// Counterstrategy result: the environment's winning region and strategy as a graph.
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, schemars::JsonSchema)]
 pub struct CounterstrategyResult {
     /// States where the environment can force the property to be violated.
     pub environment_winning_states: Vec<String>,
@@ -1380,7 +1391,9 @@ pub fn parse_terminal_states(specs: &[String]) -> Result<Vec<(String, u64)>, Str
 }
 
 /// The two-player game winning objective (`objective` field). Mirrors the CLI `--objective`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum GameObjective {
     /// Force `good` at least ONCE — the reachability game `μX. good ∨ ⟨ctrl⟩X`.
@@ -1453,7 +1466,7 @@ pub fn game_outcome(under_fault: bool, realizable: bool) -> (&'static str, Strin
     (outcome, detail.to_string())
 }
 
-/// The verdict of a CTXDSL evaluation (`context eval`, `/context/verify`): the formulas' (`holds`
+/// The verdict of a CTXDSL evaluation (`context eval`, `/context/eval`): the formulas' (`holds`
 /// iff every initial state satisfies every one), else the sanity checks' (`unknown` when they found
 /// something, a finding being a model defect to review rather than a refuted property).
 /// `formula_holds` is `None` when only the sanity checks ran.
@@ -1471,7 +1484,7 @@ pub fn realizable_outcome(realizable: bool) -> &'static str {
 }
 
 /// Response for `POST /api/v1/btor2/game`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct Btor2GameResponse {
     /// The verdict envelope: `holds` | `violated` for the property [`game_outcome`] describes.
     pub outcome: String,
@@ -2885,7 +2898,7 @@ pub struct VacuityView {
 
 /// U.0 — CEGAR refinement trace, JSON-shaped for the refinement-trace
 /// viewer. Mirrors [`crate::adapter::btor2::cegar::CegarTrace`].
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct Btor2CegarResponse {
     pub success: bool,
     /// Per-iteration refinement records (iteration 0 = initial evaluation).
@@ -2940,7 +2953,7 @@ pub struct Btor2CegarResponse {
 
 /// Track I.1 — a cube cell witnessing a non-HOLDS verdict, viewer-shaped:
 /// the cube index plus the predicate valuation (`name → holds`) at that cell.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct WitnessCellView {
     pub cube_index: usize,
     /// Predicate valuation at the cell (`name → holds`), keyed by predicate name.
@@ -2948,7 +2961,7 @@ pub struct WitnessCellView {
 }
 
 /// One CEGAR iteration, viewer-shaped.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct CegarIterationView {
     pub iteration: usize,
     /// Predicate-set size at the start of this iteration.
@@ -2966,7 +2979,7 @@ pub struct CegarIterationView {
 }
 
 /// Cell counts of a 3-valued (Kleene) verdict over the cube space.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct CegarVerdictSummary {
     /// KleeneT (definitely-true) cells.
     pub true_cells: usize,
@@ -2983,7 +2996,7 @@ pub struct CegarVerdictSummary {
 }
 
 /// A predicate spec, response-shaped.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct PredicateView {
     pub name: String,
     pub register: String,

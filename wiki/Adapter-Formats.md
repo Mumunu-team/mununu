@@ -316,7 +316,7 @@ Translates external format content to CTXDSL.
 
 ### Synthesis with Native Output
 
-`POST /api/v1/context/synthesize` with `output_format` in options:
+`POST /api/v1/context/synth` with `output_format` in options:
 
 ```json
 {

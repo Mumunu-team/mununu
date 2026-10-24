@@ -138,7 +138,7 @@ The panel provides a quick at-a-glance health check: if all controllers show as 
 
 ## Graphs Tab
 
-The Graphs tab renders automata and controllers as interactive directed graphs using [Cytoscape.js](https://js.cytoscape.org/). It calls the `/api/v1/context/graphs` endpoint.
+The Graphs tab renders automata and controllers as interactive directed graphs using [Cytoscape.js](https://js.cytoscape.org/). It calls the `/api/v1/context/graph` endpoint.
 
 ### Graph Types
 
@@ -188,7 +188,7 @@ Use the **Minimize Controllers** toggle to apply bisimulation minimization to co
 
 ## Verification Tab
 
-The Verification tab is the unified analysis view. It evaluates mu-calculus formulas, reports realizability, and provides on-demand counterstrategy graphs and counterexample traces -- combining what was previously split across separate verification and synthesis tabs. It calls the `/api/v1/context/verify` endpoint for formula evaluation and the `/api/v1/context/synthesize` endpoint for countertraces.
+The Verification tab is the unified analysis view. It evaluates mu-calculus formulas, reports realizability, and provides on-demand counterstrategy graphs and counterexample traces -- combining what was previously split across separate verification and synthesis tabs. It calls the `/api/v1/context/eval` endpoint for formula evaluation and the `/api/v1/context/synth` endpoint for countertraces.
 
 ### Running Verification
 
