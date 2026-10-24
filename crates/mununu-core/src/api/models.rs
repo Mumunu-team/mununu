@@ -976,7 +976,7 @@ pub struct Btor2VerifyResponse {
     /// (reachable) | `"unknown"` (undecided / contradiction), via
     /// [`crate::verdict::PropertyVerdict`]. The reachability *detail* is in the
     /// `reachable_by` / `unreachable_by` lists + the `contradiction` alarm.
-    pub verdict: String,
+    pub outcome: String,
     /// Engines that found `bad` reachable (a real counterexample).
     pub reachable_by: Vec<String>,
     /// Engines that proved `bad` unreachable (a real safety proof).
@@ -1038,7 +1038,7 @@ pub struct Btor2JusticeEntry {
     pub size: usize,
     /// `"holds"` (no fair infinite path — HWMCC `uns`), `"violated"` (one exists — `sat`),
     /// `"unknown"`.
-    pub verdict: String,
+    pub outcome: String,
     /// The rung and engines that decided it.
     pub decided_by: Vec<String>,
     /// Abstention reasons, when a rung abstained.
@@ -1049,7 +1049,7 @@ pub struct Btor2JusticeEntry {
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct Btor2VerifyJusticeResponse {
     /// Worst verdict over the sets: `"violated"` if any, else `"unknown"` if any, else `"holds"`.
-    pub verdict: String,
+    pub outcome: String,
     /// Whether the content was ASCII AIGER lowered to BTOR2.
     pub converted_from_aiger: bool,
     pub justice: Vec<Btor2JusticeEntry>,
@@ -1061,7 +1061,7 @@ pub struct Btor2VerifyJusticeResponse {
 pub struct Btor2VerifyLivenessResponse {
     /// Canonical property verdict — `"holds"` | `"violated"` | `"unknown"`, via
     /// [`crate::verdict::PropertyVerdict`].
-    pub verdict: String,
+    pub outcome: String,
     /// The reduced property, echoed for provenance:
     /// `AG((<request>) -> AF (<grant>))`.
     pub property: String,
@@ -1147,7 +1147,7 @@ pub struct Btor2VerifyRecoverabilityResponse {
     /// `target`) | `"violated"` (a reachable trap cannot) | `"unknown"` (over the
     /// exact engine's cap; try the cube + `smt-hyper-must` path), via
     /// [`crate::verdict::PropertyVerdict`].
-    pub verdict: String,
+    pub outcome: String,
     /// The decided property, echoed for provenance: `AG EF (<target>)`.
     pub property: String,
     /// The structured refinement, when `refine` was requested and it produced one. `None` otherwise.
@@ -1208,7 +1208,7 @@ pub struct FsmRegisterFinding {
     /// Canonical verdict — `"holds"` (stays within its encoding) | `"violated"` (an
     /// illegal encoding is reachable) | `"unknown"` (the portfolio could not decide) |
     /// `"skipped"` (a `"counter"`, not checked).
-    pub verdict: String,
+    pub outcome: String,
     /// `true` when an illegal encoding is reachable (a finding).
     pub illegal_encoding_reachable: bool,
 }
@@ -2546,7 +2546,7 @@ pub struct SvVerifyRecoverabilityReport {
     /// The property, rendered — e.g. `"AG EF (state == 0)"`.
     pub property: String,
     /// `holds` | `violated` | `unknown` | `skipped`, the same vocabulary `sv verify-auto` uses.
-    pub verdict: String,
+    pub outcome: String,
     /// Present only under `--refine` / `--config-values` / `--discover-assumptions`: the
     /// refinement record. Free-form because `VerdictRefinement` is its own evolving surface —
     /// pinning its internals here would couple two schemas that change for different reasons.
@@ -2571,9 +2571,9 @@ pub struct SvVerifyLivenessReport {
     /// The property, rendered — e.g. `"AG((req == 1) -> AF (ack == 1))"`.
     pub property: String,
     /// `holds` | `violated` | `unknown` | `skipped`.
-    pub verdict: String,
+    pub outcome: String,
     /// Which portfolio engines reached a conclusion. Empty when none did, which is not the same as
-    /// the property being undecided for a modelling reason — read `verdict` for that.
+    /// the property being undecided for a modelling reason — read `outcome` for that.
     pub decided_by: Vec<String>,
 }
 
@@ -2585,7 +2585,7 @@ pub struct SvVerifyLivenessAllReport {
     /// The conjunction, rendered as one property string.
     pub property: String,
     /// The verdict over the WHOLE conjunction — `holds` only if every response does.
-    pub verdict: String,
+    pub outcome: String,
     /// Per-response provenance, so a failing conjunct is identifiable rather than being hidden
     /// behind one aggregate verdict.
     pub responses: Vec<SvLivenessResponseView>,

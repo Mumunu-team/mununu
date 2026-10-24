@@ -20,22 +20,22 @@
       "description": "The design file as given on the command line.",
       "type": "string"
     },
+    "outcome": {
+      "description": "`holds` | `violated` | `unknown` | `skipped`, the same vocabulary `sv verify-auto` uses.",
+      "type": "string"
+    },
     "property": {
       "description": "The property, rendered — e.g. `\"AG EF (state == 0)\"`.",
       "type": "string"
     },
     "refinement": {
       "description": "Present only under `--refine` / `--config-values` / `--discover-assumptions`: the refinement record. Free-form because `VerdictRefinement` is its own evolving surface — pinning its internals here would couple two schemas that change for different reasons."
-    },
-    "verdict": {
-      "description": "`holds` | `violated` | `unknown` | `skipped`, the same vocabulary `sv verify-auto` uses.",
-      "type": "string"
     }
   },
   "required": [
     "file",
-    "property",
-    "verdict"
+    "outcome",
+    "property"
   ],
   "title": "SvVerifyRecoverabilityReport",
   "type": "object"

@@ -56,6 +56,10 @@
         "null"
       ]
     },
+    "outcome": {
+      "description": "Canonical property verdict — `\"holds\"` (`bad` unreachable) | `\"violated\"` (reachable) | `\"unknown\"` (undecided / contradiction), via [`crate::verdict::PropertyVerdict`]. The reachability *detail* is in the `reachable_by` / `unreachable_by` lists + the `contradiction` alarm.",
+      "type": "string"
+    },
     "reachable_by": {
       "description": "Engines that found `bad` reachable (a real counterexample).",
       "items": {
@@ -76,17 +80,13 @@
         "type": "string"
       },
       "type": "array"
-    },
-    "verdict": {
-      "description": "Canonical property verdict — `\"holds\"` (`bad` unreachable) | `\"violated\"` (reachable) | `\"unknown\"` (undecided / contradiction), via [`crate::verdict::PropertyVerdict`]. The reachability *detail* is in the `reachable_by` / `unreachable_by` lists + the `contradiction` alarm.",
-      "type": "string"
     }
   },
   "required": [
     "contradiction",
+    "outcome",
     "reachable_by",
-    "unreachable_by",
-    "verdict"
+    "unreachable_by"
   ],
   "title": "Btor2VerifyResponse",
   "type": "object"

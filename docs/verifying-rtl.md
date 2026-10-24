@@ -1021,7 +1021,7 @@ consumer parses two formats and picks by exit code.
 
 ```console
 $ mununu --quiet sv verify-recoverability design.sv --target "state == 0" --json   # exit 0
-{ "file": "design.sv", "property": "AG EF (state == 0)", "verdict": "unknown" }
+{ "file": "design.sv", "property": "AG EF (state == 0)", "outcome": "unknown" }
 
 $ mununu --quiet sv verify-liveness design.sv --request "a == 1" --grant "b == 1" --json   # exit 1
 { "verb": "sv-verify-liveness", "file": "design.sv",

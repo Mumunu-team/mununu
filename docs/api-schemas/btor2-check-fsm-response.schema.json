@@ -87,12 +87,12 @@
           },
           "type": "array"
         },
-        "register": {
-          "description": "The state register's symbol — the cell's own, or a value-identical alias of it (`state_q`, the port that mirrors it); never a next-value wire (#633).",
+        "outcome": {
+          "description": "Canonical verdict — `\"holds\"` (stays within its encoding) | `\"violated\"` (an illegal encoding is reachable) | `\"unknown\"` (the portfolio could not decide) | `\"skipped\"` (a `\"counter\"`, not checked).",
           "type": "string"
         },
-        "verdict": {
-          "description": "Canonical verdict — `\"holds\"` (stays within its encoding) | `\"violated\"` (an illegal encoding is reachable) | `\"unknown\"` (the portfolio could not decide) | `\"skipped\"` (a `\"counter\"`, not checked).",
+        "register": {
+          "description": "The state register's symbol — the cell's own, or a value-identical alias of it (`state_q`, the port that mirrors it); never a next-value wire (#633).",
           "type": "string"
         }
       },
@@ -100,8 +100,8 @@
         "illegal_encoding_reachable",
         "kind",
         "legal_encodings",
-        "register",
-        "verdict"
+        "outcome",
+        "register"
       ],
       "type": "object"
     }

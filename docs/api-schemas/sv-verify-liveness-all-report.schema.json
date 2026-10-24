@@ -29,6 +29,10 @@
       "description": "The design file as given on the command line.",
       "type": "string"
     },
+    "outcome": {
+      "description": "The verdict over the WHOLE conjunction — `holds` only if every response does.",
+      "type": "string"
+    },
     "property": {
       "description": "The conjunction, rendered as one property string.",
       "type": "string"
@@ -39,17 +43,13 @@
         "$ref": "#/definitions/SvLivenessResponseView"
       },
       "type": "array"
-    },
-    "verdict": {
-      "description": "The verdict over the WHOLE conjunction — `holds` only if every response does.",
-      "type": "string"
     }
   },
   "required": [
     "file",
+    "outcome",
     "property",
-    "responses",
-    "verdict"
+    "responses"
   ],
   "title": "SvVerifyLivenessAllReport",
   "type": "object"

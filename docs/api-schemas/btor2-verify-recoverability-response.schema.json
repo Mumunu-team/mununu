@@ -346,6 +346,10 @@
         "null"
       ]
     },
+    "outcome": {
+      "description": "Canonical property verdict — `\"holds\"` (every reachable state can reach `target`) | `\"violated\"` (a reachable trap cannot) | `\"unknown\"` (over the exact engine's cap; try the cube + `smt-hyper-must` path), via [`crate::verdict::PropertyVerdict`].",
+      "type": "string"
+    },
     "property": {
       "description": "The decided property, echoed for provenance: `AG EF (<target>)`.",
       "type": "string"
@@ -360,15 +364,11 @@
         }
       ],
       "description": "The structured refinement, when `refine` was requested and it produced one. `None` otherwise. Diagnostic detail carried ALONGSIDE the verdict — never changes it."
-    },
-    "verdict": {
-      "description": "Canonical property verdict — `\"holds\"` (every reachable state can reach `target`) | `\"violated\"` (a reachable trap cannot) | `\"unknown\"` (over the exact engine's cap; try the cube + `smt-hyper-must` path), via [`crate::verdict::PropertyVerdict`].",
-      "type": "string"
     }
   },
   "required": [
-    "property",
-    "verdict"
+    "outcome",
+    "property"
   ],
   "title": "Btor2VerifyRecoverabilityResponse",
   "type": "object"

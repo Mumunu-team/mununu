@@ -79,13 +79,13 @@ echo
 
 echo "--- small FIFO (Depth=16, exact engine) — expect HOLDS ---"
 lift 16 "${OUT}/d16.btor2"
-"${MUNUNU}" btor2 verify-recoverability "${OUT}/d16.btor2" --target 'cnta == cntb' 2>/dev/null | grep -iE '"verdict"'
+"${MUNUNU}" btor2 verify-recoverability "${OUT}/d16.btor2" --target 'cnta == cntb' 2>/dev/null | grep -iE '"outcome"'
 SMALL="$("${MUNUNU}" btor2 verify-recoverability "${OUT}/d16.btor2" --target 'cnta == cntb' 2>/dev/null | grep -oiE 'holds|violated|unknown' | head -1)"
 echo
 
 echo "--- wide FIFO (Depth=2^21 = 22-bit pointers) — expect HOLDS (the JSON's engine field says which engine decided) ---"
 lift 2097152 "${OUT}/wide.btor2"
-"${MUNUNU}" btor2 verify-recoverability "${OUT}/wide.btor2" --target 'cnta == cntb' 2>/dev/null | grep -iE '"verdict"'
+"${MUNUNU}" btor2 verify-recoverability "${OUT}/wide.btor2" --target 'cnta == cntb' 2>/dev/null | grep -iE '"outcome"'
 WIDE="$("${MUNUNU}" btor2 verify-recoverability "${OUT}/wide.btor2" --target 'cnta == cntb' 2>/dev/null | grep -oiE 'holds|violated|unknown' | head -1)"
 echo
 

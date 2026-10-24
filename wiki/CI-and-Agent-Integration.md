@@ -73,7 +73,7 @@ Why this and not recoverability? Because reset makes recoverability tautological
 ```jsonc
 { "file": "fsm.btor2", "fsm_registers_checked": 1, "illegal_encodings_found": 0,
   "registers": [ { "register": "state_q", "legal_encodings": [3,14,16,29,36,41,55,58],
-                   "verdict": "holds", "illegal_encoding_reachable": false } ] }
+                   "outcome": "holds", "illegal_encoding_reachable": false } ] }
 ```
 
 A `holds` register provably stays within its encoding (validated on the real OpenTitan csrng: `state_q`'s 8 sparse encodings auto-derived, no illegal value reachable).
@@ -119,7 +119,7 @@ POST /api/v1/sv/verify-auto
 ```jsonc
 POST /api/v1/sv/verify-recoverability
 { "source": "module m(...); endmodule", "use_sv2v": true, "target": "state_q == 0" }
-// → { "verdict": "holds"|"violated"|"unknown", "property": "AG EF (state_q == 0)" }
+// → { "outcome": "holds"|"violated"|"unknown", "property": "AG EF (state_q == 0)" }
 ```
 
 `POST /api/v1/sv/verify` (safety of the module's assertions) and `/api/v1/sv/verify-liveness` (`{request, grant}`) round out the trio. All return the canonical `verdict`, so the agent gates on `verdict === "violated"`.
