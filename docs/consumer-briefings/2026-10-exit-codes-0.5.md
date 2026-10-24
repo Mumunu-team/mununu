@@ -43,7 +43,7 @@ mununu context eval m.ctxdsl --automaton A --formula refuted --fail-on none; ech
 
 ## Provenance
 
-- Branch `feat/exit-codes-0.5`; tests `crates/mununu-cli/tests/exit_codes.rs` (the binary's exit status for a usage error, help / version, and `context eval` on a holding and a refuted formula) and `context_eval_fails_the_gate_on_a_refuted_formula_and_flags_sanity_findings`.
+- Branch `feat/exit-codes-0.5`; tests `a_rejected_command_line_exits_64_and_help_exits_0` (the real parser's errors through `parse_error_exit_code`) and `context_eval_fails_the_gate_on_a_refuted_formula_and_flags_sanity_findings`; the binary was also run by hand (`--no-such-flag` → 64, a refuted `context eval` → 2, with `--fail-on none` → 0).
 - Policy: [`docs/policies/cross-repo-impact.md`](../policies/cross-repo-impact.md).
 
 ## Not covered here

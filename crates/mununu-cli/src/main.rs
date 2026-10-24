@@ -218,6 +218,15 @@ const EXPECTATIONS_UNMET_EXIT: i32 = 4;
 /// rosf read a mistyped flag as a violation that way (mununu#541).
 const USAGE_EXIT: i32 = 64;
 
+/// The exit code of a command line the parser did not accept: `0` for a help or version request
+/// (not an error), [`USAGE_EXIT`] for every real parse failure, never clap's default `2`.
+fn parse_error_exit_code(e: &clap::Error) -> i32 {
+    match e.kind() {
+        clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion => 0,
+        _ => USAGE_EXIT,
+    }
+}
+
 /// Map a single property verdict + the `--fail-on` policy to a process exit code.
 /// `0` = pass, `2` = violated, `3` = unknown. (`1` is a tool error, `4` unmet expectations and
 /// `64` a usage error, all via `main`.) `holds` / `skipped` / any definite-good verdict is always `0`.
@@ -256,6 +265,34 @@ fn ci_gate_exit(verdict: &str, fail_on: FailOn) {
 #[cfg(test)]
 mod ci_gate_tests {
     use super::*;
+
+    #[test]
+    fn a_rejected_command_line_exits_64_and_help_exits_0() {
+        let code = |argv: &[&str]| match Cli::try_parse_from(argv) {
+            Ok(_) => panic!("{argv:?} must not parse"),
+            Err(e) => parse_error_exit_code(&e),
+        };
+        assert_eq!(code(&["mununu", "sv", "verify-auto", "--no-such-flag"]), 64);
+        assert_eq!(code(&["mununu", "no-such-command"]), 64);
+        assert_eq!(
+            code(&["mununu", "context", "eval", "m.ctxdsl"]),
+            64,
+            "--automaton missing"
+        );
+        assert_eq!(code(&["mununu", "--help"]), 0);
+        assert_eq!(code(&["mununu", "--version"]), 0);
+        let eval = Cli::try_parse_from([
+            "mununu",
+            "context",
+            "eval",
+            "m.ctxdsl",
+            "--automaton",
+            "A",
+            "--fail-on",
+            "none",
+        ]);
+        assert!(eval.is_ok(), "context eval takes --fail-on: {eval:?}");
+    }
 
     #[test]
     fn context_eval_fails_the_gate_on_a_refuted_formula_and_flags_sanity_findings() {
@@ -3014,16 +3051,8 @@ fn main() {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(e) => {
-            // Help and version requests are not errors. Every other parse failure is a usage
-            // error and exits 64 (EX_USAGE), never clap's default 2, which is VIOLATED here.
-            if matches!(
-                e.kind(),
-                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
-            ) {
-                e.exit();
-            }
             let _ = e.print();
-            std::process::exit(USAGE_EXIT);
+            std::process::exit(parse_error_exit_code(&e));
         }
     };
     init_tracing(cli.quiet);
