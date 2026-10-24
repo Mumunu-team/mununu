@@ -2023,6 +2023,58 @@ pub async fn sv_verify_auto_handler(
     blocking(move || sv_verify_auto_handler_impl(request)).await
 }
 
+/// `emit_testbench`: one replay testbench per counterexample, inline in its property row.
+fn attach_testbenches(
+    request: &SvVerifyAutoRequest,
+    report: &crate::adapter::slang::verify_auto::AutoVerifyReport,
+    response: &mut SvVerifyAutoResponse,
+) -> ApiResult<()> {
+    use crate::adapter::verilator::replay::{ReplayDesign, counterexample_testbench};
+    let clock = match &request.tb_clock {
+        Some(c) => c.clone(),
+        None => ["clk", "clk_i", "clock", "i_clk", "aclk", "clk_sys"]
+            .iter()
+            .find(|c| {
+                request
+                    .source
+                    .split(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
+                    .any(|w| w == **c)
+            })
+            .map(|c| c.to_string())
+            .ok_or_else(|| ApiError::BadRequest {
+                message: "emit_testbench: no clock port found; name it with `tb_clock`".to_string(),
+                details: None,
+            })?,
+    };
+    let reset = report.diagnostics.gated_resets.first().and_then(|g| {
+        let (name, inactive) = g.split_once('=')?;
+        let inactive: u64 = inactive.trim().parse().ok()?;
+        Some((name.trim().to_string(), u64::from(inactive == 0)))
+    });
+    let top = request.top.clone().unwrap_or_else(|| "top".to_string());
+    let sources: Vec<String> = std::iter::once(format!("{top}.sv"))
+        .chain(request.additional_sources.iter().map(|f| f.name.clone()))
+        .collect();
+    for (row, p) in response.properties.iter_mut().zip(report.properties.iter()) {
+        let Some(cex) = &p.counterexample else {
+            continue;
+        };
+        let design = ReplayDesign {
+            top: &top,
+            clock: &clock,
+            reset: reset.as_ref().map(|(n, a)| (n.as_str(), *a)),
+            sources: &sources,
+        };
+        row.testbench = counterexample_testbench(&design, cex).map(|b| TestbenchView {
+            tb_cpp: b.tb_cpp,
+            makefile: b.makefile,
+            checks: b.checks,
+            skipped: b.skipped,
+        });
+    }
+    Ok(())
+}
+
 fn sv_verify_auto_handler_impl(
     request: SvVerifyAutoRequest,
 ) -> ApiResult<Json<SvVerifyAutoResponse>> {
@@ -2167,6 +2219,9 @@ fn sv_verify_auto_handler_impl(
     // `serde_json::json!` literal; see the `From` impl's doc comment for why there is now
     // exactly one.
     let mut response = SvVerifyAutoResponse::from(&report);
+    if request.emit_testbench {
+        attach_testbenches(&request, &report, &mut response)?;
+    }
     // mununu#537 — check the caller's claims, if they made any. A malformed verdict spelling is
     // a 400, never a silently dropped claim: a claim that does not run gates on nothing.
     if let Some(req_exp) = &request.expectations {

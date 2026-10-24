@@ -47,6 +47,8 @@
 //! - Debian / Ubuntu: `apt install verilator` → `/usr/bin/verilator`.
 //! - Build-from-source: typically `/usr/local/bin/verilator`.
 
+pub mod replay;
+
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;

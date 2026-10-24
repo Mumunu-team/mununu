@@ -453,6 +453,17 @@
             "null"
           ]
         },
+        "testbench": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TestbenchView"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The Verilator replay testbench for this property's counterexample, when `emit_testbench` was requested and the counterexample carries a path (`sv verify-auto --emit-testbench`)."
+        },
         "unknown_cells": {
           "description": "mununu#536 — the cell count behind an `unknown` (⊥) verdict, machine-readable. `None` for every other outcome.\n\nThis is the \"cell/budget figure that accompanies a ⊥\" the issue asks for: a ⊥ is a statement about how much of the cube space stayed undecided, and a consumer tracking whether refinement is helping needs the number, not a sentence containing it.",
           "format": "uint",
@@ -480,6 +491,39 @@
         "name",
         "outcome",
         "seeded_predicates"
+      ],
+      "type": "object"
+    },
+    "TestbenchView": {
+      "description": "A generated counterexample-replay testbench ([`crate::adapter::verilator::replay`]).",
+      "properties": {
+        "checks": {
+          "description": "(cycle, register) comparisons the testbench makes.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "makefile": {
+          "description": "`Makefile`; it names the sources as the request named them.",
+          "type": "string"
+        },
+        "skipped": {
+          "description": "Cells left out of the comparison, with the reason.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "tb_cpp": {
+          "description": "`tb.cpp`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "checks",
+        "makefile",
+        "skipped",
+        "tb_cpp"
       ],
       "type": "object"
     },
