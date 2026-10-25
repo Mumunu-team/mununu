@@ -18288,9 +18288,13 @@ endmodule
             ("pulse_cdc.sv".to_string(), read("pulse_cdc.sv")),
             ("pulse_cdc_sva.sv".to_string(), read("pulse_cdc_sva.sv")),
         ];
+        // `pulse_cdc` has two clocks; since mununu#762 the lift refuses that unless the domains
+        // are merged on purpose. These tests are about atom binding and the explicit engine,
+        // so they take the lockstep lift they were written against (monono's lane does too).
         let yopts = YosysOptions {
             top: Some("pulse_cdc".to_string()),
             frontend: SvFrontend::Slang,
+            merge_clock_domains: true,
             ..Default::default()
         };
         let report = verify_auto(
@@ -18351,9 +18355,13 @@ endmodule
             ("pulse_cdc.sv".to_string(), read("pulse_cdc.sv")),
             ("pulse_cdc_sva.sv".to_string(), read("pulse_cdc_sva.sv")),
         ];
+        // `pulse_cdc` has two clocks; since mununu#762 the lift refuses that unless the domains
+        // are merged on purpose. These tests are about atom binding and the explicit engine,
+        // so they take the lockstep lift they were written against (monono's lane does too).
         let yopts = YosysOptions {
             top: Some("pulse_cdc".to_string()),
             frontend: SvFrontend::Slang,
+            merge_clock_domains: true,
             ..Default::default()
         };
         // The library default IS the explicit cube engine (`--engine explicit`).
