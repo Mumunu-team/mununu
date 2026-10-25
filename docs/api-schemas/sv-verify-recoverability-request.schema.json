@@ -128,6 +128,14 @@
       },
       "type": "array"
     },
+    "pins": {
+      "default": [],
+      "description": "Inputs tied to a constant before deciding, each `\"SIGNAL=VALUE\"` (mirrors the CLI `--pin`), typically the reset held inactive: with the reset free, every state recovers by pulsing it. A name that is no input of the model is an error.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
     "predicates": {
       "default": [],
       "description": "Extra abstraction predicate(s) for the cube-path escalation, each `\"[NAME:]REG == VALUE\"` (P2 Slice 1). Used only when the exact engine abstains.",

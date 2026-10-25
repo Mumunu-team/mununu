@@ -1352,6 +1352,34 @@ pub fn verify_recoverability_refined_explained(
     (verdict, refinement, attribution)
 }
 
+/// Tie each named input to a constant (`--pin SIG=V` / API `pins`) before deciding, so `AG EF
+/// target` is asked with, typically, the reset held inactive. With the reset free every state
+/// recovers by pulsing it, and the plain verdict is a reset-escape `holds`. The tie is exact
+/// ([`crate::adapter::btor2::pin`]), not an abstraction. A name that is no input of the model is an
+/// error: a typo must not leave the reset free. Returns the rewritten BTOR2 and the applied pins
+/// as `NAME=VALUE`, sorted.
+pub fn apply_pins(btor2: &str, pins: &[(String, u64)]) -> Result<(String, Vec<String>), String> {
+    let (pinned_btor2, mut applied) =
+        crate::adapter::btor2::pin::pin_inputs_to_constants(btor2, pins);
+    let missing: Vec<&str> = pins
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .filter(|name| {
+            !applied
+                .iter()
+                .any(|a| a.split_once('=').is_some_and(|(n, _)| n == *name))
+        })
+        .collect();
+    if !missing.is_empty() {
+        return Err(format!(
+            "--pin: no input of the model is named {} (a pin must name a primary input)",
+            missing.join(", ")
+        ));
+    }
+    applied.sort();
+    Ok((pinned_btor2, applied))
+}
+
 /// Parse `--partition`-style entries `"NAME=v1,v2,…"` into config-partition specs
 /// `(input_name, [values])`. Reuses the decimal-value convention; a malformed entry is an error.
 pub fn parse_config_value_specs(entries: &[String]) -> Result<Vec<(String, Vec<u64>)>, String> {

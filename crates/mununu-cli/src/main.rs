@@ -1374,6 +1374,13 @@ struct Btor2VerifyRecoverabilityArgs {
     /// Best for a NARROW / few-value config (the cross-product is capped).
     #[arg(long = "partition", value_name = "NAME=v1,v2,...")]
     partition: Vec<String>,
+    /// Tie an input to a constant before deciding, typically the reset held inactive
+    /// (`--pin rst_n=1`): with the reset free, every state recovers by pulsing it and the verdict
+    /// is a reset-escape `holds`. Repeatable, `SIGNAL=VALUE` (decimal). The verdict and the exit
+    /// code are then for these values, listed under `pins`; a name that is no input is an error.
+    /// Mirrored on the API as `pins`.
+    #[arg(long = "pin", value_name = "SIGNAL=VALUE")]
+    pin: Vec<String>,
     #[command(flatten)]
     ci: CiArgs,
 }
@@ -2664,6 +2671,13 @@ struct SvVerifyRecoverabilityArgs {
     /// per config. Implies the refined output. Best for a narrow / few-value config (cross-product capped).
     #[arg(long = "partition", value_name = "NAME=v1,v2,...")]
     partition: Vec<String>,
+    /// Tie an input to a constant before deciding, typically the reset held inactive
+    /// (`--pin rst_n=1`): with the reset free, every state recovers by pulsing it and the verdict
+    /// is a reset-escape `holds`. Repeatable, `SIGNAL=VALUE` (decimal). The verdict and the exit
+    /// code are then for these values, listed under `pins`; a name that is no input is an error.
+    /// Mirrored on the API as `pins`.
+    #[arg(long = "pin", value_name = "SIGNAL=VALUE")]
+    pin: Vec<String>,
     #[command(flatten)]
     ci: CiArgs,
     #[command(flatten)]
@@ -3896,11 +3910,16 @@ fn btor2_verify_recoverability(args: Btor2VerifyRecoverabilityArgs) -> Result<()
         .map(|s| parse_extra_predicate(s))
         .collect::<Result<Vec<_>, _>>()?;
     let config_specs = parse_config_value_specs(&args.partition)?;
+    let (content, applied_pins) =
+        mununu_core::adapter::recoverability::apply_pins(&content, &sorted_pins(&args.pin)?)?;
 
     let mut summary = serde_json::json!({
         "file": args.file.display().to_string(),
         "property": recoverability_property_str(&args.target),
     });
+    if !applied_pins.is_empty() {
+        summary["pins"] = serde_json::json!(applied_pins);
+    }
     // `--refine` / `--partition` / `--discover-assumptions` (refined-verdicts): the canonical
     // verdict PLUS a structured, diagnostic-only refinement (Vacuous / bot-diagnosis / config-partition
     // / holds_under) — never changes the verdict. Without any, the plain verdict path.
@@ -4714,6 +4733,13 @@ fn render_extract_sva_json(report: &mununu_core::adapter::slang::translate::Tran
 /// silent drop; a value that is not a decimal u64 (e.g. hex `0x1`) is rejected with a message
 /// naming the value. An unknown / non-input SIGNAL is caught downstream in `verify_auto`
 /// against the model's real primary inputs.
+/// `--pin` entries as `(name, value)` pairs in name order (see [`parse_config_values`]).
+fn sorted_pins(entries: &[String]) -> Result<Vec<(String, u64)>, String> {
+    let mut pins: Vec<(String, u64)> = parse_config_values(entries)?.into_iter().collect();
+    pins.sort();
+    Ok(pins)
+}
+
 fn parse_config_values(
     entries: &[String],
 ) -> Result<std::collections::HashMap<String, u64>, String> {
@@ -7089,31 +7115,37 @@ fn sv_verify_recoverability_impl(args: SvVerifyRecoverabilityArgs) -> Result<(),
     // mununu#541 — build the TYPED report, not an inline literal. The struct is what `schemars`
     // derives the published schema from, so the document a consumer parses and the schema they
     // validate against cannot drift apart.
+    let pins = sorted_pins(&args.pin)?;
     let mut report = mununu_core::api::models::SvVerifyRecoverabilityReport {
         file: file.clone(),
         property: recoverability_property_str(&args.target),
         outcome: String::new(),
+        pins: Vec::new(),
         refinement: None,
         engine: None,
         exact_abstention: None,
     };
     let (verdict, attribution) =
         if args.refine || !config_specs.is_empty() || args.discover_assumptions {
-            let (verdict, refinement, attribution) = sv_verify_recoverability_refined_explained(
-                &lift,
-                &args.target,
-                &extra,
-                &config_specs,
-                args.discover_assumptions,
-            )?;
+            let (verdict, refinement, attribution, applied) =
+                sv_verify_recoverability_refined_explained(
+                    &lift,
+                    &args.target,
+                    &extra,
+                    &config_specs,
+                    args.discover_assumptions,
+                    &pins,
+                )?;
             report.refinement = Some(
                 serde_json::to_value(&refinement)
                     .map_err(|e| format!("serialize refinement: {e}"))?,
             );
+            report.pins = applied;
             (verdict, attribution)
         } else {
-            let (verdict, attribution) =
-                sv_verify_recoverability_explained(&lift, &args.target, &extra)?;
+            let (verdict, attribution, applied) =
+                sv_verify_recoverability_explained(&lift, &args.target, &extra, &pins)?;
+            report.pins = applied;
             (verdict, Some(attribution))
         };
     report.outcome = verdict.as_str().to_string();
