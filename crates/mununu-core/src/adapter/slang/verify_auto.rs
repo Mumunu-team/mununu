@@ -4706,7 +4706,6 @@ pub(crate) fn prepare_model(
         }
         None => (btor2, None),
     };
-
     // mununu#552 — dump here, at the LAST whole-design rewrite, so what lands on disk is what the
     // engine is handed. The formulas carry the same `--pin` substitution the per-property
     // loop applies, so the pair is self-consistent.

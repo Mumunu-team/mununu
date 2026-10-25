@@ -1176,6 +1176,11 @@ impl LazyLift {
         lift_opts: &PredicateCubeLiftOptions,
     ) -> Result<Self, crate::adapter::AdapterError> {
         use crate::adapter::AdapterErrorKind;
+        // SOUNDNESS: a state with no `next` is free at every step, not held (see
+        // `nextless_states_free`); the cube representatives are stepped by a simulator that
+        // would otherwise keep its value.
+        let freed = crate::adapter::btor2::parser::nextless_states_free(btor2_content);
+        let btor2_content = freed.as_str();
         let file =
             crate::adapter::btor2::parser::parse(btor2_content).map_err(|e| AdapterError {
                 kind: AdapterErrorKind::ParseError,
@@ -2453,6 +2458,10 @@ pub fn predicate_cube_lift(
     // A4 — filled by the reachable-only post-image; empty on every other path.
     let mut unreached_cells: Vec<usize> = Vec::new();
 
+    // SOUNDNESS: a state with no `next` is free at every step, not held (see
+    // `nextless_states_free`).
+    let freed = crate::adapter::btor2::parser::nextless_states_free(btor2_content);
+    let btor2_content = freed.as_str();
     // 1. Parse the BTOR2 source to validate predicate register names
     //    against the symbol table. Bypasses bit_blast.
     let file = crate::adapter::btor2::parser::parse(btor2_content).map_err(|mut e| {
