@@ -12,6 +12,13 @@
           "description": "`baseline != mutant` — the mutation was caught by this property.",
           "type": "boolean"
         },
+        "label": {
+          "description": "The SVA label, when the source gives one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "mutant": {
           "description": "Canonical verdict on the mutated design.",
           "type": "string"
@@ -80,6 +87,13 @@
     },
     "mutation": {
       "description": "The applied mutation's label (null on a `list` request).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "outcome": {
+      "description": "`holds` when at least one property caught the mutant, `violated` when it survived every property (null on a `list` request).",
       "type": [
         "string",
         "null"

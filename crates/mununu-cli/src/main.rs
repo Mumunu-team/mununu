@@ -2128,7 +2128,9 @@ enum SvCommand {
     /// constrains the mutated behaviour; a property that does NOT flip is the
     /// finding — the spec is vacuous w.r.t. that fault. `--list` enumerates the
     /// available targets. This is a statement about the PROPERTIES, never a bug
-    /// report about the design. Surface peer of `POST /api/v1/sv/mutate`.
+    /// report about the design. The run's `outcome` is `holds` when at least one property
+    /// caught the mutant and `violated` when it survived them all, so under the default
+    /// `--fail-on violated` a surviving mutant exits 2. Surface peer of `POST /api/v1/sv/mutate`.
     Mutate(SvMutateArgs),
 }
 
@@ -4948,25 +4950,16 @@ fn render_cells(cells: &[mununu_core::trace::CexCellView]) -> String {
         .join(", ")
 }
 
-/// The one line that says a counterexample's monitor cells were left out of the text.
-fn print_hidden_monitor(
-    names: &mununu_core::trace::TraceNames,
-    states: &[Vec<(String, mununu_core::adapter::btor2::cex_value::CexValue)>],
-) {
-    let hidden = states
-        .first()
-        .map(|st| {
-            names
-                .split_state(&mununu_core::trace::cex_cells(st))
-                .1
-                .len()
+/// `site:=value` injections, comma-separated.
+fn render_faults(faults: &[mununu_core::trace::TraceFault]) -> String {
+    faults
+        .iter()
+        .map(|f| match f.value {
+            Some(v) => format!("{}:={v}", f.site),
+            None => format!("{}:={}", f.site, f.hex),
         })
-        .unwrap_or(0);
-    if hidden > 0 {
-        println!(
-            "          ({hidden} monitor cell(s) per step not shown: the property monitor's latches and $past shadows; --json lists them under steps[].monitor)"
-        );
-    }
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn render_verify_auto_text(report: &mununu_core::adapter::slang::verify_auto::AutoVerifyReport) {
@@ -5055,58 +5048,61 @@ fn render_verify_auto_text(report: &mununu_core::adapter::slang::verify_auto::Au
         // signal a safety check never produces — the reset → violation path for a safety
         // failure, or the D1.8b stall-lasso / trap-path (reset → prefix → repeating ¬p cycle)
         // for a `AF`/`AG AF`/`AG EF` failure.
-        if let Some(cex) = &p.counterexample {
-            use mununu_core::trace::cex_cells;
-            let names = &report.diagnostics.trace_names;
-            if !cex.unreachable_target.is_empty() {
-                println!(
+        if let Some(trace) = p.trace(&report.diagnostics.trace_names) {
+            use mununu_core::trace::TraceKind;
+            match trace.kind {
+                TraceKind::Unreachable => println!(
                     "        counterexample: target UNREACHABLE from reset - the design never reaches {}",
-                    cex.unreachable_target.join(" ∧ ")
-                );
-            } else if cex.cycle.is_empty() {
+                    trace.unreachable_target.join(" ∧ ")
+                ),
                 // A safety violation: the finite path from reset to the failing cycle, with the
-                // inputs each cycle read (`inputs[i]` belongs to state `i`). A trap certificate
-                // (`AG EF` refuted) reads the same way: the path ends in a closed set the target is
-                // outside of, so no cycle is drawn.
-                if p.decided_by.as_deref()
-                    == Some(mununu_core::adapter::slang::verify_auto::TRAP_CERTIFICATE_DECIDED_BY)
-                {
-                    println!(
-                        "        counterexample (reset -> trap; the trap is closed, the target is never reached again):"
-                    );
-                } else {
-                    println!("        counterexample (reset -> violation):");
-                }
-                for (i, st) in cex.prefix.iter().enumerate() {
-                    println!(
-                        "          [{i}] {}",
-                        render_cells(&names.split_state(&cex_cells(st)).0)
-                    );
-                    if let Some(inp) = cex
-                        .inputs
-                        .get(i)
-                        .map(|inp| names.inputs(&cex_cells(inp)))
-                        .filter(|inp| !inp.is_empty())
-                    {
-                        println!("              in: {}", render_cells(&inp));
+                // inputs each cycle read and the injections that fired in it. A trap certificate
+                // (`AG EF` refuted) reads the same way: the path ends in a closed set the target
+                // is outside of, so no cycle is drawn.
+                TraceKind::Finite | TraceKind::Trap | TraceKind::Attack => {
+                    if trace.kind == TraceKind::Trap {
+                        println!(
+                            "        counterexample (reset -> trap; the trap is closed, the target is never reached again):"
+                        );
+                    } else {
+                        println!("        counterexample (reset -> violation):");
+                    }
+                    for step in &trace.steps {
+                        println!("          [{}] {}", step.cycle, render_cells(&step.state));
+                        if !step.inputs.is_empty() {
+                            println!("              in: {}", render_cells(&step.inputs));
+                        }
+                        if !step.faults.is_empty() {
+                            println!("              fault: {}", render_faults(&step.faults));
+                        }
                     }
                 }
-                print_hidden_monitor(names, &cex.prefix);
-            } else {
-                println!("        counterexample (stall lasso):");
-                let render_state =
-                    |st: &[(String, mununu_core::adapter::btor2::cex_value::CexValue)]| {
-                        render_cells(&names.split_state(&cex_cells(st)).0)
-                    };
-                for st in &cex.prefix {
-                    println!("          -> {}", render_state(st));
+                TraceKind::Lasso => {
+                    println!("        counterexample (stall lasso):");
+                    let loop_start = trace.loop_start.unwrap_or(trace.steps.len());
+                    for (i, step) in trace.steps.iter().enumerate() {
+                        let marker = match i.cmp(&loop_start) {
+                            std::cmp::Ordering::Less => "->",
+                            std::cmp::Ordering::Equal => "(*)",
+                            std::cmp::Ordering::Greater => "   ",
+                        };
+                        println!("          {marker} {}", render_cells(&step.state));
+                        if !step.faults.is_empty() {
+                            println!("              fault: {}", render_faults(&step.faults));
+                        }
+                    }
+                    println!("          (cycle repeats forever - the property is avoided)");
                 }
-                for (i, st) in cex.cycle.iter().enumerate() {
-                    let marker = if i == 0 { "(*)" } else { "   " };
-                    println!("          {marker} {}", render_state(st));
-                }
-                println!("          (cycle repeats forever - the property is avoided)");
-                print_hidden_monitor(names, &cex.prefix);
+            }
+            if let Some(hidden) = trace
+                .steps
+                .first()
+                .map(|s| s.monitor.len())
+                .filter(|n| *n > 0)
+            {
+                println!(
+                    "          ({hidden} monitor cell(s) per step not shown: the property monitor's latches and $past shadows; --json lists them under steps[].monitor)"
+                );
             }
         }
     }
@@ -7338,6 +7334,7 @@ fn sv_mutate(args: SvMutateArgs) -> Result<(), String> {
         .map(|p| {
             serde_json::json!({
                 "name": p.name,
+                "label": p.label,
                 "baseline": p.baseline,
                 "mutant": p.mutant,
                 "flipped": p.flipped,
@@ -7347,6 +7344,7 @@ fn sv_mutate(args: SvMutateArgs) -> Result<(), String> {
     let summary = serde_json::json!({
         "file": file,
         "mutation": report.mutation,
+        "outcome": report.outcome(),
         "flipped": report.flipped,
         "unflipped": report.unflipped,
         "properties": properties,
@@ -7355,12 +7353,7 @@ fn sv_mutate(args: SvMutateArgs) -> Result<(), String> {
 
     // A mutation caught by at least one property (some flip) is `holds`; a mutation
     // NO property catches is `violated` (a coverage gap the CI gate should flag).
-    let worst = if report.flipped > 0 {
-        "holds"
-    } else {
-        "violated"
-    };
-    ci_gate_exit(worst, args.ci.fail_on);
+    ci_gate_exit(report.outcome(), args.ci.fail_on);
     Ok(())
 }
 

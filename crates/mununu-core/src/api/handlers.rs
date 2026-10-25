@@ -1852,6 +1852,7 @@ fn sv_mutate_handler_impl(request: SvMutateRequest) -> ApiResult<Json<SvMutateRe
         })?;
         return Ok(Json(SvMutateResponse {
             mutation: None,
+            outcome: None,
             targets: Some(SvMutateTargets {
                 stick: t.stick,
                 drop_reset: t.drop_reset,
@@ -1916,6 +1917,7 @@ fn sv_mutate_handler_impl(request: SvMutateRequest) -> ApiResult<Json<SvMutateRe
     })?;
 
     Ok(Json(SvMutateResponse {
+        outcome: Some(report.outcome().to_string()),
         mutation: Some(report.mutation),
         targets: None,
         properties: report
@@ -1923,6 +1925,7 @@ fn sv_mutate_handler_impl(request: SvMutateRequest) -> ApiResult<Json<SvMutateRe
             .into_iter()
             .map(|p| SvMutatePropertyFlip {
                 name: p.name,
+                label: p.label,
                 baseline: p.baseline,
                 mutant: p.mutant,
                 flipped: p.flipped,

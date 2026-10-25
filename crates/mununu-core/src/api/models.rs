@@ -1917,6 +1917,8 @@ pub struct SvMutateTargets {
 pub struct SvMutatePropertyFlip {
     /// The property (assertion) name.
     pub name: String,
+    /// The SVA label, when the source gives one.
+    pub label: Option<String>,
     /// Canonical verdict on the design as-lifted.
     pub baseline: String,
     /// Canonical verdict on the mutated design.
@@ -1931,6 +1933,9 @@ pub struct SvMutatePropertyFlip {
 pub struct SvMutateResponse {
     /// The applied mutation's label (null on a `list` request).
     pub mutation: Option<String>,
+    /// `holds` when at least one property caught the mutant, `violated` when it survived every
+    /// property (null on a `list` request).
+    pub outcome: Option<String>,
     /// Available targets (present on a `list` request, null otherwise).
     pub targets: Option<SvMutateTargets>,
     /// Per-property flips (empty on a `list` request).
@@ -2342,21 +2347,6 @@ impl From<&crate::adapter::slang::verify_auto::AutoVerifyReport> for SvVerifyAut
         use crate::adapter::slang::translate::SvaKind;
         use crate::adapter::slang::verify_auto::{NoteLevel, VerifyOutcome};
 
-        let cells = |v: &[Vec<(String, crate::adapter::btor2::cex_value::CexValue)>]| -> Vec<Vec<CexCellView>> {
-            v.iter()
-                .map(|st| {
-                    st.iter()
-                        .map(|(register, value)| CexCellView {
-                            register: register.clone(),
-                            value: value.as_u64(),
-                            hex: value.to_hex(),
-                            bits: value.bits(),
-                        })
-                        .collect()
-                })
-                .collect()
-        };
-
         let properties = report
             .properties
             .iter()
@@ -2454,16 +2444,7 @@ impl From<&crate::adapter::slang::verify_auto::AutoVerifyReport> for SvVerifyAut
                         }
                     }),
                     seeded_predicates: p.seeded_predicates.clone(),
-                    trace: p.counterexample.as_ref().map(|c| {
-                        report.diagnostics.trace_names.tidy(Trace::from_cells(
-                            cells(&c.prefix),
-                            cells(&c.cycle),
-                            cells(&c.inputs),
-                            c.unreachable_target.clone(),
-                            p.decided_by.as_deref()
-                                == Some(crate::adapter::slang::verify_auto::TRAP_CERTIFICATE_DECIDED_BY),
-                        ))
-                    }),
+                    trace: p.trace(&report.diagnostics.trace_names),
                 }
             })
             .collect();
@@ -3060,6 +3041,7 @@ mod bottom_reason_view_tests {
         report.diagnostics.trace_names = crate::trace::TraceNames {
             aliases: [("u_pump_seq_sva.state_q".to_string(), "state_q".to_string())].into(),
             clocks: vec!["clk".into()],
+            ..Default::default()
         };
 
         let view = SvVerifyAutoResponse::from(&report);
