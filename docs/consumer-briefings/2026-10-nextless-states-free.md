@@ -8,14 +8,14 @@
 
 - **The defect.** yosys emits a black box's cut outputs (`$anyseq`) as BTOR2 `state` lines with no `next`, which BTOR2 defines as unconstrained at every step. The exact engine read them so. The predicate-cube engines (`explicit`, used by the default portfolio) stepped cube representatives through the simulator's `apply_next`, which keeps an absent `next`'s value, so they treated those outputs as **frozen**.
 - **What it produced.** A **false HOLDS**: `assert property (!v |=> $stable(d))` over a black box's `v` and `d` came back HOLDS from the default portfolio (`decided_by: explicit`) while the exact engine skipped it, and every safety engine (exact, native BMC, SPACER, interpolation, btormc, pono, rIC3) finds the data changing between cycles on the very model verify-auto runs. Any property that holds only if a black box's outputs stay put was exposed.
-- **The fix.** Every next-less state gets a `next` from a fresh free input `<name>$next` before any engine runs (in verify-auto's model preparation and at the cube lift's entries). That is exactly the BTOR2 meaning, with any `init` still fixing cycle 0. A `$anyconst`, which keeps a `next` to itself, is untouched.
-- **Traces.** The added inputs end in `$next` and are left out of a trace's `inputs` like the other cells the verifier adds.
+- **The fix.** At the predicate-cube lift's entries, every next-less state gets a `next` from a fresh free input `<name>$next`: exactly the BTOR2 meaning, with any `init` still fixing cycle 0. A `$anyconst`, which keeps a `next` to itself, is untouched. The exact engine, which already read such a state as free, sees the model as before.
+- **What the reproducer reports now.** `!v |=> $stable(d)` over a black box comes back ⊥ (undecided) instead of HOLDS: the cube engines no longer prove it, and no engine in the portfolio refutes this shape yet. A ⊥ is an honest "don't know"; the HOLDS was wrong.
 
 ## Per consumer
 
 | consumer | what changes for you | action |
 |---|---|---|
-| **rosf** | a property over a black box's outputs that held only because the cube engines froze them now comes back VIOLATED or ⊥ | re-run your lanes on this build; review any HOLDS → VIOLATED/⊥ row as the old verdict being wrong |
+| **rosf** | a property over a black box's outputs that held only because the cube engines froze them now comes back ⊥ (or VIOLATED, when an engine refutes it) | re-run your lanes on this build; review any HOLDS → VIOLATED/⊥ row as the old verdict being wrong |
 | **monono** | the same, on lanes with black-boxed modules | re-run `make formal-docker`; review any flipped row |
 | **mununu-ui** | none (verdicts come from the backend) | none |
 
@@ -37,7 +37,7 @@
 # bb_top instantiates `(* blackbox *) module bb (output v, output [2:0] d)`; the bound SVA says
 # `!v |=> $stable(d)`, which nothing in the design guarantees.
 mununu sv verify-auto bb_top.sv --source bb_sva.sv --top bb_top --frontend slang --pin rst_n=1
-#   a_stable_unless_valid: VIOLATED (HOLDS, decided_by explicit, before this fix)
+#   a_stable_unless_valid: UNKNOWN/⊥ (HOLDS, decided_by explicit, before this fix)
 ```
 
 ## Provenance
