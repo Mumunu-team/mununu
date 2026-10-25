@@ -1,5 +1,258 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "CexCellView": {
+      "description": "One register's concrete value in a counterexample state. mununu#723 — a cell wider than 64 bits was silently absent from the trace (OpenTitan edn's 109-bit `tl_i`, the bus write behind the fatal alert). `value` is unchanged for every cell that fits 64 bits — exactly the cells that were listed before — and `null` for a wider value; `hex` and `bits` are always present.",
+      "properties": {
+        "bits": {
+          "description": "The cell's width in bits.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "hex": {
+          "description": "`0x` + the value zero-padded to the cell's width — the form that always holds it.",
+          "type": "string"
+        },
+        "register": {
+          "type": "string"
+        },
+        "value": {
+          "description": "The value when it fits 64 bits, else `null` (read `hex`).",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "bits",
+        "hex",
+        "register"
+      ],
+      "type": "object"
+    },
+    "TestbenchView": {
+      "description": "A generated counterexample-replay testbench ([`crate::adapter::verilator::replay`]).",
+      "properties": {
+        "checks": {
+          "description": "(cycle, register) comparisons the testbench makes.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "makefile": {
+          "description": "`Makefile`; it names the sources as the request named them.",
+          "type": "string"
+        },
+        "skipped": {
+          "description": "Cells left out of the comparison, with the reason.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "tb_cpp": {
+          "description": "`tb.cpp`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "checks",
+        "makefile",
+        "skipped",
+        "tb_cpp"
+      ],
+      "type": "object"
+    },
+    "Trace": {
+      "description": "The one counterexample shape of 0.5, shared by every verb that returns a path: RTL rows fill `state` / `inputs` / `faults`, CTXDSL rows fill `state_name` / `labels`. A two-player strategy stays its own object, and the counterstrategy graph stays a view.",
+      "properties": {
+        "kind": {
+          "$ref": "#/definitions/TraceKind"
+        },
+        "loop_start": {
+          "description": "For a `lasso`: the index into `steps` the last step loops back to.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "replay": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TraceReplay"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "steps": {
+          "items": {
+            "$ref": "#/definitions/TraceStep"
+          },
+          "type": "array"
+        },
+        "unreachable_target": {
+          "description": "For `unreachable`: the target atoms no path reaches.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "kind",
+        "steps"
+      ],
+      "type": "object"
+    },
+    "TraceFault": {
+      "description": "One fault injection on a [`TraceStep`].",
+      "properties": {
+        "hex": {
+          "description": "The value in hexadecimal, at any width.",
+          "type": "string"
+        },
+        "site": {
+          "description": "The register overwritten.",
+          "type": "string"
+        },
+        "value": {
+          "description": "The value written, when it fits 64 bits.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "hex",
+        "site"
+      ],
+      "type": "object"
+    },
+    "TraceKind": {
+      "description": "What a [`Trace`] shows.",
+      "oneOf": [
+        {
+          "description": "Reset → the failing step (a safety violation).",
+          "enum": [
+            "finite"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Reset → a prefix → a cycle repeated forever (`loop_start` marks it): a liveness stall.",
+          "enum": [
+            "lasso"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Reset → a closed trap the target is never reached from again (a refuted `AG EF`).",
+          "enum": [
+            "trap"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "No path: the `unreachable_target` atoms are never reached from reset (a refuted `EF`).",
+          "enum": [
+            "unreachable"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Reset → the injections of a fault attack that reaches its target (`steps[].faults`).",
+          "enum": [
+            "attack"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "TraceReplay": {
+      "description": "Replay artefacts attached to a [`Trace`].",
+      "properties": {
+        "testbench": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TestbenchView"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The Verilator testbench (`--emit-testbench` / `emit_testbench`)."
+        }
+      },
+      "type": "object"
+    },
+    "TraceStep": {
+      "description": "One step of a [`Trace`]: the state at `cycle` and what drives the step out of it.",
+      "properties": {
+        "cycle": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "faults": {
+          "description": "Faults injected in this cycle.",
+          "items": {
+            "$ref": "#/definitions/TraceFault"
+          },
+          "type": "array"
+        },
+        "inputs": {
+          "description": "The input assignment of this cycle (RTL), so the trace can be replayed.",
+          "items": {
+            "$ref": "#/definitions/CexCellView"
+          },
+          "type": "array"
+        },
+        "labels": {
+          "description": "The labels of the transition out of this step (CTXDSL).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "monitor": {
+          "description": "Cells the verifier added to the model (see [`is_monitor_cell`]): the property monitor's latches, `$past` shadows, fault-rewrite state. Kept for debugging, apart from `state`.",
+          "items": {
+            "$ref": "#/definitions/CexCellView"
+          },
+          "type": "array"
+        },
+        "state": {
+          "description": "Register cells (RTL); empty for a CTXDSL step, which names its state in `state_name`.",
+          "items": {
+            "$ref": "#/definitions/CexCellView"
+          },
+          "type": "array"
+        },
+        "state_name": {
+          "description": "The CTXDSL state's name.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "cycle"
+      ],
+      "type": "object"
+    }
+  },
   "description": "mununu#541 — the `sv verify-recoverability` CLI report, schema-pinned.\n\n# Why these exist as types\n\nAll three `sv` property verbs printed JSON before this — built inline with `serde_json::json!`, so the field set was whatever the format string happened to say that week. rosf consumes mununu as a subprocess and asked for *\"the schema-pinned document, never the transcript\"*; a document with no type behind it is the transcript in a different font.\n\nTyped here rather than in the CLI so the **same** shape is what `schemars` derives, what `docs/api-schemas/` publishes, and what the drift detector guards — the arrangement `SvVerifyAutoResponse` already has. A field added to the struct without regenerating the schema fails CI.",
   "properties": {
     "engine": {
@@ -37,6 +290,17 @@
     },
     "refinement": {
       "description": "Present only under `--refine` / `--partition` / `--discover-assumptions`: the refinement record. Free-form because `VerdictRefinement` is its own evolving surface — pinning its internals here would couple two schemas that change for different reasons."
+    },
+    "trace": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Trace"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "When the exact engine refuted the property: reset → a state from which the target is unreachable → the cycle the run stays in (`kind: \"lasso\"`, `loop_start` marks the cycle)."
     }
   },
   "required": [

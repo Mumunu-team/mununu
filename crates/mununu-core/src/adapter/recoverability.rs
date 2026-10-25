@@ -1137,6 +1137,11 @@ pub struct RecoverabilityAttribution {
     pub exact_abstention: Option<AbstentionKind>,
     /// The exact engine's own abstention message, verbatim, when it abstained.
     pub exact_abstention_reason: Option<String>,
+    /// When the exact engine refuted `AG EF good`: its witness, reset → a state from which `good`
+    /// is unreachable → the cycle the run stays in, as a raw [`crate::trace::Trace`] (the lift's
+    /// cell names). The surface tidies it once with [`crate::trace::TraceNames::tidy`]. `None`
+    /// for every other verdict, and when the cube ladder decided (it has no concrete path).
+    pub trace: Option<crate::trace::Trace>,
 }
 
 /// [`verify_recoverability_with_options`] that also says WHICH rung decided.
@@ -1188,11 +1193,12 @@ pub fn verify_recoverability_explained(
             .map(std::time::Duration::from_millis),
         None,
     );
-    match ladder.result.map(|(v, _)| v) {
+    match ladder.result {
         // The exact engine decided (definite at every alternation depth per
         // Bruns–Godefroid) — return it unchanged; the exact-only behaviour is
-        // preserved when the exact engine gives a definite verdict.
-        Ok(v) => Ok((
+        // preserved when the exact engine gives a definite verdict. A refutation carries the
+        // engine's witness, the same one `sv verify-auto` reports for an `AG EF` row.
+        Ok((v, witness)) => Ok((
             PropertyVerdict::from(v),
             RecoverabilityAttribution {
                 engine: if ladder.stage == LADDER_STAGE_RESTRICTED {
@@ -1202,6 +1208,8 @@ pub fn verify_recoverability_explained(
                 },
                 exact_abstention: None,
                 exact_abstention_reason: None,
+                trace: witness
+                    .map(|w| crate::adapter::slang::verify_auto::lasso_trace(w, btor2_content)),
             },
         )),
         // Over the bit cap (40 by default, auto-raised to 192) or an unsupported construct: escalate to the
@@ -1226,6 +1234,7 @@ pub fn verify_recoverability_explained(
                         engine: RecoverabilityEngine::CubeLadder,
                         exact_abstention: Some(kind),
                         exact_abstention_reason: Some(reason),
+                        trace: None,
                     },
                 )
             })

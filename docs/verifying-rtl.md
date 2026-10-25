@@ -115,6 +115,12 @@ recovery out of reset. A name that is no input of the model is an error. `--part
 splits the verdict over the values instead, in the `refinement`, and leaves `outcome` the
 reset-free answer. Both verbs take it: `btor2 verify-recoverability` and `sv verify-recoverability`.
 
+**The trap, as a trace.** A `violated` decided by the exact engine carries `trace` (`kind: "lasso"`):
+the path from reset into a state from which the target is unreachable, then the cycle the run stays
+in (`loop_start` marks it), with the inputs that drive each step. On `sv verify-recoverability` the
+cells carry the design's names and the clock is left out, as on `sv verify-auto`. A verdict the cube
+ladder reaches has no concrete path and no `trace`.
+
 For designs wider than the exact engine's cap, the same `AG EF` formula scales via
 predicate abstraction on the `btor2 cegar … --must-edge-inference smt-hyper-must`
 path (validated on real OpenTitan `csrng` RTL — see `recoverability-vs-sva.md` §3.2).
