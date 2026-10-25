@@ -38,6 +38,16 @@ pub enum FaultBound {
     AtMost(u32),
 }
 
+impl FaultBound {
+    /// The budget as a number, `None` when unbounded.
+    pub fn budget(self) -> Option<u32> {
+        match self {
+            FaultBound::Unbounded => None,
+            FaultBound::AtMost(k) => Some(k),
+        }
+    }
+}
+
 /// One register the adversary may overwrite.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FaultSite {

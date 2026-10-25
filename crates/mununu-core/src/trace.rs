@@ -34,6 +34,142 @@ pub struct CexCellView {
     pub bits: u32,
 }
 
+/// A cell the verifier added to the lifted model rather than one the design declares: the
+/// property monitor's history latches (`mununu_wit_…`), `$past` shadows (`x__past`), fault-rewrite
+/// state (`mununu_fault_…`), next-frame inputs (`x$next`) and the bit / popcount expansions of a
+/// relational atom. A trace lists these under [`TraceStep::monitor`], not beside the design's
+/// registers.
+pub fn is_monitor_cell(name: &str) -> bool {
+    name.starts_with("mununu_")
+        || name.starts_with("__mununu")
+        || name.contains("__past")
+        || name.contains("__bits")
+        || name.contains("__popcount")
+        || name.ends_with("$next")
+}
+
+/// How the lift names what a counterexample shows: the top-level alias of a register yosys named
+/// through a bound checker's port (`u_x_sva.state_q` for the design's `state_q`), and the clock
+/// nets, which the model steps implicitly and which a trace therefore never lists as inputs.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TraceNames {
+    /// Hierarchical register name → the top-level net on the same bits with the same leaf name.
+    pub aliases: std::collections::BTreeMap<String, String>,
+    pub clocks: Vec<String>,
+    /// Under a fault posture: each site's enable / value inputs and the register it overwrites,
+    /// in site order (`btor2::fault::InjectedFault`).
+    pub fault_inputs: Vec<FaultInputs>,
+    /// The posture's warm-up: no injection fires before this cycle.
+    pub fault_warmup: u32,
+    /// The posture's global budget; `None` when unbounded.
+    pub fault_budget: Option<u32>,
+}
+
+/// One fault site's inputs in the rewritten model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FaultInputs {
+    pub enable: String,
+    pub value: String,
+    pub site: String,
+}
+
+impl TraceNames {
+    /// One state's cells, split into the design's registers (under their top-level alias when the
+    /// state does not already name it) and the [monitor cells](is_monitor_cell).
+    pub fn split_state(&self, state: &[CexCellView]) -> (Vec<CexCellView>, Vec<CexCellView>) {
+        let (monitor, design): (Vec<_>, Vec<_>) = state
+            .iter()
+            .cloned()
+            .partition(|c| is_monitor_cell(&c.register));
+        let named: std::collections::HashSet<&str> =
+            design.iter().map(|c| c.register.as_str()).collect();
+        let design = design
+            .iter()
+            .map(|c| match self.aliases.get(&c.register) {
+                Some(alias) if !named.contains(alias.as_str()) => CexCellView {
+                    register: alias.clone(),
+                    ..c.clone()
+                },
+                _ => c.clone(),
+            })
+            .collect();
+        (design, monitor)
+    }
+
+    /// One cycle's inputs without the clocks and the inputs the verifier added (the fault
+    /// enables and values, next-frame copies).
+    pub fn inputs(&self, inputs: &[CexCellView]) -> Vec<CexCellView> {
+        inputs
+            .iter()
+            .filter(|c| !self.clocks.contains(&c.register) && !is_monitor_cell(&c.register))
+            .cloned()
+            .collect()
+    }
+
+    /// The injections that fire on each step, from the fault inputs of `trace` and the rewrite's
+    /// own rule (`btor2::fault`): site `i` fires on cycle `c` when its enable is set, `c` is at or
+    /// past the warm-up, and the injections so far plus this cycle's enables stay within the
+    /// budget. An enable that does not fire injected nothing and is not reported.
+    fn fired_faults(&self, trace: &Trace) -> Vec<Vec<TraceFault>> {
+        let mut spent: u64 = 0;
+        trace
+            .steps
+            .iter()
+            .map(|step| {
+                let by_name: std::collections::HashMap<&str, &CexCellView> = step
+                    .inputs
+                    .iter()
+                    .map(|c| (c.register.as_str(), c))
+                    .collect();
+                let enabled: Vec<&FaultInputs> = self
+                    .fault_inputs
+                    .iter()
+                    .filter(|f| {
+                        by_name
+                            .get(f.enable.as_str())
+                            .and_then(|c| c.value)
+                            .unwrap_or(0)
+                            != 0
+                    })
+                    .collect();
+                let fits = self
+                    .fault_budget
+                    .is_none_or(|k| spent + enabled.len() as u64 <= u64::from(k));
+                if enabled.is_empty() || step.cycle < self.fault_warmup as usize || !fits {
+                    return Vec::new();
+                }
+                spent += enabled.len() as u64;
+                enabled
+                    .iter()
+                    .filter_map(|f| {
+                        by_name.get(f.value.as_str()).map(|v| TraceFault {
+                            site: f.site.clone(),
+                            value: v.value,
+                            hex: v.hex.clone(),
+                        })
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// `trace` as the surfaces show it: every step's state split (see [`Self::split_state`]),
+    /// the fired injections on `faults`, and the inputs without the clocks and the added inputs.
+    pub fn tidy(&self, mut trace: Trace) -> Trace {
+        let faults = self.fired_faults(&trace);
+        for (step, faults) in trace.steps.iter_mut().zip(faults) {
+            let (design, monitor) = self.split_state(&step.state);
+            step.state = design;
+            step.monitor = monitor;
+            step.inputs = self.inputs(&step.inputs);
+            if !faults.is_empty() {
+                step.faults = faults;
+            }
+        }
+        trace
+    }
+}
+
 /// What a [`Trace`] shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "api", derive(schemars::JsonSchema))]
@@ -83,6 +219,10 @@ pub struct TraceStep {
     /// The labels of the transition out of this step (CTXDSL).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub labels: Vec<String>,
+    /// Cells the verifier added to the model (see [`is_monitor_cell`]): the property monitor's
+    /// latches, `$past` shadows, fault-rewrite state. Kept for debugging, apart from `state`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub monitor: Vec<CexCellView>,
 }
 
 /// Replay artefacts attached to a [`Trace`].
@@ -211,6 +351,7 @@ impl Trace {
                     })
                     .collect(),
                 labels: Vec::new(),
+                monitor: Vec::new(),
             })
             .collect();
         Trace {
@@ -244,6 +385,7 @@ impl Trace {
                 inputs: inputs.next().unwrap_or_default(),
                 faults: Vec::new(),
                 labels: Vec::new(),
+                monitor: Vec::new(),
             })
             .collect();
         let kind = if !unreachable_target.is_empty() && steps.is_empty() {
@@ -279,6 +421,7 @@ impl Trace {
                 inputs: Vec::new(),
                 faults: Vec::new(),
                 labels: labels.get(i).into_iter().cloned().collect(),
+                monitor: Vec::new(),
             })
             .collect();
         Trace {
@@ -317,5 +460,111 @@ pub mod ser {
             .map(|p| Trace::from_states(p, &[], None))
             .collect();
         serde::Serialize::serialize(&t, s)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cell(register: &str, value: u64) -> CexCellView {
+        CexCellView {
+            register: register.into(),
+            value: Some(value),
+            hex: format!("0x{value:x}"),
+            bits: 3,
+        }
+    }
+
+    /// Every cell the lift, the property monitor or the fault rewrite adds is a monitor cell; a
+    /// design register is not, including a for-generate name (`gen$1.q`) or a sampled input.
+    #[test]
+    fn monitor_cells_are_the_ones_the_verifier_adds() {
+        for name in [
+            "mununu_wit_3",
+            "mununu_fault_cnt",
+            "__mununu_oob__",
+            "running__past",
+            "x__bits_2",
+            "req__popcount",
+            "flow$next",
+        ] {
+            assert!(is_monitor_cell(name), "{name}");
+        }
+        for name in ["state_q", "u_core.cnt_q", "gen$1.q", "flow"] {
+            assert!(!is_monitor_cell(name), "{name}");
+        }
+    }
+
+    /// An injection is reported on the cycle it fires and nowhere else: not during the warm-up,
+    /// not past the budget; the fault inputs and the clock leave `inputs` either way.
+    #[test]
+    fn faults_are_the_injections_that_fire() {
+        let names = TraceNames {
+            clocks: vec!["clk".into()],
+            fault_inputs: vec![FaultInputs {
+                enable: "mununu_fault_en_0".into(),
+                value: "mununu_fault_val_0".into(),
+                site: "q".into(),
+            }],
+            fault_warmup: 2,
+            fault_budget: Some(1),
+            ..Default::default()
+        };
+        let step = |en: u64| {
+            vec![
+                cell("clk", 0),
+                cell("go", 1),
+                cell("mununu_fault_en_0", en),
+                cell("mununu_fault_val_0", 5),
+            ]
+        };
+        let trace = names.tidy(Trace::from_cells(
+            vec![vec![cell("q", 0)]; 4],
+            Vec::new(),
+            vec![step(1), step(0), step(1), step(1)],
+            Vec::new(),
+            false,
+        ));
+        let fired: Vec<Vec<String>> = trace
+            .steps
+            .iter()
+            .map(|s| {
+                s.faults
+                    .iter()
+                    .map(|f| format!("{}:={:?}", f.site, f.value))
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            fired,
+            vec![vec![], vec![], vec!["q:=Some(5)".to_string()], vec![]]
+        );
+        for s in &trace.steps {
+            let inputs: Vec<_> = s.inputs.iter().map(|c| c.register.as_str()).collect();
+            assert_eq!(inputs, ["go"]);
+        }
+    }
+
+    /// An alias never collides with a register the state already names, and the clock leaves
+    /// the inputs while every other input stays.
+    #[test]
+    fn an_alias_yields_to_a_register_already_named_and_clocks_leave_the_inputs() {
+        let names = TraceNames {
+            aliases: [
+                ("u.a".to_string(), "a".to_string()),
+                ("u.b".to_string(), "b".to_string()),
+            ]
+            .into(),
+            clocks: vec!["clk".into()],
+            ..Default::default()
+        };
+        let (design, monitor) = names.split_state(&[cell("u.a", 1), cell("a", 2), cell("u.b", 3)]);
+        let regs: Vec<_> = design.iter().map(|c| c.register.as_str()).collect();
+        assert_eq!(regs, ["u.a", "a", "b"]);
+        assert!(monitor.is_empty());
+        let inputs = names.inputs(&[cell("clk", 0), cell("go", 1)]);
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].register, "go");
     }
 }

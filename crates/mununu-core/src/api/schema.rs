@@ -334,6 +334,7 @@ mod tests {
                     selected_by: "explicit".into(),
                     rows: vec![],
                 }],
+                trace_names: Default::default(),
             },
             notes: vec![VerificationNote {
                 kind: "coverage-summary".into(),

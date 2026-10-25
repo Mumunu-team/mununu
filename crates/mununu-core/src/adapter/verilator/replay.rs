@@ -46,14 +46,10 @@ pub struct ReplayDesign<'a> {
     pub sources: &'a [String],
 }
 
+/// A cell the testbench cannot compare: one the verifier added ([`crate::trace::is_monitor_cell`]),
+/// or a yosys-internal name Verilator does not expose.
 fn synthetic(name: &str) -> bool {
-    name.ends_with("$next")
-        || name.contains("__past")
-        || name.contains("__bits")
-        || name.contains("__popcount")
-        || name.starts_with("mununu_")
-        || name.starts_with("__mununu")
-        || name.contains("$")
+    crate::trace::is_monitor_cell(name) || name.contains('$')
 }
 
 fn accessor(top: &str, name: &str, ports: &std::collections::BTreeSet<String>) -> String {

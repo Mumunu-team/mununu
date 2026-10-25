@@ -243,6 +243,25 @@ pub struct PropertyVerdict {
     pub vacuity: Option<VacuityFinding>,
 }
 
+impl PropertyVerdict {
+    /// The row's counterexample as every surface shows it: a [`crate::trace::Trace`] with the
+    /// design's names, the verifier's cells under `monitor`, the injections that fire on
+    /// `faults`, and no clock or added input ([`crate::trace::TraceNames::tidy`]). `None` when the
+    /// row has no counterexample.
+    pub fn trace(&self, names: &crate::trace::TraceNames) -> Option<crate::trace::Trace> {
+        use crate::trace::{Trace, cex_cells};
+        let c = self.counterexample.as_ref()?;
+        let cells = |v: &[Vec<(String, CexValue)>]| v.iter().map(|s| cex_cells(s)).collect();
+        Some(names.tidy(Trace::from_cells(
+            cells(&c.prefix),
+            cells(&c.cycle),
+            cells(&c.inputs),
+            c.unreachable_target.clone(),
+            self.decided_by.as_deref() == Some(TRAP_CERTIFICATE_DECIDED_BY),
+        )))
+    }
+}
+
 /// mununu#599 — how a recoverability guarantee that HOLDS stands against another property of the
 /// same report. See [`super::report_consistency::vacuity_of_guarantee`] for the relation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -468,6 +487,9 @@ pub struct ModelDiagnostics {
     /// The registers the adversary may corrupt under the posture, with their width, the budget,
     /// why each was selected and the rows it serves. Empty without a posture.
     pub fault_sites: Vec<crate::adapter::btor2::fault::FaultSiteReport>,
+    /// How the counterexamples name the lift's registers and clocks (display only; see
+    /// [`crate::trace::TraceNames`]).
+    pub trace_names: crate::trace::TraceNames,
 }
 
 /// Severity of a [`VerificationNote`] — how it bears on the verdict's trust.
@@ -3688,6 +3710,8 @@ pub(crate) fn replan_merged(
 pub struct PropertyFlip {
     /// The property (assertion) name — the join key between baseline and mutant.
     pub name: String,
+    /// The SVA label (`a_trip_latches: assert property …`), when the source gives one.
+    pub label: Option<String>,
     /// The canonical verdict on the design as-lifted.
     pub baseline: String,
     /// The canonical verdict on the mutated design.
@@ -3712,6 +3736,18 @@ pub struct MutateReport {
     pub flipped: usize,
     /// Number the mutation did NOT flip (the adequacy finding).
     pub unflipped: usize,
+}
+
+impl MutateReport {
+    /// The mutation run's verdict: `holds` when at least one property caught the mutant (a flip),
+    /// `violated` when it survived every property — the spec gap a CI gate fails on.
+    pub fn outcome(&self) -> &'static str {
+        if self.flipped > 0 {
+            "holds"
+        } else {
+            "violated"
+        }
+    }
 }
 
 /// `sv mutate` core — verify the design **twice** (as-lifted baseline, then with
@@ -3751,6 +3787,7 @@ pub fn mutate_and_compare(
                 .map_or("skipped", |o| o.label());
             PropertyFlip {
                 name: b.name.clone(),
+                label: b.label.clone(),
                 baseline: baseline.to_string(),
                 mutant: mutant.to_string(),
                 flipped: baseline != mutant,
@@ -3836,6 +3873,8 @@ pub(crate) struct PreLift {
     pub backend_retry: Option<String>,
     /// The clock domains the lift merged (more than one only under `--merge-clock-domains`).
     pub clock_domains: Vec<crate::adapter::yosys::ClockDomain>,
+    /// How a counterexample names this lift's registers and clocks (display only).
+    pub trace_names: crate::trace::TraceNames,
 }
 
 /// Run the SV → BTOR2 lift (yosys) with the `auto_stub_flops` re-lift. Pure function of
@@ -3901,6 +3940,11 @@ pub(crate) fn lift_sv(
         frontend_used: lift.frontend_used,
         fallback_reason: lift.fallback_reason,
         backend_retry: lift.backend_retry,
+        trace_names: crate::trace::TraceNames {
+            aliases: crate::adapter::yosys::trace_aliases(&lift.flat_netlist_json),
+            clocks: lift.clock_domains.iter().map(|d| d.net.clone()).collect(),
+            ..Default::default()
+        },
         clock_domains: lift.clock_domains,
     })
 }
@@ -4308,7 +4352,9 @@ pub(crate) fn prepare_model(
         fallback_reason,
         backend_retry,
         clock_domains,
+        trace_names,
     } = lift_sv(sources, yosys_opts, opts)?;
+    report.diagnostics.trace_names = trace_names;
     if clock_domains.len() > 1 {
         report.diagnostics.merged_clock_domains = clock_domains
             .iter()
@@ -4610,6 +4656,22 @@ pub(crate) fn prepare_model(
             let (b, applied) = apply_fault_posture(&btor2, &extraction, posture)?;
             report.diagnostics.fault_model = Some(applied.label.clone());
             report.diagnostics.fault_sites = applied.sites.clone();
+            let names = &mut report.diagnostics.trace_names;
+            names.fault_inputs = applied
+                .injected
+                .iter()
+                .map(|f| crate::trace::FaultInputs {
+                    enable: f.en_input.clone(),
+                    value: f.val_input.clone(),
+                    site: f.register.clone(),
+                })
+                .collect();
+            names.fault_warmup = posture.warmup;
+            names.fault_budget = match &posture.selection {
+                crate::adapter::btor2::fault::FaultSelection::Explicit(spec) => spec.bound,
+                crate::adapter::btor2::fault::FaultSelection::SecCm(bound) => *bound,
+            }
+            .budget();
             (b, Some(applied))
         }
         None => (btor2, None),
@@ -8089,6 +8151,30 @@ mod tests {
     ///
     /// The fixture is the reported shape: exact decides one property and leaves one ⊥, a second
     /// engine runs, and the merged report still contains a ⊥.
+    /// A mutant some property catches is `holds`; one that survives every property is the
+    /// adequacy gap, `violated`, which is what `sv mutate`'s exit code and both surfaces report.
+    #[test]
+    fn a_surviving_mutant_is_the_violated_outcome() {
+        let flip = |flipped| PropertyFlip {
+            name: "p".into(),
+            label: Some("a_p".into()),
+            baseline: "holds".into(),
+            mutant: if flipped { "violated" } else { "holds" }.into(),
+            flipped,
+        };
+        let report = |props: Vec<PropertyFlip>| {
+            let flipped = props.iter().filter(|p| p.flipped).count();
+            MutateReport {
+                mutation: "stick:q".into(),
+                unflipped: props.len() - flipped,
+                properties: props,
+                flipped,
+            }
+        };
+        assert_eq!(report(vec![flip(false), flip(true)]).outcome(), "holds");
+        assert_eq!(report(vec![flip(false), flip(false)]).outcome(), "violated");
+    }
+
     #[test]
     fn merged_portfolio_posture_note_does_not_claim_bottom_is_impossible() {
         let exact_base = {

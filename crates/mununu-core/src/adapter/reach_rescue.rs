@@ -628,7 +628,8 @@ pub fn reach_portfolio_rescue_diagnosed(
 /// formula (a box holds only if every successor satisfies its target), so a returned trace is
 /// always a genuine counterexample; the converse can fail (`[] a || [] b` can be false at a state
 /// although every single path satisfies `a` or `b` next), and then there is no trace. The monitor's
-/// history latches (`mununu_wit_…`) appear in the trace beside the design's registers.
+/// history latches (`mununu_wit_…`) are listed under the trace's `monitor` cells, apart from the
+/// design's registers ([`crate::trace::TraceNames`]).
 pub fn safety_witness(
     design_btor2: &str,
     formula: &Formula,
