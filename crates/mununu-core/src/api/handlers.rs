@@ -1210,13 +1210,21 @@ fn btor2_verify_recoverability_handler_impl(
             message,
             details: None,
         })?;
+    let pins = sorted_pins(&request.pins)?;
+    let (content, applied_pins) =
+        crate::adapter::recoverability::apply_pins(&request.content, &pins).map_err(|message| {
+            ApiError::BadRequest {
+                message,
+                details: None,
+            }
+        })?;
     // `refine`/`config_values`/`discover_assumptions` (refined-verdicts): canonical verdict PLUS a
     // diagnostic-only refinement. Either way the attribution rides along: who decided, and the
     // exact engine's abstention when the cube ladder was what did.
     let (verdict, refinement, attribution) =
         if request.refine || !config_specs.is_empty() || request.discover_assumptions {
             let (v, r, a) = verify_recoverability_refined_explained(
-                &request.content,
+                &content,
                 &request.target,
                 &extra,
                 &config_specs,
@@ -1225,7 +1233,7 @@ fn btor2_verify_recoverability_handler_impl(
             (v, Some(r), a)
         } else {
             let (v, a) = verify_recoverability_explained(
-                &request.content,
+                &content,
                 &request.target,
                 &extra,
                 &ExactSymbolicOptions::default(),
@@ -1240,6 +1248,7 @@ fn btor2_verify_recoverability_handler_impl(
     Ok(Json(Btor2VerifyRecoverabilityResponse {
         outcome: verdict.as_str().to_string(),
         property: recoverability_property_str(&request.target),
+        pins: applied_pins,
         refinement,
         engine: attribution.as_ref().map(|a| a.engine.as_str().to_string()),
         exact_abstention: attribution
@@ -1617,31 +1626,36 @@ fn sv_verify_recoverability_handler_impl(
             details: None,
         })?;
     let lift = sv_lift_of(&request.lift)?;
-    let (verdict, refinement, attribution) =
-        if request.refine || !config_specs.is_empty() || request.discover_assumptions {
-            let (v, r, a) = sv_verify_recoverability_refined_explained(
-                &lift,
-                &request.target,
-                &extra,
-                &config_specs,
-                request.discover_assumptions,
-            )
+    let pins = sorted_pins(&request.pins)?;
+    let (verdict, refinement, attribution, applied_pins) = if request.refine
+        || !config_specs.is_empty()
+        || request.discover_assumptions
+    {
+        let (v, r, a, p) = sv_verify_recoverability_refined_explained(
+            &lift,
+            &request.target,
+            &extra,
+            &config_specs,
+            request.discover_assumptions,
+            &pins,
+        )
+        .map_err(|message| ApiError::BadRequest {
+            message,
+            details: None,
+        })?;
+        (v, Some(r), a, p)
+    } else {
+        let (v, a, p) = sv_verify_recoverability_explained(&lift, &request.target, &extra, &pins)
             .map_err(|message| ApiError::BadRequest {
-                message,
-                details: None,
-            })?;
-            (v, Some(r), a)
-        } else {
-            let (v, a) = sv_verify_recoverability_explained(&lift, &request.target, &extra)
-                .map_err(|message| ApiError::BadRequest {
-                    message,
-                    details: None,
-                })?;
-            (v, None, Some(a))
-        };
+            message,
+            details: None,
+        })?;
+        (v, None, Some(a), p)
+    };
     Ok(Json(Btor2VerifyRecoverabilityResponse {
         outcome: verdict.as_str().to_string(),
         property,
+        pins: applied_pins,
         refinement,
         engine: attribution.as_ref().map(|a| a.engine.as_str().to_string()),
         exact_abstention: attribution
@@ -1789,6 +1803,13 @@ pub async fn sv_mutate_handler(
 /// `params`), never a silent drop; a value that is not a decimal u64 (e.g. hex `0x1`) is rejected
 /// by name. An unknown / non-input signal is caught downstream in `verify_auto` against the
 /// model's real primary inputs.
+/// `pins` entries as `(name, value)` pairs in name order (see [`parse_config_values`]).
+fn sorted_pins(entries: &[String]) -> Result<Vec<(String, u64)>, ApiError> {
+    let mut pins: Vec<(String, u64)> = parse_config_values(entries)?.into_iter().collect();
+    pins.sort();
+    Ok(pins)
+}
+
 fn parse_config_values(
     entries: &[String],
 ) -> Result<std::collections::HashMap<String, u64>, ApiError> {
@@ -5615,6 +5636,7 @@ members = ["x"]
             target: "st == 0".to_string(),
             predicates: Vec::new(),
             refine: false,
+            pins: Vec::new(),
             partitions: Vec::new(),
             discover_assumptions: false,
         };
@@ -5634,6 +5656,44 @@ members = ["x"]
         assert!(out.exact_abstention.is_none(), "response: {out:?}");
     }
 
+    /// A trap only the reset clears: with `rst_n` free every state recovers by pulsing it, so
+    /// `AG EF (trapped == 0)` holds; pinned inactive (`pins: ["rst_n=1"]`), one `go` traps the
+    /// design for good. The pin reaches the canonical verdict, not only a partition cell, and is
+    /// echoed; a pin that names no input is refused.
+    #[tokio::test]
+    async fn a_pinned_reset_decides_recoverability_out_of_reset() {
+        const RESET_ONLY_ESCAPE: &str = "1 sort bitvec 1\n2 input 1 rst_n\n3 input 1 go\n\
+4 state 1 trapped\n5 zero 1\n6 init 1 4 5\n7 or 1 4 3\n8 ite 1 2 7 5\n9 next 1 4 8\n";
+        let request = |pins: &[&str]| Btor2VerifyRecoverabilityRequest {
+            content: RESET_ONLY_ESCAPE.to_string(),
+            target: "trapped == 0".to_string(),
+            predicates: Vec::new(),
+            refine: false,
+            pins: pins.iter().map(|p| p.to_string()).collect(),
+            partitions: Vec::new(),
+            discover_assumptions: false,
+        };
+        let Json(free) = btor2_verify_recoverability_handler(Json(request(&[])))
+            .await
+            .expect("runs");
+        assert_eq!(free.outcome, "holds", "the reset escape: {free:?}");
+        assert!(free.pins.is_empty());
+        let Json(pinned) = btor2_verify_recoverability_handler(Json(request(&["rst_n=1"])))
+            .await
+            .expect("runs");
+        assert_eq!(
+            pinned.outcome, "violated",
+            "out of reset the trap is closed: {pinned:?}"
+        );
+        assert_eq!(pinned.pins, ["rst_n=1"]);
+        assert!(
+            btor2_verify_recoverability_handler(Json(request(&["rst=1"])))
+                .await
+                .is_err(),
+            "a pin that names no input must not leave the reset free"
+        );
+    }
+
     /// `refine: true` carries a structured refinement alongside the verdict (refined-verdicts
     /// Phase 0). A stuck-at-0 flag can never recover to 1, so the target is flagged `vacuous`.
     #[tokio::test]
@@ -5645,6 +5705,7 @@ members = ["x"]
             target: "flag == 1".to_string(),
             predicates: Vec::new(),
             refine: true,
+            pins: Vec::new(),
             partitions: Vec::new(),
             discover_assumptions: false,
         };
@@ -5669,6 +5730,7 @@ members = ["x"]
             target: "busy == 0".to_string(),
             predicates: Vec::new(),
             refine: false,
+            pins: Vec::new(),
             partitions: vec!["mode=0,1,2,3".to_string()],
             discover_assumptions: false,
         };
@@ -5695,6 +5757,7 @@ members = ["x"]
             target: "st == 0".to_string(),
             predicates: Vec::new(),
             refine: false,
+            pins: Vec::new(),
             partitions: Vec::new(),
             discover_assumptions: true,
         };
@@ -5721,6 +5784,7 @@ members = ["x"]
             target: "definitely not an atom".to_string(),
             predicates: Vec::new(),
             refine: false,
+            pins: Vec::new(),
             partitions: Vec::new(),
             discover_assumptions: false,
         };
@@ -6045,6 +6109,7 @@ members = ["x"]
             target: "not an atom !!".to_string(),
             predicates: Vec::new(),
             refine: false,
+            pins: Vec::new(),
             partitions: Vec::new(),
             discover_assumptions: false,
         };

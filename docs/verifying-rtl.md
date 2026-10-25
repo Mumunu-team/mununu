@@ -103,8 +103,17 @@ the cap the deciding width is the cone's *shape*, not its bit count — see
 ["What decides at what width"](#what-decides-at-what-width--the-measured-frontier).
 
 ```bash
-mununu btor2 verify-recoverability design.btor2 --target "state_q == 3"
+mununu btor2 verify-recoverability design.btor2 --target "state_q == 3" --pin rst_n=1
 ```
+
+**Pin the reset** ([`apply_pins`](../crates/mununu-core/src/adapter/recoverability.rs)). A
+free reset input is one more way back: every state "recovers" by pulsing it, so without a pin the
+verdict answers "can the design recover, reset included" and is `holds` on any design whose reset
+reaches the target. `--pin rst_n=1` (repeatable, `SIGNAL=VALUE`; API `pins`) ties the input to the
+constant before deciding, so `outcome`, the exit code and the `pins` field it echoes are for
+recovery out of reset. A name that is no input of the model is an error. `--partition rst_n=0,1`
+splits the verdict over the values instead, in the `refinement`, and leaves `outcome` the
+reset-free answer. Both verbs take it: `btor2 verify-recoverability` and `sv verify-recoverability`.
 
 For designs wider than the exact engine's cap, the same `AG EF` formula scales via
 predicate abstraction on the `btor2 cegar … --must-edge-inference smt-hyper-must`

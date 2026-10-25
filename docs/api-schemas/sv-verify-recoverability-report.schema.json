@@ -24,6 +24,13 @@
       "description": "`holds` | `violated` | `unknown` | `skipped`, the same vocabulary `sv verify-auto` uses.",
       "type": "string"
     },
+    "pins": {
+      "description": "The pins applied, `NAME=VALUE` (empty without `--pin`): the verdict holds for these values.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
     "property": {
       "description": "The property, rendered — e.g. `\"AG EF (state == 0)\"`.",
       "type": "string"

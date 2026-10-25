@@ -233,7 +233,7 @@ pub fn sv_verify_recoverability_with_predicates(
     target: &str,
     extra_predicates: &[PredicateSpec],
 ) -> Result<PropertyVerdict, String> {
-    sv_verify_recoverability_explained(lift, target, extra_predicates).map(|(v, _)| v)
+    sv_verify_recoverability_explained(lift, target, extra_predicates, &[]).map(|(v, _, _)| v)
 }
 
 /// [`sv_verify_recoverability_with_predicates`] that also returns who decided and why the exact
@@ -242,23 +242,26 @@ pub fn sv_verify_recoverability_explained(
     lift: &SvLift,
     target: &str,
     extra_predicates: &[PredicateSpec],
+    pins: &[(String, u64)],
 ) -> Result<
     (
         PropertyVerdict,
         crate::adapter::recoverability::RecoverabilityAttribution,
+        Vec<String>,
     ),
     String,
 > {
     parse_predicate_expr(target).map_err(|e| {
         format!("recoverability target `{target}` is not a register-comparison atom: {e:?}")
     })?;
-    let btor2 = lift.lift()?;
-    crate::adapter::recoverability::verify_recoverability_explained(
+    let (btor2, applied) = crate::adapter::recoverability::apply_pins(&lift.lift()?, pins)?;
+    let (verdict, attribution) = crate::adapter::recoverability::verify_recoverability_explained(
         &btor2,
         target,
         extra_predicates,
         &crate::adapter::btor2::symbolic_bitblast::ExactSymbolicOptions::default(),
-    )
+    )?;
+    Ok((verdict, attribution, applied))
 }
 
 /// `sv verify-recoverability --refine` — lift SV and decide `AG EF target`, returning the canonical
@@ -279,8 +282,9 @@ pub fn sv_verify_recoverability_refined(
         extra_predicates,
         config_specs,
         discover_assumptions,
+        &[],
     )
-    .map(|(v, r, _)| (v, r))
+    .map(|(v, r, _, _)| (v, r))
 }
 
 /// [`sv_verify_recoverability_refined`] that also returns the [`RecoverabilityAttribution`] of
@@ -291,27 +295,29 @@ pub fn sv_verify_recoverability_refined_explained(
     extra_predicates: &[PredicateSpec],
     config_specs: &[(String, Vec<u64>)],
     discover_assumptions: bool,
+    pins: &[(String, u64)],
 ) -> Result<
     (
         PropertyVerdict,
         crate::verdict::VerdictRefinement,
         Option<crate::adapter::recoverability::RecoverabilityAttribution>,
+        Vec<String>,
     ),
     String,
 > {
     parse_predicate_expr(target).map_err(|e| {
         format!("recoverability target `{target}` is not a register-comparison atom: {e:?}")
     })?;
-    let btor2 = lift.lift()?;
-    Ok(
+    let (btor2, applied) = crate::adapter::recoverability::apply_pins(&lift.lift()?, pins)?;
+    let (verdict, refinement, attribution) =
         crate::adapter::recoverability::verify_recoverability_refined_explained(
             &btor2,
             target,
             extra_predicates,
             config_specs,
             discover_assumptions,
-        ),
-    )
+        );
+    Ok((verdict, refinement, attribution, applied))
 }
 
 /// `sv check-fsm` — lift SV and auto-scan every FSM-like state register for a reachable

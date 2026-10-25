@@ -350,6 +350,13 @@
       "description": "Canonical property verdict — `\"holds\"` (every reachable state can reach `target`) | `\"violated\"` (a reachable trap cannot) | `\"unknown\"` (over the exact engine's cap; try the cube + `smt-hyper-must` path), via [`crate::verdict::PropertyVerdict`].",
       "type": "string"
     },
+    "pins": {
+      "description": "The pins applied, `NAME=VALUE` (empty without `pins`): the verdict holds for these values.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
     "property": {
       "description": "The decided property, echoed for provenance: `AG EF (<target>)`.",
       "type": "string"

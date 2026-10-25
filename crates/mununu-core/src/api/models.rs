@@ -1236,6 +1236,11 @@ pub struct Btor2VerifyRecoverabilityRequest {
     /// it never changes the canonical verdict. (Mirrors the CLI `--refine`.)
     #[serde(default)]
     pub refine: bool,
+    /// Inputs tied to a constant before deciding, each `"SIGNAL=VALUE"` (mirrors the CLI `--pin`),
+    /// typically the reset held inactive: with the reset free, every state recovers by pulsing it.
+    /// A name that is no input of the model is an error.
+    #[serde(default)]
+    pub pins: Vec<String>,
     /// Config-partition (capability A): config inputs to split the verdict over, each
     /// `"NAME=v1,v2,..."`. The refinement then carries a `config_partition` decided exactly per config,
     /// every named value included — a single value is a scoped pin, reported as its one cell (#634).
@@ -1260,6 +1265,9 @@ pub struct Btor2VerifyRecoverabilityResponse {
     pub outcome: String,
     /// The decided property, echoed for provenance: `AG EF (<target>)`.
     pub property: String,
+    /// The pins applied, `NAME=VALUE` (empty without `pins`): the verdict holds for these values.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pins: Vec<String>,
     /// The structured refinement, when `refine` was requested and it produced one. `None` otherwise.
     /// Diagnostic detail carried ALONGSIDE the verdict — never changes it.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1594,6 +1602,11 @@ pub struct SvVerifyRecoverabilityRequest {
     /// Diagnostic-only — never changes the canonical verdict.
     #[serde(default)]
     pub refine: bool,
+    /// Inputs tied to a constant before deciding, each `"SIGNAL=VALUE"` (mirrors the CLI `--pin`),
+    /// typically the reset held inactive: with the reset free, every state recovers by pulsing it.
+    /// A name that is no input of the model is an error.
+    #[serde(default)]
+    pub pins: Vec<String>,
     /// Config-partition config inputs, each `"NAME=v1,v2,..."` (mirrors the CLI `--partition`).
     #[serde(default)]
     pub partitions: Vec<String>,
@@ -2552,6 +2565,9 @@ pub struct SvVerifyRecoverabilityReport {
     pub property: String,
     /// `holds` | `violated` | `unknown` | `skipped`, the same vocabulary `sv verify-auto` uses.
     pub outcome: String,
+    /// The pins applied, `NAME=VALUE` (empty without `--pin`): the verdict holds for these values.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pins: Vec<String>,
     /// Present only under `--refine` / `--partition` / `--discover-assumptions`: the
     /// refinement record. Free-form because `VerdictRefinement` is its own evolving surface —
     /// pinning its internals here would couple two schemas that change for different reasons.
