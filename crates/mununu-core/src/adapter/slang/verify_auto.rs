@@ -4699,6 +4699,10 @@ pub(crate) fn prepare_model(
         }
         None => (btor2, None),
     };
+    // SOUNDNESS: a state with no `next` (a black box's cut output) is free at every step; every
+    // engine now reads it so (`nextless_states_free`). The cube engines used
+    // to step it as frozen, a false HOLDS on any property over a black box's outputs.
+    let btor2 = crate::adapter::btor2::parser::nextless_states_free(&btor2);
 
     // mununu#552 — dump here, at the LAST whole-design rewrite, so what lands on disk is what the
     // engine is handed. The formulas carry the same `--pin` substitution the per-property

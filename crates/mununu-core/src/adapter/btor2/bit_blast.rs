@@ -94,7 +94,9 @@ struct BlastOutput {
 ///
 /// **Output.** Map from state-cell symbol to its NEXT value after
 /// the step. Cells without a `Next` line in the BTOR2 retain their
-/// `register_values` entry (BTOR2 convention).
+/// `register_values` entry: one choice of the free value BTOR2 gives such a cell, which a
+/// deterministic step has to make. A caller that needs every choice gives the cell a free `next`
+/// first ([`crate::adapter::btor2::parser::nextless_states_free`]).
 ///
 /// **Semantics.** Internally runs `evaluate_pure(file, env, honor_init=false)`
 /// to compute every NID's value from the current state + inputs,
@@ -4381,7 +4383,8 @@ fn apply_next(
     for (state_nid, v) in updates {
         env.values.insert(state_nid, v);
     }
-    // States without `next` keep their current value (BTOR2 convention).
+    // States without `next` keep their current value: one choice of the free value BTOR2 gives
+    // them. Callers that need every choice rewrite them first (`parser::nextless_states_free`).
     let _ = state_meta;
     Ok(())
 }

@@ -1237,6 +1237,55 @@ fn constant_condition(file: &Btor2File, cond: crate::adapter::btor2::ast::Operan
     Some(value != cond.is_negated())
 }
 
+/// Every `state` with no `next` line given one: a fresh free input `<name>$next` of the same
+/// sort, so the cell takes an unconstrained value at every step, which is what BTOR2 means by a
+/// state without `next` (yosys emits a black box's cut outputs, `$anyseq`, this way; a
+/// `$anyconst` keeps its `next` to itself and is untouched). An `init` still fixes cycle 0. The
+/// exact engine already read such a cell as free; the predicate-cube engines stepped it with the
+/// simulator's `apply_next`, which keeps an absent `next`'s value, and so treated a black box's
+/// outputs as frozen: `!v |=> $stable(d)` over a black box's `v`, `d` came back HOLDS. The shape is
+/// the inputs-in-the-state lift's (`btor2::input_state`), which every engine handles. Returns
+/// `content` unchanged when it does not parse or every state has a `next`.
+pub fn nextless_states_free(content: &str) -> String {
+    let Ok(file) = parse(content) else {
+        return content.to_string();
+    };
+    let with_next: std::collections::HashSet<Nid> = file
+        .lines
+        .iter()
+        .filter_map(|l| match &l.node {
+            Node::Next { state, .. } => Some(*state),
+            _ => None,
+        })
+        .collect();
+    let freed: Vec<(Nid, Nid, String)> = file
+        .lines
+        .iter()
+        .filter_map(|l| match &l.node {
+            Node::State { sort, symbol } if !with_next.contains(&l.nid) => Some((
+                l.nid,
+                *sort,
+                symbol
+                    .clone()
+                    .unwrap_or_else(|| format!("mununu_state_{}", l.nid)),
+            )),
+            _ => None,
+        })
+        .collect();
+    if freed.is_empty() {
+        return content.to_string();
+    }
+    let mut next = file.lines.iter().map(|l| l.nid).max().unwrap_or(0) + 1;
+    let mut out = content.trim_end_matches('\n').to_string();
+    out.push('\n');
+    for (state, sort, name) in freed {
+        out.push_str(&format!("{next} input {sort} {name}$next\n"));
+        out.push_str(&format!("{} next {sort} {state} {next}\n", next + 1));
+        next += 2;
+    }
+    out
+}
+
 /// Whether a condition operand is a primary input — through `uext`/`sext` by 0 and `not` — the
 /// shape of an async reset no pin has tied yet.
 fn is_primary_input(file: &Btor2File, cond: crate::adapter::btor2::ast::Operand) -> bool {
@@ -1824,6 +1873,37 @@ mod tests {
             resolve_state_alias(&parse(&active).expect("parse"), "bit_cnt_q", true),
             None
         );
+    }
+
+    /// A state with no `next` gets one, from a fresh free input; a state with a `next`,
+    /// including a `$anyconst` that holds itself, is untouched; its `init` is kept.
+    #[test]
+    fn a_nextless_state_gets_a_free_next() {
+        let src = "1 sort bitvec 1\n2 state 1 bb_out\n3 zero 1\n4 init 1 2 3\n\
+                   5 state 1 held\n6 next 1 5 5\n7 state 1 reg\n8 next 1 7 2\n";
+        let out = nextless_states_free(src);
+        let file = parse(&out).expect("parses");
+        let nexts: Vec<(Nid, Nid)> = file
+            .lines
+            .iter()
+            .filter_map(|l| match &l.node {
+                Node::Next { state, value, .. } => Some((*state, value.nid())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(nexts.len(), 3, "{out}");
+        let (_, v) = nexts
+            .iter()
+            .find(|(s, _)| *s == 2)
+            .copied()
+            .expect("bb_out has a next");
+        assert!(matches!(
+            file.lookup(v).map(|l| &l.node),
+            Some(Node::Input { symbol: Some(n), .. }) if n == "bb_out$next"
+        ));
+        assert!(out.contains("4 init 1 2 3"), "the init stays: {out}");
+        let plain = "1 sort bitvec 1\n2 input 1 a\n";
+        assert_eq!(nextless_states_free(plain), plain);
     }
 
     /// A mux with the reset mux's SHAPE on an ordinary signal is a function, not an alias: the

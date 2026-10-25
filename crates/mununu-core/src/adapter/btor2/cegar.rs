@@ -2587,6 +2587,44 @@ mod tests {
         );
     }
 
+    /// A BTOR2 state with no `next` is free at every step (a black box's cut output). The cube
+    /// lift stepped it as held, so "once high, stays high" — `AG(d → AX d)` over a `d` nothing
+    /// drives — came back True; `sv verify-auto`'s portfolio took that as a HOLDS for
+    /// `!v |=> $stable(d)` over a black box's outputs, which every safety engine refutes.
+    #[test]
+    fn a_state_with_no_next_is_free_in_the_cube_lift() {
+        use crate::adapter::btor2::kmts_lift::{PredicateCubeLiftOptions, predicate_cube_lift};
+        use crate::mu_calculus::parity_game_3v::evaluate_3v_game;
+        const NEXTLESS: &str = "1 sort bitvec 1\n2 state 1 d\n3 state 1 seen\n4 zero 1\n\
+                                5 init 1 3 4\n6 next 1 3 2\n";
+        let preds = vec![PredicateSpec {
+            name: "d".into(),
+            register: "d".into(),
+            value: 1,
+        }];
+        let formula = parser::parse("nu X. ((!(d) || [] d) && [] X)").expect("formula parses");
+        let lift = predicate_cube_lift(
+            preds,
+            NEXTLESS,
+            &AdapterOptions::default(),
+            &PredicateCubeLiftOptions::default(),
+        )
+        .expect("lift");
+        let verdict = evaluate_3v_game(
+            &formula,
+            &lift.clts,
+            &Environment::new(lift.clts.state_count()),
+        )
+        .expect("evaluate");
+        for init in lift.clts.initial_states() {
+            assert_ne!(
+                verdict.verdicts.verdict_at(init.index()),
+                Trit::True,
+                "a free `d` can drop after rising: the property must not hold"
+            );
+        }
+    }
+
     /// A4 — the CEGAR loop lifts reachable cells only: the unreached cells land in
     /// `unlifted_cells` (never in the T/F/⊥ tally, never listed as undecided) and the verdict at
     /// the initial state is the one the FULL lift gives. `SMALL_BTOR2` holds both registers at
