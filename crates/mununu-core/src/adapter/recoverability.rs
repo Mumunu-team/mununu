@@ -1364,12 +1364,31 @@ pub fn verify_recoverability_refined_explained(
 /// Tie each named input to a constant (`--pin SIG=V` / API `pins`) before deciding, so `AG EF
 /// target` is asked with, typically, the reset held inactive. With the reset free every state
 /// recovers by pulsing it, and the plain verdict is a reset-escape `holds`. The tie is exact
-/// ([`crate::adapter::btor2::pin`]), not an abstraction. A name that is no input of the model is an
-/// error: a typo must not leave the reset free. Returns the rewritten BTOR2 and the applied pins
-/// as `NAME=VALUE`, sorted.
+/// ([`crate::adapter::btor2::pin`]), not an abstraction; a detected reset pinned inactive first
+/// seeds the post-reset start state. A name that is no input of the model is an error: a typo must
+/// not leave the reset free. Returns the rewritten BTOR2 and the applied pins as `NAME=VALUE`,
+/// sorted.
 pub fn apply_pins(btor2: &str, pins: &[(String, u64)]) -> Result<(String, Vec<String>), String> {
+    // A pinned reset held at its inactive value no longer establishes the start state, so the
+    // post-reset state is seeded first (`inject_reset_init`, before the tie): without it every
+    // register starts free and the verdict ranges over runs from states the design never
+    // occupies, such as an FSM's illegal encodings. A configuration pin, or a reset pinned
+    // active, seeds nothing.
+    let seeded = match crate::adapter::btor2::parser::parse(btor2) {
+        Ok(file) => {
+            let symbols = crate::adapter::btor2::parser::collect_symbols(&file);
+            let resets: Vec<(String, u64)> =
+                crate::adapter::fsm_scan::detect_resets(&file, &symbols)
+                    .into_iter()
+                    .filter(|reset| pins.contains(reset))
+                    .collect();
+            crate::adapter::btor2::reset_init::inject_reset_init(btor2, &resets)
+                .map_err(|e| format!("--pin: seeding the post-reset state: {}", e.message))?
+        }
+        Err(_) => btor2.to_string(),
+    };
     let (pinned_btor2, mut applied) =
-        crate::adapter::btor2::pin::pin_inputs_to_constants(btor2, pins);
+        crate::adapter::btor2::pin::pin_inputs_to_constants(&seeded, pins);
     let missing: Vec<&str> = pins
         .iter()
         .map(|(name, _)| name.as_str())

@@ -5663,6 +5663,31 @@ members = ["x"]
         assert!(out.exact_abstention.is_none(), "response: {out:?}");
     }
 
+    /// A pinned reset establishes the post-reset start state. The trap `st == 3` is reachable
+    /// only as an initial state (from reset the design stays at 0), so with the start state free
+    /// a pinned `AG EF (st == 0)` was refuted from a state the design never occupies.
+    #[tokio::test]
+    async fn a_pinned_reset_starts_recoverability_from_the_reset_state() {
+        const TRAP_ONLY_AT_POWER_UP: &str = "1 sort bitvec 1\n2 input 1 rst_n\n3 sort bitvec 2\n\
+4 state 3 st\n5 zero 3\n6 const 3 11\n7 eq 1 4 6\n8 ite 3 7 6 5\n9 ite 3 2 8 5\n10 next 3 4 9\n";
+        let request = Btor2VerifyRecoverabilityRequest {
+            content: TRAP_ONLY_AT_POWER_UP.to_string(),
+            target: "st == 0".to_string(),
+            predicates: Vec::new(),
+            refine: false,
+            pins: vec!["rst_n=1".to_string()],
+            partitions: Vec::new(),
+            discover_assumptions: false,
+        };
+        let Json(out) = btor2_verify_recoverability_handler(Json(request))
+            .await
+            .expect("runs");
+        assert_eq!(
+            out.outcome, "holds",
+            "from reset the trap is unreachable: {out:?}"
+        );
+    }
+
     /// A trap only the reset clears: with `rst_n` free every state recovers by pulsing it, so
     /// `AG EF (trapped == 0)` holds; pinned inactive (`pins: ["rst_n=1"]`), one `go` traps the
     /// design for good. The pin reaches the canonical verdict, not only a partition cell, and is

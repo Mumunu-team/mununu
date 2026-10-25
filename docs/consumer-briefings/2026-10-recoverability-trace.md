@@ -1,14 +1,15 @@
-# Consumer briefing — `verify-recoverability` returns the trap as a `trace` (2026-10)
+# Consumer briefing — `verify-recoverability`: the trap as a `trace`, and a pinned reset starts from the reset state (2026-10)
 
 > Source of truth: [`RecoverabilityAttribution::trace`](../../crates/mununu-core/src/adapter/recoverability.rs) — surface: (CLI+API)
 
-**Audience:** every client of `btor2 verify-recoverability` / `sv verify-recoverability` (CLI JSON and `/api/v1/{btor2,sv}/verify-recoverability`). Additive: no verdict or existing field changes.
+**Audience:** every client of `btor2 verify-recoverability` / `sv verify-recoverability` (CLI JSON and `/api/v1/{btor2,sv}/verify-recoverability`). The `trace` is additive; the start-state fix changes verdicts under `--pin` / `pins` only, toward the correct one.
 
 ## TL;DR
 
 - **New: `trace`** on a `violated` recoverability verdict decided by the exact engine — the 0.5 `Trace` shape (`kind: "lasso"`): reset → a state from which the target is unreachable → the cycle the run stays in (`loop_start`), each step with its `state` and `inputs`.
 - **Why.** The exact engine always produced this witness (it is what `sv verify-auto` shows for an `AG EF` annotation); the recoverability verbs computed and discarded it, so a violated verdict came with no path at all.
 - **Names.** `sv verify-recoverability` gives the design's register names, the verifier's cells under `steps[].monitor` and no clock among the inputs ([readable traces](2026-10-readable-traces.md)); `btor2 verify-recoverability` keeps the BTOR2's names and still moves the verifier's cells to `monitor`.
+- **Fix: a pinned reset starts the run from the reset state.** `--pin rst_n=1` (mununu#789) tied the reset without seeding the start state, so every register started free and the verdict ranged over runs from states the design never occupies: the rod-drive trace began at `state_q = 7`, an illegal encoding. A detected reset pinned at its inactive value now first seeds the post-reset state (`inject_reset_init`, as `sv verify-auto` does). A trap reachable only as a power-up state no longer refutes the property. A configuration pin, or a reset pinned active, seeds nothing. Requests without `pins` are unchanged.
 - **Absent** when the verdict holds, is unknown, or was reached by the cube ladder (no concrete path).
 - **Schemas:** `btor2-verify-recoverability-response` and `sv-verify-recoverability-report` gain the optional `trace`.
 
@@ -42,7 +43,7 @@ mununu sv verify-recoverability rod_drive_ctrl.sv --top rod_drive_ctrl --target 
 
 ## Provenance
 
-- Found preparing the EmTech tutorial recordings. Test at the handler seam both surfaces share: `api::handlers::…::a_pinned_reset_decides_recoverability_out_of_reset` (the pinned refutation carries a lasso whose cycle stays in the trap; a HOLDS carries none).
+- Found preparing the EmTech tutorial recordings. Tests at the handler seam both surfaces share: `api::handlers::…::a_pinned_reset_decides_recoverability_out_of_reset` (the pinned refutation carries a lasso whose cycle stays in the trap; a HOLDS carries none) and `…::a_pinned_reset_starts_recoverability_from_the_reset_state` (a trap reachable only at power-up: `holds`; `violated` without the seeding).
 - Policy: [`docs/policies/cross-repo-impact.md`](../policies/cross-repo-impact.md).
 
 ## Not covered here

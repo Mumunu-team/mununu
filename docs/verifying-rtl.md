@@ -111,7 +111,10 @@ free reset input is one more way back: every state "recovers" by pulsing it, so 
 verdict answers "can the design recover, reset included" and is `holds` on any design whose reset
 reaches the target. `--pin rst_n=1` (repeatable, `SIGNAL=VALUE`; API `pins`) ties the input to the
 constant before deciding, so `outcome`, the exit code and the `pins` field it echoes are for
-recovery out of reset. A name that is no input of the model is an error. `--partition rst_n=0,1`
+recovery out of reset. A pinned reset no longer establishes the start state by itself, so a detected
+reset pinned at its inactive value first seeds the post-reset state (the same `inject_reset_init`
+`sv verify-auto` runs): the run starts where the design starts after reset, not from every state,
+illegal encodings included. A name that is no input of the model is an error. `--partition rst_n=0,1`
 splits the verdict over the values instead, in the `refinement`, and leaves `outcome` the
 reset-free answer. Both verbs take it: `btor2 verify-recoverability` and `sv verify-recoverability`.
 
