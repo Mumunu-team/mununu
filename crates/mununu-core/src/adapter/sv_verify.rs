@@ -90,6 +90,21 @@ impl SvLift {
         .map_err(|e| e.message)
     }
 
+    /// [`Self::lift`] plus how a counterexample names the lift's registers and clocks
+    /// ([`crate::trace::TraceNames`]: the design's aliases for bound-checker port names, the clock
+    /// nets).
+    fn lift_named(&self) -> Result<(String, crate::trace::TraceNames), String> {
+        let (source, yopts) = self.staged()?;
+        let lifted = sv_to_btor2_with_blackboxes(&source, &yopts)
+            .map_err(|e| format!("SV → BTOR2 (sv2v + Yosys): {}", e.message))?;
+        let names = crate::trace::TraceNames {
+            aliases: crate::adapter::yosys::trace_aliases(&lifted.flat_netlist_json),
+            clocks: lifted.clock_domains.iter().map(|d| d.net.clone()).collect(),
+            ..Default::default()
+        };
+        Ok((lifted.btor2, names))
+    }
+
     /// Lift to a single flattened BTOR2 string (sv2v optional + Yosys).
     fn lift(&self) -> Result<String, String> {
         let (source, yopts) = self.staged()?;
@@ -254,13 +269,16 @@ pub fn sv_verify_recoverability_explained(
     parse_predicate_expr(target).map_err(|e| {
         format!("recoverability target `{target}` is not a register-comparison atom: {e:?}")
     })?;
-    let (btor2, applied) = crate::adapter::recoverability::apply_pins(&lift.lift()?, pins)?;
-    let (verdict, attribution) = crate::adapter::recoverability::verify_recoverability_explained(
-        &btor2,
-        target,
-        extra_predicates,
-        &crate::adapter::btor2::symbolic_bitblast::ExactSymbolicOptions::default(),
-    )?;
+    let (lifted, names) = lift.lift_named()?;
+    let (btor2, applied) = crate::adapter::recoverability::apply_pins(&lifted, pins)?;
+    let (verdict, mut attribution) =
+        crate::adapter::recoverability::verify_recoverability_explained(
+            &btor2,
+            target,
+            extra_predicates,
+            &crate::adapter::btor2::symbolic_bitblast::ExactSymbolicOptions::default(),
+        )?;
+    attribution.trace = attribution.trace.map(|t| names.tidy(t));
     Ok((verdict, attribution, applied))
 }
 
@@ -308,8 +326,9 @@ pub fn sv_verify_recoverability_refined_explained(
     parse_predicate_expr(target).map_err(|e| {
         format!("recoverability target `{target}` is not a register-comparison atom: {e:?}")
     })?;
-    let (btor2, applied) = crate::adapter::recoverability::apply_pins(&lift.lift()?, pins)?;
-    let (verdict, refinement, attribution) =
+    let (lifted, names) = lift.lift_named()?;
+    let (btor2, applied) = crate::adapter::recoverability::apply_pins(&lifted, pins)?;
+    let (verdict, refinement, mut attribution) =
         crate::adapter::recoverability::verify_recoverability_refined_explained(
             &btor2,
             target,
@@ -317,6 +336,9 @@ pub fn sv_verify_recoverability_refined_explained(
             config_specs,
             discover_assumptions,
         );
+    if let Some(a) = attribution.as_mut() {
+        a.trace = a.trace.take().map(|t| names.tidy(t));
+    }
     Ok((verdict, refinement, attribution, applied))
 }
 

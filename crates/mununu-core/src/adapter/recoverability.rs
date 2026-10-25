@@ -1137,6 +1137,11 @@ pub struct RecoverabilityAttribution {
     pub exact_abstention: Option<AbstentionKind>,
     /// The exact engine's own abstention message, verbatim, when it abstained.
     pub exact_abstention_reason: Option<String>,
+    /// When the exact engine refuted `AG EF good`: its witness, reset → a state from which `good`
+    /// is unreachable → the cycle the run stays in, as a raw [`crate::trace::Trace`] (the lift's
+    /// cell names). The surface tidies it once with [`crate::trace::TraceNames::tidy`]. `None`
+    /// for every other verdict, and when the cube ladder decided (it has no concrete path).
+    pub trace: Option<crate::trace::Trace>,
 }
 
 /// [`verify_recoverability_with_options`] that also says WHICH rung decided.
@@ -1188,11 +1193,12 @@ pub fn verify_recoverability_explained(
             .map(std::time::Duration::from_millis),
         None,
     );
-    match ladder.result.map(|(v, _)| v) {
+    match ladder.result {
         // The exact engine decided (definite at every alternation depth per
         // Bruns–Godefroid) — return it unchanged; the exact-only behaviour is
-        // preserved when the exact engine gives a definite verdict.
-        Ok(v) => Ok((
+        // preserved when the exact engine gives a definite verdict. A refutation carries the
+        // engine's witness, the same one `sv verify-auto` reports for an `AG EF` row.
+        Ok((v, witness)) => Ok((
             PropertyVerdict::from(v),
             RecoverabilityAttribution {
                 engine: if ladder.stage == LADDER_STAGE_RESTRICTED {
@@ -1202,6 +1208,8 @@ pub fn verify_recoverability_explained(
                 },
                 exact_abstention: None,
                 exact_abstention_reason: None,
+                trace: witness
+                    .map(|w| crate::adapter::slang::verify_auto::lasso_trace(w, btor2_content)),
             },
         )),
         // Over the bit cap (40 by default, auto-raised to 192) or an unsupported construct: escalate to the
@@ -1226,6 +1234,7 @@ pub fn verify_recoverability_explained(
                         engine: RecoverabilityEngine::CubeLadder,
                         exact_abstention: Some(kind),
                         exact_abstention_reason: Some(reason),
+                        trace: None,
                     },
                 )
             })
@@ -1355,12 +1364,31 @@ pub fn verify_recoverability_refined_explained(
 /// Tie each named input to a constant (`--pin SIG=V` / API `pins`) before deciding, so `AG EF
 /// target` is asked with, typically, the reset held inactive. With the reset free every state
 /// recovers by pulsing it, and the plain verdict is a reset-escape `holds`. The tie is exact
-/// ([`crate::adapter::btor2::pin`]), not an abstraction. A name that is no input of the model is an
-/// error: a typo must not leave the reset free. Returns the rewritten BTOR2 and the applied pins
-/// as `NAME=VALUE`, sorted.
+/// ([`crate::adapter::btor2::pin`]), not an abstraction; a detected reset pinned inactive first
+/// seeds the post-reset start state. A name that is no input of the model is an error: a typo must
+/// not leave the reset free. Returns the rewritten BTOR2 and the applied pins as `NAME=VALUE`,
+/// sorted.
 pub fn apply_pins(btor2: &str, pins: &[(String, u64)]) -> Result<(String, Vec<String>), String> {
+    // A pinned reset held at its inactive value no longer establishes the start state, so the
+    // post-reset state is seeded first (`inject_reset_init`, before the tie): without it every
+    // register starts free and the verdict ranges over runs from states the design never
+    // occupies, such as an FSM's illegal encodings. A configuration pin, or a reset pinned
+    // active, seeds nothing.
+    let seeded = match crate::adapter::btor2::parser::parse(btor2) {
+        Ok(file) => {
+            let symbols = crate::adapter::btor2::parser::collect_symbols(&file);
+            let resets: Vec<(String, u64)> =
+                crate::adapter::fsm_scan::detect_resets(&file, &symbols)
+                    .into_iter()
+                    .filter(|reset| pins.contains(reset))
+                    .collect();
+            crate::adapter::btor2::reset_init::inject_reset_init(btor2, &resets)
+                .map_err(|e| format!("--pin: seeding the post-reset state: {}", e.message))?
+        }
+        Err(_) => btor2.to_string(),
+    };
     let (pinned_btor2, mut applied) =
-        crate::adapter::btor2::pin::pin_inputs_to_constants(btor2, pins);
+        crate::adapter::btor2::pin::pin_inputs_to_constants(&seeded, pins);
     let missing: Vec<&str> = pins
         .iter()
         .map(|(name, _)| name.as_str())

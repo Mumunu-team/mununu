@@ -1284,6 +1284,10 @@ pub struct Btor2VerifyRecoverabilityResponse {
     /// exact engine decided.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exact_abstention: Option<String>,
+    /// When the exact engine refuted the property: reset → a state from which the target is
+    /// unreachable → the cycle the run stays in (`kind: "lasso"`, `loop_start` marks the cycle).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace: Option<Trace>,
 }
 
 /// Request for the auto FSM illegal-encoding scan
@@ -2581,6 +2585,10 @@ pub struct SvVerifyRecoverabilityReport {
     /// `arena-overflow`, `iteration-budget`, …). Absent when the exact engine decided.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exact_abstention: Option<String>,
+    /// When the exact engine refuted the property: reset → a state from which the target is
+    /// unreachable → the cycle the run stays in (`kind: "lasso"`, `loop_start` marks the cycle).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace: Option<Trace>,
 }
 
 /// mununu#541 — the `sv verify-liveness` CLI report, schema-pinned. See

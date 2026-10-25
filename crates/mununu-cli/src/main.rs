@@ -3952,6 +3952,11 @@ fn btor2_verify_recoverability(args: Btor2VerifyRecoverabilityArgs) -> Result<()
         if let Some(kind) = a.exact_abstention {
             summary["exact_abstention"] = serde_json::Value::String(kind.label().to_string());
         }
+        if let Some(trace) = &a.trace {
+            summary["trace"] =
+                serde_json::to_value(mununu_core::trace::TraceNames::default().tidy(trace.clone()))
+                    .map_err(|e| format!("serialize trace: {e}"))?;
+        }
     }
 
     println!(
@@ -7124,6 +7129,7 @@ fn sv_verify_recoverability_impl(args: SvVerifyRecoverabilityArgs) -> Result<(),
         refinement: None,
         engine: None,
         exact_abstention: None,
+        trace: None,
     };
     let (verdict, attribution) =
         if args.refine || !config_specs.is_empty() || args.discover_assumptions {
@@ -7149,9 +7155,10 @@ fn sv_verify_recoverability_impl(args: SvVerifyRecoverabilityArgs) -> Result<(),
             (verdict, Some(attribution))
         };
     report.outcome = verdict.as_str().to_string();
-    if let Some(a) = &attribution {
+    if let Some(a) = attribution {
         report.engine = Some(a.engine.as_str().to_string());
         report.exact_abstention = a.exact_abstention.map(|k| k.label().to_string());
+        report.trace = a.trace;
     }
 
     print_typed_report(&report)?;

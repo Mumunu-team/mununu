@@ -1255,6 +1255,11 @@ fn btor2_verify_recoverability_handler_impl(
             .as_ref()
             .and_then(|a| a.exact_abstention)
             .map(|k| k.label().to_string()),
+        // The btor2 model has no lift to name its cells: the default names still move the
+        // verifier's cells out of `state`.
+        trace: attribution
+            .and_then(|a| a.trace)
+            .map(|t| crate::trace::TraceNames::default().tidy(t)),
     }))
 }
 
@@ -1662,6 +1667,8 @@ fn sv_verify_recoverability_handler_impl(
             .as_ref()
             .and_then(|a| a.exact_abstention)
             .map(|k| k.label().to_string()),
+        // Tidied in `sv_verify` with the lift's names.
+        trace: attribution.and_then(|a| a.trace),
     }))
 }
 
@@ -5656,10 +5663,35 @@ members = ["x"]
         assert!(out.exact_abstention.is_none(), "response: {out:?}");
     }
 
+    /// A pinned reset establishes the post-reset start state. The trap `st == 3` is reachable
+    /// only as an initial state (from reset the design stays at 0), so with the start state free
+    /// a pinned `AG EF (st == 0)` was refuted from a state the design never occupies.
+    #[tokio::test]
+    async fn a_pinned_reset_starts_recoverability_from_the_reset_state() {
+        const TRAP_ONLY_AT_POWER_UP: &str = "1 sort bitvec 1\n2 input 1 rst_n\n3 sort bitvec 2\n\
+4 state 3 st\n5 zero 3\n6 const 3 11\n7 eq 1 4 6\n8 ite 3 7 6 5\n9 ite 3 2 8 5\n10 next 3 4 9\n";
+        let request = Btor2VerifyRecoverabilityRequest {
+            content: TRAP_ONLY_AT_POWER_UP.to_string(),
+            target: "st == 0".to_string(),
+            predicates: Vec::new(),
+            refine: false,
+            pins: vec!["rst_n=1".to_string()],
+            partitions: Vec::new(),
+            discover_assumptions: false,
+        };
+        let Json(out) = btor2_verify_recoverability_handler(Json(request))
+            .await
+            .expect("runs");
+        assert_eq!(
+            out.outcome, "holds",
+            "from reset the trap is unreachable: {out:?}"
+        );
+    }
+
     /// A trap only the reset clears: with `rst_n` free every state recovers by pulsing it, so
     /// `AG EF (trapped == 0)` holds; pinned inactive (`pins: ["rst_n=1"]`), one `go` traps the
     /// design for good. The pin reaches the canonical verdict, not only a partition cell, and is
-    /// echoed; a pin that names no input is refused.
+    /// echoed; the refutation carries its trace; a pin that names no input is refused.
     #[tokio::test]
     async fn a_pinned_reset_decides_recoverability_out_of_reset() {
         const RESET_ONLY_ESCAPE: &str = "1 sort bitvec 1\n2 input 1 rst_n\n3 input 1 go\n\
@@ -5678,6 +5710,7 @@ members = ["x"]
             .expect("runs");
         assert_eq!(free.outcome, "holds", "the reset escape: {free:?}");
         assert!(free.pins.is_empty());
+        assert!(free.trace.is_none(), "a HOLDS has no counterexample");
         let Json(pinned) = btor2_verify_recoverability_handler(Json(request(&["rst_n=1"])))
             .await
             .expect("runs");
@@ -5686,6 +5719,25 @@ members = ["x"]
             "out of reset the trap is closed: {pinned:?}"
         );
         assert_eq!(pinned.pins, ["rst_n=1"]);
+        // The refutation carries the exact engine's witness: reset into the trap, then the cycle
+        // the run stays in, where the target `trapped == 0` never holds again.
+        let trace = pinned
+            .trace
+            .as_ref()
+            .expect("a refuted AG EF carries its witness");
+        let loop_start = trace.loop_start.expect("the witness ends in a cycle");
+        let trapped = |step: &crate::trace::TraceStep| {
+            step.state
+                .iter()
+                .find(|c| c.register == "trapped")
+                .and_then(|c| c.value)
+        };
+        assert!(
+            trace.steps[loop_start..]
+                .iter()
+                .all(|s| trapped(s) == Some(1)),
+            "{trace:?}"
+        );
         assert!(
             btor2_verify_recoverability_handler(Json(request(&["rst=1"])))
                 .await
