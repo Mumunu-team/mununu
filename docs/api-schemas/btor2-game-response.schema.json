@@ -425,6 +425,13 @@
           },
           "type": "array"
         },
+        "monitor": {
+          "description": "Cells the verifier added to the model (see [`is_monitor_cell`]): the property monitor's latches, `$past` shadows, fault-rewrite state. Kept for debugging, apart from `state`.",
+          "items": {
+            "$ref": "#/definitions/CexCellView"
+          },
+          "type": "array"
+        },
         "state": {
           "description": "Register cells (RTL); empty for a CTXDSL step, which names its state in `state_name`.",
           "items": {

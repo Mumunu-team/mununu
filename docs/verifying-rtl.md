@@ -326,20 +326,25 @@ formula, one `steps[]` entry per cycle with its register `state` and the `inputs
   [assert] u_s.hs_sub_sva_0: VIOLATED (1 cell(s))
         formula: nu X. (((u_s.q == 0)) && [] X)
         counterexample (reset -> violation):
-          [0] a__past=0, u_s.q=0
-              in: a=1, clk=0
-          [1] a__past=1, u_s.q=1
-              in: a=0, clk=0
+          [0] u_s.q=0
+              in: a=1
+          [1] u_s.q=1
+              in: a=0
+          (1 monitor cell(s) per step not shown: the property monitor's latches and $past shadows; --json lists them under steps[].monitor)
 ```
 
 (`a_sub_q_zero: assert property (q == 1'b0)` inside instance `u_s`, whose `q` follows the free
-input `a`; `__past` cells are the shadow registers `$past` reads.)
+input `a`.) A trace lists the **design's** registers in `state`: the cells the verifier adds — the
+monitor's history latches (`mununu_wit_…`), the `$past` shadows (`a__past`), fault-rewrite state —
+go to `steps[].monitor` ([`is_monitor_cell`](../crates/mununu-core/src/trace.rs)); a register yosys
+named through a bound checker's port (`u_x_sva.state_q`) shows the design's name (`state_q`) when the
+flattened netlist has that net on the same bits; and the clock, which the model steps implicitly, is
+not listed among the inputs.
 
 A path BMC finds is a genuine counterexample, so the trace also cross-checks the verdict. It is
 absent when the shortest path is deeper than 60 cycles plus the property's own depth, or when only
 the branching reading fails (`[] a || [] b` can be false at a state although every single path
-satisfies one of them). The monitor's history latches (`mununu_wit_…`) appear in the states beside
-the design's registers. Liveness carries a `lasso` trace (`loop_start` marks where the last step
+satisfies one of them). Liveness carries a `lasso` trace (`loop_start` marks where the last step
 loops back), a refuted `AG EF` decided by a trap certificate a `trap` trace, and a bare `EF p` an
 `unreachable` trace listing `unreachable_target`. Every verb that returns a path uses this one
 `Trace` shape since 0.5 (`btor2 verify` with `--witness` or a fault `--target`, cegar, the game's

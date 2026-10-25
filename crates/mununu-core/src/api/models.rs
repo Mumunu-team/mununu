@@ -2455,14 +2455,14 @@ impl From<&crate::adapter::slang::verify_auto::AutoVerifyReport> for SvVerifyAut
                     }),
                     seeded_predicates: p.seeded_predicates.clone(),
                     trace: p.counterexample.as_ref().map(|c| {
-                        Trace::from_cells(
+                        report.diagnostics.trace_names.tidy(Trace::from_cells(
                             cells(&c.prefix),
                             cells(&c.cycle),
                             cells(&c.inputs),
                             c.unreachable_target.clone(),
                             p.decided_by.as_deref()
                                 == Some(crate::adapter::slang::verify_auto::TRAP_CERTIFICATE_DECIDED_BY),
-                        )
+                        ))
                     }),
                 }
             })
@@ -3028,6 +3028,52 @@ mod bottom_reason_view_tests {
             decided_by: None,
             vacuity: None,
         }
+    }
+
+    /// A counterexample as the lift and the witness monitor name it — the design's `state_q` under
+    /// the bound checker's port name, the monitor's latches and a `$past` shadow beside it, the
+    /// clock among the inputs — reaches both surfaces as the design's registers, with the added
+    /// cells under `monitor` and no clock (`TraceNames`, measured on a `[*6]` antecedent).
+    #[test]
+    fn the_trace_shows_the_designs_registers_and_keeps_the_monitor_apart() {
+        use crate::adapter::btor2::cex_value::CexValue;
+        use crate::adapter::slang::verify_auto::ExactCounterexample;
+        let cell = |n: &str, v: u64, b: u32| (n.to_string(), CexValue::from_u64(v, b));
+        let mut report = AutoVerifyReport {
+            properties: vec![PropertyVerdict {
+                outcome: VerifyOutcome::Violated { false_cells: 1 },
+                counterexample: Some(ExactCounterexample {
+                    prefix: vec![vec![
+                        cell("lof_q", 1, 2),
+                        cell("mununu_wit_0", 1, 1),
+                        cell("running__past", 1, 1),
+                        cell("u_pump_seq_sva.state_q", 2, 3),
+                    ]],
+                    cycle: Vec::new(),
+                    inputs: vec![vec![cell("clk", 0, 1), cell("flow", 0, 1)]],
+                    unreachable_target: Vec::new(),
+                }),
+                ..bottom_prop(None)
+            }],
+            ..Default::default()
+        };
+        report.diagnostics.trace_names = crate::trace::TraceNames {
+            aliases: [("u_pump_seq_sva.state_q".to_string(), "state_q".to_string())].into(),
+            clocks: vec!["clk".into()],
+        };
+
+        let view = SvVerifyAutoResponse::from(&report);
+        let step = &view.properties[0]
+            .trace
+            .as_ref()
+            .expect("a violated row has a trace")
+            .steps[0];
+        let names =
+            |cells: &[CexCellView]| cells.iter().map(|c| c.register.clone()).collect::<Vec<_>>();
+        assert_eq!(names(&step.state), ["lof_q", "state_q"]);
+        assert_eq!(names(&step.monitor), ["mununu_wit_0", "running__past"]);
+        assert_eq!(names(&step.inputs), ["flow"]);
+        assert_eq!(step.state[1].value, Some(2), "renaming keeps the value");
     }
 
     /// monono ask 26 — the API surface must carry the reason too, not just the CLI.

@@ -34,6 +34,74 @@ pub struct CexCellView {
     pub bits: u32,
 }
 
+/// A cell the verifier added to the lifted model rather than one the design declares: the
+/// property monitor's history latches (`mununu_wit_…`), `$past` shadows (`x__past`), fault-rewrite
+/// state (`mununu_fault_…`), next-frame inputs (`x$next`) and the bit / popcount expansions of a
+/// relational atom. A trace lists these under [`TraceStep::monitor`], not beside the design's
+/// registers.
+pub fn is_monitor_cell(name: &str) -> bool {
+    name.starts_with("mununu_")
+        || name.starts_with("__mununu")
+        || name.contains("__past")
+        || name.contains("__bits")
+        || name.contains("__popcount")
+        || name.ends_with("$next")
+}
+
+/// How the lift names what a counterexample shows: the top-level alias of a register yosys named
+/// through a bound checker's port (`u_x_sva.state_q` for the design's `state_q`), and the clock
+/// nets, which the model steps implicitly and which a trace therefore never lists as inputs.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TraceNames {
+    /// Hierarchical register name → the top-level net on the same bits with the same leaf name.
+    pub aliases: std::collections::BTreeMap<String, String>,
+    pub clocks: Vec<String>,
+}
+
+impl TraceNames {
+    /// One state's cells, split into the design's registers (under their top-level alias when the
+    /// state does not already name it) and the [monitor cells](is_monitor_cell).
+    pub fn split_state(&self, state: &[CexCellView]) -> (Vec<CexCellView>, Vec<CexCellView>) {
+        let (monitor, design): (Vec<_>, Vec<_>) = state
+            .iter()
+            .cloned()
+            .partition(|c| is_monitor_cell(&c.register));
+        let named: std::collections::HashSet<&str> =
+            design.iter().map(|c| c.register.as_str()).collect();
+        let design = design
+            .iter()
+            .map(|c| match self.aliases.get(&c.register) {
+                Some(alias) if !named.contains(alias.as_str()) => CexCellView {
+                    register: alias.clone(),
+                    ..c.clone()
+                },
+                _ => c.clone(),
+            })
+            .collect();
+        (design, monitor)
+    }
+
+    /// One cycle's inputs without the clocks.
+    pub fn inputs(&self, inputs: &[CexCellView]) -> Vec<CexCellView> {
+        inputs
+            .iter()
+            .filter(|c| !self.clocks.contains(&c.register))
+            .cloned()
+            .collect()
+    }
+
+    /// `trace` with every step's state split and its inputs filtered (see [`Self::split_state`]).
+    pub fn tidy(&self, mut trace: Trace) -> Trace {
+        for step in &mut trace.steps {
+            let (design, monitor) = self.split_state(&step.state);
+            step.state = design;
+            step.monitor = monitor;
+            step.inputs = self.inputs(&step.inputs);
+        }
+        trace
+    }
+}
+
 /// What a [`Trace`] shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "api", derive(schemars::JsonSchema))]
@@ -83,6 +151,10 @@ pub struct TraceStep {
     /// The labels of the transition out of this step (CTXDSL).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub labels: Vec<String>,
+    /// Cells the verifier added to the model (see [`is_monitor_cell`]): the property monitor's
+    /// latches, `$past` shadows, fault-rewrite state. Kept for debugging, apart from `state`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub monitor: Vec<CexCellView>,
 }
 
 /// Replay artefacts attached to a [`Trace`].
@@ -211,6 +283,7 @@ impl Trace {
                     })
                     .collect(),
                 labels: Vec::new(),
+                monitor: Vec::new(),
             })
             .collect();
         Trace {
@@ -244,6 +317,7 @@ impl Trace {
                 inputs: inputs.next().unwrap_or_default(),
                 faults: Vec::new(),
                 labels: Vec::new(),
+                monitor: Vec::new(),
             })
             .collect();
         let kind = if !unreachable_target.is_empty() && steps.is_empty() {
@@ -279,6 +353,7 @@ impl Trace {
                 inputs: Vec::new(),
                 faults: Vec::new(),
                 labels: labels.get(i).into_iter().cloned().collect(),
+                monitor: Vec::new(),
             })
             .collect();
         Trace {
@@ -317,5 +392,60 @@ pub mod ser {
             .map(|p| Trace::from_states(p, &[], None))
             .collect();
         serde::Serialize::serialize(&t, s)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cell(register: &str, value: u64) -> CexCellView {
+        CexCellView {
+            register: register.into(),
+            value: Some(value),
+            hex: format!("0x{value:x}"),
+            bits: 3,
+        }
+    }
+
+    /// Every cell the lift, the property monitor or the fault rewrite adds is a monitor cell; a
+    /// design register is not, including a for-generate name (`gen$1.q`) or a sampled input.
+    #[test]
+    fn monitor_cells_are_the_ones_the_verifier_adds() {
+        for name in [
+            "mununu_wit_3",
+            "mununu_fault_cnt",
+            "__mununu_oob__",
+            "running__past",
+            "x__bits_2",
+            "req__popcount",
+            "flow$next",
+        ] {
+            assert!(is_monitor_cell(name), "{name}");
+        }
+        for name in ["state_q", "u_core.cnt_q", "gen$1.q", "flow"] {
+            assert!(!is_monitor_cell(name), "{name}");
+        }
+    }
+
+    /// An alias never collides with a register the state already names, and the clock leaves
+    /// the inputs while every other input stays.
+    #[test]
+    fn an_alias_yields_to_a_register_already_named_and_clocks_leave_the_inputs() {
+        let names = TraceNames {
+            aliases: [
+                ("u.a".to_string(), "a".to_string()),
+                ("u.b".to_string(), "b".to_string()),
+            ]
+            .into(),
+            clocks: vec!["clk".into()],
+        };
+        let (design, monitor) = names.split_state(&[cell("u.a", 1), cell("a", 2), cell("u.b", 3)]);
+        let regs: Vec<_> = design.iter().map(|c| c.register.as_str()).collect();
+        assert_eq!(regs, ["u.a", "a", "b"]);
+        assert!(monitor.is_empty());
+        let inputs = names.inputs(&[cell("clk", 0), cell("go", 1)]);
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].register, "go");
     }
 }

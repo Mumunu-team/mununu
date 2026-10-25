@@ -468,6 +468,9 @@ pub struct ModelDiagnostics {
     /// The registers the adversary may corrupt under the posture, with their width, the budget,
     /// why each was selected and the rows it serves. Empty without a posture.
     pub fault_sites: Vec<crate::adapter::btor2::fault::FaultSiteReport>,
+    /// How the counterexamples name the lift's registers and clocks (display only; see
+    /// [`crate::trace::TraceNames`]).
+    pub trace_names: crate::trace::TraceNames,
 }
 
 /// Severity of a [`VerificationNote`] — how it bears on the verdict's trust.
@@ -3836,6 +3839,8 @@ pub(crate) struct PreLift {
     pub backend_retry: Option<String>,
     /// The clock domains the lift merged (more than one only under `--merge-clock-domains`).
     pub clock_domains: Vec<crate::adapter::yosys::ClockDomain>,
+    /// How a counterexample names this lift's registers and clocks (display only).
+    pub trace_names: crate::trace::TraceNames,
 }
 
 /// Run the SV → BTOR2 lift (yosys) with the `auto_stub_flops` re-lift. Pure function of
@@ -3901,6 +3906,10 @@ pub(crate) fn lift_sv(
         frontend_used: lift.frontend_used,
         fallback_reason: lift.fallback_reason,
         backend_retry: lift.backend_retry,
+        trace_names: crate::trace::TraceNames {
+            aliases: crate::adapter::yosys::trace_aliases(&lift.flat_netlist_json),
+            clocks: lift.clock_domains.iter().map(|d| d.net.clone()).collect(),
+        },
         clock_domains: lift.clock_domains,
     })
 }
@@ -4308,7 +4317,9 @@ pub(crate) fn prepare_model(
         fallback_reason,
         backend_retry,
         clock_domains,
+        trace_names,
     } = lift_sv(sources, yosys_opts, opts)?;
+    report.diagnostics.trace_names = trace_names;
     if clock_domains.len() > 1 {
         report.diagnostics.merged_clock_domains = clock_domains
             .iter()

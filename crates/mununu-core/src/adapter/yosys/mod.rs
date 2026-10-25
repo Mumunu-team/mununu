@@ -1012,6 +1012,50 @@ pub(crate) fn net_names(body: &serde_json::Value) -> HashMap<i64, String> {
     names.into_iter().map(|(id, (_, n))| (id, n)).collect()
 }
 
+/// The top-level alias of every hierarchical net in the flattened netlist (`flat_netlist_json`)
+/// that carries the same bits and the same leaf name as a top-level net: a checker bound with
+/// `bind m m_sva u_sva (.*)` gives the design's `state_q` a second name, `u_sva.state_q`, and the
+/// BTOR2 state can come out under either. Only names change; the bits are identical by
+/// construction. Display only ([`crate::trace::TraceNames`]): the lifted model keeps its names.
+pub fn trace_aliases(flat_netlist_json: &str) -> std::collections::BTreeMap<String, String> {
+    let mut aliases = std::collections::BTreeMap::new();
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(flat_netlist_json) else {
+        return aliases;
+    };
+    let Some(modules) = json.get("modules").and_then(|m| m.as_object()) else {
+        return aliases;
+    };
+    let top = modules
+        .values()
+        .find(|m| m.get("attributes").and_then(|a| a.get("top")).is_some());
+    let Some(nets) = top
+        .or_else(|| {
+            (modules.len() == 1)
+                .then(|| modules.values().next())
+                .flatten()
+        })
+        .and_then(|m| m.get("netnames"))
+        .and_then(|n| n.as_object())
+    else {
+        return aliases;
+    };
+    let public = |net: &serde_json::Value| net.get("hide_name").and_then(|h| h.as_i64()) != Some(1);
+    let top_level: HashMap<(&str, String), &str> = nets
+        .iter()
+        .filter(|(name, net)| !name.contains('.') && public(net))
+        .map(|(name, net)| ((name.as_str(), net["bits"].to_string()), name.as_str()))
+        .collect();
+    for (name, net) in nets {
+        let Some((_, leaf)) = name.rsplit_once('.') else {
+            continue;
+        };
+        if let Some(alias) = top_level.get(&(leaf, net["bits"].to_string())) {
+            aliases.insert(name.clone(), (*alias).to_string());
+        }
+    }
+    aliases
+}
+
 /// The clock domains of a flattened design, from a `write_json` snapshot taken after `flatten`
 /// and before `async2sync`, on a copy cleaned by `opt_clean` (`design -save` / `-load` around it,
 /// so the lifted model is untouched). The cleaning matters: right after `flatten` a sub-instance's
@@ -2720,6 +2764,28 @@ mod tests {
             describe_clock_domains(&d[1..]),
             "clk_a (posedge, 2 cells), clk_b (posedge, 1 cell)"
         );
+    }
+
+    /// A bound checker's port name maps to the design's own net (same bits, same leaf), as in
+    /// the flattened snapshot of `bind pump_seq pump_seq_sva u (.*)`. A hierarchical net on
+    /// different bits, or with another leaf name, keeps its name, and garbage yields nothing.
+    #[test]
+    fn trace_aliases_map_a_bound_port_to_the_designs_net() {
+        let json = r#"{"modules": {"pump_seq": {
+            "attributes": {"top": "00000000000000000000000000000001"},
+            "netnames": {
+                "state_q": {"hide_name": 0, "bits": [11, 12, 13]},
+                "u_pump_seq_sva.state_q": {"hide_name": 0, "bits": [11, 12, 13]},
+                "u_pump_seq_sva.lof_q": {"hide_name": 0, "bits": [48, 49]},
+                "lof_q": {"hide_name": 0, "bits": [22, 23]},
+                "u_core.cnt": {"hide_name": 0, "bits": [11, 12, 13]}
+            },
+            "cells": {}
+        }}}"#;
+        let a = trace_aliases(json);
+        assert_eq!(a.len(), 1, "{a:?}");
+        assert_eq!(a["u_pump_seq_sva.state_q"], "state_q");
+        assert!(trace_aliases("not json").is_empty());
     }
 
     /// One clock is one domain, and a snapshot that does not parse reports none.

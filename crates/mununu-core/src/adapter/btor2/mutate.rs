@@ -209,6 +209,15 @@ pub fn list_targets(btor2: &str) -> Result<MutationTargets, String> {
         let Some(name) = names.get(&line.nid) else {
             continue;
         };
+        // A checker bound with `bind m m_sva u (.*)` gives the design's register a second,
+        // dotted name, and the state can come out under it: list the design's name when that
+        // name reaches the same cell (the mutation resolves either spelling).
+        let name = match name.rsplit_once('.') {
+            Some((_, leaf)) if parser::resolve_state_alias(&file, leaf, true) == Some(line.nid) => {
+                leaf.to_string()
+            }
+            _ => name.clone(),
+        };
         stick.push(name.clone());
         if reset_data_branch(&file, line.nid).is_some() {
             drop_reset.push(name.clone());
@@ -238,6 +247,24 @@ pub fn list_targets(btor2: &str) -> Result<MutationTargets, String> {
             invert_cond.push(name.clone());
         }
     }
+    // A bound checker's port is the net it is connected to: leave out a dotted name whose leaf is
+    // already a target or a primary input (the checker's `clk`, `rst_n`, a sampled input), which
+    // a mutation would only reach a second time or not at all.
+    let primary_inputs: std::collections::HashSet<&str> = file
+        .lines
+        .iter()
+        .filter_map(|l| match &l.node {
+            Node::Input {
+                symbol: Some(s), ..
+            } => Some(s.as_str()),
+            _ => None,
+        })
+        .collect();
+    let listed: std::collections::HashSet<String> = invert_cond.iter().cloned().collect();
+    invert_cond.retain(|name| match name.rsplit_once('.') {
+        Some((_, leaf)) => !listed.contains(leaf) && !primary_inputs.contains(leaf),
+        None => true,
+    });
 
     for v in [
         &mut stick,
@@ -873,6 +900,39 @@ mod tests {
                 &Mutation::parse("invert-cond:nope").unwrap()
             )
             .is_err()
+        );
+    }
+
+    // A checker bound with `bind top top_sva u (.*)`: the state carries the checker's port name
+    // (`u.q`), the design exposes the same cell as the output `q`, and the checker's `clk` port
+    // mirrors the primary input.
+    const BOUND_CHECKER: &str = "1 sort bitvec 1\n2 input 1 clk\n3 input 1 d\n\
+4 state 1 u.q\n5 zero 1\n6 init 1 4 5\n7 next 1 4 3\n8 output 4 q\n\
+9 uext 1 2 0 u.clk\n10 uext 1 4 0 u.q_alias\n";
+
+    #[test]
+    fn list_targets_names_a_bound_register_by_the_designs_name_and_skips_mirrored_ports() {
+        let t = list_targets(BOUND_CHECKER).expect("list");
+        assert_eq!(
+            t.stick,
+            vec!["q".to_string()],
+            "the design's name, not `u.q`"
+        );
+        assert!(
+            !t.invert_cond.iter().any(|n| n == "u.q" || n == "u.clk"),
+            "a port mirroring a listed signal or a primary input is not a second target: {:?}",
+            t.invert_cond
+        );
+        assert!(
+            t.invert_cond.contains(&"q".to_string()),
+            "{:?}",
+            t.invert_cond
+        );
+        let file = parser::parse(BOUND_CHECKER).expect("parse");
+        assert_eq!(
+            resolve_state_nid(&file, "q"),
+            Some(4),
+            "the listed name applies"
         );
     }
 
