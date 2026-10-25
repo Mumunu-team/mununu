@@ -249,16 +249,12 @@ impl PropertyVerdict {
     /// `faults`, and no clock or added input ([`crate::trace::TraceNames::tidy`]). `None` when the
     /// row has no counterexample.
     pub fn trace(&self, names: &crate::trace::TraceNames) -> Option<crate::trace::Trace> {
-        use crate::trace::{Trace, cex_cells};
-        let c = self.counterexample.as_ref()?;
-        let cells = |v: &[Vec<(String, CexValue)>]| v.iter().map(|s| cex_cells(s)).collect();
-        Some(names.tidy(Trace::from_cells(
-            cells(&c.prefix),
-            cells(&c.cycle),
-            cells(&c.inputs),
-            c.unreachable_target.clone(),
-            self.decided_by.as_deref() == Some(TRAP_CERTIFICATE_DECIDED_BY),
-        )))
+        self.counterexample.as_ref().map(|c| {
+            names.tidy(counterexample_trace(
+                c,
+                self.decided_by.as_deref() == Some(TRAP_CERTIFICATE_DECIDED_BY),
+            ))
+        })
     }
 }
 
@@ -357,6 +353,33 @@ fn exact_counterexample_from_lasso(
         inputs: conv(lasso.inputs),
         unreachable_target: Vec::new(),
     }
+}
+
+/// An exact-engine witness (stall lasso / trap path) of `btor2` as a raw
+/// [`crate::trace::Trace`], each cell at its real width: the counterexample the recoverability
+/// verbs report, built the way `sv verify-auto` builds an `AG EF` row's.
+pub(crate) fn lasso_trace(
+    lasso: crate::adapter::btor2::symbolic_bitblast::StallLasso,
+    btor2: &str,
+) -> crate::trace::Trace {
+    counterexample_trace(
+        &exact_counterexample_from_lasso(lasso, &cell_widths_of(btor2)),
+        false,
+    )
+}
+
+/// A counterexample as a [`crate::trace::Trace`] under the lift's own cell names, not yet tidied;
+/// `trap` marks a trap-certificate path.
+fn counterexample_trace(c: &ExactCounterexample, trap: bool) -> crate::trace::Trace {
+    use crate::trace::{Trace, cex_cells};
+    let cells = |v: &[Vec<(String, CexValue)>]| v.iter().map(|s| cex_cells(s)).collect();
+    Trace::from_cells(
+        cells(&c.prefix),
+        cells(&c.cycle),
+        cells(&c.inputs),
+        c.unreachable_target.clone(),
+        trap,
+    )
 }
 
 /// The width of every named cell of a model's BTOR2 text (empty when it does not parse) — the

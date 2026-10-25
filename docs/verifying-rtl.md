@@ -111,9 +111,18 @@ free reset input is one more way back: every state "recovers" by pulsing it, so 
 verdict answers "can the design recover, reset included" and is `holds` on any design whose reset
 reaches the target. `--pin rst_n=1` (repeatable, `SIGNAL=VALUE`; API `pins`) ties the input to the
 constant before deciding, so `outcome`, the exit code and the `pins` field it echoes are for
-recovery out of reset. A name that is no input of the model is an error. `--partition rst_n=0,1`
+recovery out of reset. A pinned reset no longer establishes the start state by itself, so a detected
+reset pinned at its inactive value first seeds the post-reset state (the same `inject_reset_init`
+`sv verify-auto` runs): the run starts where the design starts after reset, not from every state,
+illegal encodings included. A name that is no input of the model is an error. `--partition rst_n=0,1`
 splits the verdict over the values instead, in the `refinement`, and leaves `outcome` the
 reset-free answer. Both verbs take it: `btor2 verify-recoverability` and `sv verify-recoverability`.
+
+**The trap, as a trace.** A `violated` decided by the exact engine carries `trace` (`kind: "lasso"`):
+the path from reset into a state from which the target is unreachable, then the cycle the run stays
+in (`loop_start` marks it), with the inputs that drive each step. On `sv verify-recoverability` the
+cells carry the design's names and the clock is left out, as on `sv verify-auto`. A verdict the cube
+ladder reaches has no concrete path and no `trace`.
 
 For designs wider than the exact engine's cap, the same `AG EF` formula scales via
 predicate abstraction on the `btor2 cegar … --must-edge-inference smt-hyper-must`
