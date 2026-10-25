@@ -932,12 +932,11 @@ pub fn resolve_state_by_symbol(file: &Btor2File, symbol: &str) -> Option<Nid> {
 /// Followed edges:
 /// - the state itself; an `output` of a passthrough; `uext`/`sext` by 0 (a
 ///   Yosys rename);
-/// - when `allow_reset_mux` is set, an `ite(cond, A, B)` where exactly one of
-///   `A`/`B` resolves to a state via passthrough and the other is a constant —
-///   the async-reset register mux that `async2sync` emits (`q = !rst ? state :
-///   resetval`). The constant (reset-value) branch is taken only during reset,
-///   which the verify-auto path pins inactive, so the register's value equals
-///   the state then. Pass `false` when the reset is not pinned.
+/// - when `allow_reset_mux` is set, the async-reset register mux that `async2sync`
+///   emits (`q = rst_n ? state : resetval`): with the reset pinned (`rst_n` became a
+///   constant), into the branch the constant selects; with the reset still a free
+///   input, the arm that is the state when the other arm is the reset value. A mux
+///   on internal logic is a function, not an alias, however its arms look.
 pub fn resolve_state_alias(file: &Btor2File, symbol: &str, allow_reset_mux: bool) -> Option<Nid> {
     let start = file.lines.iter().find_map(|l| match &l.node {
         Node::State {
@@ -976,19 +975,44 @@ fn follow_state_alias(
             Op::Uext | Op::Sext if line.immediates.first() == Some(&0) && args.len() == 1 => {
                 follow_state_alias(file, args[0].nid(), allow_reset_mux, visited)
             }
-            // Async-reset register mux: exactly one branch is the state (via
-            // passthrough), the other a constant (the reset value).
+            // The async-reset register mux (`q = rst_n ? state : resetval`). With the reset pinned
+            // its condition is a constant, and the `ite` IS the branch that constant selects. An
+            // unpinned reset (a free primary input, where a caller names registers before any
+            // pin) keeps the async-reset reading: one arm the state, the other the reset value.
+            // SOUNDNESS: a mux on internal logic is a function, never an alias, whatever its arms
+            // are — `ch_trip = link_fault ? 7 : data_q` has the reset mux's shape and used to be
+            // bound to `data_q`, so `link_fault |-> ch_trip == 7` came back a false VIOLATED.
+            // RESIDUAL: a mux on a free input that is not the reset (`o = bypass_i ? '0 : q`) has
+            // the unpinned reset's shape and is still read as `q`.
             Op::Ite if allow_reset_mux && args.len() == 3 => {
-                let then_nid = args[1].nid();
-                let else_nid = args[2].nid();
-                let then_state =
-                    follow_state_alias(file, then_nid, allow_reset_mux, &mut visited.clone());
-                let else_state =
-                    follow_state_alias(file, else_nid, allow_reset_mux, &mut visited.clone());
-                match (then_state, else_state) {
-                    (Some(s), None) if resolves_to_const(file, else_nid) => Some(s),
-                    (None, Some(s)) if resolves_to_const(file, then_nid) => Some(s),
-                    _ => None,
+                match constant_condition(file, args[0]) {
+                    Some(true) => follow_state_alias(file, args[1].nid(), allow_reset_mux, visited)
+                        .filter(|_| !args[1].is_negated()),
+                    Some(false) => {
+                        follow_state_alias(file, args[2].nid(), allow_reset_mux, visited)
+                            .filter(|_| !args[2].is_negated())
+                    }
+                    None if is_primary_input(file, args[0]) => {
+                        let (then_nid, else_nid) = (args[1].nid(), args[2].nid());
+                        let then_state = follow_state_alias(
+                            file,
+                            then_nid,
+                            allow_reset_mux,
+                            &mut visited.clone(),
+                        );
+                        let else_state = follow_state_alias(
+                            file,
+                            else_nid,
+                            allow_reset_mux,
+                            &mut visited.clone(),
+                        );
+                        match (then_state, else_state) {
+                            (Some(s), None) if resolves_to_const(file, else_nid) => Some(s),
+                            (None, Some(s)) if resolves_to_const(file, then_nid) => Some(s),
+                            _ => None,
+                        }
+                    }
+                    None => None,
                 }
             }
             _ => None,
@@ -1185,6 +1209,57 @@ pub fn canonical_register_names(file: &Btor2File) -> HashMap<Nid, String> {
 
 /// True when `nid` is a constant, or a `uext`/`sext`-by-0 passthrough of one
 /// (the shape `async2sync` gives a reset value).
+/// The value of a 1-bit condition operand that is a constant — through `uext`/`sext` by 0, `not`
+/// and the operand's own negation — or `None` when it is not one (an input, a state, logic).
+fn constant_condition(file: &Btor2File, cond: crate::adapter::btor2::ast::Operand) -> Option<bool> {
+    use crate::adapter::btor2::ast::{ConstValue, Op};
+    let line = file.lookup(cond.nid())?;
+    let value = match &line.node {
+        Node::Const { value, .. } => match value {
+            ConstValue::Zero => false,
+            ConstValue::One | ConstValue::Ones => true,
+            ConstValue::Bin(b) => b.chars().any(|c| c == '1'),
+            ConstValue::Dec(d) => *d != 0,
+            ConstValue::Hex(h) => h.chars().any(|c| c != '0'),
+        },
+        Node::Op {
+            op: Op::Uext | Op::Sext,
+            args,
+            ..
+        } if line.immediates.first() == Some(&0) && args.len() == 1 => {
+            constant_condition(file, args[0])?
+        }
+        Node::Op {
+            op: Op::Not, args, ..
+        } if args.len() == 1 => !constant_condition(file, args[0])?,
+        _ => return None,
+    };
+    Some(value != cond.is_negated())
+}
+
+/// Whether a condition operand is a primary input — through `uext`/`sext` by 0 and `not` — the
+/// shape of an async reset no pin has tied yet.
+fn is_primary_input(file: &Btor2File, cond: crate::adapter::btor2::ast::Operand) -> bool {
+    use crate::adapter::btor2::ast::Op;
+    let Some(line) = file.lookup(cond.nid()) else {
+        return false;
+    };
+    match &line.node {
+        Node::Input { .. } => true,
+        Node::Op {
+            op: Op::Uext | Op::Sext,
+            args,
+            ..
+        } if line.immediates.first() == Some(&0) && args.len() == 1 => {
+            is_primary_input(file, args[0])
+        }
+        Node::Op {
+            op: Op::Not, args, ..
+        } if args.len() == 1 => is_primary_input(file, args[0]),
+        _ => false,
+    }
+}
+
 fn resolves_to_const(file: &Btor2File, nid: Nid) -> bool {
     use crate::adapter::btor2::ast::Op;
     match file.lookup(nid).map(|l| (&l.node, l)) {
@@ -1515,7 +1590,8 @@ mod tests {
     /// not (the named node stays its own signal).
     #[test]
     fn x711_a_name_is_forwarded_to_a_register_only_along_an_identity() {
-        let src = "1 sort bitvec 2\n2 sort bitvec 1\n3 input 2 rst_ni\n4 state 1\n\
+        // The reset pinned inactive (`3 one 2 rst_ni`), as the verify-auto path leaves it.
+        let src = "1 sort bitvec 2\n2 sort bitvec 1\n3 one 2 rst_ni\n4 state 1\n\
                    5 const 1 10\n6 ite 1 3 4 5\n7 uext 1 6 0 q_alias\n\
                    8 slice 2 6 1 1\n9 slice 2 6 0 0\n10 concat 1 9 8\n11 uext 1 10 0 swapped\n\
                    12 state 1\n13 not 1 12\n14 uext 1 13 0 inverted\n";
@@ -1524,6 +1600,12 @@ mod tests {
         assert_eq!(names.get(&4).map(String::as_str), Some("q_alias"));
         assert_eq!(names.get(&12), None, "an inverted alias names no register");
         assert!(!names.values().any(|n| n == "swapped" || n == "inverted"));
+        // An unpinned reset (a free input) keeps the async-reset reading.
+        let free = parse(&src.replace("3 one 2 rst_ni", "3 input 2 rst_ni")).expect("parses");
+        assert_eq!(
+            super::collect_symbols(&free).get(&4).map(String::as_str),
+            Some("q_alias")
+        );
     }
 
     /// mununu#711 — the exact engine reads an inverted alias as the alias, not the register: the
@@ -1728,13 +1810,42 @@ mod tests {
         // bit_cnt_q = uext-0(ite(rst_n, state5, const3)) — the async-reset
         // register mux + a Yosys `uext _ _ 0` rename, the shape `async2sync`
         // emits. It is value-identical to state 5 while reset is inactive.
-        let src = "1 sort bitvec 1\n2 sort bitvec 4\n3 const 2 0000\n4 input 1 rst_n\n\
+        // The reset is pinned (`4 one 1 rst_n`), as on the verify-auto path.
+        let src = "1 sort bitvec 1\n2 sort bitvec 4\n3 const 2 0000\n4 one 1 rst_n\n\
                    5 state 2\n6 ite 2 4 5 3\n7 uext 2 6 0 bit_cnt_q\n";
         let file = parse(src).expect("parse");
         // Reset-mux following on (reset pinned): resolves to the state.
         assert_eq!(resolve_state_alias(&file, "bit_cnt_q", true), Some(5));
         // Reset-mux following off: the `ite` is not a pure passthrough → None.
         assert_eq!(resolve_state_alias(&file, "bit_cnt_q", false), None);
+        // Pinned to the ACTIVE value instead, the mux selects the constant: no alias.
+        let active = src.replace("4 one 1 rst_n", "4 zero 1 rst_n");
+        assert_eq!(
+            resolve_state_alias(&parse(&active).expect("parse"), "bit_cnt_q", true),
+            None
+        );
+    }
+
+    /// A mux with the reset mux's SHAPE on an ordinary signal is a function, not an alias: the
+    /// EmTech `sensor_monitor` output `ch_trip = link_fault ? 3'b111 : data_q` (over the pinned
+    /// reset mux of `data_q`) was bound to `data_q`, and `link_fault |-> ch_trip == 7` came back
+    /// VIOLATED although every engine finds `link_fault && ch_trip != 7` unreachable.
+    #[test]
+    fn a_mux_on_a_non_constant_condition_is_not_an_alias() {
+        let src = "1 sort bitvec 1\n2 one 1 rst_n\n3 sort bitvec 3\n4 const 3 111\n\
+                   5 state 3\n6 ite 3 2 5 4 data_q\n7 state 1\n8 uext 1 7 0 link_fault\n\
+                   9 ite 3 7 4 6\n10 output 9 ch_trip\n";
+        let file = parse(src).expect("parse");
+        assert_eq!(
+            resolve_state_alias(&file, "data_q", true),
+            Some(5),
+            "the pinned reset mux"
+        );
+        assert_eq!(
+            resolve_state_alias(&file, "ch_trip", true),
+            None,
+            "a function of link_fault"
+        );
     }
 
     #[test]

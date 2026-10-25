@@ -9086,6 +9086,33 @@ pub(crate) fn bdd_nodes_height(f: &BDDFunction) -> (usize, usize) {
 
 #[cfg(test)]
 mod tests {
+    /// A mux on internal logic is not read as the register behind its arm. The EmTech
+    /// `sensor_monitor` output `ch_trip = link_fault ? 3'b111 : data_q` (with `data_q`'s pinned
+    /// reset mux beneath it) was resolved to `data_q`, so `AG(link_fault → ch_trip == 7)` came
+    /// back VIOLATED: the engine read `data_q == 7` under `link_fault`, which is reachable, while
+    /// every safety engine finds `link_fault ∧ ch_trip ≠ 7` unreachable. Both arms of the mux and
+    /// the flag are free here, so the only way to violate it is the misbinding.
+    #[test]
+    fn a_mux_on_internal_logic_is_read_as_the_mux_not_its_register() {
+        let src = "1 sort bitvec 1\n2 one 1 rst_n\n3 sort bitvec 3\n4 const 3 111\n\
+                   5 state 3\n6 zero 3\n7 init 3 5 6\n8 input 3 d\n9 next 3 5 8\n\
+                   10 ite 3 2 5 4\n11 uext 3 10 0 data_q\n12 state 1\n13 zero 1\n\
+                   14 init 1 12 13\n15 input 1 f\n16 next 1 12 15\n17 uext 1 12 0 link_fault\n\
+                   18 ite 3 12 4 10\n19 output 18 ch_trip\n";
+        let verdict = |f: &str| {
+            exact_symbolic_verdict(src, &crate::mu_calculus::parser::parse(f).unwrap()).unwrap()
+        };
+        assert_eq!(
+            verdict("nu X. ((!(link_fault) || (ch_trip == 7)) && [] X)"),
+            ExactVerdict::Holds
+        );
+        // The register itself is still free under `link_fault`: the check is not vacuous.
+        assert_eq!(
+            verdict("nu X. ((!(link_fault) || (data_q == 7)) && [] X)"),
+            ExactVerdict::Violated
+        );
+    }
+
     /// mununu#543 — the validator accepts a WELL-FORMED diagram and is not vacuous.
     ///
     /// A validator that never fires is indistinguishable from one that cannot fire, so this pairs
