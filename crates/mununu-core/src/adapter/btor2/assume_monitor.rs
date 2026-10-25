@@ -17,9 +17,11 @@
 //! lets the guarantee rewrite (`adapter::slang::assume_guarantee::relativize`) guard each boolean
 //! block of a guarantee with `!ok ||` instead of rewriting its modal structure.
 //!
-//! **Shapes applied** ([`assume_shape`]): `AG B` (`assume property (B)`) and `AG (A → AX C)`
-//! (`A |=> C`), each with an optional kept `disable iff (D)`. Every other shape is not applied and
-//! is reported — the guarantees are then checked without it, which is the stronger obligation.
+//! **Shapes applied** ([`assume_shape`]): `AG B` (`assume property (B)`), `AG (A → AX C)`
+//! (`A |=> C`) and its bounded-sequence form `AG (A₁ → AX (A₂ → … AX C))` (`A₁ ##1 … ##1 Aₙ |=> C`,
+//! the translation of `A[*n] |=> C`: a datasheet's "a heartbeat at least every 8 cycles"), each
+//! with an optional kept `disable iff (D)`. Every other shape is not applied and is reported — the
+//! guarantees are then checked without it, which is the stronger obligation.
 //!
 //! **Every lossy step weakens an assumption, never strengthens it** — an assumption that is too
 //! strong prunes real traces and turns a VIOLATED into a false HOLDS:
@@ -69,6 +71,12 @@ pub enum AssumeShape {
         neg_ante: NodeId,
         cons: NodeId,
     },
+    /// `AG (A₁ → AX (A₂ → … AX C))`, two or more antecedent steps: `block` is the outermost
+    /// `¬A₁ ∨ [] (…)` ([`chain_parts`] splits it); `disable` a kept `disable iff (D)`.
+    Chain {
+        disable: Option<NodeId>,
+        block: NodeId,
+    },
 }
 
 fn is_boolean(f: &Formula, id: NodeId) -> bool {
@@ -104,8 +112,38 @@ fn implication(f: &Formula, id: NodeId) -> Option<(NodeId, NodeId)> {
     }
 }
 
+/// A bounded implication chain `¬A₁ ∨ [] (¬A₂ ∨ [] (… ∨ [] C))`, every `¬Aₖ` and `C` boolean:
+/// the `¬Aₖ` disjuncts as written, outermost first, and `C`. `None` for any other shape.
+pub fn chain_parts(f: &Formula, id: NodeId) -> Option<(Vec<NodeId>, NodeId)> {
+    let mut neg_antes = Vec::new();
+    let mut cur = id;
+    loop {
+        let Node::Or(x, y) = f.node(cur) else {
+            return None;
+        };
+        let unguarded_box = |id: NodeId| match f.node(id) {
+            Node::Modal {
+                kind: ModalKind::Box,
+                guard,
+                target,
+            } if *guard == Guard::default() => Some(*target),
+            _ => None,
+        };
+        let (neg, target) = match (unguarded_box(*x), unguarded_box(*y)) {
+            (None, Some(t)) if is_boolean(f, *x) => (*x, t),
+            (Some(t), None) if is_boolean(f, *y) => (*y, t),
+            _ => return None,
+        };
+        neg_antes.push(neg);
+        if is_boolean(f, target) {
+            return Some((neg_antes, target));
+        }
+        cur = target;
+    }
+}
+
 /// Classify an assumption's translated formula (`nu X. (BODY && [] X)`). `None` for a shape the
-/// monitor does not apply (bounded sequences, liveness, anything with a nested modality).
+/// monitor does not apply (unbounded sequences, liveness, a modality the chain does not cover).
 pub fn assume_shape(f: &Formula) -> Option<AssumeShape> {
     let Node::Nu { var, body } = f.node(f.root()) else {
         return None;
@@ -142,6 +180,21 @@ pub fn assume_shape(f: &Formula) -> Option<AssumeShape> {
             disable: Some(*d),
             neg_ante,
             cons,
+        });
+    }
+    if chain_parts(f, block).is_some_and(|(n, _)| n.len() >= 2) {
+        return Some(AssumeShape::Chain {
+            disable: None,
+            block,
+        });
+    }
+    if let Node::Or(d, inner) = f.node(block)
+        && is_boolean(f, *d)
+        && chain_parts(f, *inner).is_some_and(|(n, _)| n.len() >= 2)
+    {
+        return Some(AssumeShape::Chain {
+            disable: Some(*d),
+            block: *inner,
         });
     }
     None
@@ -291,6 +344,52 @@ pub fn emit_assume_ok_monitor(
                     }
                     h
                 }
+                // One latch per antecedent step: `l₁` is set by an armed `A₁`, `lₖ₊₁` by `lₖ ∧ Aₖ₊₁`,
+                // and the obligation `C` falls due when `lₙ` is set — the cycle the sequence ends,
+                // so a break is seen exactly when it happens. A `D` at any step voids the attempt.
+                AssumeShape::Chain { disable, block } => {
+                    let (neg_antes, cons) = chain_parts(f, block).expect("classified as a chain");
+                    let disabled = match disable {
+                        Some(d) => Some(compile(d, &mut next, &mut out)?),
+                        None => None,
+                    };
+                    let emit = |line: String, next: &mut Nid, out: &mut Vec<String>| {
+                        let n = *next;
+                        *next += 1;
+                        out.push(format!("{n} {line}"));
+                        n
+                    };
+                    let live = match disabled {
+                        Some(d) => emit(format!("not {b} {d}"), &mut next, &mut out),
+                        None => one,
+                    };
+                    let mut latch: Option<Nid> = None;
+                    for (k, na) in neg_antes.iter().enumerate() {
+                        let n = compile(*na, &mut next, &mut out)?;
+                        let a = emit(format!("not {b} {n}"), &mut next, &mut out);
+                        let step = match latch {
+                            None => emit(format!("and {b} {a} {arm_warm}"), &mut next, &mut out),
+                            Some(l) => emit(format!("and {b} {a} {l}"), &mut next, &mut out),
+                        };
+                        let step = emit(format!("and {b} {step} {live}"), &mut next, &mut out);
+                        let l = emit(
+                            format!("state {b} mununu_assume_chain_{i}_{k}"),
+                            &mut next,
+                            &mut out,
+                        );
+                        emit(format!("init {b} {l} {zero}"), &mut next, &mut out);
+                        emit(format!("next {b} {l} {step}"), &mut next, &mut out);
+                        latch = Some(l);
+                    }
+                    let last = latch.expect("a chain has two or more steps");
+                    let c = compile(cons, &mut next, &mut out)?;
+                    let idle = emit(format!("not {b} {last}"), &mut next, &mut out);
+                    let mut h = emit(format!("or {b} {idle} {c}"), &mut next, &mut out);
+                    if let Some(d) = disabled {
+                        h = emit(format!("or {b} {h} {d}"), &mut next, &mut out);
+                    }
+                    h
+                }
             };
             // An invariant holds trivially before its history fills (an `|=>` hold is already
             // gated by its armed latch, so `hold_after` is 0 for it).
@@ -437,6 +536,63 @@ mod tests {
         // A disable at the consequent's cycle voids the obligation instead.
         let (_, ok) = step(&m, &r, &inp(0, 1));
         assert_eq!(ok, 1, "disabled mid-attempt");
+    }
+
+    /// `req ##1 req |=> gnt` (the shape `req[*2] |=> gnt` translates to) is a chain, with or
+    /// without a kept `disable iff`.
+    #[test]
+    fn a_bounded_sequence_antecedent_is_a_chain() {
+        let shape = |s: &str| assume_shape(&crate::mu_calculus::parser::parse(s).unwrap());
+        assert!(matches!(
+            shape("nu X. (((!(req)) || [] ((!(req)) || [] gnt)) && [] X)"),
+            Some(AssumeShape::Chain { disable: None, .. })
+        ));
+        assert!(matches!(
+            shape("nu X. ((rst || ((!(req)) || [] ((!(req)) || [] gnt))) && [] X)"),
+            Some(AssumeShape::Chain {
+                disable: Some(_),
+                ..
+            })
+        ));
+        // The translator's own spelling of `(running && !flow)[*2] |=> lof_trip` (as printed in
+        // a verify-auto report): every step wrapped in its own parentheses.
+        assert!(matches!(
+            shape(
+                "nu X. (((!((running && (!(flow)))) || [] (!((running && (!(flow)))) || [] lof_trip))) && [] X)"
+            ),
+            Some(AssumeShape::Chain { disable: None, .. })
+        ));
+    }
+
+    /// The chain's obligation falls due the cycle the antecedent sequence ends, a break in the
+    /// sequence cancels the attempt, and the monitor reads the inputs one cycle at a time.
+    #[test]
+    fn a_chain_assumption_obliges_the_consequent_when_the_sequence_ends() {
+        // `assume property (req ##1 req |=> gnt)`.
+        let (m, outcome) = monitor("nu X. (((!(req)) || [] ((!(req)) || [] gnt)) && [] X)", 0);
+        assert_eq!(outcome, vec![None]);
+        let inp = |req: u128, gnt: u128| {
+            HashMap::from([("req".to_string(), req), ("gnt".to_string(), gnt)])
+        };
+        let init: HashMap<String, u128> = HashMap::from([
+            ("mununu_assume_prev_ok".to_string(), 1),
+            ("mununu_assume_chain_0_0".to_string(), 0),
+            ("mununu_assume_chain_0_1".to_string(), 0),
+        ]);
+        // req, req, then no gnt: broken in the third cycle, not before.
+        let (r, ok) = step(&m, &init, &inp(1, 0));
+        assert_eq!(ok, 1);
+        let (r, ok) = step(&m, &r, &inp(1, 0));
+        assert_eq!(ok, 1, "the sequence has not ended yet");
+        let (_, ok) = step(&m, &r, &inp(0, 0));
+        assert_eq!(ok, 0, "req ##1 req ended and gnt did not follow");
+        // req, a gap, req: the sequence broke, so nothing is owed.
+        let (r, _) = step(&m, &init, &inp(1, 0));
+        let (r, _) = step(&m, &r, &inp(0, 0));
+        let (r, ok) = step(&m, &r, &inp(1, 0));
+        assert_eq!(ok, 1);
+        let (_, ok) = step(&m, &r, &inp(0, 0));
+        assert_eq!(ok, 1, "one req after the gap is not the two-cycle sequence");
     }
 
     #[test]
