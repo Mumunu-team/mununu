@@ -504,8 +504,11 @@ input is the environment's choice: a property whose first temporal operator is e
 cannot make a reachable cover look unreachable (mununu#757); universal properties quantify that
 input universally.
 
-**Applied:** `assume property (B)` and `A |=> B` over booleans (expressions included), each with
-an optional `disable iff`. Any other shape is reported under `unapplied` with the reason, and the
+**Applied:** `assume property (B)`, `A |=> B`, and the bounded sequence `A1 ##1 … ##1 An |=> B`
+(the form `A[*n] |=> B` translates to, as in a datasheet's "a heartbeat at least every 8 cycles":
+`(!hb)[*7] |=> hb`), all over booleans (expressions included), each with an optional `disable iff`.
+A sequence is tracked with one latch per step, so its obligation falls due in the cycle the
+sequence ends and a break in the sequence cancels the attempt. Any other shape is reported under `unapplied` with the reason, and the
 guarantees are checked without it — the stronger obligation. Every lossy step makes an assumption
 WEAKER, never stronger: an obligation that reads `$past` is enforced only once that history is
 filled, and a `disable iff` voids the attempt at any of its cycles.

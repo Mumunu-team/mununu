@@ -782,8 +782,8 @@ fn plan_assumptions(
         } else {
             rep.unapplied.push((
                 display(a),
-                "only `assume property (B)` and `A |=> B` over booleans are applied as \
-                 preconditions"
+                "only `assume property (B)`, `A |=> B` and `A1 ##1 ... ##1 An |=> B` (e.g. \
+                 `A[*n] |=> B`) over booleans are applied as preconditions"
                     .to_string(),
             ));
         }
@@ -4554,6 +4554,13 @@ pub(crate) fn prepare_model(
                         arm_after: depth(neg_ante)
                             .max(disable.map(depth).unwrap_or(0))
                             .max(depth(cons).saturating_sub(1)),
+                    },
+                    // The deepest `$past` read anywhere in the chain: later than each step needs,
+                    // so the attempt arms later and the assumption is weaker, never stronger.
+                    AssumeShape::Chain { disable, block } => AssumeSpec {
+                        shape,
+                        hold_after: 0,
+                        arm_after: depth(block).max(disable.map(depth).unwrap_or(0)),
                     },
                 };
                 (f, spec)
