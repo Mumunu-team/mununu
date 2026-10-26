@@ -2225,6 +2225,85 @@ fn e2e_opentitan_sva_census() {
 /// bus free. The pins are the measured verdicts (ledger §3.3b-6, 2026-10-18); a definite verdict
 /// that moves is a finding, not a re-baseline, and a pinned ⊥ that decides is the engine
 /// improvement announcing itself.
+/// mununu#806 — a lifted register name must not embed the per-run yosys staging directory.
+/// yosys names a `$func$` temporary after the source path it was given; with the staged
+/// `preprocessed.sv` handed over by its absolute path, three edn registers
+/// (`…u_state_regs.sv2v_cast_F2F2E$func$/tmp/mununu-yosys-<pid>-…/preprocessed.sv:3983$4411.$result`)
+/// differed between any two runs of the same design. The lift now runs yosys inside the staging
+/// directory and names the file bare, so the names are `…$func$preprocessed.sv:3983$4411.$result`
+/// on every run. Two lifts, byte-identical state names, none with the temp path.
+#[test]
+#[ignore = "requires sv2v + Yosys (use the mununu-sva docker image); run with --ignored --nocapture"]
+fn e2e_lifted_register_names_carry_no_per_run_temp_path() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/verify/ip_opentitan_edn/source");
+    let read = |f: &str| {
+        std::fs::read_to_string(dir.join(f))
+            .unwrap_or_else(|e| panic!("{}: {e}", dir.join(f).display()))
+    };
+    let order: Vec<String> = read("sources.txt")
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    let additional: Vec<(String, String)> = order
+        .iter()
+        .filter(|f| *f != "edn.sv")
+        .map(|f| (f.clone(), read(f)))
+        .collect();
+    let yopts = YosysOptions {
+        top: Some("edn".to_string()),
+        use_sv2v: true,
+        additional_sources: additional,
+        ..Default::default()
+    };
+    let (primary, yopts) = mununu_core::adapter::slang::verify_auto::apply_lift_overrides(
+        "edn.sv",
+        &read("edn.sv"),
+        &yopts,
+        &ip_lift_overrides(&dir),
+    )
+    .expect("the edn lift overrides apply");
+    let state_names = |btor2: &str| -> Vec<String> {
+        btor2
+            .lines()
+            .filter_map(|l| {
+                let mut w = l.split_whitespace();
+                let _id = w.next()?;
+                (w.next()? == "state").then(|| w.nth(1).map(str::to_string))?
+            })
+            .collect()
+    };
+    let t0 = std::time::Instant::now();
+    let first =
+        mununu_core::adapter::yosys::sv_to_btor2(&primary, &yopts).expect("the edn IP lifts");
+    let second =
+        mununu_core::adapter::yosys::sv_to_btor2(&primary, &yopts).expect("the edn IP lifts again");
+    let (a, b) = (state_names(&first), state_names(&second));
+    eprintln!(
+        "edn lifted twice: {} / {} state registers, {:.0}s",
+        a.len(),
+        b.len(),
+        t0.elapsed().as_secs_f64()
+    );
+    assert!(
+        a.len() > 100,
+        "the edn lift has {} state registers",
+        a.len()
+    );
+    let leaked: Vec<&String> = a
+        .iter()
+        .filter(|n| n.contains("/tmp/mununu-yosys"))
+        .collect();
+    assert!(
+        leaked.is_empty(),
+        "state names embed the per-run yosys staging directory: {leaked:?}"
+    );
+    assert_eq!(
+        a, b,
+        "two lifts of the same design disagree on their state names"
+    );
+}
+
 #[test]
 #[ignore = "requires slang + sv2v + Yosys + z3 (use the mununu-sva docker image); run with --ignored --nocapture"]
 fn e2e_opentitan_ip_edn_full() {
