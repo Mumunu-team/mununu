@@ -285,3 +285,23 @@ settled so far, and the reading to take from each:
 
 The counters are per process, not per manager: the squarer's arena (`MUNUNU_BDD_SQUARING`) and the
 engine's share one table, so read a squaring run with the rescue off first.
+
+## Issue trends
+
+> Source of truth: [`scripts/issue_trends.py`](issue_trends.py) — surface: CLI-only — a maintainer's tool over the GitHub tracker, not a product surface
+
+```bash
+scripts/issue_trends.py fetch --repo Mumunu-team/mununu --out /tmp/issues/mununu.json
+scripts/issue_trends.py report /tmp/issues/mununu.json /tmp/issues/rosf.json
+scripts/issue_trends.py backfill /tmp/issues/mununu.json --repo Mumunu-team/mununu          # dry run
+scripts/issue_trends.py backfill /tmp/issues/mununu.json --repo Mumunu-team/mununu --apply  # adds the missing labels
+```
+
+`report` prints issues per month per class, per origin, the reopen events, duplicate
+candidates (title Jaccard ≥ 0.6, `DUPLICATE` state) and fix chains (an issue cited by two
+or more later issues of its class) — the tables of the 2026-10-25 trend analysis.
+`backfill` proposes one class label (`soundness` … `ergonomics`) and one `found:*` origin
+label per issue: the form's dropdowns when the issue was filed through
+`.github/ISSUE_TEMPLATE/defect.yml`, keyword heuristics otherwise (a first reading — read
+the dry run before `--apply`). Labels are only added, never removed. The classes and
+origins are the ones `docs/policies/cross-repo-impact.md` names.

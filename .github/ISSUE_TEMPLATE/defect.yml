@@ -1,0 +1,69 @@
+name: Defect
+description: A wrong, missing or silent result — the command, what came back, what was expected.
+title: "<verb>: <one line>"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **One ask, one issue.** A defect found by a consumer (monono, rosf, mununu-ui) is filed here once, with the evidence, and the consumer's tracker links this number (`docs/policies/cross-repo-impact.md`). Search first: a re-filing is closed as a duplicate of the original.
+  - type: input
+    id: command
+    attributes:
+      label: Command
+      description: The exact invocation (CLI or HTTP) and the version (`mununu --version`).
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: What came back
+      description: Verdict, exit code, note, panic text — or the absence of any of them. Paste the JSON when there is one.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What was expected, and why
+      description: The oracle — a hand reading of the design, another engine, SBY, simulation, the spec. Not a feeling.
+    validations:
+      required: true
+  - type: dropdown
+    id: class
+    attributes:
+      label: Class
+      description: Becomes the class label (`docs/policies/failure-paths.md`).
+      options:
+        - soundness
+        - silent
+        - crash
+        - decidability
+        - coverage
+        - semantics-docs
+        - flake
+        - performance
+        - ergonomics
+    validations:
+      required: true
+  - type: dropdown
+    id: origin
+    attributes:
+      label: Found
+      description: Becomes the `found:*` label.
+      options:
+        - internal
+        - monono
+        - opentitan
+        - hwmcc
+        - rosf
+    validations:
+      required: true
+  - type: textarea
+    id: siblings
+    attributes:
+      label: Siblings
+      description: Other sites, inputs or verbs with the same shape the fix should cover (sweep the siblings). "none known" is an answer.
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproducer
+      description: A design + property small enough to become an in-repo test, or where it lives (ledger row, corpus path).
