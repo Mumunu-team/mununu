@@ -10,6 +10,12 @@ permissions:
   checks: write
   contents: read
 
+# A new push to the same PR cancels the superseded run (2026-10-26: 331 runs in 30 days, each
+# ~14 min of runner time); a push to `main` is never cancelled, so the merge record stays complete.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CI: true
 
@@ -40,11 +46,6 @@ jobs:
         run: |
           docker run --rm -v ${{ github.workspace }}:/work mununu-dev:latest \
             make ci
-
-      - name: Run API-feature tests in the dev image
-        run: |
-          docker run --rm -v ${{ github.workspace }}:/work mununu-dev:latest \
-            cargo test --lib api --features api
 
   security-audit:
     runs-on: ubuntu-latest

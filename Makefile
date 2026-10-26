@@ -173,18 +173,20 @@ lint:
 verify:
 	$(CARGO) run --release --quiet -p mununu-cli -- context summarize $(VERIFY_FILE)
 
-# mununu#553 follow-up (2026-09-16) — `ci` MUST include the api-feature tests.
+# The gate: `cargo fmt --check` + `cargo clippy -D warnings` + `cargo test --workspace` — the same line
+# locally, in the hooks' FULL mode and in ci.yml.
 #
-# CI ran `make ci` AND a separate `cargo test --lib api --features api` (ci.yml:47), so the
-# api-gated tests were invisible to every local gate: a pre-commit hook saw 2,648 tests where CI saw
-# 3,115. A PR passed the hook and failed CI on a test the hook structurally could not run — which is
-# exactly the broken contract the CI Requirements section warns about ("if a contributor cannot
-# reproduce a CI failure with `make ci`, the contract is broken").
-ci: lint test test-api
-
-# The api-feature tests, which `test` does not cover because the feature is off by default.
-test-api:
-	$(CARGO) test -p mununu-core --lib api --features api
+# History. The mununu#553 follow-up (2026-09-16) added a `test-api` target here because CI ran a
+# separate `cargo test --lib api --features api` beside `make ci`, so the api-gated tests were
+# invisible to every local gate (a pre-commit hook saw 2,648 tests where CI saw 3,115). Measured
+# 2026-10-26 (run 40380364104): `test-api` was a DUPLICATE — the workspace build already unifies
+# mununu-core's `api` + `ast-extract` features through mununu-cli's dependency edge (resolver 3), so
+# the 119 `api::` tests run inside `cargo test --workspace` / nextest; `test-api` recompiled core
+# with a different feature hash to re-run 71 of them (2.6 min), and the separate CI step ran the ROOT
+# package's lib, which has no tests (2.8 min, "0 passed"). The hook gap #553 described was the
+# per-crate `cargo test -p mununu-core` building core WITHOUT the api feature — closed in
+# scripts/pre-commit (`run_pkg_tests` asks for the unified set), not by a second compile here.
+ci: lint test
 
 # Advisory documentation cadence check. Reports whether more than
 # THRESHOLD commits (default 10) have landed since the last touch of

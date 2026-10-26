@@ -36,8 +36,6 @@ cd "$REPO_ROOT"
 if [ "${MUNUNU_PRECOMMIT_FULL:-}" = "1" ]; then
     echo "Pre-commit (FULL): MUNUNU_PRECOMMIT_FULL=1 — running full-workspace make ci..."
     make ci
-    echo "Testing API module..."
-    cargo test --lib api --features api
     echo "Checking for unused dependencies (cargo machete)..."
     cargo machete
     echo "All pre-commit checks passed (full sweep)."
@@ -69,10 +67,21 @@ esac
 
 # Run the test suite for a single package using the selected runner.
 run_pkg_tests() {
+    # mununu-core's `api` / `ast-extract` modules are feature-gated. The workspace build (CI's
+    # `make ci`) unifies those features through mununu-cli's dependency edge, so the per-crate run
+    # asks for the same set — a bare `cargo test -p mununu-core` builds core WITHOUT them and the
+    # 119 `api::` tests never run in any hook (the mununu#553 gap; 2026-10-26). One compile, the
+    # same test set CI runs.
+    features=""
+    if [ "$1" = "mununu-core" ]; then
+        features="--features api,ast-extract"
+    fi
     if [ "$TEST_RUNNER" = "nextest" ]; then
-        cargo nextest run -p "$1"
+        # shellcheck disable=SC2086
+        cargo nextest run -p "$1" $features
     else
-        cargo test -p "$1"
+        # shellcheck disable=SC2086
+        cargo test -p "$1" $features
     fi
 }
 
@@ -145,11 +154,6 @@ fi
 # the upstream test suite passes — so keep this workspace-scoped.
 echo "Running cargo test --workspace --doc..."
 cargo test --workspace --doc
-
-# Mirrors the dedicated `cargo test --lib api --features api` step in
-# `.github/workflows/ci.yml`. Always run; the API module is small.
-echo "Testing API module..."
-cargo test --lib api --features api
 
 echo ""
 echo "All pre-commit checks passed."
