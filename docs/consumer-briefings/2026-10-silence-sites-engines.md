@@ -35,8 +35,9 @@
 
 | run | result |
 |---|---|
-| seam tests: a formula outside the witness shape is a `shape` miss and a safe design a `bound` miss; the note carries kind / property / stage; the owned driver records the native member's refusal on an array state; a malformed sidecar is one warning naming what is lost | pending the host run |
-| verdict-identity gate in `mununu-sva` (`e2e_opentitan_sva_census` vs `main`, `diff_corpus_monotone_verdict_ledger`) | pending — recorded here before merge |
+| seam tests: a formula outside the witness shape is a `shape` miss, a short bound a `bound` miss, an out-of-range constant the finder's `search` refusal; the note carries kind / property / stage; the owned driver records the native member's refusal on an array state; a malformed sidecar is one warning naming what is lost | green (reach_rescue 46, native_bmc 21, reach_portfolio 14, witness 6, fault_adversary 4, trap_certificate 6; clippy clean on core + cli) |
+| verdict-identity gate in `mununu-sva` (2026-10-26): `e2e_opentitan_sva_census` on this branch vs `main` bc82372 | **0 verdict moves** — 191 rows, 173 holds / 7 violated / 11 skipped / 0 ⊥ on both (2,483 s) |
+| `diff_corpus_monotone_verdict_ledger` on this branch | PASS (44 s) |
 
 ## Provenance
 
