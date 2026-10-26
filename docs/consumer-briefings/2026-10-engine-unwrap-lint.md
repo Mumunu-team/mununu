@@ -38,7 +38,8 @@
 | host: `cargo clippy -p mununu-core --all-targets --all-features -- -D warnings`; unit tests of the touched modules | clean; `symbolic_bitblast` 122 passed, `cegar` 62, `symbolic_engine` 9, `kmts_lift` 85 |
 | verdict-identity gate in `mununu-sva` (2026-10-26): `e2e_opentitan_sva_census` on this branch vs `main` bc82372 | **0 verdict moves** — 191 rows, 173 holds / 7 violated / 11 skipped / 0 ⊥ on both (2,297 s vs 1,961 s) |
 | `diff_corpus_monotone_verdict_ledger` on this branch | PASS (28 s) |
-| M1 PR 3 (the extractors): `e2e_opentitan_sva_census` vs `main` and the ledger | pending — recorded here before merge |
+| M1 PR 3 (the extractors, 2026-10-26): `e2e_opentitan_sva_census` on `0c2db19` vs `main` bc82372 | **0 verdict moves** — 191 rows, 173 holds / 7 violated / 11 skipped / 0 ⊥ on both (2,747 s) |
+| M1 PR 3: `diff_corpus_monotone_verdict_ledger` | PASS (63 s) |
 
 ## Provenance
 
