@@ -1,4 +1,4 @@
-# Consumer briefing — the counterexample path is found by rIC3's BMC first and replayed before it ships (2026-10)
+# Consumer briefing — the counterexample path is found by rIC3's IC3 first and replayed before it ships (2026-10)
 
 > Source of truth: [`bad_reachable_witness_routed`](../../crates/mununu-core/src/adapter/btor2/witness.rs) — surface: (CLI+API) — every VIOLATED safety `trace` of `sv verify-auto` / `POST /api/v1/sv/verify-auto`, `btor2 verify --witness` / `POST /api/v1/btor2/verify` (`witness: true`), and the fault adversary's `attack`
 
@@ -6,8 +6,8 @@
 
 ## TL;DR
 
-- **Behaviour change, no new flag.** Where rIC3 is on `PATH` (the `mununu-sva` image; `MUNUNU_RIC3_PATH` otherwise), the counterexample of a VIOLATED safety property is now found by rIC3's bit-level BMC (`--witness`, under the rescue slice) and **replayed on the concrete simulator** before it ships; native BMC re-derives it only when rIC3 is absent, declines, or its witness does not replay. Without rIC3 nothing changes (`--owned-only` is unchanged).
-- **What you may see:** traces on rows that had none — the shallow path native BMC's word-level unrolling did not reach within its bound (am2901: 900 s → rIC3 0.2 s) — and, on rows that already had one, a path of the **same depth whose free inputs may be chosen differently** (the states a property forces are the same; the inputs the monitor does not read are a solver's choice either way). A trace is still absent when neither finder returns a replayable path.
+- **Behaviour change, no new flag.** Where rIC3 is on `PATH` (the `mununu-sva` image; `MUNUNU_RIC3_PATH` otherwise), the counterexample of a VIOLATED safety property is now found by rIC3's bit-level IC3 (`--witness`, under the rescue slice — the engine the portfolio member already runs; rIC3's own BMC is as slow as native BMC on am2901) and **replayed on the concrete simulator** before it ships; native BMC re-derives it only when rIC3 is absent, declines, or its witness does not replay. Without rIC3 nothing changes (`--owned-only` is unchanged).
+- **What you may see:** traces on rows that had none — the shallow path native BMC's word-level unrolling did not reach within its bound (am2901: native BMC 900 s and rIC3's BMC still at depth 13 after 120 s → rIC3's IC3 0.2 s) — and, on rows that already had one, a path of the **same depth whose free inputs may be chosen differently** (the states a property forces are the same; the inputs the monitor does not read are a solver's choice either way). A trace is still absent when neither finder returns a replayable path.
 - **Verdicts do not move.** The portfolio decides; this explains. `MUNUNU_RESCUE_SLICE_MS=0` disables the member here as everywhere.
 - JSON shape, schemas, flags, exit codes: unchanged.
 
@@ -34,7 +34,8 @@
 | run | result |
 |---|---|
 | parser on rIC3's verbatim `--witness` output; replayed trace equals native BMC's states; a lying witness is refused; eight malformed shapes name their defect | unit tests, pending the host run |
-| `e2e_ric3_finds_the_am2901_witness_within_the_slice` (HWMCC'20, `MUNUNU_HWMCC_FLAT`) | pending — recorded here before merge |
+| first gate run, routing through rIC3 `-e bmc`: the am2901 e2e sat 2 h 22 min in the native fallback — rIC3's BMC times out at 120 s at depth 13 | the lesson that moved the finder to IC3 |
+| `e2e_ric3_finds_the_am2901_witness_within_the_slice` (HWMCC'20, `MUNUNU_HWMCC_FLAT`), routing through IC3 | pending — recorded here before merge |
 | edn IP e2e (`EdnFatalAlertNoRsp_A` ×8 traces) | pending — same depth expected; free inputs may differ |
 
 ## Provenance
@@ -45,5 +46,5 @@
 ## Not covered here
 
 - The reason a witness could not be produced reaches the log, not the report (`safety_witness` returns no reason) — #803's MEDIUM row.
-- rIC3 `-e ic3`'s witness as a second finder; btormc / pono witnesses (same format, same parser — not wired).
+- rIC3's BMC as a second finder for deep paths; btormc / pono witnesses (same format, same parser — not wired).
 - Array states: the replay refuses them; such designs keep native BMC.

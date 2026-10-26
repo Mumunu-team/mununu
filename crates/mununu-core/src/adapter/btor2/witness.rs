@@ -9,10 +9,12 @@
 //! where it claims is refused, never shipped; where the falsified `bad` operand carries a symbol it
 //! is read at the last frame too.
 //!
-//! engine: rIC3 `-e bmc --witness` (bit-level, subprocess) as the witness finder under the rescue
-//! slice; native BMC (z3 QF_BV, owned) as the fallback and the `--owned-only` path. No verdict is
-//! taken from here — the portfolio decided it; this is the shallow path that explains it, which the
-//! word-level unrolling does not always find in time (am2901: rIC3 0.2 s, native BMC > 900 s).
+//! engine: rIC3 `-e ic3 --witness` (bit-level IC3/PDR, subprocess — the same engine the portfolio
+//! member runs) as the witness finder under the rescue slice; native BMC (z3 QF_BV, owned) as the
+//! fallback and the `--owned-only` path. No verdict is taken from here — the portfolio decided it;
+//! this is the shallow path that explains it, which an unrolling does not always find in time
+//! (am2901: rIC3's IC3 prints the depth-16 witness in 0.2 s; its own BMC is still at depth 13 after
+//! 120 s, native BMC found nothing in 900 s).
 #![deny(clippy::unwrap_used)]
 
 use std::collections::HashMap;
@@ -289,7 +291,7 @@ fn check_bad_at(
 }
 
 /// [`bmc_bad_reachable_witness`] with a bit-level member asked first (mununu#744): when rIC3 is
-/// present, its BMC runs with `--witness` under the rescue slice and the parsed witness is replayed
+/// present, its IC3 runs with `--witness` under the rescue slice and the parsed witness is replayed
 /// before it ships. Any failure on that path — no tool, a timeout, an unusable witness, a replay
 /// that disagrees — falls through to native BMC, which is also the `--owned-only` behaviour,
 /// unchanged. The depth reported for a routed witness is the witness's own; `max_k` bounds only
@@ -298,20 +300,26 @@ pub fn bad_reachable_witness_routed(
     file: &Btor2File,
     max_k: u32,
 ) -> Result<(BmcOutcome, Option<BmcTrace>), BmcError> {
-    if let Some(trace) = ric3_bmc_witness(file) {
+    if let Some(trace) = ric3_witness(file) {
         let depth = u32::try_from(trace.states.len().saturating_sub(1)).unwrap_or(u32::MAX);
         return Ok((BmcOutcome::Violated { depth }, Some(trace)));
     }
     bmc_bad_reachable_witness(file, max_k)
 }
 
-fn ric3_bmc_witness(file: &Btor2File) -> Option<BmcTrace> {
+fn ric3_witness(file: &Btor2File) -> Option<BmcTrace> {
     let bin = ric3::locate_ric3().ok()?;
     // A disabled rescue slice (`MUNUNU_RESCUE_SLICE_MS=0`) disables this member too.
     let slice = Duration::from_millis(crate::adapter::run_budget::rescue_slice_ms()?);
     let btor2 = emit::emit_btor2(file);
-    let (verdict, stdout) = match ric3::run_ric3_with_output(&bin, &btor2, "bmc", true, slice, None)
-    {
+    let (verdict, stdout) = match ric3::run_ric3_with_output(
+        &bin,
+        &btor2,
+        ric3::DEFAULT_ENGINE,
+        true,
+        slice,
+        None,
+    ) {
         Ok(x) => x,
         Err(e) => {
             tracing::warn!(error = ?e, "rIC3 witness: the member failed; native BMC re-derives");
@@ -428,8 +436,27 @@ mod tests {
         );
     }
 
+    /// rIC3 `-e ic3 --witness` on HWMCC'20 `vis_arrays_am2901` (2026-10-26, mununu-sva), verbatim:
+    /// 17 four-bit states, input frames `@0`..`@16` (the depth-16 counterexample); two of the 19
+    /// inputs are absent from every frame (rIC3's preprocessing eliminated them — a left-out input
+    /// is 0 on replay, the `setundef -zero` convention).
+    #[test]
+    fn the_am2901_witness_parses_as_seventeen_frames() {
+        let w = parse_btor2_witness(include_str!("testdata/am2901_ric3_witness.txt")).unwrap();
+        assert_eq!(w.bad, 0);
+        assert_eq!(w.init.len(), 17);
+        assert!(
+            w.init.iter().all(|(_, bits)| bits.len() == 4),
+            "{:?}",
+            &w.init[..3]
+        );
+        assert_eq!(w.frames.len(), 17);
+        let sizes: Vec<usize> = w.frames.iter().map(Vec::len).collect();
+        assert!(sizes.iter().all(|&n| n == 17), "{sizes:?}");
+    }
+
     /// mununu#744 — the row that motivated the routing: HWMCC'20 `vis_arrays_am2901`, a depth-16
-    /// counterexample rIC3 prints in 0.2 s and native BMC did not find in 900 s.
+    /// counterexample rIC3's IC3 prints in 0.2 s and native BMC did not find in 900 s.
     #[test]
     #[ignore = "needs rIC3 and MUNUNU_HWMCC_FLAT (the HWMCC'20 flat bv directory); mununu-sva"]
     fn e2e_ric3_finds_the_am2901_witness_within_the_slice() {

@@ -339,7 +339,7 @@ Every VIOLATED safety property carries a `trace` (`kind: "finite"`) — whicheve
 the **shallowest** reset → violation path on a one-path monitor of the formula, one `steps[]` entry
 per cycle with its register `state` and the `inputs` that drive it (the last step's inputs are what
 tripped the assertion). Since mununu#744 the path is found by a bit-level member when one is
-present — rIC3's BMC (`--witness`, under the rescue slice) — and its witness is **replayed on the
+present — rIC3's IC3 (`--witness`, under the rescue slice; its own BMC is as slow as native BMC on am2901) — and its witness is **replayed on the
 concrete simulator** before it ships ([`btor2::witness`](../crates/mununu-core/src/adapter/btor2/witness.rs):
 the initial frame from the witness, every later frame recomputed from its inputs; a witness that
 does not replay is refused); native BMC re-derives the path when rIC3 is absent, declines, or its
