@@ -38,6 +38,7 @@
 | host: `cargo clippy -p mununu-core --all-targets --all-features -- -D warnings`; unit tests of the touched modules | clean; `symbolic_bitblast` 122 passed, `cegar` 62, `symbolic_engine` 9, `kmts_lift` 85 |
 | verdict-identity gate in `mununu-sva` (2026-10-26): `e2e_opentitan_sva_census` on this branch vs `main` bc82372 | **0 verdict moves** — 191 rows, 173 holds / 7 violated / 11 skipped / 0 ⊥ on both (2,297 s vs 1,961 s) |
 | `diff_corpus_monotone_verdict_ledger` on this branch | PASS (28 s) |
+| M1 PR 3 (the extractors): `e2e_opentitan_sva_census` vs `main` and the ledger | pending — recorded here before merge |
 
 ## Provenance
 
@@ -46,5 +47,5 @@
 
 ## Not covered here
 
-- The fifteen witness / strategy extractors (`exact_reachable_stall_lasso`, `two_player_strategy`, …) and `exact_model_partitioned_with_lift` keep their `unwrap`s under `#[allow(clippy::unwrap_used)] // M1 pending`; an arena exhaustion there still panics inside `catch_unwind` (no witness) or aborts — M1 PR 2.
+- ~~The fifteen witness / strategy extractors and `exact_model_partitioned_with_lift` keep their `unwrap`s under `#[allow(clippy::unwrap_used)] // M1 pending`~~ — closed by M1 PR 3 (2026-10-26): they return `Result`, an arena exhaustion during extraction is a reason at the boundary (the verdict stands, the path is omitted, the log says why; the two-player strategy's reason reaches `strategy_error`), and the exact engine has no `unwrap` outside its tests. Gate recorded below.
 - `expect` is not denied: it is permitted when its message names an invariant the code itself established.
