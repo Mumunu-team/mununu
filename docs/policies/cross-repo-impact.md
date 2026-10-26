@@ -52,6 +52,14 @@ For every image in scope, state the impact and the rebuild disposition. Standard
 
 Never write "Maybe" or leave blank. If the impact is genuinely unclear, that's a signal the design isn't ready to ship.
 
+## One ask, one issue — the consumer-ask protocol (2026-10-25)
+
+A consumer (monono, rosf, mununu-ui) that finds a defect or needs a capability in an upstream repository files it **once, in the upstream repository**, with the consumer's evidence (the design, the command, the two verdicts). The consumer's own tracker carries a one-line pointer to the upstream number, never a copy. A later re-filing of the same ask — by either side — is closed as a duplicate pointing at the original, so the upstream fix closes exactly one issue and the trend record counts each defect once.
+
+Evidence: on 2026-09-30 monono's consumer asks were re-filed upstream as mununu #596–#601 and rosf #55–#58, each a second copy of an issue already open or already fixed (#596 = #467, #597 = #496, #598 = #497, #600 = #462, #601 = #548; rosf #55 = #13, #56 = #14, #57 = #27). Half the day's filings were duplicates, and the trend tables of 2026-10-25 had to be de-duplicated by hand.
+
+The origin label (`found:monono`, `found:rosf`, `found:opentitan`, `found:hwmcc`, `found:internal`) records where the defect was found; the class label records what it is. Both are set at filing.
+
 ## Enforcement
 
 Today (2026-08): manual — reviewers check that any PR firing the criteria above ships a briefing. Failing to include a briefing on a qualifying PR is a review comment, not (yet) a hard CI gate.

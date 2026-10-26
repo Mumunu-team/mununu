@@ -43,6 +43,8 @@ The script is advisory with a stated reach limit (measured 2026-09-13 on mununu#
 
 **Scope.** Defect fixes. A feature, a behaviour-preserving refactor or a doc change needs no trailer. When in doubt: does the change assert that something was *broken*?
 
+A reproducer pins one site. The fix is expected to cover the site's siblings — every other place the same input shape or failure mode reaches — and to say so in the PR (`docs/policies/failure-paths.md`, Rule 3: seven PRs on the same arena-exhaustion panic, 2026-08 → 2026-10, each with a confirmed reproducer, each fixing one site).
+
 ## Why a field and not a paragraph
 
 > Concept: the rationale; no code artifact.

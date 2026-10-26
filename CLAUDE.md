@@ -21,12 +21,13 @@
 13. [Git Operations & Destructive Commands](#git-operations--destructive-commands) `[RULE]`
 14. [Code Reuse, Dead Code, Performance, Security](#code-reuse-dead-code-performance-security) `[RULE]`
 15. [Test the Layer the Bug Lives In](#test-the-layer-the-bug-lives-in) `[RULE]`
-16. [Available Agents and Skills](#available-agents-and-skills) `[REFERENCE]`
-17. [Private Files Policy](#private-files-policy) `[RULE]`
-18. [Reasoning & Recommendation Honesty](#reasoning--recommendation-honesty) `[RULE]`
-19. [Engine Specificity in Proposals](#engine-specificity-in-proposals) `[RULE]`
-20. [Reference Docs Index](#reference-docs-index) `[REFERENCE]`
-21. [Environment Variables](#environment-variables) `[REFERENCE]`
+16. [Failure Paths](#failure-paths) `[RULE]`
+17. [Available Agents and Skills](#available-agents-and-skills) `[REFERENCE]`
+18. [Private Files Policy](#private-files-policy) `[RULE]`
+19. [Reasoning & Recommendation Honesty](#reasoning--recommendation-honesty) `[RULE]`
+20. [Engine Specificity in Proposals](#engine-specificity-in-proposals) `[RULE]`
+21. [Reference Docs Index](#reference-docs-index) `[REFERENCE]`
+22. [Environment Variables](#environment-variables) `[REFERENCE]`
 
 ---
 
@@ -119,7 +120,7 @@ Every public claim about finding bugs, verifying properties or improving the sec
 
 ## Cross-Repo Impact Reporting
 
-Every PR that changes user-visible behaviour of a surface a downstream repo consumes (rosf, monono, mununu-ui, …) ships **one consumer briefing** under [`docs/consumer-briefings/`](docs/consumer-briefings/) (`YYYY-MM-<slug>.md`): audience banner, TL;DR, per-consumer section, a Docker-rebuild table with no blanks, provenance, "not covered here". It fires on verdict-value or verdict-message changes, JSON shape changes, CLI flag / HTTP route adds, removes or renames, verdict-semantics changes (bugfixes count), subprocess-tool bumps and sidecar-schema changes. Internal refactors, test-only and clarifying-doc changes are exempt. Full policy: [`docs/policies/cross-repo-impact.md`](docs/policies/cross-repo-impact.md).
+Every PR that changes user-visible behaviour of a surface a downstream repo consumes (rosf, monono, mununu-ui, …) ships **one consumer briefing** under [`docs/consumer-briefings/`](docs/consumer-briefings/) (`YYYY-MM-<slug>.md`): audience banner, TL;DR, per-consumer section, a Docker-rebuild table with no blanks, provenance, "not covered here". It fires on verdict-value or verdict-message changes, JSON shape changes, CLI flag / HTTP route adds, removes or renames, verdict-semantics changes (bugfixes count), subprocess-tool bumps and sidecar-schema changes. Internal refactors, test-only and clarifying-doc changes are exempt. **One ask, one issue** (2026-10-25): a consumer files a defect or ask once, upstream, with its evidence; its own tracker links the number; a re-filing is closed as a duplicate. Every issue carries a class label and a `found:*` origin label. Full policy: [`docs/policies/cross-repo-impact.md`](docs/policies/cross-repo-impact.md).
 
 ## Reproducers Before Fixes
 
@@ -161,6 +162,15 @@ When a change teaches one layer to produce something new, add a test **at the se
 - **Keep the e2e** as the detector and the cross-check that the cheap tier is faithful.
 - **Derive the mock from the real call site; never invent it.** When the cheap tier and the e2e disagree, that disagreement is a finding — record it and measure, rather than asserting the answer you expected.
 
+## Failure Paths
+
+Full text and incidents: [`docs/policies/failure-paths.md`](docs/policies/failure-paths.md) (2026-10-25, from the trend analysis of 119 issues).
+
+- **Silence is a defect.** Every path on which the tool does less than asked — a dropped input, a refused design, a budget stop, a fallback, a value it cannot carry — reaches the report as a field or a note with its reason. A new `Err(_) => None` / `.ok()` / `let _ =` on a verdict path is a review finding unless the error is re-surfaced where the consumer reads it. `/failure-path-audit` lists the sites.
+- **A crash is a defect of the class.** Engine modules deny `unwrap`/`expect`; an engine that cannot finish abstains with a reason, never panics or aborts (the eight-issue chain #462 → #730 was fixed one site at a time).
+- **Sweep the siblings.** A fix names every other site with the same pattern and fixes it or adds a test enumerating them; the PR body lists them (#705 → #708, #696 → #709 → #711 → #717).
+- **Read the tool's diagnostics before bisecting sources.** `diagnostics.frontend` / `lift_retry` / `bottom_reason` / the notes first, a hand replay of the failing stage second, an input bisect last (the csrng "INC_ASSERT loop" of 2026-10-22 cost a day and was a yosys backend artifact).
+
 ## Available Agents and Skills
 
 Under `.claude/skills/**` (invoke as `/<name>`) and `.claude/agents/**` (spawn by name). Invoke them rather than reproducing their logic inline.
@@ -170,6 +180,7 @@ Under `.claude/skills/**` (invoke as `/<name>`) and `.claude/agents/**` (spawn b
 | `/parity-check` | Verifies a capability is wired across CLI + API (+ UI for CTXDSL). Run before calling a feature "done". |
 | `/docs-traceability` | Walks the covered Markdown and verifies every `Source of truth:` anchor. |
 | `/soundness-check` | Flags undocumented `eval_expr → None` choices and silent under-use of CLTS / CTXDSL primitives. |
+| `/failure-path-audit` | Lists crash sites (`unwrap`/`expect`/`panic`/unchecked index in engine code) and silent failure paths (`Err → None`, `.ok()`, a cap with no reason) with the abstention or report field each should reach. Run on every change under `adapter/`. |
 | `/design-principles` | KISS / DRY / SOLID / YAGNI review of a target scope. |
 | `/rust-best-practices` | Idiomatic-Rust review: ownership, error handling, API shape. |
 | `/security-audit` | Vulnerabilities, `unsafe`, input handling. |
