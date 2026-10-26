@@ -15884,20 +15884,27 @@ endmodule
             );
         }
         assert_eq!(
-            holds, 14,
-            "config concretization lifts sysrst 9 → 12 HOLDS (sva_5/7/10/11), and the mununu#503 \
-             `|=>` rescue reducer adds sva_12 (pulse) + sva_14 (counter reset) for 14; got {holds}"
+            holds, 15,
+            "config concretization lifts sysrst 9 → 12 HOLDS (sva_5/7/10/11), the mununu#503 \
+             `|=>` rescue reducer adds sva_12 (pulse) + sva_14 (counter reset), and the IC3 \
+             members decide sva_13 (counter monotonicity) for 15; got {holds}"
         );
-        // The residual ⊥ are now just sva_13 (counter monotonicity) and sva_15 (arithmetic).
+        // The residual ⊥ is now just sva_15 (arithmetic).
         //
         // mununu#503 — sva_12 and sva_14 USED to be residual ⊥ here and are not any more: their
         // `A |=> C` shape now reduces to a `bad` monitor and the reachability portfolio decides
         // both HOLDS (`portfolio-rescue` notes name engines `exact, native` and
-        // `exact, native, spacer`). What still declines is a REGISTER-VS-REGISTER consequent —
-        // sva_13's `cnt_q >= cnt_q__past` and sva_15's `cnt_q == cnt_q__past + 1` are `CmpReg` /
-        // `CmpRegAddend` leaves, which the boolean compiler does not accept. That is a leaf-shape
-        // gap, NOT the `cnt_clr` antecedent: the antecedent was never the blocker for sva_14,
-        // whose consequent (`cnt_q == 0`) is a plain comparison and now decides.
+        // `exact, native, spacer`).
+        //
+        // mununu#797 (measured 2026-10-25, mununu 0.5.3, this test in `mununu-sva`) — sva_13
+        // (`!cnt_clr |=> cnt_q >= $past(cnt_q)`, CntNoWrap_A) now decides HOLDS as well, through
+        // the same reducer and the portfolio's IC3 members (`portfolio-rescue` names `exact, pono,
+        // ric3`). The independent SymbiYosys check recorded in #797 (the assertions restated as
+        // immediate assertions, `abc pdr`) proves it at 4-bit timers and was still open at full
+        // width after an hour; mununu's verdict is the IC3 members' on the lifted model. What still
+        // declines is sva_15's `cnt_q == cnt_q__past + 1`, a `CmpRegAddend` leaf the boolean
+        // compiler does not accept — a leaf-shape gap, NOT the `cnt_clr` antecedent: the antecedent
+        // was never the blocker for sva_14, whose consequent (`cnt_q == 0`) is a plain comparison.
         //
         // H.H NOTE: the counter-bound `cnt_q <= 7` is auto-seeded here (the counter-bound note
         // fires, asserted below), but it does NOT flip sva_13/15 — the bound is necessary infra
@@ -15905,8 +15912,8 @@ endmodule
         // demonstrator `e2e_counter_bound_flips_saturating_monotonicity` below isolates a property
         // where the bound alone flips ⊥ → HOLDS.
         assert_eq!(
-            unknown, 2,
-            "only the register-vs-register consequents (sva_13/15) stay ⊥; got UNKNOWN={unknown}"
+            unknown, 1,
+            "only the arithmetic-addend consequent (sva_15) stays ⊥; got UNKNOWN={unknown}"
         );
         // H.H — the counter-bound note fires (auto-inferred `cnt_q <= 7` from the
         // sibling `cnt_q >= cfg_detect_timer_i` comparison), even though it does not
@@ -16457,10 +16464,28 @@ endmodule
         }
         // H.F — sva_5/7/10/11 are the relational-with-input compounds
         // (`cnt_q >= cfg_*_timer_i`). Pre-H.F they SKIPPED ("input operand inside
-        // a compound"); now they bind as derived relational labels and reach an
-        // honest ⊥ (Unknown) — never a spurious verdict.
+        // a compound"); now they bind as derived relational labels and reach a
+        // verdict — never a spurious one.
+        //
+        // mununu#797 (measured 2026-10-25, mununu 0.5.3, this test in `mununu-sva`): sva_7
+        // (EnterStableSt_A), sva_10 (DetectedOut_A) and sva_11 (DetectedPulseOut_A) reach a
+        // definite HOLDS with the config timers FREE; sva_5 (EnterDetectSt_A, 16 unknown cells)
+        // stays an honest ⊥. The independent SymbiYosys check recorded in #797 (the 16 assertions
+        // restated as immediate assertions, `abc pdr`, every input free) proves EnterStableSt_A,
+        // DetectedOut_A and DetectedPulseOut_A at full width, so the three HOLDS are corroborated,
+        // not merely pinned.
+        let p = report
+            .properties
+            .iter()
+            .find(|p| p.name == "sysrst_ctrl_detect_sva_5")
+            .expect("sva_5 present");
+        assert!(
+            matches!(p.outcome, VerifyOutcome::Unknown { .. }),
+            "sva_5 (relational-with-input compound) binds and reaches an honest ⊥, not a \
+             SKIP; got {:?}",
+            p.outcome
+        );
         for name in [
-            "sysrst_ctrl_detect_sva_5",
             "sysrst_ctrl_detect_sva_7",
             "sysrst_ctrl_detect_sva_10",
             "sysrst_ctrl_detect_sva_11",
@@ -16471,9 +16496,9 @@ endmodule
                 .find(|p| p.name == name)
                 .unwrap_or_else(|| panic!("{name} present"));
             assert!(
-                matches!(p.outcome, VerifyOutcome::Unknown { .. }),
-                "{name} (relational-with-input compound) binds and reaches an honest \
-                 ⊥, not a SKIP; got {:?}",
+                matches!(p.outcome, VerifyOutcome::Holds),
+                "{name} (relational-with-input compound) reaches a definite HOLDS with the \
+                 timers free (mununu#797, SymbiYosys-corroborated); got {:?}",
                 p.outcome
             );
         }
@@ -16621,14 +16646,14 @@ endmodule
                 p.outcome
             );
         }
-        // The remaining ⊥ are the RELATIONAL-with-input compounds (`cnt_q >=
-        // cfg_*_timer_i`, sva_5/7/10/11) — the input operand is inside a
-        // relational, which the cone-input seeder does not unwrap — plus sva_13/15, whose
-        // consequents are register-vs-register (`cnt_q >= cnt_q__past`,
-        // `cnt_q == cnt_q__past + 1`). mununu#503: sva_14 is NO LONGER among them — its
-        // `cnt_clr |=> cnt_q == 0` reduces and the portfolio decides it. Honest ⊥, never a
+        // The remaining ⊥ (mununu#797, measured 2026-10-25) are sva_5 (`cnt_q >=
+        // cfg_debounce_timer_i`, a relational-with-input compound the cone-input seeder does
+        // not unwrap) and sva_15 (`cnt_q == cnt_q__past + 1`, the `CmpRegAddend` leaf).
+        // mununu#503: sva_14 is NO LONGER among them — its `cnt_clr |=> cnt_q == 0` reduces
+        // and the portfolio decides it; mununu#797: nor are sva_7/10/11 (asserted HOLDS above)
+        // and sva_13 (`cnt_q >= cnt_q__past`, decided by the IC3 members). Honest ⊥, never a
         // spurious verdict.
-        for name in ["sysrst_ctrl_detect_sva_5", "sysrst_ctrl_detect_sva_7"] {
+        for name in ["sysrst_ctrl_detect_sva_5", "sysrst_ctrl_detect_sva_15"] {
             let p = report
                 .properties
                 .iter()
@@ -16636,7 +16661,7 @@ endmodule
                 .unwrap_or_else(|| panic!("{name} present"));
             assert!(
                 matches!(p.outcome, VerifyOutcome::Unknown { .. }),
-                "{name} (relational-with-input `cnt_q >= cfg_*`) stays an honest ⊥; got {:?}",
+                "{name} stays an honest ⊥ (mununu#797); got {:?}",
                 p.outcome
             );
         }
