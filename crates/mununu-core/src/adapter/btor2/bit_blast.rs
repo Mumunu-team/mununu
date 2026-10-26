@@ -2919,18 +2919,25 @@ fn validate_sidecar_memories(
 ) -> Result<(), AdapterError> {
     use crate::adapter::systemverilog::annotation::SvAnnotation;
 
-    // Try to parse sidecar; missing/unparseable JSON ⇒ no declarations.
-    let declared: std::collections::HashMap<String, (u32, u32)> = options
-        .sidecar_json
-        .as_deref()
-        .and_then(|json| serde_json::from_str::<SvAnnotation>(json).ok())
-        .map(|ann| {
-            ann.memories
+    // mununu#803 — a sidecar that does not parse is reported as such: it used to read as "every
+    // memory is undeclared", the wrong reason. No sidecar at all is "no declarations".
+    let declared: std::collections::HashMap<String, (u32, u32)> =
+        match options.sidecar_json.as_deref() {
+            None => std::collections::HashMap::new(),
+            Some(json) => serde_json::from_str::<SvAnnotation>(json)
+                .map_err(|e| AdapterError {
+                    kind: AdapterErrorKind::UnsupportedConstruct,
+                    location: None,
+                    message: format!(
+                        "adapter/btor2: the .mununu.json sidecar does not parse ({e}); its memory \
+                     declarations cannot be checked"
+                    ),
+                })?
+                .memories
                 .into_iter()
                 .map(|m| (m.name, (m.address_width, m.data_width)))
-                .collect()
-        })
-        .unwrap_or_default();
+                .collect(),
+        };
 
     let mut missing: Vec<&MemoryCellMeta> = Vec::new();
     let mut mismatched: Vec<(&MemoryCellMeta, u32, u32)> = Vec::new();
@@ -4463,7 +4470,10 @@ fn build_cell_domains(
             warnings.push(AdapterWarning {
                 kind: WarningKind::UnsupportedConstruct,
                 message: format!(
-                    "adapter/btor2: failed to parse .mununu.json sidecar ({e}); falling back to full bit-blast"
+                    "adapter/btor2: the .mununu.json sidecar does not parse ({e}) — EVERYTHING it \
+                     declares is ignored: cell domains (full bit-blast instead), the reset_sequence \
+                     (the name heuristic picks the reset), havoc / UF wraps, seeds and valuations; \
+                     memory declarations are checked separately and report this error themselves"
                 ),
                 location: None,
             });
@@ -4607,6 +4617,8 @@ fn looks_like_reset(symbol: &str) -> Option<bool> {
 /// derived from `asserted_value` (non-zero ⇒ active-high).
 fn sidecar_reset_signal(options: &AdapterOptions) -> Option<(String, bool)> {
     let json = options.sidecar_json.as_ref()?;
+    // A sidecar that does not parse was already reported by `build_cell_domains`' warning
+    // (which names the reset among what is lost); here it is simply absent (mununu#803).
     let ann = serde_json::from_str::<crate::adapter::systemverilog::annotation::SvAnnotation>(json)
         .ok()?;
     let seq = ann.reset_sequence.as_ref()?;
@@ -11990,5 +12002,34 @@ mod tests {
         .unwrap();
         let op = init_value_of(&plain, 3).expect("init operand");
         assert_eq!(resolve_btor2_constant_operand(&plain, op), Some(0));
+    }
+
+    // mununu#803 — a malformed sidecar is one warning at the entry that names everything it would
+    // have declared, and the memory check names the parse error rather than "undeclared".
+    #[test]
+    fn a_sidecar_that_does_not_parse_is_one_warning_naming_what_is_lost() {
+        let src = "1 sort bitvec 1\n2 state 1 s\n3 input 1 i\n4 next 1 2 3\n";
+        let opts = AdapterOptions {
+            sidecar_json: Some("{ this is not json".to_string()),
+            ..Default::default()
+        };
+        let out = translate(src, &opts).expect("the design still lifts");
+        let w = out
+            .warnings
+            .iter()
+            .find(|w| w.message.contains("sidecar does not parse"))
+            .expect("the entry warning");
+        for lost in [
+            "cell domains",
+            "reset_sequence",
+            "havoc / UF wraps",
+            "memory declarations",
+        ] {
+            assert!(
+                w.message.contains(lost),
+                "the warning names `{lost}`: {}",
+                w.message
+            );
+        }
     }
 }

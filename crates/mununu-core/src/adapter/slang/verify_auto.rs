@@ -1477,8 +1477,33 @@ fn safety_counterexample(
 /// deep violation, or one only the branching reading has) leaves the field empty — the verdict is
 /// unchanged either way. Runs after every verdict-changing pass but the consistency flags, so it
 /// only spends BMC on verdicts the report ships.
+/// mununu#803 — a VIOLATED row that ships no path says why: the stage of the path finder that
+/// declined and its reason. The verdict stands; the path is the explanation, not the evidence.
+fn witness_miss_note(
+    name: &str,
+    decided_by: Option<&str>,
+    miss: &crate::adapter::reach_rescue::WitnessMiss,
+) -> VerificationNote {
+    VerificationNote {
+        kind: "witness-unavailable".to_string(),
+        level: NoteLevel::Info,
+        summary: format!("{name}: no counterexample path shipped — {miss}"),
+        detail: format!(
+            "the verdict stands (decided by {}); the path finders declined at stage `{}`: {}. A \
+             VIOLATED without a path is still a VIOLATED; the path is the explanation, not the \
+             evidence.",
+            decided_by.unwrap_or("unknown"),
+            miss.stage,
+            miss.reason
+        ),
+        items: vec![miss.stage.to_string()],
+        property: Some(name.to_string()),
+    }
+}
+
 fn attach_safety_witnesses(report: &mut AutoVerifyReport, design_btor2: &str, reset_pinned: bool) {
     use crate::mu_calculus::{PropertyClass, parser as mu_parser};
+    let mut misses: Vec<VerificationNote> = Vec::new();
     for prop in report.properties.iter_mut() {
         if !matches!(prop.outcome, VerifyOutcome::Violated { .. }) || prop.counterexample.is_some()
         {
@@ -1495,14 +1520,21 @@ fn attach_safety_witnesses(report: &mut AutoVerifyReport, design_btor2: &str, re
         if formula.property_class() != PropertyClass::Safety {
             continue;
         }
-        prop.counterexample = crate::adapter::reach_rescue::safety_witness(
+        match crate::adapter::reach_rescue::safety_witness(
             design_btor2,
             &formula,
             reset_pinned,
             SAFETY_WITNESS_MAX_K,
-        )
-        .map(safety_counterexample);
+        ) {
+            Ok(trace) => prop.counterexample = Some(safety_counterexample(trace)),
+            Err(miss) => misses.push(witness_miss_note(
+                &prop.name,
+                prop.decided_by.as_deref(),
+                &miss,
+            )),
+        }
     }
+    report.notes.extend(misses);
 }
 
 fn downgrade_violated_on_unestablished_init(report: &mut AutoVerifyReport, model_btor2: &str) {
@@ -6678,16 +6710,39 @@ pub(crate) fn escalate_bottom_with_slice(
                             // BMC extracts the `Init → ¬invariant` path from the same bad-monitor.
                             // A safety CEX is a finite path (empty `cycle`); the monitor adds no
                             // state, so the trace is over the original design registers.
-                            prop.counterexample =
-                                under_rescue_slice(slice_ms, &mut slice_expired, || {
-                                    crate::adapter::reach_rescue::safety_witness(
-                                        design_btor2,
-                                        &formula,
-                                        reset_pinned,
-                                        SAFETY_WITNESS_MAX_K,
-                                    )
-                                })
-                                .map(safety_counterexample);
+                            let witness = under_rescue_slice(slice_ms, &mut slice_expired, || {
+                                Some(crate::adapter::reach_rescue::safety_witness(
+                                    design_btor2,
+                                    &formula,
+                                    reset_pinned,
+                                    SAFETY_WITNESS_MAX_K,
+                                ))
+                            });
+                            prop.counterexample = match witness {
+                                Some(Ok(trace)) => Some(safety_counterexample(trace)),
+                                Some(Err(miss)) => {
+                                    notes.push(witness_miss_note(
+                                        &prop.name,
+                                        Some("reach-rescue"),
+                                        &miss,
+                                    ));
+                                    None
+                                }
+                                None => {
+                                    let miss = crate::adapter::reach_rescue::WitnessMiss {
+                                        stage: "slice",
+                                        reason:
+                                            "the rescue slice expired before the path search ran"
+                                                .to_string(),
+                                    };
+                                    notes.push(witness_miss_note(
+                                        &prop.name,
+                                        Some("reach-rescue"),
+                                        &miss,
+                                    ));
+                                    None
+                                }
+                            };
                             notes.push(rescue_note(&prop.name, "VIOLATED", &engines));
                         }
                         RescueVerdict::Inconclusive => attribute_portfolio_abstention(
@@ -18597,5 +18652,26 @@ endmodule
             "(a == b) && (u.SCRAM == 1) && (x <= SCRAM)"
         );
         assert_eq!(resolve_named_constants("q == SCRAM.x", &c), "q == SCRAM.x");
+    }
+
+    // mununu#803 — the note a VIOLATED row carries when no path shipped: kind, the stage as its
+    // operand, and the property it is about (not a prose prefix).
+    #[test]
+    fn a_witness_miss_becomes_a_note_about_the_property() {
+        let miss = crate::adapter::reach_rescue::WitnessMiss {
+            stage: "search",
+            reason: "native BMC: encode failed".to_string(),
+        };
+        let n = witness_miss_note("u_x.sva_3", Some("reach-rescue"), &miss);
+        assert_eq!(n.kind, "witness-unavailable");
+        assert_eq!(n.level, NoteLevel::Info);
+        assert_eq!(n.property.as_deref(), Some("u_x.sva_3"));
+        assert_eq!(n.items, vec!["search".to_string()]);
+        assert!(
+            n.summary.contains("no counterexample path shipped"),
+            "{}",
+            n.summary
+        );
+        assert!(n.detail.contains("decided by reach-rescue"), "{}", n.detail);
     }
 }

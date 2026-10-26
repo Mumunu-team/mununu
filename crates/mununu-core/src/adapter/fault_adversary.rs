@@ -84,11 +84,14 @@ pub fn verify_fault_reach(
             };
             let (attack, depth) = if verdict == "violated" {
                 match safety_witness(&model, &formula, false, witness_max_k) {
-                    Some(trace) => {
+                    Ok(trace) => {
                         let d = trace.states.len().saturating_sub(1);
                         (faults_in_trace(&trace, &injected), Some(d))
                     }
-                    None => (Vec::new(), None),
+                    Err(miss) => {
+                        tracing::warn!(%miss, "fault adversary: an attack exists but no path shipped");
+                        (Vec::new(), None)
+                    }
                 }
             } else {
                 (Vec::new(), None)

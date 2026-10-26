@@ -573,15 +573,6 @@ fn emit_boolean_or_implies_next(
     .map_err(|e| RescueDecline::MonitorEmissionFailed(e.message))
 }
 
-/// Thin wrapper preserving the original signature for existing callers.
-pub fn reach_portfolio_rescue(
-    design_btor2: &str,
-    formula: &Formula,
-    reset_pinned: bool,
-) -> Option<(RescueVerdict, ReachOutcome)> {
-    reach_portfolio_rescue_diagnosed(design_btor2, formula, reset_pinned).ok()
-}
-
 /// As [`reach_portfolio_rescue`], but reports WHY it declined instead of returning a bare `None`.
 pub fn reach_portfolio_rescue_diagnosed(
     design_btor2: &str,
@@ -628,24 +619,51 @@ pub fn reach_portfolio_rescue_diagnosed(
 /// which reads it along ONE path. A path that falsifies that reading also falsifies the
 /// formula (a box holds only if every successor satisfies its target), so a returned trace is
 /// always a genuine counterexample; the converse can fail (`[] a || [] b` can be false at a state
-/// although every single path satisfies `a` or `b` next), and then there is no trace. The monitor's
+/// although every single path satisfies `a` or `b` next), and then there is no trace — the `Err`
+/// names which stage declined and why, for the row's note. The monitor's
 /// history latches (`mununu_wit_…`) are listed under the trace's `monitor` cells, apart from the
 /// design's registers ([`crate::trace::TraceNames`]).
+/// Why [`safety_witness`] shipped no path: the stage that declined and its reason (mununu#803).
+/// `shape` is an honest "no witness for this formula shape" (the monitor compiles one reading;
+/// a formula outside it has no one-path witness), never an error; the other stages — `monitor`,
+/// `parse`, `search`, `bound` — name a failure or a miss the row's reader should see.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WitnessMiss {
+    pub stage: &'static str,
+    pub reason: String,
+}
+
+impl WitnessMiss {
+    fn shape(reason: &str) -> Self {
+        Self {
+            stage: "shape",
+            reason: reason.to_string(),
+        }
+    }
+}
+
+impl std::fmt::Display for WitnessMiss {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.stage, self.reason)
+    }
+}
+
 pub fn safety_witness(
     design_btor2: &str,
     formula: &Formula,
     reset_pinned: bool,
     max_k: u32,
-) -> Option<crate::adapter::btor2::native_bmc::BmcTrace> {
+) -> Result<crate::adapter::btor2::native_bmc::BmcTrace, WitnessMiss> {
     let Node::Nu { var, body } = formula.node(formula.root()) else {
-        return None;
+        return Err(WitnessMiss::shape("the root is not a greatest fixpoint"));
     };
     let Node::And(l, r) = formula.node(*body) else {
-        return None;
+        return Err(WitnessMiss::shape("the body is not `block && [] Z`"));
     };
-    let (block, recur) = classify_and(formula, *l, *r, *var)?;
+    let (block, recur) = classify_and(formula, *l, *r, *var)
+        .ok_or_else(|| WitnessMiss::shape("the conjunction has no `[] Z` recursion side"))?;
     if !matches!(formula.node(recur), Node::Modal { guard, .. } if *guard == Guard::default()) {
-        return None;
+        return Err(WitnessMiss::shape("the recursion is not a bare `[] Z`"));
     }
     let (monitored, depth) =
         crate::adapter::btor2::bad_monitor::emit_bounded_safety_witness_monitor(
@@ -654,12 +672,36 @@ pub fn safety_witness(
             block,
             reset_pinned,
         )
-        .ok()?;
-    let file = parser::parse(&monitored).ok()?;
-    let k = max_k.saturating_add(u32::try_from(depth).ok()?);
-    match crate::adapter::btor2::witness::bad_reachable_witness_routed(&file, k).ok()? {
-        (crate::adapter::btor2::native_bmc::BmcOutcome::Violated { .. }, trace) => trace,
-        _ => None,
+        .map_err(|e| WitnessMiss {
+            stage: "monitor",
+            reason: format!("{e:?}"),
+        })?;
+    let file = parser::parse(&monitored).map_err(|e| WitnessMiss {
+        stage: "parse",
+        reason: format!("{e:?}"),
+    })?;
+    let depth = u32::try_from(depth).map_err(|_| WitnessMiss {
+        stage: "bound",
+        reason: format!("the monitor's depth {depth} does not fit u32"),
+    })?;
+    let k = max_k.saturating_add(depth);
+    match crate::adapter::btor2::witness::bad_reachable_witness_routed(&file, k).map_err(|e| {
+        WitnessMiss {
+            stage: "search",
+            reason: e.to_string(),
+        }
+    })? {
+        (crate::adapter::btor2::native_bmc::BmcOutcome::Violated { .. }, Some(trace)) => Ok(trace),
+        (crate::adapter::btor2::native_bmc::BmcOutcome::Violated { depth }, None) => {
+            Err(WitnessMiss {
+                stage: "search",
+                reason: format!("a path of depth {depth} was found but no trace was extracted"),
+            })
+        }
+        (crate::adapter::btor2::native_bmc::BmcOutcome::NoCexWithin { k }, _) => Err(WitnessMiss {
+            stage: "bound",
+            reason: format!("no reset → violation path within {k} cycles"),
+        }),
     }
 }
 
@@ -668,6 +710,16 @@ mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
     use crate::mu_calculus::parser as mu_parser;
+
+    /// The tests' convenience over the diagnosed rescue; production callers read the reason
+    /// (mununu#803 — the undiagnosed wrapper is gone).
+    fn reach_portfolio_rescue(
+        design_btor2: &str,
+        formula: &Formula,
+        reset_pinned: bool,
+    ) -> Option<(RescueVerdict, ReachOutcome)> {
+        reach_portfolio_rescue_diagnosed(design_btor2, formula, reset_pinned).ok()
+    }
 
     fn parse(s: &str) -> Formula {
         mu_parser::parse(s).unwrap_or_else(|e| panic!("parse `{s}`: {e:?}"))
@@ -725,7 +777,7 @@ mod tests {
         assert_eq!(trace.inputs.len(), trace.states.len());
         // The property that holds (`##2 cnt == 3`) has none.
         let holds = parse("nu X. (((!((cnt == 1))) || [] [] (cnt == 3)) && [] X)");
-        assert!(safety_witness(COUNTER, &holds, false, 10).is_none());
+        assert!(safety_witness(COUNTER, &holds, false, 10).is_err());
     }
 
     /// No state at all: `a |=> b` over two inputs fails at depth 1, and the witness names the
@@ -750,7 +802,7 @@ mod tests {
     #[test]
     fn an_unbounded_body_has_no_safety_witness() {
         let f = parse("nu X. ((mu Y. ((cnt == 3) || [] Y)) && [] X)");
-        assert!(safety_witness(COUNTER, &f, false, 10).is_none());
+        assert!(safety_witness(COUNTER, &f, false, 10).is_err());
     }
 
     /// PR C — a bounded response window the one-box reducer declines: on the 2-bit counter
@@ -767,7 +819,7 @@ mod tests {
         let violated = parse("nu X. (((!((cnt == 1))) || ((cnt == 3) || [] (cnt == 3))) && [] X)");
         let (v2, _) = reach_portfolio_rescue_diagnosed(COUNTER, &violated, false).expect("reduces");
         assert_eq!(v2, RescueVerdict::Violated);
-        assert!(safety_witness(COUNTER, &violated, false, 10).is_some());
+        assert!(safety_witness(COUNTER, &violated, false, 10).is_ok());
     }
 
     /// PR C — `!en |=> ##1 $stable(q)` is a two-box chain with a register-equality leaf
@@ -828,7 +880,7 @@ mod tests {
         assert_eq!(v, RescueVerdict::Holds);
         let (v2, _) = reach_portfolio_rescue_diagnosed(RELEASED_EARLY, &f, false).expect("reduces");
         assert_eq!(v2, RescueVerdict::Violated);
-        assert!(safety_witness(RELEASED_EARLY, &f, false, 10).is_some());
+        assert!(safety_witness(RELEASED_EARLY, &f, false, 10).is_ok());
         // two weak-until blocks in conjunctive position reduce (2026-10-23, one pending latch
         // each); under an `||` of the two, or with a deeper box beside one, they stay declined
         let two = parse(
@@ -894,7 +946,7 @@ mod tests {
             RescueVerdict::Violated,
             "the second block's latch catches the early release"
         );
-        assert!(safety_witness(SECOND_EARLY, &f, false, 10).is_some());
+        assert!(safety_witness(SECOND_EARLY, &f, false, 10).is_ok());
     }
 
     /// mununu#734 — a portfolio contradiction is reported as such, never folded into "undecided".
@@ -1579,5 +1631,25 @@ mod tests {
             RescueVerdict::Violated,
             "`e` is free, so `q && e` then `q` again is reachable"
         );
+    }
+
+    // mununu#803 — a formula outside the one-path shape is an honest `shape` miss, not silence.
+    #[test]
+    fn a_formula_outside_the_witness_shape_names_the_stage() {
+        let f = parse("mu Z. ((a == 1) || <> Z)");
+        let miss = safety_witness(COUNTER, &f, false, 10).unwrap_err();
+        assert_eq!(miss.stage, "shape", "{miss}");
+        assert!(miss.to_string().starts_with("shape: "), "{miss}");
+        // The bound is a stage too: `cnt` (2 bits, counting from 0) reaches 3 only at step 3, so
+        // a search bounded at the monitor's own depth finds no path and says so.
+        let deep = parse("nu Z. ((cnt != 3) && [] Z)");
+        let miss = safety_witness(COUNTER, &deep, false, 0).unwrap_err();
+        assert_eq!(miss.stage, "bound", "{miss}");
+        // And the finder's own refusal is the `search` stage with its reason: `7` does not fit
+        // the 2-bit `cnt`, which the native encoder rejects as an out-of-range constant.
+        let wide = parse("nu Z. ((cnt != 7) && [] Z)");
+        let miss = safety_witness(COUNTER, &wide, false, 10).unwrap_err();
+        assert_eq!(miss.stage, "search", "{miss}");
+        assert!(miss.reason.contains("encode"), "{miss}");
     }
 }

@@ -274,11 +274,22 @@ pub(crate) fn effective_bitblast_cap_with(cone_bits: u32, cap_override: Option<u
     }
 }
 
+/// `std::env::var(name)` parsed as `T`: an unset variable is `None` silently; a SET but
+/// unparseable one is `None` with a warning — `MUNUNU_BDD_MAX_BITS=4O` used to take the default
+/// without a word (mununu#803, LOW).
+fn env_parsed<T: std::str::FromStr>(name: &str) -> Option<T> {
+    let raw = std::env::var(name).ok()?;
+    match raw.parse::<T>() {
+        Ok(v) => Some(v),
+        Err(_) => {
+            tracing::warn!(var = name, value = %raw, "ignored: not a valid number; the default applies");
+            None
+        }
+    }
+}
+
 pub(crate) fn effective_bitblast_cap(cone_bits: u32) -> u32 {
-    match std::env::var("MUNUNU_BDD_MAX_BITS")
-        .ok()
-        .and_then(|s| s.parse::<u32>().ok())
-    {
+    match env_parsed::<u32>("MUNUNU_BDD_MAX_BITS") {
         Some(v) => v.min(HARD_BITBLAST_CEILING),
         None => default_cap_for_cone(cone_bits),
     }
@@ -637,11 +648,7 @@ impl BddBitBlaster {
         // abstain, it exhausts the arena inside one apply and takes the uncatchable SIGABRT path.
         // Measured cost of the raise: ~160 MB of baseline RSS (190 → 350 MB on a real lift).
         let arena_nodes: usize = arena_nodes_override()
-            .or_else(|| {
-                std::env::var("MUNUNU_BDD_ARENA_NODES")
-                    .ok()
-                    .and_then(|s| s.parse().ok())
-            })
+            .or_else(|| env_parsed::<usize>("MUNUNU_BDD_ARENA_NODES"))
             .unwrap_or(if total_bits <= 40 {
                 1 << 24 // 16M nodes — the raster-wrap cone (20 bits, 2.06M) sits at 15% of its budget
             } else {
