@@ -167,7 +167,7 @@ When a change teaches one layer to produce something new, add a test **at the se
 Full text and incidents: [`docs/policies/failure-paths.md`](docs/policies/failure-paths.md) (2026-10-25, from the trend analysis of 119 issues).
 
 - **Silence is a defect.** Every path on which the tool does less than asked — a dropped input, a refused design, a budget stop, a fallback, a value it cannot carry — reaches the report as a field or a note with its reason. A new `Err(_) => None` / `.ok()` / `let _ =` on a verdict path is a review finding unless the error is re-surfaced where the consumer reads it. `/failure-path-audit` lists the sites.
-- **A crash is a defect of the class.** Engine modules deny `unwrap`/`expect`; an engine that cannot finish abstains with a reason, never panics or aborts (the eight-issue chain #462 → #730 was fixed one site at a time).
+- **A crash is a defect of the class.** Engine modules deny `unwrap` (`#![deny(clippy::unwrap_used)]`); an `expect` names an invariant the code itself established, never a value a design or a tool controls; an engine that cannot finish abstains with a reason, never panics or aborts (the eight-issue chain #462 → #730 was fixed one site at a time).
 - **Sweep the siblings.** A fix names every other site with the same pattern and fixes it or adds a test enumerating them; the PR body lists them (#705 → #708, #696 → #709 → #711 → #717).
 - **Read the tool's diagnostics before bisecting sources.** `diagnostics.frontend` / `lift_retry` / `bottom_reason` / the notes first, a hand replay of the failing stage second, an input bisect last (the csrng "INC_ASSERT loop" of 2026-10-22 cost a day and was a yosys backend artifact).
 

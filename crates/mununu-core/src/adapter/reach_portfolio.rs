@@ -62,6 +62,7 @@
 //! simply abstains — a timeout is a sound [`ReachVerdict::Unknown`], never a wrong
 //! verdict.
 
+#![deny(clippy::unwrap_used)] // docs/policies/failure-paths.md Rule 2: abstain, never panic
 use crate::adapter::btor2::ast::Btor2File;
 use crate::adapter::btor2::emit::emit_btor2;
 use crate::adapter::btor2::native_bmc::{self, SafetyVerdict};
@@ -955,6 +956,7 @@ pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcom
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
     use crate::adapter::btor2::parser;
 

@@ -21,6 +21,7 @@
 //! row whose cone holds a site is skipped by the caller: the fault player can restore any
 //! state, so `AG EF Idle` would hold trivially.
 
+#![deny(clippy::unwrap_used)] // docs/policies/failure-paths.md Rule 2: abstain, never panic
 use std::collections::{BTreeSet, HashMap};
 
 use super::ast::{Btor2File, ConstValue, Line, Nid, Node, Op, Operand, Sort};
@@ -1023,6 +1024,7 @@ pub fn cells_compared_by(file: &Btor2File, atom: &str) -> Vec<(Nid, String, u32)
 }
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
     use crate::adapter::btor2::native_bmc::{
         BmcOutcome, SafetyVerdict, bmc_bad_reachable, bmc_bad_reachable_witness, decide_bad_safety,

@@ -54,6 +54,7 @@
 //! validated end-to-end by the `#[ignore]`d `e2e_rescue_*` tests below (both verdict
 //! directions + the beyond-40-bit-cap case, with live btormc/Pono).
 
+#![deny(clippy::unwrap_used)] // docs/policies/failure-paths.md Rule 2: abstain, never panic
 use crate::adapter::btor2::bad_monitor::{
     emit_ag_boolean_invariant_monitor, emit_ag_state_atom_monitor,
 };
@@ -664,6 +665,7 @@ pub fn safety_witness(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
     use crate::mu_calculus::parser as mu_parser;
 

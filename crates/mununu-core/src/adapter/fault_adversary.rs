@@ -18,6 +18,7 @@
 //! `AG !target` through the reach rescue (`reach_portfolio_rescue_diagnosed`), its witness through
 //! `safety_witness`.
 
+#![deny(clippy::unwrap_used)] // docs/policies/failure-paths.md Rule 2: abstain, never panic
 use crate::adapter::btor2::ast::Node;
 use crate::adapter::btor2::fault::{FaultEvent, FaultSpec, faults_in_trace, inject_faults};
 use crate::adapter::btor2::{emit, parser};
@@ -134,6 +135,7 @@ pub fn verify_fault_reach(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
 
     /// A trap FSM (`st`: 0 → 1 → 2 → 3, 3 absorbing; `go` advances) with a latch `seen3` that

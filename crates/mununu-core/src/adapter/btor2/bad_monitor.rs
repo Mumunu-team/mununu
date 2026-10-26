@@ -42,6 +42,7 @@
 //! WITHOUT any external tool — that the emitted `bad` fires exactly when the
 //! internal oracle reports a violation.
 
+#![deny(clippy::unwrap_used)] // docs/policies/failure-paths.md Rule 2: abstain, never panic
 use crate::adapter::btor2::ast::{Nid, Node, Sort};
 use crate::adapter::btor2::concrete_oracle::OracleAtom;
 use crate::adapter::btor2::parser;
@@ -1444,6 +1445,7 @@ pub fn emit_bounded_chain_monitor(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
     use crate::adapter::btor2::bit_blast;
     use crate::adapter::btor2::concrete_oracle::{

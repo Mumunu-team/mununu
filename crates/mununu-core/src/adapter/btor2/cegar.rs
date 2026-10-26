@@ -54,6 +54,7 @@
 //! on `CegarTrace` are the explicit handshakes between R.5 MVP and
 //! the future load-bearing implementation.
 
+#![deny(clippy::unwrap_used)] // docs/policies/failure-paths.md Rule 2: abstain, never panic
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -1573,9 +1574,16 @@ pub fn cegar_refine_loop(
                 &game_eval.verdicts,
                 &current_predicates,
             );
+            let last = iterations.last().ok_or_else(|| AdapterError {
+                kind: AdapterErrorKind::IrConsistencyError,
+                location: None,
+                message: "adapter/btor2/cegar: the predicate source was exhausted before any \
+                          iteration ran"
+                    .to_string(),
+            })?;
             return Ok(CegarTrace {
-                final_verdict: iterations.last().unwrap().verdict.clone(),
-                unlifted_cells: iterations.last().unwrap().unlifted_cells.clone(),
+                final_verdict: last.verdict.clone(),
+                unlifted_cells: last.unlifted_cells.clone(),
                 final_predicates: current_predicates,
                 terminated_with: CegarTermination::PredicateSourceExhausted,
                 iterations,
@@ -2218,6 +2226,7 @@ pub fn config_values_to_sidecar_json(entries: &[String]) -> Result<Option<String
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
     use crate::mu_calculus::parser;
 
