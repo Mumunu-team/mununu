@@ -66,6 +66,7 @@
 //! during the search is a net loss — the witness re-solve of the deep deciding formula
 //! costs more than it saves.)
 
+#![deny(clippy::unwrap_used)] // docs/policies/failure-paths.md Rule 2: abstain, never panic
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
@@ -521,6 +522,7 @@ pub fn decide_reachable_boolector(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
     use crate::adapter::btor2::parser;
     use std::time::Duration;

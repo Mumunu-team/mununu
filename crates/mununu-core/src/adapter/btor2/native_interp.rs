@@ -30,6 +30,7 @@
 //! external SPACER decided. Next: broaden the HWMCC differential-soundness sweep,
 //! then wire into the reachability portfolio ([`super::super::reach_portfolio`]).
 
+#![deny(clippy::unwrap_used)] // docs/policies/failure-paths.md Rule 2: abstain, never panic
 use std::collections::BTreeMap;
 
 use z3::ast::{Ast, BV, Bool};
@@ -798,7 +799,7 @@ pub(crate) fn run_cvc5_raw_cancellable(
     child
         .stdin
         .take()
-        .unwrap()
+        .ok_or_else(|| "cvc5: stdin was not piped".to_string())?
         .write_all(query.as_bytes())
         .map_err(|e| format!("write cvc5 stdin: {e}"))?;
     let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64 + 2_000);
@@ -847,6 +848,7 @@ pub(crate) fn run_cvc5_raw_cancellable(
 /// a regression, and a red result masks the genuine failures in the `--ignored`
 /// sweep (mununu#498 follow-up).
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 pub(crate) fn mathsat_available() -> Result<(), String> {
     locate_mathsat().map(|_| ())
 }
@@ -887,7 +889,7 @@ pub(crate) fn run_mathsat_raw(query: &str, timeout_ms: u32) -> Result<String, St
     child
         .stdin
         .take()
-        .unwrap()
+        .ok_or_else(|| "cvc5: stdin was not piped".to_string())?
         .write_all(query.as_bytes())
         .map_err(|e| format!("write mathsat stdin: {e}"))?;
     let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64 + 2_000);
@@ -985,6 +987,7 @@ fn reparse_over_shared(raw: &str, shared: &BTreeMap<Nid, BV>) -> Option<Bool> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
     use crate::adapter::btor2::parser;
 

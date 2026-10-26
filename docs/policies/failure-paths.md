@@ -18,7 +18,7 @@ What the rule asks of a change:
 
 ## Rule 2 — a crash is a defect of the class, not the site
 
-> Source of truth: `#![deny(clippy::unwrap_used, clippy::expect_used)]` on the engine modules (`crates/mununu-core/src/adapter/btor2/symbolic_bitblast.rs` and siblings, landing per file group under the plan of 2026-10-25) — surface: build
+> Source of truth: `#![deny(clippy::unwrap_used)]` on the engine modules (`crates/mununu-core/src/adapter/btor2/symbolic_bitblast.rs` and siblings; landed 2026-10-25 with the cube relation converted and the witness / strategy extractors marked `#[allow(clippy::unwrap_used)] // M1 pending`). An `expect` is permitted only with a message naming an invariant the code itself established ("filled just above", "validated above"); a value a design or a tool controls is never an invariant — `/failure-path-audit` lists every `expect` with its message) — surface: build
 
 An engine that cannot finish abstains with a reason; it never panics, aborts or overflows the stack. The crash class was fixed eight times at single sites (#462 OOM in one `unwrap`, #490 SIGABRT under memory pressure, #504 stack overflow, #542 "the #462 sweep never reached this file", #543, #600, #638, #730) because each fix repaired the site that had just failed. The rule is mechanical where it can be: the lint denies `unwrap`/`expect` in engine code, and each remaining site becomes a typed error that reaches the existing abstention path (`AdapterErrorKind::ResourceBudgetExceeded`, a named refusal). Where a lint cannot see the pattern (recursion depth, an index computed from a width), the fix of one site lists the siblings — Rule 3.
 

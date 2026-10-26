@@ -102,6 +102,11 @@
 //! (nested νμ + guarded modalities included). R-F5.4.2 then wires this behind
 //! `--engine symbolic`.
 
+// docs/policies/failure-paths.md Rule 2 — an engine never panics where it could abstain. A new
+// `.unwrap()` does not compile; the functions still carrying `#[allow(clippy::unwrap_used)]` are the
+// M1-pending witness / strategy extractors. Every OxiDD apply that can exhaust the arena goes through
+// `oom(..)?` (the `OutOfMemory` → abstention mapping) instead.
+#![deny(clippy::unwrap_used)]
 use std::collections::{BTreeMap, HashMap};
 
 use oxidd::bdd::{self, BDDFunction, BDDManagerRef};
@@ -658,20 +663,20 @@ impl BddBitBlaster {
         // `bdd_cache_div` for the numbers and why the size is a knob and not a policy.
         let manager = bdd::new_manager(arena_nodes, arena_nodes / bdd_cache_div(), bdd_threads());
         let (all_vars, var_base, tt, ff, built_vars, built_levels) = manager
-            .with_manager_exclusive(|m| {
+            .with_manager_exclusive(|m| -> Result<_, String> {
                 let range = m.add_vars(total_bits as VarNo);
-                let vars: Vec<BDDFunction> = (0..total_bits)
-                    .map(|i| BDDFunction::var(m, range.start + i as VarNo).unwrap())
-                    .collect();
-                (
+                let vars = (0..total_bits)
+                    .map(|i| oom(BDDFunction::var(m, range.start + i as VarNo)))
+                    .collect::<Result<Vec<BDDFunction>, String>>()?;
+                Ok((
                     vars,
                     range.start,
                     BDDFunction::t(m),
                     BDDFunction::f(m),
                     m.num_vars(),
                     m.num_levels(),
-                )
-            });
+                ))
+            })?;
         // mununu#543 — the manager's own count, not ours. If these ever disagree, the level
         // ceiling `apply_bin`'s depth bound rests on is not what we think it is.
         if built_vars != total_bits || built_levels != total_bits {
@@ -951,7 +956,7 @@ impl BddBitBlaster {
                         let c = bits.into_iter().next().ok_or_else(|| {
                             "exact bit-blaster: a `constraint` signal has zero width".to_string()
                         })?;
-                        blaster.constraint_bdd = blaster.constraint_bdd.and(&c).unwrap();
+                        blaster.constraint_bdd = oom(blaster.constraint_bdd.and(&c))?;
                     }
                 }
                 Ok(())
@@ -989,16 +994,19 @@ impl BddBitBlaster {
     /// `assignment` maps every register + input symbol to its current value.
     /// Symbols absent from the map default to `0` (the `setundef -zero`
     /// discipline the concrete oracle also follows).
-    pub fn eval_step(&self, assignment: &HashMap<String, u128>) -> HashMap<String, u128> {
-        let minterm = self.minterm_for(assignment);
+    pub fn eval_step(
+        &self,
+        assignment: &HashMap<String, u128>,
+    ) -> Result<HashMap<String, u128>, String> {
+        let minterm = self.minterm_for(assignment)?;
         self.next_funcs
             .iter()
-            .map(|(sym, bits)| (sym.clone(), self.value_of(bits, &minterm)))
+            .map(|(sym, bits)| Ok((sym.clone(), self.value_of(bits, &minterm)?)))
             .collect()
     }
 
     /// The full-assignment minterm over every register + input bit.
-    fn minterm_for(&self, assignment: &HashMap<String, u128>) -> BDDFunction {
+    fn minterm_for(&self, assignment: &HashMap<String, u128>) -> Result<BDDFunction, String> {
         let mut mt = self.tt.clone();
         for cell in &self.cells {
             let v = assignment.get(&cell.symbol).copied().unwrap_or(0);
@@ -1006,24 +1014,24 @@ impl BddBitBlaster {
                 let lit = if (v >> b) & 1 == 1 {
                     var.clone()
                 } else {
-                    var.not().unwrap()
+                    oom(var.not())?
                 };
-                mt = mt.and(&lit).unwrap();
+                mt = oom(mt.and(&lit))?;
             }
         }
-        mt
+        Ok(mt)
     }
 
     /// Read a bit-vector of BDDs at a full assignment: bit `b` is set iff the
     /// minterm implies `bits[b]` (`mt ⊑ f ⟺ mt ∧ f == mt`).
-    fn value_of(&self, bits: &[BDDFunction], minterm: &BDDFunction) -> u128 {
+    fn value_of(&self, bits: &[BDDFunction], minterm: &BDDFunction) -> Result<u128, String> {
         let mut val = 0u128;
         for (b, f) in bits.iter().enumerate() {
-            if minterm.and(f).unwrap() == *minterm {
+            if oom(minterm.and(f))? == *minterm {
                 val |= 1u128 << b;
             }
         }
-        val
+        Ok(val)
     }
 
     /// Resolve an operand to its BDD vector, applying the BTOR2 negative-NID
@@ -1398,9 +1406,13 @@ impl BddBitBlaster {
     /// Evaluate a predicate BDD (over the register vars) at a concrete register
     /// assignment: `true` iff the assignment's minterm implies the BDD. The
     /// differential counterpart of [`PredicateExpr::eval`].
-    pub fn eval_predicate_at(&self, bdd: &BDDFunction, assignment: &HashMap<String, u128>) -> bool {
-        let mt = self.minterm_for(assignment);
-        mt.and(bdd).unwrap() == mt
+    pub fn eval_predicate_at(
+        &self,
+        bdd: &BDDFunction,
+        assignment: &HashMap<String, u128>,
+    ) -> Result<bool, String> {
+        let mt = self.minterm_for(assignment)?;
+        Ok(oom(mt.and(bdd))? == mt)
     }
 
     // ---- R-F5.3c: the abstract may relation over predicate cubes ----
@@ -1520,17 +1532,20 @@ impl BddBitBlaster {
         // this the check fires on legitimate refinement (measured: 3 → 7 vars with 2 predicates).
         self.declared_vars
             .fetch_add(2 * k as u32, std::sync::atomic::Ordering::Relaxed);
-        let (present, next, present_varnos) = self._manager.with_manager_exclusive(|m| {
-            let range = m.add_vars(2 * k as VarNo);
-            let present: Vec<BDDFunction> = (0..k)
-                .map(|i| BDDFunction::var(m, range.start + i as VarNo).unwrap())
-                .collect();
-            let next: Vec<BDDFunction> = (0..k)
-                .map(|i| BDDFunction::var(m, range.start + (k + i) as VarNo).unwrap())
-                .collect();
-            let present_varnos: Vec<VarNo> = (0..k as VarNo).map(|i| range.start + i).collect();
-            (present, next, present_varnos)
-        });
+        let (present, next, present_varnos) =
+            self._manager
+                .with_manager_exclusive(|m| -> Result<_, String> {
+                    let range = m.add_vars(2 * k as VarNo);
+                    let present = (0..k)
+                        .map(|i| oom(BDDFunction::var(m, range.start + i as VarNo)))
+                        .collect::<Result<Vec<BDDFunction>, String>>()?;
+                    let next = (0..k)
+                        .map(|i| oom(BDDFunction::var(m, range.start + (k + i) as VarNo)))
+                        .collect::<Result<Vec<BDDFunction>, String>>()?;
+                    let present_varnos: Vec<VarNo> =
+                        (0..k as VarNo).map(|i| range.start + i).collect();
+                    Ok((present, next, present_varnos))
+                })?;
         // The cube of next predicate vars (to quantify out in a preimage).
         let mut next_cube = self.tt.clone();
         for v in &next {
@@ -1759,16 +1774,20 @@ impl AbstractRelation {
 
     /// Is cube `cube` feasible — inhabited by at least one concrete state?
     /// Infeasible cubes are never materialised as abstract states.
-    pub fn is_feasible(&self, cube: usize) -> bool {
-        let mt = self.cube_minterm(cube, &self.present);
-        mt.and(&self.feasible_present).unwrap() == mt
+    pub fn is_feasible(&self, cube: usize) -> Result<bool, String> {
+        let mt = self.cube_minterm(cube, &self.present)?;
+        Ok(oom(mt.and(&self.feasible_present))? == mt)
     }
 
     /// The feasible cube indices, ascending.
-    pub fn feasible_cubes(&self) -> Vec<usize> {
-        (0..(1usize << self.num_predicates))
-            .filter(|&c| self.is_feasible(c))
-            .collect()
+    pub fn feasible_cubes(&self) -> Result<Vec<usize>, String> {
+        let mut out = Vec::new();
+        for c in 0..(1usize << self.num_predicates) {
+            if self.is_feasible(c)? {
+                out.push(c);
+            }
+        }
+        Ok(out)
     }
 
     /// The may relation BDD over the present + next predicate variables.
@@ -1783,22 +1802,22 @@ impl AbstractRelation {
 
     /// The complete-assignment minterm for a cube index over the given
     /// predicate variables (`vars[i]` true iff bit `i` of `cube` is set).
-    fn cube_minterm(&self, cube: usize, vars: &[BDDFunction]) -> BDDFunction {
+    fn cube_minterm(&self, cube: usize, vars: &[BDDFunction]) -> Result<BDDFunction, String> {
         let mut m = self.tt.clone();
         for (i, v) in vars.iter().enumerate() {
             let lit = if (cube >> i) & 1 == 1 {
                 v.clone()
             } else {
-                v.not().unwrap()
+                oom(v.not())?
             };
-            m = m.and(&lit).unwrap();
+            m = oom(m.and(&lit))?;
         }
-        m
+        Ok(m)
     }
 
     /// Is `present_cube → next_cube` a may-edge? (its full `(p, p')` minterm
     /// implies `R_may`).
-    pub fn may_holds(&self, present_cube: usize, next_cube: usize) -> bool {
+    pub fn may_holds(&self, present_cube: usize, next_cube: usize) -> Result<bool, String> {
         self.holds(&self.r_may, present_cube, next_cube)
     }
 
@@ -1807,36 +1826,41 @@ impl AbstractRelation {
     /// present cube's minterm, then the next predicate variables are split one at a time and a
     /// branch ends the moment nothing lies under it — `O(k · #targets)` applies on a BDD over
     /// `2k` variables, against the `2^k` point checks of [`Self::may_holds`] per source.
-    pub fn may_targets(&self, present_cube: usize) -> Vec<usize> {
-        let restricted = self
-            .cube_minterm(present_cube, &self.present)
-            .and(&self.r_may)
-            .unwrap();
+    pub fn may_targets(&self, present_cube: usize) -> Result<Vec<usize>, String> {
+        let restricted = oom(self
+            .cube_minterm(present_cube, &self.present)?
+            .and(&self.r_may))?;
         let mut out = Vec::new();
-        self.split_next(&restricted, 0, 0, &mut out);
+        self.split_next(&restricted, 0, 0, &mut out)?;
         out.sort_unstable();
-        out
+        Ok(out)
     }
 
     /// The split behind [`Self::may_targets`]: `f` is `R_may` restricted to one present cube
     /// and to the first `i` next literals of `acc`; a non-`⊥` `f` with all `k` next literals
     /// fixed is one target cube.
-    fn split_next(&self, f: &BDDFunction, i: usize, acc: usize, out: &mut Vec<usize>) {
+    fn split_next(
+        &self,
+        f: &BDDFunction,
+        i: usize,
+        acc: usize,
+        out: &mut Vec<usize>,
+    ) -> Result<(), String> {
         if *f == self.ff {
-            return;
+            return Ok(());
         }
         if i == self.num_predicates {
             out.push(acc);
-            return;
+            return Ok(());
         }
         let v = &self.next[i];
-        self.split_next(&f.and(v).unwrap(), i + 1, acc | (1 << i), out);
-        self.split_next(&f.and(&v.not().unwrap()).unwrap(), i + 1, acc, out);
+        self.split_next(&oom(f.and(v))?, i + 1, acc | (1 << i), out)?;
+        self.split_next(&oom(f.and(&oom(v.not())?))?, i + 1, acc, out)
     }
 
     /// Is `present_cube → next_cube` a must-edge? Panics if no [`MustSemantics`]
     /// was requested when the relation was built.
-    pub fn must_holds(&self, present_cube: usize, next_cube: usize) -> bool {
+    pub fn must_holds(&self, present_cube: usize, next_cube: usize) -> Result<bool, String> {
         let r_must = self
             .r_must
             .as_ref()
@@ -1845,12 +1869,16 @@ impl AbstractRelation {
     }
 
     /// Does the `(present_cube, next_cube)` pair belong to relation `r`?
-    fn holds(&self, r: &BDDFunction, present_cube: usize, next_cube: usize) -> bool {
-        let mt = self
-            .cube_minterm(present_cube, &self.present)
-            .and(&self.cube_minterm(next_cube, &self.next))
-            .unwrap();
-        mt.and(r).unwrap() == mt
+    fn holds(
+        &self,
+        r: &BDDFunction,
+        present_cube: usize,
+        next_cube: usize,
+    ) -> Result<bool, String> {
+        let mt = oom(self
+            .cube_minterm(present_cube, &self.present)?
+            .and(&self.cube_minterm(next_cube, &self.next)?))?;
+        Ok(oom(mt.and(r))? == mt)
     }
 
     // ---- R-F5.4.1: the symbolic mu-calculus evaluator over the relation ----
@@ -1865,9 +1893,8 @@ impl AbstractRelation {
     }
 
     /// Rename a present-var function to the next-var frame (for a preimage).
-    fn to_next(&self, f: &BDDFunction) -> BDDFunction {
-        f.substitute(&Subst::new(self.present_varnos.clone(), self.next.clone()))
-            .unwrap()
+    fn to_next(&self, f: &BDDFunction) -> Result<BDDFunction, String> {
+        oom(f.substitute(&Subst::new(self.present_varnos.clone(), self.next.clone())))
     }
 
     /// 3-valued box preimage of `phi` (Bruns–Godefroid): `box.must` uses
@@ -1878,45 +1905,45 @@ impl AbstractRelation {
     /// `self.r_may`) so a guarded modality can supply the guard-restricted
     /// relations from [`Self::guarded_relations`] (R-F5.5c). A bare modality
     /// passes `&self.r_may` and the relation's own `r_must`.
-    fn box_pre(&self, phi: &TritBdd, r_may: &BDDFunction, r_must: &BDDFunction) -> TritBdd {
+    fn box_pre(
+        &self,
+        phi: &TritBdd,
+        r_may: &BDDFunction,
+        r_must: &BDDFunction,
+    ) -> Result<TritBdd, String> {
         use oxidd::{BooleanFunctionQuant, BooleanOperator};
-        let must_next = self.to_next(phi.must());
-        let box_must = r_may
-            .apply_exists(
-                BooleanOperator::And,
-                &must_next.not().unwrap(),
-                &self.next_cube,
-            )
-            .unwrap()
-            .not()
-            .unwrap();
-        let may_next = self.to_next(phi.may());
-        let box_may = r_must
-            .apply_exists(
-                BooleanOperator::And,
-                &may_next.not().unwrap(),
-                &self.next_cube,
-            )
-            .unwrap()
-            .not()
-            .unwrap();
-        TritBdd::from_parts(box_must, box_may)
+        let must_next = self.to_next(phi.must())?;
+        let box_must = oom(oom(r_may.apply_exists(
+            BooleanOperator::And,
+            &oom(must_next.not())?,
+            &self.next_cube,
+        ))?
+        .not())?;
+        let may_next = self.to_next(phi.may())?;
+        let box_may = oom(oom(r_must.apply_exists(
+            BooleanOperator::And,
+            &oom(may_next.not())?,
+            &self.next_cube,
+        ))?
+        .not())?;
+        Ok(TritBdd::from_parts(box_must, box_may))
     }
 
     /// 3-valued diamond preimage of `phi`: `dia.must` uses `R_must`, `dia.may`
     /// uses `R_may`. `r_may` / `r_must` are passed explicitly for the same
     /// guard-restriction reason as [`Self::box_pre`] (R-F5.5c).
-    fn diamond_pre(&self, phi: &TritBdd, r_may: &BDDFunction, r_must: &BDDFunction) -> TritBdd {
+    fn diamond_pre(
+        &self,
+        phi: &TritBdd,
+        r_may: &BDDFunction,
+        r_must: &BDDFunction,
+    ) -> Result<TritBdd, String> {
         use oxidd::{BooleanFunctionQuant, BooleanOperator};
-        let must_next = self.to_next(phi.must());
-        let dia_must = r_must
-            .apply_exists(BooleanOperator::And, &must_next, &self.next_cube)
-            .unwrap();
-        let may_next = self.to_next(phi.may());
-        let dia_may = r_may
-            .apply_exists(BooleanOperator::And, &may_next, &self.next_cube)
-            .unwrap();
-        TritBdd::from_parts(dia_must, dia_may)
+        let must_next = self.to_next(phi.must())?;
+        let dia_must = oom(r_must.apply_exists(BooleanOperator::And, &must_next, &self.next_cube))?;
+        let may_next = self.to_next(phi.may())?;
+        let dia_may = oom(r_may.apply_exists(BooleanOperator::And, &may_next, &self.next_cube))?;
+        Ok(TritBdd::from_parts(dia_must, dia_may))
     }
 
     /// P2.5-F — the 3-valued CONTROLLABLE PREDECESSOR over the abstract game: the cubes from which the
@@ -1928,54 +1955,49 @@ impl AbstractRelation {
     /// differential oracle; with coarser predicates a cube where some states win and others do not is
     /// `⊥`. Sound: definite (`must`/`¬may`) verdicts transfer (Bruns–Godefroid). Requires the relation
     /// to carry [`GamePieces`] (built via [`BddBitBlaster::abstract_game`]).
-    fn cpre_controllable(&self, phi: &TritBdd) -> TritBdd {
+    fn cpre_controllable(&self, phi: &TritBdd) -> Result<TritBdd, String> {
         let g = self
             .game
             .as_ref()
             .expect("cpre_controllable requires a game relation (abstract_game)");
         // The concrete controller-win region toward next-set `r_next` (over concrete x):
         // `∀env. ∃ctrl. ∃p'. A'(x, ctrl, env, p') ∧ r_next(p')` = "the controller can step into r".
-        let win = |r_next: &BDDFunction| -> BDDFunction {
+        let win = |r_next: &BDDFunction| -> Result<BDDFunction, String> {
             use oxidd::{BooleanFunctionQuant, BooleanOperator};
-            let reach = g
-                .a_prime
-                .apply_exists(BooleanOperator::And, r_next, &self.next_cube)
-                .unwrap()
-                .exists(&g.ctrl_cube)
-                .unwrap();
-            reach.forall(&g.env_cube).unwrap()
+            let reach =
+                oom(oom(g
+                    .a_prime
+                    .apply_exists(BooleanOperator::And, r_next, &self.next_cube))?
+                .exists(&g.ctrl_cube))?;
+            oom(reach.forall(&g.env_cube))
         };
         self.lift_game_win(
             g,
-            &win(&self.to_next(phi.must())),
-            &win(&self.to_next(phi.may())),
+            &win(&self.to_next(phi.must())?)?,
+            &win(&self.to_next(phi.may())?)?,
         )
     }
 
     /// P2.5-F — the 3-valued ENVIRONMENT PREDECESSOR (dual of [`Self::cpre_controllable`]): the cubes
     /// from which the ENVIRONMENT can force `phi` — concrete `∃env ∀ctrl` per state, lifted by the
     /// same `∀x`/`∃x` cube abstraction.
-    fn cpre_environment(&self, phi: &TritBdd) -> TritBdd {
+    fn cpre_environment(&self, phi: &TritBdd) -> Result<TritBdd, String> {
         let g = self
             .game
             .as_ref()
             .expect("cpre_environment requires a game relation (abstract_game)");
         // `∃env. ∀ctrl. ∃p'. A'(x, ctrl, env, p') ∧ r_next(p')`.
-        let win = |r_next: &BDDFunction| -> BDDFunction {
+        let win = |r_next: &BDDFunction| -> Result<BDDFunction, String> {
             use oxidd::{BooleanFunctionQuant, BooleanOperator};
-            let step = g
+            let step = oom(g
                 .a_prime
-                .apply_exists(BooleanOperator::And, r_next, &self.next_cube)
-                .unwrap();
-            step.forall(&g.ctrl_cube)
-                .unwrap()
-                .exists(&g.env_cube)
-                .unwrap()
+                .apply_exists(BooleanOperator::And, r_next, &self.next_cube))?;
+            oom(oom(step.forall(&g.ctrl_cube))?.exists(&g.env_cube))
         };
         self.lift_game_win(
             g,
-            &win(&self.to_next(phi.must())),
-            &win(&self.to_next(phi.may())),
+            &win(&self.to_next(phi.must())?)?,
+            &win(&self.to_next(phi.may())?)?,
         )
     }
 
@@ -1986,25 +2008,13 @@ impl AbstractRelation {
         g: &GamePieces,
         win_must: &BDDFunction,
         win_may: &BDDFunction,
-    ) -> TritBdd {
+    ) -> Result<TritBdd, String> {
         use oxidd::BooleanFunctionQuant;
-        let cpre_must =
-            g.a.not()
-                .unwrap()
-                .or(win_must)
-                .unwrap()
-                .forall(&g.reg_cube)
-                .unwrap()
-                .and(&self.feasible_present)
-                .unwrap();
+        let cpre_must = oom(oom(oom(oom(g.a.not())?.or(win_must))?.forall(&g.reg_cube))?
+            .and(&self.feasible_present))?;
         let cpre_may =
-            g.a.and(win_may)
-                .unwrap()
-                .exists(&g.reg_cube)
-                .unwrap()
-                .and(&self.feasible_present)
-                .unwrap();
-        TritBdd::from_parts(cpre_must, cpre_may)
+            oom(oom(oom(g.a.and(win_may))?.exists(&g.reg_cube))?.and(&self.feasible_present))?;
+        Ok(TritBdd::from_parts(cpre_must, cpre_may))
     }
 
     /// R-F5.5c — the may/must relations RESTRICTED to a guard's matching
@@ -2029,7 +2039,7 @@ impl AbstractRelation {
         guard: &Guard,
         names: &HashMap<&str, usize>,
         r_must: &BDDFunction,
-    ) -> (BDDFunction, BDDFunction) {
+    ) -> Result<(BDDFunction, BDDFunction), String> {
         // `present[i]` if the predicate is in the cube's set; `ff` otherwise
         // (a required-but-absent predicate makes the guard vacuous; a
         // forbidden-but-absent one is vacuously satisfied since `¬ff = tt`).
@@ -2041,18 +2051,18 @@ impl AbstractRelation {
         };
         let mut c = self.tt.clone();
         for v in &guard.current.required {
-            c = c.and(&pred_set(v)).unwrap();
+            c = oom(c.and(&pred_set(v)))?;
         }
         for v in &guard.current.forbidden {
-            c = c.and(&pred_set(v).not().unwrap()).unwrap();
+            c = oom(c.and(&oom(pred_set(v).not())?))?;
         }
         for v in &guard.next.required {
-            c = c.and(&self.to_next(&pred_set(v))).unwrap();
+            c = oom(c.and(&self.to_next(&pred_set(v))?))?;
         }
         for v in &guard.next.forbidden {
-            c = c.and(&self.to_next(&pred_set(v).not().unwrap())).unwrap();
+            c = oom(c.and(&self.to_next(&oom(pred_set(v).not())?)?))?;
         }
-        (self.r_may.and(&c).unwrap(), r_must.and(&c).unwrap())
+        Ok((oom(self.r_may.and(&c))?, oom(r_must.and(&c))?))
     }
 
     /// R-F5.4.1 — evaluate a mu-calculus `formula` symbolically over this
@@ -2149,8 +2159,8 @@ impl AbstractRelation {
                     }
                     let phi = self.eval_node(f, *target, names, r_must, bindings)?;
                     return Ok(match guard.control {
-                        Control::Controllable => self.cpre_controllable(&phi),
-                        Control::Environment => self.cpre_environment(&phi),
+                        Control::Controllable => self.cpre_controllable(&phi)?,
+                        Control::Environment => self.cpre_environment(&phi)?,
                         Control::All => unreachable!("handled by the outer branch"),
                     });
                 }
@@ -2173,11 +2183,11 @@ impl AbstractRelation {
                 // filters. `guarded_relations` returns `(r_may, r_must)`
                 // unchanged for a bare (all-empty) guard, so this path is a
                 // no-op for `[]`/`<>`.
-                let (gr_may, gr_must) = self.guarded_relations(guard, names, r_must);
+                let (gr_may, gr_must) = self.guarded_relations(guard, names, r_must)?;
                 let phi = self.eval_node(f, *target, names, r_must, bindings)?;
                 match kind {
-                    ModalKind::Box => self.box_pre(&phi, &gr_may, &gr_must),
-                    ModalKind::Diamond => self.diamond_pre(&phi, &gr_may, &gr_must),
+                    ModalKind::Box => self.box_pre(&phi, &gr_may, &gr_must)?,
+                    ModalKind::Diamond => self.diamond_pre(&phi, &gr_may, &gr_must)?,
                 }
             }
             MuNode::Mu { var, body } => {
@@ -2217,38 +2227,45 @@ impl AbstractRelation {
     }
 
     /// The trit verdict of an evaluated formula at cube `cube`.
-    pub fn verdict_at(&self, verdict: &TritBdd, cube: usize) -> Trit {
-        let mt = self.cube_minterm(cube, &self.present);
-        if mt.and(verdict.must()).unwrap() == mt {
+    pub fn verdict_at(&self, verdict: &TritBdd, cube: usize) -> Result<Trit, String> {
+        let mt = self.cube_minterm(cube, &self.present)?;
+        Ok(if oom(mt.and(verdict.must()))? == mt {
             Trit::True
-        } else if mt.and(verdict.may()).unwrap() == mt {
+        } else if oom(mt.and(verdict.may()))? == mt {
             Trit::Unknown
         } else {
             Trit::False
-        }
+        })
     }
 
     /// P2.5-F — the trit verdict at the INITIAL cube(s): the abstract cubes containing a concrete
     /// initial state (`∃x. init(x) ∧ A(x,p)`). `True` iff every such cube is definite-true
     /// (`init ⊆ must`), `False` iff none is even possibly-true (`init ∩ may = ∅`), else `⊥`. Requires a
     /// game relation (which carries `A(x,p)`).
-    pub fn verdict_at_init(&self, verdict: &TritBdd, init_state: &BDDFunction) -> Trit {
+    pub fn verdict_at_init(
+        &self,
+        verdict: &TritBdd,
+        init_state: &BDDFunction,
+    ) -> Result<Trit, String> {
         use oxidd::BooleanFunctionQuant;
         let g = self
             .game
             .as_ref()
             .expect("verdict_at_init requires a game relation (abstract_game)");
-        let init_cubes = init_state.and(&g.a).unwrap().exists(&g.reg_cube).unwrap();
+        let init_cubes = oom(oom(init_state.and(&g.a))?.exists(&g.reg_cube))?;
         if init_cubes == self.ff {
-            return Trit::Unknown; // no feasible initial cube (should not happen for a real reset)
+            // No feasible initial cube (should not happen for a real reset).
+            return Ok(Trit::Unknown);
         }
-        if init_cubes.and(&verdict.must().not().unwrap()).unwrap() == self.ff {
-            Trit::True
-        } else if init_cubes.and(verdict.may()).unwrap() == self.ff {
-            Trit::False
-        } else {
-            Trit::Unknown
-        }
+        Ok(
+            if oom(init_cubes.and(&oom(verdict.must().not())?))? == self.ff {
+                Trit::True
+            } else if oom(init_cubes.and(verdict.may()))? == self.ff {
+                Trit::False
+            } else {
+                Trit::Unknown
+            },
+        )
     }
 }
 
@@ -3204,9 +3221,9 @@ impl Squarer {
         let vars: Vec<BDDFunction> = manager.with_manager_exclusive(|m| {
             let r = m.add_vars((3 * n + inputs.len()) as VarNo);
             (0..3 * n + inputs.len())
-                .map(|i| BDDFunction::var(m, r.start + i as VarNo).unwrap())
-                .collect()
-        });
+                .map(|i| oom(BDDFunction::var(m, r.start + i as VarNo)))
+                .collect::<Result<Vec<BDDFunction>, String>>()
+        })?;
         let tt = manager.with_manager_shared(|m| BDDFunction::t(m));
         let budget = arena * 8 / 10;
         // Engine varno → the `s` copy (for transferring next-state functions and `p`).
@@ -3265,7 +3282,7 @@ impl Squarer {
         let mut cubes: Vec<BDDFunction> = vec![tt.clone(); n + 1];
         for &v in &quantifiable {
             let idx = last_use.get(&v).copied().unwrap_or(0);
-            let var = manager.with_manager_shared(|m| BDDFunction::var(m, v).unwrap());
+            let var = manager.with_manager_shared(|m| oom(BDDFunction::var(m, v)))?;
             cubes[idx] = oom(cubes[idx].and(&var))?;
         }
         let base_quantify = cubes[0].clone();
@@ -3490,7 +3507,11 @@ impl Squarer {
             })();
             *self.closure.borrow_mut() = Some(result);
         }
-        self.closure.borrow().as_ref().unwrap().clone()
+        self.closure
+            .borrow()
+            .as_ref()
+            .expect("the closure slot is filled just above")
+            .clone()
     }
 
     /// `p ∨ ∃s'. R⁺(s, s') ∧ p(s')`, with `p` (an engine BDD over the state bits) transferred
@@ -3527,9 +3548,9 @@ impl Squarer {
             self.engine_varno
                 .iter()
                 .enumerate()
-                .map(|(j, &v)| (3 * j as VarNo, BDDFunction::var(m, v).unwrap()))
-                .collect()
-        });
+                .map(|(j, &v)| oom(BDDFunction::var(m, v)).map(|f| (3 * j as VarNo, f)))
+                .collect::<Result<HashMap<VarNo, BDDFunction>, String>>()
+        })?;
         let mut memo: HashMap<usize, BDDFunction> = HashMap::new();
         Self::transfer(set, &self._manager, &engine_vars, &model.tt, &mut memo)
     }
@@ -3665,9 +3686,9 @@ impl Squarer {
             self.engine_varno
                 .iter()
                 .enumerate()
-                .map(|(j, &v)| (3 * j as VarNo, BDDFunction::var(m, v).unwrap()))
-                .collect()
-        });
+                .map(|(j, &v)| oom(BDDFunction::var(m, v)).map(|f| (3 * j as VarNo, f)))
+                .collect::<Result<HashMap<VarNo, BDDFunction>, String>>()
+        })?;
         let mut memo_back: HashMap<usize, BDDFunction> = HashMap::new();
         let reach = Self::transfer(&r, &self._manager, &engine_vars, &model.tt, &mut memo_back)?;
         Ok((reach, steps))
@@ -4072,6 +4093,7 @@ impl BddBitBlaster {
     /// [`Self::exact_model_partitioned`] with the inputs-in-the-state lift's next-frame inputs
     /// (mununu#661): an input cell named in `lifted_env_next` (`name$next`) goes to
     /// [`ExactModel::env_next_cube`] instead of the per-step environment cube.
+    #[allow(clippy::unwrap_used)] // M1 pending: the four `and`s build cubes of DISTINCT variables (linear in the input count) on an arena the variables already fit in; `ExactModel` construction becomes fallible with the strategy cluster.
     pub fn exact_model_partitioned_with_lift(
         &self,
         controllable: &std::collections::HashSet<String>,
@@ -4603,7 +4625,11 @@ impl ExactModel {
         if slot.is_none() {
             *slot = Some(Squarer::build(self, self.reach_arena.max(SQUARING_ARENA)));
         }
-        let sq = slot.as_ref().unwrap().as_ref().map_err(|e| e.clone())?;
+        let sq = slot
+            .as_ref()
+            .expect("the squarer slot is filled just above")
+            .as_ref()
+            .map_err(|e| e.clone())?;
         // The reach phase's clock: `MUNUNU_BDD_REACH_BUDGET_MS` (default 30 s), and never more
         // than a quarter of what is left on the model's own deadline.
         let now = std::time::Instant::now();
@@ -4693,8 +4719,8 @@ impl ExactModel {
             let lo = self.constrain(&f0, &c0, memo)?;
             let x = self.manager.with_manager_shared(|m| {
                 let v = m.level_to_var(lvl);
-                BDDFunction::var(m, v).unwrap()
-            });
+                oom(BDDFunction::var(m, v))
+            })?;
             oom(x.ite(&hi, &lo))?
         };
         memo.insert((fk, ck), out.clone());
@@ -5292,7 +5318,11 @@ impl ExactModel {
         if slot.is_none() {
             *slot = Some(Squarer::build(self, self.reach_arena.max(SQUARING_ARENA)));
         }
-        let sq = slot.as_ref().unwrap().as_ref().map_err(|e| e.clone())?;
+        let sq = slot
+            .as_ref()
+            .expect("the squarer slot is filled just above")
+            .as_ref()
+            .map_err(|e| e.clone())?;
         let closure = sq.closure()?;
         self.tick(sq.steps.get() as u64);
         if greatest {
@@ -5311,7 +5341,11 @@ impl ExactModel {
         if slot.is_none() {
             *slot = Some(Squarer::build(self, self.reach_arena.max(SQUARING_ARENA)));
         }
-        let sq = slot.as_ref().unwrap().as_ref().map_err(|e| e.clone())?;
+        let sq = slot
+            .as_ref()
+            .expect("the squarer slot is filled just above")
+            .as_ref()
+            .map_err(|e| e.clone())?;
         let closure = sq.closure()?;
         self.tick(sq.steps.get() as u64);
         sq.fair_cycle(&closure, literals, self)
@@ -6030,7 +6064,7 @@ pub fn kmts_two_player_verdict(
     let rel = bb.abstract_game(&exprs, must_semantics, &ctrl)?;
     let init = bb.initial_state_bdd(&file)?; // before the fixpoint (ordering hazard, `check_node_budget`)
     let verdict = rel.evaluate(formula, &names)?;
-    Ok(rel.verdict_at_init(&verdict, &init))
+    rel.verdict_at_init(&verdict, &init)
 }
 
 /// P2.5-F (game-CEGAR) — decide the two-player game with automatic predicate REFINEMENT: when the
@@ -6083,7 +6117,7 @@ pub fn kmts_two_player_verdict_cegar(
     for r in 0..=max_refinements {
         let rel = bb.abstract_game_bdd(&pred_bdds, must_semantics, &ctrl)?;
         let verdict = rel.evaluate(formula, &names)?;
-        let v = rel.verdict_at_init(&verdict, &init);
+        let v = rel.verdict_at_init(&verdict, &init)?;
         if v != Trit::Unknown {
             return Ok((v, r));
         }
@@ -7091,8 +7125,8 @@ pub fn exact_env_strategy(btor2_content: &str, good: &str) -> Result<EnvStrategy
         // trivially true because you are always AT good). Require `init` to reach a `¬good` state while
         // staying in `S`. (Free-model non-vacuity is not enough: the strategy, not the free design,
         // decides whether `good` is left.)
-        let not_good = good_bdd.not().unwrap();
-        let can_leave = init.and(&exact.ef_within(&s, &not_good)?).unwrap();
+        let not_good = oom(good_bdd.not())?;
+        let can_leave = oom(init.and(&exact.ef_within(&s, &not_good)?))?;
         if can_leave == *exact.ff() {
             return Ok(EnvStrategyOutcome::Inapplicable(format!(
                 "an environment strategy would keep the design in `{good}` forever — vacuous, not a \
@@ -7101,7 +7135,7 @@ pub fn exact_env_strategy(btor2_content: &str, good: &str) -> Result<EnvStrategy
         }
         // The environment can maintain recoverability. Witness a first move: an initial state in S
         // with an admissible input keeping the successor in S — `init ∧ S ∧ move_into(S)`.
-        let move_set = init.and(&s).unwrap().and(&exact.move_into(&s)?).unwrap();
+        let move_set = oom(oom(init.and(&s))?.and(&exact.move_into(&s)?))?;
         let first_move = if move_set == *exact.ff() {
             std::collections::BTreeMap::new()
         } else {
@@ -7906,6 +7940,7 @@ impl BddBitBlaster {
     /// [`predicate_bdd`]: BddBitBlaster::predicate_bdd
     /// [`initial_state_bdd`]: BddBitBlaster::initial_state_bdd
     /// [`eval_step`]: BddBitBlaster::eval_step
+    #[allow(clippy::unwrap_used)] // M1 pending (failure-paths.md Rule 2): witness / strategy extraction over a built model — convert each site to `oom(..)?`; never add one.
     pub fn exact_stall_lasso(&self, file: &Btor2File, p: &BDDFunction) -> Option<StallLasso> {
         let exact = self.exact_model();
         let stall = self.eg_not_p(&exact, p).ok()?;
@@ -7933,6 +7968,7 @@ impl BddBitBlaster {
     ///
     /// [`exact_stall_lasso`]: BddBitBlaster::exact_stall_lasso
     /// [`eval_step`]: BddBitBlaster::eval_step
+    #[allow(clippy::unwrap_used)] // M1 pending (failure-paths.md Rule 2): witness / strategy extraction over a built model — convert each site to `oom(..)?`; never add one.
     pub fn exact_reachable_stall_lasso(
         &self,
         file: &Btor2File,
@@ -8004,7 +8040,7 @@ impl BddBitBlaster {
             let full = self.pick_full_assignment(&good);
             inputs.push(self.input_assignment(&full));
             let mut ns = s.clone();
-            for (reg, val) in self.eval_step(&full) {
+            for (reg, val) in self.eval_step(&full).ok()? {
                 ns.insert(reg, val);
             }
             s = ns;
@@ -8025,6 +8061,7 @@ impl BddBitBlaster {
     ///
     /// [`exact_reachable_stall_lasso`]: BddBitBlaster::exact_reachable_stall_lasso
     /// [`eval_step`]: BddBitBlaster::eval_step
+    #[allow(clippy::unwrap_used)] // M1 pending (failure-paths.md Rule 2): witness / strategy extraction over a built model — convert each site to `oom(..)?`; never add one.
     pub fn exact_reachable_trap_path(
         &self,
         file: &Btor2File,
@@ -8105,7 +8142,7 @@ impl BddBitBlaster {
             let full = self.pick_full_assignment(&good);
             inputs.push(self.input_assignment(&full));
             let mut ns = s.clone();
-            for (reg, val) in self.eval_step(&full) {
+            for (reg, val) in self.eval_step(&full).ok()? {
                 ns.insert(reg, val);
             }
             s = ns;
@@ -8124,6 +8161,7 @@ impl BddBitBlaster {
     ///
     /// **Engine (§16):** `exact-symbolic` ROBDD — the `EF` attractor layers (`diamond_pre` = ∃input) +
     /// the concrete minterm descent (`pick_full_assignment`/`eval_step`), reusing the trap-path machinery.
+    #[allow(clippy::unwrap_used)] // M1 pending (failure-paths.md Rule 2): witness / strategy extraction over a built model — convert each site to `oom(..)?`; never add one.
     pub fn reach_good_play(&self, file: &Btor2File, p: &BDDFunction) -> Option<StallLasso> {
         let exact = self.exact_model();
         // EF(good) attractor layers toward `good`: L_0 = good, L_k = L_{k-1} ∨ ◇L_{k-1}.
@@ -8171,7 +8209,7 @@ impl BddBitBlaster {
             let full = self.pick_full_assignment(&step);
             inputs.push(self.input_assignment(&full));
             let mut ns = s.clone();
-            for (reg, val) in self.eval_step(&full) {
+            for (reg, val) in self.eval_step(&full).ok()? {
                 ns.insert(reg, val);
             }
             s = ns;
@@ -8182,6 +8220,7 @@ impl BddBitBlaster {
     /// P2.5-E — the full positional strategy (see [`PositionalStrategy`]). The `EF(good)` attractor gives each
     /// state its rank; concrete forward reachability from the initial state enumerates the real reachable
     /// states; the forced inputs per control state are projected from the rank-decreasing moves.
+    #[allow(clippy::unwrap_used)] // M1 pending (failure-paths.md Rule 2): witness / strategy extraction over a built model — convert each site to `oom(..)?`; never add one.
     fn env_positional_strategy(
         &self,
         file: &Btor2File,
@@ -8318,6 +8357,7 @@ impl BddBitBlaster {
     /// move ([`ExactModel::env_forcing_moves`]) with an arbitrary controller response, so the recorded
     /// `inputs` are the FAITHFUL "env forces `¬good` no matter what the controller does" trace — the ack
     /// the environment withholds — not a lazy coincidence, and `¬good` holds on the whole cycle.
+    #[allow(clippy::unwrap_used)] // M1 pending (failure-paths.md Rule 2): witness / strategy extraction over a built model — convert each site to `oom(..)?`; never add one.
     fn two_player_recurrence_stall_lasso(
         &self,
         file: &Btor2File,
@@ -8374,7 +8414,7 @@ impl BddBitBlaster {
             let full = self.pick_full_assignment(&moves);
             let input = self.input_assignment(&full);
             let mut ns = s.clone();
-            for (reg, val) in self.eval_step(&full) {
+            for (reg, val) in self.eval_step(&full).ok()? {
                 ns.insert(reg, val);
             }
             Some((input, ns))
@@ -8453,6 +8493,7 @@ impl BddBitBlaster {
     /// layers). Returns the ranked states plus, per `reg_name` value, its minimum rank (fastest
     /// progress). The FORWARD walk (not a symbolic pre-image) keeps the free reset from making every
     /// encoding reachable. Shared by the reachability and Büchi strategy extractors.
+    #[allow(clippy::unwrap_used)] // M1 pending (failure-paths.md Rule 2): witness / strategy extraction over a built model — convert each site to `oom(..)?`; never add one.
     fn reachable_ranked_states(
         &self,
         file: &Btor2File,
@@ -8527,6 +8568,7 @@ impl BddBitBlaster {
     /// env-independent when one exists (Moore fast-path, [`ExactModel::ctrl_forcing_moves`]), else one
     /// response per environment input ([`ExactModel::move_into`] — a genuinely reactive controller, since
     /// the controller is the `∀env ∃ctrl` responder).
+    #[allow(clippy::unwrap_used)] // M1 pending (failure-paths.md Rule 2): witness / strategy extraction over a built model — convert each site to `oom(..)?`; never add one.
     fn controller_mealy_from_layers(
         &self,
         exact: &ExactModel,
@@ -8651,6 +8693,7 @@ impl BddBitBlaster {
     /// good ∧ CPre_ctrl W` and, from `R`, re-enters `W`, so `R ⊆ good` is visited infinitely often
     /// (positional determinacy of Büchi games). Reuses [`Self::controller_mealy_from_layers`] with the
     /// attractor layers to `R` and a recur target of `W`.
+    #[allow(clippy::unwrap_used)] // M1 pending (failure-paths.md Rule 2): witness / strategy extraction over a built model — convert each site to `oom(..)?`; never add one.
     fn two_player_buchi_strategy(
         &self,
         file: &Btor2File,
@@ -8731,6 +8774,7 @@ impl BddBitBlaster {
     ///   ∀ctrl-robust). A safety/maintain strategy, so every row has rank 0.
     ///
     /// `None` when `reg_name` is not a state register.
+    #[allow(clippy::unwrap_used)] // M1 pending (failure-paths.md Rule 2): witness / strategy extraction over a built model — convert each site to `oom(..)?`; never add one.
     fn two_player_strategy(
         &self,
         file: &Btor2File,
@@ -8843,6 +8887,7 @@ impl BddBitBlaster {
     /// The distinct concrete next-states reachable from `s` under some constraint-respecting input.
     /// Enumerates by picking a full `(state = s, input)` assignment, stepping it, then subtracting every
     /// input that leads to that successor — so the loop count is the number of DISTINCT successors (few).
+    #[allow(clippy::unwrap_used)] // M1 pending (failure-paths.md Rule 2): witness / strategy extraction over a built model — convert each site to `oom(..)?`; never add one.
     fn concrete_successors(
         &self,
         exact: &ExactModel,
@@ -8856,7 +8901,11 @@ impl BddBitBlaster {
             }
             let full = self.pick_full_assignment(&rem);
             let mut ns = s.clone();
-            for (reg, val) in self.eval_step(&full) {
+            // An arena exhaustion here ends the enumeration; the walker then reports no witness.
+            let Ok(step) = self.eval_step(&full) else {
+                break;
+            };
+            for (reg, val) in step {
                 ns.insert(reg, val);
             }
             // mununu#543 — an arena exhaustion here TRUNCATES the enumeration rather than
@@ -8879,6 +8928,7 @@ impl BddBitBlaster {
 
     /// The value `cell` is forced to across the (state,input) set `set` (assumed non-empty), or `None`
     /// if any of `cell`'s bits can take either value there — i.e. the cell is not (fully) constrained.
+    #[allow(clippy::unwrap_used)] // M1 pending (failure-paths.md Rule 2): witness / strategy extraction over a built model — convert each site to `oom(..)?`; never add one.
     fn forced_cell_value(&self, set: &BDDFunction, cell: &Cell) -> Option<u128> {
         let mut val = 0u128;
         for (b, var) in cell.vars.iter().enumerate() {
@@ -8943,6 +8993,7 @@ impl BddBitBlaster {
     /// advances via [`eval_step`]. Bounded by the stall's size; a deadlock yields an open lasso.
     ///
     /// [`eval_step`]: BddBitBlaster::eval_step
+    #[allow(clippy::unwrap_used)] // M1 pending (failure-paths.md Rule 2): witness / strategy extraction over a built model — convert each site to `oom(..)?`; never add one.
     fn walk_stall_cycle(
         &self,
         exact: &ExactModel,
@@ -8980,7 +9031,7 @@ impl BddBitBlaster {
             let full = self.pick_full_assignment(&good);
             inputs.push(self.input_assignment(&full));
             let mut ns = s.clone();
-            for (reg, val) in self.eval_step(&full) {
+            for (reg, val) in self.eval_step(&full)? {
                 ns.insert(reg, val);
             }
             s = ns;
@@ -8994,6 +9045,7 @@ impl BddBitBlaster {
     }
 
     /// The minterm fixing only the STATE bits to `state` (input bits left free).
+    #[allow(clippy::unwrap_used)] // M1 pending (failure-paths.md Rule 2): witness / strategy extraction over a built model — convert each site to `oom(..)?`; never add one.
     fn state_minterm(&self, state: &BTreeMap<String, u128>) -> BDDFunction {
         let mut mt = self.tt.clone();
         for cell in &self.cells {
@@ -9028,6 +9080,7 @@ impl BddBitBlaster {
 
     /// Greedy minterm pick: for each selected cell's bits, keep the value that leaves
     /// the residual set non-empty. `state_only` restricts to state cells.
+    #[allow(clippy::unwrap_used)] // M1 pending (failure-paths.md Rule 2): witness / strategy extraction over a built model — convert each site to `oom(..)?`; never add one.
     fn pick_assignment(&self, set: &BDDFunction, state_only: bool) -> HashMap<String, u128> {
         let mut cur = set.clone();
         let mut out: HashMap<String, u128> = HashMap::new();
@@ -9086,6 +9139,7 @@ pub(crate) fn bdd_nodes_height(f: &BDDFunction) -> (usize, usize) {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     /// A mux on internal logic is not read as the register behind its arm. The EmTech
     /// `sensor_monitor` output `ch_trip = link_fault ? 3'b111 : data_q` (with `data_q`'s pinned
     /// reset mux beneath it) was resolved to `data_q`, so `AG(link_fault → ch_trip == 7)` came
@@ -10875,7 +10929,7 @@ mod tests {
             }
 
             // Symbolic step.
-            let symbolic = bb.eval_step(&assignment);
+            let symbolic = bb.eval_step(&assignment).unwrap();
 
             // Concrete oracle.
             let regs: HashMap<String, u128> = states
@@ -11015,7 +11069,7 @@ mod tests {
                     .into_iter()
                     .collect();
                 assert_eq!(
-                    bb.eval_predicate_at(&bdd, &regs),
+                    bb.eval_predicate_at(&bdd, &regs).unwrap(),
                     expr.eval(&regs),
                     "predicate {expr:?} disagrees with eval at a={a} b={b}"
                 );
@@ -11211,7 +11265,7 @@ mod tests {
         for ci in 0..(1usize << k) {
             for cj in 0..(1usize << k) {
                 assert_eq!(
-                    rel.may_holds(ci, cj),
+                    rel.may_holds(ci, cj).unwrap(),
                     expected.contains(&(ci, cj)),
                     "may-edge {ci} -> {cj} disagrees with brute force"
                 );
@@ -11370,7 +11424,7 @@ mod tests {
                     },
                 };
                 assert_eq!(
-                    rel.must_holds(ci, cj),
+                    rel.must_holds(ci, cj).unwrap(),
                     expected,
                     "must-edge {ci} -> {cj} ({semantics:?}) disagrees with brute force"
                 );
@@ -13360,7 +13414,7 @@ mod tests {
             for (k, v) in inp {
                 full.insert(k.clone(), *v);
             }
-            let stepped = bb.eval_step(&full);
+            let stepped = bb.eval_step(&full).unwrap();
             let next_st = stepped.get("st").copied().unwrap_or(path[i]["st"]);
             assert_eq!(
                 Some(next_st),
@@ -13414,7 +13468,7 @@ mod tests {
                 let mut asg: HashMap<String, u128> =
                     from.iter().map(|(k, v)| (k.clone(), *v)).collect();
                 asg.insert("en".to_string(), en);
-                let next = bb.eval_step(&asg);
+                let next = bb.eval_step(&asg).unwrap();
                 next.get("cnt").copied().unwrap_or(0) == *to.get("cnt").unwrap()
             })
         };
@@ -13527,7 +13581,8 @@ mod tests {
                 let mut asg: HashMap<String, u128> =
                     from.iter().map(|(k, v)| (k.clone(), *v)).collect();
                 asg.insert("go".to_string(), go);
-                bb.eval_step(&asg).get("cnt").copied().unwrap_or(0) == *to.get("cnt").unwrap()
+                bb.eval_step(&asg).unwrap().get("cnt").copied().unwrap_or(0)
+                    == *to.get("cnt").unwrap()
             })
         };
         let mut path: Vec<&BTreeMap<String, u128>> =
@@ -13759,8 +13814,8 @@ mod tests {
         let formula = crate::mu_calculus::parser::parse("nu X. ((mu Y. (done or [] Y)) and [] X)")
             .expect("formula");
         let v = rel.evaluate(&formula, &names).expect("eval");
-        for c in rel.feasible_cubes() {
-            let verdict = rel.verdict_at(&v, c);
+        for c in rel.feasible_cubes().unwrap() {
+            let verdict = rel.verdict_at(&v, c).unwrap();
             eprintln!("AG AF (cnt==0) @ cube {c}: {verdict:?}");
             // No feasible cube may be definite-False: the concrete design can
             // always eventually reach cnt==0 (or stay), so a definite VIOLATED
@@ -13798,14 +13853,14 @@ mod tests {
             for ci in 0..(1usize << k) {
                 // A feasible cube has at least one may-out-edge (every concrete
                 // state steps somewhere); an infeasible cube has none.
-                let feasible = (0..(1usize << k)).any(|cj| rel.may_holds(ci, cj));
+                let feasible = (0..(1usize << k)).any(|cj| rel.may_holds(ci, cj).unwrap());
                 if !feasible {
                     continue;
                 }
                 for cj in 0..(1usize << k) {
-                    if rel.must_holds(ci, cj) {
+                    if rel.must_holds(ci, cj).unwrap() {
                         assert!(
-                            rel.may_holds(ci, cj),
+                            rel.may_holds(ci, cj).unwrap(),
                             "must ⊄ may: {ci} -> {cj} ({sem:?}) is a must-edge but not a may-edge"
                         );
                     }
@@ -13896,14 +13951,14 @@ mod tests {
         }
         for (j, &ci) in feasible.iter().enumerate() {
             for (l, &cj) in feasible.iter().enumerate() {
-                if rel.must_holds(ci, cj) {
+                if rel.must_holds(ci, cj).unwrap() {
                     b.transition_ids_with_modality(
                         ids[j],
                         &[step],
                         ids[l],
                         TransitionModality::Sharp,
                     );
-                } else if rel.may_holds(ci, cj) {
+                } else if rel.may_holds(ci, cj).unwrap() {
                     b.transition_ids_with_modality(
                         ids[j],
                         &[step],
@@ -13925,7 +13980,7 @@ mod tests {
                 .expect("symbolic evaluate");
             for (j, &ci) in feasible.iter().enumerate() {
                 assert_eq!(
-                    rel.verdict_at(&sym, ci),
+                    rel.verdict_at(&sym, ci).unwrap(),
                     tri.verdict_at(j),
                     "cube {ci} (state c{j}), formula `{formula_str}`"
                 );
@@ -14688,6 +14743,7 @@ mod tests {
 
 #[cfg(test)]
 mod lever_gating_tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
 
     /// Every [`AbstentionKind`] carries a distinct kebab-case report label — the recoverability
@@ -14889,6 +14945,7 @@ mod lever_gating_tests {
 
 #[cfg(test)]
 mod open_items_tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
 
     /// A 200-bit register held at its init value 1: over the default cap (192), under the ceiling.
@@ -15458,6 +15515,81 @@ mod open_items_tests {
             !evaluation_abstained.is_empty(),
             "no arena in the scan exhausted inside the `¬` — the reproducer did not reach the \
              defect (built at {build_did_not_fit:?}, evaluated at {evaluated:?})"
+        );
+    }
+
+    // M1 (docs/policies/failure-paths.md Rule 2) — the CUBE path's twin of the test above: the
+    // abstract relation, its evaluator and the per-cube readers (`feasible_cubes`, `verdict_at`,
+    // `may_targets`) run under an arena a 10-bit incrementer with eight predicates can exhaust.
+    // The arena is scanned because the node counts are OxiDD's; the test asserts that NO size
+    // panics (every OxiDD apply on the path goes through `oom(..)?`), that at least one size
+    // decides, and that at least one size abstains with the attributed reason.
+    #[test]
+    fn an_arena_exhausted_in_the_cube_path_abstains_instead_of_panicking() {
+        const INCREMENTER: &str = "\
+1 sort bitvec 10
+2 state 1 a
+3 one 1
+4 add 1 2 3
+5 next 1 2 4
+6 zero 1
+7 init 1 2 6
+";
+        let file = crate::adapter::btor2::parser::parse(INCREMENTER).expect("parse");
+        let predicates: Vec<PredicateExpr> = (0..8)
+            .map(|v| PredicateExpr::Cmp {
+                register: "a".into(),
+                op: CmpOp::Eq,
+                value: v,
+            })
+            .collect();
+        let names: Vec<String> = (0..8).map(|i| format!("P{i}")).collect();
+        let formula = crate::mu_calculus::parser::parse("mu Z. (P0 || <> Z)").expect("formula");
+        let (mut decided, mut abstained, mut build_did_not_fit) =
+            (Vec::new(), Vec::new(), Vec::new());
+        for arena in (512..=16_384).step_by(256) {
+            ARENA_NODES_OVERRIDE.with(|c| c.set(Some(arena)));
+            let bb = match BddBitBlaster::build(&file) {
+                Ok(bb) => bb,
+                Err(_) => {
+                    ARENA_NODES_OVERRIDE.with(|c| c.set(None));
+                    build_did_not_fit.push(arena);
+                    continue;
+                }
+            };
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let rel = bb.abstract_relation(&predicates, Some(MustSemantics::ForallExists))?;
+                let v = rel.evaluate(&formula, &names)?;
+                let mut trits = Vec::new();
+                for cube in rel.feasible_cubes()? {
+                    trits.push(rel.verdict_at(&v, cube)?);
+                    let _ = rel.may_targets(cube)?;
+                }
+                Ok::<Vec<Trit>, String>(trits)
+            }));
+            ARENA_NODES_OVERRIDE.with(|c| c.set(None));
+            match outcome {
+                Err(_) => panic!("arena {arena}: the cube path PANICKED instead of abstaining"),
+                Ok(Err(msg)) if msg.contains("arena exhausted") || msg.contains("NODE budget") => {
+                    abstained.push(arena)
+                }
+                Ok(Err(msg)) => panic!("arena {arena}: unexpected error: {msg}"),
+                Ok(Ok(trits)) => {
+                    // `a` counts 0, 1, 2, …: `EF (a == 0)` is definite-true from the initial cube
+                    // only, and false from every other reachable one once `a` has left 0.
+                    assert!(!trits.is_empty(), "arena {arena}: no feasible cube");
+                    decided.push(arena)
+                }
+            }
+        }
+        assert!(
+            !decided.is_empty(),
+            "no arena in the scan fit the design — widen the scan (build failed at {build_did_not_fit:?})"
+        );
+        assert!(
+            !abstained.is_empty(),
+            "no arena in the scan exhausted inside the cube path — the reproducer did not reach the \
+             class (built at {build_did_not_fit:?}, decided at {decided:?})"
         );
     }
 

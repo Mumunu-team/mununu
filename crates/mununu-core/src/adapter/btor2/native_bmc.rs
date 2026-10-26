@@ -37,6 +37,7 @@
 //! track) currently returns [`BmcError::Encode`]; wiring the `BvUfArray` theory is
 //! a follow-up. k-induction (unbounded SAFE proof) and IMC are the next slices.
 
+#![deny(clippy::unwrap_used)] // docs/policies/failure-paths.md Rule 2: abstain, never panic
 use std::collections::HashMap;
 
 use crate::adapter::btor2::ast::{Btor2File, Nid, Node, Operand};
@@ -651,6 +652,7 @@ pub fn bmc_cex_until(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
     use crate::adapter::btor2::parser;
 

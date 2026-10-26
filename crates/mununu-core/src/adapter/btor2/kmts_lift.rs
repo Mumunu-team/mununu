@@ -3736,7 +3736,12 @@ fn compute_all_may_edges_bdd(
         if crate::adapter::run_budget::expired() {
             return None; // the SMT path reports the budget, as before
         }
-        let targets = rel.may_targets(cube);
+        // An arena exhaustion in the BDD split is not a result: fall back to the SMT path, which
+        // computes and reports on its own (as the budget does above).
+        let Ok(targets) = rel.may_targets(cube) else {
+            tracing::warn!("may_targets: BDD arena exhausted; falling back to the SMT post-image");
+            return None;
+        };
         if roots.is_some() {
             for &t in &targets {
                 if !queued[t] {

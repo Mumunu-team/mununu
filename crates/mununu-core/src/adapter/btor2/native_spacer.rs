@@ -31,6 +31,7 @@
 //! SPACER gives no natural counterexample *depth* or inductive *k*, so those
 //! fields carry `0` here (the verdict, not the witness, is the product).
 
+#![deny(clippy::unwrap_used)] // docs/policies/failure-paths.md Rule 2: abstain, never panic
 use crate::adapter::btor2::ast::{Btor2File, Nid, Node, Operand};
 use crate::adapter::btor2::native_bmc::{self, SafetyVerdict};
 use crate::adapter::sidecar::predicate_image::btor2_encode::{EncodeError, encode_design};
@@ -232,6 +233,7 @@ pub fn decide_bad_safety_spacer(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
     use crate::adapter::btor2::parser;
 

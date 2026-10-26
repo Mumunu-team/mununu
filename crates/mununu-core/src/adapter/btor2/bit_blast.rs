@@ -20,6 +20,7 @@
 //!   offending NID. Handing the BTOR2 to an external symbolic engine
 //!   (Phase 3 hand-off) is the documented escape hatch.
 
+#![deny(clippy::unwrap_used)] // docs/policies/failure-paths.md Rule 2: abstain, never panic
 use super::ast::*;
 use super::bv::Bv;
 use super::parser;
@@ -6946,6 +6947,7 @@ pub fn translate(content: &str, options: &AdapterOptions) -> Result<AdapterOutpu
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
     use crate::adapter::AdapterOptions;
 

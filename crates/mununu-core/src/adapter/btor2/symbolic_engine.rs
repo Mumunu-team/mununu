@@ -120,8 +120,8 @@ pub fn symbolic_cube_verdicts(
 
     let mut cube_verdicts = Vec::new();
     let (mut t, mut f, mut b) = (0usize, 0usize, 0usize);
-    for cube in rel.feasible_cubes() {
-        let v = rel.verdict_at(&verdict, cube);
+    for cube in rel.feasible_cubes().map_err(ir_err)? {
+        let v = rel.verdict_at(&verdict, cube).map_err(ir_err)?;
         match v {
             Trit::True => t += 1,
             Trit::False => f += 1,
