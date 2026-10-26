@@ -33,10 +33,11 @@
 
 | run | result |
 |---|---|
-| parser on rIC3's verbatim `--witness` output; replayed trace equals native BMC's states; a lying witness is refused; eight malformed shapes name their defect | unit tests, pending the host run |
+| parser on rIC3's verbatim `--witness` output (and the real am2901 witness as a fixture); replayed trace equals native BMC's states; a lying witness is refused; eight malformed shapes name their defect | 6 unit tests, green |
 | first gate run, routing through rIC3 `-e bmc`: the am2901 e2e sat 2 h 22 min in the native fallback — rIC3's BMC times out at 120 s at depth 13 | the lesson that moved the finder to IC3 |
-| `e2e_ric3_finds_the_am2901_witness_within_the_slice` (HWMCC'20, `MUNUNU_HWMCC_FLAT`), routing through IC3 | pending — recorded here before merge |
-| edn IP e2e (`EdnFatalAlertNoRsp_A` ×8 traces) | pending — same depth expected; free inputs may differ |
+| `e2e_ric3_finds_the_am2901_witness_within_the_slice` (HWMCC'20, `MUNUNU_HWMCC_FLAT`), routing through IC3 | `violated`, a replayed witness of depth 16 in **0.3 s** (native BMC: no answer in 900 s) |
+| edn IP e2e on this branch (`mununu-sva`, 2026-10-26) | ok, 1,130 s: 67 properties, 0 unsupported, every violated row carries its trace with `tl_i` at 109 bits |
+| edn `run.sh --json` on this branch vs `main` bc82372 (`scratchpad/cex_diff.py`) | **0 verdict moves**; all 11 traces (8 finite, 3 trap) keep their kind and depth (6 and 3); the same 184 state / 4 input / 17 monitor cells per step; the free inputs differ on 1–3 of the 4 per step and the registers they drive diverge accordingly (up to ~45 of 184 by the last step) — a different, replayed path of the same length. The one name difference is pre-existing and unrelated: three `sv2v_cast…$result` register names embed yosys's per-run temp path, so they differ between any two runs (filed separately). |
 
 ## Provenance
 
