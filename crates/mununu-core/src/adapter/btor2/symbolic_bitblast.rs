@@ -3519,6 +3519,13 @@ impl Squarer {
                 // and the loop SEES the fixed point one step later, at `T_{n+1} == T_n`.
                 let max_steps = SQUARING_MAX_STEPS.max(self.s0.len() + 1);
                 for step in 1..=max_steps {
+                    // mununu#804 — the caller's run budget declines the squaring as the node
+                    // budget does; the fixpoint iteration behind it polls the same budget.
+                    if crate::adapter::run_budget::expired() {
+                        return Err(format!(
+                            "squaring: declined on the caller's RUN budget after {step} steps"
+                        ));
+                    }
                     let t_step = std::time::Instant::now();
                     let shifted = oom(t.substitute(&self.shift))?;
                     let composed =
@@ -3681,8 +3688,9 @@ impl Squarer {
             // closing, overran the exact rung's whole time slice (only the fixpoint read the
             // deadline) and starved the l2s rung — while the UNRESTRICTED fixpoint decided the same
             // instance in 3 s. A decline here is the baseline behaviour, not an abstention.
-            if let Some(dl) = deadline
-                && std::time::Instant::now() > dl
+            // mununu#804 — the caller's run budget declines the probe the same way.
+            if deadline.is_some_and(|dl| std::time::Instant::now() > dl)
+                || crate::adapter::run_budget::expired()
             {
                 return Err(format!(
                     "reach: declined on its time budget after {steps} forward image steps — \
@@ -5109,6 +5117,20 @@ impl ExactModel {
                         .into(),
                 );
             }
+            // mununu#804 — the caller's run budget (`run_budget`: the planner's per-property
+            // budget, the HWMCC harness's per-instance budget, a rescue slice) is polled HERE,
+            // every iteration, beside the opt-in deadline below. A budget that is installed and
+            // not honoured is the silence class: bufferAlloc ran four hours under a 300 s budget,
+            // one OxiDD collection every ~50 s, and reported `Unknown` without saying the budget
+            // had passed. The thread-local read plus one `Instant::now()` is nothing next to a
+            // pre-image. Unbounded (the default) ⇒ never fires.
+            if crate::adapter::run_budget::expired() {
+                return Err(format!(
+                    "symbolic bit-blaster: abstained on the caller's RUN budget (the per-property / \
+                     per-run wall-clock budget installed by the caller) with the fixpoint still \
+                     iterating at {n} steps"
+                ));
+            }
             // mununu#553 — the DETERMINISTIC work guard, and the one that now actually fires. The
             // iteration budget above bounds DEPTH; this bounds the SIZE of the set being iterated,
             // which is what distinguishes a deep-but-tractable cone (~3 nodes/iteration, converges)
@@ -5769,7 +5791,10 @@ pub fn abstention_kind(message: &str) -> AbstentionKind {
         AbstentionKind::IterationBudget
     } else if m.contains("fixpoint LATENCY bound") {
         AbstentionKind::Latency
-    } else if m.contains("WALL-CLOCK budget") || m.contains("per-request deadline") {
+    } else if m.contains("WALL-CLOCK budget")
+        || m.contains("per-request deadline")
+        || m.contains("RUN budget")
+    {
         AbstentionKind::Deadline
     } else if m.contains("cancelled by the caller") {
         AbstentionKind::Cancelled
