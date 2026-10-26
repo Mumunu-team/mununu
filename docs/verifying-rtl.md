@@ -336,9 +336,14 @@ mununu --quiet sv verify-auto design.sv --json | jq '[.notes[] | select(.level==
 > Source of truth: [`attach_safety_witnesses`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L1385) — surface: (CLI+API)
 
 Every VIOLATED safety property carries a `trace` (`kind: "finite"`) — whichever engine decided it:
-native BMC re-derives the **shallowest** reset → violation path on a one-path monitor of the
-formula, one `steps[]` entry per cycle with its register `state` and the `inputs` that drive it
-(the last step's inputs are what tripped the assertion). The CLI prints it under the property:
+the **shallowest** reset → violation path on a one-path monitor of the formula, one `steps[]` entry
+per cycle with its register `state` and the `inputs` that drive it (the last step's inputs are what
+tripped the assertion). Since mununu#744 the path is found by a bit-level member when one is
+present — rIC3's IC3 (`--witness`, under the rescue slice; its own BMC is as slow as native BMC on am2901) — and its witness is **replayed on the
+concrete simulator** before it ships ([`btor2::witness`](../crates/mununu-core/src/adapter/btor2/witness.rs):
+the initial frame from the witness, every later frame recomputed from its inputs; a witness that
+does not replay is refused); native BMC re-derives the path when rIC3 is absent, declines, or its
+witness did not replay, and is the `--owned-only` behaviour. The CLI prints it under the property:
 
 ```text
   [assert] u_s.hs_sub_sva_0: VIOLATED (1 cell(s))
@@ -359,9 +364,9 @@ named through a bound checker's port (`u_x_sva.state_q`) shows the design's name
 flattened netlist has that net on the same bits; and the clock, which the model steps implicitly, is
 not listed among the inputs.
 
-A path BMC finds is a genuine counterexample, so the trace also cross-checks the verdict. It is
-absent when the shortest path is deeper than 60 cycles plus the property's own depth, or when only
-the branching reading fails (`[] a || [] b` can be false at a state although every single path
+A replayed path is a genuine counterexample, so the trace also cross-checks the verdict. It is
+absent when neither finder returns a replayable path within its bound (native BMC: 60 cycles plus
+the property's own depth; rIC3: the rescue slice), or when only the branching reading fails (`[] a || [] b` can be false at a state although every single path
 satisfies one of them). Liveness carries a `lasso` trace (`loop_start` marks where the last step
 loops back), a refuted `AG EF` decided by a trap certificate a `trap` trace, and a bare `EF p` an
 `unreachable` trace listing `unreachable_target`. Every verb that returns a path uses this one

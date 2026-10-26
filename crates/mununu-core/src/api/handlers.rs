@@ -885,7 +885,7 @@ fn btor2_verify_handler_impl(request: Btor2VerifyRequest) -> ApiResult<Json<Btor
     let (trace, trace_unavailable_within_k) =
         if request.witness && outcome.verdict == ReachVerdict::Reachable {
             let k = request.witness_max_k.unwrap_or(200);
-            match crate::adapter::btor2::native_bmc::bmc_bad_reachable_witness(&file, k) {
+            match crate::adapter::btor2::witness::bad_reachable_witness_routed(&file, k) {
                 Ok((crate::adapter::btor2::native_bmc::BmcOutcome::Violated { .. }, Some(t))) => {
                     (Some(Trace::from_bmc(&t)), None)
                 }

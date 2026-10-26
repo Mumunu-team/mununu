@@ -657,7 +657,7 @@ pub fn safety_witness(
         .ok()?;
     let file = parser::parse(&monitored).ok()?;
     let k = max_k.saturating_add(u32::try_from(depth).ok()?);
-    match crate::adapter::btor2::native_bmc::bmc_bad_reachable_witness(&file, k).ok()? {
+    match crate::adapter::btor2::witness::bad_reachable_witness_routed(&file, k).ok()? {
         (crate::adapter::btor2::native_bmc::BmcOutcome::Violated { .. }, trace) => trace,
         _ => None,
     }

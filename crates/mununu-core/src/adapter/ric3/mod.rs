@@ -99,6 +99,20 @@ pub fn run_ric3_cancellable(
     timeout: Duration,
     cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<McVerdict, AdapterError> {
+    run_ric3_with_output(bin, btor2, engine, false, timeout, cancel).map(|(v, _)| v)
+}
+
+/// [`run_ric3_cancellable`] with rIC3's stdout kept — and `--witness` asked for when `witness` —
+/// for the witness path ([`crate::adapter::btor2::witness`], mununu#744). A timeout or a
+/// cancellation is `(Unknown, "")`, never a wrong verdict.
+pub fn run_ric3_with_output(
+    bin: &Ric3Bin,
+    btor2: &str,
+    engine: &str,
+    witness: bool,
+    timeout: Duration,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<(McVerdict, String), AdapterError> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     // rIC3 reads a FILE and picks the format from the suffix: `.btor2`.
@@ -115,14 +129,18 @@ pub fn run_ric3_cancellable(
         ))
     })?;
     let mut command = Command::new(&bin.path);
-    command.arg("-e").arg(engine).arg(&tmp_path);
+    command.arg("-e").arg(engine);
+    if witness {
+        command.arg("--witness");
+    }
+    command.arg(&tmp_path);
     let result = crate::adapter::run_with_timeout_cancellable(&mut command, None, timeout, cancel);
     let _ = std::fs::remove_file(&tmp_path);
     let outcome =
         result.map_err(|e| err(format!("failed to run `{}`: {e}", bin.path.display())))?;
     // Timed out or cancelled ⇒ inconclusive (never a wrong verdict).
     let Some((status, stdout, stderr)) = outcome else {
-        return Ok(McVerdict::Unknown);
+        return Ok((McVerdict::Unknown, String::new()));
     };
     // MULTI-PROPERTY SOUNDNESS — rIC3 checks the first `bad`; an `UNSAT` on a design with more
     // than one is a partial proof.
@@ -141,7 +159,7 @@ pub fn run_ric3_cancellable(
             stderr.lines().last().unwrap_or("").trim()
         )));
     }
-    Ok(verdict)
+    Ok((verdict, stdout))
 }
 
 /// The L2-seam → rIC3 decide path: emit the (possibly reduced / monitored) design for a subprocess

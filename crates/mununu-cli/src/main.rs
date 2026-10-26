@@ -4458,8 +4458,9 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
     let (trace, trace_unavailable_within_k) = if args.witness
         && outcome.verdict == mununu_core::adapter::reach_portfolio::ReachVerdict::Reachable
     {
-        use mununu_core::adapter::btor2::native_bmc::{BmcOutcome, bmc_bad_reachable_witness};
-        match bmc_bad_reachable_witness(&file, args.witness_max_k) {
+        use mununu_core::adapter::btor2::native_bmc::BmcOutcome;
+        use mununu_core::adapter::btor2::witness::bad_reachable_witness_routed;
+        match bad_reachable_witness_routed(&file, args.witness_max_k) {
             Ok((BmcOutcome::Violated { .. }, Some(t))) => {
                 (Some(mununu_core::api::models::Trace::from_bmc(&t)), None)
             }

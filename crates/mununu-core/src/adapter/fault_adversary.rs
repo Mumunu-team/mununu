@@ -103,7 +103,8 @@ pub fn verify_fault_reach(
             })
         }
         None => {
-            use crate::adapter::btor2::native_bmc::{BmcOutcome, bmc_bad_reachable_witness};
+            use crate::adapter::btor2::native_bmc::BmcOutcome;
+            use crate::adapter::btor2::witness::bad_reachable_witness_routed;
             use crate::adapter::reach_portfolio::{ReachVerdict, decide_reach_portfolio};
             let outcome = decide_reach_portfolio(&injected_file);
             let (verdict, decided_by) = match outcome.verdict {
@@ -112,7 +113,7 @@ pub fn verify_fault_reach(
                 _ => ("unknown", Vec::new()),
             };
             let (attack, depth) = if verdict == "violated" {
-                match bmc_bad_reachable_witness(&injected_file, witness_max_k) {
+                match bad_reachable_witness_routed(&injected_file, witness_max_k) {
                     Ok((BmcOutcome::Violated { depth }, Some(trace))) => {
                         (faults_in_trace(&trace, &injected), Some(depth as usize))
                     }

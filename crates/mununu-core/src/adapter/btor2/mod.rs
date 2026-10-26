@@ -56,6 +56,7 @@ pub mod smt_must_edge;
 pub mod symbolic_bitblast;
 pub mod symbolic_engine;
 pub mod term_backend;
+pub mod witness;
 
 pub use cegar::{
     CegarIteration, CegarOptions, CegarTermination, CegarTrace, PredicateSource, cegar_refine_loop,
