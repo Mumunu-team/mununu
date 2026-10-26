@@ -36,7 +36,8 @@
 | `an_arena_exhausted_in_the_cube_path_abstains_instead_of_panicking` (new) | scans arena sizes over a 10-bit incrementer with eight predicates: no size panics, at least one decides, at least one abstains with the reason |
 | `an_arena_exhausted_inside_the_evaluator_abstains_instead_of_panicking` (#730, unchanged) | still green |
 | host: `cargo clippy -p mununu-core --all-targets --all-features -- -D warnings`; unit tests of the touched modules | clean; `symbolic_bitblast` 122 passed, `cegar` 62, `symbolic_engine` 9, `kmts_lift` 85 |
-| verdict-identity gate (`e2e_opentitan_sva_census`, `diff_corpus_monotone_verdict_ledger`) | pending — recorded here before merge |
+| verdict-identity gate in `mununu-sva` (2026-10-26): `e2e_opentitan_sva_census` on this branch vs `main` bc82372 | **0 verdict moves** — 191 rows, 173 holds / 7 violated / 11 skipped / 0 ⊥ on both (2,297 s vs 1,961 s) |
+| `diff_corpus_monotone_verdict_ledger` on this branch | PASS (28 s) |
 
 ## Provenance
 
