@@ -593,7 +593,9 @@ pub fn decide_bad_safety_cancellable(
 /// is usually far cheaper than synthesising an equivalent safety invariant, so a deep,
 /// time-boxed CEX search flips many designs that the shallow ([`DEFAULT_MAX_K`]) or
 /// proof-oriented engines leave `Unknown` straight to a definite `Violated`. `max_k`
-/// may therefore be set well above [`DEFAULT_MAX_K`]. Bounded by the wall `deadline`
+/// may therefore be set well above [`DEFAULT_MAX_K`]. `Err` names a refused design (the encoder
+/// declined); `Ok(None)` is an honest miss (the bound, the deadline, a cancellation, a query timeout).
+/// Bounded by the wall `deadline`
 /// and `cancel` (both checked before each depth) and by `per_query_ms` per z3 check.
 pub fn bmc_cex_until(
     file: &Btor2File,
@@ -601,15 +603,16 @@ pub fn bmc_cex_until(
     per_query_ms: u32,
     deadline: std::time::Instant,
     cancel: &std::sync::atomic::AtomicBool,
-) -> Option<u32> {
+) -> Result<Option<u32>, String> {
     let (bad_ops, init_pairs, constraint_ops) = extract_props(file);
     if bad_ops.is_empty() {
-        return None;
+        return Ok(None);
     }
     let n = max_k as usize;
     let cfg = z3::Config::new();
     z3::with_z3_config(&cfg, || {
-        let view = encode_design(file).ok()?;
+        // mununu#803 — an encoder refusal is a reason the caller records, not a silent miss.
+        let view = encode_design(file).map_err(|e| format!("native BMC: encode failed: {e:?}"))?;
         let u = Unroller::build(&view, &bad_ops, &constraint_ops, n);
         let base = z3::Solver::new();
         let mut params = z3::Params::new();
@@ -625,7 +628,7 @@ pub fn bmc_cex_until(
             if cancel.load(std::sync::atomic::Ordering::Relaxed)
                 || std::time::Instant::now() >= deadline
             {
-                return None;
+                return Ok(None);
             }
             base.push();
             base.assert(u.bad_at(k));
@@ -633,10 +636,10 @@ pub fn bmc_cex_until(
             base.pop(1);
             match res {
                 // A concrete init→bad path at depth `k` — sound `Violated`.
-                z3::SatResult::Sat => return Some(k as u32),
+                z3::SatResult::Sat => return Ok(Some(k as u32)),
                 // This depth's query hit `per_query_ms`; deeper frames only get larger,
                 // so abstain rather than spin.
-                z3::SatResult::Unknown => return None,
+                z3::SatResult::Unknown => return Ok(None),
                 z3::SatResult::Unsat => {}
             }
             if k < n {
@@ -646,7 +649,7 @@ pub fn bmc_cex_until(
                 }
             }
         }
-        None
+        Ok(None)
     })
 }
 
@@ -687,17 +690,29 @@ mod tests {
         let never = AtomicBool::new(false);
         // Reaches bad at depth 1 / 5 — the deep CEX-only search returns the depth.
         let reach = parser::parse(REACH).expect("parse");
-        assert_eq!(bmc_cex_until(&reach, 64, 5_000, far, &never), Some(1));
+        assert_eq!(
+            bmc_cex_until(&reach, 64, 5_000, far, &never).unwrap(),
+            Some(1)
+        );
         let wide = parser::parse(WIDE).expect("parse"); // depth 5, 300-bit (beyond the auto-cap ceiling)
-        assert_eq!(bmc_cex_until(&wide, 64, 5_000, far, &never), Some(5));
+        assert_eq!(
+            bmc_cex_until(&wide, 64, 5_000, far, &never).unwrap(),
+            Some(5)
+        );
         // Bounded-safe design → no CEX within the depth budget → None (never a wrong verdict).
         let safe = parser::parse(SAFE).expect("parse");
-        assert_eq!(bmc_cex_until(&safe, 32, 5_000, far, &never), None);
+        assert_eq!(bmc_cex_until(&safe, 32, 5_000, far, &never).unwrap(), None);
         // Cancellation / passed deadline are honored before any work.
         let cancelled = AtomicBool::new(true);
-        assert_eq!(bmc_cex_until(&reach, 64, 5_000, far, &cancelled), None);
+        assert_eq!(
+            bmc_cex_until(&reach, 64, 5_000, far, &cancelled).unwrap(),
+            None
+        );
         let past = far - std::time::Duration::from_secs(120);
-        assert_eq!(bmc_cex_until(&reach, 64, 5_000, past, &never), None);
+        assert_eq!(
+            bmc_cex_until(&reach, 64, 5_000, past, &never).unwrap(),
+            None
+        );
     }
 
     /// S1 (engine-performance roadmap) — the safety engine's cancel flag is checked before
@@ -1048,7 +1063,7 @@ mod tests {
             );
             let file = parser::parse(src).expect("parse");
             assert_eq!(
-                bmc_cex_until(&file, 32, 5_000, far, &never),
+                bmc_cex_until(&file, 32, 5_000, far, &never).unwrap(),
                 None,
                 "deep cex: init from {name}"
             );

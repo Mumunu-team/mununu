@@ -366,7 +366,9 @@ not listed among the inputs.
 
 A replayed path is a genuine counterexample, so the trace also cross-checks the verdict. It is
 absent when neither finder returns a replayable path within its bound (native BMC: 60 cycles plus
-the property's own depth; rIC3: the rescue slice), or when only the branching reading fails (`[] a || [] b` can be false at a state although every single path
+the property's own depth; rIC3: the rescue slice), or when only the branching reading fails — and
+the row then carries a `witness-unavailable` note (`items: [stage]`) naming which stage of the path
+finder declined and why (mununu#803) (`[] a || [] b` can be false at a state although every single path
 satisfies one of them). Liveness carries a `lasso` trace (`loop_start` marks where the last step
 loops back), a refuted `AG EF` decided by a trap certificate a `trap` trace, and a bare `EF p` an
 `unreachable` trace listing `unreachable_target`. Every verb that returns a path uses this one

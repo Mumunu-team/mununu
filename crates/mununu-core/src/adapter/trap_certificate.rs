@@ -384,8 +384,14 @@ fn check_candidate(
             }
             Err(why) => return (CandidateOutcome::Declined(why.to_string()), None),
         };
+    // The certificate stands without a path; a declined finder is said in the log (the report's
+    // channel for it is the verify-auto note — mununu#803 "not covered").
     let witness = under_check_budget(|| {
         crate::adapter::reach_rescue::safety_witness(btor2, &dual, reset_pinned, WITNESS_MAX_K)
+            .map_err(|miss| {
+                tracing::warn!(%miss, signal, "trap certificate: no path to the trap shipped");
+            })
+            .ok()
     });
     (
         CandidateOutcome::Certified,

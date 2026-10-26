@@ -841,6 +841,8 @@ pub fn cegar_refine_loop(
     // seeder routes as a dimension, kept by the lift under its own name) is evaluated by the
     // uniform predicate-image only: the sampler reads registers by name and refuses such a
     // dimension. Force the SMT seam for it as for compounds, so a lone output atom decides.
+    // `btor2_content` was parsed upstream of this loop; a second parse cannot fail, so the `None`
+    // below is unreachable (mununu#803, LOW).
     let has_combinational_dimension = crate::adapter::btor2::parser::parse(btor2_content)
         .ok()
         .map(|file| {
@@ -982,6 +984,7 @@ pub fn cegar_refine_loop(
         cegar_opts.predicate_source,
         PredicateSource::CraigInterpolation
     ) {
+        // Parsed upstream; cannot fail here (mununu#803, LOW).
         crate::adapter::btor2::parser::parse(btor2_content).ok()
     } else {
         None
@@ -1522,6 +1525,8 @@ pub fn cegar_refine_loop(
                         continue; // re-discovery, not progress
                     }
                     let name = format!("craig_compound_{}", lift_opts.compound_exprs.len());
+                    // Cosmetic: the cube bit is driven by `expr`; an expression over no register
+                    // gets an empty placeholder, never a wrong bit (mununu#803, LOW).
                     let placeholder = expr.registers().into_iter().next().unwrap_or_default();
                     lift_opts.compound_exprs.insert(name.clone(), expr);
                     out.push(PredicateSpec {

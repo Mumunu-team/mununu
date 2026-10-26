@@ -748,6 +748,8 @@ fn interpolate_bool_cancellable(
         // Diagnostic: dump the failing query so we can distinguish cvc5's
         // interpolation incompleteness from a serialization bug (env-gated).
         if let Ok(path) = std::env::var("MUNUNU_INTERP_DUMP") {
+            // A debug dump of the query the solver saw; a failed write changes no result
+            // (mununu#803, LOW).
             let _ = std::fs::write(&path, &query);
         }
         return InterpStep::NoInterpolant;

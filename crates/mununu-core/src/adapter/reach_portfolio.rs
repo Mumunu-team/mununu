@@ -157,11 +157,21 @@ fn settle<T>(
     match r {
         Ok(v) => v,
         Err(why) => {
-            if let Ok(mut g) = refused.lock() {
-                g.push((member, why));
-            }
+            note_refusal(refused, member, why);
             None
         }
+    }
+}
+
+/// Record one member's refusal. A poisoned lock (a member panicked while recording) loses the
+/// list; the panic itself is the louder signal, and the verdict never depends on this list.
+fn note_refusal(
+    refused: &std::sync::Mutex<Vec<(&'static str, String)>>,
+    member: &'static str,
+    why: String,
+) {
+    if let Ok(mut g) = refused.lock() {
+        g.push((member, why));
     }
 }
 
@@ -724,6 +734,8 @@ pub fn decide_reach_portfolio_cancellable(
             refused: Vec::new(),
         }
     });
+    // A poisoned lock (a member panicked while recording) yields no refusal list; the panic is
+    // the louder signal and the verdict never depends on the list (mununu#803, LOW).
     members.refused = refused.lock().map(|g| g.clone()).unwrap_or_default();
     collect(members)
 }
@@ -760,6 +772,9 @@ const OWNED_CEX_QUERY_MS: u32 = 15_000;
 pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcome {
     use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
     use std::sync::{Arc, mpsc};
+    // mununu#803 — a member's refusal (an `Err`, not an abstention) is kept here as the scoped
+    // driver keeps it; the detached threads share the list through an `Arc`.
+    let refused: Arc<std::sync::Mutex<Vec<(&'static str, String)>>> = Arc::default();
     use std::time::{Duration, Instant};
 
     // Detached threads + a result channel (NOT `thread::scope`) so the collector can
@@ -785,7 +800,12 @@ pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcom
 
     // Safety proof — shallow native BMC + k-induction.
     {
-        let (file, decided, tx) = (Arc::clone(&file), Arc::clone(&decided), tx.clone());
+        let (file, decided, tx, refused) = (
+            Arc::clone(&file),
+            Arc::clone(&decided),
+            tx.clone(),
+            Arc::clone(&refused),
+        );
         std::thread::spawn(move || {
             let v = timed(
                 "native",
@@ -797,7 +817,11 @@ pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcom
                 ) {
                     Ok(SafetyVerdict::Violated { .. }) => Some(true),
                     Ok(SafetyVerdict::Safe { .. }) => Some(false),
-                    Ok(SafetyVerdict::Unknown { .. }) | Err(_) => None,
+                    Ok(SafetyVerdict::Unknown { .. }) => None,
+                    Err(e) => {
+                        note_refusal(&refused, "native", e.to_string());
+                        None
+                    }
                 },
             );
             if v.is_some() {
@@ -854,17 +878,27 @@ pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcom
     }
     #[cfg(not(feature = "boolector"))]
     {
-        let (file, decided, tx) = (Arc::clone(&file), Arc::clone(&decided), tx.clone());
+        let (file, decided, tx, refused) = (
+            Arc::clone(&file),
+            Arc::clone(&decided),
+            tx.clone(),
+            Arc::clone(&refused),
+        );
         std::thread::spawn(move || {
             let hit = timed("cex", || {
-                native_bmc::bmc_cex_until(
+                match native_bmc::bmc_cex_until(
                     &file,
                     OWNED_DEEP_CEX_MAX_K,
                     OWNED_CEX_QUERY_MS,
                     deadline,
                     &decided,
-                )
-                .is_some()
+                ) {
+                    Ok(hit) => hit.is_some(),
+                    Err(why) => {
+                        note_refusal(&refused, "cex", why);
+                        false
+                    }
+                }
             });
             if hit {
                 decided.store(true, Relaxed);
@@ -951,7 +985,9 @@ pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcom
             }
         }
     }
-    ReachOutcome::from_sets(reachable_by, unreachable_by)
+    let mut out = ReachOutcome::from_sets(reachable_by, unreachable_by);
+    out.refused = refused.lock().map(|g| g.clone()).unwrap_or_default();
+    out
 }
 
 #[cfg(test)]
@@ -1455,5 +1491,27 @@ mod tests {
             violations.is_empty(),
             "SOUNDNESS VIOLATIONS: {violations:?}"
         );
+    }
+
+    // mununu#803 — the owned driver keeps a member's refusal beside the verdict, as the scoped
+    // driver does: the native encoder declines an array state, and `refused` says so.
+    #[test]
+    fn the_owned_driver_records_the_native_members_refusal() {
+        const ARRAY_STATE: &str = "1 sort bitvec 2\n2 sort bitvec 4\n3 sort array 1 2\n4 state 3 mem\n5 next 3 4 4\n6 sort bitvec 1\n7 input 6 i\n8 bad 7\n";
+        let file = crate::adapter::btor2::parser::parse(ARRAY_STATE).expect("parse");
+        let out = decide_reach_owned_only(&file, 3_000);
+        let members: Vec<&str> = out.refused.iter().map(|(m, _)| *m).collect();
+        assert!(
+            members.contains(&"native"),
+            "the native member's refusal is recorded; refused = {:?}, verdict = {:?}",
+            out.refused,
+            out.verdict
+        );
+        let (_, why) = out
+            .refused
+            .iter()
+            .find(|(m, _)| *m == "native")
+            .expect("native");
+        assert!(why.contains("encode"), "{why}");
     }
 }
