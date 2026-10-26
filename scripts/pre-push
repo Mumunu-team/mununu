@@ -18,7 +18,6 @@
 #   - test --workspace --doc   (doctests — the class that has bitten us
 #                               repeatedly; the `cargo test --tests`
 #                               compilation phase does NOT cover them)
-#   - test --lib api           (the api-feature build, mirrors CI)
 #   - cargo machete            (unused deps)
 #
 # What's dropped from the default:
@@ -46,8 +45,6 @@ cd "$REPO_ROOT"
 if [ "${MUNUNU_PREPUSH_FULL:-}" = "1" ]; then
     echo "Pre-push (FULL): MUNUNU_PREPUSH_FULL=1 — running full-workspace make ci..."
     make ci
-    echo "Pre-push: testing API module..."
-    cargo test --lib api --features api
     echo "Pre-push: checking for unused dependencies (cargo machete)..."
     cargo machete
     echo "All pre-push checks passed (full sweep)."
@@ -70,9 +67,6 @@ cargo check --workspace
 
 echo "Pre-push: cargo test --workspace --doc (doctests)..."
 cargo test --workspace --doc
-
-echo "Pre-push: testing API module (api feature)..."
-cargo test --lib api --features api
 
 echo "Pre-push: checking for unused dependencies (cargo machete)..."
 cargo machete
