@@ -574,7 +574,7 @@ mod tests {
         use oxidd::BooleanFunction;
         let file = parser::parse(UNREACHABLE_CYCLE).expect("parses");
         let bb = BddBitBlaster::build(&file).expect("bit-blasts");
-        let model = bb.exact_model();
+        let model = bb.exact_model().unwrap();
         let init = bb.initial_state_bdd(&file).expect("init");
         let steps = model
             .install_reachable_restriction(&init)
