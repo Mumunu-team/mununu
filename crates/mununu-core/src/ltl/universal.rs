@@ -34,6 +34,21 @@ pub fn translate_universal(ltl: &LtlFormula) -> Result<Formula, TranslationError
     translate_universal_fair(ltl, &[])
 }
 
+/// The universal translation as the mu-calculus TEXT the parser reads — for callers that carry
+/// formulas as strings (the SV annotation scanner, whose rows re-parse their `formula` in the
+/// per-property loop). The text is parse-checked before it is returned, so a caller never
+/// stores a string the loop would refuse.
+///
+/// > Source of truth: this function — surface: (CLI+API), through `@mununu_guarantee ltl …`.
+pub fn translate_universal_text(ltl: &LtlFormula) -> Result<String, TranslationError> {
+    let mut fresh = 0usize;
+    let text = universal(&nnf(ltl, false), &mut fresh, &[])?;
+    crate::mu_calculus::parser::parse(&text).map_err(|e| TranslationError::Translation {
+        message: format!("internal: the universal translation `{text}` does not parse: {e:?}"),
+    })?;
+    Ok(text)
+}
+
 /// [`translate_universal`] over the FAIR paths only — those satisfying every `fairness`
 /// constraint infinitely often (an asynchronous composition's `fairness weak;`). `F b` becomes the
 /// fair `AF b` (`¬ E_C G ¬b`, [`crate::verify::fairness::fair_af`]) and `b U c` becomes

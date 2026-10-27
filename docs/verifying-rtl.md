@@ -289,6 +289,40 @@ The response reports a verdict per translated assertion, plus a list of assertio
 that did **not** translate (surfaced honestly, never silently dropped) and
 model-level diagnostics.
 
+### LTL bodies in annotations: `@mununu_guarantee ltl …` (2026-10-27)
+
+> Source of truth: [`scan_annotation_properties`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) + [`translate_universal_text`](../crates/mununu-core/src/ltl/universal.rs) — surface: (CLI+API) — every `--source` of `sv verify-auto` and `POST /api/v1/sv/verify-auto`.
+
+A guarantee body that starts with the keyword `ltl` is an LTL formula, read over **every** path
+from reset — the same reading as a CTXDSL `body = ltl …;` — and translated into the mu-calculus
+text the row carries, so the report's `formula` shows what the engine decided:
+
+```systemverilog
+// @mununu_guarantee(rod_scram_releases_clutch) ltl G (scram_cmd -> F clutch_release)
+// @mununu_guarantee(rod_fault_motor_off)       ltl G (state_q == 5 -> !motor_up)
+// @mununu_guarantee(rod_scram_next_cycle)      ltl G (scram_cmd && state_q != 5 -> X (state_q == 4))
+```
+
+- **Fragment:** the one [`ltl::universal`](../crates/mununu-core/src/ltl/universal.rs) documents —
+  `G φ`, `X φ`, `F b`, `b U b`, `b W b`, `φ && φ`, `b || φ`, with `b` propositional; the response
+  `G (b -> F b′)` and the recurrence `G F b` are inside it. `F` and `U` require a successor
+  (`<> true`), so a path that deadlocks never satisfies them vacuously. A body outside the fragment
+  (`F G p`, `G p || G q`, `F (p && X q)`) is **skipped with the subformula named**, under the
+  `annotation-properties` note, never translated into a different property.
+- **Atoms:** `ident`, `ident op decimal`, `ident op ident [+ k]` with `==`, `!=`, `<`, `<=`, `>`,
+  `>=` — the shapes a mu-calculus body takes; no bit-slices, no sized literals.
+- **Operators:** `G` / `always`, `F` / `eventually`, `X` / `next`, `U` / `until`, `W` /
+  `weak_until`, `R` / `release`, `!`, `&&`, `||`, `->`, parentheses.
+- **`eltl` is not an annotation keyword.** The some-path reading (`F p` as `EF p`) is what a plain
+  mu-calculus body already expresses — `mu X. (p || <> X)` — and an `eltl` body is skipped with
+  that spelled out.
+- Naming (`@mununu_guarantee(<name>) ltl …`), the positional `ann_guarantee_<index>`, `--expect`
+  and the duplicate-name refusal apply unchanged.
+
+The translated row is decided like any other annotation: `exact-symbolic` under its cap (an atom
+over a primary input goes through the inputs-in-the-state product), the cube members, the reach
+rescue; `decided_by` says which.
+
 ### The machine-readable report: `--json` (mununu#536)
 
 > Source of truth: [`impl From<&AutoVerifyReport> for SvVerifyAutoResponse`](../crates/mununu-core/src/api/models.rs) — surface: (CLI+API)
