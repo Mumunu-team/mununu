@@ -6261,6 +6261,11 @@ pub struct ExactSession {
     /// Plan P5 — what `prepare` decided about the model (the inputs-in-the-state trade: which
     /// inputs were lifted and the cone width that resulted).
     notes: Vec<String>,
+    /// mununu#808 follow-up — why the last [`attempt`](Self::attempt) shipped a VIOLATED verdict
+    /// without a lasso (the extraction returned `Err` or panicked). The verdict stands either way;
+    /// the ladder lifts this into [`LadderOutcome::witness_miss`] so the report can say why
+    /// (`witness-unavailable`), instead of a `warn!` only the log sees.
+    witness_miss: std::sync::Mutex<Option<String>>,
 }
 
 /// P2 — what one attempt on an [`ExactSession`] does differently from the last.
@@ -6734,12 +6739,22 @@ impl ExactSession {
             init,
             sampled_input_cube,
             notes: prepare_notes,
+            witness_miss: std::sync::Mutex::new(None),
         })
     }
 
     /// Plan P5 — what `prepare` decided about the model (see the field).
     pub fn prepare_notes(&self) -> &[String] {
         &self.notes
+    }
+
+    /// Why the last attempt shipped no lasso beside its VIOLATED verdict, if it did not; cleared
+    /// by the call.
+    pub fn take_witness_miss(&self) -> Option<String> {
+        self.witness_miss
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
     }
 
     /// The model, for a caller that shares a cancellation flag or reads the report counters.
@@ -6826,6 +6841,10 @@ impl ExactSession {
         exact.collect_garbage();
         let witness = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
             || -> Result<Option<StallLasso>, String> {
+                #[cfg(test)]
+                if WITNESS_EXTRACTION_FAILS.with(std::cell::Cell::get) {
+                    return Err("injected: the witness extraction failed (test hook)".to_string());
+                }
                 if let Some(p_id) = detect_af_target(formula) {
                     let p_bdd = exact.eval_at(formula, p_id, &atoms)?;
                     if let Some(lasso) = self.bb.exact_reachable_stall_lasso(&self.file, &p_bdd)? {
@@ -6846,6 +6865,11 @@ impl ExactSession {
                 "exact: no counterexample extracted after the verdict — the verdict stands, the \
                  counterexample is omitted"
             );
+            // mununu#808 follow-up — the reason reaches the report, not only the log.
+            *self
+                .witness_miss
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(reason);
             None
         });
         Ok((ExactVerdict::Violated, witness))
@@ -6866,6 +6890,16 @@ fn exact_symbolic_verdict_with_witness_inner(
 pub const LADDER_STAGE_UNRESTRICTED: &str = "exact-symbolic";
 pub const LADDER_STAGE_RESTRICTED: &str = "exact-symbolic (reach-restricted)";
 
+#[cfg(test)]
+thread_local! {
+    /// Test hook — makes every witness extraction in [`ExactSession::attempt`] on this thread
+    /// fail, so the "verdict stands, lasso omitted" path is exercised without exhausting an
+    /// arena. Derived from the real call site: the closure returns the same `Err` an OxiDD
+    /// failure would, and everything downstream is the production code.
+    pub(crate) static WITNESS_EXTRACTION_FAILS: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
 /// P3 — the outcome of [`exact_ladder`]: the verdict (or the LAST abstention), the stage that
 /// produced it, and every stage's abstention on the way.
 #[derive(Debug)]
@@ -6873,6 +6907,10 @@ pub struct LadderOutcome {
     pub result: Result<(ExactVerdict, Option<StallLasso>), String>,
     pub stage: &'static str,
     pub notes: Vec<String>,
+    /// mununu#808 follow-up — set when `result` is `Ok((Violated, None))` because the witness
+    /// extraction failed (not when the formula simply has no one-path witness shape): the reason,
+    /// for a `witness-unavailable` note on the row. The verdict is unaffected.
+    pub witness_miss: Option<String>,
 }
 
 /// The first stage's wall-clock budget (`MUNUNU_EXACT_LADDER_MS`, default 2 000 ms): the
@@ -6980,6 +7018,7 @@ pub fn exact_ladder_with(
                         result: Err(e2),
                         stage: "prepare",
                         notes,
+                        witness_miss: None,
                     };
                 }
             }
@@ -6989,6 +7028,7 @@ pub fn exact_ladder_with(
                 result: Err(e),
                 stage: "prepare",
                 notes,
+                witness_miss: None,
             };
         }
     };
@@ -7022,6 +7062,7 @@ pub fn exact_ladder_with(
                 result: Ok(v),
                 stage: LADDER_STAGE_UNRESTRICTED,
                 notes,
+                witness_miss: session.take_witness_miss(),
             };
         }
         Err(e) => {
@@ -7035,6 +7076,7 @@ pub fn exact_ladder_with(
                     result: Err(e),
                     stage: LADDER_STAGE_UNRESTRICTED,
                     notes,
+                    witness_miss: session.take_witness_miss(),
                 };
             }
             e
@@ -7047,6 +7089,7 @@ pub fn exact_ladder_with(
             result: Err(last),
             stage: LADDER_STAGE_UNRESTRICTED,
             notes,
+            witness_miss: session.take_witness_miss(),
         };
     }
     let probe = left.map_or(LADDER_PROBE_MS, |l| {
@@ -7069,6 +7112,7 @@ pub fn exact_ladder_with(
                 result: Ok(v),
                 stage: LADDER_STAGE_RESTRICTED,
                 notes,
+                witness_miss: session.take_witness_miss(),
             };
         }
         Err(e) => {
@@ -7083,6 +7127,7 @@ pub fn exact_ladder_with(
             result: Err(last),
             stage: LADDER_STAGE_RESTRICTED,
             notes,
+            witness_miss: session.take_witness_miss(),
         };
     }
     let a3 = AttemptOptions {
@@ -7097,6 +7142,7 @@ pub fn exact_ladder_with(
             result: Ok(v),
             stage: LADDER_STAGE_UNRESTRICTED,
             notes,
+            witness_miss: session.take_witness_miss(),
         },
         Err(e) => {
             notes.push(format!("stage 3 (unrestricted, remainder): {e}"));
@@ -7104,6 +7150,7 @@ pub fn exact_ladder_with(
                 result: Err(e),
                 stage: LADDER_STAGE_UNRESTRICTED,
                 notes,
+                witness_miss: session.take_witness_miss(),
             }
         }
     }
@@ -13617,6 +13664,52 @@ mod tests {
         for st in &lasso.cycle {
             assert_ne!(st.get("cnt"), Some(&1));
         }
+    }
+
+    /// mununu#808 follow-up — when the witness extraction fails after a VIOLATED verdict, the
+    /// ladder ships the verdict without a lasso AND says why; without the failure the lasso
+    /// ships and nothing is reported. The failure is injected at the real extraction closure,
+    /// so everything downstream of it is the production path.
+    #[test]
+    fn the_ladder_reports_why_a_violated_verdict_ships_no_lasso() {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                WITNESS_EXTRACTION_FAILS.with(|f| f.set(false));
+            }
+        }
+        let ag_af =
+            crate::mu_calculus::parser::parse("nu Y. ((mu X. ((cnt == 1) or [] X)) and [] Y)")
+                .expect("parse");
+        let ladder = || {
+            exact_ladder(
+                REACH_STALL_BTOR2,
+                &ag_af,
+                &std::collections::HashSet::new(),
+                &ExactSymbolicOptions::default(),
+                None,
+                None,
+            )
+        };
+        let clean = ladder();
+        assert!(
+            matches!(clean.result, Ok((ExactVerdict::Violated, Some(_)))),
+            "the lasso ships when the extraction works: {:?}",
+            clean.result
+        );
+        assert_eq!(clean.witness_miss, None);
+        let _reset = Reset;
+        WITNESS_EXTRACTION_FAILS.with(|f| f.set(true));
+        let miss = ladder();
+        assert!(
+            matches!(miss.result, Ok((ExactVerdict::Violated, None))),
+            "the verdict stands and the lasso is omitted: {:?}",
+            miss.result
+        );
+        assert_eq!(
+            miss.witness_miss.as_deref(),
+            Some("injected: the witness extraction failed (test hook)")
+        );
     }
 
     /// D1.8c — the generated GR(1) response formula `GF a → GF b` gives the correct
