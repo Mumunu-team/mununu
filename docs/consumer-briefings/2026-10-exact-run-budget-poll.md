@@ -35,9 +35,9 @@
 | run | result |
 |---|---|
 | `the_callers_run_budget_stops_the_fixpoint_with_a_deadline_abstention` (new; the reproducer) | both tests pass on the host (0.24 s): the 50 ms budget stops the raster fixpoint with `Deadline`; an unbounded budget never fires the poll (`tests/exact_run_budget.rs`) |
-| `make verify-repro` on the parent | PENDING_REPRO |
-| HWMCC two-file harness (`vis_arrays_buf_bug` + `vis_arrays_bufferAlloc`, `MUNUNU_HWMCC_TIMEOUT_MS=60000`) in `mununu-sva` | PENDING_HARNESS |
-| verdict-identity gate: `e2e_opentitan_sva_census` vs `main` and `diff_corpus_monotone_verdict_ledger` | PENDING_GATE |
+| the reproducer against the parent `7755580`, by hand (a worktree at the parent with `tests/exact_run_budget.rs` copied in; `make verify-repro` reads INCONCLUSIVE because it runs lib tests only) | **FAILS at the parent** — `the_callers_run_budget_stops_the_fixpoint_with_a_deadline_abstention` panics at its first assertion (no run-budget abstention; the run ends on the iteration budget after 1.5 s); passes on this commit |
+| HWMCC two-file harness (`vis_arrays_buf_bug` + `vis_arrays_bufferAlloc`, `MUNUNU_HWMCC_TIMEOUT_MS=60000`) in `mununu-sva` | **100 s for both files** (`vis_arrays_buf_bug` Reachable by exact + btormc; `vis_arrays_bufferAlloc` Unknown inside ~1.6× the 60 s budget) — `main` took 15,015 s on the same pair |
+| verdict-identity gate: `e2e_opentitan_sva_census` vs `main` and `diff_corpus_monotone_verdict_ledger` | **0 verdict moves** — 191 rows, 173 holds / 7 violated / 11 skipped / 0 ⊥ on both (2,499 s); ledger PASS (22 s) |
 
 ## Provenance
 
