@@ -555,6 +555,14 @@ fn run_sv_flatten_btor2_concrete(
     } else {
         SvFrontend::Verilog
     };
+    // mununu#806 — yosys names a `$func$` temporary after the SOURCE PATH it was given
+    // (`sv2v_cast_…$func$/tmp/mununu-yosys-<pid>-…/preprocessed.sv:3983$4411.$result`), so a
+    // lifted register name embedded the per-run temp directory and two runs of the same design
+    // disagreed on it in every trace step. When the input is the staged `preprocessed.sv`, yosys
+    // runs INSIDE the staging directory and reads the file by its bare name: the name becomes
+    // `…$func$preprocessed.sv:3983$4411.$result`, the same on every run (yosys's `$4411` autoidx
+    // is deterministic for the same input). Every other path in the script stays absolute.
+    let mut yosys_cwd: Option<PathBuf> = None;
     if yopts.use_sv2v && slang_plugin.is_none() {
         let sv2v = locate_sv2v()?;
         let preprocessed = tmp.path().join("preprocessed.sv");
@@ -591,11 +599,24 @@ fn run_sv_flatten_btor2_concrete(
         // Verilog-2005 file. sv2v resolves cross-file packages,
         // interfaces, and parameters in one pass, so feeding the
         // combined output to Yosys is the documented correct usage.
-        sources = vec![preprocessed];
+        // By its bare name, with yosys's cwd set to the staging directory (mununu#806).
+        sources = vec![PathBuf::from("preprocessed.sv")];
+        yosys_cwd = Some(tmp.path().to_path_buf());
     }
 
     let btor_path = tmp.path().join("design.btor");
     let hier_json_path = tmp.path().join("hier.json");
+    // With yosys's cwd moved to the staging directory, a RELATIVE caller include dir would no
+    // longer resolve: hand the script absolute ones (mununu#806).
+    let script_include_dirs: Vec<PathBuf> = if yosys_cwd.is_some() {
+        yopts
+            .extra_include_dirs
+            .iter()
+            .map(|d| d.canonicalize().unwrap_or_else(|_| d.clone()))
+            .collect()
+    } else {
+        yopts.extra_include_dirs.clone()
+    };
     let script = build_script(
         &sources,
         yopts.top.as_deref(),
@@ -606,12 +627,18 @@ fn run_sv_flatten_btor2_concrete(
         &yopts.init_policy_overrides,
         &yopts.cutpoint_signals,
         slang_plugin.is_some(),
-        &yopts.extra_include_dirs,
+        &script_include_dirs,
         &yopts.params,
     );
 
     let run_script = |script: &str| -> Result<std::process::Output, AdapterError> {
         let mut yosys_cmd = Command::new(&yosys);
+        if std::env::var_os("MUNUNU_DEBUG_YOSYS_SCRIPT").is_some() {
+            eprintln!("MUNUNU_DEBUG yosys cwd={yosys_cwd:?}\nMUNUNU_DEBUG script={script}");
+        }
+        if let Some(cwd) = &yosys_cwd {
+            yosys_cmd.current_dir(cwd);
+        }
         if let Some(plugin) = &slang_plugin {
             yosys_cmd.arg("-m").arg(plugin);
         }
@@ -1373,6 +1400,7 @@ fn translate_sv_per_module_impl(
     }
 
     // Optional sv2v preprocessing. Same shape as `translate_sv`.
+    let mut yosys_cwd: Option<PathBuf> = None; // mununu#806, as in `translate_sv`
     if yopts.use_sv2v {
         let preprocessed = tmp.path().join("preprocessed.sv");
         let include_dirs: Vec<PathBuf> = yopts
@@ -1387,7 +1415,9 @@ fn translate_sv_per_module_impl(
             .into_iter()
             .collect();
         preprocess_sv(&sources, &include_dirs, &preprocessed)?;
-        sources = vec![preprocessed];
+        // By its bare name, with yosys's cwd set to the staging directory (mununu#806).
+        sources = vec![PathBuf::from("preprocessed.sv")];
+        yosys_cwd = Some(tmp.path().to_path_buf());
     }
 
     // Pass 1 — discovery. Use `hierarchy -auto-top` when the caller did
@@ -1399,7 +1429,12 @@ fn translate_sv_per_module_impl(
         &hier_json_path,
         &yopts.params,
     );
-    run_yosys(&yosys, &discovery_script, PER_MODULE_YOSYS_TIMEOUT)?;
+    run_yosys(
+        &yosys,
+        &discovery_script,
+        PER_MODULE_YOSYS_TIMEOUT,
+        yosys_cwd.as_deref(),
+    )?;
 
     let hier_body = std::fs::read_to_string(&hier_json_path).map_err(|e| AdapterError {
         kind: AdapterErrorKind::ParseError,
@@ -1459,7 +1494,12 @@ fn translate_sv_per_module_impl(
             &yopts.init_policy_overrides,
             &yopts.params,
         );
-        run_yosys(&yosys, &script, PER_MODULE_YOSYS_TIMEOUT)?;
+        run_yosys(
+            &yosys,
+            &script,
+            PER_MODULE_YOSYS_TIMEOUT,
+            yosys_cwd.as_deref(),
+        )?;
 
         let btor = std::fs::read_to_string(&btor_path).map_err(|e| AdapterError {
             kind: AdapterErrorKind::ParseError,
@@ -1644,8 +1684,16 @@ fn select_setundef_pass(anyseq: bool, anyconst: bool) -> &'static str {
 
 /// Spawn Yosys with the given script. Captures stdout/stderr into the
 /// `AdapterError` message on failure.
-fn run_yosys(yosys: &Path, script: &str, timeout: Duration) -> Result<(), AdapterError> {
+fn run_yosys(
+    yosys: &Path,
+    script: &str,
+    timeout: Duration,
+    cwd: Option<&Path>,
+) -> Result<(), AdapterError> {
     let mut command = Command::new(yosys);
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
     command.arg("-q").arg("-p").arg(script);
     let outcome = crate::adapter::run_with_timeout(&mut command, None, timeout).map_err(|e| {
         AdapterError {
