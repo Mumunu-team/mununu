@@ -28,7 +28,7 @@ Blurring the two lanes is the failure the rule exists to prevent: a containment 
 **What counts as a reproducer.** A test or fixture that **fails on the parent commit and passes on this one**. A regression test that passes on the parent is decoration — it locks in behaviour, it does not demonstrate a defect.
 
 ```bash
-make verify-repro TEST=<test name substring> [REF=HEAD~1]
+make verify-repro TEST=<test name substring> [REF=HEAD~1] [PKG=mununu-core] [IGNORED=1]
 ```
 
 | outcome | exit | meaning |
@@ -37,7 +37,7 @@ make verify-repro TEST=<test name substring> [REF=HEAD~1]
 | `FAIL — PASSES at REF` | 1 | **the case the rule most needs to catch**: decoration, not a reproducer |
 | `INCONCLUSIVE` | 3 | the test needs API this commit introduced; **not a pass** — justify in the PR |
 
-The script is advisory with a stated reach limit (measured 2026-09-13 on mununu#542 and #544, both `INCONCLUSIVE`): a Rust unit test lives inside the production file it tests, so the script copies the test-bearing file wholesale onto the parent, which copies the fix too. It reliably catches decoration whenever the test compiles against the parent and reliably refuses to bless anything else; it does not mechanically confirm most API-introducing fixes. The trailer and review are the enforcement; the script is an instrument. It needs a commit to diff — on an uncommitted tree it reports "no file changed between HEAD and HEAD".
+The script is advisory with a stated reach limit (measured 2026-09-13 on mununu#542 and #544, both `INCONCLUSIVE`): a Rust unit test lives inside the production file it tests, so the script copies the test-bearing file wholesale onto the parent, which copies the fix too. It reliably catches decoration whenever the test compiles against the parent and reliably refuses to bless anything else; it does not mechanically confirm most API-introducing fixes. The trailer and review are the enforcement; the script is an instrument. It needs a commit to diff — on an uncommitted tree it reports "no file changed between HEAD and HEAD". An integration-test reproducer (`crates/<pkg>/tests/<name>.rs`) sits outside that limit: it is a file of its own, so the script builds and runs it with `--test <name>` against `REF` and the mechanical verdict applies (2026-10-27, from mununu#810, whose `tests/exact_run_budget.rs` read `INCONCLUSIVE` under the lib-only script). The `REF` build uses `target/verify-repro`, its own target directory, so it never overwrites the working tree's `mununu-core` (`docs/dev-container.md` §One volume per tree).
 
 **`consumer-only` is a real answer, not an escape hatch.** Some defects live in inputs we do not have (a consumer's proprietary RTL, a 1–2 % timing-dependent abort). Naming the consumer and the obstacle is honest; what it forbids is pretending. The PR says what evidence was obtained and from whom, and — where a derived artifact would make the defect ours permanently (a generated BTOR2, a minimised netlist) — records whether that was requested.
 

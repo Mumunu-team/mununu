@@ -5,7 +5,13 @@
 # parent commit and passes on this one. A regression test that passes on the parent is decoration:
 # it locks in behaviour, it does not demonstrate a defect.
 #
-#   make verify-repro TEST=<substring> [REF=HEAD~1] [PKG=mununu-core]
+#   make verify-repro TEST=<substring> [REF=HEAD~1] [PKG=mununu-core] [IGNORED=1]
+#
+#   A reproducer in an INTEGRATION test file (crates/<pkg>/tests/<name>.rs) is built and run
+#   with `--test <name>`; one inside the lib with `--lib`. IGNORED=1 runs an `#[ignore]`d test.
+#   The REF build uses its own target directory (target/verify-repro): two trees sharing one
+#   target directory overwrite each other's workspace rlibs (docs/dev-container.md), and the
+#   REF tree must never hand the working tree its unfixed `mununu-core`.
 #
 # How it works, and the limitation stated up front: in Rust a unit test lives INSIDE the production
 # file it tests (`mod tests`), so the test and the fix cannot be separated by path. So this script
@@ -29,9 +35,10 @@ set -uo pipefail
 TEST="${TEST:-}"
 REF="${REF:-HEAD~1}"
 PKG="${PKG:-mununu-core}"
+IGNORED="${IGNORED:-}"
 
 if [ -z "$TEST" ]; then
-  echo "usage: make verify-repro TEST=<test-name-substring> [REF=HEAD~1] [PKG=mununu-core]" >&2
+  echo "usage: make verify-repro TEST=<test-name-substring> [REF=HEAD~1] [PKG=mununu-core] [IGNORED=1]" >&2
   exit 2
 fi
 
@@ -105,11 +112,27 @@ done
 
 # Reuse the main target dir: a cold build here costs minutes. Per CLAUDE.md's hook-serialisation
 # rule this is a HEAVY cargo workload — do not run it concurrently with a pre-commit hook.
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$repo_root/target}"
+# Which test targets carry the reproducer: an integration test file is its own target.
+targets=""
+for f in $bearing; do
+  case "$f" in
+    crates/*/tests/*.rs)
+      stem="$(basename "$f" .rs)"
+      case " $targets " in *" --test $stem "*) ;; *) targets="$targets --test $stem" ;; esac ;;
+    *) case " $targets " in *" --lib "*) ;; *) targets="$targets --lib" ;; esac ;;
+  esac
+done
+targets="${targets# }"
+ignored_flag=""
+[ "$IGNORED" = "1" ] && ignored_flag="--ignored"
+echo "  cargo targets:   $targets${ignored_flag:+ ($ignored_flag)}"
+# Own target directory: the REF tree must not overwrite the working tree's rlibs.
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$repo_root/target}/verify-repro"
 
 echo "  building $PKG at $REF with the test files from HEAD..."
 log="$(mktemp)"
-if ! (cd "$work" && cargo test -p "$PKG" --lib --no-run) >"$log" 2>&1; then
+# shellcheck disable=SC2086
+if ! (cd "$work" && cargo test -p "$PKG" $targets --no-run) >"$log" 2>&1; then
   echo
   echo "INCONCLUSIVE — the test does not build against $REF."
   echo "  The test depends on API introduced by this commit, so the reproducer cannot be verified"
@@ -121,7 +144,8 @@ if ! (cd "$work" && cargo test -p "$PKG" --lib --no-run) >"$log" 2>&1; then
 fi
 
 echo "  running..."
-if (cd "$work" && cargo test -p "$PKG" --lib -- "$TEST") >"$log" 2>&1; then
+# shellcheck disable=SC2086
+if (cd "$work" && cargo test -p "$PKG" $targets -- $ignored_flag "$TEST") >"$log" 2>&1; then
   if grep -qE '^test result: ok\. 0 passed; 0 failed' "$log"; then
     echo
     echo "INCONCLUSIVE — '$TEST' matched NO test at $REF (nothing ran), so there is nothing to judge."
