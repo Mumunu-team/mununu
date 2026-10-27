@@ -1,6 +1,8 @@
 # Rust
 /target/
 **/target/
+# CI's bind-mounted cargo target (rust-cache), see .github/workflows/ci.yml
+/.ci-target/
 *.pdb
 
 # Machine-local cargo build config (lld linker path, optional sccache) —

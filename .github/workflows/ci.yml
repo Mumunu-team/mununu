@@ -42,10 +42,31 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # Dependency cache (2026-10-27). The container compiles into /cargo-target and reads
+      # crates from /usr/local/cargo/registry; both are bind-mounted from the runner so
+      # rust-cache can restore and save them between runs (key: the manifests, Cargo.lock, the
+      # toolchain file, the job). rust-cache prunes the workspace crates' artifacts on save, so
+      # a hit leaves `make ci` compiling mununu-core / -cli / -extract and nothing else; a miss
+      # is the full compile this job always ran. Saved from `main` only, so one cache serves
+      # every PR instead of one per branch. The container runs as root, hence the ownership
+      # fix before the post-run save. The `make ci` line itself is unchanged.
+      - name: Restore the dependency cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> .ci-target"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
       - name: Run lint + tests in the dev image
         run: |
-          docker run --rm -v ${{ github.workspace }}:/work mununu-dev:latest \
-            make ci
+          mkdir -p .ci-target "$HOME/.cargo/registry"
+          docker run --rm -v ${{ github.workspace }}:/work \
+            -v ${{ github.workspace }}/.ci-target:/cargo-target \
+            -v "$HOME/.cargo/registry":/usr/local/cargo/registry \
+            mununu-dev:latest make ci
+
+      - name: Hand the cache directories back to the runner user
+        if: always()
+        run: sudo chown -R "$(id -u):$(id -g)" .ci-target "$HOME/.cargo/registry"
 
   security-audit:
     runs-on: ubuntu-latest
