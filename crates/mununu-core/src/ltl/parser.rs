@@ -208,12 +208,69 @@ impl<'a> Parser<'a> {
             return Ok(LtlFormula::False);
         }
 
-        // Predicate (identifier)
+        // Predicate: an identifier, or a comparison atom in the shape the mu-calculus parser
+        // reads (`ident op decimal`, `ident op ident [+ k]`), so an LTL body over RTL signals
+        // (`G (state_q == 5 -> !motor_up)`) carries the comparison through to the translation
+        // as one predicate. `->` is left to the implication level: only the six comparison
+        // operators are consumed here, and `-` is not one of them.
         if let Some(identifier) = self.parse_identifier() {
+            let saved = self.pos;
+            self.skip_whitespace();
+            if let Some(op) = self.try_consume_comparison_op() {
+                self.skip_whitespace();
+                if let Some(rhs) = self.parse_comparison_rhs() {
+                    return Ok(LtlFormula::Predicate(format!("{identifier} {op} {rhs}")));
+                }
+                return Err(self.error_here(ParseErrorKind::Expected(
+                    "a number or an identifier after the comparison operator",
+                )));
+            }
+            self.pos = saved;
             return Ok(LtlFormula::Predicate(identifier));
         }
 
         Err(self.error_here(ParseErrorKind::Expected("formula")))
+    }
+
+    /// One of `==`, `!=`, `<=`, `>=`, `<`, `>`; the two-character forms first so `<=` is not
+    /// read as `<`. `->` never matches: it starts with `-`.
+    fn try_consume_comparison_op(&mut self) -> Option<&'static str> {
+        ["==", "!=", "<=", ">=", "<", ">"]
+            .into_iter()
+            .find(|op| self.try_consume_str(op))
+    }
+
+    /// The right-hand side of a comparison atom: a decimal (optionally negative), or an
+    /// identifier with an optional `+ k` offset (`cnt_q == cnt_q__past + 1`).
+    fn parse_comparison_rhs(&mut self) -> Option<String> {
+        let start = self.pos;
+        if self.try_consume_char('-') || self.peek_char().is_some_and(|c| c.is_ascii_digit()) {
+            while self.peek_char().is_some_and(|c| c.is_ascii_digit()) {
+                self.advance();
+            }
+            let text = &self.input[start..self.pos];
+            return if text.chars().any(|c| c.is_ascii_digit()) {
+                Some(text.to_string())
+            } else {
+                self.pos = start;
+                None
+            };
+        }
+        let ident = self.parse_identifier()?;
+        let saved = self.pos;
+        self.skip_whitespace();
+        if self.try_consume_char('+') {
+            self.skip_whitespace();
+            let k_start = self.pos;
+            while self.peek_char().is_some_and(|c| c.is_ascii_digit()) {
+                self.advance();
+            }
+            if self.pos > k_start {
+                return Some(format!("{ident} + {}", &self.input[k_start..self.pos]));
+            }
+        }
+        self.pos = saved;
+        Some(ident)
     }
 
     // Helper methods for parsing
@@ -403,6 +460,51 @@ mod tests {
             }
             _ => panic!("Expected Always(Not(_))"),
         }
+    }
+
+    /// An LTL body over RTL signals keeps each comparison as ONE predicate, in the text the
+    /// mu-calculus parser reads: the annotation `ltl G (state_q == 5 -> !motor_up)` must not
+    /// stop at `state_q` and report `==` as trailing input.
+    #[test]
+    fn comparison_atoms_parse_as_single_predicates() {
+        let f = parse("G (state_q == 5 -> !motor_up)").unwrap();
+        assert_eq!(
+            f,
+            LtlFormula::Always(Box::new(LtlFormula::Implies(
+                Box::new(LtlFormula::Predicate("state_q == 5".to_string())),
+                Box::new(LtlFormula::Not(Box::new(LtlFormula::Predicate(
+                    "motor_up".to_string()
+                )))),
+            )))
+        );
+        let f = parse("G (cnt_q == cnt_q__past + 1 || cnt_q <= -1)").unwrap();
+        assert_eq!(
+            f,
+            LtlFormula::Always(Box::new(LtlFormula::Or(
+                Box::new(LtlFormula::Predicate(
+                    "cnt_q == cnt_q__past + 1".to_string()
+                )),
+                Box::new(LtlFormula::Predicate("cnt_q <= -1".to_string())),
+            )))
+        );
+    }
+
+    /// `->` is implication, never a `>` comparison; and a dangling operator is an error that
+    /// names what was expected, not a silent bare predicate.
+    #[test]
+    fn implication_is_not_a_comparison_and_a_dangling_operator_is_an_error() {
+        assert_eq!(
+            parse("a -> b").unwrap(),
+            LtlFormula::Implies(
+                Box::new(LtlFormula::Predicate("a".to_string())),
+                Box::new(LtlFormula::Predicate("b".to_string())),
+            )
+        );
+        let err = parse("G (a == )").unwrap_err();
+        assert!(
+            err.to_string().contains("after the comparison operator"),
+            "{err}"
+        );
     }
 
     #[test]

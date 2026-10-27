@@ -2786,11 +2786,19 @@ struct AnnotationScan {
 /// H.5-GR1 — scan the SV source(s) for `@mununu_guarantee` / `@mununu_assume`
 /// property annotations and turn each guarantee into a verifiable property. Reuses
 /// the existing [`crate::mununu_annotations::extract_from_sv_source`] scanner and
-/// the [`crate::mu_calculus::parser`] — no new grammar. A guarantee body is a
-/// mu-calculus formula (the same string form the SVA translator emits and the
-/// per-property loop parses); box-`F` liveness (`μY.(φ ∨ []Y)`) is expressible
-/// directly, unlike the LTL translator's existential-`F`. Bodies that do not parse
-/// are recorded in `skipped`, never silently dropped.
+/// the [`crate::mu_calculus::parser`]. A guarantee body is a mu-calculus formula
+/// (the same string form the SVA translator emits and the per-property loop
+/// parses); box-`F` liveness (`μY.(φ ∨ []Y)`) is expressible directly.
+///
+/// A body that starts with the keyword `ltl` is an LTL formula instead, read over
+/// EVERY path and translated by [`crate::ltl::universal::translate_universal_text`]
+/// — the same reading as a CTXDSL `body = ltl …;` — into the mu-calculus text the
+/// row carries, so the report's `formula` shows what the engine decided. The
+/// fragment is the one that module documents (`G`, `X`, `F b`, `b U b`, `b W b`,
+/// response, recurrence); a formula outside it is skipped with the subformula
+/// named. `eltl` (the some-path reading) is NOT accepted here: that reading is the
+/// plain mu-calculus body this scanner always took. Bodies that do not parse are
+/// recorded in `skipped`, never silently dropped.
 fn scan_annotation_properties(sources: &[(String, String)]) -> AnnotationScan {
     use crate::adapter::slang::translate::TranslatedAssertion;
     use crate::mununu_annotations::{MununuTag, extract_from_sv_source};
@@ -2807,8 +2815,51 @@ fn scan_annotation_properties(sources: &[(String, String)]) -> AnnotationScan {
                             .push("@mununu_guarantee with an empty body".to_string());
                         continue;
                     }
-                    match crate::mu_calculus::parser::parse(body) {
-                        Ok(_) => {
+                    // `ltl <formula>` → the universal translation's text; anything else is
+                    // mu-calculus as before. The keyword must be followed by whitespace, so an
+                    // atom that happens to start with `ltl` (`ltl_ok`) is not captured.
+                    // A bare `ltl` / `eltl` (the body was trimmed, so the keyword alone is
+                    // what an empty formula looks like) is the keyword with nothing after it,
+                    // not an atom named `ltl`.
+                    let keyword_body = |kw: &str| -> Option<&str> {
+                        if body == kw {
+                            return Some("");
+                        }
+                        body.strip_prefix(kw)
+                            .filter(|r| r.starts_with(char::is_whitespace))
+                            .map(str::trim)
+                    };
+                    let ltl_body = keyword_body("ltl");
+                    let eltl_body = keyword_body("eltl");
+                    if let Some(rest) = eltl_body {
+                        scan.skipped.push(format!(
+                            "@mununu_guarantee `eltl {rest}`: the some-path reading is not an \
+                             annotation keyword — write it in mu-calculus (`F p` is \
+                             `mu X. (p || <> X)`), or use `ltl` for the every-path reading"
+                        ));
+                        continue;
+                    }
+                    let parsed: Result<String, String> = match ltl_body {
+                        Some("") => Err("@mununu_guarantee ltl with an empty formula".to_string()),
+                        Some(rest) => crate::ltl::parser::parse(rest)
+                            .map_err(|e| {
+                                format!("@mununu_guarantee `ltl {rest}` did not parse as LTL: {e}")
+                            })
+                            .and_then(|f| {
+                                crate::ltl::universal::translate_universal_text(&f)
+                                    .map_err(|e| format!("@mununu_guarantee `ltl {rest}`: {e}"))
+                            }),
+                        None => crate::mu_calculus::parser::parse(body)
+                            .map(|_| body.to_string())
+                            .map_err(|e| {
+                                format!(
+                                    "@mununu_guarantee `{body}` did not parse as a mu-calculus \
+                                     formula: {e}"
+                                )
+                            }),
+                    };
+                    match parsed {
+                        Ok(formula) => {
                             // mununu#550 — an author-given name becomes the LABEL, which
                             // `--expect` already matches (mununu#544). The positional `name` is
                             // kept either way, so an existing index pin does not break.
@@ -2842,14 +2893,12 @@ fn scan_annotation_properties(sources: &[(String, String)]) -> AnnotationScan {
                                 name: format!("ann_guarantee_{idx}"),
                                 label: ann.name.clone(),
                                 kind: SvaKind::Assert,
-                                formula: body.to_string(),
+                                formula,
                                 recoverability_companion: None,
                             });
                             idx += 1;
                         }
-                        Err(e) => scan.skipped.push(format!(
-                            "@mununu_guarantee `{body}` did not parse as a mu-calculus formula: {e}"
-                        )),
+                        Err(why) => scan.skipped.push(why),
                     }
                 }
                 MununuTag::Assume => {
@@ -11753,6 +11802,76 @@ module uart_tx(); endmodule"#;
         let scan = scan_annotation_properties(&src(sv));
         assert_eq!(scan.guarantees.len(), 1);
         assert!(mu_parser::parse(&scan.guarantees[0].formula).is_ok());
+    }
+
+    /// An `ltl` body is read over EVERY path, like a CTXDSL `body = ltl …;`: the response
+    /// `G (req -> F ack)` becomes the box-`F` form with the `<> true` successor guard, and a
+    /// comparison atom (`state_q == 5`) reaches the formula as one predicate. The stored text
+    /// is what the per-property loop re-parses, so it must parse.
+    #[test]
+    fn an_ltl_annotation_body_is_translated_over_every_path() {
+        let sv = "// @mununu_guarantee(resp) ltl G (req -> F ack)\n\
+                  // @mununu_guarantee(off) ltl G (state_q == 5 -> !motor_up)\n\
+                  module m(); endmodule";
+        let scan = scan_annotation_properties(&src(sv));
+        assert!(scan.skipped.is_empty(), "{:?}", scan.skipped);
+        assert_eq!(scan.guarantees.len(), 2);
+        let resp = &scan.guarantees[0].formula;
+        assert_eq!(scan.guarantees[0].label.as_deref(), Some("resp"));
+        assert!(
+            resp.contains("nu G1") && resp.contains("mu F2"),
+            "universal shape: {resp}"
+        );
+        assert!(
+            resp.contains("<> true"),
+            "the every-path `F` needs a successor: {resp}"
+        );
+        assert!(
+            mu_parser::parse(resp).is_ok(),
+            "the row's text must re-parse: {resp}"
+        );
+        let off = &scan.guarantees[1].formula;
+        assert!(
+            off.contains("(state_q == 5)"),
+            "the comparison is one atom: {off}"
+        );
+        assert!(mu_parser::parse(off).is_ok(), "{off}");
+    }
+
+    /// Outside the every-path fragment (`F G p` is path-wise), the body is skipped with the
+    /// subformula named — never translated into a different property; and `eltl` is refused
+    /// with the mu-calculus alternative spelled out, because the some-path reading is what a
+    /// plain body already is.
+    #[test]
+    fn an_ltl_body_outside_the_fragment_and_an_eltl_body_are_skipped_with_reasons() {
+        let sv = "// @mununu_guarantee ltl F G p\n\
+                  // @mununu_guarantee eltl G (p -> F q)\n\
+                  // @mununu_guarantee ltl\n\
+                  // @mununu_guarantee ltl_ok\n\
+                  module m(); endmodule";
+        let scan = scan_annotation_properties(&src(sv));
+        assert_eq!(
+            scan.guarantees.len(),
+            1,
+            "`ltl_ok` is a plain atom, not the keyword: {scan:?}"
+        );
+        assert_eq!(scan.guarantees[0].formula, "ltl_ok");
+        assert_eq!(scan.skipped.len(), 3, "{:?}", scan.skipped);
+        assert!(
+            scan.skipped[0].contains("outside the LTL fragment"),
+            "{}",
+            scan.skipped[0]
+        );
+        assert!(
+            scan.skipped[1].contains("eltl") && scan.skipped[1].contains("mu X."),
+            "{}",
+            scan.skipped[1]
+        );
+        assert!(
+            scan.skipped[2].contains("empty formula"),
+            "{}",
+            scan.skipped[2]
+        );
     }
 
     /// A guarantee body that does not parse is recorded in `skipped`, never

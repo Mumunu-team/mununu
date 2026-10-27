@@ -125,6 +125,18 @@ formula heartbeat_check {
 
 Key insight: `G` (safety, invariance) maps to **nu** (greatest fixpoint — start with everything, shrink); `F` (liveness) maps to **mu** (least fixpoint — start with nothing, grow).
 
+## Where LTL is accepted
+
+> Source of truth: [`translate_universal`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/ltl/universal.rs) (CTXDSL `ltl`) + [`scan_annotation_properties`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/adapter/slang/verify_auto.rs) (SystemVerilog `@mununu_guarantee ltl …`) — surface: (CLI+API+UI) for CTXDSL, (CLI+API) for RTL.
+
+| where | syntax | reading |
+|---|---|---|
+| CTXDSL formula | `body = ltl G (req -> F ack);` | every path, over the fragment above |
+| CTXDSL formula | `body = eltl G (req -> F ack);` | some path (`F` as `EF`) |
+| SystemVerilog annotation | `// @mununu_guarantee(name) ltl G (req -> F ack)` | every path; atoms over the design's signals (`state_q == 5`, `cnt == cnt__past + 1`); `eltl` is not accepted there — write the mu-calculus form |
+
+Atoms may be comparisons in every place LTL is parsed (`ident op decimal`, `ident op ident [+ k]`), not only predicate names.
+
 ## When to Use LTL vs. Mu-Calculus
 
 | Use LTL when... | Use mu-calculus when... |
