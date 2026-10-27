@@ -371,7 +371,10 @@ the row then carries a `witness-unavailable` note (`items: [stage]`) naming whic
 finder declined and why (mununu#803) (`[] a || [] b` can be false at a state although every single path
 satisfies one of them). Liveness carries a `lasso` trace (`loop_start` marks where the last step
 loops back), a refuted `AG EF` decided by a trap certificate a `trap` trace, and a bare `EF p` an
-`unreachable` trace listing `unreachable_target`. Every verb that returns a path uses this one
+`unreachable` trace listing `unreachable_target`. A liveness or recoverability row the exact engine
+refutes ships its lasso best-effort: when the extraction fails after the verdict (an exhausted BDD
+arena, a panic caught at that site) the verdict stands, the trace is absent, and the row carries the
+same `witness-unavailable` note with `items: ["exact-witness"]` and the engine's reason (2026-10-27). Every verb that returns a path uses this one
 `Trace` shape since 0.5 (`btor2 verify` with `--witness` or a fault `--target`, cegar, the game's
 starvation lasso); see [`docs/api-schemas/verdict.md`](api-schemas/verdict.md).
 

@@ -5896,6 +5896,7 @@ pub(crate) fn verify_auto_impl(
                 None,
             );
             let exact_stage = ladder.stage;
+            let exact_witness_miss = ladder.witness_miss.clone();
             let mut by_ladder = false;
             let (outcome, counterexample) = match ladder.result {
                 Ok((ExactVerdict::Holds, _)) => {
@@ -5933,6 +5934,20 @@ pub(crate) fn verify_auto_impl(
                     }
                 }
             };
+            // mununu#808 follow-up — a VIOLATED that ships no lasso says why (the extraction
+            // failed after the verdict), as the safety path does for its missing paths.
+            if counterexample.is_none()
+                && let Some(reason) = exact_witness_miss
+            {
+                report.notes.push(witness_miss_note(
+                    &t.name,
+                    Some(exact_stage),
+                    &crate::adapter::reach_rescue::WitnessMiss {
+                        stage: "exact-witness",
+                        reason,
+                    },
+                ));
+            }
             report.properties.push(PropertyVerdict {
                 name: t.name.clone(),
                 label: t.label.clone(),
@@ -7620,6 +7635,7 @@ pub(crate) fn rescue_skipped_via_exact(
             None,
         );
         let stage = ladder.stage;
+        let witness_miss = ladder.witness_miss.clone();
         match ladder.result {
             Ok((ExactVerdict::Holds, _)) => {
                 prop.outcome = VerifyOutcome::Holds;
@@ -7634,6 +7650,19 @@ pub(crate) fn rescue_skipped_via_exact(
                     .or_else(|| ef_unreachable_counterexample(&formula));
                 prop.decided_by = Some(stage.to_string());
                 notes.push(exact_skip_rescue_note(&prop.name, "VIOLATED"));
+                // mununu#808 follow-up — the omitted lasso's reason reaches the report.
+                if prop.counterexample.is_none()
+                    && let Some(reason) = witness_miss
+                {
+                    notes.push(witness_miss_note(
+                        &prop.name,
+                        Some(stage),
+                        &crate::adapter::reach_rescue::WitnessMiss {
+                            stage: "exact-witness",
+                            reason,
+                        },
+                    ));
+                }
             }
             // Err (over cap / intractable design): leave the property Skipped.
             Err(_) => {}
@@ -9197,6 +9226,86 @@ mod tests {
     // A.6 soundness gate — with reset-gating OFF the exact engine is unsound (it starts from
     // the illegal power-on default and does not fire the freed reset), so the rescue must NOT
     // touch the property: it stays Skipped, no note.
+    /// mununu#808 follow-up — a VIOLATED liveness row the exact rescue decides without a lasso
+    /// (the extraction failed after the verdict) carries a `witness-unavailable` note naming the
+    /// `exact-witness` stage and the reason; with the extraction working the lasso ships and no
+    /// such note exists. The failure is injected at the engine's own extraction closure.
+    #[test]
+    fn rescue_skipped_via_exact_says_why_a_violated_row_ships_no_lasso() {
+        use crate::adapter::btor2::symbolic_bitblast::WITNESS_EXTRACTION_FAILS;
+        // A 2-bit counter that stalls at 3: `AG AF (cnt == 1)` is VIOLATED (0 → 1 → 2 → 3 → 3 …).
+        const STALL: &str = "1 sort bitvec 2\n2 sort bitvec 1\n3 zero 1\n4 one 1\n\
+                             5 state 1 cnt\n6 init 1 5 3\n7 add 1 5 4\n8 const 1 11\n\
+                             9 eq 2 5 8\n10 ite 1 9 5 7\n11 next 1 5 10\n";
+        let fresh = || AutoVerifyReport {
+            properties: vec![PropertyVerdict {
+                name: "returns_to_one".to_string(),
+                label: None,
+                kind: crate::adapter::slang::translate::SvaKind::Assert,
+                formula: "nu Y. ((mu X. ((cnt == 1) or [] X)) and [] Y)".to_string(),
+                outcome: VerifyOutcome::Skipped {
+                    reason: "cube: abstained".to_string(),
+                },
+                seeded_predicates: Vec::new(),
+                counterexample: None,
+                bottom_reason: None,
+                decided_by: None,
+                vacuity: None,
+            }],
+            ..Default::default()
+        };
+        let opts = VerifyAutoOptions {
+            gate_reset: true,
+            exact_symbolic: false,
+            ..Default::default()
+        };
+        let mut report = fresh();
+        let notes = rescue_skipped_via_exact(&mut report, STALL, &opts);
+        assert!(
+            matches!(report.properties[0].outcome, VerifyOutcome::Violated { .. }),
+            "{:?}",
+            report.properties[0].outcome
+        );
+        assert!(
+            report.properties[0].counterexample.is_some(),
+            "the lasso ships when the extraction works"
+        );
+        assert!(notes.iter().all(|n| n.kind != "witness-unavailable"));
+
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                WITNESS_EXTRACTION_FAILS.with(|f| f.set(false));
+            }
+        }
+        let _reset = Reset;
+        WITNESS_EXTRACTION_FAILS.with(|f| f.set(true));
+        let mut report = fresh();
+        let notes = rescue_skipped_via_exact(&mut report, STALL, &opts);
+        assert!(
+            matches!(report.properties[0].outcome, VerifyOutcome::Violated { .. }),
+            "the verdict stands: {:?}",
+            report.properties[0].outcome
+        );
+        assert!(
+            report.properties[0].counterexample.is_none(),
+            "the lasso is omitted"
+        );
+        let kinds: Vec<&str> = notes.iter().map(|n| n.kind.as_str()).collect();
+        let note = notes
+            .iter()
+            .find(|n| n.kind == "witness-unavailable")
+            .unwrap_or_else(|| panic!("the row says why; notes: {kinds:?}"));
+        assert_eq!(note.property.as_deref(), Some("returns_to_one"));
+        assert_eq!(note.items, vec!["exact-witness".to_string()]);
+        assert!(
+            note.detail
+                .contains("injected: the witness extraction failed"),
+            "{}",
+            note.detail
+        );
+    }
+
     #[test]
     fn rescue_skipped_via_exact_respects_reset_gate() {
         const COUNTER: &str = "1 sort bitvec 2\n2 sort bitvec 1\n3 zero 1\n4 one 1\n\
