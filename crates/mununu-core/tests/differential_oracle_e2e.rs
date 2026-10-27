@@ -765,12 +765,142 @@ fn corpus_report(
         .unwrap_or_else(|e| panic!("{}: verify_auto failed: {}", d.name, e.message))
 }
 
-/// `<stem>_lift.sv` beside a source replaces `<stem>.sv` for the LIFT only
-/// (`VerifyAutoOptions::lift_overrides`); extraction keeps reading the vendored file. Written by
-/// `scripts/vendor_opentitan_ip.py --strip-inc-assert` for the two upstream files whose
-/// `ifdef INC_ASSERT` region no frontend lifts — the alert sender's `sequence` blocks, the
-/// sparse-FSM flop's enum-method loop — now that the synthesis shims define `INC_ASSERT`
-/// (2026-10-22) so the assertion-support logic (`fpv_err_present`) is in the model.
+/// Per-row pins for an `#[ignore]`d e2e (mununu#800): every pinned label appears exactly `n`
+/// times with the outcome `want` — the value the row DECIDED when it was measured, or `unknown`
+/// for a row that has never decided. A row that is `unknown` with a HOST-DEPENDENT bottom reason
+/// (a wall clock or RSS ceiling — [`BottomDeterminism::HostDependent`]) is printed as
+/// budget-bound and tolerated: the same run decides on a quieter machine, and a count or a strict
+/// pin would turn host load into a verdict about the design (the posture's ack endpoints went
+/// 5 ⊥ → 6 ⊥ under a foreign SBY job on the host, every one `BudgetExpired`). What the pins
+/// therefore cannot catch is a change that makes every engine slower without declining — a
+/// timing sweep's question, not an e2e's. Everything else — a flip, a reproducible ⊥, a row
+/// pinned `unknown` that now decides (update the pin with the measured value), a row no pin
+/// names — is drift, returned one line per row so the transcript names it.
+fn rows_off_their_pins<'a>(
+    rows: impl IntoIterator<Item = &'a mununu_core::adapter::slang::verify_auto::PropertyVerdict>,
+    expected: &[(&str, usize, &str)],
+) -> Vec<String> {
+    use mununu_core::adapter::slang::verify_auto::{BottomDeterminism, PropertyVerdict};
+    let mut seen: std::collections::BTreeMap<&str, Vec<&PropertyVerdict>> =
+        std::collections::BTreeMap::new();
+    for p in rows {
+        seen.entry(p.label.as_deref().unwrap_or(&p.name))
+            .or_default()
+            .push(p);
+    }
+    let mut drift = Vec::new();
+    for (label, n, want) in expected {
+        let got = seen.remove(label).unwrap_or_default();
+        if got.len() != *n {
+            drift.push(format!(
+                "{label}: pinned {n} × {want}, got {} row(s): {:?}",
+                got.len(),
+                got.iter().map(|p| p.outcome.label()).collect::<Vec<_>>()
+            ));
+            continue;
+        }
+        for p in got {
+            let outcome = p.outcome.label();
+            if outcome == *want {
+                continue;
+            }
+            let host_bound = outcome == "unknown"
+                && p.bottom_reason
+                    .as_ref()
+                    .is_some_and(|r| r.determinism() == BottomDeterminism::HostDependent);
+            if host_bound {
+                eprintln!(
+                    "  budget-bound on this host (pinned {want}): {label} — {}",
+                    p.bottom_reason.as_ref().map(|r| r.tag()).unwrap_or("-")
+                );
+            } else if *want == "unknown" {
+                drift.push(format!(
+                    "{label}: pinned unknown, now {outcome} — it decided; update the pin with \
+                     the measured value"
+                ));
+            } else {
+                drift.push(format!(
+                    "{label}: pinned {want}, got {outcome} (bottom reason: {:?})",
+                    p.bottom_reason
+                ));
+            }
+        }
+    }
+    for (label, got) in seen {
+        drift.push(format!(
+            "{label}: no pin names this row, got {:?}",
+            got.iter().map(|p| p.outcome.label()).collect::<Vec<_>>()
+        ));
+    }
+    drift
+}
+
+/// The pin rule at the seam the e2e tests consume it (mununu#800): a row on its pin passes; a
+/// wall-clock ⊥ on a `holds` pin is tolerated; a reproducible ⊥, a flip, a pinned-⊥ row that
+/// decided, a count mismatch and an unpinned row are each one drift line, in pin order.
+#[test]
+fn rows_off_their_pins_tolerates_only_a_host_dependent_bottom() {
+    use mununu_core::adapter::slang::translate::SvaKind;
+    use mununu_core::adapter::slang::verify_auto::{BottomReason, PropertyVerdict};
+    let row = |label: &str, outcome: VerifyOutcome, bottom: Option<BottomReason>| PropertyVerdict {
+        name: format!("m_sva_{label}"),
+        label: Some(label.to_string()),
+        kind: SvaKind::Assert,
+        formula: String::new(),
+        outcome,
+        seeded_predicates: Vec::new(),
+        counterexample: None,
+        bottom_reason: bottom,
+        decided_by: None,
+        vacuity: None,
+    };
+    let unknown = || VerifyOutcome::Unknown { unknown_cells: 1 };
+    let rows = vec![
+        row("on_pin", VerifyOutcome::Holds, None),
+        row("clock", unknown(), Some(BottomReason::BudgetExpired)),
+        row("clock", VerifyOutcome::Holds, None),
+        row(
+            "shape",
+            unknown(),
+            Some(BottomReason::SafetyShapeNotReducible),
+        ),
+        row("flip", VerifyOutcome::Violated { false_cells: 1 }, None),
+        row("decided", VerifyOutcome::Holds, None),
+        row(
+            "still_unknown",
+            unknown(),
+            Some(BottomReason::BudgetExpired),
+        ),
+        row("count", VerifyOutcome::Holds, None),
+        row("stranger", VerifyOutcome::Holds, None),
+    ];
+    let drift = rows_off_their_pins(
+        &rows,
+        &[
+            ("on_pin", 1, "holds"),
+            ("clock", 2, "holds"),
+            ("shape", 1, "holds"),
+            ("flip", 1, "holds"),
+            ("decided", 1, "unknown"),
+            ("still_unknown", 1, "unknown"),
+            ("count", 2, "holds"),
+        ],
+    );
+    let named: Vec<&str> = drift
+        .iter()
+        .map(|d| d.split(':').next().unwrap_or(d))
+        .collect();
+    assert_eq!(
+        named,
+        ["shape", "flip", "decided", "count", "stranger"],
+        "{drift:#?}"
+    );
+    assert!(drift[0].contains("SafetyShapeNotReducible"), "{}", drift[0]);
+    assert!(drift[1].contains("got violated"), "{}", drift[1]);
+    assert!(drift[2].contains("update the pin"), "{}", drift[2]);
+    assert!(drift[3].contains("got 1 row(s)"), "{}", drift[3]);
+}
+
 fn lift_variants(dir: &Path) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -2609,12 +2739,49 @@ fn e2e_opentitan_ip_edn_full() {
         );
     }
     // Floors (2026-10-21): 44 own + 8 system + 4 `EF` twins HOLDS; 8 + 3 VIOLATED; nothing ⊥.
-    let n_holds = report
-        .properties
-        .iter()
-        .filter(|p| matches!(p.outcome, VerifyOutcome::Holds))
-        .count();
-    assert!(n_holds >= 56, "holds = {n_holds}");
+    // Measured 2026-10-26 (78c6ab4; 0 moves through #808, #810 and #811): 67 rows, 56 HOLDS, 11
+    // VIOLATED. Pinned per label so a drift names the row instead of a count (mununu#800
+    // siblings); the deciding engine is printed above and is deliberately not pinned.
+    const EDN_FULL_PINS: &[(&str, usize, &str)] = &[
+        ("AlertTxKnownO_A", 1, "holds"),
+        ("CsrngAppIfOut_A", 1, "holds"),
+        ("EdnDataStableDisable_A", 8, "holds"),
+        ("EdnDataStable_A", 8, "holds"),
+        ("EdnEndPointOut_A", 8, "holds"),
+        ("EdnFatalAlertNoRsp_A", 8, "violated"),
+        ("FpvSecCmAckFsmCheck_A", 8, "holds"),
+        ("FpvSecCmCntAlertCheck_A", 1, "holds"),
+        ("FpvSecCmGenCmdFifoRptrCheck_A", 1, "holds"),
+        ("FpvSecCmGenCmdFifoWptrCheck_A", 1, "holds"),
+        ("FpvSecCmMainFsmCheck_A", 1, "holds"),
+        ("FpvSecCmRegWeOnehotCheck_A", 1, "holds"),
+        ("FpvSecCmResCmdFifoRptrCheck_A", 1, "holds"),
+        ("FpvSecCmResCmdFifoWptrCheck_A", 1, "holds"),
+        ("IntrEdnCmdReqDoneKnownO_A", 1, "holds"),
+        ("TlAReadyKnownO_A", 1, "holds"),
+        ("TlDValidKnownO_A", 1, "holds"),
+        ("edn_ack_sm_0_datawait_reachable", 1, "holds"),
+        ("edn_ack_sm_0_error_is_recorded", 1, "holds"),
+        ("edn_ack_sm_0_error_is_terminal", 1, "holds"),
+        ("edn_ack_sm_0_recover_idle", 1, "violated"),
+        ("edn_ack_sm_7_datawait_reachable", 1, "holds"),
+        ("edn_ack_sm_7_recover_idle", 1, "violated"),
+        ("edn_fatal_alert_has_a_source", 1, "holds"),
+        ("edn_main_sm_error_is_recorded", 1, "holds"),
+        ("edn_main_sm_error_is_terminal", 1, "holds"),
+        ("edn_main_sm_error_reachable", 1, "holds"),
+        ("edn_main_sm_error_record_is_sticky", 1, "holds"),
+        ("edn_main_sm_recover_idle", 1, "violated"),
+        ("edn_main_sm_swport_reachable", 1, "holds"),
+        ("edn_no_deadlock", 1, "holds"),
+        ("edn_swport_entry_excludes_boot_mode", 1, "holds"),
+    ];
+    let drift = rows_off_their_pins(&report.properties, EDN_FULL_PINS);
+    assert!(
+        drift.is_empty(),
+        "rows off their pins:\n{}",
+        drift.join("\n")
+    );
     let n_violated = report
         .properties
         .iter()
@@ -2925,17 +3092,18 @@ fn e2e_opentitan_ip_edn_sec_cm_posture() {
                 continue;
             }
             eprintln!(
-                "  {:<34} {:<9} {:<16} vacuity={}",
+                "  {:<34} {:<9} {:<16} vacuity={} bottom={:?}",
                 label,
                 p.outcome.label(),
                 p.decided_by.as_deref().unwrap_or("-"),
-                p.vacuity.as_ref().map(|v| v.kind.tag()).unwrap_or("-")
+                p.vacuity.as_ref().map(|v| v.kind.tag()).unwrap_or("-"),
+                p.bottom_reason
             );
         }
         for n in report
             .notes
             .iter()
-            .filter(|n| n.kind.starts_with("antecedent-"))
+            .filter(|n| n.kind.starts_with("antecedent-") || n.kind.contains("budget"))
         {
             eprintln!("  note {}: {}", n.kind, n.summary);
         }
@@ -3004,11 +3172,29 @@ fn e2e_opentitan_ip_edn_sec_cm_posture() {
         violated.is_empty(),
         "an escape under one fault: {violated:?}"
     );
-    let holds = rows
-        .iter()
-        .filter(|p| matches!(p.outcome, VerifyOutcome::Holds))
-        .count();
-    assert!(holds >= 10, "{holds} of 15 hold");
+    // Pinned per row (mununu#800) with the value each chain DECIDED — #755 (2026-10-23, a quiet
+    // host: 10 HOLD, 5 ⊥) and main 2026-10-27 (under a foreign SBY job: 9 HOLD, 6 ⊥). The rows
+    // whose site widens the cone past what the wall budgets finish stop with `BudgetExpired`, a
+    // host-dependent reason the pins print and tolerate, never count: four ack endpoints and
+    // the gencmd read pointer on the quiet host, five endpoints under load. The read pointer has
+    // never decided under the posture and is pinned ⊥; when it decides, the pin takes the
+    // measured value. The deciding engine is printed above and deliberately not pinned.
+    const EDN_POSTURE_PINS: &[(&str, usize, &str)] = &[
+        ("FpvSecCmAckFsmCheck_A", 8, "holds"),
+        ("FpvSecCmCntAlertCheck_A", 1, "holds"),
+        ("FpvSecCmGenCmdFifoRptrCheck_A", 1, "unknown"),
+        ("FpvSecCmGenCmdFifoWptrCheck_A", 1, "holds"),
+        ("FpvSecCmMainFsmCheck_A", 1, "holds"),
+        ("FpvSecCmRegWeOnehotCheck_A", 1, "holds"),
+        ("FpvSecCmResCmdFifoRptrCheck_A", 1, "holds"),
+        ("FpvSecCmResCmdFifoWptrCheck_A", 1, "holds"),
+    ];
+    let drift = rows_off_their_pins(rows.iter().copied(), EDN_POSTURE_PINS);
+    assert!(
+        drift.is_empty(),
+        "rows off their pins:\n{}",
+        drift.join("\n")
+    );
     let reachable = after
         .notes
         .iter()
