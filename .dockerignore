@@ -3,6 +3,7 @@
 # mainly affects build speed for the production images that do COPY src.
 
 target/
+.ci-target/
 .git/
 .github/
 .claude/
