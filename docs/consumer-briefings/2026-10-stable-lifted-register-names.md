@@ -35,10 +35,10 @@
 
 | run | result |
 |---|---|
-| `e2e_lifted_register_names_carry_no_per_run_temp_path` (new; the reproducer: edn lifted twice, state names identical and free of the temp path) | PENDING_E2E |
-| the same test on the parent (`main`) in the image | PENDING_PARENT |
-| verdict-identity gate: `e2e_opentitan_sva_census` vs `main` and `diff_corpus_monotone_verdict_ledger` | PENDING_GATE |
-| `e2e_opentitan_ip_edn_full` (pins unchanged) | PENDING_EDN |
+| `e2e_lifted_register_names_carry_no_per_run_temp_path` (new; the reproducer: edn lifted twice, state names identical and free of the temp path) | **passes** on the branch (host, sv2v path: 184 named state registers, identical across the two lifts, none with the `mununu-yosys-` staging prefix; 16 s) |
+| the same test on the parent (`main`) in the image | **fails** on `main` `fcd4efe` (host, the test copied into a detached worktree: the two lifts disagree on their state names — the three `$func$` names carry the staging path) |
+| verdict-identity gate: `e2e_opentitan_sva_census` vs `main` and `diff_corpus_monotone_verdict_ledger` | **0 verdict moves** — 191 rows, 173 holds / 7 violated / 11 skipped / 0 ⊥ on both (2,144 s); ledger PASS (38 s) |
+| `e2e_opentitan_ip_edn_full` (pins unchanged) | pins unchanged — 67 properties, 11 violated as on `main` (1,053 s) |
 
 ## Provenance
 

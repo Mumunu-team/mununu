@@ -2263,21 +2263,52 @@ fn e2e_lifted_register_names_carry_no_per_run_temp_path() {
         &ip_lift_overrides(&dir),
     )
     .expect("the edn lift overrides apply");
+    // The names a report shows: `verify_auto` flattens the symbols (`flat_symbol_names`) and the
+    // parser's `collect_symbols` reads them off the state lines.
     let state_names = |btor2: &str| -> Vec<String> {
-        btor2
+        let flat = mununu_core::adapter::btor2::parser::flat_symbol_names(btor2);
+        let file = mununu_core::adapter::btor2::parser::parse(&flat).expect("the lift parses");
+        let symbols = mununu_core::adapter::btor2::parser::collect_symbols(&file);
+        // `<nid> state <sort> …` lines, by nid; their names from the parser's symbol table.
+        let mut names: Vec<(i64, String)> = flat
             .lines()
             .filter_map(|l| {
                 let mut w = l.split_whitespace();
-                let _id = w.next()?;
-                (w.next()? == "state").then(|| w.nth(1).map(str::to_string))?
+                let nid: i64 = w.next()?.parse().ok()?;
+                (w.next()? == "state").then_some(nid)
             })
-            .collect()
+            .filter_map(|nid| symbols.get(&nid).map(|s| (nid, s.clone())))
+            .collect();
+        names.sort();
+        names.into_iter().map(|(_, s)| s).collect()
+    };
+    // `verify_auto`'s two-step lift: the bare lift black-boxes the prim flops (3 registers survive),
+    // so re-lift with the stubs for the cut modules exactly as `verify_auto` does (`auto_stub_flops`).
+    let lift = |label: &str| -> String {
+        let bare = mununu_core::adapter::yosys::sv_to_btor2_with_blackboxes(&primary, &yopts)
+            .expect("the edn IP lifts");
+        let stubs = mununu_core::adapter::slang::prim_stubs::stubs_for_cut_modules(
+            &bare.blackboxed_modules,
+        );
+        let mut with_stubs = yopts.clone();
+        with_stubs.additional_sources.extend(stubs.iter().cloned());
+        let lifted =
+            mununu_core::adapter::yosys::sv_to_btor2_with_blackboxes(&primary, &with_stubs)
+                .expect("the edn IP lifts with the flop stubs");
+        eprintln!(
+            "{label}: {} modules black-boxed before the stubs, {} stubs, {} BTOR2 lines",
+            bare.blackboxed_modules.len(),
+            stubs.len(),
+            lifted.btor2.lines().count()
+        );
+        lifted.btor2
     };
     let t0 = std::time::Instant::now();
-    let first =
-        mununu_core::adapter::yosys::sv_to_btor2(&primary, &yopts).expect("the edn IP lifts");
-    let second =
-        mununu_core::adapter::yosys::sv_to_btor2(&primary, &yopts).expect("the edn IP lifts again");
+    let first = lift("first lift");
+    let second = lift("second lift");
+    if let Some(dump) = std::env::var_os("MUNUNU_E2E_LIFT_DUMP") {
+        std::fs::write(&dump, &first).expect("the lift dump is writable");
+    }
     let (a, b) = (state_names(&first), state_names(&second));
     eprintln!(
         "edn lifted twice: {} / {} state registers, {:.0}s",
@@ -2292,7 +2323,8 @@ fn e2e_lifted_register_names_carry_no_per_run_temp_path() {
     );
     let leaked: Vec<&String> = a
         .iter()
-        .filter(|n| n.contains("/tmp/mununu-yosys"))
+        // The staging prefix, not `/tmp/`: macOS stages under `$TMPDIR` (`/var/folders/…/T/`).
+        .filter(|n| n.contains("mununu-yosys-"))
         .collect();
     assert!(
         leaked.is_empty(),

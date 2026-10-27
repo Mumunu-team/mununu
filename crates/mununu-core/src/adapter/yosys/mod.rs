@@ -633,6 +633,9 @@ fn run_sv_flatten_btor2_concrete(
 
     let run_script = |script: &str| -> Result<std::process::Output, AdapterError> {
         let mut yosys_cmd = Command::new(&yosys);
+        if std::env::var_os("MUNUNU_DEBUG_YOSYS_SCRIPT").is_some() {
+            eprintln!("MUNUNU_DEBUG yosys cwd={yosys_cwd:?}\nMUNUNU_DEBUG script={script}");
+        }
         if let Some(cwd) = &yosys_cwd {
             yosys_cmd.current_dir(cwd);
         }
