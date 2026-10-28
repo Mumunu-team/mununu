@@ -313,6 +313,13 @@ text the row carries, so the report's `formula` shows what the engine decided:
   `>=` — the shapes a mu-calculus body takes; no bit-slices, no sized literals.
 - **Operators:** `G` / `always`, `F` / `eventually`, `X` / `next`, `U` / `until`, `W` /
   `weak_until`, `R` / `release`, `!`, `&&`, `||`, `->`, parentheses.
+- **A violated weak-until ships its path.** `p W q` is translated in the spelling the one-path
+  safety witness monitor compiles (`nu W. ((q || p) && (q || [] W))`, the same reading as
+  `nu W. (q || (p && [] W))`), so a VIOLATED `G (a -> X (!a W b))` carries its counterexample —
+  found by native BMC on the monitor, like any other safety row (mununu#821). A VIOLATED row
+  whose shape that monitor cannot compile keeps its `witness-unavailable` note through the report's
+  notes rebuild — before mununu#821 the rebuild discarded every per-property note a verdict pass
+  had pushed.
 - **`eltl` is not an annotation keyword.** The some-path reading (`F p` as `EF p`) is what a plain
   mu-calculus body already expresses — `mu X. (p || <> X)` — and an `eltl` body is skipped with
   that spelled out.
