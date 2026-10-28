@@ -116,6 +116,7 @@ formula heartbeat_check {
 | `b R c` | `c W (b && c)` |
 | `G F b` | `nu Y. ((mu X. (b \|\| ([] X && <> true))) && [] Y)` |
 | `G(p -> F q)` | `nu Y. ((!p \|\| mu X. (q \|\| ([] X && <> true))) && [] Y)` |
+| `p W q` | `nu W. ((q \|\| p) && (q \|\| [] W))` — the spelling the safety witness monitor compiles (mununu#821) |
 
 | `eltl` (some-path reading) | Mu-calculus |
 |-----|-------------|

@@ -23,7 +23,7 @@ use mununu_core::adapter::btormc::{
 use mununu_core::adapter::slang::verify_auto::{
     PortfolioMode, VerifyAutoOptions, VerifyOutcome, verify_auto,
 };
-use mununu_core::adapter::yosys::YosysOptions;
+use mununu_core::adapter::yosys::{SvFrontend, YosysOptions};
 use mununu_core::mu_calculus::parser;
 use std::path::{Path, PathBuf};
 
@@ -2345,6 +2345,82 @@ fn e2e_opentitan_sva_census() {
             t0.elapsed().as_secs_f64()
         );
     }
+}
+
+/// mununu#821, on the real flow (slang lift, exact engine, the post-passes, the notes rebuild): a
+/// `@mununu_guarantee ltl G (a -> X (!a W b))` annotation VIOLATED by the exact engine — whose own
+/// extractor has no path shape for a nested ν — ships the path the safety-witness post-pass finds
+/// on the And-root weak-until spelling; and a VIOLATED annotation whose shape that monitor cannot
+/// compile (the old spelling, as a mu-calculus body) ships a `witness-unavailable` note naming the
+/// `monitor` stage — the notes rebuild no longer discards it. The tutorial material found both.
+#[test]
+#[ignore = "requires slang + Yosys (use the mununu-sva docker image); run with --ignored --nocapture"]
+fn e2e_a_violated_annotation_ships_its_path_or_says_why_not() {
+    const SRC: &str = "\
+// @mununu_guarantee(alternates) ltl G (a_q -> X (!a_q W b_q))
+// @mununu_guarantee(alt_old) (nu G1. (((!(a_q)) || ([] (nu W2. (b_q || ((!(a_q)) && ([] W2)))))) && [] G1))
+module pulses(input logic clk, input logic rst_n, input logic ia, input logic ib,
+              output logic a_q, output logic b_q);
+  always_ff @(posedge clk) begin
+    if (!rst_n) begin a_q <= 1'b0; b_q <= 1'b0; end
+    else begin a_q <= ia; b_q <= ib; end
+  end
+endmodule
+";
+    let report = verify_auto(
+        &[("pulses.sv".to_string(), SRC.to_string())],
+        &YosysOptions {
+            top: Some("pulses".to_string()),
+            frontend: SvFrontend::Slang,
+            ..Default::default()
+        },
+        &VerifyAutoOptions {
+            exact_symbolic: true,
+            config_values: [("rst_n".to_string(), 1u64)].into_iter().collect(),
+            ..Default::default()
+        },
+    )
+    .expect("verify_auto");
+    let row = |label: &str| {
+        report
+            .properties
+            .iter()
+            .find(|p| p.label.as_deref() == Some(label))
+            .unwrap_or_else(|| panic!("row `{label}`; rows: {:?}", report.properties))
+    };
+    let alternates = row("alternates");
+    assert!(
+        matches!(alternates.outcome, VerifyOutcome::Violated { .. }),
+        "{:?}",
+        alternates.outcome
+    );
+    assert!(
+        alternates
+            .formula
+            .contains("(nu W2. ((b_q || (!(a_q))) && (b_q || ([] W2))))"),
+        "the And-root weak-until spelling: {}",
+        alternates.formula
+    );
+    let cx = alternates
+        .counterexample
+        .as_ref()
+        .expect("the violated weak-until ships its path (the safety-witness post-pass)");
+    assert!(!cx.inputs.is_empty(), "a replayable input sequence: {cx:?}");
+
+    let old = row("alt_old");
+    assert!(
+        matches!(old.outcome, VerifyOutcome::Violated { .. }),
+        "{:?}",
+        old.outcome
+    );
+    assert!(old.counterexample.is_none(), "the old spelling has no path");
+    let kinds: Vec<&str> = report.notes.iter().map(|n| n.kind.as_str()).collect();
+    let note = report
+        .notes
+        .iter()
+        .find(|n| n.kind == "witness-unavailable" && n.property.as_deref() == Some(&old.name))
+        .unwrap_or_else(|| panic!("a VIOLATED without a path says why; notes: {kinds:?}"));
+    assert_eq!(note.items, vec!["monitor".to_string()], "{}", note.detail);
 }
 
 /// The first FULL OpenTitan IP in the corpus — `edn` (TL-UL register block + core + 8 endpoint FSMs,

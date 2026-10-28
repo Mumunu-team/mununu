@@ -2057,6 +2057,26 @@ fn build_notes(
         notes.extend(carrier.notes);
     }
 
+    // mununu#821 — this rebuild regenerates the MODEL-level notes from the diagnostics and the
+    // `vacuity` fields; a note a verdict pass pushed on the way here is KEPT: `witness-unavailable`
+    // (mununu#803 — the main loop's exact-witness miss and the safety-witness post-pass),
+    // `expression-leaf-unresolved` (mununu#717), `engine-isolation` (mununu#543),
+    // `array-atom-unsupported` (mununu#518), the `antecedent-*` notes of the fault posture. Only a
+    // stale copy of a kind regenerated above is dropped (`vacuous-guarantee` belongs to the carrier).
+    // Before this the assignment `report.notes = build_notes(..)` discarded every one of them, so
+    // a VIOLATED annotation whose witness monitor declined shipped with no path and no reason.
+    let kept: Vec<VerificationNote> = {
+        let regenerated: std::collections::HashSet<&str> =
+            notes.iter().map(|n| n.kind.as_str()).collect();
+        report
+            .notes
+            .iter()
+            .filter(|n| n.kind != "vacuous-guarantee" && !regenerated.contains(n.kind.as_str()))
+            .cloned()
+            .collect()
+    };
+    notes.extend(kept);
+
     notes
 }
 
@@ -11871,6 +11891,170 @@ module uart_tx(); endmodule"#;
             scan.skipped[2].contains("empty formula"),
             "{}",
             scan.skipped[2]
+        );
+    }
+
+    /// Two 1-bit registers driven by two free inputs: enough for `G (a_q -> X (!a_q W b_q))` to be
+    /// violated (a_q twice in a row with no b_q between) along one path of three cycles.
+    const TWO_BIT_PULSES: &str = "1 sort bitvec 1\n2 input 1 ia\n3 input 1 ib\n4 state 1 a_q\n5 state 1 b_q\n6 zero 1\n7 init 1 4 6\n8 init 1 5 6\n9 next 1 4 2\n10 next 1 5 3\n";
+
+    /// The weak-until an `ltl` body translates to is the spelling the one-path safety monitor
+    /// recognises, so a VIOLATED `G (a -> X (!a W b))` carries its path: here `a_q` at cycle 1 and
+    /// again at cycle 2 with `b_q` low. Before this, the universal translation spelled the block
+    /// `nu W. (q || (p && [] W))`, `weak_until_parts` did not see it, and the row shipped VIOLATED
+    /// with no path and no note — the exact engine decided it, nothing else looked.
+    #[test]
+    fn an_ltl_weak_until_violation_ships_its_path_through_the_safety_witness() {
+        let ltl = crate::ltl::parser::parse("G (a_q -> X (!a_q W b_q))").unwrap();
+        let text = crate::ltl::universal::translate_universal_text(&ltl).unwrap();
+        assert!(
+            text.contains("(nu W2. ((b_q || (!(a_q))) && (b_q || ([] W2))))"),
+            "{text}"
+        );
+        let formula = mu_parser::parse(&text).unwrap();
+        assert_eq!(
+            formula.property_class(),
+            crate::mu_calculus::PropertyClass::Safety
+        );
+        let trace =
+            crate::adapter::reach_rescue::safety_witness(TWO_BIT_PULSES, &formula, false, 8)
+                .unwrap_or_else(|miss| panic!("the monitor must compile this shape: {miss}"));
+        let a_at = |c: usize| {
+            trace.states[c]
+                .iter()
+                .find(|(n, _)| n == "a_q")
+                .and_then(|(_, v)| v.as_u64())
+        };
+        assert!(trace.states.len() >= 3, "three cycles: {trace:?}");
+        assert_eq!(
+            (a_at(1), a_at(2)),
+            (Some(1), Some(1)),
+            "a_q twice in a row: {trace:?}"
+        );
+
+        // The post-pass attaches it to a violated row that shipped none.
+        let mut report = AutoVerifyReport::default();
+        report.properties.push(PropertyVerdict {
+            name: "ann_guarantee_0".into(),
+            label: Some("alternates".into()),
+            kind: SvaKind::Assert,
+            formula: text,
+            outcome: VerifyOutcome::Violated { false_cells: 1 },
+            seeded_predicates: vec![],
+            counterexample: None,
+            bottom_reason: None,
+            decided_by: Some("exact-symbolic".into()),
+            vacuity: None,
+        });
+        attach_safety_witnesses(&mut report, TWO_BIT_PULSES, false);
+        assert!(
+            report.properties[0].counterexample.is_some(),
+            "the row carries its path; notes: {:?}",
+            report.notes.iter().map(|n| &n.summary).collect::<Vec<_>>()
+        );
+    }
+
+    /// The other half of mununu#821, pinned on the OLD weak-until spelling (which
+    /// `weak_until_parts` does not recognise): a violated safety row whose shape the one-path
+    /// monitor cannot compile leaves a `witness-unavailable` note naming the `monitor` stage
+    /// (mununu#803) — never a bare VIOLATED with no path and no reason.
+    #[test]
+    fn a_violated_row_the_witness_monitor_cannot_compile_says_so_in_a_note() {
+        let old_spelling =
+            "(nu G1. (((!(a_q)) || ([] (nu W2. (b_q || ((!(a_q)) && ([] W2)))))) && [] G1))";
+        assert!(mu_parser::parse(old_spelling).is_ok());
+        let mut report = AutoVerifyReport::default();
+        report.properties.push(PropertyVerdict {
+            name: "ann_guarantee_0".into(),
+            label: Some("alternates".into()),
+            kind: SvaKind::Assert,
+            formula: old_spelling.into(),
+            outcome: VerifyOutcome::Violated { false_cells: 1 },
+            seeded_predicates: vec![],
+            counterexample: None,
+            bottom_reason: None,
+            decided_by: Some("exact-symbolic".into()),
+            vacuity: None,
+        });
+        attach_safety_witnesses(&mut report, TWO_BIT_PULSES, false);
+        let note = report.notes.iter().find(|n| {
+            n.kind == "witness-unavailable" && n.property.as_deref() == Some("ann_guarantee_0")
+        });
+        assert!(
+            report.properties[0].counterexample.is_none(),
+            "the old spelling has no path"
+        );
+        let note = note.unwrap_or_else(|| {
+            panic!(
+                "a VIOLATED without a path must say why; notes: {:?}",
+                report.notes.iter().map(|n| &n.summary).collect::<Vec<_>>()
+            )
+        });
+        assert_eq!(note.items, vec!["monitor".to_string()], "{}", note.detail);
+        assert!(
+            note.detail.contains("decided by exact-symbolic"),
+            "{}",
+            note.detail
+        );
+    }
+
+    /// The second site of mununu#821: `build_notes` regenerates the model-level notes, and before
+    /// this the assignment `report.notes = build_notes(..)` discarded every note a verdict pass had
+    /// pushed — the `witness-unavailable` of a VIOLATED row with no path (mununu#803) among them.
+    /// The rebuild keeps such a note; a stale copy of a kind it regenerates is not duplicated.
+    #[test]
+    fn the_notes_rebuild_keeps_what_the_verdict_passes_said() {
+        let mut report = AutoVerifyReport::default();
+        report.properties.push(PropertyVerdict {
+            name: "ann_guarantee_0".into(),
+            label: Some("alternates".into()),
+            kind: SvaKind::Assert,
+            formula: "(nu G. (p && [] G))".into(),
+            outcome: VerifyOutcome::Violated { false_cells: 1 },
+            seeded_predicates: vec![],
+            counterexample: None,
+            bottom_reason: None,
+            decided_by: Some("exact-symbolic".into()),
+            vacuity: None,
+        });
+        report.notes.push(witness_miss_note(
+            "ann_guarantee_0",
+            Some("exact-symbolic"),
+            &crate::adapter::reach_rescue::WitnessMiss {
+                stage: "monitor",
+                reason: "the body is not a bounded-depth box / boolean shape".into(),
+            },
+        ));
+        report.notes.push(VerificationNote {
+            kind: "abstraction-posture".into(),
+            level: NoteLevel::Info,
+            summary: "a stale copy of a kind the rebuild regenerates".into(),
+            detail: String::new(),
+            items: vec![],
+            property: None,
+        });
+        let notes = build_notes(&report, "none", &[], &[], &[], &[], &NotePosture::Exact);
+        let witness: Vec<&VerificationNote> = notes
+            .iter()
+            .filter(|n| n.kind == "witness-unavailable")
+            .collect();
+        assert_eq!(
+            witness.len(),
+            1,
+            "{:?}",
+            notes.iter().map(|n| &n.kind).collect::<Vec<_>>()
+        );
+        assert_eq!(witness[0].property.as_deref(), Some("ann_guarantee_0"));
+        assert_eq!(witness[0].items, vec!["monitor".to_string()]);
+        let postures: Vec<&VerificationNote> = notes
+            .iter()
+            .filter(|n| n.kind == "abstraction-posture")
+            .collect();
+        assert_eq!(postures.len(), 1, "the regenerated kind is not duplicated");
+        assert!(
+            !postures[0].summary.contains("stale"),
+            "{}",
+            postures[0].summary
         );
     }
 

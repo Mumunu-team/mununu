@@ -230,10 +230,10 @@ fn universal(
         {
             let x = var("W");
             format!(
-                "((nu {x}. ({} || ({} && ([] {x})))) && {})",
-                prop(right),
-                prop(left),
-                crate::verify::fairness::fair_af(&prop(right), fairness)
+                "((nu {x}. (({q} || {p}) && ({q} || ([] {x})))) && {})",
+                crate::verify::fairness::fair_af(&prop(right), fairness),
+                q = prop(right),
+                p = prop(left),
             )
         }
         L::Until { left, right } if is_propositional(left) && is_propositional(right) => {
@@ -244,12 +244,16 @@ fn universal(
                 prop(left)
             )
         }
+        // `p W q` in the And-root spelling `nu W. ((q || p) && (q || [] W))` — the same reading
+        // as `nu W. (q || (p && [] W))`, but the spelling the one-path safety monitor recognises
+        // as a weak-until block (`bad_monitor::weak_until_parts`), so a VIOLATED `G (a -> X (!a W
+        // b))` ships its counterexample path like any other safety row.
         L::WeakUntil { left, right } if is_propositional(left) && is_propositional(right) => {
             let x = var("W");
             format!(
-                "(nu {x}. ({} || ({} && ([] {x}))))",
-                prop(right),
-                prop(left)
+                "(nu {x}. (({q} || {p}) && ({q} || ([] {x}))))",
+                q = prop(right),
+                p = prop(left),
             )
         }
         L::Until { .. } | L::WeakUntil { .. } => {
