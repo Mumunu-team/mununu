@@ -966,7 +966,7 @@ dependencies = [
 
 [[package]]
 name = "mununu"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -985,7 +985,7 @@ dependencies = [
 
 [[package]]
 name = "mununu-cli"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "bitvec",
  "clap",
@@ -1000,7 +1000,7 @@ dependencies = [
 
 [[package]]
 name = "mununu-core"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "axum",
  "bitvec",
@@ -1038,7 +1038,7 @@ dependencies = [
 
 [[package]]
 name = "mununu-extract"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "clap",
  "mununu-core",
