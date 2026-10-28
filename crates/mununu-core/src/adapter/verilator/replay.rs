@@ -102,7 +102,12 @@ pub fn counterexample_testbench(
     tb.push_str(
         "// MISMATCH, and a failing assertion of the design is reported by Verilator (--assert).\n",
     );
+    tb.push_str(
+        "// `make trace` builds it with --trace and -DMUNUNU_TRACE: the same run also writes\n",
+    );
+    tb.push_str("// replay.vcd (every signal, two time units per cycle) for GTKWave.\n");
     tb.push_str("#include \"verilated.h\"\n");
+    tb.push_str("#ifdef MUNUNU_TRACE\n#include \"verilated_vcd_c.h\"\n#endif\n");
     tb.push_str(&format!(
         "#include \"V{top}.h\"\n#include \"V{top}___024root.h\"\n"
     ));
@@ -110,8 +115,10 @@ pub fn counterexample_testbench(
     tb.push_str(&format!(
         "static V{top}* dut;\nstatic int mismatches = 0;\n"
     ));
+    tb.push_str("#ifdef MUNUNU_TRACE\nstatic VerilatedVcdC* tfp = nullptr;\nstatic vluint64_t sim_time = 0;\n");
+    tb.push_str("static void dump() { if (tfp) tfp->dump(sim_time++); }\n#else\nstatic void dump() {}\n#endif\n");
     tb.push_str(&format!(
-        "static void tick() {{ dut->{c} = 0; dut->eval(); dut->{c} = 1; dut->eval(); }}\n",
+        "static void tick() {{ dut->{c} = 0; dut->eval(); dump(); dut->{c} = 1; dut->eval(); dump(); }}\n",
         c = design.clock
     ));
     tb.push_str("static void check(int cyc, const char* name, uint64_t got, uint64_t want) {\n");
@@ -125,6 +132,10 @@ pub fn counterexample_testbench(
     tb.push_str("int main(int argc, char** argv) {\n");
     tb.push_str("    Verilated::commandArgs(argc, argv);\n");
     tb.push_str(&format!("    dut = new V{top}();\n"));
+    tb.push_str(
+        "#ifdef MUNUNU_TRACE\n    Verilated::traceEverOn(true);\n    tfp = new VerilatedVcdC;\n",
+    );
+    tb.push_str("    dut->trace(tfp, 99);\n    tfp->open(\"replay.vcd\");\n#endif\n");
     tb.push_str(&format!("    dut->{} = 0;\n", design.clock));
     let mut checks = 0usize;
     let drive = |tb: &mut String, i: usize, skipped: &mut Vec<String>| {
@@ -190,6 +201,7 @@ pub fn counterexample_testbench(
         "    // violation is reported here by Verilator (--assert) as `Assertion failed`.\n",
     );
     tb.push_str("    tick();\n");
+    tb.push_str("#ifdef MUNUNU_TRACE\n    if (tfp) { tfp->close(); delete tfp; }\n#endif\n");
     tb.push_str("    delete dut;\n    return mismatches ? 1 : 0;\n}\n");
     skipped.sort();
     skipped.dedup();
@@ -209,7 +221,13 @@ pub fn counterexample_testbench(
          obj_dir/V{top}: tb.cpp $(SOURCES)\n\
          \t$(VERILATOR) --cc --exe --build --assert --public-flat-rw -Wno-fatal \\\n\
          \t  --top-module {top} $(SOURCES) tb.cpp -o V{top}\n\n\
-         clean:\n\trm -rf obj_dir\n\n.PHONY: run clean\n",
+         # The same replay, writing replay.vcd for GTKWave (gtkwave replay.vcd).\n\
+         trace: obj_dir_trace/V{top}\n\t./obj_dir_trace/V{top}; test -s replay.vcd && echo \"wrote replay.vcd\"\n\n\
+         obj_dir_trace/V{top}: tb.cpp $(SOURCES)\n\
+         \t$(VERILATOR) --cc --exe --build --assert --public-flat-rw -Wno-fatal --trace \\\n\
+         \t  -CFLAGS -DMUNUNU_TRACE --Mdir obj_dir_trace \\\n\
+         \t  --top-module {top} $(SOURCES) tb.cpp -o V{top}\n\n\
+         clean:\n\trm -rf obj_dir obj_dir_trace replay.vcd\n\n.PHONY: run trace clean\n",
         srcs = design.sources.join(" ")
     );
     Some(ReplayBench {
@@ -274,6 +292,53 @@ mod tests {
         assert!(b.skipped.iter().any(|s| s.starts_with("state_q__past")));
         assert!(b.makefile.contains("--assert --public-flat-rw"));
         assert!(b.makefile.contains("/abs/rod.sv /abs/rod_sva.sv"));
+    }
+
+    /// `make trace` is the same replay built with `--trace` and `-DMUNUNU_TRACE`, in its own
+    /// `obj_dir_trace`, writing `replay.vcd`; the plain `make` neither needs the VCD library nor
+    /// writes a file, so the two targets stay independent and the default replay stays fast.
+    #[test]
+    fn the_makefile_has_a_trace_target_and_the_testbench_dumps_a_vcd_under_it() {
+        let cex = ExactCounterexample {
+            prefix: vec![
+                vec![("state_q".into(), v(0, 3))],
+                vec![("state_q".into(), v(1, 3))],
+            ],
+            cycle: vec![],
+            inputs: vec![vec![("go$next".into(), v(1, 1))]],
+            unreachable_target: vec![],
+        };
+        let sources = vec!["/abs/rod.sv".to_string()];
+        let b = counterexample_testbench(
+            &ReplayDesign {
+                top: "rod",
+                clock: "clk",
+                reset: None,
+                sources: &sources,
+            },
+            &cex,
+        )
+        .unwrap();
+        assert!(
+            b.makefile.contains("trace: obj_dir_trace/Vrod"),
+            "{}",
+            b.makefile
+        );
+        assert!(
+            b.makefile
+                .contains("--trace \\\n\t  -CFLAGS -DMUNUNU_TRACE --Mdir obj_dir_trace")
+        );
+        assert!(b.makefile.contains(".PHONY: run trace clean"));
+        assert!(
+            b.tb_cpp
+                .contains("#ifdef MUNUNU_TRACE\n#include \"verilated_vcd_c.h\"")
+        );
+        assert!(b.tb_cpp.contains("tfp->open(\"replay.vcd\")"));
+        assert!(
+            b.tb_cpp
+                .contains("dut->eval(); dump(); dut->clk = 1; dut->eval(); dump();")
+        );
+        assert!(b.tb_cpp.contains("if (tfp) { tfp->close(); delete tfp; }"));
     }
 
     #[test]

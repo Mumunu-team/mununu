@@ -439,6 +439,18 @@ Over HTTP, `emit_testbench: true` (and optionally `tb_clock`) on `POST /api/v1/s
 the same files in each row's `trace.replay.testbench` (`tb_cpp`, `makefile`, `checks`, `skipped`); the
 Makefile's `SOURCES` names `<top>.sv` and the additional sources as the request named them.
 
+**`make trace` — the same replay as a VCD for GTKWave (2026-10-27).** The generated Makefile has a
+second target that builds the testbench with Verilator's `--trace` and `-DMUNUNU_TRACE` in its own
+`obj_dir_trace`, runs it, and leaves `replay.vcd` beside `tb.cpp`: every signal of the design, two
+time units per cycle (the clock low then high), the reset cycle first. The plain `make` is unchanged
+and never needs the VCD library.
+
+```bash
+make -C tb/p_no_fault trace       # in mununu-sva
+# MATCH … wrote replay.vcd
+gtkwave tb/p_no_fault/replay.vcd  # the registers the trace names, and everything else
+```
+
 ### A recoverability row refuted by a trap certificate (2026-10-21)
 
 > Source of truth: [`search_trap`](../crates/mununu-core/src/adapter/trap_certificate.rs#L294) + [`TRAP_CERTIFICATE_DECIDED_BY`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L6935) — surface: (CLI+API) — `sv verify-auto` / `POST /api/v1/sv/verify-auto`, every `AG EF` row the main pass leaves ⊥
