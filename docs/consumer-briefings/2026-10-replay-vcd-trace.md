@@ -33,12 +33,13 @@
 
 | run | result |
 |---|---|
-| `replay::tests::the_makefile_has_a_trace_target_and_the_testbench_dumps_a_vcd_under_it` | MEASURED_UNIT |
-| `make trace` on a generated testbench in `mununu-sva` (the tutorial's `pump_seq` draft counterexample): build, `MATCH`, `replay.vcd` written with the design's signals | MEASURED_IMAGE |
+| `replay::tests::the_makefile_has_a_trace_target_and_the_testbench_dumps_a_vcd_under_it` | pass (`cargo test -p mununu-core --lib replay`, 2026-10-28; CI green on #819) |
+| `make trace` on a generated testbench in `mununu-sva` (the tutorial's pump-pair draft-2 loss-of-flow counterexample, `rtl_never BAD=lof_trip`, 8 cycles): `make` → `MATCH`; `make trace` → `MATCH`, `replay.vcd` written | 0.5.5 binary (`91ba42e`), 2026-10-28: `replay.vcd` carries 44 `$var` declarations and 18 timestamps; GTKWave opens it |
 
 ## Provenance
 
-PROVENANCE_PLACEHOLDER
+- mununu#819, merged 2026-10-28 as `54028a3`; released in 0.5.5 (#820, `91ba42e`).
+- Policy: [`docs/policies/cross-repo-impact.md`](../policies/cross-repo-impact.md).
 
 ## Not covered here
 

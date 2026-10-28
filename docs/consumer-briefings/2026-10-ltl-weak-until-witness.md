@@ -39,11 +39,11 @@
 | `the_notes_rebuild_keeps_what_the_verdict_passes_said` | the note survives `build_notes`; a stale copy of a regenerated kind is not duplicated |
 | `e2e_a_violated_annotation_ships_its_path_or_says_why_not` (`mununu-sva`, 2026-10-28: slang lift, exact engine, the post-passes) | PASS — the `ltl` row is VIOLATED with a replayable path in the new spelling; the old-spelling row is VIOLATED with no path and a `witness-unavailable` note at stage `monitor` |
 | mununu 0.5.5 probe (the tutorial's block, old spelling as a mu body) | VIOLATED, no path, **no note** in the shipped JSON — the rebuild dropped it |
-| the tutorial's block (private material), re-run on the 0.5.6 release binary | after this PR; the result is recorded on the 0.5.6 line of the migration briefing |
+| the tutorial's block (private material), re-run on the 0.5.6 release binary (`7586f36`) | the `alternates` row (`G (start_a -> X (!start_a W start_b))`, VIOLATED by `exact-symbolic`) ships a 4-cycle path — start on pump A, stop, start on A again; `--emit-testbench` writes `replay/draft1/alternates` (16 checks); Verilator `make` → `MATCH`, `make trace` → `MATCH` + `replay.vcd`. On 0.5.5 the same row shipped no path and no note. |
 
 ## Provenance
 
-- Branch `fix/ltl-weak-until-witness`, 2026-10-28, from mununu#821 (filed from the tutorial material's first run on 0.5.5); the PR number and merge commit are recorded in the docs follow-up that fills the #817 / #819 briefings.
+- mununu#822, merged 2026-10-28 as `05538b9` (closes mununu#821, filed from the tutorial material's first run on 0.5.5); released in 0.5.6 (#823, `7586f36`).
 - Policy: [`docs/policies/cross-repo-impact.md`](../policies/cross-repo-impact.md).
 
 ## Not covered here
