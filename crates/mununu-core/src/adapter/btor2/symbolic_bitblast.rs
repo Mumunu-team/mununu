@@ -2907,6 +2907,15 @@ pub struct ExactModel {
     early_exits: std::cell::Cell<usize>,
     /// Lever D — how many collections the arena-safety check ran before judging (the report line).
     collections: std::cell::Cell<usize>,
+    /// mununu#816 — the measured duration of the last fixpoint step of the current `evaluate`,
+    /// read by [`Self::charge_iteration`]'s step predictor. A step is ONE uninterruptible OxiDD
+    /// apply (oxidd 0.13 has no cancellation), so every poll fires only BETWEEN steps; this is
+    /// what lets a step be refused BEFORE it starts when the time left could not hold even its
+    /// predecessor.
+    last_step: std::cell::Cell<Option<std::time::Duration>>,
+    /// `MUNUNU_REPORT_BDD_ITERS`: one stderr line per fixpoint step (step index, total steps,
+    /// live nodes, step duration) — the instrument that brackets a step-level hang.
+    report_iters: bool,
     /// A cancellation flag the planner shares with a concurrent rung: checked each iteration,
     /// an abstention `cancelled by the caller` ([`AbstentionKind::Cancelled`]).
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -3482,6 +3491,14 @@ impl Squarer {
     }
 
     fn check(manager: &BDDManagerRef, budget: usize, what: &str) -> Result<(), String> {
+        // mununu#816 — the relation build and every squaring step poll the caller's run budget
+        // here too: the squaring loop's own poll runs once per step, AFTER `rel()` has been
+        // built conjunct by conjunct.
+        if crate::adapter::run_budget::expired() {
+            return Err(format!(
+                "squaring: declined on the caller's RUN budget while {what}"
+            ));
+        }
         let mut live = manager.with_manager_shared(|m| m.approx_num_inner_nodes());
         if live > budget {
             // Allocated-including-dead; collect once before refusing. Every image step and every
@@ -4089,6 +4106,18 @@ impl BddBitBlaster {
         // mununu#543 — read the LEVEL count alongside the node count. `add_bits` calls this once
         // per bit, so this runs inside the operation sequence that was measured overflowing, and
         // it is the cheapest place to catch variables appearing after build.
+        // mununu#816 — the bit-blast BUILD polls the caller's run budget too (#804 left it
+        // "bounded by the bit cap, not by time"): this guard runs at the start of every op and
+        // once per bit of a wide op, so a build that outlives the budget stops at the next op
+        // instead of at its end. A thread-local read is nothing next to an apply; unbounded
+        // (the default) ⇒ never fires.
+        if crate::adapter::run_budget::expired() {
+            return Err(
+                "symbolic bit-blaster: abstained on the caller's RUN budget (the per-property / \
+                 per-run wall-clock budget installed by the caller) while building the BDD"
+                    .to_string(),
+            );
+        }
         let (live, vars, levels) = self
             ._manager
             .with_manager_shared(|m| (m.approx_num_inner_nodes(), m.num_vars(), m.num_levels()));
@@ -4241,6 +4270,8 @@ impl BddBitBlaster {
             restriction: std::cell::RefCell::new(None),
             early_exits: std::cell::Cell::new(0),
             collections: std::cell::Cell::new(0),
+            last_step: std::cell::Cell::new(None),
+            report_iters: std::env::var_os("MUNUNU_REPORT_BDD_ITERS").is_some(),
             init_hint: std::cell::RefCell::new(None),
             reach_arena: reach_arena(),
             care_subst: std::cell::RefCell::new(None),
@@ -4859,6 +4890,9 @@ impl ExactModel {
         let mut bindings: HashMap<FormulaVarId, BDDFunction> = HashMap::new();
         let mut ctx = EvalCtx::new(formula, self.fixpoint_reuse);
         let t_eval = std::time::Instant::now();
+        // mununu#816 — the step predictor starts fresh: the gap since the last `evaluate` is
+        // not a step.
+        self.last_step.set(None);
         let r = self.eval_node(formula, formula.root(), atoms, &mut bindings, &mut ctx);
         // M4 instrument (engine-performance roadmap) — the fixpoint half of a property's cost,
         // next to the bit-blast half printed by `BddBitBlaster::build_inner`.
@@ -5096,6 +5130,22 @@ impl ExactModel {
     /// Until B1 only [`Self::fixpoint`] was guarded; `ef_region`, `env_maintain_region`,
     /// `ef_within`, the `not_ef_p` / `eg_not_p` witness regions and the four witness reach-layer
     /// loops iterated with no budget at all.
+    /// mununu#816 — record a fixpoint step's duration for [`Self::charge_iteration`]'s step
+    /// predictor, and print it under `MUNUNU_REPORT_BDD_ITERS`.
+    fn note_step(&self, step: usize, took: std::time::Duration) {
+        self.last_step.set(Some(took));
+        if self.report_iters {
+            let live = self
+                .manager
+                .with_manager_shared(|m| m.approx_num_inner_nodes());
+            eprintln!(
+                "[mununu-bdd] step={step} total={} live={live} step_ms={}",
+                self.iters.get(),
+                took.as_millis()
+            );
+        }
+    }
+
     fn charge_iteration(&self) -> Result<(), String> {
         {
             // Iteration budget — bail deterministically before a wide-counter diameter (`2^W`)
@@ -5209,6 +5259,30 @@ impl ExactModel {
                      property from the same command, and this ⊥ is not distinguishable in the \
                      report from a real one. Unset MUNUNU_BDD_TIME_BUDGET_MS for the deterministic \
                      fixpoint NODE budget instead, or use `--engine explicit`"
+                ));
+            }
+            // mununu#816 — a fixpoint step is ONE uninterruptible OxiDD apply (oxidd 0.13 has no
+            // cancellation), so the polls above fire only BETWEEN steps, and a step that starts
+            // with less time left than it needs overruns the clock by its whole duration:
+            // `vis_arrays_bufferAlloc` abstained at 60 s under a 60-s harness budget and ran
+            // 27 min under a 300-s one — the bit-blast build took 12 s, every later minute was
+            // inside one step, and the steps grow with the frontier. The frontier never shrinks,
+            // so a step is refused BEFORE it starts when the caller's run budget could not hold
+            // even the previous step. The overshoot is then bounded by one step's growth over its
+            // predecessor instead of the next step's whole duration, and the abstention names
+            // the step that would not fit. Only the RUN budget is predicted: the model's own
+            // `deadline` (the ladder's rung slice, the opt-in `MUNUNU_BDD_TIME_BUDGET_MS`) keeps
+            // its between-step poll so default ladder verdicts stay identical (the #804 choice).
+            // No run budget installed, or no step measured yet in this `evaluate` ⇒ never fires.
+            if let Some(last) = self.last_step.get()
+                && let Some(left_ms) = crate::adapter::run_budget::current().remaining_ms()
+                && std::time::Duration::from_millis(left_ms) < last
+            {
+                return Err(format!(
+                    "symbolic bit-blaster: abstained on the caller's RUN budget before fixpoint \
+                     step {n}: the previous step took {} ms and {left_ms} ms remain — a step is \
+                     one uninterruptible BDD apply, so starting it would overrun the budget",
+                    last.as_millis()
                 ));
             }
         }
@@ -5334,7 +5408,9 @@ impl ExactModel {
                 }
             }
             bindings.insert(var, x.clone());
+            let t_step = std::time::Instant::now();
             let next = self.eval_node(f, body, atoms, bindings, ctx)?;
+            self.note_step(local_iters, t_step.elapsed());
             if next == x {
                 bindings.remove(&var);
                 if ctx.reuse {

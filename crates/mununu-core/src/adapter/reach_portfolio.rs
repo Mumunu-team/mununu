@@ -777,6 +777,20 @@ pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcom
     let refused: Arc<std::sync::Mutex<Vec<(&'static str, String)>>> = Arc::default();
     use std::time::{Duration, Instant};
 
+    // mununu#816 — the caller's run budget is a THREAD-LOCAL (`run_budget`'s documented
+    // footgun): a detached thread inherits none, so every owned member below ran unbounded by
+    // the budget the caller installed — the planner's per-property budget, a rescue slice, the
+    // HWMCC harness's per-instance budget — and an already-expired budget still spawned four
+    // members. Read it once, decline when it has already expired (what the scoped driver does),
+    // clamp the collector's wall to the time left, and re-enter it on every member thread.
+    let budget = crate::adapter::run_budget::current();
+    if budget.expired() {
+        return ReachOutcome::default();
+    }
+    let timeout_ms = budget.remaining_ms().map_or(timeout_ms, |left| {
+        timeout_ms.min(u32::try_from(left).unwrap_or(u32::MAX))
+    });
+
     // Detached threads + a result channel (NOT `thread::scope`) so the collector can
     // RETURN the moment a definite verdict arrives, without joining the slow members.
     // The exact BDD engine in particular is synchronous and NON-interruptible: on a wide
@@ -806,7 +820,9 @@ pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcom
             tx.clone(),
             Arc::clone(&refused),
         );
+        let budget = budget.clone();
         std::thread::spawn(move || {
+            let _g = crate::adapter::run_budget::enter(&budget);
             let v = timed(
                 "native",
                 || match native_bmc::decide_bad_safety_cancellable(
@@ -833,7 +849,9 @@ pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcom
     // Safety proof — McMillan interpolation.
     {
         let (file, decided, tx) = (Arc::clone(&file), Arc::clone(&decided), tx.clone());
+        let budget = budget.clone();
         std::thread::spawn(move || {
+            let _g = crate::adapter::run_budget::enter(&budget);
             let v = timed(
                 "interp",
                 || match native_interp::verify_safety_interp_cancellable(
@@ -861,7 +879,9 @@ pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcom
     #[cfg(feature = "boolector")]
     {
         let (file, decided, tx) = (Arc::clone(&file), Arc::clone(&decided), tx.clone());
+        let budget = budget.clone();
         std::thread::spawn(move || {
+            let _g = crate::adapter::run_budget::enter(&budget);
             let v = timed("boolector", || {
                 crate::adapter::btor2::native_boolector::decide_reachable_boolector(
                     &file,
@@ -884,7 +904,9 @@ pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcom
             tx.clone(),
             Arc::clone(&refused),
         );
+        let budget = budget.clone();
         std::thread::spawn(move || {
+            let _g = crate::adapter::run_budget::enter(&budget);
             let hit = timed("cex", || {
                 match native_bmc::bmc_cex_until(
                     &file,
@@ -909,7 +931,9 @@ pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcom
     // Exact BDD — the non-interruptible member; spawned so it can never block the return.
     {
         let (content, decided, tx) = (Arc::clone(&content), Arc::clone(&decided), tx.clone());
+        let budget = budget.clone();
         std::thread::spawn(move || {
+            let _g = crate::adapter::run_budget::enter(&budget);
             // The owned-only driver reports verdicts only; a refusal is an abstention here.
             let v = run_exact(&content).unwrap_or(None);
             if v.is_some() {
@@ -1199,6 +1223,35 @@ mod tests {
         let out = {
             let _g = enter(&Budget::with_ms(0));
             decide_reach_portfolio(&file)
+        };
+        assert_eq!(out.verdict, ReachVerdict::Unknown, "{out:?}");
+        assert!(
+            out.reachable_by.is_empty() && out.unreachable_by.is_empty(),
+            "{out:?}"
+        );
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(1),
+            "{:?}",
+            t0.elapsed()
+        );
+    }
+
+    /// mununu#816 — the owned driver's detached members run under the caller's budget. A
+    /// thread-local is not inherited by a spawned thread, so before this an already-expired
+    /// budget still spawned four members that ran unbounded by it. The same fixture decides
+    /// `Reachable` with no budget (`owned_only_excludes_external_engines_on_small_counter`), and
+    /// on the parent commit it decides here too.
+    #[test]
+    fn the_owned_driver_abstains_promptly_under_an_expired_budget() {
+        use crate::adapter::run_budget::{Budget, enter};
+        const COUNTER: &str = "1 sort bitvec 3\n2 zero 1\n3 state 1\n4 init 1 3 2\n5 one 1\n\
+                               6 add 1 3 5\n7 next 1 3 6\n8 ones 1\n9 sort bitvec 1\n\
+                               10 eq 9 3 8\n11 bad 10\n";
+        let file = parser::parse(COUNTER).expect("parse");
+        let t0 = std::time::Instant::now();
+        let out = {
+            let _g = enter(&Budget::with_ms(0));
+            decide_reach_owned_only(&file, 30_000)
         };
         assert_eq!(out.verdict, ReachVerdict::Unknown, "{out:?}");
         assert!(

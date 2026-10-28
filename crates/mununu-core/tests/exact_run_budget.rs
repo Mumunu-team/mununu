@@ -106,3 +106,30 @@ fn an_unbounded_budget_never_fires_the_poll() {
         decided.as_ref().err()
     );
 }
+
+/// mununu#816 — the bit-blast BUILD polls the caller's run budget too. #804 covered the fixpoint,
+/// the squaring and the reach probe and recorded the build as "bounded by the bit cap, not by
+/// time"; the build's node guard runs at every op and every bit of a wide op, and now reads the
+/// budget there. An already-expired budget must stop the build at its first op with a `Deadline`
+/// abstention; on the parent commit the build ignores the budget and succeeds.
+#[test]
+fn the_callers_run_budget_stops_the_bitblast_build_with_a_deadline_abstention() {
+    let src = "1 sort bitvec 1\n2 sort bitvec 10\n3 state 2 cnt\n4 zero 2\n5 init 2 3 4\n\
+               6 one 2\n7 add 2 3 6\n8 next 2 3 7\n9 constd 2 1023\n10 eq 1 3 9\n";
+    let file = parser::parse(src).expect("parse counter");
+    let refused = {
+        let _g = run_budget::enter(&run_budget::Budget::with_ms(0));
+        BddBitBlaster::build(&file).err()
+    };
+    assert!(
+        refused.as_ref().is_some_and(|e| e.contains("RUN budget")),
+        "the build must abstain on the caller's run budget: {refused:?}"
+    );
+    assert!(
+        matches!(
+            abstention_kind(refused.as_deref().unwrap_or("")),
+            AbstentionKind::Deadline
+        ),
+        "a run-budget abstention is a Deadline: {refused:?}"
+    );
+}
