@@ -33,14 +33,16 @@
 
 | run | result |
 |---|---|
-| `ltl::parser` — `comparison_atoms_parse_as_single_predicates`, `implication_is_not_a_comparison_and_a_dangling_operator_is_an_error` | MEASURED_PARSER |
-| `verify_auto` — `an_ltl_annotation_body_is_translated_over_every_path` (response → `nu G1 … mu F2 … <> true`, comparison atom kept as `(state_q == 5)`, the text re-parses) | MEASURED_SCANNER |
-| `verify_auto` — `an_ltl_body_outside_the_fragment_and_an_eltl_body_are_skipped_with_reasons` (`F G p`, `eltl`, empty `ltl`, and `ltl_ok` as a plain atom) | MEASURED_REFUSALS |
-| the existing annotation, CTXDSL `ltl` / `eltl` and LTL-parser tests | MEASURED_EXISTING |
+| `ltl::parser` — `comparison_atoms_parse_as_single_predicates`, `implication_is_not_a_comparison_and_a_dangling_operator_is_an_error` | pass (`cargo test -p mununu-core --lib`, 2026-10-27; CI green on #817) |
+| `verify_auto` — `an_ltl_annotation_body_is_translated_over_every_path` (response → `nu G1 … mu F2 … <> true`, comparison atom kept as `(state_q == 5)`, the text re-parses) | pass — the translated text re-parses and carries `(state_q == 5)` as one atom |
+| `verify_auto` — `an_ltl_body_outside_the_fragment_and_an_eltl_body_are_skipped_with_reasons` (`F G p`, `eltl`, empty `ltl`, and `ltl_ok` as a plain atom) | pass — each refusal reaches `skipped` with its reason; `ltl_ok` stays an atom |
+| the existing annotation, CTXDSL `ltl` / `eltl` and LTL-parser tests | pass — the full `mununu-core` lib suite in the pre-commit hook (14 min) and CI |
 
 ## Provenance
 
-PROVENANCE_PLACEHOLDER
+- mununu#817, merged 2026-10-27 as `d75e04e`; released in 0.5.4 (#818, `4ab0df9`).
+- Measured on the tutorial material with the 0.5.5 binary (`91ba42e`, `mununu-sva`): `rod_drive_ctrl` carries five annotations (two mu-calculus, three `ltl`), all HOLDS by `exact-symbolic` among 11 rows; the pump-pair block's three `ltl` annotations are decided by `exact-symbolic` (one VIOLATED by design on the first draft — see the #821 briefing for the path it ships since 0.5.6).
+- Policy: [`docs/policies/cross-repo-impact.md`](../policies/cross-repo-impact.md).
 
 ## Not covered here
 
