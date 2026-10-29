@@ -63,6 +63,57 @@ pub struct TraceNames {
     pub fault_warmup: u32,
     /// The posture's global budget; `None` when unbounded.
     pub fault_budget: Option<u32>,
+    /// Where each design signal lives in the RTL (2026-10-29): the registers, inputs and outputs
+    /// of the flattened netlist with their declaration and, for a register, the `always` block(s)
+    /// driving it — from yosys's `src` attributes (yosys-slang and `read_verilog` both stamp
+    /// them). Empty when unavailable.
+    pub sources: Vec<CellSource>,
+    /// Why `sources` is empty when it is: sv2v preprocessed the source before yosys read it, so
+    /// the netlist's lines are sv2v's, not the RTL's. `None` when the map is available.
+    pub source_map: Option<String>,
+}
+
+/// A place in the RTL: the file's basename and a line (yosys's `src` keeps the path and the
+/// column; the report keeps what a reader opens).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "api", derive(schemars::JsonSchema))]
+pub struct SourceLoc {
+    pub file: String,
+    pub line: u32,
+}
+
+impl SourceLoc {
+    /// Yosys's `src` attribute (`path/file.sv:l1.c1-l2.c2`, several `|`-joined when cells were
+    /// merged — the first is kept) as a location; `None` when it carries no line.
+    pub fn parse_yosys_src(src: &str) -> Option<SourceLoc> {
+        let first = src.split('|').next()?.trim();
+        let (file, pos) = first.rsplit_once(':')?;
+        let line: u32 = pos.split(['.', '-']).next()?.parse().ok()?;
+        let file = file.rsplit('/').next().unwrap_or(file).to_string();
+        Some(SourceLoc { file, line })
+    }
+}
+
+impl std::fmt::Display for SourceLoc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.file, self.line)
+    }
+}
+
+/// Where a trace cell lives in the RTL (2026-10-29).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "api", derive(schemars::JsonSchema))]
+pub struct CellSource {
+    /// The cell as the trace names it (the net; a hierarchical name keeps its dots).
+    pub cell: String,
+    /// `"register"` | `"input"` | `"output"`.
+    pub kind: String,
+    /// The net's declaration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared: Option<SourceLoc>,
+    /// The `always` block(s) of the flop(s) driving a register; empty for an input.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assigned: Vec<SourceLoc>,
 }
 
 /// One fault site's inputs in the rewritten model.
@@ -165,6 +216,22 @@ impl TraceNames {
             if !faults.is_empty() {
                 step.faults = faults;
             }
+        }
+        // 2026-10-29 — the legend: where each cell the trace shows lives in the RTL, in the order
+        // the first step lists them (state, then inputs), only for cells the map knows.
+        if !self.sources.is_empty() {
+            let mut names: Vec<&str> = Vec::new();
+            for step in &trace.steps {
+                for c in step.state.iter().chain(step.inputs.iter()) {
+                    if !names.contains(&c.register.as_str()) {
+                        names.push(c.register.as_str());
+                    }
+                }
+            }
+            trace.sources = names
+                .iter()
+                .filter_map(|n| self.sources.iter().find(|s| s.cell == *n).cloned())
+                .collect();
         }
         trace
     }
@@ -339,6 +406,10 @@ pub struct Trace {
     pub unreachable_target: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replay: Option<TraceReplay>,
+    /// Where each cell the trace shows lives in the RTL (2026-10-29): the legend, in the order
+    /// of the first step's cells. Empty when the source map is unavailable (`diagnostics.source_map`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<CellSource>,
 }
 
 /// Register cells of one state, in the wire shape (`value` when it fits 64 bits, `hex` always).
@@ -449,6 +520,7 @@ impl Trace {
             loop_start: None,
             unreachable_target: Vec::new(),
             replay: None,
+            sources: Vec::new(),
         }
     }
 
@@ -492,6 +564,7 @@ impl Trace {
             loop_start,
             unreachable_target,
             replay: None,
+            sources: Vec::new(),
         }
     }
 }
@@ -523,6 +596,7 @@ impl Trace {
             loop_start,
             unreachable_target: Vec::new(),
             replay: None,
+            sources: Vec::new(),
         }
     }
 }
@@ -598,6 +672,8 @@ mod tests {
             }],
             fault_warmup: 2,
             fault_budget: Some(1),
+            sources: Vec::new(),
+            source_map: None,
             ..Default::default()
         };
         let step = |en: u64| {
@@ -655,5 +731,115 @@ mod tests {
         let inputs = names.inputs(&[cell("clk", 0), cell("go", 1)]);
         assert_eq!(inputs.len(), 1);
         assert_eq!(inputs[0].register, "go");
+    }
+}
+
+#[cfg(test)]
+mod source_tests {
+    use super::*;
+
+    #[test]
+    fn a_yosys_src_attribute_parses_to_its_file_and_first_line() {
+        let loc = SourceLoc::parse_yosys_src("../../rtl/pump_pair.sv:32.24").unwrap();
+        assert_eq!((loc.file.as_str(), loc.line), ("pump_pair.sv", 32));
+        assert_eq!(
+            SourceLoc::parse_yosys_src("a/b.sv:61.24-61.61|a/b.sv:62.1")
+                .unwrap()
+                .line,
+            61
+        );
+        assert_eq!(SourceLoc::parse_yosys_src("standalone.sv"), None);
+        assert_eq!(loc.to_string(), "pump_pair.sv:32");
+    }
+
+    /// The legend follows the trace: the first step's state cells then its inputs, in order, for
+    /// the cells the map knows; the clock is not an input the trace lists, and a monitor cell has
+    /// no RTL home.
+    #[test]
+    fn the_legend_lists_the_traces_cells_with_their_lines_in_trace_order() {
+        use crate::adapter::btor2::cex_value::CexValue;
+        let loc = |l: u32| SourceLoc {
+            file: "pump_pair.sv".into(),
+            line: l,
+        };
+        let names = TraceNames {
+            clocks: vec!["clk".into()],
+            sources: vec![
+                CellSource {
+                    cell: "flow".into(),
+                    kind: "input".into(),
+                    declared: Some(loc(25)),
+                    assigned: vec![],
+                },
+                CellSource {
+                    cell: "state_q".into(),
+                    kind: "register".into(),
+                    declared: Some(loc(32)),
+                    assigned: vec![loc(52)],
+                },
+                CellSource {
+                    cell: "lof_q".into(),
+                    kind: "register".into(),
+                    declared: Some(loc(36)),
+                    assigned: vec![loc(52)],
+                },
+                CellSource {
+                    cell: "clk".into(),
+                    kind: "input".into(),
+                    declared: Some(loc(21)),
+                    assigned: vec![],
+                },
+            ],
+            ..Default::default()
+        };
+        let cell = |n: &str, v: u64, b: u32| CexCellView {
+            register: n.to_string(),
+            value: Some(v),
+            hex: CexValue::from_u64(v, b).to_hex(),
+            bits: b,
+        };
+        let trace = Trace::from_cells(
+            vec![vec![
+                cell("state_q", 1, 2),
+                cell("mununu_wit_0", 0, 1),
+                cell("lof_q", 0, 3),
+            ]],
+            Vec::new(),
+            vec![vec![cell("clk", 0, 1), cell("flow", 0, 1)]],
+            Vec::new(),
+            false,
+        );
+        let tidy = names.tidy(trace);
+        let legend: Vec<(&str, &str, String)> = tidy
+            .sources
+            .iter()
+            .map(|s| {
+                (
+                    s.cell.as_str(),
+                    s.kind.as_str(),
+                    format!(
+                        "{:?}/{:?}",
+                        s.declared.as_ref().map(|l| l.line),
+                        s.assigned.iter().map(|l| l.line).collect::<Vec<_>>()
+                    ),
+                )
+            })
+            .collect();
+        assert_eq!(
+            legend,
+            vec![
+                ("state_q", "register", "Some(32)/[52]".to_string()),
+                ("lof_q", "register", "Some(36)/[52]".to_string()),
+                ("flow", "input", "Some(25)/[]".to_string()),
+            ]
+        );
+        let empty = TraceNames::default().tidy(Trace::from_cells(
+            vec![vec![cell("q", 0, 1)]],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            false,
+        ));
+        assert!(empty.sources.is_empty(), "no map, no legend");
     }
 }

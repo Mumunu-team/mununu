@@ -492,6 +492,32 @@ under `TOP.<top>.`, vectors in decimal as the report prints them. `gtkwave repla
 from that directory opens on exactly the signals the counterexample is about; the API returns the
 file as `trace.replay.gtkw`.
 
+### Where in the RTL: the `cells:` legend under a counterexample (2026-10-29)
+
+> Source of truth: [`cell_sources`](../crates/mununu-core/src/adapter/yosys/mod.rs) + [`TraceNames::tidy`](../crates/mununu-core/src/trace.rs) — surface: (CLI+API) — every `sv verify-auto` row with a path, and `POST /api/v1/sv/verify-auto`.
+
+Every counterexample ends with a legend naming where each cell it shows lives in the RTL — the
+registers of the first step, then its inputs, in that order:
+
+```
+        cells:
+          state_q ← pump_pair.sv:32 (register, assigned at pump_pair.sv:52)
+          lof_q ← pump_pair.sv:36 (register, assigned at pump_pair.sv:52)
+          flow ← pump_pair.sv:25 (input)
+```
+
+`file:line` is the net's declaration; a register also names the `always` block(s) of the flop(s)
+that drive it, which is where the value the trace shows was assigned. The lines come from yosys's
+`src` attributes in the flattened netlist, which both **yosys-slang** (`--frontend slang`, the
+default in the `mununu-sva` image) and yosys's own `read_verilog` (`--frontend verilog`) stamp
+with the RTL's own file and line. Only when **sv2v** preprocessed the source (`--frontend sv2v`,
+`use_sv2v`) are the lines its output's, not the RTL's, and then the map is declared unavailable
+rather than wrong: the report says `source map: unavailable — …` under `model:` and prints no
+legend. `--json`
+carries the legend as `trace.sources` (`cell`, `kind`, `declared`, `assigned`) and the status as
+`diagnostics.source_map` (`status`, `reason`). A cell the map does not know — a monitor latch, a
+yosys-internal name — is simply not listed.
+
 ### A recoverability row refuted by a trap certificate (2026-10-21)
 
 > Source of truth: [`search_trap`](../crates/mununu-core/src/adapter/trap_certificate.rs#L294) + [`TRAP_CERTIFICATE_DECIDED_BY`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L6935) — surface: (CLI+API) — `sv verify-auto` / `POST /api/v1/sv/verify-auto`, every `AG EF` row the main pass leaves ⊥

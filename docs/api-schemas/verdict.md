@@ -137,6 +137,12 @@ Rust source: [`Trace`](../../crates/mununu-core/src/api/models.rs) + [`CexCellVi
   ],
   "loop_start": 1,                 // lasso only: the step the last one loops back to
   "unreachable_target": [],        // unreachable only: the atoms no path reaches
+  "sources": [                     // the legend: where each cell the trace shows lives in the RTL
+    { "cell": "state_q", "kind": "register",
+      "declared": { "file": "pump_pair.sv", "line": 32 },
+      "assigned": [ { "file": "pump_pair.sv", "line": 52 } ] },
+    { "cell": "flow", "kind": "input", "declared": { "file": "pump_pair.sv", "line": 25 } }
+  ],
   "replay": {                      // when a Verilator testbench was requested
     "testbench": { "tb_cpp": "…", "makefile": "…", "checks": 16, "skipped": [] },
     "gtkw":   "…",                  // replay.gtkw: the GTKWave save file for the trace's signals
@@ -155,6 +161,9 @@ Rust source: [`Trace`](../../crates/mununu-core/src/api/models.rs) + [`CexCellVi
 }
 ```
 
+- `sources` — the legend (2026-10-29): the first step's registers then its inputs, each with its
+  declaration and, for a register, the `always` block(s) driving it; empty when the netlist's lines
+  are not the RTL's (`diagnostics.source_map` says why — sv2v preprocessed the source), omitted then.
 - `replay` — present when `emit_testbench` / `--emit-testbench` was requested on a row with a path:
   `testbench` (the files), `gtkw` (the GTKWave save file), `dir` (CLI only) and, under `replay: true` /
   `--replay`, `result` — the simulator's verdict, with `outcome: "unavailable"` and a `reason` when

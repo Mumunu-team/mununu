@@ -4106,6 +4106,26 @@ pub(crate) fn lift_sv(
                 .collect();
         }
     }
+    // 2026-10-29 — the source map: yosys-slang and yosys's own `read_verilog` both stamp nets
+    // and flops with the staged file's own lines; only when sv2v rewrote the source first are the
+    // lines its output's, and then the map is declared unavailable rather than wrong.
+    let (sources, source_map) = if lift.sv2v_ran {
+        (
+            Vec::new(),
+            Some(
+                "sv2v preprocessed the source before yosys read it, so the netlist's lines are \
+                 sv2v's, not the RTL's; lift without sv2v (--frontend slang)"
+                    .to_string(),
+            ),
+        )
+    } else {
+        let mut sources = crate::adapter::yosys::cell_sources(&lift.flat_netlist_json);
+        crate::adapter::yosys::name_staged_primary(&mut sources, primary_name);
+        let reason = sources
+            .is_empty()
+            .then(|| "the lift carried no source attributes".to_string());
+        (sources, reason)
+    };
     Ok(PreLift {
         // mununu#713 — `gen[k]` as `gen$k`, the spelling the translator gives the same names.
         btor2: crate::adapter::btor2::parser::flat_symbol_names(&lift.btor2),
@@ -4117,6 +4137,8 @@ pub(crate) fn lift_sv(
         trace_names: crate::trace::TraceNames {
             aliases: crate::adapter::yosys::trace_aliases(&lift.flat_netlist_json),
             clocks: lift.clock_domains.iter().map(|d| d.net.clone()).collect(),
+            sources,
+            source_map,
             ..Default::default()
         },
         clock_domains: lift.clock_domains,

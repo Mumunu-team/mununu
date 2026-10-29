@@ -2528,6 +2528,16 @@ impl From<&crate::adapter::slang::verify_auto::AutoVerifyReport> for SvVerifyAut
                 config_values: report.diagnostics.applied_config_values.clone(),
                 cutpoints: report.diagnostics.cutpoint_signals.clone(),
                 fault_model: report.diagnostics.fault_model.clone(),
+                source_map: match &report.diagnostics.trace_names.source_map {
+                    None if !report.diagnostics.trace_names.sources.is_empty() => SourceMapView {
+                        status: "available".to_string(),
+                        reason: None,
+                    },
+                    reason => SourceMapView {
+                        status: "unavailable".to_string(),
+                        reason: Some(reason.clone().unwrap_or_else(|| "no lift ran".to_string())),
+                    },
+                },
                 fault_sites: report
                     .diagnostics
                     .fault_sites
@@ -2673,6 +2683,17 @@ pub struct VerificationNoteView {
     pub property: Option<String>,
 }
 
+/// Whether rows and traces carry RTL source lines (2026-10-29): `available` when the netlist's
+/// lines are the RTL's (yosys-slang and yosys's `read_verilog` both stamp them), `unavailable`
+/// with the reason when they are not (sv2v preprocessed the source first).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+pub struct SourceMapView {
+    /// `"available"` | `"unavailable"`.
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 /// Model-level lift diagnostics (mirrors
 /// [`crate::adapter::slang::verify_auto::ModelDiagnostics`]).
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -2723,6 +2744,8 @@ pub struct ModelDiagnosticsView {
     /// adversary at the listed sites, so the scope ships with it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fault_model: Option<String>,
+    /// Whether the rows' traces carry RTL source lines, and why not when they do not (2026-10-29).
+    pub source_map: SourceMapView,
     /// The registers the adversary may corrupt under the posture. Empty without one.
     #[serde(default)]
     pub fault_sites: Vec<FaultSiteView>,

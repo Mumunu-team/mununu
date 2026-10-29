@@ -55,6 +55,42 @@
         }
       ]
     },
+    "CellSource": {
+      "description": "Where a trace cell lives in the RTL (2026-10-29).",
+      "properties": {
+        "assigned": {
+          "description": "The `always` block(s) of the flop(s) driving a register; empty for an input.",
+          "items": {
+            "$ref": "#/definitions/SourceLoc"
+          },
+          "type": "array"
+        },
+        "cell": {
+          "description": "The cell as the trace names it (the net; a hierarchical name keeps its dots).",
+          "type": "string"
+        },
+        "declared": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SourceLoc"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The net's declaration."
+        },
+        "kind": {
+          "description": "`\"register\"` | `\"input\"` | `\"output\"`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "cell",
+        "kind"
+      ],
+      "type": "object"
+    },
     "CexCellView": {
       "description": "One register's concrete value in a counterexample state. mununu#723 — a cell wider than 64 bits was silently absent from the trace (OpenTitan edn's 109-bit `tl_i`, the bus write behind the fatal alert). `value` is unchanged for every cell that fits 64 bits — exactly the cells that were listed before — and `null` for a wider value; `hex` and `bits` are always present.",
       "properties": {
@@ -395,6 +431,24 @@
       ],
       "type": "object"
     },
+    "SourceLoc": {
+      "description": "A place in the RTL: the file's basename and a line (yosys's `src` keeps the path and the column; the report keeps what a reader opens).",
+      "properties": {
+        "file": {
+          "type": "string"
+        },
+        "line": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "file",
+        "line"
+      ],
+      "type": "object"
+    },
     "TestbenchView": {
       "description": "A generated counterexample-replay testbench ([`crate::adapter::verilator::replay`]).",
       "properties": {
@@ -452,6 +506,13 @@
               "type": "null"
             }
           ]
+        },
+        "sources": {
+          "description": "Where each cell the trace shows lives in the RTL (2026-10-29): the legend, in the order of the first step's cells. Empty when the source map is unavailable (`diagnostics.source_map`).",
+          "items": {
+            "$ref": "#/definitions/CellSource"
+          },
+          "type": "array"
         },
         "steps": {
           "items": {
