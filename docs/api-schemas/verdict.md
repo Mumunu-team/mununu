@@ -93,7 +93,9 @@ Rust source: [`PropertyVerdictView`](../../crates/mununu-core/src/api/models.rs#
   "name":               "my_module_sva_0",    // POSITIONAL; re-points on an insertion
   "label":              "my_assertion",        // the SV label; absent when unlabelled
   "kind":               "assert",              // "assert" | "assume" | "cover"
-  "formula":            "nu X. ((!req || [] grant) && [] X)",  // mu-calc lift of the SVA
+  "formula":            "nu X. ((!req || [] grant) && [] X)",  // as written for an `ltl` annotation row; else the mu-calc lift
+  "formula_language":   "mu-calculus",         // "mu-calculus" | "ltl" — how to read `formula`
+  "translated":         "...",                  // the mu-calculus the engine decided; present only on an `ltl` row
   "outcome":            "holds",               // canonical PropertyVerdict as-string
   "detail":             "cube: 0 false / 12 unknown", // optional; skip reason, cell counts
   "seeded_predicates":  ["req == 1", "grant == 1"],   // atoms auto-seeded for this property
@@ -113,7 +115,9 @@ Rust source: [`PropertyVerdictView`](../../crates/mununu-core/src/api/models.rs#
   reorder is a no-op and a rename is a hard error. Absent for an unlabelled assertion and for
   every `@mununu_guarantee` annotation. **`--expect NAME=VERDICT` accepts either**, label first.
 - `kind` — `"assert"` / `"assume"` / `"cover"`.
-- `formula` — the mu-calc string the engine actually evaluated. Round-trip-parseable via `mu_calculus::parser::parse`.
+- `formula` — the property as its author wrote it when that was not mu-calculus (an `@mununu_guarantee ltl …` row shows its LTL, 2026-10-29); otherwise the mu-calc string the engine actually evaluated, round-trip-parseable via `mu_calculus::parser::parse`.
+- `formula_language` — `"mu-calculus"` | `"ltl"`: how to read `formula`.
+- `translated` — the mu-calc string the engine evaluated, present only when `formula` is written in another language (an `ltl` row); absent otherwise. `translated ?? formula` is always mu-calculus.
 - `outcome` — one of the four canonical `PropertyVerdict` values. This is the field to gate on.
 - `detail` — human-facing extra: `"cube: <false> false / <unknown> unknown"` for cube verdicts; `"skip-<reason>"` for skips (see the skip-reason catalog below). Optional.
 - `seeded_predicates` — the abstraction-cube atom strings seeded for this property. Empty for engines that don't use a cube.

@@ -2394,6 +2394,10 @@ impl From<&crate::adapter::slang::verify_auto::AutoVerifyReport> for SvVerifyAut
                         Some(reason.clone()),
                     ),
                 };
+                // 2026-10-29 — the row as written (an `ltl` annotation) takes the `formula`
+                // slot and the engine's mu-calculus moves beside it; every other row's formula
+                // IS that mu-calculus.
+                let written = report.written_formula(&p.name);
                 PropertyVerdictView {
                     name: p.name.clone(),
                     label: p.label.clone(),
@@ -2403,7 +2407,15 @@ impl From<&crate::adapter::slang::verify_auto::AutoVerifyReport> for SvVerifyAut
                         SvaKind::Cover => "cover",
                     }
                     .to_string(),
-                    formula: p.formula.clone(),
+                    formula: written.map_or_else(|| p.formula.clone(), |w| w.text.clone()),
+                    formula_language: written
+                        .map_or(
+                            crate::adapter::slang::translate::FormulaLanguage::MuCalculus,
+                            |w| w.language,
+                        )
+                        .tag()
+                        .to_string(),
+                    translated: written.map(|_| p.formula.clone()),
                     outcome: outcome.to_string(),
                     detail,
                     false_cells,
@@ -2824,7 +2836,18 @@ pub struct PropertyVerdictView {
     pub label: Option<String>,
     /// `"assert"` | `"assume"` | `"cover"`.
     pub kind: String,
+    /// The property as its author wrote it when that was not mu-calculus — an
+    /// `@mununu_guarantee ltl …` row shows its LTL (2026-10-29) — otherwise the mu-calculus the
+    /// engine decided (every SVA row, plain annotation body and template). `formula_language`
+    /// says which; `translated` carries the mu-calculus whenever `formula` is not it.
     pub formula: String,
+    /// How to read `formula`: `"mu-calculus"` | `"ltl"`.
+    pub formula_language: String,
+    /// The mu-calculus the engine decided, present only when `formula` is written in another
+    /// language (an `ltl` row). A tool that re-parses formulas reads this and falls back to
+    /// `formula` when it is absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub translated: Option<String>,
     /// `"holds"` | `"violated"` | `"unknown"` | `"skipped"`.
     pub outcome: String,
     /// Human-readable detail: `"N cell(s)"` (violated/unknown) or the skip reason.
@@ -3033,6 +3056,60 @@ mod bottom_reason_view_tests {
             decided_by: None,
             vacuity: None,
         }
+    }
+
+    /// An `ltl` row reaches the wire as its author wrote it, tagged, with the mu-calculus beside
+    /// it; a mu-calculus row is tagged so and carries nothing beside its formula (2026-10-29).
+    #[test]
+    fn an_ltl_row_shows_its_written_form_and_the_translation_beside_it() {
+        use crate::adapter::slang::translate::{FormulaLanguage, WrittenFormula};
+        let mu = "(nu G1. (((!(a)) || ([] b)) && [] G1))".to_string();
+        let mut report = AutoVerifyReport {
+            properties: vec![
+                PropertyVerdict {
+                    name: "ann_guarantee_0".into(),
+                    formula: mu.clone(),
+                    ..bottom_prop(None)
+                },
+                PropertyVerdict {
+                    name: "ann_guarantee_1".into(),
+                    formula: "nu X. (ok && [] X)".into(),
+                    ..bottom_prop(None)
+                },
+            ],
+            ..Default::default()
+        };
+        report.diagnostics.written_formulas = vec![(
+            "ann_guarantee_0".into(),
+            WrittenFormula {
+                language: FormulaLanguage::Ltl,
+                text: "G (a -> X b)".into(),
+            },
+        )];
+        let view = SvVerifyAutoResponse::from(&report);
+        let ltl = &view.properties[0];
+        assert_eq!(
+            (
+                ltl.formula.as_str(),
+                ltl.formula_language.as_str(),
+                ltl.translated.as_deref()
+            ),
+            ("G (a -> X b)", "ltl", Some(mu.as_str()))
+        );
+        let plain = &view.properties[1];
+        assert_eq!(
+            (
+                plain.formula.as_str(),
+                plain.formula_language.as_str(),
+                plain.translated.as_deref()
+            ),
+            ("nu X. (ok && [] X)", "mu-calculus", None)
+        );
+        let json = serde_json::to_value(&view).unwrap();
+        assert!(
+            json["properties"][1].get("translated").is_none(),
+            "a mu-calculus row omits the key, it does not send null"
+        );
     }
 
     /// A counterexample as the lift and the witness monitor name it — the design's `state_q` under

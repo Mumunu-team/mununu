@@ -327,6 +327,13 @@ mod tests {
                 applied_config_values: vec!["cfg=7".into()],
                 cutpoint_signals: vec!["fits".into()],
                 fault_model: Some("fault: a (≤1, warm-up 10)".into()),
+                written_formulas: vec![(
+                    "ann_guarantee_0".into(),
+                    crate::adapter::slang::translate::WrittenFormula {
+                        language: crate::adapter::slang::translate::FormulaLanguage::Ltl,
+                        text: "G (req -> F ack)".into(),
+                    },
+                )],
                 fault_sites: vec![crate::adapter::btor2::fault::FaultSiteReport {
                     register: "a".into(),
                     width: 2,
