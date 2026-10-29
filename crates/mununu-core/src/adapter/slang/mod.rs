@@ -463,3 +463,152 @@ mod tests {
         );
     }
 }
+
+/// Where every port, net and variable is declared, from slang's own AST with
+/// `--ast-json-source-info` (2026-10-29): the one source of declaration lines that does not depend
+/// on the lift's front end — yosys-slang stamps them on the netlist only in recent builds, yosys's
+/// `read_verilog` does, sv2v never. Runs on the ORIGINAL staged files (the SVA extraction's own
+/// run works on a preprocessed copy whose lines are shifted). Names are spelled as the lift
+/// spells them: the top instance's members bare, a nested instance's as `inst.name`, a generate
+/// block's `gen[k]` as `gen$k`.
+pub fn run_declarations(
+    bin: &SlangBin,
+    files: &[PathBuf],
+    include_dirs: &[PathBuf],
+    params: &[(String, String)],
+) -> Result<Vec<(String, crate::trace::SourceLoc)>, AdapterError> {
+    let mut args = ast_json_args(files, include_dirs, params);
+    args.push("--ast-json-source-info".into());
+    let mut cmd = Command::new(&bin.path);
+    cmd.args(&args);
+    let out = run_slang_bounded(&mut cmd, bin, "--ast-json-source-info")?;
+    let json = String::from_utf8_lossy(&out.stdout);
+    if json.trim().is_empty() {
+        return Err(AdapterError {
+            kind: AdapterErrorKind::ParseError,
+            message: format!(
+                "adapter/slang: the declarations run produced no AST (status {}). stderr: {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+            location: None,
+        });
+    }
+    Ok(declarations_from_ast(&json))
+}
+
+/// The declarations of a slang AST dumped with `--ast-json-source-info`: `Root → members →
+/// Instance → body (InstanceBody) → members`, where a `Port` / `Variable` / `Net` carries
+/// `source_file` and `source_line`. The first declaration of a name wins (a port appears as both a
+/// `Port` and a `Variable` / `Net` on the same line). Pure, so the shape is pinned by a test.
+pub fn declarations_from_ast(json: &str) -> Vec<(String, crate::trace::SourceLoc)> {
+    use crate::trace::SourceLoc;
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(json) else {
+        return Vec::new();
+    };
+    let mut out: Vec<(String, SourceLoc)> = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    fn segment(name: &str) -> String {
+        // `gen[3]` → `gen$3`, the lift's spelling (mununu#713).
+        name.replace('[', "$").replace(']', "")
+    }
+    fn walk(
+        node: &serde_json::Value,
+        prefix: &str,
+        top: bool,
+        out: &mut Vec<(String, SourceLoc)>,
+        seen: &mut std::collections::BTreeSet<String>,
+    ) {
+        let Some(obj) = node.as_object() else {
+            if let Some(items) = node.as_array() {
+                for item in items {
+                    walk(item, prefix, top, out, seen);
+                }
+            }
+            return;
+        };
+        let kind = obj.get("kind").and_then(|k| k.as_str()).unwrap_or("");
+        let name = obj.get("name").and_then(|n| n.as_str()).unwrap_or("");
+        match kind {
+            "Port" | "Variable" | "Net" if !name.is_empty() => {
+                if let (Some(file), Some(line)) = (
+                    obj.get("source_file").and_then(|f| f.as_str()),
+                    obj.get("source_line").and_then(|l| l.as_u64()),
+                ) {
+                    let full = format!("{prefix}{name}");
+                    if seen.insert(full.clone()) {
+                        let file = file.rsplit('/').next().unwrap_or(file).to_string();
+                        out.push((
+                            full,
+                            SourceLoc {
+                                file,
+                                line: u32::try_from(line).unwrap_or(u32::MAX),
+                            },
+                        ));
+                    }
+                }
+            }
+            "Instance" | "GenerateBlock" if !top && !name.is_empty() => {
+                let child = format!("{prefix}{}.", segment(name));
+                for key in ["body", "members"] {
+                    if let Some(v) = obj.get(key) {
+                        walk(v, &child, false, out, seen);
+                    }
+                }
+                return;
+            }
+            _ => {}
+        }
+        // The top instance (a direct member of the root) keeps bare names; everything else
+        // descends with the prefix it has.
+        let next_top = top && kind != "Instance";
+        for key in ["members", "body", "design"] {
+            if let Some(v) = obj.get(key) {
+                walk(v, prefix, next_top, out, seen);
+            }
+        }
+    }
+    walk(&root, "", true, &mut out, &mut seen);
+    out
+}
+
+#[cfg(test)]
+mod declaration_tests {
+    use super::*;
+
+    /// The AST shape slang dumps with `--ast-json-source-info` (trimmed from the pump-pair block
+    /// with its bound checker, slang 12.1, 2026-10-29): the top instance's members bare, the bound
+    /// instance's under its name, a port once although it appears twice, a generate block as `$`.
+    #[test]
+    fn declarations_follow_the_instance_tree_with_the_lifts_spelling() {
+        let json = r#"{"design":{"kind":"Root","name":"$root","members":[
+          {"kind":"CompilationUnit","members":[]},
+          {"kind":"Instance","name":"pump_pair","source_line":18,"body":{"kind":"InstanceBody","name":"pump_pair","members":[
+            {"kind":"Port","name":"state_q","source_file":"../rtl/pump_pair.sv","source_line":32},
+            {"kind":"Variable","name":"state_q","source_file":"../rtl/pump_pair.sv","source_line":32},
+            {"kind":"Variable","name":"lof_q","source_file":"../rtl/pump_pair.sv","source_line":36},
+            {"kind":"ProceduralBlock","source_line":52},
+            {"kind":"GenerateBlock","name":"gen[1]","members":[
+              {"kind":"Variable","name":"q","source_file":"../rtl/pump_pair.sv","source_line":60}]},
+            {"kind":"Instance","name":"u_pump_pair_sva","source_line":21,"body":{"kind":"InstanceBody","name":"pump_pair_sva","members":[
+              {"kind":"Port","name":"state_q","source_file":"../rtl/pump_pair_sva.sv","source_line":16},
+              {"kind":"Net","name":"state_q","source_file":"../rtl/pump_pair_sva.sv","source_line":16}]}}]}}]}}"#;
+        let got: Vec<(String, String)> = declarations_from_ast(json)
+            .into_iter()
+            .map(|(n, l)| (n, l.to_string()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("state_q".into(), "pump_pair.sv:32".into()),
+                ("lof_q".into(), "pump_pair.sv:36".into()),
+                ("gen$1.q".into(), "pump_pair.sv:60".into()),
+                (
+                    "u_pump_pair_sva.state_q".into(),
+                    "pump_pair_sva.sv:16".into()
+                ),
+            ]
+        );
+        assert!(declarations_from_ast("not json").is_empty());
+    }
+}

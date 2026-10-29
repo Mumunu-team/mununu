@@ -5022,7 +5022,12 @@ fn render_verify_auto_text(
     );
     // 2026-10-29 — the source map's status, once: a trace's `cells:` legend is absent for a reason.
     if let Some(reason) = &report.diagnostics.trace_names.source_map {
-        println!("  source map: unavailable — {reason}");
+        let status = if report.diagnostics.trace_names.sources.is_empty() {
+            "unavailable"
+        } else {
+            "partial"
+        };
+        println!("  source map: {status} — {reason}");
     }
     if !report.diagnostics.blackboxed_modules.is_empty() {
         println!(
@@ -5169,10 +5174,11 @@ fn render_verify_auto_text(
             if !trace.sources.is_empty() {
                 println!("        cells:");
                 for s in &trace.sources {
+                    // A half the map lacks is left out rather than shown as a placeholder.
                     let declared = s
                         .declared
                         .as_ref()
-                        .map_or_else(|| "?".to_string(), ToString::to_string);
+                        .map_or_else(String::new, |l| format!(" ← {l}"));
                     let assigned = if s.assigned.is_empty() {
                         String::new()
                     } else {
@@ -5185,7 +5191,7 @@ fn render_verify_auto_text(
                                 .join(", ")
                         )
                     };
-                    println!("          {} ← {declared} ({}{assigned})", s.cell, s.kind);
+                    println!("          {}{declared} ({}{assigned})", s.cell, s.kind);
                 }
             }
         }
