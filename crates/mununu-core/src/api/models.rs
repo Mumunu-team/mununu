@@ -2139,6 +2139,11 @@ pub struct SvVerifyAutoRequest {
     /// `i_clk`, `aclk`, `clk_sys` the source declares).
     #[serde(default)]
     pub tb_clock: Option<String>,
+    /// Build and run each replay testbench under Verilator on the server (`make`, then `make
+    /// trace`) and report the result on the row (`trace.replay.result`: match / mismatch /
+    /// unavailable with its reason); needs `emit_testbench` (2026-10-29).
+    #[serde(default)]
+    pub replay: bool,
     /// Engine selector, mirroring the CLI `--engine`: `"explicit"`, `"symbolic"`,
     /// `"exact-symbolic"`, `"portfolio-sequential"`, `"portfolio-parallel"`.
     /// **Unspecified ⇒ the default `"portfolio-sequential"`** (2026-07-06): run

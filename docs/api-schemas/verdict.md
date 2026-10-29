@@ -137,9 +137,28 @@ Rust source: [`Trace`](../../crates/mununu-core/src/api/models.rs) + [`CexCellVi
   ],
   "loop_start": 1,                 // lasso only: the step the last one loops back to
   "unreachable_target": [],        // unreachable only: the atoms no path reaches
-  "replay": { "testbench": { … } } // when a Verilator testbench was requested
+  "replay": {                      // when a Verilator testbench was requested
+    "testbench": { "tb_cpp": "…", "makefile": "…", "checks": 16, "skipped": [] },
+    "gtkw":   "…",                  // replay.gtkw: the GTKWave save file for the trace's signals
+    "dir":    "tb/alternates",      // CLI only: where the files were written
+    "result": {                     // --replay / replay: true — the bench built and run
+      "outcome": "match",           // "match" | "mismatch" | "unavailable"
+      "reason": null,               // unavailable: Verilator or make missing, a compile error
+      "checks": 16, "mismatches": 0,
+      "first_mismatch": null,       // mismatch: {cycle, register, got, expected}
+      "assertions": [],             // Verilator's `Assertion failed` lines on the final state
+      "vcd_bytes": 2037,            // replay.vcd, when `make trace` wrote it
+      "verilator": "5.0xx",
+      "log": "MATCH\nwrote replay.vcd"
+    }
+  }
 }
 ```
+
+- `replay` — present when `emit_testbench` / `--emit-testbench` was requested on a row with a path:
+  `testbench` (the files), `gtkw` (the GTKWave save file), `dir` (CLI only) and, under `replay: true` /
+  `--replay`, `result` — the simulator's verdict, with `outcome: "unavailable"` and a `reason` when
+  the bench could not run (2026-10-29).
 
 - `finite` — reset → the failing step (a safety violation). `lasso` — a prefix and a cycle repeated forever (a liveness stall). `trap` — reset → a closed trap the target is never reached from again (a refuted `AG EF` decided by the trap certificate). `unreachable` — no steps; `unreachable_target` lists the atoms. `attack` — one step per cycle with the fault injections on `steps[].faults` (`{site, value, hex}`); the adversary records injections, not states.
 - `state` / `inputs` are register cells: `value` when it fits 64 bits (else `null`), `hex` and `bits` always. A CTXDSL step names its state in `state_name` and the transition's labels in `labels`.
