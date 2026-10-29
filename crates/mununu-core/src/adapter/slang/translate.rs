@@ -138,6 +138,49 @@ pub enum SvaKind {
     Cover,
 }
 
+/// The language a property's text is written in — how a reader, or a consumer's tool, should
+/// read the row's `formula` (2026-10-29).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormulaLanguage {
+    /// The engine's own language: every SVA row, every plain `@mununu_guarantee` body, every
+    /// template instance.
+    MuCalculus,
+    /// An `@mununu_guarantee ltl …` annotation, read over every path.
+    Ltl,
+}
+
+impl FormulaLanguage {
+    /// The wire tag: `"mu-calculus"` | `"ltl"`.
+    pub fn tag(self) -> &'static str {
+        match self {
+            FormulaLanguage::MuCalculus => "mu-calculus",
+            FormulaLanguage::Ltl => "ltl",
+        }
+    }
+
+    /// The annotation keyword that introduces a body in this language (`ltl`); `None` for the
+    /// mu-calculus, which needs none.
+    pub fn keyword(self) -> Option<&'static str> {
+        match self {
+            FormulaLanguage::MuCalculus => None,
+            FormulaLanguage::Ltl => Some("ltl"),
+        }
+    }
+}
+
+/// A property as its author wrote it, when that is not the mu-calculus the row carries
+/// (2026-10-29). The engine decides [`TranslatedAssertion::formula`]; the report shows this text
+/// as the row's `formula` and the mu-calculus beside it as `translated`, so a reader sees the
+/// obligation in the language it was written in while the decided text stays available for
+/// diagnosis (the mununu#821 weak-until spelling was found by reading it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WrittenFormula {
+    pub language: FormulaLanguage,
+    /// The body as written, after the keyword, trimmed. Names stay unresolved (`state_q == IDLE`
+    /// reads so here; the mu-calculus carries the resolved constant).
+    pub text: String,
+}
+
 /// A successfully-translated assertion.
 #[derive(Debug, Clone)]
 pub struct TranslatedAssertion {
@@ -166,6 +209,10 @@ pub struct TranslatedAssertion {
     /// showcase). Forming it is XL.2; auto-checking it on a TRUE cover and
     /// attaching the I.1 countertrace is the XL.6 endpoint's job.
     pub recoverability_companion: Option<String>,
+    /// `Some` when the author wrote the property in another language than the mu-calculus in
+    /// [`Self::formula`] — today an `@mununu_guarantee ltl …` body. `None` for an SVA row (its
+    /// source is the assertion itself, named by [`Self::label`]) and for a mu-calculus body.
+    pub written: Option<WrittenFormula>,
 }
 
 /// An assertion outside the Tier-1 fragment, recorded (never silently dropped).
@@ -541,6 +588,7 @@ pub fn translate_ast_json_with_source(
                     kind,
                     formula,
                     recoverability_companion,
+                    written: None,
                 });
             }
             Err(reason) => report.unsupported.push(UnsupportedAssertion {

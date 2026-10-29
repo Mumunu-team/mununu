@@ -510,6 +510,13 @@ pub struct ModelDiagnostics {
     /// The registers the adversary may corrupt under the posture, with their width, the budget,
     /// why each was selected and the rows it serves. Empty without a posture.
     pub fault_sites: Vec<crate::adapter::btor2::fault::FaultSiteReport>,
+    /// The rows whose author wrote the property in another language than the mu-calculus the
+    /// row carries, by row name — today the `@mununu_guarantee ltl …` annotations (2026-10-29).
+    /// Both surfaces show the written text as the row's `formula` and the mu-calculus as
+    /// `translated`; [`AutoVerifyReport::written_formula`] is the lookup. It lives beside the
+    /// other provenance of the property set (`fault_sites` names its rows the same way) because
+    /// the row struct keeps the mu-calculus, which the post-passes re-parse.
+    pub written_formulas: Vec<(String, crate::adapter::slang::translate::WrittenFormula)>,
     /// How the counterexamples name the lift's registers and clocks (display only; see
     /// [`crate::trace::TraceNames`]).
     pub trace_names: crate::trace::TraceNames,
@@ -807,6 +814,7 @@ fn plan_assumptions(
             kind: SvaKind::Assert,
             formula: format!("mu Y. ((!({ASSUME_OK_SYMBOL})) || [] Y)"),
             recoverability_companion: None,
+            written: None,
         });
     (rep, candidates)
 }
@@ -928,6 +936,33 @@ pub struct AutoVerifyReport {
 /// enriched with the model-level root cause when one is evident: a black-boxed
 /// (cut) module whose registers became free inputs, or a model with no state
 /// registers at all. Pure so it can be unit-tested without the toolchain.
+impl AutoVerifyReport {
+    /// The property as its author wrote it, when that is not the mu-calculus in the row's
+    /// `formula` (an `@mununu_guarantee ltl …` row); `None` for every other row (2026-10-29).
+    pub fn written_formula(
+        &self,
+        name: &str,
+    ) -> Option<&crate::adapter::slang::translate::WrittenFormula> {
+        self.diagnostics
+            .written_formulas
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, w)| w)
+    }
+}
+
+/// The written-form table of a property set: every translated assertion that carries a
+/// [`crate::adapter::slang::translate::WrittenFormula`], keyed by its row name — what the report
+/// skeleton stores in [`ModelDiagnostics::written_formulas`] (2026-10-29).
+fn written_formulas_of(
+    translated: &[crate::adapter::slang::translate::TranslatedAssertion],
+) -> Vec<(String, crate::adapter::slang::translate::WrittenFormula)> {
+    translated
+        .iter()
+        .filter_map(|t| t.written.clone().map(|w| (t.name.clone(), w)))
+        .collect()
+}
+
 fn unseedable_skip_reason(unseedable: &[String], diag: &ModelDiagnostics) -> String {
     let base = format!(
         "atom(s) over non-state signals (combinational/IO — not cube-bindable): {}",
@@ -2813,14 +2848,16 @@ struct AnnotationScan {
 /// A body that starts with the keyword `ltl` is an LTL formula instead, read over
 /// EVERY path and translated by [`crate::ltl::universal::translate_universal_text`]
 /// — the same reading as a CTXDSL `body = ltl …;` — into the mu-calculus text the
-/// row carries, so the report's `formula` shows what the engine decided. The
+/// row carries for the engine; the LTL as written rides beside it
+/// ([`TranslatedAssertion::written`]) and is what the report shows as the row's
+/// `formula`, with the mu-calculus as `translated` (2026-10-29). The
 /// fragment is the one that module documents (`G`, `X`, `F b`, `b U b`, `b W b`,
 /// response, recurrence); a formula outside it is skipped with the subformula
 /// named. `eltl` (the some-path reading) is NOT accepted here: that reading is the
 /// plain mu-calculus body this scanner always took. Bodies that do not parse are
 /// recorded in `skipped`, never silently dropped.
 fn scan_annotation_properties(sources: &[(String, String)]) -> AnnotationScan {
-    use crate::adapter::slang::translate::TranslatedAssertion;
+    use crate::adapter::slang::translate::{FormulaLanguage, TranslatedAssertion, WrittenFormula};
     use crate::mununu_annotations::{MununuTag, extract_from_sv_source};
 
     let mut scan = AnnotationScan::default();
@@ -2859,7 +2896,10 @@ fn scan_annotation_properties(sources: &[(String, String)]) -> AnnotationScan {
                         ));
                         continue;
                     }
-                    let parsed: Result<String, String> = match ltl_body {
+                    // The row carries the mu-calculus for the engine AND the LTL as written: the
+                    // report shows the latter as the row's `formula` and the former as
+                    // `translated` (2026-10-29). A mu-calculus body is its own written form.
+                    let parsed: Result<(String, Option<WrittenFormula>), String> = match ltl_body {
                         Some("") => Err("@mununu_guarantee ltl with an empty formula".to_string()),
                         Some(rest) => crate::ltl::parser::parse(rest)
                             .map_err(|e| {
@@ -2868,9 +2908,18 @@ fn scan_annotation_properties(sources: &[(String, String)]) -> AnnotationScan {
                             .and_then(|f| {
                                 crate::ltl::universal::translate_universal_text(&f)
                                     .map_err(|e| format!("@mununu_guarantee `ltl {rest}`: {e}"))
+                            })
+                            .map(|mu| {
+                                (
+                                    mu,
+                                    Some(WrittenFormula {
+                                        language: FormulaLanguage::Ltl,
+                                        text: rest.to_string(),
+                                    }),
+                                )
                             }),
                         None => crate::mu_calculus::parser::parse(body)
-                            .map(|_| body.to_string())
+                            .map(|_| (body.to_string(), None))
                             .map_err(|e| {
                                 format!(
                                     "@mununu_guarantee `{body}` did not parse as a mu-calculus \
@@ -2879,7 +2928,7 @@ fn scan_annotation_properties(sources: &[(String, String)]) -> AnnotationScan {
                             }),
                     };
                     match parsed {
-                        Ok(formula) => {
+                        Ok((formula, written)) => {
                             // mununu#550 — an author-given name becomes the LABEL, which
                             // `--expect` already matches (mununu#544). The positional `name` is
                             // kept either way, so an existing index pin does not break.
@@ -2915,6 +2964,7 @@ fn scan_annotation_properties(sources: &[(String, String)]) -> AnnotationScan {
                                 kind: SvaKind::Assert,
                                 formula,
                                 recoverability_companion: None,
+                                written,
                             });
                             idx += 1;
                         }
@@ -4430,6 +4480,10 @@ pub(crate) fn prepare_model(
                 }
             }
             a
+        },
+        diagnostics: ModelDiagnostics {
+            written_formulas: written_formulas_of(&extraction.translated),
+            ..Default::default()
         },
         ..Default::default()
     };
@@ -9241,6 +9295,7 @@ mod tests {
             kind: SvaKind::Assert,
             formula: "nu X. ([] X)".into(),
             recoverability_companion: None,
+            written: None,
         };
         let v = abstained(&t, BottomReason::NotAttempted);
         assert_eq!(v.name, "p1");
@@ -11858,6 +11913,52 @@ module uart_tx(); endmodule"#;
         assert!(mu_parser::parse(off).is_ok(), "{off}");
     }
 
+    /// The row keeps the LTL as its author wrote it beside the mu-calculus the engine decides;
+    /// a mu-calculus body keeps nothing beside its formula (2026-10-29).
+    #[test]
+    fn an_ltl_annotation_keeps_its_written_form_and_a_mu_calculus_body_does_not() {
+        use crate::adapter::slang::translate::{FormulaLanguage, WrittenFormula};
+        let sv = "// @mununu_guarantee(alt) ltl G (start_a -> X (!start_a W start_b))\n\
+                  // @mununu_guarantee(safe) nu X. ((!(bad)) && [] X)\n\
+                  module m(); endmodule";
+        let scan = scan_annotation_properties(&src(sv));
+        assert!(scan.skipped.is_empty(), "{:?}", scan.skipped);
+        assert_eq!(scan.guarantees.len(), 2);
+        assert_eq!(
+            scan.guarantees[0].written,
+            Some(WrittenFormula {
+                language: FormulaLanguage::Ltl,
+                text: "G (start_a -> X (!start_a W start_b))".to_string(),
+            })
+        );
+        assert!(
+            scan.guarantees[0].formula.starts_with("(nu G1."),
+            "the engine's text is still the translation: {}",
+            scan.guarantees[0].formula
+        );
+        assert_eq!(scan.guarantees[1].written, None);
+        assert_eq!(scan.guarantees[1].formula, "nu X. ((!(bad)) && [] X)");
+
+        // The skeleton's table and the report's lookup: by row name, `None` for a plain row.
+        let table = written_formulas_of(&scan.guarantees);
+        assert_eq!(table.len(), 1);
+        assert_eq!(table[0].0, "ann_guarantee_0");
+        let report = AutoVerifyReport {
+            diagnostics: ModelDiagnostics {
+                written_formulas: table,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            report
+                .written_formula("ann_guarantee_0")
+                .map(|w| w.text.as_str()),
+            Some("G (start_a -> X (!start_a W start_b))")
+        );
+        assert_eq!(report.written_formula("ann_guarantee_1"), None);
+    }
+
     /// Outside the every-path fragment (`F G p` is path-wise), the body is skipped with the
     /// subformula named — never translated into a different property; and `eltl` is refused
     /// with the mu-calculus alternative spelled out, because the some-path reading is what a
@@ -12457,6 +12558,7 @@ module uart_tx(); endmodule"#;
                 // `cnt_q >= cfg_detect_timer_i` — the comparison that reveals the bound.
                 formula: "nu X. ((cnt_q >= cfg_detect_timer_i) && [] X)".into(),
                 recoverability_companion: None,
+                written: None,
             },
             crate::adapter::slang::translate::TranslatedAssertion {
                 name: "m_sva_13".into(),
@@ -12465,6 +12567,7 @@ module uart_tx(); endmodule"#;
                 // The monotonicity property — needs the bound but never names cfg.
                 formula: "nu X. ((cnt_q >= cnt_q__past) && [] X)".into(),
                 recoverability_companion: None,
+                written: None,
             },
         ];
         let bounds =
@@ -12641,6 +12744,7 @@ module uart_tx(); endmodule"#;
                 kind: SvaKind::Assert,
                 formula: chain.into(),
                 recoverability_companion: None,
+                written: None,
             }],
             ..Default::default()
         };
@@ -13805,6 +13909,7 @@ module uart_tx(); endmodule"#;
             kind,
             formula: formula.to_string(),
             recoverability_companion: None,
+            written: None,
         };
         let report = || TranslationReport {
             translated: vec![

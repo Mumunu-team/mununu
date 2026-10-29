@@ -295,7 +295,11 @@ model-level diagnostics.
 
 A guarantee body that starts with the keyword `ltl` is an LTL formula, read over **every** path
 from reset — the same reading as a CTXDSL `body = ltl …;` — and translated into the mu-calculus
-text the row carries, so the report's `formula` shows what the engine decided:
+the engine decides. The report shows the row **as written** (2026-10-29): the text line reads
+`formula: ltl G (…)` with the decided mu-calculus on a `translated:` line beneath it, and the JSON
+row carries `formula` (the LTL), `formula_language: "ltl"` and `translated` (the mu-calculus). A
+mu-calculus body, a template instance and an SVA row keep `formula` as the mu-calculus, carry
+`formula_language: "mu-calculus"` and no `translated` key:
 
 ```systemverilog
 // @mununu_guarantee(rod_scram_releases_clutch) ltl G (scram_cmd -> F clutch_release)

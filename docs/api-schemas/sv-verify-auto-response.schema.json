@@ -360,6 +360,11 @@
           ]
         },
         "formula": {
+          "description": "The property as its author wrote it when that was not mu-calculus — an `@mununu_guarantee ltl …` row shows its LTL (2026-10-29) — otherwise the mu-calculus the engine decided (every SVA row, plain annotation body and template). `formula_language` says which; `translated` carries the mu-calculus whenever `formula` is not it.",
+          "type": "string"
+        },
+        "formula_language": {
+          "description": "How to read `formula`: `\"mu-calculus\"` | `\"ltl\"`.",
           "type": "string"
         },
         "kind": {
@@ -406,6 +411,13 @@
           ],
           "description": "The counterexample ([`Trace`]) of a Violated property: for safety, the reset → violation path (empty `cycle`) native BMC re-derives whichever engine decided it (absent when none lies within the bound); D1.8b — a stall lasso for a bare `AF p` decided by the exact engine; A.4 — the unreachable target of a bare `EF p`."
         },
+        "translated": {
+          "description": "The mu-calculus the engine decided, present only when `formula` is written in another language (an `ltl` row). A tool that re-parses formulas reads this and falls back to `formula` when it is absent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "unknown_cells": {
           "description": "mununu#536 — the cell count behind an `unknown` (⊥) verdict, machine-readable. `None` for every other outcome.\n\nThis is the \"cell/budget figure that accompanies a ⊥\" the issue asks for: a ⊥ is a statement about how much of the cube space stayed undecided, and a consumer tracking whether refinement is helping needs the number, not a sentence containing it.",
           "format": "uint",
@@ -429,6 +441,7 @@
       },
       "required": [
         "formula",
+        "formula_language",
         "kind",
         "name",
         "outcome",

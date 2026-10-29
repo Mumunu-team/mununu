@@ -5037,7 +5037,20 @@ fn render_verify_auto_text(report: &mununu_core::adapter::slang::verify_auto::Au
         if let Some(label) = p.label.as_deref().filter(|l| *l != p.name) {
             println!("        label: {label}");
         }
-        println!("        formula: {}", p.formula);
+        // 2026-10-29 — an `ltl` annotation row shows the obligation as its author wrote it, with
+        // the mu-calculus the engine decided beneath it; every other row's formula IS that
+        // mu-calculus and prints as before.
+        match report.written_formula(&p.name) {
+            Some(w) => {
+                let keyword = w
+                    .language
+                    .keyword()
+                    .map_or(String::new(), |k| format!("{k} "));
+                println!("        formula: {keyword}{}", w.text);
+                println!("        translated: {}", p.formula);
+            }
+            None => println!("        formula: {}", p.formula),
+        }
         // monono ask 26 — WHY this property is ⊥, on the property's own lines rather than in a
         // note. A consumer that filters notes (monono's formal lane did, wholesale) still sees
         // this, and for a resource abstain the text is the ENGINE'S OWN message, which names the
