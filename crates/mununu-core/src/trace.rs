@@ -68,9 +68,12 @@ pub struct TraceNames {
     /// driving it — from yosys's `src` attributes (yosys-slang and `read_verilog` both stamp
     /// them). Empty when unavailable.
     pub sources: Vec<CellSource>,
-    /// Why `sources` is empty when it is: sv2v preprocessed the source before yosys read it, so
-    /// the netlist's lines are sv2v's, not the RTL's. `None` when the map is available.
+    /// Why the map is not complete: what is missing and why (the sv2v path has no assignment
+    /// lines; a cell the AST did not declare). `None` when the map is available.
     pub source_map: Option<String>,
+    /// The map places some cells but not everything (`source_map` says what is missing);
+    /// `false` with `source_map = Some(…)` means nothing could be placed.
+    pub source_map_partial: bool,
 }
 
 /// A place in the RTL: the file's basename and a line (yosys's `src` keeps the path and the
@@ -674,6 +677,7 @@ mod tests {
             fault_budget: Some(1),
             sources: Vec::new(),
             source_map: None,
+            source_map_partial: false,
             ..Default::default()
         };
         let step = |en: u64| {

@@ -610,7 +610,7 @@
       "type": "object"
     },
     "SourceMapView": {
-      "description": "Whether rows and traces carry RTL source lines (2026-10-29): `available` when the netlist's lines are the RTL's (yosys-slang and yosys's `read_verilog` both stamp them), `unavailable` with the reason when they are not (sv2v preprocessed the source first).",
+      "description": "Whether rows and traces carry RTL source lines (2026-10-29): `available` when every cell has its declaration (yosys's netlist attributes or slang's AST, on every front end) and the lift stamped its `always` blocks; `partial` with the reason when something is missing (the sv2v path has no assignment lines; a cell the AST did not declare); `unavailable` with the reason when nothing could be placed.",
       "properties": {
         "reason": {
           "type": [
@@ -619,7 +619,7 @@
           ]
         },
         "status": {
-          "description": "`\"available\"` | `\"unavailable\"`.",
+          "description": "`\"available\"` | `\"partial\"` | `\"unavailable\"`.",
           "type": "string"
         }
       },

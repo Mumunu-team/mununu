@@ -2528,15 +2528,24 @@ impl From<&crate::adapter::slang::verify_auto::AutoVerifyReport> for SvVerifyAut
                 config_values: report.diagnostics.applied_config_values.clone(),
                 cutpoints: report.diagnostics.cutpoint_signals.clone(),
                 fault_model: report.diagnostics.fault_model.clone(),
-                source_map: match &report.diagnostics.trace_names.source_map {
-                    None if !report.diagnostics.trace_names.sources.is_empty() => SourceMapView {
-                        status: "available".to_string(),
-                        reason: None,
-                    },
-                    reason => SourceMapView {
-                        status: "unavailable".to_string(),
-                        reason: Some(reason.clone().unwrap_or_else(|| "no lift ran".to_string())),
-                    },
+                source_map: {
+                    let names = &report.diagnostics.trace_names;
+                    let status = if names.sources.is_empty() {
+                        "unavailable"
+                    } else if names.source_map_partial {
+                        "partial"
+                    } else {
+                        "available"
+                    };
+                    SourceMapView {
+                        status: status.to_string(),
+                        reason: (status != "available").then(|| {
+                            names
+                                .source_map
+                                .clone()
+                                .unwrap_or_else(|| "no lift ran".to_string())
+                        }),
+                    }
                 },
                 fault_sites: report
                     .diagnostics
@@ -2683,12 +2692,14 @@ pub struct VerificationNoteView {
     pub property: Option<String>,
 }
 
-/// Whether rows and traces carry RTL source lines (2026-10-29): `available` when the netlist's
-/// lines are the RTL's (yosys-slang and yosys's `read_verilog` both stamp them), `unavailable`
-/// with the reason when they are not (sv2v preprocessed the source first).
+/// Whether rows and traces carry RTL source lines (2026-10-29): `available` when every cell
+/// has its declaration (yosys's netlist attributes or slang's AST, on every front end) and the
+/// lift stamped its `always` blocks; `partial` with the reason when something is missing (the
+/// sv2v path has no assignment lines; a cell the AST did not declare); `unavailable` with the
+/// reason when nothing could be placed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct SourceMapView {
-    /// `"available"` | `"unavailable"`.
+    /// `"available"` | `"partial"` | `"unavailable"`.
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,

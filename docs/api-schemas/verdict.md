@@ -162,8 +162,10 @@ Rust source: [`Trace`](../../crates/mununu-core/src/api/models.rs) + [`CexCellVi
 ```
 
 - `sources` — the legend (2026-10-29): the first step's registers then its inputs, each with its
-  declaration and, for a register, the `always` block(s) driving it; empty when the netlist's lines
-  are not the RTL's (`diagnostics.source_map` says why — sv2v preprocessed the source), omitted then.
+  declaration (from slang's AST on every front end, or yosys's netlist attribute when present) and,
+  for a register, the `always` block(s) driving it (from the netlist; absent when sv2v preprocessed
+  the source); `diagnostics.source_map.status` is `available`, `partial` (with what is missing in
+  `reason`) or `unavailable`; the key is omitted when nothing could be placed.
 - `replay` — present when `emit_testbench` / `--emit-testbench` was requested on a row with a path:
   `testbench` (the files), `gtkw` (the GTKWave save file), `dir` (CLI only) and, under `replay: true` /
   `--replay`, `result` — the simulator's verdict, with `outcome: "unavailable"` and a `reason` when
