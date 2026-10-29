@@ -5020,6 +5020,10 @@ fn render_verify_auto_text(
         "  model: {} state register(s)",
         report.diagnostics.state_register_count
     );
+    // 2026-10-29 — the source map's status, once: a trace's `cells:` legend is absent for a reason.
+    if let Some(reason) = &report.diagnostics.trace_names.source_map {
+        println!("  source map: unavailable — {reason}");
+    }
     if !report.diagnostics.blackboxed_modules.is_empty() {
         println!(
             "  black-boxed (cut to free inputs — provide source to model): {}",
@@ -5159,6 +5163,30 @@ fn render_verify_auto_text(
                 println!(
                     "          ({hidden} monitor cell(s) per step not shown: the property monitor's latches and $past shadows; --json lists them under steps[].monitor)"
                 );
+            }
+            // 2026-10-29 — the legend: where each cell the trace shows lives in the RTL
+            // (`trace.sources` in --json).
+            if !trace.sources.is_empty() {
+                println!("        cells:");
+                for s in &trace.sources {
+                    let declared = s
+                        .declared
+                        .as_ref()
+                        .map_or_else(|| "?".to_string(), ToString::to_string);
+                    let assigned = if s.assigned.is_empty() {
+                        String::new()
+                    } else {
+                        format!(
+                            ", assigned at {}",
+                            s.assigned
+                                .iter()
+                                .map(ToString::to_string)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    };
+                    println!("          {} ← {declared} ({}{assigned})", s.cell, s.kind);
+                }
             }
         }
         // 2026-10-29 — the replay, on the row, with the keys `--json` uses (`trace.replay.*`).
