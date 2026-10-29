@@ -466,6 +466,32 @@ make -C tb/p_no_fault trace       # in mununu-sva
 gtkwave tb/p_no_fault/replay.vcd  # the registers the trace names, and everything else
 ```
 
+**`--replay` — mununu builds and runs it (2026-10-29).** With `--emit-testbench DIR --replay`, mununu
+runs `make` and then `make trace` in each `DIR/<property>/` itself (Verilator from
+`MUNUNU_VERILATOR_PATH` or `$PATH`, `make` from the host) and reports the simulator's verdict on the
+row, so the transcript carries the replay instead of leaving it to the reader:
+
+```
+        replay dir: tb/alternates (16 checks); open: gtkwave replay.vcd replay.gtkw
+        replay: match — 0 of 16 checks disagree; verilator 5.0xx
+        replay vcd: tb/alternates/replay.vcd (2037 bytes)
+```
+
+A `mismatch` names the first disagreeing comparison (`first at cycle 3: state_q = 0x2, trace says
+0x1`); an assertion that fires on the final state is a `replay assertion:` line; everything `make`
+printed is in `DIR/<property>/replay.log`. When the replay cannot run — Verilator or `make`
+missing, a compile error — the row says `replay: unavailable — <reason>`, never nothing. `--json`
+carries the same object under `trace.replay.result` (`outcome`, `reason`, `checks`, `mismatches`,
+`first_mismatch`, `assertions`, `vcd_bytes`, `verilator`, `log`), beside `trace.replay.testbench`,
+`trace.replay.dir` and `trace.replay.gtkw`; over HTTP, `replay: true` with `emit_testbench: true`
+runs the bench in a scratch directory on the server and returns the same `result` (no `dir`).
+
+**`replay.gtkw` — the scene, ready to open.** `--emit-testbench` also writes a GTKWave save file
+beside the testbench: the clock, the trace's inputs and the registers it names, in trace order,
+under `TOP.<top>.`, vectors in decimal as the report prints them. `gtkwave replay.vcd replay.gtkw`
+from that directory opens on exactly the signals the counterexample is about; the API returns the
+file as `trace.replay.gtkw`.
+
 ### A recoverability row refuted by a trap certificate (2026-10-21)
 
 > Source of truth: [`search_trap`](../crates/mununu-core/src/adapter/trap_certificate.rs#L294) + [`TRAP_CERTIFICATE_DECIDED_BY`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L6935) — surface: (CLI+API) — `sv verify-auto` / `POST /api/v1/sv/verify-auto`, every `AG EF` row the main pass leaves ⊥

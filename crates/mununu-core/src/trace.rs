@@ -232,6 +232,95 @@ pub struct TraceReplay {
     /// The Verilator testbench (`--emit-testbench` / `emit_testbench`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub testbench: Option<TestbenchView>,
+    /// `replay.gtkw` — a GTKWave save file listing the clock, the trace's inputs and the registers
+    /// it names, so `gtkwave replay.vcd replay.gtkw` opens on the scene (2026-10-29).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gtkw: Option<String>,
+    /// Where the CLI wrote the files (`--emit-testbench DIR/<property>`); absent over HTTP.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dir: Option<String>,
+    /// The bench built and run (`--replay` / `replay: true`); absent when not requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<ReplayResultView>,
+}
+
+/// The replay's verdict: the bench ran under Verilator and compared the trace cycle by cycle, or
+/// could not run and says why (2026-10-29).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "api", derive(schemars::JsonSchema))]
+pub struct ReplayResultView {
+    /// `"match"` | `"mismatch"` | `"unavailable"`.
+    pub outcome: String,
+    /// Why the replay could not run (`unavailable`): Verilator or `make` missing, a compile error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// The (cycle, register) comparisons the bench makes.
+    pub checks: usize,
+    pub mismatches: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_mismatch: Option<ReplayMismatchView>,
+    /// Verilator's `Assertion failed` lines: the design's own assertion firing on the final state.
+    pub assertions: Vec<String>,
+    /// `replay.vcd`'s size in bytes, when `make trace` wrote it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vcd_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verilator: Option<String>,
+    /// The bench's own lines: verdict, mismatches, assertions, the VCD line.
+    pub log: String,
+}
+
+/// The first comparison that disagreed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "api", derive(schemars::JsonSchema))]
+pub struct ReplayMismatchView {
+    pub cycle: u32,
+    pub register: String,
+    pub got: String,
+    pub expected: String,
+}
+
+impl ReplayResultView {
+    /// The view of a run, or of the reason it could not happen.
+    pub fn from_run(
+        checks: usize,
+        run: Result<crate::adapter::verilator::replay::ReplayRun, String>,
+    ) -> Self {
+        match run {
+            Ok(r) => ReplayResultView {
+                outcome: if r.parse.matched == Some(true) {
+                    "match"
+                } else {
+                    "mismatch"
+                }
+                .to_string(),
+                reason: None,
+                checks,
+                mismatches: r.parse.mismatches,
+                first_mismatch: r.parse.first_mismatch.map(|m| ReplayMismatchView {
+                    cycle: m.cycle,
+                    register: m.register,
+                    got: m.got,
+                    expected: m.expected,
+                }),
+                assertions: r.parse.assertions,
+                vcd_bytes: r.vcd_bytes,
+                verilator: Some(r.verilator_version),
+                log: r.log,
+            },
+            Err(reason) => ReplayResultView {
+                outcome: "unavailable".to_string(),
+                reason: Some(reason),
+                checks,
+                mismatches: 0,
+                first_mismatch: None,
+                assertions: Vec::new(),
+                vcd_bytes: None,
+                verilator: None,
+                log: String::new(),
+            },
+        }
+    }
 }
 
 /// The one counterexample shape of 0.5, shared by every verb that returns a path: RTL rows fill

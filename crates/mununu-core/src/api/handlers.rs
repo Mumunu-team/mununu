@@ -2108,7 +2108,10 @@ fn attach_testbenches(
     report: &crate::adapter::slang::verify_auto::AutoVerifyReport,
     response: &mut SvVerifyAutoResponse,
 ) -> ApiResult<()> {
-    use crate::adapter::verilator::replay::{ReplayDesign, counterexample_testbench};
+    use crate::adapter::verilator::replay::{
+        ReplayDesign, counterexample_testbench, gtkwave_save, run_replay,
+    };
+    use crate::trace::ReplayResultView;
     let clock = match &request.tb_clock {
         Some(c) => c.clone(),
         None => ["clk", "clk_i", "clock", "i_clk", "aclk", "clk_sys"]
@@ -2150,7 +2153,12 @@ fn attach_testbenches(
                 .map(|f| f.name.clone()),
         )
         .collect();
-    for (row, p) in response.properties.iter_mut().zip(report.properties.iter()) {
+    for (idx, (row, p)) in response
+        .properties
+        .iter_mut()
+        .zip(report.properties.iter())
+        .enumerate()
+    {
         let Some(cex) = &p.counterexample else {
             continue;
         };
@@ -2160,15 +2168,57 @@ fn attach_testbenches(
             reset: reset.as_ref().map(|(n, a)| (n.as_str(), *a)),
             sources: &sources,
         };
-        let testbench = counterexample_testbench(&design, cex).map(|b| TestbenchView {
-            tb_cpp: b.tb_cpp,
-            makefile: b.makefile,
-            checks: b.checks,
-            skipped: b.skipped,
+        let Some(bench) = counterexample_testbench(&design, cex) else {
+            continue;
+        };
+        let gtkw = gtkwave_save(&design, cex);
+        // 2026-10-29 — `replay: true`: the bench and the sources go to a scratch directory, `make`
+        // builds and runs it there, and the row carries the verdict; the directory itself is not
+        // part of the response (the VCD is reported by size, the files by content).
+        let result = request.replay.then(|| {
+            let dir = std::env::temp_dir().join(format!(
+                "mununu-replay-{}-{idx}-{}",
+                std::process::id(),
+                p.name.replace(|c: char| !c.is_ascii_alphanumeric(), "_")
+            ));
+            let staged: Result<(), String> = (|| {
+                std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+                let mut files: Vec<(String, &str)> =
+                    vec![(sources[0].clone(), request.lift.source.as_str())];
+                for f in &request.lift.additional_sources {
+                    files.push((f.name.clone(), f.content.as_str()));
+                }
+                files.push(("tb.cpp".to_string(), bench.tb_cpp.as_str()));
+                files.push(("Makefile".to_string(), bench.makefile.as_str()));
+                files.push(("replay.gtkw".to_string(), gtkw.as_str()));
+                for (name, content) in files {
+                    let path = dir.join(&name);
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent)
+                            .map_err(|e| format!("{}: {e}", parent.display()))?;
+                    }
+                    std::fs::write(&path, content)
+                        .map_err(|e| format!("{}: {e}", path.display()))?;
+                }
+                Ok(())
+            })();
+            let run = staged.and_then(|()| run_replay(&dir, true));
+            if std::env::var_os("MUNUNU_KEEP_VERILATOR_TMP").is_none() {
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+            ReplayResultView::from_run(bench.checks, run)
         });
-        if let (Some(trace), Some(tb)) = (row.trace.as_mut(), testbench) {
+        if let Some(trace) = row.trace.as_mut() {
             trace.replay = Some(TraceReplay {
-                testbench: Some(tb),
+                testbench: Some(TestbenchView {
+                    tb_cpp: bench.tb_cpp,
+                    makefile: bench.makefile,
+                    checks: bench.checks,
+                    skipped: bench.skipped,
+                }),
+                gtkw: Some(gtkw),
+                dir: None,
+                result,
             });
         }
     }
@@ -2275,6 +2325,14 @@ fn sv_verify_auto_handler_impl(
     // `serde_json::json!` literal; see the `From` impl's doc comment for why there is now
     // exactly one.
     let mut response = SvVerifyAutoResponse::from(&report);
+    if request.replay && !request.emit_testbench {
+        return Err(ApiError::BadRequest {
+            message:
+                "replay needs emit_testbench: the replay runs the testbench the request asks for"
+                    .to_string(),
+            details: None,
+        });
+    }
     if request.emit_testbench {
         attach_testbenches(&request, &report, &mut response)?;
     }

@@ -305,6 +305,11 @@
       },
       "type": "array"
     },
+    "replay": {
+      "default": false,
+      "description": "Build and run each replay testbench under Verilator on the server (`make`, then `make trace`) and report the result on the row (`trace.replay.result`: match / mismatch / unavailable with its reason); needs `emit_testbench` (2026-10-29).",
+      "type": "boolean"
+    },
     "rescue": {
       "default": null,
       "description": "The ⊥ escalations (default `true`, the CLI's `--no-rescue` sets `false`): a property the cube leaves ⊥ is retried by the lane for its shape — a reducible safety invariant by the reachability portfolio, a box-AF response by liveness-to-safety plus the portfolio, an `AG EF (REG == VALUE)` recoverability by the cube with `smt-hyper-must`. `false` reports the cube's ⊥ unchanged.",

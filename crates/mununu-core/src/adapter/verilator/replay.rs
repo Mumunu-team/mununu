@@ -363,3 +363,311 @@ mod tests {
         );
     }
 }
+
+// -------------------------------------------------------------------------------------------------
+// Running the bench (2026-10-29). `--replay` / `replay: true` build and run what `--emit-testbench`
+// wrote, so the report carries the simulator's verdict instead of leaving `make` to the reader;
+// `replay.gtkw` opens the VCD on the trace's own signals.
+
+/// One mismatching comparison the bench printed: `cycle N: NAME = 0xGOT, trace says 0xWANT`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplayMismatch {
+    pub cycle: u32,
+    pub register: String,
+    pub got: String,
+    pub expected: String,
+}
+
+/// What the bench's output says, read from `make` / `make trace` output.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReplayParse {
+    /// `Some(true)` on a `MATCH` line, `Some(false)` on `MISMATCH (n)`, `None` when the bench never
+    /// reached its verdict (a compile error, a missing tool).
+    pub matched: Option<bool>,
+    pub mismatches: usize,
+    pub first_mismatch: Option<ReplayMismatch>,
+    /// Verilator's `Assertion failed` lines (`%Error: ` stripped): the design's own assertion
+    /// firing on the final state.
+    pub assertions: Vec<String>,
+    /// `make trace` printed `wrote replay.vcd`.
+    pub vcd_written: bool,
+}
+
+/// Parse the bench's output. Pure, so the lines the bench prints and the lines the report reads
+/// are pinned against each other (the seam).
+pub fn parse_replay_output(text: &str) -> ReplayParse {
+    let mut p = ReplayParse::default();
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line == "MATCH" {
+            p.matched = Some(true);
+        } else if let Some(rest) = line.strip_prefix("MISMATCH (") {
+            p.matched = Some(false);
+            p.mismatches = rest.trim_end_matches(')').trim().parse().unwrap_or(0);
+        } else if let Some(rest) = line.strip_prefix("cycle ") {
+            if p.first_mismatch.is_none()
+                && let Some((cyc, tail)) = rest.split_once(": ")
+                && let Some((reg, vals)) = tail.split_once(" = ")
+                && let Some((got, want)) = vals.split_once(", trace says ")
+                && let Ok(cycle) = cyc.trim().parse::<u32>()
+            {
+                p.first_mismatch = Some(ReplayMismatch {
+                    cycle,
+                    register: reg.trim().to_string(),
+                    got: got.trim().to_string(),
+                    expected: want.trim().to_string(),
+                });
+            }
+        } else if line.contains("Assertion failed") {
+            p.assertions
+                .push(line.trim_start_matches("%Error: ").to_string());
+        } else if line == "wrote replay.vcd" {
+            p.vcd_written = true;
+        }
+    }
+    p
+}
+
+/// The bench, built and run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplayRun {
+    pub parse: ReplayParse,
+    /// `replay.vcd`'s size when `make trace` wrote it.
+    pub vcd_bytes: Option<u64>,
+    /// The bench's own lines — verdict, mismatches, assertions, the VCD line — for the report.
+    pub log: String,
+    /// Everything `make` printed, for `replay.log`.
+    pub output: String,
+    pub verilator_version: String,
+}
+
+/// Build and run the bench in `dir`: `make`, then `make trace` when `with_trace`. `Err` names what
+/// stopped it — Verilator or `make` missing, a compile error — so the report says
+/// `replay: unavailable — …` rather than nothing. An explicit `MUNUNU_VERILATOR_PATH` reaches the
+/// Makefile as `VERILATOR=`.
+pub fn run_replay(dir: &std::path::Path, with_trace: bool) -> Result<ReplayRun, String> {
+    let verilator = crate::adapter::verilator::locate_verilator().map_err(|e| e.message)?;
+    let run = |target: Option<&str>| -> Result<String, String> {
+        let mut cmd = std::process::Command::new("make");
+        cmd.arg("-C").arg(dir);
+        if let Some(t) = target {
+            cmd.arg(t);
+        }
+        if verilator.path.is_absolute() {
+            cmd.arg(format!("VERILATOR={}", verilator.path.display()));
+        }
+        let out = cmd
+            .output()
+            .map_err(|e| format!("make: {e} (is `make` installed?)"))?;
+        Ok(format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ))
+    };
+    let mut output = run(None)?;
+    let mut parse = parse_replay_output(&output);
+    if parse.matched.is_none() {
+        let tail: Vec<&str> = output.lines().rev().take(6).collect();
+        return Err(format!(
+            "the bench did not reach its verdict (verilator {}): {}",
+            verilator.version,
+            tail.into_iter().rev().collect::<Vec<_>>().join(" | ")
+        ));
+    }
+    let mut vcd_bytes = None;
+    if with_trace {
+        let t = run(Some("trace"))?;
+        let pt = parse_replay_output(&t);
+        if pt.vcd_written {
+            vcd_bytes = std::fs::metadata(dir.join("replay.vcd"))
+                .ok()
+                .map(|m| m.len());
+        }
+        parse.vcd_written = pt.vcd_written;
+        output.push_str(&t);
+    }
+    let log = output
+        .lines()
+        .map(str::trim)
+        .filter(|l| {
+            *l == "MATCH"
+                || l.starts_with("MISMATCH (")
+                || l.starts_with("cycle ")
+                || l.contains("Assertion failed")
+                || *l == "wrote replay.vcd"
+        })
+        .map(|l| l.trim_start_matches("%Error: ").to_string())
+        // `make trace` re-runs the bench, so its verdict line repeats: keep one.
+        .fold(Vec::<String>::new(), |mut acc, l| {
+            if acc.last() != Some(&l) {
+                acc.push(l);
+            }
+            acc
+        })
+        .join("\n");
+    Ok(ReplayRun {
+        parse,
+        vcd_bytes,
+        log,
+        output,
+        verilator_version: verilator.version,
+    })
+}
+
+/// A GTKWave save file for `replay.vcd`: the clock, the trace's inputs and the registers it names,
+/// in trace order, under `TOP.<top>.` as Verilator dumps them (`--public-flat-rw` puts every design
+/// signal there; a hierarchical name keeps its dots). Vectors show in decimal, as the report prints
+/// them. Open with `gtkwave replay.vcd replay.gtkw` from the bench's directory.
+pub fn gtkwave_save(design: &ReplayDesign<'_>, cex: &ExactCounterexample) -> String {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut inputs: Vec<(String, u32)> = Vec::new();
+    for (name, v) in cex.inputs.first().into_iter().flatten() {
+        if name == design.clock || synthetic(name) || !seen.insert(name.clone()) {
+            continue;
+        }
+        inputs.push((name.clone(), v.bits()));
+    }
+    let mut regs: Vec<(String, u32)> = Vec::new();
+    for (name, v) in cex.prefix.first().into_iter().flatten() {
+        if synthetic(name) || !seen.insert(name.clone()) {
+            continue;
+        }
+        regs.push((name.clone(), v.bits()));
+    }
+    let sig = |name: &str, bits: u32| -> String {
+        if bits <= 1 {
+            format!("@28\nTOP.{}.{name}\n", design.top)
+        } else {
+            format!("@24\nTOP.{}.{name}[{}:0]\n", design.top, bits - 1)
+        }
+    };
+    let mut s = String::new();
+    s.push_str("[*]\n[*] GTKWave Analyzer save file, generated by mununu `sv verify-auto --emit-testbench`:\n");
+    s.push_str("[*] the clock, the trace's inputs and the registers it names. Open: gtkwave replay.vcd replay.gtkw\n[*]\n");
+    s.push_str("[dumpfile] \"replay.vcd\"\n[timestart] 0\n[size] 1400 800\n[pos] -1 -1\n");
+    s.push_str(&format!(
+        "[treeopen] TOP.\n[treeopen] TOP.{}.\n[sst_width] 240\n[signals_width] 280\n[sst_expanded] 1\n",
+        design.top
+    ));
+    s.push_str(&sig(design.clock, 1));
+    if !inputs.is_empty() {
+        s.push_str("@200\n-inputs\n");
+        for (n, b) in &inputs {
+            s.push_str(&sig(n, *b));
+        }
+    }
+    if !regs.is_empty() {
+        s.push_str("@200\n-registers\n");
+        for (n, b) in &regs {
+            s.push_str(&sig(n, *b));
+        }
+    }
+    s.push_str("[pattern_trace] 1\n[pattern_trace] 0\n");
+    s
+}
+
+#[cfg(test)]
+mod run_tests {
+    use super::*;
+
+    /// The lines the bench prints are the lines the report reads: MATCH, MISMATCH with its first
+    /// cycle line, Verilator's assertion line, the VCD line.
+    #[test]
+    fn the_bench_output_parses_into_verdict_mismatch_assertion_and_vcd() {
+        let ok = parse_replay_output(
+            "verilator: building\nMATCH\n%Error: p_sva.sv:14: Assertion failed in TOP.p.u_sva: a_one\nwrote replay.vcd\n",
+        );
+        assert_eq!(ok.matched, Some(true));
+        assert_eq!(ok.mismatches, 0);
+        assert_eq!(
+            ok.assertions,
+            vec!["p_sva.sv:14: Assertion failed in TOP.p.u_sva: a_one".to_string()]
+        );
+        assert!(ok.vcd_written);
+        let bad = parse_replay_output(
+            "cycle 3: state_q = 0x2, trace says 0x1\ncycle 4: lof_q = 0x0, trace says 0x1\nMISMATCH (2)\n",
+        );
+        assert_eq!(bad.matched, Some(false));
+        assert_eq!(bad.mismatches, 2);
+        assert_eq!(
+            bad.first_mismatch,
+            Some(ReplayMismatch {
+                cycle: 3,
+                register: "state_q".into(),
+                got: "0x2".into(),
+                expected: "0x1".into()
+            })
+        );
+        assert!(!bad.vcd_written);
+        let none = parse_replay_output(
+            "%Error: Cannot find file containing module: 'x'\nmake: *** [obj_dir/Vx] Error 1\n",
+        );
+        assert_eq!(
+            none.matched, None,
+            "no verdict line means the bench never ran"
+        );
+    }
+
+    /// The save file lists the clock, then the inputs, then the registers, under `TOP.<top>.`, with
+    /// vectors ranged and in decimal and 1-bit signals in binary; synthetic cells and the clock
+    /// among the inputs are left out.
+    #[test]
+    fn the_gtkwave_save_file_lists_the_traces_signals_in_order() {
+        use crate::adapter::btor2::cex_value::CexValue;
+        let cell = |n: &str, v: u64, b: u32| (n.to_string(), CexValue::from_u64(v, b));
+        let cex = ExactCounterexample {
+            prefix: vec![vec![
+                cell("state_q", 1, 2),
+                cell("start_a", 1, 1),
+                cell("mununu_wit_0", 0, 1),
+                cell("u_sva.seen", 0, 1),
+            ]],
+            cycle: Vec::new(),
+            inputs: vec![vec![
+                cell("clk", 0, 1),
+                cell("flow", 0, 1),
+                cell("start_cmd", 1, 1),
+            ]],
+            unreachable_target: Vec::new(),
+        };
+        let sources = vec!["pump_pair.sv".to_string()];
+        let design = ReplayDesign {
+            top: "pump_pair",
+            clock: "clk",
+            reset: None,
+            sources: &sources,
+        };
+        let gtkw = gtkwave_save(&design, &cex);
+        let signals: Vec<&str> = gtkw
+            .lines()
+            .filter(|l| l.starts_with("TOP.") || l.starts_with('-'))
+            .collect();
+        assert_eq!(
+            signals,
+            vec![
+                "TOP.pump_pair.clk",
+                "-inputs",
+                "TOP.pump_pair.flow",
+                "TOP.pump_pair.start_cmd",
+                "-registers",
+                "TOP.pump_pair.state_q[1:0]",
+                "TOP.pump_pair.start_a",
+                "TOP.pump_pair.u_sva.seen"
+            ]
+        );
+        assert!(
+            gtkw.contains("@24\nTOP.pump_pair.state_q[1:0]"),
+            "a vector shows in decimal"
+        );
+        assert!(
+            gtkw.contains("@28\nTOP.pump_pair.start_a"),
+            "a bit shows in binary"
+        );
+        assert!(
+            !gtkw.contains("mununu_wit_0"),
+            "a monitor cell has no RTL signal"
+        );
+        assert!(gtkw.contains("[dumpfile] \"replay.vcd\""));
+    }
+}
