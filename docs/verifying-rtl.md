@@ -347,10 +347,14 @@ mununu --quiet sv verify-auto design.sv --source design_sva.sv --top design --js
 ```jsonc
 {
   "properties": [
-    { "name": "dut_sva_0", "kind": "assert", "formula": "nu X. …", "outcome": "holds",
-      "detail": null, "seeded_predicates": ["st_q == 2"] },
-    { "name": "dut_sva_1", "kind": "assert", "formula": "nu X. …", "outcome": "unknown",
-      "detail": "32768 cell(s)", "unknown_cells": 32768, "seeded_predicates": [] }
+    { "name": "dut_sva_0", "kind": "assert", "formula": "nu X. …", "formula_language": "mu-calculus",
+      "outcome": "holds", "detail": null, "seeded_predicates": ["st_q == 2"] },
+    { "name": "dut_sva_1", "kind": "assert", "formula": "nu X. …", "formula_language": "mu-calculus",
+      "outcome": "unknown", "detail": "32768 cell(s)", "unknown_cells": 32768, "seeded_predicates": [] },
+    { "name": "ann_guarantee_0", "label": "alternates", "kind": "assert",
+      "formula": "G (start_a -> X (!start_a W start_b))", "formula_language": "ltl",
+      "translated": "(nu G1. …)", "outcome": "violated", "detail": "1 cell(s)", "false_cells": 1,
+      "seeded_predicates": [] }
   ],
   "unsupported": [ { "name": "dut_sva_2", "kind": null,
                      "reason": "unsupported binary op: BinaryAnd" } ],
