@@ -464,19 +464,33 @@ mod tests {
     }
 }
 
-/// Where every port, net and variable is declared, from slang's own AST with
-/// `--ast-json-source-info` (2026-10-29): the one source of declaration lines that does not depend
-/// on the lift's front end — yosys-slang stamps them on the netlist only in recent builds, yosys's
-/// `read_verilog` does, sv2v never. Runs on the ORIGINAL staged files (the SVA extraction's own
-/// run works on a preprocessed copy whose lines are shifted). Names are spelled as the lift
-/// spells them: the top instance's members bare, a nested instance's as `inst.name`, a generate
-/// block's `gen[k]` as `gen$k`.
-pub fn run_declarations(
+/// What slang's own AST says about where the design's names live in the RTL (2026-10-29/30),
+/// from one run with `--ast-json-source-info` on the ORIGINAL staged files (the SVA extraction's
+/// own run works on a preprocessed copy whose lines are shifted). It does not depend on the lift's
+/// front end: yosys-slang stamps lines on the netlist only in recent builds, yosys's `read_verilog`
+/// does, sv2v never. Names are spelled as the lift spells them: the top instance's members bare, a
+/// nested instance's as `inst.name`, a generate block's `gen[k]` as `gen$k`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SourceIndex {
+    /// Every port, net and variable with its declaration; the first declaration of a name wins.
+    pub declared: Vec<(String, crate::trace::SourceLoc)>,
+    /// Per name: the header line of each edge-triggered procedural block (`always_ff`,
+    /// `always @(posedge …)`) that assigns it — the line yosys stamps on the flop it infers.
+    pub flop_blocks: std::collections::BTreeMap<String, Vec<crate::trace::SourceLoc>>,
+    /// Per name: the line of every statement that writes it — procedural assignments in any
+    /// `always` block and continuous `assign`s (not `initial` / `final`).
+    pub writes: std::collections::BTreeMap<String, Vec<crate::trace::SourceLoc>>,
+    /// Per concurrent assertion: its report name (the translator's), its label, its line.
+    pub assertions: Vec<(String, Option<String>, crate::trace::SourceLoc)>,
+}
+
+/// Run slang once more with `--ast-json-source-info` and read the [`SourceIndex`] from its AST.
+pub fn run_source_index(
     bin: &SlangBin,
     files: &[PathBuf],
     include_dirs: &[PathBuf],
     params: &[(String, String)],
-) -> Result<Vec<(String, crate::trace::SourceLoc)>, AdapterError> {
+) -> Result<SourceIndex, AdapterError> {
     let mut args = ast_json_args(files, include_dirs, params);
     args.push("--ast-json-source-info".into());
     let mut cmd = Command::new(&bin.path);
@@ -487,89 +501,303 @@ pub fn run_declarations(
         return Err(AdapterError {
             kind: AdapterErrorKind::ParseError,
             message: format!(
-                "adapter/slang: the declarations run produced no AST (status {}). stderr: {}",
+                "adapter/slang: the source-index run produced no AST (status {}). stderr: {}",
                 out.status,
                 String::from_utf8_lossy(&out.stderr).trim()
             ),
             location: None,
         });
     }
-    Ok(declarations_from_ast(&json))
+    source_index_from_ast(&json).ok_or_else(|| AdapterError {
+        kind: AdapterErrorKind::ParseError,
+        message: "adapter/slang: the source-index run's AST is not valid JSON".to_string(),
+        location: None,
+    })
 }
 
-/// The declarations of a slang AST dumped with `--ast-json-source-info`: `Root → members →
-/// Instance → body (InstanceBody) → members`, where a `Port` / `Variable` / `Net` carries
-/// `source_file` and `source_line`. The first declaration of a name wins (a port appears as both a
-/// `Port` and a `Variable` / `Net` on the same line). Pure, so the shape is pinned by a test.
-pub fn declarations_from_ast(json: &str) -> Vec<(String, crate::trace::SourceLoc)> {
-    use crate::trace::SourceLoc;
-    let Ok(root) = serde_json::from_str::<serde_json::Value>(json) else {
-        return Vec::new();
+/// The [`SourceIndex`] of an AST dumped with `--ast-json-source-info`; `None` when it is not JSON.
+/// Pure, so each part's shape is pinned by a test on real slang output.
+pub fn source_index_from_ast(json: &str) -> Option<SourceIndex> {
+    let root: serde_json::Value = {
+        use serde::Deserialize as _;
+        // Deeply nested expressions exceed serde_json's default recursion limit (the translator
+        // lifts it for the same trusted AST).
+        let mut de = serde_json::Deserializer::from_str(json);
+        de.disable_recursion_limit();
+        serde_json::Value::deserialize(&mut de).ok()?
     };
-    let mut out: Vec<(String, SourceLoc)> = Vec::new();
+    let mut index = SourceIndex {
+        assertions: translate::assertion_sites(&root),
+        ..SourceIndex::default()
+    };
     let mut seen = std::collections::BTreeSet::new();
-    fn segment(name: &str) -> String {
-        // `gen[3]` → `gen$3`, the lift's spelling (mununu#713).
-        name.replace('[', "$").replace(']', "")
-    }
-    fn walk(
-        node: &serde_json::Value,
-        prefix: &str,
-        top: bool,
-        out: &mut Vec<(String, SourceLoc)>,
-        seen: &mut std::collections::BTreeSet<String>,
-    ) {
-        let Some(obj) = node.as_object() else {
-            if let Some(items) = node.as_array() {
-                for item in items {
-                    walk(item, prefix, top, out, seen);
-                }
-            }
-            return;
-        };
+    let bodies = translate::collect_instance_bodies(&root);
+    walk_scopes(&root, "", true, &bodies, &mut |obj, prefix| {
         let kind = obj.get("kind").and_then(|k| k.as_str()).unwrap_or("");
         let name = obj.get("name").and_then(|n| n.as_str()).unwrap_or("");
         match kind {
             "Port" | "Variable" | "Net" if !name.is_empty() => {
-                if let (Some(file), Some(line)) = (
-                    obj.get("source_file").and_then(|f| f.as_str()),
-                    obj.get("source_line").and_then(|l| l.as_u64()),
-                ) {
+                if let Some(loc) = point_loc(obj, "source_file", "source_line") {
                     let full = format!("{prefix}{name}");
                     if seen.insert(full.clone()) {
-                        let file = file.rsplit('/').next().unwrap_or(file).to_string();
-                        out.push((
-                            full,
-                            SourceLoc {
-                                file,
-                                line: u32::try_from(line).unwrap_or(u32::MAX),
-                            },
-                        ));
+                        index.declared.push((full, loc));
                     }
                 }
             }
-            "Instance" | "GenerateBlock" if !top && !name.is_empty() => {
-                let child = format!("{prefix}{}.", segment(name));
-                for key in ["body", "members"] {
-                    if let Some(v) = obj.get(key) {
-                        walk(v, &child, false, out, seen);
+            "ProceduralBlock" => {
+                let proc_kind = obj
+                    .get("procedureKind")
+                    .and_then(|k| k.as_str())
+                    .unwrap_or("");
+                if matches!(proc_kind, "Initial" | "Final") {
+                    return;
+                }
+                let Some(body) = obj.get("body") else { return };
+                let mut targets: Vec<(String, crate::trace::SourceLoc)> = Vec::new();
+                collect_assignments(body, &mut targets);
+                let edge = proc_kind == "AlwaysFF" || (proc_kind == "Always" && has_edge(body));
+                let block = point_loc(obj, "source_file", "source_line");
+                for (target, at) in targets {
+                    let full = format!("{prefix}{target}");
+                    if edge && let Some(block) = &block {
+                        push_unique(index.flop_blocks.entry(full.clone()).or_default(), block);
+                    }
+                    push_unique(index.writes.entry(full).or_default(), &at);
+                }
+            }
+            "ContinuousAssign" => {
+                if let Some(assignment) = obj.get("assignment") {
+                    let mut targets = Vec::new();
+                    collect_assignments(assignment, &mut targets);
+                    for (target, at) in targets {
+                        push_unique(
+                            index.writes.entry(format!("{prefix}{target}")).or_default(),
+                            &at,
+                        );
                     }
                 }
-                return;
             }
             _ => {}
         }
-        // The top instance (a direct member of the root) keeps bare names; everything else
-        // descends with the prefix it has.
-        let next_top = top && kind != "Instance";
-        for key in ["members", "body", "design"] {
-            if let Some(v) = obj.get(key) {
-                walk(v, prefix, next_top, out, seen);
+    });
+    // In line order: the walk visits a statement's keys alphabetically (`else` before `then`).
+    for lines in index
+        .flop_blocks
+        .values_mut()
+        .chain(index.writes.values_mut())
+    {
+        lines.sort();
+    }
+    Some(index)
+}
+
+/// The declarations of a slang AST dumped with `--ast-json-source-info` (the
+/// [`SourceIndex::declared`] part on its own).
+pub fn declarations_from_ast(json: &str) -> Vec<(String, crate::trace::SourceLoc)> {
+    source_index_from_ast(json)
+        .map(|i| i.declared)
+        .unwrap_or_default()
+}
+
+/// A symbol's position (`source_file` / `source_line`) or a statement's (`source_file_start` /
+/// `source_line_start`), as a basename and a line.
+fn point_loc(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    file_key: &str,
+    line_key: &str,
+) -> Option<crate::trace::SourceLoc> {
+    let file = obj.get(file_key).and_then(|f| f.as_str())?;
+    let line = obj.get(line_key).and_then(|l| l.as_u64())?;
+    Some(crate::trace::SourceLoc {
+        file: file.rsplit('/').next().unwrap_or(file).to_string(),
+        line: u32::try_from(line).unwrap_or(u32::MAX),
+    })
+}
+
+fn push_unique(list: &mut Vec<crate::trace::SourceLoc>, loc: &crate::trace::SourceLoc) {
+    if !list.contains(loc) {
+        list.push(loc.clone());
+    }
+}
+
+/// Walk the instance tree, calling `visit` on every object with the name prefix it sits under:
+/// `Root → members → Instance → body (InstanceBody) → members`. The top instance (a direct member
+/// of the root) keeps bare names; a nested instance or a named generate block extends the prefix;
+/// a `for` generate's iteration is `<array>$<genvar value>` (the lift's spelling of `gen[k]`,
+/// mununu#713); an uninstantiated block (the branch elaboration did not take) is skipped; an
+/// instance whose body slang serialised once and refers to by address is resolved through
+/// `bodies` — the same rules the translator's assertion walk follows.
+fn walk_scopes<'a>(
+    node: &'a serde_json::Value,
+    prefix: &str,
+    top: bool,
+    bodies: &std::collections::HashMap<u64, &'a serde_json::Value>,
+    visit: &mut dyn FnMut(&'a serde_json::Map<String, serde_json::Value>, &str),
+) {
+    let Some(obj) = node.as_object() else {
+        if let Some(items) = node.as_array() {
+            for item in items {
+                walk_scopes(item, prefix, top, bodies, visit);
             }
         }
+        return;
+    };
+    // `u[3]` / `gen[3]` → `$3`, the lift's spelling (mununu#713).
+    fn segment(name: &str) -> String {
+        name.replace('[', "$").replace(']', "")
     }
-    walk(&root, "", true, &mut out, &mut seen);
-    out
+    let kind = obj.get("kind").and_then(|k| k.as_str()).unwrap_or("");
+    let name = obj.get("name").and_then(|n| n.as_str()).unwrap_or("");
+    if obj.get("isUninstantiated").and_then(|u| u.as_bool()) == Some(true) {
+        return;
+    }
+    match kind {
+        "Instance" if !top && !name.is_empty() => {
+            let child = format!("{prefix}{}.", segment(name));
+            let body = match obj.get("body") {
+                Some(serde_json::Value::String(r)) => r
+                    .split(' ')
+                    .next()
+                    .and_then(|a| a.parse::<u64>().ok())
+                    .and_then(|a| bodies.get(&a).copied()),
+                other => other,
+            };
+            if let Some(body) = body {
+                walk_scopes(body, &child, false, bodies, visit);
+            }
+            return;
+        }
+        "GenerateBlock" if !name.is_empty() => {
+            let child = format!("{prefix}{}.", segment(name));
+            if let Some(v) = obj.get("members") {
+                walk_scopes(v, &child, false, bodies, visit);
+            }
+            return;
+        }
+        "GenerateBlockArray" => {
+            let var = obj
+                .get("loopVariable")
+                .and_then(|v| v.as_str())
+                .and_then(|v| v.rsplit(' ').next())
+                .unwrap_or("");
+            for block in obj
+                .get("members")
+                .and_then(|m| m.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|b| b.as_object())
+                .filter(|b| b.get("kind").and_then(|k| k.as_str()) == Some("GenerateBlock"))
+                .filter(|b| b.get("isUninstantiated").and_then(|u| u.as_bool()) != Some(true))
+            {
+                let genvar = block
+                    .get("members")
+                    .and_then(|m| m.as_array())
+                    .into_iter()
+                    .flatten()
+                    .find(|m| {
+                        m.get("kind").and_then(|k| k.as_str()) == Some("Parameter")
+                            && m.get("name").and_then(|n| n.as_str()) == Some(var)
+                    })
+                    .and_then(|m| m.get("value"))
+                    .and_then(|v| v.as_str())
+                    .and_then(translate::parse_sv_literal);
+                // An iteration whose index cannot be read keeps a prefix no lift name matches.
+                let index = genvar.map_or_else(|| "?".to_string(), |v| v.to_string());
+                let child = format!("{prefix}{name}${index}.");
+                if let Some(v) = block.get("members") {
+                    walk_scopes(v, &child, false, bodies, visit);
+                }
+            }
+            return;
+        }
+        _ => {}
+    }
+    visit(obj, prefix);
+    let next_top = top && kind != "Instance";
+    for key in ["members", "body", "design"] {
+        if let Some(v) = obj.get(key) {
+            walk_scopes(v, prefix, next_top, bodies, visit);
+        }
+    }
+}
+
+/// Every `Assignment` under `node` (a procedural block's body, a continuous assign) with the
+/// name(s) it writes and the statement's line. The written name is the left-hand side's root
+/// signal: through a bit / part select and a member access, every operand of a concatenation;
+/// never the select's index (which is read, not written).
+fn collect_assignments(node: &serde_json::Value, out: &mut Vec<(String, crate::trace::SourceLoc)>) {
+    fn targets(lhs: &serde_json::Value, out: &mut Vec<String>) {
+        let Some(obj) = lhs.as_object() else { return };
+        match obj.get("kind").and_then(|k| k.as_str()).unwrap_or("") {
+            "NamedValue" => {
+                if let Some(sym) = obj.get("symbol").and_then(|s| s.as_str()) {
+                    // `"<addr> <name>"`.
+                    let name = sym.split_once(' ').map_or(sym, |(_, n)| n);
+                    out.push(name.to_string());
+                }
+            }
+            "ElementSelect" | "RangeSelect" | "MemberAccess" => {
+                if let Some(v) = obj.get("value") {
+                    targets(v, out);
+                }
+            }
+            "Concatenation" => {
+                for op in obj
+                    .get("operands")
+                    .and_then(|o| o.as_array())
+                    .into_iter()
+                    .flatten()
+                {
+                    targets(op, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    match node {
+        serde_json::Value::Object(obj) => {
+            if obj.get("kind").and_then(|k| k.as_str()) == Some("Assignment")
+                && let Some(at) = point_loc(obj, "source_file_start", "source_line_start")
+            {
+                let mut names = Vec::new();
+                if let Some(lhs) = obj.get("left") {
+                    targets(lhs, &mut names);
+                }
+                for n in names {
+                    out.push((n, at.clone()));
+                }
+            }
+            for v in obj.values() {
+                collect_assignments(v, out);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for v in items {
+                collect_assignments(v, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Whether a procedural block's timing control names a clock edge (`always @(posedge clk)`).
+fn has_edge(body: &serde_json::Value) -> bool {
+    let Some(timing) = body.get("timing") else {
+        return false;
+    };
+    fn any_edge(v: &serde_json::Value) -> bool {
+        match v {
+            serde_json::Value::Object(o) => {
+                matches!(
+                    o.get("edge").and_then(|e| e.as_str()),
+                    Some("PosEdge" | "NegEdge" | "BothEdges")
+                ) || o.values().any(any_edge)
+            }
+            serde_json::Value::Array(a) => a.iter().any(any_edge),
+            _ => false,
+        }
+    }
+    any_edge(timing)
 }
 
 #[cfg(test)]
@@ -610,5 +838,97 @@ mod declaration_tests {
             ]
         );
         assert!(declarations_from_ast("not json").is_empty());
+    }
+
+    const SOURCE_INDEX_FORMS: &str = include_str!("testdata/source_index_forms.ast.json");
+
+    fn lines(
+        index: &std::collections::BTreeMap<String, Vec<crate::trace::SourceLoc>>,
+        name: &str,
+    ) -> Vec<u32> {
+        index
+            .get(name)
+            .map(|l| l.iter().map(|l| l.line).collect())
+            .unwrap_or_default()
+    }
+
+    /// Real slang 11.0 output (`testdata/source_index_forms.sv`): an `always_comb` writes but is
+    /// not a flop block; `always_ff` and Verilog `always @(posedge)` are; a bit-select writes its
+    /// array (never the index it reads), a concatenation writes each operand, a continuous assign
+    /// writes its target; a `for` generate's iterations are `gen$0` / `gen$1`, the second one's
+    /// instance body serialised by address and still walked.
+    #[test]
+    fn the_source_index_reads_assignments_blocks_and_generate_iterations_from_real_slang() {
+        let index = source_index_from_ast(SOURCE_INDEX_FORMS).expect("the fixture is JSON");
+        assert_eq!(lines(&index.flop_blocks, "state_q"), vec![24]);
+        assert_eq!(lines(&index.flop_blocks, "bits"), vec![29]);
+        assert_eq!(lines(&index.flop_blocks, "a"), vec![29]);
+        assert_eq!(lines(&index.flop_blocks, "b"), vec![29]);
+        assert!(
+            !index.flop_blocks.contains_key("state_d") && !index.flop_blocks.contains_key("done"),
+            "combinational writes are not flop blocks"
+        );
+        assert!(!index.flop_blocks.contains_key("state_q[0]") && !index.writes.contains_key("go"));
+        assert_eq!(lines(&index.writes, "state_d"), vec![20, 21]);
+        assert_eq!(lines(&index.writes, "state_q"), vec![25, 26]);
+        assert_eq!(lines(&index.writes, "bits"), vec![30]);
+        assert_eq!(lines(&index.writes, "done"), vec![34]);
+        for k in ["gen$0.u_leaf.q", "gen$1.u_leaf.q"] {
+            assert_eq!(lines(&index.flop_blocks, k), vec![5], "{k}");
+        }
+        let declared = |name: &str| {
+            index
+                .declared
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, l)| l.to_string())
+        };
+        assert_eq!(
+            declared("state_q").as_deref(),
+            Some("source_index_forms.sv:12")
+        );
+        assert_eq!(
+            declared("state_d").as_deref(),
+            Some("source_index_forms.sv:14")
+        );
+        assert_eq!(
+            declared("gen$1.u_leaf.q").as_deref(),
+            Some("source_index_forms.sv:4")
+        );
+        let sites: Vec<(String, Option<String>, u32)> = index
+            .assertions
+            .iter()
+            .map(|(n, l, at)| (n.clone(), l.clone(), at.line))
+            .collect();
+        assert_eq!(
+            sites,
+            vec![
+                ("top_sva_0".to_string(), Some("a_wraps".to_string()), 40),
+                ("top_sva_1".to_string(), None, 41),
+            ]
+        );
+    }
+
+    /// The seam the property's `source` line rests on: the index names each assertion exactly as
+    /// the translator names its row, label included, on the same AST.
+    #[test]
+    fn the_index_names_each_assertion_as_the_translator_names_its_row() {
+        let report =
+            translate::translate_ast_json(SOURCE_INDEX_FORMS).expect("the fixture translates");
+        assert!(report.unsupported.is_empty(), "{:?}", report.unsupported);
+        let mut rows: Vec<(String, Option<String>)> = report
+            .translated
+            .iter()
+            .map(|t| (t.name.clone(), t.label.clone()))
+            .collect();
+        rows.sort();
+        let index = source_index_from_ast(SOURCE_INDEX_FORMS).expect("JSON");
+        let mut sites: Vec<(String, Option<String>)> = index
+            .assertions
+            .iter()
+            .map(|(n, l, _)| (n.clone(), l.clone()))
+            .collect();
+        sites.sort();
+        assert_eq!(rows, sites);
     }
 }

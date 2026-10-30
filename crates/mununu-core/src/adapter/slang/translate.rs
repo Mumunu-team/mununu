@@ -377,6 +377,50 @@ pub fn translate_ast_json_with_options(
     translate_ast_json_with_source(json, None, opts)
 }
 
+/// Where each concurrent assertion is written (2026-10-30): its report name — the
+/// `<instance prefix><module>_sva_<index>` [`translate_ast_json_with_source`] gives it, from the
+/// same walk over the same elaborated design — its label, and the statement's first line, read
+/// from an AST dumped with `--ast-json-source-info`. An assertion the dump gives no position is
+/// left out. The caller joins on the name AND the label, so a run whose assertions differ from
+/// the extraction's places nothing rather than the wrong line.
+pub(crate) fn assertion_sites(
+    root: &Value,
+) -> Vec<(String, Option<String>, crate::trace::SourceLoc)> {
+    let mut scopes = Hierarchy::default();
+    let bodies = collect_instance_bodies(root);
+    let mut found: Vec<FoundAssertion<'_>> = Vec::new();
+    collect_assertions(
+        root,
+        &Walk {
+            enclosing: "design",
+            label: None,
+            scope: None,
+            rel: String::new(),
+            genvars: Vec::new(),
+        },
+        &bodies,
+        &mut scopes,
+        &mut found,
+    );
+    found
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, f)| {
+            let prefix = f.scope.as_ref().map_or("", |s| s.prefix.as_str());
+            let file = f.node.get("source_file_start").and_then(Value::as_str)?;
+            let line = f.node.get("source_line_start").and_then(Value::as_u64)?;
+            Some((
+                format!("{prefix}{}_sva_{idx}", f.module),
+                f.label.clone(),
+                crate::trace::SourceLoc {
+                    file: file.rsplit('/').next().unwrap_or(file).to_string(),
+                    line: u32::try_from(line).unwrap_or(u32::MAX),
+                },
+            ))
+        })
+        .collect()
+}
+
 /// [`translate_ast_json_with_options`] with the PREPROCESSED source the JSON was dumped from
 /// (`--ast-json-source-info` spans index into it) — what a hierarchical reference into a module
 /// instantiated more than once is read from (mununu#722, [`scope_refs`]). `None` keeps every
@@ -796,7 +840,7 @@ fn input_connections(
 
 /// Every `InstanceBody` by address — the target of an instance whose `body` is a reference
 /// (`"<addr> <module>"`) to a body serialised under an earlier instance.
-fn collect_instance_bodies(root: &Value) -> std::collections::HashMap<u64, &Value> {
+pub(crate) fn collect_instance_bodies(root: &Value) -> std::collections::HashMap<u64, &Value> {
     fn walk<'a>(n: &'a Value, out: &mut std::collections::HashMap<u64, &'a Value>) {
         match n {
             Value::Object(m) => {
@@ -4298,7 +4342,7 @@ fn constant_disable(cond: &Value) -> Option<bool> {
 
 /// Parse SystemVerilog integer-literal text. `"8"`→8, `"8'd5"`→5, `"1'b0"`→0,
 /// `"4'hff"`→255, `"3'b101"`→5. Returns `None` for X/Z digits or malformed text.
-fn parse_sv_literal(raw: &str) -> Option<i64> {
+pub(crate) fn parse_sv_literal(raw: &str) -> Option<i64> {
     let s: String = raw
         .chars()
         .filter(|c| !c.is_whitespace() && *c != '_')

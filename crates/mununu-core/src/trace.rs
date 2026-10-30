@@ -74,11 +74,14 @@ pub struct TraceNames {
     /// The map places some cells but not everything (`source_map` says what is missing);
     /// `false` with `source_map = Some(…)` means nothing could be placed.
     pub source_map_partial: bool,
+    /// The lift's front end rewrote the source before yosys read it (sv2v), so the netlist's
+    /// lines are the rewrite's: the map takes every line from slang's AST instead.
+    pub source_lines_rewritten: bool,
 }
 
 /// A place in the RTL: the file's basename and a line (yosys's `src` keeps the path and the
 /// column; the report keeps what a reader opens).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[cfg_attr(feature = "api", derive(schemars::JsonSchema))]
 pub struct SourceLoc {
     pub file: String,
@@ -101,6 +104,43 @@ impl std::fmt::Display for SourceLoc {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}:{}", self.file, self.line)
     }
+}
+
+/// Source lines as one short line of text (2026-10-30): grouped by file in sorted order, each
+/// run of consecutive lines as a range — `pump_pair.sv:24-25, 31, 52; pump_pair_sva.sv:16`.
+pub fn compact_lines(locs: &[SourceLoc]) -> String {
+    let mut sorted: Vec<&SourceLoc> = locs.iter().collect();
+    sorted.sort();
+    sorted.dedup();
+    let mut files: Vec<(String, Vec<String>)> = Vec::new();
+    let mut i = 0;
+    while i < sorted.len() {
+        let file = &sorted[i].file;
+        let start = sorted[i].line;
+        let mut end = start;
+        while i + 1 < sorted.len()
+            && sorted[i + 1].file == *file
+            && sorted[i + 1].line == end.saturating_add(1)
+        {
+            i += 1;
+            end = sorted[i].line;
+        }
+        let run = if end > start {
+            format!("{start}-{end}")
+        } else {
+            start.to_string()
+        };
+        match files.last_mut() {
+            Some((f, runs)) if f == file => runs.push(run),
+            _ => files.push((file.clone(), vec![run])),
+        }
+        i += 1;
+    }
+    files
+        .into_iter()
+        .map(|(f, runs)| format!("{f}:{}", runs.join(", ")))
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// Where a trace cell lives in the RTL (2026-10-29).
@@ -741,6 +781,34 @@ mod tests {
 #[cfg(test)]
 mod source_tests {
     use super::*;
+
+    /// The `involves:` text line: files sorted, runs of consecutive lines collapsed, duplicates
+    /// dropped, a file's lines never merged across a file boundary.
+    #[test]
+    fn source_lines_compact_into_ranges_per_file() {
+        let at = |file: &str, line: u32| SourceLoc {
+            file: file.into(),
+            line,
+        };
+        assert_eq!(
+            compact_lines(&[
+                at("pump_pair_sva.sv", 16),
+                at("pump_pair.sv", 52),
+                at("pump_pair.sv", 24),
+                at("pump_pair.sv", 25),
+                at("pump_pair.sv", 31),
+                at("pump_pair.sv", 25),
+                at("pump_pair.sv", 53),
+                at("pump_pair.sv", 54),
+            ]),
+            "pump_pair.sv:24-25, 31, 52-54; pump_pair_sva.sv:16"
+        );
+        assert_eq!(compact_lines(&[]), "");
+        assert_eq!(
+            compact_lines(&[at("a.sv", 9), at("b.sv", 10)]),
+            "a.sv:9; b.sv:10"
+        );
+    }
 
     #[test]
     fn a_yosys_src_attribute_parses_to_its_file_and_first_line() {

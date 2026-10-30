@@ -285,6 +285,53 @@ pub fn cone_leaf_nids(file: &Btor2File, atoms: &[String]) -> HashSet<Nid> {
 /// Time O(N + E) integer reachability (a dense `seen`/`leaves` over line NIDs),
 /// no per-symbol `String` hashing / dep-graph allocation.
 fn cone_reachable_leaves(file: &Btor2File, atoms: &[String]) -> HashSet<Nid> {
+    cone_closure(file, atoms).0
+}
+
+/// The names the cone of influence of `atoms` reaches (2026-10-30, the source map's `involves`):
+/// every named `state` / `input` in it, and every named wire — yosys keeps a wire's name as a
+/// no-op alias line (`uext W n 0 state_d`) whose operand is the wire's value, so a wire is in the
+/// cone when that operand is; an output port is in the cone when its driver is. The same closure as [`cone_leaf_nids`] (data flow, `next`, and the
+/// constraint / fairness pullback); display only — no engine reads it.
+pub fn cone_named_signals(
+    file: &Btor2File,
+    atoms: &[String],
+) -> std::collections::BTreeSet<String> {
+    let (_, visited) = cone_closure(file, atoms);
+    let mut names = std::collections::BTreeSet::new();
+    for line in &file.lines {
+        match &line.node {
+            Node::State {
+                symbol: Some(s), ..
+            }
+            | Node::Input {
+                symbol: Some(s), ..
+            } if visited.contains(&line.nid) => {
+                names.insert(s.clone());
+            }
+            Node::Op {
+                symbol: Some(s),
+                args,
+                ..
+            } if args.first().is_some_and(|a| visited.contains(&a.nid())) => {
+                names.insert(s.clone());
+            }
+            // An output port names its driver; the sv2v lift names its registers only this way
+            // (the `state` lines are anonymous).
+            Node::Output {
+                signal,
+                symbol: Some(s),
+            } if visited.contains(&signal.nid()) => {
+                names.insert(s.clone());
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
+/// [`cone_reachable_leaves`] with the set of every node the closure visited.
+fn cone_closure(file: &Btor2File, atoms: &[String]) -> (HashSet<Nid>, HashSet<Nid>) {
     let symbols = parser::collect_symbols(file);
 
     // state NID -> its `next` value operand (one pass). `init` is intentionally
@@ -338,7 +385,7 @@ fn cone_reachable_leaves(file: &Btor2File, atoms: &[String]) -> HashSet<Nid> {
         drain_cone(file, &next_val, &mut work, &mut seen, &mut leaves);
     }
 
-    leaves
+    (leaves, seen)
 }
 
 /// Drain `work`, closing the cone under combinational fan-in AND the temporal
@@ -810,6 +857,33 @@ pub fn bit_cone_bits(cone: &HashMap<Nid, Vec<bool>>) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The four ways a name enters the cone, in the lifts' own shapes: a named `state`, an
+    /// `input`, a wire's no-op `uext … 0 name` alias (yosys-slang / read_verilog), and an `output`
+    /// naming an anonymous `state` (the sv2v lift names its registers only that way). A register
+    /// the property does not depend on, and an output of it, stay out.
+    #[test]
+    fn cone_named_signals_reads_states_inputs_wire_aliases_and_outputs() {
+        const MODEL: &str = "\
+1 sort bitvec 1
+2 input 1 go
+3 state 1 q
+4 state 1
+5 output 4 start_a
+6 and 1 2 3
+7 uext 1 6 0 q_d
+8 next 1 3 6
+9 next 1 4 3
+10 state 1 other
+11 next 1 10 10
+12 output 10 other_o
+";
+        let file = parser::parse(MODEL).unwrap();
+        let names: Vec<String> = cone_named_signals(&file, &["start_a".to_string()])
+            .into_iter()
+            .collect();
+        assert_eq!(names, vec!["go", "q", "q_d", "start_a"]);
+    }
 
     const SAFETY_DEMO: &str = include_str!("../../../../../examples/btor2/safety_demo.btor");
 

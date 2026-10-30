@@ -516,6 +516,16 @@ pub struct ModelDiagnostics {
     /// other provenance of the property set (`fault_sites` names its rows the same way) because
     /// the row struct keeps the mu-calculus, which the post-passes re-parse.
     pub written_formulas: Vec<(String, crate::adapter::slang::translate::WrittenFormula)>,
+    /// Where each property is written in the RTL (2026-10-30), by row name: an SVA row's
+    /// assertion statement (slang's AST), an annotation row's `@mununu_guarantee` comment (the
+    /// scanner). A template row has no source line and is absent.
+    pub property_sources: Vec<(String, crate::trace::SourceLoc)>,
+    /// The RTL lines of each property's cone of influence (2026-10-30), by row name: for every
+    /// register, input and named wire the property depends on, its declaration, the `always`
+    /// block(s) driving it and every statement that writes it — sorted, de-duplicated. The code
+    /// the verdict is about, not a causal slice of a counterexample. Absent when the source map
+    /// placed nothing in the cone.
+    pub involves: Vec<(String, Vec<crate::trace::SourceLoc>)>,
     /// How the counterexamples name the lift's registers and clocks (display only; see
     /// [`crate::trace::TraceNames`]).
     pub trace_names: crate::trace::TraceNames,
@@ -936,6 +946,24 @@ pub struct AutoVerifyReport {
 /// (cut) module whose registers became free inputs, or a model with no state
 /// registers at all. Pure so it can be unit-tested without the toolchain.
 impl AutoVerifyReport {
+    /// Where the property is written in the RTL, when known (2026-10-30).
+    pub fn property_source(&self, name: &str) -> Option<&crate::trace::SourceLoc> {
+        self.diagnostics
+            .property_sources
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, l)| l)
+    }
+
+    /// The RTL lines of the property's cone of influence; empty when unknown (2026-10-30).
+    pub fn involves(&self, name: &str) -> &[crate::trace::SourceLoc] {
+        self.diagnostics
+            .involves
+            .iter()
+            .find(|(n, _)| n == name)
+            .map_or(&[], |(_, l)| l.as_slice())
+    }
+
     /// The property as its author wrote it, when that is not the mu-calculus in the row's
     /// `formula` (an `@mununu_guarantee ltl …` row); `None` for every other row (2026-10-29).
     pub fn written_formula(
@@ -950,40 +978,49 @@ impl AutoVerifyReport {
     }
 }
 
-/// Complete the source map from slang's declarations (2026-10-29): every cell the netlist knows
-/// but could not place gets its declaration by name, and the status is settled — `available`
-/// when every cell has a declaration and the lift stamped its `always` blocks, `partial` with the
-/// reason when something is missing (the sv2v path has no assignment lines; an older yosys-slang
-/// stamps cells but not nets, which the AST covers; a cell the AST did not declare under that
-/// name stays bare), `unavailable` when nothing could be placed.
+/// Complete the source map from slang's AST (2026-10-29/30): every cell the netlist knows but could
+/// not place gets its declaration by name, every register without a stamped `always` line gets the
+/// edge-triggered block(s) the AST says assign it, and the status is settled — `available` when
+/// every cell has its declaration and every register its block, `partial` with the reason when
+/// something is missing (a name the lift mangled, e.g. sv2v's `sv2v_cast_…$result`, is not in the
+/// AST under that name and stays bare; it is listed, never guessed), `unavailable` when nothing
+/// could be placed.
 pub(crate) fn fill_declarations(
     names: &mut crate::trace::TraceNames,
     declarations: &crate::adapter::slang::extract::Declarations,
 ) {
-    let mut gaps: Vec<String> = Vec::new();
+    let mut undeclared: Vec<String> = Vec::new();
+    let mut unassigned: Vec<String> = Vec::new();
     match declarations {
-        Ok(decls) => {
+        Ok(index) => {
             for s in &mut names.sources {
                 if s.declared.is_none() {
-                    s.declared = decls
+                    s.declared = index
+                        .declared
                         .iter()
                         .find(|(n, _)| *n == s.cell)
                         .map(|(_, l)| l.clone());
                     if s.declared.is_none() {
-                        gaps.push(s.cell.clone());
+                        undeclared.push(s.cell.clone());
+                    }
+                }
+                if s.kind == "register" && s.assigned.is_empty() {
+                    s.assigned = index.flop_blocks.get(&s.cell).cloned().unwrap_or_default();
+                    if s.assigned.is_empty() {
+                        unassigned.push(s.cell.clone());
                     }
                 }
             }
         }
         Err(why) => {
-            let undeclared = names
+            let unplaced = names
                 .sources
                 .iter()
-                .filter(|s| s.declared.is_none())
+                .filter(|s| s.declared.is_none() || (s.kind == "register" && s.assigned.is_empty()))
                 .count();
-            if undeclared > 0 {
-                gaps.push(format!(
-                    "{undeclared} cell(s): the declarations run failed — {why}"
+            if unplaced > 0 {
+                undeclared.push(format!(
+                    "{unplaced} cell(s): the slang source-index run failed — {why}"
                 ));
             }
         }
@@ -1004,8 +1041,20 @@ pub(crate) fn fill_declarations(
         return;
     }
     let mut reasons: Vec<String> = names.source_map.take().into_iter().collect();
-    if !gaps.is_empty() {
-        reasons.push(format!("no declaration for {}", gaps.join(", ")));
+    if !undeclared.is_empty() {
+        reasons.push(format!("no declaration for {}", undeclared.join(", ")));
+    }
+    if !unassigned.is_empty() {
+        let why = if names.source_lines_rewritten {
+            " (sv2v rewrote the source, so the lines come from slang's AST, which does not \
+             know these names)"
+        } else {
+            ""
+        };
+        reasons.push(format!(
+            "no assignment line for {}{why}",
+            unassigned.join(", ")
+        ));
     }
     names.source_map_partial = !reasons.is_empty();
     names.source_map = (!reasons.is_empty()).then(|| reasons.join("; "));
@@ -1020,6 +1069,37 @@ fn written_formulas_of(
     translated
         .iter()
         .filter_map(|t| t.written.clone().map(|w| (t.name.clone(), w)))
+        .collect()
+}
+
+/// Where each translated property is written (2026-10-30): an SVA row joins the AST's assertion
+/// sites on its name AND its label — the source-index run elaborates the same files, so the names
+/// agree; a label that does not match means the two runs saw different assertions, and the row
+/// gets no line rather than a wrong one. An annotation row takes its comment's line.
+fn property_sources_of(
+    translated: &[crate::adapter::slang::translate::TranslatedAssertion],
+    index: &crate::adapter::slang::extract::Declarations,
+    annotation_lines: &[(String, crate::trace::SourceLoc)],
+) -> Vec<(String, crate::trace::SourceLoc)> {
+    let sites: &[(String, Option<String>, crate::trace::SourceLoc)] = match index {
+        Ok(i) => &i.assertions,
+        Err(_) => &[],
+    };
+    translated
+        .iter()
+        .filter_map(|t| {
+            annotation_lines
+                .iter()
+                .find(|(n, _)| *n == t.name)
+                .map(|(_, l)| l.clone())
+                .or_else(|| {
+                    sites
+                        .iter()
+                        .find(|(n, label, _)| *n == t.name && *label == t.label)
+                        .map(|(_, _, l)| l.clone())
+                })
+                .map(|l| (t.name.clone(), l))
+        })
         .collect()
 }
 
@@ -1771,6 +1851,64 @@ fn withhold_violated_over_free_leaves(report: &mut AutoVerifyReport, model_btor2
             leaves: leaves.into_iter().collect(),
         });
     }
+}
+
+/// The RTL lines of every row's cone of influence (2026-10-30), into
+/// [`ModelDiagnostics::involves`]: the cone's named registers, inputs and wires
+/// ([`crate::adapter::btor2::dep_graph::cone_named_signals`] over the model the engines ran), each
+/// mapped through the source map (declaration, `always` block) and slang's AST (declaration, every
+/// statement that writes it). A name neither knows — a monitor or fault cell the rewrite added, a
+/// name the lift mangled — contributes nothing. Display only: no verdict is read or changed.
+fn attach_involves(
+    report: &mut AutoVerifyReport,
+    model_btor2: &str,
+    index: &crate::adapter::slang::extract::Declarations,
+) {
+    let index = index.as_ref().ok();
+    if report.diagnostics.trace_names.sources.is_empty() && index.is_none() {
+        return;
+    }
+    let Ok(file) = crate::adapter::btor2::parser::parse(model_btor2) else {
+        return;
+    };
+    let sources = &report.diagnostics.trace_names.sources;
+    let aliases = &report.diagnostics.trace_names.aliases;
+    let mut involves = Vec::new();
+    for p in &report.properties {
+        let Ok(formula) = crate::mu_calculus::parser::parse(&p.formula) else {
+            continue;
+        };
+        let atoms = crate::adapter::btor2::symbolic_bitblast::formula_seed_atoms(&formula);
+        if atoms.is_empty() {
+            continue;
+        }
+        let mut lines: std::collections::BTreeSet<crate::trace::SourceLoc> =
+            std::collections::BTreeSet::new();
+        // A register the model names through a bound checker's port (`u_x_sva.state_q`) is the
+        // design's own net on the same bits: its lines are the design's, not the port's.
+        let cone: std::collections::BTreeSet<String> =
+            crate::adapter::btor2::dep_graph::cone_named_signals(&file, &atoms)
+                .into_iter()
+                .map(|n| aliases.get(&n).cloned().unwrap_or(n))
+                .collect();
+        for name in cone {
+            if let Some(cell) = sources.iter().find(|s| s.cell == name) {
+                lines.extend(cell.declared.iter().cloned());
+                lines.extend(cell.assigned.iter().cloned());
+            } else if let Some((_, l)) =
+                index.and_then(|i| i.declared.iter().find(|(n, _)| *n == name))
+            {
+                lines.insert(l.clone());
+            }
+            if let Some(w) = index.and_then(|i| i.writes.get(&name)) {
+                lines.extend(w.iter().cloned());
+            }
+        }
+        if !lines.is_empty() {
+            involves.push((p.name.clone(), lines.into_iter().collect()));
+        }
+    }
+    report.diagnostics.involves = involves;
 }
 
 fn drop_stale_bottom_reasons(report: &mut AutoVerifyReport) {
@@ -2871,6 +3009,9 @@ struct AnnotationScan {
     /// `@mununu_guarantee <mu-calculus>` properties that parsed, as
     /// `TranslatedAssertion`s ready to merge into `extraction.translated`.
     guarantees: Vec<crate::adapter::slang::translate::TranslatedAssertion>,
+    /// Where each of [`Self::guarantees`] is written (the comment's file and line), by row name;
+    /// a template instance has no source line and is absent (2026-10-30).
+    guarantee_lines: Vec<(String, crate::trace::SourceLoc)>,
     /// `@mununu_assume <body>` bodies (verbatim) that were NOT recognised as
     /// typed fairness / config assumes — recorded for provenance. A
     /// `<signal> = <value>` assume is applied by this path via config
@@ -2922,7 +3063,14 @@ fn scan_annotation_properties(sources: &[(String, String)]) -> AnnotationScan {
 
     let mut scan = AnnotationScan::default();
     let mut idx = 0usize;
-    for (_name, content) in sources {
+    for (source_name, content) in sources {
+        // A template instance lives in a synthetic source the user never wrote.
+        let written_by_user = !source_name.starts_with("__mununu_");
+        let file = source_name
+            .rsplit('/')
+            .next()
+            .unwrap_or(source_name)
+            .to_string();
         for ann in extract_from_sv_source(content) {
             match ann.tag {
                 MununuTag::Guarantee => {
@@ -3017,6 +3165,15 @@ fn scan_annotation_properties(sources: &[(String, String)]) -> AnnotationScan {
                                     prev.name
                                 ));
                                 continue;
+                            }
+                            if written_by_user && let Some(line) = ann.source_line {
+                                scan.guarantee_lines.push((
+                                    format!("ann_guarantee_{idx}"),
+                                    crate::trace::SourceLoc {
+                                        file: file.clone(),
+                                        line,
+                                    },
+                                ));
                             }
                             scan.guarantees.push(TranslatedAssertion {
                                 name: format!("ann_guarantee_{idx}"),
@@ -4173,20 +4330,14 @@ pub(crate) fn lift_sv(
     // input / output) stay, the lines go, and the status says what is missing.
     let mut sources = crate::adapter::yosys::cell_sources(&lift.flat_netlist_json);
     crate::adapter::yosys::name_staged_primary(&mut sources, primary_name);
-    let source_map = if lift.sv2v_ran {
+    // The sv2v path: the netlist's lines are sv2v's output's; the kinds (register / input /
+    // output) stay, every line comes from slang's AST at the hand-off.
+    if lift.sv2v_ran {
         for s in &mut sources {
             s.declared = None;
             s.assigned.clear();
         }
-        Some(
-            "the assignment lines are unavailable: sv2v preprocessed the source before yosys \
-             read it, so the netlist's lines are sv2v's, not the RTL's; lift without sv2v \
-             (--frontend slang) for them"
-                .to_string(),
-        )
-    } else {
-        None
-    };
+    }
     Ok(PreLift {
         // mununu#713 — `gen[k]` as `gen$k`, the spelling the translator gives the same names.
         btor2: crate::adapter::btor2::parser::flat_symbol_names(&lift.btor2),
@@ -4199,7 +4350,7 @@ pub(crate) fn lift_sv(
             aliases: crate::adapter::yosys::trace_aliases(&lift.flat_netlist_json),
             clocks: lift.clock_domains.iter().map(|d| d.net.clone()).collect(),
             sources,
-            source_map,
+            source_lines_rewritten: lift.sv2v_ran,
             ..Default::default()
         },
         clock_domains: lift.clock_domains,
@@ -4433,6 +4584,9 @@ pub(crate) struct PreparedModel {
     applied_config_values: Vec<(String, u64)>,
     /// The fault posture as applied (`--fault` / `--fault-model`), `None` without one.
     fault: Option<crate::adapter::btor2::fault::FaultApplied>,
+    /// slang's source index of the design (or why that run failed): the `involves` post-pass maps
+    /// each row's cone through it (2026-10-30).
+    source_index: crate::adapter::slang::extract::Declarations,
 }
 
 impl PreparedModel {
@@ -4572,6 +4726,11 @@ pub(crate) fn prepare_model(
         },
         diagnostics: ModelDiagnostics {
             written_formulas: written_formulas_of(&extraction.translated),
+            property_sources: property_sources_of(
+                &extraction.translated,
+                &declarations,
+                &ann_scan.guarantee_lines,
+            ),
             ..Default::default()
         },
         ..Default::default()
@@ -4977,6 +5136,7 @@ pub(crate) fn prepare_model(
         ann_scan,
         applied_config_values,
         fault,
+        source_index: declarations,
     })))
 }
 
@@ -5537,6 +5697,7 @@ pub(crate) fn verify_auto_impl(
         ann_scan,
         applied_config_values,
         fault,
+        source_index,
     } = match prepared {
         Some(m) => m,
         None => match prepare_model(sources, yosys_opts, opts)? {
@@ -6675,6 +6836,8 @@ pub(crate) fn verify_auto_impl(
     attach_safety_witnesses(&mut report, &btor2, reset_pinned);
     // mununu#750 — after the witness, so a withheld violation keeps its trace as a may-trace.
     withhold_violated_over_free_leaves(&mut report, &btor2);
+    // 2026-10-30 — the RTL lines of each row's cone (display only; reads no verdict).
+    attach_involves(&mut report, &btor2, &source_index);
     // mununu#579 — last of the verdict post-passes: everything above may still CHANGE a verdict, and
     // a self-contradiction must be judged on the verdicts the report actually ships.
     flag_self_contradictory_verdicts(&mut report);
@@ -19309,10 +19472,20 @@ mod source_map_tests {
         }
     }
 
+    fn index(declared: Vec<(&str, SourceLoc)>) -> crate::adapter::slang::SourceIndex {
+        crate::adapter::slang::SourceIndex {
+            declared: declared
+                .into_iter()
+                .map(|(n, l)| (n.to_string(), l))
+                .collect(),
+            ..Default::default()
+        }
+    }
+
     /// A gap the netlist left (an older yosys-slang stamps cells, not nets) is filled from the
     /// AST by name; a cell the AST does not declare is named in the reason and the map is
-    /// `partial`; everything placed is available; the sv2v path keeps its reason and is partial;
-    /// nothing placed at all is unavailable with its reason.
+    /// `partial`; everything placed is available; nothing placed at all is unavailable with its
+    /// reason.
     #[test]
     fn declarations_fill_the_gaps_and_settle_the_status() {
         let mut names = TraceNames {
@@ -19328,10 +19501,10 @@ mod source_map_tests {
             ],
             ..Default::default()
         };
-        let decls = Ok(vec![
-            ("state_q".to_string(), loc("pump_pair.sv", 32)),
-            ("flow".to_string(), loc("x.sv", 1)),
-        ]);
+        let decls = Ok(index(vec![
+            ("state_q", loc("pump_pair.sv", 32)),
+            ("flow", loc("x.sv", 1)),
+        ]));
         fill_declarations(&mut names, &decls);
         assert_eq!(
             names.sources[0].declared,
@@ -19353,23 +19526,11 @@ mod source_map_tests {
             sources: vec![cell("q", "register", None, vec![loc("a.sv", 5)])],
             ..Default::default()
         };
-        fill_declarations(&mut full, &Ok(vec![("q".to_string(), loc("a.sv", 2))]));
+        fill_declarations(&mut full, &Ok(index(vec![("q", loc("a.sv", 2))])));
         assert!(
             !full.source_map_partial && full.source_map.is_none(),
             "every cell placed: available"
         );
-
-        let mut sv2v = TraceNames {
-            sources: vec![cell("q", "register", None, vec![])],
-            source_map: Some("the assignment lines are unavailable: sv2v …".into()),
-            ..Default::default()
-        };
-        fill_declarations(&mut sv2v, &Ok(vec![("q".to_string(), loc("a.sv", 2))]));
-        assert!(
-            sv2v.source_map_partial,
-            "declarations only: partial, with sv2v's reason kept"
-        );
-        assert_eq!(sv2v.sources[0].declared, Some(loc("a.sv", 2)));
 
         let mut none = TraceNames {
             sources: vec![cell("q", "register", None, vec![])],
@@ -19385,5 +19546,165 @@ mod source_map_tests {
             "{:?}",
             none.source_map
         );
+    }
+
+    /// The sv2v path (2026-10-30): the netlist's lines are sv2v's, so the lift clears them and the
+    /// AST supplies both halves — a register's `always_ff` line from its flop blocks. A name sv2v
+    /// mangled is not in the AST: it stays without a line and the reason lists it, never a guess.
+    #[test]
+    fn the_sv2v_path_takes_its_assignment_lines_from_the_ast_and_lists_what_it_cannot_place() {
+        let mut ast = index(vec![("state_q", loc("pump_pair.sv", 32))]);
+        ast.flop_blocks
+            .insert("state_q".into(), vec![loc("pump_pair.sv", 52)]);
+        let mut placed = TraceNames {
+            sources: vec![cell("state_q", "register", None, vec![])],
+            source_lines_rewritten: true,
+            ..Default::default()
+        };
+        fill_declarations(&mut placed, &Ok(ast.clone()));
+        assert_eq!(placed.sources[0].declared, Some(loc("pump_pair.sv", 32)));
+        assert_eq!(placed.sources[0].assigned, vec![loc("pump_pair.sv", 52)]);
+        assert!(
+            !placed.source_map_partial && placed.source_map.is_none(),
+            "every cell placed from the AST: available, sv2v or not — {:?}",
+            placed.source_map
+        );
+
+        let mut mangled = TraceNames {
+            sources: vec![
+                cell("state_q", "register", None, vec![]),
+                cell("u_fsm.sv2v_cast_2$result", "register", None, vec![]),
+            ],
+            source_lines_rewritten: true,
+            ..Default::default()
+        };
+        fill_declarations(&mut mangled, &Ok(ast));
+        assert!(mangled.source_map_partial);
+        let reason = mangled.source_map.unwrap_or_default();
+        assert!(
+            reason.contains("no assignment line for u_fsm.sv2v_cast_2$result (sv2v rewrote"),
+            "{reason}"
+        );
+        assert!(
+            reason.contains("no declaration for u_fsm.sv2v_cast_2$result"),
+            "{reason}"
+        );
+        assert!(mangled.sources[1].declared.is_none() && mangled.sources[1].assigned.is_empty());
+    }
+
+    fn row(
+        name: &str,
+        label: Option<&str>,
+    ) -> crate::adapter::slang::translate::TranslatedAssertion {
+        crate::adapter::slang::translate::TranslatedAssertion {
+            name: name.into(),
+            label: label.map(str::to_string),
+            kind: SvaKind::Assert,
+            formula: "nu X. (true && [] X)".into(),
+            recoverability_companion: None,
+            written: None,
+        }
+    }
+
+    /// A row's `source`: an SVA row joins the AST's assertion sites on its name AND its label (a
+    /// label that disagrees means the runs saw different assertions: no line, not a wrong one); an
+    /// annotation row takes its comment's line; a template row has none.
+    #[test]
+    fn a_rows_source_joins_on_name_and_label_and_never_guesses() {
+        let ast = crate::adapter::slang::SourceIndex {
+            assertions: vec![
+                (
+                    "top_sva_0".into(),
+                    Some("a_wraps".into()),
+                    loc("dut.sv", 40),
+                ),
+                ("top_sva_1".into(), None, loc("dut.sv", 41)),
+                ("top_sva_2".into(), Some("a_old".into()), loc("dut.sv", 42)),
+            ],
+            ..Default::default()
+        };
+        let translated = vec![
+            row("top_sva_0", Some("a_wraps")),
+            row("top_sva_1", None),
+            row("top_sva_2", Some("a_renamed")),
+            row("ann_guarantee_0", None),
+            row("tmpl.rtl_never.x", Some("tmpl.rtl_never.x")),
+        ];
+        let got: Vec<(String, String)> = property_sources_of(
+            &translated,
+            &Ok(ast),
+            &[("ann_guarantee_0".into(), loc("dut.sv", 7))],
+        )
+        .into_iter()
+        .map(|(n, l)| (n, l.to_string()))
+        .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("top_sva_0".to_string(), "dut.sv:40".to_string()),
+                ("top_sva_1".to_string(), "dut.sv:41".to_string()),
+                ("ann_guarantee_0".to_string(), "dut.sv:7".to_string()),
+            ]
+        );
+        assert!(property_sources_of(&translated, &Err("no slang".into()), &[]).is_empty());
+    }
+
+    /// `involves` (2026-10-30): a row lists the lines of what its cone reaches — the register it
+    /// reads, the wire and input feeding that register's `next` — and nothing of a register
+    /// outside the cone. The model is the lift's shape: `state_d` is a named wire (a no-op `uext`
+    /// alias), `other` an unrelated register.
+    #[test]
+    fn involves_lists_the_cones_lines_and_nothing_outside_it() {
+        const MODEL: &str = "\
+1 sort bitvec 1
+2 sort bitvec 2
+3 input 1 go
+4 state 2 state_q
+5 state 2 other
+6 one 2
+7 add 2 4 6
+8 ite 2 3 7 4
+9 uext 2 8 0 state_d
+10 next 2 4 8
+11 next 2 5 5
+";
+        let mut report = AutoVerifyReport::default();
+        report.properties.push(PropertyVerdict {
+            name: "p".into(),
+            label: None,
+            kind: SvaKind::Assert,
+            formula: "nu X. ((state_q != 3) && [] X)".into(),
+            outcome: VerifyOutcome::Holds,
+            seeded_predicates: Vec::new(),
+            counterexample: None,
+            bottom_reason: None,
+            decided_by: None,
+            vacuity: None,
+        });
+        report.diagnostics.trace_names.sources = vec![
+            cell(
+                "state_q",
+                "register",
+                Some(loc("dut.sv", 12)),
+                vec![loc("dut.sv", 24)],
+            ),
+            cell("go", "input", Some(loc("dut.sv", 11)), vec![]),
+            cell(
+                "other",
+                "register",
+                Some(loc("dut.sv", 15)),
+                vec![loc("dut.sv", 29)],
+            ),
+        ];
+        let mut ast = index(vec![("state_d", loc("dut.sv", 14))]);
+        ast.writes
+            .insert("state_d".into(), vec![loc("dut.sv", 20), loc("dut.sv", 21)]);
+        ast.writes
+            .insert("state_q".into(), vec![loc("dut.sv", 25), loc("dut.sv", 26)]);
+        ast.writes.insert("other".into(), vec![loc("dut.sv", 30)]);
+        attach_involves(&mut report, MODEL, &Ok(ast));
+        let lines: Vec<u32> = report.involves("p").iter().map(|l| l.line).collect();
+        assert_eq!(lines, vec![11, 12, 14, 20, 21, 24, 25, 26]);
+        assert!(report.involves("absent").is_empty());
     }
 }
