@@ -353,7 +353,9 @@ fn native_engine_adjudication_over_btor2tools_suite() {
 #[ignore = "provide MUNUNU_HWMCC_DIR (user-downloaded HWMCC benchmarks); run in mununu-sva"]
 fn hwmcc_adjudication_over_user_dir() {
     use mununu_core::adapter::btor2::parser::parse as parse_btor2;
-    use mununu_core::adapter::reach_portfolio::{ReachVerdict, decide_reach_portfolio};
+    use mununu_core::adapter::reach_portfolio::{
+        ReachOutcome, ReachVerdict, decide_reach_portfolio,
+    };
 
     let Some(dir) = std::env::var_os("MUNUNU_HWMCC_DIR") else {
         eprintln!("MUNUNU_HWMCC_DIR unset — nothing to adjudicate (see the doc comment).");
@@ -378,6 +380,7 @@ fn hwmcc_adjudication_over_user_dir() {
     );
 
     let (mut total, mut decided, mut reach, mut unreach) = (0u32, 0u32, 0u32, 0u32);
+    let mut walled = 0u32;
     let mut contradictions: Vec<String> = Vec::new();
     let mut label_mismatch: Vec<String> = Vec::new();
     let mut by_engine: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
@@ -418,10 +421,37 @@ fn hwmcc_adjudication_over_user_dir() {
         };
         // mununu#738 — a per-instance run budget the members poll (the exact engine between its
         // stages, the z3 members per query, the subprocesses as a wall limit).
+        // mununu#816 — and a HARD WALL beside it: one exact-engine fixpoint step is a single
+        // OxiDD apply that no poll can interrupt (`vis_arrays_bufferAlloc`'s third step runs
+        // past 24 min after a 1.9-s second step, so even the step predictor cannot see it
+        // coming). The portfolio therefore runs on a detached thread that re-enters the budget
+        // (a thread-local: a spawned thread inherits none); the harness waits for the budget
+        // plus a grace and otherwise records ⊥ and moves on. The abandoned member finishes its
+        // apply, sees the expired budget at its next poll and exits; until then it holds one
+        // core and its arena — the trade #504 refused for the production path and this
+        // measurement harness accepts, one instance at a time.
         let budget = mununu_core::adapter::run_budget::Budget::with_ms(budget_ms);
-        let out = {
-            let _g = mununu_core::adapter::run_budget::enter(&budget);
-            decide_reach_portfolio(&file)
+        let (tx, rx) = std::sync::mpsc::channel();
+        {
+            let file = file.clone();
+            let budget = budget.clone();
+            std::thread::spawn(move || {
+                let _g = mununu_core::adapter::run_budget::enter(&budget);
+                let _ = tx.send(decide_reach_portfolio(&file));
+            });
+        }
+        const WALL_GRACE: std::time::Duration = std::time::Duration::from_secs(15);
+        let out = match rx.recv_timeout(std::time::Duration::from_millis(budget_ms) + WALL_GRACE) {
+            Ok(out) => out,
+            Err(_) => {
+                eprintln!(
+                    "  {fname:44} WALL — the portfolio did not return within the budget + {} s; \
+                     abandoned (a member's single BDD apply cannot be interrupted, mununu#816)",
+                    WALL_GRACE.as_secs()
+                );
+                walled += 1;
+                ReachOutcome::default()
+            }
         };
         // Ground truth from the -sat/-unsat filename convention.
         let label = if fname.contains("-sat") {
@@ -465,7 +495,7 @@ fn hwmcc_adjudication_over_user_dir() {
         "-----------------------------------------------------------------------------------"
     );
     eprintln!(
-        "  benchmarks {total};  decided {decided} (reachable {reach}, unreachable {unreach});  abstained {}",
+        "  benchmarks {total};  decided {decided} (reachable {reach}, unreachable {unreach});  abstained {} (walled {walled})",
         total - decided
     );
     eprintln!("  per-engine contributions: {by_engine:?}");
