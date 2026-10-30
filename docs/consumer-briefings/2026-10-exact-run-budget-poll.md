@@ -46,5 +46,5 @@
 
 ## Not covered here
 
-- The bit-blasting phase itself (building the transition relation) is not polled; it is bounded by the bit cap, not by time.
+- The bit-blasting phase itself (building the transition relation) is not polled; it is bounded by the bit cap, not by time. Polled since mununu#816: see [the follow-up briefing](2026-10-exact-run-budget-steps-and-owned-driver.md).
 - Folding the run budget into the exact model's `deadline` (which would also enable the deadline-gated collection lever) — deliberately not done, to keep budgeted verdicts otherwise identical.
