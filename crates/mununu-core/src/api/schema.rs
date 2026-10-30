@@ -334,6 +334,26 @@ mod tests {
                         text: "G (req -> F ack)".into(),
                     },
                 )],
+                property_sources: vec![(
+                    "ann_guarantee_0".into(),
+                    crate::trace::SourceLoc {
+                        file: "dut.sv".into(),
+                        line: 7,
+                    },
+                )],
+                involves: vec![(
+                    "ann_guarantee_0".into(),
+                    vec![
+                        crate::trace::SourceLoc {
+                            file: "dut.sv".into(),
+                            line: 12,
+                        },
+                        crate::trace::SourceLoc {
+                            file: "dut.sv".into(),
+                            line: 24,
+                        },
+                    ],
+                )],
                 fault_sites: vec![crate::adapter::btor2::fault::FaultSiteReport {
                     register: "a".into(),
                     width: 2,

@@ -96,6 +96,8 @@ Rust source: [`PropertyVerdictView`](../../crates/mununu-core/src/api/models.rs#
   "formula":            "nu X. ((!req || [] grant) && [] X)",  // as written for an `ltl` annotation row; else the mu-calc lift
   "formula_language":   "mu-calculus",         // "mu-calculus" | "ltl" — how to read `formula`
   "translated":         "...",                  // the mu-calculus the engine decided; present only on an `ltl` row
+  "source":             {"file": "dut_sva.sv", "line": 19},   // where the property is written; absent when unknown
+  "involves":           [{"file": "dut.sv", "line": 24}],  // the RTL lines of the property's cone; absent when empty
   "outcome":            "holds",               // canonical PropertyVerdict as-string
   "detail":             "cube: 0 false / 12 unknown", // optional; skip reason, cell counts
   "seeded_predicates":  ["req == 1", "grant == 1"],   // atoms auto-seeded for this property
@@ -118,6 +120,8 @@ Rust source: [`PropertyVerdictView`](../../crates/mununu-core/src/api/models.rs#
 - `formula` — the property as its author wrote it when that was not mu-calculus (an `@mununu_guarantee ltl …` row shows its LTL, 2026-10-29); otherwise the mu-calc string the engine actually evaluated, round-trip-parseable via `mu_calculus::parser::parse`.
 - `formula_language` — `"mu-calculus"` | `"ltl"`: how to read `formula`.
 - `translated` — the mu-calc string the engine evaluated, present only when `formula` is written in another language (an `ltl` row); absent otherwise. `translated ?? formula` is always mu-calculus.
+- `source` — where the property is written (2026-10-30): an SVA row's assertion statement (slang's AST, joined on `name` and `label`), an annotation row's `@mununu_guarantee` comment. Absent for a template row and when unknown. Text: `source: file:line`.
+- `involves` — the RTL lines of the property's cone of influence (2026-10-30): the declaration, the `always` block(s) and every writing statement of each register, input and named wire the property depends on, sorted by file and line. The cone's code, not a causal slice of a counterexample. Absent when the source map placed nothing in the cone. Text: `involves: file:a-b, c; other.sv:d` (runs collapsed).
 - `outcome` — one of the four canonical `PropertyVerdict` values. This is the field to gate on.
 - `detail` — human-facing extra: `"cube: <false> false / <unknown> unknown"` for cube verdicts; `"skip-<reason>"` for skips (see the skip-reason catalog below). Optional.
 - `seeded_predicates` — the abstraction-cube atom strings seeded for this property. Empty for engines that don't use a cube.
@@ -162,9 +166,9 @@ Rust source: [`Trace`](../../crates/mununu-core/src/api/models.rs) + [`CexCellVi
 ```
 
 - `sources` — the legend (2026-10-29): the first step's registers then its inputs, each with its
-  declaration (from slang's AST on every front end, or yosys's netlist attribute when present) and,
-  for a register, the `always` block(s) driving it (from the netlist; absent when sv2v preprocessed
-  the source); `diagnostics.source_map.status` is `available`, `partial` (with what is missing in
+  declaration and, for a register, the `always` block(s) driving it — from yosys's netlist
+  attributes when present, from slang's AST otherwise, on every front end (since 2026-10-30 the
+  sv2v path takes both halves from the AST); `diagnostics.source_map.status` is `available`, `partial` (with what is missing in
   `reason`) or `unavailable`; the key is omitted when nothing could be placed.
 - `replay` — present when `emit_testbench` / `--emit-testbench` was requested on a row with a path:
   `testbench` (the files), `gtkw` (the GTKWave save file), `dir` (CLI only) and, under `replay: true` /

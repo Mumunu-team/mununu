@@ -2421,6 +2421,8 @@ impl From<&crate::adapter::slang::verify_auto::AutoVerifyReport> for SvVerifyAut
                         .tag()
                         .to_string(),
                     translated: written.map(|_| p.formula.clone()),
+                    source: report.property_source(&p.name).cloned(),
+                    involves: report.involves(&p.name).to_vec(),
                     outcome: outcome.to_string(),
                     detail,
                     false_cells,
@@ -2887,6 +2889,17 @@ pub struct PropertyVerdictView {
     /// `formula` when it is absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub translated: Option<String>,
+    /// Where the property is written in the RTL (2026-10-30): an SVA row's assertion statement,
+    /// an annotation row's `@mununu_guarantee` comment. Absent for a template row and when the
+    /// source map is unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<crate::trace::SourceLoc>,
+    /// The RTL lines of the property's cone of influence (2026-10-30): the declaration, the
+    /// `always` block(s) and every statement writing each register, input and named wire the
+    /// property depends on, sorted. The code the verdict is about, not a causal slice of a
+    /// counterexample. Absent when the source map placed nothing in the cone.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub involves: Vec<crate::trace::SourceLoc>,
     /// `"holds"` | `"violated"` | `"unknown"` | `"skipped"`.
     pub outcome: String,
     /// Human-readable detail: `"N cell(s)"` (violated/unknown) or the skip reason.

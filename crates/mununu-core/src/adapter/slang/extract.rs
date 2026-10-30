@@ -53,15 +53,15 @@ pub fn extract_sva_with_params(
     extract_sva_with_declarations(sources, opts, params).map(|(report, _)| report)
 }
 
-/// Every port, net and variable with its declaration (`prefix.name` → file and line), or why the
-/// declarations run failed (2026-10-29).
-pub type Declarations = Result<Vec<(String, crate::trace::SourceLoc)>, String>;
+/// Where the design's names and assertions live in the RTL ([`super::SourceIndex`]: declarations,
+/// the `always` blocks and statements that write each name, each assertion's line), or why that
+/// slang run failed (2026-10-29/30).
+pub type Declarations = Result<super::SourceIndex, String>;
 
-/// [`extract_sva_with_params`] plus the declarations of every port, net and variable with their
-/// file and line, from a second slang run on the same staged files
-/// ([`super::run_declarations`]) — the front-end-independent half of the source map
-/// (2026-10-29). That run's failure is returned as a reason, never as the extraction's failure:
-/// the verdicts do not depend on it, the legend says what it lacks.
+/// [`extract_sva_with_params`] plus the [`super::SourceIndex`] of the same staged files, from a
+/// second slang run ([`super::run_source_index`]) — the front-end-independent half of the source
+/// map (2026-10-29/30). That run's failure is returned as a reason, never as the extraction's
+/// failure: the verdicts do not depend on it, the legend says what it lacks.
 pub fn extract_sva_with_declarations(
     sources: &[(String, String)],
     opts: &TranslateOptions,
@@ -105,7 +105,7 @@ pub fn extract_sva_with_declarations(
     let (json, source) = run_ast_json_with_source(&bin, &files, &include_dirs, params)?;
     let report = translate_ast_json_with_source(&json, Some(&source), opts)?;
     let declarations =
-        super::run_declarations(&bin, &files, &include_dirs, params).map_err(|e| e.message);
+        super::run_source_index(&bin, &files, &include_dirs, params).map_err(|e| e.message);
     Ok((report, declarations))
     // `dir` drops here → temp files removed.
 }

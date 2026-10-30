@@ -494,36 +494,74 @@ file as `trace.replay.gtkw`.
 
 ### Where in the RTL: the `cells:` legend under a counterexample (2026-10-29)
 
-> Source of truth: [`cell_sources`](../crates/mununu-core/src/adapter/yosys/mod.rs) + [`declarations_from_ast`](../crates/mununu-core/src/adapter/slang/mod.rs) + [`fill_declarations`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) + [`TraceNames::tidy`](../crates/mununu-core/src/trace.rs) — surface: (CLI+API) — every `sv verify-auto` row with a path, and `POST /api/v1/sv/verify-auto`.
+> Source of truth: [`cell_sources`](../crates/mununu-core/src/adapter/yosys/mod.rs#L1103) + [`source_index_from_ast`](../crates/mununu-core/src/adapter/slang/mod.rs#L520) + [`fill_declarations`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L988) + [`TraceNames::tidy`](../crates/mununu-core/src/trace.rs#L252) — surface: (CLI+API) — every `sv verify-auto` row with a path, and `POST /api/v1/sv/verify-auto`.
 
 Every counterexample ends with a legend naming where each cell it shows lives in the RTL — the
 registers of the first step, then its inputs, in that order:
 
 ```
         cells:
-          state_q ← pump_pair.sv:32 (register, assigned at pump_pair.sv:52)
+          state_q ← pump_pair.sv:33 (register, assigned at pump_pair.sv:52)
           lof_q ← pump_pair.sv:36 (register, assigned at pump_pair.sv:52)
-          flow ← pump_pair.sv:25 (input)
+          flow ← pump_pair.sv:26 (input)
 ```
 
 `file:line` is the net's declaration; a register also names the `always` block(s) of the flop(s)
-that drive it, which is where the value the trace shows was assigned. The two halves have two
-sources. **Declarations** come from slang's own AST (`--ast-json-source-info`, a second run on the
-same staged files the SVA extraction uses), so they do not depend on the lift's front end — sv2v
-included — and from yosys's `src` attributes where the netlist carries them (recent yosys-slang
-builds stamp nets; the attribute wins when present, the AST fills every gap). **Assignment lines**
-come from the storage cells' `src` attributes, which both **yosys-slang** (`--frontend slang`, the
-default in the `mununu-sva` image) and yosys's own `read_verilog` (`--frontend verilog`) stamp with
-the RTL's own file and line; when **sv2v** preprocessed the source (`--frontend sv2v`, `use_sv2v`)
-those lines are sv2v's output's, so they are dropped rather than shown wrong. The report says what
-it has: no status line when every cell is placed, `source map: partial — <what is missing>` under
-`model:` when some half is (the sv2v path, a cell the AST did not declare under the lift's name),
-`source map: unavailable — <reason>` and no legend when nothing could be placed. A half the map
-lacks is simply left out of the cell's line (`state_q (register, assigned at pump_pair.sv:52)`),
-never shown as a placeholder. `--json`
-carries the legend as `trace.sources` (`cell`, `kind`, `declared`, `assigned`) and the status as
+that drive it, which is where the value the trace shows was assigned. Both halves come from two
+sources, and the lift's front end no longer decides whether they are there. **yosys's `src`
+attributes** carry them where the netlist has them: **yosys-slang** (`--frontend slang`, the
+default in the `mununu-sva` image) stamps storage cells (recent builds stamp nets too) and yosys's
+own `read_verilog` (`--frontend verilog`) stamps both, with the RTL's own file and line. **slang's
+own AST** (`--ast-json-source-info`, a second run on the same staged files the SVA extraction uses)
+fills every gap: each port, net and variable's declaration, and, for a register, the
+edge-triggered `always` block(s) assigning it (`always_ff`, `always @(posedge …)`). When **sv2v**
+preprocessed the source (`--frontend sv2v`, `use_sv2v`), the netlist's lines are sv2v's output's,
+so the lift drops them and the AST supplies both halves (2026-10-30; before, the sv2v path had no
+assignment lines). What the AST cannot place is a name the lift invented: sv2v's
+`sv2v_cast_…$result`, a yosys-internal net. Such a cell keeps its kind and no line, and the report
+lists it.
+
+The report says what it has: no status line when every cell is placed, `source map: partial — <what
+is missing>` under `model:` when something is (`no declaration for …`, `no assignment line for …`,
+the latter saying when sv2v rewrote the source), `source map: unavailable — <reason>` and no legend
+when nothing could be placed. A half the map lacks is simply left out of the cell's line
+(`state_q (register, assigned at pump_pair.sv:52)`), never shown as a placeholder. `--json` carries
+the legend as `trace.sources` (`cell`, `kind`, `declared`, `assigned`) and the status as
 `diagnostics.source_map` (`status`: `available` | `partial` | `unavailable`, `reason`). A cell the
-map does not know — a monitor latch, a yosys-internal name — is simply not listed.
+map does not know, such as a monitor latch, is simply not listed.
+
+### Where in the RTL: each row's `source:` and `involves:` (2026-10-30)
+
+> Source of truth: [`property_sources_of`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L1079) + [`attach_involves`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L1862) + [`cone_named_signals`](../crates/mununu-core/src/adapter/btor2/dep_graph.rs#L296) + [`compact_lines`](../crates/mununu-core/src/trace.rs#L111) — surface: (CLI+API) — every `sv verify-auto` row, and `POST /api/v1/sv/verify-auto`.
+
+Every row says where the property is written and which RTL lines it is about, whatever its verdict:
+
+```
+  [assert] ann_guarantee_0: VIOLATED (1 cell(s))
+        label: alternates
+        source: pump_pair.sv:13
+        formula: ltl G (start_a -> X (!start_a W start_b))
+        translated: (nu G1. ...)
+        involves: pump_pair.sv:24-26, 31-33, 36-37, 40, 42, 44-45, 47-48, 52, 54-57, 59-63
+```
+
+**`source:`** is the property's own line. An SVA row's is the assertion statement, from the same
+AST run; it is joined on the row's positional name *and* its label, so if the two slang runs ever
+saw different assertions the row gets no line rather than a neighbour's. An `@mununu_guarantee`
+row's is its comment. A template row (`--template`) has no source line and prints none.
+
+**`involves:`** is the code the verdict is about: every register, input and named wire in the
+property's cone of influence (the same closure the engines' cone reduction uses: data flow, `next`,
+constraints and fairness), mapped to its declaration, the `always` block(s) driving it, and every
+statement that writes it — procedural assignments in any `always` block and continuous `assign`s.
+A register the model names through a bound checker's port (`u_x_sva.state_q`) counts as the
+design's own net. Lines are grouped by file, consecutive lines collapsed into ranges. It is the
+cone's code, not a causal slice of a counterexample: on a VIOLATED row the defect is somewhere in
+these lines, and on a HOLDS row they are what the proof covered. A reset pinned with `--pin` is a
+constant, so its lines are not in the cone. Absent when the source map placed nothing in the cone.
+
+`--json` carries both on the row: `source` (`{file, line}`, absent when unknown) and `involves`
+(`[{file, line}]`, absent when empty). The text line is the JSON key followed by the value.
 
 ### A recoverability row refuted by a trap certificate (2026-10-21)
 

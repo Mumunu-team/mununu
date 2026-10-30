@@ -5057,6 +5057,10 @@ fn render_verify_auto_text(
         if let Some(label) = p.label.as_deref().filter(|l| *l != p.name) {
             println!("        label: {label}");
         }
+        // 2026-10-30 — where the property is written, and the lines of its cone of influence.
+        if let Some(at) = report.property_source(&p.name) {
+            println!("        source: {at}");
+        }
         // 2026-10-29 — an `ltl` annotation row shows the obligation as its author wrote it, with
         // the mu-calculus the engine decided beneath it; every other row's formula IS that
         // mu-calculus and prints as before.
@@ -5070,6 +5074,13 @@ fn render_verify_auto_text(
                 println!("        translated: {}", p.formula);
             }
             None => println!("        formula: {}", p.formula),
+        }
+        let involves = report.involves(&p.name);
+        if !involves.is_empty() {
+            println!(
+                "        involves: {}",
+                mununu_core::trace::compact_lines(involves)
+            );
         }
         // monono ask 26 — WHY this property is ⊥, on the property's own lines rather than in a
         // note. A consumer that filters notes (monono's formal lane did, wholesale) still sees
