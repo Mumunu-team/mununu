@@ -1,6 +1,42 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "definitions": {
+    "CellSource": {
+      "description": "Where a trace cell lives in the RTL (2026-10-29).",
+      "properties": {
+        "assigned": {
+          "description": "The `always` block(s) of the flop(s) driving a register; empty for an input.",
+          "items": {
+            "$ref": "#/definitions/SourceLoc"
+          },
+          "type": "array"
+        },
+        "cell": {
+          "description": "The cell as the trace names it (the net; a hierarchical name keeps its dots).",
+          "type": "string"
+        },
+        "declared": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SourceLoc"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The net's declaration."
+        },
+        "kind": {
+          "description": "`\"register\"` | `\"input\"` | `\"output\"`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "cell",
+        "kind"
+      ],
+      "type": "object"
+    },
     "CexCellView": {
       "description": "One register's concrete value in a counterexample state. mununu#723 — a cell wider than 64 bits was silently absent from the trace (OpenTitan edn's 109-bit `tl_i`, the bus write behind the fatal alert). `value` is unchanged for every cell that fits 64 bits — exactly the cells that were listed before — and `null` for a wider value; `hex` and `bits` are always present.",
       "properties": {
@@ -304,6 +340,103 @@
       ],
       "type": "object"
     },
+    "ReplayMismatchView": {
+      "description": "The first comparison that disagreed.",
+      "properties": {
+        "cycle": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "expected": {
+          "type": "string"
+        },
+        "got": {
+          "type": "string"
+        },
+        "register": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "cycle",
+        "expected",
+        "got",
+        "register"
+      ],
+      "type": "object"
+    },
+    "ReplayResultView": {
+      "description": "The replay's verdict: the bench ran under Verilator and compared the trace cycle by cycle, or could not run and says why (2026-10-29).",
+      "properties": {
+        "assertions": {
+          "description": "Verilator's `Assertion failed` lines: the design's own assertion firing on the final state.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "checks": {
+          "description": "The (cycle, register) comparisons the bench makes.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "first_mismatch": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ReplayMismatchView"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "log": {
+          "description": "The bench's own lines: verdict, mismatches, assertions, the VCD line.",
+          "type": "string"
+        },
+        "mismatches": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "outcome": {
+          "description": "`\"match\"` | `\"mismatch\"` | `\"unavailable\"`.",
+          "type": "string"
+        },
+        "reason": {
+          "description": "Why the replay could not run (`unavailable`): Verilator or `make` missing, a compile error.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "vcd_bytes": {
+          "description": "`replay.vcd`'s size in bytes, when `make trace` wrote it.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "verilator": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "assertions",
+        "checks",
+        "log",
+        "mismatches",
+        "outcome"
+      ],
+      "type": "object"
+    },
     "SanityReport": {
       "description": "The findings of [`check`].",
       "properties": {
@@ -352,6 +485,24 @@
         "labels_never_fired",
         "reachable_states",
         "unreachable_states"
+      ],
+      "type": "object"
+    },
+    "SourceLoc": {
+      "description": "A place in the RTL: the file's basename and a line (yosys's `src` keeps the path and the column; the report keeps what a reader opens).",
+      "properties": {
+        "file": {
+          "type": "string"
+        },
+        "line": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "file",
+        "line"
       ],
       "type": "object"
     },
@@ -412,6 +563,13 @@
               "type": "null"
             }
           ]
+        },
+        "sources": {
+          "description": "Where each cell the trace shows lives in the RTL (2026-10-29): the legend, in the order of the first step's cells. Empty when the source map is unavailable (`diagnostics.source_map`).",
+          "items": {
+            "$ref": "#/definitions/CellSource"
+          },
+          "type": "array"
         },
         "steps": {
           "items": {
@@ -503,6 +661,31 @@
     "TraceReplay": {
       "description": "Replay artefacts attached to a [`Trace`].",
       "properties": {
+        "dir": {
+          "description": "Where the CLI wrote the files (`--emit-testbench DIR/<property>`); absent over HTTP.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "gtkw": {
+          "description": "`replay.gtkw` — a GTKWave save file listing the clock, the trace's inputs and the registers it names, so `gtkwave replay.vcd replay.gtkw` opens on the scene (2026-10-29).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "result": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ReplayResultView"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The bench built and run (`--replay` / `replay: true`); absent when not requested."
+        },
         "testbench": {
           "anyOf": [
             {

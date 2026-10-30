@@ -6,6 +6,8 @@
 
 ## TL;DR
 
+> **Revised 2026-10-29 on one point** ([`2026-10-ltl-annotation-formula-as-written.md`](2026-10-ltl-annotation-formula-as-written.md)): an `ltl` row's `formula` now shows the LTL as written, and the translated mu-calculus moves to `translated` (`formula_language` tells which). The sentence below and the rosf row that said "expect the translation, not the LTL" describe 0.5.4–0.5.6.
+
 - **Additive, no new flag.** A guarantee body may now start with `ltl`: `// @mununu_guarantee(name) ltl G (req -> F ack)`. It is read over EVERY path (the reading of a CTXDSL `body = ltl …;`) and translated to the mu-calculus text the row carries, so the row's `formula` field shows that text, not the LTL. A body without the keyword is mu-calculus exactly as before.
 - **Comparison atoms in LTL.** The LTL parser accepts `ident op decimal` and `ident op ident [+ k]` (`state_q == 5`, `cnt_q == cnt_q__past + 1`) wherever LTL is parsed — in annotations and in CTXDSL `ltl` / `eltl` bodies, where a predicate name was the only atom before. A body that used `->` after an identifier is unaffected (`-` is not a comparison operator).
 - **Refusals name their reason.** A formula outside the every-path fragment (`F G p`, `G p || G q`, `F (p && X q)`) and an `eltl` body are skipped under the `annotation-properties` note (scope caveat), never decided as a different property; `eltl`'s message spells out the mu-calculus form of the some-path reading.

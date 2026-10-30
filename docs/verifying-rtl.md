@@ -295,7 +295,11 @@ model-level diagnostics.
 
 A guarantee body that starts with the keyword `ltl` is an LTL formula, read over **every** path
 from reset — the same reading as a CTXDSL `body = ltl …;` — and translated into the mu-calculus
-text the row carries, so the report's `formula` shows what the engine decided:
+the engine decides. The report shows the row **as written** (2026-10-29): the text line reads
+`formula: ltl G (…)` with the decided mu-calculus on a `translated:` line beneath it, and the JSON
+row carries `formula` (the LTL), `formula_language: "ltl"` and `translated` (the mu-calculus). A
+mu-calculus body, a template instance and an SVA row keep `formula` as the mu-calculus, carry
+`formula_language: "mu-calculus"` and no `translated` key:
 
 ```systemverilog
 // @mununu_guarantee(rod_scram_releases_clutch) ltl G (scram_cmd -> F clutch_release)
@@ -343,10 +347,14 @@ mununu --quiet sv verify-auto design.sv --source design_sva.sv --top design --js
 ```jsonc
 {
   "properties": [
-    { "name": "dut_sva_0", "kind": "assert", "formula": "nu X. …", "outcome": "holds",
-      "detail": null, "seeded_predicates": ["st_q == 2"] },
-    { "name": "dut_sva_1", "kind": "assert", "formula": "nu X. …", "outcome": "unknown",
-      "detail": "32768 cell(s)", "unknown_cells": 32768, "seeded_predicates": [] }
+    { "name": "dut_sva_0", "kind": "assert", "formula": "nu X. …", "formula_language": "mu-calculus",
+      "outcome": "holds", "detail": null, "seeded_predicates": ["st_q == 2"] },
+    { "name": "dut_sva_1", "kind": "assert", "formula": "nu X. …", "formula_language": "mu-calculus",
+      "outcome": "unknown", "detail": "32768 cell(s)", "unknown_cells": 32768, "seeded_predicates": [] },
+    { "name": "ann_guarantee_0", "label": "alternates", "kind": "assert",
+      "formula": "G (start_a -> X (!start_a W start_b))", "formula_language": "ltl",
+      "translated": "(nu G1. …)", "outcome": "violated", "detail": "1 cell(s)", "false_cells": 1,
+      "seeded_predicates": [] }
   ],
   "unsupported": [ { "name": "dut_sva_2", "kind": null,
                      "reason": "unsupported binary op: BinaryAnd" } ],
@@ -457,6 +465,65 @@ make -C tb/p_no_fault trace       # in mununu-sva
 # MATCH … wrote replay.vcd
 gtkwave tb/p_no_fault/replay.vcd  # the registers the trace names, and everything else
 ```
+
+**`--replay` — mununu builds and runs it (2026-10-29).** With `--emit-testbench DIR --replay`, mununu
+runs `make` and then `make trace` in each `DIR/<property>/` itself (Verilator from
+`MUNUNU_VERILATOR_PATH` or `$PATH`, `make` from the host) and reports the simulator's verdict on the
+row, so the transcript carries the replay instead of leaving it to the reader:
+
+```
+        replay dir: tb/alternates (16 checks); open: gtkwave replay.vcd replay.gtkw
+        replay: match — 0 of 16 checks disagree; verilator 5.0xx
+        replay vcd: tb/alternates/replay.vcd (2037 bytes)
+```
+
+A `mismatch` names the first disagreeing comparison (`first at cycle 3: state_q = 0x2, trace says
+0x1`); an assertion that fires on the final state is a `replay assertion:` line; everything `make`
+printed is in `DIR/<property>/replay.log`. When the replay cannot run — Verilator or `make`
+missing, a compile error — the row says `replay: unavailable — <reason>`, never nothing. `--json`
+carries the same object under `trace.replay.result` (`outcome`, `reason`, `checks`, `mismatches`,
+`first_mismatch`, `assertions`, `vcd_bytes`, `verilator`, `log`), beside `trace.replay.testbench`,
+`trace.replay.dir` and `trace.replay.gtkw`; over HTTP, `replay: true` with `emit_testbench: true`
+runs the bench in a scratch directory on the server and returns the same `result` (no `dir`).
+
+**`replay.gtkw` — the scene, ready to open.** `--emit-testbench` also writes a GTKWave save file
+beside the testbench: the clock, the trace's inputs and the registers it names, in trace order,
+under `TOP.<top>.`, vectors in decimal as the report prints them. `gtkwave replay.vcd replay.gtkw`
+from that directory opens on exactly the signals the counterexample is about; the API returns the
+file as `trace.replay.gtkw`.
+
+### Where in the RTL: the `cells:` legend under a counterexample (2026-10-29)
+
+> Source of truth: [`cell_sources`](../crates/mununu-core/src/adapter/yosys/mod.rs) + [`declarations_from_ast`](../crates/mununu-core/src/adapter/slang/mod.rs) + [`fill_declarations`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) + [`TraceNames::tidy`](../crates/mununu-core/src/trace.rs) — surface: (CLI+API) — every `sv verify-auto` row with a path, and `POST /api/v1/sv/verify-auto`.
+
+Every counterexample ends with a legend naming where each cell it shows lives in the RTL — the
+registers of the first step, then its inputs, in that order:
+
+```
+        cells:
+          state_q ← pump_pair.sv:32 (register, assigned at pump_pair.sv:52)
+          lof_q ← pump_pair.sv:36 (register, assigned at pump_pair.sv:52)
+          flow ← pump_pair.sv:25 (input)
+```
+
+`file:line` is the net's declaration; a register also names the `always` block(s) of the flop(s)
+that drive it, which is where the value the trace shows was assigned. The two halves have two
+sources. **Declarations** come from slang's own AST (`--ast-json-source-info`, a second run on the
+same staged files the SVA extraction uses), so they do not depend on the lift's front end — sv2v
+included — and from yosys's `src` attributes where the netlist carries them (recent yosys-slang
+builds stamp nets; the attribute wins when present, the AST fills every gap). **Assignment lines**
+come from the storage cells' `src` attributes, which both **yosys-slang** (`--frontend slang`, the
+default in the `mununu-sva` image) and yosys's own `read_verilog` (`--frontend verilog`) stamp with
+the RTL's own file and line; when **sv2v** preprocessed the source (`--frontend sv2v`, `use_sv2v`)
+those lines are sv2v's output's, so they are dropped rather than shown wrong. The report says what
+it has: no status line when every cell is placed, `source map: partial — <what is missing>` under
+`model:` when some half is (the sv2v path, a cell the AST did not declare under the lift's name),
+`source map: unavailable — <reason>` and no legend when nothing could be placed. A half the map
+lacks is simply left out of the cell's line (`state_q (register, assigned at pump_pair.sv:52)`),
+never shown as a placeholder. `--json`
+carries the legend as `trace.sources` (`cell`, `kind`, `declared`, `assigned`) and the status as
+`diagnostics.source_map` (`status`: `available` | `partial` | `unavailable`, `reason`). A cell the
+map does not know — a monitor latch, a yosys-internal name — is simply not listed.
 
 ### A recoverability row refuted by a trap certificate (2026-10-21)
 

@@ -2455,6 +2455,13 @@ struct SvVerifyAutoArgs {
     /// `clock`, `i_clk`, `aclk`, `clk_sys` the primary source declares).
     #[arg(long = "tb-clock", value_name = "PORT", requires = "emit_testbench")]
     tb_clock: Option<String>,
+    /// With `--emit-testbench`: build and run each testbench under Verilator (`make`, then
+    /// `make trace` for `replay.vcd`) and report the result on the row — match / mismatch, the
+    /// assertion that fired, the VCD — in the text report and under `trace.replay.result` in
+    /// `--json`. Verilator comes from `MUNUNU_VERILATOR_PATH` or `$PATH`; without it the row says
+    /// `replay: unavailable`.
+    #[arg(long = "replay", requires = "emit_testbench")]
+    replay: bool,
     /// Print a JSON report instead of the human-readable summary.
     #[arg(long)]
     json: bool,
@@ -4892,13 +4899,14 @@ fn sv_verify_auto(args: SvVerifyAutoArgs) -> Result<(), String> {
             &expectations,
         ))
     };
-    if let Some(dir) = &args.emit_testbench {
-        emit_replay_testbenches(dir, &args, &sources, &report)?;
-    }
+    let replays = match &args.emit_testbench {
+        Some(dir) => emit_replay_testbenches(dir, &args, &sources, &report)?,
+        None => std::collections::BTreeMap::new(),
+    };
     if args.json {
-        render_verify_auto_json(&report, &expectation_result)?;
+        render_verify_auto_json(&report, &expectation_result, &replays)?;
     } else {
-        render_verify_auto_text(&report);
+        render_verify_auto_text(&report, &replays);
         render_expectations_text(&expectation_result);
     }
     // mununu#537 — when the caller DECLARED expectations, they supersede the verdict gate.
@@ -4994,7 +5002,10 @@ fn render_faults(faults: &[mununu_core::trace::TraceFault]) -> String {
         .join(", ")
 }
 
-fn render_verify_auto_text(report: &mununu_core::adapter::slang::verify_auto::AutoVerifyReport) {
+fn render_verify_auto_text(
+    report: &mununu_core::adapter::slang::verify_auto::AutoVerifyReport,
+    replays: &std::collections::BTreeMap<String, CliReplay>,
+) {
     println!(
         "verify-auto: {} propert{} verified, {} unsupported assertion(s)",
         report.properties.len(),
@@ -5009,6 +5020,15 @@ fn render_verify_auto_text(report: &mununu_core::adapter::slang::verify_auto::Au
         "  model: {} state register(s)",
         report.diagnostics.state_register_count
     );
+    // 2026-10-29 — the source map's status, once: a trace's `cells:` legend is absent for a reason.
+    if let Some(reason) = &report.diagnostics.trace_names.source_map {
+        let status = if report.diagnostics.trace_names.sources.is_empty() {
+            "unavailable"
+        } else {
+            "partial"
+        };
+        println!("  source map: {status} — {reason}");
+    }
     if !report.diagnostics.blackboxed_modules.is_empty() {
         println!(
             "  black-boxed (cut to free inputs — provide source to model): {}",
@@ -5037,7 +5057,20 @@ fn render_verify_auto_text(report: &mununu_core::adapter::slang::verify_auto::Au
         if let Some(label) = p.label.as_deref().filter(|l| *l != p.name) {
             println!("        label: {label}");
         }
-        println!("        formula: {}", p.formula);
+        // 2026-10-29 — an `ltl` annotation row shows the obligation as its author wrote it, with
+        // the mu-calculus the engine decided beneath it; every other row's formula IS that
+        // mu-calculus and prints as before.
+        match report.written_formula(&p.name) {
+            Some(w) => {
+                let keyword = w
+                    .language
+                    .keyword()
+                    .map_or(String::new(), |k| format!("{k} "));
+                println!("        formula: {keyword}{}", w.text);
+                println!("        translated: {}", p.formula);
+            }
+            None => println!("        formula: {}", p.formula),
+        }
         // monono ask 26 — WHY this property is ⊥, on the property's own lines rather than in a
         // note. A consumer that filters notes (monono's formal lane did, wholesale) still sees
         // this, and for a resource abstain the text is the ENGINE'S OWN message, which names the
@@ -5136,6 +5169,80 @@ fn render_verify_auto_text(report: &mununu_core::adapter::slang::verify_auto::Au
                     "          ({hidden} monitor cell(s) per step not shown: the property monitor's latches and $past shadows; --json lists them under steps[].monitor)"
                 );
             }
+            // 2026-10-29 — the legend: where each cell the trace shows lives in the RTL
+            // (`trace.sources` in --json).
+            if !trace.sources.is_empty() {
+                println!("        cells:");
+                for s in &trace.sources {
+                    // A half the map lacks is left out rather than shown as a placeholder.
+                    let declared = s
+                        .declared
+                        .as_ref()
+                        .map_or_else(String::new, |l| format!(" ← {l}"));
+                    let assigned = if s.assigned.is_empty() {
+                        String::new()
+                    } else {
+                        format!(
+                            ", assigned at {}",
+                            s.assigned
+                                .iter()
+                                .map(ToString::to_string)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    };
+                    println!("          {}{declared} ({}{assigned})", s.cell, s.kind);
+                }
+            }
+        }
+        // 2026-10-29 — the replay, on the row, with the keys `--json` uses (`trace.replay.*`).
+        if let Some(r) = replays.get(&p.name) {
+            println!(
+                "        replay dir: {} ({} checks{}); open: gtkwave replay.vcd replay.gtkw",
+                r.dir.display(),
+                r.bench.checks,
+                if r.bench.skipped.is_empty() {
+                    String::new()
+                } else {
+                    format!(", {} cell(s) not compared", r.bench.skipped.len())
+                }
+            );
+            if let Some(result) = &r.result {
+                match result.outcome.as_str() {
+                    "unavailable" => println!(
+                        "        replay: unavailable — {}",
+                        result.reason.as_deref().unwrap_or("no reason recorded")
+                    ),
+                    outcome => {
+                        let first = result
+                            .first_mismatch
+                            .as_ref()
+                            .map(|m| {
+                                format!(
+                                    "; first at cycle {}: {} = {}, trace says {}",
+                                    m.cycle, m.register, m.got, m.expected
+                                )
+                            })
+                            .unwrap_or_default();
+                        println!(
+                            "        replay: {outcome} — {} of {} checks disagree{first}; verilator {}",
+                            result.mismatches,
+                            result.checks,
+                            result.verilator.as_deref().unwrap_or("?")
+                        );
+                        for a in &result.assertions {
+                            println!("        replay assertion: {a}");
+                        }
+                        match result.vcd_bytes {
+                            Some(b) => println!(
+                                "        replay vcd: {} ({b} bytes)",
+                                r.dir.join("replay.vcd").display()
+                            ),
+                            None => println!("        replay vcd: not written"),
+                        }
+                    }
+                }
+            }
         }
     }
     for (name, reason) in &report.unsupported {
@@ -5171,6 +5278,7 @@ fn note_level_glyph(level: mununu_core::adapter::slang::verify_auto::NoteLevel) 
 fn render_verify_auto_json(
     report: &mununu_core::adapter::slang::verify_auto::AutoVerifyReport,
     expectations: &Option<mununu_core::adapter::slang::expectations::ExpectationResult>,
+    replays: &std::collections::BTreeMap<String, CliReplay>,
 ) -> Result<(), String> {
     // mununu#536 — serialize the SAME type the HTTP API returns, via the one shared conversion
     // (`impl From<&AutoVerifyReport> for SvVerifyAutoResponse`).
@@ -5186,6 +5294,27 @@ fn render_verify_auto_json(
     // mununu#537 — carry WHICH expectation failed in the machine-readable output, so a consumer
     // never has to parse the human lines to find out. That is the point of doing #536 first.
     view.expectations = expectations.as_ref().map(Into::into);
+    // 2026-10-29 — the same `trace.replay` object the HTTP response carries, plus `dir`: the
+    // files are on disk here, their contents travel too so one document reads the same on both
+    // surfaces.
+    for row in &mut view.properties {
+        let Some(r) = replays.get(&row.name) else {
+            continue;
+        };
+        if let Some(trace) = row.trace.as_mut() {
+            trace.replay = Some(mununu_core::trace::TraceReplay {
+                testbench: Some(mununu_core::trace::TestbenchView {
+                    tb_cpp: r.bench.tb_cpp.clone(),
+                    makefile: r.bench.makefile.clone(),
+                    checks: r.bench.checks,
+                    skipped: r.bench.skipped.clone(),
+                }),
+                gtkw: Some(r.gtkw.clone()),
+                dir: Some(r.dir.display().to_string()),
+                result: r.result.clone(),
+            });
+        }
+    }
     println!(
         "{}",
         serde_json::to_string_pretty(&view).map_err(|e| format!("serialize report: {e}"))?
@@ -9663,13 +9792,25 @@ fn list_templates(args: TemplatesArgs) -> Result<(), String> {
 
 /// `--emit-testbench DIR`: one Verilator replay testbench per counterexample
 /// ([`mununu_core::adapter::verilator::replay`]), under DIR/<property label or name>/.
+/// What `--emit-testbench` wrote for one row, and what `--replay` made of it (2026-10-29).
+struct CliReplay {
+    dir: PathBuf,
+    bench: mununu_core::adapter::verilator::replay::ReplayBench,
+    gtkw: String,
+    /// `Some` under `--replay`: the verdict, or why the bench could not run.
+    result: Option<mununu_core::trace::ReplayResultView>,
+}
+
 fn emit_replay_testbenches(
     dir: &Path,
     args: &SvVerifyAutoArgs,
     sources: &[(String, String)],
     report: &mununu_core::adapter::slang::verify_auto::AutoVerifyReport,
-) -> Result<(), String> {
-    use mununu_core::adapter::verilator::replay::{ReplayDesign, counterexample_testbench};
+) -> Result<std::collections::BTreeMap<String, CliReplay>, String> {
+    use mununu_core::adapter::verilator::replay::{
+        ReplayDesign, counterexample_testbench, gtkwave_save, run_replay,
+    };
+    let mut emitted = std::collections::BTreeMap::new();
     let clock = match &args.tb_clock {
         Some(c) => c.clone(),
         None => ["clk", "clk_i", "clock", "i_clk", "aclk", "clk_sys"]
@@ -9735,6 +9876,8 @@ fn emit_replay_testbenches(
         std::fs::create_dir_all(&out).map_err(|e| format!("{}: {e}", out.display()))?;
         std::fs::write(out.join("tb.cpp"), &bench.tb_cpp).map_err(|e| e.to_string())?;
         std::fs::write(out.join("Makefile"), &bench.makefile).map_err(|e| e.to_string())?;
+        let gtkw = gtkwave_save(&design, cex);
+        std::fs::write(out.join("replay.gtkw"), &gtkw).map_err(|e| e.to_string())?;
         eprintln!(
             "replay testbench: {} ({} checks{})",
             out.display(),
@@ -9745,13 +9888,31 @@ fn emit_replay_testbenches(
                 format!(", {} cell(s) not compared", bench.skipped.len())
             }
         );
+        // `--replay`: build and run it now; everything `make` printed goes to replay.log, the
+        // verdict to the row.
+        let result = args.replay.then(|| {
+            let run = run_replay(&out, true);
+            if let Ok(r) = &run {
+                let _ = std::fs::write(out.join("replay.log"), &r.output);
+            }
+            mununu_core::trace::ReplayResultView::from_run(bench.checks, run)
+        });
+        emitted.insert(
+            p.name.clone(),
+            CliReplay {
+                dir: out,
+                bench,
+                gtkw,
+                result,
+            },
+        );
         written += 1;
     }
     if written == 0 {
         eprintln!("replay testbench: no counterexample with a path to replay");
     }
     let _ = sources;
-    Ok(())
+    Ok(emitted)
 }
 
 /// `--template ID` / `--template-arg [ID.]KEY=VALUE` → template references. A key is bound to its

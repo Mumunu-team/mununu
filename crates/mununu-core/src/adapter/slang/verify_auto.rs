@@ -63,7 +63,6 @@ use std::collections::HashSet;
 use crate::adapter::btor2::cex_value::CexValue;
 use crate::adapter::btor2::kmts_lift::{MayEdgeInference, MustEdgeInference, PredicateSpec};
 use crate::adapter::btor2::predicate_expr::{CmpOp, PredicateExpr, parse_predicate_expr};
-use crate::adapter::slang::extract::extract_sva_with_params;
 use crate::adapter::slang::translate::{SvaKind, TranslateOptions};
 use crate::adapter::yosys::YosysOptions;
 use crate::adapter::{AdapterError, AdapterErrorKind};
@@ -510,6 +509,13 @@ pub struct ModelDiagnostics {
     /// The registers the adversary may corrupt under the posture, with their width, the budget,
     /// why each was selected and the rows it serves. Empty without a posture.
     pub fault_sites: Vec<crate::adapter::btor2::fault::FaultSiteReport>,
+    /// The rows whose author wrote the property in another language than the mu-calculus the
+    /// row carries, by row name — today the `@mununu_guarantee ltl …` annotations (2026-10-29).
+    /// Both surfaces show the written text as the row's `formula` and the mu-calculus as
+    /// `translated`; [`AutoVerifyReport::written_formula`] is the lookup. It lives beside the
+    /// other provenance of the property set (`fault_sites` names its rows the same way) because
+    /// the row struct keeps the mu-calculus, which the post-passes re-parse.
+    pub written_formulas: Vec<(String, crate::adapter::slang::translate::WrittenFormula)>,
     /// How the counterexamples name the lift's registers and clocks (display only; see
     /// [`crate::trace::TraceNames`]).
     pub trace_names: crate::trace::TraceNames,
@@ -807,6 +813,7 @@ fn plan_assumptions(
             kind: SvaKind::Assert,
             formula: format!("mu Y. ((!({ASSUME_OK_SYMBOL})) || [] Y)"),
             recoverability_companion: None,
+            written: None,
         });
     (rep, candidates)
 }
@@ -928,6 +935,94 @@ pub struct AutoVerifyReport {
 /// enriched with the model-level root cause when one is evident: a black-boxed
 /// (cut) module whose registers became free inputs, or a model with no state
 /// registers at all. Pure so it can be unit-tested without the toolchain.
+impl AutoVerifyReport {
+    /// The property as its author wrote it, when that is not the mu-calculus in the row's
+    /// `formula` (an `@mununu_guarantee ltl …` row); `None` for every other row (2026-10-29).
+    pub fn written_formula(
+        &self,
+        name: &str,
+    ) -> Option<&crate::adapter::slang::translate::WrittenFormula> {
+        self.diagnostics
+            .written_formulas
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, w)| w)
+    }
+}
+
+/// Complete the source map from slang's declarations (2026-10-29): every cell the netlist knows
+/// but could not place gets its declaration by name, and the status is settled — `available`
+/// when every cell has a declaration and the lift stamped its `always` blocks, `partial` with the
+/// reason when something is missing (the sv2v path has no assignment lines; an older yosys-slang
+/// stamps cells but not nets, which the AST covers; a cell the AST did not declare under that
+/// name stays bare), `unavailable` when nothing could be placed.
+pub(crate) fn fill_declarations(
+    names: &mut crate::trace::TraceNames,
+    declarations: &crate::adapter::slang::extract::Declarations,
+) {
+    let mut gaps: Vec<String> = Vec::new();
+    match declarations {
+        Ok(decls) => {
+            for s in &mut names.sources {
+                if s.declared.is_none() {
+                    s.declared = decls
+                        .iter()
+                        .find(|(n, _)| *n == s.cell)
+                        .map(|(_, l)| l.clone());
+                    if s.declared.is_none() {
+                        gaps.push(s.cell.clone());
+                    }
+                }
+            }
+        }
+        Err(why) => {
+            let undeclared = names
+                .sources
+                .iter()
+                .filter(|s| s.declared.is_none())
+                .count();
+            if undeclared > 0 {
+                gaps.push(format!(
+                    "{undeclared} cell(s): the declarations run failed — {why}"
+                ));
+            }
+        }
+    }
+    let placed = names
+        .sources
+        .iter()
+        .any(|s| s.declared.is_some() || !s.assigned.is_empty());
+    if names.sources.is_empty() || !placed {
+        names.source_map_partial = false;
+        if names.source_map.is_none() {
+            names.source_map = Some(
+                "the lift carried no source attributes and the AST declared none of its cells"
+                    .to_string(),
+            );
+        }
+        names.sources.clear();
+        return;
+    }
+    let mut reasons: Vec<String> = names.source_map.take().into_iter().collect();
+    if !gaps.is_empty() {
+        reasons.push(format!("no declaration for {}", gaps.join(", ")));
+    }
+    names.source_map_partial = !reasons.is_empty();
+    names.source_map = (!reasons.is_empty()).then(|| reasons.join("; "));
+}
+
+/// The written-form table of a property set: every translated assertion that carries a
+/// [`crate::adapter::slang::translate::WrittenFormula`], keyed by its row name — what the report
+/// skeleton stores in [`ModelDiagnostics::written_formulas`] (2026-10-29).
+fn written_formulas_of(
+    translated: &[crate::adapter::slang::translate::TranslatedAssertion],
+) -> Vec<(String, crate::adapter::slang::translate::WrittenFormula)> {
+    translated
+        .iter()
+        .filter_map(|t| t.written.clone().map(|w| (t.name.clone(), w)))
+        .collect()
+}
+
 fn unseedable_skip_reason(unseedable: &[String], diag: &ModelDiagnostics) -> String {
     let base = format!(
         "atom(s) over non-state signals (combinational/IO — not cube-bindable): {}",
@@ -2813,14 +2908,16 @@ struct AnnotationScan {
 /// A body that starts with the keyword `ltl` is an LTL formula instead, read over
 /// EVERY path and translated by [`crate::ltl::universal::translate_universal_text`]
 /// — the same reading as a CTXDSL `body = ltl …;` — into the mu-calculus text the
-/// row carries, so the report's `formula` shows what the engine decided. The
+/// row carries for the engine; the LTL as written rides beside it
+/// ([`TranslatedAssertion::written`]) and is what the report shows as the row's
+/// `formula`, with the mu-calculus as `translated` (2026-10-29). The
 /// fragment is the one that module documents (`G`, `X`, `F b`, `b U b`, `b W b`,
 /// response, recurrence); a formula outside it is skipped with the subformula
 /// named. `eltl` (the some-path reading) is NOT accepted here: that reading is the
 /// plain mu-calculus body this scanner always took. Bodies that do not parse are
 /// recorded in `skipped`, never silently dropped.
 fn scan_annotation_properties(sources: &[(String, String)]) -> AnnotationScan {
-    use crate::adapter::slang::translate::TranslatedAssertion;
+    use crate::adapter::slang::translate::{FormulaLanguage, TranslatedAssertion, WrittenFormula};
     use crate::mununu_annotations::{MununuTag, extract_from_sv_source};
 
     let mut scan = AnnotationScan::default();
@@ -2859,7 +2956,10 @@ fn scan_annotation_properties(sources: &[(String, String)]) -> AnnotationScan {
                         ));
                         continue;
                     }
-                    let parsed: Result<String, String> = match ltl_body {
+                    // The row carries the mu-calculus for the engine AND the LTL as written: the
+                    // report shows the latter as the row's `formula` and the former as
+                    // `translated` (2026-10-29). A mu-calculus body is its own written form.
+                    let parsed: Result<(String, Option<WrittenFormula>), String> = match ltl_body {
                         Some("") => Err("@mununu_guarantee ltl with an empty formula".to_string()),
                         Some(rest) => crate::ltl::parser::parse(rest)
                             .map_err(|e| {
@@ -2868,9 +2968,18 @@ fn scan_annotation_properties(sources: &[(String, String)]) -> AnnotationScan {
                             .and_then(|f| {
                                 crate::ltl::universal::translate_universal_text(&f)
                                     .map_err(|e| format!("@mununu_guarantee `ltl {rest}`: {e}"))
+                            })
+                            .map(|mu| {
+                                (
+                                    mu,
+                                    Some(WrittenFormula {
+                                        language: FormulaLanguage::Ltl,
+                                        text: rest.to_string(),
+                                    }),
+                                )
                             }),
                         None => crate::mu_calculus::parser::parse(body)
-                            .map(|_| body.to_string())
+                            .map(|_| (body.to_string(), None))
                             .map_err(|e| {
                                 format!(
                                     "@mununu_guarantee `{body}` did not parse as a mu-calculus \
@@ -2879,7 +2988,7 @@ fn scan_annotation_properties(sources: &[(String, String)]) -> AnnotationScan {
                             }),
                     };
                     match parsed {
-                        Ok(formula) => {
+                        Ok((formula, written)) => {
                             // mununu#550 — an author-given name becomes the LABEL, which
                             // `--expect` already matches (mununu#544). The positional `name` is
                             // kept either way, so an existing index pin does not break.
@@ -2915,6 +3024,7 @@ fn scan_annotation_properties(sources: &[(String, String)]) -> AnnotationScan {
                                 kind: SvaKind::Assert,
                                 formula,
                                 recoverability_companion: None,
+                                written,
                             });
                             idx += 1;
                         }
@@ -4056,6 +4166,27 @@ pub(crate) fn lift_sv(
                 .collect();
         }
     }
+    // 2026-10-29 — the source map's netlist half: yosys-slang (recent builds) and yosys's own
+    // `read_verilog` stamp nets and storage cells with the staged file's own lines. Declarations
+    // the netlist lacks are filled from slang's AST at the hand-off (`fill_declarations`). When
+    // sv2v rewrote the source first, the netlist's lines are its output's: the kinds (register /
+    // input / output) stay, the lines go, and the status says what is missing.
+    let mut sources = crate::adapter::yosys::cell_sources(&lift.flat_netlist_json);
+    crate::adapter::yosys::name_staged_primary(&mut sources, primary_name);
+    let source_map = if lift.sv2v_ran {
+        for s in &mut sources {
+            s.declared = None;
+            s.assigned.clear();
+        }
+        Some(
+            "the assignment lines are unavailable: sv2v preprocessed the source before yosys \
+             read it, so the netlist's lines are sv2v's, not the RTL's; lift without sv2v \
+             (--frontend slang) for them"
+                .to_string(),
+        )
+    } else {
+        None
+    };
     Ok(PreLift {
         // mununu#713 — `gen[k]` as `gen$k`, the spelling the translator gives the same names.
         btor2: crate::adapter::btor2::parser::flat_symbol_names(&lift.btor2),
@@ -4067,6 +4198,8 @@ pub(crate) fn lift_sv(
         trace_names: crate::trace::TraceNames {
             aliases: crate::adapter::yosys::trace_aliases(&lift.flat_netlist_json),
             clocks: lift.clock_domains.iter().map(|d| d.net.clone()).collect(),
+            sources,
+            source_map,
             ..Default::default()
         },
         clock_domains: lift.clock_domains,
@@ -4125,6 +4258,9 @@ pub fn apply_lift_overrides(
 pub(crate) struct SharedExtraction {
     /// The translated SVA with the `@mununu_guarantee` properties merged in.
     extraction: crate::adapter::slang::translate::TranslationReport,
+    /// Every port, net and variable with its declaration, from slang's AST (2026-10-29), or why
+    /// that run failed; fills the source map where the lift's netlist carries no line.
+    declarations: crate::adapter::slang::extract::Declarations,
     /// The `@mununu_*` annotation scan (drives the annotation note).
     ann_scan: AnnotationScan,
     /// Abstraction-predicate hints (in-source `@mununu_predicate` + CLI/API `--predicate`).
@@ -4142,13 +4278,14 @@ pub(crate) fn extract_front(
 ) -> Result<SharedExtraction, AdapterError> {
     // mununu#717 — the SAME `--param` overrides the lift applies, or the SVA describes the design
     // at its parameter defaults.
-    let mut extraction = extract_sva_with_params(
-        sources,
-        &TranslateOptions {
-            gate_reset: opts.gate_reset,
-        },
-        params,
-    )?;
+    let (mut extraction, declarations) =
+        crate::adapter::slang::extract::extract_sva_with_declarations(
+            sources,
+            &TranslateOptions {
+                gate_reset: opts.gate_reset,
+            },
+            params,
+        )?;
     // Templates become annotations of a synthetic source the lift never reads, so they go
     // through the same parse, naming and duplicate check as a hand-written `@mununu_guarantee`.
     let template_source = template_guarantees(&opts.templates, &opts.templates_files)?;
@@ -4169,6 +4306,7 @@ pub(crate) fn extract_front(
         .extend(ann_scan.guarantees.iter().cloned());
     Ok(SharedExtraction {
         extraction,
+        declarations,
         ann_scan,
         predicate_hints,
     })
@@ -4344,6 +4482,7 @@ pub(crate) fn prepare_model(
     // 1. Extract + translate the SVA (slang) + merge `@mununu_guarantee` annotations.
     let SharedExtraction {
         mut extraction,
+        declarations,
         ann_scan,
         predicate_hints,
     } = extract_front(sources, opts, &yosys_opts.params)?;
@@ -4431,6 +4570,10 @@ pub(crate) fn prepare_model(
             }
             a
         },
+        diagnostics: ModelDiagnostics {
+            written_formulas: written_formulas_of(&extraction.translated),
+            ..Default::default()
+        },
         ..Default::default()
     };
     if extraction.translated.is_empty() {
@@ -4478,6 +4621,8 @@ pub(crate) fn prepare_model(
         clock_domains,
         trace_names,
     } = lift_sv(sources, yosys_opts, opts)?;
+    let mut trace_names = trace_names;
+    fill_declarations(&mut trace_names, &declarations);
     report.diagnostics.trace_names = trace_names;
     if clock_domains.len() > 1 {
         report.diagnostics.merged_clock_domains = clock_domains
@@ -9241,6 +9386,7 @@ mod tests {
             kind: SvaKind::Assert,
             formula: "nu X. ([] X)".into(),
             recoverability_companion: None,
+            written: None,
         };
         let v = abstained(&t, BottomReason::NotAttempted);
         assert_eq!(v.name, "p1");
@@ -11858,6 +12004,52 @@ module uart_tx(); endmodule"#;
         assert!(mu_parser::parse(off).is_ok(), "{off}");
     }
 
+    /// The row keeps the LTL as its author wrote it beside the mu-calculus the engine decides;
+    /// a mu-calculus body keeps nothing beside its formula (2026-10-29).
+    #[test]
+    fn an_ltl_annotation_keeps_its_written_form_and_a_mu_calculus_body_does_not() {
+        use crate::adapter::slang::translate::{FormulaLanguage, WrittenFormula};
+        let sv = "// @mununu_guarantee(alt) ltl G (start_a -> X (!start_a W start_b))\n\
+                  // @mununu_guarantee(safe) nu X. ((!(bad)) && [] X)\n\
+                  module m(); endmodule";
+        let scan = scan_annotation_properties(&src(sv));
+        assert!(scan.skipped.is_empty(), "{:?}", scan.skipped);
+        assert_eq!(scan.guarantees.len(), 2);
+        assert_eq!(
+            scan.guarantees[0].written,
+            Some(WrittenFormula {
+                language: FormulaLanguage::Ltl,
+                text: "G (start_a -> X (!start_a W start_b))".to_string(),
+            })
+        );
+        assert!(
+            scan.guarantees[0].formula.starts_with("(nu G1."),
+            "the engine's text is still the translation: {}",
+            scan.guarantees[0].formula
+        );
+        assert_eq!(scan.guarantees[1].written, None);
+        assert_eq!(scan.guarantees[1].formula, "nu X. ((!(bad)) && [] X)");
+
+        // The skeleton's table and the report's lookup: by row name, `None` for a plain row.
+        let table = written_formulas_of(&scan.guarantees);
+        assert_eq!(table.len(), 1);
+        assert_eq!(table[0].0, "ann_guarantee_0");
+        let report = AutoVerifyReport {
+            diagnostics: ModelDiagnostics {
+                written_formulas: table,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            report
+                .written_formula("ann_guarantee_0")
+                .map(|w| w.text.as_str()),
+            Some("G (start_a -> X (!start_a W start_b))")
+        );
+        assert_eq!(report.written_formula("ann_guarantee_1"), None);
+    }
+
     /// Outside the every-path fragment (`F G p` is path-wise), the body is skipped with the
     /// subformula named — never translated into a different property; and `eltl` is refused
     /// with the mu-calculus alternative spelled out, because the some-path reading is what a
@@ -12457,6 +12649,7 @@ module uart_tx(); endmodule"#;
                 // `cnt_q >= cfg_detect_timer_i` — the comparison that reveals the bound.
                 formula: "nu X. ((cnt_q >= cfg_detect_timer_i) && [] X)".into(),
                 recoverability_companion: None,
+                written: None,
             },
             crate::adapter::slang::translate::TranslatedAssertion {
                 name: "m_sva_13".into(),
@@ -12465,6 +12658,7 @@ module uart_tx(); endmodule"#;
                 // The monotonicity property — needs the bound but never names cfg.
                 formula: "nu X. ((cnt_q >= cnt_q__past) && [] X)".into(),
                 recoverability_companion: None,
+                written: None,
             },
         ];
         let bounds =
@@ -12641,6 +12835,7 @@ module uart_tx(); endmodule"#;
                 kind: SvaKind::Assert,
                 formula: chain.into(),
                 recoverability_companion: None,
+                written: None,
             }],
             ..Default::default()
         };
@@ -13805,6 +14000,7 @@ module uart_tx(); endmodule"#;
             kind,
             formula: formula.to_string(),
             recoverability_companion: None,
+            written: None,
         };
         let report = || TranslationReport {
             translated: vec![
@@ -19085,5 +19281,109 @@ endmodule
             n.summary
         );
         assert!(n.detail.contains("decided by reach-rescue"), "{}", n.detail);
+    }
+}
+
+#[cfg(test)]
+mod source_map_tests {
+    use super::*;
+    use crate::trace::{CellSource, SourceLoc, TraceNames};
+
+    fn loc(f: &str, l: u32) -> SourceLoc {
+        SourceLoc {
+            file: f.into(),
+            line: l,
+        }
+    }
+    fn cell(
+        name: &str,
+        kind: &str,
+        declared: Option<SourceLoc>,
+        assigned: Vec<SourceLoc>,
+    ) -> CellSource {
+        CellSource {
+            cell: name.into(),
+            kind: kind.into(),
+            declared,
+            assigned,
+        }
+    }
+
+    /// A gap the netlist left (an older yosys-slang stamps cells, not nets) is filled from the
+    /// AST by name; a cell the AST does not declare is named in the reason and the map is
+    /// `partial`; everything placed is available; the sv2v path keeps its reason and is partial;
+    /// nothing placed at all is unavailable with its reason.
+    #[test]
+    fn declarations_fill_the_gaps_and_settle_the_status() {
+        let mut names = TraceNames {
+            sources: vec![
+                cell("state_q", "register", None, vec![loc("pump_pair.sv", 52)]),
+                cell("flow", "input", Some(loc("pump_pair.sv", 25)), vec![]),
+                cell(
+                    "u_sva.seen",
+                    "register",
+                    None,
+                    vec![loc("pump_pair_sva.sv", 9)],
+                ),
+            ],
+            ..Default::default()
+        };
+        let decls = Ok(vec![
+            ("state_q".to_string(), loc("pump_pair.sv", 32)),
+            ("flow".to_string(), loc("x.sv", 1)),
+        ]);
+        fill_declarations(&mut names, &decls);
+        assert_eq!(
+            names.sources[0].declared,
+            Some(loc("pump_pair.sv", 32)),
+            "the gap is filled"
+        );
+        assert_eq!(
+            names.sources[1].declared,
+            Some(loc("pump_pair.sv", 25)),
+            "the netlist's own line is kept"
+        );
+        assert!(names.source_map_partial);
+        assert_eq!(
+            names.source_map.as_deref(),
+            Some("no declaration for u_sva.seen")
+        );
+
+        let mut full = TraceNames {
+            sources: vec![cell("q", "register", None, vec![loc("a.sv", 5)])],
+            ..Default::default()
+        };
+        fill_declarations(&mut full, &Ok(vec![("q".to_string(), loc("a.sv", 2))]));
+        assert!(
+            !full.source_map_partial && full.source_map.is_none(),
+            "every cell placed: available"
+        );
+
+        let mut sv2v = TraceNames {
+            sources: vec![cell("q", "register", None, vec![])],
+            source_map: Some("the assignment lines are unavailable: sv2v …".into()),
+            ..Default::default()
+        };
+        fill_declarations(&mut sv2v, &Ok(vec![("q".to_string(), loc("a.sv", 2))]));
+        assert!(
+            sv2v.source_map_partial,
+            "declarations only: partial, with sv2v's reason kept"
+        );
+        assert_eq!(sv2v.sources[0].declared, Some(loc("a.sv", 2)));
+
+        let mut none = TraceNames {
+            sources: vec![cell("q", "register", None, vec![])],
+            ..Default::default()
+        };
+        fill_declarations(&mut none, &Err("slang not found".into()));
+        assert!(none.sources.is_empty() && !none.source_map_partial);
+        assert!(
+            none.source_map
+                .as_deref()
+                .unwrap_or("")
+                .contains("declared none"),
+            "{:?}",
+            none.source_map
+        );
     }
 }

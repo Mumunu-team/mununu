@@ -114,6 +114,42 @@
       ],
       "type": "object"
     },
+    "CellSource": {
+      "description": "Where a trace cell lives in the RTL (2026-10-29).",
+      "properties": {
+        "assigned": {
+          "description": "The `always` block(s) of the flop(s) driving a register; empty for an input.",
+          "items": {
+            "$ref": "#/definitions/SourceLoc"
+          },
+          "type": "array"
+        },
+        "cell": {
+          "description": "The cell as the trace names it (the net; a hierarchical name keeps its dots).",
+          "type": "string"
+        },
+        "declared": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SourceLoc"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The net's declaration."
+        },
+        "kind": {
+          "description": "`\"register\"` | `\"input\"` | `\"output\"`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "cell",
+        "kind"
+      ],
+      "type": "object"
+    },
     "CexCellView": {
       "description": "One register's concrete value in a counterexample state. mununu#723 — a cell wider than 64 bits was silently absent from the trace (OpenTitan edn's 109-bit `tl_i`, the bus write behind the fatal alert). `value` is unchanged for every cell that fits 64 bits — exactly the cells that were listed before — and `null` for a wider value; `hex` and `bits` are always present.",
       "properties": {
@@ -307,6 +343,14 @@
           },
           "type": "array"
         },
+        "source_map": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/SourceMapView"
+            }
+          ],
+          "description": "Whether the rows' traces carry RTL source lines, and why not when they do not (2026-10-29)."
+        },
         "state_register_count": {
           "description": "Number of state register lines in the lifted model.",
           "format": "uint",
@@ -318,6 +362,7 @@
         "auto_provided_stubs",
         "blackboxed_modules",
         "gated_resets",
+        "source_map",
         "state_register_count"
       ],
       "type": "object"
@@ -360,6 +405,11 @@
           ]
         },
         "formula": {
+          "description": "The property as its author wrote it when that was not mu-calculus — an `@mununu_guarantee ltl …` row shows its LTL (2026-10-29) — otherwise the mu-calculus the engine decided (every SVA row, plain annotation body and template). `formula_language` says which; `translated` carries the mu-calculus whenever `formula` is not it.",
+          "type": "string"
+        },
+        "formula_language": {
+          "description": "How to read `formula`: `\"mu-calculus\"` | `\"ltl\"`.",
           "type": "string"
         },
         "kind": {
@@ -406,6 +456,13 @@
           ],
           "description": "The counterexample ([`Trace`]) of a Violated property: for safety, the reset → violation path (empty `cycle`) native BMC re-derives whichever engine decided it (absent when none lies within the bound); D1.8b — a stall lasso for a bare `AF p` decided by the exact engine; A.4 — the unreachable target of a bare `EF p`."
         },
+        "translated": {
+          "description": "The mu-calculus the engine decided, present only when `formula` is written in another language (an `ltl` row). A tool that re-parses formulas reads this and falls back to `formula` when it is absent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "unknown_cells": {
           "description": "mununu#536 — the cell count behind an `unknown` (⊥) verdict, machine-readable. `None` for every other outcome.\n\nThis is the \"cell/budget figure that accompanies a ⊥\" the issue asks for: a ⊥ is a statement about how much of the cube space stayed undecided, and a consumer tracking whether refinement is helping needs the number, not a sentence containing it.",
           "format": "uint",
@@ -429,10 +486,145 @@
       },
       "required": [
         "formula",
+        "formula_language",
         "kind",
         "name",
         "outcome",
         "seeded_predicates"
+      ],
+      "type": "object"
+    },
+    "ReplayMismatchView": {
+      "description": "The first comparison that disagreed.",
+      "properties": {
+        "cycle": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "expected": {
+          "type": "string"
+        },
+        "got": {
+          "type": "string"
+        },
+        "register": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "cycle",
+        "expected",
+        "got",
+        "register"
+      ],
+      "type": "object"
+    },
+    "ReplayResultView": {
+      "description": "The replay's verdict: the bench ran under Verilator and compared the trace cycle by cycle, or could not run and says why (2026-10-29).",
+      "properties": {
+        "assertions": {
+          "description": "Verilator's `Assertion failed` lines: the design's own assertion firing on the final state.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "checks": {
+          "description": "The (cycle, register) comparisons the bench makes.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "first_mismatch": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ReplayMismatchView"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "log": {
+          "description": "The bench's own lines: verdict, mismatches, assertions, the VCD line.",
+          "type": "string"
+        },
+        "mismatches": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "outcome": {
+          "description": "`\"match\"` | `\"mismatch\"` | `\"unavailable\"`.",
+          "type": "string"
+        },
+        "reason": {
+          "description": "Why the replay could not run (`unavailable`): Verilator or `make` missing, a compile error.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "vcd_bytes": {
+          "description": "`replay.vcd`'s size in bytes, when `make trace` wrote it.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "verilator": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "assertions",
+        "checks",
+        "log",
+        "mismatches",
+        "outcome"
+      ],
+      "type": "object"
+    },
+    "SourceLoc": {
+      "description": "A place in the RTL: the file's basename and a line (yosys's `src` keeps the path and the column; the report keeps what a reader opens).",
+      "properties": {
+        "file": {
+          "type": "string"
+        },
+        "line": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "file",
+        "line"
+      ],
+      "type": "object"
+    },
+    "SourceMapView": {
+      "description": "Whether rows and traces carry RTL source lines (2026-10-29): `available` when every cell has its declaration (yosys's netlist attributes or slang's AST, on every front end) and the lift stamped its `always` blocks; `partial` with the reason when something is missing (the sv2v path has no assignment lines; a cell the AST did not declare); `unavailable` with the reason when nothing could be placed.",
+      "properties": {
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "description": "`\"available\"` | `\"partial\"` | `\"unavailable\"`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status"
       ],
       "type": "object"
     },
@@ -493,6 +685,13 @@
               "type": "null"
             }
           ]
+        },
+        "sources": {
+          "description": "Where each cell the trace shows lives in the RTL (2026-10-29): the legend, in the order of the first step's cells. Empty when the source map is unavailable (`diagnostics.source_map`).",
+          "items": {
+            "$ref": "#/definitions/CellSource"
+          },
+          "type": "array"
         },
         "steps": {
           "items": {
@@ -584,6 +783,31 @@
     "TraceReplay": {
       "description": "Replay artefacts attached to a [`Trace`].",
       "properties": {
+        "dir": {
+          "description": "Where the CLI wrote the files (`--emit-testbench DIR/<property>`); absent over HTTP.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "gtkw": {
+          "description": "`replay.gtkw` — a GTKWave save file listing the clock, the trace's inputs and the registers it names, so `gtkwave replay.vcd replay.gtkw` opens on the scene (2026-10-29).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "result": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ReplayResultView"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The bench built and run (`--replay` / `replay: true`); absent when not requested."
+        },
         "testbench": {
           "anyOf": [
             {

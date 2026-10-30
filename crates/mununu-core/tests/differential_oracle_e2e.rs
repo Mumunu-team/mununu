@@ -798,10 +798,11 @@ fn corpus_report(
 /// Per-row pins for an `#[ignore]`d e2e (mununu#800): every pinned label appears exactly `n`
 /// times with the outcome `want` — the value the row DECIDED when it was measured, or `unknown`
 /// for a row that has never decided. A row that is `unknown` with a HOST-DEPENDENT bottom reason
-/// (a wall clock or RSS ceiling — [`BottomDeterminism::HostDependent`]) is printed as
-/// budget-bound and tolerated: the same run decides on a quieter machine, and a count or a strict
-/// pin would turn host load into a verdict about the design (the posture's ack endpoints went
-/// 5 ⊥ → 6 ⊥ under a foreign SBY job on the host, every one `BudgetExpired`). What the pins
+/// (a wall clock or RSS ceiling — [`BottomDeterminism::HostDependent`]) is printed as a
+/// wall-clock stop and tolerated: a clock is not a verdict about the design, and a count or a
+/// strict pin would make it one. The stop need not be this host's doing — the posture's ack
+/// endpoints read 5 ⊥ at #755 and 6 ⊥ on every run since, loaded or idle, on both binaries,
+/// every one `BudgetExpired` (mununu#800, runs 1–7). What the pins
 /// therefore cannot catch is a change that makes every engine slower without declining — a
 /// timing sweep's question, not an e2e's. Everything else — a flip, a reproducible ⊥, a row
 /// pinned `unknown` that now decides (update the pin with the measured value), a row no pin
@@ -840,7 +841,7 @@ fn rows_off_their_pins<'a>(
                     .is_some_and(|r| r.determinism() == BottomDeterminism::HostDependent);
             if host_bound {
                 eprintln!(
-                    "  budget-bound on this host (pinned {want}): {label} — {}",
+                    "  wall-clock stop, tolerated (pinned {want}): {label} — {}",
                     p.bottom_reason.as_ref().map(|r| r.tag()).unwrap_or("-")
                 );
             } else if *want == "unknown" {
@@ -3278,12 +3279,14 @@ fn e2e_opentitan_ip_edn_sec_cm_posture() {
         violated.is_empty(),
         "an escape under one fault: {violated:?}"
     );
-    // Pinned per row (mununu#800) with the value each chain DECIDED — #755 (2026-10-23, a quiet
-    // host: 10 HOLD, 5 ⊥) and main 2026-10-27 (under a foreign SBY job: 9 HOLD, 6 ⊥). The rows
-    // whose site widens the cone past what the wall budgets finish stop with `BudgetExpired`, a
-    // host-dependent reason the pins print and tolerate, never count: four ack endpoints and
-    // the gencmd read pointer on the quiet host, five endpoints under load. The read pointer has
-    // never decided under the posture and is pinned ⊥; when it decides, the pin takes the
+    // Pinned per row (mununu#800) with the value each chain DECIDED — #755 (2026-10-23: 10 HOLD,
+    // 5 ⊥) and every run since (2026-10-26 → 10-28, loaded and idle, `main` and the #755 binary
+    // alike: 9 HOLD, 6 ⊥). The rows whose site widens the cone past what the rescue slice
+    // finishes stop with `BudgetExpired`, a host-dependent reason the pins print and tolerate,
+    // never count: ack endpoints 2–6 and the gencmd read pointer, on every host measured (the
+    // #755 fourth endpoint was a one-off inside the slice; ep0 / ep1 / ep7 decide in 20–76 s,
+    // ep2–ep6 not within 300 s — the isomorphic-instance gap has its own issue). The read pointer
+    // has never decided under the posture and is pinned ⊥; when it decides, the pin takes the
     // measured value. The deciding engine is printed above and deliberately not pinned.
     const EDN_POSTURE_PINS: &[(&str, usize, &str)] = &[
         ("FpvSecCmAckFsmCheck_A", 8, "holds"),

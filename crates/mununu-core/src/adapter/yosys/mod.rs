@@ -322,6 +322,9 @@ struct SvFlattenArtifacts {
     /// The concrete front end that produced this BTOR2 (`Verilog`/`Slang`, never
     /// `Auto`) — surfaced by verify-auto's `lift-frontend` note (#466).
     frontend_used: SvFrontend,
+    /// sv2v rewrote the source before yosys read it (`use_sv2v` without the slang plugin), so the
+    /// netlist's `src` lines are `preprocessed.sv`'s, not the RTL's (2026-10-29).
+    sv2v_ran: bool,
     /// When `Auto` fell back (an earlier front end errored before this one
     /// succeeded), the prior attempt's error — else `None`. (#466)
     fallback_reason: Option<String>,
@@ -563,7 +566,9 @@ fn run_sv_flatten_btor2_concrete(
     // `…$func$preprocessed.sv:3983$4411.$result`, the same on every run (yosys's `$4411` autoidx
     // is deterministic for the same input). Every other path in the script stays absolute.
     let mut yosys_cwd: Option<PathBuf> = None;
+    let mut sv2v_ran = false;
     if yopts.use_sv2v && slang_plugin.is_none() {
+        sv2v_ran = true;
         let sv2v = locate_sv2v()?;
         let preprocessed = tmp.path().join("preprocessed.sv");
         // Include-search path. Two sources, in priority order:
@@ -746,6 +751,7 @@ fn run_sv_flatten_btor2_concrete(
         hier_json,
         staged_primary: primary.to_string_lossy().into_owned(),
         frontend_used,
+        sv2v_ran,
         fallback_reason: None,
         backend_retry,
         clock_domains,
@@ -949,6 +955,7 @@ pub fn sv_to_btor2_with_blackboxes(
         btor2: artifacts.btor2,
         blackboxed_modules: blackboxed_module_names(&artifacts.hier_json),
         frontend_used: artifacts.frontend_used,
+        sv2v_ran: artifacts.sv2v_ran,
         fallback_reason: artifacts.fallback_reason,
         backend_retry: artifacts.backend_retry,
         clock_domains: artifacts.clock_domains,
@@ -964,6 +971,10 @@ pub struct SvLiftResult {
     pub blackboxed_modules: Vec<String>,
     /// The concrete front end used (`Verilog`/`Slang`, never `Auto`).
     pub frontend_used: SvFrontend,
+    /// sv2v preprocessed the source before yosys read it, so the netlist's `src` lines are
+    /// sv2v's output's, not the RTL's; the source map is declared unavailable then (2026-10-29).
+    /// Both yosys-slang and yosys's own `read_verilog` stamp the staged file's own lines.
+    pub sv2v_ran: bool,
     /// `Some(reason)` when `Auto` fell back after an earlier front end errored.
     pub fallback_reason: Option<String>,
     /// `Some(reason)` when the BTOR backend's topological-loop error made the lift rerun its
@@ -1081,6 +1092,157 @@ pub fn trace_aliases(flat_netlist_json: &str) -> std::collections::BTreeMap<Stri
         }
     }
     aliases
+}
+
+/// Where each design signal lives in the RTL (2026-10-29), from yosys's `src` attributes in the
+/// flattened netlist (`flat_netlist_json`): a net's declaration and, for a register, the `always`
+/// block(s) of the flop(s) that drive it (the cell's `src`, joined through the `Q` bits). Ports are
+/// `input` / `output`, a net a flop drives is a `register`; other nets are left out, as are
+/// yosys-internal (`$…`, hidden) names. Only `--frontend slang` stamps the original file and line
+/// (sv2v rewrites the source first); the caller declares the map unavailable on that path.
+pub fn cell_sources(flat_netlist_json: &str) -> Vec<crate::trace::CellSource> {
+    use crate::trace::{CellSource, SourceLoc};
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(flat_netlist_json) else {
+        return Vec::new();
+    };
+    let Some(modules) = json.get("modules").and_then(|m| m.as_object()) else {
+        return Vec::new();
+    };
+    let top = modules
+        .values()
+        .find(|m| m.get("attributes").and_then(|a| a.get("top")).is_some())
+        .or_else(|| {
+            (modules.len() == 1)
+                .then(|| modules.values().next())
+                .flatten()
+        });
+    let Some(top) = top else {
+        return Vec::new();
+    };
+    let Some(nets) = top.get("netnames").and_then(|n| n.as_object()) else {
+        return Vec::new();
+    };
+    let public = |name: &str, net: &serde_json::Value| {
+        !name.starts_with('$') && net.get("hide_name").and_then(|h| h.as_i64()) != Some(1)
+    };
+    let src_of = |v: &serde_json::Value| {
+        v.get("attributes")
+            .and_then(|a| a.get("src"))
+            .and_then(|s| s.as_str())
+            .and_then(SourceLoc::parse_yosys_src)
+    };
+    // Every public net carrying a bit.
+    let mut by_bit: HashMap<i64, Vec<&str>> = HashMap::new();
+    for (name, net) in nets {
+        if !public(name, net) {
+            continue;
+        }
+        for b in net
+            .get("bits")
+            .and_then(|b| b.as_array())
+            .into_iter()
+            .flatten()
+        {
+            if let Some(b) = b.as_i64() {
+                by_bit.entry(b).or_default().push(name.as_str());
+            }
+        }
+    }
+    // The registers: the `Q` bits of every storage cell, with the cell's `src`.
+    const FLOPS: [&str; 14] = [
+        "$dff",
+        "$dffe",
+        "$adff",
+        "$adffe",
+        "$sdff",
+        "$sdffe",
+        "$sdffce",
+        "$aldff",
+        "$aldffe",
+        "$dffsr",
+        "$dffsre",
+        "$dlatch",
+        "$adlatch",
+        "$dlatchsr",
+    ];
+    let mut assigned: std::collections::BTreeMap<&str, Vec<SourceLoc>> =
+        std::collections::BTreeMap::new();
+    for cell in top
+        .get("cells")
+        .and_then(|c| c.as_object())
+        .into_iter()
+        .flat_map(|c| c.values())
+    {
+        let ty = cell.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        if !FLOPS.contains(&ty) {
+            continue;
+        }
+        let loc = src_of(cell);
+        for b in cell
+            .get("connections")
+            .and_then(|c| c.get("Q"))
+            .and_then(|q| q.as_array())
+            .into_iter()
+            .flatten()
+        {
+            let Some(b) = b.as_i64() else {
+                continue;
+            };
+            for n in by_bit.get(&b).into_iter().flatten() {
+                let e = assigned.entry(n).or_default();
+                if let Some(l) = &loc
+                    && !e.contains(l)
+                {
+                    e.push(l.clone());
+                }
+            }
+        }
+    }
+    let ports = top.get("ports").and_then(|p| p.as_object());
+    let direction = |name: &str| {
+        ports
+            .and_then(|p| p.get(name))
+            .and_then(|p| p.get("direction"))
+            .and_then(|d| d.as_str())
+    };
+    let mut out = Vec::new();
+    for (name, net) in nets {
+        if !public(name, net) {
+            continue;
+        }
+        let kind = match (direction(name), assigned.contains_key(name.as_str())) {
+            (Some("input"), _) => "input",
+            (_, true) => "register",
+            (Some("output"), false) => "output",
+            _ => continue,
+        };
+        out.push(CellSource {
+            cell: name.clone(),
+            kind: kind.to_string(),
+            declared: src_of(net),
+            assigned: assigned.remove(name.as_str()).unwrap_or_default(),
+        });
+    }
+    out
+}
+
+/// The lift stages the primary source as `work.sv` in its temp directory, so yosys's `src`
+/// attributes name that file; the report names the file the user invoked mununu on. `primary`
+/// is the primary source's name as the caller gave it (a path on the CLI, `source_name` or
+/// `<top>.sv` over HTTP); its basename replaces `work.sv` in every location.
+pub fn name_staged_primary(sources: &mut [crate::trace::CellSource], primary: &str) {
+    let file = std::path::Path::new(primary)
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or(primary)
+        .to_string();
+    for s in sources {
+        for loc in s.declared.iter_mut().chain(s.assigned.iter_mut()) {
+            if loc.file == "work.sv" {
+                loc.file = file.clone();
+            }
+        }
+    }
 }
 
 /// The clock domains of a flattened design, from a `write_json` snapshot taken after `flatten`
@@ -4598,5 +4760,90 @@ endmodule
     fn parse_undefined_module_cells_empty_for_self_contained() {
         let hier = r#"{"modules":{"top":{"cells":{"a":{"type":"$dff"},"b":{"type":"sub"}}},"sub":{"cells":{}}}}"#;
         assert!(parse_undefined_module_cells(hier).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod cell_source_tests {
+    use super::*;
+
+    /// A netlist trimmed from the tutorial's `pump_pair` lift (yosys 0.70 + yosys-slang,
+    /// 2026-10-29): ports, nets with their declaration, two `$aldff` flops on the `always_ff` at
+    /// line 52 (one merged `src`), a `$mux`, and a hidden internal net.
+    const FLAT: &str = r#"{"modules":{"pump_pair":{"attributes":{"top":1},
+      "ports":{"clk":{"direction":"input","bits":[2]},"start_cmd":{"direction":"input","bits":[4]},
+               "running":{"direction":"output","bits":[7]},"state_q":{"direction":"output","bits":[9,10]}},
+      "cells":{
+        "$aldff$1":{"type":"$aldff","attributes":{"src":"../rtl/pump_pair.sv:52.5"},"connections":{"Q":[9,10]}},
+        "$aldff$2":{"type":"$aldff","attributes":{"src":"../rtl/pump_pair.sv:52.5|../rtl/pump_pair.sv:60.1"},"connections":{"Q":[11,12,13]}},
+        "$mux$1":{"type":"$mux","attributes":{"src":"../rtl/pump_pair.sv:42.49-42.73"},"connections":{"Y":[7]}}},
+      "netnames":{
+        "clk":{"bits":[2],"attributes":{"src":"../rtl/pump_pair.sv:21.24"}},
+        "start_cmd":{"bits":[4],"attributes":{"src":"../rtl/pump_pair.sv:23.24"}},
+        "running":{"bits":[7],"attributes":{"src":"../rtl/pump_pair.sv:28.24"}},
+        "state_q":{"bits":[9,10],"attributes":{"src":"../rtl/pump_pair.sv:32.24"}},
+        "lof_q":{"bits":[11,12,13],"attributes":{"src":"../rtl/pump_pair.sv:36.17"}},
+        "next":{"bits":[14,15],"attributes":{"src":"../rtl/pump_pair.sv:37.17"}},
+        "$auto$w":{"bits":[99],"hide_name":1,"attributes":{"src":"x.sv:1.1"}}}}}}"#;
+
+    #[test]
+    fn cell_sources_reads_declarations_flops_and_ports_and_skips_wires() {
+        let got: Vec<(String, String, Option<u32>, Vec<u32>)> = cell_sources(FLAT)
+            .into_iter()
+            .map(|c| {
+                (
+                    c.cell,
+                    c.kind,
+                    c.declared.map(|l| l.line),
+                    c.assigned.iter().map(|l| l.line).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("clk".into(), "input".into(), Some(21), vec![]),
+                ("lof_q".into(), "register".into(), Some(36), vec![52]),
+                ("running".into(), "output".into(), Some(28), vec![]),
+                ("start_cmd".into(), "input".into(), Some(23), vec![]),
+                ("state_q".into(), "register".into(), Some(32), vec![52]),
+            ],
+            "a register is a net a flop drives, its always block is the flop's src (first of a merged pair); `next` is a wire and `$auto$w` is hidden — neither is listed"
+        );
+        assert!(cell_sources("not json").is_empty());
+    }
+
+    /// The primary's staging name becomes the file the user named; another file is left alone.
+    #[test]
+    fn the_staged_primary_is_named_after_the_users_file() {
+        use crate::trace::{CellSource, SourceLoc};
+        let loc = |f: &str, l: u32| SourceLoc {
+            file: f.into(),
+            line: l,
+        };
+        let mut sources = vec![
+            CellSource {
+                cell: "state_q".into(),
+                kind: "register".into(),
+                declared: Some(loc("work.sv", 32)),
+                assigned: vec![loc("work.sv", 52)],
+            },
+            CellSource {
+                cell: "u_sva.seen".into(),
+                kind: "register".into(),
+                declared: Some(loc("pump_pair_sva.sv", 9)),
+                assigned: vec![],
+            },
+        ];
+        name_staged_primary(&mut sources, "rtl/draft1/pump_pair.sv");
+        assert_eq!(
+            sources[0].declared.as_ref().unwrap().to_string(),
+            "pump_pair.sv:32"
+        );
+        assert_eq!(sources[0].assigned[0].to_string(), "pump_pair.sv:52");
+        assert_eq!(
+            sources[1].declared.as_ref().unwrap().to_string(),
+            "pump_pair_sva.sv:9"
+        );
     }
 }
