@@ -77,6 +77,14 @@ pub struct TraceNames {
     /// The lift's front end rewrote the source before yosys read it (sv2v), so the netlist's
     /// lines are the rewrite's: the map takes every line from slang's AST instead.
     pub source_lines_rewritten: bool,
+    /// The flattened netlist as a circuit of values (2026-10-30), for the trace-relative slice;
+    /// `None` when the model did not come from the SystemVerilog lift.
+    pub netlist: Option<std::sync::Arc<crate::adapter::yosys::netlist::Netlist>>,
+    /// The staged sources' text by file basename, for the slice's line text.
+    pub source_text: std::collections::BTreeMap<String, Vec<String>>,
+    /// Inputs the run pinned to a constant (`--pin`, the gated reset, `--config-value`): the
+    /// value the slice evaluates them at, since a trace does not list them.
+    pub pinned: std::collections::BTreeMap<String, u128>,
 }
 
 /// A place in the RTL: the file's basename and a line (yosys's `src` keeps the path and the
@@ -278,6 +286,134 @@ impl TraceNames {
         }
         trace
     }
+
+    /// Attach the trace-relative slice (2026-10-30) for the public nets `seeds` (the property's
+    /// atoms, monitor suffixes stripped and aliases resolved): per cycle, the lines that decided
+    /// their values, with the line text when the run holds the source. The status always says
+    /// what happened — `exact`, `widened` (with the cell types kept whole) or `unavailable` (with
+    /// why). A CTXDSL path (named states) gets none.
+    pub fn attach_slice(&self, trace: &mut Trace, seeds: &[String]) {
+        use std::collections::{BTreeSet, HashMap};
+        let status = |status: &str, reason: Option<String>| SliceStatus {
+            status: status.to_string(),
+            reason,
+        };
+        if trace.steps.is_empty() || trace.steps.iter().any(|s| s.state_name.is_some()) {
+            return;
+        }
+        let Some(netlist) = &self.netlist else {
+            trace.slice_status = Some(status(
+                "unavailable",
+                Some("no netlist: the model did not come from the SystemVerilog lift".to_string()),
+            ));
+            return;
+        };
+        if self.source_lines_rewritten {
+            trace.slice_status = Some(status(
+                "unavailable",
+                Some(
+                    "the sv2v front end does not preserve source lines; use --frontend slang"
+                        .to_string(),
+                ),
+            ));
+            return;
+        }
+        let value = |c: &CexCellView| -> Option<u128> {
+            c.value
+                .map(u128::from)
+                .or_else(|| u128::from_str_radix(c.hex.trim_start_matches("0x"), 16).ok())
+        };
+        let steps: Vec<(HashMap<String, u128>, HashMap<String, u128>)> = trace
+            .steps
+            .iter()
+            .map(|s| {
+                let mut state = HashMap::new();
+                for c in s.state.iter().chain(s.monitor.iter()) {
+                    if let Some(v) = value(c) {
+                        state.insert(c.register.clone(), v);
+                    }
+                }
+                let mut inputs: HashMap<String, u128> =
+                    self.pinned.iter().map(|(k, v)| (k.clone(), *v)).collect();
+                for c in &s.inputs {
+                    if let Some(v) = value(c) {
+                        inputs.insert(c.register.clone(), v);
+                    }
+                }
+                (state, inputs)
+            })
+            .collect();
+        // A monitor cell's name is its net plus a suffix (`start_a__past`, `x__bits7_0`); the
+        // slice is about the net.
+        let base = |s: &str| -> String {
+            let mut end = s.len();
+            for marker in ["__past", "__bits", "__popcount"] {
+                if let Some(i) = s.find(marker) {
+                    end = end.min(i);
+                }
+            }
+            s[..end].to_string()
+        };
+        let seeds: Vec<String> = seeds
+            .iter()
+            .map(|s| base(s))
+            .map(|s| self.aliases.get(&s).cloned().unwrap_or(s))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let rep = netlist.slice(&steps, &seeds);
+        let text = |l: &SourceLoc| -> Option<String> {
+            let line = self
+                .source_text
+                .get(&l.file)?
+                .get((l.line as usize).checked_sub(1)?)?
+                .trim();
+            Some(if line.chars().count() > 72 {
+                format!("{}\u{2026}", line.chars().take(71).collect::<String>())
+            } else {
+                line.to_string()
+            })
+        };
+        trace.slice = rep
+            .cycles
+            .iter()
+            .map(|c| SliceCycle {
+                cycle: c.cycle,
+                lines: c
+                    .lines
+                    .iter()
+                    .map(|l| SliceLine {
+                        file: l.file.clone(),
+                        line: l.line,
+                        text: text(l),
+                    })
+                    .collect(),
+            })
+            .collect();
+        trace.slice_status = Some(if !rep.widened.is_empty() {
+            status(
+                "widened",
+                Some(format!(
+                    "cell type(s) the evaluator does not know, their whole fan-in kept: {}",
+                    rep.widened.iter().cloned().collect::<Vec<_>>().join(", ")
+                )),
+            )
+        } else if trace.slice.is_empty() {
+            status(
+                "unavailable",
+                Some(if rep.unknown_seeds.is_empty() {
+                    "the property reads no public net of the netlist".to_string()
+                } else {
+                    format!(
+                        "the property's atoms are not public nets of the netlist: {}",
+                        rep.unknown_seeds.join(", ")
+                    )
+                }),
+            )
+        } else {
+            status("exact", None)
+        });
+    }
 }
 
 /// What a [`Trace`] shows.
@@ -453,6 +589,47 @@ pub struct Trace {
     /// of the first step's cells. Empty when the source map is unavailable (`diagnostics.source_map`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sources: Vec<CellSource>,
+    /// The trace-relative slice (2026-10-30): per cycle, the RTL lines that decided the values the
+    /// property read — the branches taken and the operands that controlled them, nothing else
+    /// ([`crate::adapter::yosys::netlist::Netlist::slice`]). Empty when unavailable; `slice_status`
+    /// says why, and whether an unevaluated cell widened it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub slice: Vec<SliceCycle>,
+    /// `exact` (every cell on the path was evaluated), `widened` (a cell type the evaluator does
+    /// not know kept its whole fan-in — the slice is never smaller than the truth) or
+    /// `unavailable` (no netlist, source lines rewritten by sv2v, no public net among the
+    /// property's atoms), with the reason. Absent on a trace no slice was attempted for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slice_status: Option<SliceStatus>,
+}
+
+/// One cycle of a counterexample's trace-relative slice (2026-10-30).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "api", derive(schemars::JsonSchema))]
+pub struct SliceCycle {
+    /// The step of the trace whose values these lines decided (the transition out of it).
+    pub cycle: usize,
+    pub lines: Vec<SliceLine>,
+}
+
+/// One RTL line of a slice, with its text when the run holds the source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "api", derive(schemars::JsonSchema))]
+pub struct SliceLine {
+    pub file: String,
+    pub line: u32,
+    /// The line as written, trimmed, at most 72 characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+}
+
+/// What limited a slice: `exact` | `widened` | `unavailable`, with the reason.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "api", derive(schemars::JsonSchema))]
+pub struct SliceStatus {
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// Register cells of one state, in the wire shape (`value` when it fits 64 bits, `hex` always).
@@ -564,6 +741,8 @@ impl Trace {
             unreachable_target: Vec::new(),
             replay: None,
             sources: Vec::new(),
+            slice: Vec::new(),
+            slice_status: None,
         }
     }
 
@@ -608,6 +787,8 @@ impl Trace {
             unreachable_target,
             replay: None,
             sources: Vec::new(),
+            slice: Vec::new(),
+            slice_status: None,
         }
     }
 }
@@ -640,6 +821,8 @@ impl Trace {
             unreachable_target: Vec::new(),
             replay: None,
             sources: Vec::new(),
+            slice: Vec::new(),
+            slice_status: None,
         }
     }
 }

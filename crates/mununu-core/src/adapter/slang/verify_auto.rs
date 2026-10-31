@@ -249,10 +249,13 @@ impl PropertyVerdict {
     /// row has no counterexample.
     pub fn trace(&self, names: &crate::trace::TraceNames) -> Option<crate::trace::Trace> {
         self.counterexample.as_ref().map(|c| {
-            names.tidy(counterexample_trace(
+            let mut trace = names.tidy(counterexample_trace(
                 c,
                 self.decided_by.as_deref() == Some(TRAP_CERTIFICATE_DECIDED_BY),
-            ))
+            ));
+            // 2026-10-30 — the lines that decided the values the property read, cycle by cycle.
+            names.attach_slice(&mut trace, &slice_seeds(&self.formula));
+            trace
         })
     }
 }
@@ -4617,11 +4620,81 @@ pub(crate) struct PreLift {
 /// Run the SV → BTOR2 lift (yosys) with the `auto_stub_flops` re-lift. Pure function of
 /// `(sources, yosys_opts, opts)` — the same inputs every precision-ladder operator shares —
 /// so the planner calls it once and threads the [`PreLift`] into each [`verify_auto_impl`].
+/// The sources' text by file basename (2026-10-30), for the slice's line text.
+fn sources_text_by_file(
+    sources: &[(String, String)],
+) -> std::collections::BTreeMap<String, Vec<String>> {
+    sources
+        .iter()
+        .map(|(name, text)| {
+            let file = std::path::Path::new(name)
+                .file_name()
+                .and_then(|f| f.to_str())
+                .unwrap_or(name)
+                .to_string();
+            (file, text.lines().map(str::to_string).collect())
+        })
+        .collect()
+}
+
+/// The inputs the run pinned (the gated resets, `--pin` / `--config-value`), as the values the
+/// slice evaluates them at (2026-10-30): a trace lists only the free inputs.
+fn fill_pinned(report: &mut AutoVerifyReport) {
+    let mut pinned = std::collections::BTreeMap::new();
+    for entry in report
+        .diagnostics
+        .gated_resets
+        .iter()
+        .chain(report.diagnostics.applied_config_values.iter())
+    {
+        if let Some((name, value)) = entry.split_once('=') {
+            let value = value.trim();
+            let parsed = value
+                .strip_prefix("0x")
+                .map(|h| u128::from_str_radix(h, 16))
+                .unwrap_or_else(|| value.parse::<u128>());
+            if let Ok(v) = parsed {
+                pinned.insert(name.trim().to_string(), v);
+            }
+        }
+    }
+    report.diagnostics.trace_names.pinned = pinned;
+}
+
+/// The public nets a property's atoms read (2026-10-30), for the slice's seeds: the identifiers
+/// of its seed atoms, monitor names left out.
+fn slice_seeds(formula: &str) -> Vec<String> {
+    let Ok(f) = crate::mu_calculus::parser::parse(formula) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for atom in crate::adapter::btor2::symbolic_bitblast::formula_seed_atoms(&f) {
+        for tok in
+            atom.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '$'))
+        {
+            if tok.is_empty()
+                || tok.starts_with(|c: char| c.is_ascii_digit())
+                || tok.starts_with("mununu_")
+                || tok == "true"
+                || tok == "false"
+            {
+                continue;
+            }
+            if !out.contains(&tok.to_string()) {
+                out.push(tok.to_string());
+            }
+        }
+    }
+    out
+}
+
 pub(crate) fn lift_sv(
     sources: &[(String, String)],
     yosys_opts: &YosysOptions,
     opts: &VerifyAutoOptions,
 ) -> Result<PreLift, AdapterError> {
+    // 2026-10-30 — the sources' text for the slice, taken before `sources` is re-bound below.
+    let source_text = sources_text_by_file(sources);
     use crate::adapter::yosys::sv_to_btor2_with_blackboxes;
     let (primary_name, primary_content) = sources.first().ok_or_else(|| AdapterError {
         kind: AdapterErrorKind::ParseError,
@@ -4697,6 +4770,19 @@ pub(crate) fn lift_sv(
             clocks: lift.clock_domains.iter().map(|d| d.net.clone()).collect(),
             sources,
             source_lines_rewritten: lift.sv2v_ran,
+            // 2026-10-30 — the netlist as a circuit of values, for the trace-relative slice; the
+            // staged primary is `work.sv` to yosys and the user's file to the report.
+            netlist: crate::adapter::yosys::netlist::Netlist::parse(&lift.flat_netlist_json)
+                .ok()
+                .map(|mut n| {
+                    let file = std::path::Path::new(primary_name)
+                        .file_name()
+                        .and_then(|f| f.to_str())
+                        .unwrap_or(primary_name);
+                    n.rename_file("work.sv", file);
+                    std::sync::Arc::new(n)
+                }),
+            source_text,
             ..Default::default()
         },
         clock_domains: lift.clock_domains,
@@ -7190,6 +7276,8 @@ pub(crate) fn verify_auto_impl(
     withhold_violated_over_free_leaves(&mut report, &btor2);
     // 2026-10-30 — the RTL lines of each row's cone (display only; reads no verdict).
     attach_involves(&mut report, &btor2, &source_index);
+    // 2026-10-30 — the inputs the slice evaluates a trace at, which the trace does not list.
+    fill_pinned(&mut report);
     // mununu#579 — last of the verdict post-passes: everything above may still CHANGE a verdict, and
     // a self-contradiction must be judged on the verdicts the report actually ships.
     flag_self_contradictory_verdicts(&mut report);
@@ -16718,6 +16806,139 @@ module uart_tx(); endmodule"#;
                 .iter()
                 .find(|n| n.kind == "assumptions")
                 .map(|n| &n.detail)
+        );
+    }
+
+    /// 2026-10-30 — the trace-relative slice of a counterexample, end to end on the slice
+    /// fixture: `lane_arbiter.sv`'s first draft grants lane A twice; the slice of the
+    /// `alternates` counterexample names the IDLE arm that chose A and the pulse that reported
+    /// it, cycle by cycle, with the line text — and not the FAULT / default arms or the
+    /// `assign`s, which the cone of influence (`involves:`) does list.
+    #[test]
+    #[ignore = "requires slang + sv2v + Yosys + z3 (use the mununu-sva docker image); run with --ignored"]
+    fn e2e_the_slice_of_a_counterexample_names_the_lines_that_decided_it() {
+        use crate::adapter::yosys::SvFrontend;
+        let sv = include_str!("../yosys/testdata/lane_arbiter.sv");
+        let sources = vec![("lane_arbiter.sv".to_string(), sv.to_string())];
+        let yopts = YosysOptions {
+            top: Some("lane_arbiter".to_string()),
+            use_sv2v: true,
+            frontend: SvFrontend::Slang,
+            ..Default::default()
+        };
+        let (symbolic_engine, exact_symbolic, portfolio) = engine_selection(None);
+        let report = verify_auto(
+            &sources,
+            &yopts,
+            &VerifyAutoOptions {
+                symbolic_engine,
+                exact_symbolic,
+                portfolio,
+                ..Default::default()
+            },
+        )
+        .expect("verify_auto runs on lane_arbiter");
+        let row = report
+            .properties
+            .iter()
+            .find(|p| p.label.as_deref() == Some("alternates"))
+            .unwrap_or_else(|| panic!("the alternates row: {:?}", report.properties));
+        assert!(
+            matches!(row.outcome, VerifyOutcome::Violated { .. }),
+            "{:?}",
+            row.outcome
+        );
+        let trace = row
+            .trace(&report.diagnostics.trace_names)
+            .expect("the violated row has a trace");
+        for s in &trace.steps {
+            eprintln!(
+                "  [{}] {:?} in: {:?}",
+                s.cycle,
+                s.state
+                    .iter()
+                    .map(|c| format!("{}={}", c.register, c.hex))
+                    .collect::<Vec<_>>(),
+                s.inputs
+                    .iter()
+                    .map(|c| format!("{}={}", c.register, c.hex))
+                    .collect::<Vec<_>>()
+            );
+        }
+        for c in &trace.slice {
+            for l in &c.lines {
+                eprintln!(
+                    "  slice [{}] {}:{}  {}",
+                    c.cycle,
+                    l.file,
+                    l.line,
+                    l.text.as_deref().unwrap_or("")
+                );
+            }
+        }
+        eprintln!("  status: {:?}", trace.slice_status);
+        assert_eq!(
+            trace.slice_status.as_ref().map(|s| s.status.as_str()),
+            Some("exact"),
+            "{:?}",
+            trace.slice_status
+        );
+        assert_eq!(
+            trace.steps.len(),
+            4,
+            "the measured counterexample has four steps"
+        );
+        let lines = |t: usize| -> Vec<u32> {
+            trace
+                .slice
+                .iter()
+                .find(|c| c.cycle == t)
+                .map(|c| c.lines.iter().map(|l| l.line).collect())
+                .unwrap_or_default()
+        };
+        // The second grant: the `case` (34), the IDLE arm (35), the flops (45), the pulses.
+        assert_eq!(lines(2), vec![34, 35, 45, 53, 54]);
+        let arm = trace.slice[2]
+            .lines
+            .iter()
+            .find(|l| l.line == 35)
+            .and_then(|l| l.text.clone())
+            .unwrap_or_default();
+        assert!(arm.contains("next = LANE_A"), "{arm}");
+        // The branches not taken (the FAULT and default arms write `next`, so the cone lists
+        // them) are not in the slice; the `assign`s to the grant outputs are downstream of what
+        // the property reads — in neither (measured 2026-10-30: the cone is 24 lines, the slice
+        // four to six per cycle).
+        let sliced: std::collections::BTreeSet<u32> = trace
+            .slice
+            .iter()
+            .flat_map(|c| c.lines.iter().map(|l| l.line))
+            .collect();
+        let cone: std::collections::BTreeSet<u32> =
+            report.involves(&row.name).iter().map(|l| l.line).collect();
+        for l in [40u32, 41] {
+            assert!(cone.contains(&l), "line {l} is in the cone: {cone:?}");
+            assert!(
+                !sliced.contains(&l),
+                "line {l} is not on the path: {sliced:?}"
+            );
+        }
+        for l in [60u32, 61, 62, 63] {
+            assert!(
+                !cone.contains(&l),
+                "line {l} is downstream of the property: {cone:?}"
+            );
+            assert!(!sliced.contains(&l), "{sliced:?}");
+        }
+        assert!(cone.len() >= 20, "{cone:?}");
+        // A slice is the cone's statements plus the branch headers that selected them: the
+        // `case (state_q)` line (34) writes nothing, so `involves:` does not list it, and the slice
+        // names it because the `$pmux` it lowers to chose the arm.
+        let headers: std::collections::BTreeSet<u32> = sliced.difference(&cone).copied().collect();
+        assert_eq!(
+            headers,
+            [34u32].into_iter().collect(),
+            "{sliced:?} vs {cone:?}"
         );
     }
 

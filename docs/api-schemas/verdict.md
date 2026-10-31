@@ -151,6 +151,11 @@ Rust source: [`Trace`](../../crates/mununu-core/src/api/models.rs) + [`CexCellVi
       "assigned": [ { "file": "pump_pair.sv", "line": 52 } ] },
     { "cell": "flow", "kind": "input", "declared": { "file": "pump_pair.sv", "line": 25 } }
   ],
+  "slice": [                       // the trace-relative slice (2026-10-30): per cycle, the lines that decided
+    { "cycle": 2, "lines": [       //   the values the property read — the branch taken, the operands that controlled it
+        { "file": "pump_pair.sv", "line": 42, "text": "IDLE: if (start_cmd) next = RUN_A;" } ] }
+  ],
+  "slice_status": { "status": "exact" },   // "exact" | "widened" | "unavailable", with `reason` when not exact
   "replay": {                      // when a Verilator testbench was requested
     "testbench": { "tb_cpp": "…", "makefile": "…", "checks": 16, "skipped": [] },
     "gtkw":   "…",                  // replay.gtkw: the GTKWave save file for the trace's signals
@@ -174,6 +179,16 @@ Rust source: [`Trace`](../../crates/mununu-core/src/api/models.rs) + [`CexCellVi
   attributes when present, from slang's AST otherwise, on every front end (since 2026-10-30 the
   sv2v path takes both halves from the AST); `diagnostics.source_map.status` is `available`, `partial` (with what is missing in
   `reason`) or `unavailable`; the key is omitted when nothing could be placed.
+- `slice` — the trace-relative slice (2026-10-30): for each step `cycle`, the RTL lines that
+  decided the values the property read at that step, each with `file`, `line` and `text` (the line
+  as written, trimmed, ≤ 72 chars, when the run holds the source). The branch taken and the operands
+  that controlled it, nothing else — the row's `involves` statements that ran, plus the branch headers
+  (`case`, `if` lines) that selected them. Omitted when empty.
+- `slice_status` — `exact` (every cell on the path evaluated), `widened` (a cell type the evaluator
+  does not know kept its whole fan-in; `reason` names the types — the slice is never smaller than
+  the truth) or `unavailable` (`reason`: the sv2v front end rewrote the source, no netlist because
+  the model was a BTOR2 given directly, the property reads no public net). Present on every RTL
+  trace a slice was attempted for; absent on a CTXDSL path.
 - `replay` — present when `emit_testbench` / `--emit-testbench` was requested on a row with a path:
   `testbench` (the files), `gtkw` (the GTKWave save file), `dir` (CLI only) and, under `replay: true` /
   `--replay`, `result` — the simulator's verdict, with `outcome: "unavailable"` and a `reason` when
