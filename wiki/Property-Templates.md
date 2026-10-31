@@ -174,6 +174,26 @@ With a single `--template`, the `ID.` prefix on `--template-arg` keys may be dro
 
 Bounded response (`within K cycles`) stays with SVA (`a |-> ##[1:K] b`), which verify-auto translates.
 
+#### Persisted next to the design: `@mununu_template` (2026-10-30)
+
+> Source of truth: [`scan_annotation_properties_with`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/adapter/slang/verify_auto.rs) — surface: CLI+API (every `--source` of `sv verify-auto` and `POST /api/v1/sv/verify-auto`)
+
+The same instances can be written as annotations in the RTL (or in any `--source`), so they travel
+with the design instead of a command line — the flags above are rendered as these internally:
+
+```systemverilog
+// @mununu_template(no_trip)    rtl_never       BAD=state_q == 5
+// @mununu_template(trip_resp)  rtl_response    TRIGGER="trip == 1 && state_q != FAULT" RESPONSE="state_q == SCRAM"
+// @mununu_template(recover)    rtl_recoverable TARGET="state_q == IDLE"
+// @mununu_template(trip_holds, assumes=ignore) rtl_hold_until HOLD=trip RELEASE=stop
+```
+
+The parenthesised name is the row's label (unnamed: `tmpl.<instance>`, as the flags); a VALUE with
+whitespace is double-quoted; `assumes=ignore` after the name judges that one row on every trace
+while the others are judged under the design's applied `assume`s (`--assumes precondition`). A body
+the catalog cannot instantiate is skipped with its reason in the report's `annotation-properties`
+note. Details: [`docs/verifying-rtl.md`](../docs/verifying-rtl.md) §"Template instances as annotations".
+
 ### In `verify.toml`
 
 > Source of truth: [`PropertySpec`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/verify/config.rs#L307) — surface: CLI+API.

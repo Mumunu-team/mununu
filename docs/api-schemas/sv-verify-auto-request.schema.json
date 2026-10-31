@@ -328,7 +328,7 @@
     },
     "templates": {
       "default": [],
-      "description": "Property templates to check besides the design's assertions, each `{template, args}` (`{\"template\": \"rtl_response\", \"args\": {\"TRIGGER\": \"trip == 1\", \"RESPONSE\": \"state_q == SCRAM\"}}`), instantiated against the server's catalog. Each becomes a row labelled `tmpl.<instance>`. Default empty.",
+      "description": "Property templates to check besides the design's assertions, each `{template, args}` (`{\"template\": \"rtl_response\", \"args\": {\"TRIGGER\": \"trip == 1\", \"RESPONSE\": \"state_q == SCRAM\"}}`), instantiated against the server's catalog. Each becomes a row labelled `tmpl.<instance>`. Default empty. The same instance can be written in the source as `// @mununu_template(<name>) rtl_response TRIGGER=\"trip == 1\" RESPONSE=\"state_q == SCRAM\"` (2026-10-30), which needs no request field.",
       "items": {
         "$ref": "#/definitions/TemplateRef"
       },

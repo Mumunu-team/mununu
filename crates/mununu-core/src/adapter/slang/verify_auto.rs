@@ -516,6 +516,11 @@ pub struct ModelDiagnostics {
     /// other provenance of the property set (`fault_sites` names its rows the same way) because
     /// the row struct keeps the mu-calculus, which the post-passes re-parse.
     pub written_formulas: Vec<(String, crate::adapter::slang::translate::WrittenFormula)>,
+    /// The `@mununu_template` rows (2026-10-30), by row name, with the instance as the author
+    /// wrote it (`rtl_reachable TARGET="state_q == 3"`); the row's `formula` is the instantiated
+    /// mu-calculus. Both surfaces show it as the row's `template`. A `--template` flag's row has
+    /// the same entry (the flag is rendered as that annotation).
+    pub template_forms: Vec<(String, String)>,
     /// Where each property is written in the RTL (2026-10-30), by row name: an SVA row's
     /// assertion statement (slang's AST), an annotation row's `@mununu_guarantee` comment (the
     /// scanner). A template row has no source line and is absent.
@@ -692,6 +697,12 @@ pub struct AssumptionReport {
     /// `consistent` (some trace satisfies every applied assumption forever), `contradictory`
     /// (none does: every HOLDS is vacuous) or `unknown`; `None` when nothing was applied.
     pub consistency: Option<String>,
+    /// Rows whose annotation head says `assumes=ignore` (2026-10-30), by ROW NAME, with what the
+    /// modifier did in this run: under `--assumes precondition` with applied assumptions the row
+    /// is judged on every trace while the others are judged under them; in every other mode it
+    /// changed nothing, and the reason says why. Filled whether or not the design has `assume`s,
+    /// so [`AutoVerifyReport::assume_exempt`] can show it on the row.
+    pub exempt: Vec<(String, String)>,
 }
 
 /// The `$past` depth a signal name reads: `x__past` → 1, `x__past3` → 3, `x__past__bits7_0` → 1,
@@ -750,6 +761,7 @@ pub(crate) const ASSUMPTION_CONSISTENCY_PROPERTY: &str = "mununu_assumption_cons
 fn plan_assumptions(
     ex: &mut crate::adapter::slang::translate::TranslationReport,
     mode: AssumeMode,
+    exempt: &[String],
 ) -> (AssumptionReport, Vec<(String, String)>) {
     use crate::adapter::btor2::assume_monitor::{ASSUME_OK_SYMBOL, assume_shape};
     use crate::adapter::slang::assume_guarantee::relativize;
@@ -764,8 +776,24 @@ fn plan_assumptions(
         .iter()
         .filter(|u| u.kind == Some(SvaKind::Assume))
         .count();
+    // 2026-10-30 — a row's `assumes=ignore` modifier is recorded in EVERY mode, with what it
+    // did: a modifier the author wrote and the report never mentions would be a silent no-op.
+    let exempt_rows = |reason: &str| -> Vec<(String, String)> {
+        exempt
+            .iter()
+            .map(|n| (n.clone(), reason.to_string()))
+            .collect()
+    };
     if assumes.is_empty() && unsupported_assumes == 0 {
-        return (AssumptionReport::default(), Vec::new());
+        return (
+            AssumptionReport {
+                exempt: exempt_rows(
+                    "no assume statement in the design: the modifier changed nothing",
+                ),
+                ..Default::default()
+            },
+            Vec::new(),
+        );
     }
     let mut rep = AssumptionReport {
         mode: mode.label().to_string(),
@@ -775,13 +803,19 @@ fn plan_assumptions(
         t.label.clone().unwrap_or_else(|| t.name.clone())
     };
     match mode {
-        AssumeMode::Check => return (rep, Vec::new()),
+        AssumeMode::Check => {
+            rep.exempt =
+                exempt_rows("--assumes check applies no assumption: the modifier changed nothing");
+            return (rep, Vec::new());
+        }
         AssumeMode::Ignore => {
             ex.translated.retain(|t| t.kind != SvaKind::Assume);
             rep.unapplied = assumes
                 .iter()
                 .map(|a| (display(a), "ignored (--assumes ignore)".to_string()))
                 .collect();
+            rep.exempt =
+                exempt_rows("--assumes ignore applies to every row: the modifier changed nothing");
             return (rep, Vec::new());
         }
         AssumeMode::Precondition => {}
@@ -805,9 +839,22 @@ fn plan_assumptions(
         }
     }
     if candidates.is_empty() {
+        rep.exempt = exempt_rows("no assumption was applicable: the modifier changed nothing");
         return (rep, candidates);
     }
     for t in &mut ex.translated {
+        // An exempt row keeps its formula: it never reads `mununu_assume_ok`, so its cone
+        // excludes the monitor and the engines decide it on the un-assumed design — the same
+        // verdict `--assumes ignore` gives that row, in the same run as the assumed ones.
+        if exempt.contains(&t.name) {
+            rep.exempt.push((
+                t.name.clone(),
+                "judged on every trace (annotation modifier assumes=ignore); the other rows are \
+                 judged under the applied assumptions"
+                    .to_string(),
+            ));
+            continue;
+        }
         match relativize(&t.formula, ASSUME_OK_SYMBOL, t.kind == SvaKind::Cover) {
             Ok(f) => t.formula = f,
             Err(why) => rep.unguarded.push((display(t), why)),
@@ -882,6 +929,25 @@ pub(crate) fn finish_assumptions(report: &mut AutoVerifyReport) {
                 .join(", ")
         ));
     }
+    if !a.exempt.is_empty() && !a.applied.is_empty() {
+        // Shown by LABEL where the row has one: the rows print theirs, the note matches.
+        let shown: Vec<String> = a
+            .exempt
+            .iter()
+            .map(|(n, _)| {
+                report
+                    .properties
+                    .iter()
+                    .find(|p| p.name == *n)
+                    .and_then(|p| p.label.clone())
+                    .unwrap_or_else(|| n.clone())
+            })
+            .collect();
+        detail.push_str(&format!(
+            " Judged on every trace by annotation (`assumes=ignore`): {}.",
+            shown.join(", ")
+        ));
+    }
     let contradictory = a.consistency.as_deref() == Some("contradictory");
     report.notes.push(VerificationNote {
         kind: "assumptions".to_string(),
@@ -953,6 +1019,26 @@ impl AutoVerifyReport {
             .iter()
             .find(|(n, _)| n == name)
             .map(|(_, l)| l)
+    }
+
+    /// The template instance a `@mununu_template` / `--template` row was written as, when it is
+    /// one (2026-10-30).
+    pub fn template_form(&self, name: &str) -> Option<&str> {
+        self.diagnostics
+            .template_forms
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, f)| f.as_str())
+    }
+
+    /// What the row's `assumes=ignore` modifier did in this run, when the row carries one
+    /// (2026-10-30): the reason [`AssumptionReport::exempt`] recorded.
+    pub fn assume_exempt(&self, name: &str) -> Option<&str> {
+        self.assumptions
+            .exempt
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, r)| r.as_str())
     }
 
     /// The RTL lines of the property's cone of influence; empty when unknown (2026-10-30).
@@ -3037,6 +3123,142 @@ struct AnnotationScan {
     /// `seed_from_formula`'s `extra_atoms`. Sound by monotonicity — a hint only
     /// refines the cube (a ⊥ can become definite; a definite verdict never flips).
     predicates: Vec<String>,
+    /// The `@mununu_template` rows (2026-10-30), by row name, with the instance as the author
+    /// wrote it (`rtl_reachable TARGET="state_q == 3"`); the row's `formula` is the
+    /// instantiated mu-calculus. Shown on the row as `template:`.
+    template_forms: Vec<(String, String)>,
+    /// Rows whose head carries `assumes=ignore` (2026-10-30): judged on every trace while the
+    /// other rows are judged under the applied assumptions ([`plan_assumptions`] skips their
+    /// relativization). Row names.
+    assume_exempt: Vec<String>,
+}
+
+/// The modifiers a `guarantee` / `template` row's head may carry (2026-10-30).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct RowModifiers {
+    /// `assumes=ignore`: the row is not relativized to the applied assumptions.
+    assume_exempt: bool,
+}
+
+/// Read a row's head modifiers; an unknown key or value is an `Err` the scanner reports (a
+/// modifier the author wrote and the tool ignored would change the verdict's meaning silently).
+fn row_modifiers(
+    ann: &crate::mununu_annotations::MununuAnnotation,
+    tag: &str,
+) -> Result<RowModifiers, String> {
+    let mut m = RowModifiers::default();
+    let named = ann
+        .name
+        .as_deref()
+        .map(|n| format!("({n})"))
+        .unwrap_or_default();
+    for (k, v) in &ann.modifiers {
+        match (k.as_str(), v.as_str()) {
+            ("assumes", "ignore") => m.assume_exempt = true,
+            ("assumes", "precondition") => m.assume_exempt = false,
+            ("assumes", other) => {
+                return Err(format!(
+                    "@mununu_{tag}{named}: `assumes={other}` \u{2014} a row's modifier is \
+                     `ignore` or `precondition`; `check` is a run mode (`--assumes check`), not \
+                     a property's"
+                ));
+            }
+            (key, _) => {
+                return Err(format!(
+                    "@mununu_{tag}{named}: unknown modifier `{key}` (this version knows \
+                     `assumes`)"
+                ));
+            }
+        }
+    }
+    Ok(m)
+}
+
+/// Parse a `@mununu_template` body (2026-10-30): `<id> (KEY=VALUE)*`, a VALUE with whitespace
+/// double-quoted (`TARGET="state_q == 3"`), no escapes. Returns the reference to instantiate.
+fn parse_template_body(body: &str) -> Result<crate::adapter::templates::TemplateRef, String> {
+    let body = body.trim();
+    let ident = |s: &str| {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-')
+    };
+    let (id, mut rest) = match body.find(char::is_whitespace) {
+        Some(i) => (&body[..i], body[i..].trim_start()),
+        None => (body, ""),
+    };
+    if !ident(id) {
+        return Err(if id.is_empty() {
+            "a template id is required (`mununu templates --domain rtl` lists them)".to_string()
+        } else {
+            format!("`{id}` is not a template id")
+        });
+    }
+    let mut args = std::collections::HashMap::new();
+    while !rest.is_empty() {
+        let Some(eq) = rest.find('=') else {
+            return Err(format!(
+                "`{}` is not `KEY=VALUE`",
+                rest.split_whitespace().next().unwrap_or(rest)
+            ));
+        };
+        let key = rest[..eq].trim();
+        if !ident(key) {
+            return Err(format!(
+                "`{key}` is not a parameter name (write `KEY=VALUE`)"
+            ));
+        }
+        let after = &rest[eq + 1..];
+        let (value, tail) = if let Some(q) = after.strip_prefix('"') {
+            let Some(close) = q.find('"') else {
+                return Err(format!("`{key}=` opens a quote that never closes"));
+            };
+            (&q[..close], &q[close + 1..])
+        } else {
+            match after.find(char::is_whitespace) {
+                Some(i) => (&after[..i], &after[i..]),
+                None => (after, ""),
+            }
+        };
+        if value.is_empty() {
+            return Err(format!("`{key}=` has no value"));
+        }
+        if args.insert(key.to_string(), value.to_string()).is_some() {
+            return Err(format!("`{key}` is given twice"));
+        }
+        rest = tail.trim_start();
+    }
+    Ok(crate::adapter::templates::TemplateRef {
+        template: id.to_string(),
+        args,
+    })
+}
+
+/// The label of an unnamed template row, `tmpl.<instance name>` sanitised to the annotation-name
+/// alphabet (`tmpl.rtl_reachable_TARGET_state_q_eq_3`) — the label `--template` rows have carried
+/// since they existed, so a consumer's pin on it does not move.
+fn template_instance_label(instance_name: &str) -> String {
+    let name: String = instance_name
+        .replace("==", "eq")
+        .replace("!=", "ne")
+        .replace("<=", "le")
+        .replace(">=", "ge")
+        .replace("&&", "and")
+        .replace("||", "or")
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .split('_')
+        .filter(|p| !p.is_empty())
+        .collect::<Vec<_>>()
+        .join("_");
+    format!("tmpl.{name}")
 }
 
 /// H.5-GR1 — scan the SV source(s) for `@mununu_guarantee` / `@mununu_assume`
@@ -3057,9 +3279,26 @@ struct AnnotationScan {
 /// named. `eltl` (the some-path reading) is NOT accepted here: that reading is the
 /// plain mu-calculus body this scanner always took. Bodies that do not parse are
 /// recorded in `skipped`, never silently dropped.
+///
+/// A `@mununu_template <id> KEY=VALUE…` body (2026-10-30) is a property-template instance,
+/// instantiated against the built-in catalog here; the production path passes the run's
+/// configured catalog through [`scan_annotation_properties_with`].
+#[cfg(test)]
 fn scan_annotation_properties(sources: &[(String, String)]) -> AnnotationScan {
+    scan_annotation_properties_with(
+        sources,
+        &crate::adapter::templates::TemplateRegistry::builtin(),
+    )
+}
+
+/// [`scan_annotation_properties`] against `registry` — the catalog `@mununu_template` rows are
+/// instantiated from (the built-in templates, the deployment's and the project's packs).
+fn scan_annotation_properties_with(
+    sources: &[(String, String)],
+    registry: &crate::adapter::templates::TemplateRegistry,
+) -> AnnotationScan {
     use crate::adapter::slang::translate::{FormulaLanguage, TranslatedAssertion, WrittenFormula};
-    use crate::mununu_annotations::{MununuTag, extract_from_sv_source};
+    use crate::mununu_annotations::{MununuTag, extract_from_sv_source_checked};
 
     let mut scan = AnnotationScan::default();
     let mut idx = 0usize;
@@ -3071,7 +3310,18 @@ fn scan_annotation_properties(sources: &[(String, String)]) -> AnnotationScan {
             .next()
             .unwrap_or(source_name)
             .to_string();
-        for ann in extract_from_sv_source(content) {
+        let extracted = extract_from_sv_source_checked(content);
+        // 2026-10-30 — a `@mununu_` line the extractor could not read (a tag typo, a malformed
+        // head) used to vanish: an obligation the author wrote was silently not checked.
+        for r in &extracted.rejected {
+            scan.skipped.push(format!(
+                "{file}:{}: `{}` — {}",
+                r.line,
+                r.text.split_whitespace().next().unwrap_or(&r.text),
+                r.reason
+            ));
+        }
+        for ann in extracted.annotations {
             match ann.tag {
                 MununuTag::Guarantee => {
                     let body = ann.value.trim();
@@ -3080,6 +3330,13 @@ fn scan_annotation_properties(sources: &[(String, String)]) -> AnnotationScan {
                             .push("@mununu_guarantee with an empty body".to_string());
                         continue;
                     }
+                    let mods = match row_modifiers(&ann, "guarantee") {
+                        Ok(m) => m,
+                        Err(why) => {
+                            scan.skipped.push(why);
+                            continue;
+                        }
+                    };
                     // `ltl <formula>` → the universal translation's text; anything else is
                     // mu-calculus as before. The keyword must be followed by whitespace, so an
                     // atom that happens to start with `ltl` (`ltl_ok`) is not captured.
@@ -3183,10 +3440,91 @@ fn scan_annotation_properties(sources: &[(String, String)]) -> AnnotationScan {
                                 recoverability_companion: None,
                                 written,
                             });
+                            if mods.assume_exempt {
+                                scan.assume_exempt.push(format!("ann_guarantee_{idx}"));
+                            }
                             idx += 1;
                         }
                         Err(why) => scan.skipped.push(why),
                     }
+                }
+                MununuTag::Template => {
+                    // 2026-10-30 — a template instance written next to the design. The same
+                    // row shape as a guarantee (it IS one: the instantiated mu-calculus), the
+                    // same naming, duplicate and source-line rules; the instance as written
+                    // rides beside it as the row's `template:`.
+                    let body = ann.value.trim();
+                    let mods = match row_modifiers(&ann, "template") {
+                        Ok(m) => m,
+                        Err(why) => {
+                            scan.skipped.push(why);
+                            continue;
+                        }
+                    };
+                    let tref = match parse_template_body(body) {
+                        Ok(t) => t,
+                        Err(why) => {
+                            scan.skipped
+                                .push(format!("@mununu_template `{body}`: {why}"));
+                            continue;
+                        }
+                    };
+                    let inst = match registry.instantiate(&tref) {
+                        Ok(i) => i,
+                        Err(e) => {
+                            scan.skipped.push(format!("@mununu_template `{body}`: {e}"));
+                            continue;
+                        }
+                    };
+                    if let Err(e) = crate::mu_calculus::parser::parse(&inst.formula) {
+                        scan.skipped.push(format!(
+                            "@mununu_template `{body}`: the instance `{}` did not parse as a \
+                             mu-calculus formula: {e}",
+                            inst.formula
+                        ));
+                        continue;
+                    }
+                    let label = ann
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| template_instance_label(&inst.name));
+                    if let Some(prev) = scan
+                        .guarantees
+                        .iter()
+                        .find(|g| g.label.as_deref() == Some(label.as_str()))
+                    {
+                        scan.skipped.push(format!(
+                            "@mununu_template({label}) \u{2014} duplicate name, already used by \
+                             `{}`. A name is a PIN: two properties answering to one would make \
+                             `--expect {label}` silently match only the first. Rename one of \
+                             them.",
+                            prev.name
+                        ));
+                        continue;
+                    }
+                    let row = format!("ann_guarantee_{idx}");
+                    if written_by_user && let Some(line) = ann.source_line {
+                        scan.guarantee_lines.push((
+                            row.clone(),
+                            crate::trace::SourceLoc {
+                                file: file.clone(),
+                                line,
+                            },
+                        ));
+                    }
+                    scan.template_forms.push((row.clone(), body.to_string()));
+                    if mods.assume_exempt {
+                        scan.assume_exempt.push(row.clone());
+                    }
+                    scan.guarantees.push(TranslatedAssertion {
+                        name: row,
+                        label: Some(label),
+                        kind: SvaKind::Assert,
+                        formula: inst.formula,
+                        recoverability_companion: None,
+                        written: None,
+                    });
+                    idx += 1;
                 }
                 MununuTag::Assume => {
                     let body = ann.value.trim();
@@ -3247,7 +3585,10 @@ fn annotation_note(scan: &AnnotationScan) -> Option<VerificationNote> {
     }
     let mut items = Vec::new();
     for g in &scan.guarantees {
-        items.push(format!("guarantee {}: {}", g.name, g.formula));
+        match scan.template_forms.iter().find(|(n, _)| *n == g.name) {
+            Some((_, form)) => items.push(format!("template {}: {form}", g.name)),
+            None => items.push(format!("guarantee {}: {}", g.name, g.formula)),
+        }
     }
     for a in &scan.assumes {
         items.push(format!("assume: {a}"));
@@ -4437,12 +4778,20 @@ pub(crate) fn extract_front(
             },
             params,
         )?;
-    // Templates become annotations of a synthetic source the lift never reads, so they go
-    // through the same parse, naming and duplicate check as a hand-written `@mununu_guarantee`.
-    let template_source = template_guarantees(&opts.templates, &opts.templates_files)?;
+    // Templates become `@mununu_template` annotations of a synthetic source the lift never
+    // reads, so a flag and a hand-written instance go through the same parse, naming and
+    // duplicate check (2026-10-30; before, the flag was rendered as a `@mununu_guarantee` of the
+    // instantiated formula). The catalog is the run's: built-in + deployment + project packs.
+    let registry = crate::adapter::templates::TemplateRegistry::configured(&opts.templates_files)
+        .map_err(|e| AdapterError {
+        kind: AdapterErrorKind::ParseError,
+        message: format!("verify_auto: the template catalog: {e}"),
+        location: None,
+    })?;
+    let template_source = template_annotations(&opts.templates, &registry)?;
     let scan_sources: Vec<(String, String)> =
         sources.iter().cloned().chain(template_source).collect();
-    let mut ann_scan = scan_annotation_properties(&scan_sources);
+    let mut ann_scan = scan_annotation_properties_with(&scan_sources, &registry);
     for g in &mut ann_scan.guarantees {
         g.formula = resolve_named_constants(&g.formula, &extraction.named_constants);
     }
@@ -4463,12 +4812,16 @@ pub(crate) fn extract_front(
     })
 }
 
-/// The `@mununu_guarantee` lines for the requested templates, as one synthetic source (`None` when
-/// no template is requested). Each instance is named `tmpl.<instance name>`, sanitised to the
-/// annotation-name alphabet (`rtl_never.BAD-state_q_eq_5`).
-fn template_guarantees(
+/// The `@mununu_template` lines for the requested `--template` flags, as one synthetic source
+/// (`None` when no template is requested). Each flag is rendered as the annotation an author
+/// would write — `// @mununu_template(tmpl.<instance>) <id> KEY="VALUE"…` — so the two forms are
+/// one path from here on (2026-10-30; before, the flag was rendered as a `@mununu_guarantee` of
+/// the instantiated formula). The flag's instance is validated HERE, as a hard error: a flag the
+/// user typed and the run could not honour must not become a note. The row keeps the label a
+/// `--template` row has always had ([`template_instance_label`]).
+fn template_annotations(
     templates: &[crate::adapter::templates::TemplateRef],
-    files: &[std::path::PathBuf],
+    registry: &crate::adapter::templates::TemplateRegistry,
 ) -> Result<Option<(String, String)>, AdapterError> {
     if templates.is_empty() {
         return Ok(None);
@@ -4478,38 +4831,30 @@ fn template_guarantees(
         message,
         location: None,
     };
-    let registry = crate::adapter::templates::TemplateRegistry::configured(files)
-        .map_err(|e| err(format!("verify_auto: the template catalog: {e}")))?;
     let mut text = String::new();
     for tref in templates {
         let inst = registry
             .instantiate(tref)
             .map_err(|e| err(format!("verify_auto: template `{}`: {e}", tref.template)))?;
-        let name: String = inst
-            .name
-            .replace("==", "eq")
-            .replace("!=", "ne")
-            .replace("<=", "le")
-            .replace(">=", "ge")
-            .replace("&&", "and")
-            .replace("||", "or")
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect::<String>()
-            .split('_')
-            .filter(|p| !p.is_empty())
-            .collect::<Vec<_>>()
-            .join("_");
-        text.push_str(&format!(
-            "// @mununu_guarantee(tmpl.{name}) {}\n",
-            inst.formula
-        ));
+        let mut args: Vec<(&String, &String)> = tref.args.iter().collect();
+        args.sort();
+        let mut line = format!(
+            "// @mununu_template({}) {}",
+            template_instance_label(&inst.name),
+            tref.template
+        );
+        for (k, v) in args {
+            if v.contains('"') {
+                return Err(err(format!(
+                    "verify_auto: template `{}`: the value of `{k}` contains a double quote, \
+                     which the annotation form cannot carry",
+                    tref.template
+                )));
+            }
+            line.push_str(&format!(" {k}=\"{v}\""));
+        }
+        line.push('\n');
+        text.push_str(&line);
     }
     Ok(Some(("__mununu_templates.sv".to_string(), text)))
 }
@@ -4641,9 +4986,10 @@ pub(crate) fn prepare_model(
         predicate_hints,
     } = extract_front(sources, opts, &yosys_opts.params)?;
     // Phase 4 — `assume` statements: split off, guarantees relativized (the monitor itself is
-    // emitted below, once the expressions it reads are minted).
+    // emitted below, once the expressions it reads are minted); a row whose annotation head says
+    // `assumes=ignore` keeps its formula.
     let (assumption_report, assume_candidates) =
-        plan_assumptions(&mut extraction, opts.assume_mode);
+        plan_assumptions(&mut extraction, opts.assume_mode, &ann_scan.assume_exempt);
 
     // Validate `--param` override names against the design's declared parameters
     // (from the slang AST). The read_verilog lift's `chparam` errors on an unknown
@@ -4726,6 +5072,7 @@ pub(crate) fn prepare_model(
         },
         diagnostics: ModelDiagnostics {
             written_formulas: written_formulas_of(&extraction.translated),
+            template_forms: ann_scan.template_forms.clone(),
             property_sources: property_sources_of(
                 &extraction.translated,
                 &declarations,
@@ -14185,7 +14532,7 @@ module uart_tx(); endmodule"#;
         };
         // precondition
         let mut ex = report();
-        let (rep, candidates) = plan_assumptions(&mut ex, AssumeMode::Precondition);
+        let (rep, candidates) = plan_assumptions(&mut ex, AssumeMode::Precondition, &[]);
         assert_eq!(rep.mode, "precondition");
         assert_eq!(
             candidates
@@ -14205,13 +14552,13 @@ module uart_tx(); endmodule"#;
         assert!(ex.translated[1].formula.contains("(mununu_assume_ok && "));
         // check: untouched
         let mut ex = report();
-        let (rep, candidates) = plan_assumptions(&mut ex, AssumeMode::Check);
+        let (rep, candidates) = plan_assumptions(&mut ex, AssumeMode::Check, &[]);
         assert_eq!(rep.mode, "check");
         assert!(candidates.is_empty());
         assert_eq!(ex.translated.len(), 5);
         // ignore: assumes dropped, guarantees untouched
         let mut ex = report();
-        let (rep, _) = plan_assumptions(&mut ex, AssumeMode::Ignore);
+        let (rep, _) = plan_assumptions(&mut ex, AssumeMode::Ignore, &[]);
         assert_eq!(rep.unapplied.len(), 3);
         assert_eq!(ex.translated.len(), 2);
         assert_eq!(ex.translated[0].formula, "nu X. ((cnt == 0) && [] X)");
@@ -14220,9 +14567,102 @@ module uart_tx(); endmodule"#;
             translated: vec![t("a", SvaKind::Assert, "nu X. ((cnt == 0) && [] X)")],
             ..Default::default()
         };
-        let (rep, _) = plan_assumptions(&mut ex, AssumeMode::Precondition);
+        let (rep, _) = plan_assumptions(&mut ex, AssumeMode::Precondition, &[]);
         assert!(rep.mode.is_empty());
         assert_eq!(ex.translated.len(), 1);
+    }
+
+    /// 2026-10-30 — a row named in `exempt` keeps its formula under `precondition` (it never
+    /// reads `mununu_assume_ok`, so its cone excludes the monitor and it is decided on the
+    /// un-assumed design), and the report records what the modifier did in every mode — a no-op
+    /// is said out loud with its reason.
+    #[test]
+    fn an_exempt_row_is_not_relativized_and_the_report_says_what_the_modifier_did() {
+        use crate::adapter::slang::translate::{TranslatedAssertion, TranslationReport};
+        let t = |name: &str, kind: SvaKind, formula: &str| TranslatedAssertion {
+            name: name.to_string(),
+            label: Some(name.to_string()),
+            kind,
+            formula: formula.to_string(),
+            recoverability_companion: None,
+            written: None,
+        };
+        let exempt = vec!["b".to_string()];
+        let report = || TranslationReport {
+            translated: vec![
+                t("m_inv", SvaKind::Assume, "nu X. ((!(inc)) && [] X)"),
+                t("a", SvaKind::Assert, "nu X. ((cnt == 0) && [] X)"),
+                t("b", SvaKind::Assert, "nu X. ((cnt == 1) && [] X)"),
+            ],
+            ..Default::default()
+        };
+        // precondition with an applied assumption: `a` is relativized, `b` is not.
+        let mut ex = report();
+        let (rep, candidates) = plan_assumptions(&mut ex, AssumeMode::Precondition, &exempt);
+        assert_eq!(candidates.len(), 1);
+        assert!(
+            ex.translated[0].formula.contains("mununu_assume_ok"),
+            "{}",
+            ex.translated[0].formula
+        );
+        assert_eq!(ex.translated[1].formula, "nu X. ((cnt == 1) && [] X)");
+        assert_eq!(rep.exempt.len(), 1);
+        assert_eq!(rep.exempt[0].0, "b");
+        assert!(
+            rep.exempt[0].1.contains("judged on every trace"),
+            "{}",
+            rep.exempt[0].1
+        );
+        assert!(
+            rep.unguarded.is_empty(),
+            "exempt is not a failure to relativize"
+        );
+        // ignore / check: the modifier changed nothing, and the record says why.
+        let mut ex = report();
+        let (rep, _) = plan_assumptions(&mut ex, AssumeMode::Ignore, &exempt);
+        assert!(
+            rep.exempt[0].1.contains("--assumes ignore"),
+            "{}",
+            rep.exempt[0].1
+        );
+        let mut ex = report();
+        let (rep, _) = plan_assumptions(&mut ex, AssumeMode::Check, &exempt);
+        assert!(
+            rep.exempt[0].1.contains("--assumes check"),
+            "{}",
+            rep.exempt[0].1
+        );
+        // no assume in the design: still recorded (the row shows it), the mode stays empty.
+        let mut ex = TranslationReport {
+            translated: vec![t("b", SvaKind::Assert, "nu X. ((cnt == 1) && [] X)")],
+            ..Default::default()
+        };
+        let (rep, _) = plan_assumptions(&mut ex, AssumeMode::Precondition, &exempt);
+        assert!(rep.mode.is_empty());
+        assert!(
+            rep.exempt[0].1.contains("no assume statement"),
+            "{}",
+            rep.exempt[0].1
+        );
+        // only unapplicable assumes: nothing to be exempt from.
+        let mut ex = TranslationReport {
+            translated: vec![
+                t(
+                    "m_deep",
+                    SvaKind::Assume,
+                    "nu X. (((!(req)) || [] [] req) && [] X)",
+                ),
+                t("b", SvaKind::Assert, "nu X. ((cnt == 1) && [] X)"),
+            ],
+            ..Default::default()
+        };
+        let (rep, _) = plan_assumptions(&mut ex, AssumeMode::Precondition, &exempt);
+        assert!(
+            rep.exempt[0].1.contains("no assumption was applicable"),
+            "{}",
+            rep.exempt[0].1
+        );
+        assert_eq!(ex.translated[0].formula, "nu X. ((cnt == 1) && [] X)");
     }
 
     #[test]
@@ -16016,6 +16456,164 @@ module uart_tx(); endmodule"#;
             matches!(by_label("a_bounded").outcome, VerifyOutcome::Holds),
             "{:?}",
             by_label("a_bounded").outcome
+        );
+    }
+
+    /// 2026-10-30 — one run, two postures: a `@mununu_template` row and an exempt
+    /// (`assumes=ignore`) row next to a design with an applied `assume`. The exempt rows get the
+    /// verdict a whole `--assumes ignore` run gives them; the other rows are judged under the
+    /// assumption and differ from that run — the exemption is per row, not global. The template
+    /// rows carry their instance and their own source line.
+    #[test]
+    #[ignore = "requires slang + sv2v + Yosys + z3 (use the mununu-sva docker image); run with --ignored"]
+    fn e2e_template_annotation_and_exempt_row_in_one_run() {
+        use crate::adapter::yosys::SvFrontend;
+        let sv = "module cnt (input logic clk, input logic rst_n, input logic inc, output logic [1:0] q);\n\
+                  always_ff @(posedge clk or negedge rst_n) if (!rst_n) q <= '0; else if (inc) q <= q + 2'd1;\n\
+                  m_quiet: assume property (@(posedge clk) disable iff (!rst_n) !inc);\n\
+                  endmodule\n\
+                  // @mununu_template(never_full) rtl_never BAD=\"q == 3\"\n\
+                  // @mununu_template(full_reach) rtl_reachable TARGET=\"q == 3\"\n\
+                  // @mununu_template(full_reach_free, assumes=ignore) rtl_reachable TARGET=\"q == 3\"\n\
+                  // @mununu_guarantee(small_free, assumes=ignore) nu X. ((q != 3) && [] X)\n";
+        let sources = vec![("cnt.sv".to_string(), sv.to_string())];
+        let yopts = YosysOptions {
+            top: Some("cnt".to_string()),
+            use_sv2v: true,
+            frontend: SvFrontend::Slang,
+            ..Default::default()
+        };
+        let run = |mode: AssumeMode| {
+            verify_auto(
+                &sources,
+                &yopts,
+                &VerifyAutoOptions {
+                    assume_mode: mode,
+                    ..Default::default()
+                },
+            )
+            .expect("verify_auto runs on cnt")
+        };
+        let under = run(AssumeMode::Precondition);
+        let ignored = run(AssumeMode::Ignore);
+        for r in [&under, &ignored] {
+            for p in &r.properties {
+                eprintln!(
+                    "  [{}] {} ({:?}): {:?}",
+                    r.assumptions.mode, p.name, p.label, p.outcome
+                );
+            }
+        }
+        let row = |r: &AutoVerifyReport, l: &str| {
+            r.properties
+                .iter()
+                .find(|p| p.label.as_deref() == Some(l))
+                .unwrap_or_else(|| panic!("row labelled `{l}` in {:?}", r.properties))
+                .clone()
+        };
+        let definite = |p: &PropertyVerdict| match &p.outcome {
+            VerifyOutcome::Holds => true,
+            VerifyOutcome::Violated { .. } => false,
+            other => panic!("{} is not definite: {other:?}", p.name),
+        };
+        // Under the assumption `inc` never rises: `q == 3` is unreachable (never_full HOLDS,
+        // full_reach VIOLATED); the exempt rows see the free design (q reaches 3 at cycle 3).
+        assert_eq!(under.assumptions.applied, vec!["m_quiet".to_string()]);
+        assert!(definite(&row(&under, "never_full")));
+        assert!(!definite(&row(&under, "full_reach")));
+        assert!(definite(&row(&under, "full_reach_free")));
+        assert!(!definite(&row(&under, "small_free")));
+        // The exempt rows' verdicts ARE the `--assumes ignore` run's; the others differ from it.
+        for l in ["full_reach_free", "small_free"] {
+            assert_eq!(
+                definite(&row(&under, l)),
+                definite(&row(&ignored, l)),
+                "{l}"
+            );
+        }
+        for l in ["never_full", "full_reach"] {
+            assert_ne!(
+                definite(&row(&under, l)),
+                definite(&row(&ignored, l)),
+                "{l}"
+            );
+        }
+        // The exempt rows never read the monitor; the others do.
+        assert!(
+            !row(&under, "full_reach_free")
+                .formula
+                .contains("mununu_assume_ok")
+        );
+        assert!(
+            !row(&under, "small_free")
+                .formula
+                .contains("mununu_assume_ok")
+        );
+        assert!(
+            row(&under, "full_reach")
+                .formula
+                .contains("mununu_assume_ok")
+        );
+        // What the report says about it.
+        let exempt_names: Vec<&str> = under
+            .assumptions
+            .exempt
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect();
+        assert_eq!(
+            exempt_names,
+            vec![
+                row(&under, "full_reach_free").name.as_str(),
+                row(&under, "small_free").name.as_str()
+            ]
+        );
+        assert!(
+            under
+                .assume_exempt(&row(&under, "small_free").name)
+                .unwrap()
+                .contains("judged on every trace")
+        );
+        assert!(
+            under
+                .assume_exempt(&row(&ignored, "small_free").name)
+                .is_some(),
+            "recorded in the ignore run too"
+        );
+        assert!(
+            ignored
+                .assume_exempt(&row(&ignored, "small_free").name)
+                .unwrap()
+                .contains("--assumes ignore")
+        );
+        // The template rows: instance beside the formula, their own line; the guarantee has none.
+        assert_eq!(
+            under.template_form(&row(&under, "full_reach").name),
+            Some("rtl_reachable TARGET=\"q == 3\"")
+        );
+        assert_eq!(under.template_form(&row(&under, "small_free").name), None);
+        assert_eq!(
+            under
+                .property_source(&row(&under, "never_full").name)
+                .map(|l| l.line),
+            Some(5)
+        );
+        assert_eq!(
+            under
+                .property_source(&row(&under, "small_free").name)
+                .map(|l| l.line),
+            Some(8)
+        );
+        assert!(
+            under.notes.iter().any(
+                |n| n.kind == "assumptions" && n.detail.contains("full_reach_free, small_free")
+            ),
+            "{:?}",
+            under
+                .notes
+                .iter()
+                .find(|n| n.kind == "assumptions")
+                .map(|n| &n.detail)
         );
     }
 
@@ -19372,27 +19970,46 @@ endmodule
         );
     }
 
-    /// Templates become `@mununu_guarantee(tmpl.<instance>)` lines with an atom in parentheses, and
-    /// the annotation scan picks them up as guarantees under that label.
+    /// A `--template` flag becomes a `@mununu_template(tmpl.<instance>) <id> KEY="VALUE"` line
+    /// (2026-10-30; before, a `@mununu_guarantee` of the instantiated formula), and the annotation
+    /// scan instantiates it under the label `--template` rows have always had, with the same
+    /// formula as before.
     #[test]
-    fn a_template_becomes_a_named_guarantee() {
-        use crate::adapter::templates::TemplateRef;
+    fn a_template_flag_becomes_a_template_annotation_under_its_old_label() {
+        use crate::adapter::templates::{TemplateRef, TemplateRegistry};
+        let registry = TemplateRegistry::builtin();
         let tref = TemplateRef {
             template: "rtl_never".to_string(),
             args: [("BAD".to_string(), "state_q == FAULT".to_string())]
                 .into_iter()
                 .collect(),
         };
-        let (_, text) = template_guarantees(&[tref], &[]).unwrap().unwrap();
+        let (name, text) = template_annotations(&[tref], &registry).unwrap().unwrap();
+        assert_eq!(name, "__mununu_templates.sv");
         assert_eq!(
             text,
-            "// @mununu_guarantee(tmpl.rtl_never_BAD_state_q_eq_FAULT) nu X. ((!(state_q == FAULT)) && [] X)\n"
+            "// @mununu_template(tmpl.rtl_never_BAD_state_q_eq_FAULT) rtl_never BAD=\"state_q == FAULT\"\n"
         );
-        let scan = scan_annotation_properties(&[("t.sv".to_string(), text)]);
+        let scan = scan_annotation_properties(&[(name, text)]);
         assert_eq!(scan.guarantees.len(), 1, "{:?}", scan.skipped);
         assert_eq!(
             scan.guarantees[0].label.as_deref(),
             Some("tmpl.rtl_never_BAD_state_q_eq_FAULT")
+        );
+        assert_eq!(
+            scan.guarantees[0].formula,
+            "nu X. ((!(state_q == FAULT)) && [] X)"
+        );
+        assert_eq!(
+            scan.template_forms,
+            vec![(
+                "ann_guarantee_0".to_string(),
+                "rtl_never BAD=\"state_q == FAULT\"".to_string()
+            )]
+        );
+        assert!(
+            scan.guarantee_lines.is_empty(),
+            "a flag's synthetic source has no line the user wrote"
         );
         let bad = TemplateRef {
             template: "rtl_never".to_string(),
@@ -19401,8 +20018,154 @@ endmodule
                 .collect(),
         };
         assert!(
-            template_guarantees(&[bad], &[]).is_err(),
-            "an RTL atom argument must be a boolean condition"
+            template_annotations(&[bad], &registry).is_err(),
+            "an RTL atom argument must be a boolean condition, and a flag's error is hard"
+        );
+    }
+
+    /// 2026-10-30 — a `@mununu_` line the extractor refuses REACHES the report. On the parent
+    /// commit `@mununu_guarantee(a b) …` (a space in the name) and `@mununu_gurantee …` (a typo)
+    /// produced neither a row nor a `skipped` entry: the obligation vanished.
+    #[test]
+    fn a_refused_annotation_head_is_skipped_with_its_reason_not_dropped() {
+        let sv = "// @mununu_guarantee(a b) nu X. (p && [] X)\n\
+                  // @mununu_gurantee nu X. (p && [] X)\n\
+                  module m(); endmodule";
+        let scan = scan_annotation_properties(&src(sv));
+        assert!(scan.guarantees.is_empty());
+        assert_eq!(scan.skipped.len(), 2, "{:?}", scan.skipped);
+        assert!(
+            scan.skipped[0].contains("design.sv:1") && scan.skipped[0].contains("not a name"),
+            "{}",
+            scan.skipped[0]
+        );
+        assert!(
+            scan.skipped[1].contains("design.sv:2") && scan.skipped[1].contains("not a tag"),
+            "{}",
+            scan.skipped[1]
+        );
+    }
+
+    /// 2026-10-30 — a template instance written next to the design: a named row whose formula is
+    /// the instantiated mu-calculus, its instance beside it, its own source line.
+    #[test]
+    fn a_template_annotation_is_a_named_row_with_its_instance_beside_it() {
+        let sv = "module m();\n\
+                  // @mununu_template(trip_reach) rtl_reachable TARGET=\"state_q == 3\"\n\
+                  endmodule";
+        let scan = scan_annotation_properties(&src(sv));
+        assert_eq!(scan.guarantees.len(), 1, "{:?}", scan.skipped);
+        let g = &scan.guarantees[0];
+        assert_eq!(g.name, "ann_guarantee_0");
+        assert_eq!(g.label.as_deref(), Some("trip_reach"));
+        assert_eq!(g.formula, "mu Y. ((state_q == 3) || <> Y)");
+        assert!(mu_parser::parse(&g.formula).is_ok());
+        assert!(
+            g.written.is_none(),
+            "the instance is not a written formula; it rides as `template:`"
+        );
+        assert_eq!(
+            scan.template_forms,
+            vec![(
+                "ann_guarantee_0".to_string(),
+                "rtl_reachable TARGET=\"state_q == 3\"".to_string()
+            )]
+        );
+        assert_eq!(
+            scan.guarantee_lines,
+            vec![(
+                "ann_guarantee_0".to_string(),
+                crate::trace::SourceLoc {
+                    file: "design.sv".to_string(),
+                    line: 2
+                }
+            )]
+        );
+        assert!(scan.assume_exempt.is_empty());
+        assert!(scan.skipped.is_empty());
+
+        // Unnamed: the label a `--template` row has always had.
+        let scan = scan_annotation_properties(&src(
+            "// @mununu_template rtl_reachable TARGET=\"state_q == 3\"",
+        ));
+        assert_eq!(scan.guarantees.len(), 1, "{:?}", scan.skipped);
+        assert_eq!(
+            scan.guarantees[0].label.as_deref(),
+            Some("tmpl.rtl_reachable_TARGET_state_q_eq_3")
+        );
+
+        // A duplicate name is refused, as for a guarantee.
+        let scan = scan_annotation_properties(&src(
+            "// @mununu_guarantee(x) nu X. (p && [] X)\n// @mununu_template(x) rtl_never BAD=p",
+        ));
+        assert_eq!(scan.guarantees.len(), 1);
+        assert!(
+            scan.skipped[0].contains("duplicate name"),
+            "{}",
+            scan.skipped[0]
+        );
+    }
+
+    /// 2026-10-30 — every way a template body can be wrong is a `skipped` entry naming the body
+    /// and the reason, never a dropped obligation.
+    #[test]
+    fn a_bad_template_annotation_is_skipped_with_the_reason() {
+        let cases: [(&str, &str); 7] = [
+            ("rtl_frobnicate X=1", "rtl_frobnicate"),
+            ("rtl_never", "BAD"),
+            ("rtl_never BAD", "not `KEY=VALUE`"),
+            ("rtl_never BAD=\"state_q == 3", "never closes"),
+            ("rtl_never BAD=", "has no value"),
+            ("rtl_never BAD=a BAD=b", "given twice"),
+            ("", "template id is required"),
+        ];
+        for (body, expect) in cases {
+            let scan = scan_annotation_properties(&src(&format!("// @mununu_template {body}")));
+            assert!(scan.guarantees.is_empty(), "{body}: {:?}", scan.guarantees);
+            assert_eq!(scan.skipped.len(), 1, "{body}: {:?}", scan.skipped);
+            assert!(
+                scan.skipped[0].contains(expect),
+                "{body}: expected `{expect}` in `{}`",
+                scan.skipped[0]
+            );
+        }
+    }
+
+    /// 2026-10-30 — the `assumes=` modifier on a guarantee or a template row: `ignore` marks the
+    /// row exempt, `precondition` is the default said out loud, anything else is refused with a
+    /// reason, as is a modifier the scanner does not know.
+    #[test]
+    fn the_assumes_modifier_marks_a_row_exempt_and_a_bad_one_is_refused() {
+        let sv = "// @mununu_template(trip_holds, assumes=ignore) rtl_hold_until HOLD=lof_trip RELEASE=stop_cmd\n\
+                  // @mununu_guarantee(p, assumes=precondition) nu X. (p && [] X)\n\
+                  // @mununu_guarantee(q, assumes=ignore) nu X. (q && [] X)\n\
+                  // @mununu_guarantee(r, assumes=check) nu X. (r && [] X)\n\
+                  // @mununu_guarantee(s, foo=1) nu X. (s && [] X)\n\
+                  // @mununu_template(t, assumes=sometimes) rtl_never BAD=t";
+        let scan = scan_annotation_properties(&src(sv));
+        assert_eq!(scan.guarantees.len(), 3, "{:?}", scan.skipped);
+        assert_eq!(
+            scan.assume_exempt,
+            vec!["ann_guarantee_0".to_string(), "ann_guarantee_2".to_string()]
+        );
+        assert_eq!(scan.skipped.len(), 3, "{:?}", scan.skipped);
+        assert!(
+            scan.skipped[0].contains("@mununu_guarantee(r)")
+                && scan.skipped[0].contains("run mode"),
+            "{}",
+            scan.skipped[0]
+        );
+        assert!(
+            scan.skipped[1].contains("@mununu_guarantee(s)")
+                && scan.skipped[1].contains("unknown modifier `foo`"),
+            "{}",
+            scan.skipped[1]
+        );
+        assert!(
+            scan.skipped[2].contains("@mununu_template(t)")
+                && scan.skipped[2].contains("assumes=sometimes"),
+            "{}",
+            scan.skipped[2]
         );
     }
 

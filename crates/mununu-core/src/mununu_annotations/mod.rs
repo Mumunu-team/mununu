@@ -23,6 +23,12 @@
 //! | `@mununu_interface <uri>` | Reference a stored contract (sidecar path or `contract://`) |
 //! | `@mununu_controllable <label>`   | Override default controllability             |
 //! | `@mununu_uncontrollable <label>` | Override default controllability             |
+//! | `@mununu_template <id> KEY=VALUE…` | A property-template instance (2026-10-30)  |
+//!
+//! The tag may carry a parenthesised head, `@mununu_<tag>(<name>[, <key>=<value>]*)`: the
+//! optional author-given name (mununu#550) and, after it, modifiers the consumer interprets —
+//! today `assumes=ignore|precondition` on `guarantee` / `template` rows. The head is split here
+//! ([`split_tag_head`]); its keys are validated by the consumer, which knows what they mean.
 //!
 //! `@mununu_register` and `@mununu_behavior` are reserved by D.5.1 but
 //! out of scope for this module today — they need Document C
@@ -59,6 +65,12 @@ pub enum MununuTag {
     /// dimension even when it does not appear in any property formula. Sound by
     /// monotonicity of predicate abstraction — a hint only refines the cube.
     Predicate,
+    /// `@mununu_template <id> KEY=VALUE…` (2026-10-30) — an instance of a property template
+    /// (`mununu templates --domain rtl`), written next to the design instead of as
+    /// `--template` / `--template-arg` flags. The body grammar (`<id>` then `KEY=VALUE` pairs,
+    /// a VALUE with whitespace double-quoted) is the consumer's — `sv verify-auto` instantiates
+    /// it against the run's catalog and the row carries the resulting mu-calculus.
+    Template,
 }
 
 impl MununuTag {
@@ -75,6 +87,7 @@ impl MununuTag {
             "uncontrollable" => Some(MununuTag::Uncontrollable),
             "isr" => Some(MununuTag::Isr),
             "predicate" => Some(MununuTag::Predicate),
+            "template" => Some(MununuTag::Template),
             _ => None,
         }
     }
@@ -90,6 +103,7 @@ impl MununuTag {
             MununuTag::Uncontrollable => "uncontrollable",
             MununuTag::Isr => "isr",
             MununuTag::Predicate => "predicate",
+            MununuTag::Template => "template",
         }
     }
 }
@@ -122,6 +136,31 @@ pub struct MununuAnnotation {
     /// property keeps its positional `ann_<tag>_<index>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// The `key=value` modifiers of the parenthesised head (2026-10-30), in source order, after
+    /// the name: `@mununu_guarantee(recover, assumes=ignore) …` → `[("assumes", "ignore")]`.
+    /// Split here, interpreted by the consumer (an unknown key is the consumer's to refuse).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modifiers: Vec<(String, String)>,
+}
+
+/// A `@mununu_` line the extractor could not read (2026-10-30): a tag it does not know, or a
+/// malformed parenthesised head. Reported beside the annotations so the consumer can say so —
+/// before this, such a line vanished with no message at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RejectedAnnotation {
+    /// 1-based source line.
+    pub line: u32,
+    /// The `@mununu_…` text as written, trimmed.
+    pub text: String,
+    pub reason: String,
+}
+
+/// What [`extract_from_sv_source_checked`] found: the annotations, and the lines that looked
+/// like one but were refused.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SvAnnotationScan {
+    pub annotations: Vec<MununuAnnotation>,
+    pub rejected: Vec<RejectedAnnotation>,
 }
 
 impl MununuAnnotation {
@@ -131,7 +170,22 @@ impl MununuAnnotation {
             value: value.into(),
             source_line: None,
             name: None,
+            modifiers: Vec::new(),
         }
+    }
+
+    /// Attach the head's modifiers (2026-10-30).
+    pub fn with_modifiers(mut self, modifiers: Vec<(String, String)>) -> Self {
+        self.modifiers = modifiers;
+        self
+    }
+
+    /// The value of modifier `key`, when the head carries it.
+    pub fn modifier(&self, key: &str) -> Option<&str> {
+        self.modifiers
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
     }
 
     pub fn with_line(mut self, line: u32) -> Self {
@@ -296,11 +350,32 @@ fn parse_doxygen_block(body: &str, block_start_line: u32) -> Vec<MununuAnnotatio
 ///     line only; multi-line block comments are tolerated but only
 ///     the first line's content is captured.
 ///
-/// Both forms can coexist in the same file. Unknown tags are
-/// silently skipped (they may belong to another tool's
-/// `(* synthesis_attribute *)` namespace).
+/// Both forms can coexist in the same file. An unknown `(* … *)` attribute is silently skipped
+/// (it may belong to another tool's `(* synthesis_attribute *)` namespace); an unknown or
+/// malformed `@mununu_…` comment is reported by [`extract_from_sv_source_checked`] and dropped
+/// here.
 pub fn extract_from_sv_source(text: &str) -> Vec<MununuAnnotation> {
+    extract_from_sv_source_checked(text).annotations
+}
+
+/// [`extract_from_sv_source`] plus the `@mununu_…` comment lines it refused (2026-10-30): a tag
+/// `from_name` does not know (`@mununu_gurantee`), or a parenthesised head that is malformed
+/// (`guarantee()`, `guarantee(a b)`, `guarantee(oops`). A consumer that reports what it did with
+/// a source (`sv verify-auto`) surfaces these; before, the line vanished with no message.
+pub fn extract_from_sv_source_checked(text: &str) -> SvAnnotationScan {
     let mut out = Vec::new();
+    let mut rejected = Vec::new();
+    let mut comment = |body: &str, line_no: u32, out: &mut Vec<MununuAnnotation>| {
+        match parse_line_comment_body_checked(body) {
+            Ok(Some(annot)) => out.push(annot.with_line(line_no)),
+            Ok(None) => {}
+            Err(reason) => rejected.push(RejectedAnnotation {
+                line: line_no,
+                text: body.trim().to_string(),
+                reason,
+            }),
+        }
+    };
     for (idx, line) in text.lines().enumerate() {
         let line_no = (idx + 1) as u32;
         // First, scan for `(* mununu_xxx [= "value"] *)` attributes.
@@ -320,22 +395,24 @@ pub fn extract_from_sv_source(text: &str) -> Vec<MununuAnnotation> {
         // form must NOT be inside a `(* ... *)` block we already
         // processed — we approximate by requiring the `//` to start
         // before the first `(*`.
-        if let Some(comment_start) = line.find("//")
-            && let Some(annot) = parse_line_comment_body(&line[comment_start + 2..])
-        {
-            out.push(annot.with_line(line_no));
+        if let Some(comment_start) = line.find("//") {
+            comment(&line[comment_start + 2..], line_no, &mut out);
         }
         // Block comments: `/* @mununu_xxx ... */` on a single line.
         if let Some(b_start) = line.find("/*")
             && let Some(b_end_rel) = line[b_start + 2..].find("*/")
         {
-            let body = &line[b_start + 2..b_start + 2 + b_end_rel];
-            if let Some(annot) = parse_line_comment_body(body) {
-                out.push(annot.with_line(line_no));
-            }
+            comment(
+                &line[b_start + 2..b_start + 2 + b_end_rel],
+                line_no,
+                &mut out,
+            );
         }
     }
-    out
+    SvAnnotationScan {
+        annotations: out,
+        rejected,
+    }
 }
 
 /// Parse the body of a `(* ... *)` attribute block. The body may
@@ -365,58 +442,111 @@ fn parse_attribute_body(body: &str) -> Vec<MununuAnnotation> {
 }
 
 /// Parse the body of a `// @mununu_xxx ...` line comment. Returns
-/// `None` if the body doesn't start with an `@mununu_` tag.
+/// `None` if the body doesn't start with an `@mununu_` tag, or when it does but the tag or its
+/// head is malformed ([`parse_line_comment_body_checked`] says why).
 fn parse_line_comment_body(body: &str) -> Option<MununuAnnotation> {
+    parse_line_comment_body_checked(body).ok().flatten()
+}
+
+/// [`parse_line_comment_body`] with the refusal named: `Ok(None)` when the body is not an
+/// annotation at all (no `@mununu_` prefix), `Err(reason)` when it is one the extractor cannot
+/// read — an unknown tag, or a malformed parenthesised head (2026-10-30).
+fn parse_line_comment_body_checked(body: &str) -> Result<Option<MununuAnnotation>, String> {
     let trimmed = body.trim_start();
-    let rest = trimmed.strip_prefix("@mununu_")?;
-    // Either `<tag>` alone, or `<tag> <value>`.
-    let (tag_token, value) = match rest.find(|c: char| c.is_whitespace()) {
-        None => (rest.trim_end(), String::new()),
-        Some(idx) => {
-            let tag_token = &rest[..idx];
-            let raw_value = rest[idx..].trim();
-            (tag_token, unquote(raw_value).to_string())
-        }
+    let Some(rest) = trimmed.strip_prefix("@mununu_") else {
+        return Ok(None);
     };
+    // Either `<tag>` alone, or `<tag> <value>`. A head may contain whitespace inside its
+    // parentheses (`(a, assumes=ignore)`), so the split is after the closing `)` when one opens
+    // before the first whitespace.
+    let head_end = match (rest.find('('), rest.find(|c: char| c.is_whitespace())) {
+        (Some(open), Some(ws)) if open < ws => rest[open..]
+            .find(')')
+            .map(|close| open + close + 1)
+            .unwrap_or(ws),
+        (_, Some(ws)) => ws,
+        (_, None) => rest.len(),
+    };
+    let tag_token = rest[..head_end].trim_end();
+    let value = unquote(rest[head_end..].trim()).to_string();
     // mununu#550 — `<tag>(<name>)` carries an optional author-given name.
     //
     // The name is taken off the TAG token, not out of the value. A separator inside the value (a
     // leading `name:`, say) would collide with the body: a mu-calculus formula can legitimately
     // contain a colon since mununu#565 admitted bit-slice atoms (`wdata[7:0] == 8'hA5`), so any
     // split rule over the value has a real ambiguity. The parentheses have none.
-    let (tag_name, name) = split_tag_name(tag_token);
-    let ann = MununuTag::from_name(tag_name).map(|tag| MununuAnnotation::new(tag, value))?;
-    Some(match name {
+    let (tag_name, name, modifiers) = split_tag_head(tag_token)?;
+    let tag = MununuTag::from_name(tag_name)
+        .ok_or_else(|| format!("`@mununu_{tag_name}` is not a tag this version knows"))?;
+    let ann = MununuAnnotation::new(tag, value).with_modifiers(modifiers);
+    Ok(Some(match name {
         Some(n) => ann.with_name(n),
         None => ann,
-    })
+    }))
 }
 
-/// Split `guarantee(p_foo)` into `("guarantee", Some("p_foo"))`; `guarantee` into
-/// `("guarantee", None)`.
+/// Split the tag token into the tag, the optional name and the modifiers (2026-10-30):
+/// `guarantee(p_foo)` → `("guarantee", Some("p_foo"), [])`; `guarantee(p_foo, assumes=ignore)`
+/// → `("guarantee", Some("p_foo"), [("assumes", "ignore")])`; `template(assumes=ignore)` →
+/// `("template", None, [("assumes", "ignore")])`; `guarantee` → `("guarantee", None, [])`.
 ///
-/// A malformed or empty parenthesis group leaves the token intact, so it fails `from_name` and the
-/// annotation is skipped with the same diagnostic as any other unrecognised tag — rather than being
-/// silently accepted under a truncated name. Before mununu#550 the whole `guarantee(p_foo)` token was
-/// handed to `from_name`, which returned `None`, and the annotation vanished with no message at all.
-fn split_tag_name(token: &str) -> (&str, Option<&str>) {
+/// Items are comma-separated; an item with `=` is a modifier (identifier key, non-empty value);
+/// an item without `=` is the name and must come first and alone. A malformed or empty group is
+/// an `Err` the caller reports — never half-accepted under a truncated name. Before mununu#550 the
+/// whole `guarantee(p_foo)` token was handed to `from_name`, which returned `None`, and the
+/// annotation vanished with no message at all; until 2026-10-30 a malformed group did the same.
+/// A split tag token: the tag, the optional name, the `key=value` modifiers.
+type TagHead<'a> = (&'a str, Option<&'a str>, Vec<(String, String)>);
+
+fn split_tag_head(token: &str) -> Result<TagHead<'_>, String> {
     let Some(open) = token.find('(') else {
-        return (token, None);
+        return Ok((token, None, Vec::new()));
     };
     if !token.ends_with(')') {
-        return (token, None);
+        return Err(format!("`{token}`: the parenthesised head is not closed"));
     }
-    let name = token[open + 1..token.len() - 1].trim();
+    let tag = &token[..open];
+    let inner = token[open + 1..token.len() - 1].trim();
+    if inner.is_empty() {
+        return Err(format!(
+            "`{token}`: empty parentheses — write a name, or drop them"
+        ));
+    }
+    // `guarantee(oops nu X. (p && [] X)`: the `)` that closed the token belongs to the body, so
+    // the group itself is still open.
+    if inner.matches('(').count() > inner.matches(')').count() {
+        return Err(format!("`{token}`: the parenthesised head is not closed"));
+    }
     // A name must be a plain identifier: it becomes a pin a consumer types on a command line.
-    let ok = !name.is_empty()
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-');
-    if ok {
-        (&token[..open], Some(name))
-    } else {
-        (token, None)
+    let ident = |s: &str| {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-')
+    };
+    let mut name = None;
+    let mut modifiers = Vec::new();
+    for (i, item) in inner.split(',').enumerate() {
+        let item = item.trim();
+        match item.split_once('=') {
+            Some((k, v)) => {
+                let (k, v) = (k.trim(), v.trim());
+                if !ident(k) || v.is_empty() {
+                    return Err(format!(
+                        "`{token}`: modifier `{item}` is not `key=value` with an identifier key"
+                    ));
+                }
+                modifiers.push((k.to_string(), v.to_string()));
+            }
+            None if i == 0 && ident(item) => name = Some(item),
+            None => {
+                return Err(format!(
+                    "`{token}`: `{item}` is not a name (letters, digits, `_`, `.`, `-`) nor a \
+                     `key=value` modifier; the name comes first and once"
+                ));
+            }
+        }
     }
+    Ok((tag, name, modifiers))
 }
 
 /// Strip surrounding double quotes from a string, if present.
@@ -522,6 +652,111 @@ mod tests {
                 "a malformed name must not produce an annotation: {bad}"
             );
         }
+    }
+
+    /// 2026-10-30 — the head carries `key=value` modifiers after the name, or alone.
+    #[test]
+    fn modifiers_ride_on_the_head_after_the_name() {
+        let a = parse_line_comment_body(
+            "@mununu_guarantee(recover, assumes=ignore) nu Y.((mu X.(idle || <> X)) && [] Y)",
+        )
+        .expect("named + modifier parses");
+        assert_eq!(a.tag, MununuTag::Guarantee);
+        assert_eq!(a.name.as_deref(), Some("recover"));
+        assert_eq!(
+            a.modifiers,
+            vec![("assumes".to_string(), "ignore".to_string())]
+        );
+        assert_eq!(a.modifier("assumes"), Some("ignore"));
+        assert_eq!(a.value, "nu Y.((mu X.(idle || <> X)) && [] Y)");
+
+        let unnamed = parse_line_comment_body(
+            "@mununu_template(assumes=ignore) rtl_hold_until HOLD=lof_trip RELEASE=stop_cmd",
+        )
+        .expect("modifier-only head parses");
+        assert_eq!(unnamed.tag, MununuTag::Template);
+        assert_eq!(unnamed.name, None, "a modifier is not a name");
+        assert_eq!(unnamed.modifier("assumes"), Some("ignore"));
+        assert_eq!(
+            unnamed.value,
+            "rtl_hold_until HOLD=lof_trip RELEASE=stop_cmd"
+        );
+
+        let two = parse_line_comment_body("@mununu_guarantee(p, assumes=ignore, foo=bar) p")
+            .expect("several modifiers parse");
+        assert_eq!(two.modifiers.len(), 2);
+        assert_eq!(
+            two.modifier("foo"),
+            Some("bar"),
+            "keys are the consumer's to validate"
+        );
+    }
+
+    /// 2026-10-30 — a `@mununu_` line the extractor cannot read is REPORTED, with the reason.
+    /// Before, `parse_line_comment_body` returned `None` and the line vanished: a typo in the tag
+    /// or a space in the name silently removed an obligation from the run.
+    #[test]
+    fn a_refused_annotation_line_is_reported_not_dropped() {
+        let sv = "\
+// @mununu_gurantee nu X. (p && [] X)
+// @mununu_guarantee() nu X. (p && [] X)
+// @mununu_guarantee(a b) nu X. (p && [] X)
+// @mununu_guarantee(oops nu X. (p && [] X)
+// @mununu_guarantee(p, =ignore) nu X. (p && [] X)
+// @mununu_guarantee(p, assumes=) nu X. (p && [] X)
+// @mununu_guarantee(q) nu X. (q && [] X)
+module m(); endmodule";
+        let scan = extract_from_sv_source_checked(sv);
+        assert_eq!(
+            scan.annotations.len(),
+            1,
+            "only the well-formed line is an annotation"
+        );
+        assert_eq!(scan.annotations[0].name.as_deref(), Some("q"));
+        let lines: Vec<u32> = scan.rejected.iter().map(|r| r.line).collect();
+        assert_eq!(lines, vec![1, 2, 3, 4, 5, 6]);
+        assert!(
+            scan.rejected[0].reason.contains("not a tag"),
+            "{}",
+            scan.rejected[0].reason
+        );
+        assert!(
+            scan.rejected[1].reason.contains("empty"),
+            "{}",
+            scan.rejected[1].reason
+        );
+        assert!(
+            scan.rejected[2].reason.contains("not a name"),
+            "{}",
+            scan.rejected[2].reason
+        );
+        assert!(
+            scan.rejected[3].reason.contains("not closed"),
+            "{}",
+            scan.rejected[3].reason
+        );
+        assert!(
+            scan.rejected[4].reason.contains("modifier"),
+            "{}",
+            scan.rejected[4].reason
+        );
+        assert!(
+            scan.rejected[5].reason.contains("modifier"),
+            "{}",
+            scan.rejected[5].reason
+        );
+        assert!(scan.rejected[0].text.starts_with("@mununu_gurantee"));
+        // The plain extractor keeps its contract: annotations only.
+        assert_eq!(extract_from_sv_source(sv), scan.annotations);
+    }
+
+    /// The `(* mununu_… *)` attribute path is unchanged: an unknown attribute is another tool's,
+    /// not a refusal, so it is neither an annotation nor a rejected line.
+    #[test]
+    fn an_unknown_attribute_stays_silently_skipped() {
+        let scan = extract_from_sv_source_checked("(* mununu_frobnicate = \"x\" *) module m();");
+        assert!(scan.annotations.is_empty());
+        assert!(scan.rejected.is_empty());
     }
 
     #[test]

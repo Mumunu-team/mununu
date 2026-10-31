@@ -96,6 +96,8 @@ Rust source: [`PropertyVerdictView`](../../crates/mununu-core/src/api/models.rs#
   "formula":            "nu X. ((!req || [] grant) && [] X)",  // as written for an `ltl` annotation row; else the mu-calc lift
   "formula_language":   "mu-calculus",         // "mu-calculus" | "ltl" — how to read `formula`
   "translated":         "...",                  // the mu-calculus the engine decided; present only on an `ltl` row
+  "template":           "rtl_never BAD=\"x\"",   // the template instance the row was written as (`@mununu_template` / `--template`); absent otherwise
+  "assumes_exempt":     "judged on every ...",   // present when the row's head says `assumes=ignore`: what the modifier did in this run
   "source":             {"file": "dut_sva.sv", "line": 19},   // where the property is written; absent when unknown
   "involves":           [{"file": "dut.sv", "line": 24}],  // the RTL lines of the property's cone; absent when empty
   "outcome":            "holds",               // canonical PropertyVerdict as-string
@@ -120,6 +122,8 @@ Rust source: [`PropertyVerdictView`](../../crates/mununu-core/src/api/models.rs#
 - `formula` — the property as its author wrote it when that was not mu-calculus (an `@mununu_guarantee ltl …` row shows its LTL, 2026-10-29); otherwise the mu-calc string the engine actually evaluated, round-trip-parseable via `mu_calculus::parser::parse`.
 - `formula_language` — `"mu-calculus"` | `"ltl"`: how to read `formula`.
 - `translated` — the mu-calc string the engine evaluated, present only when `formula` is written in another language (an `ltl` row); absent otherwise. `translated ?? formula` is always mu-calculus.
+- `template` — the template instance the row was written as, e.g. `rtl_reachable TARGET="state_q == 3"` (a `@mununu_template` annotation or a `--template` flag; 2026-10-30); `formula` is what it instantiated to. Absent for every other row.
+- `assumes_exempt` — present when the row's annotation head says `assumes=ignore` (2026-10-30): under `--assumes precondition` with applied assumptions the row was judged on every trace while the others were judged under them; in any other mode the modifier changed nothing and this says why.
 - `source` — where the property is written (2026-10-30): an SVA row's assertion statement (slang's AST, joined on `name` and `label`), an annotation row's `@mununu_guarantee` comment. Absent for a template row and when unknown. Text: `source: file:line`.
 - `involves` — the RTL lines of the property's cone of influence (2026-10-30): the declaration, the `always` block(s) and every writing statement of each register, input and named wire the property depends on, sorted by file and line. The cone's code, not a causal slice of a counterexample. Absent when the source map placed nothing in the cone. Text: `involves: file:a-b, c; other.sv:d` (runs collapsed).
 - `outcome` — one of the four canonical `PropertyVerdict` values. This is the field to gate on.

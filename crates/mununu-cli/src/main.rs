@@ -2430,7 +2430,8 @@ struct SvVerifyAutoArgs {
     /// A property template to check besides the design's assertions (`mununu templates --domain
     /// rtl` lists them): `--template rtl_response --template-arg 'TRIGGER=trip_o == 1'
     /// --template-arg 'RESPONSE=state_q == SCRAM'`. Repeatable; each becomes a row labelled
-    /// `tmpl.<instance>`.
+    /// `tmpl.<instance>`. The same instance can live next to the design as
+    /// `// @mununu_template(<name>) rtl_response TRIGGER="trip_o == 1" RESPONSE="state_q == SCRAM"`.
     #[arg(long = "template", value_name = "ID")]
     template: Vec<String>,
     /// A template argument, `KEY=VALUE`; with more than one `--template`, prefix the key with the
@@ -5061,6 +5062,11 @@ fn render_verify_auto_text(
         if let Some(at) = report.property_source(&p.name) {
             println!("        source: {at}");
         }
+        // 2026-10-30 — a template row shows the instance as written; `formula:` is what it
+        // instantiated to.
+        if let Some(form) = report.template_form(&p.name) {
+            println!("        template: {form}");
+        }
         // 2026-10-29 — an `ltl` annotation row shows the obligation as its author wrote it, with
         // the mu-calculus the engine decided beneath it; every other row's formula IS that
         // mu-calculus and prints as before.
@@ -5074,6 +5080,10 @@ fn render_verify_auto_text(
                 println!("        translated: {}", p.formula);
             }
             None => println!("        formula: {}", p.formula),
+        }
+        // 2026-10-30 — the row's `assumes=ignore` modifier and what it did in this run.
+        if let Some(why) = report.assume_exempt(&p.name) {
+            println!("        assumes: exempt \u{2014} {why}");
         }
         let involves = report.involves(&p.name);
         if !involves.is_empty() {

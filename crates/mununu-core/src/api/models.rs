@@ -2129,7 +2129,9 @@ pub struct SvVerifyAutoRequest {
     /// Property templates to check besides the design's assertions, each `{template, args}`
     /// (`{"template": "rtl_response", "args": {"TRIGGER": "trip == 1", "RESPONSE": "state_q ==
     /// SCRAM"}}`), instantiated against the server's catalog. Each becomes a row labelled
-    /// `tmpl.<instance>`. Default empty.
+    /// `tmpl.<instance>`. Default empty. The same instance can be written in the source as
+    /// `// @mununu_template(<name>) rtl_response TRIGGER="trip == 1" RESPONSE="state_q == SCRAM"`
+    /// (2026-10-30), which needs no request field.
     #[serde(default)]
     pub templates: Vec<crate::adapter::templates::TemplateRef>,
     /// Return a Verilator replay testbench with every counterexample (`--emit-testbench`).
@@ -2422,6 +2424,8 @@ impl From<&crate::adapter::slang::verify_auto::AutoVerifyReport> for SvVerifyAut
                         .to_string(),
                     translated: written.map(|_| p.formula.clone()),
                     source: report.property_source(&p.name).cloned(),
+                    template: report.template_form(&p.name).map(str::to_string),
+                    assumes_exempt: report.assume_exempt(&p.name).map(str::to_string),
                     involves: report.involves(&p.name).to_vec(),
                     outcome: outcome.to_string(),
                     detail,
@@ -2894,6 +2898,17 @@ pub struct PropertyVerdictView {
     /// source map is unavailable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<crate::trace::SourceLoc>,
+    /// The template instance the row was written as (2026-10-30) — `@mununu_template` or
+    /// `--template` — e.g. `rtl_reachable TARGET="state_q == 3"`; `formula` is what it
+    /// instantiated to. Absent for every other row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+    /// Present when the row's annotation head says `assumes=ignore` (2026-10-30): what the
+    /// modifier did in this run — under `--assumes precondition` with applied assumptions the
+    /// row is judged on every trace while the others are judged under them; otherwise it
+    /// changed nothing, and this says why.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assumes_exempt: Option<String>,
     /// The RTL lines of the property's cone of influence (2026-10-30): the declaration, the
     /// `always` block(s) and every statement writing each register, input and named wire the
     /// property depends on, sorted. The code the verdict is about, not a causal slice of a
