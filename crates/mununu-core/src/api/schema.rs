@@ -334,6 +334,7 @@ mod tests {
                         text: "G (req -> F ack)".into(),
                     },
                 )],
+                template_forms: vec![("p_skipped".into(), "rtl_never BAD=\"d\"".into())],
                 property_sources: vec![(
                     "ann_guarantee_0".into(),
                     crate::trace::SourceLoc {

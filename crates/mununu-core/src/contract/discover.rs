@@ -302,6 +302,9 @@ impl AnnotationSummary {
                 // `@mununu_predicate` is a cube-abstraction hint consumed by
                 // `sv verify-auto`'s seeder, not by the contract pipeline. Ignore.
                 MununuTag::Predicate => {}
+                // `@mununu_template` (2026-10-30) is a guarantee written as a template
+                // instance; for discovery it is one more progress clause the author asserted.
+                MununuTag::Template => s.guarantee_count += 1,
             }
         }
         s

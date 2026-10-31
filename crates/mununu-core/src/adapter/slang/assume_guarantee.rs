@@ -235,6 +235,29 @@ pub fn relativize(formula: &str, ok: &str, existential: bool) -> Result<String, 
     )
 }
 
+/// Whether `formula`'s root quantifies existentially (2026-10-30): a `mu` / `nu` whose body
+/// reaches only `<>` modalities — `EF t` is `mu X. (t || <> X)` — so that [`relativize`] guards
+/// it as it guards a cover. A guarantee row is an `assert` whatever its shape, and guarding an EF
+/// root universally yields `(!ok) || EF (ok && t)`, which an initial state that already breaks
+/// the assumption satisfies at once: a vacuous HOLDS on the one row that exists to rule vacuity
+/// out (measured 2026-10-30: a 2-bit counter under `assume property (!inc)`, `rtl_reachable
+/// TARGET="q == 3"` HOLDS although no assumption-keeping trace reaches it). A root that is not a
+/// fixpoint, or whose body mixes `[]` and `<>`, is read as universal, as before.
+pub fn root_is_existential(formula: &str) -> bool {
+    let Ok(f) = crate::mu_calculus::parser::parse(formula) else {
+        return false;
+    };
+    match f.node(f.root()) {
+        Node::Mu { body, .. } | Node::Nu { body, .. } => {
+            matches!(
+                fixpoint_polarity(&f, *body),
+                Ok(Some(Polarity::Existential))
+            )
+        }
+        _ => false,
+    }
+}
+
 fn guard_blocks(formula: &str, g: &Guards, existential: bool) -> Result<String, String> {
     let f = crate::mu_calculus::parser::parse(formula)
         .map_err(|e| format!("formula does not parse: {e:?}"))?;
@@ -303,6 +326,21 @@ mod tests {
             r("nu X. ((mu Y. ((cnt == 0) || [] Y)) && [] X)", false),
             same("nu X. ((mu Y. (((!(ok)) || (cnt == 0)) || [] Y)) && [] X)")
         );
+    }
+
+    /// 2026-10-30 — the root's polarity decides how an `assert` row is guarded: an EF root is
+    /// existential (guarded like a cover), every safety / AG EF / AG AF root is universal.
+    #[test]
+    fn an_ef_root_is_existential_and_a_universal_root_is_not() {
+        assert!(root_is_existential("mu X. ((q == 3) || <> X)"));
+        assert!(root_is_existential("nu X. ((q != 3) && <> X)"));
+        assert!(!root_is_existential("nu X. ((q != 3) && [] X)"));
+        assert!(!root_is_existential(
+            "nu Y. ((mu X. ((st == 0) || <> X)) && [] Y)"
+        ));
+        assert!(!root_is_existential("nu X. ((mu Y. (p || [] Y)) && [] X)"));
+        assert!(!root_is_existential("(!(a)) || b"));
+        assert!(!root_is_existential("not a formula ("));
     }
 
     #[test]

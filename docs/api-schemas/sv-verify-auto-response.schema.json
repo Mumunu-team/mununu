@@ -370,6 +370,13 @@
     "PropertyVerdictView": {
       "description": "One property's auto-verification verdict (mirrors `PropertyVerdict`).",
       "properties": {
+        "assumes_exempt": {
+          "description": "Present when the row's annotation head says `assumes=ignore` (2026-10-30): what the modifier did in this run — under `--assumes precondition` with applied assumptions the row is judged on every trace while the others are judged under them; otherwise it changed nothing, and this says why.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "bottom_reason": {
           "anyOf": [
             {
@@ -462,6 +469,13 @@
             }
           ],
           "description": "Where the property is written in the RTL (2026-10-30): an SVA row's assertion statement, an annotation row's `@mununu_guarantee` comment. Absent for a template row and when the source map is unavailable."
+        },
+        "template": {
+          "description": "The template instance the row was written as (2026-10-30) — `@mununu_template` or `--template` — e.g. `rtl_reachable TARGET=\"state_q == 3\"`; `formula` is what it instantiated to. Absent for every other row.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "trace": {
           "anyOf": [

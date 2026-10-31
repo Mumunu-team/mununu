@@ -253,6 +253,65 @@ which may legally repeat — two asserts inside one labelled `begin…end` inher
 refusing those would reject valid SystemVerilog. An annotation name is author-chosen, one per
 annotation, and has no such excuse.
 
+### Template instances as annotations: `@mununu_template` (2026-10-30)
+
+> Source of truth: [`scan_annotation_properties_with`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) + [`parse_template_body`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) + [`template_annotations`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) — surface: (CLI+API) — every `--source` of `sv verify-auto` and `POST /api/v1/sv/verify-auto`.
+
+A property template (`mununu templates --domain rtl`) can be instantiated next to the design, so the
+obligation is persisted with the RTL instead of living in a command line:
+
+```systemverilog
+// @mununu_template(no_trip)    rtl_never       BAD=lof_trip
+// @mununu_template(trip_reach) rtl_reachable   TARGET="state_q == 3"
+// @mununu_template(recover)    rtl_recoverable TARGET="state_q == 0"
+```
+
+The body is the template id followed by `KEY=VALUE` pairs; a VALUE with whitespace is double-quoted
+(no escapes). The row is a guarantee like any other: labelled by the name in the parentheses — or
+`tmpl.<instance>` when unnamed, the label a `--template` row has always had — with the instantiated
+mu-calculus as its `formula`, the instance as written on a `template:` line beneath the label, and
+its own `source:` line. An id the catalog does not define, a missing or unknown parameter, a KEY
+without `=`, a repeated KEY or a quote that never closes is **skipped with that reason** in the
+`annotation-properties` note, never dropped. The catalog is the run's: the built-in templates, the
+deployment's packs and the project's (`--templates-file`, `verify.toml [templates] files`).
+
+The `--template` / `--template-arg` flags still work and are rendered as these annotations
+internally (one path, same labels and formulas as before); a flag that cannot be instantiated is a
+hard error, because the user typed it. `--json` carries the instance as the row's `template`.
+
+### Per-property assumptions: the `assumes=` modifier (2026-10-30)
+
+> Source of truth: [`split_tag_head`](../crates/mununu-core/src/mununu_annotations/mod.rs) + [`row_modifiers`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) + [`plan_assumptions`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) — surface: (CLI+API).
+
+`--assumes` is one mode for the whole run. Some obligations are only meaningful **without** the
+environment's promise — "the trip, once raised, holds until the stop" says nothing under an
+assumption that excludes the trip — and the way to judge them used to be a second run with
+`--assumes ignore`. The tag's parentheses take modifiers after the name, and `assumes=ignore` marks
+one row exempt:
+
+```systemverilog
+// @mununu_template(trip_holds, assumes=ignore) rtl_hold_until HOLD=lof_trip RELEASE=stop_cmd
+// @mununu_template(trip_reach_unassumed, assumes=ignore) rtl_reachable TARGET="state_q == 3"
+// @mununu_guarantee(recover_plain, assumes=ignore) nu Y. ((mu X. ((state_q == 0) || <> X)) && [] Y)
+```
+
+Under `--assumes precondition` such a row keeps its formula — it never reads the assumption monitor,
+so its cone excludes it and the engines decide it on the un-assumed design — while every other row
+is judged under the applied assumptions. The verdict is the one `--assumes ignore` gives that row,
+in the same run as the assumed ones; the row prints `assumes: exempt — judged on every trace …`, the
+assumptions note lists the exempt rows, and `--json` carries the reason as `assumes_exempt`. Under
+`--assumes ignore` or `check`, or when no assumption was applicable, the modifier changes nothing
+and the same line says so rather than staying silent. `assumes=precondition` is the default said
+out loud; `assumes=check` is refused (a run mode, not a property's), as is any modifier key this
+version does not know.
+
+**Refused annotation lines reach the report** (2026-10-30). A `@mununu_…` comment the scanner
+cannot read — a tag typo (`@mununu_gurantee`), a malformed head (`@mununu_guarantee(a b)`, an
+unclosed `(`, empty `()`) — used to vanish: the obligation was silently not checked. It is now a
+`skipped` item of the `annotation-properties` note with the file, the line and the reason, and that
+note becomes a scope caveat. An unknown `(* mununu_… *)` attribute is still skipped silently: that
+namespace is shared with other tools.
+
 ## No-sidecar SystemVerilog verification: `sv verify-auto`
 
 > Source of truth: [`verify_auto`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L3463) — surface: (CLI+API+UI)
@@ -548,7 +607,7 @@ Every row says where the property is written and which RTL lines it is about, wh
 **`source:`** is the property's own line. An SVA row's is the assertion statement, from the same
 AST run; it is joined on the row's positional name *and* its label, so if the two slang runs ever
 saw different assertions the row gets no line rather than a neighbour's. An `@mununu_guarantee`
-row's is its comment. A template row (`--template`) has no source line and prints none.
+row's is its comment. A `@mununu_template` row's is its comment; a `--template` flag's row has no source line and prints none.
 
 **`involves:`** is the code the verdict is about: every register, input and named wire in the
 property's cone of influence (the same closure the engines' cone reduction uses: data flow, `next`,
@@ -665,7 +724,10 @@ mununu sv verify-auto prim_arbiter_ppc.sv --top prim_arbiter_ppc --frontend sv2v
 **How.** The assumptions become one monitor signal `mununu_assume_ok`, true while every applied
 assumption has held at every cycle so far (a latch: once broken, false for good). Each boolean
 block of a guarantee is guarded by it — `(!ok || B)` where the guarantee quantifies universally,
-`(ok && B)` inside a `cover` or the `EF` of a recoverability check — so every engine evaluates the
+`(ok && B)` inside a `cover`, the `EF` of a recoverability check, or a guarantee whose ROOT is an
+`EF` (an `rtl_reachable` instance, a `mu X. (t || <> X)` body; until 2026-10-30 such an `assert`
+row got the universal excuse at its root, which the bad cycle-0 input below satisfied at once — a
+vacuous HOLDS, mununu#837) — so every engine evaluates the
 same relativized formula and the safety and liveness rescue lanes still reduce it. The cycle-0
 input is the environment's choice: a property whose first temporal operator is existential (a
 `cover`, an `EF …`) is satisfied when SOME cycle-0 input satisfies it, so a bad input at reset
