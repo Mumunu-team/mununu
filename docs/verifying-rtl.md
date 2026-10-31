@@ -622,6 +622,53 @@ constant, so its lines are not in the cone. Absent when the source map placed no
 `--json` carries both on the row: `source` (`{file, line}`, absent when unknown) and `involves`
 (`[{file, line}]`, absent when empty). The text line is the JSON key followed by the value.
 
+### The lines that decided a counterexample: `slice:` (2026-10-30)
+
+> Source of truth: [`Netlist::slice`](../crates/mununu-core/src/adapter/yosys/netlist.rs) + [`TraceNames::attach_slice`](../crates/mununu-core/src/trace.rs) + [`PropertyVerdict::trace`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) — surface: (CLI+API) — every `sv verify-auto` row with a counterexample, and `POST /api/v1/sv/verify-auto`.
+
+`involves:` is the code the verdict is about; the slice is the code that **ran** on this
+counterexample. After the `cells:` legend, every RTL counterexample lists, per cycle, the lines that
+decided the values the property read at that step — the branch taken and the operands that
+controlled it, nothing else:
+
+```
+        slice:
+          [0] lane_arbiter.sv:34  case (state_q)
+          [0] lane_arbiter.sv:35  IDLE:           if (req) next = LANE_A;   // the first draft always grants A
+          [0] lane_arbiter.sv:45  always_ff @(posedge clk or negedge rst_n) begin
+          [0] lane_arbiter.sv:53  start_a <= (next == LANE_A) && (state_q != LANE_A);
+          …
+          [2] lane_arbiter.sv:35  IDLE:           if (req) next = LANE_A;   // the first draft always grants A
+```
+
+`[t]` is the step whose transition the lines decided. The slice is the path-slicing idea of
+software model checking (Jhala & Majumdar, 2005) applied to the netlist: the flattened netlist the
+legend already reads (yosys's `write_json` after `flatten; opt_clean`, every cell stamped with its
+statement span) is evaluated on each step's registers and inputs, and walked backwards from the
+property's atoms with the **controlling-value rule** — a `$mux` / `$pmux` contributes its selector
+and the selected input only (the `case` arm not taken is gone), an `and` whose output is 0 the
+operands that are 0, an `or` whose output is 1 the operands that are 1; a register sends the walk
+to its `D` at the previous cycle; an input or a constant ends it. The result is the cone's
+statements that ran, plus the branch headers that selected them (a `case (state_q)` line writes
+nothing, so `involves:` does not list it, and the slice names it because the `$pmux` it lowers to
+chose the arm). On the fixture above the cone is 24 lines and the slice four to six per cycle — the
+FAULT and default arms write `next`, so the cone lists them, and the slice does not; the `assign`s
+to the grant outputs are downstream of what the property reads and are in neither.
+
+**Never smaller than the truth.** A cell type the evaluator does not know keeps its whole fan-in
+and the slice says so: `slice: widened — cell type(s) the evaluator does not know, their whole
+fan-in kept: $shiftx`. The evaluation is cross-checked against the engine's own one-step evaluator
+on the lifted BTOR2 (every register's `D` at `t` is the trace's state at `t+1`, and the engine's
+`next_state`). When no slice can be made the report says why, once: `slice: unavailable — the sv2v
+front end does not preserve source lines; use --frontend slang`, or `… no netlist: the model did not
+come from the SystemVerilog lift` (a BTOR2 given to the `btor2` verbs), or `… the property reads no
+public net of the netlist`. Inputs the run pinned (`--pin`, the gated reset, `--config-value`) are
+evaluated at their pinned value, since a trace does not list them. Display only: no engine reads
+the slice and no verdict changes.
+
+`--json` carries it as `trace.slice` (`[{cycle, lines: [{file, line, text}]}]`, `text` the line as
+written, trimmed, at most 72 characters) and `trace.slice_status` (`{status: "exact" | "widened" |
+"unavailable", reason}`), on every `Trace` the response holds.
 ### Repair candidates under a counterexample: `--localize` (2026-10-30)
 
 > Source of truth: [`repair::localize`](../crates/mununu-core/src/adapter/btor2/repair.rs) + [`attach_repair_candidates`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) + [`AutoVerifyReport::trace_of`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) — surface: (CLI+API) — `sv verify-auto --localize`, `POST /api/v1/sv/verify-auto` with `localize: true`.

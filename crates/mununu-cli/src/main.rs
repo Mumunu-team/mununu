@@ -5223,6 +5223,30 @@ fn render_verify_auto_text(
                     println!("          {}{declared} ({}{assigned})", s.cell, s.kind);
                 }
             }
+            // 2026-10-30 — the slice: per cycle, the lines that decided what the property read
+            // (`trace.slice` / `trace.slice_status` in --json); its status when not exact.
+            if !trace.slice.is_empty() {
+                println!("        slice:");
+                for c in &trace.slice {
+                    for l in &c.lines {
+                        match &l.text {
+                            Some(t) => {
+                                println!("          [{}] {}:{}  {t}", c.cycle, l.file, l.line)
+                            }
+                            None => println!("          [{}] {}:{}", c.cycle, l.file, l.line),
+                        }
+                    }
+                }
+            }
+            if let Some(st) = &trace.slice_status
+                && st.status != "exact"
+            {
+                println!(
+                    "        slice: {} \u{2014} {}",
+                    st.status,
+                    st.reason.as_deref().unwrap_or("no reason recorded")
+                );
+            }
             // 2026-10-30 — `--localize`: the repair candidates, the real ones first, then the
             // registers the property reads (`trace.repair_candidates` / `trace.localization`).
             if !trace.repair_candidates.is_empty() {

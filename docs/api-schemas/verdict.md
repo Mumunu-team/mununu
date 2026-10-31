@@ -151,6 +151,11 @@ Rust source: [`Trace`](../../crates/mununu-core/src/api/models.rs) + [`CexCellVi
       "assigned": [ { "file": "pump_pair.sv", "line": 52 } ] },
     { "cell": "flow", "kind": "input", "declared": { "file": "pump_pair.sv", "line": 25 } }
   ],
+  "slice": [                       // the trace-relative slice (2026-10-30): per cycle, the lines that decided
+    { "cycle": 2, "lines": [       //   the values the property read — the branch taken, the operands that controlled it
+        { "file": "pump_pair.sv", "line": 42, "text": "IDLE: if (start_cmd) next = RUN_A;" } ] }
+  ],
+  "slice_status": { "status": "exact" },   // "exact" | "widened" | "unavailable", with `reason` when not exact
   "repair_candidates": [           // --localize / localize: true — registers whose next-state function, freed at
     { "register": "state_q",       //   `cycles` with the trace's inputs fixed, let the property survive the trace;
       "cycles": [1], "values": ["0x3"],   //   ranked: not read by the property first, closest-acting first
@@ -181,6 +186,16 @@ Rust source: [`Trace`](../../crates/mununu-core/src/api/models.rs) + [`CexCellVi
   attributes when present, from slang's AST otherwise, on every front end (since 2026-10-30 the
   sv2v path takes both halves from the AST); `diagnostics.source_map.status` is `available`, `partial` (with what is missing in
   `reason`) or `unavailable`; the key is omitted when nothing could be placed.
+- `slice` — the trace-relative slice (2026-10-30): for each step `cycle`, the RTL lines that
+  decided the values the property read at that step, each with `file`, `line` and `text` (the line
+  as written, trimmed, ≤ 72 chars, when the run holds the source). The branch taken and the operands
+  that controlled it, nothing else — the row's `involves` statements that ran, plus the branch headers
+  (`case`, `if` lines) that selected them. Omitted when empty.
+- `slice_status` — `exact` (every cell on the path evaluated), `widened` (a cell type the evaluator
+  does not know kept its whole fan-in; `reason` names the types — the slice is never smaller than
+  the truth) or `unavailable` (`reason`: the sv2v front end rewrote the source, no netlist because
+  the model was a BTOR2 given directly, the property reads no public net). Present on every RTL
+  trace a slice was attempted for; absent on a CTXDSL path.
 - `repair_candidates` — present when `localize` / `--localize` was requested and found candidates
   (2026-10-30): the registers whose next-state function, freed at `cycles` (with the override
   writing `values`, hex) while the trace's inputs are fixed, let the property survive the trace;
