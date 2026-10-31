@@ -453,6 +453,45 @@ pub struct Trace {
     /// of the first step's cells. Empty when the source map is unavailable (`diagnostics.source_map`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sources: Vec<CellSource>,
+    /// Repair candidates (2026-10-30, `--localize`): with this trace's inputs fixed, the registers
+    /// whose next-state function, if free at the named cycles, would let the property survive the
+    /// whole trace — candidates, never causes ([`crate::adapter::btor2::repair`]). Empty when
+    /// localisation was not requested or found none; `localization` says which.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repair_candidates: Vec<RepairCandidate>,
+    /// `done` (every candidate register was queried), `partial` (a cap or budget cut the query
+    /// short — `reason` says what), `none` (no single-register change avoids the violation within
+    /// the trace's length) or `unavailable` (no trace to fix inputs from, the model could not be
+    /// queried). Absent when `--localize` was not requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub localization: Option<RepairStatus>,
+}
+
+/// One repair candidate (2026-10-30): a register whose next-state function, freed at `cycles`,
+/// lets the property survive the trace with the trace's inputs fixed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "api", derive(schemars::JsonSchema))]
+pub struct RepairCandidate {
+    pub register: String,
+    /// The steps at which the override acts (the transition out of each).
+    pub cycles: Vec<usize>,
+    /// The value the override gives the register at each of `cycles`, as hex.
+    pub values: Vec<String>,
+    /// The statements that write the register (the candidate lines to read).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lines: Vec<SourceLoc>,
+    /// The property reads this register directly: a change here changes what is measured, not
+    /// what happens — reported, in its own bucket.
+    pub reads_property: bool,
+}
+
+/// What limited a localisation: `done` | `partial` | `none` | `unavailable`, with the reason.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "api", derive(schemars::JsonSchema))]
+pub struct RepairStatus {
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// Register cells of one state, in the wire shape (`value` when it fits 64 bits, `hex` always).
@@ -564,6 +603,8 @@ impl Trace {
             unreachable_target: Vec::new(),
             replay: None,
             sources: Vec::new(),
+            repair_candidates: Vec::new(),
+            localization: None,
         }
     }
 
@@ -608,6 +649,8 @@ impl Trace {
             unreachable_target,
             replay: None,
             sources: Vec::new(),
+            repair_candidates: Vec::new(),
+            localization: None,
         }
     }
 }
@@ -640,6 +683,8 @@ impl Trace {
             unreachable_target: Vec::new(),
             replay: None,
             sources: Vec::new(),
+            repair_candidates: Vec::new(),
+            localization: None,
         }
     }
 }

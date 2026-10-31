@@ -622,6 +622,59 @@ constant, so its lines are not in the cone. Absent when the source map placed no
 `--json` carries both on the row: `source` (`{file, line}`, absent when unknown) and `involves`
 (`[{file, line}]`, absent when empty). The text line is the JSON key followed by the value.
 
+### Repair candidates under a counterexample: `--localize` (2026-10-30)
+
+> Source of truth: [`repair::localize`](../crates/mununu-core/src/adapter/btor2/repair.rs) + [`attach_repair_candidates`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) + [`AutoVerifyReport::trace_of`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) — surface: (CLI+API) — `sv verify-auto --localize`, `POST /api/v1/sv/verify-auto` with `localize: true`.
+
+`involves:` is the code the verdict is about; a counterexample is what happened. `--localize` asks
+the next question, with the counterexample's **inputs fixed**: which register's next-state function,
+if it were free to take any value at some cycles, would let the property survive the whole trace?
+Each such register is a **repair candidate** — the place a one-register change could remove this
+counterexample:
+
+```
+        repair candidates (with the trace's inputs fixed, a change here avoids the violation within 4 cycles):
+          state_q at [1] := 0x3: lane_arbiter.sv:47, 52
+          stall_q at [0] := 0x4: lane_arbiter.sv:48, 55-56
+          start_a — reads the property: a change here changes what is measured, not what happens
+          start_b — reads the property: a change here changes what is measured, not what happens
+```
+
+`[t] := v` is the frame the override acts at and the value it writes; the lines are the statements
+that write the register. This is SAT-based design debugging (Smith, Veneris et al., 2005; BugAssist,
+Jose & Majumdar, 2011) at register granularity, bounded to the trace. **engine:** native BMC
+(in-process Z3, QF_BV), depth = the trace's last frame — where the monitor's `bad` fired; a frame
+beyond it would have free inputs, and a violation they cause is not this one — one query per
+register in the property's cone and per override budget, which is why it is opt-in.
+
+**Candidates, never causes.** A register upstream of the property can repair by steering the design
+elsewhere: on the fixture above, forcing the stall counter to its limit at reset trips the fault arm
+one cycle later, the arbiter parks in FAULT and the second grant never happens — a correct answer
+to the question asked, and not where the bug is. So the candidates the property does not read come
+first, **ranked by how close to the violation their change acts** (the state register at frame 1 —
+the state entering the second request — before the stall counter at reset), and a register the
+property reads directly — overriding what is measured "repairs" anything — comes last, in its own
+bucket. Override budgets are tried from one frame up (one, two, three, unbounded), and for one frame
+the frames from the last backwards, so the report names the latest single-frame change that still
+avoids the violation rather than a scatter of harmless overrides. On the fixture that is frame 1,
+not 2: the `start_a` pulse is computed from the combinational `next`, so a change to what the
+register takes at frame 3 cannot stop it, while any frame-2 state other than IDLE does — the kind of
+fact the register-level question answers exactly, and a statement-level one would not.
+
+The model of each query is the design with the row's violation as a `bad` — the same safety witness
+monitor the counterexample path itself came from — with the fault posture's override mux on the
+register's `next` (`en` / `val` free), a cycle counter and one `constraint (cycle != t) || (in ==
+v_t)` per design input and frame, and the design's `bad`s folded into a `seen` latch; the query's
+`bad` is "survived to the last frame". A lasso (liveness) counterexample has no finite length to fix
+and says so; so does a row whose shape has no `bad` monitor, or whose counterexample recorded no
+inputs. The status is always stated: `done`, `partial` (the cap of 64 candidates, or a query that
+could not run, with the reason), `none` (no single-register change avoids the violation within the
+trace), `unavailable` (with why). Display only: no engine reads it and no verdict changes.
+
+`--json` carries `trace.repair_candidates` (`[{register, cycles, values, lines, reads_property}]`,
+in the ranked order) and `trace.localization` (`{status, reason}`); the API request takes
+`localize: true`.
+
 ### A recoverability row refuted by a trap certificate (2026-10-21)
 
 > Source of truth: [`search_trap`](../crates/mununu-core/src/adapter/trap_certificate.rs#L294) + [`TRAP_CERTIFICATE_DECIDED_BY`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L6935) — surface: (CLI+API) — `sv verify-auto` / `POST /api/v1/sv/verify-auto`, every `AG EF` row the main pass leaves ⊥

@@ -271,6 +271,11 @@
       ],
       "description": "The SV design and how to lift it (the CLI's shared lift flags)."
     },
+    "localize": {
+      "default": false,
+      "description": "Name, for every violated row, the registers whose next-state function, freed at some cycles with the counterexample's inputs fixed, would let the property survive the trace — repair candidates (`trace.repair_candidates` / `trace.localization`; 2026-10-30). One native-BMC query per register in the property's cone, so off by default.",
+      "type": "boolean"
+    },
     "max_iterations": {
       "default": null,
       "description": "Max CEGAR iterations per property (default 16).",

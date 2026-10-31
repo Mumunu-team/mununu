@@ -151,6 +151,13 @@ Rust source: [`Trace`](../../crates/mununu-core/src/api/models.rs) + [`CexCellVi
       "assigned": [ { "file": "pump_pair.sv", "line": 52 } ] },
     { "cell": "flow", "kind": "input", "declared": { "file": "pump_pair.sv", "line": 25 } }
   ],
+  "repair_candidates": [           // --localize / localize: true — registers whose next-state function, freed at
+    { "register": "state_q",       //   `cycles` with the trace's inputs fixed, let the property survive the trace;
+      "cycles": [1], "values": ["0x3"],   //   ranked: not read by the property first, closest-acting first
+      "lines": [ { "file": "lane_arbiter.sv", "line": 52 } ],
+      "reads_property": false }
+  ],
+  "localization": { "status": "done" },  // "done" | "partial" | "none" | "unavailable", with `reason` when not done
   "replay": {                      // when a Verilator testbench was requested
     "testbench": { "tb_cpp": "…", "makefile": "…", "checks": 16, "skipped": [] },
     "gtkw":   "…",                  // replay.gtkw: the GTKWave save file for the trace's signals
@@ -174,6 +181,14 @@ Rust source: [`Trace`](../../crates/mununu-core/src/api/models.rs) + [`CexCellVi
   attributes when present, from slang's AST otherwise, on every front end (since 2026-10-30 the
   sv2v path takes both halves from the AST); `diagnostics.source_map.status` is `available`, `partial` (with what is missing in
   `reason`) or `unavailable`; the key is omitted when nothing could be placed.
+- `repair_candidates` — present when `localize` / `--localize` was requested and found candidates
+  (2026-10-30): the registers whose next-state function, freed at `cycles` (with the override
+  writing `values`, hex) while the trace's inputs are fixed, let the property survive the trace;
+  `lines` are the statements that write the register; `reads_property` marks a register the property
+  reads directly (its own bucket, last). Candidates, never causes: ranked by how close to the
+  violation the change acts.
+- `localization` — present when `localize` ran on the row: `done` | `partial` | `none` | `unavailable`,
+  with `reason` when not `done`.
 - `replay` — present when `emit_testbench` / `--emit-testbench` was requested on a row with a path:
   `testbench` (the files), `gtkw` (the GTKWave save file), `dir` (CLI only) and, under `replay: true` /
   `--replay`, `result` — the simulator's verdict, with `outcome: "unavailable"` and a `reason` when

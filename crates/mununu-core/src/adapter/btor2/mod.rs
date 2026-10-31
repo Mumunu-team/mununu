@@ -50,6 +50,7 @@ pub mod pin;
 pub mod predicate_expr;
 pub mod r_s8_encoder;
 pub mod refine;
+pub mod repair;
 pub mod reset_init;
 pub mod shadow;
 pub mod smt_must_edge;

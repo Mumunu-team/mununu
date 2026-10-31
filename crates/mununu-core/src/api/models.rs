@@ -2146,6 +2146,12 @@ pub struct SvVerifyAutoRequest {
     /// unavailable with its reason); needs `emit_testbench` (2026-10-29).
     #[serde(default)]
     pub replay: bool,
+    /// Name, for every violated row, the registers whose next-state function, freed at some
+    /// cycles with the counterexample's inputs fixed, would let the property survive the trace —
+    /// repair candidates (`trace.repair_candidates` / `trace.localization`; 2026-10-30). One
+    /// native-BMC query per register in the property's cone, so off by default.
+    #[serde(default)]
+    pub localize: bool,
     /// Engine selector, mirroring the CLI `--engine`: `"explicit"`, `"symbolic"`,
     /// `"exact-symbolic"`, `"portfolio-sequential"`, `"portfolio-parallel"`.
     /// **Unspecified ⇒ the default `"portfolio-sequential"`** (2026-07-06): run
@@ -2484,7 +2490,7 @@ impl From<&crate::adapter::slang::verify_auto::AutoVerifyReport> for SvVerifyAut
                         }
                     }),
                     seeded_predicates: p.seeded_predicates.clone(),
-                    trace: p.trace(&report.diagnostics.trace_names),
+                    trace: report.trace_of(p),
                 }
             })
             .collect();
