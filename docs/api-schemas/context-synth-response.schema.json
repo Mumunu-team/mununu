@@ -426,6 +426,71 @@
       ],
       "type": "object"
     },
+    "SliceCycle": {
+      "description": "One cycle of a counterexample's trace-relative slice (2026-10-30).",
+      "properties": {
+        "cycle": {
+          "description": "The step of the trace whose values these lines decided (the transition out of it).",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "lines": {
+          "items": {
+            "$ref": "#/definitions/SliceLine"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "cycle",
+        "lines"
+      ],
+      "type": "object"
+    },
+    "SliceLine": {
+      "description": "One RTL line of a slice, with its text when the run holds the source.",
+      "properties": {
+        "file": {
+          "type": "string"
+        },
+        "line": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "text": {
+          "description": "The line as written, trimmed, at most 72 characters.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "file",
+        "line"
+      ],
+      "type": "object"
+    },
+    "SliceStatus": {
+      "description": "What limited a slice: `exact` | `widened` | `unavailable`, with the reason.",
+      "properties": {
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "type": "object"
+    },
     "SourceLoc": {
       "description": "A place in the RTL: the file's basename and a line (yosys's `src` keeps the path and the column; the report keeps what a reader opens).",
       "properties": {
@@ -570,6 +635,24 @@
               "type": "null"
             }
           ]
+        },
+        "slice": {
+          "description": "The trace-relative slice (2026-10-30): per cycle, the RTL lines that decided the values the property read — the branches taken and the operands that controlled them, nothing else ([`crate::adapter::yosys::netlist::Netlist::slice`]). Empty when unavailable; `slice_status` says why, and whether an unevaluated cell widened it.",
+          "items": {
+            "$ref": "#/definitions/SliceCycle"
+          },
+          "type": "array"
+        },
+        "slice_status": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SliceStatus"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`exact` (every cell on the path was evaluated), `widened` (a cell type the evaluator does not know kept its whole fan-in — the slice is never smaller than the truth) or `unavailable` (no netlist, source lines rewritten by sv2v, no public net among the property's atoms), with the reason. Absent on a trace no slice was attempted for."
         },
         "sources": {
           "description": "Where each cell the trace shows lives in the RTL (2026-10-29): the legend, in the order of the first step's cells. Empty when the source map is unavailable (`diagnostics.source_map`).",
