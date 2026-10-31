@@ -534,6 +534,11 @@ pub struct ModelDiagnostics {
     /// the verdict is about, not a causal slice of a counterexample. Absent when the source map
     /// placed nothing in the cone.
     pub involves: Vec<(String, Vec<crate::trace::SourceLoc>)>,
+    /// The repair candidates of each violated row (2026-10-30, `--localize`), by row name: the
+    /// registers whose next-state function, freed at some cycles with the counterexample's inputs
+    /// fixed, let the property survive the trace, and what limited the search. Empty unless
+    /// requested. Shown on the trace as `repair_candidates` / `localization`.
+    pub repairs: Vec<(String, RepairReport)>,
     /// How the counterexamples name the lift's registers and clocks (display only; see
     /// [`crate::trace::TraceNames`]).
     pub trace_names: crate::trace::TraceNames,
@@ -1019,8 +1024,35 @@ pub struct AutoVerifyReport {
 /// enriched with the model-level root cause when one is evident: a black-boxed
 /// (cut) module whose registers became free inputs, or a model with no state
 /// registers at all. Pure so it can be unit-tested without the toolchain.
+/// One row's localisation (2026-10-30): the candidates and the status every surface shows.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RepairReport {
+    pub candidates: Vec<crate::trace::RepairCandidate>,
+    pub status: Option<crate::trace::RepairStatus>,
+}
+
 impl AutoVerifyReport {
     /// Where the property is written in the RTL, when known (2026-10-30).
+    /// The row's localisation, when `--localize` ran on it (2026-10-30).
+    pub fn repair(&self, name: &str) -> Option<&RepairReport> {
+        self.diagnostics
+            .repairs
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, r)| r)
+    }
+
+    /// The row's counterexample as every surface shows it ([`PropertyVerdict::trace`]), with the
+    /// report-level additions a row alone cannot carry: the repair candidates (2026-10-30).
+    pub fn trace_of(&self, p: &PropertyVerdict) -> Option<crate::trace::Trace> {
+        let mut trace = p.trace(&self.diagnostics.trace_names)?;
+        if let Some(r) = self.repair(&p.name) {
+            trace.repair_candidates = r.candidates.clone();
+            trace.localization = r.status.clone();
+        }
+        Some(trace)
+    }
+
     pub fn property_source(&self, name: &str) -> Option<&crate::trace::SourceLoc> {
         self.diagnostics
             .property_sources
@@ -1947,6 +1979,181 @@ fn withhold_violated_over_free_leaves(report: &mut AutoVerifyReport, model_btor2
     }
 }
 
+/// `--localize` (2026-10-30): for every violated row with a finite counterexample, the registers
+/// whose next-state function, freed at some cycles with the trace's inputs fixed, let the property
+/// survive the trace ([`crate::adapter::btor2::repair`]). Candidates are the state cells in the
+/// property's cone, monitor cells left out; one the property reads directly is reported in its own
+/// bucket (`reads_property`). The lines are the statements that write the register. A lasso
+/// (liveness) or an `unreachable` counterexample has no finite trace to fix inputs from, and says
+/// so. Display only: no verdict is read or changed.
+fn attach_repair_candidates(
+    report: &mut AutoVerifyReport,
+    model_btor2: &str,
+    index: &crate::adapter::slang::extract::Declarations,
+    reset_pinned: bool,
+) {
+    use crate::trace::{RepairCandidate, RepairStatus, is_monitor_cell};
+    let status = |status: &str, reason: Option<String>| RepairStatus {
+        status: status.to_string(),
+        reason,
+    };
+    let index = index.as_ref().ok();
+    let aliases = report.diagnostics.trace_names.aliases.clone();
+    let sources = report.diagnostics.trace_names.sources.clone();
+    let mut repairs = Vec::new();
+    for p in &report.properties {
+        let Some(c) = &p.counterexample else { continue };
+        if !matches!(p.outcome, VerifyOutcome::Violated { .. }) {
+            continue;
+        }
+        let mut rep = RepairReport::default();
+        if !c.cycle.is_empty() {
+            rep.status = Some(status(
+                "unavailable",
+                Some("a lasso (liveness) counterexample has no finite length to fix".to_string()),
+            ));
+            repairs.push((p.name.clone(), rep));
+            continue;
+        }
+        if c.inputs.is_empty() || c.prefix.is_empty() {
+            rep.status = Some(status(
+                "unavailable",
+                Some("the counterexample carries no input sequence to fix".to_string()),
+            ));
+            repairs.push((p.name.clone(), rep));
+            continue;
+        }
+        let Ok(formula) = crate::mu_calculus::parser::parse(&p.formula) else {
+            continue;
+        };
+        // The model with this row's violation as a `bad`: the safety witness monitor the path
+        // itself came from. A row the monitor does not cover (not a safety shape) says so.
+        let (monitored, _depth) = match crate::adapter::reach_rescue::safety_bad_model(
+            model_btor2,
+            &formula,
+            reset_pinned,
+        ) {
+            Ok(m) => m,
+            Err(miss) => {
+                rep.status = Some(status(
+                    "unavailable",
+                    Some(format!("no `bad` monitor for this row's shape ({miss})")),
+                ));
+                repairs.push((p.name.clone(), rep));
+                continue;
+            }
+        };
+        let Ok(file) = crate::adapter::btor2::parser::parse(&monitored) else {
+            rep.status = Some(status(
+                "unavailable",
+                Some("the monitored model did not parse".to_string()),
+            ));
+            repairs.push((p.name.clone(), rep));
+            continue;
+        };
+        let atoms = crate::adapter::btor2::symbolic_bitblast::formula_seed_atoms(&formula);
+        let read: std::collections::BTreeSet<String> = atoms
+            .iter()
+            .flat_map(|a| {
+                a.split(|ch: char| {
+                    !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' || ch == '$')
+                })
+                .filter(|t| {
+                    !t.is_empty()
+                        && !t.starts_with(|ch: char| ch.is_ascii_digit())
+                        && !is_monitor_cell(t)
+                        && *t != "true"
+                        && *t != "false"
+                })
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+            })
+            .collect();
+        let candidates: Vec<String> = crate::adapter::btor2::fault::coi_states(&file, &atoms)
+            .into_iter()
+            .filter(|r| !is_monitor_cell(r))
+            .collect();
+        if candidates.is_empty() {
+            rep.status = Some(status(
+                "none",
+                Some("no register in the property's cone".to_string()),
+            ));
+            repairs.push((p.name.clone(), rep));
+            continue;
+        }
+        let loc = crate::adapter::btor2::repair::localize(&file, &c.inputs, &candidates);
+        for f in &loc.found {
+            let shown = aliases
+                .get(&f.register)
+                .cloned()
+                .unwrap_or_else(|| f.register.clone());
+            let mut lines: Vec<crate::trace::SourceLoc> = index
+                .and_then(|i| i.writes.get(&shown).or_else(|| i.writes.get(&f.register)))
+                .cloned()
+                .unwrap_or_default();
+            if lines.is_empty()
+                && let Some(cell) = sources.iter().find(|s| s.cell == shown)
+            {
+                lines = cell.assigned.clone();
+            }
+            rep.candidates.push(RepairCandidate {
+                reads_property: read.contains(&shown) || read.contains(&f.register),
+                register: shown,
+                cycles: f.cycles.clone(),
+                values: f.values.clone(),
+                lines,
+            });
+        }
+        // The candidates the property does not read first, and among them the one whose change
+        // acts CLOSEST to the violation first: a register upstream can "repair" by steering the
+        // design elsewhere early (into a fault state, say), which removes this counterexample
+        // without being where the bug is. Proximity is the ranking, not a proof.
+        rep.candidates.sort_by_key(|c| {
+            (
+                c.reads_property,
+                std::cmp::Reverse(c.cycles.iter().copied().max().unwrap_or(0)),
+            )
+        });
+        rep.status = Some(if loc.skipped_by_cap > 0 {
+            status(
+                "partial",
+                Some(format!(
+                    "{} candidate register(s) beyond the cap of {} not queried",
+                    loc.skipped_by_cap,
+                    crate::adapter::btor2::repair::MAX_CANDIDATES
+                )),
+            )
+        } else if !loc.errors.is_empty() {
+            status(
+                "partial",
+                Some(format!(
+                    "{} of {} queries could not run: {}",
+                    loc.errors.len(),
+                    loc.queried,
+                    loc.errors
+                        .iter()
+                        .map(|(r, e)| format!("{r}: {e}"))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                )),
+            )
+        } else if rep.candidates.is_empty() {
+            status(
+                "none",
+                Some(format!(
+                    "no single-register change among {} avoids the violation within the trace's {} cycles",
+                    loc.queried,
+                    c.inputs.len()
+                )),
+            )
+        } else {
+            status("done", None)
+        });
+        repairs.push((p.name.clone(), rep));
+    }
+    report.diagnostics.repairs = repairs;
+}
+
 /// The RTL lines of every row's cone of influence (2026-10-30), into
 /// [`ModelDiagnostics::involves`]: the cone's named registers, inputs and wires
 /// ([`crate::adapter::btor2::dep_graph::cone_named_signals`] over the model the engines ran), each
@@ -2483,6 +2690,12 @@ pub struct VerifyAutoOptions {
     pub templates: Vec<crate::adapter::templates::TemplateRef>,
     /// Project template packs (`--templates-file`) layered over the configured catalog.
     pub templates_files: Vec<std::path::PathBuf>,
+    /// `--localize` / API `localize` (2026-10-30): for every row with a counterexample, name the
+    /// registers whose next-state function, freed at some cycles with the trace's inputs fixed,
+    /// would let the property survive the trace — repair candidates, one native-BMC query per
+    /// register in the property's cone ([`crate::adapter::btor2::repair`]). Off by default: the
+    /// queries cost a BMC run per candidate.
+    pub localize: bool,
     /// R-F5.5d (2026-07-03) — run each property through the R-F5 **symbolic**
     /// predicate-cube engine (BDD relation + WP CEGAR loop; no per-cube-pair
     /// SMT) instead of the explicit `cegar_refine_loop`. Default `false`
@@ -2647,6 +2860,7 @@ impl Default for VerifyAutoOptions {
             predicate_hints: Vec::new(),
             templates: Vec::new(),
             templates_files: Vec::new(),
+            localize: false,
             symbolic_engine: false,
             exact_symbolic: false,
             portfolio: None,
@@ -7278,6 +7492,11 @@ pub(crate) fn verify_auto_impl(
     attach_involves(&mut report, &btor2, &source_index);
     // 2026-10-30 — the inputs the slice evaluates a trace at, which the trace does not list.
     fill_pinned(&mut report);
+    // 2026-10-30 — `--localize`: repair candidates per violated row, one BMC query per register
+    // in the property's cone, with the counterexample's inputs fixed.
+    if opts.localize {
+        attach_repair_candidates(&mut report, &btor2, &source_index, reset_pinned);
+    }
     // mununu#579 — last of the verdict post-passes: everything above may still CHANGE a verdict, and
     // a self-contradiction must be judged on the verdicts the report actually ships.
     flag_self_contradictory_verdicts(&mut report);
@@ -16940,6 +17159,90 @@ module uart_tx(); endmodule"#;
             [34u32].into_iter().collect(),
             "{sliced:?} vs {cone:?}"
         );
+    }
+
+    /// 2026-10-30 — `--localize` end to end on the slice fixture: with the alternation
+    /// counterexample's inputs fixed, `state_q` is a repair candidate whose latest single-frame
+    /// change acts at frame 1 (the state entering the second request — frame 2 cannot be it, the
+    /// `start_a` pulse reads the combinational `next`), `stall_q` one by diversion (the fault arm,
+    /// from reset), the two pulses are reported as reading the property; `state_q` ranks first (its
+    /// change acts closest to the violation) and carries the lines that write it. Measured
+    /// 2026-10-31: state_q [1] := 0x3, stall_q [0] := 0x4, start_a [2] := 0x0, start_b [2] := 0x1.
+    #[test]
+    #[ignore = "requires slang + sv2v + Yosys + z3 (use the mununu-sva docker image); run with --ignored"]
+    fn e2e_localize_names_the_state_register_at_the_second_grant_first() {
+        use crate::adapter::yosys::SvFrontend;
+        let sv = include_str!("../btor2/testdata/lane_arbiter.sv");
+        let sources = vec![("lane_arbiter.sv".to_string(), sv.to_string())];
+        let yopts = YosysOptions {
+            top: Some("lane_arbiter".to_string()),
+            use_sv2v: true,
+            frontend: SvFrontend::Slang,
+            ..Default::default()
+        };
+        let (symbolic_engine, exact_symbolic, portfolio) = engine_selection(None);
+        let report = verify_auto(
+            &sources,
+            &yopts,
+            &VerifyAutoOptions {
+                symbolic_engine,
+                exact_symbolic,
+                portfolio,
+                localize: true,
+                ..Default::default()
+            },
+        )
+        .expect("verify_auto runs on lane_arbiter");
+        let row = report
+            .properties
+            .iter()
+            .find(|p| p.label.as_deref() == Some("alternates"))
+            .unwrap_or_else(|| panic!("the alternates row: {:?}", report.properties));
+        let trace = report.trace_of(row).expect("the violated row has a trace");
+        for c in &trace.repair_candidates {
+            eprintln!(
+                "  candidate {} at {:?} := {:?} lines {:?} reads_property={}",
+                c.register, c.cycles, c.values, c.lines, c.reads_property
+            );
+        }
+        eprintln!("  localization: {:?}", trace.localization);
+        assert_eq!(
+            trace.localization.as_ref().map(|s| s.status.as_str()),
+            Some("done"),
+            "{:?}",
+            trace.localization
+        );
+        let first = trace.repair_candidates.first().expect("a candidate");
+        assert_eq!(first.register, "state_q");
+        assert!(!first.reads_property);
+        assert_eq!(first.cycles, vec![1], "{:?}", first.cycles);
+        assert_ne!(
+            first.values[0], "0x1",
+            "any state but LANE_A: {:?}",
+            first.values
+        );
+        assert!(
+            first.lines.iter().any(|l| l.file == "lane_arbiter.sv"),
+            "the statements writing state_q: {:?}",
+            first.lines
+        );
+        let by = |r: &str| {
+            trace
+                .repair_candidates
+                .iter()
+                .find(|c| c.register == r)
+                .unwrap_or_else(|| panic!("{r} among {:?}", trace.repair_candidates))
+        };
+        assert!(!by("stall_q").reads_property);
+        assert!(by("start_a").reads_property);
+        assert!(by("start_b").reads_property);
+        // Every candidate the property does not read comes before every one it does.
+        let flags: Vec<bool> = trace
+            .repair_candidates
+            .iter()
+            .map(|c| c.reads_property)
+            .collect();
+        assert!(flags.windows(2).all(|w| !w[0] || w[1]), "{flags:?}");
     }
 
     /// mununu#717 — an override slang's top-scoped `-G` cannot apply (a `MODULE.NAME` on a

@@ -699,7 +699,7 @@ fn topo_order(lines: Vec<Line>) -> Vec<Line> {
         .collect()
 }
 
-fn rebuild(lines: Vec<Line>) -> Btor2File {
+pub(crate) fn rebuild(lines: Vec<Line>) -> Btor2File {
     let lines = topo_order(lines);
     let by_nid = lines.iter().enumerate().map(|(i, l)| (l.nid, i)).collect();
     Btor2File { lines, by_nid }
@@ -714,7 +714,7 @@ fn op(sort: Nid, op: Op, args: Vec<Nid>) -> Node {
     }
 }
 
-fn sort_of(file: &Btor2File, nid: Nid) -> Option<Nid> {
+pub(crate) fn sort_of(file: &Btor2File, nid: Nid) -> Option<Nid> {
     match &file.lookup(nid)?.node {
         Node::State { sort, .. } | Node::Input { sort, .. } => Some(*sort),
         _ => None,
@@ -733,7 +733,7 @@ fn state_width(file: &Btor2File, nid: Nid) -> Option<u32> {
 
 /// A register by any value-identical spelling, else by its canonical `--list` name
 /// (`mutate::resolve_state_nid`'s rule).
-fn resolve_register(file: &Btor2File, name: &str) -> Option<Nid> {
+pub(crate) fn resolve_register(file: &Btor2File, name: &str) -> Option<Nid> {
     if let Some(nid) = parser::resolve_state_alias(file, name, true) {
         return Some(nid);
     }

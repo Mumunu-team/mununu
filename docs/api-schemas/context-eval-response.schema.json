@@ -340,6 +340,66 @@
       ],
       "type": "object"
     },
+    "RepairCandidate": {
+      "description": "One repair candidate (2026-10-30): a register whose next-state function, freed at `cycles`, lets the property survive the trace with the trace's inputs fixed.",
+      "properties": {
+        "cycles": {
+          "description": "The steps at which the override acts (the transition out of each).",
+          "items": {
+            "format": "uint",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "lines": {
+          "description": "The statements that write the register (the candidate lines to read).",
+          "items": {
+            "$ref": "#/definitions/SourceLoc"
+          },
+          "type": "array"
+        },
+        "reads_property": {
+          "description": "The property reads this register directly: a change here changes what is measured, not what happens — reported, in its own bucket.",
+          "type": "boolean"
+        },
+        "register": {
+          "type": "string"
+        },
+        "values": {
+          "description": "The value the override gives the register at each of `cycles`, as hex.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "cycles",
+        "reads_property",
+        "register",
+        "values"
+      ],
+      "type": "object"
+    },
+    "RepairStatus": {
+      "description": "What limited a localisation: `done` | `partial` | `none` | `unavailable`, with the reason.",
+      "properties": {
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "type": "object"
+    },
     "ReplayMismatchView": {
       "description": "The first comparison that disagreed.",
       "properties": {
@@ -610,6 +670,17 @@
         "kind": {
           "$ref": "#/definitions/TraceKind"
         },
+        "localization": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RepairStatus"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`done` (every candidate register was queried), `partial` (a cap or budget cut the query short — `reason` says what), `none` (no single-register change avoids the violation within the trace's length) or `unavailable` (no trace to fix inputs from, the model could not be queried). Absent when `--localize` was not requested."
+        },
         "loop_start": {
           "description": "For a `lasso`: the index into `steps` the last step loops back to.",
           "format": "uint",
@@ -618,6 +689,13 @@
             "integer",
             "null"
           ]
+        },
+        "repair_candidates": {
+          "description": "Repair candidates (2026-10-30, `--localize`): with this trace's inputs fixed, the registers whose next-state function, if free at the named cycles, would let the property survive the whole trace — candidates, never causes ([`crate::adapter::btor2::repair`]). Empty when localisation was not requested or found none; `localization` says which.",
+          "items": {
+            "$ref": "#/definitions/RepairCandidate"
+          },
+          "type": "array"
         },
         "replay": {
           "anyOf": [

@@ -34,6 +34,7 @@ no bound (historical behaviour).
 
 | Surface / property | Path → engine | Predicates? |
 |---|---|---|
+| `sv verify-auto --localize` — repair candidates under a violated row's counterexample (2026-10-30) | the design + the row's safety witness monitor (`safety_bad_model`) + the fault posture's override mux on one register → **native BMC** (in-process Z3, QF_BV; `bmc_bad_reachable_witness`), depth = the trace's last frame, the trace's inputs pinned by `constraint`s, one query per register in the property's cone × the override-budget ladder (1, 2, 3, ∞) — display only, decides no verdict | none |
 | `btor2/sv verify` (safety) | `decide_reach_portfolio` → **reach portfolio** | none |
 | `btor2/sv verify-liveness` (`AG(a→AF b)`) | Biere l2s → `bad`-monitor → **reach portfolio** | none |
 | `btor2/sv verify-recoverability` (`AG EF good`) | `exact_symbolic_verdict` → **exact-symbolic** | **none** |

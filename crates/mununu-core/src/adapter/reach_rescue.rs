@@ -648,12 +648,15 @@ impl std::fmt::Display for WitnessMiss {
     }
 }
 
-pub fn safety_witness(
+/// The design with a safety row's violation as a `bad` (2026-10-30): the bounded safety witness
+/// monitor of `formula`'s block on `design_btor2`, and the monitor's depth — how many frames after
+/// the block's violation the `bad` fires. The model [`safety_witness`] searches and
+/// [`crate::adapter::btor2::repair`] queries, so both ask about the same `bad`.
+pub fn safety_bad_model(
     design_btor2: &str,
     formula: &Formula,
     reset_pinned: bool,
-    max_k: u32,
-) -> Result<crate::adapter::btor2::native_bmc::BmcTrace, WitnessMiss> {
+) -> Result<(String, usize), WitnessMiss> {
     let Node::Nu { var, body } = formula.node(formula.root()) else {
         return Err(WitnessMiss::shape("the root is not a greatest fixpoint"));
     };
@@ -665,17 +668,25 @@ pub fn safety_witness(
     if !matches!(formula.node(recur), Node::Modal { guard, .. } if *guard == Guard::default()) {
         return Err(WitnessMiss::shape("the recursion is not a bare `[] Z`"));
     }
-    let (monitored, depth) =
-        crate::adapter::btor2::bad_monitor::emit_bounded_safety_witness_monitor(
-            design_btor2,
-            formula,
-            block,
-            reset_pinned,
-        )
-        .map_err(|e| WitnessMiss {
-            stage: "monitor",
-            reason: format!("{e:?}"),
-        })?;
+    crate::adapter::btor2::bad_monitor::emit_bounded_safety_witness_monitor(
+        design_btor2,
+        formula,
+        block,
+        reset_pinned,
+    )
+    .map_err(|e| WitnessMiss {
+        stage: "monitor",
+        reason: format!("{e:?}"),
+    })
+}
+
+pub fn safety_witness(
+    design_btor2: &str,
+    formula: &Formula,
+    reset_pinned: bool,
+    max_k: u32,
+) -> Result<crate::adapter::btor2::native_bmc::BmcTrace, WitnessMiss> {
+    let (monitored, depth) = safety_bad_model(design_btor2, formula, reset_pinned)?;
     let file = parser::parse(&monitored).map_err(|e| WitnessMiss {
         stage: "parse",
         reason: format!("{e:?}"),

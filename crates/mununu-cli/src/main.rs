@@ -2463,6 +2463,13 @@ struct SvVerifyAutoArgs {
     /// `replay: unavailable`.
     #[arg(long = "replay", requires = "emit_testbench")]
     replay: bool,
+    /// For every violated row, name the registers whose next-state function, freed at some
+    /// cycles with the counterexample's inputs fixed, would let the property survive the trace —
+    /// repair CANDIDATES, never causes (one native-BMC query per register in the property's cone,
+    /// which is why this is opt-in). Printed under the counterexample as `repair candidates:`;
+    /// `trace.repair_candidates` / `trace.localization` in `--json`.
+    #[arg(long = "localize")]
+    localize: bool,
     /// Print a JSON report instead of the human-readable summary.
     #[arg(long)]
     json: bool,
@@ -4842,6 +4849,7 @@ fn sv_verify_auto(args: SvVerifyAutoArgs) -> Result<(), String> {
         predicate_hints: args.predicate.clone(),
         templates: template_refs(&args.template, &args.template_args)?,
         templates_files: args.templates_files.clone(),
+        localize: args.localize,
         // R-F5.5d — `--engine symbolic` routes every property through the R-F5
         // BDD CEGAR loop (no per-cube-pair SMT).
         symbolic_engine: args.engine == EngineArg::Symbolic,
@@ -5134,7 +5142,7 @@ fn render_verify_auto_text(
         // signal a safety check never produces — the reset → violation path for a safety
         // failure, or the D1.8b stall-lasso / trap-path (reset → prefix → repeating ¬p cycle)
         // for a `AF`/`AG AF`/`AG EF` failure.
-        if let Some(trace) = p.trace(&report.diagnostics.trace_names) {
+        if let Some(trace) = report.trace_of(p) {
             use mununu_core::trace::TraceKind;
             match trace.kind {
                 TraceKind::Unreachable => println!(
@@ -5235,6 +5243,45 @@ fn render_verify_auto_text(
             {
                 println!(
                     "        slice: {} \u{2014} {}",
+                    st.status,
+                    st.reason.as_deref().unwrap_or("no reason recorded")
+                );
+            }
+            // 2026-10-30 — `--localize`: the repair candidates, the real ones first, then the
+            // registers the property reads (`trace.repair_candidates` / `trace.localization`).
+            if !trace.repair_candidates.is_empty() {
+                println!(
+                    "        repair candidates (with the trace's inputs fixed, a change here avoids the violation within {} cycles):",
+                    trace.steps.len()
+                );
+                for c in &trace.repair_candidates {
+                    if c.reads_property {
+                        println!(
+                            "          {} \u{2014} reads the property: a change here changes what is measured, not what happens",
+                            c.register
+                        );
+                        continue;
+                    }
+                    let when = c
+                        .cycles
+                        .iter()
+                        .zip(&c.values)
+                        .map(|(t, v)| format!("[{t}] := {v}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let lines = if c.lines.is_empty() {
+                        String::new()
+                    } else {
+                        format!(": {}", mununu_core::trace::compact_lines(&c.lines))
+                    };
+                    println!("          {} at {when}{lines}", c.register);
+                }
+            }
+            if let Some(st) = &trace.localization
+                && st.status != "done"
+            {
+                println!(
+                    "        localization: {} \u{2014} {}",
                     st.status,
                     st.reason.as_deref().unwrap_or("no reason recorded")
                 );

@@ -342,6 +342,7 @@ mod tests {
                         line: 7,
                     },
                 )],
+                repairs: Vec::new(),
                 involves: vec![(
                     "ann_guarantee_0".into(),
                     vec![

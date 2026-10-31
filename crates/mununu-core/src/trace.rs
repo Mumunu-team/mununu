@@ -601,6 +601,18 @@ pub struct Trace {
     /// property's atoms), with the reason. Absent on a trace no slice was attempted for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slice_status: Option<SliceStatus>,
+    /// Repair candidates (2026-10-30, `--localize`): with this trace's inputs fixed, the registers
+    /// whose next-state function, if free at the named cycles, would let the property survive the
+    /// whole trace — candidates, never causes ([`crate::adapter::btor2::repair`]). Empty when
+    /// localisation was not requested or found none; `localization` says which.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repair_candidates: Vec<RepairCandidate>,
+    /// `done` (every candidate register was queried), `partial` (a cap or budget cut the query
+    /// short — `reason` says what), `none` (no single-register change avoids the violation within
+    /// the trace's length) or `unavailable` (no trace to fix inputs from, the model could not be
+    /// queried). Absent when `--localize` was not requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub localization: Option<RepairStatus>,
 }
 
 /// One cycle of a counterexample's trace-relative slice (2026-10-30).
@@ -627,6 +639,33 @@ pub struct SliceLine {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "api", derive(schemars::JsonSchema))]
 pub struct SliceStatus {
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// One repair candidate (2026-10-30): a register whose next-state function, freed at `cycles`,
+/// lets the property survive the trace with the trace's inputs fixed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "api", derive(schemars::JsonSchema))]
+pub struct RepairCandidate {
+    pub register: String,
+    /// The steps at which the override acts (the transition out of each).
+    pub cycles: Vec<usize>,
+    /// The value the override gives the register at each of `cycles`, as hex.
+    pub values: Vec<String>,
+    /// The statements that write the register (the candidate lines to read).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lines: Vec<SourceLoc>,
+    /// The property reads this register directly: a change here changes what is measured, not
+    /// what happens — reported, in its own bucket.
+    pub reads_property: bool,
+}
+
+/// What limited a localisation: `done` | `partial` | `none` | `unavailable`, with the reason.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "api", derive(schemars::JsonSchema))]
+pub struct RepairStatus {
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
@@ -743,6 +782,8 @@ impl Trace {
             sources: Vec::new(),
             slice: Vec::new(),
             slice_status: None,
+            repair_candidates: Vec::new(),
+            localization: None,
         }
     }
 
@@ -789,6 +830,8 @@ impl Trace {
             sources: Vec::new(),
             slice: Vec::new(),
             slice_status: None,
+            repair_candidates: Vec::new(),
+            localization: None,
         }
     }
 }
@@ -823,6 +866,8 @@ impl Trace {
             sources: Vec::new(),
             slice: Vec::new(),
             slice_status: None,
+            repair_candidates: Vec::new(),
+            localization: None,
         }
     }
 }

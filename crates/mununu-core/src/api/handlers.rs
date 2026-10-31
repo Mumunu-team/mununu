@@ -2280,6 +2280,7 @@ fn sv_verify_auto_handler_impl(
         // The deployment's catalog (`server --config`); a request cannot name server-local files.
         templates: request.templates.clone(),
         templates_files: Vec::new(),
+        localize: request.localize,
         // Engine selection (`"explicit"` | `"symbolic"` | `"exact-symbolic"` |
         // `"portfolio-sequential"` | `"portfolio-parallel"`). Unspecified ⇒ the
         // default `portfolio-sequential`. `engine_selection` is the single place the
