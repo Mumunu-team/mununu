@@ -764,7 +764,7 @@ fn plan_assumptions(
     exempt: &[String],
 ) -> (AssumptionReport, Vec<(String, String)>) {
     use crate::adapter::btor2::assume_monitor::{ASSUME_OK_SYMBOL, assume_shape};
-    use crate::adapter::slang::assume_guarantee::relativize;
+    use crate::adapter::slang::assume_guarantee::{relativize, root_is_existential};
     let assumes: Vec<_> = ex
         .translated
         .iter()
@@ -855,7 +855,12 @@ fn plan_assumptions(
             ));
             continue;
         }
-        match relativize(&t.formula, ASSUME_OK_SYMBOL, t.kind == SvaKind::Cover) {
+        // 2026-10-30 — a `mu`-rooted (EF) guarantee is guarded as a cover is, whatever its
+        // `kind`: the universal excuse `(!ok) || …` at an EF root is satisfied by an initial
+        // state that already breaks the assumption, a vacuous HOLDS on the anti-vacuity row
+        // (mununu#837).
+        let existential = t.kind == SvaKind::Cover || root_is_existential(&t.formula);
+        match relativize(&t.formula, ASSUME_OK_SYMBOL, existential) {
             Ok(f) => t.formula = f,
             Err(why) => rep.unguarded.push((display(t), why)),
         }
@@ -14665,6 +14670,70 @@ module uart_tx(); endmodule"#;
         assert_eq!(ex.translated[0].formula, "nu X. ((cnt == 1) && [] X)");
     }
 
+    /// 2026-10-30 — an EF-rooted `assert` row (an `rtl_reachable` instance, a `mu X. (t || <> X)`
+    /// guarantee) is relativized existentially — `EF (ok && t)` — not with the universal excuse
+    /// `(!ok) || …`, which an initial state that already breaks the assumption satisfies: on the
+    /// parent, `rtl_reachable TARGET="q == 3"` under `assume property (!inc)` HOLDS on a 2-bit
+    /// counter although no assumption-keeping trace reaches `q == 3` (mununu#837).
+    #[test]
+    fn an_ef_rooted_guarantee_is_relativized_existentially() {
+        use crate::adapter::slang::translate::{TranslatedAssertion, TranslationReport};
+        let t = |name: &str, kind: SvaKind, formula: &str| TranslatedAssertion {
+            name: name.to_string(),
+            label: Some(name.to_string()),
+            kind,
+            formula: formula.to_string(),
+            recoverability_companion: None,
+            written: None,
+        };
+        let mut ex = TranslationReport {
+            translated: vec![
+                t("m_inv", SvaKind::Assume, "nu X. ((!(inc)) && [] X)"),
+                t("reach", SvaKind::Assert, "mu X. ((q == 3) || <> X)"),
+                t("never", SvaKind::Assert, "nu X. ((!(q == 3)) && [] X)"),
+                t(
+                    "recover",
+                    SvaKind::Assert,
+                    "nu Y. ((mu X. ((q == 0) || <> X)) && [] Y)",
+                ),
+            ],
+            ..Default::default()
+        };
+        let (rep, _) = plan_assumptions(&mut ex, AssumeMode::Precondition, &[]);
+        assert!(rep.unguarded.is_empty(), "{:?}", rep.unguarded);
+        let f = |n: &str| {
+            ex.translated
+                .iter()
+                .find(|t| t.name == n)
+                .map(|t| t.formula.clone())
+                .unwrap()
+        };
+        let reach = f("reach");
+        assert!(
+            !reach.contains("(!(mununu_assume_ok))"),
+            "no universal excuse at an EF root: {reach}"
+        );
+        assert!(reach.contains("(mununu_assume_ok && (q == 3))"), "{reach}");
+        assert!(
+            reach.trim_start_matches('(').starts_with("mu X."),
+            "{reach}"
+        );
+        // The universal roots keep the universal guard: the safety block `!(q == 3)` folds to
+        // `!(ok && (q == 3))` (the excuse is still there, as the printer folds it), the AG EF
+        // keeps the excuse in front of its EF block.
+        let never = f("never");
+        assert!(
+            never.trim_start_matches('(').starts_with("nu X.")
+                && never.contains("(!((mununu_assume_ok && (q == 3))))"),
+            "{never}"
+        );
+        assert!(
+            f("recover").contains("(!(mununu_assume_ok))"),
+            "{}",
+            f("recover")
+        );
+    }
+
     #[test]
     fn lift_overrides_replace_same_named_sources_and_refuse_unknown_names() {
         let yopts = YosysOptions {
@@ -16483,12 +16552,20 @@ module uart_tx(); endmodule"#;
             frontend: SvFrontend::Slang,
             ..Default::default()
         };
+        // The CLI's default engine selection (portfolio-sequential, exact-symbolic first): the
+        // library default is the cube engine alone, which leaves the relativized `EF` ⊥ (measured
+        // 2026-10-30: `UnclassifiedBottom`, the safety rescue does not cover a possibility row) —
+        // a cube abstention, not a property of the exemption.
+        let (symbolic_engine, exact_symbolic, portfolio) = engine_selection(None);
         let run = |mode: AssumeMode| {
             verify_auto(
                 &sources,
                 &yopts,
                 &VerifyAutoOptions {
                     assume_mode: mode,
+                    symbolic_engine,
+                    exact_symbolic,
+                    portfolio,
                     ..Default::default()
                 },
             )
@@ -16511,6 +16588,33 @@ module uart_tx(); endmodule"#;
                 .unwrap_or_else(|| panic!("row labelled `{l}` in {:?}", r.properties))
                 .clone()
         };
+        // A ⊥ row is a finding, not an assertion: say everything the report knows about it.
+        for r in [&under, &ignored] {
+            for p in r
+                .properties
+                .iter()
+                .filter(|p| matches!(p.outcome, VerifyOutcome::Unknown { .. }))
+            {
+                eprintln!(
+                    "  ⊥ [{}] {}: formula={} bottom_reason={:?} decided_by={:?} seeded={:?}",
+                    r.assumptions.mode,
+                    p.name,
+                    p.formula,
+                    p.bottom_reason,
+                    p.decided_by,
+                    p.seeded_predicates
+                );
+                for n in r.notes.iter().filter(|n| {
+                    n.property.as_deref() == Some(p.name.as_str())
+                        || n.kind.contains("plan")
+                        || n.kind.contains("portfolio")
+                        || n.kind.contains("posture")
+                        || n.kind.contains("input")
+                }) {
+                    eprintln!("    [{}] {} — {}", n.kind, n.summary, n.detail);
+                }
+            }
+        }
         let definite = |p: &PropertyVerdict| match &p.outcome {
             VerifyOutcome::Holds => true,
             VerifyOutcome::Violated { .. } => false,

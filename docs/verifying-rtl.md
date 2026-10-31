@@ -724,7 +724,10 @@ mununu sv verify-auto prim_arbiter_ppc.sv --top prim_arbiter_ppc --frontend sv2v
 **How.** The assumptions become one monitor signal `mununu_assume_ok`, true while every applied
 assumption has held at every cycle so far (a latch: once broken, false for good). Each boolean
 block of a guarantee is guarded by it — `(!ok || B)` where the guarantee quantifies universally,
-`(ok && B)` inside a `cover` or the `EF` of a recoverability check — so every engine evaluates the
+`(ok && B)` inside a `cover`, the `EF` of a recoverability check, or a guarantee whose ROOT is an
+`EF` (an `rtl_reachable` instance, a `mu X. (t || <> X)` body; until 2026-10-30 such an `assert`
+row got the universal excuse at its root, which the bad cycle-0 input below satisfied at once — a
+vacuous HOLDS, mununu#837) — so every engine evaluates the
 same relativized formula and the safety and liveness rescue lanes still reduce it. The cycle-0
 input is the environment's choice: a property whose first temporal operator is existential (a
 `cover`, an `EF …`) is satisfied when SOME cycle-0 input satisfies it, so a bad input at reset
