@@ -98,7 +98,7 @@ fn sterile_batch_release_properties_hold() -> Result<(), Box<dyn Error>> {
 #[test]
 fn sterile_batch_release_dsl_example_parses() -> Result<(), Box<dyn Error>> {
     let doc = parser::parse(include_str!(
-        "../../../examples/sterile_batch_release.ctxdsl"
+        "../../../../examples/sterile_batch_release.ctxdsl"
     ))
     .map_err(|e| -> Box<dyn Error> { Box::new(e) })?;
     assert_eq!(doc.alphabet.len(), 8);

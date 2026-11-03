@@ -66,7 +66,7 @@ fn machine_start_requires_gate_and_operator() -> Result<(), Box<dyn Error>> {
 #[test]
 fn dual_condition_ctxdsl_example_parses() -> Result<(), Box<dyn Error>> {
     parser::parse(include_str!(
-        "../../../examples/dual_condition_start.ctxdsl"
+        "../../../../examples/dual_condition_start.ctxdsl"
     ))
     .map_err(|e| -> Box<dyn Error> { Box::new(e) })?;
     Ok(())

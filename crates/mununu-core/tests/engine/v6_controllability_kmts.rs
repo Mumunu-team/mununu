@@ -52,7 +52,7 @@ use mununu_core::adapter::btor2::kmts_lift::{
 use mununu_core::clts::{LabelControllability, TransitionModality};
 
 const AMBA_ARBITER_BTOR2: &str =
-    include_str!("../../../examples/verify/v6_controllability_kmts/source/amba_arbiter.btor2");
+    include_str!("../../../../examples/verify/v6_controllability_kmts/source/amba_arbiter.btor2");
 
 /// V.6 sub-test: the controllability-aware lifter produces a CLTS
 /// with the env/ctrl dual-label dispatch from R.6.6.

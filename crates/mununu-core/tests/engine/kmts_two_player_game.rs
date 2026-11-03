@@ -143,8 +143,8 @@ fn kmts_coarse_predicate_decides_unreachable_target() {
 
 // ---- Industrial soundness: KMTS two-player never contradicts the exact two-player oracle -------------
 
-const EDN: &str = include_str!("fixtures/wall_classes/edn_boot_sm.btor");
-const OTBN: &str = include_str!("fixtures/wall_classes/otbn_start_stop_fsm.btor");
+const EDN: &str = include_str!("../fixtures/wall_classes/edn_boot_sm.btor");
+const OTBN: &str = include_str!("../fixtures/wall_classes/otbn_start_stop_fsm.btor");
 const EDN_ALL: &[&str] = &[
     "auto_req_mode_i",
     "boot_req_mode_i",

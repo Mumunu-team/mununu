@@ -65,7 +65,7 @@ const ENVBLK_INIT0: &str = "\
 9 next 1 4 8
 ";
 
-const EDN: &str = include_str!("fixtures/wall_classes/edn_boot_sm.btor");
+const EDN: &str = include_str!("../fixtures/wall_classes/edn_boot_sm.btor");
 const EDN_ALL: &[&str] = &[
     "auto_req_mode_i",
     "boot_req_mode_i",
