@@ -17,7 +17,7 @@ BASELINE   ?= main
 PROPTEST_CASES ?= 64
 
 .PHONY: build test lint verify ci clean help \
-        test-fast e2e e2e-oneshot test-properties stress fuzz proptest-deep \
+        test-fast e2e e2e-oneshot e2e-parallel test-properties stress fuzz proptest-deep \
         coverage mem-profile sweep \
         bench-baseline bench-compare bench-record \
         experiment replay publish-prep frontier-smoke
@@ -29,6 +29,7 @@ help:
 	@echo "  test-fast      - cargo test --lib + integration tests, sub-minute (pre-commit gate)"
 	@echo "  e2e            - SVA-verification e2e suite, one test per process (#[ignore]d; run inside the mununu-sva image)"
 	@echo "  e2e-oneshot    - same suite in a single libtest process (an aborting test loses the run)"
+	@echo "  e2e-parallel   - same suite under cargo-nextest, one process per test, E2E_JOBS in flight"
 	@echo "  lint           - cargo fmt --check && cargo clippy -D warnings"
 	@echo "  verify         - cargo run mununu against $(VERIFY_FILE)"
 	@echo "  ci             - lint + test (the gate)"
@@ -133,8 +134,23 @@ e2e-oneshot:
 	$(CARGO) test -p mununu-core --lib --all-features e2e_ -- --ignored --nocapture
 	$(CARGO) test -p mununu-core --test differential_oracle_e2e --all-features -- --ignored --nocapture
 
+# N0.3 (2026-11-03) — the same suite under cargo-nextest: one process per test, which is
+# exactly the isolation scripts/e2e-sweep.sh builds by hand (an abort is one failed row,
+# never a lost run), plus parallel scheduling. The sweep is serial by design (mununu#504)
+# and took 112 min on 2026-10-26, 98 of them in four OpenTitan tests that run one after
+# another; with E2E_JOBS of them in flight the wall is the longest test, not the sum.
+# Needs cargo-nextest (the dev image carries it; `cargo install --locked cargo-nextest`).
+# `--no-fail-fast` keeps every row; a crashed test is reported with its signal.
+E2E_JOBS ?= 4
+e2e-parallel:
+	$(CARGO) nextest run -p mununu-core --all-features --run-ignored ignored-only \
+	    -E 'test(/e2e_/)' --test-threads $(E2E_JOBS) --no-fail-fast --no-capture
+
 test-properties:
-	PROPTEST_CASES=$(PROPTEST_CASES) $(CARGO) test --workspace --test 'properties*' -- --nocapture
+# The `properties*` crates are gated on `test_support` (their generators live behind it);
+# without the feature the target compiled them out and ran ZERO tests — measured 2026-11-03,
+# a gate with no negative control. The feature is now passed explicitly.
+	PROPTEST_CASES=$(PROPTEST_CASES) $(CARGO) test -p mununu-core --features test_support --test 'properties*' -- --nocapture
 
 proptest-deep:
 	$(MAKE) test-properties PROPTEST_CASES=4096
