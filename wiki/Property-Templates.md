@@ -194,6 +194,29 @@ while the others are judged under the design's applied `assume`s (`--assumes pre
 the catalog cannot instantiate is skipped with its reason in the report's `annotation-properties`
 note. Details: [`docs/verifying-rtl.md`](../docs/verifying-rtl.md) §"Template instances as annotations".
 
+### In the CTXDSL file: a `template` clause (2026-11)
+
+> Source of truth: [`parse_template_clause`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/context_dsl/parser.rs) + [`collect_formulas`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/context_dsl/realize.rs) — surface: CLI+API+UI (every path that realizes a CTXDSL document)
+
+The CTXDSL analogue of `@mununu_template`: a formula names the template in place of its `body`, and
+the file carries the instantiation. It is expanded at realization through the same catalog the
+flags and `template_ref` use (built-ins, the deployment's packs, `--templates-file` on the CLI):
+
+```
+mu_formulas {
+    formula trip_exists {
+        over protection;
+        template reachable { TARGET = Lof; }
+    }
+}
+```
+
+The formula keeps the name the file gives it (`trip_exists`, not `reachable_TARGET_Lof`), and the
+CLI prints the expansion as `--template` does: `Template 'reachable' → formula 'trip_exists':
+mu X. (Lof || <> X)`. `body` and `template` exclude each other; the argument rules are those of
+`verify.toml` below (identifiers for `Predicate` / `State` parameters); an unknown id, a missing or
+invalid argument refuses the file naming the formula. Grammar: [CTXDSL Language Reference](CTXDSL-Language-Reference#a-formula-from-the-template-catalog).
+
 ### In `verify.toml`
 
 > Source of truth: [`PropertySpec`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/verify/config.rs#L307) — surface: CLI+API.

@@ -115,8 +115,8 @@ context integration_demo {
     for formula in &doc.mu_formulas {
         let raw = match &formula.body {
             context_dsl::ast::FormulaExpr::MuCalculus(mu_expr) => &mu_expr.raw,
-            context_dsl::ast::FormulaExpr::Ltl(_) => {
-                return Err("LTL formulas not supported in this test".into());
+            context_dsl::ast::FormulaExpr::Ltl(_) | context_dsl::ast::FormulaExpr::Template(_) => {
+                return Err("LTL formulas and template clauses not supported in this test".into());
             }
         };
         let parsed = mu_parser::parse(raw)?;

@@ -148,7 +148,9 @@ context syntax_demo {
                 "formula body should be preserved"
             );
         }
-        FormulaExpr::Ltl(_) => panic!("Expected μ-calculus formula in test"),
+        FormulaExpr::Ltl(_) | FormulaExpr::Template(_) => {
+            panic!("Expected μ-calculus formula in test")
+        }
     }
 }
 
@@ -415,7 +417,9 @@ context producer_consumer {
                 "formula body retained as raw μ-calculus text"
             );
         }
-        FormulaExpr::Ltl(_) => panic!("Expected μ-calculus formula in test"),
+        FormulaExpr::Ltl(_) | FormulaExpr::Template(_) => {
+            panic!("Expected μ-calculus formula in test")
+        }
     }
 }
 
@@ -823,7 +827,7 @@ fn test_formula_expr_enum() {
         FormulaExpr::MuCalculus(ref expr) => {
             assert_eq!(expr.raw, "nu X. (safe && [] X)");
         }
-        FormulaExpr::Ltl(_) => panic!("Expected MuCalculus variant"),
+        FormulaExpr::Ltl(_) | FormulaExpr::Template(_) => panic!("Expected MuCalculus variant"),
     }
 
     // Test Ltl variant
@@ -838,7 +842,7 @@ fn test_formula_expr_enum() {
         FormulaExpr::Ltl(ref expr) => {
             assert!(matches!(expr.formula, LtlFormula::Always(_)));
         }
-        FormulaExpr::MuCalculus(_) => panic!("Expected Ltl variant"),
+        FormulaExpr::MuCalculus(_) | FormulaExpr::Template(_) => panic!("Expected Ltl variant"),
     }
 
     // Test cloning
@@ -872,7 +876,9 @@ fn test_mu_formula_with_ltl() {
         FormulaExpr::Ltl(ref expr) => {
             assert!(matches!(expr.formula, LtlFormula::Always(_)));
         }
-        FormulaExpr::MuCalculus(_) => panic!("Expected Ltl variant in MuFormula"),
+        FormulaExpr::MuCalculus(_) | FormulaExpr::Template(_) => {
+            panic!("Expected Ltl variant in MuFormula")
+        }
     }
 }
 
@@ -903,7 +909,7 @@ fn parses_ltl_formula_with_explicit_marker() {
         FormulaExpr::Ltl(ltl_expr) => {
             assert!(matches!(ltl_expr.formula, LtlFormula::Always(_)));
         }
-        FormulaExpr::MuCalculus(_) => panic!("Expected LTL formula"),
+        FormulaExpr::MuCalculus(_) | FormulaExpr::Template(_) => panic!("Expected LTL formula"),
     }
 }
 
@@ -934,7 +940,7 @@ fn parses_mu_formula_with_explicit_marker() {
         FormulaExpr::MuCalculus(mu_expr) => {
             assert!(mu_expr.raw.contains("nu X"));
         }
-        FormulaExpr::Ltl(_) => panic!("Expected μ-calculus formula"),
+        FormulaExpr::Ltl(_) | FormulaExpr::Template(_) => panic!("Expected μ-calculus formula"),
     }
 }
 
@@ -965,7 +971,9 @@ fn parses_mu_formula_without_marker_backward_compatible() {
         FormulaExpr::MuCalculus(mu_expr) => {
             assert!(mu_expr.raw.contains("nu X"));
         }
-        FormulaExpr::Ltl(_) => panic!("Expected μ-calculus formula (default)"),
+        FormulaExpr::Ltl(_) | FormulaExpr::Template(_) => {
+            panic!("Expected μ-calculus formula (default)")
+        }
     }
 }
 
@@ -1020,7 +1028,9 @@ fn parses_mixed_ltl_and_mu_formulas() {
     // Safety formula: LTL
     match &safety.body {
         FormulaExpr::Ltl(_) => {}
-        FormulaExpr::MuCalculus(_) => panic!("Safety formula should be LTL"),
+        FormulaExpr::MuCalculus(_) | FormulaExpr::Template(_) => {
+            panic!("Safety formula should be LTL")
+        }
     }
 
     // Liveness formula: μ-calculus with explicit marker
@@ -1030,7 +1040,9 @@ fn parses_mixed_ltl_and_mu_formulas() {
             // The raw should contain the μ-calculus formula (without the "mu" marker)
             assert!(mu_expr.raw.contains("X") || mu_expr.raw.contains("completed"));
         }
-        FormulaExpr::Ltl(_) => panic!("Liveness formula should be μ-calculus"),
+        FormulaExpr::Ltl(_) | FormulaExpr::Template(_) => {
+            panic!("Liveness formula should be μ-calculus")
+        }
     }
 
     // Reachability formula: μ-calculus without marker (default)
@@ -1038,7 +1050,9 @@ fn parses_mixed_ltl_and_mu_formulas() {
         FormulaExpr::MuCalculus(mu_expr) => {
             assert!(mu_expr.raw.contains("X") || mu_expr.raw.contains("goal"));
         }
-        FormulaExpr::Ltl(_) => panic!("Reachability formula should be μ-calculus"),
+        FormulaExpr::Ltl(_) | FormulaExpr::Template(_) => {
+            panic!("Reachability formula should be μ-calculus")
+        }
     }
 }
 
@@ -1081,7 +1095,7 @@ fn parses_complex_ltl_formula() {
                 _ => panic!("Expected Always at top level"),
             }
         }
-        FormulaExpr::MuCalculus(_) => panic!("Expected LTL formula"),
+        FormulaExpr::MuCalculus(_) | FormulaExpr::Template(_) => panic!("Expected LTL formula"),
     }
 }
 
@@ -1207,4 +1221,130 @@ context typo {
         msg.contains("cannot be decided") && msg.contains("cuont"),
         "{msg}"
     );
+}
+
+#[test]
+fn a_formula_can_be_a_template_clause_in_place_of_a_body() {
+    let doc = parse(
+        r#"
+context t {
+    automata {
+        automaton A {
+            states { state Off initial; state Lof; }
+            transitions { transition Off -> Lof on label lof_trip; }
+        }
+    }
+    mu_formulas {
+        formula trip_exists {
+            over A;
+            template reachable { TARGET = Lof; }
+        }
+        formula rearm_needs_rods_in {
+            over A;
+            template mutual_exclusion { A = "Armed"; B = Scram; };
+        }
+        formula bounded_wait {
+            over A;
+            template bounded { OVERFLOW = Hi; UNDERFLOW = 3; }
+        }
+    }
+}
+"#,
+    )
+    .expect("a template clause parses");
+    assert_eq!(doc.mu_formulas.len(), 3);
+    // `parse` returns the canonicalised document: formulas come back sorted by name
+    let clause = |formula: &str| -> (String, Vec<(String, String)>) {
+        let f = doc
+            .mu_formulas
+            .iter()
+            .find(|f| f.name.name == formula)
+            .unwrap_or_else(|| panic!("formula `{formula}` is in the document"));
+        match &f.body {
+            FormulaExpr::Template(spec) => (
+                spec.template.name.clone(),
+                spec.args
+                    .iter()
+                    .map(|a| (a.name.name.clone(), a.value.clone()))
+                    .collect(),
+            ),
+            other => panic!("expected a template clause, got {other:?}"),
+        }
+    };
+    assert_eq!(
+        clause("trip_exists"),
+        (
+            "reachable".to_string(),
+            vec![("TARGET".to_string(), "Lof".to_string())]
+        )
+    );
+    // a string literal and an identifier are the same text to the registry; the trailing `;` is optional
+    assert_eq!(
+        clause("rearm_needs_rods_in"),
+        (
+            "mutual_exclusion".to_string(),
+            vec![
+                ("A".to_string(), "Armed".to_string()),
+                ("B".to_string(), "Scram".to_string())
+            ]
+        )
+    );
+    // an integer value is kept as its text
+    assert_eq!(
+        clause("bounded_wait"),
+        (
+            "bounded".to_string(),
+            vec![
+                ("OVERFLOW".to_string(), "Hi".to_string()),
+                ("UNDERFLOW".to_string(), "3".to_string())
+            ]
+        )
+    );
+}
+
+#[test]
+fn a_formula_with_both_a_body_and_a_template_is_refused() {
+    let err = parse(
+        r#"
+context t {
+    mu_formulas {
+        formula both {
+            over A;
+            body = true;
+            template reachable { TARGET = Lof; }
+        }
+    }
+}
+"#,
+    )
+    .expect_err("both forms in one formula must not parse");
+    let text = err.to_string();
+    assert!(
+        text.contains("both") && text.contains("`both`"),
+        "the error names the formula and the conflict: {text}"
+    );
+}
+
+#[test]
+fn template_is_still_an_ordinary_identifier_outside_a_formula() {
+    // `template` is recognised only after a formula's `over`; a label, a state or an automaton
+    // named `template` keeps parsing.
+    let doc = parse(
+        r#"
+context t {
+    alphabet { label template; }
+    automata {
+        automaton template {
+            states { state template initial; state Done; }
+            transitions { transition template -> Done on label template; }
+        }
+    }
+    mu_formulas {
+        formula done { over template; body = mu X. (Done || <> X); }
+    }
+}
+"#,
+    )
+    .expect("`template` as an identifier parses");
+    assert_eq!(doc.automata[0].name.name, "template");
 }

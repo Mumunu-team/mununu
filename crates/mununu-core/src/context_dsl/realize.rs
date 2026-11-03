@@ -1,3 +1,4 @@
+use crate::adapter::templates::{TemplateRef, TemplateRegistry};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use serde_json::Value;
@@ -104,6 +105,20 @@ pub struct RealizedFormula {
     pub property_class: crate::mu_calculus::PropertyClass,
     /// Alternation depth of the formula (0 = propositional, 1 = safety/reach, 2+ = liveness).
     pub alternation_depth: usize,
+    /// When the formula was written as `template ID { ... }`: the id, the bindings and the
+    /// instantiated mu-calculus (`raw` holds the same text). `None` for a written-out body.
+    pub template: Option<TemplateExpansion>,
+}
+
+/// How a formula written as a `template` clause was expanded at realization — what the CLI
+/// prints as `Template 'ID' → formula 'NAME': <formula>`.
+#[derive(Debug, Clone)]
+pub struct TemplateExpansion {
+    pub template: String,
+    /// The bindings, in key order.
+    pub args: BTreeMap<String, String>,
+    /// The instantiated mu-calculus: the formula that was evaluated.
+    pub formula: String,
 }
 
 /// Metadata describing a guard-derived predicate.
@@ -1626,9 +1641,14 @@ fn composition_fairness(
 /// Collects and parses all μ-calculus formulas from the main document and sidecars.
 fn collect_formulas(
     docs: &[&ContextDoc],
+    registry: Option<&TemplateRegistry>,
 ) -> Result<HashMap<String, RealizedFormula>, RealizationError> {
     let fairness = composition_fairness(docs);
     let mut formulas: HashMap<String, RealizedFormula> = HashMap::new();
+    // The catalog a `template` clause expands through: the caller's (project packs included), or
+    // the configured one (built-ins + the deployment's packs), built once and only when a file
+    // uses the clause.
+    let mut configured_registry: Option<TemplateRegistry> = None;
     for doc in docs {
         AstTraverser::visit_formulas(doc, |formula| {
             let name = formula.name.name.clone();
@@ -1642,7 +1662,61 @@ fn collect_formulas(
                     name,
                 });
             }
+            let mut template: Option<TemplateExpansion> = None;
             let (parsed, parse_error, raw) = match &formula.body {
+                FormulaExpr::Template(spec) => {
+                    let registry = match registry {
+                        Some(registry) => registry,
+                        None => {
+                            if configured_registry.is_none() {
+                                configured_registry =
+                                    Some(TemplateRegistry::configured(&[]).map_err(|e| {
+                                        RealizationError::InvalidFormula {
+                                            name: name.clone(),
+                                            error: format!("the template catalog: {e}"),
+                                        }
+                                    })?);
+                            }
+                            configured_registry
+                                .as_ref()
+                                .expect("the configured registry was built just above")
+                        }
+                    };
+                    let id = spec.template.name.clone();
+                    let tref = TemplateRef {
+                        template: id.clone(),
+                        args: spec
+                            .args
+                            .iter()
+                            .map(|a| (a.name.name.clone(), a.value.clone()))
+                            .collect(),
+                    };
+                    let inst = registry.instantiate(&tref).map_err(|e| {
+                        RealizationError::InvalidFormula {
+                            name: name.clone(),
+                            error: format!("template `{id}`: {e}"),
+                        }
+                    })?;
+                    let parsed = mu_parser::parse(&inst.formula).map_err(|e| {
+                        RealizationError::InvalidFormula {
+                            name: name.clone(),
+                            error: format!(
+                                "template `{id}` expanded to `{}`, which does not parse: {e}",
+                                inst.formula
+                            ),
+                        }
+                    })?;
+                    template = Some(TemplateExpansion {
+                        template: id,
+                        args: spec
+                            .args
+                            .iter()
+                            .map(|a| (a.name.name.clone(), a.value.clone()))
+                            .collect(),
+                        formula: inst.formula.clone(),
+                    });
+                    (parsed, None, inst.formula)
+                }
                 FormulaExpr::MuCalculus(mu_expr) => {
                     let (parsed, parse_error) = match mu_parser::parse(&mu_expr.raw) {
                         Ok(parsed) => (parsed, None),
@@ -1741,6 +1815,7 @@ fn collect_formulas(
                     parse_error,
                     property_class,
                     alternation_depth,
+                    template,
                 },
             );
             Ok::<(), RealizationError>(())
@@ -1759,6 +1834,25 @@ pub fn realize(
     doc: &ContextDoc,
     sidecars: &[ContextDoc],
 ) -> Result<RealizedContext, RealizationError> {
+    realize_inner(doc, sidecars, None)
+}
+
+/// [`realize`] with the template catalog a `template` clause expands through — the caller's
+/// registry carries its project packs (`--templates-file`, `verify.toml [templates] files`);
+/// [`realize`] alone uses the configured catalog (built-ins and the deployment's packs).
+pub fn realize_with_templates(
+    doc: &ContextDoc,
+    sidecars: &[ContextDoc],
+    registry: &TemplateRegistry,
+) -> Result<RealizedContext, RealizationError> {
+    realize_inner(doc, sidecars, Some(registry))
+}
+
+fn realize_inner(
+    doc: &ContextDoc,
+    sidecars: &[ContextDoc],
+    registry: Option<&TemplateRegistry>,
+) -> Result<RealizedContext, RealizationError> {
     let mut docs: Vec<&ContextDoc> = Vec::with_capacity(1 + sidecars.len());
     docs.push(doc);
     docs.extend(sidecars.iter());
@@ -1773,7 +1867,7 @@ pub fn realize(
     let (context, composition_members) =
         build_context_with_compositions(doc, &label_universe, &input_signals)?;
 
-    let mut formulas = collect_formulas(&docs)?;
+    let mut formulas = collect_formulas(&docs, registry)?;
 
     // Generate structural predicates for each automaton.
     generate_structural_predicates(&context, &mut formulas)?;
@@ -2113,6 +2207,7 @@ fn generate_structural_predicates(
                     parse_error,
                     property_class,
                     alternation_depth,
+                    template: None,
                 },
             );
         }
@@ -2156,6 +2251,7 @@ fn generate_structural_predicates(
                     parse_error,
                     property_class,
                     alternation_depth,
+                    template: None,
                 },
             );
         }
@@ -2239,6 +2335,7 @@ fn generate_structural_predicates(
                         parse_error: None,
                         property_class,
                         alternation_depth,
+                        template: None,
                     },
                 );
             }
@@ -5157,5 +5254,149 @@ context k1b_unrolled_multi {
             "K.1b-unrolled: parametric automaton with `[t1, t2, t3] [must]` \
              must produce a hyper-must edge with 3 targets in the unrolled CLTS"
         );
+    }
+
+    const TEMPLATE_MODEL: &str = r#"
+context protocol {
+    automata {
+        automaton Latch {
+            controllable { }
+            states { state Armed initial; state Tripping; state Scram; }
+            transitions {
+                transition Armed -> Tripping on label lof_trip;
+                transition Tripping -> Scram on label scram;
+                transition Scram -> Armed on label reset_perm;
+            }
+        }
+    }
+    mu_formulas {
+        formula written_out { over Latch; body = mu X. (Scram || <> X); }
+        formula from_template {
+            over Latch;
+            template reachable { TARGET = Scram; }
+        }
+        formula exclusive {
+            over Latch;
+            template mutual_exclusion { A = Armed; B = Scram; }
+        }
+    }
+}
+"#;
+
+    #[test]
+    fn a_template_clause_expands_to_the_catalog_formula_and_keeps_the_declared_name() {
+        let doc = parse(TEMPLATE_MODEL).expect("parses");
+        let realized = realize(&doc, &[]).expect("realizes");
+        let from_template = &realized.formulas["from_template"];
+        let written_out = &realized.formulas["written_out"];
+        // the same formula the CLI flag instantiates, under the name the file gave it
+        assert_eq!(from_template.raw, "mu X. (Scram || <> X)");
+        assert_eq!(from_template.raw, written_out.raw);
+        assert_eq!(from_template.property_class, written_out.property_class);
+        let expansion = from_template
+            .template
+            .as_ref()
+            .expect("a template clause records its expansion");
+        assert_eq!(expansion.template, "reachable");
+        assert_eq!(
+            expansion.args.get("TARGET").map(String::as_str),
+            Some("Scram")
+        );
+        assert_eq!(expansion.formula, from_template.raw);
+        assert!(written_out.template.is_none());
+        assert_eq!(
+            realized.formulas["exclusive"].raw,
+            "nu X. (!(Armed && Scram) && [] X)"
+        );
+    }
+
+    #[test]
+    fn a_template_clause_with_an_unknown_id_is_refused_naming_the_formula() {
+        let doc = parse(
+            r#"
+context t {
+    automata { automaton A { states { state S initial; } } }
+    mu_formulas { formula f { over A; template no_such_template { TARGET = S; } } }
+}
+"#,
+        )
+        .expect("parses");
+        let err = realize(&doc, &[]).expect_err("an unknown template is refused");
+        let text = err.to_string();
+        assert!(
+            text.contains("f") && text.contains("no_such_template"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_template_clause_missing_a_required_argument_is_refused_naming_the_formula() {
+        let doc = parse(
+            r#"
+context t {
+    automata { automaton A { states { state S initial; } } }
+    mu_formulas { formula f { over A; template reachable { } } }
+}
+"#,
+        )
+        .expect("parses");
+        let err = realize(&doc, &[]).expect_err("a missing argument is refused");
+        let text = err.to_string();
+        assert!(text.contains("f") && text.contains("TARGET"), "{text}");
+    }
+
+    #[test]
+    fn a_template_clause_with_an_expression_where_an_identifier_is_due_is_refused() {
+        // `TARGET` is a predicate parameter: an identifier, never an expression — as on the CLI
+        // and in verify.toml.
+        let doc = parse(
+            r#"
+context t {
+    automata { automaton A { states { state S initial; } } }
+    mu_formulas { formula f { over A; template reachable { TARGET = "n == 2"; } } }
+}
+"#,
+        )
+        .expect("parses");
+        let err = realize(&doc, &[]).expect_err("an expression argument is refused");
+        let text = err.to_string();
+        assert!(text.contains("f") && text.contains("TARGET"), "{text}");
+    }
+
+    #[test]
+    fn a_template_clause_resolves_from_the_callers_registry_too() {
+        // A project pack (`--templates-file`) reaches the clause through `realize_with_templates`.
+        let pack = r#"{
+            "version": "1",
+            "pack_id": "test-pack",
+            "templates": [{
+                "id": "stays",
+                "display_name": "Stays",
+                "description": "the state is never left",
+                "kind": "safety",
+                "role": "guarantee",
+                "domains": ["universal"],
+                "params": [{"name": "STATE", "description": "the state", "param_type": {"type": "state"}, "required": true}],
+                "formula_pattern": "nu X. (${STATE} && [] X)",
+                "domain_hints": {},
+                "tags": []
+            }]
+        }"#;
+        let registry = TemplateRegistry::from_json(pack).expect("the pack parses");
+        let doc = parse(
+            r#"
+context t {
+    automata { automaton A { states { state S initial; } transitions { transition S -> S on label tick; } } }
+    mu_formulas { formula f { over A; template stays { STATE = S; } } }
+}
+"#,
+        )
+        .expect("parses");
+        let realized =
+            realize_with_templates(&doc, &[], &registry).expect("realizes with the pack");
+        assert_eq!(realized.formulas["f"].raw, "nu X. (S && [] X)");
+        // the configured catalog does not know the pack's template
+        let err = realize(&doc, &[]).expect_err("without the pack the id is unknown");
+        assert!(err.to_string().contains("stays"), "{err}");
     }
 }

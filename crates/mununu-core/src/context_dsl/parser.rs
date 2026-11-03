@@ -1223,10 +1223,32 @@ impl<'a> Parser<'a> {
             FormulaTargets::Named(list)
         };
 
-        self.expect_keyword(Keyword::Body)?;
-        self.expect_symbol(Symbol::Assign)?;
-        let body = self.parse_formula_body()?;
-        self.expect_symbol(Symbol::Semicolon)?;
+        let body = if self.check_keyword(Keyword::Body) {
+            self.advance();
+            self.expect_symbol(Symbol::Assign)?;
+            let body = self.parse_formula_body()?;
+            self.expect_symbol(Symbol::Semicolon)?;
+            body
+        } else if self.check_identifier("template") {
+            FormulaExpr::Template(self.parse_template_clause()?)
+        } else {
+            let token = self.peek().clone();
+            return Err(ParseError::UnexpectedToken {
+                found: token.kind,
+                expected: "`body = ...;` or `template ID { KEY = value; }`",
+                span: token.span,
+            });
+        };
+        // One or the other: a formula with both would have two meanings.
+        if self.check_keyword(Keyword::Body) || self.check_identifier("template") {
+            return Err(ParseError::InvalidExpr {
+                span: self.peek().span,
+                message: format!(
+                    "formula `{}` carries both a `body` and a `template`; write one or the other",
+                    name.name
+                ),
+            });
+        }
         self.expect_symbol(Symbol::RBrace)?;
 
         Ok(MuFormula {
@@ -1235,6 +1257,57 @@ impl<'a> Parser<'a> {
             targets,
             body,
         })
+    }
+
+    /// `template ID { KEY = value; ... }` in place of a formula's body. `template` is not a
+    /// keyword — it stays usable as a label or state name — and is recognised only here, where
+    /// nothing but `body` or `template` may follow the formula's `over`.
+    fn parse_template_clause(&mut self) -> Result<TemplateExpr, ParseError> {
+        let start = self.peek().span;
+        self.advance(); // the `template` word
+        let template = self.expect_ident()?;
+        self.expect_symbol(Symbol::LBrace)?;
+        let mut args = Vec::new();
+        while !self.check_symbol(Symbol::RBrace) {
+            let key = self.expect_ident()?;
+            self.expect_symbol(Symbol::Assign)?;
+            let token = self.advance().clone();
+            let value = match token.kind {
+                TokenKind::Identifier(text) | TokenKind::String(text) => text,
+                TokenKind::Integer(n) => n.to_string(),
+                kind => {
+                    return Err(ParseError::UnexpectedToken {
+                        found: kind,
+                        expected: "an identifier, a string literal or an integer",
+                        span: token.span,
+                    });
+                }
+            };
+            self.expect_symbol(Symbol::Semicolon)?;
+            let span = Span::new(
+                key.span.start,
+                token.span.end,
+                key.span.line,
+                key.span.column,
+            );
+            args.push(TemplateArg {
+                name: key,
+                value,
+                span,
+            });
+        }
+        let end = self.expect_symbol(Symbol::RBrace)?.span;
+        // An optional `;` after the block, as `body = ...;` ends with one.
+        self.match_symbol(Symbol::Semicolon);
+        Ok(TemplateExpr {
+            template,
+            args,
+            span: Span::new(start.start, end.end, start.line, start.column),
+        })
+    }
+
+    fn check_identifier(&self, text: &str) -> bool {
+        matches!(self.peek_kind(), TokenKind::Identifier(name) if name == text)
     }
 
     fn parse_formula_body(&mut self) -> Result<FormulaExpr, ParseError> {
@@ -2282,7 +2355,9 @@ context test {
             FormulaExpr::MuCalculus(mu_expr) => {
                 assert_eq!(mu_expr.raw.trim(), "true");
             }
-            FormulaExpr::Ltl(_) => panic!("Expected μ-calculus formula in test"),
+            FormulaExpr::Ltl(_) | FormulaExpr::Template(_) => {
+                panic!("Expected μ-calculus formula in test")
+            }
         }
 
         // Verify F2: formula with meta, multiple targets
@@ -2300,7 +2375,9 @@ context test {
             FormulaExpr::MuCalculus(mu_expr) => {
                 assert_eq!(mu_expr.raw.trim(), "<labels={tick}>true");
             }
-            FormulaExpr::Ltl(_) => panic!("Expected μ-calculus formula in test"),
+            FormulaExpr::Ltl(_) | FormulaExpr::Template(_) => {
+                panic!("Expected μ-calculus formula in test")
+            }
         }
 
         // Verify F3: formula with "over all"
@@ -2313,7 +2390,9 @@ context test {
                 // The "mu" marker is consumed but included in raw string for completeness
                 assert_eq!(mu_expr.raw.trim(), "mu X. (p || <> X)");
             }
-            FormulaExpr::Ltl(_) => panic!("Expected μ-calculus formula in test"),
+            FormulaExpr::Ltl(_) | FormulaExpr::Template(_) => {
+                panic!("Expected μ-calculus formula in test")
+            }
         }
     }
 
@@ -2353,7 +2432,7 @@ context test {
                     "Raw formula should include the 'mu' marker when present"
                 );
             }
-            FormulaExpr::Ltl(_) => panic!("Expected μ-calculus formula"),
+            FormulaExpr::Ltl(_) | FormulaExpr::Template(_) => panic!("Expected μ-calculus formula"),
         }
     }
 
