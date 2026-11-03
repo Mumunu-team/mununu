@@ -504,6 +504,61 @@ pub fn decide_bad_safety_cancellable(
         let view = encode_design(file).map_err(BmcError::Encode)?;
         let u = Unroller::build(&view, &bad_ops, &constraint_ops, n);
 
+        // N0.5 (2026-11-03) — a peer's decision is honoured INSIDE a query, not only at the
+        // next depth boundary. Until now `cancel` was read between depths, so a k-induction
+        // query already running kept its row waiting for the full per-query timeout: in the
+        // 2026-10-28 attribution run native k-induction ran 40–100 s past rIC3's decision
+        // (edn ep0: rIC3 45 s, native 148 s, row 148 s) — a row's wall is its slowest member.
+        // A scoped watchdog thread polls the flag and interrupts the z3 context the two
+        // solvers run on, but ONLY while a `check()` is in flight (`in_query`): an interrupt
+        // on an idle context would poison the next query of whoever reuses this thread's
+        // context. An interrupted check returns `Unknown`, which the ladder already reads
+        // as an abstention at that depth — never a verdict. The thread is joined before the
+        // closure returns (`done`), so nothing outlives the solvers it may interrupt.
+        let ctx = z3::Context::thread_local();
+        let handle = ctx.handle();
+        let in_query = std::sync::atomic::AtomicBool::new(false);
+        let done = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            if let Some(c) = cancel {
+                scope.spawn(|| {
+                    use std::sync::atomic::Ordering::Relaxed;
+                    // The member grace applies here as at the depth boundary: a query that is
+                    // about to finish still lands; one still running past the grace is cut.
+                    let mut seen: Option<std::time::Instant> = None;
+                    while !done.load(Relaxed) {
+                        if c.load(Relaxed)
+                            && seen.get_or_insert_with(std::time::Instant::now).elapsed()
+                                >= crate::adapter::MEMBER_CANCEL_GRACE
+                            && in_query.load(Relaxed)
+                        {
+                            handle.interrupt();
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                });
+            }
+            let out =
+                decide_bad_safety_ladder(&u, &init_pairs, n, max_k, timeout_ms, cancel, &in_query);
+            done.store(true, std::sync::atomic::Ordering::Relaxed);
+            out
+        })
+    })
+}
+
+/// The BMC + k-induction depth ladder of [`decide_bad_safety_cancellable`], on the thread's
+/// current z3 context; `in_query` is raised around every `check()` so the caller's watchdog
+/// can interrupt exactly those.
+fn decide_bad_safety_ladder(
+    u: &Unroller,
+    init_pairs: &[(Nid, Operand)],
+    n: usize,
+    max_k: u32,
+    timeout_ms: Option<u32>,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+    in_query: &std::sync::atomic::AtomicBool,
+) -> Result<SafetyVerdict, BmcError> {
+    {
         // Base: an init-constrained path (as in `bmc_bad_reachable`).
         let base = z3::Solver::new();
         // Step: a FREE path (no init) accumulating `¬bad ∧ transition` per frame;
@@ -516,7 +571,7 @@ pub fn decide_bad_safety_cancellable(
             base.set_params(&params);
             step.set_params(&params);
         }
-        u.assert_init(&base, &init_pairs);
+        u.assert_init(&base, init_pairs);
         for c in u.constraints_at(0) {
             base.assert(&c);
             step.assert(&c);
@@ -548,7 +603,9 @@ pub fn decide_bad_safety_cancellable(
             // Base — reachable counterexample? Violated ONLY on a definite Sat.
             base.push();
             base.assert(u.bad_at(k));
+            in_query.store(true, std::sync::atomic::Ordering::Relaxed);
             let base_res = base.check();
+            in_query.store(false, std::sync::atomic::Ordering::Relaxed);
             base.pop(1);
             match base_res {
                 z3::SatResult::Sat => return Ok(SafetyVerdict::Violated { depth: k as u32 }),
@@ -559,7 +616,9 @@ pub fn decide_bad_safety_cancellable(
             // (must NOT be read as "inductive"). Base has held through depth k above.
             step.push();
             step.assert(u.bad_at(k));
+            in_query.store(true, std::sync::atomic::Ordering::Relaxed);
             let step_res = step.check();
+            in_query.store(false, std::sync::atomic::Ordering::Relaxed);
             step.pop(1);
             match step_res {
                 z3::SatResult::Unsat => return Ok(SafetyVerdict::Safe { k: k as u32 }),
@@ -578,7 +637,7 @@ pub fn decide_bad_safety_cancellable(
             }
         }
         Ok(SafetyVerdict::Unknown { k: max_k })
-    })
+    }
 }
 
 /// Time-boxed **pure counterexample search** — the "counterstrategy" half of the
@@ -658,6 +717,95 @@ mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
     use crate::adapter::btor2::parser;
+
+    /// N0.5 — a peer's decision interrupts the query in flight. The `bad` is the pigeonhole
+    /// principle with 11 pigeons and 10 holes over 1-bit inputs — trivial to bit-blast and
+    /// exponential for resolution, so z3's SAT core searches for tens of seconds before the
+    /// `unsat`; a probe with a 1.5 s per-query timeout establishes that on this host first
+    /// (factoring-style instances were tried: z3 settles a 64-bit prime's factorisation in
+    /// about a second; a 1536-bit multiplier is slow but its blasting is not a cancellation
+    /// point). When the probe times out, the cancelled run must come back within the 300 ms
+    /// the peer takes plus the member grace, abstaining; before the watchdog it waited the
+    /// whole 60 s. When the probe decides (a faster z3), the interrupt path is not exercised
+    /// here and the test says so rather than asserting on a fast machine.
+    #[test]
+    fn a_peer_decision_interrupts_the_query_in_flight() {
+        // x_{p,h}: pigeon p sits in hole h. Every pigeon sits somewhere; no hole holds two.
+        let (pigeons, holes) = (11usize, 10usize);
+        let mut src = String::from("1 sort bitvec 1\n");
+        let mut nid = 2i64;
+        let mut x = vec![vec![0i64; holes]; pigeons];
+        for (p, row) in x.iter_mut().enumerate() {
+            for (h, cell) in row.iter_mut().enumerate() {
+                src.push_str(&format!("{nid} input 1 x_{p}_{h}\n"));
+                *cell = nid;
+                nid += 1;
+            }
+        }
+        let mut conj: Vec<i64> = Vec::new();
+        for row in &x {
+            let mut acc = row[0];
+            for &cell in &row[1..] {
+                src.push_str(&format!("{nid} or 1 {acc} {cell}\n"));
+                acc = nid;
+                nid += 1;
+            }
+            conj.push(acc);
+        }
+        for h in 0..holes {
+            let col: Vec<i64> = x.iter().map(|row| row[h]).collect();
+            for p in 0..pigeons {
+                for q in (p + 1)..pigeons {
+                    src.push_str(&format!("{nid} and 1 {} {}\n", col[p], col[q]));
+                    let both = nid;
+                    nid += 1;
+                    src.push_str(&format!("{nid} not 1 {both}\n"));
+                    conj.push(nid);
+                    nid += 1;
+                }
+            }
+        }
+        let mut acc = conj[0];
+        for &c in &conj[1..] {
+            src.push_str(&format!("{nid} and 1 {acc} {c}\n"));
+            acc = nid;
+            nid += 1;
+        }
+        src.push_str(&format!("{nid} bad {acc}\n"));
+        let src = src.as_str();
+        let file = parser::parse(src).expect("parses");
+        let probe_t0 = std::time::Instant::now();
+        let probe = decide_bad_safety(&file, 0, Some(1_500)).expect("encodes");
+        eprintln!("probe: {probe:?} in {:?}", probe_t0.elapsed());
+        if !matches!(probe, SafetyVerdict::Unknown { .. }) {
+            eprintln!(
+                "the factoring query decided in under 1.5 s ({probe:?}); the interrupt path is not exercised on this host"
+            );
+            return;
+        }
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let started = std::time::Instant::now();
+        let verdict = std::thread::scope(|s| {
+            s.spawn(|| {
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            });
+            decide_bad_safety_cancellable(&file, 4, Some(60_000), Some(&cancel)).expect("encodes")
+        });
+        let elapsed = started.elapsed();
+        eprintln!("cancelled run: {verdict:?} in {elapsed:?}");
+        assert!(
+            matches!(verdict, SafetyVerdict::Unknown { .. }),
+            "an interrupted query must abstain, got {verdict:?}"
+        );
+        assert!(
+            elapsed
+                < std::time::Duration::from_millis(300)
+                    + crate::adapter::MEMBER_CANCEL_GRACE
+                    + std::time::Duration::from_millis(700),
+            "the in-flight query was not interrupted within the grace: {elapsed:?}"
+        );
+    }
 
     fn bmc(content: &str, max_k: u32) -> BmcOutcome {
         let file = parser::parse(content).expect("parse btor2");
