@@ -2304,6 +2304,7 @@ fn sv_verify_auto_handler_impl(
         replan_defer: false,
         breadcrumb_append: false,
         skip_rows: std::collections::HashSet::new(),
+        only_rows: None,
         assume_mode,
         faults: crate::adapter::btor2::fault::FaultPosture::parse(
             &request.faults,

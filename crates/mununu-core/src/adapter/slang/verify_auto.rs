@@ -534,6 +534,12 @@ pub struct ModelDiagnostics {
     /// the verdict is about, not a causal slice of a counterexample. Absent when the source map
     /// placed nothing in the cone.
     pub involves: Vec<(String, Vec<crate::trace::SourceLoc>)>,
+    /// N0.1 (2026-11-03) — the identity of each property's cone, by row name: the FNV-1a hash of
+    /// the formula and the BTOR2 slice the property depends on (`cone_slice`, NIDs preserved), so
+    /// the executable ledger (`scripts/ledger_check.py`) re-runs a row only when what decides it
+    /// changed. A renumbering elsewhere in the design moves it too — a false miss, never a
+    /// false hit. Absent for a row whose formula does not parse or names no atom.
+    pub cone_hashes: Vec<(String, String)>,
     /// The repair candidates of each violated row (2026-10-30, `--localize`), by row name: the
     /// registers whose next-state function, freed at some cycles with the counterexample's inputs
     /// fixed, let the property survive the trace, and what limited the search. Empty unless
@@ -2166,21 +2172,25 @@ fn attach_involves(
     index: &crate::adapter::slang::extract::Declarations,
 ) {
     let index = index.as_ref().ok();
-    if report.diagnostics.trace_names.sources.is_empty() && index.is_none() {
-        return;
-    }
     let Ok(file) = crate::adapter::btor2::parser::parse(model_btor2) else {
         return;
     };
+    let no_source_map = report.diagnostics.trace_names.sources.is_empty() && index.is_none();
     let sources = &report.diagnostics.trace_names.sources;
     let aliases = &report.diagnostics.trace_names.aliases;
     let mut involves = Vec::new();
+    let mut cone_hashes = Vec::new();
     for p in &report.properties {
         let Ok(formula) = crate::mu_calculus::parser::parse(&p.formula) else {
             continue;
         };
         let atoms = crate::adapter::btor2::symbolic_bitblast::formula_seed_atoms(&formula);
         if atoms.is_empty() {
+            continue;
+        }
+        // N0.1 — the cone's identity, whether or not a source map exists to name its lines.
+        cone_hashes.push((p.name.clone(), cone_hash(&file, &p.formula, &atoms)));
+        if no_source_map {
             continue;
         }
         let mut lines: std::collections::BTreeSet<crate::trace::SourceLoc> =
@@ -2210,6 +2220,28 @@ fn attach_involves(
         }
     }
     report.diagnostics.involves = involves;
+    report.diagnostics.cone_hashes = cone_hashes;
+}
+
+/// N0.1 — a property's cone identity: FNV-1a over its formula and the text of the BTOR2 slice
+/// it depends on (`cone_slice`: data flow plus constraint / fairness coupling, NIDs preserved).
+/// Anything that changes what decides the row changes it; a renumbering elsewhere changes it
+/// too (a false miss the ledger pays with one re-run, never a false hit). 16 hex digits.
+fn cone_hash(
+    file: &crate::adapter::btor2::ast::Btor2File,
+    formula: &str,
+    atoms: &[String],
+) -> String {
+    let slice = crate::adapter::btor2::bit_blast::cone_slice(file, atoms);
+    let text = crate::adapter::btor2::emit::emit_btor2(&slice);
+    let mut bytes = Vec::with_capacity(formula.len() + 1 + text.len());
+    bytes.extend_from_slice(formula.as_bytes());
+    bytes.push(b'\n');
+    bytes.extend_from_slice(text.as_bytes());
+    format!(
+        "{:016x}",
+        crate::adapter::btor2::minted_expr::fnv1a64(&bytes)
+    )
 }
 
 fn drop_stale_bottom_reasons(report: &mut AutoVerifyReport) {
@@ -2760,6 +2792,12 @@ pub struct VerifyAutoOptions {
     /// exact engine decides). Set by the sequential planner only; empty on a single-engine or
     /// parallel run.
     pub skip_rows: std::collections::HashSet<String>,
+    /// N0.1 (2026-11-03) — when set, only the rows whose name OR label is in the set run; every
+    /// other row is `Unknown { NotAttempted }` and the ⊥ re-plan leaves it alone. The executable
+    /// ledger (`scripts/ledger_check.py`) re-runs the rows whose cone changed this way, and runs
+    /// NO row (an empty set) to read every row's cone hash. From `MUNUNU_VERIFY_AUTO_ONLY_ROWS`
+    /// at [`verify_auto`]; `None` runs every row.
+    pub only_rows: Option<std::collections::HashSet<String>>,
     /// #468 — apply a NAMED structural mutation to the prepared BTOR2 before
     /// verification (`prepare_model`), so `sv mutate` can assert the property
     /// verdicts FLIP (property adequacy). `None` (default) ⇒ no mutation, the model
@@ -2870,6 +2908,7 @@ impl Default for VerifyAutoOptions {
             replan_defer: false,
             breadcrumb_append: false,
             skip_rows: std::collections::HashSet::new(),
+            only_rows: None,
             mutation: None,
             faults: None,
             antecedent_shadow: true,
@@ -4764,6 +4803,46 @@ pub fn verify_auto(
     yosys_opts: &YosysOptions,
     opts: &VerifyAutoOptions,
 ) -> Result<AutoVerifyReport, AdapterError> {
+    // N0.1 — `MUNUNU_VERIFY_AUTO_ONLY_ROWS` narrows the run to the named rows (the executable
+    // ledger's re-run of what changed); the row facts are written once the report is final,
+    // whichever path produced it.
+    let selected = std::env::var("MUNUNU_VERIFY_AUTO_ONLY_ROWS")
+        .ok()
+        .and_then(|v| parse_only_rows(&v))
+        .map(|rows| VerifyAutoOptions {
+            only_rows: Some(rows),
+            ..opts.clone()
+        });
+    let report = verify_auto_with(sources, yosys_opts, selected.as_ref().unwrap_or(opts))?;
+    crate::adapter::row_facts::write_from_env(&report);
+    Ok(report)
+}
+
+/// `MUNUNU_VERIFY_AUTO_ONLY_ROWS` (N0.1): `-` selects no row (the facts of every row for the
+/// price of the lift); otherwise the comma-separated names or labels, trimmed; blank = unset.
+pub(crate) fn parse_only_rows(v: &str) -> Option<std::collections::HashSet<String>> {
+    let v = v.trim();
+    if v.is_empty() {
+        return None;
+    }
+    if v == "-" {
+        return Some(std::collections::HashSet::new());
+    }
+    Some(
+        v.split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect(),
+    )
+}
+
+/// [`verify_auto`] after the environment's row selection: the dispatch as it was.
+fn verify_auto_with(
+    sources: &[(String, String)],
+    yosys_opts: &YosysOptions,
+    opts: &VerifyAutoOptions,
+) -> Result<AutoVerifyReport, AdapterError> {
     // PORTFOLIO dispatch — when a portfolio mode is set, run the common-IR-hub pipeline:
     // `prepare_model` once → `plan()` (the ladder + the per-property cost RATIONALE, computed from
     // the shared prepared model) → `execute()` (drive each operator over the shared model, merge
@@ -6575,7 +6654,12 @@ pub(crate) fn verify_auto_impl(
         // keeps that verdict, so this member records "not attempted" and spends nothing on it —
         // before the budget sentinels (no budget consumed, never mislabelled `BudgetExpired`) and as
         // `Unknown`, not `Skipped` (the cube-skip rescue and the over-cap notes act on `Skipped`).
-        if opts.skip_rows.contains(&t.name) {
+        // N0.1 — and a row the run was told not to attempt (`only_rows`, by name or label) is the
+        // same `NotAttempted` abstention: ⊥ by selection, not by an engine.
+        let not_selected = opts.only_rows.as_ref().is_some_and(|rows| {
+            !rows.contains(&t.name) && !t.label.as_ref().is_some_and(|l| rows.contains(l))
+        });
+        if opts.skip_rows.contains(&t.name) || not_selected {
             report
                 .properties
                 .push(abstained(t, BottomReason::NotAttempted));
@@ -7667,6 +7751,13 @@ pub(crate) fn escalate_bottom_with_slice(
             prop.bottom_reason,
             Some(BottomReason::ViolationOverFreeLeaves { .. })
         ) {
+            continue;
+        }
+        // N0.1 — a row the run was told not to attempt (`only_rows`) is ⊥ by selection, not by an
+        // engine: no rescue either. This loop is the one place every re-plan reaches (the planner's
+        // merged re-plan, the single-engine path, a direct caller), so the selection holds here,
+        // not in whichever caller remembered to park the row.
+        if matches!(prop.bottom_reason, Some(BottomReason::NotAttempted)) {
             continue;
         }
         // mununu#490 — same ceiling guard as the main per-property loop: if the
@@ -9778,6 +9869,63 @@ mod tests {
             settled.notes.len(),
             before,
             "nothing to re-plan, nothing touched"
+        );
+    }
+
+    /// N0.1 — a row the run was told not to attempt (`only_rows`: `Unknown { NotAttempted }`)
+    /// is ⊥ by selection, not by an engine: the re-plan that decides its sibling leaves it as it
+    /// is — outcome, reason and attribution. The first image run of the seam e2e found the
+    /// selection honoured in the main loop and undone here: the rescue loop took every `Unknown`
+    /// row, and the single-engine path reaches it without the planner's parking.
+    #[test]
+    fn replan_merged_leaves_a_not_attempted_row_alone() {
+        const DESIGN: &str =
+            "1 sort bitvec 4\n2 state 1 big\n3 zero 1\n4 init 1 2 3\n5 next 1 2 2\n";
+        let row = |name: &str, reason: BottomReason| PropertyVerdict {
+            name: name.to_string(),
+            label: None,
+            kind: crate::adapter::slang::translate::SvaKind::Assert,
+            formula: "nu X. ((big == 0) && [] X)".to_string(),
+            outcome: VerifyOutcome::Unknown { unknown_cells: 1 },
+            seeded_predicates: Vec::new(),
+            counterexample: None,
+            bottom_reason: Some(reason),
+            decided_by: None,
+            vacuity: None,
+        };
+        let mut merged = AutoVerifyReport {
+            properties: vec![
+                row("not_selected", BottomReason::NotAttempted),
+                row("selected", BottomReason::UnclassifiedBottom),
+            ],
+            ..Default::default()
+        };
+        replan_merged(&mut merged, DESIGN, &[], &VerifyAutoOptions::default());
+        let parked = &merged.properties[0];
+        assert!(
+            matches!(parked.outcome, VerifyOutcome::Unknown { .. }),
+            "{:?}",
+            parked.outcome
+        );
+        assert!(
+            matches!(parked.bottom_reason, Some(BottomReason::NotAttempted)),
+            "{:?}",
+            parked.bottom_reason
+        );
+        assert!(parked.decided_by.is_none(), "{:?}", parked.decided_by);
+        let sibling = &merged.properties[1];
+        assert!(
+            matches!(sibling.outcome, VerifyOutcome::Holds),
+            "the same rescue decides the sibling: {:?}",
+            sibling.outcome
+        );
+        assert!(
+            merged
+                .notes
+                .iter()
+                .all(|n| n.property.as_deref() != Some("not_selected")),
+            "no note names the row that was not attempted: {:?}",
+            merged.notes.iter().map(|n| &n.kind).collect::<Vec<_>>()
         );
     }
 
@@ -19974,6 +20122,105 @@ endmodule
         assert!(s.summary.contains("yosys-slang"), "{}", s.summary);
     }
 
+    /// N0.1 — the ledger's two knobs at the seam, end to end: `only_rows` runs the named row and
+    /// leaves the other `unknown` / `not-attempted` (through the merge and the ⊥ re-plan, which
+    /// parks it rather than rescuing it); the cone hashes name EVERY row either way; the facts
+    /// file carries both rows with their outcome, decider and hash; an empty selection (`-`)
+    /// runs no row and still prices every hash.
+    #[test]
+    #[ignore = "requires slang + yosys (mununu-sva image)"]
+    fn e2e_only_rows_runs_the_selected_row_and_the_facts_name_every_row() {
+        const DESIGN: &str = "// @mununu_guarantee nu X. ((q == 0) and [] X)\n\
+             // @mununu_guarantee nu X. ((q < 16) and [] X)\n\
+             module m(input logic clk, input logic rst_n, input logic [3:0] d,\n\
+                      output logic [3:0] q);\n\
+               always_ff @(posedge clk or negedge rst_n)\n\
+                 if (!rst_n) q <= '0; else q <= d;\n\
+             endmodule\n";
+        let sources = vec![("m.sv".to_string(), DESIGN.to_string())];
+        let cfg = {
+            let mut m = std::collections::HashMap::new();
+            m.insert("rst_n".to_string(), 1u64);
+            m
+        };
+        let run = |only: Option<&[&str]>| {
+            verify_auto(
+                &sources,
+                &YosysOptions {
+                    top: Some("m".to_string()),
+                    ..Default::default()
+                },
+                &VerifyAutoOptions {
+                    config_values: cfg.clone(),
+                    only_rows: only.map(|rows| rows.iter().map(|s| s.to_string()).collect()),
+                    // The CLI's and the API's default (`portfolio-sequential`): the ledger runs
+                    // the binary, and the merge is what attributes a decided row.
+                    portfolio: Some(PortfolioMode::Sequential),
+                    ..Default::default()
+                },
+            )
+            .expect("verify_auto runs")
+        };
+        let hashes = |r: &AutoVerifyReport| -> Vec<String> {
+            let mut names: Vec<String> = r
+                .diagnostics
+                .cone_hashes
+                .iter()
+                .map(|(n, _)| n.clone())
+                .collect();
+            names.sort();
+            names
+        };
+        // Every row: the first is violated (q follows d), the second holds (q is 4 bits).
+        let all = run(None);
+        assert_eq!(all.properties.len(), 2, "{:?}", all.properties);
+        assert_eq!(all.properties[0].outcome.label(), "violated");
+        assert_eq!(all.properties[1].outcome.label(), "holds");
+        assert_eq!(hashes(&all), ["ann_guarantee_0", "ann_guarantee_1"]);
+        // One row selected: the other is not attempted, and stays so after the re-plan.
+        let one = run(Some(&["ann_guarantee_1"]));
+        assert_eq!(one.properties[1].outcome.label(), "holds");
+        assert_eq!(one.properties[0].outcome.label(), "unknown");
+        assert!(
+            matches!(
+                one.properties[0].bottom_reason,
+                Some(BottomReason::NotAttempted)
+            ),
+            "{:?}",
+            one.properties[0].bottom_reason
+        );
+        assert_eq!(hashes(&one), hashes(&all));
+        assert_eq!(one.diagnostics.cone_hashes, all.diagnostics.cone_hashes);
+        // The facts file: both rows, the outcome, the hash, the decider of the decided one.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("facts.ndjson");
+        crate::adapter::row_facts::write_to_path(path.to_str().expect("utf8"), &one)
+            .expect("written");
+        let text = std::fs::read_to_string(&path).expect("read");
+        let recs: Vec<serde_json::Value> = text
+            .lines()
+            .map(|l| serde_json::from_str(l).expect("json"))
+            .collect();
+        assert_eq!(recs.len(), 2);
+        assert_eq!(recs[0]["property"], "ann_guarantee_0");
+        assert_eq!(recs[0]["outcome"], "unknown");
+        assert_eq!(recs[0]["bottom_reason"], "not-attempted");
+        assert_eq!(recs[0]["cone_hash"].as_str().map(str::len), Some(16));
+        assert_eq!(recs[1]["outcome"], "holds");
+        assert!(recs[1]["decided_by"].is_string(), "{}", recs[1]);
+        assert_eq!(recs[1]["cone_hash"].as_str().map(str::len), Some(16));
+        // No row selected: nothing runs, every hash is still there.
+        let none = run(Some(&[]));
+        assert!(
+            none.properties
+                .iter()
+                .all(|p| p.outcome.label() == "unknown"),
+            "{:?}",
+            none.properties
+        );
+        assert_eq!(none.diagnostics.cone_hashes, all.diagnostics.cone_hashes);
+    }
+
     #[test]
     #[ignore = "requires slang + sv2v + yosys (mununu-sva image)"]
     fn e2e_partsel_partial_write_slang_refuses_or_agrees_with_sv2v() {
@@ -21097,5 +21344,88 @@ mod source_map_tests {
         let lines: Vec<u32> = report.involves("p").iter().map(|l| l.line).collect();
         assert_eq!(lines, vec![11, 12, 14, 20, 21, 24, 25, 26]);
         assert!(report.involves("absent").is_empty());
+    }
+
+    /// N0.1 — `cone_hashes`: set for every row with a parsed formula and an atom, with or
+    /// without a source map; moves when the cone's logic or the formula moves; stays when a
+    /// register outside the cone moves. The model is the `involves` test's.
+    #[test]
+    fn cone_hashes_follow_the_cone_and_the_formula_and_ignore_the_rest() {
+        const MODEL: &str = "\
+1 sort bitvec 1
+2 sort bitvec 2
+3 input 1 go
+4 state 2 state_q
+5 state 2 other
+6 one 2
+7 add 2 4 6
+8 ite 2 3 7 4
+9 uext 2 8 0 state_d
+10 next 2 4 8
+11 next 2 5 5
+";
+        let report_for = |formula: &str| {
+            let mut report = AutoVerifyReport::default();
+            report.properties.push(PropertyVerdict {
+                name: "p".into(),
+                label: None,
+                kind: SvaKind::Assert,
+                formula: formula.into(),
+                outcome: VerifyOutcome::Holds,
+                seeded_predicates: Vec::new(),
+                counterexample: None,
+                bottom_reason: None,
+                decided_by: None,
+                vacuity: None,
+            });
+            report
+        };
+        let hash_of = |model: &str, formula: &str| -> String {
+            let mut report = report_for(formula);
+            // No source map at all: the hash is still computed, `involves` stays empty.
+            attach_involves(&mut report, model, &Err("no slang".into()));
+            assert!(report.involves("p").is_empty());
+            let hashes = &report.diagnostics.cone_hashes;
+            assert_eq!(hashes.len(), 1, "{hashes:?}");
+            assert_eq!(hashes[0].0, "p");
+            assert_eq!(hashes[0].1.len(), 16);
+            hashes[0].1.clone()
+        };
+        let base = hash_of(MODEL, "nu X. ((state_q != 3) && [] X)");
+        assert_eq!(hash_of(MODEL, "nu X. ((state_q != 3) && [] X)"), base);
+        // `other` is outside the cone: its next-state function may change freely.
+        assert_eq!(
+            hash_of(
+                &MODEL.replace("11 next 2 5 5", "11 next 2 5 6"),
+                "nu X. ((state_q != 3) && [] X)"
+            ),
+            base
+        );
+        // The cone's logic moved (the increment became a decrement).
+        assert_ne!(
+            hash_of(
+                &MODEL.replace("7 add 2 4 6", "7 sub 2 4 6"),
+                "nu X. ((state_q != 3) && [] X)"
+            ),
+            base
+        );
+        // The formula moved.
+        assert_ne!(hash_of(MODEL, "nu X. ((state_q != 2) && [] X)"), base);
+        // A formula naming no atom has no hash.
+        let mut report = report_for("nu X. (true && [] X)");
+        attach_involves(&mut report, MODEL, &Err("no slang".into()));
+        assert!(report.diagnostics.cone_hashes.is_empty());
+    }
+
+    /// N0.1 — `MUNUNU_VERIFY_AUTO_ONLY_ROWS`: blank is unset, `-` is "no row", otherwise the
+    /// trimmed comma-separated names or labels.
+    #[test]
+    fn only_rows_parses_blank_dash_and_lists() {
+        assert_eq!(parse_only_rows(""), None);
+        assert_eq!(parse_only_rows("  "), None);
+        assert_eq!(parse_only_rows("-"), Some(std::collections::HashSet::new()));
+        let rows = parse_only_rows(" a_label, top_sva_2 ,,b ").expect("a list");
+        assert_eq!(rows.len(), 3);
+        assert!(rows.contains("a_label") && rows.contains("top_sva_2") && rows.contains("b"));
     }
 }

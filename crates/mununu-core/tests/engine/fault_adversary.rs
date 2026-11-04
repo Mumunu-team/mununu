@@ -77,7 +77,7 @@ fn an_unblockable_attack_is_realizable_with_one_fault_and_not_without() {
 /// that verdict, and one injection on `state_q` lets the attacker jump to the completed state.
 #[test]
 fn edn_boot_one_fault_forces_completion_a_zero_budget_does_not() {
-    let edn = include_str!("fixtures/wall_classes/edn_boot_sm.btor");
+    let edn = include_str!("../fixtures/wall_classes/edn_boot_sm.btor");
     let mode_only = ["boot_req_mode_i".to_string(), "edn_enable_i".to_string()];
     let decide = |ops: &[&str]| {
         let (model, fault_inputs, _) = faulted(edn, ops);

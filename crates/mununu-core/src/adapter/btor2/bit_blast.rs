@@ -1066,7 +1066,10 @@ fn try_per_cluster_blast(
 ///
 /// Sort lines are always kept (cheap, shared); NIDs are preserved so
 /// surviving references stay valid without renumbering.
-fn cone_slice(file: &Btor2File, atoms: &[String]) -> Btor2File {
+///
+/// `pub(crate)` since N0.1: the per-row cone identity in `verify_auto::attach_involves` hashes
+/// this slice's text.
+pub(crate) fn cone_slice(file: &Btor2File, atoms: &[String]) -> Btor2File {
     use std::collections::HashSet;
 
     let mut keep: HashSet<Nid> = HashSet::new();

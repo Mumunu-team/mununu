@@ -351,7 +351,10 @@ fn sign_extend(x: u128, w: u32) -> i128 {
     ((x << shift) as i128) >> shift
 }
 
-fn fnv1a64(bytes: &[u8]) -> u64 {
+/// FNV-1a over `bytes`: stable across Rust versions and platforms (`DefaultHasher` is not), which
+/// is what a hash written to a file and compared on a later build needs. `pub(crate)` since N0.1
+/// (the per-row cone identity in `verify_auto::attach_involves`).
+pub(crate) fn fnv1a64(bytes: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in bytes {
         h ^= u64::from(*b);

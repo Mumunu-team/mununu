@@ -4885,6 +4885,7 @@ fn sv_verify_auto(args: SvVerifyAutoArgs) -> Result<(), String> {
         replan_defer: false,
         breadcrumb_append: false,
         skip_rows: std::collections::HashSet::new(),
+        only_rows: None,
         assume_mode: match args.assumes {
             AssumesArg::Precondition => {
                 mununu_core::adapter::slang::verify_auto::AssumeMode::Precondition

@@ -26,8 +26,8 @@ use mununu_core::adapter::btor2::symbolic_bitblast::{
 };
 use mununu_core::mu_calculus::parser;
 
-const EDN: &str = include_str!("fixtures/wall_classes/edn_boot_sm.btor");
-const OTBN: &str = include_str!("fixtures/wall_classes/otbn_start_stop_fsm.btor");
+const EDN: &str = include_str!("../fixtures/wall_classes/edn_boot_sm.btor");
+const OTBN: &str = include_str!("../fixtures/wall_classes/otbn_start_stop_fsm.btor");
 
 // Every primary input of each fixture — the "all controllable" partition (⇒ single-agent reduction).
 const EDN_ALL: &[&str] = &[
