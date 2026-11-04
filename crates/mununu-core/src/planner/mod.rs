@@ -21,9 +21,9 @@
 //! See `.claude/plans/verification-execution-planner.md` + `.claude/plans/cost-annotated-plan-telemetry.md`.
 
 use crate::adapter::slang::verify_auto::{
-    AutoVerifyReport, NoteLevel, PortfolioMode, PreparedModel, VerificationNote, VerifyAutoOptions,
-    VerifyOutcome, escalate_bottom, merge_portfolio_reports, outcome_definite, replan_merged,
-    rescue_skipped_via_exact, verify_auto_impl,
+    AutoVerifyReport, BottomReason, NoteLevel, PortfolioMode, PreparedModel, VerificationNote,
+    VerifyAutoOptions, VerifyOutcome, escalate_bottom, merge_portfolio_reports, outcome_definite,
+    replan_merged, rescue_skipped_via_exact, verify_auto_impl,
 };
 use crate::adapter::yosys::YosysOptions;
 use crate::adapter::{AdapterError, AdapterErrorKind};
@@ -224,10 +224,18 @@ fn replan_once(
     prepared: &PreparedModel,
     opts: &VerifyAutoOptions,
 ) -> AutoVerifyReport {
+    // N0.1 — a row the run was told not to attempt (`only_rows`) is ⊥ by selection, not by an
+    // engine: the rescue loop leaves it alone (`escalate_bottom_with_slice`), and it is not an
+    // undecided row here either, so the note counts what the re-plan took. Only `only_rows`
+    // leaves a `NotAttempted` row in a MERGED report (a member's `NotAttempted` is always
+    // overridden by the earlier member's definite verdict it deferred to).
     let undecided = |r: &AutoVerifyReport| {
         r.properties
             .iter()
-            .filter(|p| outcome_definite(&p.outcome).is_none())
+            .filter(|p| {
+                outcome_definite(&p.outcome).is_none()
+                    && !matches!(p.bottom_reason, Some(BottomReason::NotAttempted))
+            })
             .count()
     };
     // PR A1 — the fault posture's post-pass runs on the merged report whether or not a row is

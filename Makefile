@@ -17,7 +17,7 @@ BASELINE   ?= main
 PROPTEST_CASES ?= 64
 
 .PHONY: build test lint verify ci clean help \
-        test-fast e2e e2e-oneshot e2e-parallel test-properties stress fuzz proptest-deep \
+        test-fast e2e e2e-oneshot e2e-parallel ledger-check test-properties stress fuzz proptest-deep \
         coverage mem-profile sweep \
         bench-baseline bench-compare bench-record \
         experiment replay publish-prep frontier-smoke
@@ -30,6 +30,7 @@ help:
 	@echo "  e2e            - SVA-verification e2e suite, one test per process (#[ignore]d; run inside the mununu-sva image)"
 	@echo "  e2e-oneshot    - same suite in a single libtest process (an aborting test loses the run)"
 	@echo "  e2e-parallel   - same suite under cargo-nextest, one process per test, E2E_JOBS in flight"
+	@echo "  ledger-check   - [LEDGER_ARGS=\"--write|--all|--retired E|--only D\"] re-run only the ledger rows whose cone changed (measurements/ledger/README.md)"
 	@echo "  lint           - cargo fmt --check && cargo clippy -D warnings"
 	@echo "  verify         - cargo run mununu against $(VERIFY_FILE)"
 	@echo "  ci             - lint + test (the gate)"
@@ -162,6 +163,14 @@ e2e-parallel:
 test-properties:
 # The `properties*` crates are gated on `test_support` (their generators live behind it);
 # without the feature the target compiled them out and ran ZERO tests — measured 2026-11-03,
+# N0.1 (2026-11-03) — the executable ledger (measurements/ledger/README.md): every design's rows
+# get their cone hash for the price of a lift; only NEW / CHANGED / RETIRED rows re-run, under
+# 3× their recorded time. `LEDGER_ARGS="--write"` records; `--all` is the breadth run;
+# `--retired spacer` re-runs the rows a removed member decided. Needs `make build` (release
+# binary) and the mununu-sva image.
+ledger-check:
+	@scripts/ledger_check.py $(LEDGER_ARGS)
+
 # a gate with no negative control. The feature is now passed explicitly.
 	PROPTEST_CASES=$(PROPTEST_CASES) $(CARGO) test -p mununu-core --features test_support --test 'properties*' -- --nocapture
 

@@ -1,0 +1,4 @@
+# design<TAB>cwd<TAB>command — see README.md. The command runs with `mununu` on PATH, in `cwd`
+# (relative to the repo root), with MUNUNU_VERIFY_AUTO_ONLY_ROWS / _ROW_FACTS / _PROPERTY_* set.
+edn	examples/verify/ip_opentitan_edn/source	./run.sh
+csrng	examples/verify/ip_opentitan_csrng/source	./run.sh
