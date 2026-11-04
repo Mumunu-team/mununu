@@ -4951,32 +4951,48 @@ pub(crate) fn lift_sv(
     // 2. SV → flattened BTOR2. The lift reports modules it black-boxed (instantiated, no
     // body) — surfaced in `diagnostics.blackboxed_modules` so a cut FSM (the
     // `prim_sparse_fsm_flop`-class root cause) is visible, not silent.
-    let mut lift = sv_to_btor2_with_blackboxes(primary_content, yosys_opts).map_err(|mut e| {
-        e.message = format!("verify_auto: SV → BTOR2: {}", e.message);
+    //
+    // H.C — a known flop primitive the design does not define gets a behavioral stub so its
+    // register survives: OpenTitan's `prim_sparse_fsm_flop` IS the FSM's state register in the
+    // non-simulation branch of `PRIM_FLOP_SPARSE_FSM`, and `prim_flop` holds `prim_count`'s
+    // counters. Under `read_verilog` the first lift succeeded with the module cut and named it in
+    // `blackboxed_modules`; sv-elab refuses an instantiated module with no definition
+    // (2026-11-04), so the names come from the failed lift's error — the yosys log's
+    // `unknown module 'X'` lines — and the lift is retried with the stubs staged. Only stubs
+    // ACTUALLY-missing modules (no collision with designs that provide their own body).
+    let lift_err = |mut e: AdapterError, stage: &str| {
+        e.message = format!("verify_auto: SV → BTOR2{stage}: {}", e.message);
         e
-    })?;
-    // H.C — if the first lift cut a known flop primitive, inject a behavioral stub for it and
-    // re-lift so the register survives (e.g. OpenTitan's `prim_sparse_fsm_flop`). Only stubs
-    // ACTUALLY-cut modules (no collision with designs that provide their own body).
+    };
+    let stub_names = |stubs: &[(String, String)]| -> Vec<String> {
+        stubs
+            .iter()
+            .map(|(name, _)| name.trim_end_matches(".sv").to_string())
+            .collect()
+    };
     let mut auto_provided_stubs = Vec::new();
-    if opts.auto_stub_flops {
-        let stubs =
-            crate::adapter::slang::prim_stubs::stubs_for_cut_modules(&lift.blackboxed_modules);
-        if !stubs.is_empty() {
+    let lift = match sv_to_btor2_with_blackboxes(primary_content, yosys_opts) {
+        Ok(lift) => lift,
+        Err(e) => {
+            let missing = crate::adapter::yosys::unknown_modules_in_error(&e.message);
+            let stubs = if opts.auto_stub_flops {
+                crate::adapter::slang::prim_stubs::stubs_for_cut_modules(&missing)
+            } else {
+                Vec::new()
+            };
+            if stubs.is_empty() {
+                return Err(lift_err(e, ""));
+            }
             let mut yopts2 = yosys_opts.clone();
             yopts2.additional_sources.extend(stubs.iter().cloned());
-            // The re-lift produces the FINAL BTOR2, so its front-end/fallback info is
-            // the one to report (#466).
-            lift = sv_to_btor2_with_blackboxes(primary_content, &yopts2).map_err(|mut e| {
-                e.message = format!("verify_auto: SV → BTOR2 (with flop stubs): {}", e.message);
-                e
-            })?;
-            auto_provided_stubs = stubs
-                .iter()
-                .map(|(name, _)| name.trim_end_matches(".sv").to_string())
-                .collect();
+            auto_provided_stubs = stub_names(&stubs);
+            sv_to_btor2_with_blackboxes(primary_content, &yopts2)
+                .map_err(|e| lift_err(e, " (with flop stubs)"))?
         }
-    }
+    };
+    // A lift that succeeded has every module defined: a known primitive the design itself
+    // declares `(* blackbox *)` or empty is the design's own cut and is left as declared (a
+    // second definition would be a redefinition error under sv-elab, as it was under yosys).
     // 2026-10-29 — the source map's netlist half: yosys-slang stamps nets and storage cells
     // with the staged file's own lines. Declarations the netlist lacks are filled from slang's
     // AST at the hand-off (`fill_declarations`). When the dev-only oracle's sv2v rewrote the
@@ -17368,6 +17384,12 @@ module uart_tx(); endmodule"#;
                 "prim_assert_standard_macros.svh".to_string(),
                 read(prim.join("prim_assert_standard_macros.svh")),
             ),
+            // sv-elab predefines SYNTHESIS: prim_assert.sv takes its dummy-macros branch and
+            // includes prim_flop_macros.sv (2026-11-04)
+            (
+                "prim_assert_dummy_macros.svh".to_string(),
+                read(prim.join("prim_assert_dummy_macros.svh")),
+            ),
             (
                 "prim_assert_sec_cm.svh".to_string(),
                 read(prim.join("prim_assert_sec_cm.svh")),
@@ -17819,6 +17841,12 @@ endmodule
                 "prim_assert_standard_macros.svh".to_string(),
                 read(prim.join("prim_assert_standard_macros.svh")),
             ),
+            // sv-elab predefines SYNTHESIS: prim_assert.sv takes its dummy-macros branch and
+            // includes prim_flop_macros.sv (2026-11-04)
+            (
+                "prim_assert_dummy_macros.svh".to_string(),
+                read(prim.join("prim_assert_dummy_macros.svh")),
+            ),
             (
                 "prim_assert_sec_cm.svh".to_string(),
                 read(prim.join("prim_assert_sec_cm.svh")),
@@ -18123,6 +18151,12 @@ endmodule
                 "prim_assert_standard_macros.svh".to_string(),
                 read("prim_assert_standard_macros.svh"),
             ),
+            // sv-elab predefines SYNTHESIS: prim_assert.sv takes its dummy-macros branch and
+            // includes prim_flop_macros.sv (2026-11-04)
+            (
+                "prim_assert_dummy_macros.svh".to_string(),
+                read("prim_assert_dummy_macros.svh"),
+            ),
             (
                 "prim_assert_sec_cm.svh".to_string(),
                 read("prim_assert_sec_cm.svh"),
@@ -18358,6 +18392,12 @@ endmodule
             (
                 "prim_assert_standard_macros.svh".to_string(),
                 read(prim.join("prim_assert_standard_macros.svh")),
+            ),
+            // sv-elab predefines SYNTHESIS: prim_assert.sv takes its dummy-macros branch and
+            // includes prim_flop_macros.sv (2026-11-04)
+            (
+                "prim_assert_dummy_macros.svh".to_string(),
+                read(prim.join("prim_assert_dummy_macros.svh")),
             ),
             (
                 "prim_assert_sec_cm.svh".to_string(),
@@ -19061,6 +19101,12 @@ endmodule
                 "prim_assert_standard_macros.svh".to_string(),
                 read(prim.join("prim_assert_standard_macros.svh")),
             ),
+            // sv-elab predefines SYNTHESIS: prim_assert.sv takes its dummy-macros branch and
+            // includes prim_flop_macros.sv (2026-11-04)
+            (
+                "prim_assert_dummy_macros.svh".to_string(),
+                read(prim.join("prim_assert_dummy_macros.svh")),
+            ),
             (
                 "prim_assert_sec_cm.svh".to_string(),
                 read(prim.join("prim_assert_sec_cm.svh")),
@@ -19550,6 +19596,12 @@ endmodule
                 "prim_assert_standard_macros.svh".to_string(),
                 read(prim.join("prim_assert_standard_macros.svh")),
             ),
+            // sv-elab predefines SYNTHESIS: prim_assert.sv takes its dummy-macros branch and
+            // includes prim_flop_macros.sv (2026-11-04)
+            (
+                "prim_assert_dummy_macros.svh".to_string(),
+                read(prim.join("prim_assert_dummy_macros.svh")),
+            ),
             (
                 "prim_assert_sec_cm.svh".to_string(),
                 read(prim.join("prim_assert_sec_cm.svh")),
@@ -19680,6 +19732,12 @@ endmodule
             (
                 "prim_assert_standard_macros.svh".to_string(),
                 read(prim.join("prim_assert_standard_macros.svh")),
+            ),
+            // sv-elab predefines SYNTHESIS: prim_assert.sv takes its dummy-macros branch and
+            // includes prim_flop_macros.sv (2026-11-04)
+            (
+                "prim_assert_dummy_macros.svh".to_string(),
+                read(prim.join("prim_assert_dummy_macros.svh")),
             ),
             (
                 "prim_assert_sec_cm.svh".to_string(),
@@ -20178,6 +20236,12 @@ endmodule
                 "prim_assert_standard_macros.svh".to_string(),
                 read(prim.join("prim_assert_standard_macros.svh")),
             ),
+            // sv-elab predefines SYNTHESIS: prim_assert.sv takes its dummy-macros branch and
+            // includes prim_flop_macros.sv (2026-11-04)
+            (
+                "prim_assert_dummy_macros.svh".to_string(),
+                read(prim.join("prim_assert_dummy_macros.svh")),
+            ),
             (
                 "prim_assert_sec_cm.svh".to_string(),
                 read(prim.join("prim_assert_sec_cm.svh")),
@@ -20256,6 +20320,12 @@ endmodule
                 (
                     "prim_assert_standard_macros.svh".to_string(),
                     read(prim.join("prim_assert_standard_macros.svh")),
+                ),
+                // sv-elab predefines SYNTHESIS: prim_assert.sv takes its dummy-macros branch and
+                // includes prim_flop_macros.sv (2026-11-04)
+                (
+                    "prim_assert_dummy_macros.svh".to_string(),
+                    read(prim.join("prim_assert_dummy_macros.svh")),
                 ),
                 (
                     "prim_assert_sec_cm.svh".to_string(),

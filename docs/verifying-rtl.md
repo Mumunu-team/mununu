@@ -552,7 +552,7 @@ file as `trace.replay.gtkw`.
 
 ### Where in the RTL: the `cells:` legend under a counterexample (2026-10-29)
 
-> Source of truth: [`cell_sources`](../crates/mununu-core/src/adapter/yosys/mod.rs#L1103) + [`source_index_from_ast`](../crates/mununu-core/src/adapter/slang/mod.rs#L520) + [`fill_declarations`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L988) + [`TraceNames::tidy`](../crates/mununu-core/src/trace.rs#L252) — surface: (CLI+API) — every `sv verify-auto` row with a path, and `POST /api/v1/sv/verify-auto`.
+> Source of truth: [`cell_sources`](../crates/mununu-core/src/adapter/yosys/mod.rs#L1296) + [`source_index_from_ast`](../crates/mununu-core/src/adapter/slang/mod.rs#L520) + [`fill_declarations`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L988) + [`TraceNames::tidy`](../crates/mununu-core/src/trace.rs#L252) — surface: (CLI+API) — every `sv verify-auto` row with a path, and `POST /api/v1/sv/verify-auto`.
 
 Every counterexample ends with a legend naming where each cell it shows lives in the RTL — the
 registers of the first step, then its inputs, in that order:
@@ -1467,6 +1467,12 @@ in `trace` as a may-trace. Three things keep their verdict: a refuted `EF p` (th
 is unreachable even on the freer model), a `HOLDS`, and a **deliberate** cut — a `--cutpoint` or a
 `(* blackbox *)` stub (mununu#578: a cut you asked for does not change a verdict; its
 `control-slice` / `blackbox-cut` caveat stands). The remedy is to add the missing module's source.
+(Since the slang-only lift, 2026-11-04, a module missing from the source set stops the lift with
+`unknown module '<name>'` rather than leaving undriven nets — except `prim_flop` and
+`prim_sparse_fsm_flop`, which `verify-auto` still stubs automatically. An empty stub module with
+the missing module's ports, marked `(* mununu_missing_module *)`, restores the undriven-nets
+reading this withholding was written for; unmarked it is the deliberate-cut form. See §"Two things
+sv-elab needs" under the agent-over-HTTP section.)
 
 ### An init-less register is free at cycle 0 on every path: `unestablished-initial-cubes` (mununu#579, #609)
 
@@ -1681,7 +1687,7 @@ Three caveats are load-bearing; plan for them.
 
 ### 1. The server host needs the SV toolchain
 
-> Source of truth: [`locate_yosys`](../crates/mununu-core/src/adapter/yosys/mod.rs#L2529) + [`read_slang_hint`](../crates/mununu-core/src/adapter/yosys/mod.rs#L2585) — surface: (CLI+API+UI)
+> Source of truth: [`locate_yosys`](../crates/mununu-core/src/adapter/yosys/mod.rs#L2552) + [`read_slang_hint`](../crates/mununu-core/src/adapter/yosys/mod.rs#L2613) — surface: (CLI+API+UI)
 
 `sv verify-auto` shells out to **slang** (elaboration + SVA) and **Yosys** with
 yosys-slang's `read_slang` (SV → BTOR2 — built into yosys ≥ 0.67 and the pinned
@@ -1727,6 +1733,34 @@ is gone by construction; the partial-write refusal stands on its own, and writin
 is the route that works. `diagnostics.frontend` still names the reader (`"yosys-slang (read_slang)"`)
 as provenance.
 
+**Two things sv-elab needs that `read_verilog` did not (measured 2026-11-04).** (1) **Every
+instantiated module needs a definition.** `read_verilog` lifted an instantiation with no definition
+silently, in two shapes: a known flop primitive (`prim_flop`, which holds `prim_count`'s counters;
+`prim_sparse_fsm_flop`, which *is* the FSM state register in the non-simulation branch of
+`PRIM_FLOP_SPARSE_FSM`) got `verify-auto`'s behavioural stub after the first lift reported it cut
+(`--no-auto-stub-flops` turns that off); any other missing module left its cell undefined, and
+yosys's BTOR backend made the cell's outputs anonymous undriven inputs — the module named in
+`diagnostics.blackboxed_modules`, a VIOLATED over them withheld (`violation-over-free-leaves`,
+above). sv-elab refuses the instantiation (`error: unknown module 'prim_flop'`; its
+`--ignore-unknown-modules` is retired upstream). The known flop primitives are still stubbed
+automatically — the names now come from the failed lift's log. For any other module the lift
+error names it and the stub to write, an **empty module with the missing module's ports**, in two
+forms. Marked `(* mununu_missing_module *)` it stands in for the missing module exactly as before:
+the read keeps it as a black box (`--empty-blackboxes`), the hierarchy snapshot names it in
+`blackboxed_modules`, and the lift deletes the module again before writing the BTOR2, so the cell
+is undefined and its outputs are the same anonymous free inputs (measured: two anonymous inputs,
+no next-less state — `read_verilog`'s shape to the byte). Unmarked, or `(* blackbox *)`, it is a
+deliberate cut: `cutpoint -blackbox` frees its outputs as next-less states and a VIOLATED keeps its
+verdict under the `blackbox-cut` caveat. No SystemVerilog construct gives the undriven shape under
+sv-elab on its own — an empty module without the flag, or an `'x` assignment, reads constant zero,
+an unsound pin — which is why the flag and the attribute exist. (2) **sv-elab predefines
+`SYNTHESIS` and `YOSYS`.** OpenTitan's
+`prim_assert.sv` therefore takes its `SYNTHESIS` branch and includes `prim_assert_dummy_macros.svh`
+and `prim_flop_macros.sv`: stage both next to it (a lift staged for sv2v's branch — the standard
+macros only — fails with `unknown macro '\`ASSERT'`). Both facts were invisible while `yosys -q`
+kept sv-elab's diagnostics off the console; the driver now keeps yosys's full log (`-l`) beside the
+BTOR2 and puts its `error:` lines into the lift error.
+
 **The BTOR backend's "topological loop".** yosys's `write_btor` walks the netlist cell by cell and can
 report `Found topological loop while processing cell $N` on a design `check` finds loop-free: yosys-slang
 emits thousands of `$buf` cells, and a wide buffer chained bit-wise through another wide cell reads as a
@@ -1737,7 +1771,7 @@ cells, so the verdicts are over the same design — and reports it as the `lift-
 `diagnostics.lift_retry`. Any other yosys error is not retried, and a lift that succeeds on the first run
 is unchanged.
 
-> Source of truth: [`plan_lift`](../crates/mununu-core/src/adapter/yosys/mod.rs#L639) + [`slang_plugin_arg`](../crates/mununu-core/src/adapter/yosys/mod.rs#L2579) — surface: (CLI+API+UI)
+> Source of truth: [`plan_lift`](../crates/mununu-core/src/adapter/yosys/mod.rs#L639) + [`slang_plugin_arg`](../crates/mununu-core/src/adapter/yosys/mod.rs#L2600) — surface: (CLI+API+UI)
 > Source of truth: [`SvFrontend::lift_label`](../crates/mununu-core/src/adapter/yosys/mod.rs#L91) (the `diagnostics.frontend` provenance string) — surface: (CLI+API+UI)
 
 ### 2. Properties come from the module's own assertions

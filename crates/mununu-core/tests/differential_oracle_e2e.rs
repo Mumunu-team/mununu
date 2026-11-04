@@ -1154,6 +1154,9 @@ const CORPUS: &[CorpusDesign] = &[
     CorpusDesign {
         name: "prim_count",
         dir: "dc_opentitan_prim_count",
+        // `prim_flop` (the counters' registers) is not part of the entry: verify-auto's auto-stub
+        // gives it the behavioral model, from the failed lift's unknown-module names since sv-elab
+        // refuses an undefined module (2026-11-04; `read_verilog` lifted with it cut and reported)
         files: &["prim_count.sv", "prim_assert.sv", "prim_count_pkg.sv"],
         top: "prim_count",
         annotations: &["nu Y. ((mu X. ((cnt_o == 0) or <> X)) and [] Y)"],
@@ -1265,7 +1268,10 @@ const CORPUS: &[CorpusDesign] = &[
     CorpusDesign {
         name: "usbdev_linkstate",
         dir: "dc_opentitan_usbdev_linkstate",
-        files: &["usbdev_linkstate.sv", "prim_assert.sv"],
+        // `prim_filter.sv` is an EMPTY-module stub (ports, no body, no `(* blackbox *)`): its
+        // output stays undriven — the free input `read_verilog` left for the module this entry
+        // never carried — since sv-elab refuses an undefined module (2026-11-04)
+        files: &["usbdev_linkstate.sv", "prim_assert.sv", "prim_filter.sv"],
         top: "usbdev_linkstate",
         annotations: &["nu Y. ((mu X. ((link_state_q == 0) or <> X)) and [] Y)"], // LinkDisconnected = 0
         config: &[("rst_ni", 1)],
@@ -1415,6 +1421,17 @@ const CORPUS: &[CorpusDesign] = &[
             "otp_ctrl_pkg.sv",
             "keymgr_reg_pkg.sv",
             "keymgr_pkg.sv",
+            // EMPTY-module stubs (ports, no body, no `(* blackbox *)`) of the seven modules the
+            // entry never carried: their outputs stay undriven, the free leaves `read_verilog`
+            // left and mununu#750 withholds a VIOLATED over (the row stays ⊥ below); sv-elab
+            // refuses an undefined module (2026-11-04)
+            "keymgr_op_state_ctrl.sv",
+            "keymgr_data_en_state.sv",
+            "keymgr_err.sv",
+            "prim_count.sv",
+            "prim_flop_2sync.sv",
+            "prim_mubi4_sender.sv",
+            "prim_secded_inv_72_64_dec.sv",
         ],
         top: "keymgr_ctrl",
         annotations: &["nu Y. ((mu X. ((state_q == 865) or <> X)) and [] Y)"], // StCtrlReset = 865
@@ -2782,21 +2799,27 @@ fn e2e_opentitan_ip_edn_full() {
     // The `AG EF Idle` rows are FALSE under `rst_ni=1`. Each FSM's SEC_CM `Error` state is reachable
     // (a software ERR_CODE_TEST write raises `fatal_loc_events`, which the main FSM's and every
     // endpoint FSM's `local_escalate_i` read) and terminal (the `*_error_is_terminal` rows above), so
-    // from `Error` the FSM never returns to `Idle`. The trap certificate refutes them (ledger §3.18,
-    // 2026-10-21) with the path into `Error`; until then they were pinned ⊥ — the state's cone is over
-    // the exact cap and the cube certified no MUST path into the trap.
-    for (l, trap) in [
+    // from `Error` the FSM never returns to `Idle`. The main FSM's row is refuted by the trap
+    // certificate (ledger §3.18, 2026-10-21) with the path into `Error`; until then it was pinned ⊥ —
+    // the state's cone is over the exact cap and the cube certified no MUST path into the trap.
+    // Under the slang-only lift (2026-11-04) each endpoint FSM's cone fits the exact cap and
+    // `exact-symbolic` refutes its row directly, with the same path into the trap; under the sv2v
+    // lift the endpoint rows went through the certificate too.
+    for (l, trap, decider) in [
         (
             "edn_main_sm_recover_idle",
             "u_edn_core.u_edn_main_sm.state_q == 382",
+            "trap-certificate",
         ),
         (
             "edn_ack_sm_0_recover_idle",
             "u_edn_core.gen_ep_blk$0.u_edn_ack_sm_ep.state_q == 465",
+            "exact-symbolic",
         ),
         (
             "edn_ack_sm_7_recover_idle",
             "u_edn_core.gen_ep_blk$7.u_edn_ack_sm_ep.state_q == 465",
+            "exact-symbolic",
         ),
     ] {
         let p = report
@@ -2809,14 +2832,16 @@ fn e2e_opentitan_ip_edn_full() {
             "{l}: {:?}",
             p.outcome
         );
-        assert_eq!(p.decided_by.as_deref(), Some("trap-certificate"), "{l}");
-        let want = format!("trap: {trap}");
-        assert!(
-            report.notes.iter().any(|n| n.kind == "trap-certificate"
-                && n.property.as_deref() == Some(p.name.as_str())
-                && n.items.contains(&want)),
-            "{l}: the certificate note names `{trap}`"
-        );
+        assert_eq!(p.decided_by.as_deref(), Some(decider), "{l}");
+        if decider == "trap-certificate" {
+            let want = format!("trap: {trap}");
+            assert!(
+                report.notes.iter().any(|n| n.kind == "trap-certificate"
+                    && n.property.as_deref() == Some(p.name.as_str())
+                    && n.items.contains(&want)),
+                "{l}: the certificate note names `{trap}`"
+            );
+        }
         // The trace names state CELLS, not the `state_q` alias: the main FSM's 9-bit state shows as
         // `u_edn_core.edn_main_sm_state`, an endpoint FSM's as a cell inside its `u_state_regs`. The
         // last state holds the trap value in a 9-bit cell of the core (2026-10-21 measurement).
@@ -3280,7 +3305,9 @@ fn e2e_opentitan_ip_edn_sec_cm_posture() {
     const EDN_POSTURE_PINS: &[(&str, usize, &str)] = &[
         ("FpvSecCmAckFsmCheck_A", 8, "holds"),
         ("FpvSecCmCntAlertCheck_A", 1, "holds"),
-        ("FpvSecCmGenCmdFifoRptrCheck_A", 1, "unknown"),
+        // ⊥ (BudgetExpired) on every sv2v-lift run since #755; decides under the slang-only lift
+        // (reach-rescue, 2026-11-04), whose netlist the rescue finishes within the row budget
+        ("FpvSecCmGenCmdFifoRptrCheck_A", 1, "holds"),
         ("FpvSecCmGenCmdFifoWptrCheck_A", 1, "holds"),
         ("FpvSecCmMainFsmCheck_A", 1, "holds"),
         ("FpvSecCmRegWeOnehotCheck_A", 1, "holds"),

@@ -1,6 +1,6 @@
 # External Tools
 
-> Source of truth: [`adapter/yosys/mod.rs::locate_yosys`](../crates/mununu-core/src/adapter/yosys/mod.rs#L2531), [`plan_lift`](../crates/mununu-core/src/adapter/yosys/mod.rs#L639), [`slang_plugin_arg`](../crates/mununu-core/src/adapter/yosys/mod.rs#L2579), [`adapter/cvc5/mod.rs::locate_cvc5`](../crates/mununu-core/src/adapter/cvc5/mod.rs#L78) — surface: CLI+API
+> Source of truth: [`adapter/yosys/mod.rs::locate_yosys`](../crates/mununu-core/src/adapter/yosys/mod.rs#L2552), [`plan_lift`](../crates/mununu-core/src/adapter/yosys/mod.rs#L639), [`slang_plugin_arg`](../crates/mununu-core/src/adapter/yosys/mod.rs#L2600), [`adapter/cvc5/mod.rs::locate_cvc5`](../crates/mununu-core/src/adapter/cvc5/mod.rs#L78) — surface: CLI+API
 
 Mununu's verification engine, model checker, and synthesiser are pure Rust + the linked [Z3](https://github.com/Z3Prover/z3) library. Several pipelines also invoke external command-line tools via subprocess. Those tools are **optional** — mununu functions without them, and individual pipelines emit a structured `AdapterWarning` or `AdapterError` when invoked while a required tool is missing, never silently fail.
 
@@ -80,7 +80,7 @@ Missing-tool behaviour: an oracle test's lift errors with an `UnsupportedConstru
 
 ## Yosys
 
-> Source of truth: [`adapter/yosys/mod.rs::locate_yosys`](../crates/mununu-core/src/adapter/yosys/mod.rs#L2531) + [`slang_plugin_arg`](../crates/mununu-core/src/adapter/yosys/mod.rs#L2579) — surface: CLI+API
+> Source of truth: [`adapter/yosys/mod.rs::locate_yosys`](../crates/mununu-core/src/adapter/yosys/mod.rs#L2552) + [`slang_plugin_arg`](../crates/mununu-core/src/adapter/yosys/mod.rs#L2600) — surface: CLI+API
 
 Yosys is the open-source synthesis suite mununu uses to lower SystemVerilog into BTOR2 — the word-level intermediate representation the KMTS lifter consumes. The RTL front end is yosys-slang's `read_slang` (N1, 2026-11-04: the only one), **built into yosys ≥ 0.67**; on an older yosys set `MUNUNU_YOSYS_SLANG_PLUGIN` to a yosys-slang plugin (loaded with `-m`). A yosys with neither (Homebrew's 0.59, Debian's 0.23) lifts **no** SystemVerilog: the error names the fix.
 

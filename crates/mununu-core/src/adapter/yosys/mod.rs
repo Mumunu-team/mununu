@@ -802,6 +802,11 @@ fn run_sv_flatten_btor2_concrete(
         run_sv2v(&s.bin, &s.sources, &s.include_dirs, &s.out)?;
     }
 
+    // `-q` keeps the console to warnings and errors — and silences sv-elab's diagnostics, which
+    // go through yosys's `log()`, so a failed `read_slang` reached the report as nothing but
+    // "Design elaboration failed; see full log for details" (2026-11-04: seven corpus designs,
+    // no reason named). `-l` keeps the full log beside the BTOR2 and the failure path reads it.
+    let log_path = plan.btor_path.with_file_name("yosys.log");
     let run_script = |script: &str| -> Result<std::process::Output, AdapterError> {
         let mut yosys_cmd = Command::new(&yosys);
         if std::env::var_os("MUNUNU_DEBUG_YOSYS_SCRIPT").is_some() {
@@ -816,11 +821,17 @@ fn run_sv_flatten_btor2_concrete(
         if let Some(plugin) = &plan.plugin {
             yosys_cmd.arg("-m").arg(plugin);
         }
-        yosys_cmd.arg("-q").arg("-p").arg(script);
+        yosys_cmd
+            .arg("-l")
+            .arg(&log_path)
+            .arg("-q")
+            .arg("-p")
+            .arg(script);
         // N0.2 — the lift cache's manifest renders this invocation as the script text, the
         // plugin identity and the cwd rule. An argument or environment variable added here
         // that the script text does not carry needs `lift_cache::LIFT_CACHE_FORMAT` bumped,
-        // or entries stored before the change would be served after it.
+        // or entries stored before the change would be served after it (`-l` only adds a
+        // log the cache never stores, and changes no output).
         // mununu#504 — bounded. This ran as a bare `.output()`, i.e. forever. The lift precedes
         // every property, so a hung yosys emits ZERO output and the whole run reads as absent —
         // one of the two ways a consumer loses a full gate run. `run_yosys` 700 lines below has
@@ -874,11 +885,12 @@ fn run_sv_flatten_btor2_concrete(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let hint = read_slang_hint(&stderr);
+        let log_errors = yosys_log_errors(&log_path);
+        let hint = read_slang_hint(&format!("{stderr}\n{log_errors}"));
         return Err(AdapterError {
             kind: AdapterErrorKind::ParseError,
             message: format!(
-                "adapter/yosys: yosys exited with status {}{hint} \nstdout:\n{stdout}\nstderr:\n{stderr}",
+                "adapter/yosys: yosys exited with status {}{hint} \nstdout:\n{stdout}\nstderr:\n{stderr}{log_errors}",
                 output.status
             ),
             location: None,
@@ -1576,6 +1588,18 @@ pub(crate) fn blackboxed_module_names(hier_json: &str) -> Vec<String> {
     names.into_iter().collect()
 }
 
+/// The module attribute that marks a stub standing in for a module the source set lacks.
+/// sv-elab refuses an instantiation with no definition (2026-11-04); `read_verilog` lifted it
+/// with the cell undefined, and yosys's BTOR backend made the cell's outputs anonymous inputs —
+/// free, non-deliberate leaves that `violation-over-free-leaves` withholds a VIOLATED over. A
+/// stub carrying this attribute (empty, with the module's ports) gets exactly that: the read keeps
+/// it as a black box (`--empty-blackboxes`), the hierarchy snapshot names it in
+/// `blackboxed_modules`, and the script deletes the module before the BTOR2 is written, so the
+/// parent's cell is undefined again. Measured 2026-11-04: two anonymous inputs, no next-less
+/// state — the old reader's shape to the byte; without the attribute the same stub is a
+/// deliberate `(* blackbox *)` cut (`cutpoint -blackbox`, next-less states, verdict kept).
+pub const MISSING_MODULE_ATTR: &str = "mununu_missing_module";
+
 /// One submodule's translated output, as returned by
 /// [`translate_sv_per_module`]. The `btor2_path` is `Some(..)` when
 /// `yopts.per_module_output_dir` was set (the BTOR2 file persists);
@@ -1734,6 +1758,7 @@ fn translate_sv_per_module_impl(
         &discovery_script,
         PER_MODULE_YOSYS_TIMEOUT,
         plugin.as_deref(),
+        &hier_json_path.with_file_name("yosys-discovery.log"),
     )?;
 
     let hier_body = std::fs::read_to_string(&hier_json_path).map_err(|e| AdapterError {
@@ -1794,7 +1819,13 @@ fn translate_sv_per_module_impl(
             &yopts.init_policy_overrides,
             &yopts.params,
         );
-        run_yosys(&yosys, &script, PER_MODULE_YOSYS_TIMEOUT, plugin.as_deref())?;
+        run_yosys(
+            &yosys,
+            &script,
+            PER_MODULE_YOSYS_TIMEOUT,
+            plugin.as_deref(),
+            &btor_path.with_file_name(format!("{module_name}.yosys.log")),
+        )?;
 
         let btor = std::fs::read_to_string(&btor_path).map_err(|e| AdapterError {
             kind: AdapterErrorKind::ParseError,
@@ -1967,19 +1998,21 @@ fn select_setundef_pass(anyseq: bool, anyconst: bool) -> &'static str {
     }
 }
 
-/// Spawn Yosys with the given script. Captures stdout/stderr into the
+/// Spawn Yosys with the given script. Captures stdout/stderr — and the `error` lines of the
+/// full log kept at `log` (`-l`; `-q` keeps sv-elab's diagnostics off the console) — into the
 /// `AdapterError` message on failure.
 fn run_yosys(
     yosys: &Path,
     script: &str,
     timeout: Duration,
     plugin: Option<&str>,
+    log: &Path,
 ) -> Result<(), AdapterError> {
     let mut command = Command::new(yosys);
     if let Some(p) = plugin {
         command.arg("-m").arg(p);
     }
-    command.arg("-q").arg("-p").arg(script);
+    command.arg("-l").arg(log).arg("-q").arg("-p").arg(script);
     let outcome = crate::adapter::run_with_timeout(&mut command, None, timeout).map_err(|e| {
         AdapterError {
             kind: AdapterErrorKind::ParseError,
@@ -1987,7 +2020,7 @@ fn run_yosys(
             location: None,
         }
     })?;
-    yosys_run_outcome_to_result(outcome, script, timeout)
+    yosys_run_outcome_to_result(outcome, script, timeout, &yosys_log_errors(log))
 }
 
 /// Map a [`crate::adapter::run_with_timeout`] outcome to a result: `None`
@@ -2019,6 +2052,7 @@ fn yosys_run_outcome_to_result(
     outcome: Option<(std::process::ExitStatus, String, String)>,
     script: &str,
     timeout: Duration,
+    log_errors: &str,
 ) -> Result<(), AdapterError> {
     // Timed out — killed. Per-module emission targets small fixtures; a large
     // design can thrash past the cap. Surface an actionable error, not a hang.
@@ -2037,10 +2071,11 @@ fn yosys_run_outcome_to_result(
         });
     };
     if !status.success() {
+        let hint = read_slang_hint(&format!("{stderr}\n{log_errors}"));
         return Err(AdapterError {
             kind: AdapterErrorKind::ParseError,
             message: format!(
-                "adapter/yosys: yosys exited with status {status} (script: {script})\nstdout:\n{stdout}\nstderr:\n{stderr}"
+                "adapter/yosys: yosys exited with status {status}{hint} (script: {script})\nstdout:\n{stdout}\nstderr:\n{stderr}{log_errors}"
             ),
             location: None,
         });
@@ -2580,16 +2615,92 @@ fn slang_plugin_arg() -> Option<String> {
         .filter(|p| !p.trim().is_empty())
 }
 
-/// The actionable tail of a yosys failure whose stderr says `read_slang` is not a command: the
-/// binary predates the built-in reader and no plugin was named.
-fn read_slang_hint(stderr: &str) -> &'static str {
-    if stderr.contains("No such command: read_slang") {
-        " — this yosys has no `read_slang`: use yosys ≥ 0.67 (the pinned oss-cad-suite of the \
-         mununu-sva image has it built in) or set MUNUNU_YOSYS_SLANG_PLUGIN to a yosys-slang \
-         plugin"
-    } else {
-        ""
+/// The actionable tail of a yosys failure, read off its stderr and log: `read_slang` is not a
+/// command (the binary predates the built-in reader and no plugin was named), or sv-elab refused
+/// an instantiated module it has no definition for — `read_verilog` black-boxed a missing module
+/// silently (its outputs free, `diagnostics.blackboxed_modules` naming it); sv-elab retired
+/// `--ignore-unknown-modules` and wants a definition, which a port-only `(* blackbox *)` stub
+/// supplies with the same semantics (2026-11-04: seven corpus designs lifted only by the old
+/// reader failed this way, the reason hidden by `-q`).
+fn read_slang_hint(text: &str) -> String {
+    let mut hint = String::new();
+    if text.contains("No such command: read_slang") {
+        hint.push_str(
+            " — this yosys has no `read_slang`: use yosys ≥ 0.67 (the pinned oss-cad-suite of \
+             the mununu-sva image has it built in) or set MUNUNU_YOSYS_SLANG_PLUGIN to a \
+             yosys-slang plugin",
+        );
     }
+    if text.contains("unknown module '") {
+        hint.push_str(&format!(
+            " — the design instantiates a module with no definition: sv-elab needs one for every \
+             instantiated module (`read_verilog` lifted a missing one silently; a known flop \
+             primitive such as prim_flop / prim_sparse_fsm_flop is still stubbed automatically \
+             unless --no-auto-stub-flops). Add the module's source, or an empty stub module with \
+             its ports: marked `(* {MISSING_MODULE_ATTR} *)` it stands in for the missing module \
+             exactly as the old reader did — outputs free, a VIOLATED over them withheld — and \
+             unmarked (or `(* blackbox *)`) it is a deliberate cut that keeps its verdict under \
+             the `blackbox-cut` caveat; either way `diagnostics.blackboxed_modules` names it"
+        ));
+    }
+    hint
+}
+
+/// The module names a failed lift's message says have no definition — every
+/// `unknown module 'NAME'` sv-elab wrote into the log ([`yosys_log_errors`] carries them into the
+/// message), sorted and deduplicated. `verify_auto`'s H.C auto-stub reads them to stage the
+/// behavioural stubs of the flop primitives it knows; under `read_verilog` the same names came
+/// from the hierarchy snapshot of a lift that succeeded with the modules cut.
+pub(crate) fn unknown_modules_in_error(message: &str) -> Vec<String> {
+    const MARK: &str = "unknown module '";
+    let mut names = std::collections::BTreeSet::new();
+    let mut rest = message;
+    while let Some(i) = rest.find(MARK) {
+        rest = &rest[i + MARK.len()..];
+        let Some(end) = rest.find('\'') else {
+            break;
+        };
+        let name = &rest[..end];
+        if !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+        {
+            names.insert(name.to_string());
+        }
+        rest = &rest[end..];
+    }
+    names.into_iter().collect()
+}
+
+/// The `error` lines of a yosys log kept with `-l`: sv-elab's `file:line:col: error: …`
+/// diagnostics and yosys's own `ERROR: …`, in order, deduplicated, at most 24 — the reason a lift
+/// failed, which `-q` keeps off the console. Empty when the log is missing or carries none.
+fn yosys_log_errors(log: &Path) -> String {
+    let Ok(text) = std::fs::read_to_string(log) else {
+        return String::new();
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    let mut lines: Vec<&str> = Vec::new();
+    for raw in text.lines() {
+        let line = raw.trim();
+        let is_error =
+            line.contains(": error: ") || line.starts_with("ERROR:") || line.starts_with("error:");
+        if is_error && seen.insert(line) {
+            lines.push(line);
+        }
+    }
+    if lines.is_empty() {
+        return String::new();
+    }
+    let total = lines.len();
+    lines.truncate(24);
+    let more = if total > lines.len() {
+        format!("\n… {} more", total - lines.len())
+    } else {
+        String::new()
+    };
+    format!("\nyosys log (errors):\n{}{more}\n", lines.join("\n"))
 }
 
 /// Test-only probe shared by every lib test that lifts SystemVerilog: a `yosys` on the PATH
@@ -2833,7 +2944,10 @@ fn emit_cutpoints(signals: &[String]) -> String {
 /// too, so no product path ever lifted them), `--ignore-timing` (slang is stricter than `read_verilog` about
 /// `#`-delay timing controls, which are not part of the design's cycle behaviour — SOUNDNESS:
 /// read_verilog-equivalent, not an extra abstraction; without it ~18 corpus designs failed to
-/// lift, 2026-07-25), `--top` when given, one `-G NAME=VALUE` per parameter override (top-scoped,
+/// lift, 2026-07-25), `--empty-blackboxes` (an empty module is a black box — what yosys made of a
+/// bodiless module under `read_verilog`, mununu#724 — rather than a module whose outputs read
+/// constant zero, which is what sv-elab makes of it otherwise; measured 2026-11-04. A stub marked
+/// [`MISSING_MODULE_ATTR`] is deleted again after the hierarchy snapshot), `--top` when given, one `-G NAME=VALUE` per parameter override (top-scoped,
 /// so `MODULE.NAME` applies by its bare name; an unknown name is validated upstream against the
 /// slang AST), the staging directory as an include dir (a cross-file `\`include "peer.sv"`
 /// between staged sources resolves) and the caller's include dirs.
@@ -2867,7 +2981,7 @@ fn read_slang_cmd(
         })
         .collect();
     format!(
-        "read_slang --ignore-assertions --ignore-timing{top_arg}{param_g}{inc}{extra_inc} {files}"
+        "read_slang --ignore-assertions --ignore-timing --empty-blackboxes{top_arg}{param_g}{inc}{extra_inc} {files}"
     )
 }
 
@@ -2949,7 +3063,11 @@ fn build_script(
     // The explicit control-slice cut points splice in just before `cutpoint -blackbox`
     // (both after `write_json`, before `memory_collect`/`flatten`).
     format!(
-        "{}; {hier}; {per_signal}proc; write_json {}; {cutpoints}cutpoint -blackbox; memory_collect; flatten; design -save mununu_pre_clocks; opt_clean; write_json {}; design -load mununu_pre_clocks; async2sync; chformal -lower; dffunmap; {setundef_pass}; write_btor {}",
+        // `delete =A:…` right after the snapshot: a stub marked [`MISSING_MODULE_ATTR`] has been
+        // named in the hierarchy JSON and is now removed, so its cell is undefined when the BTOR2 is
+        // written — the old reader's missing-module shape (anonymous inputs). The `=` includes
+        // black-box modules in the selection; with no such module the pass is a no-op.
+        "{}; {hier}; {per_signal}proc; write_json {}; delete =A:{MISSING_MODULE_ATTR}; {cutpoints}cutpoint -blackbox; memory_collect; flatten; design -save mununu_pre_clocks; opt_clean; write_json {}; design -load mununu_pre_clocks; async2sync; chformal -lower; dffunmap; {setundef_pass}; write_btor {}",
         read_cmds.join("; "),
         hier_json_out.display(),
         clock_json_path(btor_out).display(),
@@ -3386,7 +3504,7 @@ endmodule
         // A timed-out (killed) per-module yosys call must surface an ACTIONABLE
         // scope error — naming the cap, the small-fixture scope, and the
         // whole-design alternative — not hang and not a bare "failure".
-        let err = yosys_run_outcome_to_result(None, "write_btor …", Duration::from_secs(60))
+        let err = yosys_run_outcome_to_result(None, "write_btor …", Duration::from_secs(60), "")
             .expect_err("a timeout must be an error");
         assert_eq!(err.kind, AdapterErrorKind::ParseError);
         assert!(
@@ -3820,6 +3938,81 @@ endmodule
     }
 
     #[test]
+    fn read_slang_hint_names_the_fix_for_each_failure_class() {
+        assert_eq!(read_slang_hint("ERROR: Design elaboration failed"), "");
+        let unknown = read_slang_hint("prim_count.sv:126:5: error: unknown module 'prim_flop'");
+        assert!(
+            unknown.contains("(* blackbox *)") && unknown.contains("blackboxed_modules"),
+            "{unknown}"
+        );
+        let missing = read_slang_hint("ERROR: No such command: read_slang");
+        assert!(missing.contains("yosys ≥ 0.67"), "{missing}");
+        let both =
+            read_slang_hint("No such command: read_slang\nx.sv:1:1: error: unknown module 'y'");
+        assert!(
+            both.contains("yosys ≥ 0.67") && both.contains("(* blackbox *)"),
+            "{both}"
+        );
+    }
+
+    #[test]
+    fn unknown_modules_are_read_off_the_lift_error() {
+        let msg = "adapter/yosys: yosys exited with status 1\nyosys log (errors):\n\
+                   k.sv:310:9: error: unknown module 'prim_secded_inv_72_64_dec'\n\
+                   k.sv:406:3: error: unknown module 'prim_count'\n\
+                   k.sv:406:3: error: unknown module 'prim_count'\n\
+                   ERROR: Design elaboration failed; see full log for details\n";
+        assert_eq!(
+            unknown_modules_in_error(msg),
+            vec![
+                "prim_count".to_string(),
+                "prim_secded_inv_72_64_dec".to_string()
+            ]
+        );
+        assert!(unknown_modules_in_error("ERROR: Design elaboration failed").is_empty());
+        assert!(unknown_modules_in_error("unknown module 'bad name'").is_empty());
+    }
+
+    /// The seam `verify_auto`'s auto-stub consumes: the names the error carries feed the stub
+    /// table, so a design whose FSM register is an undefined `prim_sparse_fsm_flop` gets the
+    /// behavioral stub from a FAILED lift exactly as it did from a succeeded-with-cuts one.
+    #[test]
+    fn unknown_modules_in_the_error_reach_the_flop_stub_table() {
+        let names = unknown_modules_in_error(
+            "x.sv:39:3: error: unknown module 'prim_sparse_fsm_flop'\n\
+             x.sv:90:3: error: unknown module 'prim_filter'",
+        );
+        let stubs = crate::adapter::slang::prim_stubs::stubs_for_cut_modules(&names);
+        assert_eq!(
+            stubs.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+            vec!["prim_sparse_fsm_flop.sv"]
+        );
+    }
+
+    #[test]
+    fn yosys_log_errors_keeps_the_diagnostics_quiet_mode_hides() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join("yosys.log");
+        std::fs::write(
+            &log,
+            "-- Running command `read_slang …' --\n\
+             prim_count.sv:126:5: error: unknown module 'prim_flop'\n\
+             prim_count.sv:126:5: error: unknown module 'prim_flop'\n\
+                 prim_flop #(\n\
+                 ^\n\
+             Build failed: 1 error, 0 warnings\n\
+             ERROR: Design elaboration failed; see full log for details\n",
+        )
+        .expect("write");
+        assert_eq!(
+            yosys_log_errors(&log),
+            "\nyosys log (errors):\nprim_count.sv:126:5: error: unknown module 'prim_flop'\n\
+             ERROR: Design elaboration failed; see full log for details\n"
+        );
+        assert_eq!(yosys_log_errors(&dir.path().join("missing.log")), "");
+    }
+
+    #[test]
     fn emit_cutpoints_empty_and_populated() {
         assert_eq!(emit_cutpoints(&[]), "");
         assert_eq!(
@@ -3832,6 +4025,25 @@ endmodule
             emit_cutpoints(&["bad;name".to_string(), "ok_net".to_string()]),
             "cutpoint w:ok_net; "
         );
+    }
+
+    /// The missing-module stub's deletion sits between the hierarchy snapshot (which names the
+    /// stub in `blackboxed_modules`) and `cutpoint -blackbox` (which would otherwise make it a
+    /// deliberate cut); the read keeps an empty module as a black box so the stub survives to the
+    /// snapshot at all.
+    #[test]
+    fn build_script_deletes_missing_module_stubs_after_the_snapshot() {
+        use std::path::PathBuf;
+        let script = slang_script(&[PathBuf::from("/tmp/foo.sv")], Some("top"), &[], &[], &[]);
+        let wj = script.find("write_json").expect("write_json present");
+        let del = script
+            .find(&format!("delete =A:{MISSING_MODULE_ATTR};"))
+            .expect("the delete present");
+        let cut = script
+            .find("cutpoint -blackbox")
+            .expect("cutpoint -blackbox present");
+        assert!(wj < del && del < cut, "{script}");
+        assert!(script.contains("--empty-blackboxes"), "{script}");
     }
 
     #[test]
@@ -4015,7 +4227,7 @@ endmodule
         let script = slang_script(&sources, None, &[], &inc, &[]);
         assert!(
             script.contains(
-                "read_slang --ignore-assertions --ignore-timing -I/stage -I/design/pkg /stage/a.sv"
+                "read_slang --ignore-assertions --ignore-timing --empty-blackboxes -I/stage -I/design/pkg /stage/a.sv"
             ),
             "caller include dir not appended on the slang path: {script}"
         );
@@ -4833,7 +5045,7 @@ mod lift_cache_tests {
         assert!(m.attempt.plugin.is_none() && m.attempt.sv2v.is_none());
         assert!(
             m.attempt.script.contains(
-                "read_slang --ignore-assertions --ignore-timing --top m \
+                "read_slang --ignore-assertions --ignore-timing --empty-blackboxes --top m \
                  -I/mununu-lift-cache/staging /mununu-lift-cache/staging/work.sv"
             ),
             "{}",
@@ -4923,23 +5135,16 @@ mod lift_cache_tests {
         assert_eq!(second.clock_domains, first.clock_domains);
         assert_eq!(second.frontend_used, first.frontend_used);
         assert_eq!(second.staged_primary, first.staged_primary);
-        // Two UNCACHED lifts are never byte-identical: yosys writes the per-run staging path
-        // into the BTOR2's `src` comments (`; /tmp/mununu-yosys-…/work.sv:1.16-1.19`), which
-        // downstream reads by basename only. Compare modulo that path; a hit reproduces the
-        // first run's, exactly as the uncached run's survives its deleted temp dir.
-        let modulo_staging =
-            |a: &SvFlattenArtifacts| a.btor2.replace(&a.staged_primary, "<staged>");
+        // sv-elab writes no per-run path into the BTOR2 (`read_verilog`'s `src` comments carried
+        // the staging directory, which is why this compared modulo it until 2026-11-04), so an
+        // uncached lift and a hit are byte-identical; what tells them apart is `cache`.
         let changed = src.replace("q <= d", "q <= ~d");
         let third = run_sv_flatten_btor2_with(&changed, &yopts, Some(&cache)).expect("lifts");
         assert_eq!(third.cache, LiftCacheOutcome::Miss);
-        assert_ne!(modulo_staging(&third), modulo_staging(&first));
+        assert_ne!(third.btor2, first.btor2);
         let off = run_sv_flatten_btor2_with(src, &yopts, None).expect("lifts");
         assert_eq!(off.cache, LiftCacheOutcome::Off);
-        assert_eq!(modulo_staging(&off), modulo_staging(&first));
-        assert_ne!(
-            off.btor2, first.btor2,
-            "the staging path differs per uncached run"
-        );
+        assert_eq!(off.btor2, first.btor2);
         // An unusable cache directory is a bypass, never a failure.
         std::fs::write(dir.path().join("file"), b"").expect("write");
         let blocked = LiftCache::at(dir.path().join("file"));
