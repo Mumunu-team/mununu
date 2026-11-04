@@ -25,8 +25,8 @@ pub use loader::{IncrementalState, LoadPlan};
 pub use parser::parse;
 pub use realize::{
     FormulaTargetsKind, GuardExpressionMetadata, PredicateMetadata, RealizationError,
-    RealizedContext, RealizedController, RealizedFormula, realize as realize_context,
-    realized_automaton_names,
+    RealizedContext, RealizedController, RealizedFormula, TemplateExpansion,
+    realize as realize_context, realize_with_templates, realized_automaton_names,
 };
 pub use runtime::ResolvedControllerOptions;
 

@@ -545,9 +545,50 @@ pub(crate) fn prepare_eval_context(
         )?
     };
 
-    let realized = realize_documents(&context_doc, &sidecar_docs)?;
+    let realized =
+        realize_documents_with_templates(&context_doc, &sidecar_docs, p.templates_files)?;
+    report_template_expansions(&realized);
     Ok(PreparedEvalContext {
         realized,
         formula_name,
     })
+}
+
+/// [`realize_documents`] with the project's template packs (`--templates-file`) reachable from a
+/// formula's `template ID { ... }` clause; without packs the configured catalog serves it.
+pub(crate) fn realize_documents_with_templates(
+    context_doc: &ContextDoc,
+    sidecar_docs: &[ContextDoc],
+    templates_files: &[PathBuf],
+) -> Result<RealizedContext, String> {
+    if templates_files.is_empty() {
+        return realize_documents(context_doc, sidecar_docs);
+    }
+    let registry = mununu_core::adapter::templates::TemplateRegistry::configured(templates_files)
+        .map_err(|e| e.to_string())?;
+    mununu_core::context_dsl::realize_with_templates(context_doc, sidecar_docs, &registry).map_err(
+        |err| {
+            format!(
+                "failed to realise context '{}': {err}",
+                context_doc.name.name
+            )
+        },
+    )
+}
+
+/// Every formula the file wrote as a `template` clause, with its expansion — the same line
+/// `--template` prints, so the reader sees the mu-calculus that was evaluated.
+pub(crate) fn report_template_expansions(realized: &RealizedContext) {
+    let mut rows: Vec<(&str, &mununu_core::context_dsl::TemplateExpansion)> = realized
+        .formulas
+        .values()
+        .filter_map(|f| f.template.as_ref().map(|t| (f.name.as_str(), t)))
+        .collect();
+    rows.sort_by(|a, b| a.0.cmp(b.0));
+    for (name, expansion) in rows {
+        eprintln!(
+            "Template '{}' → formula '{}': {}",
+            expansion.template, name, expansion.formula
+        );
+    }
 }

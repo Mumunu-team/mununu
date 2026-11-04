@@ -376,6 +376,38 @@ mu_formulas {
 
 See the [Mu-Calculus Reference](Mu-Calculus-Reference) for the full expression language.
 
+### A formula from the template catalog
+
+> Source of truth: [`parse_template_clause`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/context_dsl/parser.rs) + [`collect_formulas`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/context_dsl/realize.rs) — surface: CLI+API+UI (every path that realizes a CTXDSL document)
+
+A formula may name a property template in place of a `body`. The clause is expanded when the file
+is realized, through the same catalog `context eval --template` and the API's `template_ref` use —
+the built-in templates, the deployment's packs (`mununu.toml`) and, on the CLI with
+`--templates-file`, the project's — so it means exactly what the flags mean, persisted beside the
+model (as `@mununu_template` is beside the RTL):
+
+```
+mu_formulas {
+    formula trip_exists {
+        over protection;
+        template reachable { TARGET = Lof; }
+    }
+    formula rearm_needs_rods_in {
+        over protection;
+        template mutual_exclusion { A = Armed; B = Scram; }
+    }
+}
+```
+
+`body` and `template` exclude each other. An argument is `KEY = value;` where the value is an
+identifier, a string literal or an integer, validated as on the command line: a `Predicate` / `State`
+parameter takes a bare identifier, never an expression (`TARGET = "n == 2"` is refused). An unknown
+template id, a missing argument or a bad value refuses realization naming the formula; nothing is
+dropped silently. The CLI prints every expansion before the verdict —
+`Template 'reachable' → formula 'trip_exists': mu X. (Lof || <> X)` — read it before trusting a
+template's name (`response` is AG(T → **EF** R), the possibility reading). `template` is not a
+keyword: a label, a state or an automaton may still be called `template`.
+
 ## Controllers
 
 A controller block synthesizes a maximally permissive controller that restricts only controllable labels to enforce a given formula.

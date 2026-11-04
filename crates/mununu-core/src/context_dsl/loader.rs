@@ -492,6 +492,14 @@ fn hash_formula(formula: &MuFormula) -> u64 {
             // Hash the LTL formula representation
             hash_string(&mut hasher, &format!("{:?}", ltl_expr.formula));
         }
+        FormulaExpr::Template(spec) => {
+            hash_string(&mut hasher, "template");
+            hash_string(&mut hasher, &spec.template.name);
+            for arg in &spec.args {
+                hash_string(&mut hasher, &arg.name.name);
+                hash_string(&mut hasher, &arg.value);
+            }
+        }
     }
     hasher.finish()
 }

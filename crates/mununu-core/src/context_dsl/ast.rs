@@ -358,6 +358,31 @@ pub enum FormulaExpr {
     MuCalculus(MuExpr),
     /// New LTL syntax
     Ltl(LtlExpr),
+    /// A property-template instantiation written in the file, expanded at realization.
+    Template(TemplateExpr),
+}
+
+/// A property-template instantiation written in place of a `body`:
+/// `template reachable { TARGET = Lof; }`. It is expanded at realization through the template
+/// registry (the built-in catalog, the deployment's and the project's packs), so it means exactly
+/// what `--template reachable --template-arg TARGET=Lof` means on the command line — persisted
+/// beside the model, as `@mununu_template` is beside the RTL.
+#[derive(Debug, Clone)]
+pub struct TemplateExpr {
+    /// The template's catalog id (`reachable`, `mutual_exclusion`, …).
+    pub template: Ident,
+    /// The `KEY = value;` bindings, in source order.
+    pub args: Vec<TemplateArg>,
+    pub span: Span,
+}
+
+/// One `KEY = value;` binding of a [`TemplateExpr`]. The value is an identifier, a string literal
+/// or an integer, kept as the text the registry validates against the parameter's type.
+#[derive(Debug, Clone)]
+pub struct TemplateArg {
+    pub name: Ident,
+    pub value: String,
+    pub span: Span,
 }
 
 /// μ-calculus expression (raw string representation).

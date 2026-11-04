@@ -255,6 +255,12 @@ args = { TARGET = "n == 2" }
 formula = "mu X . ((n == 2) || (<> X))"
 ```
 
+To persist an instantiation inside the model instead of beside it, write a
+`template` clause in place of the formula's `body`
+(`formula trip_exists { over protection; template reachable { TARGET = Lof; } }`,
+[CTXDSL Language Reference](../wiki/CTXDSL-Language-Reference.md#a-formula-from-the-template-catalog));
+the argument rules are the same.
+
 `var == value` atoms bind through the `verify` path for a **single-source**
 project. They do **not** bind across a multi-source composition — see the
 matrix below.
