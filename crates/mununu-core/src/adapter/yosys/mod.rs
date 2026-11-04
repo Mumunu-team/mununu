@@ -35,6 +35,8 @@
 //! - Multi-clock SVA, classes, and Verific-only constructs are out of scope —
 //!   Yosys errors will surface with a layer-tagged context (`adapter/yosys: ...`).
 
+/// N0.2 — the content-addressed cache of the lift's raw tool outputs (`MUNUNU_LIFT_CACHE_DIR`).
+pub mod lift_cache;
 /// R-MM (KMTS multi-module composition) — netlist-driven driver.
 pub mod multi_module;
 pub mod netlist;
@@ -44,9 +46,15 @@ use crate::adapter::{
     AdapterError, AdapterErrorKind, AdapterOptions, AdapterOutput, FormatAdapter, SourceFormat,
     SourceInfo,
 };
+use lift_cache::{
+    AttemptManifest, CachedLift, LIFT_CACHE_FORMAT, LiftCache, LiftCacheKey, LiftCacheOutcome,
+    LiftManifest, Sv2vManifest, ToolIdentity, collect_include_files, frontend_from_tag,
+    frontend_tag,
+};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 /// Per-invocation wall-clock cap for the per-module BTOR2 emission path
@@ -338,6 +346,8 @@ struct SvFlattenArtifacts {
     clock_domains: Vec<ClockDomain>,
     /// The flattened, `opt_clean`ed netlist the clock-domain scan read (yosys `write_json`).
     flat_netlist_json: String,
+    /// What the lift cache did for this lift (N0.2): `Off`, `Hit`, `Miss` or `Bypassed(why)`.
+    cache: LiftCacheOutcome,
 }
 
 /// Run sv2v (optional) + the flattened Yosys script and return the
@@ -451,7 +461,205 @@ pub(crate) fn strip_port_net_types(src: &str) -> String {
 /// default for everything else. Fallback fires only on `Err` (never a vacuous success, so the
 /// sv2v-drops-SVA trap can't be masked); an EXPLICIT `Verilog`/`Slang` request is honoured as-is
 /// with no fallback. Preference is env-driven (`MUNUNU_YOSYS_FRONTEND=slang` tries slang first).
+///
+/// N0.2 — under `MUNUNU_LIFT_CACHE_DIR` the whole lift (every attempt) is looked up before a tool
+/// runs and stored after; see [`run_sv_flatten_btor2_with`].
 fn run_sv_flatten_btor2(
+    content: &str,
+    yopts: &YosysOptions,
+) -> Result<SvFlattenArtifacts, AdapterError> {
+    run_sv_flatten_btor2_with(content, yopts, LiftCache::from_env().as_ref())
+}
+
+/// [`run_sv_flatten_btor2`] against an explicit lift cache (`None` = off) — N0.2. A hit returns
+/// the stored raw tool outputs with mununu's post-processing (clock domains, the multi-clock
+/// refusal) re-run on them; a miss runs the tools and stores the result; a cache that cannot be
+/// used for this lift is bypassed, with the reason on the artifacts — never a failure.
+fn run_sv_flatten_btor2_with(
+    content: &str,
+    yopts: &YosysOptions,
+    cache: Option<&LiftCache>,
+) -> Result<SvFlattenArtifacts, AdapterError> {
+    let key: Result<Option<LiftCacheKey>, String> = match cache {
+        None => Ok(None),
+        Some(c) => match lift_cache_key(content, yopts) {
+            Ok(k) => Ok(Some(k)),
+            Err(reason) => {
+                tracing::warn!(
+                    target: "mununu::lift_cache",
+                    dir = %c.dir().display(),
+                    "lift cache bypassed: {reason}"
+                );
+                Err(reason)
+            }
+        },
+    };
+    if let (Some(c), Ok(Some(k))) = (cache, &key)
+        && let Some(hit) = c.lookup(k)
+    {
+        tracing::info!(target: "mununu::lift_cache", index = k.index(), "lift cache hit");
+        return artifacts_from_cached(hit, yopts);
+    }
+    let mut artifacts = run_sv_flatten_btor2_uncached(content, yopts)?;
+    artifacts.cache = match &key {
+        Ok(None) => LiftCacheOutcome::Off,
+        Ok(Some(_)) => LiftCacheOutcome::Miss,
+        Err(reason) => LiftCacheOutcome::Bypassed(reason.clone()),
+    };
+    if let (Some(c), Ok(Some(k))) = (cache, &key) {
+        match c.store(k, &cached_lift_of(&artifacts)) {
+            Ok(()) => tracing::info!(
+                target: "mununu::lift_cache",
+                index = k.index(),
+                "lift cache miss: the lift is stored"
+            ),
+            Err(e) => tracing::warn!(
+                target: "mununu::lift_cache",
+                index = k.index(),
+                "lift cache miss: the lift could not be stored ({e})"
+            ),
+        }
+    }
+    Ok(artifacts)
+}
+
+/// `MUNUNU_YOSYS_FRONTEND=slang` flips the `Auto` attempt order.
+fn prefer_slang_env() -> bool {
+    std::env::var("MUNUNU_YOSYS_FRONTEND")
+        .map(|v| v.eq_ignore_ascii_case("slang"))
+        .unwrap_or(false)
+}
+
+/// The cache key of this lift: the manifest of what it would tell its tools (N0.2). `Err` names
+/// why none can be built (no yosys, an include tree over the walk cap, …) — a bypass.
+fn lift_cache_key(content: &str, yopts: &YosysOptions) -> Result<LiftCacheKey, String> {
+    let yosys = locate_yosys().map_err(|e| e.message)?;
+    let banner = yosys_banner(&yosys).map_err(|e| e.message)?;
+    let manifest = lift_manifest(
+        content,
+        yopts,
+        ToolIdentity {
+            path: yosys.display().to_string(),
+            identity: banner,
+        },
+    )?;
+    LiftCacheKey::new(&manifest)
+}
+
+/// What this lift would tell its tools: every front end the `Auto` loop would attempt, planned
+/// by [`plan_lift`] against a placeholder staging directory — the same planner the run
+/// executes, so the key cannot drift from the run. `yosys` is the located binary's identity.
+fn lift_manifest(
+    content: &str,
+    yopts: &YosysOptions,
+    yosys: ToolIdentity,
+) -> Result<LiftManifest, String> {
+    let dir = Path::new("/mununu-lift-cache/staging");
+    let order = if yopts.frontend == SvFrontend::Auto {
+        frontend_attempt_order(locate_slang_plugin().is_some(), prefer_slang_env())
+    } else {
+        vec![yopts.frontend]
+    };
+    let mut attempts = Vec::with_capacity(order.len());
+    let mut staged: Vec<(String, String)> = Vec::new();
+    // The directories a tool may read `include`d files from: the script's `-I` dirs and sv2v's.
+    let mut include_dirs: Vec<PathBuf> = yopts.extra_include_dirs.clone();
+    for fe in order {
+        let mut y = yopts.clone();
+        y.frontend = fe;
+        let plan = plan_lift(content, &y, dir).map_err(|e| e.message)?;
+        if staged.is_empty() {
+            staged = plan
+                .staged
+                .iter()
+                .map(|(p, text)| {
+                    let rel = p.strip_prefix(dir).unwrap_or(p);
+                    (rel.to_string_lossy().into_owned(), text.clone())
+                })
+                .collect();
+        }
+        let sv2v = match &plan.sv2v {
+            Some(s) => {
+                include_dirs.extend(
+                    s.include_dirs
+                        .iter()
+                        .filter(|d| d.as_path() != dir)
+                        .cloned(),
+                );
+                Some(Sv2vManifest {
+                    tool: ToolIdentity {
+                        path: s.bin.display().to_string(),
+                        identity: sv2v_version(&s.bin).map_err(|e| e.message)?,
+                    },
+                    argv: sv2v_args(&s.sources, &s.include_dirs),
+                })
+            }
+            None => None,
+        };
+        attempts.push(AttemptManifest {
+            frontend: frontend_tag(fe),
+            script: plan.script,
+            cwd_in_staging_dir: plan.yosys_cwd.is_some(),
+            plugin: plan.plugin.as_deref().map(ToolIdentity::of_plugin),
+            sv2v,
+        });
+    }
+    Ok(LiftManifest {
+        format: LIFT_CACHE_FORMAT,
+        crate_version: env!("CARGO_PKG_VERSION"),
+        yosys,
+        attempts,
+        staged,
+        include_files: collect_include_files(&include_dirs)?,
+    })
+}
+
+/// The artifacts of a cache hit: the stored raw outputs, with everything mununu derives from
+/// them computed afresh — so a change to that code applies to hits as to misses.
+fn artifacts_from_cached(
+    hit: CachedLift,
+    yopts: &YosysOptions,
+) -> Result<SvFlattenArtifacts, AdapterError> {
+    let frontend_used = frontend_from_tag(&hit.frontend_used).ok_or_else(|| AdapterError {
+        kind: AdapterErrorKind::ParseError,
+        message: format!(
+            "adapter/yosys: lift cache entry names an unknown front end `{}`",
+            hit.frontend_used
+        ),
+        location: None,
+    })?;
+    let clock_domains = clock_domains(&hit.flat_netlist_json);
+    refuse_merged_clock_domains(&clock_domains, yopts)?;
+    Ok(SvFlattenArtifacts {
+        btor2: hit.btor2,
+        hier_json: hit.hier_json,
+        staged_primary: hit.staged_primary,
+        frontend_used,
+        sv2v_ran: hit.sv2v_ran,
+        fallback_reason: hit.fallback_reason,
+        backend_retry: hit.backend_retry,
+        clock_domains,
+        flat_netlist_json: hit.flat_netlist_json,
+        cache: LiftCacheOutcome::Hit,
+    })
+}
+
+/// The raw outputs and process facts of a successful lift, as the cache stores them.
+fn cached_lift_of(a: &SvFlattenArtifacts) -> CachedLift {
+    CachedLift {
+        btor2: a.btor2.clone(),
+        hier_json: a.hier_json.clone(),
+        flat_netlist_json: a.flat_netlist_json.clone(),
+        staged_primary: a.staged_primary.clone(),
+        frontend_used: frontend_tag(a.frontend_used).to_string(),
+        sv2v_ran: a.sv2v_ran,
+        fallback_reason: a.fallback_reason.clone(),
+        backend_retry: a.backend_retry.clone(),
+    }
+}
+
+/// The `Auto` fallback loop of [`run_sv_flatten_btor2`], tools always run.
+fn run_sv_flatten_btor2_uncached(
     content: &str,
     yopts: &YosysOptions,
 ) -> Result<SvFlattenArtifacts, AdapterError> {
@@ -459,9 +667,7 @@ fn run_sv_flatten_btor2(
         return run_sv_flatten_btor2_concrete(content, yopts);
     }
     let slang_ok = locate_slang_plugin().is_some();
-    let prefer_slang = std::env::var("MUNUNU_YOSYS_FRONTEND")
-        .map(|v| v.eq_ignore_ascii_case("slang"))
-        .unwrap_or(false);
+    let prefer_slang = prefer_slang_env();
     // Track the prior failed attempt so a successful FALLBACK can name what it fell
     // back from + why (#466) — a silent front-end swap is the #459 failure class.
     let mut prior: Option<(SvFrontend, AdapterError)> = None;
@@ -497,31 +703,49 @@ fn frontend_attempt_order(slang_available: bool, prefer_slang: bool) -> Vec<SvFr
     }
 }
 
-fn run_sv_flatten_btor2_concrete(
-    content: &str,
-    yopts: &YosysOptions,
-) -> Result<SvFlattenArtifacts, AdapterError> {
-    let yosys = locate_yosys()?;
-    if !yopts.skip_verific_check {
-        verify_no_verific(&yosys)?;
-    }
+/// Everything one concrete lift will do, decided before any tool runs: the files to stage,
+/// the sv2v invocation when it runs, where yosys runs and with which plugin, and the exact
+/// script. [`run_sv_flatten_btor2_concrete`] executes it against a real staging directory; the
+/// lift cache renders it against a placeholder one (N0.2, [`lift_manifest`]), so the cache key
+/// is exactly what runs and cannot drift from it.
+struct LiftPlan {
+    /// The staged primary, `<dir>/work.sv`.
+    primary: PathBuf,
+    /// `(path under the staging dir, content)` — the primary first, each already through
+    /// `strip_port_net_types`.
+    staged: Vec<(PathBuf, String)>,
+    sv2v: Option<Sv2vPlan>,
+    /// yosys runs inside the staging directory when it reads sv2v's output by its bare name
+    /// (mununu#806) — the names it mints depend on it.
+    yosys_cwd: Option<PathBuf>,
+    /// The `-m` argument loading the slang plugin, when this attempt uses it.
+    plugin: Option<String>,
+    script: String,
+    frontend_used: SvFrontend,
+    btor_path: PathBuf,
+    hier_json_path: PathBuf,
+}
 
-    let tmp = TempDir::new("mununu-yosys")?;
-    let primary = tmp.path().join("work.sv");
+/// The sv2v pass of a [`LiftPlan`]: binary, inputs, include dirs, output file.
+struct Sv2vPlan {
+    bin: PathBuf,
+    sources: Vec<PathBuf>,
+    include_dirs: Vec<PathBuf>,
+    out: PathBuf,
+}
+
+/// Plan one concrete lift of `content` staged under `dir` (which need not exist: the lift
+/// cache plans against a placeholder). Touches no file; locates the tools it would run.
+fn plan_lift(content: &str, yopts: &YosysOptions, dir: &Path) -> Result<LiftPlan, AdapterError> {
+    let primary = dir.join("work.sv");
     // A2 — strip yosys/slang-rejected net-type qualifiers on port headers
     // (`input tri0 x`) so the design parses; sound (a port net type is invisible
     // to isolated single-module verification). No-op on sources without them.
-    write_file(&primary, &strip_port_net_types(content))?;
-
-    let mut sources = vec![primary.clone()];
+    let mut staged = vec![(primary.clone(), strip_port_net_types(content))];
     for (name, src) in &yopts.additional_sources {
-        let p = tmp.path().join(name);
-        if let Some(parent) = p.parent() {
-            std::fs::create_dir_all(parent).map_err(io_err)?;
-        }
-        write_file(&p, &strip_port_net_types(src))?;
-        sources.push(p);
+        staged.push((dir.join(name), strip_port_net_types(src)));
     }
+    let mut sources: Vec<PathBuf> = staged.iter().map(|(p, _)| p.clone()).collect();
 
     // Optional sv2v preprocessing pass. sv2v translates modern SV
     // constructs Yosys's built-in parser doesn't accept (notably the
@@ -567,11 +791,10 @@ fn run_sv_flatten_btor2_concrete(
     // `…$func$preprocessed.sv:3983$4411.$result`, the same on every run (yosys's `$4411` autoidx
     // is deterministic for the same input). Every other path in the script stays absolute.
     let mut yosys_cwd: Option<PathBuf> = None;
-    let mut sv2v_ran = false;
+    let mut sv2v: Option<Sv2vPlan> = None;
     if yopts.use_sv2v && slang_plugin.is_none() {
-        sv2v_ran = true;
-        let sv2v = locate_sv2v()?;
-        let preprocessed = tmp.path().join("preprocessed.sv");
+        let bin = locate_sv2v()?;
+        let preprocessed = dir.join("preprocessed.sv");
         // Include-search path. Two sources, in priority order:
         //
         // 1. The staging tempdir itself. Every `additional_sources` entry
@@ -591,7 +814,7 @@ fn run_sv_flatten_btor2_concrete(
         //    per-call tempdir. Canonicalized to an absolute path so
         //    relative invocations (e.g. `mununu context eval foo.sv` from
         //    the source dir) resolve to a usable `-I`.
-        let mut include_dirs: Vec<PathBuf> = vec![tmp.path().to_path_buf()];
+        let mut include_dirs: Vec<PathBuf> = vec![dir.to_path_buf()];
         include_dirs.extend(yopts.primary_source_path.as_ref().and_then(|p| {
             let abs = Path::new(p)
                 .canonicalize()
@@ -600,18 +823,23 @@ fn run_sv_flatten_btor2_concrete(
         }));
         // 3. Caller-supplied include dirs (the source-manifest lift path).
         include_dirs.extend(yopts.extra_include_dirs.iter().cloned());
-        run_sv2v(&sv2v, &sources, &include_dirs, &preprocessed)?;
+        sv2v = Some(Sv2vPlan {
+            bin,
+            sources: sources.clone(),
+            include_dirs,
+            out: preprocessed,
+        });
         // Replace the original .sv inputs with the single combined
         // Verilog-2005 file. sv2v resolves cross-file packages,
         // interfaces, and parameters in one pass, so feeding the
         // combined output to Yosys is the documented correct usage.
         // By its bare name, with yosys's cwd set to the staging directory (mununu#806).
         sources = vec![PathBuf::from("preprocessed.sv")];
-        yosys_cwd = Some(tmp.path().to_path_buf());
+        yosys_cwd = Some(dir.to_path_buf());
     }
 
-    let btor_path = tmp.path().join("design.btor");
-    let hier_json_path = tmp.path().join("hier.json");
+    let btor_path = dir.join("design.btor");
+    let hier_json_path = dir.join("hier.json");
     // With yosys's cwd moved to the staging directory, a RELATIVE caller include dir would no
     // longer resolve: hand the script absolute ones (mununu#806).
     let script_include_dirs: Vec<PathBuf> = if yosys_cwd.is_some() {
@@ -636,19 +864,59 @@ fn run_sv_flatten_btor2_concrete(
         &script_include_dirs,
         &yopts.params,
     );
+    Ok(LiftPlan {
+        primary,
+        staged,
+        sv2v,
+        yosys_cwd,
+        plugin: slang_plugin,
+        script,
+        frontend_used,
+        btor_path,
+        hier_json_path,
+    })
+}
+
+fn run_sv_flatten_btor2_concrete(
+    content: &str,
+    yopts: &YosysOptions,
+) -> Result<SvFlattenArtifacts, AdapterError> {
+    let yosys = locate_yosys()?;
+    if !yopts.skip_verific_check {
+        verify_no_verific(&yosys)?;
+    }
+
+    let tmp = TempDir::new("mununu-yosys")?;
+    let plan = plan_lift(content, yopts, tmp.path())?;
+    for (path, text) in &plan.staged {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(io_err)?;
+        }
+        write_file(path, text)?;
+    }
+    if let Some(s) = &plan.sv2v {
+        run_sv2v(&s.bin, &s.sources, &s.include_dirs, &s.out)?;
+    }
 
     let run_script = |script: &str| -> Result<std::process::Output, AdapterError> {
         let mut yosys_cmd = Command::new(&yosys);
         if std::env::var_os("MUNUNU_DEBUG_YOSYS_SCRIPT").is_some() {
-            eprintln!("MUNUNU_DEBUG yosys cwd={yosys_cwd:?}\nMUNUNU_DEBUG script={script}");
+            eprintln!(
+                "MUNUNU_DEBUG yosys cwd={:?}\nMUNUNU_DEBUG script={script}",
+                plan.yosys_cwd
+            );
         }
-        if let Some(cwd) = &yosys_cwd {
+        if let Some(cwd) = &plan.yosys_cwd {
             yosys_cmd.current_dir(cwd);
         }
-        if let Some(plugin) = &slang_plugin {
+        if let Some(plugin) = &plan.plugin {
             yosys_cmd.arg("-m").arg(plugin);
         }
         yosys_cmd.arg("-q").arg("-p").arg(script);
+        // N0.2 — the lift cache's manifest renders this invocation as the script text, the
+        // plugin identity and the cwd rule. An argument or environment variable added here
+        // that the script text does not carry needs `lift_cache::LIFT_CACHE_FORMAT` bumped,
+        // or entries stored before the change would be served after it.
         // mununu#504 — bounded. This ran as a bare `.output()`, i.e. forever. The lift precedes
         // every property, so a hung yosys emits ZERO output and the whole run reads as absent —
         // one of the two ways a consumer loses a full gate run. `run_yosys` 700 lines below has
@@ -675,7 +943,7 @@ fn run_sv_flatten_btor2_concrete(
             stderr: stderr_s.into_bytes(),
         })
     };
-    let mut output = run_script(&script)?;
+    let mut output = run_script(&plan.script)?;
     let mut backend_retry = None;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -686,7 +954,7 @@ fn run_sv_flatten_btor2_concrete(
         // the backend's walk terminates; it removes nothing the design reads, so the model is
         // the same design. Retried once, and only on that error, so every lift that succeeds
         // today is byte-identical.
-        if let Some(retry) = backend_loop_retry_script(&script, &stderr) {
+        if let Some(retry) = backend_loop_retry_script(&plan.script, &stderr) {
             let second = run_script(&retry)?;
             if second.status.success() {
                 backend_retry = Some(format!(
@@ -712,26 +980,49 @@ fn run_sv_flatten_btor2_concrete(
         });
     }
 
-    let btor2 = std::fs::read_to_string(&btor_path).map_err(|e| AdapterError {
+    let btor2 = std::fs::read_to_string(&plan.btor_path).map_err(|e| AdapterError {
         kind: AdapterErrorKind::ParseError,
         message: format!(
             "adapter/yosys: yosys ran but did not produce {} ({e})",
-            btor_path.display()
+            plan.btor_path.display()
         ),
         location: None,
     })?;
 
     // Best-effort hierarchy snapshot (port directions + blackbox scan);
     // empty when Yosys did not emit it.
-    let hier_json = std::fs::read_to_string(&hier_json_path).unwrap_or_default();
+    let hier_json = std::fs::read_to_string(&plan.hier_json_path).unwrap_or_default();
 
     // The BTOR2 model has ONE implicit clock: every `next` fires on it. A design whose flops sit
     // in two domains was lifted as if they ticked together — silently, because the old refusal
     // matched clock-shaped input NAMES (`clk`, `clk_i`, …) and `clk_src`/`clk_dst` passed.
     let flat_netlist_json =
-        std::fs::read_to_string(clock_json_path(&btor_path)).unwrap_or_default();
+        std::fs::read_to_string(clock_json_path(&plan.btor_path)).unwrap_or_default();
     let clock_domains = clock_domains(&flat_netlist_json);
-    if clock_domains.len() > 1 && !yopts.merge_clock_domains {
+    refuse_merged_clock_domains(&clock_domains, yopts)?;
+
+    Ok(SvFlattenArtifacts {
+        btor2,
+        hier_json,
+        staged_primary: plan.primary.to_string_lossy().into_owned(),
+        frontend_used: plan.frontend_used,
+        sv2v_ran: plan.sv2v.is_some(),
+        fallback_reason: None,
+        backend_retry,
+        clock_domains,
+        flat_netlist_json,
+        cache: LiftCacheOutcome::Off,
+    })
+}
+
+/// The multi-clock refusal: more than one domain is an error unless
+/// [`YosysOptions::merge_clock_domains`] accepts the under-approximation. Applied to a fresh
+/// lift and to a cache hit alike (N0.2), since the cache stores the netlist, not the decision.
+fn refuse_merged_clock_domains(
+    domains: &[ClockDomain],
+    yopts: &YosysOptions,
+) -> Result<(), AdapterError> {
+    if domains.len() > 1 && !yopts.merge_clock_domains {
         return Err(AdapterError {
             kind: AdapterErrorKind::UnsupportedConstruct,
             message: format!(
@@ -740,24 +1031,13 @@ fn run_sv_flatten_btor2_concrete(
                  defect. Run `mununu sv cdc-lint` to classify the crossings, verify each domain \
                  on its own, or pass `--merge-clock-domains` to accept that under-approximation \
                  explicitly.",
-                clock_domains.len(),
-                describe_clock_domains(&clock_domains)
+                domains.len(),
+                describe_clock_domains(domains)
             ),
             location: None,
         });
     }
-
-    Ok(SvFlattenArtifacts {
-        btor2,
-        hier_json,
-        staged_primary: primary.to_string_lossy().into_owned(),
-        frontend_used,
-        sv2v_ran,
-        fallback_reason: None,
-        backend_retry,
-        clock_domains,
-        flat_netlist_json,
-    })
+    Ok(())
 }
 
 /// The yosys BTOR backend's loop diagnostic, as its first line reads (the "Active cells" list
@@ -961,6 +1241,7 @@ pub fn sv_to_btor2_with_blackboxes(
         backend_retry: artifacts.backend_retry,
         clock_domains: artifacts.clock_domains,
         flat_netlist_json: artifacts.flat_netlist_json,
+        lift_cache: artifacts.cache,
     })
 }
 
@@ -987,6 +1268,9 @@ pub struct SvLiftResult {
     /// The flattened netlist (yosys `write_json`, after `flatten` + `opt_clean`, before
     /// `async2sync`): every storage cell still carries its own clock, which `sv cdc-lint` reads.
     pub flat_netlist_json: String,
+    /// What the lift cache (`MUNUNU_LIFT_CACHE_DIR`, N0.2) did for this lift: `Off` when unset,
+    /// `Hit` (no tool ran), `Miss` (the tools ran, the result is stored) or `Bypassed(why)`.
+    pub lift_cache: LiftCacheOutcome,
 }
 
 /// One clock domain of a flattened design: a clock net and the edge its storage cells fire on.
@@ -2503,6 +2787,16 @@ fn slang_frontend_selection() -> Option<String> {
     }
 }
 
+/// sv2v's argument vector: `-I<dir>` per include dir, then the sources. One function for the
+/// run ([`run_sv2v`]) and the lift cache's manifest (N0.2), so the key is what runs.
+fn sv2v_args(sources: &[PathBuf], include_dirs: &[PathBuf]) -> Vec<String> {
+    include_dirs
+        .iter()
+        .map(|dir| format!("-I{}", dir.display()))
+        .chain(sources.iter().map(|s| s.display().to_string()))
+        .collect()
+}
+
 /// Run sv2v over `sources`, capture stdout into `out`. sv2v's documented
 /// multi-file mode resolves cross-file packages/interfaces in one pass
 /// and emits a single combined Verilog-2005 stream on stdout.
@@ -2518,10 +2812,7 @@ fn run_sv2v(
     out: &Path,
 ) -> Result<(), AdapterError> {
     let mut cmd = Command::new(sv2v);
-    for dir in include_dirs {
-        cmd.arg(format!("-I{}", dir.display()));
-    }
-    cmd.args(sources);
+    cmd.args(sv2v_args(sources, include_dirs));
     // mununu#504 — bounded; see the note on the main yosys lift.
     let outcome = match crate::adapter::lift_timeout() {
         Some(t) => crate::adapter::run_with_timeout(&mut cmd, None, t),
@@ -2559,16 +2850,33 @@ fn run_sv2v(
     std::fs::write(out, &result.stdout).map_err(io_err)
 }
 
-/// Best-effort check that the located yosys binary was not built with the
-/// commercial Verific frontend. Verific-built yosys binaries print
-/// "verific" in their `-V` banner.
-fn verify_no_verific(yosys: &Path) -> Result<(), AdapterError> {
-    let out = Command::new(yosys)
-        .arg("-V")
+/// `yosys -V` (stdout + stderr) for `yosys`, read once per process: the Verific check reads it
+/// on every lift and the lift cache keys on it (N0.2).
+fn yosys_banner(yosys: &Path) -> Result<String, AdapterError> {
+    tool_version(yosys, "-V", "yosys")
+}
+
+/// `sv2v --version` for `sv2v`, read once per process (the lift cache keys on it, N0.2).
+fn sv2v_version(sv2v: &Path) -> Result<String, AdapterError> {
+    tool_version(sv2v, "--version", "sv2v")
+}
+
+/// A tool's version banner, memoised per (binary, flag) for the life of the process — the
+/// binaries are pinned per image, and a lift that asks for the same banner twice would
+/// otherwise spawn the tool twice.
+fn tool_version(bin: &Path, flag: &str, label: &str) -> Result<String, AdapterError> {
+    static BANNERS: OnceLock<Mutex<HashMap<(PathBuf, String), String>>> = OnceLock::new();
+    let key = (bin.to_path_buf(), flag.to_string());
+    let cache = BANNERS.get_or_init(Default::default);
+    if let Some(banner) = cache.lock().ok().and_then(|m| m.get(&key).cloned()) {
+        return Ok(banner);
+    }
+    let out = Command::new(bin)
+        .arg(flag)
         .output()
         .map_err(|e| AdapterError {
             kind: AdapterErrorKind::ParseError,
-            message: format!("adapter/yosys: failed to read yosys version: {e}"),
+            message: format!("adapter/yosys: failed to read {label} version: {e}"),
             location: None,
         })?;
     let banner = format!(
@@ -2576,6 +2884,17 @@ fn verify_no_verific(yosys: &Path) -> Result<(), AdapterError> {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
+    if let Ok(mut m) = cache.lock() {
+        m.insert(key, banner.clone());
+    }
+    Ok(banner)
+}
+
+/// Best-effort check that the located yosys binary was not built with the
+/// commercial Verific frontend. Verific-built yosys binaries print
+/// "verific" in their `-V` banner.
+fn verify_no_verific(yosys: &Path) -> Result<(), AdapterError> {
+    let banner = yosys_banner(yosys)?;
     if banner.to_lowercase().contains("verific") {
         return Err(AdapterError {
             kind: AdapterErrorKind::UnsupportedConstruct,
@@ -4845,6 +5164,161 @@ mod cell_source_tests {
         assert_eq!(
             sources[1].declared.as_ref().unwrap().to_string(),
             "pump_pair_sva.sv:9"
+        );
+    }
+}
+
+/// N0.2 — the lift cache at the driver: the manifest renders the plan the run executes, and
+/// (in the image) a second lift of the same design is a hit with byte-identical artifacts.
+#[cfg(test)]
+mod lift_cache_tests {
+    use super::*;
+
+    fn yosys_id() -> ToolIdentity {
+        ToolIdentity {
+            path: "yosys".into(),
+            identity: "Yosys 0.68 (test)".into(),
+        }
+    }
+
+    /// Without a tool on the host: the manifest of a `read_verilog` lift carries the staged
+    /// primary as `work.sv`, the exact script against the placeholder directory, one attempt,
+    /// and moves with the top, a parameter, an additional source — and not with
+    /// `merge_clock_domains`, which the hit re-applies instead of keying on.
+    #[test]
+    fn the_manifest_renders_the_plan_the_run_executes() {
+        let src =
+            "module m(input clk, input d, output reg q); always @(posedge clk) q <= d; endmodule\n";
+        let base = YosysOptions {
+            top: Some("m".into()),
+            frontend: SvFrontend::Verilog,
+            ..Default::default()
+        };
+        let m = lift_manifest(src, &base, yosys_id()).expect("manifest");
+        assert_eq!(m.format, LIFT_CACHE_FORMAT);
+        assert_eq!(m.staged, vec![("work.sv".to_string(), src.to_string())]);
+        assert_eq!(m.attempts.len(), 1);
+        assert_eq!(m.attempts[0].frontend, "verilog");
+        assert!(!m.attempts[0].cwd_in_staging_dir);
+        assert!(m.attempts[0].plugin.is_none() && m.attempts[0].sv2v.is_none());
+        assert!(
+            m.attempts[0]
+                .script
+                .contains("read_verilog -formal -sv /mununu-lift-cache/staging/work.sv"),
+            "{}",
+            m.attempts[0].script
+        );
+        assert!(m.attempts[0].script.contains("hierarchy -top m"));
+        assert!(m.include_files.is_empty());
+        let key = |y: &YosysOptions, s: &str| {
+            LiftCacheKey::new(&lift_manifest(s, y, yosys_id()).expect("manifest"))
+                .expect("key")
+                .index()
+                .to_string()
+        };
+        let k0 = key(&base, src);
+        assert_eq!(key(&base, src), k0, "deterministic");
+        let mut top = base.clone();
+        top.top = Some("other".into());
+        assert_ne!(key(&top, src), k0, "the top is in the script");
+        let mut param = base.clone();
+        param.params.push(("W".into(), "8".into()));
+        assert_ne!(key(&param, src), k0, "a parameter is in the script");
+        let mut extra = base.clone();
+        extra
+            .additional_sources
+            .push(("peer.sv".into(), "module p; endmodule\n".into()));
+        let m2 = lift_manifest(src, &extra, yosys_id()).expect("manifest");
+        assert_eq!(m2.staged.len(), 2);
+        assert_eq!(m2.staged[1].0, "peer.sv");
+        assert_ne!(key(&extra, src), k0);
+        let mut merged = base.clone();
+        merged.merge_clock_domains = true;
+        assert_eq!(
+            key(&merged, src),
+            k0,
+            "the refusal is re-applied on a hit, not keyed"
+        );
+        assert_ne!(
+            key(&base, "module m; endmodule\n"),
+            k0,
+            "the source is keyed"
+        );
+        // The port net-type strip is applied before keying, as before staging.
+        let stripped = key(&base, "module m(input tri0 a); endmodule\n");
+        assert_eq!(stripped, key(&base, "module m(input a); endmodule\n"));
+    }
+
+    /// An include directory's files are in the manifest: adding one is a miss.
+    #[test]
+    fn an_include_dir_file_is_keyed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("defs.svh"), "`define W 4\n").expect("write");
+        let src = "`include \"defs.svh\"\nmodule m; endmodule\n";
+        let y = YosysOptions {
+            frontend: SvFrontend::Verilog,
+            extra_include_dirs: vec![dir.path().to_path_buf()],
+            ..Default::default()
+        };
+        let m = lift_manifest(src, &y, yosys_id()).expect("manifest");
+        assert_eq!(m.include_files.len(), 1);
+        assert!(m.include_files[0].0.ends_with("defs.svh"));
+        let k0 = LiftCacheKey::new(&m).expect("key").index().to_string();
+        std::fs::write(dir.path().join("defs.svh"), "`define W 8\n").expect("write");
+        let m = lift_manifest(src, &y, yosys_id()).expect("manifest");
+        assert_ne!(LiftCacheKey::new(&m).expect("key").index(), k0);
+    }
+
+    /// In the image: the first lift of a design is a miss, the second a hit with the same
+    /// artifacts, a changed source a miss again, and `None` is off. Run with
+    /// `cargo test -p mununu-core --lib e2e_lift_cache -- --ignored`.
+    #[test]
+    #[ignore = "requires yosys (the mununu-sva image)"]
+    fn e2e_lift_cache_second_lift_is_a_hit_with_identical_artifacts() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = LiftCache::at(dir.path().join("lift-cache"));
+        let src =
+            "module m(input clk, input d, output reg q); always @(posedge clk) q <= d; endmodule\n";
+        let yopts = YosysOptions {
+            top: Some("m".into()),
+            ..Default::default()
+        };
+        let first = run_sv_flatten_btor2_with(src, &yopts, Some(&cache)).expect("lifts");
+        assert_eq!(first.cache, LiftCacheOutcome::Miss);
+        let second = run_sv_flatten_btor2_with(src, &yopts, Some(&cache)).expect("lifts");
+        assert_eq!(second.cache, LiftCacheOutcome::Hit);
+        assert_eq!(second.btor2, first.btor2);
+        assert_eq!(second.hier_json, first.hier_json);
+        assert_eq!(second.flat_netlist_json, first.flat_netlist_json);
+        assert_eq!(second.clock_domains, first.clock_domains);
+        assert_eq!(second.frontend_used, first.frontend_used);
+        assert_eq!(second.staged_primary, first.staged_primary);
+        assert_eq!(second.sv2v_ran, first.sv2v_ran);
+        // Two UNCACHED lifts are never byte-identical: yosys writes the per-run staging path
+        // into the BTOR2's `src` comments (`; /tmp/mununu-yosys-…/work.sv:1.16-1.19`), which
+        // downstream reads by basename only. Compare modulo that path; a hit reproduces the
+        // first run's, exactly as the uncached run's survives its deleted temp dir.
+        let modulo_staging =
+            |a: &SvFlattenArtifacts| a.btor2.replace(&a.staged_primary, "<staged>");
+        let changed = src.replace("q <= d", "q <= ~d");
+        let third = run_sv_flatten_btor2_with(&changed, &yopts, Some(&cache)).expect("lifts");
+        assert_eq!(third.cache, LiftCacheOutcome::Miss);
+        assert_ne!(modulo_staging(&third), modulo_staging(&first));
+        let off = run_sv_flatten_btor2_with(src, &yopts, None).expect("lifts");
+        assert_eq!(off.cache, LiftCacheOutcome::Off);
+        assert_eq!(modulo_staging(&off), modulo_staging(&first));
+        assert_ne!(
+            off.btor2, first.btor2,
+            "the staging path differs per uncached run"
+        );
+        // An unusable cache directory is a bypass, never a failure.
+        std::fs::write(dir.path().join("file"), b"").expect("write");
+        let blocked = LiftCache::at(dir.path().join("file"));
+        let bypassed = run_sv_flatten_btor2_with(src, &yopts, Some(&blocked)).expect("lifts");
+        assert!(
+            matches!(bypassed.cache, LiftCacheOutcome::Miss),
+            "a store failure is logged, the lift is a miss: {:?}",
+            bypassed.cache
         );
     }
 }

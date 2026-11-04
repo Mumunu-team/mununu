@@ -127,6 +127,13 @@ test-fast:
 # an abort becomes one CRASH row and the sweep still completes.
 #
 # `make e2e-oneshot` keeps the old single-process form for a quick local run.
+#
+# N0.2 (2026-11-03) — the suite reuses lifts: `MUNUNU_LIFT_CACHE_DIR` names a content-
+# addressed cache of the SV → BTOR2 lift's raw tool outputs (adapter/yosys/lift_cache.rs),
+# keyed by everything the tools are told. Under the cargo target dir, which in the image is
+# the persistent volume, so it survives sweeps. Only these three targets set it; `make ci`
+# lifts nothing and stays as it was. `MUNUNU_LIFT_CACHE_DIR= make e2e` runs every lift.
+e2e e2e-oneshot e2e-parallel: export MUNUNU_LIFT_CACHE_DIR ?= $(or $(CARGO_TARGET_DIR),target)/lift-cache
 e2e:
 	./scripts/e2e-sweep.sh
 
@@ -142,11 +149,14 @@ e2e-oneshot:
 # Needs cargo-nextest (the dev image carries it; `cargo install --locked cargo-nextest`).
 # `--no-fail-fast` keeps every row; a crashed test is reported with its signal. Output is
 # captured per test (nextest's `--no-capture` would run the tests SERIALLY) and a failing
-# test's output is printed as it fails and again in the final summary.
+# test's output is printed as it fails and again in the final summary. The two binaries are
+# the sweep's (the lib and the oracle): `--all-features` on the whole package would also
+# build the `adapters` group, whose feature-gated syntcomp module includes `mununu-private`
+# fixtures at compile time and does not build in the image.
 E2E_JOBS ?= 4
 e2e-parallel:
-	$(CARGO) nextest run -p mununu-core --all-features --run-ignored ignored-only \
-	    -E 'test(/e2e_/)' --test-threads $(E2E_JOBS) --no-fail-fast \
+	$(CARGO) nextest run -p mununu-core --all-features --lib --test differential_oracle_e2e \
+	    --run-ignored ignored-only -E 'test(/e2e_/)' --test-threads $(E2E_JOBS) --no-fail-fast \
 	    --failure-output immediate-final --success-output never
 
 test-properties:

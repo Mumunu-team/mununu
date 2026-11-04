@@ -38,6 +38,7 @@ grep -rhoE 'env::var(_os)?\("MUNUNU_[A-Z0-9_]+"' crates/ | grep -oE 'MUNUNU_[A-Z
 | `MUNUNU_YOSYS_FRONTEND` | prefer `slang` over `read_verilog` + sv2v for the lift (the CLI's `--frontend` is the per-request form). |
 | `MUNUNU_YOSYS_SETUNDEF_ANYSEQ` (`=1`), `MUNUNU_YOSYS_SETUNDEF_ANYCONST` (`=1`) | the lift's init policy for undefined bits: one free input per cycle (`anyseq`), or one nondeterministic constant per bit (`anyconst`); `ANYSEQ` wins if both are set; default `-zero` (which can mask bugs). |
 | `MUNUNU_KEEP_YOSYS_TMP` (`=1`), `MUNUNU_KEEP_VERILATOR_TMP` (`=1`) | keep the tool's temp directory (how the sv2v-drops-asserts trap was root-caused: `preprocessed.sv` had 0 asserts). |
+| `MUNUNU_LIFT_CACHE_DIR` | a directory; the SV → BTOR2 lift stores its raw tool outputs there (`design.btor`, `hier.json`, `clocks.json` and the process facts), keyed by everything the tools were told — the staged sources, the exact yosys script of every front end it would attempt, the sv2v argv, every file under an include dir, the tool banners — and reuses them on an identical lift; everything mununu computes from those outputs runs on a hit as on a miss (`adapter/yosys/lift_cache.rs`, N0.2, 2026-11-03). Unset = every lift runs. `make e2e`, `e2e-oneshot` and `e2e-parallel` set it under the cargo target dir, so the image's volume keeps it between sweeps; a bypass (an unusable dir, an include tree over the walk cap) is logged at `warn` and the lift runs. |
 
 ## Exact-symbolic engine (OxiDD ROBDD)
 
