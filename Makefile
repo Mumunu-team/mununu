@@ -140,11 +140,14 @@ e2e-oneshot:
 # and took 112 min on 2026-10-26, 98 of them in four OpenTitan tests that run one after
 # another; with E2E_JOBS of them in flight the wall is the longest test, not the sum.
 # Needs cargo-nextest (the dev image carries it; `cargo install --locked cargo-nextest`).
-# `--no-fail-fast` keeps every row; a crashed test is reported with its signal.
+# `--no-fail-fast` keeps every row; a crashed test is reported with its signal. Output is
+# captured per test (nextest's `--no-capture` would run the tests SERIALLY) and a failing
+# test's output is printed as it fails and again in the final summary.
 E2E_JOBS ?= 4
 e2e-parallel:
 	$(CARGO) nextest run -p mununu-core --all-features --run-ignored ignored-only \
-	    -E 'test(/e2e_/)' --test-threads $(E2E_JOBS) --no-fail-fast --no-capture
+	    -E 'test(/e2e_/)' --test-threads $(E2E_JOBS) --no-fail-fast \
+	    --failure-output immediate-final --success-output never
 
 test-properties:
 # The `properties*` crates are gated on `test_support` (their generators live behind it);
