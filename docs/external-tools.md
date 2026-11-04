@@ -1,6 +1,6 @@
 # External Tools
 
-> Source of truth: [`adapter/yosys/mod.rs::locate_yosys`](../crates/mununu-core/src/adapter/yosys/mod.rs#L979), [`adapter/yosys/mod.rs::locate_sv2v`](../crates/mununu-core/src/adapter/yosys/mod.rs#L1027), [`adapter/cvc5/mod.rs::locate_cvc5`](../crates/mununu-core/src/adapter/cvc5/mod.rs#L75) — surface: CLI+API
+> Source of truth: [`adapter/yosys/mod.rs::locate_yosys`](../crates/mununu-core/src/adapter/yosys/mod.rs#L2531), [`plan_lift`](../crates/mununu-core/src/adapter/yosys/mod.rs#L639), [`slang_plugin_arg`](../crates/mununu-core/src/adapter/yosys/mod.rs#L2579), [`adapter/cvc5/mod.rs::locate_cvc5`](../crates/mununu-core/src/adapter/cvc5/mod.rs#L78) — surface: CLI+API
 
 Mununu's verification engine, model checker, and synthesiser are pure Rust + the linked [Z3](https://github.com/Z3Prover/z3) library. Several pipelines also invoke external command-line tools via subprocess. Those tools are **optional** — mununu functions without them, and individual pipelines emit a structured `AdapterWarning` or `AdapterError` when invoked while a required tool is missing, never silently fail.
 
@@ -13,8 +13,8 @@ This document is the single canonical place describing each optional tool: what 
 | Tool | Required for | Install (macOS) | Install (Debian/Ubuntu) | Env var override |
 |---|---|---|---|---|
 | [Z3](#z3-required-linked-library) | Everything (linked at build time) | `brew install z3` | `apt install libz3-dev` | `LIBRARY_PATH` |
-| [sv2v](#sv2v) | SystemVerilog preprocessing | `brew install zachjs-sv2v` | Build from [zachjs/sv2v](https://github.com/zachjs/sv2v) | `MUNUNU_SV2V_PATH` |
-| [Yosys](#yosys) | SystemVerilog → BTOR2 pipeline | `brew install yosys` | `apt install yosys` | `MUNUNU_YOSYS_PATH` |
+| [sv2v](#sv2v--dev-only-differential-oracle) | **dev-only**: the `read_verilog` + sv2v differential oracle of `test_support` builds — never the product lift | `brew install zachjs-sv2v` | Build from [zachjs/sv2v](https://github.com/zachjs/sv2v) | `MUNUNU_SV2V_PATH` (dev-only) |
+| [Yosys](#yosys) | SystemVerilog → BTOR2 lift via yosys-slang's `read_slang` (built into yosys ≥ 0.67; `MUNUNU_YOSYS_SLANG_PLUGIN` loads a plugin on an older yosys) | `brew install yosys` | `apt install yosys` | `MUNUNU_YOSYS_PATH` |
 | [SymbiYosys (sby)](#sby--symbiyosys) | Verification oracle on RTL fixtures | Bundled with Yosys via OSS-CAD-Suite | Bundled with Yosys | `MUNUNU_SBY_PATH` |
 | [CVC5](#cvc5) | Craig interpolation predicate source (`--predicate-source craig`) | `brew install cvc5` | `apt install cvc5` (Debian 12+ / Ubuntu 24.04+) | `MUNUNU_CVC5_PATH` |
 | [Verilator](#verilator) | Reset-state simulation seeding (R-S2b, sidecar `simulate_reset`) | `brew install verilator` | `apt install verilator` | `MUNUNU_VERILATOR_PATH` |
@@ -59,45 +59,33 @@ See the [upstream Z3 docs](https://github.com/Z3Prover/z3#building-z3-from-sourc
 
 ---
 
-## sv2v
+## sv2v — dev-only differential oracle
 
-> Source of truth: [`adapter/yosys/mod.rs::locate_sv2v`](../crates/mununu-core/src/adapter/yosys/mod.rs#L1027) — surface: CLI+API
+> Concept: the dev-only differential oracle of `test_support` builds (`SvFrontend::Verilog` in `crates/mununu-core/src/adapter/yosys/mod.rs`, 2026-11-04) — no CLI, API or UI surface reaches it, so it carries no anchor.
 
-sv2v lowers SystemVerilog-2017 constructs (interfaces, structs, `always_ff`, generates, parameterised modules) to a Verilog-2005 subset that Yosys can ingest. Preserves module hierarchy and signal names — load-bearing for mununu's per-module BTOR2 lift path.
+sv2v lowers SystemVerilog-2017 constructs (interfaces, structs, `always_ff`, generates, parameterised modules) to a Verilog-2005 subset that yosys's native `read_verilog` can ingest. **The product does not use it** (N1, 2026-11-04): the SV → BTOR2 lift is yosys-slang's `read_slang` only. The `--frontend` flag, the `--preprocessor sv2v` flag, the `sv preprocess` subcommand, the API fields `lift.frontend` / `use_sv2v`, the `verify.toml` key `options.use_sv2v` (now refused by config validation) and the env vars `MUNUNU_YOSYS_FRONTEND` / `MUNUNU_USE_SV2V` are gone.
 
-Used by:
-- The `mununu sv preprocess` CLI subcommand.
-- The `--preprocessor sv2v` flag on the Yosys path (or `MUNUNU_USE_SV2V=1`).
+What survives is a **developer oracle** in `test_support` builds (`cargo test --features test_support`, the `mununu-sva` image's e2e suite): `SvFrontend::Verilog` lifts a source through `read_verilog` after sv2v, so a test can lift one design twice and compare the two models' verdicts (the partial-write agreement test, the minted-expression elaboration oracle). A product build refuses `SvFrontend::Verilog` with a reason; nothing on the CLI or the HTTP API can select it. Note that sv2v silently drops `assert property`, so the oracle's lift carries no SVA — this is why it was retired as a product path (`docs/policies/ci-and-hooks.md`).
 
-### macOS
-```bash
-brew install zachjs-sv2v
-```
+### Install (only to run the oracle tests)
+macOS: `brew install zachjs-sv2v`. Elsewhere: build from [zachjs/sv2v](https://github.com/zachjs/sv2v) (`make`, then put `bin/sv2v` on `$PATH`). The `mununu-sva` image pins sv2v `v0.0.13` for this purpose only.
 
-### Debian / Ubuntu / others
-No native package. Build from source:
-```bash
-git clone https://github.com/zachjs/sv2v
-cd sv2v && make
-# Copy the produced `bin/sv2v` somewhere on $PATH, or set MUNUNU_SV2V_PATH.
-```
-
-### Discovery
+### Discovery (test_support builds only)
 1. `MUNUNU_SV2V_PATH` env var (explicit override).
 2. `sv2v` on `$PATH`.
 
-Missing-tool behaviour: `mununu sv preprocess` errors with an `UnsupportedConstruct` adapter error naming the install instructions. The Yosys path falls back to its native SV reader without sv2v normalisation; some SV-2017 constructs (generates, parameterised structs) won't elaborate.
+Missing-tool behaviour: an oracle test's lift errors with an `UnsupportedConstruct` adapter error naming the install instructions ("the dev-only read_verilog oracle needs it"). No product path is affected.
 
 ---
 
 ## Yosys
 
-> Source of truth: [`adapter/yosys/mod.rs::locate_yosys`](../crates/mununu-core/src/adapter/yosys/mod.rs#L979) — surface: CLI+API
+> Source of truth: [`adapter/yosys/mod.rs::locate_yosys`](../crates/mununu-core/src/adapter/yosys/mod.rs#L2531) + [`slang_plugin_arg`](../crates/mununu-core/src/adapter/yosys/mod.rs#L2579) — surface: CLI+API
 
-Yosys is the open-source synthesis suite mununu uses to lower elaborated Verilog into BTOR2 — the word-level intermediate representation the KMTS lifter consumes. Mininum supported version: **0.40**.
+Yosys is the open-source synthesis suite mununu uses to lower SystemVerilog into BTOR2 — the word-level intermediate representation the KMTS lifter consumes. The RTL front end is yosys-slang's `read_slang` (N1, 2026-11-04: the only one), **built into yosys ≥ 0.67**; on an older yosys set `MUNUNU_YOSYS_SLANG_PLUGIN` to a yosys-slang plugin (loaded with `-m`). A yosys with neither (Homebrew's 0.59, Debian's 0.23) lifts **no** SystemVerilog: the error names the fix.
 
 Used by:
-- The SystemVerilog → BTOR2 pipeline (`adapter/yosys/`).
+- The SystemVerilog → BTOR2 pipeline (`adapter/yosys/`): `read_slang --ignore-assertions` (SVA is extracted separately by slang), `hierarchy`, `flatten`, `write_btor`.
 - Per-submodule emission (`write_btor <m>.btor`) without `flatten`, preserving module hierarchy.
 
 ### macOS
@@ -114,13 +102,13 @@ apt install yosys
 ### OSS-CAD-Suite (cross-platform, includes sby)
 The [OSS-CAD-Suite](https://github.com/YosysHQ/oss-cad-suite-build) ships Yosys + sby + many other YosysHQ tools as a self-contained release tarball. Recommended when you need both Yosys and sby together.
 
-It is also what the `mununu-sva` image (`docker/Dockerfile.sva`) carries — one tag-pinned release (`2026-08-24` → Yosys 0.68, the yosys-slang `slang.so` plugin, slang 11.0, Verilator 5.051, btormc, pono, cvc5), the same tag the sibling rosf and monono images pin, asserted at build time and readable off the image labels (`docker/README.md`). The suite does **not** ship sv2v; the image adds it separately.
+It is also what the `mununu-sva` image (`docker/Dockerfile.sva`) carries — one tag-pinned release (`2026-08-24` → Yosys 0.68, the yosys-slang `slang.so` plugin, slang 11.0, Verilator 5.051, btormc, pono, cvc5), the same tag the sibling rosf and monono images pin, asserted at build time and readable off the image labels (`docker/README.md`). The suite does **not** ship sv2v; the image adds it separately, for the dev-only differential oracle only (`test_support` builds).
 
 ### Discovery
 1. `MUNUNU_YOSYS_PATH` env var (explicit override).
 2. `yosys` on `$PATH`.
 
-Missing-tool behaviour: the SV pipeline errors with an `UnsupportedConstruct` adapter error. Other mununu pipelines (CTXDSL, agentic, microcode) are unaffected.
+Missing-tool behaviour: the SV pipeline errors with an `UnsupportedConstruct` adapter error; a yosys that has no `read_slang` fails the lift with the error tail "this yosys has no `read_slang`: use yosys ≥ 0.67 … or set MUNUNU_YOSYS_SLANG_PLUGIN". Other mununu pipelines (CTXDSL, agentic, microcode) are unaffected.
 
 ---
 
@@ -154,7 +142,7 @@ Missing-tool behaviour: the milestone validation harness skips fixtures that req
 
 ## CVC5
 
-> Source of truth: [`adapter/cvc5/mod.rs::locate_cvc5`](../crates/mununu-core/src/adapter/cvc5/mod.rs#L75) — surface: CLI+API
+> Source of truth: [`adapter/cvc5/mod.rs::locate_cvc5`](../crates/mununu-core/src/adapter/cvc5/mod.rs#L78) — surface: CLI+API
 
 [CVC5](https://cvc5.github.io/) is an open-source SMT solver developed at Stanford + The University of Iowa, with strong support for SMT-LIB Craig interpolation via `(get-interpolant ...)`. Mununu uses it as a **second SMT backend** (alongside Z3) for the `PredicateSource::CraigInterpolation` path in the R.5 CEGAR loop.
 
@@ -261,7 +249,7 @@ circt-verilog design.sv | mununu-extract circt --output spec.espec.json
 ```
 
 This is an **alternative** extraction frontend (the primary RTL path is
-sv2v → Yosys → BTOR2). Because it's pipe input, there is no `MUNUNU_*_PATH`
+yosys-slang `read_slang` → Yosys → BTOR2). Because it's pipe input, there is no `MUNUNU_*_PATH`
 discovery and no in-mununu version check — the user supplies the MLIR. CIRCT is
 Apache-2.0 (with the LLVM exception); as upstream tooling whose output mununu
 consumes, it imposes no obligation on mununu.
@@ -274,7 +262,7 @@ consumes, it imposes no obligation on mununu.
 
 [slang](https://github.com/MikePopoloski/slang) is an open-source, full-featured
 SystemVerilog-2017 compiler front-end (MIT-licensed). Mununu uses it as a **discovered
-subprocess** (the cvc5 / sv2v / Yosys pattern) to parse **SystemVerilog Assertions** out
+subprocess** (the cvc5 / Yosys pattern) to parse **SystemVerilog Assertions** out
 of RTL: `slang --ast-json` serialises the elaborated design — including `assert` /
 `assume` / `cover property` — as a structured AST, which mununu's Tier-1/Tier-2 translator
 ([`adapter/slang/translate.rs`](../crates/mununu-core/src/adapter/slang/translate.rs))
@@ -340,7 +328,7 @@ After installing any of these tools, you can confirm mununu discovers them via:
 # Z3 (linked; check via cargo)
 cargo run -- --version
 
-# sv2v
+# sv2v (dev-only differential oracle; not needed for the product lift)
 sv2v --version
 
 # Yosys

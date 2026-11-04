@@ -27,7 +27,6 @@ files = ["three_wide.sv"]
 adapter = "sv-yosys"
 
 [sources.options]
-use_sv2v = true
 top = "three_wide"
 sidecar = "three_wide.mununu.json"
 

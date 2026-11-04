@@ -673,7 +673,7 @@ struct CorpusDesign {
     /// Source filenames in `<dir>/source/`, read UNTOUCHED from disk. `files[0]` is the
     /// primary DUT (gets the `@mununu_guarantee` annotations); the rest — the
     /// `prim_assert.sv` macro shim + the byte-exact upstream package/submodule closure —
-    /// are the additional_sources fed to sv2v/yosys.
+    /// are the additional_sources fed to yosys-slang.
     files: &'static [&'static str],
     top: &'static str,
     /// `@mununu_guarantee <mu-formula>` lines prepended to the PRIMARY source.
@@ -690,7 +690,7 @@ struct CorpusDesign {
 /// only on a SETUP failure (verify_auto errored, or a ledger property is absent from the
 /// report) — never on a verdict fact, so a definite/⊥ outcome is always returned, not raised.
 /// Which verification engine to route the corpus property through. All three share the same
-/// front-end (slang → sv2v → yosys → BTOR2 → reset-gated `$past`-shadow model) and the same
+/// front-end (yosys-slang → BTOR2 → reset-gated `$past`-shadow model) and the same
 /// per-property μ-calculus; they differ only in how the abstract transition relation is
 /// decided. Mirrors the CLI/API `--engine` selector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -776,7 +776,6 @@ fn corpus_report(
     }
     let yopts = YosysOptions {
         top: Some(d.top.to_string()),
-        use_sv2v: true,
         additional_sources: sources[1..].to_vec(),
         ..Default::default()
     };
@@ -1435,7 +1434,7 @@ const CORPUS: &[CorpusDesign] = &[
 ];
 
 #[test]
-#[ignore = "requires slang + sv2v + yosys (mununu-sva image); run with --ignored"]
+#[ignore = "requires slang + yosys (mununu-sva image); run with --ignored"]
 fn diff_corpus_monotone_verdict_ledger() {
     let mut all_improvements = Vec::new();
     for d in CORPUS {
@@ -1473,7 +1472,7 @@ fn observe_engine(
 /// for each engine, the raw input for the "how many T/F/⊥, why the ⊥s, and the path forward"
 /// census. Never asserts (a wrong verdict is caught by the strict ledger gate above).
 #[test]
-#[ignore = "requires slang + sv2v + yosys (mununu-sva image); run with --ignored"]
+#[ignore = "requires slang + yosys (mununu-sva image); run with --ignored"]
 fn diff_corpus_verdict_census() {
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
@@ -1582,7 +1581,7 @@ fn diff_corpus_verdict_census() {
 /// (comma-separated design names) restricts the run to a subset — the fast FSMs for a quick read;
 /// unset runs the whole corpus (slow: the big closures cost minutes per engine).
 #[test]
-#[ignore = "requires slang + sv2v + yosys (mununu-sva image); run with --ignored"]
+#[ignore = "requires slang + yosys (mununu-sva image); run with --ignored"]
 fn diff_corpus_cegar_vs_symbolic_engine_parity() {
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
@@ -1731,7 +1730,7 @@ fn diff_corpus_cegar_vs_symbolic_engine_parity() {
 /// The PORTFOLIO end-to-end gate. Runs uart_tx (both liveness properties, definite under the
 /// exact engine) through the real `verify_auto → portfolio → merge` chain — validating the full
 /// integration the hermetic combiner tests can't: the engine dispatch, the scoped-thread
-/// parallel orchestration, and the sequential early-exit, all against live slang/sv2v/yosys +
+/// parallel orchestration, and the sequential early-exit, all against live slang/yosys +
 /// the three real engines. Asserts:
 ///   1. `Cegar` alone leaves AT LEAST ONE of the two properties ⊥ — the gap the portfolio
 ///      closes. When this test was written it left both ⊥; by 2026-09 the engine decided the
@@ -1751,7 +1750,7 @@ fn diff_corpus_cegar_vs_symbolic_engine_parity() {
 ///   5. No `portfolio-soundness-alarm` note fired (the runtime guard stayed quiet) and a
 ///      `portfolio` provenance note is present.
 #[test]
-#[ignore = "requires slang + sv2v + yosys (mununu-sva image); run with --ignored"]
+#[ignore = "requires slang + yosys (mununu-sva image); run with --ignored"]
 fn e2e_portfolio_decides_what_the_default_engine_misses() {
     let uart = &CORPUS[0];
     assert_eq!(
@@ -1860,7 +1859,7 @@ fn e2e_portfolio_decides_what_the_default_engine_misses() {
 /// bind to no state register; this prints the names yosys actually emits so the atoms can be
 /// re-pointed. Non-failing; run when refining those atoms.
 #[test]
-#[ignore = "requires slang + sv2v + yosys (mununu-sva image); run with --ignored"]
+#[ignore = "requires slang + yosys (mununu-sva image); run with --ignored"]
 fn dump_state_registers_atom_binding_todo() {
     use mununu_core::adapter::btor2::parser::{collect_symbols, parse as parse_btor2};
     use mununu_core::adapter::yosys::sv_to_btor2;
@@ -1881,7 +1880,6 @@ fn dump_state_registers_atom_binding_todo() {
             .collect();
         let yopts = YosysOptions {
             top: Some(d.top.to_string()),
-            use_sv2v: true,
             additional_sources: additional,
             ..Default::default()
         };
@@ -1931,7 +1929,7 @@ endmodule
 "#;
 
 #[test]
-#[ignore = "requires slang + sv2v + yosys + verilator (mununu-sva image); run with --ignored"]
+#[ignore = "requires slang + yosys + verilator (mununu-sva image); run with --ignored"]
 fn p3_verilator_replays_ag_ef_trap_counterexample() {
     use mununu_core::adapter::verilator::{
         TraceReplayConfig, VerilatorOptions, VerilatorTempDir, build_trace_replay_tb_cpp,
@@ -1946,7 +1944,6 @@ fn p3_verilator_replays_ag_ef_trap_counterexample() {
         &[("trapfsm.sv".to_string(), src)],
         &YosysOptions {
             top: Some("trapfsm".to_string()),
-            use_sv2v: true,
             ..Default::default()
         },
         &VerifyAutoOptions {
@@ -2048,10 +2045,10 @@ fn p3_verilator_replays_ag_ef_trap_counterexample() {
 /// `AG(state ⋈ value)` shape [`reduce_ag_invariant`] recognises. Only reducible ⊥
 /// properties can be rescued by the subprocess portfolio, so this count is the
 /// upper bound on the feature's corpus payoff. Diagnostic (no assertion) — the
-/// `--nocapture` output is the deliverable. Needs only slang+sv2v+yosys (no
+/// `--nocapture` output is the deliverable. Needs only slang+yosys (no
 /// btormc/pono): reducibility is a pure formula-shape question.
 #[test]
-#[ignore = "requires slang + sv2v + yosys (mununu-sva image); run with --ignored"]
+#[ignore = "requires slang + yosys (mununu-sva image); run with --ignored"]
 fn e2e_reach_rescue_reducibility_census() {
     use mununu_core::adapter::reach_rescue::reduce_ag_invariant;
 
@@ -2130,7 +2127,7 @@ endmodule
 "#;
 
 #[test]
-#[ignore = "requires slang + sv2v + yosys (mununu-sva image); run with --ignored"]
+#[ignore = "requires slang + yosys (mununu-sva image); run with --ignored"]
 fn e2e_sv_mutate_stick_flips_recoverability() {
     use mununu_core::adapter::btor2::mutate::Mutation;
     use mununu_core::adapter::slang::verify_auto::mutate_and_compare;
@@ -2141,7 +2138,6 @@ fn e2e_sv_mutate_stick_flips_recoverability() {
     let sources = [("counter3.sv".to_string(), src)];
     let yopts = YosysOptions {
         top: Some("counter3".to_string()),
-        use_sv2v: true,
         ..Default::default()
     };
     let base_opts = VerifyAutoOptions {
@@ -2193,7 +2189,7 @@ endmodule
 "#;
 
 #[test]
-#[ignore = "requires slang + sv2v + yosys (mununu-sva image); run with --ignored"]
+#[ignore = "requires slang + yosys (mununu-sva image); run with --ignored"]
 fn e2e_sv_mutate_off_by_one_flips_a_threshold_property() {
     use mununu_core::adapter::btor2::mutate::Mutation;
     use mununu_core::adapter::slang::verify_auto::mutate_and_compare;
@@ -2202,7 +2198,6 @@ fn e2e_sv_mutate_off_by_one_flips_a_threshold_property() {
     let sources = [("wrapctr.sv".to_string(), src)];
     let yopts = YosysOptions {
         top: Some("wrapctr".to_string()),
-        use_sv2v: true,
         ..Default::default()
     };
     let base_opts = VerifyAutoOptions {
@@ -2246,7 +2241,7 @@ fn e2e_sv_mutate_off_by_one_flips_a_threshold_property() {
 /// too, with a `_lift.sv` variant for each file that cannot be lifted under it) through
 /// `VerifyAutoOptions::lift_overrides`, and the design's `census:` line says `lift=shim`.
 #[test]
-#[ignore = "census: requires slang + sv2v + yosys (mununu-sva image); run with --ignored --nocapture"]
+#[ignore = "census: requires slang + yosys (mununu-sva image); run with --ignored --nocapture"]
 fn e2e_opentitan_sva_census() {
     use mununu_core::adapter::slang::verify_auto::PortfolioMode;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/verify");
@@ -2278,7 +2273,6 @@ fn e2e_opentitan_sva_census() {
         }
         let yopts = YosysOptions {
             top: Some(d.top.to_string()),
-            use_sv2v: true,
             additional_sources: sources[1..].to_vec(),
             ..Default::default()
         };
@@ -2470,7 +2464,7 @@ endmodule
 /// directory and names the file bare, so the names are `…$func$preprocessed.sv:3983$4411.$result`
 /// on every run. Two lifts, byte-identical state names, none with the temp path.
 #[test]
-#[ignore = "requires sv2v + Yosys (use the mununu-sva docker image); run with --ignored --nocapture"]
+#[ignore = "requires slang + Yosys (use the mununu-sva docker image); run with --ignored --nocapture"]
 fn e2e_lifted_register_names_carry_no_per_run_temp_path() {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../examples/verify/ip_opentitan_edn/source");
@@ -2489,7 +2483,6 @@ fn e2e_lifted_register_names_carry_no_per_run_temp_path() {
         .collect();
     let yopts = YosysOptions {
         top: Some("edn".to_string()),
-        use_sv2v: true,
         additional_sources: additional,
         ..Default::default()
     };
@@ -2574,7 +2567,7 @@ fn e2e_lifted_register_names_carry_no_per_run_temp_path() {
 }
 
 #[test]
-#[ignore = "requires slang + sv2v + Yosys + z3 (use the mununu-sva docker image); run with --ignored --nocapture"]
+#[ignore = "requires slang + Yosys + z3 (use the mununu-sva docker image); run with --ignored --nocapture"]
 fn e2e_opentitan_ip_edn_full() {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../examples/verify/ip_opentitan_edn/source");
@@ -2600,7 +2593,6 @@ fn e2e_opentitan_ip_edn_full() {
     ));
     let yopts = YosysOptions {
         top: Some("edn".to_string()),
-        use_sv2v: true,
         additional_sources: sources[1..].to_vec(),
         ..Default::default()
     };
@@ -2945,7 +2937,7 @@ fn probe_reach_portfolio_on_env_btor2() {
 /// `unsupported` by construction. The pins are the 2026-10-22 measurement (the README table); a
 /// definite verdict that moves is a finding, not a re-baseline.
 #[test]
-#[ignore = "requires slang + sv2v + Yosys + z3 (use the mununu-sva docker image); run with --ignored --nocapture"]
+#[ignore = "requires slang + Yosys + z3 (use the mununu-sva docker image); run with --ignored --nocapture"]
 fn e2e_opentitan_ip_csrng_full() {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../examples/verify/ip_opentitan_csrng/source");
@@ -2966,7 +2958,6 @@ fn e2e_opentitan_ip_csrng_full() {
     );
     let yopts = YosysOptions {
         top: Some("csrng".to_string()),
-        use_sv2v: true,
         additional_sources: sources[1..].to_vec(),
         ..Default::default()
     };
@@ -3006,9 +2997,8 @@ fn e2e_opentitan_ip_csrng_full() {
         report.diagnostics.blackboxed_modules,
         vec!["aes_cipher_core".to_string()]
     );
-    // The lift: `--frontend auto`'s read_verilog + sv2v attempt fails on sv2v's output, the
-    // slang attempt dies in the BTOR backend's cell-level topological sort (yosys-slang's
-    // `$buf` cells) and succeeds on the retry with `opt_clean` — this IP is the retry's e2e.
+    // The lift: yosys-slang dies in the BTOR backend's cell-level topological sort (its `$buf`
+    // cells) and succeeds on the retry with `opt_clean` — this IP is the retry's e2e.
     assert_eq!(
         report.diagnostics.frontend.as_deref(),
         Some("yosys-slang (read_slang)")
@@ -3135,7 +3125,7 @@ const CSRNG_PINS: &[(&str, usize, &str)] = &[
 /// `*_sm_err` → the fatal alert) and every one of the fifteen HOLDS. The rows are printed
 /// before the pins, so a wrong prediction is diagnosable from the transcript.
 #[test]
-#[ignore = "requires slang + sv2v + Yosys + z3 (use the mununu-sva docker image); run with --ignored --nocapture"]
+#[ignore = "requires slang + Yosys + z3 (use the mununu-sva docker image); run with --ignored --nocapture"]
 fn e2e_opentitan_ip_edn_sec_cm_posture() {
     use mununu_core::adapter::btor2::fault::{FaultBound, FaultPosture, FaultSelection};
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -3157,7 +3147,6 @@ fn e2e_opentitan_ip_edn_sec_cm_posture() {
     );
     let yopts = YosysOptions {
         top: Some("edn".to_string()),
-        use_sv2v: true,
         additional_sources: sources[1..].to_vec(),
         ..Default::default()
     };
@@ -3331,7 +3320,7 @@ fn e2e_opentitan_ip_edn_sec_cm_posture() {
 /// lift as [`e2e_opentitan_ip_edn_full`], the two properties carried inline so the baseline and the
 /// mutant each run only the IP's own SVA beside them.
 #[test]
-#[ignore = "requires slang + sv2v + Yosys + z3 (use the mununu-sva docker image); run with --ignored --nocapture"]
+#[ignore = "requires slang + Yosys + z3 (use the mununu-sva docker image); run with --ignored --nocapture"]
 fn e2e_opentitan_ip_edn_stick_flips_the_error_record() {
     use mununu_core::adapter::btor2::mutate::Mutation;
     use mununu_core::adapter::slang::verify_auto::mutate_and_compare;
@@ -3361,7 +3350,6 @@ fn e2e_opentitan_ip_edn_stick_flips_the_error_record() {
     ));
     let yopts = YosysOptions {
         top: Some("edn".to_string()),
-        use_sv2v: true,
         additional_sources: sources[1..].to_vec(),
         ..Default::default()
     };

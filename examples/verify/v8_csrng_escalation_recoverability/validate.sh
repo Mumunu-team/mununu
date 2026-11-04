@@ -38,7 +38,7 @@ if [[ ! -x "${MUNUNU}" ]]; then
   echo "validate.sh: mununu not found at ${MUNUNU} — build with: LIBRARY_PATH=/usr/local/opt/z3/lib cargo build -p mununu-cli" >&2
   exit 2
 fi
-for tool in sv2v yosys; do
+for tool in yosys; do
   command -v "${tool}" >/dev/null 2>&1 || { echo "validate.sh: required tool '${tool}' not on PATH" >&2; exit 2; }
 done
 
@@ -58,10 +58,10 @@ SRC=(--source "${CSRNG}/csrng_pkg.sv"
      --source "${PRIM}/prim_flop_macros.sv")
 
 run() {
-  # --frontend sv2v: run sv2v first (as the reset-gated exact path expects), which
-  # resolves the prim_assert include dispatch and flattens before yosys.
+  # The lift is yosys-slang's `read_slang` (slang-only since 2026-11-04); it
+  # resolves the prim_assert include dispatch itself and yosys flattens.
   "${MUNUNU}" sv verify-auto "${OUT}/csrng_main_sm.sv" "${SRC[@]}" \
-    --top csrng_main_sm --engine exact-symbolic --frontend sv2v "$@"
+    --top csrng_main_sm --engine exact-symbolic "$@"
 }
 
 echo "=== H.5-GR1 — csrng recoverability (AG EF MainSmIdle), exact-symbolic ==="

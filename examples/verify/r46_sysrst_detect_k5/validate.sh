@@ -28,7 +28,7 @@
 # (PR #94) makes sound.
 #
 # The included `prim_assert.sv` resolves on the verify path because the
-# sv2v staging tempdir is on the include search path (the same PR that adds
+# lift's staging tempdir is on the include search path (the same PR that adds
 # this fixture).
 set -euo pipefail
 
@@ -43,7 +43,7 @@ if [[ ! -x "${MUNUNU}" ]]; then
   echo "             build it first with: cargo build -p mununu-cli" >&2
   exit 2
 fi
-for tool in yosys sv2v; do
+for tool in yosys; do
   if ! command -v "${tool}" >/dev/null 2>&1; then
     echo "validate.sh: required tool '${tool}' not on PATH" >&2
     exit 2

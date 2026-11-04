@@ -1,7 +1,8 @@
 name: E2E (SVA verification)
 
 # The `#[ignore]`d end-to-end suite (`make e2e`) shells out to the external
-# SystemVerilog toolchain — slang + sv2v + yosys, plus btormc for the
+# SystemVerilog toolchain — slang + yosys (read_slang; sv2v only as the dev-only
+# differential oracle of test_support builds), plus btormc for the
 # reachability differential and Verilator for the counterexample-replay gate.
 # Those tools are contributor-installed, not bundled, so `make ci` (in ci.yml)
 # skips these tests. This workflow runs them in the `mununu-sva` image, which

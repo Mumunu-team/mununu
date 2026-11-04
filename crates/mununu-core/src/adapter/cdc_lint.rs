@@ -1219,9 +1219,7 @@ endmodule
                 source: src,
                 additional_sources: Vec::new(),
                 top: Some("cdc".to_string()),
-                use_sv2v: false,
                 include_dirs: Vec::new(),
-                frontend: crate::adapter::yosys::SvFrontend::Verilog,
                 merge_clock_domains: false,
                 ..Default::default()
             })

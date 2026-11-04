@@ -8,10 +8,10 @@ cd "$(git rev-parse --show-toplevel)"
 DIR="examples/verify/microprogram_plus_sv"
 TRANSCRIPT="$DIR/transcript.txt"
 
-# yosys + sv2v are required: the peripheral source is elaborated via
-# the sv-yosys (sv2v -> Yosys -> BTOR2 -> KMTS) pipeline. They are not
-# bundled with the mununu repo; the dev container installs them.
-for tool in yosys sv2v; do
+# yosys (with read_slang) is required: the peripheral source is elaborated via
+# the sv-yosys (read_slang -> Yosys -> BTOR2 -> KMTS) pipeline. It is not
+# bundled with the mununu repo; the mununu-sva image provides it.
+for tool in yosys; do
   if ! command -v "${tool}" >/dev/null 2>&1; then
     echo "validate.sh: required tool '${tool}' not on PATH" >&2
     exit 2
@@ -33,7 +33,7 @@ strip_logs() {
     printf '# Regenerated via examples/verify/microprogram_plus_sv/validate.sh\n'
     printf '#\n'
     printf '# Hand-authored CTXDSL microcode (Microprogram) + real SV\n'
-    printf '# peripheral elaborated via the sv-yosys (sv2v -> Yosys -> BTOR2\n'
+    printf '# peripheral elaborated via the sv-yosys (read_slang -> Yosys -> BTOR2\n'
     printf '# -> KMTS) pipeline; its single automaton is named Circuit.\n'
     printf '# Disjoint label alphabets → asynchronous composition = product of\n'
     printf '# the independent state spaces (4 microcode states × 4 peripheral\n'

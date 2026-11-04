@@ -696,12 +696,9 @@ mod tests {
         );
     }
 
+    /// A yosys WITH `read_slang` (the slang-only lift, 2026-11-04): a brew 0.59 skips.
     fn yosys_available() -> bool {
-        std::process::Command::new("yosys")
-            .arg("-V")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+        super::super::yosys_can_read_slang()
     }
 
     /// R-MM-4d — end-to-end: compose `producer_consumer_top` (producer ⊗

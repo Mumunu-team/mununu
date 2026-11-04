@@ -38,7 +38,7 @@ cargo build -p mununu-cli          # build the binary
 ./validate.sh                      # runs the full pipeline + checks the criteria
 ```
 
-Requires `yosys` and `sv2v` on `PATH` (the KMTS frontend), and
+Requires `yosys` (with `read_slang`) on `PATH` (the KMTS frontend), and
 `LIBRARY_PATH=/usr/local/opt/z3/lib` for the z3 link (handled by
 `validate.sh`).
 

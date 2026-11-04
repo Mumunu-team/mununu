@@ -77,7 +77,7 @@ mununu context eval examples/agentic/mcp_auth.ctxdsl \
 ```
 
 ```bash
-# Evaluate a SystemVerilog design (sv2v → Yosys → BTOR2 → bit-blast)
+# Evaluate a SystemVerilog design (read_slang → Yosys → BTOR2 → bit-blast)
 mununu context eval design.sv --adapter sv-yosys \
     --formula safety --automaton Circuit
 
@@ -417,20 +417,19 @@ See [Adapter Formats](Adapter-Formats.md) for supported formats and limitations.
 
 > **S.2b note.** The native `mununu sv init` / `sv discover` commands (which
 > parsed SV with a hand-rolled recursive-descent frontend) were **removed**.
-> SystemVerilog now has exactly one pipeline — `sv-yosys` (sv2v → Yosys →
+> SystemVerilog now has exactly one pipeline — `sv-yosys` (yosys-slang `read_slang` → Yosys →
 > BTOR2 → bit-blast). Sidecar significant-value discovery moved to
 > [`mununu btor2 discover`](#mununu-btor2), which runs SMT predicate-image
 > discovery over the BTOR2 IR the verify path uses and writes the
 > `discovered_values` map into the sidecar. Author the `.mununu.json`
 > sidecar by hand or seed it via `btor2 discover`.
 
-### `mununu sv preprocess`
-
-Lower SystemVerilog-2017 to a Verilog-2005 subset via `sv2v` (the KMTS
-frontend normaliser), preserving module hierarchy and signal names.
-Requires `sv2v` on `PATH`. Output goes to `--output` or `<stem>.elab.v`.
-Used internally by the `sv-yosys` pipeline; exposed standalone for
-inspection. Run `mununu sv preprocess --help` for flags.
+> **N1 note (2026-11-04).** The lift is slang-only: yosys-slang's `read_slang`
+> (built into yosys ≥ 0.67 and the `mununu-sva` image; `MUNUNU_YOSYS_SLANG_PLUGIN`
+> loads a plugin on an older yosys). `mununu sv preprocess`, the `--frontend`
+> flag on the `sv` verbs and `--preprocessor sv2v` on the `context` verbs were
+> **removed**; sv2v survives only as a dev-only differential oracle of
+> `test_support` builds.
 
 ### `mununu sv emit-btor2-per-module`
 

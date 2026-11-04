@@ -23,7 +23,7 @@ mod emit_valuations_roundtrip;
 #[cfg(feature = "ast-extract")]
 mod extraction_composition_e2e;
 mod past_shadow_input_e2e;
+mod support;
 mod sv_per_module_btor2;
-mod sv_preprocess_sweep;
 mod sv_state_splitting;
 mod sv_yosys_multi_module_verify;

@@ -17,19 +17,9 @@
       ],
       "type": "object"
     },
-    "SvFrontendName": {
-      "description": "The RTL front end of a lift: `auto` (the environment's default), `verilog` (yosys `read_verilog`), `slang` (the yosys-slang plugin) or `sv2v` (sv2v first, then the `auto` order with its slang fallback). The CLI's `--frontend` takes the same four values.",
-      "enum": [
-        "auto",
-        "verilog",
-        "slang",
-        "sv2v"
-      ],
-      "type": "string"
-    },
     "SvLiftRequest": {
       "additionalProperties": false,
-      "description": "The SV design and how to lift it, shared by every `sv` route: the API peer of the CLI's lift flags (`SV_FILE` / `--source`, `--top`, `--frontend`, `--param`, `--lift-override`, `--cutpoint`, `--merge-clock-domains`). Unknown keys are refused.",
+      "description": "The SV design and how to lift it, shared by every `sv` route: the API peer of the CLI's lift flags (`SV_FILE` / `--source`, `--top`, `--param`, `--lift-override`, `--cutpoint`, `--merge-clock-domains`). Unknown keys are refused.",
       "properties": {
         "additional_sources": {
           "default": [],
@@ -46,15 +36,6 @@
             "type": "string"
           },
           "type": "array"
-        },
-        "frontend": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/SvFrontendName"
-            }
-          ],
-          "default": "auto",
-          "description": "The RTL front end (default `auto`)."
         },
         "lift_overrides": {
           "default": [],
@@ -104,7 +85,7 @@
       "type": "object"
     }
   },
-  "description": "The SV → BTOR2 lift inputs shared by the SV-direct verb endpoints (`/api/v1/sv/verify`, `/sv/verify-liveness`, `/sv/verify-recoverability`). These lift the module (sv2v + Yosys) and then decide the corresponding BTOR2 property, returning the same `Btor2Verify*Response` shapes — one call, no `emit-btor2` step.",
+  "description": "The SV → BTOR2 lift inputs shared by the SV-direct verb endpoints (`/api/v1/sv/verify`, `/sv/verify-liveness`, `/sv/verify-recoverability`). These lift the module (yosys-slang) and then decide the corresponding BTOR2 property, returning the same `Btor2Verify*Response` shapes — one call, no `emit-btor2` step.",
   "properties": {
     "lift": {
       "allOf": [

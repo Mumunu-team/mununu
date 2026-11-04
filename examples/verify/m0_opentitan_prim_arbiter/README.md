@@ -17,7 +17,7 @@ Documented invariant (from OpenTitan's own SVA comments + the
 exclusively. M.0 does *not* verify this property today; verification
 is deferred to M.1+ when the KMTS lifter (R.2) and KleeneDomain
 evaluator (R.3) ship. M.0's contract is **frontend reach only**:
-the sv2v → Yosys-no-flatten → BTOR2-per-module pipeline must produce
+the `read_slang` → Yosys-no-flatten → BTOR2-per-module pipeline must produce
 a valid BTOR2 file without errors.
 
 ## Source pinning
@@ -57,10 +57,11 @@ bash examples/verify/m0_opentitan_prim_arbiter/validate.sh
 
 Outputs land under `build/`:
 
-- `build/elaborated.v` — sv2v output (R.0a).
 - `build/btor2/<module>.btor2` — per-submodule BTOR2 (R.0b).
 
-The script asserts at each stage and exits non-zero on failure.
+(The R.0a step, `mununu sv preprocess` writing `build/elaborated.v`, was retired
+with the slang-only lift on 2026-11-04: `read_slang` reads the SV-2017 sources
+directly.) The script asserts at each stage and exits non-zero on failure.
 
 ## Milestone result
 

@@ -321,7 +321,7 @@ hand-written sidecar and no supplied formula**. End to end:
 
 1. **slang** elaborates the source and extracts the design's own SVA `assert` /
    `assume` / `cover` properties, translating each to mu-calculus.
-2. **sv2v → Yosys** lift the RTL to a BTOR2 model.
+2. **Yosys** (yosys-slang's `read_slang`) lifts the RTL to a BTOR2 model.
 3. Cube predicates are **auto-seeded from each property's atoms** (no sidecar to
    author) and the CEGAR loop refines on an undecided verdict.
 4. Each property gets a `holds` / `violated` / `unknown` / `skipped` verdict.
@@ -332,13 +332,12 @@ field:
 > Source of truth: [`sv_verify_auto_handler`](../crates/mununu-core/src/api/handlers.rs#L846) — surface: API
 
 ```bash
-mununu sv verify-auto my_module.sv --frontend sv2v
+mununu sv verify-auto my_module.sv
 ```
 
 ```jsonc
 // POST /api/v1/sv/verify-auto
-{ "lift": { "source": "module m(...); ... assert property (...); endmodule",
-            "frontend": "sv2v" },
+{ "lift": { "source": "module m(...); ... assert property (...); endmodule" },
   "must_edge_inference": "smt-hyper-must" }   // all fields optional; absent = "auto" (mununu#663): per-target must for
                                                // AG EF / AG AF-class properties, may-only for the rest
 // → { "properties": [ { "name": ..., "outcome": "holds" | "violated" | ... } ], "unsupported": [...] }
@@ -418,7 +417,7 @@ mununu --quiet sv verify-auto design.sv --source design_sva.sv --top design --js
   "unsupported": [ { "name": "dut_sva_2", "kind": null,
                      "reason": "unsupported binary op: BinaryAnd" } ],
   "diagnostics": { "state_register_count": 12, "blackboxed_modules": [], "gated_resets": ["rst_n=1"],
-                   "auto_provided_stubs": [], "frontend": "read_verilog + sv2v",
+                   "auto_provided_stubs": [], "frontend": "yosys-slang (read_slang)",
                    "config_values": ["cfg_timer=7"], "cutpoints": [] },
   "notes": [ { "kind": "coverage-summary", "level": "info", "summary": "…", "items": [] } ]
 }
@@ -503,7 +502,7 @@ counterpart and are listed as skipped. The clock is the first port named `clk`, 
 `i_clk`, `aclk` or `clk_sys`; `--tb-clock PORT` names another.
 
 ```bash
-mununu sv verify-auto rod.sv --source rod_sva.sv --top rod --frontend slang --emit-testbench tb
+mununu sv verify-auto rod.sv --source rod_sva.sv --top rod --emit-testbench tb
 make -C tb/p_no_fault      # in mununu-sva
 # MATCH
 # [0] %Error: rod_sva.sv:2: Assertion failed in TOP.rod.u_sva.p_no_fault
@@ -567,22 +566,20 @@ registers of the first step, then its inputs, in that order:
 
 `file:line` is the net's declaration; a register also names the `always` block(s) of the flop(s)
 that drive it, which is where the value the trace shows was assigned. Both halves come from two
-sources, and the lift's front end no longer decides whether they are there. **yosys's `src`
-attributes** carry them where the netlist has them: **yosys-slang** (`--frontend slang`, the
-default in the `mununu-sva` image) stamps storage cells (recent builds stamp nets too) and yosys's
-own `read_verilog` (`--frontend verilog`) stamps both, with the RTL's own file and line. **slang's
-own AST** (`--ast-json-source-info`, a second run on the same staged files the SVA extraction uses)
-fills every gap: each port, net and variable's declaration, and, for a register, the
-edge-triggered `always` block(s) assigning it (`always_ff`, `always @(posedge …)`). When **sv2v**
-preprocessed the source (`--frontend sv2v`, `use_sv2v`), the netlist's lines are sv2v's output's,
-so the lift drops them and the AST supplies both halves (2026-10-30; before, the sv2v path had no
-assignment lines). What the AST cannot place is a name the lift invented: sv2v's
-`sv2v_cast_…$result`, a yosys-internal net. Such a cell keeps its kind and no line, and the report
-lists it.
+sources. **yosys's `src` attributes** carry them where the netlist has them: **yosys-slang**
+(`read_slang`, the one product front end since 2026-11-04) stamps storage cells (recent builds stamp
+nets too) with the RTL's own file and line. **slang's own AST** (`--ast-json-source-info`, a second
+run on the same staged files the SVA extraction uses) fills every gap: each port, net and variable's
+declaration, and, for a register, the edge-triggered `always` block(s) assigning it (`always_ff`,
+`always @(posedge …)`). What the AST cannot place is a name the lift invented (a yosys-internal
+net). Such a cell keeps its kind and no line, and the report lists it. (Before 2026-11-04 an sv2v
+pass could rewrite the source first; the netlist's lines were then sv2v's output's and the AST
+supplied both halves — that path is now the dev-only oracle of `test_support` builds, never a
+product lift.)
 
 The report says what it has: no status line when every cell is placed, `source map: partial — <what
-is missing>` under `model:` when something is (`no declaration for …`, `no assignment line for …`,
-the latter saying when sv2v rewrote the source), `source map: unavailable — <reason>` and no legend
+is missing>` under `model:` when something is (`no declaration for …`, `no assignment line for …`),
+`source map: unavailable — <reason>` and no legend
 when nothing could be placed. A half the map lacks is simply left out of the cell's line
 (`state_q (register, assigned at pump_pair.sv:52)`), never shown as a placeholder. `--json` carries
 the legend as `trace.sources` (`cell`, `kind`, `declared`, `assigned`) and the status as
@@ -659,10 +656,9 @@ to the grant outputs are downstream of what the property reads and are in neithe
 and the slice says so: `slice: widened — cell type(s) the evaluator does not know, their whole
 fan-in kept: $shiftx`. The evaluation is cross-checked against the engine's own one-step evaluator
 on the lifted BTOR2 (every register's `D` at `t` is the trace's state at `t+1`, and the engine's
-`next_state`). When no slice can be made the report says why, once: `slice: unavailable — the sv2v
-front end does not preserve source lines; use --frontend slang`, or `… no netlist: the model did not
-come from the SystemVerilog lift` (a BTOR2 given to the `btor2` verbs), or `… the property reads no
-public net of the netlist`. Inputs the run pinned (`--pin`, the gated reset, `--config-value`) are
+`next_state`). When no slice can be made the report says why, once: `slice: unavailable — no
+netlist: the model did not come from the SystemVerilog lift` (a BTOR2 given to the `btor2` verbs), or
+`… the property reads no public net of the netlist`. Inputs the run pinned (`--pin`, the gated reset, `--config-value`) are
 evaluated at their pinned value, since a trace does not list them. Display only: no engine reads
 the slice and no verdict changes.
 
@@ -815,7 +811,7 @@ so far. Under `check` each assumption is instead checked like an assertion and c
 (the behaviour before 2026-10-15); `ignore` drops them.
 
 ```bash
-mununu sv verify-auto prim_arbiter_ppc.sv --top prim_arbiter_ppc --frontend sv2v ... --json \
+mununu sv verify-auto prim_arbiter_ppc.sv --top prim_arbiter_ppc ... --json \
   | jq '.assumptions'
 # {"mode":"precondition","applied":["ReqStaysHighUntilGranted0_M"],"unapplied":[],
 #  "unguarded":[],"consistency":"consistent"}
@@ -855,7 +851,7 @@ verdict is scoped to the traces those assumptions admit.
 
 > Source of truth: [`VerifyAutoOptions::lift_overrides`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) + [`apply_lift_overrides`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) — surface: (CLI+API)
 
-`sv verify-auto` reads the sources twice: slang extracts the SVA, and sv2v / yosys lift the RTL to
+`sv verify-auto` reads the sources twice: slang extracts the SVA, and yosys (`read_slang`) lifts the RTL to
 BTOR2. Some assertion macro sets do not survive the lift — OpenTitan's real `prim_assert.sv` expands
 `ASSERT_FPV_LINEAR_FSM` into a local-variable property and a `posedge !rst_ni` flop, which the
 lift rejects — while the design's synthesis shim (every `ASSERT` macro expands to nothing) lifts fine
@@ -863,7 +859,7 @@ but leaves slang nothing to extract. `--lift-override NAME=PATH` replaces the so
 for the **lift only**; extraction still reads the original:
 
 ```bash
-mununu sv verify-auto prim_esc_sender.sv --top prim_esc_sender --frontend sv2v \
+mununu sv verify-auto prim_esc_sender.sv --top prim_esc_sender \
   --source prim_assert.sv --source prim_assert_standard_macros.svh \
   --lift-override prim_assert.sv=shim/prim_assert.sv \
   --lift-override prim_assert_standard_macros.svh=/dev/null
@@ -930,7 +926,7 @@ latches and black-boxed modules are not analysed. The worst row drives `--fail-o
 `violated` row by default); the JSON is `SvCdcLintResponse`, the same type the API returns.
 
 ```bash
-mununu sv cdc-lint rps_top.sv --top rps_top --frontend slang | jq '.crossings[] | {kind, outcome, source, destination}'
+mununu sv cdc-lint rps_top.sv --top rps_top | jq '.crossings[] | {kind, outcome, source, destination}'
 ```
 
 A synchroniser passes levels, and whether a pulse survives the crossing depends on the clock
@@ -970,9 +966,8 @@ mununu sv verify-auto sdram_ctrl.sv --top sdram_ctrl --param INIT_WAIT=4
 ```
 
 `NAME=VALUE` targets the top module; `MODULE.NAME=VALUE` a submodule. The
-mechanism is frontend-appropriate — yosys `chparam` on the read_verilog frontend
-(parameters stay unresolved until `hierarchy`), slang `-G` on the `--frontend
-slang` path (slang elaborates at read time). A parameter that is **not** a real
+mechanism is `read_slang`'s `-G NAME=VALUE` (slang elaborates at read time, so
+the value is in the netlist before `hierarchy`). A parameter that is **not** a real
 parameter of the design is a hard **error** (it lists the declared parameters),
 never a silent drop; the applied overrides are echoed as a `parameter-override`
 scope note — the verdicts are scoped to those values.
@@ -1028,7 +1023,7 @@ python3 scripts/vendor_opentitan_ip.py --ip edn --commit 558921ccc8aeefab652b45c
 cd examples/verify/ip_opentitan_edn/source && sh run.sh --json --source mununu_properties.sv
 ```
 
-`run.sh` is `sv verify-auto edn.sv --top edn --frontend sv2v --source … --lift-override
+`run.sh` is `sv verify-auto edn.sv --top edn --source … --lift-override
 prim_assert.sv=prim_assert_shim.sv --lift-override prim_assert_standard_macros.svh=/dev/null
 --lift-override prim_assert_sec_cm.svh=/dev/null --lift-override prim_alert_sender.sv=prim_alert_sender_lift.sv
 --lift-override prim_sparse_fsm_flop.sv=prim_sparse_fsm_flop_lift.sv --pin rst_ni=1`: the SVA is
@@ -1038,7 +1033,7 @@ assertion macro of the real set empty, `INC_ASSERT` defined so the assertion-sup
 2026-10-22), the bus and the endpoint requests stay free inputs. Two upstream files cannot be lifted
 with their `ifdef INC_ASSERT` region in (`prim_alert_sender.sv`: `sequence` blocks;
 `prim_sparse_fsm_flop.sv`: the enum-method loop of `is_undefined_state` — yosys-slang "unsupported
-system task 'next'", sv2v leaves the calls unresolved), so the script writes a `_lift.sv` variant of
+system task 'next'"), so the script writes a `_lift.sv` variant of
 each with that region removed, for the lift only. The sparse-FSM flop's `unused_err_o` is therefore the
 synthesis constant `1'b0` in the lift: the nine FSM error → alert rows hold with an antecedent the model
 cannot raise (under `--fault-model sec-cm` the flag is re-minted from the state's compared constants — see the posture section below).
@@ -1686,12 +1681,18 @@ Three caveats are load-bearing; plan for them.
 
 ### 1. The server host needs the SV toolchain
 
-`sv verify-auto` shells out to **slang** (elaboration + SVA), **sv2v**
-(normalisation), and **Yosys** (SV → BTOR2). These are **not bundled** — mununu
-discovers each via a `locate_*` helper (a `MUNUNU_<TOOL>_PATH` env var, then `$PATH`)
-and returns a **structured error** if one is missing, rather than crashing. Run the
-API on a host that has them installed (the pinned `docker/Dockerfile.sva` image is the
-supported environment). See [`external-tools.md`](external-tools.md).
+> Source of truth: [`locate_yosys`](../crates/mununu-core/src/adapter/yosys/mod.rs#L2529) + [`read_slang_hint`](../crates/mununu-core/src/adapter/yosys/mod.rs#L2585) — surface: (CLI+API+UI)
+
+`sv verify-auto` shells out to **slang** (elaboration + SVA) and **Yosys** with
+yosys-slang's `read_slang` (SV → BTOR2 — built into yosys ≥ 0.67 and the pinned
+image; `MUNUNU_YOSYS_SLANG_PLUGIN` loads a plugin with `-m` on a yosys that lacks
+it). These are **not bundled** — mununu discovers each via a `locate_*` helper (a
+`MUNUNU_<TOOL>_PATH` env var, then `$PATH`) and returns a **structured error** if one
+is missing, rather than crashing. A yosys without `read_slang` (Homebrew's 0.59, say)
+lifts **no** SystemVerilog at all: the error names the fix (yosys ≥ 0.67 or
+`MUNUNU_YOSYS_SLANG_PLUGIN`). Run the API on a host that has them installed (the
+pinned `docker/Dockerfile.sva` image is the supported environment). See
+[`external-tools.md`](external-tools.md).
 
 **Net-type normalization (lift widening).** A net-type qualifier on a *port* header
 (`input tri0 baud8x`) is rejected by both yosys's reader (a parse error) and slang's
@@ -1703,41 +1704,45 @@ staging the source, so the design parses: a port net type only governs that port
 an output is driven internally — dropping it is **sound** (exact for inputs). **Internal**
 net-type declarations are left untouched (their pull / resolution semantics matter).
 
-> Source of truth: [`strip_port_net_types`](../crates/mununu-core/src/adapter/yosys/mod.rs#L254) — surface: (CLI+API+UI)
+> Source of truth: [`strip_port_net_types`](../crates/mununu-core/src/adapter/yosys/mod.rs#L352) — surface: (CLI+API+UI)
 
-**Wider front-end via yosys-slang (opt-in).** yosys's native `read_verilog` rejects some legal
-SystemVerilog a full front-end accepts — e.g. a bounded `while` loop in an `always @*` block —
-and black-boxes the module (all its properties then skip). Set `MUNUNU_YOSYS_FRONTEND=slang` (when
-the yosys-slang `read_slang` plugin is present — `MUNUNU_YOSYS_SLANG_PLUGIN`, or the pinned image's
-`share/yosys/plugins/slang.so`) to lift the RTL with `read_slang` (a complete SV front-end) instead.
-It reads the RTL **only** (`--ignore-assertions` — SVA is extracted separately, so nothing is lost)
-and names named registers/ports **identically** to `read_verilog`, so cutpoints / `--pin` /
-atoms resolve unchanged. *(Example: the `xgate` coprocessor, whose RISC core has a rejected `while`
-loop, is black-boxed under `read_verilog` but lifts its full 125-register core under `read_slang`.)*
-
-The default `--frontend auto` tries `read_verilog` (+sv2v) first and **falls back to `read_slang`**
-on a lift error (`MUNUNU_YOSYS_FRONTEND=slang` flips the preference). The two paths are **not
-interchangeable for soundness** — `read_slang` and `read_verilog` model a *partial* register write
-(`q[hi:lo] <= d` / `q[idx] <= d`) differently (see the partial-write refusal / cone fix), so a silent
-choice between them can be green about a different question than the one asked. Verify-auto therefore
-**reports which front end produced the verdicts** as a `lift-frontend` note — Info when there was no
-choice, and a **ScopeCaveat naming the fallback reason** when `auto` fell back. Note also that SVA in
-a `bind`-ed file cannot be parsed by `read_verilog`, so `auto` **always** ends on slang there.
+**The front end is yosys-slang's `read_slang` — the only one (N1, 2026-11-04).** A complete
+SystemVerilog front end: module-header `import pkg::*;`, packages, interfaces, a bounded `while`
+loop in an `always @*` block — everything yosys's native `read_verilog` used to reject (and
+black-box) lifts. It reads the RTL **only** (`--ignore-assertions`: concurrent SVA is extracted
+separately by slang and translated by mununu; an *immediate* `assert` inside a procedural block
+is not lifted — without the flag yosys-slang refuses any temporal property as "unsupported SVA
+feature" and has no finer switch, and sv2v dropped immediate assertions too, so no default path
+ever lifted them) and names named registers/ports `instance.signal`, so cutpoints /
+`--pin` / atoms resolve by name. `read_slang` is built into yosys ≥ 0.67 and the pinned
+`mununu-sva` image (oss-cad-suite 2026-08-24, yosys 0.68); set `MUNUNU_YOSYS_SLANG_PLUGIN` to a
+yosys-slang plugin only on a yosys without it (then yosys is started with `-m <plugin>`). A yosys
+with neither lifts no SystemVerilog: the error names the fix. There is no second front end to fall
+back to and no `--frontend` / `lift.frontend` to choose one (removed 2026-11-04 with the
+`read_verilog` + sv2v path, which survives only as the dev-only differential oracle of
+`test_support` builds — two lifts of one source, the verdicts compared). One front end means the
+mununu#464/#465 class — two lifts modelling a *partial* register write (`q[hi:lo] <= d` /
+`q[idx] <= d`) differently, so a silent choice between them was green about a different question —
+is gone by construction; the partial-write refusal stands on its own, and writing the register whole
+is the route that works. `diagnostics.frontend` still names the reader (`"yosys-slang (read_slang)"`)
+as provenance.
 
 **The BTOR backend's "topological loop".** yosys's `write_btor` walks the netlist cell by cell and can
 report `Found topological loop while processing cell $N` on a design `check` finds loop-free: yosys-slang
 emits thousands of `$buf` cells, and a wide buffer chained bit-wise through another wide cell reads as a
 cycle at cell granularity (OpenTitan `csrng`, 2026-10-22: 4,035 `$buf` cells, the loop through the command
-arbiter's grant vector; the sv2v path showed it too). On exactly that error the lift reruns its script
+arbiter's grant vector). On exactly that error the lift reruns its script
 once with `opt_clean` before `write_btor` — the pass folds the buffers into connections and drops unused
 cells, so the verdicts are over the same design — and reports it as the `lift-retry` note and
 `diagnostics.lift_retry`. Any other yosys error is not retried, and a lift that succeeds on the first run
 is unchanged.
 
-> Source of truth: [`slang_frontend_selection`](../crates/mununu-core/src/adapter/yosys/mod.rs#L1672) — surface: (CLI+API+UI)
-> Source of truth: [`SvFrontend::lift_label`](../crates/mununu-core/src/adapter/yosys/mod.rs) + the `lift-frontend` note in [`build_notes`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) — surface: (CLI+API+UI)
+> Source of truth: [`plan_lift`](../crates/mununu-core/src/adapter/yosys/mod.rs#L639) + [`slang_plugin_arg`](../crates/mununu-core/src/adapter/yosys/mod.rs#L2579) — surface: (CLI+API+UI)
+> Source of truth: [`SvFrontend::lift_label`](../crates/mununu-core/src/adapter/yosys/mod.rs#L91) (the `diagnostics.frontend` provenance string) — surface: (CLI+API+UI)
 
 ### 2. Properties come from the module's own assertions
+
+> Source of truth: [`verify_auto`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L4746) — surface: (CLI+API+UI)
 
 `sv verify-auto` checks the SVA the design *carries*. An agent that emits RTL **with**
 `assert property` statements gets those checked automatically. Properties the design does not
@@ -1747,7 +1752,7 @@ its readings are in [`wiki/Property-Templates.md`](../wiki/Property-Templates.md
 reported as a row labelled `tmpl.<instance>` — or with an **SV-direct verb**, which lifts the
 module *and* decides one property in one call:
 
-> Source of truth: [`sv_verify::sv_verify_recoverability`](../crates/mununu-core/src/adapter/sv_verify.rs#L84) — surface: (CLI+API+UI)
+> Source of truth: [`sv_verify::sv_verify_recoverability_explained`](../crates/mununu-core/src/adapter/sv_verify.rs#L251) — surface: (CLI+API+UI)
 
 ```bash
 mununu sv verify-recoverability my_module.sv --target "state_q == 3"
@@ -1868,7 +1873,7 @@ argument by its own — and refuses on any width it would have to guess. `$past(
 signal of `e` from its shadow. Three checks pin it: the BTOR2 it emits against a reference
 evaluator on every valuation of random expressions; the minted IR of real slang JSON (prim_count's
 `min` / `max` checks) against hand-computed values; and an **independent elaborator** —
-`e2e_minted_expressions_agree_with_yosys_elaboration` has sv2v + yosys elaborate random expressions
+`e2e_minted_expressions_agree_with_yosys_elaboration` has the dev-only `read_verilog` + sv2v oracle (`test_support` builds) elaborate random expressions
 into `assign r = E` while the assertion `r == E` is lowered by the compiler: every translated
 assertion must HOLD.
 
@@ -2090,7 +2095,7 @@ unfaithful lift is caught *before* the minutes-long formal gate runs. It **chang
 no verdict**; it is a read-only preflight.
 
 ```bash
-mununu --quiet sv lint rtl/mod.sv --frontend slang        # exit 2 ⇒ a register can't be kept
+mununu --quiet sv lint rtl/mod.sv        # exit 2 ⇒ a register can't be kept
 ```
 
 ```jsonc
@@ -2256,8 +2261,7 @@ This is a statement about the **properties**, never a bug report about the desig
 a deliberately-injected fault, not a discovered one.
 
 The mutation catalog — two **structural** (no targeting) and two **targeted** (a
-named-signal + structural-cone resolution, never a source line, which the sv2v lift
-does not preserve):
+named-signal + structural-cone resolution, never a source line):
 
 - **`stick:<reg>`** — freeze a register at its reset value (`next(reg) := reg`).
   Universal; flips any property that depends on the register progressing.
@@ -2329,16 +2333,16 @@ JSON.
 jobs:
   recoverability:
     runs-on: ubuntu-latest
-    container: ghcr.io/mumunu-team/mununu-sva:latest   # bundles slang + sv2v + yosys
+    container: ghcr.io/mumunu-team/mununu-sva:latest   # bundles slang + yosys (read_slang)
     steps:
       - uses: actions/checkout@v4
       - run: |
           mununu --quiet sv verify-recoverability rtl/fsm.sv \
-            --frontend sv2v --target "state_q == 0"   # exit 2 ⇒ step fails
+            --target "state_q == 0"   # exit 2 ⇒ step fails
 ```
 
 For a whole module's assertions in one gate, `mununu --quiet sv verify-auto rtl/mod.sv
---frontend sv2v --json` exits non-zero iff any property is violated; the JSON on
+--json` exits non-zero iff any property is violated; the JSON on
 stdout carries the per-property detail for a summary step. `verify-auto` also
 **auto-escalates** a *safety* property the cube abstraction leaves `⊥` to the
 multi-engine reachability portfolio (`--no-rescue` opts out), recording a
@@ -2357,7 +2361,7 @@ recipe live in
 - [`design/recoverability-vs-sva.md`](design/recoverability-vs-sva.md) — why `AG EF`
   recoverability is outside SVA, with the OpenTitan `csrng` worked example.
 - [`cli-cookbook.md`](cli-cookbook.md) — common `mununu` CLI invocations.
-- [`external-tools.md`](external-tools.md) — installing slang / sv2v / Yosys and the
+- [`external-tools.md`](external-tools.md) — installing slang / Yosys (yosys-slang) and the
   discovery env vars.
 - [`../wiki/Verify-Project-Flow.md`](../wiki/Verify-Project-Flow.md) — the N-source
   `verify.toml` framework for composing multiple sources.

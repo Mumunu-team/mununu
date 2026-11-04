@@ -21,7 +21,6 @@ files = ["two_cones.sv"]
 adapter = "sv-yosys"
 
 [sources.options]
-use_sv2v = true
 top = "two_cones"
 
 [alphabet]

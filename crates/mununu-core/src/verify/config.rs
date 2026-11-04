@@ -416,6 +416,13 @@ pub enum ConfigIssue {
     EmptyAdapter { source_id: String },
     /// `[[sources]]` entry had an empty `files` list.
     SourceNoFiles { source_id: String },
+    /// `[[sources]]` entry sets an `options` key the tool no longer honours (it would be
+    /// silently ignored otherwise): `use_sv2v` since the slang-only lift (N1, 2026-11-04).
+    SourceOptionRemoved {
+        source_id: String,
+        key: String,
+        hint: &'static str,
+    },
     /// `[[sources]]` entry had `count = 0` — meaningless. Use `count
     /// = 1` (or omit the field) for a single instance, `>= 2` for
     /// parameterised expansion.
@@ -508,6 +515,14 @@ impl fmt::Display for ConfigIssue {
             ConfigIssue::EmptyAdapter { source_id } => {
                 write!(f, "[[sources]] `{source_id}` has empty `adapter`")
             }
+            ConfigIssue::SourceOptionRemoved {
+                source_id,
+                key,
+                hint,
+            } => write!(
+                f,
+                "[[sources]] `{source_id}`: options.{key} is no longer supported — {hint}"
+            ),
             ConfigIssue::SourceCountZero { source_id } => write!(
                 f,
                 "[[sources]] `{source_id}` has `count = 0` (use 1 or omit for single-instance; >= 2 for parameterised expansion)"
@@ -682,6 +697,16 @@ impl VerifyConfig {
             if source.files.is_empty() {
                 issues.push(ConfigIssue::SourceNoFiles {
                     source_id: source.id.clone(),
+                });
+            }
+            // N1 (2026-11-04) — the lift is slang-only; a key that used to pick the sv2v +
+            // read_verilog path is refused rather than ignored, so a project file says what
+            // the tool does.
+            if source.options.contains_key("use_sv2v") {
+                issues.push(ConfigIssue::SourceOptionRemoved {
+                    source_id: source.id.clone(),
+                    key: "use_sv2v".to_string(),
+                    hint: "the SystemVerilog lift runs yosys-slang's `read_slang` only; remove the key",
                 });
             }
             // Memory-abstraction posture: validate kind + fence_semantics

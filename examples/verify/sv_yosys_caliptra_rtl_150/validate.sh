@@ -37,7 +37,7 @@ fi
 
 # yosys + sv2v are required for this fixture. They are not bundled with
 # the mununu repo; the dev container installs them.
-for tool in yosys sv2v; do
+for tool in yosys; do
   if ! command -v "${tool}" >/dev/null 2>&1; then
     echo "validate.sh: required tool '${tool}' not on PATH" >&2
     exit 2
@@ -49,7 +49,7 @@ cd "${THIS_DIR}"
 # Run the pipeline. The sidecar + additional SV package files are
 # passed via repeated `--sidecar` flags (the CLI loader resolves them
 # from the same directory tree).
-echo "==> mununu context summarize --adapter sv-yosys --preprocessor sv2v"
+echo "==> mununu context summarize --adapter sv-yosys"
 echo "    cwd: source/"
 echo "    primary: soc_ifc_boot_fsm_pre_fix.sv"
 echo "    sidecar (auto-loaded): soc_ifc_boot_fsm_pre_fix.mununu.json"
@@ -58,7 +58,6 @@ echo "    additional sources: soc_ifc_pkg.sv, soc_ifc_reg_pkg.sv"
 OUTPUT="$(
   cd source && "${MUNUNU}" context summarize \
     --adapter sv-yosys \
-    --preprocessor sv2v \
     --sidecar soc_ifc_pkg.sv \
     --sidecar soc_ifc_reg_pkg.sv \
     soc_ifc_boot_fsm_pre_fix.sv 2>&1 || true
@@ -117,7 +116,6 @@ if [[ "${EVAL:-0}" -eq 1 ]]; then
     EVAL_OUT="$(
       cd source && timeout 300 "${MUNUNU}" context eval \
         --adapter sv-yosys \
-        --preprocessor sv2v \
         --sidecar soc_ifc_pkg.sv \
         --sidecar soc_ifc_reg_pkg.sv \
         --formula "${FORMULA}" \

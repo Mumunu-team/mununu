@@ -9,8 +9,9 @@
 # so the max per-cluster cone is strictly smaller than the naive joint COI.
 #
 # R4W-3.5 made this runnable through the verify path:
-#   - `use_sv2v = true`  — sv2v lowers the `import csrng_pkg::*;` header
-#     form yosys's parser rejects.
+#   - the `import csrng_pkg::*;` module-header form is read by yosys-slang's
+#     `read_slang` (the `use_sv2v = true` key that once lowered it through
+#     sv2v is refused since the slang-only lift, 2026-11-04).
 #   - (no sidecar needed here — the harness ties off every wide/
 #     non-essential input internally, leaving 2 free 1-bit inputs.)
 # and fixed the cone seeding so a property over a combinational *output*
@@ -36,7 +37,6 @@ files = [
 adapter = "sv-yosys"
 
 [sources.options]
-use_sv2v = true
 top = "csrng_main_sm_pair"
 
 [alphabet]

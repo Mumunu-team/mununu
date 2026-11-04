@@ -5,7 +5,6 @@ id = "sr"
 files = ["sysrst_ctrl_pkg.sv", "sysrst_ctrl_detect.sv", "prim_assert.sv", "sysrst_harness.sv"]
 adapter = "sv-yosys"
 [sources.options]
-use_sv2v = true
 top = "sysrst_harness"
 sidecar = "sysrst_harness.mununu.json"
 [alphabet]

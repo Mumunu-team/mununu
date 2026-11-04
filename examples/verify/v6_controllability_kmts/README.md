@@ -40,7 +40,7 @@ hand-authored Verilog implementation of an AMBA-style arbiter with
 a small predicate-abstractable burst counter. The Verilog is the
 canonical documentation (`source/amba_arbiter.sv`); the equivalent
 BTOR2 (`source/amba_arbiter.btor2`) is what the integration test
-consumes to sidestep the sv2v + Yosys subprocess requirement for
+consumes to sidestep the yosys subprocess requirement for
 the V.6 MVP test (the test still verifies the actual R.6.6 +
 R.6.3 code paths end-to-end).
 
@@ -71,7 +71,7 @@ which was already sound). See [`kmts-theory.md`](../../../docs/design/kmts-theor
 ### Verilog (`source/amba_arbiter.sv`)
 
 - **Module**: `amba_arbiter`. 2-client arbiter with a 2-bit burst
-  counter. Synthesisable (sv2v + Yosys friendly).
+  counter. Synthesisable (yosys-slang friendly).
 - **Inputs**:
   - `req_0`, `req_1` — client requests (uncontrollable / environment).
   - `ctrl_g0`, `ctrl_g1` — per-cycle controller grant choices

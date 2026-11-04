@@ -4,7 +4,7 @@
 # The point of this example is to demonstrate the framework's
 # adapter-agnosticism: the orchestrator pairs a `ctxdsl` source
 # (microcode authored by hand) with an `sv-yosys` source (real SV
-# elaborated via sv2v → Yosys → BTOR2 → KMTS bit-blast) under one
+# elaborated via read_slang → Yosys → BTOR2 → KMTS bit-blast) under one
 # `verify.toml`. The two automata have disjoint label alphabets here
 # (the microcode steps on `tick_microcode`; the SV side steps on the
 # bit-blaster's clock label), so the asynchronous composition just

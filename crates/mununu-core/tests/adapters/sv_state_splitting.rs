@@ -79,7 +79,9 @@ fn state_splitting_resolves_joint_combinational_mutex() {
     );
     if let Err(e) = &probe {
         let msg = e.to_string().to_lowercase();
-        if msg.contains("yosys") && (msg.contains("not found") || msg.contains("locate")) {
+        if msg.contains("read_slang")
+            || (msg.contains("yosys") && (msg.contains("not found") || msg.contains("locate")))
+        {
             eprintln!("SKIP sv_state_splitting: yosys not available ({e})");
             return;
         }

@@ -1,6 +1,6 @@
 # Consumer briefing — lifted register names no longer embed yosys's per-run staging directory (mununu#806, 2026-10)
 
-> Source of truth: [`run_yosys`](../../crates/mununu-core/src/adapter/yosys/mod.rs) and the sv2v branch of `translate_sv` in the same file — surface: (CLI+API) — every SystemVerilog lift that goes through sv2v (`sv verify-auto`, `sv verify`, `sv mutate`, `sv game`, `context import --format sv-yosys`)
+> Source of truth: [`plan_lift`](../../crates/mununu-core/src/adapter/yosys/mod.rs#L639) — surface: (CLI+API) — every SystemVerilog lift that went through sv2v (the dev-only oracle since the slang-only lift of 2026-11-04; product register names carry the staged `work.sv` / the user's file names) (`sv verify-auto`, `sv verify`, `sv mutate`, `sv game`, `context import --format sv-yosys`)
 
 **Audience:** rosf, monono and anyone who diffs mununu reports across runs or keys a sidecar, a `--config-value` or a predicate on a lifted register name.
 

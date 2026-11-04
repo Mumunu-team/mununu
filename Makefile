@@ -103,7 +103,8 @@ test-fast:
 	$(CARGO) test --workspace --lib --bins --tests --examples
 
 # End-to-end SVA-verification suite — the `#[ignore]`d tests that shell out to
-# the external SystemVerilog toolchain (slang + sv2v + yosys, plus btormc for
+# the external SystemVerilog toolchain (slang + yosys with read_slang — sv2v only as
+# the dev-only differential oracle of test_support builds — plus btormc for
 # the reachability differential and Verilator for the counterexample-replay
 # gate). They are `#[ignore]`d in `make ci` because the tools are contributor-
 # installed, not bundled (subprocess-tools-are-not-bundled policy), so this

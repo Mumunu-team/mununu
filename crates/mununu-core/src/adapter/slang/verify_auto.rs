@@ -469,16 +469,11 @@ pub struct ModelDiagnostics {
     /// stub is an exact behavioral model of the flop datapath; auto-injection is
     /// reported here so it is never silent.
     pub auto_provided_stubs: Vec<String>,
-    /// #466 — the RTL front end that produced the lift (`SvFrontend::lift_label`,
-    /// e.g. `read_verilog + sv2v` / `yosys-slang (read_slang)`). `--frontend auto`
-    /// picks one silently; surfacing it (via the `lift-frontend` note) answers
-    /// "which lift produced this verdict?" — the two paths differ in SOUNDNESS on
-    /// partial writes (#464/#465), so a silent choice is the #459 failure class.
+    /// The RTL front end that produced the lift (`SvFrontend::lift_label`): `yosys-slang
+    /// (read_slang)` on every product lift (N1, 2026-11-04 — one front end, so the #464/#465
+    /// class of two lifts disagreeing on partial writes is gone by construction); `read_verilog
+    /// + sv2v` only from the dev-only oracle. Kept as provenance: which reader built the model.
     pub frontend: Option<String>,
-    /// #466 — when `--frontend auto` FELL BACK (an earlier front end errored before
-    /// the one used succeeded), the prior attempt's error. `None` when there was no
-    /// fallback (an explicit front end, or the first attempt succeeded).
-    pub frontend_fallback_reason: Option<String>,
     /// `Some(reason)` when the lift's first yosys run died in the BTOR backend with a
     /// "topological loop" (`check` sees none: yosys-slang's `$buf` cells chain wide vectors
     /// through other cells) and the script succeeded rerun with `opt_clean` before `write_btor`.
@@ -1178,8 +1173,8 @@ pub(crate) fn fill_declarations(
     }
     if !unassigned.is_empty() {
         let why = if names.source_lines_rewritten {
-            " (sv2v rewrote the source, so the lines come from slang's AST, which does not \
-             know these names)"
+            " (the oracle's sv2v rewrote the source, so the lines come from slang's AST, which \
+             does not know these names)"
         } else {
             ""
         };
@@ -2332,39 +2327,6 @@ fn build_notes(
     // Coverage summary (Info) — the honest at-a-glance tally.
     notes.push(coverage_summary_note(report));
 
-    // #466 — which RTL front end produced the lift. `--frontend auto` picks one
-    // silently, but read_verilog and yosys-slang differ in SOUNDNESS on partial
-    // writes (#464/#465), so naming it answers "which lift produced this verdict?".
-    // A fallback (read_verilog errored → slang) is a change of plan ⇒ ScopeCaveat.
-    if let Some(fe) = &d.frontend {
-        let (level, summary, detail) = match &d.frontend_fallback_reason {
-            Some(reason) => (
-                NoteLevel::ScopeCaveat,
-                format!("lift: {fe} — `--frontend auto` fell back ({reason})."),
-                "read_verilog and yosys-slang are NOT interchangeable for soundness (they differ on \
-                 partial register writes such as `q[hi:lo] <= d`), so an auto-fallback is reported \
-                 as a change of plan. Force a front end with `--frontend verilog|slang` to remove \
-                 the choice."
-                    .to_string(),
-            ),
-            None => (
-                NoteLevel::Info,
-                format!("lift: {fe}."),
-                "The RTL front end that produced this BTOR2. `--frontend auto` tries read_verilog \
-                 (+sv2v) first and falls back to yosys-slang on a lift error; the two paths are not \
-                 interchangeable for soundness. Force one with `--frontend verilog|slang`."
-                    .to_string(),
-            ),
-        };
-        notes.push(VerificationNote {
-            kind: "lift-frontend".into(),
-            level,
-            summary,
-            detail,
-            items: Vec::new(),
-            property: None,
-        });
-    }
     // The lift rerun its yosys script with `opt_clean` after the BTOR backend reported a
     // topological loop (2026-10-22, OpenTitan csrng through yosys-slang's `$buf` cells). Info:
     // the model is the same design, and a reader diffing two runs wants to know the script moved.
@@ -3052,23 +3014,6 @@ fn undriven_via_partial_write_concat(
         }
     }
     false
-}
-
-/// mununu#507 — does any staged source carry a module-scope `bind`?
-///
-/// Assertions live in a bound `*_sva.sv` file BECAUSE THEY MUST: `read_verilog -sv`
-/// cannot parse `assert property`, and verify-auto has no `--define`, so an `ifdef`
-/// guard would hide them from the verifier too. And sv2v 0.0.13 cannot parse `bind`
-/// at all (verified 2026-09-06: `Parse error: unexpected token 'bind'`). So the
-/// `--frontend sv2v` remedy is not merely awkward for such a
-/// design — it cannot run, and recommending it sends the reader into a parse error.
-fn sources_use_bind(sources: &[(String, String)]) -> bool {
-    sources.iter().any(|(_, body)| {
-        body.lines().any(|l| {
-            let t = l.trim_start();
-            t.starts_with("bind ") && !t.starts_with("bind_") && !l.trim_start().starts_with("//")
-        })
-    })
 }
 
 fn formula_atom_over_undriven_register(
@@ -4896,11 +4841,8 @@ pub(crate) struct PreLift {
     pub blackboxed_modules: Vec<String>,
     /// Flop-primitive stubs auto-injected on the H.C re-lift (empty when none).
     pub auto_provided_stubs: Vec<String>,
-    /// The concrete front end that produced the BTOR2 (#466) — `Verilog`/`Slang`.
+    /// The front end that produced the BTOR2 (`Slang`; `Verilog` only from the dev-only oracle).
     pub frontend_used: crate::adapter::yosys::SvFrontend,
-    /// `Some(reason)` when `--frontend auto` fell back after an earlier front end
-    /// errored (#466).
-    pub fallback_reason: Option<String>,
     /// `Some(reason)` when the lift rerun its script with `opt_clean` after a BTOR-backend
     /// topological-loop error (`ModelDiagnostics::lift_retry`).
     pub backend_retry: Option<String>,
@@ -5035,16 +4977,17 @@ pub(crate) fn lift_sv(
                 .collect();
         }
     }
-    // 2026-10-29 — the source map's netlist half: yosys-slang (recent builds) and yosys's own
-    // `read_verilog` stamp nets and storage cells with the staged file's own lines. Declarations
-    // the netlist lacks are filled from slang's AST at the hand-off (`fill_declarations`). When
-    // sv2v rewrote the source first, the netlist's lines are its output's: the kinds (register /
-    // input / output) stay, the lines go, and the status says what is missing.
+    // 2026-10-29 — the source map's netlist half: yosys-slang stamps nets and storage cells
+    // with the staged file's own lines. Declarations the netlist lacks are filled from slang's
+    // AST at the hand-off (`fill_declarations`). When the dev-only oracle's sv2v rewrote the
+    // source first, the netlist's lines are its output's: the kinds (register / input / output)
+    // stay, the lines go, and the status says what is missing.
     let mut sources = crate::adapter::yosys::cell_sources(&lift.flat_netlist_json);
     crate::adapter::yosys::name_staged_primary(&mut sources, primary_name);
-    // The sv2v path: the netlist's lines are sv2v's output's; the kinds (register / input /
-    // output) stay, every line comes from slang's AST at the hand-off.
-    if lift.sv2v_ran {
+    // The oracle's sv2v path: the netlist's lines are sv2v's output's; the kinds (register /
+    // input / output) stay, every line comes from slang's AST at the hand-off.
+    let source_rewritten = lift.frontend_used == crate::adapter::yosys::SvFrontend::Verilog;
+    if source_rewritten {
         for s in &mut sources {
             s.declared = None;
             s.assigned.clear();
@@ -5056,13 +4999,12 @@ pub(crate) fn lift_sv(
         blackboxed_modules: lift.blackboxed_modules,
         auto_provided_stubs,
         frontend_used: lift.frontend_used,
-        fallback_reason: lift.fallback_reason,
         backend_retry: lift.backend_retry,
         trace_names: crate::trace::TraceNames {
             aliases: crate::adapter::yosys::trace_aliases(&lift.flat_netlist_json),
             clocks: lift.clock_domains.iter().map(|d| d.net.clone()).collect(),
             sources,
-            source_lines_rewritten: lift.sv2v_ran,
+            source_lines_rewritten: source_rewritten,
             // 2026-10-30 — the netlist as a circuit of values, for the trace-relative slice; the
             // staged primary is `work.sv` to yosys and the user's file to the report.
             netlist: crate::adapter::yosys::netlist::Netlist::parse(&lift.flat_netlist_json)
@@ -5506,7 +5448,6 @@ pub(crate) fn prepare_model(
         blackboxed_modules,
         auto_provided_stubs,
         frontend_used,
-        fallback_reason,
         backend_retry,
         clock_domains,
         trace_names,
@@ -5522,10 +5463,8 @@ pub(crate) fn prepare_model(
     }
     report.diagnostics.blackboxed_modules = blackboxed_modules;
     report.diagnostics.auto_provided_stubs = auto_provided_stubs;
-    // #466 — record which RTL front end produced this lift (and any auto-fallback)
-    // so verify-auto can report it (the `lift-frontend` note in `build_notes`).
+    // Which RTL front end produced this lift — provenance on the report.
     report.diagnostics.frontend = Some(frontend_used.lift_label().to_string());
-    report.diagnostics.frontend_fallback_reason = fallback_reason;
     report.diagnostics.lift_retry = backend_retry;
 
     // mununu#709 — a reset named inside a sub-instance (`u_rx.rst_ni`) is an alias of the input
@@ -6810,9 +6749,8 @@ pub(crate) fn verify_auto_impl(
         // it, `q != 0`) then reads those free inputs and every engine returns a
         // spurious definite verdict (the reported `HOLDS` on a reachable-non-zero
         // register — monono's planted-bug canary). Refusing is honest and
-        // recoverable (a downstream gate fails on `skipped`, never on a false HOLDS);
-        // the read_verilog / sv2v front-end models the register faithfully and
-        // decides it. Runs BEFORE any engine so cube, exact, symbolic and explicit
+        // recoverable (a downstream gate fails on `skipped`, never on a false HOLDS).
+        // Runs BEFORE any engine so cube, exact, symbolic and explicit
         // are covered uniformly. (The packed-2-D `q[idx] <= d` split — anonymous
         // sub-*registers*, no free inputs — is NOT refused: the NID-indexed
         // cone-of-influence keeps those cells, so that case now decides.)
@@ -6854,18 +6792,11 @@ pub(crate) fn verify_auto_impl(
                      unconnected port.{bb_hint}"
                 )
             };
-            // The sv2v remedy only exists for a design sv2v can parse. It cannot
-            // parse `bind` (0.0.13), and bound SVA is not optional for these
-            // designs — `read_verilog -sv` cannot parse `assert property`, and there
-            // is no `--define` to guard an `ifdef` with.
-            let remedy = if partial_write && !sources_use_bind(sources) {
-                " Re-lift with the read_verilog / sv2v front-end \
-                 (`--frontend sv2v`), which models the register faithfully."
-                    .to_string()
-            } else if partial_write {
-                " The usual remedy (`--frontend sv2v`) is NOT available \
-                 here: these sources use `bind`, which sv2v cannot parse. Rewriting the \
-                 assignment to write the register whole is the route that works."
+            // One front end (N1): there is no second lift to recommend. Writing the register
+            // whole is the route that works; the refusal stands either way.
+            let remedy = if partial_write {
+                " Writing the register whole (`q <= …` rather than `q[hi:lo] <= …`) is the \
+                 route that works."
                     .to_string()
             } else {
                 String::new()
@@ -13958,58 +13889,6 @@ module uart_tx(); endmodule"#;
         );
     }
 
-    #[test]
-    fn build_notes_reports_lift_frontend() {
-        // #466 — verify-auto names the RTL front end that produced the lift: Info
-        // when there was no fallback, ScopeCaveat + the reason when `--frontend auto`
-        // fell back (read_verilog errored → slang), and no note when unrecorded.
-        let base = |frontend: Option<&str>, fallback: Option<&str>| AutoVerifyReport {
-            assumptions: Default::default(),
-            properties: Vec::new(),
-            unsupported: Vec::new(),
-            diagnostics: ModelDiagnostics {
-                frontend: frontend.map(String::from),
-                frontend_fallback_reason: fallback.map(String::from),
-                ..Default::default()
-            },
-            notes: Vec::new(),
-        };
-        let note_of = |r: &AutoVerifyReport| {
-            build_notes(
-                r,
-                must_edge_posture_label(MustEdgeInference::Off, false),
-                &[],
-                &[],
-                &[],
-                &[],
-                &NotePosture::Cube,
-            )
-            .into_iter()
-            .find(|n| n.kind == "lift-frontend")
-        };
-
-        // No fallback → Info note naming the front end.
-        let n = note_of(&base(Some("read_verilog + sv2v"), None)).expect("lift-frontend note");
-        assert_eq!(n.level, NoteLevel::Info);
-        assert!(n.summary.contains("read_verilog + sv2v"), "{}", n.summary);
-
-        // Fallback → ScopeCaveat naming the front end + why the prior one fell back.
-        let n = note_of(&base(
-            Some("yosys-slang (read_slang)"),
-            Some("read_verilog + sv2v failed: parse error at x.sv:21"),
-        ))
-        .expect("lift-frontend note");
-        assert_eq!(n.level, NoteLevel::ScopeCaveat);
-        assert!(
-            n.summary.contains("fell back") && n.summary.contains("yosys-slang"),
-            "{}",
-            n.summary
-        );
-
-        // No front end recorded (a non-lift path) → no note.
-        assert!(note_of(&base(None, None)).is_none());
-    }
-
     /// mununu#507 — the refusal must attribute a partial write ONLY when the lift
     /// shows that shape, because an unnamed free input has several other sources.
     #[test]
@@ -14049,34 +13928,6 @@ module uart_tx(); endmodule"#;
             !undriven_via_partial_write_concat(&f, "q"),
             "but there is NO partial-write shape, so the refusal must not name one \
              (mununu#507: the old message pointed at correct, whole-written RTL)"
-        );
-    }
-
-    /// mununu#507 — the sv2v remedy must not be offered to a design that uses
-    /// `bind`, because sv2v 0.0.13 cannot parse it (`Parse error: unexpected token
-    /// 'bind'`). Bound SVA is not optional for these designs: `read_verilog -sv`
-    /// cannot parse `assert property` and there is no `--define` for an `ifdef`.
-    #[test]
-    fn bound_sva_sources_are_detected_so_the_sv2v_remedy_is_withheld() {
-        let bound = vec![
-            ("dut.sv".to_string(), "module dut; endmodule\n".to_string()),
-            (
-                "dut_sva.sv".to_string(),
-                "module dut_sva; endmodule\nbind dut dut_sva u_sva();\n".to_string(),
-            ),
-        ];
-        assert!(
-            sources_use_bind(&bound),
-            "a module-scope `bind` is detected"
-        );
-
-        let plain = vec![(
-            "dut.sv".to_string(),
-            "module dut;\n  // no bind here\n  logic bind_addr;\n endmodule\n".to_string(),
-        )];
-        assert!(
-            !sources_use_bind(&plain),
-            "a commented mention and an identifier PREFIXED `bind_` are not a bind"
         );
     }
 
@@ -15260,7 +15111,6 @@ module uart_tx(); endmodule"#;
         let sources = vec![("sg_dut.sv".to_string(), design.to_string())];
         let yopts = YosysOptions {
             top: Some("sg_dut".to_string()),
-            use_sv2v: true,
             frontend: crate::adapter::yosys::SvFrontend::Slang,
             ..Default::default()
         };
@@ -15324,7 +15174,6 @@ module uart_tx(); endmodule"#;
         let sources = vec![("po_dut.sv".to_string(), design.to_string())];
         let yopts = YosysOptions {
             top: Some("po_dut".to_string()),
-            use_sv2v: true,
             frontend: crate::adapter::yosys::SvFrontend::Slang,
             ..Default::default()
         };
@@ -15390,7 +15239,6 @@ module uart_tx(); endmodule"#;
         let sources = vec![("dd_dut.sv".to_string(), design.to_string())];
         let yopts = YosysOptions {
             top: Some("dd_dut".to_string()),
-            use_sv2v: true,
             ..Default::default()
         };
         let opts = VerifyAutoOptions {
@@ -15441,7 +15289,6 @@ module uart_tx(); endmodule"#;
         let sources = vec![("hs_top.sv".to_string(), design.to_string())];
         let yopts = YosysOptions {
             top: Some("hs_top".to_string()),
-            use_sv2v: true,
             ..Default::default()
         };
         let opts = VerifyAutoOptions {
@@ -15514,7 +15361,6 @@ module uart_tx(); endmodule"#;
         let sources = vec![("fg_top.sv".to_string(), design.to_string())];
         let yopts = YosysOptions {
             top: Some("fg_top".to_string()),
-            use_sv2v: true,
             ..Default::default()
         };
         let opts = VerifyAutoOptions {
@@ -15574,7 +15420,6 @@ module uart_tx(); endmodule"#;
         let sources = vec![("wide_dut.sv".to_string(), design.to_string())];
         let yopts = YosysOptions {
             top: Some("wide_dut".to_string()),
-            use_sv2v: true,
             ..Default::default()
         };
         let opts = VerifyAutoOptions {
@@ -15615,7 +15460,6 @@ module uart_tx(); endmodule"#;
         let sources = vec![("sva_hierarchy_refs.sv".to_string(), design.to_string())];
         let yopts = YosysOptions {
             top: Some("top".to_string()),
-            use_sv2v: true,
             ..Default::default()
         };
         let opts = VerifyAutoOptions {
@@ -15685,7 +15529,6 @@ module uart_tx(); endmodule"#;
         let sources = vec![("sw_top.sv".to_string(), design.to_string())];
         let yopts = YosysOptions {
             top: Some("sw_top".to_string()),
-            use_sv2v: true,
             ..Default::default()
         };
         let opts = VerifyAutoOptions {
@@ -15738,7 +15581,6 @@ module uart_tx(); endmodule"#;
         let sources = vec![("ds_dut.sv".to_string(), design.to_string())];
         let yopts = YosysOptions {
             top: Some("ds_dut".to_string()),
-            use_sv2v: true,
             ..Default::default()
         };
         let opts = VerifyAutoOptions {
@@ -15797,7 +15639,6 @@ module uart_tx(); endmodule"#;
             let sources = vec![("ag_dut.sv".to_string(), design)];
             let yopts = YosysOptions {
                 top: Some("ag_dut".to_string()),
-                use_sv2v: true,
                 ..Default::default()
             };
             let opts = VerifyAutoOptions {
@@ -15914,7 +15755,6 @@ module uart_tx(); endmodule"#;
         let sources = vec![("pc_dut.sv".to_string(), design.to_string())];
         let yopts = YosysOptions {
             top: Some("pc_dut".to_string()),
-            use_sv2v: true,
             ..Default::default()
         };
         let opts = VerifyAutoOptions {
@@ -15959,6 +15799,7 @@ module uart_tx(); endmodule"#;
     /// shipped default with `E` lowered by OUR compiler (minted into the model). Mixed widths
     /// (1–6 bits) and signedness exercise slang's conversions, which both elaborators must agree
     /// on; a disagreement is a VIOLATED with the expression named.
+    #[cfg(feature = "test_support")]
     #[test]
     #[ignore = "requires slang + sv2v + Yosys + z3 (use the mununu-sva docker image); run with --ignored"]
     fn e2e_minted_expressions_agree_with_yosys_elaboration() {
@@ -16024,9 +15865,10 @@ module uart_tx(); endmodule"#;
         let sources = vec![("ex_dut.sv".to_string(), design.clone())];
         let yopts = YosysOptions {
             top: Some("ex_dut".to_string()),
-            // sv2v + `read_verilog`: an elaborator independent of slang (which typed the SVA
-            // side), and one that ignores the assertions the slang plugin refuses to lift.
-            use_sv2v: true,
+            // The dev-only oracle (`test_support`): sv2v + `read_verilog`, an elaborator
+            // independent of slang (which typed the SVA side) and one that ignores the
+            // assertions it cannot parse.
+            frontend: crate::adapter::yosys::SvFrontend::Verilog,
             ..Default::default()
         };
         let opts = VerifyAutoOptions {
@@ -16110,7 +15952,6 @@ module uart_tx(); endmodule"#;
         let sources = vec![("ph_dut.sv".to_string(), design.to_string())];
         let yopts = YosysOptions {
             top: Some("ph_dut".to_string()),
-            use_sv2v: true,
             frontend: crate::adapter::yosys::SvFrontend::Slang,
             ..Default::default()
         };
@@ -16195,7 +16036,6 @@ module uart_tx(); endmodule"#;
         let sources = vec![("tc_dut.sv".to_string(), design.to_string())];
         let yopts = YosysOptions {
             top: Some("tc_dut".to_string()),
-            use_sv2v: true,
             frontend: crate::adapter::yosys::SvFrontend::Slang,
             ..Default::default()
         };
@@ -16277,7 +16117,6 @@ module uart_tx(); endmodule"#;
         let sources = vec![("hs_dut.sv".to_string(), design.to_string())];
         let yopts = YosysOptions {
             top: Some("hs_dut".to_string()),
-            use_sv2v: true,
             frontend: crate::adapter::yosys::SvFrontend::Slang,
             ..Default::default()
         };
@@ -16396,7 +16235,6 @@ module uart_tx(); endmodule"#;
         let sources = vec![("live_dut.sv".to_string(), design.to_string())];
         let yopts = YosysOptions {
             top: Some("live_dut".to_string()),
-            use_sv2v: true,
             frontend: crate::adapter::yosys::SvFrontend::Slang,
             ..Default::default()
         };
@@ -16482,7 +16320,6 @@ module uart_tx(); endmodule"#;
         let sources = vec![("bs_dut.sv".to_string(), design.to_string())];
         let yopts = YosysOptions {
             top: Some("bs_dut".to_string()),
-            use_sv2v: true,
             frontend: crate::adapter::yosys::SvFrontend::Slang,
             ..Default::default()
         };
@@ -16573,7 +16410,6 @@ module uart_tx(); endmodule"#;
         let sources = vec![("slice_dut.sv".to_string(), design.to_string())];
         let yopts = YosysOptions {
             top: Some("slice_dut".to_string()),
-            use_sv2v: true,
             ..Default::default()
         };
         let report = verify_auto(&sources, &yopts, &VerifyAutoOptions::default())
@@ -16702,7 +16538,6 @@ module uart_tx(); endmodule"#;
         let sources = vec![("fsm.sv".to_string(), sv.to_string())];
         let yopts = YosysOptions {
             top: Some("fsm".to_string()),
-            use_sv2v: true,
             ..Default::default()
         };
 
@@ -16783,7 +16618,6 @@ module uart_tx(); endmodule"#;
         let sources = vec![("link_ctrl.sv".to_string(), sv)];
         let yopts = YosysOptions {
             top: Some("link_ctrl".to_string()),
-            use_sv2v: true,
             frontend: SvFrontend::Slang,
             ..Default::default()
         };
@@ -17003,7 +16837,6 @@ module uart_tx(); endmodule"#;
         let sources = vec![("cnt.sv".to_string(), sv.to_string())];
         let yopts = YosysOptions {
             top: Some("cnt".to_string()),
-            use_sv2v: true,
             frontend: SvFrontend::Slang,
             ..Default::default()
         };
@@ -17189,7 +17022,6 @@ module uart_tx(); endmodule"#;
         let sources = vec![("lane_arbiter.sv".to_string(), sv.to_string())];
         let yopts = YosysOptions {
             top: Some("lane_arbiter".to_string()),
-            use_sv2v: true,
             frontend: SvFrontend::Slang,
             ..Default::default()
         };
@@ -17324,7 +17156,6 @@ module uart_tx(); endmodule"#;
         let sources = vec![("lane_arbiter.sv".to_string(), sv.to_string())];
         let yopts = YosysOptions {
             top: Some("lane_arbiter".to_string()),
-            use_sv2v: true,
             frontend: SvFrontend::Slang,
             ..Default::default()
         };
@@ -17435,7 +17266,6 @@ module uart_tx(); endmodule"#;
         let sources = vec![("link_ctrl.sv".to_string(), sv)];
         let yopts = YosysOptions {
             top: Some("link_ctrl".to_string()),
-            use_sv2v: true,
             frontend: SvFrontend::Slang,
             ..Default::default()
         };
@@ -17549,7 +17379,6 @@ module uart_tx(); endmodule"#;
         ];
         let yopts = YosysOptions {
             top: Some("csrng_main_sm".to_string()),
-            use_sv2v: true,
             // The lift (sv2v + Yosys) resolves `\`include`s and packages from
             // `additional_sources` (staged + used as the sv2v include path);
             // `sources` itself only feeds slang's extraction.
@@ -18001,7 +17830,6 @@ endmodule
         ];
         let yopts = YosysOptions {
             top: Some("sysrst_ctrl_detect".to_string()),
-            use_sv2v: true,
             additional_sources: sources[1..].to_vec(),
             ..Default::default()
         };
@@ -18230,7 +18058,6 @@ endmodule
         let sources = vec![("onehot_fsm.sv".to_string(), SV.to_string())];
         let yopts = YosysOptions {
             top: Some("onehot_fsm".to_string()),
-            use_sv2v: true,
             ..Default::default()
         };
         let report = verify_auto(
@@ -18307,7 +18134,6 @@ endmodule
         ];
         let yopts = YosysOptions {
             top: Some("prim_onehot_check_wrapper".to_string()),
-            use_sv2v: true,
             additional_sources: sources[1..].to_vec(),
             ..Default::default()
         };
@@ -18366,7 +18192,6 @@ endmodule
         let sources = vec![("redor_demo.sv".to_string(), SV.to_string())];
         let yopts = YosysOptions {
             top: Some("redor_demo".to_string()),
-            use_sv2v: true,
             ..Default::default()
         };
         let report = verify_auto(
@@ -18431,7 +18256,6 @@ endmodule
         let sources = vec![("sat_hold_counter.sv".to_string(), SV.to_string())];
         let yopts = YosysOptions {
             top: Some("sat_hold_counter".to_string()),
-            use_sv2v: true,
             ..Default::default()
         };
         let mono = |report: &AutoVerifyReport| -> VerifyOutcome {
@@ -18546,7 +18370,6 @@ endmodule
         ];
         let yopts = YosysOptions {
             top: Some("sysrst_ctrl_detect".to_string()),
-            use_sv2v: true,
             additional_sources: sources[1..].to_vec(),
             ..Default::default()
         };
@@ -18983,7 +18806,6 @@ endmodule
         let sources = vec![("fsm.sv".to_string(), sv.to_string())];
         let yopts = YosysOptions {
             top: Some("fsm".to_string()),
-            use_sv2v: true,
             ..Default::default()
         };
 
@@ -19063,7 +18885,6 @@ endmodule
         let sources = vec![("fsm.sv".to_string(), sv.to_string())];
         let yopts = YosysOptions {
             top: Some("fsm".to_string()),
-            use_sv2v: true,
             ..Default::default()
         };
         let report = verify_auto(&sources, &yopts, &VerifyAutoOptions::default())
@@ -19123,7 +18944,6 @@ endmodule
         let sources = vec![("fsm.sv".to_string(), sv.to_string())];
         let yopts = YosysOptions {
             top: Some("fsm".to_string()),
-            use_sv2v: true,
             ..Default::default()
         };
 
@@ -19252,7 +19072,6 @@ endmodule
         ];
         let yopts = YosysOptions {
             top: Some("sysrst_ctrl_detect".to_string()),
-            use_sv2v: true,
             additional_sources: sources[1..].to_vec(),
             ..Default::default()
         };
@@ -19742,7 +19561,6 @@ endmodule
         ];
         let yopts = YosysOptions {
             top: Some("sysrst_ctrl_detect".to_string()),
-            use_sv2v: true,
             additional_sources: sources[1..].to_vec(),
             ..Default::default()
         };
@@ -19874,7 +19692,6 @@ endmodule
         ];
         let yopts = YosysOptions {
             top: Some("sysrst_ctrl_detect".to_string()),
-            use_sv2v: true,
             additional_sources: sources[1..].to_vec(),
             ..Default::default()
         };
@@ -20014,7 +19831,6 @@ endmodule
         let sources = vec![("uart_tx.sv".to_string(), annotated)];
         let yopts = YosysOptions {
             top: Some("uart_tx".to_string()),
-            use_sv2v: true,
             ..Default::default()
         };
         let report = verify_auto(
@@ -20073,13 +19889,12 @@ endmodule
     /// over-refuse the faithful lift. Together these pin the fix (no silent HOLDS),
     /// its precision (the good path still decides), and the COI fix (packed-2-D now
     /// decides on slang instead of being frozen).
-    /// #466 — the `lift-frontend` note names the RTL front end that produced the
-    /// verdicts, end-to-end. Forced `read_verilog` → the note says `read_verilog`
-    /// (Info, no fallback); forced `slang` → the note says `yosys-slang`.
+    /// The report names the RTL front end that produced the verdicts: `diagnostics.frontend`
+    /// is yosys-slang's `read_slang`, the one product front end, and no `lift-frontend` note
+    /// repeats it (N1, 2026-11-04 — before it, an `Auto` order could fall back silently).
     #[test]
-    #[ignore = "requires slang + sv2v + yosys (mununu-sva image)"]
-    fn e2e_verify_auto_reports_lift_frontend() {
-        use crate::adapter::yosys::SvFrontend;
+    #[ignore = "requires slang + yosys (mununu-sva image)"]
+    fn e2e_verify_auto_reports_the_slang_lift() {
         const DESIGN: &str = "// @mununu_guarantee nu X. ((q == 0) and [] X)\n\
              module m(input logic clk, input logic rst_n, input logic [3:0] d,\n\
                       output logic [3:0] q);\n\
@@ -20092,34 +19907,27 @@ endmodule
             m.insert("rst_n".to_string(), 1u64);
             m
         };
-        let run = |frontend: SvFrontend| {
-            verify_auto(
-                &sources,
-                &YosysOptions {
-                    top: Some("m".to_string()),
-                    use_sv2v: matches!(frontend, SvFrontend::Verilog),
-                    frontend,
-                    ..Default::default()
-                },
-                &VerifyAutoOptions {
-                    config_values: cfg.clone(),
-                    ..Default::default()
-                },
-            )
-            .expect("verify_auto runs")
-        };
-        let note = |r: &AutoVerifyReport| {
-            r.notes
-                .iter()
-                .find(|n| n.kind == "lift-frontend")
-                .unwrap_or_else(|| panic!("lift-frontend note present; got {:?}", r.notes))
-                .clone()
-        };
-        let v = note(&run(SvFrontend::Verilog));
-        assert_eq!(v.level, NoteLevel::Info);
-        assert!(v.summary.contains("read_verilog"), "{}", v.summary);
-        let s = note(&run(SvFrontend::Slang));
-        assert!(s.summary.contains("yosys-slang"), "{}", s.summary);
+        let report = verify_auto(
+            &sources,
+            &YosysOptions {
+                top: Some("m".to_string()),
+                ..Default::default()
+            },
+            &VerifyAutoOptions {
+                config_values: cfg,
+                ..Default::default()
+            },
+        )
+        .expect("verify_auto runs");
+        assert_eq!(
+            report.diagnostics.frontend.as_deref(),
+            Some("yosys-slang (read_slang)")
+        );
+        assert!(
+            !report.notes.iter().any(|n| n.kind == "lift-frontend"),
+            "one front end: no note repeats the field; got {:?}",
+            report.notes.iter().map(|n| &n.kind).collect::<Vec<_>>()
+        );
     }
 
     /// N0.1 — the ledger's two knobs at the seam, end to end: `only_rows` runs the named row and
@@ -20221,8 +20029,9 @@ endmodule
         assert_eq!(none.diagnostics.cone_hashes, all.diagnostics.cone_hashes);
     }
 
+    #[cfg(feature = "test_support")]
     #[test]
-    #[ignore = "requires slang + sv2v + yosys (mununu-sva image)"]
+    #[ignore = "the dev-only oracle: slang + sv2v + yosys, a test_support build (mununu-sva image)"]
     fn e2e_partsel_partial_write_slang_refuses_or_agrees_with_sv2v() {
         const CC: &str = r#"// @mununu_guarantee nu X. ((a_q == 0) and [] X)
 // @mununu_guarantee nu X. ((b_q == 0) and [] X)
@@ -20257,10 +20066,9 @@ endmodule
             m.insert("rst_n".to_string(), 1u64);
             m
         };
-        let run = |frontend: crate::adapter::yosys::SvFrontend, use_sv2v: bool| {
+        let run = |frontend: crate::adapter::yosys::SvFrontend| {
             let yopts = YosysOptions {
                 top: Some("cc".to_string()),
-                use_sv2v,
                 frontend,
                 ..Default::default()
             };
@@ -20296,8 +20104,8 @@ endmodule
         // What IS ours, on either plugin: never a silent Holds, never a ⊥, and a
         // decided verdict must agree with the faithful read_verilog + sv2v lift.
         // The sv_verify e2e pins the lint side of the same agreement.
-        let slang = run(crate::adapter::yosys::SvFrontend::Slang, false);
-        let sv2v = run(crate::adapter::yosys::SvFrontend::Verilog, true);
+        let slang = run(crate::adapter::yosys::SvFrontend::Slang);
+        let sv2v = run(crate::adapter::yosys::SvFrontend::Verilog);
         for reg in ["a_q == 0", "b_q == 0", "c_q == 0", "d_q == 0", "p_q == 0"] {
             let faithful = outcome_of(&sv2v, reg);
             assert!(
@@ -20381,7 +20189,6 @@ endmodule
         ];
         let yopts = YosysOptions {
             top: Some("csrng_main_sm".to_string()),
-            use_sv2v: true,
             additional_sources: sources[1..].to_vec(),
             ..Default::default()
         };
@@ -20461,7 +20268,6 @@ endmodule
             ];
             let yopts = YosysOptions {
                 top: Some("csrng_main_sm".to_string()),
-                use_sv2v: true,
                 additional_sources: sources[1..].to_vec(),
                 ..Default::default()
             };
@@ -21186,11 +20992,12 @@ mod source_map_tests {
         );
     }
 
-    /// The sv2v path (2026-10-30): the netlist's lines are sv2v's, so the lift clears them and the
+    /// A rewritten source (the `test_support` oracle's sv2v, 2026-10-30; no product path rewrites the
+    /// source since 2026-11-04): the netlist's lines are sv2v's, so the lift clears them and the
     /// AST supplies both halves — a register's `always_ff` line from its flop blocks. A name sv2v
     /// mangled is not in the AST: it stays without a line and the reason lists it, never a guess.
     #[test]
-    fn the_sv2v_path_takes_its_assignment_lines_from_the_ast_and_lists_what_it_cannot_place() {
+    fn a_rewritten_source_takes_its_assignment_lines_from_the_ast_and_lists_what_it_cannot_place() {
         let mut ast = index(vec![("state_q", loc("pump_pair.sv", 32))]);
         ast.flop_blocks
             .insert("state_q".into(), vec![loc("pump_pair.sv", 52)]);
@@ -21220,7 +21027,9 @@ mod source_map_tests {
         assert!(mangled.source_map_partial);
         let reason = mangled.source_map.unwrap_or_default();
         assert!(
-            reason.contains("no assignment line for u_fsm.sv2v_cast_2$result (sv2v rewrote"),
+            reason.contains(
+                "no assignment line for u_fsm.sv2v_cast_2$result (the oracle's sv2v rewrote"
+            ),
             "{reason}"
         );
         assert!(

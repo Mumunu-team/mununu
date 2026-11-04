@@ -10,7 +10,8 @@
 #     yosys + the yosys-slang plugin (`slang.so`, the `read_slang` RTL lift),
 #     the slang CLI (SVA extraction), Verilator (counterexample replay),
 #     btormc / pono / cvc5 / bitwuzla / boolector (reachability oracles).
-#   * sv2v, which the suite does not ship — pinned GitHub release.
+#   * sv2v, which the suite does not ship — pinned GitHub release; the dev-only
+#     differential oracle of `test_support` builds (never the product lift).
 #
 # Why a separate image: per the project's "subprocess tools are not bundled"
 # policy, none of the above goes into `mununu-dev` (the build/test image). This
@@ -99,7 +100,8 @@ RUN curl -fsSL \
       "https://github.com/YosysHQ/oss-cad-suite-build/releases/download/${OSS_CAD_SUITE_TAG}/oss-cad-suite-linux-x64-${OSS_CAD_SUITE_DATE}.tgz" \
     | tar xz -C /opt
 
-# sv2v (SystemVerilog-2017 → Verilog-2005 normaliser) — not in the suite;
+# sv2v (SystemVerilog-2017 → Verilog-2005 normaliser) — the dev-only differential
+# oracle of `test_support` builds, not the product lift; not in the suite;
 # Linux prebuilt from its GitHub release.
 RUN curl -fsSL -o /tmp/sv2v.zip \
         "https://github.com/zachjs/sv2v/releases/download/${SV2V_VERSION}/sv2v-Linux.zip" \
@@ -132,7 +134,7 @@ RUN set -e; \
 # verbatim, and the ARGs were just asserted against the binaries, so a label
 # here is a fact about the tree, not a hope.
 LABEL org.opencontainers.image.title="mununu-sva" \
-      org.opencontainers.image.description="mununu-dev + the pinned SystemVerilog toolchain (oss-cad-suite: yosys, yosys-slang, slang, Verilator, btormc, pono, cvc5; plus sv2v) for the slang-gated e2e suite" \
+      org.opencontainers.image.description="mununu-dev + the pinned SystemVerilog toolchain (oss-cad-suite: yosys, yosys-slang, slang, Verilator, btormc, pono, cvc5; plus sv2v as the dev-only differential oracle of test_support builds) for the slang-gated e2e suite" \
       org.opencontainers.image.source="https://github.com/Mumunu-team/mununu" \
       org.opencontainers.image.base.name="mununu-dev:latest" \
       io.github.mumunu-team.oss-cad-suite.tag="${OSS_CAD_SUITE_TAG}" \

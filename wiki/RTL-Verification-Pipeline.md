@@ -2,7 +2,7 @@
 
 > **Alpha Software** — Mununu is under active development. APIs, syntax, and behavior may change.
 
-Mununu has **one** RTL ingestion path: the **Yosys-driven `sv-yosys` pipeline** (sv2v → Yosys → BTOR2 → bit-blast). It elaborates the full SystemVerilog subset Yosys handles — generate blocks, parameter elaboration, packages, structural SV — and lifts the per-module BTOR2 to a KMTS. A `.mununu.json` annotation sidecar drives the abstraction posture (`FieldDomain` Boolean / BoundedCounter / EnumValues / Ignored, `discovered_values`, automatic cone-of-influence).
+Mununu has **one** RTL ingestion path: the **Yosys-driven `sv-yosys` pipeline** (yosys-slang `read_slang` → Yosys → BTOR2 → bit-blast). It elaborates the full SystemVerilog yosys-slang handles — generate blocks, parameter elaboration, packages, module-header imports, interfaces, structural SV — and lifts the per-module BTOR2 to a KMTS. A `.mununu.json` annotation sidecar drives the abstraction posture (`FieldDomain` Boolean / BoundedCounter / EnumValues / Ignored, `discovered_values`, automatic cone-of-influence).
 
 > **S.2b note.** The legacy hand-written SV parser (`--adapter sv`, `mununu sv init`, `mununu sv discover`) was **removed**. Its sidecar-authoring role is now hand-editing plus `mununu btor2 discover`, which runs SMT predicate-image discovery over the same BTOR2 IR the verify path uses and writes `discovered_values` into the sidecar. SystemVerilog has exactly one pipeline.
 
@@ -11,7 +11,7 @@ Mununu has **one** RTL ingestion path: the **Yosys-driven `sv-yosys` pipeline** 
 ### Pipeline Overview
 
 ```
-SV Source → sv2v → Yosys (hierarchy, no flatten) → BTOR2 (per module) → Load Sidecar → bit-blast (+ optional SMT discovery) → KMTS → Verify
+SV Source → Yosys `read_slang` (hierarchy, no flatten) → BTOR2 (per module) → Load Sidecar → bit-blast (+ optional SMT discovery) → KMTS → Verify
 ```
 
 | Step | Command | Input | Output |
@@ -21,7 +21,7 @@ SV Source → sv2v → Yosys (hierarchy, no flatten) → BTOR2 (per module) → 
 | 3. Edit | (manual) | `.mununu.json` | Refined annotations |
 | 4. Verify | `mununu context eval design.sv --adapter sv-yosys` (or a `verify.toml` source) | `.sv` + `.mununu.json` | Property results |
 
-Requires `yosys` (and `sv2v` for SV-2017 constructs) on `PATH`. Steps 2-4 are iterative — refine annotations and properties based on verification results.
+Requires `yosys` ≥ 0.67 (with the built-in `read_slang`; or `MUNUNU_YOSYS_SLANG_PLUGIN`) on `PATH`. Steps 2-4 are iterative — refine annotations and properties based on verification results.
 
 > **This page = the explicit bit-blast engine.** The BTOR2 IR also feeds the
 > **predicate-cube** abstraction (states = predicate cubes, not register bit-blast),
@@ -291,5 +291,5 @@ Based on MITRE CWE-1245, with real CVEs (CVE-2024-21853, CVE-2024-24968). One-ho
 - [Predicate-Cube CEGAR](Predicate-Cube-CEGAR) — the complementary predicate-abstraction engine for designs too large to bit-blast (3-valued `{T, F, ⊥}` verdicts + automatic refinement)
 - [Adapter Formats — SystemVerilog](Adapter-Formats#systemverilog) — supported SV subset and inline annotations
 - [Hardware Verification Patterns](Hardware-Verification-Patterns) — CTXDSL patterns for common hardware
-- [CLI Reference](CLI-Reference) — `sv preprocess`, `sv emit-btor2-per-module`, `btor2 discover`, `context eval`, `context synth`
+- [CLI Reference](CLI-Reference) — `sv emit-btor2-per-module`, `btor2 discover`, `context eval`, `context synth`
 - [Controller Synthesis](Controller-Synthesis) — synthesizing controllers from specifications

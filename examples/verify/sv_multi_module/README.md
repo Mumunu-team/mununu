@@ -34,14 +34,14 @@ instances. The composed automaton is named `Circuit`.
 | `producer.sv` | RTL for the producer module (3-state FSM driving `valid`). |
 | `consumer.sv` | RTL for the consumer module (3-state FSM reacting to `valid`). |
 | `verify.toml` | Single source with `files = [top, producer, consumer]` + `multi_module = true`. |
-| `validate.sh` | End-to-end reproduction (guards on `yosys` + `sv2v`). |
+| `validate.sh` | End-to-end reproduction (guards on `yosys`). |
 | `transcript.txt` | Checked-in expected output. |
 
 ## Reproduce
 
-Requires `yosys` and `sv2v` on `PATH` (`validate.sh` exits with a clear
-error if either is missing). They are not bundled with the repo — the dev
-container installs them.
+Requires `yosys` (≥ 0.67, with `read_slang`) on `PATH` (`validate.sh` exits
+with a clear error if it is missing). It is not bundled with the repo — the
+`mununu-sva` image provides it.
 
 ```bash
 bash examples/verify/sv_multi_module/validate.sh

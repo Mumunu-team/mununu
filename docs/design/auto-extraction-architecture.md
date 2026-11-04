@@ -74,7 +74,7 @@ mununu ships eleven adapters that all implement `FormatAdapter`:
 | `crewai` | Multi-agent workflows → automaton (agentic) |
 | `langgraph` | LangGraph workflows → automaton (agentic) |
 | `microcode` | Microprogram assembly → automaton |
-| `yosys` | Driver/frontend that calls Yosys + sv2v, emits BTOR2 |
+| `yosys` | Driver/frontend that calls Yosys (yosys-slang `read_slang`), emits BTOR2 |
 
 Only `ctxdsl` and `xstate` dispatch through the verify orchestrator
 today; the others run via per-format CLI sub-commands and feed into

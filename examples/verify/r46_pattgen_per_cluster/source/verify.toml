@@ -5,7 +5,6 @@ id = "pg"
 files = ["pattgen_ctrl_pkg.sv", "pattgen_chan.sv", "pattgen_harness.sv"]
 adapter = "sv-yosys"
 [sources.options]
-use_sv2v = true
 top = "pattgen_harness"
 sidecar = "pattgen_harness.mununu.json"
 [alphabet]

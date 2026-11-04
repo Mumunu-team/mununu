@@ -68,8 +68,7 @@ endmodule
 "#;
 
 /// The behavioral stub SV for a known flop-primitive module, or `None` if there
-/// is no stub for `module_name`. `module_name` is the de-mangled module name
-/// (sv2v's `_<HEX>_<HEX>` parameter suffix already stripped — see
+/// is no stub for `module_name`, the module name as instantiated (see
 /// [`crate::adapter::yosys`]'s undefined-cell detection).
 pub fn behavioral_stub(module_name: &str) -> Option<&'static str> {
     match module_name {

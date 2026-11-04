@@ -263,15 +263,6 @@ pub struct ContextImportRequest {
     /// Additional source files (for multi-module SV compositions).
     #[serde(default)]
     pub additional_sources: Vec<FileContent>,
-    /// When `format == "sv-yosys"`, opt in to the `sv2v` preprocessor pass
-    /// before Yosys elaboration. Required for modern open-source SV
-    /// dialects (SV2009/2012 module-header `import pkg::*;` etc.) that
-    /// Yosys's built-in `read_verilog -sv` parser does not accept.
-    /// Requires `sv2v` (zachjs/sv2v) on `$PATH` or in `MUNUNU_SV2V_PATH`.
-    /// Mirrors the CLI's `--preprocessor sv2v` flag. Ignored by all
-    /// other formats.
-    #[serde(default)]
-    pub use_sv2v: bool,
     /// R.6.7 / V.6 (2026-06-09) — predicate set for the
     /// controllability-aware predicate-cube lift. Each entry is a
     /// `{name, register, value}` triple identifying a register-value
@@ -1549,7 +1540,7 @@ pub struct Btor2GameResponse {
 
 /// The SV → BTOR2 lift inputs shared by the SV-direct verb endpoints
 /// (`/api/v1/sv/verify`, `/sv/verify-liveness`, `/sv/verify-recoverability`). These
-/// lift the module (sv2v + Yosys) and then decide the corresponding BTOR2 property,
+/// lift the module (yosys-slang) and then decide the corresponding BTOR2 property,
 /// returning the same `Btor2Verify*Response` shapes — one call, no `emit-btor2` step.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SvVerifyRequest {
@@ -1638,24 +1629,8 @@ pub struct SvCheckFsmRequest {
     pub terminal: Vec<String>,
 }
 
-/// The RTL front end of a lift: `auto` (the environment's default), `verilog` (yosys
-/// `read_verilog`), `slang` (the yosys-slang plugin) or `sv2v` (sv2v first, then the `auto`
-/// order with its slang fallback).
-/// The CLI's `--frontend` takes the same four values.
-#[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema,
-)]
-#[serde(rename_all = "lowercase")]
-pub enum SvFrontendName {
-    #[default]
-    Auto,
-    Verilog,
-    Slang,
-    Sv2v,
-}
-
 /// The SV design and how to lift it, shared by every `sv` route: the API peer of the CLI's
-/// lift flags (`SV_FILE` / `--source`, `--top`, `--frontend`, `--param`, `--lift-override`,
+/// lift flags (`SV_FILE` / `--source`, `--top`, `--param`, `--lift-override`,
 /// `--cutpoint`, `--merge-clock-domains`). Unknown keys are refused.
 #[derive(Debug, Clone, Default, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -1672,9 +1647,6 @@ pub struct SvLiftRequest {
     /// Top module (auto-detected when omitted).
     #[serde(default)]
     pub top: Option<String>,
-    /// The RTL front end (default `auto`).
-    #[serde(default)]
-    pub frontend: SvFrontendName,
     /// Parameter overrides, `NAME=VALUE` or `MODULE.NAME=VALUE`.
     #[serde(default)]
     pub params: Vec<String>,
@@ -1694,16 +1666,6 @@ pub struct SvLiftRequest {
 impl SvLiftRequest {
     /// The core lift this request describes; a malformed `params` entry is an error.
     pub fn to_sv_lift(&self) -> Result<crate::adapter::sv_verify::SvLift, String> {
-        use crate::adapter::yosys::SvFrontend;
-        let (frontend, use_sv2v) = match self.frontend {
-            SvFrontendName::Auto => (SvFrontend::Auto, false),
-            SvFrontendName::Verilog => (SvFrontend::Verilog, false),
-            SvFrontendName::Slang => (SvFrontend::Slang, false),
-            // sv2v first, then the `auto` order (read_verilog, slang fallback): the pre-0.5
-            // `--preprocess-sv2v` semantics. A forced `Verilog` loses the fallback that lifts what
-            // sv2v cannot parse (a `bind` checker).
-            SvFrontendName::Sv2v => (SvFrontend::Auto, true),
-        };
         Ok(crate::adapter::sv_verify::SvLift {
             primary_name: self
                 .source_name
@@ -1716,9 +1678,8 @@ impl SvLiftRequest {
                 .map(|f| (f.name.clone(), f.content.clone()))
                 .collect(),
             top: self.top.clone(),
-            use_sv2v,
             include_dirs: Vec::new(),
-            frontend,
+            frontend: crate::adapter::yosys::SvFrontend::Slang,
             merge_clock_domains: self.merge_clock_domains,
             params: crate::adapter::sv_verify::parse_params(&self.params)?,
             cutpoints: self.cutpoints.clone(),
@@ -1966,7 +1927,7 @@ pub struct SvMutateResponse {
 /// cegar-extraction Stage 2 (2026-06-22) — request for the SV-direct
 /// CEGAR endpoint (`POST /api/v1/sv/cegar`). Mirrors the CLI
 /// `mununu sv cegar`: lifts SystemVerilog to a single flattened BTOR2
-/// (sv2v + Yosys) in one call, then runs the same predicate-abstraction
+/// (yosys-slang) in one call, then runs the same predicate-abstraction
 /// refinement loop as `/btor2/cegar` and returns the same
 /// [`Btor2CegarResponse`]. The CEGAR fields below are identical to
 /// [`Btor2CegarRequest`]; only the source half differs (SV + Yosys
@@ -2021,7 +1982,7 @@ pub struct SvCegarRequest {
 /// XL.6a — SVA-extraction endpoint (`POST /api/v1/sv/extract-sva`). Mirrors the
 /// CLI `mununu sv extract-sva`: runs the slang SVA front-end over the SV
 /// source(s) and returns the translated mu-calculus property set. slang is a
-/// full SV-2017 parser, so no sv2v / Yosys / `top` is needed; no model
+/// full SV-2017 parser, so no lift / `top` is needed; no model
 /// verification happens here (that is `/sv/verify-auto`).
 #[derive(Debug, Deserialize)]
 pub struct SvExtractSvaRequest {
@@ -2075,7 +2036,7 @@ pub struct ShadowSignalView {
 /// XL.6b — automated SVA verification endpoint (`POST /api/v1/sv/verify-auto`).
 /// Mirrors the CLI `mununu sv verify-auto`: extract the design's SVA, lift, and
 /// verify each property against the model with no sidecar. slang parses SV
-/// directly, but the verify lift uses sv2v + Yosys, so `top` / `use_sv2v` apply.
+/// directly and the verify lift runs yosys-slang, so `top` applies.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SvVerifyAutoRequest {
@@ -2534,7 +2495,6 @@ impl From<&crate::adapter::slang::verify_auto::AutoVerifyReport> for SvVerifyAut
                 gated_resets: report.diagnostics.gated_resets.clone(),
                 auto_provided_stubs: report.diagnostics.auto_provided_stubs.clone(),
                 frontend: report.diagnostics.frontend.clone(),
-                frontend_fallback_reason: report.diagnostics.frontend_fallback_reason.clone(),
                 lift_retry: report.diagnostics.lift_retry.clone(),
                 merged_clock_domains: report.diagnostics.merged_clock_domains.clone(),
                 config_values: report.diagnostics.applied_config_values.clone(),
@@ -2706,8 +2666,8 @@ pub struct VerificationNoteView {
 
 /// Whether rows and traces carry RTL source lines (2026-10-29): `available` when every cell
 /// has its declaration (yosys's netlist attributes or slang's AST, on every front end) and the
-/// lift stamped its `always` blocks; `partial` with the reason when something is missing (the
-/// sv2v path has no assignment lines; a cell the AST did not declare); `unavailable` with the
+/// lift stamped its `always` blocks; `partial` with the reason when something is missing (a
+/// cell the AST did not declare); `unavailable` with the
 /// reason when nothing could be placed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct SourceMapView {
@@ -2733,17 +2693,11 @@ pub struct ModelDiagnosticsView {
     /// Cut flop-primitive modules for which a behavioral stub was auto-injected
     /// so the register survives the lift (e.g. `prim_sparse_fsm_flop`).
     pub auto_provided_stubs: Vec<String>,
-    /// #466 / mununu#536 — the RTL front end that produced the lift (e.g.
-    /// `"read_verilog + sv2v"`, `"yosys-slang (read_slang)"`). `--frontend auto` picks one
-    /// silently and the two paths differ in SOUNDNESS on partial writes (#464/#465), so
-    /// "which lift produced this verdict?" is a question the payload must answer. It was
-    /// previously reachable only as `lift-frontend` note prose.
+    /// mununu#536 — the RTL front end that produced the lift: `"yosys-slang (read_slang)"`,
+    /// the one product front end since the slang-only lift (N1, 2026-11-04). Provenance:
+    /// which reader built the model this verdict is about.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frontend: Option<String>,
-    /// #466 — when `--frontend auto` FELL BACK (an earlier front end errored), the prior
-    /// attempt's error. `None` when there was no fallback.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub frontend_fallback_reason: Option<String>,
     /// The lift rerun its yosys script with `opt_clean` before `write_btor` after the BTOR
     /// backend reported a topological loop (yosys-slang `$buf` cells; the model is the same
     /// design) — the reason, else `None`. The `lift-retry` note carries the same text.

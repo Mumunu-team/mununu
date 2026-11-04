@@ -491,15 +491,9 @@ fn sv_safety_cube_results(
         .get("top")
         .and_then(|v| v.as_str())
         .map(str::to_string);
-    let use_sv2v = src
-        .options
-        .get("use_sv2v")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
     let yopts = crate::adapter::yosys::YosysOptions {
         top,
         additional_sources,
-        use_sv2v,
         ..Default::default()
     };
     // slang absent / lift failure / no SVA → Err or empty → skip.
@@ -1039,18 +1033,6 @@ fn dispatch_sv_yosys(
     base_dir: &Path,
     cluster_coi: &ClusterCoiInputs,
 ) -> Result<(String, Option<crate::adapter::partition::PartitionSummary>), VerifyError> {
-    // R4W-3.5 — `use_sv2v = true` runs sv2v as a preprocessing pass
-    // before Yosys, unblocking the SV-2009/2012 `module M import pkg::*;`
-    // header form real OpenTitan / Caliptra / ibex RTL uses (yosys's
-    // built-in parser rejects it otherwise). Matches the API's
-    // `use_sv2v` field and the CLI's `--preprocessor sv2v`. Default
-    // false preserves the plain-Verilog behaviour existing fixtures rely
-    // on.
-    let use_sv2v = options
-        .get("use_sv2v")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-
     // Additional SV sources (submodules / stub packages), by basename —
     // also the typedef / case-literal source for sidecar widening below.
     let additional_sources: Vec<(String, String)> = additional_files
@@ -1157,7 +1139,6 @@ fn dispatch_sv_yosys(
             &ann,
             &opts,
             additional_sources.clone(),
-            use_sv2v,
             top,
         );
     }
@@ -1171,7 +1152,6 @@ fn dispatch_sv_yosys(
             top,
             per_module_btor: true,
             additional_sources,
-            use_sv2v,
             init_policy_overrides: init_policy_overrides.clone(),
             ..Default::default()
         };
@@ -1197,7 +1177,6 @@ fn dispatch_sv_yosys(
 
     let yopts = crate::adapter::yosys::YosysOptions {
         additional_sources,
-        use_sv2v,
         init_policy_overrides,
         ..Default::default()
     };
@@ -1243,7 +1222,6 @@ fn dispatch_sv_predicate_cube(
     ann: &crate::adapter::systemverilog::annotation::SvAnnotation,
     opts: &AdapterOptions,
     additional_sources: Vec<(String, String)>,
-    use_sv2v: bool,
     top: Option<String>,
 ) -> Result<(String, Option<crate::adapter::partition::PartitionSummary>), VerifyError> {
     use crate::adapter::btor2::kmts_lift::{
@@ -1260,7 +1238,6 @@ fn dispatch_sv_predicate_cube(
     let yopts = crate::adapter::yosys::YosysOptions {
         top,
         additional_sources,
-        use_sv2v,
         ..Default::default()
     };
     let btor2 = crate::adapter::yosys::sv_to_btor2(content, &yopts)
@@ -2376,7 +2353,7 @@ safety_cube = true
 id = "fsm"
 adapter = "sv-yosys"
 files = ["onehot_fsm.sv"]
-options = { top = "onehot_fsm", use_sv2v = true }
+options = { top = "onehot_fsm" }
 
 [composition]
 semantics = "asynchronous"
@@ -2935,13 +2912,8 @@ over = "S"
     /// define it), and the verdict is DEFINITE (no ⊥). yosys-gated.
     #[test]
     fn predicate_cube_sidecar_routes_verify_through_3valued_cube() {
-        if std::process::Command::new("yosys")
-            .arg("-V")
-            .output()
-            .map(|o| !o.status.success())
-            .unwrap_or(true)
-        {
-            eprintln!("skip: yosys not installed");
+        if !crate::adapter::yosys::yosys_can_read_slang() {
+            eprintln!("skip: yosys with read_slang not installed");
             return;
         }
         let temp = tempdir().unwrap();

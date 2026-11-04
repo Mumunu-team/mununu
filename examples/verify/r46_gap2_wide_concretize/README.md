@@ -53,14 +53,14 @@ cargo build -p mununu-cli
 examples/verify/r46_gap2_wide_concretize/validate.sh
 ```
 
-`validate.sh` requires `yosys` and `sv2v` on `PATH` (the sv-yosys
+`validate.sh` requires `yosys` (with `read_slang`) on `PATH` (the sv-yosys
 pipeline). It checks all three contract points: the raw design is rejected
 at the cap, the concretized design lifts, and both reachable targets come
 back SATISFIED.
 
 ## CI-level regression
 
-The validate.sh script needs `yosys`/`sv2v` and is a manual reproduction.
+The validate.sh script needs `yosys` and is a manual reproduction.
 The fix's CI-level guards are the unit tests in
 `crates/mununu-core/src/context_dsl/realize.rs`:
 `oob_sink_marker_does_not_trip_numericity_gate` (positive) and

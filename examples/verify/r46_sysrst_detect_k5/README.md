@@ -76,9 +76,9 @@ cargo build -p mununu-cli
 examples/verify/r46_sysrst_detect_k5/validate.sh
 ```
 
-Requires `yosys` and `sv2v` on `PATH`. `sysrst_ctrl_detect` does
+Requires `yosys` (≥ 0.67, with `read_slang`) on `PATH`. `sysrst_ctrl_detect` does
 `` `include "prim_assert.sv" ``; the stub resolves on the verify path
-because the sv2v staging tempdir is on the include search path (added in
+because the lift's staging tempdir is on the include search path (added in
 the same PR as this fixture).
 
 ## Provenance / claims integrity
