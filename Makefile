@@ -145,8 +145,11 @@ e2e-oneshot:
 # N0.3 (2026-11-03) — the same suite under cargo-nextest: one process per test, which is
 # exactly the isolation scripts/e2e-sweep.sh builds by hand (an abort is one failed row,
 # never a lost run), plus parallel scheduling. The sweep is serial by design (mununu#504)
-# and took 112 min on 2026-10-26, 98 of them in four OpenTitan tests that run one after
-# another; with E2E_JOBS of them in flight the wall is the longest test, not the sum.
+# and took 112 min on 2026-10-26, 98 of them in four OpenTitan full-IP tests. Those are each
+# an internally parallel portfolio under wall-clock row budgets: run beside each other they
+# slow 4–14× and their budget-bound pins move (2026-11-04, E2E_JOBS=4: 234 min, one pinned
+# count off), so `.config/nextest.toml` gives each of them every test thread — they run one
+# after another, alone — and only the short tail (73 tests, 612 s in all) shares the threads.
 # Needs cargo-nextest (the dev image carries it; `cargo install --locked cargo-nextest`).
 # `--no-fail-fast` keeps every row; a crashed test is reported with its signal. Output is
 # captured per test (nextest's `--no-capture` would run the tests SERIALLY) and a failing
@@ -160,9 +163,6 @@ e2e-parallel:
 	    --run-ignored ignored-only -E 'test(/e2e_/)' --test-threads $(E2E_JOBS) --no-fail-fast \
 	    --failure-output immediate-final --success-output never
 
-test-properties:
-# The `properties*` crates are gated on `test_support` (their generators live behind it);
-# without the feature the target compiled them out and ran ZERO tests — measured 2026-11-03,
 # N0.1 (2026-11-03) — the executable ledger (measurements/ledger/README.md): every design's rows
 # get their cone hash for the price of a lift; only NEW / CHANGED / RETIRED rows re-run, under
 # 3× their recorded time. `LEDGER_ARGS="--write"` records; `--all` is the breadth run;
@@ -171,6 +171,9 @@ test-properties:
 ledger-check:
 	@scripts/ledger_check.py $(LEDGER_ARGS)
 
+test-properties:
+# The `properties*` crates are gated on `test_support` (their generators live behind it);
+# without the feature the target compiled them out and ran ZERO tests — measured 2026-11-03,
 # a gate with no negative control. The feature is now passed explicitly.
 	PROPTEST_CASES=$(PROPTEST_CASES) $(CARGO) test -p mununu-core --features test_support --test 'properties*' -- --nocapture
 

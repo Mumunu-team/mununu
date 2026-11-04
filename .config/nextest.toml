@@ -1,0 +1,12 @@
+# cargo-nextest configuration — read by `make e2e-parallel` (N0.3, 2026-11-04).
+#
+# The full-IP e2e tests are each an internally parallel portfolio: several engine members per
+# row, each row under a wall-clock budget. Run beside each other on one box they slow 4–14×
+# and their budget-bound pins move: at E2E_JOBS=4 on 2026-11-04 the four edn tests took
+# 2.7–3.1 h EACH (nightly, serial: 674 / 1,205 / 1,164 / 2,840 s), the suite 234 min against
+# 112 serial, and `e2e_opentitan_ip_edn_sec_cm_posture` lost one of its non-vacuity probes to
+# the budget. Each of them takes every test thread, so it runs alone and nothing starts beside
+# it; the short tail (73 tests, 612 s in all) shares the threads.
+[[profile.default.overrides]]
+filter = 'test(/e2e_opentitan_ip_|e2e_opentitan_sva_census|e2e_reach_rescue_reducibility_census|e2e_portfolio_decides_what_the_default_engine_misses/)'
+threads-required = "num-test-threads"
