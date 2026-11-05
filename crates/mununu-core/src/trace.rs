@@ -390,14 +390,24 @@ impl TraceNames {
                     .collect(),
             })
             .collect();
-        trace.slice_status = Some(if !rep.widened.is_empty() {
-            status(
-                "widened",
-                Some(format!(
-                    "cell type(s) the evaluator does not know, their whole fan-in kept: {}",
-                    rep.widened.iter().cloned().collect::<Vec<_>>().join(", ")
-                )),
-            )
+        let join = |s: &BTreeSet<String>| s.iter().cloned().collect::<Vec<_>>().join(", ");
+        let mut limits: Vec<String> = Vec::new();
+        if !rep.widened.is_empty() {
+            limits.push(format!(
+                "cell type(s) the evaluator does not know, their whole fan-in kept: {}",
+                join(&rep.widened)
+            ));
+        }
+        if !rep.too_wide.is_empty() {
+            limits.push(format!(
+                "net(s) wider than the evaluator's {}-bit value, left unknown and every arm they \
+                 fed kept: {}",
+                crate::adapter::yosys::netlist::CARRIER_BITS,
+                join(&rep.too_wide)
+            ));
+        }
+        trace.slice_status = Some(if !limits.is_empty() {
+            status("widened", Some(limits.join("; ")))
         } else if trace.slice.is_empty() {
             status(
                 "unavailable",
@@ -1141,5 +1151,63 @@ mod source_tests {
             false,
         ));
         assert!(empty.sources.is_empty(), "no map, no legend");
+    }
+
+    /// A register wider than the evaluator's carrier on the slice's path reaches `slice_status`
+    /// as `widened`, named — never as `exact` over values it could not carry (mununu#848).
+    #[test]
+    fn a_too_wide_register_on_the_slice_path_reports_a_widened_slice() {
+        use crate::adapter::yosys::netlist::Netlist;
+        let r: Vec<u64> = (10..10 + 135).collect();
+        let j = serde_json::json!({"modules": {"m": {
+            "attributes": {"top": 1},
+            "ports": {"y": {"direction": "output", "bits": [4]}},
+            "cells": {
+                "q": {"type": "$dff", "parameters": {}, "attributes": {"src": "m.sv:3.3-3.20"},
+                      "port_directions": {"CLK": "input", "D": "input", "Q": "output"},
+                      "connections": {"CLK": [2], "D": r.clone(), "Q": r.clone()}},
+                "s": {"type": "$mux", "parameters": {}, "attributes": {"src": "m.sv:5.3-5.20"},
+                      "port_directions": {"A": "input", "B": "input", "S": "input", "Y": "output"},
+                      "connections": {"A": ["0"], "B": ["1"], "S": [10], "Y": [4]}}},
+            "netnames": {"r": {"bits": r}, "y": {"bits": [4]}}}}});
+        let names = TraceNames {
+            netlist: Some(std::sync::Arc::new(
+                Netlist::parse(&j.to_string()).expect("parses"),
+            )),
+            ..TraceNames::default()
+        };
+        let mut trace = Trace {
+            kind: TraceKind::Attack,
+            steps: vec![TraceStep {
+                cycle: 0,
+                state: vec![CexCellView {
+                    register: "r".into(),
+                    value: Some(1),
+                    hex: "0x1".into(),
+                    bits: 135,
+                }],
+                state_name: None,
+                inputs: Vec::new(),
+                faults: Vec::new(),
+                labels: Vec::new(),
+                monitor: Vec::new(),
+            }],
+            loop_start: None,
+            unreachable_target: Vec::new(),
+            replay: None,
+            sources: Vec::new(),
+            slice: Vec::new(),
+            slice_status: None,
+            repair_candidates: Vec::new(),
+            localization: None,
+        };
+        names.attach_slice(&mut trace, &["y".to_string()]);
+        let status = trace.slice_status.expect("a status is always attached");
+        assert_eq!(status.status, "widened");
+        let reason = status.reason.unwrap_or_default();
+        assert!(
+            reason.contains("128-bit") && reason.ends_with(": r"),
+            "{reason}"
+        );
     }
 }
