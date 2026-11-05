@@ -80,6 +80,8 @@ Mununu exhaustively verifies finite-state models; its verdicts are correct **for
 
 **Discipline.** Document every `eval_expr → None` choice as over- or under-approximation with a `// SOUNDNESS:` comment (`/soundness-check` flags undeclared sites); never mix directions within one model without saying so; add a soundness regression test for every new abstraction decision; prefer the KMTS path (`Transition::modality`, `state_3valued_predicates`) when emitting a CLTS for an alternating property — legacy adapters produce `Sharp`-everywhere KMTSes that carry only the 2-valued guarantees.
 
+**Learned components propose, the engine checks** (Track Q, 2026-11-05): a learned component may only propose; the engine checks every proposal; nothing a model emits reaches `outcome`, `vacuity` or a trace without the checker's confirmation. The neural-verification levers that follow this rule are planned in `.claude/plans/roadmap.md` §Track Q, not started.
+
 Strategy extraction uses signature-based selection from iteration ranks; both players have memoryless winning strategies (positional determinacy, Zielonka 1998) — memoryless on the model-checking product = finite-memory on the plant. `ControllerMode`, lasso traces, counterstrategies and the Skolem-paradigm rules: [`docs/synthesis.md`](docs/synthesis.md).
 
 ## Abstraction Guidelines
@@ -197,7 +199,7 @@ When extending one, its `description:` and inline guidance follow Documentation 
 
 ## Private Files Policy
 
-Sensitive or unpublished material lives in `/Users/marianocerrutti/git_repo/mununu-private/`, never here: paper sources, benchmark scripts and expected outputs, extraction specs with CVE data, protocol CTXDSL models, MCP-extracted CTXDSL, governance scripts, tutorials, evaluation data and drafts. Public: Rust source, adapters and their formats, the extraction framework's *capabilities* (adapter code, validation, schema), shared IR, tests, README and wiki. Before adding a file here you would not want public, move it to `mununu-private` and add the path to `.gitignore` (which already excludes `/paper/`, `/artifact/`, `/examples/syntcomp/`, `/examples/scalable/`, `/tutorial/`).
+Sensitive or unpublished material lives in the sibling `mununu-private/` repository, never here: paper sources, benchmark scripts and expected outputs, extraction specs with CVE data, protocol CTXDSL models, MCP-extracted CTXDSL, governance scripts, tutorials, evaluation data and drafts. Public: Rust source, adapters and their formats, the extraction framework's *capabilities* (adapter code, validation, schema), shared IR, tests, README and wiki. Before adding a file here you would not want public, move it to `mununu-private` and add the path to `.gitignore` (which already excludes `/paper/`, `/artifact/`, `/examples/syntcomp/`, `/examples/scalable/`, `/tutorial/`).
 
 ## Reasoning & Recommendation Honesty
 
