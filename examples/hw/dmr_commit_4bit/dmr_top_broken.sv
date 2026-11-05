@@ -1,7 +1,6 @@
 // 4-bit DMR commit gate — NEGATIVE CONTROL (intentionally broken).
 //
 // Companion: dmr_top.sv (correct).
-// Plan: /Users/marianocerrutti/.claude/plans/read-this-description-for-tranquil-aurora.md
 //
 // The break: commit_valid_r is asserted unconditionally instead of being
 // gated by `equal`. This simulates the design without the DMR comparator
