@@ -251,7 +251,7 @@ docs-audit:
 # The exact engine's bit-cap frontier — the known points, asserted against the release binary
 # under the shipped defaults (every MUNUNU_* scrubbed). Not in `ci`: it runs the engine on a
 # 32-bit multiplier (~30 s) and a 48-bit one through the cube ladder. `scripts/bitcap_frontier.py
-# sweep` is the full measurement; `experiments/EXP-0031-bitcap-frontier/` the recorded table.
+# sweep` is the full measurement; the recorded table (EXP-0031) is kept with the private evaluation data.
 frontier-smoke: build
 	@scripts/bitcap_frontier.py smoke
 

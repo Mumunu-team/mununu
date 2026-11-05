@@ -1,1 +1,0 @@
-cargo bench -p mununu-core --features test_support --bench mu_calculus_only -- --quick

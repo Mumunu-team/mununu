@@ -1224,7 +1224,7 @@ game, PR C).
 
 ### What decides at what width — the measured frontier (2026-10-14)
 
-> Source of truth: [`default_cap_for_cone`](../crates/mununu-core/src/adapter/btor2/symbolic_bitblast.rs#L254) + [`scripts/bitcap_frontier.py`](../scripts/bitcap_frontier.py) + [`experiments/EXP-0031-bitcap-frontier/`](../experiments/EXP-0031-bitcap-frontier/) — surface: (CLI+API) — the `engine` / `exact_abstention` fields of `btor2 verify-recoverability` and `sv verify-recoverability` (mununu#682) are what the sweep reads.
+> Source of truth: [`default_cap_for_cone`](../crates/mununu-core/src/adapter/btor2/symbolic_bitblast.rs#L254) + [`scripts/bitcap_frontier.py`](../scripts/bitcap_frontier.py) — surface: (CLI+API) — the `engine` / `exact_abstention` fields of `btor2 verify-recoverability` and `sv verify-recoverability` (mununu#682) are what the sweep reads.
 
 "How many bits can the exact engine handle?" has no single answer, and "40 bits" is the wrong one.
 The mechanics: `MAX_BITBLAST_BITS = 40` is the admission **floor**; `default_cap_for_cone` raises the cap
@@ -1242,8 +1242,8 @@ grows monotonically and records the largest width the exact engine decides (`eng
 `exact-reach-restricted`) and the first it does not, with the typed reason — every probe under the
 **shipped defaults** (every `MUNUNU_*` scrubbed, release binary, 300 s wall cap per probe), every probe
 kept, non-monotone pairs flagged (the arena tier steps at 40 bits). `make frontier-smoke` asserts the
-known points in about 1.5 min. The sweep below is `experiments/EXP-0031-bitcap-frontier/` (manifest,
-hardware fingerprint, every probe); re-run it with `scripts/bitcap_frontier.py sweep`.
+known points in about 1.5 min. The sweep below is the EXP-0031 archive (manifest, hardware
+fingerprint, every probe), kept with the private evaluation data; re-run it with `scripts/bitcap_frontier.py sweep`.
 
 | shape (generator in `scripts/profile_cases.py`) | knob → cone bits | largest width the exact engine decides | first width it does not | bounded by |
 |---|---|---|---|---|
@@ -1260,8 +1260,8 @@ hardware fingerprint, every probe); re-run it with `scripts/bitcap_frontier.py s
 | i2c `scl_padoen_o == 1` (real RTL, `wall_classes/`) | 146 kept b | HOLDS, `exact`, 0.2 s | — | — |
 | aes cipher control FSM `cs == 9` (real RTL) | 37 kept b | HOLDS, `exact`, 0.1 s | — | — |
 
-Every row: `btor2 verify-recoverability`, `MUNUNU_*` scrubbed, release binary at the commit in
-`experiments/EXP-0031-bitcap-frontier/manifest.json`, wall cap 300 s per probe, Intel i7-9750H.
+Every row: `btor2 verify-recoverability`, `MUNUNU_*` scrubbed, release binary at commit `d7462e57` (the
+EXP-0031 manifest), wall cap 300 s per probe, Intel i7-9750H.
 `exact-reach-restricted` is the same verdict reached through the reachable-state restriction (stage 2
 of the exact ladder, after the 2 s first slice); rows above 192 bits went through the cap ladder's
 retry at 1024.
