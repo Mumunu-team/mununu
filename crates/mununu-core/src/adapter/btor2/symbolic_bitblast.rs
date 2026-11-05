@@ -6945,14 +6945,32 @@ impl ExactSession {
                 }
                 if let Some(p_id) = detect_af_target(formula) {
                     let p_bdd = exact.eval_at(formula, p_id, &atoms)?;
-                    if let Some(lasso) = self.bb.exact_reachable_stall_lasso(&self.file, &p_bdd)? {
-                        return Ok(Some(lasso));
-                    }
+                    return match self.bb.exact_reachable_stall_lasso(&self.file, &p_bdd)? {
+                        Some(lasso) => Ok(Some(lasso)),
+                        // A refuted `AF` with no reconstructable stall: a recorded miss, not
+                        // silence — the verdict stands, the path is its explanation.
+                        None => {
+                            Err("refuted AF but no reachable stall could be reconstructed"
+                                .to_string())
+                        }
+                    };
                 }
                 if let Some(p_id) = detect_ag_ef_target(formula) {
                     let p_bdd = exact.eval_at(formula, p_id, &atoms)?;
-                    return self.bb.exact_reachable_trap_path(&self.file, &p_bdd);
+                    return match self.bb.exact_reachable_trap_path(&self.file, &p_bdd)? {
+                        Some(lasso) => Ok(Some(lasso)),
+                        // A refuted `AG EF` whose refutation is not a single forward trap path
+                        // (the OpenTitan edn endpoint rows, decided on the slang netlist by the
+                        // exact ladder where the trap certificate used to carry the path): a
+                        // recorded miss, so the row says why it ships no path.
+                        None => Err("refuted AG EF but no single reachable trap path could be \
+                                     reconstructed (the recoverability refutation need not be one \
+                                     forward path)"
+                            .to_string()),
+                    };
                 }
+                // No one-path (liveness / recoverability) shape: a safety witness, when one
+                // exists, comes from the bounded-safety path, not here.
                 Ok(None)
             },
         ))
@@ -8263,11 +8281,34 @@ impl BddBitBlaster {
         Ok(entries)
     }
 
+    /// The lasso / trap representation carries a cell's value as `u128`: a state or input cell
+    /// wider than that (reachable since the cap ladder bit-blasts cones the 192-bit cap used to
+    /// refuse) has no faithful witness here — none, never a wrapped shift into a wrong minterm
+    /// (mununu#723: `pick_assignment` shifts `1u128 << b` for every cell). The refusal is an
+    /// `Err`, so every caller records it the way it records any other failed extraction — the
+    /// ladder lifts it into `witness_miss` and the report's `witness-unavailable` note. It used to
+    /// be an `Ok(None)` that reached only the log: the slang-only lift's gate run 2 (2026-11-05)
+    /// shipped the edn IP's endpoint `AG EF Idle` rows as VIOLATED with no path and no note.
+    fn refuse_wide_cells(&self) -> Result<(), String> {
+        match self.cells.iter().find(|c| c.vars.len() > 128) {
+            Some(wide) => Err(format!(
+                "no witness: cell `{}` is {} bits wide and the lasso carries a cell as `u128` \
+                 (mununu#723) — the verdict stands, the path is omitted",
+                wide.symbol,
+                wide.vars.len()
+            )),
+            None => Ok(()),
+        }
+    }
+
     pub fn exact_stall_lasso(
         &self,
         file: &Btor2File,
         p: &BDDFunction,
     ) -> Result<Option<StallLasso>, String> {
+        // Sibling of the two reachable builders below: `pick_state_assignment` shifts by the bit
+        // index too, so a wide cell refuses here as well instead of overflowing.
+        self.refuse_wide_cells()?;
         let exact = self.exact_model()?;
         let stall = self.eg_not_p(&exact, p)?;
         // A stall state that is also initial ⇒ AF p is violated from reset.
@@ -8299,19 +8340,7 @@ impl BddBitBlaster {
         file: &Btor2File,
         p: &BDDFunction,
     ) -> Result<Option<StallLasso>, String> {
-        // The lasso / trap representation carries a cell's value as `u128`: a state cell wider than
-        // that (reachable since the cap ladder bit-blasts cones the 192-bit cap used to refuse)
-        // has no faithful witness here — none, never a wrapped shift into a wrong minterm.
-        // mununu#723 — INPUT cells too: `pick_assignment` shifts `1u128 << b` for every cell.
-        if let Some(wide) = self.cells.iter().find(|c| c.vars.len() > 128) {
-            tracing::warn!(
-                cell = %wide.symbol,
-                width = wide.vars.len(),
-                "exact: no counterexample for a design with a state cell wider than 128 bits — \
-                 the verdict stands, the witness is omitted"
-            );
-            return Ok(None);
-        }
+        self.refuse_wide_cells()?;
         let exact = self.exact_model()?;
         let stall = self.eg_not_p(&exact, p)?;
         if stall == self.ff {
@@ -8381,19 +8410,7 @@ impl BddBitBlaster {
         file: &Btor2File,
         p: &BDDFunction,
     ) -> Result<Option<StallLasso>, String> {
-        // The lasso / trap representation carries a cell's value as `u128`: a state cell wider than
-        // that (reachable since the cap ladder bit-blasts cones the 192-bit cap used to refuse)
-        // has no faithful witness here — none, never a wrapped shift into a wrong minterm.
-        // mununu#723 — INPUT cells too: `pick_assignment` shifts `1u128 << b` for every cell.
-        if let Some(wide) = self.cells.iter().find(|c| c.vars.len() > 128) {
-            tracing::warn!(
-                cell = %wide.symbol,
-                width = wide.vars.len(),
-                "exact: no counterexample for a design with a state cell wider than 128 bits — \
-                 the verdict stands, the witness is omitted"
-            );
-            return Ok(None);
-        }
+        self.refuse_wide_cells()?;
         let exact = self.exact_model()?;
         let trap = self.not_ef_p(&exact, p)?;
         if trap == self.ff {
