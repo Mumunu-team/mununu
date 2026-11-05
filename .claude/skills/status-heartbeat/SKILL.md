@@ -1,6 +1,6 @@
 ---
 name: status-heartbeat
-description: Write this session's row to the private status board — call it when a session starts, finishes, or blocks on a task. Reads the board URL and this machine's nickname from local settings; holds no URL, path, hostname, or name of its own.
+description: Write this session's row to the private status board and bring the board's task rows in line with GitHub — call it when a session starts, finishes, or blocks on a task. Reads the board URL and this machine's nickname from local settings; holds no URL, path, hostname, or name of its own.
 ---
 
 # status-heartbeat
@@ -38,6 +38,32 @@ gitignored local settings. If either is unset, this machine has not been enrolle
    `url` the value from step 1, `collection: agents`, `doc_id` the session id, `data` the row.
    On an existing row pass `if_version` (the version from a prior read); re-read and retry if it
    is stale.
+
+4. Reconcile the task rows with GitHub, on every check-in. The board's `tasks` rows drift when a
+   PR merges or an issue closes and nobody flips the row; this step closes that gap.
+   - Read the `tasks` collection (`action: list`) and keep the rows whose `link` is `#<n>`.
+   - Ask GitHub for each number's state, PRs first, then issues for the numbers that are not PRs:
+     ```sh
+     gh pr view <n> --json state --jq .state      # OPEN | MERGED | CLOSED
+     gh issue view <n> --json state --jq .state   # OPEN | CLOSED
+     ```
+   - The new status follows from that state alone:
+
+     | GitHub state | row status |
+     |---|---|
+     | PR `MERGED`, issue `CLOSED` | `done` |
+     | PR `OPEN` | `in-progress` |
+     | PR `CLOSED` (not merged) | `blocked` — and say so in the report; a human decides |
+     | issue `OPEN` | unchanged |
+
+   - Never move a row out of `done`. Never create, delete or retitle a row here; only `status`
+     and `updated_at` change. Leave a row alone when `gh` fails for its number, and list the
+     number in the report — a lookup that failed is not a state.
+   - A wall whose `id` is `i<n>` closes when issue `<n>` is `CLOSED`: set its `closed_at` to now.
+   - Write every change in one `action: batch`, each entry pinned with the `if_version` from the
+     list read. If the batch is refused as stale, re-read and redo it once; if it fails again,
+     report it and stop.
+   - Report the flips in one line (`#846 N0 → done, #853 pr-853 → done`), or "no changes".
 
 ## Keep it clean
 
