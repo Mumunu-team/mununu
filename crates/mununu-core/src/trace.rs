@@ -400,8 +400,8 @@ impl TraceNames {
         }
         if !rep.too_wide.is_empty() {
             limits.push(format!(
-                "net(s) wider than the evaluator's {}-bit value, left unknown and every arm they \
-                 fed kept: {}",
+                "net(s) or word operand(s) wider than the evaluator's {}-bit value, left unknown \
+                 and every arm they fed kept: {}",
                 crate::adapter::yosys::netlist::CARRIER_BITS,
                 join(&rep.too_wide)
             ));

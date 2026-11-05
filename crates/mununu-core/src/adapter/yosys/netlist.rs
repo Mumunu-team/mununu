@@ -75,6 +75,17 @@ pub type Step = (HashMap<String, u128>, HashMap<String, u128>);
 /// it (mununu#848).
 pub const CARRIER_BITS: usize = 128;
 
+/// The widest operand the word cells evaluate (an `i128` with room for the sign): a wider
+/// operand leaves the cell's output unknown, and the slice names the cell when it walks
+/// through it.
+const WORD_BITS: usize = 127;
+
+/// The cells evaluated as words over `A` / `B` — the ones [`WORD_BITS`] limits.
+const WORD_CELLS: [&str; 18] = [
+    "$not", "$pos", "$neg", "$eq", "$ne", "$lt", "$le", "$gt", "$ge", "$eqx", "$nex", "$add",
+    "$sub", "$mul", "$shl", "$sshl", "$shr", "$sshr",
+];
+
 /// The top module of a flattened netlist.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Netlist {
@@ -315,7 +326,7 @@ impl Netlist {
         ev: &mut Evaluation,
         visiting: &mut HashSet<usize>,
     ) -> Option<i128> {
-        if bits.is_empty() || bits.len() > 127 {
+        if bits.is_empty() || bits.len() > WORD_BITS {
             return None;
         }
         let mut v: i128 = 0;
@@ -356,6 +367,9 @@ impl Netlist {
         };
         let a_signed = p("A_SIGNED") == Some(1);
         let b_signed = p("B_SIGNED") == Some(1);
+        if WORD_CELLS.contains(&ty) && ["A", "B"].iter().any(|k| port(k).len() > WORD_BITS) {
+            ev.wide_cells.insert(idx);
+        }
         if FLOPS.contains(&ty) {
             // `Q` is the state the caller seeded; nothing to compute.
         } else {
@@ -652,6 +666,9 @@ impl Netlist {
                 };
                 let c = &self.cells[*idx];
                 cells_per_cycle[t].insert(*idx);
+                if ev.wide_cells.contains(idx) {
+                    report.too_wide.insert(c.name.clone());
+                }
                 let val = |b: &Bit| -> Option<bool> {
                     match b {
                         Bit::Zero => Some(false),
@@ -821,6 +838,8 @@ pub struct Evaluation {
     /// Cell types this module does not evaluate that the netlist contains.
     pub unevaluated: BTreeSet<String>,
     done: HashSet<usize>,
+    /// Word cells with an operand wider than [`WORD_BITS`]: their outputs stayed unknown.
+    wide_cells: HashSet<usize>,
 }
 
 impl Evaluation {
@@ -887,8 +906,9 @@ pub struct SliceReport {
     pub widened: BTreeSet<String>,
     /// Seeds that are not public nets of the netlist (a monitor cell, a name the lift mangled).
     pub unknown_seeds: Vec<String>,
-    /// Registers and inputs wider than [`CARRIER_BITS`] the walk passed through: their values
-    /// stayed unknown, so every arm they fed was kept.
+    /// What the walk passed through that the evaluator could not carry: registers and inputs
+    /// wider than [`CARRIER_BITS`], and word cells with an operand wider than [`WORD_BITS`]
+    /// (by cell name). Their values stayed unknown, so every arm they fed was kept.
     pub too_wide: BTreeSet<String>,
 }
 
