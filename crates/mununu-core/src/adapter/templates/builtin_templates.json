@@ -643,6 +643,42 @@
         "rtl",
         "cover"
       ]
+    },
+    {
+      "id": "rtl_inevitable",
+      "display_name": "Inevitable (RTL)",
+      "description": "On every path from reset a cycle where TARGET holds is reached: AF TARGET. The two-sided witness of an invariant: `rtl_invariant P=flag_q == 0` says the flag never fires, `rtl_inevitable TARGET=flag_q == 1` says it always does — on a healthy design the first HOLDS and the second is VIOLATED, which is what shows the invariant is not vacuous.",
+      "kind": "liveness",
+      "role": "standalone",
+      "domains": ["rtl"],
+      "params": [
+        {
+          "name": "TARGET",
+          "description": "the condition every run must reach, e.g. `flag_q == 1`",
+          "param_type": { "type": "rtl_atom" },
+          "required": true
+        }
+      ],
+      "formula_pattern": "mu X. (${TARGET} || [] X)",
+      "tags": ["rtl", "liveness", "witness"]
+    },
+    {
+      "id": "rtl_always_eventually",
+      "display_name": "Always eventually (RTL)",
+      "description": "From every reachable state, every path reaches a cycle where TARGET holds: AG AF TARGET. Stronger than `rtl_recoverable` (some path): no input sequence can hold the design away from TARGET.",
+      "kind": "liveness",
+      "role": "standalone",
+      "domains": ["rtl"],
+      "params": [
+        {
+          "name": "TARGET",
+          "description": "the state every run keeps returning to, e.g. `st_q == 0`",
+          "param_type": { "type": "rtl_atom" },
+          "required": true
+        }
+      ],
+      "formula_pattern": "nu Y. ((mu X. (${TARGET} || [] X)) && [] Y)",
+      "tags": ["rtl", "liveness"]
     }
   ]
 }

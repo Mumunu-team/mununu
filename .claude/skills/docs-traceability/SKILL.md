@@ -16,7 +16,7 @@ Run a documentation traceability audit on $ARGUMENTS (a path, file list, or "cha
 
 If $ARGUMENTS is empty, derive scope from `git diff --name-only HEAD~1 HEAD` filtered to `*.md` files under the covered paths. Otherwise, treat $ARGUMENTS as either:
 
-- A path or directory (e.g., `wiki/`, `docs/abstraction_overview.md`) — audit every Markdown file under it.
+- A path or directory (e.g., `wiki/`, `docs/abstraction.md`) — audit every Markdown file under it.
 - A feature/symbol name — find every doc page that should anchor to it and check those.
 
 ## Covered paths
@@ -32,8 +32,8 @@ If $ARGUMENTS is empty, derive scope from `git diff --name-only HEAD~1 HEAD` fil
 
 Explicit opt-outs:
 - `docs/architecture/**` (design notes — anchor where possible but not required)
-- `docs/witness_refinement_plan.md` and files starting with `> Status: planning` (planning docs)
-- `wiki/_Sidebar.md`, `wiki/Home.md` table-of-contents pages (anchor target is each linked page, not the sidebar)
+- `docs/design/native-sv-abstraction.md` and every file starting with `> Status: planning` (planning docs)
+- `wiki/Home.md`, the table-of-contents page (anchor target is each linked page, not the index)
 
 ## Anchor grammar
 
@@ -91,7 +91,7 @@ Audited N Markdown files across {wiki, docs, READMEs, agents, skills}. M section
 |---|---|---|---|---|
 | `wiki/CLI-Reference.md` § `mununu context eval` | OK | `crates/mununu-cli/src/main.rs#L412` (`EvalArgs`) | CLI+API+UI | aligned |
 | `wiki/Adapter-Formats.md` § TLSF | BROKEN | `crates/mununu-core/src/adapter/tlsf/mod.rs#L88` (`fn parse_tlsf`) | CLI+API | symbol-missing — moved to `parser.rs:L42` |
-| `docs/abstraction_overview.md` § "Boolean domain" | ORPHAN | — | — | add anchor or mark `> Concept:` |
+| `docs/abstraction.md` § "Boolean domain" | ORPHAN | — | — | add anchor or mark `> Concept:` |
 ```
 
 Each row must cite the path used as the anchor for OK rows. BROKEN / ORPHAN rows must include a one-line remediation in the **Issue** column.

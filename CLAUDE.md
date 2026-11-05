@@ -25,9 +25,10 @@
 17. [Available Agents and Skills](#available-agents-and-skills) `[REFERENCE]`
 18. [Private Files Policy](#private-files-policy) `[RULE]`
 19. [Reasoning & Recommendation Honesty](#reasoning--recommendation-honesty) `[RULE]`
-20. [Engine Specificity in Proposals](#engine-specificity-in-proposals) `[RULE]`
-21. [Reference Docs Index](#reference-docs-index) `[REFERENCE]`
-22. [Environment Variables](#environment-variables) `[REFERENCE]`
+20. [Falsifier First](#falsifier-first) `[RULE]`
+21. [Engine Specificity in Proposals](#engine-specificity-in-proposals) `[RULE]`
+22. [Reference Docs Index](#reference-docs-index) `[REFERENCE]`
+23. [Environment Variables](#environment-variables) `[REFERENCE]`
 
 ---
 
@@ -139,7 +140,7 @@ Prefer the CLTS / CTXDSL primitives over re-encoding source features as state-na
 - **Per-label controllability** (`LabelControllability::{Controllable, Internal, Uncontrollable}`) in the `controllable { … }` / `internal { … }` blocks, not in label-name prefixes.
 - **Rich modal guards** (`Guard { labels, current, next, control, max_steps }`): `[(labels = {a}, req_next = {active}, ctrl = controllable)] φ` — reach for `req_next` / `forb_next` whenever the property says "after this transition the system must be in a state where …".
 
-Reference implementations: `crates/mununu-core/src/adapter/emit.rs` (turn-aware `[(ctrl=Controllable)]` guards), `crates/mununu-core/src/adapter/systemverilog/kripke.rs` (Kripke valuations). When a primitive is intentionally unused, leave a one-line comment saying why; `/soundness-check` flags silent under-use.
+Reference implementations: `crates/mununu-core/src/adapter/emit.rs` (turn-aware `[(ctrl=Controllable)]` guards), `crates/mununu-core/src/adapter/btor2/kmts_lift.rs` (3-valued per-state predicates on the lifted RTL, `Clts::state_3valued_predicates`). When a primitive is intentionally unused, leave a one-line comment saying why; `/soundness-check` flags silent under-use.
 
 ## Git Operations & Destructive Commands
 
@@ -204,6 +205,10 @@ Sensitive or unpublished material lives in the sibling `mununu-private/` reposit
 ## Reasoning & Recommendation Honesty
 
 Never justify a decision, recommendation or deferral with a limitation the agent does not have — "the session is long", "end of session", fatigue, attention erosion. Turn N is produced at the same capability as turn 1. The genuine session-linked factors, named when they apply: **context degradation** (earlier invariants can be summarised away — which argues for doing dependent work *while* the context is warm, not deferring it), **token / compute cost** (the user's axis to weigh — surface it, do not assume it as a stop), **intrinsic difficulty / soundness-criticality** (answered with procedural rigour — differential tests, oracles — not postponement). If the only reason is "the user should make this call", say exactly that. Warm build caches typically make longer-running work cheaper, not riskier.
+
+## Falsifier First
+
+Where more than one structure would work and the choice is not forced: name the decision, give its reason, and state **what observation would falsify it — before building it**; then check the falsifier first, because it is nearly always cheaper than the implementation. A falsifier is a checkable observation, never a worry ("this might be slow" is not one; "the renderer's setup state is not 16 cycles long" is). After a measurement, ask what you did **not** check and whether it was cheaper than what you did. On this host (an interactive desktop) a directional result at ≥10× survives the noise; a ratio under ~2× does not and is not evidence. Working measure (roadmap A1, 2026-11-03): the count of mechanisms retired within 7 days of shipping must fall from the 4 of the 2026-09 window.
 
 ## Engine Specificity in Proposals
 
