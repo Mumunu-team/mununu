@@ -4479,6 +4479,24 @@ impl ExactModel {
         oom(self.constraint.exists(&self.input_cube))
     }
 
+    /// mununu#852 — project a target predicate (`bad` / `good`) that may read a primary input down
+    /// to a pure STATE set: `∃i. (phi(s,i) ∧ constraint(s,i))`. A target reads its inputs AT the
+    /// target cycle, which must be INDEPENDENT of the transition inputs the modal pre-image
+    /// ([`Self::diamond_pre`]) quantifies. Left free and fed to the `EF` fixpoint, the target's
+    /// input bits are the same BDD variables [`Self::to_next`] carries through unsubstituted (it
+    /// substitutes state vars only), so the pre-image's single `∃i` ties "the input the target
+    /// reads" to "the input that drove the step into the target" — a false UNREACHABLE when the two
+    /// cycles need different input values. Projecting here keeps them independent. The per-cycle
+    /// `constraint` is conjoined BEFORE the projection so the witnessing input also respects the
+    /// assume at the target cycle (btormc checks the constraint at the `bad` step too). A target
+    /// with no input bits is unchanged up to the pre-existing `∧ constraint_satisfiable` filter,
+    /// since `∃i.(phi ∧ constraint) = phi ∧ ∃i.constraint` when `phi` has no `i`.
+    pub fn target_state_set(&self, phi: &BDDFunction) -> Result<BDDFunction, String> {
+        use oxidd::BooleanFunctionQuant;
+        let with_constraint = oom(phi.and(&self.constraint))?;
+        oom(with_constraint.exists(&self.input_cube))
+    }
+
     /// `⟨⟩φ` — some **constraint-respecting** successor satisfies `φ`:
     /// `∃i. constraint(s,i) ∧ to_next(φ)`. `constraint = tt` (unconstrained) makes
     /// this the plain `∃i. to_next(φ)`, so an unconstrained design is unchanged.
@@ -5699,13 +5717,17 @@ pub fn exact_bad_reachable(btor2_content: &str) -> Result<bool, String> {
     }
 
     let model = bb.exact_model()?;
-    // The `bad` target must itself be constraint-consistent: btormc checks the
-    // constraint at the step where `bad` holds too, so reaching a state that
-    // violates every constraint is not a valid counterexample. Conjoining the
-    // constraint-satisfiable states leaves an unconstrained design unchanged
-    // (`constraint_satisfiable() = tt`). The constrained `◇` (`diamond_pre`)
-    // already restricts every intermediate step.
-    let bad = oom(bad.and(&model.constraint_satisfiable()?))?;
+    // mununu#852 — project the `bad` target to a pure STATE set BEFORE the `EF` fixpoint:
+    // `∃i. (bad(s,i) ∧ constraint(s,i))`. `bad` may read a primary input combinationally; left
+    // free, its input bits are the SAME BDD variables the modal pre-image ([`diamond_pre`])
+    // quantifies for the transition, so the one-step `∃i` would tie "the input `bad` reads at its
+    // cycle" to "the input that drove the step into that state" — a false UNREACHABLE when the
+    // counterexample needs different input values at the two cycles (the shrunk 18-line design in
+    // the mununu#852 regression test). The joint
+    // conjunction with the per-cycle `constraint` keeps the old consistency guarantee: the `bad`
+    // target is itself constraint-consistent (btormc checks the assume at the `bad` step too), and
+    // an unconstrained, input-free `bad` is unchanged since `∃i.(bad ∧ tt) = bad`.
+    let bad = model.target_state_set(&bad)?;
     let formula = mu_parser::parse("mu Y. (BAD or <> Y)").expect("EF(bad) formula parses");
     let mut atoms: HashMap<&str, BDDFunction> = HashMap::new();
     atoms.insert("BAD", bad);
