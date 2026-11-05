@@ -406,6 +406,13 @@ impl TraceNames {
                 join(&rep.too_wide)
             ));
         }
+        if !rep.no_value.is_empty() {
+            limits.push(format!(
+                "register(s) or input(s) with no value in the trace, left unknown and every arm \
+                 they fed kept: {}",
+                join(&rep.no_value)
+            ));
+        }
         trace.slice_status = Some(if !limits.is_empty() {
             status("widened", Some(limits.join("; ")))
         } else if trace.slice.is_empty() {

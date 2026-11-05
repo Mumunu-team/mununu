@@ -631,9 +631,11 @@ impl Netlist {
         if !known_seed {
             return report;
         }
-        // The bits of every register and input `evaluate` leaves unknown for its width: a walk
-        // through one is named, since the unknown keeps every arm of what it feeds.
-        let too_wide: HashMap<u64, &String> = self
+        // Every register and input bit → its net and whether it is wider than the carrier. A
+        // walk through one that stayed unknown is named — too wide to carry, or no value in the
+        // cycle's maps — since the unknown keeps every arm of what it feeds. "Unknown after
+        // evaluation", not "name absent from the map": a register's alias may carry the value.
+        let owner: HashMap<u64, (&String, bool)> = self
             .registers
             .iter()
             .chain(
@@ -641,10 +643,10 @@ impl Netlist {
                     .iter()
                     .filter_map(|n| self.nets.get_key_value(n)),
             )
-            .filter(|(_, bits)| bits.len() > CARRIER_BITS)
             .flat_map(|(name, bits)| {
+                let wide = bits.len() > CARRIER_BITS;
                 bits.iter().filter_map(move |b| match b {
-                    Bit::Id(id) => Some((*id, name)),
+                    Bit::Id(id) => Some((*id, (name, wide))),
                     _ => None,
                 })
             })
@@ -658,8 +660,12 @@ impl Netlist {
                 if !seen.insert(bit) {
                     continue;
                 }
-                if let Some(name) = too_wide.get(&bit) {
-                    report.too_wide.insert((*name).clone());
+                if let Some(&(name, wide)) = owner.get(&bit) {
+                    if wide {
+                        report.too_wide.insert(name.clone());
+                    } else if !ev.bits.contains_key(&bit) {
+                        report.no_value.insert(name.clone());
+                    }
                 }
                 let Some((idx, port, k)) = self.driver.get(&bit) else {
                     continue; // an input port bit or an undriven net: the walk ends
@@ -910,6 +916,10 @@ pub struct SliceReport {
     /// wider than [`CARRIER_BITS`], and word cells with an operand wider than [`WORD_BITS`]
     /// (by cell name). Their values stayed unknown, so every arm they fed was kept.
     pub too_wide: BTreeSet<String>,
+    /// Registers and inputs the walk passed through that the cycle's maps gave no value (the
+    /// trace did not list them under any of their names): unknown, so every arm they fed was
+    /// kept.
+    pub no_value: BTreeSet<String>,
 }
 
 #[cfg(test)]
@@ -1042,6 +1052,10 @@ mod tests {
         let s = n.slice(&trace(), &["start_a".to_string(), "start_b".to_string()]);
         assert!(s.widened.is_empty(), "{:?}", s.widened);
         assert!(s.unknown_seeds.is_empty());
+        // The measured counterexample gives a value to everything the walk reads (mununu#857:
+        // a gap here would make the real slice `widened`, not `exact`).
+        assert!(s.no_value.is_empty(), "{:?}", s.no_value);
+        assert!(s.too_wide.is_empty(), "{:?}", s.too_wide);
         let lines = |t: usize| -> Vec<u32> {
             s.cycles
                 .iter()
