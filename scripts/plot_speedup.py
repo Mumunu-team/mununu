@@ -8,7 +8,8 @@ Usage:
   scripts/plot_speedup.py --exp EXP-NNNN-slug --kind scaling
 
 Reads experiments/<EXP>/criterion-archive.tar.zst and emits an SVG and PNG
-to publications/blog/figures/<EXP>/<kind>.svg|png.
+to experiments/<EXP>/figures/<kind>.svg|png (override with --out-dir); the
+write-up that embeds them is kept with the private publication drafts.
 
 Stub for now: prints what it WOULD do. The real plotting waits until at
 least one archived EXP exists to drive the layout decisions.
@@ -59,7 +60,7 @@ def main() -> int:
         print(f"error: {exp_dir} not found", file=sys.stderr)
         return 2
     out_dir = Path(args.out_dir) if args.out_dir else (
-        repo_root / "publications" / "blog" / "figures" / args.exp
+        exp_dir / "figures"
     )
     out_dir.mkdir(parents=True, exist_ok=True)
 

@@ -73,6 +73,6 @@ The bench harness itself (`crates/mununu-core/benches/_common.rs` and the per-su
 
 ## Refining the publication artifacts
 
-- Blog post drafts in `publications/blog/` are mutable until they ship publicly. Once a post is published (URL exists outside the repo), treat it like an archive — fix bugs via "Errata" appendices.
-- The paper outline in `publications/paper/outline.md` is mutable until camera-ready submission. After submission, edits become errata.
-- Figures in `publications/blog/figures/EXP-NNNN/` are regenerated from the archive and the plotting script. If a figure changes (e.g., switched from log to linear y-axis), commit the new figure alongside the old one with a `-v2.svg` suffix and reference both in the post.
+- Blog post drafts (`mununu-private/publications/blog/`, moved out of this repo on 2026-11-05) are mutable until they ship publicly. Once a post is published (URL exists outside the repo), treat it like an archive — fix bugs via "Errata" appendices.
+- The paper outline (`mununu-private/publications/paper/outline.md`) is mutable until camera-ready submission. After submission, edits become errata.
+- Figures (`experiments/EXP-NNNN-<slug>/figures/`, beside the archive they come from) are regenerated from the archive and the plotting script. If a figure changes (e.g., switched from log to linear y-axis), keep the new figure alongside the old one with a `-v2.svg` suffix and reference both in the post.

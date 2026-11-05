@@ -91,3 +91,9 @@ examples/verify/**/build/
 # by a `git add -A` that swept it in; the `--cached` removal left every file on
 # disk untouched.
 scratchpad/
+
+# Unpublished write-ups and machine-local launchd units (2026-11-05): both live in
+# mununu-private/ (`publications/`, `scripts/launchd/`). The per-example write-ups under
+# examples/industrial/*/publications/ are tracked on purpose.
+/publications/
+/scripts/*.plist
