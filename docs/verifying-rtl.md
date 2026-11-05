@@ -1224,7 +1224,7 @@ game, PR C).
 
 ### What decides at what width — the measured frontier (2026-10-14)
 
-> Source of truth: [`default_cap_for_cone`](../crates/mununu-core/src/adapter/btor2/symbolic_bitblast.rs#L254) + [`scripts/bitcap_frontier.py`](../scripts/bitcap_frontier.py) — surface: (CLI+API) — the `engine` / `exact_abstention` fields of `btor2 verify-recoverability` and `sv verify-recoverability` (mununu#682) are what the sweep reads.
+> Source of truth: [`default_cap_for_cone`](../crates/mununu-core/src/adapter/btor2/symbolic_bitblast.rs#L260) + [`scripts/bitcap_frontier.py`](../scripts/bitcap_frontier.py) — surface: (CLI+API) — the `engine` / `exact_abstention` fields of `btor2 verify-recoverability` and `sv verify-recoverability` (mununu#682) are what the sweep reads.
 
 "How many bits can the exact engine handle?" has no single answer, and "40 bits" is the wrong one.
 The mechanics: `MAX_BITBLAST_BITS = 40` is the admission **floor**; `default_cap_for_cone` raises the cap
