@@ -32,7 +32,7 @@
 
 ## Provenance
 
-Seen on the OpenTitan `edn` IP's two endpoint `AG EF Idle` rows under the slang-only lift (mununu#849): VIOLATED, no path, no note. The wide-cell branch is the candidate path (the rows' 405-bit cone, a 135-bit cell found in the same IP by mununu#848); confirmation on the SVA host is pending and the PR states the outcome. Reproducer: `crates/mununu-core/tests/exact_witness_wide_cell_849.rs` — an `AG EF` and an `AF` row over a design with a 130-bit cell in the cone; on the parent both ship VIOLATED with no recorded reason, on the fix the reason names the cell and its width.
+Seen on the OpenTitan `edn` IP's two endpoint `AG EF Idle` rows under the slang-only lift (mununu#849): VIOLATED, no path, no note. Measured on the SVA host, these rows reach **neither** branch fixed here. The exact engine refuses their 405-bit cone at the bit cap before any witness is attempted, and a fallback engine decides the row; that path is mununu#849's own fix, a separate PR. The two branches fixed here were silent in the same way on other rows, which is why they are fixed on their own. Reproducer: `crates/mununu-core/tests/exact_witness_wide_cell_849.rs` — an `AG EF` and an `AF` row over a design with a 130-bit cell in the cone; on the parent both ship VIOLATED with no recorded reason, on the fix the reason names the cell and its width.
 
 ## Not covered here
 
