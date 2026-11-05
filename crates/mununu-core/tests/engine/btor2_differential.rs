@@ -15,10 +15,31 @@
 //! Shape: 1–5 state bits (as 1–3 registers of width 1–3), 0–2 inputs, each `next` a
 //! random expression over the registers and inputs from a small op menu, `init`
 //! constants, one `bad` that is a random comparison or bit of a register.
+//!
+//! **Gate vs explorer.** Under `make ci` the tier replays one fixed draw ([`TIER_SEED`]), so
+//! a red gate names a regression the change made, never a pre-existing engine bug the dice
+//! happened to find (mununu#852 turned two unrelated PRs red that way). Fresh draws are
+//! `make diff-tier-explore`, off the gate; a disagreement it finds is filed with its printed
+//! design and pinned as a deterministic test. `PROPTEST_RNG_SEED=<n>` replays another draw.
 use mununu_core::adapter::btor2::native_bmc::{SafetyVerdict, decide_bad_safety};
 use mununu_core::adapter::btor2::parser;
 use mununu_core::adapter::btor2::symbolic_bitblast::exact_bad_reachable;
 use proptest::prelude::*;
+use proptest::test_runner::RngSeed;
+
+/// The gate's draw. Any value works; changing it changes which designs the gate checks.
+const TIER_SEED: u64 = 0x6d75_6e75_6e75;
+
+/// `Random` only when exploring; otherwise the env's `PROPTEST_RNG_SEED`, else [`TIER_SEED`].
+fn tier_seed() -> RngSeed {
+    if std::env::var_os("MUNUNU_DIFF_TIER_EXPLORE").is_some() {
+        return RngSeed::Random;
+    }
+    match ProptestConfig::default().rng_seed {
+        RngSeed::Random => RngSeed::Fixed(TIER_SEED),
+        from_env => from_env,
+    }
+}
 
 /// A random design, rendered as BTOR2 text.
 #[derive(Debug, Clone)]
@@ -219,6 +240,7 @@ proptest! {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(48),
+        rng_seed: tier_seed(),
         ..ProptestConfig::default()
     })]
 
