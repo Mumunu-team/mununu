@@ -6713,10 +6713,9 @@ impl ExactSession {
         // free inputs and the fixpoint mis-decides (a spurious `Holds` on a register
         // that is reachably non-zero). Refuse rather than emit an unsound verdict — the
         // verify-auto driver skips such a property up front, and this guards the exact
-        // engine's other callers (the differential oracle, `btor2 verify`). A faithful
-        // state cell (read_verilog / sv2v) and an anonymous split sub-register the
-        // NID-indexed COI keeps (packed-2-D `q[idx] <= d`) are both NOT flagged — the
-        // latter now decides.
+        // engine's other callers (the differential oracle, `btor2 verify`). An anonymous
+        // split sub-register the NID-indexed COI keeps (packed-2-D `q[idx] <= d`) is NOT
+        // flagged — it decides.
         if let Some(bad) = seed_regs
             .iter()
             .find(|r| crate::adapter::btor2::parser::signal_reaches_anonymous_input(&file, r))
@@ -6725,8 +6724,8 @@ impl ExactSession {
                 "exact MC: atom `{bad}` binds to a signal whose unwritten bits the RTL front-end \
              left undriven (modelled as free inputs) — the yosys-slang lift of a plain-vector \
              partial assignment (`{bad}[hi:lo] <= …`). A state predicate over it reads those \
-             havoc inputs and would be unsound, so it is refused. Re-lift with the \
-             read_verilog / sv2v front-end, which models `{bad}` faithfully."
+             havoc inputs and would be unsound, so it is refused; writing the register whole \
+             is the route that works."
             ));
         }
 
@@ -13951,7 +13950,6 @@ mod tests {
         .expect("read uart_tx.sv");
         let yopts = YosysOptions {
             top: Some("uart_tx".to_string()),
-            use_sv2v: true,
             ..Default::default()
         };
         let btor2 = sv_to_btor2_with_blackboxes(&sv, &yopts)

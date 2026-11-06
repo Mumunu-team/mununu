@@ -111,10 +111,10 @@ It changes no verdict.
 
 ```bash
 # Report the unfaithful partial-write registers; exit 2 if any (a CI gate).
-mununu --quiet sv lint rtl/mod.sv --frontend slang
+mununu --quiet sv lint rtl/mod.sv
 
 # Advisory (report-only, always exit 0):
-mununu --quiet sv lint rtl/mod.sv --frontend slang --fail-on none
+mununu --quiet sv lint rtl/mod.sv --fail-on none
 ```
 
 The JSON on stdout lists each flagged `signal` with a `kind` of `"register"` (the root — the register itself) or `"output"` (a downstream combinational output of one). See [`docs/verifying-rtl.md`](verifying-rtl.md) for the soundness background (the monono#partsel guard).
@@ -126,7 +126,7 @@ The JSON on stdout lists each flagged `signal` with a `kind` of `"register"` (th
 `mununu sv cdc-lint` classifies every flop that samples another clock's flop (synchronised, logic before the first stage, a capture read by logic, a multi-bit bus with its gray step decided, qualified data, reconvergence, dual-clock memories). The worst row drives `--fail-on`, so an unsafe crossing exits 2. Pulse survival across clocks is functional and runs through SymbiYosys instead; both are described in [`docs/verifying-rtl.md`](verifying-rtl.md) §"Clock-domain crossings".
 
 ```bash
-mununu --quiet sv cdc-lint rtl/top.sv --top top --frontend slang
+mununu --quiet sv cdc-lint rtl/top.sv --top top
 scripts/cdc_formal_sby.sh --top top --mode bmc --depth 20 rtl/top.sv
 ```
 

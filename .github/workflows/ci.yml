@@ -96,7 +96,7 @@ jobs:
       # Copyleft gate on the LINKED crate graph (deny.toml). Fails if any
       # dependency's license isn't in the permissive allow-list — protects the
       # Mununu Non-Commercial License from GPL/AGPL/LGPL contamination. External
-      # CLI tools (yosys/sv2v/cvc5/Verilator/slang) are subprocesses, not linked,
+      # CLI tools (yosys/cvc5/Verilator/slang; sv2v as the dev-only oracle) are subprocesses, not linked,
       # so they're out of scope here (see docs/external-tools.md).
       - name: Check dependency licenses
         run: cargo deny check licenses

@@ -3,7 +3,7 @@ mod render;
 
 use crate::loader::{
     EvalContextParams, PreparedEvalContext, load_context_documents, load_context_documents_mode,
-    prepare_eval_context, print_context_structure, realize_documents, validate_preprocessor,
+    prepare_eval_context, print_context_structure, realize_documents,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use mununu_core::clts::{Clts, DefaultLabelIdx, LabelId};
@@ -875,42 +875,6 @@ enum AssumesArg {
     Check,
     /// Drop the assumptions: neither checked nor applied.
     Ignore,
-}
-
-/// [`mununu_core::adapter::yosys::SvFrontend`]).
-#[derive(Clone, Debug, Copy, clap::ValueEnum, Default)]
-enum SvFrontendArg {
-    /// Env-driven default: `MUNUNU_YOSYS_FRONTEND=slang` → slang, else read_verilog.
-    #[default]
-    Auto,
-    /// Force yosys `read_verilog`.
-    Verilog,
-    /// Force the yosys-slang plugin (`read_slang`) — lifts modern-SV constructs
-    /// `read_verilog`/sv2v reject (`while` loops, `module M import pkg::*;`).
-    /// Requires the yosys-slang plugin (present in the `mununu-sva` image).
-    Slang,
-    /// Run sv2v first, then yosys `read_verilog` (replaces `--frontend sv2v`, 0.5).
-    Sv2v,
-}
-
-impl SvFrontendArg {
-    /// Whether the lift runs sv2v before yosys.
-    fn sv2v(self) -> bool {
-        matches!(self, SvFrontendArg::Sv2v)
-    }
-}
-
-impl From<SvFrontendArg> for mununu_core::adapter::yosys::SvFrontend {
-    fn from(a: SvFrontendArg) -> Self {
-        match a {
-            SvFrontendArg::Auto => Self::Auto,
-            SvFrontendArg::Verilog => Self::Verilog,
-            // sv2v first (`sv2v()`), then the `auto` order and its slang fallback — what the
-            // pre-0.5 `--preprocess-sv2v` did; a forced `Verilog` loses the fallback.
-            SvFrontendArg::Sv2v => Self::Auto,
-            SvFrontendArg::Slang => Self::Slang,
-        }
-    }
 }
 
 #[derive(Clone, Debug, Copy, clap::ValueEnum, Default)]
@@ -1980,19 +1944,6 @@ struct ExtractionCheckArgs {
 
 #[derive(Subcommand, Debug)]
 enum SvCommand {
-    /// Preprocess SystemVerilog through sv2v into Verilog-2005.
-    ///
-    /// Standalone wrapper over the sv2v binary (zachjs/sv2v). Elaborates
-    /// SV-2017 constructs (generates, interfaces, structs, always_ff,
-    /// parameterized modules, …) into a Verilog-2005 subset, preserving
-    /// module hierarchy and signal names. Output goes to --output or
-    /// <stem>.elab.v next to the input.
-    ///
-    /// Used by the KMTS pipeline (R.0a) as the frontend normaliser
-    /// before Yosys-no-flatten. Also exposed standalone for users who
-    /// want to inspect or further-process the sv2v output. Same
-    /// sv2v invocation as the Yosys path's `--preprocessor sv2v`.
-    Preprocess(SvPreprocessArgs),
     /// Emit one BTOR2 per submodule (R.0b — KMTS pipeline frontend).
     ///
     /// Runs Yosys with `hierarchy -check` (no `flatten`) and emits one
@@ -2031,7 +1982,7 @@ enum SvCommand {
     /// Discover a design's state cells and emit a skeleton sidecar
     /// (sidecar-audit C1.1 / finding E1).
     ///
-    /// Drives sv2v → Yosys-flatten → BTOR2 and prints a `.mununu.json`
+    /// Drives the slang lift → Yosys-flatten → BTOR2 and prints a `.mununu.json`
     /// skeleton pre-populated with the design's real post-`flatten`
     /// dotted-instance state-cell names (`u_chan0.prediv_q`) — the names
     /// the bit-blaster and a param-concretization sidecar key on. Removes
@@ -2053,7 +2004,7 @@ enum SvCommand {
     Discover(SvDiscoverArgs),
     /// SV-direct CEGAR in one command (cegar-extraction Stage 2).
     ///
-    /// Lifts SystemVerilog to a single flattened BTOR2 (sv2v + Yosys) and
+    /// Lifts SystemVerilog to a single flattened BTOR2 (yosys-slang) and
     /// runs the same predicate-abstraction refinement loop as
     /// `mununu btor2 cegar`, printing the per-iteration trace + 3-valued
     /// verdict. Removes the manual "run `sv emit-btor2-per-module` first,
@@ -2075,7 +2026,7 @@ enum SvCommand {
     /// Automated SVA verification — no sidecar (Track-H, XL.6b).
     ///
     /// The headline no-sidecar verify: extract the design's SVA (slang) → lift
-    /// SV → BTOR2 (sv2v + Yosys) → synthesize `$past` shadow flops → for each
+    /// SV → BTOR2 (yosys-slang) → synthesize `$past` shadow flops → for each
     /// translated property, auto-seed cube predicates from the formula's
     /// state-cell atoms and run the predicate-abstraction refinement loop,
     /// printing a per-property verdict. Properties whose atoms reference
@@ -2083,7 +2034,7 @@ enum SvCommand {
     /// can't bind them) — never given a misleading verdict. Surface peer of
     /// `POST /api/v1/sv/verify-auto` + the extraction-tab verify-auto panel.
     VerifyAuto(Box<SvVerifyAutoArgs>),
-    /// Lift SV (sv2v + Yosys) and decide `bad`-reachability of the `bad` lines yosys lowers its
+    /// Lift SV (yosys-slang) and decide `bad`-reachability of the `bad` lines yosys lowers its
     /// immediate assertions to, with the multi-engine safety portfolio — one call, no
     /// `emit-btor2` step. Not the SVA property set: that is `sv verify-auto`. (0.5: renamed from
     /// `sv verify`.) Surface peer of `POST /api/v1/sv/verify-bad`.
@@ -2164,29 +2115,8 @@ struct SvDiscoverArgs {
     /// flattens from the right root.
     #[arg(long)]
     top: Option<String>,
-    /// RTL front end: `auto`, `verilog`, `slang`, or `sv2v` (sv2v, then read_verilog).
-    #[arg(long = "frontend", value_enum, default_value_t = SvFrontendArg::Auto)]
-    frontend: SvFrontendArg,
     /// Write the skeleton sidecar here instead of stdout.
     #[arg(long, value_name = "FILE")]
-    output: Option<PathBuf>,
-}
-
-#[derive(Args, Debug)]
-struct SvPreprocessArgs {
-    /// Path(s) to the SystemVerilog source file(s) (.sv). At least one
-    /// required. Multiple files are passed to sv2v in one invocation
-    /// (sv2v resolves cross-file packages, interfaces, and parameter
-    /// references in a single pass).
-    #[arg(value_name = "FILE", num_args = 1..)]
-    files: Vec<PathBuf>,
-    /// Include directory for `\`include` resolution. Repeatable;
-    /// forwarded to sv2v as `-I <dir>`.
-    #[arg(short = 'I', long = "include-dir", value_name = "DIR")]
-    include_dirs: Vec<PathBuf>,
-    /// Output path for the elaborated Verilog-2005. Defaults to
-    /// <first-stem>.elab.v next to the first input file.
-    #[arg(long = "output", value_name = "FILE")]
     output: Option<PathBuf>,
 }
 
@@ -2208,9 +2138,6 @@ struct SvEmitBtor2PerModuleArgs {
     /// to the directory of the primary input.
     #[arg(long = "output-dir", value_name = "DIR")]
     output_dir: Option<PathBuf>,
-    /// RTL front end: `auto`, `verilog`, `slang`, or `sv2v` (sv2v, then read_verilog).
-    #[arg(long = "frontend", value_enum, default_value_t = SvFrontendArg::Auto)]
-    frontend: SvFrontendArg,
     /// Use Yosys's `setundef -anyseq` instead of the default
     /// `setundef -zero`. Preserves CWE-1245-class semantics at the
     /// cost of introducing `$anyseq` state cells.
@@ -2229,7 +2156,7 @@ struct SvEmitBtor2PerModuleArgs {
 }
 
 /// cegar-extraction Stage 2 — `mununu sv cegar`. SV-direct CEGAR in one
-/// command: lift SV → single flattened BTOR2 (sv2v + Yosys) → predicate-
+/// command: lift SV → single flattened BTOR2 (yosys-slang) → predicate-
 /// abstraction refinement loop. The CEGAR flags mirror `btor2 cegar`
 /// exactly; the source half mirrors `sv emit-btor2-per-module`.
 #[derive(Args, Debug)]
@@ -2245,9 +2172,6 @@ struct SvCegarArgs {
     /// flattens from the right root; omitted lets Yosys auto-detect.
     #[arg(long = "top", value_name = "NAME")]
     top: Option<String>,
-    /// RTL front end: `auto`, `verilog`, `slang`, or `sv2v` (sv2v, then read_verilog).
-    #[arg(long = "frontend", value_enum, default_value_t = SvFrontendArg::Auto)]
-    frontend: SvFrontendArg,
     /// Use Yosys's `setundef -anyseq` instead of the default
     /// `setundef -zero` (per-cycle havoc on undefined nets).
     #[arg(long = "setundef-anyseq")]
@@ -2572,14 +2496,6 @@ struct SvLiftArgs {
     /// name-staging of additional sources already resolves cross-file includes.
     #[arg(long = "include-dir", value_name = "DIR")]
     include_dirs: Vec<PathBuf>,
-    /// RTL front-end for the lift. `slang` forces the yosys-slang plugin
-    /// (`read_slang`), which lifts modern-SV constructs `read_verilog` and sv2v
-    /// reject (`while` loops, `module M import pkg::*;`). Requires the
-    /// yosys-slang plugin (present in the mununu-sva image). `auto` (default)
-    /// keeps the env-driven behaviour; `verilog` forces read_verilog; `sv2v` runs sv2v first
-    /// (modern SV the plain `read_verilog` refuses: `import pkg::*;`, structs, interfaces).
-    #[arg(long = "frontend", value_enum, default_value_t = SvFrontendArg::Auto)]
-    frontend: SvFrontendArg,
     /// Override a module parameter, `NAME=VALUE` or `MODULE.NAME=VALUE` (repeatable). Shrinks a
     /// parameterised design (a FIFO depth, a counter width) to a decidable size. A malformed
     /// entry is an error. API: `lift.params`.
@@ -2870,13 +2786,6 @@ struct ContextSummarizeArgs {
     /// Mode for extraction adapter: "fixed" or "vulnerable".
     #[arg(long = "mode", value_name = "MODE")]
     mode: Option<String>,
-    /// Optional source-language preprocessor to run before adapter
-    /// translation. Currently supports: `sv2v` (lowers SV2009/2012
-    /// constructs to Verilog-2005 before Yosys; required for modern
-    /// open-source RTL — Caliptra-RTL, OpenTitan, ibex, etc.).
-    /// Only honoured by `--adapter sv-yosys`.
-    #[arg(long = "preprocessor", value_name = "NAME")]
-    preprocessor: Option<String>,
     /// Print the internal structure of the context to stdout or a file.
     #[arg(long = "print-structure", value_name = "FILE")]
     print_structure: Option<Option<PathBuf>>,
@@ -2897,11 +2806,6 @@ struct ContextPredicatesArgs {
     /// Mode for extraction adapter: "fixed" or "vulnerable".
     #[arg(long = "mode", value_name = "MODE")]
     mode: Option<String>,
-    /// Optional source-language preprocessor to run before adapter
-    /// translation. Currently supports: `sv2v`. Only honoured by
-    /// `--adapter sv-yosys`.
-    #[arg(long = "preprocessor", value_name = "NAME")]
-    preprocessor: Option<String>,
     /// Restrict output to a single automaton.
     #[arg(long = "automaton", value_name = "NAME")]
     automaton: Option<String>,
@@ -2922,11 +2826,6 @@ struct ContextEvalArgs {
     /// Mode for extraction adapter: "fixed" or "vulnerable".
     #[arg(long = "mode", value_name = "MODE")]
     mode: Option<String>,
-    /// Optional source-language preprocessor to run before adapter
-    /// translation. Currently supports: `sv2v`. Only honoured by
-    /// `--adapter sv-yosys`.
-    #[arg(long = "preprocessor", value_name = "NAME")]
-    preprocessor: Option<String>,
     /// μ-calculus formula to evaluate (by name from the context).
     #[arg(long = "formula", value_name = "NAME", conflicts_with = "template")]
     formula: Option<String>,
@@ -2994,11 +2893,6 @@ struct ContextSynthesizeArgs {
     /// Mode for extraction adapter: "fixed" or "vulnerable".
     #[arg(long = "mode", value_name = "MODE")]
     mode: Option<String>,
-    /// Optional source-language preprocessor to run before adapter
-    /// translation. Currently supports: `sv2v`. Only honoured by
-    /// `--adapter sv-yosys`.
-    #[arg(long = "preprocessor", value_name = "NAME")]
-    preprocessor: Option<String>,
     /// μ-calculus formula to synthesise (by name from the context).
     #[arg(long = "formula", value_name = "NAME", conflicts_with = "template")]
     formula: Option<String>,
@@ -3176,33 +3070,6 @@ fn parse_cli_controller_mode(
     } else {
         ControllerMode::Projection
     })
-}
-
-#[cfg(test)]
-mod sv_frontend_arg_tests {
-    use super::*;
-    use mununu_core::adapter::yosys::SvFrontend;
-
-    // Guards against a copy-paste swap in the CLI → core front-end mapping
-    // (e.g. Slang accidentally routed to Verilog would silently disable the
-    // whole slang-lift capability while still reporting "frontend=slang").
-    #[test]
-    fn frontend_arg_maps_to_core_variant() {
-        assert_eq!(SvFrontend::from(SvFrontendArg::Auto), SvFrontend::Auto);
-        assert_eq!(
-            SvFrontend::from(SvFrontendArg::Verilog),
-            SvFrontend::Verilog
-        );
-        assert_eq!(SvFrontend::from(SvFrontendArg::Slang), SvFrontend::Slang);
-        // 0.5.1: `--frontend sv2v` keeps the `auto` fallback (sv2v cannot parse `bind`).
-        assert_eq!(SvFrontend::from(SvFrontendArg::Sv2v), SvFrontend::Auto);
-        assert!(SvFrontendArg::Sv2v.sv2v());
-    }
-
-    #[test]
-    fn frontend_arg_default_is_auto() {
-        assert!(matches!(SvFrontendArg::default(), SvFrontendArg::Auto));
-    }
 }
 
 #[cfg(test)]
@@ -4576,8 +4443,7 @@ fn btor2_cegar(args: Btor2CegarArgs) -> Result<(), String> {
 }
 
 /// cegar-extraction Stage 2 (2026-06-22) — SV-direct CEGAR in one
-/// command: lift SystemVerilog to a single flattened BTOR2 (sv2v +
-/// Yosys) and run the same predicate-abstraction refinement loop as
+/// command: lift SystemVerilog to a single flattened BTOR2 (yosys-slang) and run the same predicate-abstraction refinement loop as
 /// `btor2 cegar`. Surface peer of the API `POST /api/v1/sv/cegar`.
 fn sv_cegar(args: SvCegarArgs) -> Result<(), String> {
     use std::collections::HashMap;
@@ -4599,8 +4465,7 @@ fn sv_cegar(args: SvCegarArgs) -> Result<(), String> {
         top: args.top.clone(),
         additional_sources: additional.into_iter().collect(),
         primary_source_path: Some(args.file.display().to_string()),
-        use_sv2v: args.frontend.sv2v(),
-        frontend: args.frontend.into(),
+        frontend: mununu_core::adapter::yosys::SvFrontend::Slang,
         setundef_anyseq: args.setundef_anyseq,
         setundef_anyconst: args.setundef_anyconst,
         ..Default::default()
@@ -4608,7 +4473,7 @@ fn sv_cegar(args: SvCegarArgs) -> Result<(), String> {
     // SV → single flattened BTOR2 (the predicate-cube lift wants one
     // transition system, not the per-module split).
     let btor2 = mununu_core::adapter::yosys::sv_to_btor2(&primary_content, &yopts)
-        .map_err(|e| format!("sv cegar: SV → BTOR2 (sv2v + Yosys): {}", e.message))?;
+        .map_err(|e| format!("sv cegar: SV → BTOR2 (yosys-slang): {}", e.message))?;
 
     run_cegar_cli(
         &btor2,
@@ -6995,7 +6860,6 @@ fn contract_validate(args: ContractValidateArgs) -> Result<(), String> {
 
 fn handle_sv(command: SvCommand) -> Result<(), String> {
     match command {
-        SvCommand::Preprocess(args) => sv_preprocess(args),
         SvCommand::EmitBtor2PerModule(args) => sv_emit_btor2_per_module(args),
         SvCommand::Validate(args) => sv_validate(args),
         SvCommand::Discover(args) => sv_discover(args),
@@ -7074,10 +6938,9 @@ fn read_sv_lift(args: &SvLiftArgs) -> Result<mununu_core::adapter::sv_verify::Sv
             source: a.primary.1,
             additional_sources,
             top,
-            use_sv2v: args.frontend.sv2v(),
             merge_clock_domains: args.merge_clock_domains,
             include_dirs,
-            frontend: args.frontend.into(),
+            frontend: mununu_core::adapter::yosys::SvFrontend::Slang,
             params: mununu_core::adapter::sv_verify::parse_params(&args.params)?,
             cutpoints: args.cutpoint.clone(),
             lift_overrides: read_lift_overrides(&args.lift_override)?,
@@ -7158,10 +7021,9 @@ fn read_sv_lift(args: &SvLiftArgs) -> Result<mununu_core::adapter::sv_verify::Sv
         source,
         additional_sources,
         top: args.top.clone(),
-        use_sv2v: args.frontend.sv2v(),
         merge_clock_domains: args.merge_clock_domains,
         include_dirs: args.include_dirs.clone(),
-        frontend: args.frontend.into(),
+        frontend: mununu_core::adapter::yosys::SvFrontend::Slang,
         params: mununu_core::adapter::sv_verify::parse_params(&args.params)?,
         cutpoints: args.cutpoint.clone(),
         lift_overrides: read_lift_overrides(&args.lift_override)?,
@@ -7699,8 +7561,7 @@ fn sv_discover(args: SvDiscoverArgs) -> Result<(), String> {
         top: args.top.clone(),
         additional_sources,
         primary_source_path: Some(primary.display().to_string()),
-        use_sv2v: args.frontend.sv2v(),
-        frontend: args.frontend.into(),
+        frontend: mununu_core::adapter::yosys::SvFrontend::Slang,
         ..Default::default()
     };
 
@@ -7817,8 +7678,7 @@ fn sv_emit_btor2_per_module(args: SvEmitBtor2PerModuleArgs) -> Result<(), String
         top: args.top.clone(),
         additional_sources: additional.into_iter().collect(),
         primary_source_path: Some(args.file.display().to_string()),
-        use_sv2v: args.frontend.sv2v(),
-        frontend: args.frontend.into(),
+        frontend: mununu_core::adapter::yosys::SvFrontend::Slang,
         setundef_anyseq: args.setundef_anyseq,
         setundef_anyconst: args.setundef_anyconst,
         per_module_btor: true,
@@ -7849,31 +7709,6 @@ fn sv_emit_btor2_per_module(args: SvEmitBtor2PerModuleArgs) -> Result<(), String
             per_module.output.source_info.property_count,
         );
     }
-    Ok(())
-}
-
-fn sv_preprocess(args: SvPreprocessArgs) -> Result<(), String> {
-    if args.files.is_empty() {
-        return Err("sv preprocess: at least one .sv input file required".to_string());
-    }
-    let output_path = args.output.unwrap_or_else(|| {
-        let first = &args.files[0];
-        let stem = first
-            .file_stem()
-            .unwrap_or_default()
-            .to_str()
-            .unwrap_or("module");
-        first.with_file_name(format!("{stem}.elab.v"))
-    });
-    let sv2v =
-        mununu_core::adapter::yosys::preprocess_sv(&args.files, &args.include_dirs, &output_path)
-            .map_err(|e| format!("sv preprocess: {e}"))?;
-    println!(
-        "sv2v ({}) -> {} (inputs: {})",
-        sv2v.display(),
-        output_path.display(),
-        args.files.len()
-    );
     Ok(())
 }
 
@@ -8288,13 +8123,11 @@ fn context_merge(args: ContextMergeArgs) -> Result<(), String> {
 }
 
 fn context_summarize(args: ContextSummarizeArgs) -> Result<(), String> {
-    let preprocessor = validate_preprocessor(args.preprocessor.as_deref())?;
     let (context_doc, sidecar_docs, _) = load_context_documents_mode(
         &args.context,
         &args.sidecars,
         args.adapter.as_deref(),
         args.mode.as_deref(),
-        preprocessor,
     )?;
     let realized = realize_documents(&context_doc, &sidecar_docs)?;
     let summary = build_context_summary(&context_doc, &sidecar_docs, &realized);
@@ -8311,13 +8144,11 @@ fn context_summarize(args: ContextSummarizeArgs) -> Result<(), String> {
 }
 
 fn context_predicates(args: ContextPredicatesArgs) -> Result<(), String> {
-    let preprocessor = validate_preprocessor(args.preprocessor.as_deref())?;
     let (context_doc, sidecar_docs, _) = load_context_documents_mode(
         &args.context,
         &args.sidecars,
         args.adapter.as_deref(),
         args.mode.as_deref(),
-        preprocessor,
     )?;
     let realized = realize_documents(&context_doc, &sidecar_docs)?;
     let mut automata: Vec<String> = realized.predicates.keys().cloned().collect();
@@ -8409,7 +8240,6 @@ fn print_context_eval_json(
 fn context_eval_impl(args: ContextEvalArgs) -> Result<(), String> {
     let as_json = args.json.json;
     let mut sanity_reports = Vec::new();
-    let preprocessor = validate_preprocessor(args.preprocessor.as_deref())?;
     let PreparedEvalContext {
         realized,
         formula_name,
@@ -8418,7 +8248,6 @@ fn context_eval_impl(args: ContextEvalArgs) -> Result<(), String> {
         sidecars: &args.sidecars,
         adapter: args.adapter.as_deref(),
         mode: args.mode.as_deref(),
-        preprocessor,
         print_ctxdsl_path: args.print_ctxdsl.as_ref(),
         stubs: &args.stubs,
         formula: &args.formula,
@@ -8779,7 +8608,6 @@ const GR1_UNSUPPORTED_FLAGS: &[(&str, &str)] = &[
         "--mode",
         "adapter mode selection applies to the projection path's realize step",
     ),
-    ("--preprocessor", "the TLSF path has no preprocessor stage"),
     (
         "--formula",
         "gr1 takes the STRUCTURED spec (assumptions + guarantees + signal directions), not a single mu-calculus formula",
@@ -8847,7 +8675,6 @@ fn gr1_rejected_flags(args: &ContextSynthesizeArgs) -> Vec<&'static (&'static st
     let set: &[(&str, bool)] = &[
         ("--sidecar", !args.sidecars.is_empty()),
         ("--mode", args.mode.is_some()),
-        ("--preprocessor", args.preprocessor.is_some()),
         ("--formula", args.formula.is_some()),
         ("--template", args.template.is_some()),
         ("--template-arg", !args.template_args.is_empty()),
@@ -8977,7 +8804,6 @@ fn context_synthesize(args: ContextSynthesizeArgs) -> Result<(), String> {
     if cli_mode == mununu_core::context::ControllerMode::Gr1 {
         return context_synthesize_gr1(&args);
     }
-    let preprocessor = validate_preprocessor(args.preprocessor.as_deref())?;
     let PreparedEvalContext {
         realized,
         formula_name,
@@ -8986,7 +8812,6 @@ fn context_synthesize(args: ContextSynthesizeArgs) -> Result<(), String> {
         sidecars: &args.sidecars,
         adapter: args.adapter.as_deref(),
         mode: args.mode.as_deref(),
-        preprocessor,
         print_ctxdsl_path: args.print_ctxdsl.as_ref(),
         stubs: &[], // context_synthesize has no --stub support
         formula: &args.formula,
@@ -10430,7 +10255,6 @@ mod gr1_flag_guard_tests {
             "--sidecar",
             "--adapter",
             "--mode",
-            "--preprocessor",
             "--formula",
             "--template",
             "--template-arg",
@@ -10495,7 +10319,6 @@ mod gr1_flag_guard_tests {
             sidecars: Vec::new(),
             adapter: Some("tlsf".into()),
             mode: None,
-            preprocessor: None,
             formula: None,
             template: None,
             template_args: Vec::new(),
@@ -10540,7 +10363,6 @@ mod gr1_flag_guard_tests {
             sidecars: Vec::new(),
             adapter: Some("tlsf".into()),
             mode: None,
-            preprocessor: None,
             formula: None,
             template: None,
             template_args: Vec::new(),
@@ -10584,7 +10406,7 @@ mod sv_lift_search_path_tests {
     //! lift with cross-directory submodule instantiations resolves without
     //! the caller hand-listing every `--source`. Deduplicates against the
     //! primary and explicit `--source` entries by canonical path.
-    use super::{SvFrontendArg, SvLiftArgs, read_sv_lift};
+    use super::{SvLiftArgs, read_sv_lift};
     use std::path::PathBuf;
     use tempfile::tempdir;
 
@@ -10603,7 +10425,6 @@ mod sv_lift_search_path_tests {
             top: None,
             merge_clock_domains: false,
             include_dirs: Vec::new(),
-            frontend: SvFrontendArg::Auto,
             params: Vec::new(),
             lift_override: Vec::new(),
             cutpoint: Vec::new(),

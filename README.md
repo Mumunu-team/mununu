@@ -160,7 +160,7 @@ flowchart TD
   end
 
   SV -->|"slang --ast-json"| TR["SVA translator<br/>→ mu-calculus formula + predicate atoms"]
-  SV -->|"sv2v + yosys (no flatten)"| B2["BTOR2 IR"]
+  SV -->|"yosys read_slang (no flatten)"| B2["BTOR2 IR"]
 
   B2 --> STS["STS-IR seam<br/>StsVar + StepEval + SmtEncode<br/>(hides BTOR2 / Z3)"]
 
@@ -263,7 +263,7 @@ branching-time decides that no bv tool can state). Deployment vs ownership are s
 `btormc` / `Pono` / `cvc5` are external **subprocesses**; Z3's SPACER is an external
 **algorithm** run in-process via the linked z3 library. z3-as-an-SMT-solver (per-query,
 inside native BMC/k-induction/interp) is mununu's search using z3 as an oracle — that part
-*is* mununu-owned. `slang` / `sv2v` / `yosys` are SV *front-ends*, not solvers.
+*is* mununu-owned. `slang` / `yosys` (yosys-slang) are SV *front-ends*, not solvers.
 
 ### Surfaces — CLI · API · UI
 
@@ -319,7 +319,7 @@ Inside `mununu-core/src/`:
 ```
 
 The `adapter/` module carries the format adapters and the RTL pipeline: `systemverilog/`,
-`slang/`, `yosys/` (SV frontends — SVA translation + sv2v/yosys → BTOR2); `btor2/`,
+`slang/`, `yosys/` (SV frontends — SVA translation + yosys `read_slang` → BTOR2); `btor2/`,
 `btormc/` (BTOR2 IR, predicate-cube lift, model-checker oracle); `cvc5/`, `verilator/`
 (Craig interpolation, reset-state seeding); `tlsf/`, `aiger/`, `promela/`, `xstate/`
 (classic formats); `crewai/`, `langgraph/`, `microcode/` (agentic + microcode);
@@ -371,7 +371,7 @@ cargo build --release --features api
 
 ### Optional external tools
 
-Several mununu pipelines invoke external tools via subprocess. **All are optional** — mununu functions without them and emits a structured warning when an invoked pipeline requires a missing tool. Each is discovered via a `locate_*` helper (a `MUNUNU_<TOOL>_PATH` env var, then `$PATH`). The currently-invoked tools are slang (SVA front-end for `sv extract-sva` / `sv verify-auto`), sv2v (SystemVerilog normalisation), Yosys (SV → BTOR2), CVC5 (Craig interpolation for the CEGAR loop), btormc (BTOR2 model-checker oracle), and Verilator (reset-state simulation seeding). See [`docs/external-tools.md`](docs/external-tools.md) for the canonical list, per-platform install instructions, and discovery env vars.
+Several mununu pipelines invoke external tools via subprocess. **All are optional** — mununu functions without them and emits a structured warning when an invoked pipeline requires a missing tool. Each is discovered via a `locate_*` helper (a `MUNUNU_<TOOL>_PATH` env var, then `$PATH`). The currently-invoked tools are slang (SVA front-end for `sv extract-sva` / `sv verify-auto`), Yosys with yosys-slang's `read_slang` (SV → BTOR2; built into yosys ≥ 0.67), CVC5 (Craig interpolation for the CEGAR loop), btormc (BTOR2 model-checker oracle), and Verilator (reset-state simulation seeding). See [`docs/external-tools.md`](docs/external-tools.md) for the canonical list, per-platform install instructions, and discovery env vars.
 
 ## Web UI
 

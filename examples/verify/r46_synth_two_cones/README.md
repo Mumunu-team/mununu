@@ -48,7 +48,7 @@ cargo build -p mununu-cli
 ./examples/verify/r46_synth_two_cones/validate.sh
 ```
 
-Requires `yosys`, `sv2v`, and `z3` on `PATH`
+Requires `yosys` (with `read_slang`) and `z3` on `PATH`
 (`LIBRARY_PATH=/usr/local/opt/z3/lib` for z3). The BTOR2 is produced
 inside mununu's own temp directory; nothing is written under `examples/`.
 

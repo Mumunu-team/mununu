@@ -21,7 +21,6 @@ files = ["wide7.sv"]
 adapter = "sv-yosys"
 
 [sources.options]
-use_sv2v = true
 top = "wide7"
 sidecar = "wide7.mununu.json"
 

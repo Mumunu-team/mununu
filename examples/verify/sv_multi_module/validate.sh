@@ -7,10 +7,10 @@ cd "$(git rev-parse --show-toplevel)"
 DIR="examples/verify/sv_multi_module"
 TRANSCRIPT="$DIR/transcript.txt"
 
-# yosys + sv2v are required: the submodules are elaborated and composed
-# via the sv-yosys multi-module pipeline (sv2v -> Yosys -> BTOR2 -> KMTS).
-# They are not bundled with the mununu repo; the dev container installs them.
-for tool in yosys sv2v; do
+# yosys (with read_slang) is required: the submodules are elaborated and composed
+# via the sv-yosys multi-module pipeline (read_slang -> Yosys -> BTOR2 -> KMTS).
+# It is not bundled with the mununu repo; the mununu-sva image provides it.
+for tool in yosys; do
   if ! command -v "${tool}" >/dev/null 2>&1; then
     echo "validate.sh: required tool '${tool}' not on PATH" >&2
     exit 2

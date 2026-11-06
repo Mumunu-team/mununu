@@ -14,7 +14,7 @@
 # smaller (136 LOC → 413 BTOR2 lines vs hmac_core's 17 595).
 #
 # Scope:
-#   `mununu context eval --adapter sv-yosys --preprocessor sv2v` on
+#   `mununu context eval --adapter sv-yosys` on
 #   the upstream `csrng_main_sm.sv` + a hand-written minimal stub
 #   `csrng_pkg.sv` (defines only the acmd_e + main_sm_state_e
 #   enums the FSM consumes; sound vs upstream — see SOUNDNESS notes
@@ -42,7 +42,7 @@ if [[ ! -x "${MUNUNU}" ]]; then
   echo "             build it first with: cargo build -p mununu-cli" >&2
   exit 2
 fi
-for tool in yosys sv2v; do
+for tool in yosys; do
   if ! command -v "${tool}" >/dev/null 2>&1; then
     echo "validate.sh: required tool '${tool}' not on PATH" >&2
     exit 2
@@ -60,7 +60,7 @@ echo
 cd "${SRC}"
 echo "--- step 1/1: mununu context eval (R.2 + R.3 end-to-end) ---"
 LIBRARY_PATH=/usr/local/opt/z3/lib "${MUNUNU}" context eval --fail-on none \
-  --adapter sv-yosys --preprocessor sv2v \
+  --adapter sv-yosys \
   --sidecar prim_assert.sv \
   --sidecar csrng_pkg.sv \
   --formula error_never_reached \

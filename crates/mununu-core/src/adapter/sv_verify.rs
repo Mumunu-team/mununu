@@ -40,16 +40,13 @@ pub struct SvLift {
     pub additional_sources: Vec<(String, String)>,
     /// Top module (Yosys auto-detects when `None`).
     pub top: Option<String>,
-    /// Run sv2v before Yosys (modern SV module-header imports, etc.).
-    pub use_sv2v: bool,
     /// Extra on-disk include-search directories (`-I<dir>`), so
     /// `` `include "frag.vh" `` resolves against the original source tree
     /// without the fragment being read as a standalone compilation unit.
     /// Feeds [`YosysOptions::extra_include_dirs`]; empty by default.
     pub include_dirs: Vec<std::path::PathBuf>,
-    /// RTL front-end selection. `Slang` forces the yosys-slang plugin, which
-    /// lifts modern-SV constructs `read_verilog`/sv2v reject. Feeds
-    /// [`YosysOptions::frontend`]; `Auto` by default.
+    /// The RTL front end ([`YosysOptions::frontend`]): `Slang` by default and on every
+    /// product lift; `Verilog` is the dev-only oracle of `test_support` builds.
     pub frontend: SvFrontend,
     /// Lift a multi-clock design onto the one implicit clock instead of refusing it
     /// ([`YosysOptions::merge_clock_domains`] — an under-approximation).
@@ -69,7 +66,6 @@ impl SvLift {
         YosysOptions {
             top: self.top.clone(),
             additional_sources: self.additional_sources.clone(),
-            use_sv2v: self.use_sv2v,
             extra_include_dirs: self.include_dirs.clone(),
             frontend: self.frontend,
             merge_clock_domains: self.merge_clock_domains,
@@ -96,7 +92,7 @@ impl SvLift {
     fn lift_named(&self) -> Result<(String, crate::trace::TraceNames), String> {
         let (source, yopts) = self.staged()?;
         let lifted = sv_to_btor2_with_blackboxes(&source, &yopts)
-            .map_err(|e| format!("SV → BTOR2 (sv2v + Yosys): {}", e.message))?;
+            .map_err(|e| format!("SV → BTOR2 (yosys-slang): {}", e.message))?;
         let names = crate::trace::TraceNames {
             aliases: crate::adapter::yosys::trace_aliases(&lifted.flat_netlist_json),
             clocks: lifted.clock_domains.iter().map(|d| d.net.clone()).collect(),
@@ -105,11 +101,10 @@ impl SvLift {
         Ok((lifted.btor2, names))
     }
 
-    /// Lift to a single flattened BTOR2 string (sv2v optional + Yosys).
+    /// Lift to a single flattened BTOR2 string (yosys-slang).
     fn lift(&self) -> Result<String, String> {
         let (source, yopts) = self.staged()?;
-        sv_to_btor2(&source, &yopts)
-            .map_err(|e| format!("SV → BTOR2 (sv2v + Yosys): {}", e.message))
+        sv_to_btor2(&source, &yopts).map_err(|e| format!("SV → BTOR2 (yosys-slang): {}", e.message))
     }
 }
 
@@ -147,7 +142,7 @@ pub fn sv_cdc_lint(lift: &SvLift) -> Result<crate::adapter::cdc_lint::CdcReport,
         ..yopts
     };
     let lifted = sv_to_btor2_with_blackboxes(&source, &yopts)
-        .map_err(|e| format!("SV → BTOR2 (sv2v + Yosys): {}", e.message))?;
+        .map_err(|e| format!("SV → BTOR2 (yosys-slang): {}", e.message))?;
     let mut report =
         crate::adapter::cdc_lint::cdc_lint(&lifted.flat_netlist_json, Some(&lifted.btor2))?;
     for c in &mut report.crossings {
@@ -1008,9 +1003,7 @@ mod tests {
             source: source.to_string(),
             additional_sources: Vec::new(),
             top: None,
-            use_sv2v: false,
             include_dirs: Vec::new(),
-            frontend: SvFrontend::Auto,
             merge_clock_domains: false,
             ..Default::default()
         }
@@ -1556,9 +1549,7 @@ mod tests {
                 ("prim_assert.sv".into(), read("prim_assert.sv")),
             ],
             top: Some("aes_cipher_control_fsm".into()),
-            use_sv2v: true,
             include_dirs: Vec::new(),
-            frontend: SvFrontend::Auto,
             merge_clock_domains: false,
             ..Default::default()
         };
@@ -1612,7 +1603,6 @@ endmodule
             source: SRC.to_string(),
             additional_sources: Vec::new(),
             top: Some("partsel_lint".into()),
-            use_sv2v: false,
             include_dirs: Vec::new(),
             frontend: SvFrontend::Slang,
             merge_clock_domains: false,
@@ -1694,7 +1684,6 @@ endmodule
             source: src.to_string(),
             additional_sources: Vec::new(),
             top: Some(top.into()),
-            use_sv2v: false,
             include_dirs: Vec::new(),
             frontend: SvFrontend::Slang,
             merge_clock_domains: false,
@@ -1812,7 +1801,6 @@ endmodule
             source,
             additional_sources: Vec::new(),
             top: Some("link_ctrl".into()),
-            use_sv2v: true,
             include_dirs: Vec::new(),
             frontend: SvFrontend::Slang,
             merge_clock_domains: false,
@@ -1891,7 +1879,6 @@ endmodule
             source,
             additional_sources: Vec::new(),
             top: Some("link_ctrl".into()),
-            use_sv2v: true,
             include_dirs: Vec::new(),
             frontend: SvFrontend::Slang,
             merge_clock_domains: false,

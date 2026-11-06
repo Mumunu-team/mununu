@@ -65,7 +65,7 @@ Notable structure:
   uncontrollable, `ctrl_*` controllable). Canonical documentation —
   not what the test consumes.
 - **BTOR2 (`amba_arbiter.btor2`)**: hand-written equivalent of the SV.
-  ~28 lines. Sidesteps the sv2v+Yosys subprocess requirement for the
+  ~28 lines. Sidesteps the yosys subprocess requirement for the
   MVP test. This is what the CLI + integration tests consume.
 
 ## Step 3 — Run the CEGAR loop with the controllability-aware lift
@@ -185,7 +185,7 @@ edges from the same source. This is the R.6.7 done-criterion (R.6 plan §1).
 **Status: MVP shipped 2026-06-09.** API extension (`/api/v1/context/import`
 accepts `predicates` + `controllable` for BTOR2 input) + a
 dedicated UI workflow panel mounted at the `/v6` route. SV-direct
-input (UI runs sv2v + Yosys + lift internally) is the next session
+input (UI runs yosys `read_slang` + lift internally) is the next session
 item; today the user runs `mununu sv emit-btor2-per-module` first
 to produce BTOR2 from SV, then pastes/uploads the BTOR2 in the UI.
 
@@ -273,7 +273,7 @@ curl -X POST http://localhost:8080/api/v1/context/import \
 
 - **SV-direct input**: extend the panel to accept SV files + call
   the backend with `format: "sv-yosys"` which internally runs
-  sv2v + Yosys before the predicate_cube_lift. Requires a parallel
+  yosys (`read_slang`) before the predicate_cube_lift. Requires a parallel
   backend extension routing the SV path through
   `translate_sv_per_module` to get BTOR2 before lifting.
 - **Full CTXDSL emit + graph rendering**: today the summary CTXDSL

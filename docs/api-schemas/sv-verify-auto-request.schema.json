@@ -55,19 +55,9 @@
       ],
       "type": "object"
     },
-    "SvFrontendName": {
-      "description": "The RTL front end of a lift: `auto` (the environment's default), `verilog` (yosys `read_verilog`), `slang` (the yosys-slang plugin) or `sv2v` (sv2v first, then the `auto` order with its slang fallback). The CLI's `--frontend` takes the same four values.",
-      "enum": [
-        "auto",
-        "verilog",
-        "slang",
-        "sv2v"
-      ],
-      "type": "string"
-    },
     "SvLiftRequest": {
       "additionalProperties": false,
-      "description": "The SV design and how to lift it, shared by every `sv` route: the API peer of the CLI's lift flags (`SV_FILE` / `--source`, `--top`, `--frontend`, `--param`, `--lift-override`, `--cutpoint`, `--merge-clock-domains`). Unknown keys are refused.",
+      "description": "The SV design and how to lift it, shared by every `sv` route: the API peer of the CLI's lift flags (`SV_FILE` / `--source`, `--top`, `--param`, `--lift-override`, `--cutpoint`, `--merge-clock-domains`). Unknown keys are refused.",
       "properties": {
         "additional_sources": {
           "default": [],
@@ -84,15 +74,6 @@
             "type": "string"
           },
           "type": "array"
-        },
-        "frontend": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/SvFrontendName"
-            }
-          ],
-          "default": "auto",
-          "description": "The RTL front end (default `auto`)."
         },
         "lift_overrides": {
           "default": [],
@@ -163,7 +144,7 @@
       "type": "object"
     }
   },
-  "description": "XL.6b — automated SVA verification endpoint (`POST /api/v1/sv/verify-auto`). Mirrors the CLI `mununu sv verify-auto`: extract the design's SVA, lift, and verify each property against the model with no sidecar. slang parses SV directly, but the verify lift uses sv2v + Yosys, so `top` / `use_sv2v` apply.",
+  "description": "XL.6b — automated SVA verification endpoint (`POST /api/v1/sv/verify-auto`). Mirrors the CLI `mununu sv verify-auto`: extract the design's SVA, lift, and verify each property against the model with no sidecar. slang parses SV directly and the verify lift runs yosys-slang, so `top` applies.",
   "properties": {
     "antecedent_propagate": {
       "default": null,

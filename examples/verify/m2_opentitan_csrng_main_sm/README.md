@@ -21,7 +21,7 @@
 CSRNG (Counter-based Random-Number Generator). 8-state sparse FSM
 handling INS/RES/GEN/UPD/UNI commands + an error sink state.
 
-After sv2v + Yosys + BTOR2 emission:
+After the yosys-slang lift + BTOR2 emission:
 
 - **1 state cell, 6 bits** (`main_sm_state_o` — the FSM state register).
 - **64 abstract states** (2^6).
@@ -127,7 +127,7 @@ hand-maintained.
 bash examples/verify/m2_opentitan_csrng_main_sm/validate.sh
 ```
 
-The script runs `mununu context eval --adapter sv-yosys --preprocessor sv2v`
+The script runs `mununu context eval --adapter sv-yosys`
 on the three sources and confirms a non-vacuous verdict.
 
 ## Out of scope at M.2

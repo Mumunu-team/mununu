@@ -9,7 +9,7 @@
 # producing a verdict on the declared property.
 #
 # Scope:
-#   1. mununu context eval --adapter sv-yosys --preprocessor sv2v on
+#   1. mununu context eval --adapter sv-yosys on
 #      the upstream `uart_tx.sv` with the M.1 sidecar declaring
 #      bit_cnt_q + baud_div_q as bounded counters, sreg_q as
 #      discover, etc. Verdict must be non-vacuous.
@@ -35,7 +35,7 @@ if [[ ! -x "${MUNUNU}" ]]; then
   echo "             build it first with: cargo build -p mununu-cli" >&2
   exit 2
 fi
-for tool in yosys sv2v; do
+for tool in yosys; do
   if ! command -v "${tool}" >/dev/null 2>&1; then
     echo "validate.sh: required tool '${tool}' not on PATH" >&2
     exit 2
@@ -53,7 +53,7 @@ echo
 cd "${SRC}"
 echo "--- step 1/1: mununu context eval (R.2 KMTS lifter end-to-end) ---"
 LIBRARY_PATH=/usr/local/opt/z3/lib "${MUNUNU}" context eval --fail-on none \
-  --adapter sv-yosys --preprocessor sv2v \
+  --adapter sv-yosys \
   --formula idle_reachable_from_every_state \
   --automaton Circuit \
   uart_tx.sv 2>&1 | tee "${OUT}/eval.out" | tail -15

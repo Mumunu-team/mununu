@@ -30,14 +30,16 @@ module prim_sparse_fsm_flop #(
   parameter logic [Width-1:0]  ResetValue            = '0,
   parameter bit                EnableAlertTriggerSVA = 1
 ) (
-  input  logic             clk_i,
-  input  logic             rst_ni,
-  input  logic [Width-1:0] state_i,
-  output logic [Width-1:0] state_o
+  input  logic      clk_i,
+  input  logic      rst_ni,
+  input  StateEnumT state_i,
+  output StateEnumT state_o
 );
-  logic [Width-1:0] state_q;
+  // The ports carry the FSM's enum type, as upstream's do: slang refuses a `logic [Width-1:0]`
+  // output assigned to the enum-typed state (`read_verilog` never type-checked it, 2026-11-04).
+  StateEnumT state_q;
   always_ff @(posedge clk_i or negedge rst_ni) begin
-    if (!rst_ni) state_q <= ResetValue;
+    if (!rst_ni) state_q <= StateEnumT'(ResetValue);
     else         state_q <= state_i;
   end
   assign state_o = state_q;
@@ -68,8 +70,7 @@ endmodule
 "#;
 
 /// The behavioral stub SV for a known flop-primitive module, or `None` if there
-/// is no stub for `module_name`. `module_name` is the de-mangled module name
-/// (sv2v's `_<HEX>_<HEX>` parameter suffix already stripped — see
+/// is no stub for `module_name`, the module name as instantiated (see
 /// [`crate::adapter::yosys`]'s undefined-cell detection).
 pub fn behavioral_stub(module_name: &str) -> Option<&'static str> {
     match module_name {

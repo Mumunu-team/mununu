@@ -38,7 +38,7 @@ KMTS abstraction is **uniformly sound for the full mu-calculus including livenes
 
 ### When the canonical recipe applies
 
-- **SystemVerilog** (post-S.2b — the native parser is deleted): the sv2v → Yosys-no-flatten → BTOR2-per-module → KMTS lifter pipeline is the only path. Adopt predicates instead of `BoundedCounter` / `Enum` / `BitBlast` / `Discover` per the migration table below.
+- **SystemVerilog** (post-S.2b — the native parser is deleted): the `read_slang` (yosys-slang) → Yosys-no-flatten → BTOR2-per-module → KMTS lifter pipeline is the only path. Adopt predicates instead of `BoundedCounter` / `Enum` / `BitBlast` / `Discover` per the migration table below.
 - **BTOR2**: the KMTS lifter consumes BTOR2 directly. Same predicate primitives apply.
 - **C-codesign**: the lifter's predicate-image is BV-only today; richer theories (arrays for memories) deferred. Use the legacy `c-codesign` adapter for current C extraction work; KMTS for C is gated on a memory-cell abstraction roadmap item.
 
@@ -244,7 +244,7 @@ XState, microcode, agentic adapters do not use these SV-specific variants and ar
 
 This holds for:
 
-- **SystemVerilog / BTOR2** — the KMTS pipeline. sv2v elaborates SV-2017 to a Verilog-2005 subset; Yosys-no-flatten preserves hierarchy; BTOR2-per-module retains word-level types; the lifter seeds predicates from property APs + COI + typedef enums.
+- **SystemVerilog / BTOR2** — the KMTS pipeline. yosys-slang's `read_slang` elaborates SV-2017 (slang-only since 2026-11-04); Yosys-no-flatten preserves hierarchy; BTOR2-per-module retains word-level types; the lifter seeds predicates from property APs + COI + typedef enums.
 - **Firmware drivers** — `c-codesign` adapter. The register-map sidecar carries the structural information (which signals are MMIO, what their direction is).
 - **Restricted microprograms** — shipped via the [`microcode` adapter](../crates/mununu-core/src/adapter/microcode/) (plan Part 5 + Part 5.5). JSON input; `regs` / `mem` / `interrupts` declarations carry the structural information; ops emit canonical rendezvous labels (`wr_mem_<region>`, `rd_mem_<region>`, `fence_<order>`, `irq_ack_<source>`). See `examples/verify/rv5_2core_mesi_microcode_extracted/` (parity) and `examples/verify/dma_engine_microcode/` (industrial DMA demo).
 - **Word-level arithmetic inside firmware / microcode** — subsumed by the host adapter's register-abstraction infrastructure; no separate extraction path.

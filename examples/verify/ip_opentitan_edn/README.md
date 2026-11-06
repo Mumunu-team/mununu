@@ -16,21 +16,21 @@ block. It answers "block level or IP level?" with numbers — for ONE IP at ONE 
 ## Run it
 
 ```bash
-# in the mununu-sva image (slang, sv2v, yosys); from this directory
+# in the mununu-sva image (slang, yosys); from this directory
 cd source
 sh run.sh --json                                   # the IP's own 52 assertions
 sh run.sh --json --source mununu_properties.sv     # + the system-level properties below
 ```
 
-`run.sh` is `sv verify-auto edn.sv --top edn --frontend sv2v --source … --lift-override
+`run.sh` is `sv verify-auto edn.sv --top edn --source … --lift-override
 prim_assert.sv=prim_assert_shim.sv … --pin rst_ni=1`: the SVA is **extracted from the real
-`prim_assert` macros**, while the sv2v + yosys lift sees `prim_assert_shim.sv`, which defines every
+`prim_assert` macros**, while the yosys-slang lift sees `prim_assert_shim.sv`, which defines every
 assertion macro of the real set as nothing (as OpenTitan's own synthesis macros do) **and defines
 `INC_ASSERT`** (2026-10-22), so the RTL's assertion-support logic is in the model: `prim_count`'s
 `fpv_err_present` and the `ASSERT_FPV_LINEAR_FSM` `<name>_cond` flop. Two upstream files cannot be
-lifted with that region in — `prim_alert_sender.sv` declares `sequence` blocks (no sv2v lowering,
-yosys-slang "unimplemented") and `prim_sparse_fsm_flop.sv` walks its enum with `t.first()/t.next()`
-(yosys-slang "unsupported system task 'next'"; sv2v leaves the calls and yosys cannot resolve them) —
+lifted with that region in — `prim_alert_sender.sv` declares `sequence` blocks (yosys-slang
+"unimplemented") and `prim_sparse_fsm_flop.sv` walks its enum with `t.first()/t.next()`
+(yosys-slang "unsupported system task 'next'") —
 so `run.sh` lifts them through `prim_alert_sender_lift.sv` / `prim_sparse_fsm_flop_lift.sv`, the same
 files with the `ifdef INC_ASSERT` regions removed (`--strip-inc-assert`; the removed line ranges are in
 each file's header). Consequence: the sparse-FSM flop's `unused_err_o` is still the synthesis constant
@@ -60,7 +60,7 @@ To re-vendor at another commit: `python3 ../../../scripts/vendor_opentitan_ip.py
 
 Total: 67 properties, **56 HOLDS / 11 VIOLATED / 0 ⊥ / 0 unsupported**; `e2e_opentitan_ip_edn_full` pins them in 851 s (2026-10-21; the IP's own 52 rows alone run in 556 s under `run.sh`; the three `AG EF` recoverability rows are refuted by a trap certificate in 1–11 s each, where each used to pay a 60-s rescue slice and stay ⊥).
 
-Lift (sv2v + yosys): ≈ 10 s. Main pass: ≈ 1 min per engine. The ⊥ re-plan runs once on the merged report and spends at most the 60-s rescue slice per undecided row. Engines:
+Lift: ≈ 10 s (2026-10-18 measurement). Main pass: ≈ 1 min per engine. The ⊥ re-plan runs once on the merged report and spends at most the 60-s rescue slice per undecided row. Engines:
 `constant` (atom-less formulas), the `explicit` predicate-cube KMTS (every cross-block invariant), the
 `symbolic` cube's BMC rescue (the counterexample); the exact ROBDD engine decided nothing on edn — every
 cone it was offered exceeds the 192-bit auto-raised cap (the register block's bus datapath reaches

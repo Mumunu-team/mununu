@@ -12,7 +12,7 @@
 
 > Source of truth: [`scripts/e2e-sweep.sh`](../../scripts/e2e-sweep.sh) · [`docker/Dockerfile.sva`](../../docker/Dockerfile.sva) — surface: CLI-only — a test sweep run in the image, not a shipped verb
 
-The SVA front-end (`sv extract-sva`, `sv verify-auto`) shells out to slang, sv2v and yosys. They are not bundled, so the slang-gated `e2e_` tests are `#[ignore]`d and do not run in `make ci`; their mechanisms are covered by non-ignored unit tests. Run them in the `mununu-sva` image, which extends `mununu-dev` with one tag-pinned public oss-cad-suite release (yosys + yosys-slang, slang, Verilator, btormc, pono, cvc5) plus sv2v — the same tag rosf and monono pin:
+The SVA front-end (`sv extract-sva`, `sv verify-auto`) shells out to slang and yosys (yosys-slang's `read_slang`). They are not bundled, so the slang-gated `e2e_` tests are `#[ignore]`d and do not run in `make ci`; their mechanisms are covered by non-ignored unit tests. Run them in the `mununu-sva` image, which extends `mununu-dev` with one tag-pinned public oss-cad-suite release (yosys + yosys-slang, slang, Verilator, btormc, pono, cvc5) plus sv2v (the dev-only differential oracle of `test_support` builds) — the same tag rosf and monono pin:
 
 ```bash
 docker build -f docker/Dockerfile.dev -t mununu-dev .     # once (or on toolchain bump)
@@ -33,7 +33,7 @@ make e2e                                                  # the whole sweep, one
 
 > Source of truth: [`adapter::slang::locate_slang`](../../crates/mununu-core/src/adapter/slang/mod.rs) — surface: CLI+API
 
-The dev host commonly has sv2v + yosys but not slang. With slang absent, `sv verify-auto` / `sv extract-sva` cannot run, so a "green" host run has skipped the real path — and the sv2v-only lift is worse than useless for SVA: sv2v 0.0.13 silently drops `assert property` (concurrent and immediate), so the BTOR2 has 0 `bad` nodes and the plain `sv verify-bad` verb reports a vacuous `holds`. (2026-07-13: an sv-yosys safety-cube wiring looked like a spurious `holds`; the whole chain was the sv2v drop, invisible without slang; root-caused with `MUNUNU_KEEP_YOSYS_TMP=1` — `preprocessed.sv` had 0 asserts.) A bare-host `holds` on SVA is presumed vacuous until reproduced under `mununu-sva`.
+The dev host commonly has neither slang nor a yosys with `read_slang` (Homebrew yosys 0.59). Since the slang-only lift (N1, 2026-11-04) such a host lifts **no** SystemVerilog — the error names the fix and the host-gated lift tests skip — so a bare-host run cannot even produce a vacuous SVA verdict; it has skipped the real path. Before N1 it was worse: the sv2v-only lift silently dropped the assertions — sv2v 0.0.13 drops `assert property` (concurrent and immediate), so the BTOR2 had 0 `bad` nodes and the plain `sv verify-bad` verb reported a vacuous `holds`. (2026-07-13: an sv-yosys safety-cube wiring looked like a spurious `holds`; the whole chain was the sv2v drop, invisible without slang; root-caused with `MUNUNU_KEEP_YOSYS_TMP=1` — `preprocessed.sv` had 0 asserts.) A bare-host `holds` on SVA is presumed vacuous until reproduced under `mununu-sva`.
 
 ## Pre-push workspace check (added 2026-06-08)
 

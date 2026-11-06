@@ -17,11 +17,7 @@ use mununu_core::verify::verify_project;
 use std::path::Path;
 
 fn yosys_available() -> bool {
-    std::process::Command::new("yosys")
-        .arg("-V")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    crate::support::slang_lift_available()
 }
 
 fn examples_sv_dir() -> std::path::PathBuf {

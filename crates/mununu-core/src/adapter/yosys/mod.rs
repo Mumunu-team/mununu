@@ -9,7 +9,7 @@
 //! ```text
 //!   .sv source ─► tempdir/work.sv
 //!                       │
-//!                       ▼  yosys -p "read_verilog -formal -sv ...; prep -top X; chformal -lower; write_btor ..."
+//!                       ▼  yosys -p "read_slang --ignore-assertions ...; hierarchy -top X; ...; chformal -lower; write_btor ..."
 //!                       │
 //!                  tempdir/design.btor
 //!                       │
@@ -20,9 +20,11 @@
 //! # Hard rules
 //!
 //! - **Never enable Yosys's optional Verific frontend.** It is commercial and
-//!   would taint the binary. The driver passes only `-p` (no `-Q -F` or
-//!   plugin-load arguments) and verifies (best-effort) that the binary in
-//!   `$PATH` is a stock build by checking the `-V` banner for `verific`.
+//!   would taint the binary. The driver passes `-p` and, only when
+//!   `MUNUNU_YOSYS_SLANG_PLUGIN` names one, `-m <plugin>`. The front end is
+//!   yosys-slang's `read_slang` (N1, 2026-11-04) — built into yosys ≥ 0.67 and the
+//!   pinned `mununu-sva` image; `read_verilog` after sv2v survives only as the
+//!   dev-only differential oracle of `test_support` builds ([`SvFrontend::Verilog`]).
 //! - **No persistent state in the working tree.** The driver writes only to
 //!   a per-call tempdir which is removed (or kept for inspection if
 //!   `MUNUNU_KEEP_YOSYS_TMP=1` is set).
@@ -46,10 +48,11 @@ use crate::adapter::{
     AdapterError, AdapterErrorKind, AdapterOptions, AdapterOutput, FormatAdapter, SourceFormat,
     SourceInfo,
 };
+#[cfg(feature = "test_support")]
+use lift_cache::Sv2vManifest;
 use lift_cache::{
     AttemptManifest, CachedLift, LIFT_CACHE_FORMAT, LiftCache, LiftCacheKey, LiftCacheOutcome,
-    LiftManifest, Sv2vManifest, ToolIdentity, collect_include_files, frontend_from_tag,
-    frontend_tag,
+    LiftManifest, ToolIdentity, collect_include_files, frontend_from_tag, frontend_tag,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -67,36 +70,28 @@ use std::time::Duration;
 /// trips on the fixtures the feature actually targets.
 const PER_MODULE_YOSYS_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// RTL front-end selection for the SV → BTOR2 lift.
-///
-/// - `Auto` (default) — the historical behaviour: yosys `read_verilog` (with
-///   optional sv2v), unless `MUNUNU_YOSYS_FRONTEND=slang` is set in the env and
-///   the plugin is present, in which case slang is used.
-/// - `Verilog` — force yosys `read_verilog` (+ sv2v per `use_sv2v`), ignoring the
-///   env override.
-/// - `Slang` — force the yosys-slang plugin (`read_slang`), a full SystemVerilog
-///   front-end that accepts constructs `read_verilog` and sv2v reject (bounded
-///   `while` loops, `module M import pkg::*;`, …). Errors clearly if the plugin is
-///   not found. Validated in the `mununu-sva` image (the plugin ships there).
+/// The RTL front end of the SV → BTOR2 lift. The product has one: yosys-slang's `read_slang`
+/// (N1, 2026-11-04) — a full SystemVerilog front end, built into yosys ≥ 0.67 and the pinned
+/// `mununu-sva` image (`MUNUNU_YOSYS_SLANG_PLUGIN` names a plugin to load on a yosys without
+/// it). `Verilog` — yosys `read_verilog` after sv2v — is the dev-only differential oracle of
+/// `test_support` builds (two lifts of one source, the verdicts compared); the CLI and the API
+/// never produce it, and a product build refuses it with a reason.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SvFrontend {
-    /// Env-driven (default): `MUNUNU_YOSYS_FRONTEND=slang` → slang, else read_verilog.
+    /// yosys-slang's `read_slang`: the product front end.
     #[default]
-    Auto,
-    /// Force yosys `read_verilog` (+ sv2v per `use_sv2v`).
-    Verilog,
-    /// Force the slang front-end (`read_slang`); error if the plugin is absent.
     Slang,
+    /// `read_verilog` after sv2v: the dev-only oracle (`test_support`); refused elsewhere.
+    #[doc(hidden)]
+    Verilog,
 }
 
 impl SvFrontend {
-    /// Human-readable lift label for diagnostics (the `lift-frontend` note, #466).
-    /// `Auto` is a request, not an outcome — a resolved lift is always `Verilog`/`Slang`.
+    /// Human-readable lift label for `ModelDiagnostics::frontend`.
     pub fn lift_label(self) -> &'static str {
         match self {
             SvFrontend::Slang => "yosys-slang (read_slang)",
             SvFrontend::Verilog => "read_verilog + sv2v",
-            SvFrontend::Auto => "auto",
         }
     }
 }
@@ -109,8 +104,7 @@ pub struct YosysOptions {
     /// Additional SV source files to compile alongside the primary input.
     pub additional_sources: Vec<(String, String)>,
     /// Extra on-disk include-search directories, forwarded to the RTL
-    /// front-end as `-I<dir>` flags (yosys `read_verilog` / `read_slang`,
-    /// and the sv2v preprocessor). This lets a caller resolve
+    /// front-end as `-I<dir>` flags (`read_slang`). This lets a caller resolve
     /// `` `include "frag.vh" `` directives against the *original* source
     /// tree WITHOUT having to pass every include fragment as a compiled
     /// `additional_sources` entry — passing a mid-module fragment as a
@@ -127,28 +121,24 @@ pub struct YosysOptions {
     /// concept — the flat name-staging of `additional_sources` already
     /// resolves cross-file includes on those surfaces).
     pub extra_include_dirs: Vec<PathBuf>,
-    /// Module-parameter overrides applied BEFORE elaboration sizes the design —
-    /// yosys `chparam -set <name> <value> <module>` (before `hierarchy`) on the
-    /// read_verilog frontend, or slang `-G <name>=<value>` (at read time, since
-    /// slang elaborates then) on the slang frontend. Each entry is `(lhs, value)`
-    /// where `lhs` is a bare parameter name
-    /// `NAME` (applied to the top module) or a scoped `MODULE.NAME` (applied to
-    /// that module). This lets a caller shrink a parameterised timing interval so
-    /// the design's counters get smaller — a 20000-cycle power-up wait sizing a
-    /// 15-bit counter becomes a 10-bit counter at `INIT_WAIT=4` — without a wrapper
-    /// module (which would rename the SVA atoms and break binding).
+    /// Module-parameter overrides applied BEFORE elaboration sizes the design — slang
+    /// `-G <name>=<value>` at read time (slang elaborates then). Each entry is `(lhs, value)`
+    /// where `lhs` is a bare parameter name `NAME` (applied to the top module) or a scoped
+    /// `MODULE.NAME` (applied by its bare name — `-G` is top-scoped). This lets a caller shrink
+    /// a parameterised timing interval so the design's counters get smaller — a 20000-cycle
+    /// power-up wait sizing a 15-bit counter becomes a 10-bit counter at `INIT_WAIT=4` —
+    /// without a wrapper module (which would rename the SVA atoms and break binding).
     ///
     /// SOUNDNESS / scope: the verdict is scoped to the overridden parameters
-    /// (echoed in the transcript + JSON report). A parameter yosys cannot apply
-    /// (not a parameter of the target module) is an ERROR surfaced from the lift —
-    /// never a silent drop (contrast `--pin`, mununu#459).
+    /// (echoed in the transcript + JSON report). A parameter the design does not
+    /// carry is an ERROR surfaced from the lift — never a silent drop (contrast
+    /// `--pin`, mununu#459); the name is validated upstream against the slang AST
+    /// (`read_slang` itself would ignore an unknown `-G`).
     ///
     /// **Default**: empty. Populated from the CLI `--param NAME=VALUE` flag / the
-    /// API `params` field. No `read_slang` analog is needed — `chparam` operates
-    /// on the elaborated netlist regardless of front-end.
+    /// API `params` field. The dev-only `read_verilog` oracle applies them as
+    /// `chparam` passes before `hierarchy`.
     pub params: Vec<(String, String)>,
-    /// Skip the Verific-taint check (for testing).
-    pub skip_verific_check: bool,
     /// Optional original path of the primary SV source. Used only to
     /// rewrite the `source_file` field of any auto-emitted black-box
     /// sidecar (Document B task B3) — yosys sees the SV through a
@@ -156,23 +146,8 @@ pub struct YosysOptions {
     /// at `/tmp/.../work.sv`. The user expects the path of the file
     /// they actually invoked mununu on.
     pub primary_source_path: Option<String>,
-    /// Run `sv2v` as a preprocessing pass before Yosys. Unblocks Yosys's
-    /// built-in parser for modern SystemVerilog constructs it doesn't
-    /// accept — most notably the SV2009/2012 module-header import
-    /// syntax `module M import pkg::*; (ports);` used by Caliptra-RTL,
-    /// OpenTitan, ibex, cv32e40p, and similar open-source RTL.
-    ///
-    /// Requires `sv2v` (zachjs/sv2v ≥ 0.0.10 recommended) on `$PATH` or
-    /// in `MUNUNU_SV2V_PATH`. Defaults to `false` so existing examples
-    /// keep their current parse behavior. Opt in via the CLI flag
-    /// `--preprocessor sv2v` or the API field `use_sv2v: true` on the
-    /// import request.
-    pub use_sv2v: bool,
-    /// RTL front-end selection. `Auto` (default) preserves the env-driven
-    /// behaviour; `Slang` forces the yosys-slang plugin (`read_slang`), which
-    /// lifts modern-SV constructs `read_verilog`/sv2v reject (`while` loops,
-    /// `module M import pkg::*;`). Populated from the CLI `--frontend` flag / the
-    /// API `use_slang` field. See [`SvFrontend`].
+    /// The RTL front end: [`SvFrontend::Slang`] (the default and the only product front
+    /// end); [`SvFrontend::Verilog`] is the dev-only oracle of `test_support` builds.
     pub frontend: SvFrontend,
     /// When `true`, Yosys's `setundef -anyseq` pass replaces every
     /// undefined net with a fresh symbolic choice instead of pinning
@@ -328,15 +303,8 @@ struct SvFlattenArtifacts {
     btor2: String,
     hier_json: String,
     staged_primary: String,
-    /// The concrete front end that produced this BTOR2 (`Verilog`/`Slang`, never
-    /// `Auto`) — surfaced by verify-auto's `lift-frontend` note (#466).
+    /// The front end that produced this BTOR2 — `ModelDiagnostics::frontend`.
     frontend_used: SvFrontend,
-    /// sv2v rewrote the source before yosys read it (`use_sv2v` without the slang plugin), so the
-    /// netlist's `src` lines are `preprocessed.sv`'s, not the RTL's (2026-10-29).
-    sv2v_ran: bool,
-    /// When `Auto` fell back (an earlier front end errored before this one
-    /// succeeded), the prior attempt's error — else `None`. (#466)
-    fallback_reason: Option<String>,
     /// `Some(reason)` when the first yosys run died in the BTOR backend with a
     /// topological loop and the script succeeded on a second run with `opt_clean`
     /// before `write_btor` (see [`backend_loop_retry_script`]).
@@ -350,12 +318,10 @@ struct SvFlattenArtifacts {
     cache: LiftCacheOutcome,
 }
 
-/// Run sv2v (optional) + the flattened Yosys script and return the
-/// design's BTOR2 text plus the hierarchy snapshot. Shared by
-/// [`translate_sv`] (which bit-blasts the BTOR2) and
-/// [`sv_discover_state_cells`] (which only reads the BTOR2's named state
-/// cells), so the sv2v include-path + Yosys-invocation logic lives in one
-/// place.
+/// Run the flattened Yosys script and return the design's BTOR2 text plus the
+/// hierarchy snapshot. Shared by [`translate_sv`] (which bit-blasts the BTOR2) and
+/// [`sv_discover_state_cells`] (which only reads the BTOR2's named state cells), so
+/// the staging + Yosys-invocation logic lives in one place.
 /// Net-type keywords that yosys `read_verilog` / the slang lowering reject in a
 /// PORT header (`input tri0 baud8x`). A net type on a *port* only governs that
 /// port's EXTERNAL resolution (a shared bus with pulls / wired-logic across
@@ -453,17 +419,13 @@ pub(crate) fn strip_port_net_types(src: &str) -> String {
     out
 }
 
-/// The SV → flattened-BTOR2 lift (verification-execution-planner P1.1). When the frontend is
-/// [`SvFrontend::Auto`] it tries the `read_verilog`(+sv2v) path first and, on a hard lift ERROR,
-/// **falls back to slang** — which parses SystemVerilog natively (module-header package imports
-/// `read_verilog` rejects with `unexpected TOK_IMPORT`, `while` loops, `import pkg::*`). This
-/// unlocks the OpenTitan-class designs the default frontend cannot lift while keeping the broad
-/// default for everything else. Fallback fires only on `Err` (never a vacuous success, so the
-/// sv2v-drops-SVA trap can't be masked); an EXPLICIT `Verilog`/`Slang` request is honoured as-is
-/// with no fallback. Preference is env-driven (`MUNUNU_YOSYS_FRONTEND=slang` tries slang first).
+/// The SV → flattened-BTOR2 lift: yosys-slang's `read_slang` (N1, 2026-11-04 — before it, an
+/// `Auto` order tried `read_verilog`(+sv2v) first and fell back to slang on error, so every
+/// OpenTitan lift ran yosys twice and the netlist came from sv2v's rewritten text while the
+/// properties came from slang's AST of the original). One grammar, one lift, no fallback.
 ///
-/// N0.2 — under `MUNUNU_LIFT_CACHE_DIR` the whole lift (every attempt) is looked up before a tool
-/// runs and stored after; see [`run_sv_flatten_btor2_with`].
+/// N0.2 — under `MUNUNU_LIFT_CACHE_DIR` the lift is looked up before a tool runs and stored
+/// after; see [`run_sv_flatten_btor2_with`].
 fn run_sv_flatten_btor2(
     content: &str,
     yopts: &YosysOptions,
@@ -500,7 +462,7 @@ fn run_sv_flatten_btor2_with(
         tracing::info!(target: "mununu::lift_cache", index = k.index(), "lift cache hit");
         return artifacts_from_cached(hit, yopts);
     }
-    let mut artifacts = run_sv_flatten_btor2_uncached(content, yopts)?;
+    let mut artifacts = run_sv_flatten_btor2_concrete(content, yopts)?;
     artifacts.cache = match &key {
         Ok(None) => LiftCacheOutcome::Off,
         Ok(Some(_)) => LiftCacheOutcome::Miss,
@@ -523,13 +485,6 @@ fn run_sv_flatten_btor2_with(
     Ok(artifacts)
 }
 
-/// `MUNUNU_YOSYS_FRONTEND=slang` flips the `Auto` attempt order.
-fn prefer_slang_env() -> bool {
-    std::env::var("MUNUNU_YOSYS_FRONTEND")
-        .map(|v| v.eq_ignore_ascii_case("slang"))
-        .unwrap_or(false)
-}
-
 /// The cache key of this lift: the manifest of what it would tell its tools (N0.2). `Err` names
 /// why none can be built (no yosys, an include tree over the walk cap, …) — a bypass.
 fn lift_cache_key(content: &str, yopts: &YosysOptions) -> Result<LiftCacheKey, String> {
@@ -546,69 +501,60 @@ fn lift_cache_key(content: &str, yopts: &YosysOptions) -> Result<LiftCacheKey, S
     LiftCacheKey::new(&manifest)
 }
 
-/// What this lift would tell its tools: every front end the `Auto` loop would attempt, planned
-/// by [`plan_lift`] against a placeholder staging directory — the same planner the run
-/// executes, so the key cannot drift from the run. `yosys` is the located binary's identity.
+/// What this lift would tell its tools, planned by [`plan_lift`] against a placeholder staging
+/// directory — the same planner the run executes, so the key cannot drift from the run.
+/// `yosys` is the located binary's identity.
 fn lift_manifest(
     content: &str,
     yopts: &YosysOptions,
     yosys: ToolIdentity,
 ) -> Result<LiftManifest, String> {
     let dir = Path::new("/mununu-lift-cache/staging");
-    let order = if yopts.frontend == SvFrontend::Auto {
-        frontend_attempt_order(locate_slang_plugin().is_some(), prefer_slang_env())
-    } else {
-        vec![yopts.frontend]
-    };
-    let mut attempts = Vec::with_capacity(order.len());
-    let mut staged: Vec<(String, String)> = Vec::new();
-    // The directories a tool may read `include`d files from: the script's `-I` dirs and sv2v's.
+    let plan = plan_lift(content, yopts, dir).map_err(|e| e.message)?;
+    let staged: Vec<(String, String)> = plan
+        .staged
+        .iter()
+        .map(|(p, text)| {
+            let rel = p.strip_prefix(dir).unwrap_or(p);
+            (rel.to_string_lossy().into_owned(), text.clone())
+        })
+        .collect();
+    // The directories a tool may read `include`d files from: the script's `-I` dirs (and the
+    // oracle's sv2v dirs).
+    #[allow(unused_mut)]
     let mut include_dirs: Vec<PathBuf> = yopts.extra_include_dirs.clone();
-    for fe in order {
-        let mut y = yopts.clone();
-        y.frontend = fe;
-        let plan = plan_lift(content, &y, dir).map_err(|e| e.message)?;
-        if staged.is_empty() {
-            staged = plan
-                .staged
-                .iter()
-                .map(|(p, text)| {
-                    let rel = p.strip_prefix(dir).unwrap_or(p);
-                    (rel.to_string_lossy().into_owned(), text.clone())
-                })
-                .collect();
+    #[cfg(feature = "test_support")]
+    let sv2v = match &plan.sv2v {
+        Some(s) => {
+            include_dirs.extend(
+                s.include_dirs
+                    .iter()
+                    .filter(|d| d.as_path() != dir)
+                    .cloned(),
+            );
+            Some(Sv2vManifest {
+                tool: ToolIdentity {
+                    path: s.bin.display().to_string(),
+                    identity: sv2v_version(&s.bin).map_err(|e| e.message)?,
+                },
+                argv: sv2v_args(&s.sources, &s.include_dirs),
+            })
         }
-        let sv2v = match &plan.sv2v {
-            Some(s) => {
-                include_dirs.extend(
-                    s.include_dirs
-                        .iter()
-                        .filter(|d| d.as_path() != dir)
-                        .cloned(),
-                );
-                Some(Sv2vManifest {
-                    tool: ToolIdentity {
-                        path: s.bin.display().to_string(),
-                        identity: sv2v_version(&s.bin).map_err(|e| e.message)?,
-                    },
-                    argv: sv2v_args(&s.sources, &s.include_dirs),
-                })
-            }
-            None => None,
-        };
-        attempts.push(AttemptManifest {
-            frontend: frontend_tag(fe),
-            script: plan.script,
-            cwd_in_staging_dir: plan.yosys_cwd.is_some(),
-            plugin: plan.plugin.as_deref().map(ToolIdentity::of_plugin),
-            sv2v,
-        });
-    }
+        None => None,
+    };
+    #[cfg(not(feature = "test_support"))]
+    let sv2v = None;
     Ok(LiftManifest {
         format: LIFT_CACHE_FORMAT,
         crate_version: env!("CARGO_PKG_VERSION"),
         yosys,
-        attempts,
+        attempt: AttemptManifest {
+            frontend: frontend_tag(plan.frontend_used),
+            script: plan.script,
+            cwd_in_staging_dir: plan.yosys_cwd.is_some(),
+            plugin: plan.plugin.as_deref().map(ToolIdentity::of_plugin),
+            sv2v,
+        },
         staged,
         include_files: collect_include_files(&include_dirs)?,
     })
@@ -635,8 +581,6 @@ fn artifacts_from_cached(
         hier_json: hit.hier_json,
         staged_primary: hit.staged_primary,
         frontend_used,
-        sv2v_ran: hit.sv2v_ran,
-        fallback_reason: hit.fallback_reason,
         backend_retry: hit.backend_retry,
         clock_domains,
         flat_netlist_json: hit.flat_netlist_json,
@@ -652,60 +596,13 @@ fn cached_lift_of(a: &SvFlattenArtifacts) -> CachedLift {
         flat_netlist_json: a.flat_netlist_json.clone(),
         staged_primary: a.staged_primary.clone(),
         frontend_used: frontend_tag(a.frontend_used).to_string(),
-        sv2v_ran: a.sv2v_ran,
-        fallback_reason: a.fallback_reason.clone(),
         backend_retry: a.backend_retry.clone(),
     }
 }
 
-/// The `Auto` fallback loop of [`run_sv_flatten_btor2`], tools always run.
-fn run_sv_flatten_btor2_uncached(
-    content: &str,
-    yopts: &YosysOptions,
-) -> Result<SvFlattenArtifacts, AdapterError> {
-    if yopts.frontend != SvFrontend::Auto {
-        return run_sv_flatten_btor2_concrete(content, yopts);
-    }
-    let slang_ok = locate_slang_plugin().is_some();
-    let prefer_slang = prefer_slang_env();
-    // Track the prior failed attempt so a successful FALLBACK can name what it fell
-    // back from + why (#466) — a silent front-end swap is the #459 failure class.
-    let mut prior: Option<(SvFrontend, AdapterError)> = None;
-    for fe in frontend_attempt_order(slang_ok, prefer_slang) {
-        let mut y = yopts.clone();
-        y.frontend = fe;
-        match run_sv_flatten_btor2_concrete(content, &y) {
-            Ok(mut a) => {
-                if let Some((prior_fe, e)) = prior {
-                    a.fallback_reason =
-                        Some(format!("{} failed: {}", prior_fe.lift_label(), e.message));
-                }
-                return Ok(a);
-            }
-            Err(e) => prior = Some((fe, e)),
-        }
-    }
-    Err(prior
-        .map(|(_, e)| e)
-        .expect("Auto frontend has at least the Verilog attempt"))
-}
-
-/// The ordered concrete frontends an [`SvFrontend::Auto`] lift attempts (P1.1 fallback). The
-/// broad `read_verilog`(+sv2v) path leads (no plugin needed, handles inout / use-before-decl that
-/// yosys-slang rejects); slang is the fallback (module-header package imports, `while` loops).
-/// `MUNUNU_YOSYS_FRONTEND=slang` flips the preference. slang is included only when its plugin is
-/// present — otherwise the sole attempt is `read_verilog` (unchanged legacy behaviour).
-fn frontend_attempt_order(slang_available: bool, prefer_slang: bool) -> Vec<SvFrontend> {
-    match (slang_available, prefer_slang) {
-        (true, true) => vec![SvFrontend::Slang, SvFrontend::Verilog],
-        (true, false) => vec![SvFrontend::Verilog, SvFrontend::Slang],
-        (false, _) => vec![SvFrontend::Verilog],
-    }
-}
-
-/// Everything one concrete lift will do, decided before any tool runs: the files to stage,
-/// the sv2v invocation when it runs, where yosys runs and with which plugin, and the exact
-/// script. [`run_sv_flatten_btor2_concrete`] executes it against a real staging directory; the
+/// Everything one lift will do, decided before any tool runs: the files to stage, where
+/// yosys runs and with which plugin, the exact script (and, for the dev-only oracle, the sv2v
+/// invocation). [`run_sv_flatten_btor2_concrete`] executes it against a real staging directory; the
 /// lift cache renders it against a placeholder one (N0.2, [`lift_manifest`]), so the cache key
 /// is exactly what runs and cannot drift from it.
 struct LiftPlan {
@@ -714,11 +611,13 @@ struct LiftPlan {
     /// `(path under the staging dir, content)` — the primary first, each already through
     /// `strip_port_net_types`.
     staged: Vec<(PathBuf, String)>,
+    /// The oracle's sv2v pass (`test_support` only; the product plans none).
+    #[cfg(feature = "test_support")]
     sv2v: Option<Sv2vPlan>,
     /// yosys runs inside the staging directory when it reads sv2v's output by its bare name
-    /// (mununu#806) — the names it mints depend on it.
+    /// (mununu#806) — the names it mints depend on it. `None` on the product lift.
     yosys_cwd: Option<PathBuf>,
-    /// The `-m` argument loading the slang plugin, when this attempt uses it.
+    /// The `-m` argument loading a slang plugin, when `MUNUNU_YOSYS_SLANG_PLUGIN` names one.
     plugin: Option<String>,
     script: String,
     frontend_used: SvFrontend,
@@ -726,7 +625,8 @@ struct LiftPlan {
     hier_json_path: PathBuf,
 }
 
-/// The sv2v pass of a [`LiftPlan`]: binary, inputs, include dirs, output file.
+/// The sv2v pass of a [`LiftPlan`]: binary, inputs, include dirs, output file (the oracle).
+#[cfg(feature = "test_support")]
 struct Sv2vPlan {
     bin: PathBuf,
     sources: Vec<PathBuf>,
@@ -745,98 +645,28 @@ fn plan_lift(content: &str, yopts: &YosysOptions, dir: &Path) -> Result<LiftPlan
     for (name, src) in &yopts.additional_sources {
         staged.push((dir.join(name), strip_port_net_types(src)));
     }
-    let mut sources: Vec<PathBuf> = staged.iter().map(|(p, _)| p.clone()).collect();
+    let sources: Vec<PathBuf> = staged.iter().map(|(p, _)| p.clone()).collect();
 
-    // Optional sv2v preprocessing pass. sv2v translates modern SV
-    // constructs Yosys's built-in parser doesn't accept (notably the
-    // module-header `import pkg::*;` syntax) into Verilog-2005 that
-    // Yosys handles cleanly. Activated by `YosysOptions::use_sv2v`
-    // (the only switch — wire `--preprocessor sv2v` on the CLI or
-    // `use_sv2v: true` on the API into this field).
-    //
-    // A3 — the opt-in slang RTL frontend (`MUNUNU_YOSYS_FRONTEND=slang`). `read_slang`
-    // parses SystemVerilog natively (a superset of what `read_verilog` accepts), so sv2v
-    // is redundant with it and is skipped when slang is active.
-    // Front-end selection: an explicit `Slang` request forces the plugin (and
-    // errors if it is absent — never a silent fall-back to read_verilog, which
-    // would defeat the whole point of asking for slang); `Verilog` forces
-    // read_verilog; `Auto` keeps the env-driven default.
-    let slang_plugin = match yopts.frontend {
-        SvFrontend::Slang => Some(locate_slang_plugin().ok_or_else(|| {
-            AdapterError {
-                kind: AdapterErrorKind::UnsupportedConstruct,
-                message: "adapter/yosys: the slang RTL front-end was requested (--frontend slang \
-                      / use_slang) but the yosys-slang plugin was not found. Set \
-                      MUNUNU_YOSYS_SLANG_PLUGIN to slang.so, or run in the mununu-sva image."
-                    .into(),
-                location: None,
-            }
-        })?),
-        SvFrontend::Verilog => None,
-        SvFrontend::Auto => slang_frontend_selection(),
-    };
-    // The concrete front end this lift resolved to (#466). `Auto` is never seen here
-    // for the fallback loop (it sets a concrete `fe` per attempt); directly-called
-    // `Auto` resolves via the plugin presence above.
-    let frontend_used = if slang_plugin.is_some() {
-        SvFrontend::Slang
-    } else {
-        SvFrontend::Verilog
-    };
-    // mununu#806 — yosys names a `$func$` temporary after the SOURCE PATH it was given
-    // (`sv2v_cast_…$func$/tmp/mununu-yosys-<pid>-…/preprocessed.sv:3983$4411.$result`), so a
-    // lifted register name embedded the per-run temp directory and two runs of the same design
-    // disagreed on it in every trace step. When the input is the staged `preprocessed.sv`, yosys
-    // runs INSIDE the staging directory and reads the file by its bare name: the name becomes
-    // `…$func$preprocessed.sv:3983$4411.$result`, the same on every run (yosys's `$4411` autoidx
-    // is deterministic for the same input). Every other path in the script stays absolute.
-    let mut yosys_cwd: Option<PathBuf> = None;
-    let mut sv2v: Option<Sv2vPlan> = None;
-    if yopts.use_sv2v && slang_plugin.is_none() {
-        let bin = locate_sv2v()?;
-        let preprocessed = dir.join("preprocessed.sv");
-        // Include-search path. Two sources, in priority order:
-        //
-        // 1. The staging tempdir itself. Every `additional_sources` entry
-        //    is written here (see above), so an `\`include "X.sv"` whose
-        //    target is one of the staged sources — e.g. real OpenTitan RTL
-        //    doing `\`include "prim_assert.sv"` where the stub prim_assert
-        //    is passed as an additional source (the verify-path /
-        //    multi-file case, which never sets `primary_source_path`) —
-        //    resolves against the staged copy. sv2v does not search the
-        //    including file's own directory by default, so without this the
-        //    include fails even though the file is right next to it.
-        //
-        // 2. The parent dir of the primary source on disk, if known.
-        //    `caliptra_sva.svh` and similar header files live next to the
-        //    `.sv` the user invoked us on (the `context eval` single-file
-        //    case); sv2v can't see them otherwise because mununu staged a
-        //    per-call tempdir. Canonicalized to an absolute path so
-        //    relative invocations (e.g. `mununu context eval foo.sv` from
-        //    the source dir) resolve to a usable `-I`.
-        let mut include_dirs: Vec<PathBuf> = vec![dir.to_path_buf()];
-        include_dirs.extend(yopts.primary_source_path.as_ref().and_then(|p| {
-            let abs = Path::new(p)
-                .canonicalize()
-                .unwrap_or_else(|_| PathBuf::from(p));
-            abs.parent().map(Path::to_path_buf)
-        }));
-        // 3. Caller-supplied include dirs (the source-manifest lift path).
-        include_dirs.extend(yopts.extra_include_dirs.iter().cloned());
-        sv2v = Some(Sv2vPlan {
-            bin,
-            sources: sources.clone(),
-            include_dirs,
-            out: preprocessed,
+    // The front end (N1): yosys-slang's `read_slang`, built into yosys ≥ 0.67 and the pinned
+    // image; `MUNUNU_YOSYS_SLANG_PLUGIN` names a plugin to load on a yosys without it. The
+    // `read_verilog` + sv2v path is the dev-only oracle of `test_support` builds — a product
+    // build refuses it here, with the reason, never with a silent swap.
+    let slang_plugin = slang_plugin_arg();
+    #[cfg(not(feature = "test_support"))]
+    if yopts.frontend == SvFrontend::Verilog {
+        return Err(AdapterError {
+            kind: AdapterErrorKind::UnsupportedConstruct,
+            message: "adapter/yosys: the read_verilog + sv2v lift is the dev-only differential \
+                      oracle of `test_support` builds; the product lifts with yosys-slang"
+                .into(),
+            location: None,
         });
-        // Replace the original .sv inputs with the single combined
-        // Verilog-2005 file. sv2v resolves cross-file packages,
-        // interfaces, and parameters in one pass, so feeding the
-        // combined output to Yosys is the documented correct usage.
-        // By its bare name, with yosys's cwd set to the staging directory (mununu#806).
-        sources = vec![PathBuf::from("preprocessed.sv")];
-        yosys_cwd = Some(dir.to_path_buf());
     }
+    let frontend_used = yopts.frontend;
+    #[cfg(feature = "test_support")]
+    let (sv2v, yosys_cwd, sources) = plan_oracle_sv2v(sources, yopts, dir)?;
+    #[cfg(not(feature = "test_support"))]
+    let yosys_cwd: Option<PathBuf> = None;
 
     let btor_path = dir.join("design.btor");
     let hier_json_path = dir.join("hier.json");
@@ -851,8 +681,31 @@ fn plan_lift(content: &str, yopts: &YosysOptions, dir: &Path) -> Result<LiftPlan
     } else {
         yopts.extra_include_dirs.clone()
     };
+    let slang_read = || {
+        (
+            vec![read_slang_cmd(
+                &sources,
+                yopts.top.as_deref(),
+                &yopts.params,
+                &script_include_dirs,
+            )],
+            String::new(),
+        )
+    };
+    #[cfg(feature = "test_support")]
+    let (read_cmds, chparam) = if frontend_used == SvFrontend::Verilog {
+        (
+            oracle_read_cmds(&sources, &script_include_dirs),
+            build_chparam_passes(&yopts.params, yopts.top.as_deref()),
+        )
+    } else {
+        slang_read()
+    };
+    #[cfg(not(feature = "test_support"))]
+    let (read_cmds, chparam) = slang_read();
     let script = build_script(
-        &sources,
+        &read_cmds,
+        &chparam,
         yopts.top.as_deref(),
         &btor_path,
         &hier_json_path,
@@ -860,13 +713,11 @@ fn plan_lift(content: &str, yopts: &YosysOptions, dir: &Path) -> Result<LiftPlan
         yopts.setundef_anyconst,
         &yopts.init_policy_overrides,
         &yopts.cutpoint_signals,
-        slang_plugin.is_some(),
-        &script_include_dirs,
-        &yopts.params,
     );
     Ok(LiftPlan {
         primary,
         staged,
+        #[cfg(feature = "test_support")]
         sv2v,
         yosys_cwd,
         plugin: slang_plugin,
@@ -877,15 +728,67 @@ fn plan_lift(content: &str, yopts: &YosysOptions, dir: &Path) -> Result<LiftPlan
     })
 }
 
+/// The oracle's sv2v pass, planned (`test_support`): for [`SvFrontend::Verilog`], sv2v combines
+/// the staged sources into `preprocessed.sv`, which yosys reads by its bare name from inside
+/// the staging directory (mununu#806); for the product front end nothing changes.
+#[cfg(feature = "test_support")]
+#[allow(clippy::type_complexity)]
+fn plan_oracle_sv2v(
+    sources: Vec<PathBuf>,
+    yopts: &YosysOptions,
+    dir: &Path,
+) -> Result<(Option<Sv2vPlan>, Option<PathBuf>, Vec<PathBuf>), AdapterError> {
+    if yopts.frontend != SvFrontend::Verilog {
+        return Ok((None, None, sources));
+    }
+    let bin = locate_sv2v()?;
+    let preprocessed = dir.join("preprocessed.sv");
+    // Include-search path, in priority order: the staging tempdir itself (every
+    // `additional_sources` entry is written there, so an `\`include "X.sv"` whose target is a
+    // staged source resolves — sv2v does not search the including file's own directory), the
+    // parent dir of the primary source on disk (header files beside the `.sv` the user invoked
+    // us on), then the caller-supplied include dirs.
+    let mut include_dirs: Vec<PathBuf> = vec![dir.to_path_buf()];
+    include_dirs.extend(yopts.primary_source_path.as_ref().and_then(|p| {
+        let abs = Path::new(p)
+            .canonicalize()
+            .unwrap_or_else(|_| PathBuf::from(p));
+        abs.parent().map(Path::to_path_buf)
+    }));
+    include_dirs.extend(yopts.extra_include_dirs.iter().cloned());
+    let plan = Sv2vPlan {
+        bin,
+        sources,
+        include_dirs,
+        out: preprocessed,
+    };
+    // yosys reads the single combined Verilog-2005 file by its bare name, from inside the
+    // staging directory (mununu#806).
+    Ok((
+        Some(plan),
+        Some(dir.to_path_buf()),
+        vec![PathBuf::from("preprocessed.sv")],
+    ))
+}
+
+/// The oracle's read commands: one `read_verilog -formal -sv` per source (`test_support`).
+#[cfg(feature = "test_support")]
+fn oracle_read_cmds(sources: &[PathBuf], extra_include_dirs: &[PathBuf]) -> Vec<String> {
+    let extra_inc: String = extra_include_dirs
+        .iter()
+        .map(|d| format!(" -I{}", d.display()))
+        .collect();
+    sources
+        .iter()
+        .map(|p| format!("read_verilog -formal -sv{extra_inc} {}", p.display()))
+        .collect()
+}
+
 fn run_sv_flatten_btor2_concrete(
     content: &str,
     yopts: &YosysOptions,
 ) -> Result<SvFlattenArtifacts, AdapterError> {
     let yosys = locate_yosys()?;
-    if !yopts.skip_verific_check {
-        verify_no_verific(&yosys)?;
-    }
-
     let tmp = TempDir::new("mununu-yosys")?;
     let plan = plan_lift(content, yopts, tmp.path())?;
     for (path, text) in &plan.staged {
@@ -894,10 +797,16 @@ fn run_sv_flatten_btor2_concrete(
         }
         write_file(path, text)?;
     }
+    #[cfg(feature = "test_support")]
     if let Some(s) = &plan.sv2v {
         run_sv2v(&s.bin, &s.sources, &s.include_dirs, &s.out)?;
     }
 
+    // `-q` keeps the console to warnings and errors — and silences sv-elab's diagnostics, which
+    // go through yosys's `log()`, so a failed `read_slang` reached the report as nothing but
+    // "Design elaboration failed; see full log for details" (2026-11-04: seven corpus designs,
+    // no reason named). `-l` keeps the full log beside the BTOR2 and the failure path reads it.
+    let log_path = plan.btor_path.with_file_name("yosys.log");
     let run_script = |script: &str| -> Result<std::process::Output, AdapterError> {
         let mut yosys_cmd = Command::new(&yosys);
         if std::env::var_os("MUNUNU_DEBUG_YOSYS_SCRIPT").is_some() {
@@ -912,11 +821,17 @@ fn run_sv_flatten_btor2_concrete(
         if let Some(plugin) = &plan.plugin {
             yosys_cmd.arg("-m").arg(plugin);
         }
-        yosys_cmd.arg("-q").arg("-p").arg(script);
+        yosys_cmd
+            .arg("-l")
+            .arg(&log_path)
+            .arg("-q")
+            .arg("-p")
+            .arg(script);
         // N0.2 — the lift cache's manifest renders this invocation as the script text, the
         // plugin identity and the cwd rule. An argument or environment variable added here
         // that the script text does not carry needs `lift_cache::LIFT_CACHE_FORMAT` bumped,
-        // or entries stored before the change would be served after it.
+        // or entries stored before the change would be served after it (`-l` only adds a
+        // log the cache never stores, and changes no output).
         // mununu#504 — bounded. This ran as a bare `.output()`, i.e. forever. The lift precedes
         // every property, so a hung yosys emits ZERO output and the whole run reads as absent —
         // one of the two ways a consumer loses a full gate run. `run_yosys` 700 lines below has
@@ -970,10 +885,12 @@ fn run_sv_flatten_btor2_concrete(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
+        let log_errors = yosys_log_errors(&log_path);
+        let hint = read_slang_hint(&format!("{stderr}\n{log_errors}"));
         return Err(AdapterError {
             kind: AdapterErrorKind::ParseError,
             message: format!(
-                "adapter/yosys: yosys exited with status {} \nstdout:\n{stdout}\nstderr:\n{stderr}",
+                "adapter/yosys: yosys exited with status {}{hint} \nstdout:\n{stdout}\nstderr:\n{stderr}{log_errors}",
                 output.status
             ),
             location: None,
@@ -1006,8 +923,6 @@ fn run_sv_flatten_btor2_concrete(
         hier_json,
         staged_primary: plan.primary.to_string_lossy().into_owned(),
         frontend_used: plan.frontend_used,
-        sv2v_ran: plan.sv2v.is_some(),
-        fallback_reason: None,
         backend_retry,
         clock_domains,
         flat_netlist_json,
@@ -1077,7 +992,7 @@ pub struct SvStateCell {
     pub width: u32,
 }
 
-/// Drive sv2v → Yosys-flatten → BTOR2 and return the design's named state
+/// Drive the slang lift → Yosys-flatten → BTOR2 and return the design's named state
 /// cells (sidecar-audit C1.1 / finding E1). Unlike [`translate_sv`], this
 /// does NOT bit-blast, so it succeeds on cap-busting designs — exactly the
 /// case where the author needs the dotted state-cell names to write a
@@ -1196,7 +1111,7 @@ pub fn translate_sv(
     Ok(out)
 }
 
-/// Run sv2v (optional) + the flattened Yosys script and return *just*
+/// Run the flattened Yosys script and return *just*
 /// the design's BTOR2 text. This is the SV-direct CEGAR one-call
 /// frontend: `mununu sv cegar` and `POST /api/v1/sv/cegar` lift SV to a
 /// single flattened BTOR2 here, then hand it to `cegar_refine_loop` (the
@@ -1236,8 +1151,6 @@ pub fn sv_to_btor2_with_blackboxes(
         btor2: artifacts.btor2,
         blackboxed_modules: blackboxed_module_names(&artifacts.hier_json),
         frontend_used: artifacts.frontend_used,
-        sv2v_ran: artifacts.sv2v_ran,
-        fallback_reason: artifacts.fallback_reason,
         backend_retry: artifacts.backend_retry,
         clock_domains: artifacts.clock_domains,
         flat_netlist_json: artifacts.flat_netlist_json,
@@ -1246,19 +1159,14 @@ pub fn sv_to_btor2_with_blackboxes(
 }
 
 /// The SV → BTOR2 lift result: the BTOR2 text, the modules the lift could not
-/// model (blackboxed / undefined cells), and — for `--frontend auto` — which
-/// concrete front end produced it and whether it was a fallback (#466).
+/// model (blackboxed / undefined cells), and the front end that produced it.
 pub struct SvLiftResult {
     pub btor2: String,
     pub blackboxed_modules: Vec<String>,
-    /// The concrete front end used (`Verilog`/`Slang`, never `Auto`).
+    /// The front end used: `Slang` on every product lift; `Verilog` only from the dev-only
+    /// oracle, whose sv2v pass rewrites the source before yosys reads it (the netlist's `src`
+    /// lines are then sv2v's output's, not the RTL's — the source map is declared unavailable).
     pub frontend_used: SvFrontend,
-    /// sv2v preprocessed the source before yosys read it, so the netlist's `src` lines are
-    /// sv2v's output's, not the RTL's; the source map is declared unavailable then (2026-10-29).
-    /// Both yosys-slang and yosys's own `read_verilog` stamp the staged file's own lines.
-    pub sv2v_ran: bool,
-    /// `Some(reason)` when `Auto` fell back after an earlier front end errored.
-    pub fallback_reason: Option<String>,
     /// `Some(reason)` when the BTOR backend's topological-loop error made the lift rerun its
     /// script with `opt_clean` before `write_btor` (the model is the same design).
     pub backend_retry: Option<String>,
@@ -1619,8 +1527,7 @@ pub fn clock_domains(flat_json: &str) -> Vec<ClockDomain> {
 /// Yosys built-in (`$...`) cell. These dangling cell references are NOT declared
 /// blackbox *modules*, so [`parse_blackbox_modules`] misses them, yet they are
 /// the dominant real-world "cut FSM" cause (OpenTitan's `prim_sparse_fsm_flop`).
-/// Names are de-mangled of sv2v's parameter-specialisation suffix for
-/// readability and returned sorted + deduped.
+/// Returned sorted + deduped.
 fn parse_undefined_module_cells(hier_json: &str) -> Vec<String> {
     let root: serde_json::Value = match serde_json::from_str(hier_json) {
         Ok(v) => v,
@@ -1633,14 +1540,14 @@ fn parse_undefined_module_cells(hier_json: &str) -> Vec<String> {
     instantiated_cell_types(hier_json)
         .iter()
         .filter(|ty| !defined.contains(ty.as_str()))
-        .map(|ty| strip_sv2v_mangle(ty).to_string())
+        .cloned()
         .collect::<std::collections::BTreeSet<String>>()
         .into_iter()
         .collect()
 }
 
 /// Every non-built-in cell TYPE instantiated anywhere in the elaborated design (`modules[*].cells
-/// [*].type`, `$…` Yosys primitives excluded), raw (sv2v-mangled) names.
+/// [*].type`, `$…` Yosys primitives excluded).
 fn instantiated_cell_types(hier_json: &str) -> std::collections::BTreeSet<String> {
     let mut types = std::collections::BTreeSet::new();
     let root: serde_json::Value = match serde_json::from_str(hier_json) {
@@ -1681,23 +1588,17 @@ pub(crate) fn blackboxed_module_names(hier_json: &str) -> Vec<String> {
     names.into_iter().collect()
 }
 
-/// Strip sv2v's parameter-specialisation suffix (`_<HEX>_<HEX>`, two trailing
-/// uppercase-hex groups of ≥ 4 chars) from a mangled module name, so e.g.
-/// `prim_sparse_fsm_flop_B4CDB_707CE` reads as `prim_sparse_fsm_flop` in
-/// diagnostics. Conservative: only strips when both trailing groups match the
-/// exact sv2v shape; otherwise returns the name unchanged.
-fn strip_sv2v_mangle(name: &str) -> &str {
-    let is_hex4 = |s: &str| s.len() >= 4 && s.chars().all(|c| c.is_ascii_hexdigit());
-    if let Some((head, last)) = name.rsplit_once('_')
-        && is_hex4(last)
-        && let Some((stem, mid)) = head.rsplit_once('_')
-        && is_hex4(mid)
-        && !stem.is_empty()
-    {
-        return stem;
-    }
-    name
-}
+/// The module attribute that marks a stub standing in for a module the source set lacks.
+/// sv-elab refuses an instantiation with no definition (2026-11-04); `read_verilog` lifted it
+/// with the cell undefined, and yosys's BTOR backend made the cell's outputs anonymous inputs —
+/// free, non-deliberate leaves that `violation-over-free-leaves` withholds a VIOLATED over. A
+/// stub carrying this attribute (empty, with the module's ports) gets exactly that: the read keeps
+/// it as a black box (`--empty-blackboxes`), the hierarchy snapshot names it in
+/// `blackboxed_modules`, and the script deletes the module before the BTOR2 is written, so the
+/// parent's cell is undefined again. Measured 2026-11-04: two anonymous inputs, no next-less
+/// state — the old reader's shape to the byte; without the attribute the same stub is a
+/// deliberate `(* blackbox *)` cut (`cutpoint -blackbox`, next-less states, verdict kept).
+pub const MISSING_MODULE_ATTR: &str = "mununu_missing_module";
 
 /// One submodule's translated output, as returned by
 /// [`translate_sv_per_module`]. The `btor2_path` is `Some(..)` when
@@ -1825,10 +1726,7 @@ fn translate_sv_per_module_impl(
     surface_net_driving: bool,
 ) -> Result<(Vec<PerModuleOutput>, String), AdapterError> {
     let yosys = locate_yosys()?;
-    if !yopts.skip_verific_check {
-        verify_no_verific(&yosys)?;
-    }
-
+    let plugin = slang_plugin_arg();
     let tmp = TempDir::new("mununu-yosys-per-module")?;
     let primary = tmp.path().join("work.sv");
     // A2 — strip yosys/slang-rejected net-type qualifiers on port headers
@@ -1846,27 +1744,6 @@ fn translate_sv_per_module_impl(
         sources.push(p);
     }
 
-    // Optional sv2v preprocessing. Same shape as `translate_sv`.
-    let mut yosys_cwd: Option<PathBuf> = None; // mununu#806, as in `translate_sv`
-    if yopts.use_sv2v {
-        let preprocessed = tmp.path().join("preprocessed.sv");
-        let include_dirs: Vec<PathBuf> = yopts
-            .primary_source_path
-            .as_ref()
-            .and_then(|p| {
-                let abs = Path::new(p)
-                    .canonicalize()
-                    .unwrap_or_else(|_| PathBuf::from(p));
-                abs.parent().map(Path::to_path_buf)
-            })
-            .into_iter()
-            .collect();
-        preprocess_sv(&sources, &include_dirs, &preprocessed)?;
-        // By its bare name, with yosys's cwd set to the staging directory (mununu#806).
-        sources = vec![PathBuf::from("preprocessed.sv")];
-        yosys_cwd = Some(tmp.path().to_path_buf());
-    }
-
     // Pass 1 — discovery. Use `hierarchy -auto-top` when the caller did
     // not provide one (matches the legacy build_script).
     let hier_json_path = tmp.path().join("hier.json");
@@ -1880,7 +1757,8 @@ fn translate_sv_per_module_impl(
         &yosys,
         &discovery_script,
         PER_MODULE_YOSYS_TIMEOUT,
-        yosys_cwd.as_deref(),
+        plugin.as_deref(),
+        &hier_json_path.with_file_name("yosys-discovery.log"),
     )?;
 
     let hier_body = std::fs::read_to_string(&hier_json_path).map_err(|e| AdapterError {
@@ -1945,7 +1823,8 @@ fn translate_sv_per_module_impl(
             &yosys,
             &script,
             PER_MODULE_YOSYS_TIMEOUT,
-            yosys_cwd.as_deref(),
+            plugin.as_deref(),
+            &btor_path.with_file_name(format!("{module_name}.yosys.log")),
         )?;
 
         let btor = std::fs::read_to_string(&btor_path).map_err(|e| AdapterError {
@@ -2008,7 +1887,8 @@ fn translate_sv_per_module_impl(
 /// module selection — yosys applies it to whichever module carries the parameter,
 /// and ERRORS ("Can't find object for defparam") if none does. That error
 /// propagates out of the lift (never a silent drop). Naming a `MODULE.NAME` or
-/// passing `--top` makes the target explicit.
+/// passing `--top` makes the target explicit. The dev-only oracle's mechanism (`test_support`).
+#[cfg(feature = "test_support")]
 fn build_chparam_passes(params: &[(String, String)], top: Option<&str>) -> String {
     if params.is_empty() {
         return String::new();
@@ -2045,18 +1925,13 @@ fn build_discovery_script(
     hier_json_out: &Path,
     params: &[(String, String)],
 ) -> String {
-    let read_cmds: Vec<String> = sources
-        .iter()
-        .map(|p| format!("read_verilog -formal -sv {}", p.display()))
-        .collect();
-    let chparam = build_chparam_passes(params, top);
+    let read = read_slang_cmd(sources, top, params, &[]);
     let hier = match top {
-        Some(t) => format!("{chparam}hierarchy -check -top {t}"),
-        None => format!("{chparam}hierarchy -check -auto-top"),
+        Some(t) => format!("hierarchy -check -top {t}"),
+        None => "hierarchy -check -auto-top".to_string(),
     };
     format!(
-        "{}; {hier}; proc; write_json {}",
-        read_cmds.join("; "),
+        "{read}; {hier}; proc; write_json {}",
         hier_json_out.display()
     )
 }
@@ -2082,15 +1957,10 @@ fn build_per_module_script(
     init_policy_overrides: &InitPolicyOverrides,
     params: &[(String, String)],
 ) -> String {
-    let read_cmds: Vec<String> = sources
-        .iter()
-        .map(|p| format!("read_verilog -formal -sv {}", p.display()))
-        .collect();
+    // Parameter overrides apply to this submodule's own top (`module`) at read time (`-G`).
+    let read = read_slang_cmd(sources, Some(module), params, &[]);
     let setundef_pass = select_setundef_pass(setundef_anyseq, setundef_anyconst);
     let per_signal = emit_init_policy_setattrs(init_policy_overrides);
-    // Parameter overrides apply to this submodule's own top (`module`) before its
-    // `hierarchy` sizes it.
-    let chparam = build_chparam_passes(params, Some(module));
     format!(
         // `memory_collect` normalizes memory read/write accesses into `$mem` cells
         // (fixing an internal yosys assert on some fifo styles when a raw `$mem`
@@ -2099,8 +1969,7 @@ fn build_per_module_script(
         // explosion). Unlike `memory`/`memory -nomap`, it runs NO internal `opt_clean`,
         // so it does not drop dead registers (which would change memory-free lifts).
         // No-op when the design has no memories.
-        "{}; {chparam}hierarchy -check -top {module}; {per_signal}proc; memory_collect; flatten; async2sync; chformal -lower; dffunmap; {setundef_pass}; write_btor {}",
-        read_cmds.join("; "),
+        "{read}; hierarchy -check -top {module}; {per_signal}proc; memory_collect; flatten; async2sync; chformal -lower; dffunmap; {setundef_pass}; write_btor {}",
         btor_out.display()
     )
 }
@@ -2129,19 +1998,21 @@ fn select_setundef_pass(anyseq: bool, anyconst: bool) -> &'static str {
     }
 }
 
-/// Spawn Yosys with the given script. Captures stdout/stderr into the
+/// Spawn Yosys with the given script. Captures stdout/stderr — and the `error` lines of the
+/// full log kept at `log` (`-l`; `-q` keeps sv-elab's diagnostics off the console) — into the
 /// `AdapterError` message on failure.
 fn run_yosys(
     yosys: &Path,
     script: &str,
     timeout: Duration,
-    cwd: Option<&Path>,
+    plugin: Option<&str>,
+    log: &Path,
 ) -> Result<(), AdapterError> {
     let mut command = Command::new(yosys);
-    if let Some(cwd) = cwd {
-        command.current_dir(cwd);
+    if let Some(p) = plugin {
+        command.arg("-m").arg(p);
     }
-    command.arg("-q").arg("-p").arg(script);
+    command.arg("-l").arg(log).arg("-q").arg("-p").arg(script);
     let outcome = crate::adapter::run_with_timeout(&mut command, None, timeout).map_err(|e| {
         AdapterError {
             kind: AdapterErrorKind::ParseError,
@@ -2149,7 +2020,7 @@ fn run_yosys(
             location: None,
         }
     })?;
-    yosys_run_outcome_to_result(outcome, script, timeout)
+    yosys_run_outcome_to_result(outcome, script, timeout, &yosys_log_errors(log))
 }
 
 /// Map a [`crate::adapter::run_with_timeout`] outcome to a result: `None`
@@ -2181,6 +2052,7 @@ fn yosys_run_outcome_to_result(
     outcome: Option<(std::process::ExitStatus, String, String)>,
     script: &str,
     timeout: Duration,
+    log_errors: &str,
 ) -> Result<(), AdapterError> {
     // Timed out — killed. Per-module emission targets small fixtures; a large
     // design can thrash past the cap. Surface an actionable error, not a hang.
@@ -2199,10 +2071,11 @@ fn yosys_run_outcome_to_result(
         });
     };
     if !status.success() {
+        let hint = read_slang_hint(&format!("{stderr}\n{log_errors}"));
         return Err(AdapterError {
             kind: AdapterErrorKind::ParseError,
             message: format!(
-                "adapter/yosys: yosys exited with status {status} (script: {script})\nstdout:\n{stdout}\nstderr:\n{stderr}"
+                "adapter/yosys: yosys exited with status {status}{hint} (script: {script})\nstdout:\n{stdout}\nstderr:\n{stderr}{log_errors}"
             ),
             location: None,
         });
@@ -2707,35 +2580,9 @@ fn locate_yosys() -> Result<PathBuf, AdapterError> {
     })
 }
 
-/// Preprocess one or more SystemVerilog sources through `sv2v` and
-/// write the elaborated Verilog-2005 output to `out`. Public entry
-/// point for R.0a's standalone `mununu sv preprocess` CLI subcommand
-/// and for any future caller that needs sv2v output without
-/// invoking Yosys.
-///
-/// `include_dirs` forwards `-I` flags so `\`include` directives in the
-/// `.sv` sources resolve. Returns the absolute path of `sv2v` that
-/// was used (for diagnostics) on success; `AdapterError` if the
-/// binary is missing or the subprocess fails.
-///
-/// This wraps the same `locate_sv2v` + `run_sv2v` helpers the Yosys
-/// `--preprocessor sv2v` path uses, exposed here as a single public
-/// function. Soundness invariant: identical sv2v invocation on both
-/// paths means any future change to one path lands on the other for
-/// free.
-pub fn preprocess_sv(
-    sources: &[PathBuf],
-    include_dirs: &[PathBuf],
-    out: &Path,
-) -> Result<PathBuf, AdapterError> {
-    let sv2v = locate_sv2v()?;
-    run_sv2v(&sv2v, sources, include_dirs, out)?;
-    Ok(sv2v)
-}
-
-/// Find a usable sv2v binary. Mirrors `locate_yosys` — check
-/// `MUNUNU_SV2V_PATH` first, then fall back to the bare `sv2v` on
-/// `$PATH`. zachjs/sv2v's `--version` flag is a stable smoke test.
+/// Find a usable sv2v binary for the dev-only oracle (`test_support`): `MUNUNU_SV2V_PATH`
+/// first, then the bare `sv2v` on `$PATH`. zachjs/sv2v's `--version` flag is a stable smoke test.
+#[cfg(feature = "test_support")]
 fn locate_sv2v() -> Result<PathBuf, AdapterError> {
     if let Ok(path) = std::env::var("MUNUNU_SV2V_PATH") {
         return Ok(PathBuf::from(path));
@@ -2747,48 +2594,137 @@ fn locate_sv2v() -> Result<PathBuf, AdapterError> {
     }
     Err(AdapterError {
         kind: AdapterErrorKind::UnsupportedConstruct,
-        message: "adapter/yosys: sv2v binary not found in $PATH (set MUNUNU_SV2V_PATH or install zachjs/sv2v ≥ 0.0.10). Required by --preprocessor sv2v / MUNUNU_USE_SV2V=1."
+        message: "adapter/yosys: sv2v binary not found in $PATH (set MUNUNU_SV2V_PATH or install zachjs/sv2v ≥ 0.0.10) — the dev-only read_verilog oracle needs it"
             .into(),
         location: None,
     })
 }
 
-/// The yosys `-m` argument that loads the yosys-slang frontend plugin (`read_slang`),
-/// or `None` if unavailable. Order: `MUNUNU_YOSYS_SLANG_PLUGIN` (a path to `slang.so`) →
-/// the pinned `mununu-sva` image plugin (loadable by bare name `slang`) → absent.
+/// The yosys `-m` argument loading a yosys-slang plugin, when `MUNUNU_YOSYS_SLANG_PLUGIN`
+/// names one (a path to `slang.so`, or a bare name yosys resolves from its plugin dir); `None`
+/// otherwise — `read_slang` is built into yosys ≥ 0.67 and the pinned `mununu-sva` image, and
+/// loading the plugin beside the built-in reader would register the command twice.
 ///
-/// `read_slang` is a full SystemVerilog front-end that accepts constructs yosys's native
-/// `read_verilog` rejects (a bounded `while` loop in `always @*`, …). mununu uses it for
-/// the **RTL lift only** (`--ignore-assertions` — SVA is extracted separately by the slang
-/// `extract_sva` path, so no `bad` nodes are needed here). Named registers and ports get
-/// the SAME `instance.signal` BTOR2 names as the `read_verilog` path, so cutpoints /
-/// `--pin` over named signals resolve unchanged.
-fn locate_slang_plugin() -> Option<String> {
-    if let Ok(p) = std::env::var("MUNUNU_YOSYS_SLANG_PLUGIN")
-        && Path::new(&p).exists()
-    {
-        return Some(p);
-    }
-    // The pinned image ships slang.so in yosys's plugin dir → loadable by bare name.
-    if Path::new("/opt/oss-cad-suite/share/yosys/plugins/slang.so").exists() {
-        return Some("slang".to_string());
-    }
-    None
+/// `read_slang` is a full SystemVerilog front end. mununu uses it for the **RTL lift only**
+/// (`--ignore-assertions` — SVA is extracted separately by the slang `extract_sva` path, so no
+/// `bad` nodes are needed here). Named registers and ports get `instance.signal` BTOR2 names,
+/// so cutpoints / `--pin` over named signals resolve by name.
+fn slang_plugin_arg() -> Option<String> {
+    std::env::var("MUNUNU_YOSYS_SLANG_PLUGIN")
+        .ok()
+        .filter(|p| !p.trim().is_empty())
 }
 
-/// The yosys-slang `-m` plugin argument when the slang RTL frontend is selected for this
-/// lift, else `None`. Opt-in via `MUNUNU_YOSYS_FRONTEND=slang` (case-insensitive) AND the
-/// plugin being present. Conservative rollout (A3): opt-in first; a
-/// fallback-on-`read_verilog`-parse-failure and a benchmark-validated default are follow-ups.
-fn slang_frontend_selection() -> Option<String> {
-    match std::env::var("MUNUNU_YOSYS_FRONTEND") {
-        Ok(v) if v.eq_ignore_ascii_case("slang") => locate_slang_plugin(),
-        _ => None,
+/// The actionable tail of a yosys failure, read off its stderr and log: `read_slang` is not a
+/// command (the binary predates the built-in reader and no plugin was named), or sv-elab refused
+/// an instantiated module it has no definition for — `read_verilog` black-boxed a missing module
+/// silently (its outputs free, `diagnostics.blackboxed_modules` naming it); sv-elab retired
+/// `--ignore-unknown-modules` and wants a definition, which a port-only `(* blackbox *)` stub
+/// supplies with the same semantics (2026-11-04: seven corpus designs lifted only by the old
+/// reader failed this way, the reason hidden by `-q`).
+fn read_slang_hint(text: &str) -> String {
+    let mut hint = String::new();
+    if text.contains("No such command: read_slang") {
+        hint.push_str(
+            " — this yosys has no `read_slang`: use yosys ≥ 0.67 (the pinned oss-cad-suite of \
+             the mununu-sva image has it built in) or set MUNUNU_YOSYS_SLANG_PLUGIN to a \
+             yosys-slang plugin",
+        );
     }
+    if text.contains("unknown module '") {
+        hint.push_str(&format!(
+            " — the design instantiates a module with no definition: sv-elab needs one for every \
+             instantiated module (`read_verilog` lifted a missing one silently; a known flop \
+             primitive such as prim_flop / prim_sparse_fsm_flop is still stubbed automatically \
+             unless --no-auto-stub-flops). Add the module's source, or an empty stub module with \
+             its ports: marked `(* {MISSING_MODULE_ATTR} *)` it stands in for the missing module \
+             exactly as the old reader did — outputs free, a VIOLATED over them withheld — and \
+             unmarked (or `(* blackbox *)`) it is a deliberate cut that keeps its verdict under \
+             the `blackbox-cut` caveat; either way `diagnostics.blackboxed_modules` names it"
+        ));
+    }
+    hint
+}
+
+/// The module names a failed lift's message says have no definition — every
+/// `unknown module 'NAME'` sv-elab wrote into the log ([`yosys_log_errors`] carries them into the
+/// message), sorted and deduplicated. `verify_auto`'s H.C auto-stub reads them to stage the
+/// behavioural stubs of the flop primitives it knows; under `read_verilog` the same names came
+/// from the hierarchy snapshot of a lift that succeeded with the modules cut.
+pub(crate) fn unknown_modules_in_error(message: &str) -> Vec<String> {
+    const MARK: &str = "unknown module '";
+    let mut names = std::collections::BTreeSet::new();
+    let mut rest = message;
+    while let Some(i) = rest.find(MARK) {
+        rest = &rest[i + MARK.len()..];
+        let Some(end) = rest.find('\'') else {
+            break;
+        };
+        let name = &rest[..end];
+        if !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+        {
+            names.insert(name.to_string());
+        }
+        rest = &rest[end..];
+    }
+    names.into_iter().collect()
+}
+
+/// The `error` lines of a yosys log kept with `-l`: sv-elab's `file:line:col: error: …`
+/// diagnostics and yosys's own `ERROR: …`, in order, deduplicated, at most 24 — the reason a lift
+/// failed, which `-q` keeps off the console. Empty when the log is missing or carries none.
+fn yosys_log_errors(log: &Path) -> String {
+    let Ok(text) = std::fs::read_to_string(log) else {
+        return String::new();
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    let mut lines: Vec<&str> = Vec::new();
+    for raw in text.lines() {
+        let line = raw.trim();
+        let is_error =
+            line.contains(": error: ") || line.starts_with("ERROR:") || line.starts_with("error:");
+        if is_error && seen.insert(line) {
+            lines.push(line);
+        }
+    }
+    if lines.is_empty() {
+        return String::new();
+    }
+    let total = lines.len();
+    lines.truncate(24);
+    let more = if total > lines.len() {
+        format!("\n… {} more", total - lines.len())
+    } else {
+        String::new()
+    };
+    format!("\nyosys log (errors):\n{}{more}\n", lines.join("\n"))
+}
+
+/// Test-only probe shared by every lib test that lifts SystemVerilog: a `yosys` on the PATH
+/// **with** `read_slang` (built in from 0.67, or loaded from `MUNUNU_YOSYS_SLANG_PLUGIN`). A
+/// yosys without it (a brew 0.59) skips those tests, as a host without yosys always did; the
+/// `mununu-sva` image runs them. `help <unknown>` exits 0 and prints "No such command or cell
+/// type" — and `-q` silences that line — so the output is read, not the status alone.
+#[cfg(test)]
+pub(crate) fn yosys_can_read_slang() -> bool {
+    let mut cmd = Command::new("yosys");
+    if let Some(p) = slang_plugin_arg() {
+        cmd.arg("-m").arg(p);
+    }
+    cmd.args(["-p", "help read_slang"])
+        .output()
+        .map(|o| {
+            o.status.success() && !String::from_utf8_lossy(&o.stdout).contains("No such command")
+        })
+        .unwrap_or(false)
 }
 
 /// sv2v's argument vector: `-I<dir>` per include dir, then the sources. One function for the
 /// run ([`run_sv2v`]) and the lift cache's manifest (N0.2), so the key is what runs.
+#[cfg(feature = "test_support")]
 fn sv2v_args(sources: &[PathBuf], include_dirs: &[PathBuf]) -> Vec<String> {
     include_dirs
         .iter()
@@ -2805,6 +2741,7 @@ fn sv2v_args(sources: &[PathBuf], include_dirs: &[PathBuf]) -> Vec<String> {
 /// `.sv` sources (e.g. `\`include "caliptra_sva.svh"`) resolve. Without
 /// these, sv2v errors on missing headers because mununu stages a per-call
 /// tempdir away from the original source directory.
+#[cfg(feature = "test_support")]
 fn run_sv2v(
     sv2v: &Path,
     sources: &[PathBuf],
@@ -2850,13 +2787,14 @@ fn run_sv2v(
     std::fs::write(out, &result.stdout).map_err(io_err)
 }
 
-/// `yosys -V` (stdout + stderr) for `yosys`, read once per process: the Verific check reads it
-/// on every lift and the lift cache keys on it (N0.2).
+/// `yosys -V` (stdout + stderr) for `yosys`, read once per process: the lift cache keys on it
+/// (N0.2).
 fn yosys_banner(yosys: &Path) -> Result<String, AdapterError> {
     tool_version(yosys, "-V", "yosys")
 }
 
 /// `sv2v --version` for `sv2v`, read once per process (the lift cache keys on it, N0.2).
+#[cfg(feature = "test_support")]
 fn sv2v_version(sv2v: &Path) -> Result<String, AdapterError> {
     tool_version(sv2v, "--version", "sv2v")
 }
@@ -2888,23 +2826,6 @@ fn tool_version(bin: &Path, flag: &str, label: &str) -> Result<String, AdapterEr
         m.insert(key, banner.clone());
     }
     Ok(banner)
-}
-
-/// Best-effort check that the located yosys binary was not built with the
-/// commercial Verific frontend. Verific-built yosys binaries print
-/// "verific" in their `-V` banner.
-fn verify_no_verific(yosys: &Path) -> Result<(), AdapterError> {
-    let banner = yosys_banner(yosys)?;
-    if banner.to_lowercase().contains("verific") {
-        return Err(AdapterError {
-            kind: AdapterErrorKind::UnsupportedConstruct,
-            message: format!(
-                "adapter/yosys: refusing to use a yosys binary built with Verific (commercial / license-incompatible). Banner:\n{banner}"
-            ),
-            location: None,
-        });
-    }
-    Ok(())
 }
 
 // `build_script` (defined further below) elaborates `sources` into a
@@ -3013,12 +2934,64 @@ fn emit_cutpoints(signals: &[String]) -> String {
     }
 }
 
+/// The `read_slang` command of a lift: every source in ONE read (slang elaborates the whole
+/// design at read time), `--ignore-assertions` (embedded SVA is extracted separately by the
+/// slang `extract_sva` path; the flag also drops *immediate* `assert` statements, so they
+/// never become `bad` nodes — measured 2026-11-04 on yosys 0.68+120: without the flag
+/// yosys-slang lowers immediate and boolean `assert property` to `$check` cells but refuses
+/// any temporal property (`|=>`, `##1`, `$rose`, `s_eventually`) as "unsupported SVA feature",
+/// a hard elaboration error, and offers no finer switch; sv2v dropped immediate assertions
+/// too, so no product path ever lifted them), `--ignore-timing` (slang is stricter than `read_verilog` about
+/// `#`-delay timing controls, which are not part of the design's cycle behaviour — SOUNDNESS:
+/// read_verilog-equivalent, not an extra abstraction; without it ~18 corpus designs failed to
+/// lift, 2026-07-25), `--empty-blackboxes` (an empty module is a black box — what yosys made of a
+/// bodiless module under `read_verilog`, mununu#724 — rather than a module whose outputs read
+/// constant zero, which is what sv-elab makes of it otherwise; measured 2026-11-04. A stub marked
+/// [`MISSING_MODULE_ATTR`] is deleted again after the hierarchy snapshot), `--top` when given, one `-G NAME=VALUE` per parameter override (top-scoped,
+/// so `MODULE.NAME` applies by its bare name; an unknown name is validated upstream against the
+/// slang AST), the staging directory as an include dir (a cross-file `\`include "peer.sv"`
+/// between staged sources resolves) and the caller's include dirs.
+fn read_slang_cmd(
+    sources: &[PathBuf],
+    top: Option<&str>,
+    params: &[(String, String)],
+    extra_include_dirs: &[PathBuf],
+) -> String {
+    let files = sources
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let top_arg = top.map(|t| format!(" --top {t}")).unwrap_or_default();
+    let inc = sources
+        .first()
+        .and_then(|p| p.parent())
+        .filter(|d| !d.as_os_str().is_empty())
+        .map(|d| format!(" -I{}", d.display()))
+        .unwrap_or_default();
+    let extra_inc: String = extra_include_dirs
+        .iter()
+        .map(|d| format!(" -I{}", d.display()))
+        .collect();
+    let param_g: String = params
+        .iter()
+        .map(|(lhs, val)| {
+            let name = lhs.rsplit('.').next().unwrap_or(lhs);
+            format!(" -G {name}={val}")
+        })
+        .collect();
+    format!(
+        "read_slang --ignore-assertions --ignore-timing --empty-blackboxes{top_arg}{param_g}{inc}{extra_inc} {files}"
+    )
+}
+
 // The lift-script builder threads each independent Yosys-pass knob (top, output
 // paths, the two setundef flags, per-signal init overrides, and now the cut points)
 // as its own argument; bundling them into a struct would not improve clarity here.
 #[allow(clippy::too_many_arguments)]
 fn build_script(
-    sources: &[PathBuf],
+    read_cmds: &[String],
+    chparam: &str,
     top: Option<&str>,
     btor_out: &Path,
     hier_json_out: &Path,
@@ -3026,75 +2999,10 @@ fn build_script(
     setundef_anyconst: bool,
     init_policy_overrides: &InitPolicyOverrides,
     cutpoint_signals: &[String],
-    use_slang: bool,
-    extra_include_dirs: &[PathBuf],
-    params: &[(String, String)],
 ) -> String {
-    // Caller-supplied include-search dirs, as attached `-I<dir>` flags (the
-    // form yosys `read_verilog`/`read_slang` and sv2v all accept). Lets
-    // `\`include "frag.vh"` resolve against the original source tree without
-    // the fragment being read as a standalone compilation unit.
-    let extra_inc: String = extra_include_dirs
-        .iter()
-        .map(|d| format!(" -I{}", d.display()))
-        .collect();
-    // A3 — the RTL read command. `read_slang` (yosys-slang plugin) is a full SV front-end
-    // that accepts constructs `read_verilog` rejects; it reads ALL sources in ONE command
-    // and `--ignore-assertions` drops embedded SVA (extracted separately by the slang
-    // `extract_sva` path). `read_verilog` reads each source. Everything after the read is
-    // identical, so the lift is frontend-agnostic downstream.
-    //
-    // `--ignore-timing`: slang is stricter than `read_verilog` about `#`-delay timing
-    // controls (`error: unsynthesizable timing control`), which `read_verilog` silently
-    // drops. Ignoring them here matches `read_verilog`'s behaviour and is the correct
-    // cycle-based-verification modelling choice — `#delays` are non-synthesizable and are
-    // not part of the design's synthesized (cycle) behaviour. SOUNDNESS: this is
-    // read_verilog-equivalent, not an extra abstraction. Without it, slang regressed ~18
-    // corpus designs that read_verilog lifts (measured 2026-07-25 lift sweep).
-    let read_cmds: Vec<String> = if use_slang {
-        let files = sources
-            .iter()
-            .map(|p| p.display().to_string())
-            .collect::<Vec<_>>()
-            .join(" ");
-        let top_arg = top.map(|t| format!(" --top {t}")).unwrap_or_default();
-        // The staging tempdir (parent of the sources) as an include dir, so a cross-file
-        // `\`include "peer.sv"` between staged sources resolves; plus any caller dirs.
-        let inc = sources
-            .first()
-            .and_then(|p| p.parent())
-            .map(|d| format!(" -I{}", d.display()))
-            .unwrap_or_default();
-        // Parameter overrides — slang (read_slang) fully ELABORATES at read time, so
-        // a post-read `chparam` finds nothing ("not parametric"). The Verilog-style
-        // `-G NAME=VALUE` override at read time is the right mechanism here; it is
-        // top-scoped, so a `MODULE.NAME` override applies by its bare name. (An
-        // unknown name is validated upstream against the slang AST — read_slang
-        // itself would silently ignore it.)
-        let param_g: String = params
-            .iter()
-            .map(|(lhs, val)| {
-                let name = lhs.rsplit('.').next().unwrap_or(lhs);
-                format!(" -G {name}={val}")
-            })
-            .collect();
-        vec![format!(
-            "read_slang --ignore-assertions --ignore-timing{top_arg}{param_g}{inc}{extra_inc} {files}"
-        )]
-    } else {
-        sources
-            .iter()
-            .map(|p| format!("read_verilog -formal -sv{extra_inc} {}", p.display()))
-            .collect()
-    };
-    // chparam is the read_verilog path's parameter-override mechanism (params stay
-    // unresolved until `hierarchy`, so a pre-`hierarchy` chparam applies and errors
-    // on an unknown name). The slang path uses `-G` at read time instead (above).
-    let chparam = if use_slang {
-        String::new()
-    } else {
-        build_chparam_passes(params, top)
-    };
+    // The read command(s) come from the caller — [`read_slang_cmd`] for the product lift, the
+    // oracle's `read_verilog` lines (with its `chparam` prefix) under `test_support` — and
+    // everything after the read is identical, so the lift is front-end-agnostic downstream.
     let hier = match top {
         Some(t) => format!("{chparam}hierarchy -top {t}"),
         None => format!("{chparam}hierarchy -auto-top"),
@@ -3155,7 +3063,11 @@ fn build_script(
     // The explicit control-slice cut points splice in just before `cutpoint -blackbox`
     // (both after `write_json`, before `memory_collect`/`flatten`).
     format!(
-        "{}; {hier}; {per_signal}proc; write_json {}; {cutpoints}cutpoint -blackbox; memory_collect; flatten; design -save mununu_pre_clocks; opt_clean; write_json {}; design -load mununu_pre_clocks; async2sync; chformal -lower; dffunmap; {setundef_pass}; write_btor {}",
+        // `delete =A:…` right after the snapshot: a stub marked [`MISSING_MODULE_ATTR`] has been
+        // named in the hierarchy JSON and is now removed, so its cell is undefined when the BTOR2 is
+        // written — the old reader's missing-module shape (anonymous inputs). The `=` includes
+        // black-box modules in the selection; with no such module the pass is a no-op.
+        "{}; {hier}; {per_signal}proc; write_json {}; delete =A:{MISSING_MODULE_ATTR}; {cutpoints}cutpoint -blackbox; memory_collect; flatten; design -save mununu_pre_clocks; opt_clean; write_json {}; design -load mununu_pre_clocks; async2sync; chformal -lower; dffunmap; {setundef_pass}; write_btor {}",
         read_cmds.join("; "),
         hier_json_out.display(),
         clock_json_path(btor_out).display(),
@@ -3331,8 +3243,51 @@ mod tests {
     use super::*;
     use crate::controllability::BoundaryDirection;
 
-    // P1.1 — Auto-frontend fallback attempt ordering (the slang branch itself needs the plugin /
-    // mununu-sva image; the ordering is deterministic + host-testable).
+    /// The product lift's script for `sources` — `read_slang_cmd` + `build_script`, composed
+    /// as `plan_lift` composes them; no staging, no tool.
+    fn slang_script(
+        sources: &[PathBuf],
+        top: Option<&str>,
+        cuts: &[String],
+        inc: &[PathBuf],
+        params: &[(String, String)],
+    ) -> String {
+        let overrides: InitPolicyOverrides = Vec::new();
+        build_script(
+            &[read_slang_cmd(sources, top, params, inc)],
+            "",
+            top,
+            Path::new("/tmp/out.btor"),
+            Path::new("/tmp/hier.json"),
+            false,
+            false,
+            &overrides,
+            cuts,
+        )
+    }
+
+    /// The dev-only oracle's script (`test_support`): `read_verilog` lines + `chparam`.
+    #[cfg(feature = "test_support")]
+    fn oracle_script(
+        sources: &[PathBuf],
+        top: Option<&str>,
+        inc: &[PathBuf],
+        params: &[(String, String)],
+    ) -> String {
+        let overrides: InitPolicyOverrides = Vec::new();
+        build_script(
+            &oracle_read_cmds(sources, inc),
+            &build_chparam_passes(params, top),
+            top,
+            Path::new("/tmp/out.btor"),
+            Path::new("/tmp/hier.json"),
+            false,
+            false,
+            &overrides,
+            &[],
+        )
+    }
+
     #[test]
     /// mununu#504 — a lift-subprocess timeout must produce an ACTIONABLE error naming the cap,
     /// not a bare failure. Pure mapper, so this runs without spawning anything.
@@ -3432,29 +3387,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn auto_frontend_attempt_order() {
-        // No slang plugin → the sole attempt is read_verilog (unchanged legacy behaviour).
-        assert_eq!(
-            frontend_attempt_order(false, false),
-            vec![SvFrontend::Verilog]
-        );
-        assert_eq!(
-            frontend_attempt_order(false, true),
-            vec![SvFrontend::Verilog]
-        );
-        // slang present, default preference → verilog first, slang fallback (broad default leads).
-        assert_eq!(
-            frontend_attempt_order(true, false),
-            vec![SvFrontend::Verilog, SvFrontend::Slang]
-        );
-        // MUNUNU_YOSYS_FRONTEND=slang flips the preference → slang first, verilog fallback.
-        assert_eq!(
-            frontend_attempt_order(true, true),
-            vec![SvFrontend::Slang, SvFrontend::Verilog]
-        );
-    }
-
     /// A design whose flops sit on two clock nets is refused at lift time; it used to lift as if
     /// both domains ticked together, and only clock-shaped input NAMES were refused, so
     /// `clk_src` / `clk_dst` passed silently. `merge_clock_domains` lifts it and reports the
@@ -3495,41 +3427,6 @@ endmodule
         )
         .expect("one clock lifts");
         assert_eq!(one.clock_domains.len(), 1);
-    }
-
-    // P1.1 — the Auto-frontend fallback, end-to-end. `read_verilog` rejects a module-header
-    // package import (`module m import p::*;`) with `unexpected TOK_IMPORT`; Auto must retry with
-    // slang and lift. (Unblocks OpenTitan-class designs — the roadmap's stated P1.1 blocker.)
-    // Needs the yosys-slang plugin ⇒ mununu-sva image.
-    #[test]
-    #[ignore = "requires the yosys-slang plugin (mununu-sva image)"]
-    fn e2e_auto_frontend_falls_back_to_slang_on_module_import() {
-        const IMPORT_SV: &str = "\
-package p; typedef enum logic [1:0] {A=0, B=1, C=2} st_e; endpackage
-module m import p::*; (input logic clk, output logic [1:0] o);
-  st_e s = A;
-  always_ff @(posedge clk) s <= (s == C) ? A : st_e'(s + 2'd1);
-  assign o = s;
-endmodule
-";
-        // Auto → read_verilog fails (TOK_IMPORT) → falls back to slang → lifts.
-        let auto = YosysOptions {
-            frontend: SvFrontend::Auto,
-            ..Default::default()
-        };
-        let btor2 = sv_to_btor2(IMPORT_SV, &auto)
-            .expect("Auto must fall back to slang and lift a module-header package import");
-        assert!(!btor2.is_empty(), "the fallback lift produced empty BTOR2");
-        // An EXPLICIT Verilog frontend must still FAIL on the same input — proving it is the
-        // fallback (not read_verilog) that lifted it, and that an explicit request is honoured.
-        let verilog = YosysOptions {
-            frontend: SvFrontend::Verilog,
-            ..Default::default()
-        };
-        assert!(
-            sv_to_btor2(IMPORT_SV, &verilog).is_err(),
-            "read_verilog must reject the module-header import (no silent fallback on explicit request)"
-        );
     }
 
     // A2 — port net-type stripping (`input tri0 x` → `input x`).
@@ -3607,7 +3504,7 @@ endmodule
         // A timed-out (killed) per-module yosys call must surface an ACTIONABLE
         // scope error — naming the cap, the small-fixture scope, and the
         // whole-design alternative — not hang and not a bare "failure".
-        let err = yosys_run_outcome_to_result(None, "write_btor …", Duration::from_secs(60))
+        let err = yosys_run_outcome_to_result(None, "write_btor …", Duration::from_secs(60), "")
             .expect_err("a timeout must be an error");
         assert_eq!(err.kind, AdapterErrorKind::ParseError);
         assert!(
@@ -3627,12 +3524,11 @@ endmodule
         );
     }
 
+    /// The lift's tool on this host: a yosys whose `read_slang` is built in (yosys ≥ 0.67, the
+    /// pinned image) or loadable from `MUNUNU_YOSYS_SLANG_PLUGIN`. A yosys without it (a brew
+    /// 0.59) SKIPS the lift tests here rather than failing them; the image runs them.
     fn yosys_available() -> bool {
-        Command::new("yosys")
-            .arg("-V")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+        super::yosys_can_read_slang()
     }
 
     // ----- R-MM-3: top-module instance connectivity parsing ----------
@@ -4042,6 +3938,81 @@ endmodule
     }
 
     #[test]
+    fn read_slang_hint_names_the_fix_for_each_failure_class() {
+        assert_eq!(read_slang_hint("ERROR: Design elaboration failed"), "");
+        let unknown = read_slang_hint("prim_count.sv:126:5: error: unknown module 'prim_flop'");
+        assert!(
+            unknown.contains("(* blackbox *)") && unknown.contains("blackboxed_modules"),
+            "{unknown}"
+        );
+        let missing = read_slang_hint("ERROR: No such command: read_slang");
+        assert!(missing.contains("yosys ≥ 0.67"), "{missing}");
+        let both =
+            read_slang_hint("No such command: read_slang\nx.sv:1:1: error: unknown module 'y'");
+        assert!(
+            both.contains("yosys ≥ 0.67") && both.contains("(* blackbox *)"),
+            "{both}"
+        );
+    }
+
+    #[test]
+    fn unknown_modules_are_read_off_the_lift_error() {
+        let msg = "adapter/yosys: yosys exited with status 1\nyosys log (errors):\n\
+                   k.sv:310:9: error: unknown module 'prim_secded_inv_72_64_dec'\n\
+                   k.sv:406:3: error: unknown module 'prim_count'\n\
+                   k.sv:406:3: error: unknown module 'prim_count'\n\
+                   ERROR: Design elaboration failed; see full log for details\n";
+        assert_eq!(
+            unknown_modules_in_error(msg),
+            vec![
+                "prim_count".to_string(),
+                "prim_secded_inv_72_64_dec".to_string()
+            ]
+        );
+        assert!(unknown_modules_in_error("ERROR: Design elaboration failed").is_empty());
+        assert!(unknown_modules_in_error("unknown module 'bad name'").is_empty());
+    }
+
+    /// The seam `verify_auto`'s auto-stub consumes: the names the error carries feed the stub
+    /// table, so a design whose FSM register is an undefined `prim_sparse_fsm_flop` gets the
+    /// behavioral stub from a FAILED lift exactly as it did from a succeeded-with-cuts one.
+    #[test]
+    fn unknown_modules_in_the_error_reach_the_flop_stub_table() {
+        let names = unknown_modules_in_error(
+            "x.sv:39:3: error: unknown module 'prim_sparse_fsm_flop'\n\
+             x.sv:90:3: error: unknown module 'prim_filter'",
+        );
+        let stubs = crate::adapter::slang::prim_stubs::stubs_for_cut_modules(&names);
+        assert_eq!(
+            stubs.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+            vec!["prim_sparse_fsm_flop.sv"]
+        );
+    }
+
+    #[test]
+    fn yosys_log_errors_keeps_the_diagnostics_quiet_mode_hides() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join("yosys.log");
+        std::fs::write(
+            &log,
+            "-- Running command `read_slang …' --\n\
+             prim_count.sv:126:5: error: unknown module 'prim_flop'\n\
+             prim_count.sv:126:5: error: unknown module 'prim_flop'\n\
+                 prim_flop #(\n\
+                 ^\n\
+             Build failed: 1 error, 0 warnings\n\
+             ERROR: Design elaboration failed; see full log for details\n",
+        )
+        .expect("write");
+        assert_eq!(
+            yosys_log_errors(&log),
+            "\nyosys log (errors):\nprim_count.sv:126:5: error: unknown module 'prim_flop'\n\
+             ERROR: Design elaboration failed; see full log for details\n"
+        );
+        assert_eq!(yosys_log_errors(&dir.path().join("missing.log")), "");
+    }
+
+    #[test]
     fn emit_cutpoints_empty_and_populated() {
         assert_eq!(emit_cutpoints(&[]), "");
         assert_eq!(
@@ -4056,27 +4027,31 @@ endmodule
         );
     }
 
+    /// The missing-module stub's deletion sits between the hierarchy snapshot (which names the
+    /// stub in `blackboxed_modules`) and `cutpoint -blackbox` (which would otherwise make it a
+    /// deliberate cut); the read keeps an empty module as a black box so the stub survives to the
+    /// snapshot at all.
+    #[test]
+    fn build_script_deletes_missing_module_stubs_after_the_snapshot() {
+        use std::path::PathBuf;
+        let script = slang_script(&[PathBuf::from("/tmp/foo.sv")], Some("top"), &[], &[], &[]);
+        let wj = script.find("write_json").expect("write_json present");
+        let del = script
+            .find(&format!("delete =A:{MISSING_MODULE_ATTR};"))
+            .expect("the delete present");
+        let cut = script
+            .find("cutpoint -blackbox")
+            .expect("cutpoint -blackbox present");
+        assert!(wj < del && del < cut, "{script}");
+        assert!(script.contains("--empty-blackboxes"), "{script}");
+    }
+
     #[test]
     fn build_script_injects_cutpoint_between_write_json_and_flatten() {
         use std::path::PathBuf;
         let sources = vec![PathBuf::from("/tmp/foo.sv")];
-        let btor = PathBuf::from("/tmp/out.btor");
-        let hier = PathBuf::from("/tmp/hier.json");
-        let overrides: InitPolicyOverrides = Vec::new();
         let cuts = vec!["must_refresh".to_string(), "precharge_done".to_string()];
-        let script = build_script(
-            &sources,
-            Some("top"),
-            &btor,
-            &hier,
-            false,
-            false,
-            &overrides,
-            &cuts,
-            false,
-            &[],
-            &[],
-        );
+        let script = slang_script(&sources, Some("top"), &cuts, &[], &[]);
         assert!(
             script.contains("cutpoint w:must_refresh w:precharge_done"),
             "explicit cut points missing from script: {script}"
@@ -4098,22 +4073,7 @@ endmodule
     fn build_script_without_cutpoints_has_no_explicit_cutpoint_pass() {
         use std::path::PathBuf;
         let sources = vec![PathBuf::from("/tmp/foo.sv")];
-        let btor = PathBuf::from("/tmp/out.btor");
-        let hier = PathBuf::from("/tmp/hier.json");
-        let overrides: InitPolicyOverrides = Vec::new();
-        let script = build_script(
-            &sources,
-            Some("top"),
-            &btor,
-            &hier,
-            false,
-            false,
-            &overrides,
-            &[],
-            false,
-            &[],
-            &[],
-        );
+        let script = slang_script(&sources, Some("top"), &[], &[], &[]);
         // The blackbox cut is always present; there must be no explicit `cutpoint w:` pass.
         assert!(script.contains("cutpoint -blackbox"));
         assert!(
@@ -4128,22 +4088,7 @@ endmodule
     fn build_script_slang_frontend_uses_read_slang() {
         use std::path::PathBuf;
         let sources = vec![PathBuf::from("/tmp/a.sv"), PathBuf::from("/tmp/b.sv")];
-        let btor = PathBuf::from("/tmp/out.btor");
-        let hier = PathBuf::from("/tmp/hier.json");
-        let overrides: InitPolicyOverrides = Vec::new();
-        let script = build_script(
-            &sources,
-            Some("top"),
-            &btor,
-            &hier,
-            false,
-            false,
-            &overrides,
-            &[],
-            true, // use_slang
-            &[],
-            &[],
-        );
+        let script = slang_script(&sources, Some("top"), &[], &[], &[]);
         assert!(
             script.contains("read_slang --ignore-assertions"),
             "slang read command missing: {script}"
@@ -4173,47 +4118,30 @@ endmodule
         );
     }
 
-    // (b) source-manifest lift — caller-supplied include dirs surface as
-    // attached `-I<dir>` flags on the read command (verified empirically to be
-    // the form yosys `read_verilog`/`read_slang` accept). Without them a
-    // `` `include "frag.vh" `` that lives outside the staging tempdir fails.
+    // (b) source-manifest lift — caller-supplied include dirs surface as attached `-I<dir>`
+    // flags on the read command (the form `read_slang` and `read_verilog` accept). Without
+    // them a `` `include "frag.vh" `` that lives outside the staging tempdir fails. The
+    // oracle's read lines carry them too (`test_support`).
+    #[cfg(feature = "test_support")]
     #[test]
-    fn build_script_read_verilog_forwards_extra_include_dirs() {
+    fn oracle_read_verilog_forwards_extra_include_dirs() {
         use std::path::PathBuf;
         let sources = vec![PathBuf::from("/tmp/top.v")];
-        let btor = PathBuf::from("/tmp/out.btor");
-        let hier = PathBuf::from("/tmp/hier.json");
-        let overrides: InitPolicyOverrides = Vec::new();
         let inc = vec![
             PathBuf::from("/design/include"),
             PathBuf::from("/design/rtl"),
         ];
-        let script = build_script(
-            &sources,
-            None,
-            &btor,
-            &hier,
-            false,
-            false,
-            &overrides,
-            &[],
-            false,
-            &inc,
-            &[],
-        );
-        assert!(
-            script.contains("read_verilog -formal -sv -I/design/include -I/design/rtl /tmp/top.v"),
-            "include dirs not forwarded to read_verilog: {script}"
+        assert_eq!(
+            oracle_read_cmds(&sources, &inc),
+            vec!["read_verilog -formal -sv -I/design/include -I/design/rtl /tmp/top.v"]
         );
     }
 
+    #[cfg(feature = "test_support")]
     #[test]
-    fn chparam_passes_scope_and_quote_correctly() {
+    fn oracle_chparam_passes_scope_and_quote_correctly() {
         use std::path::PathBuf;
         let sources = vec![PathBuf::from("/tmp/dut.sv")];
-        let btor = PathBuf::from("/tmp/o.btor");
-        let hier = PathBuf::from("/tmp/h.json");
-        let overrides: InitPolicyOverrides = Vec::new();
         // bare NAME → the top module; MODULE.NAME → that module; a non-integer
         // value is quoted; integers pass through.
         let params = vec![
@@ -4221,19 +4149,7 @@ endmodule
             ("u_sub.DEPTH".to_string(), "8".to_string()),
             ("MODE".to_string(), "fast".to_string()),
         ];
-        let script = build_script(
-            &sources,
-            Some("dut"),
-            &btor,
-            &hier,
-            false,
-            false,
-            &overrides,
-            &[],
-            false,
-            &[],
-            &params,
-        );
+        let script = oracle_script(&sources, Some("dut"), &[], &params);
         assert!(
             script.contains("chparam -set INIT_WAIT 4 dut"),
             "bare NAME → top module: {script}"
@@ -4256,26 +4172,11 @@ endmodule
     fn slang_frontend_uses_param_g_not_chparam() {
         use std::path::PathBuf;
         let sources = vec![PathBuf::from("/tmp/dut.sv")];
-        let btor = PathBuf::from("/tmp/o.btor");
-        let hier = PathBuf::from("/tmp/h.json");
-        let overrides: InitPolicyOverrides = Vec::new();
         let params = vec![
             ("INIT_WAIT".to_string(), "4".to_string()),
             ("u_sub.DEPTH".to_string(), "8".to_string()),
         ];
-        let script = build_script(
-            &sources,
-            Some("dut"),
-            &btor,
-            &hier,
-            false,
-            false,
-            &overrides,
-            &[],
-            true, // use_slang
-            &[],
-            &params,
-        );
+        let script = slang_script(&sources, Some("dut"), &[], &[], &params);
         // slang elaborates at read time, so it takes `-G NAME=VALUE` overrides —
         // chparam (which the read_verilog path uses) would be too late.
         assert!(script.contains("read_slang"), "{script}");
@@ -4293,6 +4194,7 @@ endmodule
         );
     }
 
+    #[cfg(feature = "test_support")]
     #[test]
     fn chparam_bare_name_without_top_has_no_module_selection() {
         // Auto-top: a bare NAME gets no module selection — yosys applies it where
@@ -4304,34 +4206,14 @@ endmodule
         assert_eq!(build_chparam_passes(&[], Some("top")), "");
     }
 
+    #[cfg(feature = "test_support")]
     #[test]
-    fn build_script_read_verilog_no_include_dirs_is_unchanged() {
+    fn oracle_read_verilog_without_include_dirs_has_no_dash_i() {
         use std::path::PathBuf;
         let sources = vec![PathBuf::from("/tmp/top.v")];
-        let btor = PathBuf::from("/tmp/out.btor");
-        let hier = PathBuf::from("/tmp/hier.json");
-        let overrides: InitPolicyOverrides = Vec::new();
-        let script = build_script(
-            &sources,
-            None,
-            &btor,
-            &hier,
-            false,
-            false,
-            &overrides,
-            &[],
-            false,
-            &[],
-            &[],
-        );
-        // Empty extra include dirs → no `-I` on the read command (historical form).
-        assert!(
-            script.contains("read_verilog -formal -sv /tmp/top.v"),
-            "read command changed shape with no include dirs: {script}"
-        );
-        assert!(
-            !script.contains(" -I"),
-            "no `-I` should appear when no include dirs are supplied: {script}"
+        assert_eq!(
+            oracle_read_cmds(&sources, &[]),
+            vec!["read_verilog -formal -sv /tmp/top.v"]
         );
     }
 
@@ -4341,26 +4223,11 @@ endmodule
     fn build_script_read_slang_forwards_extra_include_dirs() {
         use std::path::PathBuf;
         let sources = vec![PathBuf::from("/stage/a.sv")];
-        let btor = PathBuf::from("/tmp/out.btor");
-        let hier = PathBuf::from("/tmp/hier.json");
-        let overrides: InitPolicyOverrides = Vec::new();
         let inc = vec![PathBuf::from("/design/pkg")];
-        let script = build_script(
-            &sources,
-            None,
-            &btor,
-            &hier,
-            false,
-            false,
-            &overrides,
-            &[],
-            true,
-            &inc,
-            &[],
-        );
+        let script = slang_script(&sources, None, &[], &inc, &[]);
         assert!(
             script.contains(
-                "read_slang --ignore-assertions --ignore-timing -I/stage -I/design/pkg /stage/a.sv"
+                "read_slang --ignore-assertions --ignore-timing --empty-blackboxes -I/stage -I/design/pkg /stage/a.sv"
             ),
             "caller include dir not appended on the slang path: {script}"
         );
@@ -4390,7 +4257,6 @@ endmodule
         let with_inc = YosysOptions {
             top: Some("top".to_string()),
             extra_include_dirs: vec![inc.clone()],
-            skip_verific_check: true,
             ..Default::default()
         };
         let lifted = sv_to_btor2(top, &with_inc);
@@ -4403,7 +4269,6 @@ endmodule
         // cannot be resolved, so the lift fails cleanly rather than silently.
         let no_inc = YosysOptions {
             top: Some("top".to_string()),
-            skip_verific_check: true,
             ..Default::default()
         };
         assert!(
@@ -4412,14 +4277,12 @@ endmodule
         );
     }
 
-    // (a) front-end selection — a non-constant `while` loop is rejected by yosys
-    // `read_verilog` ("While loops are only allowed in constant functions!") but
-    // accepted by the slang front-end (`read_slang`), which elaborates it. This is
-    // the real corpus lift blocker the slang front-end unlocks (e.g. AssertLLM2
-    // `xgate`). yosys + yosys-slang-plugin gated → runs in the `mununu-sva` image.
+    // (a) a non-constant `while` loop — rejected by yosys `read_verilog` ("While loops are
+    // only allowed in constant functions!"), the real corpus lift blocker (AssertLLM2 `xgate`)
+    // — elaborates under `read_slang`. yosys + read_slang gated → the `mununu-sva` image.
     #[test]
-    #[ignore = "requires yosys + the yosys-slang plugin (run in the mununu-sva image)"]
-    fn frontend_slang_lifts_while_loop_read_verilog_rejects() {
+    #[ignore = "requires yosys with read_slang (run in the mununu-sva image)"]
+    fn slang_lifts_a_non_constant_while_loop() {
         let src = "module m(input [3:0] n, output reg [7:0] y);\n\
                    integer i;\n\
                    always @* begin\n\
@@ -4427,24 +4290,8 @@ endmodule
                      while (i < n) begin y = y + 8'd1; i = i + 1; end\n\
                    end\n\
                    endmodule\n";
-
-        // read_verilog rejects the non-constant while loop.
-        let verilog = YosysOptions {
-            top: Some("m".to_string()),
-            frontend: SvFrontend::Verilog,
-            skip_verific_check: true,
-            ..Default::default()
-        };
-        assert!(
-            sv_to_btor2(src, &verilog).is_err(),
-            "read_verilog should reject a non-constant while loop"
-        );
-
-        // The slang front-end elaborates it → the design lifts.
         let slang = YosysOptions {
             top: Some("m".to_string()),
-            frontend: SvFrontend::Slang,
-            skip_verific_check: true,
             ..Default::default()
         };
         let lifted = sv_to_btor2(src, &slang);
@@ -4520,7 +4367,7 @@ endmodule
                     "cells": {
                         "u_x": { "type": "prim_x" },
                         "u_dff": { "type": "$dff" },
-                        "u_ghost": { "type": "prim_sparse_fsm_flop_B4CDB_707CE" }
+                        "u_ghost": { "type": "prim_sparse_fsm_flop" }
                     }
                 },
                 "prim_x": {
@@ -4658,10 +4505,18 @@ endmodule
 
     // ----- Yosys subprocess integration tests (require yosys binary) -
 
+    /// `locate_yosys` is about the binary, not about `read_slang`: a yosys without it (a brew
+    /// 0.59) is still located — the lift then fails with the hint — so this probes `yosys -V`,
+    /// not [`yosys_available`].
     #[test]
     fn locate_yosys_finds_binary_or_errors() {
         let res = locate_yosys();
-        if yosys_available() {
+        let binary_present = Command::new("yosys")
+            .arg("-V")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if binary_present {
             assert!(res.is_ok());
         } else {
             assert!(res.is_err());
@@ -4813,9 +4668,10 @@ endmodule
         assert!(gap_sidecars[0].content.contains("output_sequencing"));
     }
 
-    // ----- sv2v preprocessor integration -----------------------------
+    // ----- the dev-only read_verilog + sv2v oracle (`test_support`) ---------
 
     /// Probe whether `sv2v` is on PATH. Mirrors `yosys_available()`.
+    #[cfg(feature = "test_support")]
     fn sv2v_available() -> bool {
         Command::new("sv2v")
             .arg("--version")
@@ -4824,6 +4680,7 @@ endmodule
             .unwrap_or(false)
     }
 
+    #[cfg(feature = "test_support")]
     #[test]
     fn sv2v_preprocesses_module_header_import_then_yosys_succeeds() {
         if !yosys_available() || !sv2v_available() {
@@ -4862,7 +4719,7 @@ endmodule
         let opts = AdapterOptions::default();
         let yopts = YosysOptions {
             top: Some("dut".into()),
-            use_sv2v: true,
+            frontend: SvFrontend::Verilog,
             ..Default::default()
         };
         let out = translate_sv(sv, &opts, &yopts).expect("sv2v + yosys translate");
@@ -4873,6 +4730,7 @@ endmodule
         );
     }
 
+    #[cfg(feature = "test_support")]
     #[test]
     fn sv2v_multi_file_cross_package_imports() {
         if !yosys_available() || !sv2v_available() {
@@ -4901,7 +4759,7 @@ endpackage
         let yopts = YosysOptions {
             top: Some("top".into()),
             additional_sources: vec![("shared_pkg.sv".into(), additional.into())],
-            use_sv2v: true,
+            frontend: SvFrontend::Verilog,
             ..Default::default()
         };
         let out = translate_sv(primary, &opts, &yopts).expect("sv2v multi-file translate");
@@ -4914,6 +4772,7 @@ endpackage
         );
     }
 
+    #[cfg(feature = "test_support")]
     #[test]
     fn sv2v_include_resolves_staged_additional_source_header() {
         if !yosys_available() || !sv2v_available() {
@@ -4945,7 +4804,7 @@ endmodule
             // No `primary_source_path` (the verify-path shape). The header
             // resolves only because the staging tempdir is on sv2v's `-I`.
             additional_sources: vec![("defs.svh".into(), header.into())],
-            use_sv2v: true,
+            frontend: SvFrontend::Verilog,
             ..Default::default()
         };
         let out = translate_sv(primary, &opts, &yopts)
@@ -4979,7 +4838,6 @@ endmodule
 "#;
         let yopts = YosysOptions {
             top: Some("dut".into()),
-            use_sv2v: false,
             ..Default::default()
         };
         let cells = sv_discover_state_cells(dut, &yopts).expect("discover state cells");
@@ -4994,6 +4852,7 @@ endmodule
         );
     }
 
+    #[cfg(feature = "test_support")]
     #[test]
     fn sv2v_missing_tool_errors_cleanly() {
         // Point MUNUNU_SV2V_PATH at a definitely-missing file to make
@@ -5016,7 +4875,7 @@ endmodule
         let opts = AdapterOptions::default();
         let yopts = YosysOptions {
             top: Some("empty".into()),
-            use_sv2v: true,
+            frontend: SvFrontend::Verilog,
             ..Default::default()
         };
         let res = translate_sv(sv, &opts, &yopts);
@@ -5036,31 +4895,16 @@ endmodule
     }
 
     #[test]
-    fn strip_sv2v_mangle_demangles_param_suffix() {
-        // sv2v's `_<HEX>_<HEX>` parameter-specialisation suffix is stripped.
-        assert_eq!(
-            strip_sv2v_mangle("prim_sparse_fsm_flop_B4CDB_707CE"),
-            "prim_sparse_fsm_flop"
-        );
-        // A plain module name is untouched.
-        assert_eq!(
-            strip_sv2v_mangle("prim_sparse_fsm_flop"),
-            "prim_sparse_fsm_flop"
-        );
-        // A name with only one trailing hex group is untouched (not the sv2v shape).
-        assert_eq!(strip_sv2v_mangle("foo_DEAD"), "foo_DEAD");
-    }
-
-    #[test]
     fn parse_undefined_module_cells_finds_dangling_instance() {
         // A module that instantiates an undefined cell type (the csrng
         // prim_sparse_fsm_flop shape) — yosys leaves it as a dangling cell, not
-        // a blackbox module, so it must be found via the cell scan.
+        // a blackbox module, so it must be found via the cell scan. (The name is the
+        // plain one: the sv2v `_HEX_HEX` specialisation suffix left with sv2v, 2026-11-04.)
         let hier = r#"{
           "modules": {
             "top": {
               "cells": {
-                "u_state_regs": { "type": "prim_sparse_fsm_flop_B4CDB_707CE" },
+                "u_state_regs": { "type": "prim_sparse_fsm_flop" },
                 "an_and": { "type": "$and" },
                 "u_sub": { "type": "defined_sub" }
               }
@@ -5181,9 +5025,9 @@ mod lift_cache_tests {
         }
     }
 
-    /// Without a tool on the host: the manifest of a `read_verilog` lift carries the staged
-    /// primary as `work.sv`, the exact script against the placeholder directory, one attempt,
-    /// and moves with the top, a parameter, an additional source — and not with
+    /// Without a tool on the host: the manifest of a lift carries the staged primary as
+    /// `work.sv`, the exact `read_slang` script against the placeholder directory, and moves
+    /// with the top, a parameter, an additional source — and not with
     /// `merge_clock_domains`, which the hit re-applies instead of keying on.
     #[test]
     fn the_manifest_renders_the_plan_the_run_executes() {
@@ -5191,24 +5035,23 @@ mod lift_cache_tests {
             "module m(input clk, input d, output reg q); always @(posedge clk) q <= d; endmodule\n";
         let base = YosysOptions {
             top: Some("m".into()),
-            frontend: SvFrontend::Verilog,
             ..Default::default()
         };
         let m = lift_manifest(src, &base, yosys_id()).expect("manifest");
         assert_eq!(m.format, LIFT_CACHE_FORMAT);
         assert_eq!(m.staged, vec![("work.sv".to_string(), src.to_string())]);
-        assert_eq!(m.attempts.len(), 1);
-        assert_eq!(m.attempts[0].frontend, "verilog");
-        assert!(!m.attempts[0].cwd_in_staging_dir);
-        assert!(m.attempts[0].plugin.is_none() && m.attempts[0].sv2v.is_none());
+        assert_eq!(m.attempt.frontend, "slang");
+        assert!(!m.attempt.cwd_in_staging_dir);
+        assert!(m.attempt.plugin.is_none() && m.attempt.sv2v.is_none());
         assert!(
-            m.attempts[0]
-                .script
-                .contains("read_verilog -formal -sv /mununu-lift-cache/staging/work.sv"),
+            m.attempt.script.contains(
+                "read_slang --ignore-assertions --ignore-timing --empty-blackboxes --top m \
+                 -I/mununu-lift-cache/staging /mununu-lift-cache/staging/work.sv"
+            ),
             "{}",
-            m.attempts[0].script
+            m.attempt.script
         );
-        assert!(m.attempts[0].script.contains("hierarchy -top m"));
+        assert!(m.attempt.script.contains("hierarchy -top m"));
         assert!(m.include_files.is_empty());
         let key = |y: &YosysOptions, s: &str| {
             LiftCacheKey::new(&lift_manifest(s, y, yosys_id()).expect("manifest"))
@@ -5256,7 +5099,6 @@ mod lift_cache_tests {
         std::fs::write(dir.path().join("defs.svh"), "`define W 4\n").expect("write");
         let src = "`include \"defs.svh\"\nmodule m; endmodule\n";
         let y = YosysOptions {
-            frontend: SvFrontend::Verilog,
             extra_include_dirs: vec![dir.path().to_path_buf()],
             ..Default::default()
         };
@@ -5293,24 +5135,16 @@ mod lift_cache_tests {
         assert_eq!(second.clock_domains, first.clock_domains);
         assert_eq!(second.frontend_used, first.frontend_used);
         assert_eq!(second.staged_primary, first.staged_primary);
-        assert_eq!(second.sv2v_ran, first.sv2v_ran);
-        // Two UNCACHED lifts are never byte-identical: yosys writes the per-run staging path
-        // into the BTOR2's `src` comments (`; /tmp/mununu-yosys-…/work.sv:1.16-1.19`), which
-        // downstream reads by basename only. Compare modulo that path; a hit reproduces the
-        // first run's, exactly as the uncached run's survives its deleted temp dir.
-        let modulo_staging =
-            |a: &SvFlattenArtifacts| a.btor2.replace(&a.staged_primary, "<staged>");
+        // sv-elab writes no per-run path into the BTOR2 (`read_verilog`'s `src` comments carried
+        // the staging directory, which is why this compared modulo it until 2026-11-04), so an
+        // uncached lift and a hit are byte-identical; what tells them apart is `cache`.
         let changed = src.replace("q <= d", "q <= ~d");
         let third = run_sv_flatten_btor2_with(&changed, &yopts, Some(&cache)).expect("lifts");
         assert_eq!(third.cache, LiftCacheOutcome::Miss);
-        assert_ne!(modulo_staging(&third), modulo_staging(&first));
+        assert_ne!(third.btor2, first.btor2);
         let off = run_sv_flatten_btor2_with(src, &yopts, None).expect("lifts");
         assert_eq!(off.cache, LiftCacheOutcome::Off);
-        assert_eq!(modulo_staging(&off), modulo_staging(&first));
-        assert_ne!(
-            off.btor2, first.btor2,
-            "the staging path differs per uncached run"
-        );
+        assert_eq!(off.btor2, first.btor2);
         // An unusable cache directory is a bypass, never a failure.
         std::fs::write(dir.path().join("file"), b"").expect("write");
         let blocked = LiftCache::at(dir.path().join("file"));

@@ -31,7 +31,7 @@ if [[ ! -x "${MUNUNU}" ]]; then
   echo "             build it first with: cargo build -p mununu-cli" >&2
   exit 2
 fi
-for tool in yosys sv2v; do
+for tool in yosys; do
   if ! command -v "${tool}" >/dev/null 2>&1; then
     echo "validate.sh: required tool '${tool}' not on PATH" >&2
     exit 2

@@ -317,8 +317,7 @@ mod tests {
                 blackboxed_modules: vec!["m".into()],
                 gated_resets: vec!["rst_n=1".into()],
                 auto_provided_stubs: vec![],
-                frontend: Some("read_verilog + sv2v".into()),
-                frontend_fallback_reason: Some("slang errored".into()),
+                frontend: Some("yosys-slang (read_slang)".into()),
                 lift_retry: Some("the BTOR backend reported a topological loop".into()),
                 merged_clock_domains: vec![
                     "clk_a (posedge, 3 cells)".into(),
@@ -464,7 +463,7 @@ mod tests {
         );
         assert_eq!(doc["properties"][1]["false_cells"], 3);
         assert_eq!(doc["properties"][3]["skip_reason"], "bit cap");
-        assert_eq!(doc["diagnostics"]["frontend"], "read_verilog + sv2v");
+        assert_eq!(doc["diagnostics"]["frontend"], "yosys-slang (read_slang)");
         assert_eq!(doc["diagnostics"]["config_values"][0], "cfg=7");
         assert_eq!(doc["diagnostics"]["cutpoints"][0], "fits");
         assert_eq!(
@@ -480,26 +479,6 @@ mod tests {
     /// `CexCellView`, `VerificationNoteView`, `ModelDiagnosticsView`,
     /// `UnsupportedAssertionView`. Guards against silent removal of a
     /// documented type from the schema tree.
-    /// 0.5.1 — `lift.frontend: "sv2v"` must keep the pre-0.5 `--preprocess-sv2v` semantics: sv2v
-    /// first, then the `auto` attempt order, whose slang fallback lifts what sv2v cannot parse
-    /// (a `bind` checker). 0.5.0 mapped it to a forced `read_verilog` with no fallback, so every
-    /// design with a bound checker failed to lift.
-    #[test]
-    fn the_sv2v_frontend_keeps_the_auto_fallback() {
-        let lift: super::super::models::SvLiftRequest = serde_json::from_value(serde_json::json!({
-            "source": "module m; endmodule",
-            "frontend": "sv2v"
-        }))
-        .expect("parses");
-        let core = lift.to_sv_lift().expect("converts");
-        assert!(core.use_sv2v, "sv2v runs first");
-        assert_eq!(
-            core.frontend,
-            crate::adapter::yosys::SvFrontend::Auto,
-            "the auto order (and its slang fallback) follows"
-        );
-    }
-
     #[test]
     fn response_schema_references_documented_types() {
         let s = sv_verify_auto_response_schema();

@@ -35,7 +35,7 @@ Read the figures from the structured fields, not from prose:
 | why a property was skipped | `properties[].skip_reason` | `detail` |
 | why an assertion is missing | `unsupported[].reason` | the `[unsupported]` transcript line |
 | a scope caveat to act on | `notes[].level == "scope-caveat"` | string-matching `summary` |
-| what the run was scoped to | `diagnostics.config_values` / `.cutpoints` / `.frontend` | the `config-concretization` / `control-slice` / `lift-frontend` note prose |
+| what the run was scoped to | `diagnostics.config_values` / `.cutpoints` (`.frontend` is provenance, `"yosys-slang (read_slang)"` on every product lift since 2026-11-04) | the `config-concretization` / `control-slice` note prose |
 
 `detail` remains for existing consumers, but it is prose and should be treated as such.
 
@@ -183,8 +183,8 @@ Rust source: [`Trace`](../../crates/mununu-core/src/api/models.rs) + [`CexCellVi
 
 - `sources` — the legend (2026-10-29): the first step's registers then its inputs, each with its
   declaration and, for a register, the `always` block(s) driving it — from yosys's netlist
-  attributes when present, from slang's AST otherwise, on every front end (since 2026-10-30 the
-  sv2v path takes both halves from the AST); `diagnostics.source_map.status` is `available`, `partial` (with what is missing in
+  attributes when present, from slang's AST otherwise (one front end, yosys-slang, since
+  2026-11-04); `diagnostics.source_map.status` is `available`, `partial` (with what is missing in
   `reason`) or `unavailable`; the key is omitted when nothing could be placed.
 - `slice` — the trace-relative slice (2026-10-30): for each step `cycle`, the RTL lines that
   decided the values the property read at that step, each with `file`, `line` and `text` (the line
@@ -193,8 +193,8 @@ Rust source: [`Trace`](../../crates/mununu-core/src/api/models.rs) + [`CexCellVi
   (`case`, `if` lines) that selected them. Omitted when empty.
 - `slice_status` — `exact` (every cell on the path evaluated), `widened` (a cell type the evaluator
   does not know kept its whole fan-in; `reason` names the types — the slice is never smaller than
-  the truth) or `unavailable` (`reason`: the sv2v front end rewrote the source, no netlist because
-  the model was a BTOR2 given directly, the property reads no public net). Present on every RTL
+  the truth) or `unavailable` (`reason`: no netlist because the model was a BTOR2 given directly,
+  the property reads no public net). Present on every RTL
   trace a slice was attempted for; absent on a CTXDSL path.
 - `repair_candidates` — present when `localize` / `--localize` was requested and found candidates
   (2026-10-30): the registers whose next-state function, freed at `cycles` (with the override
@@ -224,7 +224,7 @@ Rust source: [`Trace`](../../crates/mununu-core/src/api/models.rs) + [`CexCellVi
 
 **`notes`** — provenance / scope / soundness paragraph objects. Each has:
 
-- `kind` — kebab-case category, e.g. `"config-concretization"`, `"antecedent-shadow"`, `"parameter-override"`, `"control-slice"`, `"lift-frontend"`.
+- `kind` — kebab-case category, e.g. `"config-concretization"`, `"antecedent-shadow"`, `"parameter-override"`, `"control-slice"`, `"lift-retry"`.
 - `level` — `"info"` | `"scope-caveat"` | `"soundness-caveat"`.
 - `summary` — one-line human line.
 - `detail` — longer explanation of the why + implication.

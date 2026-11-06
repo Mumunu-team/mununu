@@ -70,7 +70,7 @@ cargo build -p mununu-cli
 examples/verify/r46_pattgen_per_cluster/validate.sh
 ```
 
-Requires `yosys` and `sv2v` on `PATH`.
+Requires `yosys` (with `read_slang`) on `PATH`.
 
 ## Provenance / claims integrity
 

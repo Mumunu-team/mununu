@@ -57,7 +57,7 @@ FROM rust:${RUST_VERSION}-slim-trixie
 #   docker run --cap-add=SYS_PTRACE --security-opt seccomp=unconfined \
 #     -v "$(pwd)":/work -w /work mununu-dev \
 #     gdb --batch -ex run -ex "bt 40" -ex "bt -20" \
-#       --args ./mununu sv verify-auto <design> --frontend slang
+#       --args ./mununu sv verify-auto <design>
 #
 # `bt 40` shows the recursion cycle, `bt -20` the entry path; the other ~40k frames are noise.
 RUN apt-get update && apt-get install -y --no-install-recommends \

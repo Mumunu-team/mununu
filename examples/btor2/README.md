@@ -31,7 +31,7 @@ A 2-client round-robin arbiter with a 1-bit priority pointer. The user-named sta
 
 ### `handshake_protocol.sv` — AMBA-style valid/ready handshake (H1 only)
 
-A small FSM that asserts `valid` on `request`, holds it until `ready`, then idles. Phase 5A's H1 (handshake stability) is encoded with a shadow register — `(valid && !ready)` last cycle implies `valid` this cycle. 32 states. Phase 5A's S1 (`$stable(payload)`) requires a second shadow register and adds enough state to push the design past the cap; it ships when compositional decomposition (Phase 3) lands or when sv2v preprocessing is wired in.
+A small FSM that asserts `valid` on `request`, holds it until `ready`, then idles. Phase 5A's H1 (handshake stability) is encoded with a shadow register — `(valid && !ready)` last cycle implies `valid` this cycle. 32 states. Phase 5A's S1 (`$stable(payload)`) requires a second shadow register and adds enough state to push the design past the cap; it ships when compositional decomposition (Phase 3) lands.
 
 ### `bounded_counter_with_assume.sv` — environment assume + safety
 
@@ -39,7 +39,7 @@ A 3-bit saturating counter with an `assume`-based environment constraint ("rst i
 
 ## Yosys SVA support — what the built-in parser actually accepts
 
-**Scope: the yosys `read_verilog` lift used by this corpus** (`btor2 from-sv`, plain `sv verify-bad`). Temporal SVA is not lost to mununu — `sv verify-auto` elaborates the design with slang and translates `assert property` itself; its fragment is listed in [`docs/verifying-rtl.md` §3](../../docs/verifying-rtl.md#3-coverage-is-a-fragment-and-verdicts-are-honest). What follows is what the **yosys** frontend accepts. Yosys 0.59's `read_verilog -formal -sv` is a synthesis frontend, not a full SystemVerilog assertion frontend. It accepts:
+**Scope: the hand-run yosys `read_verilog -formal -sv` script below, which produced this corpus's `.btor` files.** Temporal SVA is not lost to mununu — `sv verify-auto` elaborates the design with slang and translates `assert property` itself; its fragment is listed in [`docs/verifying-rtl.md` §3](../../docs/verifying-rtl.md#3-coverage-is-a-fragment-and-verdicts-are-honest). mununu's own SV → BTOR2 lift is yosys-slang's `read_slang --ignore-assertions` (slang-only since 2026-11-04; the SVA is extracted separately by slang) — what follows is what **yosys's built-in `read_verilog`** frontend accepts when you run it by hand. Yosys 0.59's `read_verilog -formal -sv` is a synthesis frontend, not a full SystemVerilog assertion frontend. It accepts:
 
 - **Immediate assertions** inside `always @(posedge clk)`: `assert (boolean_expr);`
 - **Immediate assumes / covers**: `assume (...)`, `cover (...)`
@@ -112,13 +112,9 @@ Replacing `"sv-yosys"` with `"btor2"` and `$SV` with the contents of `safety_dem
 - **Implicit clock is sound for posedge-only single-clock designs.** Multi-clock and negedge are explicitly rejected at read time. The "one CLTS transition = one posedge" mapping is exact under that scope.
 - **`async2sync` preserves synchronous structure** for both register cells and `chformal`-lowered assertions. The user-named state cells get one BTOR2 `state` line each (no shadow / previous-clk auxiliaries), and assertion-tracking latches that `chformal -lower` introduces are real synthetic state — they encode the temporal property "the assertion has fired in some prior cycle" — not edge detection.
 - **`setundef -zero`** in the Yosys script makes X / undef bits deterministic (bit-blaster does not model X-prop). For X-aware verification, route through a commercial flow; that is out of mununu's roadmap scope.
-- **Verific check** at runtime: the driver refuses to use a yosys binary built with the commercial Verific frontend (license-incompatible). See [`adapter::yosys::verify_no_verific`](../../crates/mununu-core/src/adapter/yosys/mod.rs).
+- **No Verific** — the driver never enables Yosys's optional commercial Verific frontend (license-incompatible); the RTL front end is yosys-slang's `read_slang`, loaded with `-m` only when `MUNUNU_YOSYS_SLANG_PLUGIN` names a plugin. See the module header of [`adapter::yosys`](../../crates/mununu-core/src/adapter/yosys/mod.rs).
 - **`chformal -lower` property-tracking latches** are real CLTS state — they encode "the assertion has fired in some prior cycle." They appear in state names as anonymous `st<idx>_n<nid>` symbols and are filtered out of `StateSpec.valuations` so user-written formulas don't accidentally reference them.
 
-## Optional sv2v preprocessing (modern SV dialect)
+## Modern SV dialect (module-header `import pkg::*;`, packages, interfaces)
 
-Yosys's built-in parser rejects the SV2009/2012 module-header `import pkg::*;` syntax used by Caliptra-RTL, OpenTitan, ibex, cv32e40p, and similar open-source RTL. The mununu sv-yosys driver can optionally run [zachjs/sv2v](https://github.com/zachjs/sv2v) as a preprocessing pass.
-
-**Opt in** via either `MUNUNU_USE_SV2V=1` (env var) or `YosysOptions.use_sv2v = true` (programmatic). Requires `sv2v` (≥ 0.0.10 recommended) on `$PATH` or in `MUNUNU_SV2V_PATH`. See [`adapter::yosys::run_sv2v`](../../crates/mununu-core/src/adapter/yosys/mod.rs).
-
-**What it does.** Before the Yosys subprocess, the driver invokes `sv2v -I<source-parent-dir> <all-input-sv>`, captures stdout into a temp `preprocessed.sv`, and feeds that single Verilog-2005 file to Yosys. Cross-file package resolution uses sv2v's documented multi-file mode — pass related `.sv` files together via `YosysOptions::additional_sources` so sv2v resolves them in one pass. `\`include` directives are searched relative to the source's parent directory.
+Yosys's built-in `read_verilog` rejects the SV2009/2012 module-header `import pkg::*;` syntax used by Caliptra-RTL, OpenTitan, ibex, cv32e40p, and similar open-source RTL. mununu's driver does not use it: the lift is yosys-slang's `read_slang`, a full SystemVerilog front end, which reads all the sources in one command (`YosysOptions::additional_sources`, `-I<staging dir>` plus any `--include-dir`). The former sv2v preprocessing pass (`MUNUNU_USE_SV2V`, `use_sv2v`, `sv preprocess`) was removed with the slang-only lift (2026-11-04); sv2v survives only as the dev-only differential oracle of `test_support` builds. See [`plan_lift`](../../crates/mununu-core/src/adapter/yosys/mod.rs).

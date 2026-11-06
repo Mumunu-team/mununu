@@ -46,7 +46,7 @@ LIBRARY_PATH=/usr/local/opt/z3/lib cargo build -p mununu-cli   # once
 examples/verify/v8_csrng_escalation_recoverability/validate.sh
 ```
 
-Requires `sv2v` and `yosys` on `PATH` (and `z3`). The script annotates a temp copy of
+Requires `yosys` ≥ 0.67 (with `read_slang`) on `PATH` (and `z3`). The script annotates a temp copy of
 `csrng_main_sm.sv` with the recoverability guarantee, runs `sv verify-auto --engine
 exact-symbolic` twice (with and without the `local_escalate_i=0` assumption), and
 checks the flip.

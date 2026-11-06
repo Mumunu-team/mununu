@@ -551,7 +551,6 @@ Import an external format (XState, SystemVerilog, TLSF, AIGER, BTOR2, Promela, C
 | `filename` | `string \| null` | No | Original filename (used for extension-based detection if format is `"auto"`). |
 | `sidecar` | `string \| null` | No | Optional sidecar content (`.mununu.json` for SV, `.espec.json` for extraction). Drives abstraction/property configuration. |
 | `additional_sources` | `FileContent[]` | No | Extra SV source files to compile alongside the primary input (Yosys path). Each entry: `{name, content}`. |
-| `use_sv2v` | `boolean` | No | When `format == "sv-yosys"`, run the `sv2v` preprocessor before Yosys. Required for modern SV dialects. Mirrors the CLI `--preprocessor sv2v`. Defaults to `false`. |
 | `predicates` | `PredicateSpecRequest[]` | No | Predicate set for the controllability-aware predicate-cube lift. Each entry: `{name, register, value}`. When non-empty (with `controllable_inputs`) and `format` produces BTOR2, the predicate-cube lift runs and a KMTS is returned. Mirrors `--predicate [NAME:]REG == VALUE`. |
 | `controllable` | `string[]` | No | Names of BTOR2 input symbols the controller drives. Mirrors `--controllable`. Enables the controllability-aware lift when combined with `predicates`. |
 | `sv_source_path` | `string \| null` | No | Filesystem path to the original SV source. With a `simulate_reset` sidecar block and a discoverable Verilator, runs a short reset simulation. Mirrors `--sv-source`. |
@@ -771,7 +770,7 @@ curl -X POST http://localhost:3000/api/v1/btor2/cegar \
 
 ## POST /api/v1/sv/cegar
 
-SV-direct CEGAR (cegar-extraction Stage 2): lift a SystemVerilog design to a single flattened BTOR2 (sv2v + Yosys) in one call, then run the same predicate-abstraction refinement loop as [`/api/v1/btor2/cegar`](#post-apiv1btor2cegar) and return the same response. Mirrors `mununu sv cegar`. Lets an SV workflow run CEGAR without a manual emit-BTOR2-per-module step.
+SV-direct CEGAR (cegar-extraction Stage 2): lift a SystemVerilog design to a single flattened BTOR2 (yosys-slang `read_slang` + Yosys) in one call, then run the same predicate-abstraction refinement loop as [`/api/v1/btor2/cegar`](#post-apiv1btor2cegar) and return the same response. Mirrors `mununu sv cegar`. Lets an SV workflow run CEGAR without a manual emit-BTOR2-per-module step.
 
 > Source of truth: [`api::handlers::sv_cegar_handler`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/api/handlers.rs) — surface: API.
 
@@ -781,7 +780,7 @@ The CEGAR fields (`formula`, `predicates`, `controllable`, `predicate_source`, `
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `lift` | `SvLiftRequest` | Yes | The design and how to lift it: `source` (required), `source_name`, `additional_sources`, `top`, `frontend` (`auto` \| `verilog` \| `slang` \| `sv2v`), `params`, `lift_overrides`, `cutpoints`, `merge_clock_domains` — shared by every `sv` route (0.5). |
+| `lift` | `SvLiftRequest` | Yes | The design and how to lift it: `source` (required), `source_name`, `additional_sources`, `top`, `params`, `lift_overrides`, `cutpoints`, `merge_clock_domains` — shared by every `sv` route (0.5; `frontend` was removed with the slang-only lift, 2026-11-04 — the lift is yosys-slang's `read_slang`). |
 | `setundef_anyseq` | `boolean` | No | Yosys `setundef -anyseq` (per-cycle havoc on undefined nets). Defaults to `false`. |
 | `setundef_anyconst` | `boolean` | No | Yosys `setundef -anyconst` (one nondeterministic constant per undefined bit — the Caliptra CWE-1245 power-up policy). Defaults to `false`. |
 | `formula` | `string` | Yes | μ-calculus formula (see `/btor2/cegar`). |
@@ -798,7 +797,7 @@ Identical to [`/api/v1/btor2/cegar`](#post-apiv1btor2cegar) (`Btor2CegarResponse
 curl -X POST http://localhost:3000/api/v1/sv/cegar \
   -H "Content-Type: application/json" \
   -d '{
-    "lift": { "source": "module counter(...); ... endmodule", "top": "counter", "frontend": "sv2v" },
+    "lift": { "source": "module counter(...); ... endmodule", "top": "counter" },
     "formula": "nu X. ([] X && mu Y. (done || <> Y))",
     "predicates": [ { "name": "burst_zero", "register": "burst_cnt", "value": 0 } ]
   }'

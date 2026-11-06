@@ -153,7 +153,7 @@ mununu templates --json
 The `rtl_*` templates take **RTL conditions** as arguments (`param_type: rtl_atom`): boolean expressions over the design's signals in the `@mununu_guarantee` atom syntax, where an enum member or parameter on the right of `==` / `!=` resolves to its value (`state_q == SCRAM`). Each template is checked beside the design's own assertions, with the same engines, and reported as a row labelled `tmpl.<instance>`:
 
 ```bash
-mununu sv verify-auto rod.sv --top rod --frontend slang \
+mununu sv verify-auto rod.sv --top rod \
   --template rtl_never        --template-arg 'rtl_never.BAD=state_q == 5' \
   --template rtl_response     --template-arg 'rtl_response.TRIGGER=trip == 1 && state_q != FAULT' \
                               --template-arg 'rtl_response.RESPONSE=state_q == SCRAM' \

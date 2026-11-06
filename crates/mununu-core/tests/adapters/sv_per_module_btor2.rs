@@ -142,7 +142,10 @@ fn translates_three_multi_module_fixtures_per_submodule() {
             }
             Err(err) => {
                 let msg = err.to_string();
-                if msg.contains("yosys binary not found") || msg.contains("failed to spawn yosys") {
+                if msg.contains("yosys binary not found")
+                    || msg.contains("failed to spawn yosys")
+                    || msg.contains("read_slang")
+                {
                     eprintln!(
                         "SKIP: yosys not installed (set MUNUNU_YOSYS_PATH or install yosys). \
                          Skipping per-module-BTOR2 sweep; production CI ships yosys."

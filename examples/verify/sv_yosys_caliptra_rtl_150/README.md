@@ -187,8 +187,8 @@ cargo build -p mununu-cli
 
 Requirements:
 
-- `yosys` 0.59 or later on `PATH`
-- `sv2v` 0.0.13 or later on `PATH` (the dev container provides both)
+- `yosys` 0.67 or later (with `read_slang`) on `PATH` for `validate.sh`
+- `sv2v` 0.0.13 or later on `PATH` for the hand-yosys flows `validate_m4_cegar.sh` / `validate_m6_ui_e2e.sh` (the `mununu-sva` image provides both)
 
 ## Provenance
 

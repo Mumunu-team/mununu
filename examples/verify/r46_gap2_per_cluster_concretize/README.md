@@ -58,7 +58,7 @@ cargo build -p mununu-cli
 examples/verify/r46_gap2_per_cluster_concretize/validate.sh
 ```
 
-`validate.sh` requires `yosys` and `sv2v` on `PATH`. It asserts both
+`validate.sh` requires `yosys` (with `read_slang`) on `PATH`. It asserts both
 contract points: the raw design is rejected, and the
 sliced-and-concretized clusters all verify SATISFIED over distinct
 automata.

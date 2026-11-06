@@ -3,7 +3,7 @@
 # OpenTitan RTL (§Phase 11 slot 7, R4W-4 / R4W-5).
 #
 # Contract: the verify `sv-yosys` route runs the automated pipeline
-# (sv2v → Yosys-no-flatten-then-flatten → BTOR2 → bit-blast → 3-valued
+# (read_slang → Yosys-no-flatten-then-flatten → BTOR2 → bit-blast → 3-valued
 # eval) on two independent instances of the real OpenTitan
 # `csrng_main_sm` sparse FSM, and the report carries a clustered
 # cone-of-influence comparison whose max per-cluster cone is strictly
@@ -34,7 +34,7 @@ if [[ ! -x "${MUNUNU}" ]]; then
   echo "             build it first with: cargo build -p mununu-cli" >&2
   exit 2
 fi
-for tool in yosys sv2v; do
+for tool in yosys; do
   if ! command -v "${tool}" >/dev/null 2>&1; then
     echo "validate.sh: required tool '${tool}' not on PATH" >&2
     exit 2
@@ -49,7 +49,7 @@ echo "upstream: lowRISC/opentitan @ $(cat "${SRC}/UPSTREAM_COMMIT.txt")"
 echo
 
 cd "${SRC}"
-echo "--- mununu verify (sv2v + flatten + bit-blast + clustered COI) ---"
+echo "--- mununu verify (read_slang + flatten + bit-blast + clustered COI) ---"
 LIBRARY_PATH=/usr/local/opt/z3/lib "${MUNUNU}" verify --fail-on none --json verify.toml > "${OUT}/verify.json" 2>"${OUT}/verify.err" || {
   echo "FAIL: mununu verify exited non-zero" >&2
   tail -15 "${OUT}/verify.err" >&2

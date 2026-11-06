@@ -97,8 +97,8 @@ baseline. Verified 2026-05-20:
 
 | Fixture | Adapter | State count | Status |
 |---|---|---|---|
-| `caliptra_pre_fix` | sv-yosys (+sv2v) | 4 096 | ✅ |
-| `caliptra_post_fix` | sv-yosys (+sv2v) | 4 096 | ✅ (same source tree) |
+| `caliptra_pre_fix` | sv-yosys | 4 096 | ✅ |
+| `caliptra_post_fix` | sv-yosys | 4 096 | ✅ (same source tree) |
 | `safety_demo_btor` | btor2 | 16 | ✅ |
 | `cwe1245_fsm_bug` | systemverilog (custom) | 4 | ✅ |
 | `cwe1260_addr_overlap_bug` | systemverilog (custom) | 5 | ✅ |

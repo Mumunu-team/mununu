@@ -28,7 +28,7 @@ A fix for a defect names every other site with the same pattern and either fixes
 
 ## Rule 4 — read the tool's own diagnostics before bisecting sources
 
-When a lift or a run fails, the first instrument is the report: `diagnostics.frontend`, `frontend_fallback_reason`, `lift_retry`, `bottom_reason`, the notes. On 2026-10-22 a lift failure on OpenTitan `csrng` ("Found topological loop") was bisected for a day over the `INC_ASSERT` regions of twelve source files; it was yosys's BTOR backend tripping on yosys-slang's `$buf` cells, independent of every source change, and `check` reported no loop at any stage. A direct probe of the failing pass (replaying the lift script by hand on the kept staging directory, `MUNUNU_KEEP_YOSYS_TMP=1`) found it in one run. The order is: read what the tool reports → replay the failing stage by hand → bisect inputs last.
+When a lift or a run fails, the first instrument is the report: `diagnostics.frontend`, `lift_retry`, `bottom_reason`, the notes. On 2026-10-22 a lift failure on OpenTitan `csrng` ("Found topological loop") was bisected for a day over the `INC_ASSERT` regions of twelve source files; it was yosys's BTOR backend tripping on yosys-slang's `$buf` cells, independent of every source change, and `check` reported no loop at any stage. A direct probe of the failing pass (replaying the lift script by hand on the kept staging directory, `MUNUNU_KEEP_YOSYS_TMP=1`) found it in one run. The order is: read what the tool reports → replay the failing stage by hand → bisect inputs last.
 
 ## See also
 

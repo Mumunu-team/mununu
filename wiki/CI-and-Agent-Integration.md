@@ -28,7 +28,7 @@ Every verify verb — `btor2 verify` / `verify-liveness` / `verify-recoverabilit
 
 ### A GitHub Actions workflow
 
-The SV toolchain (slang + sv2v + Yosys) is not bundled; run in the `mununu-sva` container that pins it.
+The SV toolchain (slang + Yosys with yosys-slang's `read_slang`) is not bundled; run in the `mununu-sva` container that pins it.
 
 ```yaml
 # .github/workflows/verify.yml
@@ -37,18 +37,17 @@ on: [push, pull_request]
 jobs:
   recoverability:
     runs-on: ubuntu-latest
-    container: ghcr.io/mumunu-team/mununu-sva:latest   # slang + sv2v + yosys + mununu
+    container: ghcr.io/mumunu-team/mununu-sva:latest   # slang + yosys (read_slang) + mununu
     steps:
       - uses: actions/checkout@v4
       # Fail the PR if the FSM can no longer get back to idle.
       - name: recoverability gate
         run: |
-          mununu --quiet sv verify-recoverability rtl/fsm.sv \
-            --frontend sv2v --target "state_q == 0"
+          mununu --quiet sv verify-recoverability rtl/fsm.sv --target "state_q == 0"
       # Verify the module's own assertions; fail on any violation, allow ⊥.
       - name: assertion gate
         run: |
-          mununu --quiet sv verify-auto rtl/fsm.sv --frontend sv2v --json \
+          mununu --quiet sv verify-auto rtl/fsm.sv --json \
             | tee verify-auto.json
 ```
 
@@ -62,7 +61,7 @@ Every verb above needs a property or a target atom. **`btor2 check-fsm` needs ne
 
 ```bash
 # SV-direct: lift + auto-scan in one call. Exit 2 on any reachable illegal encoding.
-mununu --quiet sv check-fsm rtl/fsm.sv --frontend sv2v   # --fail-on / --quiet / exit codes as above
+mununu --quiet sv check-fsm rtl/fsm.sv   # --fail-on / --quiet / exit codes as above
 
 # Or on a BTOR2 you already have (or lifted with `sv emit-btor2-per-module`):
 mununu --quiet btor2 check-fsm fsm.btor2
@@ -81,7 +80,7 @@ A `holds` register provably stays within its encoding (validated on the real Ope
 **`--liveness`: the liveness inventory.** With `--liveness` (API `liveness: true`), each scanned register also gets, out of reset with the resets pinned inactive: the legal encodings **no path reaches** (`unreachable` — decided by the reach portfolio, no bit cap; a dead enum value is a defect or a leftover), the reachable encodings it can **never leave** (`absorbing` — `AG(reg == v → EF reg ≠ v)` fails, decided by the exact engine), and whether it always gets back to its reset value (`returns_to_reset`, `AG EF`). An absorbing state is often intended — a `LOCK` or a fatal `ERROR` only reset clears — so it is listed, not judged; `--terminal state_q=4` (API `terminal: ["state_q=4"]`) moves an intended one to `expected_terminal`. The inventory is report-only: the exit code stays the encoding scan's. Scope: single-register FSMs with a recognisable reset (one-hot FSMs split across cells and coupled FSMs are not covered); a raw BTOR2 deadlock is not a question here, since the transition relation is total — "stuck" means absorbing.
 
 ```bash
-mununu --quiet sv check-fsm rod.sv --top rod --frontend slang --liveness --terminal state_q=4
+mununu --quiet sv check-fsm rod.sv --top rod --liveness --terminal state_q=4
 ```
 
 ```jsonc
@@ -107,7 +106,7 @@ An RTL-writing agent has two request styles:
 
 ```jsonc
 POST /api/v1/sv/verify-auto
-{ "lift": { "source": "module m(...); ... assert property (...); endmodule", "frontend": "sv2v" },
+{ "lift": { "source": "module m(...); ... assert property (...); endmodule" },
   "must_edge_inference": "smt-hyper-must" }   // sound νμ verdicts; every field but lift.source optional
 // → { "properties": [ { "name": "...", "outcome": "holds"|"violated"|"unknown"|"skipped" } ],
 //     "unsupported": [ ... ], "notes": [ ... ] }
@@ -117,13 +116,13 @@ POST /api/v1/sv/verify-auto
 
 ```jsonc
 POST /api/v1/sv/verify-recoverability
-{ "lift": { "source": "module m(...); endmodule", "frontend": "sv2v" }, "target": "state_q == 0" }
+{ "lift": { "source": "module m(...); endmodule" }, "target": "state_q == 0" }
 // → { "outcome": "holds"|"violated"|"unknown", "property": "AG EF (state_q == 0)" }
 ```
 
-`POST /api/v1/sv/verify-bad` (safety of the module's assertions) and `/api/v1/sv/verify-liveness` (`{request, grant}`) round out the trio. All return the canonical `outcome`, so the agent gates on `outcome === "violated"`. Every `sv` route takes the design as one `lift` object (`source`, `additional_sources`, `top`, `frontend`, `params`, `lift_overrides`, `cutpoints`, `merge_clock_domains`), the API peer of the CLI's shared lift flags.
+`POST /api/v1/sv/verify-bad` (safety of the module's assertions) and `/api/v1/sv/verify-liveness` (`{request, grant}`) round out the trio. All return the canonical `outcome`, so the agent gates on `outcome === "violated"`. Every `sv` route takes the design as one `lift` object (`source`, `additional_sources`, `top`, `params`, `lift_overrides`, `cutpoints`, `merge_clock_domains`), the API peer of the CLI's shared lift flags.
 
-**No property to name?** `POST /api/v1/sv/check-fsm { "lift": { "source": "<sv>", "frontend": "sv2v" } }` lifts the module and auto-scans every FSM register for a reachable illegal encoding, returning `{ fsm_registers_checked, illegal_encodings_found, registers: [{ register, legal_encodings, outcome, illegal_encoding_reachable }] }` — the agent gates on `illegal_encodings_found > 0`. The BTOR2-direct peer is `POST /api/v1/btor2/check-fsm { "content": "<btor2>" }`.
+**No property to name?** `POST /api/v1/sv/check-fsm { "lift": { "source": "<sv>" } }` lifts the module and auto-scans every FSM register for a reachable illegal encoding, returning `{ fsm_registers_checked, illegal_encodings_found, registers: [{ register, legal_encodings, outcome, illegal_encoding_reachable }] }` — the agent gates on `illegal_encodings_found > 0`. The BTOR2-direct peer is `POST /api/v1/btor2/check-fsm { "content": "<btor2>" }`.
 
 The agent can skip the SV lift entirely and post pre-lifted BTOR2 to `/api/v1/btor2/verify{,-liveness,-recoverability}` — same responses.
 
@@ -131,7 +130,7 @@ The agent can skip the SV lift entirely and post pre-lifted BTOR2 to `/api/v1/bt
 
 ## 3. What to plan for
 
-- **Toolchain on the host.** `sv verify-auto` and the `sv verify-*` verbs shell out to **slang + sv2v + Yosys**, discovered via `MUNUNU_<TOOL>_PATH` then `$PATH`. A missing tool is a *structured error / exit `1`*, not a crash. The supported environment is the pinned `docker/Dockerfile.sva` image ([External-Tools](External-Tools)).
+- **Toolchain on the host.** `sv verify-auto` and the `sv verify-*` verbs shell out to **slang + Yosys** (yosys-slang's `read_slang`, built into yosys ≥ 0.67 — a yosys without it lifts no SystemVerilog and the error names the fix), discovered via `MUNUNU_<TOOL>_PATH` then `$PATH`. A missing tool is a *structured error / exit `1`*, not a crash. The supported environment is the pinned `docker/Dockerfile.sva` image ([External-Tools](External-Tools)).
 - **Assertion-free RTL.** `sv verify-auto` checks the SVA the design *carries*. If the agent emits no `assert property`, use the target-atom verbs (`sv verify-recoverability`, `sv verify-liveness`) to name the property directly.
 - **Coverage is a fragment.** Assertions outside the supported SVA fragment come back in `unsupported`; some designs hit the abstraction ceiling and return `unknown`. A definite verdict is sound; treat `unknown` / `skipped` as "not decided here," never as "safe."
 - **A recoverability `⊥` is refuted when a trap exists.** For an `AG EF good` row left `⊥`, `verify-auto` first looks for a reachable value of `good`'s register that is closed under every transition (two safety queries on the reach portfolio); a certified trap makes the row `violated` with `decided_by: "trap-certificate"` and the path into the trap. It never produces `holds`, and it is withheld on a cone with an undriven net or a cut point.
@@ -144,5 +143,5 @@ The agent can skip the SV lift entirely and post pre-lifted BTOR2 to `/api/v1/bt
 ## See also
 
 - [`docs/verifying-rtl.md`](https://github.com/Mumunu-team/mununu/blob/main/docs/verifying-rtl.md) — the property verbs, the no-sidecar flow, and the honest caveats.
-- [External-Tools](External-Tools) — installing slang / sv2v / Yosys and the discovery env vars.
+- [External-Tools](External-Tools) — installing slang / Yosys (yosys-slang) and the discovery env vars.
 - [API-Reference](API-Reference) — the full HTTP surface.

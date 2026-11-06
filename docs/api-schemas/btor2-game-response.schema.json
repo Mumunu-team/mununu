@@ -602,7 +602,7 @@
               "type": "null"
             }
           ],
-          "description": "`exact` (every cell on the path was evaluated), `widened` (a cell type the evaluator does not know kept its whole fan-in — the slice is never smaller than the truth) or `unavailable` (no netlist, source lines rewritten by sv2v, no public net among the property's atoms), with the reason. Absent on a trace no slice was attempted for."
+          "description": "`exact` (every cell on the path was evaluated), `widened` (a cell type the evaluator does not know kept its whole fan-in — the slice is never smaller than the truth) or `unavailable` (no netlist, source lines rewritten by the oracle's sv2v, no public net among the property's atoms), with the reason. Absent on a trace no slice was attempted for."
         },
         "sources": {
           "description": "Where each cell the trace shows lives in the RTL (2026-10-29): the legend, in the order of the first step's cells. Empty when the source map is unavailable (`diagnostics.source_map`).",

@@ -497,12 +497,6 @@ fn context_import_handler_impl(
         "sv-yosys" | "yosys" => {
             // Yosys-driven SV elaboration via child process. Parity with the
             // CLI `--adapter sv-yosys` flag.
-            //
-            // `use_sv2v` is the API-side mirror of the CLI's
-            // `--preprocessor sv2v` flag. When set, the driver runs sv2v
-            // as a preprocessing pass before invoking Yosys, lowering
-            // modern SystemVerilog constructs (notably module-header
-            // `import pkg::*;`) to Verilog-2005 that Yosys handles.
             let yopts = if !request.additional_sources.is_empty() {
                 let mut additional = std::collections::HashMap::new();
                 for src in &request.additional_sources {
@@ -510,12 +504,10 @@ fn context_import_handler_impl(
                 }
                 crate::adapter::yosys::YosysOptions {
                     additional_sources: additional.into_iter().collect(),
-                    use_sv2v: request.use_sv2v,
                     ..Default::default()
                 }
             } else {
                 crate::adapter::yosys::YosysOptions {
-                    use_sv2v: request.use_sv2v,
                     ..Default::default()
                 }
             };
@@ -525,7 +517,7 @@ fn context_import_handler_impl(
         "xstate" => crate::adapter::xstate::XStateAdapter::translate(&request.content, &options),
         // The native `systemverilog` / `sv` parser route was removed in
         // S.2b. SystemVerilog is served exclusively by the `sv-yosys`
-        // arm above (sv2v → Yosys → BTOR2 → bit-blast).
+        // arm above (yosys-slang → BTOR2 → bit-blast).
         "extraction" | "espec" => {
             let mut opts = options.clone();
             opts.mode = Some("vulnerable".to_string());
@@ -572,7 +564,7 @@ fn context_import_handler_impl(
     // is wired through this path (the `sv-yosys` route returns
     // CTXDSL directly; routing it through predicate_cube_lift
     // requires a multi-step plumbing that lifts BTOR2 from the
-    // sv2v+Yosys output — queued as a V.6 follow-up).
+    // slang-lift output — queued as a V.6 follow-up).
     //
     // Per CLAUDE.md §Surface Parity, this API surface mirrors the
     // CLI's `--controllable` + `--predicate` flags on
@@ -1460,10 +1452,10 @@ fn btor2_game_handler_impl(request: Btor2GameRequest) -> ApiResult<Json<Btor2Gam
     }))
 }
 
-// --- SV-direct verbs: lift SV (sv2v + Yosys) then decide, in one call. Surface peers
+// --- SV-direct verbs: lift SV (yosys-slang) then decide, in one call. Surface peers
 // of the CLI `sv verify-bad` / `verify-liveness` / `verify-recoverability`; they return
 // the same `Btor2Verify*Response` shapes as the BTOR2-direct verbs. The lift needs
-// sv2v + Yosys on the host (a missing tool → BadRequest). ---
+// yosys with the slang reader on the host (a missing tool → BadRequest). ---
 
 /// `POST /api/v1/sv/verify-bad` — lift SV and decide `bad`-reachability of its assertions
 /// with the multi-engine safety portfolio.
@@ -1966,7 +1958,7 @@ fn sv_mutate_handler_impl(request: SvMutateRequest) -> ApiResult<Json<SvMutateRe
 
 /// cegar-extraction Stage 2 (2026-06-22) — SV-direct CEGAR in one call.
 ///
-/// Lifts SystemVerilog to a single flattened BTOR2 (sv2v + Yosys, the
+/// Lifts SystemVerilog to a single flattened BTOR2 (yosys-slang, the
 /// same server-side pipeline `/context/import` already runs) and then
 /// runs the *identical* predicate-abstraction refinement loop as
 /// [`btor2_cegar_handler`], returning the same [`Btor2CegarResponse`].
@@ -1989,7 +1981,7 @@ fn sv_cegar_handler_impl(request: SvCegarRequest) -> ApiResult<Json<Btor2CegarRe
         });
     }
 
-    // SV → single flattened BTOR2 (sv2v optional + Yosys). The per-module
+    // SV → single flattened BTOR2 (yosys-slang). The per-module
     // split is for composition; CEGAR's predicate-cube lift wants one
     // transition system, so the flattened shape is the right input.
     let (source, yopts) =
@@ -2005,7 +1997,7 @@ fn sv_cegar_handler_impl(request: SvCegarRequest) -> ApiResult<Json<Btor2CegarRe
         ..yopts
     };
     let btor2 = sv_to_btor2(&source, &yopts).map_err(|e| ApiError::BadRequest {
-        message: format!("SV → BTOR2 (sv2v + Yosys): {}", e.message),
+        message: format!("SV → BTOR2 (yosys-slang): {}", e.message),
         details: None,
     })?;
 
@@ -4799,7 +4791,6 @@ members = ["x"]
             filename: Some("mini.crewai.json".to_string()),
             sidecar: None,
             additional_sources: Vec::new(),
-            use_sv2v: false,
             ..Default::default()
         };
         let Json(out) = context_import_handler(Json(request))
@@ -4828,7 +4819,6 @@ members = ["x"]
             filename: Some("graph.langgraph.json".to_string()),
             sidecar: None,
             additional_sources: Vec::new(),
-            use_sv2v: false,
             ..Default::default()
         };
         let Json(out) = context_import_handler(Json(request))
@@ -4885,7 +4875,6 @@ members = ["x"]
             filename: Some("amba_arbiter.btor2".to_string()),
             sidecar: None,
             additional_sources: Vec::new(),
-            use_sv2v: false,
             predicates: vec![PredicateSpecRequest {
                 name: "burst_zero".to_string(),
                 register: "burst".to_string(),
@@ -5262,7 +5251,7 @@ members = ["x"]
     }
 
     /// cegar-extraction Stage 2 — the SV-direct CEGAR endpoint rejects an
-    /// empty predicate set BEFORE invoking the (heavy) sv2v+Yosys lift, so
+    /// empty predicate set BEFORE invoking the (heavy) slang lift, so
     /// the guard is testable without the toolchain present.
     #[tokio::test]
     async fn sv_cegar_handler_rejects_empty_predicates() {
@@ -5291,20 +5280,15 @@ members = ["x"]
     }
 
     /// cegar-extraction Stage 2 — the SV-direct CEGAR endpoint lifts a real
-    /// SV design (sv2v + Yosys → flattened BTOR2) and runs the CEGAR loop
+    /// SV design (yosys-slang → flattened BTOR2) and runs the CEGAR loop
     /// end-to-end, returning the same trace shape as `/btor2/cegar`. Gated
     /// on the yosys toolchain (skips when absent, matching the yosys-test
     /// convention).
     #[tokio::test]
     async fn sv_cegar_handler_lifts_sv_and_runs_cegar() {
-        // Skip when yosys is not on PATH (CI-without-toolchain).
-        if std::process::Command::new("yosys")
-            .arg("-V")
-            .output()
-            .map(|o| !o.status.success())
-            .unwrap_or(true)
-        {
-            eprintln!("skip: yosys not installed");
+        // Skip when no yosys with `read_slang` is on PATH (CI-without-toolchain, a brew 0.59).
+        if !crate::adapter::yosys::yosys_can_read_slang() {
+            eprintln!("skip: yosys with read_slang not installed");
             return;
         }
         // A 2-bit down-counter register `burst`; clk/rst become inputs.
@@ -5367,7 +5351,6 @@ endmodule
             filename: Some("trivial.btor2".to_string()),
             sidecar: None,
             additional_sources: Vec::new(),
-            use_sv2v: false,
             predicates: vec![PredicateSpecRequest {
                 name: "p".to_string(),
                 register: "reg_a".to_string(),
@@ -6192,7 +6175,7 @@ members = ["x"]
     }
 
     // SV-direct verbs validate the atoms BEFORE the (toolchain-gated) SV→BTOR2 lift,
-    // so the guard is a BadRequest reachable in make-ci without sv2v / Yosys. The full
+    // so the guard is a BadRequest reachable in make-ci without yosys. The full
     // lift → verdict path is covered by the mununu-sva e2e suite.
     #[tokio::test]
     async fn sv_verify_liveness_handler_rejects_malformed_atom_before_lift() {

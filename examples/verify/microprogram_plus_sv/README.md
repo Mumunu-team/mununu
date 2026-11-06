@@ -5,7 +5,7 @@
 Third example in the verify-framework fleet. Demonstrates the
 framework's **adapter-agnosticism** by pairing a hand-authored
 CTXDSL microprogram with a real SystemVerilog peripheral
-(elaborated via the `sv-yosys` pipeline: sv2v → Yosys → BTOR2 →
+(elaborated via the `sv-yosys` pipeline: read_slang → Yosys → BTOR2 →
 KMTS bit-blast) under one `verify.toml`.
 
 ## What it demonstrates
@@ -38,10 +38,10 @@ KMTS bit-blast) under one `verify.toml`.
 
 ## Reproduce
 
-Requires `yosys` and `sv2v` on `PATH` (the SV peripheral is elaborated
-through them; `validate.sh` exits with a clear error if either is
-missing). They are not bundled with the repo — the dev container
-installs them.
+Requires `yosys` (≥ 0.67, with `read_slang`) on `PATH` (the SV peripheral is
+elaborated through it; `validate.sh` exits with a clear error if it is
+missing). It is not bundled with the repo — the `mununu-sva` image
+provides it.
 
 ```bash
 bash examples/verify/microprogram_plus_sv/validate.sh

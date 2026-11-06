@@ -16,7 +16,7 @@ The BTOR2-direct property verbs (`verify`, `verify-liveness`, `verify-recoverabi
 | `btor2 verify-recoverability` / `sv verify-recoverability` | Recoverability `AG EF good` | `Btor2VerifyRecoverabilityResponse` | Optional `VerdictRefinement` tree (vacuous / config-partition / holds-under / ⊥-hint) |
 | `btor2 check-fsm` / `sv check-fsm` | Auto-scan of illegal FSM encodings | `Btor2CheckFsmResponse` | Per-register findings + counts |
 
-The SV wrappers exist so downstream consumers do not need the intermediate `sv emit-btor2` step. They accept SystemVerilog on the wire, lift it via `sv2v` + Yosys (or `read_slang` with `lift.frontend: "slang"` — the reliable path for modern SV per `docs/verifying-rtl.md`), and return the sibling BTOR2 response shape.
+The SV wrappers exist so downstream consumers do not need the intermediate `sv emit-btor2` step. They accept SystemVerilog on the wire, lift it with yosys-slang's `read_slang` (the one front end since 2026-11-04; `docs/verifying-rtl.md`), and return the sibling BTOR2 response shape.
 
 ## `POST /btor2/verify` (and `POST /sv/verify-bad`) — safety portfolio
 
@@ -171,9 +171,9 @@ of the CLI's shared lift flags; unknown keys are refused:
   `<top>.sv`), which `lift_overrides` match.
 - `additional_sources` — extra packages / includes / submodules as `FileContent` records.
 - `top` — top module for the lift (auto-detected when omitted).
-- `frontend` — `auto` (default), `verilog`, `slang` (the yosys-slang plugin: `while` loops,
-  `import pkg::*;` and other constructs `sv2v` silently drops) or `sv2v` (sv2v, then
-  `read_verilog`). Replaces the `use_sv2v` / `use_slang` booleans.
+- (no `frontend` field — removed 2026-11-04 with the slang-only lift; a request carrying it is
+  refused as an unknown field. The lift is yosys-slang's `read_slang`, reported back as
+  `diagnostics.frontend: "yosys-slang (read_slang)"`.)
 - `params` (`NAME=VALUE`), `lift_overrides` (lift-only source replacements), `cutpoints`,
   `merge_clock_domains`.
 

@@ -15,14 +15,14 @@ what "one IP at one commit" does and does not show.
 ## Run it
 
 ```bash
-# in the mununu-sva image (slang, sv2v, yosys); from this directory
+# in the mununu-sva image (slang, yosys); from this directory
 cd source
 sh run.sh --json          # the IP's own assertions
 ```
 
-`run.sh` is `sv verify-auto csrng.sv --top csrng --frontend sv2v --source … --lift-override
+`run.sh` is `sv verify-auto csrng.sv --top csrng --source … --lift-override
 prim_assert.sv=prim_assert_shim.sv … --pin rst_ni=1`: the SVA is **extracted from the real
-`prim_assert` macros**, while the sv2v + yosys lift sees `prim_assert_shim.sv` (every assertion macro of the
+`prim_assert` macros**, while the yosys-slang lift sees `prim_assert_shim.sv` (every assertion macro of the
 real set empty, `INC_ASSERT` defined so the assertion-support logic is in the model) and the two
 `_lift.sv` variants, `prim_alert_sender_lift.sv` / `prim_sparse_fsm_flop_lift.sv`, the upstream files with
 their `ifdef INC_ASSERT` regions removed because no frontend lifts them (the alert sender's `sequence`
@@ -46,14 +46,15 @@ prim_sparse_fsm_flop.sv` (needs `slang`; it reports the two `could not resolve h
 Whole run **110 s**; 216 registers once flattened. `e2e_opentitan_ip_csrng_full` pins every row. The same
 34 / 0 / 0 / 3 was measured on 2026-10-18 (ledger §3.3b-6) with the slang frontend forced by hand.
 
-**The lift.** `--frontend auto` tries read_verilog + sv2v first; sv2v's output of this closure is rejected
-by yosys (`syntax error, unexpected TOK_DEFAULT`, an unpacked-array default pattern like the one edn
-rewrites), so the lift falls back to yosys-slang. That attempt dies in yosys's BTOR backend with
-`Found topological loop while processing cell $6638` on a design `check` finds loop-free — yosys-slang
-emits 4,035 `$buf` cells and the backend's cell-level walk reads a wide buffer chained through the command
-arbiter's grant vector as a cycle — and succeeds on the lift's one retry with `opt_clean` before
-`write_btor` (2026-10-23; reported as the `lift-retry` note and `diagnostics.lift_retry`). Both steps are
-in the JSON: `diagnostics.frontend`, `frontend_fallback_reason`, `lift_retry`.
+**The lift.** yosys-slang's `read_slang` (the one product front end since 2026-11-04; before that,
+`--frontend auto` tried read_verilog + sv2v first and fell back to slang when yosys rejected sv2v's
+output of this closure with `syntax error, unexpected TOK_DEFAULT`). The first yosys run dies in the
+BTOR backend with `Found topological loop while processing cell $6638` on a design `check` finds
+loop-free — yosys-slang emits 4,035 `$buf` cells and the backend's cell-level walk reads a wide buffer
+chained through the command arbiter's grant vector as a cycle — and succeeds on the lift's one retry
+with `opt_clean` before `write_btor` (2026-10-23; reported as the `lift-retry` note and
+`diagnostics.lift_retry`). Both facts are in the JSON: `diagnostics.frontend` (`"yosys-slang
+(read_slang)"`, provenance) and `lift_retry`.
 
 ## Caveats
 
@@ -62,8 +63,8 @@ in the JSON: `diagnostics.frontend`, `frontend_fallback_reason`, `lift_retry`.
   such hierarchy in the model. They are the only unsupported rows and `e2e_opentitan_ip_csrng_full` pins
   that.
 - **The FSM error → alert checks hold with an antecedent the model cannot raise.** The sparse-FSM flop's
-  `unused_err_o` is computed only under `INC_ASSERT` by an enum-method loop neither sv2v + yosys nor
-  yosys-slang compiles, so the lift uses the file's synthesis branch (`unused_err_o = 1'b0`). The
+  `unused_err_o` is computed only under `INC_ASSERT` by an enum-method loop that
+  yosys-slang does not compile, so the lift uses the file's synthesis branch (`unused_err_o = 1'b0`). The
   `*FsmCheck_A` rows are therefore vacuous HOLDS on this model; under `--fault-model sec-cm` the
   flag is re-minted from the state's compared constants (`docs/verifying-rtl.md` §\"The fault-injection posture\"). `prim_count`'s `fpv_err_present` is in the model and is the
   synthesis constant too (`PrimCountFpv` is not defined); its `err_o` is real logic, so the counter chains

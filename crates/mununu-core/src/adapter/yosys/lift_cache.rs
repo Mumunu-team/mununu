@@ -1,21 +1,21 @@
 //! N0.2 (2026-11-03) — a content-addressed cache of the SV → BTOR2 lift's raw tool outputs.
 //!
-//! Every `e2e_` test, app test and corpus gate re-ran yosys (and sv2v) on inputs identical to
+//! Every `e2e_` test, app test and corpus gate re-ran yosys on inputs identical to
 //! the run before; the four OpenTitan e2e tests paid their lift on every sweep. With
 //! `MUNUNU_LIFT_CACHE_DIR=<dir>` set, [`super::run_sv_flatten_btor2`] looks the lift up before
 //! it runs a tool and stores it after. Unset, nothing changes.
 //!
 //! **What is keyed** — everything the tools are *told*, rendered by the same planner that
 //! stages the real run ([`super::plan_lift`] against a placeholder directory): the staged
-//! sources after `strip_port_net_types`, the exact yosys script of every front end the lift
-//! would attempt, whether yosys runs inside the staging directory, the sv2v argv, every file
-//! under an include directory a tool may read, the tool identities (`yosys -V` banner, sv2v
-//! `--version`, the slang plugin's path, size and mtime), the crate version and
-//! [`LIFT_CACHE_FORMAT`]. A change to any of it is a miss.
+//! sources after `strip_port_net_types`, the exact yosys script, whether yosys runs inside the
+//! staging directory, every file under an include directory a tool may read, the tool
+//! identities (`yosys -V` banner, a plugin's path, size and mtime; the dev-only oracle's sv2v
+//! argv and `--version`), the crate version and [`LIFT_CACHE_FORMAT`]. A change to any of it is
+//! a miss.
 //!
 //! **What is stored** — the raw outputs of a *successful* lift (`design.btor`, `hier.json`,
-//! `clocks.json`) plus the process facts (front end used, sv2v ran, fallback reason, backend
-//! retry, the staged primary path). Everything mununu computes *from* those — clock domains,
+//! `clocks.json`) plus the process facts (front end used, backend retry, the staged primary
+//! path). Everything mununu computes *from* those — clock domains,
 //! the multi-clock refusal, blackbox names, port directions — runs on a hit exactly as on a
 //! miss, so a change to that Rust code takes effect without invalidating the cache.
 //!
@@ -39,9 +39,10 @@ pub const LIFT_CACHE_DIR_ENV: &str = "MUNUNU_LIFT_CACHE_DIR";
 
 /// Bump when the way the tools are INVOKED changes in a way the manifest does not render —
 /// a new environment variable handed to yosys, a flag outside the script text, a different
-/// working directory rule. The script, the sv2v argv and the tool banners are in the manifest,
-/// so a change to any of those misses on its own.
-pub(super) const LIFT_CACHE_FORMAT: u32 = 1;
+/// working directory rule. The script, the oracle's sv2v argv and the tool banners are in the
+/// manifest, so a change to any of those misses on its own. 2 (N1, 2026-11-04): one attempt per
+/// lift, the slang-only product front end.
+pub(super) const LIFT_CACHE_FORMAT: u32 = 2;
 
 /// Caps on the include-directory walk: above either, the manifest is not built and the lift
 /// bypasses the cache (a walk that large would cost more than the lift it saves).
@@ -85,14 +86,17 @@ impl ToolIdentity {
     }
 }
 
-/// sv2v's part of one attempt: the binary and the exact argument vector.
+/// The dev-only oracle's sv2v pass: the binary and the exact argument vector (`test_support`
+/// builds plan one; the product never does, and the field stays in the key so both builds
+/// render the same manifest for the same lift).
 #[derive(Debug, Serialize)]
+#[cfg_attr(not(feature = "test_support"), allow(dead_code))]
 pub(super) struct Sv2vManifest {
     pub tool: ToolIdentity,
     pub argv: Vec<String>,
 }
 
-/// One front end the lift would attempt, as the tools would see it.
+/// The lift as the tools would see it.
 #[derive(Debug, Serialize)]
 pub(super) struct AttemptManifest {
     pub frontend: &'static str,
@@ -110,7 +114,7 @@ pub(super) struct LiftManifest {
     pub format: u32,
     pub crate_version: &'static str,
     pub yosys: ToolIdentity,
-    pub attempts: Vec<AttemptManifest>,
+    pub attempt: AttemptManifest,
     /// The staged sources as the tools read them, relative to the staging directory, the
     /// primary (`work.sv`) first.
     pub staged: Vec<(String, String)>,
@@ -149,10 +153,8 @@ pub(super) struct CachedLift {
     pub hier_json: String,
     pub flat_netlist_json: String,
     pub staged_primary: String,
-    /// `verilog` | `slang` — see [`frontend_tag`].
+    /// `slang` (`verilog` only from the dev-only oracle) — see [`frontend_tag`].
     pub frontend_used: String,
-    pub sv2v_ran: bool,
-    pub fallback_reason: Option<String>,
     pub backend_retry: Option<String>,
 }
 
@@ -161,7 +163,6 @@ pub(super) fn frontend_tag(fe: super::SvFrontend) -> &'static str {
     match fe {
         super::SvFrontend::Slang => "slang",
         super::SvFrontend::Verilog => "verilog",
-        super::SvFrontend::Auto => "auto",
     }
 }
 
@@ -365,13 +366,15 @@ mod tests {
                 path: "yosys".into(),
                 identity: "Yosys 0.68".into(),
             },
-            attempts: vec![AttemptManifest {
-                frontend: "verilog",
-                script: "read_verilog -formal -sv /P/work.sv; hierarchy -auto-top".into(),
+            attempt: AttemptManifest {
+                frontend: "slang",
+                script:
+                    "read_slang --ignore-assertions --ignore-timing /P/work.sv; hierarchy -auto-top"
+                        .into(),
                 cwd_in_staging_dir: false,
                 plugin: None,
                 sv2v: None,
-            }],
+            },
             staged: vec![("work.sv".into(), primary.into())],
             include_files: Vec::new(),
         }
@@ -384,8 +387,6 @@ mod tests {
             flat_netlist_json: "{}".into(),
             staged_primary: "/tmp/mununu-yosys-1-2-3-4/work.sv".into(),
             frontend_used: "verilog".into(),
-            sv2v_ran: false,
-            fallback_reason: None,
             backend_retry: None,
         }
     }
@@ -442,21 +443,21 @@ mod tests {
         assert_eq!(cache.lookup(&key), Some(lift()));
     }
 
-    /// The manifest's index moves with anything the tools are told — the script, the attempt
-    /// order, a plugin's identity, an include file — and stays put when nothing moved.
+    /// The manifest's index moves with anything the tools are told — the script, whether yosys
+    /// runs in the staging dir, a plugin's identity, an include file — and stays put when nothing moved.
     #[test]
     fn the_index_follows_what_the_tools_are_told() {
         let base = LiftCacheKey::new(&manifest("module m; endmodule")).unwrap();
         let again = LiftCacheKey::new(&manifest("module m; endmodule")).unwrap();
         assert_eq!(base.index(), again.index());
         let mut m = manifest("module m; endmodule");
-        m.attempts[0].script.push_str("; opt_clean");
+        m.attempt.script.push_str("; opt_clean");
         assert_ne!(LiftCacheKey::new(&m).unwrap().index(), base.index());
         let mut m = manifest("module m; endmodule");
-        m.attempts[0].cwd_in_staging_dir = true;
+        m.attempt.cwd_in_staging_dir = true;
         assert_ne!(LiftCacheKey::new(&m).unwrap().index(), base.index());
         let mut m = manifest("module m; endmodule");
-        m.attempts[0].plugin = Some(ToolIdentity {
+        m.attempt.plugin = Some(ToolIdentity {
             path: "slang".into(),
             identity: "len=1,mtime=2".into(),
         });

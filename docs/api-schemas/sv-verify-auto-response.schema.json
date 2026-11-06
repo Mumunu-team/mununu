@@ -307,16 +307,7 @@
           "type": "array"
         },
         "frontend": {
-          "description": "`\"read_verilog + sv2v\"`, `\"yosys-slang (read_slang)\"`). `--frontend auto` picks one silently and the two paths differ in SOUNDNESS on partial writes (#464/#465), so \"which lift produced this verdict?\" is a question the payload must answer. It was previously reachable only as `lift-frontend` note prose.",
-          "title": "466 / mununu#536 — the RTL front end that produced the lift (e.g.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "frontend_fallback_reason": {
-          "description": "attempt's error. `None` when there was no fallback.",
-          "title": "466 — when `--frontend auto` FELL BACK (an earlier front end errored), the prior",
+          "description": "mununu#536 — the RTL front end that produced the lift: `\"yosys-slang (read_slang)\"`, the one product front end since the slang-only lift (N1, 2026-11-04). Provenance: which reader built the model this verdict is about.",
           "type": [
             "string",
             "null"
@@ -767,7 +758,7 @@
       "type": "object"
     },
     "SourceMapView": {
-      "description": "Whether rows and traces carry RTL source lines (2026-10-29): `available` when every cell has its declaration (yosys's netlist attributes or slang's AST, on every front end) and the lift stamped its `always` blocks; `partial` with the reason when something is missing (the sv2v path has no assignment lines; a cell the AST did not declare); `unavailable` with the reason when nothing could be placed.",
+      "description": "Whether rows and traces carry RTL source lines (2026-10-29): `available` when every cell has its declaration (yosys's netlist attributes or slang's AST, on every front end) and the lift stamped its `always` blocks; `partial` with the reason when something is missing (a cell the AST did not declare); `unavailable` with the reason when nothing could be placed.",
       "properties": {
         "reason": {
           "type": [
@@ -877,7 +868,7 @@
               "type": "null"
             }
           ],
-          "description": "`exact` (every cell on the path was evaluated), `widened` (a cell type the evaluator does not know kept its whole fan-in — the slice is never smaller than the truth) or `unavailable` (no netlist, source lines rewritten by sv2v, no public net among the property's atoms), with the reason. Absent on a trace no slice was attempted for."
+          "description": "`exact` (every cell on the path was evaluated), `widened` (a cell type the evaluator does not know kept its whole fan-in — the slice is never smaller than the truth) or `unavailable` (no netlist, source lines rewritten by the oracle's sv2v, no public net among the property's atoms), with the reason. Absent on a trace no slice was attempted for."
         },
         "sources": {
           "description": "Where each cell the trace shows lives in the RTL (2026-10-29): the legend, in the order of the first step's cells. Empty when the source map is unavailable (`diagnostics.source_map`).",

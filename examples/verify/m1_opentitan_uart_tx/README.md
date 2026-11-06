@@ -50,7 +50,7 @@ git ls-remote https://github.com/lowRISC/opentitan.git HEAD | awk '{print $1}' \
 bash examples/verify/m1_opentitan_uart_tx/validate.sh
 ```
 
-The script runs `mununu context eval --adapter sv-yosys --preprocessor sv2v` and confirms a non-vacuous verdict.
+The script runs `mununu context eval --adapter sv-yosys` and confirms a non-vacuous verdict.
 
 ## Out of scope at M.1
 

@@ -1,6 +1,6 @@
 # v12 — `link_ctrl`, an LLM-written FSM with `localparam` state encodings
 
-> Source of truth: [`link_ctrl.sv`](link_ctrl.sv) — surface: CLI+API (`sv verify-auto`, `sv check-fsm`, `sv mutate`, `sv verify-recoverability`, all with `--frontend slang`)
+> Source of truth: [`link_ctrl.sv`](link_ctrl.sv) — surface: CLI+API (`sv verify-auto`, `sv check-fsm`, `sv mutate`, `sv verify-recoverability`; the lift is yosys-slang's `read_slang`)
 
 A request/acknowledge link controller with retry, error and fatal handling — generated from a
 natural-language spec by an LLM for a 2026-10-08 demonstration, kept here **as written** (its

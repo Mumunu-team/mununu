@@ -68,14 +68,15 @@ pub struct TraceNames {
     /// driving it — from yosys's `src` attributes (yosys-slang and `read_verilog` both stamp
     /// them). Empty when unavailable.
     pub sources: Vec<CellSource>,
-    /// Why the map is not complete: what is missing and why (the sv2v path has no assignment
-    /// lines; a cell the AST did not declare). `None` when the map is available.
+    /// Why the map is not complete: what is missing and why (a cell the AST did not declare;
+    /// the dev-only oracle's sv2v path has no assignment lines). `None` when the map is available.
     pub source_map: Option<String>,
     /// The map places some cells but not everything (`source_map` says what is missing);
     /// `false` with `source_map = Some(…)` means nothing could be placed.
     pub source_map_partial: bool,
-    /// The lift's front end rewrote the source before yosys read it (sv2v), so the netlist's
-    /// lines are the rewrite's: the map takes every line from slang's AST instead.
+    /// The lift's front end rewrote the source before yosys read it (the dev-only oracle's
+    /// sv2v), so the netlist's lines are the rewrite's: the map takes every line from slang's
+    /// AST instead. Never set on a product lift.
     pub source_lines_rewritten: bool,
     /// The flattened netlist as a circuit of values (2026-10-30), for the trace-relative slice;
     /// `None` when the model did not come from the SystemVerilog lift.
@@ -311,10 +312,7 @@ impl TraceNames {
         if self.source_lines_rewritten {
             trace.slice_status = Some(status(
                 "unavailable",
-                Some(
-                    "the sv2v front end does not preserve source lines; use --frontend slang"
-                        .to_string(),
-                ),
+                Some("the read_verilog oracle lift does not preserve source lines".to_string()),
             ));
             return;
         }
@@ -614,7 +612,7 @@ pub struct Trace {
     pub slice: Vec<SliceCycle>,
     /// `exact` (every cell on the path was evaluated), `widened` (a cell type the evaluator does
     /// not know kept its whole fan-in — the slice is never smaller than the truth) or
-    /// `unavailable` (no netlist, source lines rewritten by sv2v, no public net among the
+    /// `unavailable` (no netlist, source lines rewritten by the oracle's sv2v, no public net among the
     /// property's atoms), with the reason. Absent on a trace no slice was attempted for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slice_status: Option<SliceStatus>,
