@@ -2624,10 +2624,14 @@ fn run_cegar_build_response(params: CegarRunParams<'_>) -> Result<Btor2CegarResp
     // M.6 parity (2026-06-20) — the may-edge inference policy is now an API
     // field (was CLI-only). `smt-all-pairs` selects the sound all-pairs
     // may-relation, matching `--may-edge-inference`; default is Off.
+    // mununu#867 — the default is the sound all-pairs relation, as on the CLI. `off` (sampling)
+    // is an under-approximation of the may relation: it simulates one canonical representative
+    // per cube and can miss a may-successor, so a definite HOLDS on a box property over it is
+    // not sound (the A.4 warning says so when a client asks for it).
     let may_edge_inference = parse_choice(
         "may_edge_inference",
         params.may_edge_inference,
-        MayEdgeInference::Off,
+        MayEdgeInference::SmtAllPairs,
         &[
             ("off", MayEdgeInference::Off),
             ("smt-all-pairs", MayEdgeInference::SmtAllPairs),

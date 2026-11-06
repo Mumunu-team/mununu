@@ -713,7 +713,7 @@ Run the CEGAR predicate-abstraction-refinement loop over a BTOR2 design and retu
 | `predicate_source` | `string \| null` | No | Predicate-discovery source: `"wp"` (default) or `"craig"`. |
 | `max_iterations` | `number \| null` | No | Max CEGAR iterations. Defaults to `16`. |
 | `must_edge_inference` | `string \| null` | No | Must-edge inference policy (default `"off"`): `"smt-per-target"`, `"smt-per-target-standard"`, `"smt-hyper-must"`; `"auto"` is accepted and means `"off"` on this endpoint (it resolves per property only on `sv/verify-auto`, mununu#663). Any other value is a 400 naming the accepted ones (mununu#865), as are unknown `predicate_source` / `may_edge_inference` / `engine` values. With `engine: "symbolic"`, a non-default `controllable`, `predicate_source`, edge-inference policy or `emit_ctxdsl: true` is refused: the single-shot path does not read them. |
-| `may_edge_inference` | `string \| null` | No | May-edge inference policy (default `"off"`): `"smt-all-pairs"`. |
+| `may_edge_inference` | `string \| null` | No | May-edge inference policy: `"smt-all-pairs"` (default since mununu#867, the sound all-pairs may-relation, as on the CLI) or `"off"` (sampling: one representative per cube, an under-approximation; a definite HOLDS on a box property over it is not sound, and the response carries the A.4 warning). |
 | `init_values` | `string[]` | No | R-S8 symbolic-init values, one entry per register as `"REG=v1,v2,..."`. Seeds the predicate-cube initial states. Defaults to `[]`. |
 | `emit_ctxdsl` | `boolean` | No | When `true`, the response `ctxdsl` field carries the final refined cube model + checked formula as a self-contained CTXDSL document. Mirrors `--emit-ctxdsl`. Defaults to `false`. |
 
