@@ -1,29 +1,22 @@
 //! Reachability portfolio — decide BTOR2 `bad`-reachability with every available
 //! engine and merge under the **differential-oracle discipline**.
 //!
-//! The P1 payoff made usable — five sound engines, each deciding a *different*
-//! slice of designs:
+//! The P1 payoff made usable — sound engines, each deciding a *different* slice of
+//! designs:
 //! - the **exact** BDD engine
 //!   ([`exact_bad_reachable`](crate::adapter::btor2::symbolic_bitblast::exact_bad_reachable))
 //!   within its 40-bit cone cap;
 //! - the in-house **native** engine (BMC + k-induction on the Z3 seam,
 //!   [`native_bmc`](crate::adapter::btor2::native_bmc)) — no bit cap, no
 //!   subprocess: mununu's own scalable safety member;
-//! - the in-house **SPACER** engine (IC3/PDR + interpolation via Z3's Fixedpoint,
-//!   [`native_spacer`](crate::adapter::btor2::native_spacer)) — decides safe
-//!   properties whose inductive invariant native k-induction cannot reach by simple
-//!   induction. It is run in an ISOLATED child process (a self-exec of the hidden
-//!   `btor2 spacer-check` subcommand, gated on `MUNUNU_SELF_EXE`) because z3's
-//!   Fixedpoint can flaky-`SIGSEGV` on some CHC encodings; a crash in the child is
-//!   read as a sound `Unknown`, never a crash of the whole verify;
 //! - **btormc** (BMC + k-induction) on deep counterexamples;
-//! - **Pono** (IC3/PDR) on IC3-provable / violated instances.
+//! - **Pono** (IC3/PDR) on IC3-provable / violated instances;
+//! - **rIC3** (bit-level IC3/PDR) on the inductive-invariant safety class.
 //!
-//! Plus a sixth member — the in-house **interpolation** engine
-//! ([`native_interp`], owned McMillan-style forward reachability with an
-//! interpolation k-schedule). It synthesises inductive invariants that neither
-//! k-induction nor even z3-SPACER reach at their budgets (measured *unique* HWMCC
-//! decides `gen12`/`gen14`/`gen39`). It runs *concurrently* with the other five
+//! Plus the in-house **interpolation** engine ([`native_interp`], owned McMillan-style
+//! forward reachability with an interpolation k-schedule). It synthesises inductive
+//! invariants that k-induction does not reach at its budget (measured *unique* HWMCC
+//! decides `gen12`/`gen14`/`gen39`). It runs *concurrently* with the other members
 //! but polls a shared cancellation flag and bails the instant any faster engine
 //! reaches a definite verdict — so it costs ~nothing on the common (fast-decided)
 //! path yet still spends its full budget on the designs where it is the unique
@@ -36,19 +29,16 @@
 //! - **two DEFINITE verdicts that DISAGREE raise a soundness alarm** ([`ReachVerdict::Contradiction`])
 //!   rather than a guess. Since all engines are sound, a disagreement can only mean
 //!   a real bug — exactly what the differential oracle exists to catch;
-//! - **SPACER corroborates, never decides alone** (mununu#740, both directions): a lone
-//!   SPACER `reachable` was already dropped (a Horn *derivation* over mununu's btor2→CHC
-//!   encoding, with a demonstrated spurious counterexample on a pure-BV design), and a
-//!   lone SPACER `unreachable` is dropped too since libz3 4.13.3's SPACER proved HWMCC'20
-//!   `vis_arrays_am2901` safe — violated at depth 16 (rIC3 witness, six competition
-//!   solvers; z3 4.16 answers `unknown` on the same CHC). A sole-decider SPACER verdict is
-//!   a sound `Unknown`; a SPACER verdict another member shares stays attributed to both,
-//!   and a SPACER-vs-other disagreement stays a `Contradiction` (see [`collect`]).
+//! - **z3-SPACER is no longer a member** (N2, 2026-11-06). Since mununu#740 it had been
+//!   corroborate-only in both directions, so it could not decide a row on its own: a lone
+//!   `reachable` was a Horn derivation over the btor2→CHC encoding with a demonstrated
+//!   spurious counterexample, and libz3 4.13.3's SPACER proved the violated HWMCC'20
+//!   `vis_arrays_am2901` safe. rIC3 and the interpolation member carry the IC3-class proofs.
 //!
 //! One driver, [`decide_reach_portfolio`] (and its explicit-budget form
-//! [`decide_reach_portfolio_parallel_with_timeout`]): every member — the two
-//! subprocess engines, the isolated SPACER child, the in-process exact/native
-//! engines and the interpolation member — runs concurrently, and the moment one of
+//! [`decide_reach_portfolio_parallel_with_timeout`]): every member — the subprocess
+//! engines (btormc, Pono, rIC3), the in-process exact/native engines and the
+//! interpolation member — runs concurrently, and the moment one of
 //! them reaches a trusted definite verdict the subprocess members are cancelled
 //! after a short grace, so a call's wall is the first decider's time, not the
 //! slowest member's budget (S1, engine-performance roadmap). Until S1 the rescue
@@ -67,7 +57,6 @@ use crate::adapter::btor2::ast::Btor2File;
 use crate::adapter::btor2::emit::emit_btor2;
 use crate::adapter::btor2::native_bmc::{self, SafetyVerdict};
 use crate::adapter::btor2::native_interp::{self, InterpSafetyVerdict};
-use crate::adapter::btor2::native_spacer;
 use crate::adapter::btor2::symbolic_bitblast::exact_bad_reachable;
 use crate::adapter::btormc::{self, McVerdict};
 use crate::adapter::pono;
@@ -138,7 +127,6 @@ impl ReachOutcome {
 pub(crate) struct Members {
     pub exact: Option<bool>,
     pub native: Option<bool>,
-    pub spacer: Option<bool>,
     pub interp: Option<bool>,
     pub btormc: Option<McVerdict>,
     pub pono: Option<McVerdict>,
@@ -230,107 +218,6 @@ fn run_native(
     )
 }
 
-/// The in-house **SPACER engine** (IC3/PDR + interpolation via Z3's Fixedpoint)
-/// verdict: `Some(true)` reachable, `Some(false)` unreachable (an inductive-invariant
-/// safety proof), `None` abstained (Unknown / timeout / encode error). SPACER's
-/// invariant discovery decides *safe* designs whose invariant native k-induction
-/// cannot reach by simple induction below a large depth — also in-process, no
-/// subprocess.
-fn run_spacer(
-    file: &Btor2File,
-    cancel: Option<&std::sync::atomic::AtomicBool>,
-    isolated_ms: u32,
-    in_process_ms: u32,
-) -> Result<Option<bool>, String> {
-    // z3's Fixedpoint (SPACER) has a demonstrated FLAKY SIGSEGV on some CHC encodings
-    // (e.g. `vis_arrays_bufferAlloc`) — a z3-internal abort, uncatchable in-process and
-    // independent of concurrency (it segfaults even run alone). When the CLI / server
-    // exports `MUNUNU_SELF_EXE`, run SPACER in an ISOLATED child process (a self-exec of
-    // the hidden `btor2 spacer-check` subcommand) so a segfault becomes a non-success
-    // child exit we read as ABSTAIN rather than a crash of the whole verify. Without that
-    // env var (unit tests, or an embedding without the CLI binary) fall back to the
-    // in-process engine — those paths never exercise a crash-triggering design.
-    timed("spacer", || match std::env::var_os("MUNUNU_SELF_EXE") {
-        Some(exe) => run_spacer_isolated(std::path::Path::new(&exe), file, isolated_ms, cancel),
-        // The in-process engine has no cancellation point (z3's Fixedpoint runs to its own
-        // timeout). mununu#740 — a corroborate-only member must not hold a cancellable
-        // portfolio for its whole 10-s query (every rescued row waited ≥ 10.2 s with rIC3
-        // answering in 2 s), so with a cancellation flag and no isolated child it is skipped;
-        // it still runs for a caller that asked for it uncancellably.
-        None if cancel.is_some() => {
-            tracing::debug!(
-                "spacer: no isolated child (MUNUNU_SELF_EXE unset) — the corroborate-only \
-                 member is skipped rather than run uncancellably"
-            );
-            Ok(None)
-        }
-        None => run_spacer_in_process(file, in_process_ms),
-    })
-}
-
-/// In-process SPACER — the direct engine call. Used as the fallback when no isolated
-/// self-exec target is available (tests / non-CLI embeddings).
-fn run_spacer_in_process(file: &Btor2File, timeout_ms: u32) -> Result<Option<bool>, String> {
-    match native_spacer::decide_bad_safety_spacer(file, Some(timeout_ms)) {
-        Ok(SafetyVerdict::Violated { .. }) => Ok(Some(true)),
-        Ok(SafetyVerdict::Safe { .. }) => Ok(Some(false)),
-        Ok(SafetyVerdict::Unknown { .. }) => Ok(None),
-        Err(e) => Err(e.to_string()),
-    }
-}
-
-/// SPACER in an isolated child (`<exe> btor2 spacer-check --timeout-ms <t>`, BTOR2 on
-/// stdin, `safe`/`unsafe`/`unknown` on stdout). A z3-Fixedpoint SIGSEGV in the child is
-/// a non-success exit ⇒ `None` (abstain); a timeout ⇒ `None`; a clean verdict maps like
-/// the in-process engine. This contains the crash to a throwaway process — the verify
-/// itself never dies.
-fn run_spacer_isolated(
-    exe: &std::path::Path,
-    file: &Btor2File,
-    timeout_ms: u32,
-    cancel: Option<&std::sync::atomic::AtomicBool>,
-) -> Result<Option<bool>, String> {
-    let content = emit_btor2(file);
-    let mut cmd = std::process::Command::new(exe);
-    // `--quiet` keeps the child's tracing off stdout; we still scan for the verdict
-    // line defensively (the child may print a startup log line before it).
-    cmd.args(["--quiet", "btor2", "spacer-check", "--timeout-ms"])
-        .arg(timeout_ms.to_string());
-    // Wall headroom over the child's own z3 timeout so we read its verdict rather than
-    // killing it; a hung or segfaulting child is bounded either way.
-    let wall = std::time::Duration::from_millis(u64::from(timeout_ms) + 5_000);
-    let Some((status, stdout, stderr)) = crate::adapter::run_with_timeout_cancellable(
-        &mut cmd,
-        Some(content.as_bytes()),
-        wall,
-        cancel,
-    )
-    .map_err(|e| format!("spacer child could not start: {e}"))?
-    else {
-        return Ok(None); // timeout or cancelled — an abstention, not a refusal
-    };
-    if !status.success() {
-        // SIGSEGV / error exit — the isolation payoff: abstain, don't crash; say why.
-        return Err(format!(
-            "spacer child exited {}: {}",
-            status
-                .code()
-                .map_or_else(|| "by signal".to_string(), |c| c.to_string()),
-            stderr.lines().next().unwrap_or("").trim()
-        ));
-    }
-    // The verdict is the last `safe`/`unsafe`/`unknown` line the child printed.
-    for line in stdout.lines().rev() {
-        match line.trim() {
-            "safe" => return Ok(Some(false)),
-            "unsafe" => return Ok(Some(true)),
-            "unknown" => return Ok(None),
-            _ => {}
-        }
-    }
-    Ok(None)
-}
-
 /// Budget for the interpolation member. In the parallel driver it runs concurrently
 /// but cancels the moment another engine decides (so the common fast-decided design
 /// pays almost nothing); in the sequential driver it runs only after the other five
@@ -348,8 +235,7 @@ const INTERP_OVERALL_TIMEOUT_MS: u64 = 25_000;
 /// forward reachability with an interpolation k-schedule) verdict: `Some(true)`
 /// reachable, `Some(false)` unreachable (an interpolation-synthesised inductive
 /// invariant), `None` abstained. It decides a slice of safe designs whose invariant
-/// needs *synthesised* predicates that neither k-induction nor even z3-SPACER's PDR
-/// reach at their budgets — measured *unique* HWMCC coverage (`gen12`/`gen14`/`gen39`,
+/// needs *synthesised* predicates that k-induction does not reach at its budget — measured *unique* HWMCC coverage (`gen12`/`gen14`/`gen39`,
 /// which the whole rest of the portfolio leaves `Unknown`). cvc5 (a subprocess) is
 /// required; when it is absent the engine abstains.
 fn run_interp(
@@ -380,15 +266,12 @@ fn run_interp(
 /// is the constant it always was (the floor = today's behaviour, byte-identical). Under a budget
 /// the members may use the time that is left: the native BMC / k-induction per-query timeout grows
 /// to the remaining time (the fixed 5 s let one to three of eight identical rows decide per run on
-/// the full OpenTitan `edn` IP), the isolated SPACER child and the interpolation search get the
-/// remainder as their wall, the subprocess members' wall IS the remainder (above 60 s btormc's
-/// depth cap lifts automatically, as before), and the in-process SPACER fallback — which has no
-/// cancellation point — keeps its 10 s so a test-only run never holds the join for the whole slice.
+/// the full OpenTitan `edn` IP), the interpolation search gets the
+/// remainder as its wall, the subprocess members' wall IS the remainder (above 60 s btormc's
+/// depth cap lifts automatically, as before).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct MemberTimeouts {
     pub native_query_ms: u32,
-    pub spacer_isolated_ms: u32,
-    pub spacer_in_process_ms: u32,
     pub interp_query_ms: u32,
     pub interp_overall_ms: u64,
     pub subprocess: std::time::Duration,
@@ -401,8 +284,6 @@ pub(crate) fn member_timeouts(
     match remaining_ms {
         None => MemberTimeouts {
             native_query_ms: native_bmc::DEFAULT_TIMEOUT_MS,
-            spacer_isolated_ms: native_spacer::DEFAULT_TIMEOUT_MS,
-            spacer_in_process_ms: native_spacer::DEFAULT_TIMEOUT_MS,
             interp_query_ms: INTERP_QUERY_TIMEOUT_MS,
             interp_overall_ms: INTERP_OVERALL_TIMEOUT_MS,
             subprocess,
@@ -412,8 +293,6 @@ pub(crate) fn member_timeouts(
             let rem32 = u32::try_from(rem).unwrap_or(u32::MAX);
             MemberTimeouts {
                 native_query_ms: rem32,
-                spacer_isolated_ms: rem32,
-                spacer_in_process_ms: native_spacer::DEFAULT_TIMEOUT_MS.min(rem32),
                 interp_query_ms: INTERP_QUERY_TIMEOUT_MS.max(rem32 / 5).min(rem32),
                 interp_overall_ms: rem,
                 subprocess: std::time::Duration::from_millis(rem),
@@ -423,7 +302,7 @@ pub(crate) fn member_timeouts(
 }
 
 /// Merge the members' verdicts into a [`ReachOutcome`], in the fixed engine order
-/// (`exact`, `native`, `spacer`, `interp`, `btormc`, `pono`) so the outcome is
+/// (`exact`, `native`, `interp`, `btormc`, `pono`, `ric3`) so the outcome is
 /// deterministic regardless of which driver (sequential / parallel) produced them. The
 /// members' refusals ride along untouched (mununu#734).
 fn collect(m: Members) -> ReachOutcome {
@@ -433,7 +312,6 @@ fn collect(m: Members) -> ReachOutcome {
     for (name, v) in [
         ("exact", m.exact),
         ("native", m.native),
-        ("spacer", m.spacer),
         ("interp", m.interp),
     ] {
         match v {
@@ -450,54 +328,15 @@ fn collect(m: Members) -> ReachOutcome {
             Some(McVerdict::Unknown) | None => {}
         }
     }
-    // SOUNDNESS GUARD — uncorroborated SPACER counterexample.
-    //
-    // Every other member proves *reachable* with a concrete witness: exact-BDD is
-    // exact, native BMC / btormc / Pono return a bounded trace, and native interp
-    // (McMillan) escalates through BMC. SPACER alone reports `reachable` from a Horn
-    // *derivation* over mununu's btor2→CHC rule encoding, and that encoding has at
-    // least one demonstrated spurious-CEX bug on a pure-BV design
-    // (`vcegar_arrays_itc99_b12_p2`: SPACER says reachable, ground truth is safe, and
-    // no BMC engine can corroborate the trace). The inter-engine `Contradiction`
-    // alarm did not catch it because SPACER was the *sole* decider — nothing else
-    // ran to disagree.
-    //
-    // So: when SPACER is the only engine claiming reachable AND nothing contradicts
-    // it, we cannot trust the derivation — drop the claim and abstain (`Unknown`)
-    // rather than emit a spurious `Reachable`. A spacer-reachable that any
-    // concrete-witness engine corroborates, or a spacer-vs-safe disagreement (which
-    // stays a `Contradiction` alarm), is left untouched. See
-    // `measurements/hwmcc-owned-engine-gaps.md` (Category D) for the root-cause
-    // encoding fix that would let SPACER emit `Reachable` on its own again.
-    if reachable_by == ["spacer"] && unreachable_by.is_empty() {
-        reachable_by.clear();
-    }
-    // mununu#740 — the `unreachable` direction is not trusted alone either: libz3 4.13.3's
-    // SPACER (the one `mununu-sva` / `mununu-sva-pono` link) proved HWMCC'20
-    // `vis_arrays_am2901` safe — the property is violated at depth 16 (the official table has
-    // six solvers `sat`, rIC3 prints the 17-step witness in 0.2 s), and the SAME CHC on z3
-    // 4.16.0 is `unknown`. The encoding was cleared (the native BMC on the same `encode_design`
-    // view, with the inputs pinned to the witness, finds the violation in 0 s), so the proof is
-    // a wrong `unsat` from that z3 build. SPACER is corroborate-only in BOTH directions until a
-    // newer libz3 is pinned and the 67 + 33 adjudication rows re-run clean. Measured cost on the
-    // HWMCC'20 bv adjudication (2026-10-21): ONE row — `h_RCU` (ground-truth safe) moves to
-    // `unknown` where rIC3 has no answer within the budget; `gen31` / `gen35` / `gen44`, SPACER-
-    // alone the day before, stay decided as proofs SHARED with rIC3, because a SPACER answer no
-    // longer cancels the members whose corroboration it needs.
-    if unreachable_by == ["spacer"] && reachable_by.is_empty() {
-        unreachable_by.clear();
-    }
     let mut out = ReachOutcome::from_sets(reachable_by, unreachable_by);
     // The refusals arrive in FINISHING order (each member on its own thread); report them in the
     // fixed engine order so two runs of one design produce one outcome (the drivers' equality
     // tests compare whole outcomes).
     let rank = |member: &str| {
-        [
-            "exact", "native", "spacer", "interp", "btormc", "pono", "ric3",
-        ]
-        .iter()
-        .position(|m| *m == member)
-        .unwrap_or(usize::MAX)
+        ["exact", "native", "interp", "btormc", "pono", "ric3"]
+            .iter()
+            .position(|m| *m == member)
+            .unwrap_or(usize::MAX)
     };
     let mut refused = m.refused;
     refused.sort_by(|(a, _), (b, _)| rank(a).cmp(&rank(b)).then_with(|| a.cmp(b)));
@@ -505,9 +344,9 @@ fn collect(m: Members) -> ReachOutcome {
     out
 }
 
-/// Decide `bad`-reachability of `file` across all seven engines — the exact BDD
-/// engine, the in-house native (BMC + k-induction), SPACER and interpolation
-/// engines, and the btormc, Pono and rIC3 subprocess members — merged under the
+/// Decide `bad`-reachability of `file` across all six engines — the exact BDD
+/// engine, the in-house native (BMC + k-induction) and interpolation engines, and
+/// the btormc, Pono and rIC3 subprocess members — merged under the
 /// differential-oracle discipline, with the subprocess members' default budget
 /// ([`btormc::DEFAULT_TIMEOUT`]).
 ///
@@ -537,7 +376,7 @@ const DEEP_BUDGET_KMAX: u32 = 1000;
 /// longer budget is pointless if the unrolling stays capped at 40 — see that constant).
 /// Measured: with both raised, `krebs.3`'s depth-75 CEX is found in ~73 s (`unknown` →
 /// `violated`); `vis_arrays_buf_bug`'s is found in ~1 s either way. The in-process members
-/// (exact / native / SPACER / interp) keep their own budgets. Surfaced via `btor2 verify
+/// (exact / native / interp) keep their own budgets. Surfaced via `btor2 verify
 /// --timeout-ms`.
 ///
 /// Scoped threads borrow `file` directly — the scope guarantees the borrows end before
@@ -557,8 +396,7 @@ pub fn decide_reach_portfolio_parallel_with_timeout(
 /// poll), and the outcome is whatever had been decided — usually `Unknown`. For a caller that
 /// races this portfolio against something else and must not return while it still runs
 /// (mununu#689: the justice parallel policy left it running on a detached thread). The exact
-/// member and the in-process SPACER fallback have no cancellation point and run to their own
-/// budgets.
+/// member has no cancellation point and runs to its own budget.
 pub fn decide_reach_portfolio_cancellable(
     file: &Btor2File,
     subprocess_timeout: std::time::Duration,
@@ -587,17 +425,12 @@ pub fn decide_reach_portfolio_cancellable(
     // (#1 — run interpolation as a concurrent member, not last-resort, so its unique
     // decides get owned credit, without its pathological query dominating wall-clock on
     // instances another engine already decided), and since S1 (engine-performance
-    // roadmap, category 4) the three CHILD members — btormc, Pono and the isolated
-    // SPACER — kill their subprocess after a short grace instead of running out their
+    // roadmap, category 4) the CHILD members — btormc, Pono and rIC3 — kill
+    // their subprocess after a short grace instead of running out their
     // 60 s / 15 s budgets: the portfolio's wall is the first decider plus the grace, not
     // the slowest member's timeout. A member still running when the flag is set is not
     // cross-checked, exactly as in the owned-only driver; every member is individually
     // sound, so the decision itself is.
-    //
-    // "Trusted" excludes SPACER altogether (mununu#740): `collect` drops a lone SPACER verdict
-    // in either direction as uncorroborated, so SPACER must never cancel the members whose
-    // corroboration it needs — a SPACER answer that cancelled everything else would always
-    // end `Unknown`.
     let decided = AtomicBool::new(false);
     let decided = &decided;
     let finished = AtomicBool::new(false);
@@ -653,7 +486,7 @@ pub fn decide_reach_portfolio_cancellable(
         });
         // Plan 4 / PR D2 (mununu#736) — rIC3's bit-level IC3: the member that proves the
         // inductive-invariant safety class (OpenTitan's duplicated-counter fault-flag chains, which
-        // k-induction cannot close from a free step state and SPACER does not within the slice).
+        // k-induction cannot close from a free step state).
         // Trusted like btormc / pono: it reads the same emitted BTOR2 and answers with a certificate-
         // capable verdict; the HWMCC adjudication ran clean before it was promoted.
         let ric3_h = scope.spawn(move || {
@@ -674,7 +507,7 @@ pub fn decide_reach_portfolio_cancellable(
             }
             v
         });
-        // The native and SPACER engines are in-process Z3 work — each on its own
+        // The native engine is in-process Z3 work — on its own
         // thread so it overlaps the exact engine + the subprocess members rather than
         // serialising.
         let native_h = scope.spawn(move || {
@@ -688,20 +521,6 @@ pub fn decide_reach_portfolio_cancellable(
                 decided.store(true, Relaxed);
             }
             v
-        });
-        let spacer_h = scope.spawn(move || {
-            let _g = crate::adapter::run_budget::enter(budget);
-            // mununu#740 — corroborate-only: a SPACER verdict cancels nothing.
-            settle(
-                refused,
-                "spacer",
-                run_spacer(
-                    file,
-                    Some(decided),
-                    t.spacer_isolated_ms,
-                    t.spacer_in_process_ms,
-                ),
-            )
         });
         // Owned McMillan interpolation — now a FIRST-CLASS concurrent member (was
         // last-resort). Polls `decided` and bails out early once a faster member decides.
@@ -717,7 +536,6 @@ pub fn decide_reach_portfolio_cancellable(
         }
         // A panicked member thread abstains (None) rather than poisoning the merge.
         let native = native_h.join().unwrap_or(None);
-        let spacer = spacer_h.join().unwrap_or(None);
         let btormc = btormc_h.join().unwrap_or(None);
         let pono = pono_h.join().unwrap_or(None);
         let ric3 = ric3_h.join().unwrap_or(None);
@@ -726,7 +544,6 @@ pub fn decide_reach_portfolio_cancellable(
         Members {
             exact,
             native,
-            spacer,
             interp,
             btormc,
             pono,
@@ -754,7 +571,7 @@ const OWNED_CEX_QUERY_MS: u32 = 15_000;
 
 /// The **owned-standalone** driver: decide `bad`-reachability with ONLY the
 /// mununu-owned engines, run concurrently under a shared `timeout_ms` wall budget,
-/// deliberately EXCLUDING the external algorithms (Z3 SPACER, btormc, Pono). It
+/// deliberately EXCLUDING the external algorithms (btormc, Pono, rIC3). It
 /// answers "what can mununu's *own* algorithms decide on their own budget?" — the
 /// ceiling that matters for a no-subprocess deployment and the soundness cross-check.
 ///
@@ -1046,7 +863,7 @@ mod tests {
     #[test]
     fn interp_member_never_overrides_a_definite_verdict() {
         // The interpolation member is gated: the sequential driver only computes it
-        // when the base portfolio (exact / native / spacer / btormc / pono) is still
+        // when the base portfolio (exact / native / btormc / pono) is still
         // Unknown, and the merge is first-definite-wins. A design that native
         // k-induction already proves safe must come back Unreachable with the interp
         // member never running or flipping it.
@@ -1100,93 +917,6 @@ mod tests {
         assert_eq!(
             ReachOutcome::from_sets(vec![], vec![]).refused,
             Vec::<(&str, String)>::new()
-        );
-    }
-
-    #[test]
-    fn uncorroborated_spacer_counterexample_abstains() {
-        // SOUNDNESS GUARD (`vcegar_arrays_itc99_b12_p2`): a SPACER-only `reachable`
-        // with no concrete-witness corroboration is a suspect derivation over the
-        // btor2→CHC encoding, so the merge drops it and abstains rather than emit a
-        // spurious Reachable.
-        let out = collect(Members {
-            spacer: Some(true),
-            ..Default::default()
-        });
-        assert_eq!(
-            out.verdict,
-            ReachVerdict::Unknown,
-            "sole-decider spacer-reachable must abstain: {out:?}"
-        );
-        assert!(
-            out.reachable_by.is_empty(),
-            "the uncorroborated spacer claim is dropped: {out:?}"
-        );
-        // Corroborated by any concrete-witness engine ⇒ trusted (stays Reachable).
-        assert_eq!(
-            collect(Members {
-                native: Some(true),
-                spacer: Some(true),
-                ..Default::default()
-            })
-            .verdict,
-            ReachVerdict::Reachable,
-            "native BMC corroborates spacer ⇒ trust the counterexample"
-        );
-        // A spacer-vs-safe disagreement is a real soundness alarm, NOT silently
-        // resolved — the guard only fires when spacer is the *sole* decider.
-        assert_eq!(
-            collect(Members {
-                exact: Some(false),
-                spacer: Some(true),
-                ..Default::default()
-            })
-            .verdict,
-            ReachVerdict::Contradiction,
-            "exact-safe vs spacer-reachable must still raise the alarm"
-        );
-    }
-
-    /// mununu#740 — the mirror guard: a SPACER-only `unreachable` is NOT a proof either.
-    /// libz3 4.13.3's SPACER proved HWMCC'20 `vis_arrays_am2901` safe although the property is
-    /// violated at depth 16 (rIC3 witness; six competition solvers), and the portfolio shipped
-    /// `holds` with `unreachable_by: ["spacer"]`. A sole-decider SPACER proof abstains; one
-    /// another member shares stays attributed to both; a disagreement stays an alarm.
-    #[test]
-    fn uncorroborated_spacer_proof_abstains() {
-        let out = collect(Members {
-            spacer: Some(false),
-            ..Default::default()
-        });
-        assert_eq!(
-            out.verdict,
-            ReachVerdict::Unknown,
-            "sole-decider spacer-unreachable must abstain: {out:?}"
-        );
-        assert!(
-            out.unreachable_by.is_empty(),
-            "the uncorroborated spacer proof is dropped: {out:?}"
-        );
-        let out = collect(Members {
-            ric3: Some(McVerdict::Safe),
-            spacer: Some(false),
-            ..Default::default()
-        });
-        assert_eq!(out.verdict, ReachVerdict::Unreachable);
-        assert_eq!(
-            out.unreachable_by,
-            vec!["spacer", "ric3"],
-            "a corroborated spacer proof keeps both names: {out:?}"
-        );
-        assert_eq!(
-            collect(Members {
-                native: Some(true),
-                spacer: Some(false),
-                ..Default::default()
-            })
-            .verdict,
-            ReachVerdict::Contradiction,
-            "native-reachable vs spacer-safe must still raise the alarm"
         );
     }
 
@@ -1266,31 +996,22 @@ mod tests {
     }
 
     /// mununu#726 — with no budget the members keep the constants they always had (the floor);
-    /// under a budget every bound follows the time left, and the in-process SPACER fallback — no
-    /// cancellation point — never grows past its 10 s.
+    /// under a budget every bound follows the time left.
     #[test]
     fn member_timeouts_floor_is_todays_constants_and_follows_the_budget() {
         let sixty = std::time::Duration::from_secs(60);
         let floor = member_timeouts(None, sixty);
         assert_eq!(floor.native_query_ms, native_bmc::DEFAULT_TIMEOUT_MS);
-        assert_eq!(floor.spacer_isolated_ms, native_spacer::DEFAULT_TIMEOUT_MS);
-        assert_eq!(
-            floor.spacer_in_process_ms,
-            native_spacer::DEFAULT_TIMEOUT_MS
-        );
         assert_eq!(floor.interp_query_ms, INTERP_QUERY_TIMEOUT_MS);
         assert_eq!(floor.interp_overall_ms, INTERP_OVERALL_TIMEOUT_MS);
         assert_eq!(floor.subprocess, sixty);
         let b = member_timeouts(Some(60_000), sixty);
         assert_eq!(b.native_query_ms, 60_000);
-        assert_eq!(b.spacer_isolated_ms, 60_000);
-        assert_eq!(b.spacer_in_process_ms, 10_000);
         assert_eq!(b.interp_query_ms, 12_000);
         assert_eq!(b.interp_overall_ms, 60_000);
         assert_eq!(b.subprocess, sixty);
         let short = member_timeouts(Some(2_000), sixty);
         assert!(short.native_query_ms <= 2_000 && short.interp_query_ms <= 2_000);
-        assert!(short.spacer_isolated_ms <= 2_000 && short.spacer_in_process_ms <= 2_000);
         assert_eq!(short.subprocess, std::time::Duration::from_millis(2_000));
         let big = member_timeouts(Some(u64::MAX), sixty);
         assert_eq!(big.native_query_ms, u32::MAX, "no overflow");
@@ -1319,36 +1040,31 @@ mod tests {
     }
 
     #[test]
-    fn a_design_only_spacer_decides_is_unknown_under_the_demotion() {
+    fn a_design_only_an_ic3_member_proves_is_unknown_without_one() {
         // An 300-bit counter that STALLS at 0 (init 0, next = (c==0)?0:c+1), bad = (c==MAX).
         // Reachable set is {0} ⇒ SAFE, but:
         //   - the exact BDD engine abstains (300-bit > its auto-cap ceiling of 192);
         //   - native k-induction abstains — the property is not provable by *simple*
         //     k-induction: an unreachable free path MAX-k → … → MAX stays ¬bad until
         //     the last step at every depth, so it never closes below depth 2^80-1.
-        // Only SPACER's invariant discovery (`c == 0`) decides it — and since mununu#740 a
-        // lone SPACER proof decides NOTHING (libz3 4.13.3 proved a violated HWMCC design safe),
-        // so with no bit-level IC3 on PATH (btormc / pono / rIC3 absent in `make ci`) the
-        // portfolio answers `Unknown`: the measured cost of the demotion (`h_RCU` on the
-        // HWMCC'20 sweep), paid for the am2901 class of wrong `holds`. In `mununu-sva` rIC3
-        // proves this design.
+        // Only an invariant-discovering member (`c == 0`) decides it: rIC3 or Pono's IC3, or
+        // the interpolation member with cvc5. With none on PATH (`make ci`) the portfolio
+        // answers `Unknown`. That was also the case before N2 removed z3-SPACER, which had been
+        // corroborate-only since mununu#740 (`h_RCU` on the HWMCC'20 sweep is this class). In
+        // `mununu-sva` rIC3 proves this design.
         const WIDE_STALL: &str = "1 sort bitvec 300\n2 zero 1\n3 one 1\n4 state 1 c\n5 init 1 4 2\n\
              6 sort bitvec 1\n7 eq 6 4 2\n8 add 1 4 3\n9 ite 1 7 2 8\n\
              10 next 1 4 9\n11 ones 1\n12 eq 6 4 11\n13 bad 12\n";
         let file = parser::parse(WIDE_STALL).expect("parse");
         let out = decide_reach_portfolio(&file);
         // Whoever is on PATH (cvc5 lets the interpolation member prove it; rIC3 / btormc / pono
-        // in the image), the attribution is never SPACER alone — and without such a member the
-        // verdict is `Unknown`, the demotion's cost.
-        assert_ne!(
-            out.unreachable_by,
-            vec!["spacer"],
-            "a lone SPACER proof must not decide (mununu#740): {out:?}"
-        );
+        // in the image) carries the proof; without such a member the verdict is `Unknown`.
         match out.verdict {
             ReachVerdict::Unreachable => assert!(
-                out.unreachable_by.iter().any(|m| *m != "spacer"),
-                "a proof is carried by a member other than SPACER: {out:?}"
+                out.unreachable_by
+                    .iter()
+                    .any(|m| ["interp", "ric3", "pono", "btormc"].contains(m)),
+                "a proof is carried by an invariant-discovering member: {out:?}"
             ),
             ReachVerdict::Unknown => {}
             other => panic!("unexpected {other:?}: {out:?}"),
@@ -1442,7 +1158,7 @@ mod tests {
                 "owned-only listed a non-owned engine {name}: {out:?}"
             );
         }
-        for ext in ["spacer", "btormc", "pono", "ric3"] {
+        for ext in ["btormc", "pono", "ric3"] {
             assert!(
                 !out.reachable_by.contains(&ext) && !out.unreachable_by.contains(&ext),
                 "owned-only must never list {ext}: {out:?}"

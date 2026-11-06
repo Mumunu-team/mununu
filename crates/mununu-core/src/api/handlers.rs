@@ -809,7 +809,7 @@ fn btor2_cegar_handler_impl(request: Btor2CegarRequest) -> ApiResult<Json<Btor2C
 /// Decide `bad`-reachability of a BTOR2 design with the multi-engine safety
 /// portfolio (`POST /api/v1/btor2/verify`). Surface peer of the CLI
 /// `mununu btor2 verify`: runs every available sound engine (exact ⊕ native ⊕
-/// spacer ⊕ btormc ⊕ Pono) via the **parallel** driver — its wall-clock is bounded
+/// interpolation ⊕ btormc ⊕ Pono ⊕ rIC3) via the **parallel** driver — its wall-clock is bounded
 /// by the slowest single engine, keeping the request within the extended client's
 /// budget even when the subprocess members are present — and returns the merged
 /// verdict + per-engine breakdown. A `"contradiction"` verdict means two sound

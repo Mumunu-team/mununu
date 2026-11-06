@@ -815,7 +815,7 @@ fn predict_engine(
                     "reach-portfolio",
                     format!(
                         "safety/reachability, cone {cone_bits}b > {cap}b cap → exact over-cap; the \
-                         reachability portfolio (native BMC / spacer) decides wide `bad`-reachability"
+                         reachability portfolio (native BMC / IC3 members) decides wide `bad`-reachability"
                     ),
                 )
             }
@@ -1441,7 +1441,7 @@ mod tests {
         use crate::mu_calculus::PropertyClass::*;
         // safety, cone fits the cap → exact decides.
         assert_eq!(predict_engine(Safety, 40, 192, None).0, "exact-symbolic");
-        // safety, over cap → the reachability portfolio (BMC/spacer) decides wide safety.
+        // safety, over cap → the reachability portfolio (BMC / IC3 members) decides wide safety.
         assert_eq!(predict_engine(Safety, 300, 192, None).0, "reach-portfolio");
         // reachability, fits → exact.
         assert_eq!(

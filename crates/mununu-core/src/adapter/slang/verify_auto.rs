@@ -2741,7 +2741,7 @@ pub struct VerifyAutoOptions {
     pub portfolio: Option<PortfolioMode>,
     /// On a *safety* property the cube portfolio leaves `⊥`, escalate to the
     /// multi-engine reachability portfolio (reduce the AG-invariant to a `bad`-monitor
-    /// and decide it symbolically — exact ⊕ native ⊕ spacer ⊕ btormc ⊕ Pono). Only
+    /// and decide it symbolically — exact ⊕ native ⊕ interpolation ⊕ btormc ⊕ Pono ⊕ rIC3). Only
     /// fires on `⊥` reducible AG-invariants, so there is no common-path cost and
     /// liveness / recoverability are untouched. Default `true`; the CLI `--no-rescue`
     /// / API `rescue_bottom_safety: false` opts out.
@@ -8993,7 +8993,7 @@ fn rescue_note(name: &str, verdict: &str, engines: &[&str]) -> VerificationNote 
             }
         ),
         detail: "The safety ⊥ was reduced to a `bad`-monitor and decided symbolically by the \
-                 multi-engine reachability portfolio (exact ⊕ native ⊕ spacer ⊕ btormc ⊕ Pono). \
+                 multi-engine reachability portfolio (exact ⊕ native ⊕ interpolation ⊕ btormc ⊕ Pono ⊕ rIC3). \
                  Sound: every portfolio member is sound, and a disagreement would surface a \
                  contradiction alarm rather than a verdict."
             .into(),
@@ -10048,7 +10048,7 @@ mod tests {
 
     // The safety-⊥ escalation reduces a reducible AG-invariant the cube left ⊥ to a
     // `bad`-monitor and decides it with the reachability portfolio — testable on a
-    // BTOR2 fixture without the SV toolchain (exact/native/spacer run in-process).
+    // BTOR2 fixture without the SV toolchain (exact/native run in-process).
     #[test]
     fn escalate_bottom_safety_rescues_a_reducible_invariant() {
         // `big` (4-bit) is init 0 and holds its value ⇒ AG(big == 0) HOLDS; the cube

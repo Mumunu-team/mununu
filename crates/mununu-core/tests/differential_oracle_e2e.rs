@@ -322,10 +322,8 @@ fn native_engine_adjudication_over_btor2tools_suite() {
 /// ```sh
 /// curl -LO https://hwmcc.github.io/2020/hwmcc20benchmarks.tar.xz
 /// mkdir -p /tmp/hwmcc20 && tar xf hwmcc20benchmarks.tar.xz -C /tmp/hwmcc20
-/// # in the mununu-sva image (btormc + pono + rIC3 on PATH), point at a leaf dir of .btor2,
-/// # and give SPACER its isolated child (a release binary): run in-process, z3's Fixedpoint
-/// # SIGSEGVs on `vis_arrays_bufferAlloc` and takes the whole test with it (measured 2026-10-19)
-/// MUNUNU_SELF_EXE=/cargo-target/release/mununu MUNUNU_HWMCC_DIR=/tmp/hwmcc20/<btor-subdir> \
+/// # in the mununu-sva image (btormc + pono + rIC3 on PATH), point at a leaf dir of .btor2
+/// MUNUNU_HWMCC_DIR=/tmp/hwmcc20/<btor-subdir> \
 ///   cargo test -p mununu-core --test differential_oracle_e2e \
 ///   hwmcc_adjudication_over_user_dir -- --ignored --nocapture
 /// ```

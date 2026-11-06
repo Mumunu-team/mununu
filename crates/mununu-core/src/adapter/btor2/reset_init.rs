@@ -17,7 +17,7 @@
 //! | predicate cube — `state_cell_init_values` + the free initial dimensions | **free**, since mununu#579 (was 0) | more start states ⇒ over-approx |
 //! | explicit lift — `kmts_lift::initial_cube_indices` | **free**: every cube consistent with the `init` lines, since mununu#609 (was cube_0) | over-approx |
 //! | exact — `symbolic_bitblast::initial_state_bdd` | **free**, since mununu#498 | over-approx |
-//! | reachability portfolio (native BMC / SPACER / btormc / Pono) | **free** (BTOR2 semantics) | over-approx |
+//! | reachability portfolio (native BMC / interpolation / btormc / Pono / rIC3) | **free** (BTOR2 semantics) | over-approx |
 //!
 //! Before mununu#579 the cube's 0 stood against the other two — opposite soundness postures on
 //! cycle 0 within one portfolio run, the cube's being unsound for `HOLDS` — and that split is the
