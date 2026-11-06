@@ -9952,8 +9952,9 @@ mod tests {
     }
 
     /// mununu#734 — a reach portfolio that decides nothing within an intact budget names its cause:
-    /// on a design with an array sort every in-process member refuses (`ArraySortUnsupportedInBvOnly`
-    /// from the SMT encoder; the exact engine has no array support) and the subprocess members are
+    /// on a design whose memory is initialised from an array-sorted INPUT every in-process member
+    /// refuses (native BMC since N5 encodes memories, but not that `init`; the exact engine and
+    /// interpolation have no array support) and the subprocess members are
     /// absent on the host, so the row's ⊥ carries `EngineDidNotComplete { engine: "reach-portfolio" }`
     /// with the members' own words and a `portfolio-refused` note — not `unclassified`, not
     /// `budget-expired`. On OpenTitan csrng the same situation (a 64-bit constant limit) cost a debug
@@ -9962,7 +9963,8 @@ mod tests {
     fn escalate_bottom_attributes_an_instant_inconclusive_to_the_refusing_members() {
         const ARRAY_DESIGN: &str = "1 sort bitvec 1\n2 sort bitvec 2\n3 sort array 2 1\n\
                                     4 state 3 mem\n5 zero 1\n6 state 1 q\n7 init 1 6 5\n\
-                                    8 next 1 6 6\n9 next 3 4 4\n";
+                                    8 next 1 6 6\n9 next 3 4 4\n10 input 3 seed\n\
+                                    11 init 3 4 10\n";
         let mut report = AutoVerifyReport {
             properties: vec![PropertyVerdict {
                 name: "q_zero".to_string(),

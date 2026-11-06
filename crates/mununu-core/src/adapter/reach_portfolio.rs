@@ -1547,10 +1547,11 @@ mod tests {
     }
 
     // mununu#803 — the owned driver keeps a member's refusal beside the verdict, as the scoped
-    // driver does: the native encoder declines an array state, and `refused` says so.
+    // driver does: the native encoder declines a memory initialised from an array-sorted input (it
+    // encodes memories since N5, not that `init`), and `refused` says so.
     #[test]
     fn the_owned_driver_records_the_native_members_refusal() {
-        const ARRAY_STATE: &str = "1 sort bitvec 2\n2 sort bitvec 4\n3 sort array 1 2\n4 state 3 mem\n5 next 3 4 4\n6 sort bitvec 1\n7 input 6 i\n8 bad 7\n";
+        const ARRAY_STATE: &str = "1 sort bitvec 2\n2 sort bitvec 4\n3 sort array 1 2\n4 state 3 mem\n5 next 3 4 4\n6 sort bitvec 1\n7 input 6 i\n8 bad 7\n9 input 3 seed\n10 init 3 4 9\n";
         let file = crate::adapter::btor2::parser::parse(ARRAY_STATE).expect("parse");
         let out = decide_reach_owned_only(&file, 3_000);
         let members: Vec<&str> = out.refused.iter().map(|(m, _)| *m).collect();

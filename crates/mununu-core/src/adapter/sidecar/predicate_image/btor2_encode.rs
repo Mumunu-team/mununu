@@ -491,6 +491,83 @@ pub(crate) fn encode_primed(
 /// (the canonical implementation, shared with the `walk_design` driver);
 /// kept as a module-local name so existing call sites + the test read
 /// unchanged.
+/// N5 — the initial value of every array-sorted state cell that has an `init` line, as a term
+/// over the CURRENT-step variables (a caller instantiates it at frame 0 by substitution).
+///
+/// - An `init` whose value is an array expression (a `write` chain, an `ite`, another array
+///   state) is that expression.
+/// - An `init` whose value is a bit-vector is BTOR2's whole-memory initialisation: the constant
+///   array holding it at every index.
+///
+/// An `init` that cannot be encoded is an error, never a dropped `init`: a memory left free at
+/// frame 0 over-approximates the initial states, and a bounded counterexample over it can be
+/// spurious. Empty when the view has no array state (`Theory::BvOnly`).
+pub fn encode_array_inits(
+    file: &Btor2File,
+    view: &Btor2SmtView,
+) -> Result<HashMap<Nid, z3::ast::Array>, EncodeError> {
+    let mut out = HashMap::new();
+    if view.state_curr_arr.is_empty() {
+        return Ok(out);
+    }
+    let mut cache: HashMap<Nid, z3::ast::BV> = HashMap::new();
+    let mut array_cache: HashMap<Nid, z3::ast::Array> = HashMap::new();
+    let sort_of = |nid: Nid| {
+        file.lookup(nid).and_then(|l| match &l.node {
+            Node::State { sort, .. }
+            | Node::Input { sort, .. }
+            | Node::Const { sort, .. }
+            | Node::Op { sort, .. } => Some(*sort),
+            _ => None,
+        })
+    };
+    for line in &file.lines {
+        let Node::Init { state, value, .. } = &line.node else {
+            continue;
+        };
+        if !view.state_curr_arr.contains_key(state) {
+            continue;
+        }
+        let (idx_w, elem_w) = sort_of(*state).and_then(|s| array_widths(file, s)).ok_or(
+            EncodeError::UnsupportedOperator {
+                nid: *state,
+                op_name: "array init on a state without an array sort",
+            },
+        )?;
+        let value_is_array = sort_of(value.nid()).is_some_and(|s| array_widths(file, s).is_some());
+        let init = if value_is_array {
+            eval_array_operand(
+                *value,
+                file,
+                &view.state_curr,
+                &view.inputs,
+                &view.state_curr_arr,
+                &mut cache,
+                &mut array_cache,
+            )?
+        } else {
+            let bv = eval_operand(
+                *value,
+                file,
+                &view.state_curr,
+                &view.inputs,
+                Some(&view.state_curr_arr),
+                &mut cache,
+            )?;
+            if bv.get_size() != elem_w {
+                return Err(EncodeError::WidthMismatch {
+                    nid: line.nid,
+                    state_width: elem_w,
+                    operand_width: bv.get_size(),
+                });
+            }
+            z3::ast::Array::const_array(&z3::Sort::bitvector(idx_w), &bv)
+        };
+        out.insert(*state, init);
+    }
+    Ok(out)
+}
+
 fn array_widths(file: &Btor2File, sort_nid: Nid) -> Option<(u32, u32)> {
     crate::adapter::btor2::parser::array_widths(file, sort_nid)
 }
