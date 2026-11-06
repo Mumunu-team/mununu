@@ -2802,9 +2802,12 @@ fn e2e_opentitan_ip_edn_full() {
     // from `Error` the FSM never returns to `Idle`. The main FSM's row is refuted by the trap
     // certificate (ledger §3.18, 2026-10-21) with the path into `Error`; until then it was pinned ⊥ —
     // the state's cone is over the exact cap and the cube certified no MUST path into the trap.
-    // Under the slang-only lift (2026-11-04) each endpoint FSM's cone fits the exact cap and
-    // `exact-symbolic` refutes its row directly, with the same path into the trap; under the sv2v
-    // lift the endpoint rows went through the certificate too.
+    // Under the slang-only lift each endpoint row's 405-bit cone is over the exact cap: the exact
+    // member refuses it at `prepare`, and its fallback, the scalable recoverability engine, refutes
+    // the row with no path (mununu#849, measured on the SVA host 2026-11-05). The row names that
+    // engine and carries a `witness-unavailable` note saying why no path ships. Under the sv2v lift
+    // the endpoint rows went through the certificate, with the path into the trap.
+    const RECOVERABILITY_RESCUE: &str = "explicit cube + smt-hyper-must (recoverability rescue)";
     for (l, trap, decider) in [
         (
             "edn_main_sm_recover_idle",
@@ -2814,12 +2817,12 @@ fn e2e_opentitan_ip_edn_full() {
         (
             "edn_ack_sm_0_recover_idle",
             "u_edn_core.gen_ep_blk$0.u_edn_ack_sm_ep.state_q == 465",
-            "exact-symbolic",
+            RECOVERABILITY_RESCUE,
         ),
         (
             "edn_ack_sm_7_recover_idle",
             "u_edn_core.gen_ep_blk$7.u_edn_ack_sm_ep.state_q == 465",
-            "exact-symbolic",
+            RECOVERABILITY_RESCUE,
         ),
     ] {
         let p = report
@@ -2841,6 +2844,19 @@ fn e2e_opentitan_ip_edn_full() {
                     && n.items.contains(&want)),
                 "{l}: the certificate note names `{trap}`"
             );
+        }
+        if decider == RECOVERABILITY_RESCUE {
+            assert!(
+                p.counterexample.is_none(),
+                "{l}: the fallback builds no path"
+            );
+            assert!(
+                report.notes.iter().any(|n| n.kind == "witness-unavailable"
+                    && n.property.as_deref() == Some(p.name.as_str())
+                    && n.items.iter().any(|i| i == "exact-refused")),
+                "{l}: the missing path is explained by the exact refusal"
+            );
+            continue;
         }
         // The trace names state CELLS, not the `state_q` alias: the main FSM's 9-bit state shows as
         // `u_edn_core.edn_main_sm_state`, an endpoint FSM's as a cell inside its `u_state_regs`. The
