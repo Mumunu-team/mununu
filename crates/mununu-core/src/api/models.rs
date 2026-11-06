@@ -1014,9 +1014,10 @@ pub struct Btor2CegarRequest {
     /// other value is a 400 (mununu#865).
     #[serde(default)]
     pub must_edge_inference: Option<String>,
-    /// May-edge inference policy (kebab-case; default `"off"`):
-    /// `"smt-all-pairs"` for the sound all-pairs may-relation. Mirrors the
-    /// CLI `--may-edge-inference`.
+    /// May-edge inference policy (kebab-case): `"smt-all-pairs"` (default, the sound all-pairs
+    /// may-relation) or `"off"` (sampling, an under-approximation: a definite HOLDS on a box
+    /// property over it is not sound). Mirrors the CLI `--may-edge-inference`, whose default it
+    /// shares since mununu#867 (it used to default to `"off"`).
     #[serde(default)]
     pub may_edge_inference: Option<String>,
     /// R-S8 symbolic-init config-values, one entry per register as
@@ -2025,7 +2026,8 @@ pub struct SvCegarRequest {
     /// Must-edge inference policy (default `"off"`).
     #[serde(default)]
     pub must_edge_inference: Option<String>,
-    /// May-edge inference policy (default `"off"`).
+    /// May-edge inference policy: `"smt-all-pairs"` (default, sound) or `"off"` (sampling, not
+    /// sound for a definite HOLDS on a box property) — as on `/btor2/cegar` (mununu#867).
     #[serde(default)]
     pub may_edge_inference: Option<String>,
     /// R-S8 symbolic-init config-values (`"REG=v1,v2,..."`).

@@ -175,6 +175,10 @@ required-features = ["api"]
 name = "api_unread_fields_865"
 required-features = ["api"]
 
+[[test]]
+name = "cegar_may_edge_default_867"
+required-features = ["api"]
+
 [[bench]]
 name = "clts_composition"
 harness = false
