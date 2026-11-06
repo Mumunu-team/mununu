@@ -36,6 +36,8 @@ pub struct ContextSummarizeRequest {
     pub context: FileContent,
     #[serde(default)]
     pub sidecars: Vec<SidecarFile>,
+    /// Output format. Only `json` (the default) is supported: `table` is refused with a 400
+    /// (mununu#865; it used to be accepted and ignored).
     #[serde(default = "default_summarize_format")]
     pub format: SummarizeFormat,
 }
@@ -143,15 +145,33 @@ pub struct SynthesisOptions {
 }
 
 /// Diagnostics options
-#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct DiagnosticsOptions {
     #[serde(default)]
     pub counterexample: bool,
-    #[serde(default)]
+    /// Compute the environment's counterstrategy when the specification is unrealizable.
+    /// Defaults to `true` (mununu#865: the flag used to be accepted and ignored, the
+    /// counterstrategy always computed); `false` skips it.
+    #[serde(default = "default_true")]
     pub counterstrategy: bool,
     #[serde(default)]
     pub deadlock_traces: bool,
     pub max_counter_traces: Option<u32>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for DiagnosticsOptions {
+    fn default() -> Self {
+        Self {
+            counterexample: false,
+            counterstrategy: true,
+            deadlock_traces: false,
+            max_counter_traces: None,
+        }
+    }
 }
 
 /// Response from controller synthesis
@@ -989,9 +1009,9 @@ pub struct Btor2CegarRequest {
     /// Max CEGAR iterations (default 16).
     #[serde(default)]
     pub max_iterations: Option<usize>,
-    /// Must-edge inference policy (kebab-case; default `"off"`):
-    /// `"sampling-confluence"` | `"smt-per-target"` |
-    /// `"smt-per-target-standard"` | `"smt-hyper-must"`.
+    /// Must-edge inference policy (kebab-case; default `"off"`): `"auto"` (= `"off"` here) |
+    /// `"off"` | `"smt-per-target"` | `"smt-per-target-standard"` | `"smt-hyper-must"`. Any
+    /// other value is a 400 (mununu#865).
     #[serde(default)]
     pub must_edge_inference: Option<String>,
     /// May-edge inference policy (kebab-case; default `"off"`):
