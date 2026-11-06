@@ -44,7 +44,7 @@
 
 ## Provenance
 
-- Branch `feat/mcp-context-eval`, from `main` at `28289548`. PR number filled on open.
+- Branch `feat/mcp-context-eval`, from `main` at `28289548`. PR #863.
 - Dependency: `rmcp` 3.x (the official Rust MCP SDK; targets the 2026-07-28 revision), features `server` + `transport-io`, no macros: the tools are declared from the API's own `schemars` 0.8 schemas so the advertised schema is the committed file.
 - Docs: [`docs/mcp.md`](../mcp.md), `wiki/API-Reference.md` §"MCP server", [`docs/api-schemas/README.md`](../api-schemas/README.md).
 - Policy: [`docs/policies/cross-repo-impact.md`](../policies/cross-repo-impact.md) (a route/surface add fires a briefing).
