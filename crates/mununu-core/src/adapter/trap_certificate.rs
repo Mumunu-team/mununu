@@ -37,7 +37,7 @@
 //!
 //! engine: closure — `native` k-induction (z3 QF_BV; a genuine trap is 1-inductive) as the decider
 //! inside the reachability portfolio ([`decide_reach_portfolio`]: exact ROBDD under its cap,
-//! interpolation, btormc / pono / rIC3 when installed; SPACER corroborates only), one portfolio call
+//! interpolation, btormc / pono / rIC3 when installed), one portfolio call
 //! per candidate under a per-check budget; reach — the same portfolio on the dual `AG ¬T`, then
 //! `native` BMC ([`safety_witness`]) for the shallowest reset → `T` path. Role: decider for
 //! VIOLATED only.

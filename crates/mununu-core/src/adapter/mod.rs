@@ -709,9 +709,8 @@ pub(crate) fn run_with_timeout(
 /// about to finish still lands — so it is listed in `reachable_by` / `unreachable_by` and
 /// still reaches the inter-engine contradiction alarm — if it finishes inside this window
 /// (the owned-only driver's straggler grace, applied to every cancellable member: the
-/// btormc / Pono / isolated-SPACER children and native k-induction's depth loop). Short on
-/// purpose: past it the member's remaining budget — up to a 60 s btormc / Pono timeout, a
-/// 10 s SPACER one, 40 depths × 2 queries × 5 s for native — is pure wall-clock the caller
+/// btormc / Pono / rIC3 children and native k-induction's depth loop). Short on
+/// purpose: past it the member's remaining budget — up to a 60 s btormc / Pono timeout, 40 depths × 2 queries × 5 s for native — is pure wall-clock the caller
 /// would otherwise wait for. On a design every member decides in milliseconds, nothing is
 /// cancelled and the attribution is the same as before S1.
 pub(crate) const MEMBER_CANCEL_GRACE: std::time::Duration = std::time::Duration::from_millis(250);

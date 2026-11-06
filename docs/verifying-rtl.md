@@ -32,8 +32,7 @@ signal/value of interest (`"state_q == 3"`).
 > Source of truth: [`decide_reach_portfolio`](../crates/mununu-core/src/adapter/reach_portfolio.rs#L355) — surface: (CLI+API+UI)
 
 Decides `bad`-reachability with the multi-engine safety portfolio — the exact BDD
-engine, the in-house native BMC + k-induction and SPACER (IC3/PDR) engines (all
-in-process), plus the `btormc`, `Pono` and `rIC3` (bit-level IC3, 2026-10-19) subprocess members when present — fed a constant-hoisted emission since mununu#736, before which btormc and Pono rejected every `sv verify-auto` design — and a
+engine, the in-house native BMC + k-induction engine (in-process), plus the `btormc`, `Pono` and `rIC3` (bit-level IC3, 2026-10-19) subprocess members when present — fed a constant-hoisted emission since mununu#736, before which btormc and Pono rejected every `sv verify-auto` design — and a
 **last-resort** in-house interpolation engine (owned McMillan forward reachability;
 [`native_interp`](../crates/mununu-core/src/adapter/btor2/native_interp.rs)) invoked
 only when every other member abstains — merged
@@ -153,7 +152,7 @@ decides every justice line of the design with two sound rungs — `--rung exact|
   resumes the iteration where it was.
 - **l2s** — liveness-to-safety: the response monitor with antecedent `true`, consequent `false`
   and the literals as fairness atoms is exactly "a reachable cycle that visits every literal";
-  the reachability portfolio (native BMC/k-induction ⊕ spacer (corroborate-only, mununu#740) ⊕ btormc ⊕ Pono ⊕ rIC3) decides the `bad`.
+  the reachability portfolio (native BMC/k-induction ⊕ interpolation ⊕ btormc ⊕ Pono ⊕ rIC3) decides the `bad`.
 
 Before either rung runs, the literals are exposed as `output`s (`mununu_j<i>_<k>`, `mununu_f<m>`,
 `mununu_true`, `mununu_false`) — observation only, the design is otherwise untouched.

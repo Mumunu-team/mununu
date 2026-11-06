@@ -14,7 +14,7 @@
 //!   ([`crate::adapter::btor2::l2s_monitor::emit_response_l2s_monitor_under_fairness`]) with
 //!   antecedent `true`, consequent `false` and the justice + fairness literals as the fairness
 //!   atoms is exactly "a reachable cycle on which every literal is seen", a `bad` the reachability
-//!   portfolio (native BMC/k-induction ⊕ spacer ⊕ btormc ⊕ Pono) decides at scale.
+//!   portfolio (native BMC/k-induction ⊕ interpolation ⊕ btormc ⊕ Pono ⊕ rIC3) decides at scale.
 //!
 //! The literals of a `justice` / `fair` line are rarely named, so [`name_justice_literals`] first
 //! appends `output` lines (`mununu_j<i>_<k>`, `mununu_f<m>`, plus `mununu_true` / `mununu_false`

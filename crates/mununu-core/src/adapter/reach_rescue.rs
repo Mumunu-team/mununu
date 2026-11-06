@@ -1464,7 +1464,7 @@ mod tests {
         //
         // mununu#625 — which member CARRIES the portfolio's verdict is a race since #607
         // (the first trusted decider cancels the rest after a short grace): on a fast host
-        // `native` and `spacer` decide this trivial model inside the grace and the subprocess
+        // `native` (and, before N2, `spacer`) decide this trivial model inside the grace and the subprocess
         // members are cancelled before they answer, so asserting on `unreachable_by` encoded
         // "who was first", not the claim. The claim — btormc and pono DECIDE beyond the cap —
         // is checked by running each directly on the same monitored model.

@@ -13,7 +13,7 @@
 //!   (`btor2 game --fault`), not this one.
 //!
 //! engine: the reach portfolio (native BMC for the witness, native k-induction / rIC3 / btormc /
-//! pono for `unreachable`, SPACER corroborating) on the injected BTOR2 — word-level, no bit cap. With
+//! pono for `unreachable`) on the injected BTOR2 — word-level, no bit cap. With
 //! a `--target` the design's own `bad` lines are dropped and the target is decided as the invariant
 //! `AG !target` through the reach rescue (`reach_portfolio_rescue_diagnosed`), its witness through
 //! `safety_witness`.
