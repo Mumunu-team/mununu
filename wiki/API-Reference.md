@@ -102,7 +102,7 @@ Parse a CTXDSL context (with optional sidecar files) and return a summary of all
 |-------|------|----------|-------------|
 | `context` | `FileContent` | Yes | Main CTXDSL file. |
 | `sidecars` | `SidecarFile[]` | No | Additional sidecar CTXDSL files merged into the context. Defaults to `[]`. |
-| `format` | `"json" \| "table"` | No | Output format. Defaults to `"json"`. |
+| `format` | `"json"` | No | Output format. Defaults to `"json"`; `"table"` is refused with a 400 (mununu#865). |
 
 **FileContent / SidecarFile**
 
@@ -207,7 +207,7 @@ Synthesize a controller for a given automaton and mu-calculus formula. The contr
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `counterexample` | `boolean` | `false` | Compute a counterexample trace when unrealizable. |
-| `counterstrategy` | `boolean` | `false` | Compute environment counterstrategy traces. |
+| `counterstrategy` | `boolean` | `true` | Compute the environment's counterstrategy when the specification is unrealizable; `false` skips it (mununu#865: it used to be ignored and always computed). |
 | `deadlock_traces` | `boolean` | `false` | Include deadlock traces in diagnostics. |
 | `max_counter_traces` | `number \| null` | `null` | Limit the number of counterstrategy traces. |
 
@@ -462,9 +462,9 @@ Evaluate mu-calculus formulas over automata and report which initial states sati
 | `automaton` | `string \| null` | No | Target automaton. `null` uses each formula's declared targets. |
 | `counterstrategy` | `boolean` | No | Compute counterstrategy for failed formulas. Defaults to `false`. |
 | `minimize_counterstrategy` | `boolean` | No | Apply bisimulation minimization to counterstrategy. Defaults to `false`. |
-| `hide` | `string[]` | No | Labels to hide (reclassify as internal) before evaluation. Defaults to `[]`. |
-| `minimize` | `boolean` | No | Apply bisimulation minimization before evaluation. Defaults to `false`. |
-| `stubs` | `SidecarFile[]` | No | Stub `.espec.json` content to compose as sidecars (interface automata). Defaults to `[]`. |
+| `hide` | `string[]` | No | Not supported by this route: a non-empty list is refused with a 400 naming the field (mununu#862). Defaults to `[]`. |
+| `minimize` | `boolean` | No | Not supported by this route: `true` is refused with a 400 naming the field (mununu#862). Defaults to `false`. |
+| `stubs` | `SidecarFile[]` | No | Not supported by this route: a non-empty list is refused with a 400 naming the field (mununu#862). Defaults to `[]`. |
 
 ### Response Body
 
@@ -548,7 +548,7 @@ Import an external format (XState, SystemVerilog, TLSF, AIGER, BTOR2, Promela, C
 |-------|------|----------|-------------|
 | `content` | `string` | Yes | Raw file content in the source format. |
 | `format` | `string` | No | Format hint: `"auto"` (default), `"tlsf"`, `"aiger"`, `"btor2"` (or `"btor"`), `"promela"`, `"xstate"`, `"systemverilog"` (hand-written parser), `"sv-yosys"` (or `"yosys"`, Yosys-driven elaboration), `"extraction"`, `"crewai"`, `"langgraph"`. |
-| `filename` | `string \| null` | No | Original filename (used for extension-based detection if format is `"auto"`). |
+| `filename` | `string \| null` | No | Original filename. Under `"auto"`, a known extension picks the adapter before content sniffing, as in the CLI (mununu#865; it used to be ignored). |
 | `sidecar` | `string \| null` | No | Optional sidecar content (`.mununu.json` for SV, `.espec.json` for extraction). Drives abstraction/property configuration. |
 | `additional_sources` | `FileContent[]` | No | Extra SV source files to compile alongside the primary input (Yosys path). Each entry: `{name, content}`. |
 | `predicates` | `PredicateSpecRequest[]` | No | Predicate set for the controllability-aware predicate-cube lift. Each entry: `{name, register, value}`. When non-empty (with `controllable_inputs`) and `format` produces BTOR2, the predicate-cube lift runs and a KMTS is returned. Mirrors `--predicate [NAME:]REG == VALUE`. |
@@ -712,8 +712,8 @@ Run the CEGAR predicate-abstraction-refinement loop over a BTOR2 design and retu
 | `controllable` | `string[]` | No | R.6.6 controllability split — controller-driven input symbols. Mirrors `--controllable`. Defaults to `[]`. |
 | `predicate_source` | `string \| null` | No | Predicate-discovery source: `"wp"` (default) or `"craig"`. |
 | `max_iterations` | `number \| null` | No | Max CEGAR iterations. Defaults to `16`. |
-| `must_edge_inference` | `string \| null` | No | Must-edge inference policy (default `"off"`): `"smt-per-target"`, `"smt-per-target-standard"`, `"smt-hyper-must"`; `"auto"` is accepted and means `"off"` on this endpoint (it resolves per property only on `sv/verify-auto`, mununu#663). |
-| `may_edge_inference` | `string \| null` | No | May-edge inference policy (default `"off"`): `"smt-all-pairs"`. |
+| `must_edge_inference` | `string \| null` | No | Must-edge inference policy (default `"off"`): `"smt-per-target"`, `"smt-per-target-standard"`, `"smt-hyper-must"`; `"auto"` is accepted and means `"off"` on this endpoint (it resolves per property only on `sv/verify-auto`, mununu#663). Any other value is a 400 naming the accepted ones (mununu#865), as are unknown `predicate_source` / `may_edge_inference` / `engine` values. With `engine: "symbolic"`, a non-default `controllable`, `predicate_source`, edge-inference policy or `emit_ctxdsl: true` is refused: the single-shot path does not read them. |
+| `may_edge_inference` | `string \| null` | No | May-edge inference policy: `"smt-all-pairs"` (default since mununu#867, the sound all-pairs may-relation, as on the CLI) or `"off"` (sampling: one representative per cube, an under-approximation; a definite HOLDS on a box property over it is not sound, and the response carries the A.4 warning). |
 | `init_values` | `string[]` | No | R-S8 symbolic-init values, one entry per register as `"REG=v1,v2,..."`. Seeds the predicate-cube initial states. Defaults to `[]`. |
 | `emit_ctxdsl` | `boolean` | No | When `true`, the response `ctxdsl` field carries the final refined cube model + checked formula as a self-contained CTXDSL document. Mirrors `--emit-ctxdsl`. Defaults to `false`. |
 

@@ -4679,16 +4679,8 @@ fn sv_verify_auto(args: SvVerifyAutoArgs) -> Result<(), String> {
         MustEdgeInferenceArg::SmtHyperMust => MustEdgeInference::SmtHyperMust,
     };
     let config_values = parse_config_values(&args.pin)?;
-    // H.H — parse `SIGNAL<=VALUE` (or `SIGNAL=VALUE`) counter-bound entries; both
-    // spellings mean the inclusive upper bound `SIGNAL <= VALUE`.
-    let counter_bounds: std::collections::HashMap<String, u64> = args
-        .counter_bound
-        .iter()
-        .filter_map(|e| {
-            let (name, val) = e.split_once("<=").or_else(|| e.split_once('='))?;
-            Some((name.trim().to_string(), val.trim().parse::<u64>().ok()?))
-        })
-        .collect();
+    let counter_bounds =
+        mununu_core::adapter::slang::verify_auto::parse_counter_bounds(&args.counter_bound)?;
     let lift_overrides = lift.lift_overrides.clone();
     let opts = VerifyAutoOptions {
         max_iterations: args.max_iterations,

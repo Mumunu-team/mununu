@@ -36,6 +36,8 @@ pub struct ContextSummarizeRequest {
     pub context: FileContent,
     #[serde(default)]
     pub sidecars: Vec<SidecarFile>,
+    /// Output format. Only `json` (the default) is supported: `table` is refused with a 400
+    /// (mununu#865; it used to be accepted and ignored).
     #[serde(default = "default_summarize_format")]
     pub format: SummarizeFormat,
 }
@@ -143,15 +145,33 @@ pub struct SynthesisOptions {
 }
 
 /// Diagnostics options
-#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct DiagnosticsOptions {
     #[serde(default)]
     pub counterexample: bool,
-    #[serde(default)]
+    /// Compute the environment's counterstrategy when the specification is unrealizable.
+    /// Defaults to `true` (mununu#865: the flag used to be accepted and ignored, the
+    /// counterstrategy always computed); `false` skips it.
+    #[serde(default = "default_true")]
     pub counterstrategy: bool,
     #[serde(default)]
     pub deadlock_traces: bool,
     pub max_counter_traces: Option<u32>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for DiagnosticsOptions {
+    fn default() -> Self {
+        Self {
+            counterexample: false,
+            counterstrategy: true,
+            deadlock_traces: false,
+            max_counter_traces: None,
+        }
+    }
 }
 
 /// Response from controller synthesis
@@ -531,16 +551,20 @@ pub struct ContextVerifyRequest {
     /// bisimulation. Defaults to `false`.
     #[serde(default)]
     pub minimize_counterstrategy: bool,
-    /// Labels to hide (reclassified as internal) before evaluation. Defaults to `[]`. NOT APPLIED
-    /// by `POST /api/v1/context/eval` today — accepted and ignored (mununu#862).
+    /// Labels to hide (reclassified as internal) before evaluation. Defaults to `[]`. NOT
+    /// SUPPORTED by `POST /api/v1/context/eval` (and the MCP tool `context_eval`): a non-empty
+    /// list is refused with a 400 naming it (mununu#862; it used to be accepted and ignored).
     #[serde(default)]
     pub hide: Vec<String>,
     /// When true, apply bisimulation minimization before evaluation. Defaults to `false`. NOT
-    /// APPLIED by `POST /api/v1/context/eval` today — accepted and ignored (mununu#862).
+    /// SUPPORTED by `POST /api/v1/context/eval` (and the MCP tool `context_eval`): `true` is
+    /// refused with a 400 naming it (mununu#862; it used to be accepted and ignored).
     #[serde(default)]
     pub minimize: bool,
     /// Stub `.espec.json` contents composed as sidecars (interface automata). Defaults to `[]`.
-    /// NOT APPLIED by `POST /api/v1/context/eval` today — accepted and ignored (mununu#862).
+    /// NOT SUPPORTED by `POST /api/v1/context/eval` (and the MCP tool `context_eval`): a
+    /// non-empty list is refused with a 400 naming it (mununu#862; it used to be accepted and
+    /// ignored).
     #[serde(default)]
     pub stubs: Vec<SidecarFile>,
     /// Run the structural checks (`context eval --sanity`) on `automaton`, or on every automaton
@@ -548,6 +572,26 @@ pub struct ContextVerifyRequest {
     /// fire, internal livelocks.
     #[serde(default)]
     pub sanity: bool,
+}
+
+impl ContextVerifyRequest {
+    /// The fields this request type declares that `POST /api/v1/context/eval` does not apply.
+    /// A set one is refused rather than ignored: evaluating the unhidden, unminimised, unstubbed
+    /// model and answering `success` would be a verdict on a model the client did not ask about
+    /// (mununu#862).
+    pub fn unsupported_fields(&self) -> Vec<&'static str> {
+        let mut set = Vec::new();
+        if !self.hide.is_empty() {
+            set.push("hide");
+        }
+        if self.minimize {
+            set.push("minimize");
+        }
+        if !self.stubs.is_empty() {
+            set.push("stubs");
+        }
+        set
+    }
 }
 
 /// Response from context verification
@@ -965,14 +1009,15 @@ pub struct Btor2CegarRequest {
     /// Max CEGAR iterations (default 16).
     #[serde(default)]
     pub max_iterations: Option<usize>,
-    /// Must-edge inference policy (kebab-case; default `"off"`):
-    /// `"sampling-confluence"` | `"smt-per-target"` |
-    /// `"smt-per-target-standard"` | `"smt-hyper-must"`.
+    /// Must-edge inference policy (kebab-case; default `"off"`): `"auto"` (= `"off"` here) |
+    /// `"off"` | `"smt-per-target"` | `"smt-per-target-standard"` | `"smt-hyper-must"`. Any
+    /// other value is a 400 (mununu#865).
     #[serde(default)]
     pub must_edge_inference: Option<String>,
-    /// May-edge inference policy (kebab-case; default `"off"`):
-    /// `"smt-all-pairs"` for the sound all-pairs may-relation. Mirrors the
-    /// CLI `--may-edge-inference`.
+    /// May-edge inference policy (kebab-case): `"smt-all-pairs"` (default, the sound all-pairs
+    /// may-relation) or `"off"` (sampling, an under-approximation: a definite HOLDS on a box
+    /// property over it is not sound). Mirrors the CLI `--may-edge-inference`, whose default it
+    /// shares since mununu#867 (it used to default to `"off"`).
     #[serde(default)]
     pub may_edge_inference: Option<String>,
     /// R-S8 symbolic-init config-values, one entry per register as
@@ -1981,7 +2026,8 @@ pub struct SvCegarRequest {
     /// Must-edge inference policy (default `"off"`).
     #[serde(default)]
     pub must_edge_inference: Option<String>,
-    /// May-edge inference policy (default `"off"`).
+    /// May-edge inference policy: `"smt-all-pairs"` (default, sound) or `"off"` (sampling, not
+    /// sound for a definite HOLDS on a box property) — as on `/btor2/cegar` (mununu#867).
     #[serde(default)]
     pub may_edge_inference: Option<String>,
     /// R-S8 symbolic-init config-values (`"REG=v1,v2,..."`).

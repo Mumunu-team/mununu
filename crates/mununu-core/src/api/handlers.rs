@@ -37,6 +37,72 @@ where
         })?
 }
 
+/// mununu#865 — map a string option to its value. An unknown spelling is a 400 naming the field
+/// and the accepted values, never a silent fall-through to the default (a typo used to select
+/// the default engine policy without a word).
+fn parse_choice<T: Clone>(
+    field: &str,
+    value: Option<&str>,
+    default: T,
+    choices: &[(&str, T)],
+) -> ApiResult<T> {
+    let Some(v) = value else {
+        return Ok(default);
+    };
+    choices
+        .iter()
+        .find(|(name, _)| *name == v)
+        .map(|(_, t)| t.clone())
+        .ok_or_else(|| ApiError::BadRequest {
+            message: format!(
+                "{field}: unknown value `{v}`; accepted: {} (mununu#865)",
+                choices
+                    .iter()
+                    .map(|(n, _)| *n)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            details: None,
+        })
+}
+
+/// mununu#865 — the must-edge policy strings every route accepts. `auto` is the per-property
+/// resolution on `sv verify-auto` and `off` everywhere else, as on the CLI.
+fn parse_must_edge(
+    value: Option<&str>,
+) -> ApiResult<crate::adapter::btor2::kmts_lift::MustEdgeInference> {
+    use crate::adapter::btor2::kmts_lift::MustEdgeInference as M;
+    parse_choice(
+        "must_edge_inference",
+        value,
+        M::Off,
+        &[
+            ("auto", M::Off),
+            ("off", M::Off),
+            ("smt-per-target", M::SmtPerTarget),
+            ("smt-per-target-standard", M::SmtPerTargetStandard),
+            ("smt-hyper-must", M::SmtHyperMust),
+        ],
+    )
+}
+
+/// mununu#865 — the `engine` strings `verify_auto::engine_selection` knows; it maps anything else
+/// to the default portfolio, so the routes check the spelling first.
+fn check_verify_auto_engine(value: Option<&str>) -> ApiResult<()> {
+    parse_choice(
+        "engine",
+        value.map(str::to_ascii_lowercase).as_deref(),
+        (),
+        &[
+            ("explicit", ()),
+            ("symbolic", ()),
+            ("exact-symbolic", ()),
+            ("portfolio-sequential", ()),
+            ("portfolio-parallel", ()),
+        ],
+    )
+}
+
 /// Health check endpoint
 pub async fn health_check() -> Json<serde_json::Value> {
     Json(serde_json::json!({
@@ -72,6 +138,15 @@ fn context_summarize_handler_impl(
     request: ContextSummarizeRequest,
 ) -> ApiResult<Json<ContextSummarizeResponse>> {
     let handler_start = Instant::now();
+    // mununu#865 — the route answers JSON only; `table` used to be accepted and ignored.
+    if request.format == crate::api::models::SummarizeFormat::Table {
+        return Err(ApiError::BadRequest {
+            message: "context/summarize returns JSON only; `format: table` is not supported \
+                      (mununu#865)"
+                .to_string(),
+            details: None,
+        });
+    }
 
     // Cache parse + realize. Subsequent calls with identical content reuse the
     // realized result, sidestepping CLTS construction / abstraction unrolling.
@@ -346,8 +421,9 @@ fn context_synthesize_handler_impl(
         None
     };
 
-    // Compute counterstrategy graph for unrealizable cases
-    let counterstrategy = if !synthesis.realizable {
+    // Compute counterstrategy graph for unrealizable cases, unless the request switched the
+    // diagnostic off (mununu#865: the flag used to be accepted and ignored; it defaults to on).
+    let counterstrategy = if !synthesis.realizable && request.options.diagnostics.counterstrategy {
         compute_counterstrategy_result(
             realized,
             &request.automaton,
@@ -470,7 +546,18 @@ fn context_import_handler_impl(
         ..AdapterOptions::default()
     };
 
-    let result = match request.format.as_str() {
+    // mununu#865 — under `auto`, the filename's extension picks the adapter (as the CLI's loader
+    // does); `filename` used to be accepted and ignored, leaving content sniffing alone.
+    let by_extension = if matches!(request.format.as_str(), "auto" | "") {
+        request
+            .filename
+            .as_deref()
+            .and_then(|f| crate::adapter::detect_format_by_extension(std::path::Path::new(f)))
+            .map(|f| if f == "systemverilog" { "sv-yosys" } else { f })
+    } else {
+        None
+    };
+    let result = match by_extension.unwrap_or(request.format.as_str()) {
         "tlsf" => crate::adapter::tlsf::TlsfAdapter::translate(&request.content, &options),
         "aiger" => crate::adapter::aiger::AigerAdapter::translate(&request.content, &options),
         "btor2" | "btor" => {
@@ -972,6 +1059,7 @@ fn btor2_verify_liveness_handler_impl(
     // one response.
     if request.justice {
         if request.request.is_some()
+            || request.grant.is_some()
             || !request.responses.is_empty()
             || !request.fairness.is_empty()
         {
@@ -997,7 +1085,8 @@ fn btor2_verify_liveness_handler_impl(
         }));
     }
     if !request.responses.is_empty() {
-        if request.request.is_some() || !request.fairness.is_empty() {
+        // mununu#865 — `grant` was not in the check, so it was silently ignored beside `responses`.
+        if request.request.is_some() || request.grant.is_some() || !request.fairness.is_empty() {
             return Err(bad_req(
                 "responses is a conjunction of its own; it takes no request / grant / fairness"
                     .to_string(),
@@ -1492,7 +1581,8 @@ fn sv_verify_liveness_handler_impl(
         details: None,
     };
     if !request.responses.is_empty() {
-        if request.request.is_some() || !request.fairness.is_empty() {
+        // mununu#865 — `grant` was not in the check, so it was silently ignored beside `responses`.
+        if request.request.is_some() || request.grant.is_some() || !request.fairness.is_empty() {
             return Err(bad_req(
                 "responses is a conjunction of its own; it takes no request / grant / fairness"
                     .to_string(),
@@ -1821,7 +1911,6 @@ fn parse_config_values(
 }
 
 fn sv_mutate_handler_impl(request: SvMutateRequest) -> ApiResult<Json<SvMutateResponse>> {
-    use crate::adapter::btor2::kmts_lift::MustEdgeInference;
     use crate::adapter::btor2::mutate::{Mutation, list_targets};
     use crate::adapter::slang::verify_auto::{
         VerifyAutoOptions, engine_selection, mutate_and_compare,
@@ -1880,12 +1969,8 @@ fn sv_mutate_handler_impl(request: SvMutateRequest) -> ApiResult<Json<SvMutateRe
         details: None,
     })?;
 
-    let must_edge_inference = match request.must_edge_inference.as_deref() {
-        Some("smt-per-target") => MustEdgeInference::SmtPerTarget,
-        Some("smt-per-target-standard") => MustEdgeInference::SmtPerTargetStandard,
-        Some("smt-hyper-must") => MustEdgeInference::SmtHyperMust,
-        _ => MustEdgeInference::Off,
-    };
+    let must_edge_inference = parse_must_edge(request.must_edge_inference.as_deref())?;
+    check_verify_auto_engine(request.engine.as_deref())?;
     let (engine_symbolic, engine_exact, engine_portfolio) =
         engine_selection(request.engine.as_deref());
     // mununu#663 — absent / `"auto"` resolves the policy per property, as on `sv/verify-auto`.
@@ -2202,7 +2287,6 @@ fn attach_testbenches(
 fn sv_verify_auto_handler_impl(
     request: SvVerifyAutoRequest,
 ) -> ApiResult<Json<SvVerifyAutoResponse>> {
-    use crate::adapter::btor2::kmts_lift::MustEdgeInference;
     use crate::adapter::slang::verify_auto::{VerifyAutoOptions, verify_auto};
 
     let lift = sv_lift_of(&request.lift)?;
@@ -2214,23 +2298,18 @@ fn sv_verify_auto_handler_impl(
     // mununu#663 — absent / `"auto"` resolves the policy per property (per-target must for
     // Liveness/Mixed-class formulas); an explicit `"off"` switches that resolution off.
     let must_edge_auto = matches!(request.must_edge_inference.as_deref(), None | Some("auto"));
-    let must_edge_inference = match request.must_edge_inference.as_deref() {
-        Some("smt-per-target") => MustEdgeInference::SmtPerTarget,
-        Some("smt-per-target-standard") => MustEdgeInference::SmtPerTargetStandard,
-        Some("smt-hyper-must") => MustEdgeInference::SmtHyperMust,
-        _ => MustEdgeInference::Off,
-    };
+    let must_edge_inference = parse_must_edge(request.must_edge_inference.as_deref())?;
     let config_values = parse_config_values(&request.pins)?;
     // H.H — parse `"signal<=value"` (or `"signal=value"`) counter-bound entries;
     // both spellings mean the inclusive upper bound `signal <= value`.
-    let counter_bounds: std::collections::HashMap<String, u64> = request
-        .counter_bounds
-        .iter()
-        .filter_map(|e| {
-            let (name, val) = e.split_once("<=").or_else(|| e.split_once('='))?;
-            Some((name.trim().to_string(), val.trim().parse::<u64>().ok()?))
-        })
-        .collect();
+    let counter_bounds = crate::adapter::slang::verify_auto::parse_counter_bounds(
+        &request.counter_bounds,
+    )
+    .map_err(|message| ApiError::BadRequest {
+        message,
+        details: None,
+    })?;
+    check_verify_auto_engine(request.engine.as_deref())?;
     let (engine_symbolic, engine_exact, engine_portfolio) =
         crate::adapter::slang::verify_auto::engine_selection(request.engine.as_deref());
     let assume_mode = match request.assumes.as_deref() {
@@ -2462,7 +2541,7 @@ fn run_cegar_build_response(params: CegarRunParams<'_>) -> Result<Btor2CegarResp
         CegarOptions, CegarTermination, LiftStrategy, PredicateSource, cegar_refine_loop,
         config_values_to_sidecar_json,
     };
-    use crate::adapter::btor2::kmts_lift::{MayEdgeInference, MustEdgeInference, PredicateSpec};
+    use crate::adapter::btor2::kmts_lift::{MayEdgeInference, PredicateSpec};
     use crate::mu_calculus::trit::TritSet;
     use crate::mu_calculus::{Environment, parser as mu_parser};
 
@@ -2485,7 +2564,44 @@ fn run_cegar_build_response(params: CegarRunParams<'_>) -> Result<Btor2CegarResp
     // loop: build the may/must relation as BDDs directly (no per-cube-pair SMT)
     // and evaluate. Single-shot at the given predicate set; simple equality
     // predicates + the bare `[]`/`<>` fragment only.
-    if matches!(params.engine, Some(e) if e.eq_ignore_ascii_case("symbolic")) {
+    let symbolic = parse_choice(
+        "engine",
+        params.engine.map(str::to_ascii_lowercase).as_deref(),
+        false,
+        &[("explicit", false), ("symbolic", true)],
+    )?;
+    if symbolic {
+        // mununu#865 — the single-shot symbolic path builds its relation from the predicates
+        // alone; these explicit-lift options used to be accepted and ignored there.
+        // A value equal to the default is accepted (mununu-ui sends every field on every run).
+        let mut unread = Vec::new();
+        if !params.controllable_inputs.is_empty() {
+            unread.push("controllable");
+        }
+        if !matches!(params.predicate_source, None | Some("wp")) {
+            unread.push("predicate_source");
+        }
+        if !matches!(
+            params.must_edge_inference,
+            None | Some("off") | Some("auto")
+        ) {
+            unread.push("must_edge_inference");
+        }
+        if !matches!(params.may_edge_inference, None | Some("off")) {
+            unread.push("may_edge_inference");
+        }
+        if params.emit_ctxdsl {
+            unread.push("emit_ctxdsl");
+        }
+        if !unread.is_empty() {
+            return Err(ApiError::BadRequest {
+                message: format!(
+                    "engine `symbolic` does not apply {}; remove them or use `explicit` (mununu#865)",
+                    unread.join(", ")
+                ),
+                details: None,
+            });
+        }
         return run_symbolic_cegar_response(&params, &predicates, &formula);
     }
 
@@ -2493,23 +2609,34 @@ fn run_cegar_build_response(params: CegarRunParams<'_>) -> Result<Btor2CegarResp
     // CLI `btor2 cegar` bootstrap.
     let env = Environment::new(1usize << predicates.len());
 
-    let predicate_source = match params.predicate_source {
-        Some("craig") => PredicateSource::CraigInterpolation,
-        _ => PredicateSource::WeakestPrecondition,
+    let craig = parse_choice(
+        "predicate_source",
+        params.predicate_source,
+        false,
+        &[("wp", false), ("craig", true)],
+    )?;
+    let predicate_source = if craig {
+        PredicateSource::CraigInterpolation
+    } else {
+        PredicateSource::WeakestPrecondition
     };
-    let must_edge_inference = match params.must_edge_inference {
-        Some("smt-per-target") => MustEdgeInference::SmtPerTarget,
-        Some("smt-per-target-standard") => MustEdgeInference::SmtPerTargetStandard,
-        Some("smt-hyper-must") => MustEdgeInference::SmtHyperMust,
-        _ => MustEdgeInference::Off,
-    };
+    let must_edge_inference = parse_must_edge(params.must_edge_inference)?;
     // M.6 parity (2026-06-20) — the may-edge inference policy is now an API
     // field (was CLI-only). `smt-all-pairs` selects the sound all-pairs
     // may-relation, matching `--may-edge-inference`; default is Off.
-    let may_edge_inference = match params.may_edge_inference {
-        Some("smt-all-pairs") => MayEdgeInference::SmtAllPairs,
-        _ => MayEdgeInference::Off,
-    };
+    // mununu#867 — the default is the sound all-pairs relation, as on the CLI. `off` (sampling)
+    // is an under-approximation of the may relation: it simulates one canonical representative
+    // per cube and can miss a may-successor, so a definite HOLDS on a box property over it is
+    // not sound (the A.4 warning says so when a client asks for it).
+    let may_edge_inference = parse_choice(
+        "may_edge_inference",
+        params.may_edge_inference,
+        MayEdgeInference::SmtAllPairs,
+        &[
+            ("off", MayEdgeInference::Off),
+            ("smt-all-pairs", MayEdgeInference::SmtAllPairs),
+        ],
+    )?;
 
     let cegar_opts = CegarOptions {
         max_iterations: params.max_iterations.unwrap_or(16),
@@ -4349,6 +4476,34 @@ mod controller_mode_tests {
             }
             _ => panic!("expected BadRequest, got {err:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod choice_parsing_tests {
+    use super::*;
+
+    /// mununu#865 — a known spelling maps, an absent one is the default, and anything else is a
+    /// 400 naming the field and the accepted values (a typo used to select the default).
+    #[test]
+    fn a_string_option_maps_known_values_and_refuses_the_rest() {
+        use crate::adapter::btor2::kmts_lift::MustEdgeInference as M;
+        assert_eq!(parse_must_edge(None).ok(), Some(M::Off));
+        assert_eq!(parse_must_edge(Some("auto")).ok(), Some(M::Off));
+        assert_eq!(
+            parse_must_edge(Some("smt-hyper-must")).ok(),
+            Some(M::SmtHyperMust)
+        );
+        match parse_must_edge(Some("smt-hypermust")) {
+            Err(ApiError::BadRequest { message, .. }) => assert!(
+                message.contains("must_edge_inference") && message.contains("smt-hyper-must"),
+                "{message}"
+            ),
+            other => panic!("a typo is refused: {other:?}"),
+        }
+        assert!(check_verify_auto_engine(None).is_ok());
+        assert!(check_verify_auto_engine(Some("Exact-Symbolic")).is_ok());
+        assert!(check_verify_auto_engine(Some("portfolio")).is_err());
     }
 }
 
