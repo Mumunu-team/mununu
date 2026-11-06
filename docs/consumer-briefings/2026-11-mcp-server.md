@@ -38,9 +38,9 @@
 
 | run | result |
 |---|---|
-| seam test: `context_eval` vs `POST /api/v1/context/eval` on the same request (all formulas, one formula, `template_ref`, `counterstrategy`, `sanity`, a CTXDSL syntax error, a 1-ms budget) | pending — filled when the PR's gate runs |
-| schema identity: the tool's advertised `inputSchema` / `outputSchema` vs the two committed schema files | pending |
-| per-call overhead, MCP vs HTTP, same example, same box | pending |
+| seam test: `context_eval` vs `POST /api/v1/context/eval` on the same request (all formulas, one formula, `template_ref`, `counterstrategy`, `sanity`, a CTXDSL syntax error, a 1-ms budget) | identical on every case, plus the syntax error as an `isError` result with the same body and the 1-ms budget as an `isError` naming it (`api::mcp::tests`, 5 tests, in `make ci`) |
+| schema identity: the tool's advertised `inputSchema` / `outputSchema` vs the two committed schema files | identical (`the_tools_advertise_the_api_schemas`) |
+| per-call overhead, MCP vs HTTP, same example, same box | MCP 0.58 ms, HTTP 0.48 ms per call (in-process, 5 calls, optimized test profile); the ≈ 0.1 ms is JSON-RPC framing, under the 2× noise floor and immaterial beside the evaluation |
 
 ## Provenance
 
