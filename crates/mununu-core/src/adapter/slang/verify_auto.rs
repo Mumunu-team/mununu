@@ -2853,6 +2853,33 @@ pub enum PortfolioMode {
 /// explicit `"explicit"` selects the single predicate-abstraction CEGAR engine. The CLI reaches
 /// the same defaults through clap's `default_value_t = EngineArg::PortfolioSequential`; this
 /// helper is the API/string entry point (and the single place the default is defined for it).
+/// H.H — parse `SIGNAL<=VALUE` (or `SIGNAL=VALUE`) counter-bound entries; both spellings mean
+/// the inclusive upper bound `SIGNAL <= VALUE`. An entry that does not parse is an error naming
+/// it (mununu#865: the CLI and the API used to drop it without a word).
+pub fn parse_counter_bounds(
+    entries: &[String],
+) -> Result<std::collections::HashMap<String, u64>, String> {
+    entries
+        .iter()
+        .map(|e| {
+            let parsed =
+                e.split_once("<=")
+                    .or_else(|| e.split_once('='))
+                    .and_then(|(name, val)| {
+                        let name = name.trim();
+                        let val = val.trim().parse::<u64>().ok()?;
+                        (!name.is_empty()).then(|| (name.to_string(), val))
+                    });
+            parsed.ok_or_else(|| {
+                format!(
+                    "counter bound `{e}` does not parse: expected `SIGNAL<=VALUE` or \
+                     `SIGNAL=VALUE` with an unsigned integer VALUE (mununu#865)"
+                )
+            })
+        })
+        .collect()
+}
+
 pub fn engine_selection(engine: Option<&str>) -> (bool, bool, Option<PortfolioMode>) {
     match engine {
         Some(e) if e.eq_ignore_ascii_case("symbolic") => (true, false, None),
@@ -12855,6 +12882,20 @@ mod tests {
         let runs = vec![exact, symbolic];
         let merged = merge_portfolio_reports(&runs, PortfolioMode::Parallel).expect("merge ok");
         assert_eq!(merged.properties[0].outcome, VerifyOutcome::Holds);
+    }
+
+    /// mununu#865 — both spellings parse; an entry that does not is an error naming it, where
+    /// the CLI and the API used to drop it.
+    #[test]
+    fn counter_bounds_parse_both_spellings_and_refuse_the_rest() {
+        let ok = parse_counter_bounds(&["cnt_q<=7".to_string(), " ptr = 3 ".to_string()])
+            .expect("both spellings");
+        assert_eq!(ok.get("cnt_q"), Some(&7));
+        assert_eq!(ok.get("ptr"), Some(&3));
+        for bad in ["cnt_q<7", "cnt_q<=-1", "<=4", "cnt_q<=x"] {
+            let e = parse_counter_bounds(&[bad.to_string()]).expect_err(bad);
+            assert!(e.contains(bad), "{bad}: the error names the entry: {e}");
+        }
     }
 
     #[test]

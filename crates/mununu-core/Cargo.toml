@@ -171,6 +171,10 @@ required-features = ["api"]
 name = "context_eval_unsupported_fields_862"
 required-features = ["api"]
 
+[[test]]
+name = "api_unread_fields_865"
+required-features = ["api"]
+
 [[bench]]
 name = "clts_composition"
 harness = false
