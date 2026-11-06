@@ -127,7 +127,7 @@ mod api_unread_fields_865 {
     async fn liveness_refuses_grant_beside_responses() {
         let r = btor2_verify_liveness_handler(Json(from(json!({
             "content": BTOR2_SAFE,
-            "responses": ["q -> q"],
+            "responses": ["q == 0 => q == 0"],
             "grant": "q",
         }))))
         .await;
