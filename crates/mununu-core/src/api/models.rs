@@ -16,10 +16,13 @@ pub struct FileContent {
     pub content: String,
 }
 
-/// Sidecar file content
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Sidecar file content — structurally identical to `FileContent`; sidecars are merged into the
+/// main context during parsing, so a specification can be modular.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct SidecarFile {
+    /// The file's name (`properties.ctxdsl`); provenance only, the content is what is parsed.
     pub name: String,
+    /// The file's text.
     pub content: String,
 }
 
@@ -497,33 +500,47 @@ pub struct GraphPosition {
 // Context Verify Endpoints
 // ============================================================================
 
-/// Request for context verification (formula evaluation)
-#[derive(Debug, Deserialize, PartialEq, Eq)]
+/// Request for context verification (formula evaluation) — the body of `POST /api/v1/context/eval`
+/// and the input of the MCP `context_eval` tool (one shape, two surfaces; the schema is
+/// `docs/api-schemas/context-eval-request.schema.json`).
+#[derive(Debug, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ContextVerifyRequest {
+    /// The main CTXDSL file: its name and its full text. Sources come inline, never as a path
+    /// the server opens.
     pub context: FileContent,
+    /// Sidecar CTXDSL files merged into the main context during parsing. Defaults to `[]`.
     #[serde(default)]
     pub sidecars: Vec<SidecarFile>,
-    /// If omitted, evaluate ALL formulas defined in the context.
-    /// Mutually exclusive with `template_ref`.
+    /// Evaluate one formula by name. If omitted (`null`), evaluate ALL user-defined formulas of
+    /// the context. Mutually exclusive with `template_ref`.
     pub formula: Option<String>,
-    /// Template reference to instantiate (mutually exclusive with `formula`).
+    /// A property template to instantiate instead of selecting an existing formula —
+    /// `{"template": "no_deadlock"}` or `{"template": "reachable", "args": {"TARGET": "…"}}`;
+    /// the catalogue is `GET /api/v1/templates` / the MCP `templates` tool. Mutually exclusive
+    /// with `formula`.
     #[serde(default)]
     pub template_ref: Option<crate::adapter::templates::TemplateRef>,
-    /// If omitted, use the formula's target automaton(s).
+    /// The automaton to evaluate against. If omitted (`null`), each formula's declared target
+    /// automaton(s).
     pub automaton: Option<String>,
-    /// When true, compute counterstrategy for failed formulas via formula inversion.
+    /// When true, compute the environment's counterstrategy for each violated formula, via
+    /// formula inversion. Defaults to `false`.
     #[serde(default)]
     pub counterstrategy: bool,
-    /// When true and counterstrategy is enabled, minimize the counterstrategy automaton.
+    /// When true and `counterstrategy` is set, minimize the counterstrategy automaton by
+    /// bisimulation. Defaults to `false`.
     #[serde(default)]
     pub minimize_counterstrategy: bool,
-    /// Labels to hide (reclassify as internal) before evaluation.
+    /// Labels to hide (reclassified as internal) before evaluation. Defaults to `[]`. NOT APPLIED
+    /// by `POST /api/v1/context/eval` today — accepted and ignored (mununu#862).
     #[serde(default)]
     pub hide: Vec<String>,
-    /// When true, apply bisimulation minimization before evaluation.
+    /// When true, apply bisimulation minimization before evaluation. Defaults to `false`. NOT
+    /// APPLIED by `POST /api/v1/context/eval` today — accepted and ignored (mununu#862).
     #[serde(default)]
     pub minimize: bool,
-    /// Stub .espec.json content to compose as sidecars (interface automata).
+    /// Stub `.espec.json` contents composed as sidecars (interface automata). Defaults to `[]`.
+    /// NOT APPLIED by `POST /api/v1/context/eval` today — accepted and ignored (mununu#862).
     #[serde(default)]
     pub stubs: Vec<SidecarFile>,
     /// Run the structural checks (`context eval --sanity`) on `automaton`, or on every automaton

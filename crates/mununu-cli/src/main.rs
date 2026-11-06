@@ -636,6 +636,24 @@ enum Commands {
         #[arg(long = "config", value_name = "FILE")]
         config: Option<PathBuf>,
     },
+    /// Start the Model Context Protocol server: the tools `context_eval` (CTXDSL sources in,
+    /// verdicts out — the request and response of `POST /api/v1/context/eval`, byte for byte)
+    /// and `templates` (`GET /api/v1/templates`). stdio by default: stdout is the protocol
+    /// channel, every log line goes to stderr.
+    Mcp {
+        /// The transport: `stdio` (the default; what `claude mcp add mununu -- mununu mcp`
+        /// speaks).
+        #[arg(long, default_value = "stdio", value_parser = ["stdio"])]
+        transport: String,
+        /// Wall-clock budget per tool call, in seconds (default: the HTTP layer's 30). A call
+        /// over budget returns a tool error naming it; the engine thread finishes on its own.
+        #[arg(long = "request-timeout", value_name = "SECONDS", default_value_t = 30)]
+        request_timeout: u64,
+        /// The deployment configuration this server exposes (`mununu.toml`); same as the global
+        /// `--deployment-config`.
+        #[arg(long = "config", value_name = "FILE")]
+        config: Option<PathBuf>,
+    },
     /// BTOR2-direct analysis tools (Phase A.4 predicate-image discovery).
     Btor2 {
         #[command(subcommand)]
@@ -3027,9 +3045,11 @@ fn main() {
             std::process::exit(parse_error_exit_code(&e));
         }
     };
-    init_tracing(cli.quiet);
+    // `mununu mcp` speaks the protocol on stdout: its logs take the stderr-only path.
+    let stdout_is_the_protocol = matches!(cli.command, Commands::Mcp { .. });
+    init_tracing(cli.quiet || stdout_is_the_protocol);
     let server_config = match &cli.command {
-        Commands::Server { config, .. } => config.clone(),
+        Commands::Server { config, .. } | Commands::Mcp { config, .. } => config.clone(),
         _ => None,
     };
     if let Some(path) = server_config.or(cli.deployment_config.clone()) {
@@ -3537,6 +3557,24 @@ fn dispatch(command: Commands) -> Result<(), String> {
                 .map_err(|e| format!("Failed to create runtime: {}", e))?;
             rt.block_on(mununu_core::api::start_server(addr))
                 .map_err(|e| format!("Server error: {}", e))?;
+            Ok(())
+        }
+        Commands::Mcp {
+            transport,
+            request_timeout,
+            ..
+        } => {
+            // `transport` is validated by clap (`stdio` only today; streamable HTTP is a
+            // follow-up — see docs/mcp.md).
+            debug_assert_eq!(transport, "stdio");
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| format!("Failed to create runtime: {}", e))?;
+            rt.block_on(mununu_core::api::mcp::serve_stdio(
+                std::time::Duration::from_secs(request_timeout),
+            ))
+            .map_err(|e| format!("MCP server error: {}", e))?;
             Ok(())
         }
         Commands::Btor2 { command } => handle_btor2(*command),

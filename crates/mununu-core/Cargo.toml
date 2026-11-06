@@ -84,6 +84,12 @@ tokio = { version = "1", optional = true, features = ["full"] }
 # don't (yet) need a full OpenAPI spec / axum handler integration —
 # consumers want the schema file, not a runtime `/openapi.json` endpoint.
 schemars = { version = "0.8", optional = true }
+# MCP server (optional, feature `mcp`): the official Rust SDK. `server` is the handler trait and
+# the tool model, `transport-io` the stdio transport. `macros` is NOT enabled: the tools are
+# declared by hand from the `schemars` 0.8 schemas the API already publishes (rmcp's own
+# `schemars` is 1.x), so the advertised `inputSchema` is byte-for-byte
+# `docs/api-schemas/context-eval-request.schema.json`.
+rmcp = { version = "3.5", optional = true, default-features = false, features = ["server", "transport-io"] }
 
 # AST extraction (optional — tree-sitter grammars for source code analysis)
 tree-sitter = { version = "0.24", optional = true }
@@ -124,6 +130,9 @@ dhat = { version = "0.3", optional = true }
 boolector = { version = "0.4", optional = true, features = ["vendor-lgl"] }
 
 [dev-dependencies]
+# The MCP seam test drives the server through an in-process client (`client`) over a tokio duplex
+# pipe; the product build never carries the client side.
+rmcp = { version = "3.5", default-features = false, features = ["server", "client", "transport-io"] }
 criterion = "0.8"
 proptest = "1.9"
 tempfile = "3.24"
@@ -134,7 +143,9 @@ rand_chacha = "0.3"
 [features]
 default = []
 api = ["dep:axum", "dep:tower", "dep:tower-http", "dep:tokio", "dep:schemars"]
-ast-extract = ["dep:tree-sitter", "dep:tree-sitter-typescript", "dep:tree-sitter-python", "dep:tree-sitter-rust"]
+# The MCP server (`mununu mcp`): a third transport of the HTTP API's ops, so it implies `api`.
+mcp = ["api", "dep:rmcp"]
+ast-extract =["dep:tree-sitter", "dep:tree-sitter-typescript", "dep:tree-sitter-python", "dep:tree-sitter-rust"]
 syntcomp = []
 # Optimization-programme features (see notebook/0000-overview.md). Each is
 # additive and can be enabled per-bench, per-test, or per-CI-tier.
