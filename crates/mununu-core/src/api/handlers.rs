@@ -51,26 +51,8 @@ pub async fn health_check() -> Json<serde_json::Value> {
 pub async fn templates_handler(
     query: axum::extract::Query<TemplatesQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let registry = crate::adapter::templates::TemplateRegistry::configured(&[]).map_err(|e| {
-        ApiError::BadRequest {
-            message: format!("the template catalog: {e}"),
-            details: None,
-        }
-    })?;
-
-    if let Some(domain_str) = &query.domain {
-        let domain: crate::adapter::templates::TemplateDomain =
-            domain_str.parse().map_err(|message| ApiError::BadRequest {
-                message,
-                details: None,
-            })?;
-        let mut filtered = registry.for_domain(domain);
-        filtered.sort_by(|a, b| a.id.cmp(&b.id));
-        return Ok(Json(serde_json::to_value(filtered).unwrap_or_default()));
-    }
-
-    let catalog = registry.catalog();
-    Ok(Json(serde_json::to_value(catalog).unwrap_or_default()))
+    // The op lives in `ops::templates` (mununu MCP: the same op behind the `templates` tool).
+    crate::api::ops::templates(query.domain.as_deref()).map(Json)
 }
 
 /// Query parameters for the templates endpoint.
@@ -2789,241 +2771,16 @@ fn context_graphs_handler_impl(
 pub async fn context_verify_handler(
     Json(request): Json<ContextVerifyRequest>,
 ) -> ApiResult<Json<ContextVerifyResponse>> {
-    blocking(move || context_verify_handler_impl(request)).await
-}
-
-fn context_verify_handler_impl(
-    request: ContextVerifyRequest,
-) -> ApiResult<Json<ContextVerifyResponse>> {
-    let handler_start = Instant::now();
-    let counterstrategy_requested = request.counterstrategy;
-
-    let t0 = Instant::now();
-
-    // Resolve template_ref BEFORE cache lookup so the cache key covers the
-    // template instantiation. Repeated requests with the same context +
-    // template params hit the cache.
-    let (effective_formula, synth_sidecar) = resolve_template_ref_for_cache(
-        &request.formula,
-        &request.template_ref,
-        request.automaton.as_deref().unwrap_or("__default"),
-    )?;
-
-    let mut sidecar_strs: Vec<&str> = request
-        .sidecars
-        .iter()
-        .map(|s| s.content.as_str())
-        .collect();
-    if let Some(ref s) = synth_sidecar {
-        sidecar_strs.push(s.as_str());
-    }
-
-    let (entry, cache_hit) =
-        crate::api::cache::get_or_realize(&request.context.content, &sidecar_strs).map_err(
-            |e| ApiError::BadRequest {
-                message: format!("Failed to parse/realize context: {}", e),
-                details: Some(e.clone()),
-            },
-        )?;
-    let realized = entry.realized.as_ref();
-    let realize_ms = t0.elapsed().as_millis();
-    info!(
-        realize_ms,
-        cache_hit,
-        counterstrategy = counterstrategy_requested,
-        "verify: parse+realize complete"
-    );
-
-    // Collect formula–automaton pairs to evaluate
-    let mut pairs: Vec<(String, String)> = Vec::new();
-
-    if let Some(ref formula_name) = effective_formula {
-        // Specific formula requested
-        if !realized.formulas.contains_key(formula_name) {
-            return Err(ApiError::BadRequest {
-                message: format!("Unknown formula '{}'", formula_name),
-                details: None,
-            });
-        }
-        if let Some(ref automaton_name) = request.automaton {
-            pairs.push((formula_name.clone(), automaton_name.clone()));
-        } else {
-            // Use the formula's target automata
-            let rf = &realized.formulas[formula_name];
-            let automata = resolve_targets(&rf.targets, realized);
-            for a in automata {
-                pairs.push((formula_name.clone(), a));
-            }
-        }
-    } else {
-        // Evaluate ALL explicit user-defined formulas (skip auto-generated structural predicates)
-        for (name, rf) in &realized.formulas {
-            if rf
-                .meta
-                .comment
-                .as_ref()
-                .is_some_and(|c| c.contains("\"type\":\"structural\""))
-            {
-                continue;
-            }
-            if let Some(ref automaton_name) = request.automaton {
-                pairs.push((name.clone(), automaton_name.clone()));
-            } else {
-                let automata = resolve_targets(&rf.targets, realized);
-                for a in automata {
-                    pairs.push((name.clone(), a));
-                }
-            }
-        }
-    }
-
-    // Sort for deterministic output
-    pairs.sort();
-
-    let eval_options = EvaluationOptions::default();
-    let mut results = Vec::new();
-    let t2 = Instant::now();
-
-    for (formula_name, automaton_name) in &pairs {
-        let rf = &realized.formulas[formula_name];
-        let clts = realized
-            .context
-            .clts(automaton_name)
-            .ok_or_else(|| ApiError::BadRequest {
-                message: format!("Unknown automaton '{}'", automaton_name),
-                details: None,
-            })?;
-        let env = realized.environment_for(automaton_name);
-
-        let bitvec = realized
-            .context
-            .evaluate_mu(automaton_name, &rf.formula, &env, Some(&eval_options))
-            .map_err(|e| ApiError::Internal {
-                message: format!(
-                    "μ-calculus evaluation failed for formula '{}' on '{}': {}",
-                    formula_name, automaton_name, e
-                ),
-                source: None,
-            })?;
-
-        let mut satisfying_state_names = Vec::new();
-        for state_id in clts.states() {
-            if bitvec
-                .get(state_id.index())
-                .map(|bit| *bit)
-                .unwrap_or(false)
-                && let Some(name) = clts.state_name(state_id)
-            {
-                satisfying_state_names.push(name.to_string());
-            }
-        }
-        satisfying_state_names.sort();
-
-        let initial_states: Vec<String> = clts
-            .initial_states()
-            .iter()
-            .filter_map(|sid| clts.state_name(*sid).map(|n| n.to_string()))
-            .collect();
-
-        let mut initial_satisfying = Vec::new();
-        let mut initial_violating = Vec::new();
-        for sid in clts.initial_states() {
-            if let Some(name) = clts.state_name(*sid) {
-                if bitvec.get(sid.index()).map(|bit| *bit).unwrap_or(false) {
-                    initial_satisfying.push(name.to_string());
-                } else {
-                    initial_violating.push(name.to_string());
-                }
-            }
-        }
-        initial_satisfying.sort();
-        initial_violating.sort();
-
-        let satisfied = initial_violating.is_empty() && !initial_states.is_empty();
-
-        // Compute counterstrategy for failed formulas when requested
-        let counterstrategy = if request.counterstrategy && !satisfied {
-            compute_counterstrategy_result(
-                realized,
-                automaton_name,
-                &rf.formula,
-                &env,
-                &eval_options,
-                request.minimize_counterstrategy,
-            )
-        } else {
-            None
-        };
-
-        results.push(FormulaVerificationResult {
-            formula_name: formula_name.clone(),
-            automaton: automaton_name.clone(),
-            outcome: realizable_outcome(satisfied).to_string(),
-            total_states: clts.state_count(),
-            satisfying_states: satisfying_state_names.len(),
-            initial_states,
-            initial_satisfying,
-            initial_violating,
-            satisfying_state_names,
-            counterstrategy,
-        });
-    }
-
-    let eval_ms = t2.elapsed().as_millis();
-    let total_ms = handler_start.elapsed().as_millis();
-    info!(
-        realize_ms,
-        eval_ms,
-        total_ms,
-        cache_hit,
-        formulas = pairs.len(),
-        counterstrategy = counterstrategy_requested,
-        "verify: complete"
-    );
-
-    let all_satisfied = results.iter().all(|r| r.outcome == "holds");
-
-    let mut sanity = Vec::new();
-    if request.sanity {
-        let mut targets: Vec<String> = match &request.automaton {
-            Some(a) => vec![a.clone()],
-            None => pairs.iter().map(|(_, a)| a.clone()).collect(),
-        };
-        targets.sort();
-        targets.dedup();
-        for a in targets {
-            let Some(clts) = realized.context.clts(&a) else {
-                return Err(ApiError::BadRequest {
-                    message: format!("Unknown automaton '{a}'"),
-                    details: None,
-                });
-            };
-            let members: Vec<(String, &crate::clts::Clts<_, _>)> = realized
-                .members_of(&a)
-                .unwrap_or(&[])
-                .iter()
-                .filter_map(|m| realized.context.clts(m).map(|c| (m.clone(), c)))
-                .collect();
-            sanity.push(crate::context::sanity::check(
-                &a,
-                clts,
-                &realized.declared_labels_of(&a),
-                &members,
-            ));
-        }
-    }
-
-    let outcome = context_outcome(Some(all_satisfied), sanity.iter().all(|r| r.is_clean()));
-    Ok(Json(ContextVerifyResponse {
-        success: true,
-        outcome: outcome.to_string(),
-        results,
-        sanity,
-    }))
+    // The op lives in `ops::context_verify` — one body for this route and the MCP tool
+    // `context_eval`, so the two cannot drift; this transport runs it on the blocking pool (so the
+    // `TimeoutLayer` can fire and a slow model does not hold a worker) and wraps it in the JSON body.
+    blocking(move || crate::api::ops::context_verify(request))
+        .await
+        .map(Json)
 }
 
 /// Resolve formula targets to a list of automaton names
-fn resolve_targets(
+pub(crate) fn resolve_targets(
     targets: &crate::context_dsl::FormulaTargetsKind,
     realized: &crate::context_dsl::RealizedContext,
 ) -> Vec<String> {
@@ -3038,7 +2795,7 @@ fn resolve_targets(
 ///
 /// Inverts the formula, evaluates the inverted formula to find the environment's
 /// winning region, and builds Cytoscape graph elements for visualization.
-fn compute_counterstrategy_result(
+pub(crate) fn compute_counterstrategy_result(
     realized: &RealizedContext,
     automaton_name: &str,
     formula: &Formula,
@@ -3754,7 +3511,7 @@ fn context_predicates_handler_impl(
 ///   hits across repeated requests with identical template params).
 /// - When neither is given: returns `(None, None)` — caller decides whether
 ///   that's an error.
-fn resolve_template_ref_for_cache(
+pub(crate) fn resolve_template_ref_for_cache(
     formula: &Option<String>,
     template_ref: &Option<crate::adapter::templates::TemplateRef>,
     automaton: &str,
@@ -6228,7 +5985,7 @@ mod context_sanity_tests {
             "sanity": true
         }))
         .expect("request");
-        let Json(resp) = context_verify_handler_impl(request).expect("verifies");
+        let resp = crate::api::ops::context_verify(request).expect("verifies");
         assert_eq!(resp.sanity.len(), 1);
         let rep = &resp.sanity[0];
         assert_eq!(rep.automaton, "A");

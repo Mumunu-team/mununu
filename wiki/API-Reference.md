@@ -1194,6 +1194,16 @@ See [Property Templates](Property-Templates) for the full catalog and usage guid
 
 ---
 
+## MCP server
+
+`mununu mcp` serves two [Model Context Protocol](https://modelcontextprotocol.io/specification/2026-07-28) tools over stdio. It is a third transport of this API, not a new capability: `context_eval` takes exactly the request body of [POST /api/v1/context/eval](#post-apiv1contexteval) and returns that route's response as `structuredContent` (plus a one-line-per-result text summary); `templates` returns what [GET /api/v1/templates](#get-apiv1templates) returns. The tool's `inputSchema` is [`context-eval-request.schema.json`](https://github.com/Mumunu-team/mununu/blob/main/docs/api-schemas/context-eval-request.schema.json) and its `outputSchema` is [`context-eval-response.schema.json`](https://github.com/Mumunu-team/mununu/blob/main/docs/api-schemas/context-eval-response.schema.json), byte for byte. A design problem is a tool result with `isError: true` carrying the same `{success, error}` body as the HTTP 400; a call over `--request-timeout` (default 30 s, the HTTP layer's value) is `isError: true` naming the budget. Client setup, the budget and the posture: [`docs/mcp.md`](https://github.com/Mumunu-team/mununu/blob/main/docs/mcp.md).
+
+> Source of truth: [`api::mcp::MununuMcp`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/api/mcp.rs) + [`Commands::Mcp`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-cli/src/main.rs) — surface: CLI+API — the MCP tool is the HTTP handler's op (`api::ops::context_verify`).
+
+```sh
+claude mcp add mununu -- mununu mcp --request-timeout 60
+```
+
 ## Common Types
 
 ### FileContent

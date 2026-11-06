@@ -33,8 +33,9 @@ pub async fn start_server(
     Ok(())
 }
 
-/// Create the API router
-fn create_router() -> Router {
+/// Create the API router. Public so the MCP seam test can drive a route in-process
+/// (`tower::ServiceExt::oneshot`) and compare its body with the tool's `structuredContent`.
+pub fn create_router() -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
