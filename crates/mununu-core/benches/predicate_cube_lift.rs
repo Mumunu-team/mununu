@@ -91,7 +91,12 @@ fn r2_5_cap_exceeding_capability(c: &mut Criterion) {
             make_predicates(4),
             CAP_EXCEEDING_BTOR2,
             &AdapterOptions::default(),
-            &PredicateCubeLiftOptions::default(),
+            &PredicateCubeLiftOptions {
+                // The sampled may-relation by name, as these runs always used (the default is now the
+                // sound all-pairs one, 2026-11-06).
+                may_edge_inference: mununu_core::adapter::btor2::kmts_lift::MayEdgeInference::Off,
+                ..PredicateCubeLiftOptions::default()
+            },
         );
         assert!(
             r2_5.is_ok(),
@@ -116,7 +121,13 @@ fn r2_5_cap_exceeding_capability(c: &mut Criterion) {
                         predicates.clone(),
                         CAP_EXCEEDING_BTOR2,
                         &AdapterOptions::default(),
-                        &PredicateCubeLiftOptions::default(),
+                        &PredicateCubeLiftOptions {
+                            // The sampled may-relation by name, as these runs always used (the default is now the
+                            // sound all-pairs one, 2026-11-06).
+                            may_edge_inference:
+                                mununu_core::adapter::btor2::kmts_lift::MayEdgeInference::Off,
+                            ..PredicateCubeLiftOptions::default()
+                        },
                     )
                     .expect("predicate_cube_lift succeeds at every |P|");
                     black_box(result);

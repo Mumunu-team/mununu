@@ -697,7 +697,10 @@ fn run_controllability_aware_lift(
         max_cube_count: 1024,
         max_input_bits: 8,
         must_edge_inference: MustEdgeInference::Off,
-        may_edge_inference: Default::default(),
+        // SOUNDNESS: sampled may-relation, named (the default is now the sound all-pairs one).
+        // This lift returns summary counts and a comment-only CTXDSL, never a verdict, and
+        // all-pairs at this route's 1024-cube cap would be ~10^6 SMT calls per request.
+        may_edge_inference: crate::adapter::btor2::kmts_lift::MayEdgeInference::Off,
         config_values: std::collections::HashMap::new(),
         compound_exprs: std::collections::HashMap::new(),
         derived_predicates: Vec::new(),
