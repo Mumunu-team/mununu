@@ -70,6 +70,22 @@ pub const FLOPS: [&str; 14] = [
 /// (the pinned ones included) by name.
 pub type Step = (HashMap<String, u128>, HashMap<String, u128>);
 
+/// The widest value the evaluator carries (a [`Step`] holds `u128`s): a register or input wider
+/// than this stays unknown, and [`SliceReport::too_wide`] names it when the slice walks through
+/// it (mununu#848).
+pub const CARRIER_BITS: usize = 128;
+
+/// The widest operand the word cells evaluate (an `i128` with room for the sign): a wider
+/// operand leaves the cell's output unknown, and the slice names the cell when it walks
+/// through it.
+const WORD_BITS: usize = 127;
+
+/// The cells evaluated as words over `A` / `B` — the ones [`WORD_BITS`] limits.
+const WORD_CELLS: [&str; 18] = [
+    "$not", "$pos", "$neg", "$eq", "$ne", "$lt", "$le", "$gt", "$ge", "$eqx", "$nex", "$add",
+    "$sub", "$mul", "$shl", "$sshl", "$shr", "$sshr",
+];
+
 /// The top module of a flattened netlist.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Netlist {
@@ -251,7 +267,8 @@ impl Netlist {
 
     /// Evaluate every cell of the netlist on one cycle's values: the registers' `Q` from `state`
     /// (by register net name), the input ports from `inputs` (by port name). A value the maps do
-    /// not give, or that depends on a cell type this module does not evaluate, stays unknown.
+    /// not give, a register or input wider than [`CARRIER_BITS`], or a value that depends on a
+    /// cell type this module does not evaluate, stays unknown.
     pub fn evaluate(
         &self,
         state: &HashMap<String, u128>,
@@ -259,6 +276,10 @@ impl Netlist {
     ) -> Evaluation {
         let mut ev = Evaluation::default();
         let mut seed = |bits: &[Bit], value: u128| {
+            // A `u128` cannot carry the net: unknown, not read through a shift past bit 127.
+            if bits.len() > CARRIER_BITS {
+                return;
+            }
             for (i, b) in bits.iter().enumerate() {
                 if let Bit::Id(id) = b {
                     ev.bits.insert(*id, (value >> i) & 1 == 1);
@@ -305,7 +326,7 @@ impl Netlist {
         ev: &mut Evaluation,
         visiting: &mut HashSet<usize>,
     ) -> Option<i128> {
-        if bits.is_empty() || bits.len() > 127 {
+        if bits.is_empty() || bits.len() > WORD_BITS {
             return None;
         }
         let mut v: i128 = 0;
@@ -315,7 +336,9 @@ impl Netlist {
             }
         }
         if signed && bits.len() < 128 && (v >> (bits.len() - 1)) & 1 == 1 {
-            v -= 1i128 << bits.len();
+            // Set every bit above the width; at 127 bits that is the sign bit alone, where
+            // subtracting `1 << 127` would overflow.
+            v |= -1i128 << bits.len();
         }
         Some(v)
     }
@@ -337,11 +360,16 @@ impl Netlist {
         };
         let y = port("Y").to_vec();
         let yw = y.len();
-        // A word result as `Y_WIDTH` bits (two's complement truncation / extension).
-        let word_out =
-            |v: i128| -> Vec<Option<bool>> { (0..yw).map(|i| Some((v >> i) & 1 == 1)).collect() };
+        // A word result as `Y_WIDTH` bits (two's complement truncation / extension: every bit
+        // above 127 repeats the sign).
+        let word_out = |v: i128| -> Vec<Option<bool>> {
+            (0..yw).map(|i| Some((v >> i.min(127)) & 1 == 1)).collect()
+        };
         let a_signed = p("A_SIGNED") == Some(1);
         let b_signed = p("B_SIGNED") == Some(1);
+        if WORD_CELLS.contains(&ty) && ["A", "B"].iter().any(|k| port(k).len() > WORD_BITS) {
+            ev.wide_cells.insert(idx);
+        }
         if FLOPS.contains(&ty) {
             // `Q` is the state the caller seeded; nothing to compute.
         } else {
@@ -551,12 +579,13 @@ impl Netlist {
                         } else {
                             (1i128 << aw) - 1
                         };
+                        // `b` is unsigned and may exceed `u32`: saturate, never truncate (a
+                        // shift by 2^32 is a shift past every bit, not a shift by 0).
+                        let sh = u32::try_from(b).unwrap_or(u32::MAX);
                         let v = match ty {
-                            "$shl" | "$sshl" => a.checked_shl(b as u32).unwrap_or(0),
-                            "$shr" => ((a & mask) as u128 >> (b as u32).min(127)) as i128,
-                            _ => a
-                                .checked_shr(b as u32)
-                                .unwrap_or(if a < 0 { -1 } else { 0 }),
+                            "$shl" | "$sshl" => a.checked_shl(sh).unwrap_or(0),
+                            "$shr" => ((a & mask) as u128 >> sh.min(127)) as i128,
+                            _ => a.checked_shr(sh).unwrap_or(if a < 0 { -1 } else { 0 }),
                         };
                         set_bits(ev, &y, &word_out(v));
                     }
@@ -602,6 +631,26 @@ impl Netlist {
         if !known_seed {
             return report;
         }
+        // Every register and input bit → its net and whether it is wider than the carrier. A
+        // walk through one that stayed unknown is named — too wide to carry, or no value in the
+        // cycle's maps — since the unknown keeps every arm of what it feeds. "Unknown after
+        // evaluation", not "name absent from the map": a register's alias may carry the value.
+        let owner: HashMap<u64, (&String, bool)> = self
+            .registers
+            .iter()
+            .chain(
+                self.inputs
+                    .iter()
+                    .filter_map(|n| self.nets.get_key_value(n)),
+            )
+            .flat_map(|(name, bits)| {
+                let wide = bits.len() > CARRIER_BITS;
+                bits.iter().filter_map(move |b| match b {
+                    Bit::Id(id) => Some((*id, (name, wide))),
+                    _ => None,
+                })
+            })
+            .collect();
         let mut cells_per_cycle: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); steps.len()];
         for t in (0..steps.len()).rev() {
             let ev = &evs[t];
@@ -611,11 +660,21 @@ impl Netlist {
                 if !seen.insert(bit) {
                     continue;
                 }
+                if let Some(&(name, wide)) = owner.get(&bit) {
+                    if wide {
+                        report.too_wide.insert(name.clone());
+                    } else if !ev.bits.contains_key(&bit) {
+                        report.no_value.insert(name.clone());
+                    }
+                }
                 let Some((idx, port, k)) = self.driver.get(&bit) else {
                     continue; // an input port bit or an undriven net: the walk ends
                 };
                 let c = &self.cells[*idx];
                 cells_per_cycle[t].insert(*idx);
+                if ev.wide_cells.contains(idx) {
+                    report.too_wide.insert(c.name.clone());
+                }
                 let val = |b: &Bit| -> Option<bool> {
                     match b {
                         Bit::Zero => Some(false),
@@ -785,12 +844,17 @@ pub struct Evaluation {
     /// Cell types this module does not evaluate that the netlist contains.
     pub unevaluated: BTreeSet<String>,
     done: HashSet<usize>,
+    /// Word cells with an operand wider than [`WORD_BITS`]: their outputs stayed unknown.
+    wide_cells: HashSet<usize>,
 }
 
 impl Evaluation {
-    /// A public net's value, when every bit is known.
+    /// A public net's value, when every bit is known and it fits [`CARRIER_BITS`].
     pub fn net(&self, netlist: &Netlist, name: &str) -> Option<u128> {
         let bits = netlist.nets.get(name)?;
+        if bits.len() > CARRIER_BITS {
+            return None;
+        }
         let mut v = 0u128;
         for (i, b) in bits.iter().enumerate() {
             let bit = match b {
@@ -806,9 +870,13 @@ impl Evaluation {
         Some(v)
     }
 
-    /// A register's `D` — the value it takes at the next edge — when every bit is known.
+    /// A register's `D` — the value it takes at the next edge — when every bit is known and it
+    /// fits [`CARRIER_BITS`].
     pub fn next_of(&self, netlist: &Netlist, register: &str) -> Option<u128> {
         let q = netlist.registers.get(register)?;
+        if q.len() > CARRIER_BITS {
+            return None;
+        }
         let mut v = 0u128;
         for (i, qb) in q.iter().enumerate() {
             let Bit::Id(qid) = qb else { return None };
@@ -844,6 +912,14 @@ pub struct SliceReport {
     pub widened: BTreeSet<String>,
     /// Seeds that are not public nets of the netlist (a monitor cell, a name the lift mangled).
     pub unknown_seeds: Vec<String>,
+    /// What the walk passed through that the evaluator could not carry: registers and inputs
+    /// wider than [`CARRIER_BITS`], and word cells with an operand wider than [`WORD_BITS`]
+    /// (by cell name). Their values stayed unknown, so every arm they fed was kept.
+    pub too_wide: BTreeSet<String>,
+    /// Registers and inputs the walk passed through that the cycle's maps gave no value (the
+    /// trace did not list them under any of their names): unknown, so every arm they fed was
+    /// kept.
+    pub no_value: BTreeSet<String>,
 }
 
 #[cfg(test)]
@@ -976,6 +1052,10 @@ mod tests {
         let s = n.slice(&trace(), &["start_a".to_string(), "start_b".to_string()]);
         assert!(s.widened.is_empty(), "{:?}", s.widened);
         assert!(s.unknown_seeds.is_empty());
+        // The measured counterexample gives a value to everything the walk reads (mununu#857:
+        // a gap here would make the real slice `widened`, not `exact`).
+        assert!(s.no_value.is_empty(), "{:?}", s.no_value);
+        assert!(s.too_wide.is_empty(), "{:?}", s.too_wide);
         let lines = |t: usize| -> Vec<u32> {
             s.cycles
                 .iter()
@@ -1075,6 +1155,36 @@ mod tests {
             None,
             "an unknown cell's output is unknown, never guessed"
         );
+    }
+
+    /// A register wider than the carrier stays unknown (never read through a shift past bit 127)
+    /// and the slice names it when the walk passes through it, so the report can say the slice
+    /// kept every arm it fed.
+    #[test]
+    fn a_register_wider_than_the_carrier_stays_unknown_and_is_named_by_the_slice() {
+        let r: Vec<u64> = (10..10 + 135).collect();
+        let j = serde_json::json!({"modules": {"m": {
+            "attributes": {"top": 1},
+            "ports": {"y": {"direction": "output", "bits": [4]}},
+            "cells": {
+                "q": {"type": "$dff", "parameters": {}, "attributes": {"src": "m.sv:3.3-3.20"},
+                      "port_directions": {"CLK": "input", "D": "input", "Q": "output"},
+                      "connections": {"CLK": [2], "D": r.clone(), "Q": r.clone()}},
+                "s": {"type": "$mux", "parameters": {}, "attributes": {"src": "m.sv:5.3-5.20"},
+                      "port_directions": {"A": "input", "B": "input", "S": "input", "Y": "output"},
+                      "connections": {"A": ["0"], "B": ["1"], "S": [10], "Y": [4]}}},
+            "netnames": {"r": {"bits": r}, "y": {"bits": [4]}}}}});
+        let n = Netlist::parse(&j.to_string()).expect("parses");
+        let steps = [(m(&[("r", 1)]), m(&[]))];
+        let ev = n.evaluate(&steps[0].0, &steps[0].1);
+        assert_eq!(
+            ev.net(&n, "y"),
+            None,
+            "the selector is bit 0 of the too-wide register"
+        );
+        let s = n.slice(&steps, &["y".to_string()]);
+        assert_eq!(s.too_wide.iter().collect::<Vec<_>>(), vec!["r"]);
+        assert!(s.widened.is_empty(), "no unknown cell type here");
     }
 
     #[test]

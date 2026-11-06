@@ -290,8 +290,8 @@ N targets proposed (Class A: x, B: y, C: z, D: w). Domains covered. Highest-impa
 For each:
 - ID, name, source URL, commit pin
 - Bug class + CWE/CVE
-- Adapter path + state-space estimate — name the live Rust adapter module that will process the target (e.g., `crates/mununu-core/src/adapter/systemverilog/mod.rs`) and the surface that will expose it (CLI subcommand, API route, UI workflow). A target that cannot be tied to an existing adapter symbol must list the adapter as `new — proposed` and append a Phase 6.5 GAP entry so the proposal is traceable to either alive code or an explicit gap.
-- Property skeleton (mu-calculus or template_ref) — if the skeleton uses a template, cite the template's registry entry path (`crates/mununu-core/src/adapter/templates/...rs`); template references with no registry entry are rejected at Phase 4.
+- Adapter path + state-space estimate — name the live Rust adapter module that will process the target (e.g., `crates/mununu-core/src/adapter/slang/verify_auto.rs` for SystemVerilog) and the surface that will expose it (CLI subcommand, API route, UI workflow). A target that cannot be tied to an existing adapter symbol must list the adapter as `new — proposed` and append a Phase 6.5 GAP entry so the proposal is traceable to either alive code or an explicit gap.
+- Property skeleton (mu-calculus or template_ref) — if the skeleton uses a template, cite the template's registry entry path (`crates/mununu-core/src/adapter/templates/builtin_templates.json`, or the project's `--templates-file`); template references with no registry entry are rejected at Phase 4.
 - Reproduction status
 - Effort (S/M/L/XL)
 - Rigor class (A/B/C/D — see below)

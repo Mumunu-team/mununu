@@ -1806,6 +1806,12 @@ fn witness_miss_note(
 fn attach_safety_witnesses(report: &mut AutoVerifyReport, design_btor2: &str, reset_pinned: bool) {
     use crate::mu_calculus::{PropertyClass, parser as mu_parser};
     let mut misses: Vec<VerificationNote> = Vec::new();
+    let explained: std::collections::HashSet<String> = report
+        .notes
+        .iter()
+        .filter(|n| n.kind == "witness-unavailable")
+        .filter_map(|n| n.property.clone())
+        .collect();
     for prop in report.properties.iter_mut() {
         if !matches!(prop.outcome, VerifyOutcome::Violated { .. }) || prop.counterexample.is_some()
         {
@@ -1820,6 +1826,22 @@ fn attach_safety_witnesses(report: &mut AutoVerifyReport, design_btor2: &str, re
             continue;
         };
         if formula.property_class() != PropertyClass::Safety {
+            // mununu#849 — no safety path finder for this shape: the path, when there is one,
+            // comes from the engine that decided the row. One that decided without a path and
+            // recorded no reason (a fallback after an exact refusal, a rescue lane, an isolated
+            // child) would otherwise ship VIOLATED with neither.
+            if !explained.contains(&prop.name) {
+                misses.push(witness_miss_note(
+                    &prop.name,
+                    prop.decided_by.as_deref(),
+                    &crate::adapter::reach_rescue::WitnessMiss {
+                        stage: "no-path",
+                        reason: "the engine that decided this non-safety row returned a verdict \
+                                 and no path, and the safety path finder does not cover its shape"
+                            .to_string(),
+                    },
+                ));
+            }
             continue;
         }
         match crate::adapter::reach_rescue::safety_witness(
@@ -6956,6 +6978,7 @@ pub(crate) fn verify_auto_impl(
             let exact_stage = ladder.stage;
             let exact_witness_miss = ladder.witness_miss.clone();
             let mut by_ladder = false;
+            let mut fallback_decided_by: Option<&'static str> = None;
             let (outcome, counterexample) = match ladder.result {
                 Ok((ExactVerdict::Holds, _)) => {
                     by_ladder = true;
@@ -6982,7 +7005,30 @@ pub(crate) fn verify_auto_impl(
                     // well-founded datapath descent the exact engine can't fit. Route
                     // it to the scalable ranking/recoverability engine before abstaining.
                     match try_ranking_recoverability(&btor2, &formula) {
-                        Some(outcome) => (outcome, None),
+                        Some(outcome) => {
+                            // mununu#849 — the exact engine refused, so the verdict is the
+                            // scalable recoverability engine's, and it carries no path: the
+                            // label and a note say both (the edn endpoint `AG EF Idle` rows, a
+                            // 405-bit cone over the cap, read `exact-symbolic` with neither).
+                            let engine =
+                                crate::adapter::recoverability::RecoverabilityEngine::CubeLadder
+                                    .decided_by_label();
+                            fallback_decided_by = Some(engine);
+                            if matches!(outcome, VerifyOutcome::Violated { .. }) {
+                                report.notes.push(witness_miss_note(
+                                    &t.name,
+                                    Some(engine),
+                                    &crate::adapter::reach_rescue::WitnessMiss {
+                                        stage: "exact-refused",
+                                        reason: format!(
+                                            "the exact engine refused the row ({e}); the \
+                                             recoverability engine that decided it builds no path"
+                                        ),
+                                    },
+                                ));
+                            }
+                            (outcome, None)
+                        }
                         None => (
                             VerifyOutcome::Skipped {
                                 reason: format!("exact symbolic MC: {e}"),
@@ -7015,7 +7061,9 @@ pub(crate) fn verify_auto_impl(
                 seeded_predicates: Vec::new(),
                 counterexample,
                 bottom_reason: None,
-                decided_by: by_ladder.then(|| exact_stage.to_string()),
+                decided_by: by_ladder
+                    .then(|| exact_stage.to_string())
+                    .or_else(|| fallback_decided_by.map(str::to_string)),
                 vacuity: None,
             });
             continue;
@@ -13105,6 +13153,82 @@ module uart_tx(); endmodule"#;
             "{}",
             note.detail
         );
+    }
+
+    /// A VIOLATED recoverability row as the exact member's fallback leaves it (mununu#849): no
+    /// path, labelled with the engine that decided.
+    fn violated_ag_ef_row_without_a_path() -> PropertyVerdict {
+        PropertyVerdict {
+            name: "ann_guarantee_0".into(),
+            label: Some("recover_idle".into()),
+            kind: SvaKind::Assert,
+            formula: "nu Y. ((mu X. ((a_q == 0) || <> X)) && [] Y)".into(),
+            outcome: VerifyOutcome::Violated { false_cells: 1 },
+            seeded_predicates: vec![],
+            counterexample: None,
+            bottom_reason: None,
+            decided_by: Some(
+                crate::adapter::recoverability::RecoverabilityEngine::CubeLadder
+                    .decided_by_label()
+                    .into(),
+            ),
+            vacuity: None,
+        }
+    }
+
+    /// mununu#849 — the safety path finder does not cover a non-safety row, and the post-pass used
+    /// to skip one with a bare `continue`: a row whose deciding engine built no path and recorded
+    /// no reason shipped VIOLATED with neither. It now carries a `witness-unavailable` note
+    /// naming the engine that decided it.
+    #[test]
+    fn a_violated_non_safety_row_with_no_path_and_no_reason_gets_a_note_naming_its_engine() {
+        let mut report = AutoVerifyReport::default();
+        report.properties.push(violated_ag_ef_row_without_a_path());
+        attach_safety_witnesses(&mut report, TWO_BIT_PULSES, false);
+        let note = report
+            .notes
+            .iter()
+            .find(|n| {
+                n.kind == "witness-unavailable" && n.property.as_deref() == Some("ann_guarantee_0")
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "a VIOLATED without a path must say why; notes: {:?}",
+                    report.notes.iter().map(|n| &n.summary).collect::<Vec<_>>()
+                )
+            });
+        assert_eq!(note.items, vec!["no-path".to_string()], "{}", note.detail);
+        assert!(
+            note.detail.contains("recoverability rescue"),
+            "the note names the deciding engine: {}",
+            note.detail
+        );
+    }
+
+    /// The post-pass's note is a net, not a second voice: a row whose deciding site already said
+    /// why it ships no path (the exact member's fallback names the exact refusal) is not noted
+    /// again.
+    #[test]
+    fn a_non_safety_row_already_explained_is_not_noted_twice() {
+        let mut report = AutoVerifyReport::default();
+        let row = violated_ag_ef_row_without_a_path();
+        report.notes.push(witness_miss_note(
+            &row.name,
+            row.decided_by.as_deref(),
+            &crate::adapter::reach_rescue::WitnessMiss {
+                stage: "exact-refused",
+                reason: "the exact engine refused the row".to_string(),
+            },
+        ));
+        report.properties.push(row);
+        attach_safety_witnesses(&mut report, TWO_BIT_PULSES, false);
+        let misses: Vec<_> = report
+            .notes
+            .iter()
+            .filter(|n| n.kind == "witness-unavailable")
+            .map(|n| n.items.clone())
+            .collect();
+        assert_eq!(misses, vec![vec!["exact-refused".to_string()]]);
     }
 
     /// The second site of mununu#821: `build_notes` regenerates the model-level notes, and before

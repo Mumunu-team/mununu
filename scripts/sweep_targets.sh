@@ -14,8 +14,9 @@
 #
 # Install cargo-sweep once: cargo install cargo-sweep
 # Manual run:                make sweep              (this script via Makefile)
-# Schedule weekly:           cp scripts/com.vscorza.mununu-sweep.plist ~/Library/LaunchAgents/
-#                            launchctl load ~/Library/LaunchAgents/com.vscorza.mununu-sweep.plist
+# Schedule weekly:           a launchd unit that runs this script with SWEEP_APPLY=1. It is
+#                            machine-local (absolute paths), so it is kept with the private ops
+#                            files (mununu-private/scripts/launchd/), not in this repo.
 
 set -euo pipefail
 

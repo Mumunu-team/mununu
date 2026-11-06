@@ -15,9 +15,11 @@ VERIFY_FILE ?= examples/hw/handshake.ctxdsl
 EXP        ?=
 BASELINE   ?= main
 PROPTEST_CASES ?= 64
+DIFF_CASES ?= 512
 
 .PHONY: build test lint verify ci clean help \
         test-fast e2e e2e-oneshot e2e-parallel ledger-check test-properties stress fuzz proptest-deep \
+        diff-tier-explore \
         coverage mem-profile sweep \
         bench-baseline bench-compare bench-record \
         experiment replay publish-prep frontier-smoke
@@ -40,6 +42,7 @@ help:
 	@echo "Properties / stress / fuzz:"
 	@echo "  test-properties - run proptest suite (PROPTEST_CASES=$(PROPTEST_CASES))"
 	@echo "  proptest-deep   - run proptest suite with PROPTEST_CASES=4096"
+	@echo "  diff-tier-explore - random-BTOR2 differential tier on FRESH draws (off the gate; DIFF_CASES=$(DIFF_CASES))"
 	@echo "  stress          - run #[ignore]+stress feature tests (tier 3)"
 	@echo "  fuzz            - run cargo-fuzz harnesses for 5 minutes each"
 	@echo
@@ -181,6 +184,12 @@ test-properties:
 proptest-deep:
 	$(MAKE) test-properties PROPTEST_CASES=4096
 
+# The random-BTOR2 differential tier on fresh draws. `make ci` replays one fixed draw (a blocking
+# gate must be deterministic); this is the explorer that looks for new engine disagreements. A
+# failure prints the design: file it, pin it as a deterministic test, fix the engine.
+diff-tier-explore:
+	MUNUNU_DIFF_TIER_EXPLORE=1 PROPTEST_CASES=$(DIFF_CASES) $(CARGO) test -p mununu-core --test engine btor2_differential -- --nocapture
+
 stress:
 	$(CARGO) test --workspace --features stress --tests 'stress_*' -- --ignored --nocapture
 
@@ -252,7 +261,7 @@ docs-audit:
 # The exact engine's bit-cap frontier — the known points, asserted against the release binary
 # under the shipped defaults (every MUNUNU_* scrubbed). Not in `ci`: it runs the engine on a
 # 32-bit multiplier (~30 s) and a 48-bit one through the cube ladder. `scripts/bitcap_frontier.py
-# sweep` is the full measurement; `experiments/EXP-0031-bitcap-frontier/` the recorded table.
+# sweep` is the full measurement; the recorded table (EXP-0031) is kept with the private evaluation data.
 frontier-smoke: build
 	@scripts/bitcap_frontier.py smoke
 

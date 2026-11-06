@@ -1,6 +1,5 @@
 // 4-bit DMR (dual modular redundancy) commit gate — fault-tolerance contract example.
 //
-// Plan: /Users/marianocerrutti/.claude/plans/read-this-description-for-tranquil-aurora.md
 // Companion design note: docs/design/fault-tolerance-contracts.md
 //
 // Property under verification:

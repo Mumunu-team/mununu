@@ -1,1 +1,0 @@
-cargo bench -p mununu-core --features test_support --bench clts_construction -- --quick

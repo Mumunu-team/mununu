@@ -4479,6 +4479,24 @@ impl ExactModel {
         oom(self.constraint.exists(&self.input_cube))
     }
 
+    /// mununu#852 — project a target predicate (`bad` / `good`) that may read a primary input down
+    /// to a pure STATE set: `∃i. (phi(s,i) ∧ constraint(s,i))`. A target reads its inputs AT the
+    /// target cycle, which must be INDEPENDENT of the transition inputs the modal pre-image
+    /// ([`Self::diamond_pre`]) quantifies. Left free and fed to the `EF` fixpoint, the target's
+    /// input bits are the same BDD variables [`Self::to_next`] carries through unsubstituted (it
+    /// substitutes state vars only), so the pre-image's single `∃i` ties "the input the target
+    /// reads" to "the input that drove the step into the target" — a false UNREACHABLE when the two
+    /// cycles need different input values. Projecting here keeps them independent. The per-cycle
+    /// `constraint` is conjoined BEFORE the projection so the witnessing input also respects the
+    /// assume at the target cycle (btormc checks the constraint at the `bad` step too). A target
+    /// with no input bits is unchanged up to the pre-existing `∧ constraint_satisfiable` filter,
+    /// since `∃i.(phi ∧ constraint) = phi ∧ ∃i.constraint` when `phi` has no `i`.
+    pub fn target_state_set(&self, phi: &BDDFunction) -> Result<BDDFunction, String> {
+        use oxidd::BooleanFunctionQuant;
+        let with_constraint = oom(phi.and(&self.constraint))?;
+        oom(with_constraint.exists(&self.input_cube))
+    }
+
     /// `⟨⟩φ` — some **constraint-respecting** successor satisfies `φ`:
     /// `∃i. constraint(s,i) ∧ to_next(φ)`. `constraint = tt` (unconstrained) makes
     /// this the plain `∃i. to_next(φ)`, so an unconstrained design is unchanged.
@@ -5699,13 +5717,17 @@ pub fn exact_bad_reachable(btor2_content: &str) -> Result<bool, String> {
     }
 
     let model = bb.exact_model()?;
-    // The `bad` target must itself be constraint-consistent: btormc checks the
-    // constraint at the step where `bad` holds too, so reaching a state that
-    // violates every constraint is not a valid counterexample. Conjoining the
-    // constraint-satisfiable states leaves an unconstrained design unchanged
-    // (`constraint_satisfiable() = tt`). The constrained `◇` (`diamond_pre`)
-    // already restricts every intermediate step.
-    let bad = oom(bad.and(&model.constraint_satisfiable()?))?;
+    // mununu#852 — project the `bad` target to a pure STATE set BEFORE the `EF` fixpoint:
+    // `∃i. (bad(s,i) ∧ constraint(s,i))`. `bad` may read a primary input combinationally; left
+    // free, its input bits are the SAME BDD variables the modal pre-image ([`diamond_pre`])
+    // quantifies for the transition, so the one-step `∃i` would tie "the input `bad` reads at its
+    // cycle" to "the input that drove the step into that state" — a false UNREACHABLE when the
+    // counterexample needs different input values at the two cycles (the shrunk 18-line design in
+    // the mununu#852 regression test). The joint
+    // conjunction with the per-cycle `constraint` keeps the old consistency guarantee: the `bad`
+    // target is itself constraint-consistent (btormc checks the assume at the `bad` step too), and
+    // an unconstrained, input-free `bad` is unchanged since `∃i.(bad ∧ tt) = bad`.
+    let bad = model.target_state_set(&bad)?;
     let formula = mu_parser::parse("mu Y. (BAD or <> Y)").expect("EF(bad) formula parses");
     let mut atoms: HashMap<&str, BDDFunction> = HashMap::new();
     atoms.insert("BAD", bad);
@@ -6922,14 +6944,32 @@ impl ExactSession {
                 }
                 if let Some(p_id) = detect_af_target(formula) {
                     let p_bdd = exact.eval_at(formula, p_id, &atoms)?;
-                    if let Some(lasso) = self.bb.exact_reachable_stall_lasso(&self.file, &p_bdd)? {
-                        return Ok(Some(lasso));
-                    }
+                    return match self.bb.exact_reachable_stall_lasso(&self.file, &p_bdd)? {
+                        Some(lasso) => Ok(Some(lasso)),
+                        // A refuted `AF` with no reconstructable stall: a recorded miss, not
+                        // silence — the verdict stands, the path is its explanation.
+                        None => {
+                            Err("refuted AF but no reachable stall could be reconstructed"
+                                .to_string())
+                        }
+                    };
                 }
                 if let Some(p_id) = detect_ag_ef_target(formula) {
                     let p_bdd = exact.eval_at(formula, p_id, &atoms)?;
-                    return self.bb.exact_reachable_trap_path(&self.file, &p_bdd);
+                    return match self.bb.exact_reachable_trap_path(&self.file, &p_bdd)? {
+                        Some(lasso) => Ok(Some(lasso)),
+                        // A refuted `AG EF` whose refutation is not a single forward trap path
+                        // (the OpenTitan edn endpoint rows, decided on the slang netlist by the
+                        // exact ladder where the trap certificate used to carry the path): a
+                        // recorded miss, so the row says why it ships no path.
+                        None => Err("refuted AG EF but no single reachable trap path could be \
+                                     reconstructed (the recoverability refutation need not be one \
+                                     forward path)"
+                            .to_string()),
+                    };
                 }
+                // No one-path (liveness / recoverability) shape: a safety witness, when one
+                // exists, comes from the bounded-safety path, not here.
                 Ok(None)
             },
         ))
@@ -8240,11 +8280,34 @@ impl BddBitBlaster {
         Ok(entries)
     }
 
+    /// The lasso / trap representation carries a cell's value as `u128`: a state or input cell
+    /// wider than that (reachable since the cap ladder bit-blasts cones the 192-bit cap used to
+    /// refuse) has no faithful witness here — none, never a wrapped shift into a wrong minterm
+    /// (mununu#723: `pick_assignment` shifts `1u128 << b` for every cell). The refusal is an
+    /// `Err`, so every caller records it the way it records any other failed extraction — the
+    /// ladder lifts it into `witness_miss` and the report's `witness-unavailable` note. It used to
+    /// be an `Ok(None)` that reached only the log: the slang-only lift's gate run 2 (2026-11-05)
+    /// shipped the edn IP's endpoint `AG EF Idle` rows as VIOLATED with no path and no note.
+    fn refuse_wide_cells(&self) -> Result<(), String> {
+        match self.cells.iter().find(|c| c.vars.len() > 128) {
+            Some(wide) => Err(format!(
+                "no witness: cell `{}` is {} bits wide and the lasso carries a cell as `u128` \
+                 (mununu#723) — the verdict stands, the path is omitted",
+                wide.symbol,
+                wide.vars.len()
+            )),
+            None => Ok(()),
+        }
+    }
+
     pub fn exact_stall_lasso(
         &self,
         file: &Btor2File,
         p: &BDDFunction,
     ) -> Result<Option<StallLasso>, String> {
+        // Sibling of the two reachable builders below: `pick_state_assignment` shifts by the bit
+        // index too, so a wide cell refuses here as well instead of overflowing.
+        self.refuse_wide_cells()?;
         let exact = self.exact_model()?;
         let stall = self.eg_not_p(&exact, p)?;
         // A stall state that is also initial ⇒ AF p is violated from reset.
@@ -8276,19 +8339,7 @@ impl BddBitBlaster {
         file: &Btor2File,
         p: &BDDFunction,
     ) -> Result<Option<StallLasso>, String> {
-        // The lasso / trap representation carries a cell's value as `u128`: a state cell wider than
-        // that (reachable since the cap ladder bit-blasts cones the 192-bit cap used to refuse)
-        // has no faithful witness here — none, never a wrapped shift into a wrong minterm.
-        // mununu#723 — INPUT cells too: `pick_assignment` shifts `1u128 << b` for every cell.
-        if let Some(wide) = self.cells.iter().find(|c| c.vars.len() > 128) {
-            tracing::warn!(
-                cell = %wide.symbol,
-                width = wide.vars.len(),
-                "exact: no counterexample for a design with a state cell wider than 128 bits — \
-                 the verdict stands, the witness is omitted"
-            );
-            return Ok(None);
-        }
+        self.refuse_wide_cells()?;
         let exact = self.exact_model()?;
         let stall = self.eg_not_p(&exact, p)?;
         if stall == self.ff {
@@ -8358,19 +8409,7 @@ impl BddBitBlaster {
         file: &Btor2File,
         p: &BDDFunction,
     ) -> Result<Option<StallLasso>, String> {
-        // The lasso / trap representation carries a cell's value as `u128`: a state cell wider than
-        // that (reachable since the cap ladder bit-blasts cones the 192-bit cap used to refuse)
-        // has no faithful witness here — none, never a wrapped shift into a wrong minterm.
-        // mununu#723 — INPUT cells too: `pick_assignment` shifts `1u128 << b` for every cell.
-        if let Some(wide) = self.cells.iter().find(|c| c.vars.len() > 128) {
-            tracing::warn!(
-                cell = %wide.symbol,
-                width = wide.vars.len(),
-                "exact: no counterexample for a design with a state cell wider than 128 bits — \
-                 the verdict stands, the witness is omitted"
-            );
-            return Ok(None);
-        }
+        self.refuse_wide_cells()?;
         let exact = self.exact_model()?;
         let trap = self.not_ef_p(&exact, p)?;
         if trap == self.ff {

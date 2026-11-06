@@ -86,8 +86,19 @@ examples/verify/**/build/
 /examples/scalable/
 /tutorial/
 
+# Experiment archives (EXP-NNNN-<slug>/: criterion + dhat output, sweep JSON, hardware
+# fingerprints) — generated artifacts that embed machine-local paths. Untracked since
+# 2026-11-05; the files stay on disk and a copy lives in mununu-private/experiments/.
+/experiments/
+
 # Local experiment area — BTOR2 dumps, probe scripts, vendor stubs, ledger runs.
 # Untracked by design: it is a working surface, not a deliverable. Committed once
 # by a `git add -A` that swept it in; the `--cached` removal left every file on
 # disk untouched.
 scratchpad/
+
+# Unpublished write-ups and machine-local launchd units (2026-11-05): both live in
+# mununu-private/ (`publications/`, `scripts/launchd/`). The per-example write-ups under
+# examples/industrial/*/publications/ are tracked on purpose.
+/publications/
+/scripts/*.plist

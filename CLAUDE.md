@@ -25,9 +25,10 @@
 17. [Available Agents and Skills](#available-agents-and-skills) `[REFERENCE]`
 18. [Private Files Policy](#private-files-policy) `[RULE]`
 19. [Reasoning & Recommendation Honesty](#reasoning--recommendation-honesty) `[RULE]`
-20. [Engine Specificity in Proposals](#engine-specificity-in-proposals) `[RULE]`
-21. [Reference Docs Index](#reference-docs-index) `[REFERENCE]`
-22. [Environment Variables](#environment-variables) `[REFERENCE]`
+20. [Falsifier First](#falsifier-first) `[RULE]`
+21. [Engine Specificity in Proposals](#engine-specificity-in-proposals) `[RULE]`
+22. [Reference Docs Index](#reference-docs-index) `[REFERENCE]`
+23. [Environment Variables](#environment-variables) `[REFERENCE]`
 
 ---
 
@@ -79,6 +80,8 @@ Mununu exhaustively verifies finite-state models; its verdicts are correct **for
 **KMTS + Kleene 3-valued** (canonical for SystemVerilog / BTOR2; available to adapters that opt in) — may and must edges tracked separately, the full modal μ-calculus over `KleeneT` / `KleeneF` / `KleeneBot`; Bruns–Godefroid (CONCUR 2000) gives definite verdicts that transfer at **every** alternation depth; `KleeneBot` triggers a CEGAR refinement. Use it whenever a μ sits inside a ν (or vice versa), or for a sound liveness verdict on an over-approximation. Theory and the per-adapter migration table: [`docs/abstraction.md`](docs/abstraction.md) §"The canonical recipe", [`docs/design/kmts-theory.md`](docs/design/kmts-theory.md).
 
 **Discipline.** Document every `eval_expr → None` choice as over- or under-approximation with a `// SOUNDNESS:` comment (`/soundness-check` flags undeclared sites); never mix directions within one model without saying so; add a soundness regression test for every new abstraction decision; prefer the KMTS path (`Transition::modality`, `state_3valued_predicates`) when emitting a CLTS for an alternating property — legacy adapters produce `Sharp`-everywhere KMTSes that carry only the 2-valued guarantees.
+
+**Learned components propose, the engine checks** (Track Q, 2026-11-05): a learned component may only propose; the engine checks every proposal; nothing a model emits reaches `outcome`, `vacuity` or a trace without the checker's confirmation. The neural-verification levers that follow this rule are planned in `.claude/plans/roadmap.md` §Track Q, not started.
 
 Strategy extraction uses signature-based selection from iteration ranks; both players have memoryless winning strategies (positional determinacy, Zielonka 1998) — memoryless on the model-checking product = finite-memory on the plant. `ControllerMode`, lasso traces, counterstrategies and the Skolem-paradigm rules: [`docs/synthesis.md`](docs/synthesis.md).
 
@@ -137,7 +140,7 @@ Prefer the CLTS / CTXDSL primitives over re-encoding source features as state-na
 - **Per-label controllability** (`LabelControllability::{Controllable, Internal, Uncontrollable}`) in the `controllable { … }` / `internal { … }` blocks, not in label-name prefixes.
 - **Rich modal guards** (`Guard { labels, current, next, control, max_steps }`): `[(labels = {a}, req_next = {active}, ctrl = controllable)] φ` — reach for `req_next` / `forb_next` whenever the property says "after this transition the system must be in a state where …".
 
-Reference implementations: `crates/mununu-core/src/adapter/emit.rs` (turn-aware `[(ctrl=Controllable)]` guards), `crates/mununu-core/src/adapter/systemverilog/kripke.rs` (Kripke valuations). When a primitive is intentionally unused, leave a one-line comment saying why; `/soundness-check` flags silent under-use.
+Reference implementations: `crates/mununu-core/src/adapter/emit.rs` (turn-aware `[(ctrl=Controllable)]` guards), `crates/mununu-core/src/adapter/btor2/kmts_lift.rs` (3-valued per-state predicates on the lifted RTL, `Clts::state_3valued_predicates`). When a primitive is intentionally unused, leave a one-line comment saying why; `/soundness-check` flags silent under-use.
 
 ## Git Operations & Destructive Commands
 
@@ -197,11 +200,17 @@ When extending one, its `description:` and inline guidance follow Documentation 
 
 ## Private Files Policy
 
-Sensitive or unpublished material lives in `/Users/marianocerrutti/git_repo/mununu-private/`, never here: paper sources, benchmark scripts and expected outputs, extraction specs with CVE data, protocol CTXDSL models, MCP-extracted CTXDSL, governance scripts, tutorials, evaluation data and drafts. Public: Rust source, adapters and their formats, the extraction framework's *capabilities* (adapter code, validation, schema), shared IR, tests, README and wiki. Before adding a file here you would not want public, move it to `mununu-private` and add the path to `.gitignore` (which already excludes `/paper/`, `/artifact/`, `/examples/syntcomp/`, `/examples/scalable/`, `/tutorial/`).
+Sensitive or unpublished material lives in the sibling `mununu-private/` repository, never here: paper sources, benchmark scripts and expected outputs, extraction specs with CVE data, protocol CTXDSL models, MCP-extracted CTXDSL, governance scripts, tutorials, evaluation data and drafts. Public: Rust source, adapters and their formats, the extraction framework's *capabilities* (adapter code, validation, schema), shared IR, tests, README and wiki. Before adding a file here you would not want public, move it to `mununu-private` and add the path to `.gitignore` (which already excludes `/paper/`, `/artifact/`, `/examples/syntcomp/`, `/examples/scalable/`, `/tutorial/`).
+
+**Names, machine-local files, live surfaces** (2026-11-05, from the exposure audit; full text: [`docs/policies/private-files.md`](docs/policies/private-files.md)). Partner, customer, vendor, engagement and person names stay in `mununu-private`: not in tracked files, code comments, commit messages, branch names, or PR / issue titles, bodies and comments — a consumer briefing names a consumer by repository (rosf, monono, mununu-ui) and an origin by issue number, never by who the work was done for. No tracked file embeds an absolute path, a home directory, an account handle or a hostname — launchd / systemd units, profiler and sweep output, hardware fingerprints and local configs stay out (`.gitignore` also excludes `/experiments/`, `/publications/` and `/scripts/*.plist`). Unpublished write-ups live in `mununu-private/publications/`. A published artifact stays private; a local `mununu server` container binds loopback (`-p 127.0.0.1:8080:8080`). A name or path that reached `main` is scrubbed by a working-tree PR plus a pass over the GitHub issue / PR text; history is reported, never rewritten without explicit user instruction.
 
 ## Reasoning & Recommendation Honesty
 
 Never justify a decision, recommendation or deferral with a limitation the agent does not have — "the session is long", "end of session", fatigue, attention erosion. Turn N is produced at the same capability as turn 1. The genuine session-linked factors, named when they apply: **context degradation** (earlier invariants can be summarised away — which argues for doing dependent work *while* the context is warm, not deferring it), **token / compute cost** (the user's axis to weigh — surface it, do not assume it as a stop), **intrinsic difficulty / soundness-criticality** (answered with procedural rigour — differential tests, oracles — not postponement). If the only reason is "the user should make this call", say exactly that. Warm build caches typically make longer-running work cheaper, not riskier.
+
+## Falsifier First
+
+Where more than one structure would work and the choice is not forced: name the decision, give its reason, and state **what observation would falsify it — before building it**; then check the falsifier first, because it is nearly always cheaper than the implementation. A falsifier is a checkable observation, never a worry ("this might be slow" is not one; "the renderer's setup state is not 16 cycles long" is). After a measurement, ask what you did **not** check and whether it was cheaper than what you did. On this host (an interactive desktop) a directional result at ≥10× survives the noise; a ratio under ~2× does not and is not evidence. Working measure (roadmap A1, 2026-11-03): the count of mechanisms retired within 7 days of shipping must fall from the 4 of the 2026-09 window.
 
 ## Engine Specificity in Proposals
 
@@ -210,7 +219,7 @@ Every proposed experiment, approach, design or implementation states which engin
 ## Reference Docs Index
 
 - [`docs/env-vars.md`](docs/env-vars.md) — every `MUNUNU_*` variable the code reads, one line each.
-- [`docs/policies/`](docs/policies/) — the full policies: `ci-and-hooks.md`, `reproducers-before-fixes.md`, `documentation-traceability.md`, `claims-integrity.md`, `cross-repo-impact.md`.
+- [`docs/policies/`](docs/policies/) — the full policies: `ci-and-hooks.md`, `reproducers-before-fixes.md`, `documentation-traceability.md`, `claims-integrity.md`, `cross-repo-impact.md`, `failure-paths.md`, `private-files.md`.
 - [`docs/dev-container.md`](docs/dev-container.md) · [`docs/build-recipes.md`](docs/build-recipes.md) · [`docs/toolchain.md`](docs/toolchain.md) · [`docs/docker.md`](docs/docker.md) — building and running.
 - [`docs/cli-cookbook.md`](docs/cli-cookbook.md) — common `mununu` invocations.
 - [`docs/ctxdsl-modelling-guide.md`](docs/ctxdsl-modelling-guide.md) — hand-authoring CTXDSL: boolean `guard`s and the undecidable-guard error, pre-state `effects`, where `var == value` binds vs silently evaluates true. Read before writing a model with `variables`.

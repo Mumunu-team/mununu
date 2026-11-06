@@ -25,8 +25,7 @@ Every published number satisfies the **Reproducibility Contract** in the plan fi
 
 - `experiments/EXP-NNNN-<slug>/` — one append-only directory per experiment with eight standard files (README, manifest, command, hw-fingerprint, criterion-archive, dhat-archive, log.md, notes.md).
 - `notebook/` — this overview, weekly running entries (`YYYY-WW-day.md`), ADR log (`decisions.md`).
-- `publications/blog/` — public-default blog drafts (one per EXP-ID or grouping).
-- `publications/paper/outline.md` — paper outline; LaTeX in `mununu-private/paper/`.
+- `publications/` — blog drafts and the paper outline. Moved to `mununu-private/publications/` on 2026-11-05 (unpublished write-ups are private material; the path is gitignored here); the LaTeX is in `mununu-private/paper/`.
 - `scripts/{capture_hw,bench_record,repro,bench_diff,check_repro,plot_speedup}.sh|.py` — replay infrastructure.
 - `crates/mununu-core/benches/_common.rs` — provenance recorder + fixture loader shared by all benches.
 - `crates/mununu-core/src/test_support.rs` — deterministic CLTS generators (gated by `test_support` feature).
