@@ -156,6 +156,10 @@ oxidd-statistics = ["oxidd/statistics"]
 name = "api_graph_valuations"
 required-features = ["api"]
 
+[[test]]
+name = "context_eval_unsupported_fields_862"
+required-features = ["api"]
+
 [[bench]]
 name = "clts_composition"
 harness = false

@@ -5,10 +5,11 @@
 # parent commit and passes on this one. A regression test that passes on the parent is decoration:
 # it locks in behaviour, it does not demonstrate a defect.
 #
-#   make verify-repro TEST=<substring> [REF=HEAD~1] [PKG=mununu-core] [IGNORED=1]
+#   make verify-repro TEST=<substring> [REF=HEAD~1] [PKG=mununu-core] [IGNORED=1] [FEATURES=api]
 #
 #   A reproducer in an INTEGRATION test file (crates/<pkg>/tests/<name>.rs) is built and run
 #   with `--test <name>`; one inside the lib with `--lib`. IGNORED=1 runs an `#[ignore]`d test.
+#   FEATURES=<list> builds both trees with `--features <list>` (a `required-features` target).
 #   The REF build uses its own target directory (target/verify-repro): two trees sharing one
 #   target directory overwrite each other's workspace rlibs (docs/dev-container.md), and the
 #   REF tree must never hand the working tree its unfixed `mununu-core`.
@@ -125,6 +126,8 @@ done
 targets="${targets# }"
 ignored_flag=""
 [ "$IGNORED" = "1" ] && ignored_flag="--ignored"
+features_flag=""
+[ -n "${FEATURES:-}" ] && features_flag="--features $FEATURES"
 echo "  cargo targets:   $targets${ignored_flag:+ ($ignored_flag)}"
 # Own target directory: the REF tree must not overwrite the working tree's rlibs.
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$repo_root/target}/verify-repro"
@@ -132,7 +135,7 @@ export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$repo_root/target}/verify-repro"
 echo "  building $PKG at $REF with the test files from HEAD..."
 log="$(mktemp)"
 # shellcheck disable=SC2086
-if ! (cd "$work" && cargo test -p "$PKG" $targets --no-run) >"$log" 2>&1; then
+if ! (cd "$work" && cargo test -p "$PKG" $features_flag $targets --no-run) >"$log" 2>&1; then
   echo
   echo "INCONCLUSIVE — the test does not build against $REF."
   echo "  The test depends on API introduced by this commit, so the reproducer cannot be verified"
@@ -145,7 +148,7 @@ fi
 
 echo "  running..."
 # shellcheck disable=SC2086
-if (cd "$work" && cargo test -p "$PKG" $targets -- $ignored_flag "$TEST") >"$log" 2>&1; then
+if (cd "$work" && cargo test -p "$PKG" $features_flag $targets -- $ignored_flag "$TEST") >"$log" 2>&1; then
   if grep -qE '^test result: ok\. 0 passed; 0 failed' "$log"; then
     echo
     echo "INCONCLUSIVE — '$TEST' matched NO test at $REF (nothing ran), so there is nothing to judge."

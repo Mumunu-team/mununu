@@ -517,13 +517,17 @@ pub struct ContextVerifyRequest {
     /// When true and counterstrategy is enabled, minimize the counterstrategy automaton.
     #[serde(default)]
     pub minimize_counterstrategy: bool,
-    /// Labels to hide (reclassify as internal) before evaluation.
+    /// Labels to hide (reclassify as internal) before evaluation. NOT SUPPORTED by this route: a
+    /// non-empty list is refused with a 400 (mununu#862; it used to be accepted and ignored).
     #[serde(default)]
     pub hide: Vec<String>,
-    /// When true, apply bisimulation minimization before evaluation.
+    /// When true, apply bisimulation minimization before evaluation. NOT SUPPORTED by this route:
+    /// `true` is refused with a 400 (mununu#862; it used to be accepted and ignored).
     #[serde(default)]
     pub minimize: bool,
-    /// Stub .espec.json content to compose as sidecars (interface automata).
+    /// Stub .espec.json content to compose as sidecars (interface automata). NOT SUPPORTED by this
+    /// route: a non-empty list is refused with a 400 (mununu#862; it used to be accepted and
+    /// ignored).
     #[serde(default)]
     pub stubs: Vec<SidecarFile>,
     /// Run the structural checks (`context eval --sanity`) on `automaton`, or on every automaton
@@ -531,6 +535,26 @@ pub struct ContextVerifyRequest {
     /// fire, internal livelocks.
     #[serde(default)]
     pub sanity: bool,
+}
+
+impl ContextVerifyRequest {
+    /// The fields this request type declares that `POST /api/v1/context/eval` does not apply.
+    /// A set one is refused rather than ignored: evaluating the unhidden, unminimised, unstubbed
+    /// model and answering `success` would be a verdict on a model the client did not ask about
+    /// (mununu#862).
+    pub fn unsupported_fields(&self) -> Vec<&'static str> {
+        let mut set = Vec::new();
+        if !self.hide.is_empty() {
+            set.push("hide");
+        }
+        if self.minimize {
+            set.push("minimize");
+        }
+        if !self.stubs.is_empty() {
+            set.push("stubs");
+        }
+        set
+    }
 }
 
 /// Response from context verification

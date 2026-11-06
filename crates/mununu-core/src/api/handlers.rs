@@ -2796,6 +2796,16 @@ fn context_verify_handler_impl(
     request: ContextVerifyRequest,
 ) -> ApiResult<Json<ContextVerifyResponse>> {
     let handler_start = Instant::now();
+    let unsupported = request.unsupported_fields();
+    if !unsupported.is_empty() {
+        return Err(ApiError::BadRequest {
+            message: format!(
+                "context/eval does not apply {}; remove the field(s) from the request (mununu#862)",
+                unsupported.join(", ")
+            ),
+            details: None,
+        });
+    }
     let counterstrategy_requested = request.counterstrategy;
 
     let t0 = Instant::now();

@@ -462,9 +462,9 @@ Evaluate mu-calculus formulas over automata and report which initial states sati
 | `automaton` | `string \| null` | No | Target automaton. `null` uses each formula's declared targets. |
 | `counterstrategy` | `boolean` | No | Compute counterstrategy for failed formulas. Defaults to `false`. |
 | `minimize_counterstrategy` | `boolean` | No | Apply bisimulation minimization to counterstrategy. Defaults to `false`. |
-| `hide` | `string[]` | No | Labels to hide (reclassify as internal) before evaluation. Defaults to `[]`. |
-| `minimize` | `boolean` | No | Apply bisimulation minimization before evaluation. Defaults to `false`. |
-| `stubs` | `SidecarFile[]` | No | Stub `.espec.json` content to compose as sidecars (interface automata). Defaults to `[]`. |
+| `hide` | `string[]` | No | Not supported by this route: a non-empty list is refused with a 400 naming the field (mununu#862). Defaults to `[]`. |
+| `minimize` | `boolean` | No | Not supported by this route: `true` is refused with a 400 naming the field (mununu#862). Defaults to `false`. |
+| `stubs` | `SidecarFile[]` | No | Not supported by this route: a non-empty list is refused with a 400 naming the field (mununu#862). Defaults to `[]`. |
 
 ### Response Body
 
