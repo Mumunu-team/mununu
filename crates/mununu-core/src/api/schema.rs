@@ -31,8 +31,8 @@ use super::models::{
     Btor2CegarResponse, Btor2CheckFsmRequest, Btor2CheckFsmResponse, Btor2GameResponse,
     Btor2VerifyLivenessRequest, Btor2VerifyLivenessResponse, Btor2VerifyRecoverabilityRequest,
     Btor2VerifyRecoverabilityResponse, Btor2VerifyRequest, Btor2VerifyResponse,
-    ContextSynthesizeResponse, ContextVerifyResponse, SvCdcLintRequest, SvCdcLintResponse,
-    SvCheckFsmRequest, SvMutateRequest, SvMutateResponse, SvVerifyAutoRequest,
+    ContextSynthesizeResponse, ContextVerifyRequest, ContextVerifyResponse, SvCdcLintRequest,
+    SvCdcLintResponse, SvCheckFsmRequest, SvMutateRequest, SvMutateResponse, SvVerifyAutoRequest,
     SvVerifyAutoResponse, SvVerifyLivenessAllReport, SvVerifyLivenessReport,
     SvVerifyLivenessRequest, SvVerifyRecoverabilityReport, SvVerifyRecoverabilityRequest,
     SvVerifyRequest,
@@ -60,6 +60,12 @@ pub fn sv_cdc_lint_request_schema() -> serde_json::Value {
 pub fn sv_cdc_lint_response_schema() -> serde_json::Value {
     serde_json::to_value(schema_for!(SvCdcLintResponse))
         .expect("SvCdcLintResponse schema must serialise as JSON")
+}
+
+/// `POST /api/v1/context/eval` request body — and the MCP `context_eval` tool's `inputSchema`,
+/// byte-for-byte (mununu MCP, 2026-11: one shape, two surfaces).
+pub fn context_eval_request_schema() -> serde_json::Value {
+    serde_json::to_value(schema_for!(ContextVerifyRequest)).expect("schemars output is valid JSON")
 }
 
 /// JSON Schema for `POST /api/v1/context/eval` responses and `mununu context eval --json` ([`ContextVerifyResponse`], 0.5).
@@ -576,6 +582,14 @@ mod tests {
         drift_check(
             "docs/api-schemas/sv-cdc-lint-response.schema.json",
             &sv_cdc_lint_response_schema(),
+        );
+    }
+
+    #[test]
+    fn api_schema_drift_context_eval_request() {
+        drift_check(
+            "docs/api-schemas/context-eval-request.schema.json",
+            &context_eval_request_schema(),
         );
     }
 

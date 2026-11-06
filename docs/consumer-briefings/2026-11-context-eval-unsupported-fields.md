@@ -1,6 +1,6 @@
 # Consumer briefing — `context/eval` refuses `hide`, `minimize` and `stubs` instead of ignoring them (2026-11)
 
-> Source of truth: [`ContextVerifyRequest::unsupported_fields`](../../crates/mununu-core/src/api/models.rs) + [`context_verify_handler`](../../crates/mununu-core/src/api/handlers.rs) — surface: API-only — `POST /api/v1/context/eval`; `mununu context eval` (CLI) never had these options.
+> Source of truth: [`ContextVerifyRequest::unsupported_fields`](../../crates/mununu-core/src/api/models.rs) + [`ops::context_verify`](../../crates/mununu-core/src/api/ops.rs) — surface: CLI+API — `POST /api/v1/context/eval` and the MCP tool `context_eval` (started by `mununu mcp`); `mununu context eval` (CLI) never had these options.
 
 **Audience:** any HTTP client of `POST /api/v1/context/eval`, including mununu-ui.
 
@@ -37,4 +37,4 @@ Found in the review of the MCP server PR (#863), which advertises this request t
 
 ## Not covered here
 
-Implementing `hide`, `minimize` or `stubs` for this route. The CLI has no peer and nobody has asked for them; a client that needs one can change the CTXDSL source. The MCP server (#863) documents the three fields as "accepted, not applied"; whichever of the two PRs merges second makes those docs read "refused".
+Implementing `hide`, `minimize` or `stubs` for this route. The CLI has no peer and nobody has asked for them; a client that needs one can change the CTXDSL source. The MCP tool `context_eval` (#863) calls the same op, so it refuses the three fields the same way, as a tool result with `isError`.

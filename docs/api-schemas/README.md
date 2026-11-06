@@ -68,7 +68,8 @@ branch on its shape instead of on the exit code.
 |------|----------|-----------|
 | [`btor2-game-response.schema.json`](btor2-game-response.schema.json) | `POST /api/v1/btor2/game` | Response body |
 | [`cegar-response.schema.json`](cegar-response.schema.json) | `POST /api/v1/btor2/cegar`, `/sv/cegar` | Response body |
-| [`context-eval-response.schema.json`](context-eval-response.schema.json) | `POST /api/v1/context/eval`, `mununu context eval --json` | Response body / stdout |
+| [`context-eval-request.schema.json`](context-eval-request.schema.json) | `POST /api/v1/context/eval`; the MCP tool `context_eval`'s `inputSchema` (`mununu mcp`) | Request body |
+| [`context-eval-response.schema.json`](context-eval-response.schema.json) | `POST /api/v1/context/eval`, `mununu context eval --json`; the MCP tool `context_eval`'s `outputSchema` / `structuredContent` | Response body / stdout |
 | [`context-synth-response.schema.json`](context-synth-response.schema.json) | `POST /api/v1/context/synth` (every `controller_mode`, `gr1` included) | Response body |
 
 Narrative companion: [`verify-verbs.md`](verify-verbs.md) walks the BTOR2 + SV verb responses field-by-field and explains where each verb sits on the safety / liveness / recoverability / FSM axes.

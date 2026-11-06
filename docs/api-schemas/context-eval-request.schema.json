@@ -1,0 +1,146 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "FileContent": {
+      "description": "File content with optional name",
+      "properties": {
+        "content": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "content",
+        "name"
+      ],
+      "type": "object"
+    },
+    "SidecarFile": {
+      "description": "Sidecar file content — structurally identical to `FileContent`; sidecars are merged into the main context during parsing, so a specification can be modular.",
+      "properties": {
+        "content": {
+          "description": "The file's text.",
+          "type": "string"
+        },
+        "name": {
+          "description": "The file's name (`properties.ctxdsl`); provenance only, the content is what is parsed.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "content",
+        "name"
+      ],
+      "type": "object"
+    },
+    "TemplateRef": {
+      "description": "A concrete template reference (template ID + bound arguments).\n\nUsed in `.espec.json`, `.mununu.json`, XState `__mununu`, CLI, and API requests as an alternative to a raw formula string.",
+      "properties": {
+        "args": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Argument bindings: param_name → value.",
+          "type": "object"
+        },
+        "template": {
+          "description": "Template ID to instantiate.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "template"
+      ],
+      "type": "object"
+    }
+  },
+  "description": "Request for context verification (formula evaluation) — the body of `POST /api/v1/context/eval` and the input of the MCP `context_eval` tool (one shape, two surfaces; the schema is `docs/api-schemas/context-eval-request.schema.json`).",
+  "properties": {
+    "automaton": {
+      "description": "The automaton to evaluate against. If omitted (`null`), each formula's declared target automaton(s).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "context": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/FileContent"
+        }
+      ],
+      "description": "The main CTXDSL file: its name and its full text. Sources come inline, never as a path the server opens."
+    },
+    "counterstrategy": {
+      "default": false,
+      "description": "When true, compute the environment's counterstrategy for each violated formula, via formula inversion. Defaults to `false`.",
+      "type": "boolean"
+    },
+    "formula": {
+      "description": "Evaluate one formula by name. If omitted (`null`), evaluate ALL user-defined formulas of the context. Mutually exclusive with `template_ref`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "hide": {
+      "default": [],
+      "description": "Labels to hide (reclassified as internal) before evaluation. Defaults to `[]`. NOT SUPPORTED by `POST /api/v1/context/eval` (and the MCP tool `context_eval`): a non-empty list is refused with a 400 naming it (mununu#862; it used to be accepted and ignored).",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "minimize": {
+      "default": false,
+      "description": "When true, apply bisimulation minimization before evaluation. Defaults to `false`. NOT SUPPORTED by `POST /api/v1/context/eval` (and the MCP tool `context_eval`): `true` is refused with a 400 naming it (mununu#862; it used to be accepted and ignored).",
+      "type": "boolean"
+    },
+    "minimize_counterstrategy": {
+      "default": false,
+      "description": "When true and `counterstrategy` is set, minimize the counterstrategy automaton by bisimulation. Defaults to `false`.",
+      "type": "boolean"
+    },
+    "sanity": {
+      "default": false,
+      "description": "Run the structural checks (`context eval --sanity`) on `automaton`, or on every automaton the evaluated formulas target: deadlocks with a path, unreachable states, labels that never fire, internal livelocks.",
+      "type": "boolean"
+    },
+    "sidecars": {
+      "default": [],
+      "description": "Sidecar CTXDSL files merged into the main context during parsing. Defaults to `[]`.",
+      "items": {
+        "$ref": "#/definitions/SidecarFile"
+      },
+      "type": "array"
+    },
+    "stubs": {
+      "default": [],
+      "description": "Stub `.espec.json` contents composed as sidecars (interface automata). Defaults to `[]`. NOT SUPPORTED by `POST /api/v1/context/eval` (and the MCP tool `context_eval`): a non-empty list is refused with a 400 naming it (mununu#862; it used to be accepted and ignored).",
+      "items": {
+        "$ref": "#/definitions/SidecarFile"
+      },
+      "type": "array"
+    },
+    "template_ref": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/TemplateRef"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "A property template to instantiate instead of selecting an existing formula — `{\"template\": \"no_deadlock\"}` or `{\"template\": \"reachable\", \"args\": {\"TARGET\": \"…\"}}`; the catalogue is `GET /api/v1/templates` / the MCP `templates` tool. Mutually exclusive with `formula`."
+    }
+  },
+  "required": [
+    "context"
+  ],
+  "title": "ContextVerifyRequest",
+  "type": "object"
+}

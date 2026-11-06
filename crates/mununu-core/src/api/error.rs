@@ -58,18 +58,24 @@ impl std::error::Error for ApiError {
     }
 }
 
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
+impl ApiError {
+    /// The HTTP status and the body every transport reports this error with: the HTTP response
+    /// is `(status, body)`, and the MCP tool result's text and `structuredContent` are the same
+    /// `body` (mununu MCP, 2026-11 — one error shape, two surfaces).
+    pub fn response_body(&self) -> (StatusCode, ErrorResponse) {
         let (status, code, message, details) = match self {
-            ApiError::BadRequest { message, details } => {
-                (StatusCode::BAD_REQUEST, "BAD_REQUEST", message, details)
-            }
+            ApiError::BadRequest { message, details } => (
+                StatusCode::BAD_REQUEST,
+                "BAD_REQUEST",
+                message.clone(),
+                details.clone(),
+            ),
             ApiError::Internal {
                 message, source, ..
             } => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "INTERNAL_ERROR",
-                message,
+                message.clone(),
                 source.as_ref().map(|s| s.to_string()),
             ),
             ApiError::NotFound { resource } => (
@@ -79,16 +85,23 @@ impl IntoResponse for ApiError {
                 None,
             ),
         };
-
-        let error_response = ErrorResponse {
-            success: false,
-            error: ErrorDetail {
-                code: code.to_string(),
-                message,
-                details,
+        (
+            status,
+            ErrorResponse {
+                success: false,
+                error: ErrorDetail {
+                    code: code.to_string(),
+                    message,
+                    details,
+                },
             },
-        };
+        )
+    }
+}
 
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        let (status, error_response) = self.response_body();
         (status, Json(error_response)).into_response()
     }
 }
