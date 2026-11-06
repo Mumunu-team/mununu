@@ -531,16 +531,20 @@ pub struct ContextVerifyRequest {
     /// bisimulation. Defaults to `false`.
     #[serde(default)]
     pub minimize_counterstrategy: bool,
-    /// Labels to hide (reclassified as internal) before evaluation. Defaults to `[]`. NOT APPLIED
-    /// by `POST /api/v1/context/eval` today — accepted and ignored (mununu#862).
+    /// Labels to hide (reclassified as internal) before evaluation. Defaults to `[]`. NOT
+    /// SUPPORTED by `POST /api/v1/context/eval` (and the MCP tool `context_eval`): a non-empty
+    /// list is refused with a 400 naming it (mununu#862; it used to be accepted and ignored).
     #[serde(default)]
     pub hide: Vec<String>,
     /// When true, apply bisimulation minimization before evaluation. Defaults to `false`. NOT
-    /// APPLIED by `POST /api/v1/context/eval` today — accepted and ignored (mununu#862).
+    /// SUPPORTED by `POST /api/v1/context/eval` (and the MCP tool `context_eval`): `true` is
+    /// refused with a 400 naming it (mununu#862; it used to be accepted and ignored).
     #[serde(default)]
     pub minimize: bool,
     /// Stub `.espec.json` contents composed as sidecars (interface automata). Defaults to `[]`.
-    /// NOT APPLIED by `POST /api/v1/context/eval` today — accepted and ignored (mununu#862).
+    /// NOT SUPPORTED by `POST /api/v1/context/eval` (and the MCP tool `context_eval`): a
+    /// non-empty list is refused with a 400 naming it (mununu#862; it used to be accepted and
+    /// ignored).
     #[serde(default)]
     pub stubs: Vec<SidecarFile>,
     /// Run the structural checks (`context eval --sanity`) on `automaton`, or on every automaton
@@ -548,6 +552,26 @@ pub struct ContextVerifyRequest {
     /// fire, internal livelocks.
     #[serde(default)]
     pub sanity: bool,
+}
+
+impl ContextVerifyRequest {
+    /// The fields this request type declares that `POST /api/v1/context/eval` does not apply.
+    /// A set one is refused rather than ignored: evaluating the unhidden, unminimised, unstubbed
+    /// model and answering `success` would be a verdict on a model the client did not ask about
+    /// (mununu#862).
+    pub fn unsupported_fields(&self) -> Vec<&'static str> {
+        let mut set = Vec::new();
+        if !self.hide.is_empty() {
+            set.push("hide");
+        }
+        if self.minimize {
+            set.push("minimize");
+        }
+        if !self.stubs.is_empty() {
+            set.push("stubs");
+        }
+        set
+    }
 }
 
 /// Response from context verification

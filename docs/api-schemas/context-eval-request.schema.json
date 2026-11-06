@@ -88,7 +88,7 @@
     },
     "hide": {
       "default": [],
-      "description": "Labels to hide (reclassified as internal) before evaluation. Defaults to `[]`. NOT APPLIED by `POST /api/v1/context/eval` today — accepted and ignored (mununu#862).",
+      "description": "Labels to hide (reclassified as internal) before evaluation. Defaults to `[]`. NOT SUPPORTED by `POST /api/v1/context/eval` (and the MCP tool `context_eval`): a non-empty list is refused with a 400 naming it (mununu#862; it used to be accepted and ignored).",
       "items": {
         "type": "string"
       },
@@ -96,7 +96,7 @@
     },
     "minimize": {
       "default": false,
-      "description": "When true, apply bisimulation minimization before evaluation. Defaults to `false`. NOT APPLIED by `POST /api/v1/context/eval` today — accepted and ignored (mununu#862).",
+      "description": "When true, apply bisimulation minimization before evaluation. Defaults to `false`. NOT SUPPORTED by `POST /api/v1/context/eval` (and the MCP tool `context_eval`): `true` is refused with a 400 naming it (mununu#862; it used to be accepted and ignored).",
       "type": "boolean"
     },
     "minimize_counterstrategy": {
@@ -119,7 +119,7 @@
     },
     "stubs": {
       "default": [],
-      "description": "Stub `.espec.json` contents composed as sidecars (interface automata). Defaults to `[]`. NOT APPLIED by `POST /api/v1/context/eval` today — accepted and ignored (mununu#862).",
+      "description": "Stub `.espec.json` contents composed as sidecars (interface automata). Defaults to `[]`. NOT SUPPORTED by `POST /api/v1/context/eval` (and the MCP tool `context_eval`): a non-empty list is refused with a 400 naming it (mununu#862; it used to be accepted and ignored).",
       "items": {
         "$ref": "#/definitions/SidecarFile"
       },
