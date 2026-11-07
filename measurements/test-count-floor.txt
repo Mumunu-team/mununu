@@ -1,0 +1,6 @@
+# Roadmap C3 — the fewest tests `make test` may report as passed and still be green.
+# scripts/test_count_gate.sh compares the suite summary against this number. Lower it in the
+# same commit that removes tests, and say why there; a drop of hundreds is a vanished lane.
+# Set from the 2026-11-07 CI run (nextest: 3627 passed of 3656) and the local cargo count,
+# rounded down so platform differences in #[cfg] tests do not trip it.
+3500

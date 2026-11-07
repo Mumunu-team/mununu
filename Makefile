@@ -23,12 +23,13 @@ DIFF_CASES ?= 512
         coverage mem-profile sweep \
         bench-baseline bench-compare bench-record \
         experiment replay publish-prep frontier-smoke \
-        verify-repro docs-audit tracker-audit
+        verify-repro docs-audit tracker-audit test-count-gate
 
 help:
 	@echo "Build / test / lint:"
 	@echo "  build          - cargo build --release for mununu-cli and mununu-extract"
-	@echo "  test           - cargo test --workspace"
+	@echo "  test           - cargo test --workspace, then the test-count gate (C3)"
+	@echo "  test-count-gate - the gate's negative control + the last make-test.log against the floor"
 	@echo "  test-fast      - cargo test --lib + integration tests, sub-minute (pre-commit gate)"
 	@echo "  tracker-audit  - open issues that a commit on main claims to close (non-zero when any)"
 	@echo "  e2e            - SVA-verification e2e suite, one test per process (#[ignore]d; run inside the mununu-sva image)"
@@ -87,19 +88,19 @@ build:
 # measured ~25× faster locally (1391 mununu-core tests in 4.9 s vs.
 # nextest taking 1:59 for just 9). It also covers unit + doc tests in one
 # shot. Override the auto-detection with MUNUNU_TEST_RUNNER=nextest|cargo.
+# Roadmap C3 — the suite's own summary is checked against measurements/test-count-floor.txt by
+# scripts/test_count_gate.sh, after its negative control; a lane that runs nothing is red, not
+# green (the C1 incident: a bare `cargo test --lib api` ran 0 tests and passed for weeks).
+# Runner choice (MUNUNU_TEST_RUNNER=nextest|cargo, else cargo on macOS / nextest on Linux) and
+# the doctest pass live in the script, unchanged.
 test:
-	@runner="$(MUNUNU_TEST_RUNNER)"; \
-	if [ -z "$$runner" ]; then \
-		if [ "$$(uname -s)" = "Darwin" ]; then runner=cargo; \
-		elif command -v cargo-nextest >/dev/null 2>&1; then runner=nextest; \
-		else runner=cargo; fi; \
-	fi; \
-	if [ "$$runner" = "nextest" ]; then \
-		$(CARGO) nextest run --workspace && \
-		$(CARGO) test --workspace --doc; \
-	else \
-		$(CARGO) test --workspace; \
-	fi
+	scripts/test_with_gate.sh
+
+# The gate alone: its control, then the last `make test` log if there is one.
+test-count-gate:
+	scripts/test_count_gate.sh --control
+	@log="$${MUNUNU_TEST_LOG:-$${CARGO_TARGET_DIR:-target}/make-test.log}"; \
+	if [ -f "$$log" ]; then scripts/test_count_gate.sh "$$log"; else echo "test-count-gate: no make-test.log yet (run make test)"; fi
 
 # tier-1 + tier-2: pre-commit gate. Skips #[ignore]'d stress tests by default.
 # Eventually this will be the canonical pre-commit form; for now it is an
