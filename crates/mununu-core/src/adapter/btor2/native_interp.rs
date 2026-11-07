@@ -857,9 +857,9 @@ pub(crate) fn mathsat_available() -> Result<(), String> {
 
 fn locate_mathsat() -> Result<std::path::PathBuf, String> {
     use std::path::PathBuf;
-    let path = std::env::var("MUNUNU_MATHSAT_PATH")
+    let path = crate::adapter::env_var::read("MUNUNU_MATHSAT_PATH")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("mathsat"));
+        .unwrap_or_else(|| PathBuf::from("mathsat"));
     match crate::adapter::probe_tool(&path, &["-version"]) {
         Ok(_) => Ok(path),
         Err(e) => Err(format!(

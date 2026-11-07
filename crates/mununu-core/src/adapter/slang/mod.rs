@@ -408,22 +408,12 @@ mod tests {
 
     #[test]
     fn locate_slang_returns_structured_error_when_binary_absent() {
-        let original = std::env::var("MUNUNU_SLANG_PATH").ok();
-        // SAFETY: env vars are process-global; set + restore to avoid leaking
-        // the bogus path to other tests (mirrors the cvc5 test).
-        unsafe {
-            std::env::set_var(
-                "MUNUNU_SLANG_PATH",
-                "/nonexistent/path/to/slang/definitely/not/here",
-            );
-        }
+        // A bogus path, overridden for this thread only (mununu#880; mirrors the cvc5 test).
+        let _env = crate::adapter::env_var::override_for_test(
+            "MUNUNU_SLANG_PATH",
+            "/nonexistent/path/to/slang/definitely/not/here",
+        );
         let result = locate_slang();
-        unsafe {
-            match original {
-                Some(v) => std::env::set_var("MUNUNU_SLANG_PATH", v),
-                None => std::env::remove_var("MUNUNU_SLANG_PATH"),
-            }
-        }
         assert!(
             result.is_err(),
             "locate_slang MUST return Err when the binary is absent; got {result:?}"

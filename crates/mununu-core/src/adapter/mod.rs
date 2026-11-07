@@ -47,6 +47,7 @@ pub mod cvc5;
 pub mod domain;
 pub mod emit;
 pub mod engine_isolate;
+pub(crate) mod env_var;
 pub mod extraction;
 pub mod fault_adversary;
 pub mod fsm_scan;
@@ -655,16 +656,16 @@ pub(crate) fn probe_tool(
 }
 
 pub(crate) fn locate_tool(
-    env_var: &str,
+    var_name: &str,
     default_bin: &str,
     adapter_tag: &str,
     install_hint: &str,
     parse_version: impl Fn(&str) -> Option<String>,
 ) -> Result<(std::path::PathBuf, String), AdapterError> {
     use std::path::PathBuf;
-    let path = std::env::var(env_var)
+    let path = env_var::read(var_name)
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(default_bin));
+        .unwrap_or_else(|| PathBuf::from(default_bin));
     let (status, stdout, _) = probe_tool(&path, &["--version"]).map_err(|e| AdapterError {
         kind: AdapterErrorKind::UnsupportedConstruct,
         message: format!(

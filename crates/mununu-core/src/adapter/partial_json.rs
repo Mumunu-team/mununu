@@ -87,7 +87,7 @@ impl Breadcrumb {
     /// of a portfolio run held only the LAST member's records. A reader takes the last record per
     /// property; the records of every member are kept, each in the order its pass wrote them.
     pub fn from_env_with_append(append: bool) -> Self {
-        let Ok(path) = std::env::var(PARTIAL_JSON_ENV) else {
+        let Some(path) = crate::adapter::env_var::read(PARTIAL_JSON_ENV) else {
             return Self::default();
         };
         if path.trim().is_empty() {
@@ -228,19 +228,13 @@ mod tests {
 
     #[test]
     fn an_unwritable_path_disables_rather_than_failing() {
-        // SAFETY: scoped to this test; the var is not read concurrently by other tests in-module.
-        unsafe {
-            std::env::set_var(
-                PARTIAL_JSON_ENV,
-                "/nonexistent-dir-mununu-c7/breadcrumb.ndjson",
-            );
-        }
+        let _env = crate::adapter::env_var::override_for_test(
+            PARTIAL_JSON_ENV,
+            "/nonexistent-dir-mununu-c7/breadcrumb.ndjson",
+        );
         let mut b = Breadcrumb::from_env();
         assert!(!b.is_active(), "an unopenable path disables the breadcrumb");
         b.record(0, "p", "holds", "main", None); // must not panic
-        unsafe {
-            std::env::remove_var(PARTIAL_JSON_ENV);
-        }
     }
 
     #[test]
@@ -248,10 +242,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("mununu-c7-cursor-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
         let path = dir.join("b.ndjson");
-        // SAFETY: scoped to this test.
-        unsafe {
-            std::env::set_var(PARTIAL_JSON_ENV, &path);
-        }
+        let _env = crate::adapter::env_var::override_for_test(PARTIAL_JSON_ENV, &path);
         let mut b = Breadcrumb::from_env();
 
         let mut props: Vec<(&str, &str)> = vec![("p0", "holds")];
@@ -275,18 +266,12 @@ mod tests {
             "the index is the property's position, not a write counter"
         );
 
-        unsafe {
-            std::env::remove_var(PARTIAL_JSON_ENV);
-        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn record_pending_is_a_no_op_when_disabled() {
-        // SAFETY: scoped to this test.
-        unsafe {
-            std::env::remove_var(PARTIAL_JSON_ENV);
-        }
+        let _env = crate::adapter::env_var::unset_for_test(PARTIAL_JSON_ENV);
         let mut b = Breadcrumb::from_env();
         assert!(!b.is_active());
         b.record_pending(vec![("p", "holds")], "main"); // must not panic
@@ -297,10 +282,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("mununu-c7-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
         let path = dir.join("breadcrumb.ndjson");
-        // SAFETY: scoped to this test.
-        unsafe {
-            std::env::set_var(PARTIAL_JSON_ENV, &path);
-        }
+        let _env = crate::adapter::env_var::override_for_test(PARTIAL_JSON_ENV, &path);
         let mut b = Breadcrumb::from_env();
         assert!(b.is_active());
         b.record(0, "p0", "holds", "main", Some(10));
@@ -314,9 +296,6 @@ mod tests {
         let v1: serde_json::Value = serde_json::from_str(lines[1]).expect("line 1");
         assert_eq!(v0["property"], "p0");
         assert_eq!(v1["outcome"], "unknown");
-        unsafe {
-            std::env::remove_var(PARTIAL_JSON_ENV);
-        }
         let _ = std::fs::remove_dir_all(&dir);
     }
     /// PR C — a later sequential-portfolio member appends: the file keeps the first member's

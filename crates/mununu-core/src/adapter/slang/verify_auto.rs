@@ -6358,7 +6358,7 @@ const SHADOW_DUMP_ENV: &str = "MUNUNU_SHADOW_BTOR2_DUMP";
 /// Diagnostic only: every failure is swallowed after one warning, mirroring
 /// [`crate::adapter::partial_json`]. A dump must never be able to change a verdict.
 fn dump_prepared_model(btor2: &str, properties: &[(String, String)], fault_model: Option<&str>) {
-    let Ok(path) = std::env::var(SHADOW_DUMP_ENV) else {
+    let Some(path) = crate::adapter::env_var::read(SHADOW_DUMP_ENV) else {
         return;
     };
     if path.trim().is_empty() {
@@ -12652,13 +12652,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("mununu552-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("tmpdir");
         let path = dir.join("dump.btor2");
-        // SAFETY: single-threaded test scope; the var is read once inside the call below.
-        unsafe { std::env::set_var(SHADOW_DUMP_ENV, &path) };
+        let _env = crate::adapter::env_var::override_for_test(SHADOW_DUMP_ENV, &path);
 
         let btor2 = "1 sort bitvec 4\n2 state 1 s\n";
         let props = vec![("p0".to_string(), "nu X. ((s == 1) && [] X)".to_string())];
         dump_prepared_model(btor2, &props, None);
-        unsafe { std::env::remove_var(SHADOW_DUMP_ENV) };
 
         let got = std::fs::read_to_string(&path).expect("dump written");
         // The model is present and still parses as BTOR2 (the header is all `;` comments).
@@ -12688,18 +12686,20 @@ mod tests {
     /// thing it is diagnosing is worse than no diagnostic.
     #[test]
     fn shadow_dump_is_diagnostic_only_and_cannot_fail_a_run() {
-        // Unset — no panic, no file, nothing.
-        unsafe { std::env::remove_var(SHADOW_DUMP_ENV) };
+        // Unset — no panic, no file, nothing. (Thread-local overrides, mununu#880; the newest wins.)
+        let _unset = crate::adapter::env_var::unset_for_test(SHADOW_DUMP_ENV);
         dump_prepared_model("1 sort bitvec 1\n", &[], None);
 
         // Empty — treated as unset, not as the path "".
-        unsafe { std::env::set_var(SHADOW_DUMP_ENV, "   ") };
+        let _empty = crate::adapter::env_var::override_for_test(SHADOW_DUMP_ENV, "   ");
         dump_prepared_model("1 sort bitvec 1\n", &[], None);
 
         // Unwritable — warns, does not propagate.
-        unsafe { std::env::set_var(SHADOW_DUMP_ENV, "/nonexistent-dir-552/x.btor2") };
+        let _bogus = crate::adapter::env_var::override_for_test(
+            SHADOW_DUMP_ENV,
+            "/nonexistent-dir-552/x.btor2",
+        );
         dump_prepared_model("1 sort bitvec 1\n", &[], None);
-        unsafe { std::env::remove_var(SHADOW_DUMP_ENV) };
     }
 
     /// mununu#553 ask 2 — REPRODUCER: the ⊥ that fires on an ORDINARY run must say it is
@@ -19282,15 +19282,12 @@ endmodule
         let dir = std::env::temp_dir().join(format!("mununu-c7-e2e-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
         let path = dir.join("breadcrumb.ndjson");
-        // SAFETY: set immediately before the run and removed immediately after; see the
-        // concurrency note above.
-        unsafe {
-            std::env::set_var(crate::adapter::partial_json::PARTIAL_JSON_ENV, &path);
-        }
+        // A thread-local override (mununu#880): the process environment is untouched.
+        let _env = crate::adapter::env_var::override_for_test(
+            crate::adapter::partial_json::PARTIAL_JSON_ENV,
+            &path,
+        );
         let report = verify_auto(&sources, &yopts, &VerifyAutoOptions::default());
-        unsafe {
-            std::env::remove_var(crate::adapter::partial_json::PARTIAL_JSON_ENV);
-        }
         let report = report.expect("verify_auto runs end-to-end");
 
         let content = std::fs::read_to_string(&path).expect("the breadcrumb was written");

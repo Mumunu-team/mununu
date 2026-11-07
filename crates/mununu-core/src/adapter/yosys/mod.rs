@@ -2562,7 +2562,7 @@ fn parse_yosys_src(src: &str) -> (Option<String>, Option<u32>) {
 
 /// Find a usable yosys binary.
 fn locate_yosys() -> Result<PathBuf, AdapterError> {
-    if let Ok(path) = std::env::var("MUNUNU_YOSYS_PATH") {
+    if let Some(path) = crate::adapter::env_var::read("MUNUNU_YOSYS_PATH") {
         return Ok(PathBuf::from(path));
     }
     let candidates = ["yosys"];
@@ -2584,7 +2584,7 @@ fn locate_yosys() -> Result<PathBuf, AdapterError> {
 /// first, then the bare `sv2v` on `$PATH`. zachjs/sv2v's `--version` flag is a stable smoke test.
 #[cfg(feature = "test_support")]
 fn locate_sv2v() -> Result<PathBuf, AdapterError> {
-    if let Ok(path) = std::env::var("MUNUNU_SV2V_PATH") {
+    if let Some(path) = crate::adapter::env_var::read("MUNUNU_SV2V_PATH") {
         return Ok(PathBuf::from(path));
     }
     if let Ok((status, _, _)) = crate::adapter::probe_tool(Path::new("sv2v"), &["--version"])
@@ -4857,14 +4857,11 @@ endmodule
             eprintln!("skipping: yosys not on PATH");
             return;
         }
-        // Save/restore the env var so we don't pollute other tests.
-        let prev = std::env::var("MUNUNU_SV2V_PATH").ok();
-        // SAFETY: tests in this binary run on one thread by default for
-        // YosysOptions-mutating cases; if parallelism is enabled this
-        // test should be ignored. Per cargo test default we're fine.
-        unsafe {
-            std::env::set_var("MUNUNU_SV2V_PATH", "/definitely/not/a/real/sv2v/binary");
-        }
+        // Overridden for this thread only (mununu#880); the process environment is untouched.
+        let _env = crate::adapter::env_var::override_for_test(
+            "MUNUNU_SV2V_PATH",
+            "/definitely/not/a/real/sv2v/binary",
+        );
         let sv = "module empty; endmodule\n";
         let opts = AdapterOptions::default();
         let yopts = YosysOptions {
@@ -4873,13 +4870,6 @@ endmodule
             ..Default::default()
         };
         let res = translate_sv(sv, &opts, &yopts);
-        // Restore env first so panic in assert below doesn't leak it.
-        unsafe {
-            match prev {
-                Some(p) => std::env::set_var("MUNUNU_SV2V_PATH", p),
-                None => std::env::remove_var("MUNUNU_SV2V_PATH"),
-            }
-        }
         let err = res.expect_err("expected sv2v spawn failure when binary path is bogus");
         assert!(
             err.message.contains("sv2v"),

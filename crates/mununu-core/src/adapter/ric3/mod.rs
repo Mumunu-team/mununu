@@ -61,9 +61,9 @@ pub struct Ric3Bin {
 /// Presence is probed by invocability (`rIC3 --help`, any exit code); only a spawn failure is an
 /// `Err` — the portfolio member is then simply unavailable, like btormc / pono.
 pub fn locate_ric3() -> Result<Ric3Bin, AdapterError> {
-    let path = std::env::var("MUNUNU_RIC3_PATH")
+    let path = crate::adapter::env_var::read("MUNUNU_RIC3_PATH")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("rIC3"));
+        .unwrap_or_else(|| PathBuf::from("rIC3"));
     match crate::adapter::probe_tool(&path, &["--help"]) {
         Ok(_) => Ok(Ric3Bin { path }),
         Err(e) => Err(err(format!(

@@ -4929,17 +4929,11 @@ mod tests {
         // CVC5 is not available, the CEGAR loop MUST emit an
         // AdapterWarning + fall back to the WP heuristic for
         // the run. Test by forcing MUNUNU_CVC5_PATH to a bogus
-        // path so locate_cvc5() fails deterministically.
-        //
-        // SAFETY: env var manipulation in tests is racy; we
-        // restore the original value at the end.
-        let original = std::env::var("MUNUNU_CVC5_PATH").ok();
-        unsafe {
-            std::env::set_var(
-                "MUNUNU_CVC5_PATH",
-                "/nonexistent/path/to/cvc5/binary/from/3_4/test",
-            );
-        }
+        // path so locate_cvc5() fails deterministically (a thread-local override, mununu#880).
+        let _env = crate::adapter::env_var::override_for_test(
+            "MUNUNU_CVC5_PATH",
+            "/nonexistent/path/to/cvc5/binary/from/3_4/test",
+        );
 
         let formula = parser::parse("true").expect("formula parses");
         let initial = vec![PredicateSpec {
@@ -4969,15 +4963,6 @@ mod tests {
             &AdapterOptions::default(),
             &cegar_opts,
         );
-
-        // Restore env var before any assertion (so failure
-        // doesn't leak the bogus value).
-        unsafe {
-            match original {
-                Some(v) => std::env::set_var("MUNUNU_CVC5_PATH", v),
-                None => std::env::remove_var("MUNUNU_CVC5_PATH"),
-            }
-        }
 
         let trace = trace_result.expect("cegar should succeed by falling back to WP");
         assert!(

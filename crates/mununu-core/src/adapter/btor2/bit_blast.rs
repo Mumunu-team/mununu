@@ -11714,22 +11714,12 @@ mod tests {
             ..Default::default()
         };
 
-        // SAFETY: required for env-var manipulation in tests; the
-        // value is restored before the test returns.
-        let original = std::env::var("MUNUNU_VERILATOR_PATH").ok();
-        unsafe {
-            std::env::set_var(
-                "MUNUNU_VERILATOR_PATH",
-                "/nonexistent/path/to/verilator/binary",
-            );
-        }
+        // Verilator absent, for this thread only (mununu#880).
+        let _env = crate::adapter::env_var::override_for_test(
+            "MUNUNU_VERILATOR_PATH",
+            "/nonexistent/path/to/verilator/binary",
+        );
         let out = translate(src, &opts).expect("translate");
-        unsafe {
-            match original {
-                Some(v) => std::env::set_var("MUNUNU_VERILATOR_PATH", v),
-                None => std::env::remove_var("MUNUNU_VERILATOR_PATH"),
-            }
-        }
 
         let r_s2b_6_warning = out
             .warnings

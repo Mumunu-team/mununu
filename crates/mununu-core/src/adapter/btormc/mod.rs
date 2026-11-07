@@ -334,10 +334,11 @@ mod tests {
     fn locate_absent_btormc_is_graceful_error() {
         // A bogus override path must yield a structured error, never a panic —
         // callers fall back to "oracle unavailable".
-        // SAFETY: single-threaded test; restored before returning.
-        unsafe { std::env::set_var("MUNUNU_BTORMC_PATH", "/nonexistent/btormc-xyz") };
+        let _env = crate::adapter::env_var::override_for_test(
+            "MUNUNU_BTORMC_PATH",
+            "/nonexistent/btormc-xyz",
+        );
         let r = locate_btormc();
-        unsafe { std::env::remove_var("MUNUNU_BTORMC_PATH") };
         let err = r.expect_err("absent binary must error");
         assert_eq!(err.kind, AdapterErrorKind::UnsupportedConstruct);
         assert!(err.message.contains("btormc"));
