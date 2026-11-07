@@ -1,0 +1,27 @@
+name: Tracker audit
+
+# Roadmap C4 — the tracker and `main` must agree. Weekly, and on demand: every open issue that a
+# commit on `main` or a merged PR claims to close is reported, and the run fails. The negative
+# control runs first (a known closed issue must be reported), so a green run is not vacuous.
+
+on:
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+jobs:
+  tracker-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Audit open issues against main and merged PRs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: make tracker-audit
