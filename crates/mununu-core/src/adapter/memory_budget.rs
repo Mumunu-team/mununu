@@ -3,7 +3,7 @@
 //! **Motivation.** The default Rust allocator calls `abort()` (process exit 134)
 //! on a failed allocation. That is invisible to the model checker: the process
 //! dies BEFORE any BDD-level or SMT-level budget can fire, taking every property
-//! in the same invocation down with it. A verify-lane consumer (monono's `sv
+//! in the same invocation down with it. A verify-lane consumer (the consumer's `sv
 //! verify-auto` gate on 25 checks) then sees a crash instead of an `unknown`
 //! verdict, so a run that would have decided N-1 properties reports none.
 //!

@@ -106,7 +106,7 @@ pub fn sv_mutate_response_schema() -> serde_json::Value {
 
 /// mununu#541 — JSON Schema for the `sv verify-recoverability` CLI report (`--json`).
 ///
-/// CLI-shaped rather than an HTTP body: rosf drives mununu as a SUBPROCESS, so the document it
+/// CLI-shaped rather than an HTTP body: the consumer drives mununu as a SUBPROCESS, so the document it
 /// parses is stdout. Publishing it here puts it under the same drift detector as the HTTP wire
 /// types, which is the point — an ad-hoc `json!` literal is exactly what it replaces.
 pub fn sv_verify_recoverability_report_schema() -> serde_json::Value {
@@ -522,6 +522,41 @@ mod tests {
     ///
     /// This writes the derived schemas to disk; a follow-up PR commits them
     /// alongside a consumer briefing per `docs/policies/cross-repo-impact.md`.
+    /// The first consumer-private reference in `text`, if any: `<consumer>#<slug>`,
+    /// `<consumer> ask <n>` or `<consumer>-<n>` for the consumers this repository briefs. The
+    /// repository name alone is not one (briefings name consumers by repository).
+    fn consumer_private_reference(text: &str) -> Option<String> {
+        let lower = text.to_ascii_lowercase();
+        for consumer in ["monono", "rosf"] {
+            for suffix in ["#", " ask "] {
+                let needle = format!("{consumer}{suffix}");
+                if let Some(i) = lower.find(&needle) {
+                    return Some(lower[i..(i + 24).min(lower.len())].to_string());
+                }
+            }
+            let dash = format!("{consumer}-");
+            let mut from = 0;
+            while let Some(i) = lower[from..].find(&dash) {
+                let at = from + i + dash.len();
+                if lower[at..].starts_with(|c: char| c.is_ascii_digit()) {
+                    return Some(lower[from + i..(from + i + 24).min(lower.len())].to_string());
+                }
+                from = at;
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn a_consumer_private_reference_is_found_and_a_repository_name_is_not() {
+        assert!(consumer_private_reference("see monono ask 26 for why").is_some());
+        assert!(consumer_private_reference("the Monono#partsel guard").is_some());
+        assert!(consumer_private_reference("agent monono-45 reported").is_some());
+        assert!(consumer_private_reference("rosf-7's measurement").is_some());
+        assert!(consumer_private_reference("the monono repository; rosf's gate").is_none());
+        assert!(consumer_private_reference("mununu#553, mununu-core").is_none());
+    }
+
     fn drift_check(rel_path: &str, derived: &serde_json::Value) {
         let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
@@ -529,6 +564,15 @@ mod tests {
         let committed_path = repo_root.join(rel_path);
         let derived_pretty =
             serde_json::to_string_pretty(derived).expect("pretty-print derived schema");
+        // Roadmap G5 — a consumer-private reference in a doc comment (an ask number, an agent
+        // id, a consumer-side issue slug) reaches the published schema through `schemars`. A
+        // reader of the schema cannot resolve it; fail before it ships.
+        if let Some(hit) = consumer_private_reference(&derived_pretty) {
+            panic!(
+                "the derived schema for `{rel_path}` carries a consumer-private reference \
+                 {hit:?}; name the mununu issue in the doc comment instead"
+            );
+        }
         if std::env::var("MUNUNU_UPDATE_API_SCHEMAS").is_ok() {
             if let Some(parent) = committed_path.parent() {
                 std::fs::create_dir_all(parent).expect("create schema-doc dir");

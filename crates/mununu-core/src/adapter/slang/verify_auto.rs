@@ -210,7 +210,7 @@ pub struct PropertyVerdict {
     pub counterexample: Option<ExactCounterexample>,
     /// Why this property is `⊥`, when it is. `None` for a definite outcome.
     ///
-    /// monono ask 26 — a FIELD rather than a note. See [`BottomReason`].
+    /// mununu#553 — a FIELD rather than a note. See [`BottomReason`].
     pub bottom_reason: Option<BottomReason>,
     /// Which portfolio engine produced this property's DEFINITE verdict. `None` for `⊥`.
     ///
@@ -1529,7 +1529,7 @@ fn refresh_coverage_summary(report: &mut AutoVerifyReport) {
 /// Conservative by construction: a note is dropped only when the property it names is now
 /// DEFINITE. A ⊥ that survived the merge keeps its explanation, which is the case the note exists
 /// for. Matching is on the `"<name>: "` prefix `bottom_reason_note` writes.
-/// monono ask 26 — attribute a residual ⊥ to the highest-precision engine that FAILED.
+/// mununu#553 — attribute a residual ⊥ to the highest-precision engine that FAILED.
 ///
 /// The counterpart to [`drop_stale_bottom_reasons`], and the mirror of the mununu#548 defect: there
 /// a note describing ONE engine was wrongly INHERITED by properties another engine decided; here a
@@ -3008,7 +3008,7 @@ struct Seeded {
     derived_relational: Vec<(String, PredicateExpr)>,
 }
 
-/// monono#partsel soundness guard — the first register/signal name a formula's
+/// mununu#469 soundness guard — the first register/signal name a formula's
 /// predicate atoms reference that binds to a signal reaching an ANONYMOUS
 /// (undriven-register-bit) free input, or `None` when the formula is sound to
 /// decide.
@@ -4477,7 +4477,7 @@ pub(crate) fn merge_portfolio_reports(
         .filter_map(|(l, r)| r.as_ref().ok().map(|rep| (*l, rep)))
         .collect();
 
-    // mununu#553 follow-up / monono ask 26 — THE ERRORS USED TO CONTRIBUTE NOTHING, and that was
+    // mununu#553 follow-up / mununu#553 — THE ERRORS USED TO CONTRIBUTE NOTHING, and that was
     // the defect. Each engine's `Err` carries its own abstention string, which NAMES the budget it
     // hit and the numbers ("abstained on the ITERATION budget (N > M) — raise
     // MUNUNU_BDD_ITER_BUDGET"). Seven such messages exist. All seven were discarded HERE, one
@@ -4638,7 +4638,7 @@ pub(crate) fn merge_portfolio_reports(
     // mununu#548 — and a third note inherited from the base that the merge can falsify: an
     // explanation of why a property is ⊥, kept for a property another engine has since decided.
     drop_stale_bottom_reasons(&mut merged);
-    // monono ask 26 — and the reason a ⊥ was previously unattributable: the failing engine's own
+    // mununu#553 — and the reason a ⊥ was previously unattributable: the failing engine's own
     // abstention string, which names the budget it hit, was discarded here. Attach it now.
     attach_engine_failure_reason(&mut merged, &engine_failures);
     // mununu#599 — the merged report pairs verdicts from DIFFERENT engines, which is where
@@ -6669,7 +6669,7 @@ pub(crate) fn verify_auto_impl(
     // mununu#504 C7 — the SIGKILL-survivable breadcrumb. The budgets above preserve verdicts when
     // MUNUNU can observe its own trouble; they are powerless against a kill from outside (the
     // kernel OOM killer, a CI step timeout), which runs no Rust code at all. That is the exact
-    // failure in the comment above: "monono lost a gate run to a process kill that emitted zero
+    // failure in the comment above: "the consumer lost a gate run to a process kill that emitted zero
     // bytes, including for properties mununu had already decided." Opt-in via
     // `MUNUNU_VERIFY_AUTO_PARTIAL_JSON=<path>`; disabled and zero-cost otherwise.
     let mut breadcrumb =
@@ -6844,7 +6844,7 @@ pub(crate) fn verify_auto_impl(
             continue;
         }
 
-        // monono#partsel soundness guard (all engines). Refuse — rather than
+        // mununu#469 soundness guard (all engines). Refuse — rather than
         // silently mis-decide — a property whose atom binds to a signal reaching an
         // ANONYMOUS free `input`. The yosys-slang lift of a plain-vector partial
         // register assignment (`q[hi:lo] <= d`) models the register's unwritten bits
@@ -8275,7 +8275,7 @@ pub(crate) fn escalate_bottom_with_slice(
         }
         let reason = classify_bottom_reason(prop, stateless_model);
         notes.push(bottom_reason_note(&prop.name, reason.clone()));
-        // monono ask 26 — carried as a FIELD as well as a note. The note has existed since
+        // mununu#553 — carried as a FIELD as well as a note. The note has existed since
         // mununu#492 and never reached the consumer it was written for, because their harness
         // filtered notes wholesale. A field cannot be filtered out by a consumer that does not
         // know about it; a note can.
@@ -8284,12 +8284,12 @@ pub(crate) fn escalate_bottom_with_slice(
     notes
 }
 
-/// Why a property's residual outcome is `⊥`. mununu#492 Part B, extended by monono ask 26.
+/// Why a property's residual outcome is `⊥`. mununu#492 Part B, extended by mununu#553.
 ///
 /// **Carried as a FIELD on [`PropertyVerdict`], not only as a note** — and the distinction is the
 /// whole point. A consumer that does not know about a field cannot silently filter it out; a
 /// consumer that does not know about a note routinely does. This has existed as a
-/// `bottom-reason` NOTE since mununu#492, and monono's formal lane discarded notes wholesale, so
+/// `bottom-reason` NOTE since mununu#492, and the consumer's formal lane discarded notes wholesale, so
 /// it never reached the one reader it was written for — while the engine's own abstention string
 /// was being dropped in [`merge_portfolio_reports`] under *"Errors contribute nothing."*
 ///
@@ -8315,7 +8315,7 @@ pub enum BottomReason {
     /// doesn't cover here). A downstream gate should NOT treat this as
     /// distinct-from-abstain without more evidence.
     UnclassifiedBottom,
-    /// monono ask 26 — a higher-precision engine **did not run to completion on this design**, so
+    /// mununu#553 — a higher-precision engine **did not run to completion on this design**, so
     /// the outcome came from a lower-precision one (or from none).
     ///
     /// **Read the attribution precisely.** `engine` and `detail` describe a WHOLE-RUN failure over
@@ -8724,7 +8724,7 @@ fn bottom_reason_note(name: &str, reason: BottomReason) -> VerificationNote {
              notes for the actionable answer."
                 .into(),
         ),
-        // monono ask 26 — the case the sentence just above used to send readers hunting for.
+        // mununu#553 — the case the sentence just above used to send readers hunting for.
         // That advice ("check for a sibling `abstained on the …` note") was unactionable: the
         // engine's abstention string was being DROPPED at the portfolio merge, so the sibling
         // note it pointed at did not exist. Now the reason arrives here verbatim.
@@ -8747,7 +8747,7 @@ fn bottom_reason_note(name: &str, reason: BottomReason) -> VerificationNote {
                  for."
             ),
         ),
-        // Every variant added after monono ask 26 renders from `one_line()`, which the compiler
+        // Every variant added after mununu#553 renders from `one_line()`, which the compiler
         // forces to stay exhaustive. So a new variant cannot silently acquire an empty or
         // misleading note — the failure mode that let `unclassified-bottom` point readers at a
         // sibling note the merge had already discarded.
@@ -10552,7 +10552,7 @@ mod tests {
 
     #[test]
     /// mununu#504 — a stopped run reports every property, including the ones it never reached.
-    /// The whole point is that verdicts already computed survive; monono lost a gate run to a
+    /// The whole point is that verdicts already computed survive; the consumer lost a gate run to a
     /// kill that emitted zero bytes including for properties mununu had already decided.
     fn abstained_marks_an_unreached_property_as_unknown_not_skipped() {
         let t = crate::adapter::slang::translate::TranslatedAssertion {
@@ -11606,7 +11606,7 @@ mod tests {
     /// The merge starts from `base.clone()`, which carries the base engine's notes; it then
     /// rewrites `properties[].outcome` across engines. Nothing rewrote the summary, so it kept
     /// reporting the base's tally. With `portfolio-sequential` as the DEFAULT engine this was
-    /// the common case, and it is what monono saw: a summary claiming `0 unknown` beside
+    /// the common case, and it is what the consumer saw: a summary claiming `0 unknown` beside
     /// properties printing `UNKNOWN`. A consumer counting the summary under-reported its own
     /// coverage.
     #[test]
@@ -12898,7 +12898,7 @@ mod tests {
         );
     }
 
-    /// REPRODUCER (monono, 2026-09-15, post-#558): a residual ⊥ arrived at a consumer with the
+    /// REPRODUCER (a consumer, 2026-09-15, post-#558): a residual ⊥ arrived at a consumer with the
     /// `bottom_reason` key ABSENT from the property object — not `unclassified-bottom`, absent.
     ///
     /// Verbatim from their `--json` on `b8a2abb`:
@@ -13020,7 +13020,7 @@ mod tests {
         );
     }
 
-    /// REPRODUCER for monono ask 26 (2026-09-15).
+    /// REPRODUCER for mununu#553 (2026-09-15).
     ///
     /// `merge_portfolio_reports` carried the comment *"Errors contribute nothing"* and meant it:
     /// the exact engine's `Err` — which NAMES the budget it hit — was discarded, so a consumer saw
@@ -17970,7 +17970,7 @@ module uart_tx(); endmodule"#;
     /// with NO `next` line. Reading that as a *held register* pinned it to its
     /// absent-therefore-zero init, so the freed net was nailed to 0: `fits` could
     /// never be 1, the FSM never left idle, and the cut model was an
-    /// UNDER-approximation. Reported from monono's `sprite_fetch`, reduced to this
+    /// UNDER-approximation. Reported from the consumer's `sprite_fetch`, reduced to this
     /// 30-line FSM, and it flipped BOTH directions at once:
     ///
     ///   EF (st_q == 2)  HOLDS unabstracted -> VIOLATED under the cut
@@ -20356,7 +20356,7 @@ endmodule
         );
     }
 
-    /// monono#partsel — the partial-register-assignment soundness fix, end-to-end
+    /// mununu#469 — the partial-register-assignment soundness fix, end-to-end
     /// through `verify_auto`. Five registers, each reachably non-zero, each written
     /// a different way.
     ///
@@ -20803,7 +20803,7 @@ endmodule
         );
     }
 
-    /// mununu#638 — monono's `video_timing` raster twin (vendored at
+    /// mununu#638 — the consumer's `video_timing` raster twin (vendored at
     /// `examples/verify/v13_video_timing_raster_twin/`, Apache-2.0): two 10-bit counters whose
     /// frame wraps one row early, so `a_frame_wraps_at_total` (`sva_1`) and
     /// `a_row_advances_only_at_line_end` (`sva_2`) must be VIOLATED; the whole 800×525 frame is
@@ -20897,7 +20897,7 @@ endmodule
         );
     }
 
-    /// The regression of the #629 re-land (#646), on monono's `pulse_cdc` (vendored at
+    /// The regression of the #629 re-land (#646), on the consumer's `pulse_cdc` (vendored at
     /// `examples/verify/v14_pulse_cdc_sync/`, Apache-2.0): `pulse_in == 0 |=> tog_q ==
     /// $past(tog_q)` — an INPUT antecedent whose consequent is read in the NEXT cycle. The
     /// antecedent-propagation pass rewrote it as a same-cycle implication, dropped the antecedent,

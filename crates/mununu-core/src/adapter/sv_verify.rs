@@ -386,7 +386,7 @@ impl SvLintSignalKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SvLintRule {
-    /// monono#partsel — the register's lift reaches an anonymous free input, so
+    /// mununu#469 — the register's lift reaches an anonymous free input, so
     /// a state predicate over it is *refused* by the verifier.
     UndrivenPartialWrite,
     /// mununu#496 — a registered array read (`q <= mem[a_q];`) whose address
@@ -434,7 +434,7 @@ impl SvLintFinding {
 /// model checking), every register whose partial-write lift the verifier can NOT
 /// keep faithfully.
 ///
-/// This is the read-only, cap-immune preflight for the monono#partsel soundness
+/// This is the read-only, cap-immune preflight for the mununu#469 soundness
 /// refusal shipped in #464/#465: the yosys-slang lift of a plain-vector partial
 /// register assignment (`q[hi:lo] <= d`) models `q`'s *unwritten* bits as free
 /// `input`s (havoc) and aliases the register name to the `concat` mixing them, so
@@ -792,7 +792,7 @@ fn smt_confirms_tracking(
 /// ```
 ///
 /// `q` holds the word at the address `a_q` held *last* cycle, but a consumer
-/// reading `q` alongside the live `a_q` sees a pair that never coexisted. monono
+/// reading `q` alongside the live `a_q` sees a pair that never coexisted. the consumer
 /// hit this twice in the same block — the second time with a prose rule against
 /// it in force — shipping a 2 KB sprite bank shifted by one halfword. Prose did
 /// not prevent the recurrence; this check is the structural refusal.
@@ -1339,7 +1339,7 @@ mod tests {
         );
     }
 
-    // monono#partsel lint core — the yosys-slang lift of a plain-vector partial
+    // mununu#469 lint core — the yosys-slang lift of a plain-vector partial
     // register assignment (`a_q[11:8] <= val`), captured verbatim so the
     // regression runs in make-ci without slang. `a_q`'s unwritten bits are free
     // `input`s (nid 17, 21) mixed into the `concat` its name aliases; `o_partsel`
@@ -1455,7 +1455,7 @@ mod tests {
     }
 
     /// mununu#475 item 1 — a function argument's `<function>.<arg>` mangled
-    /// name (e.g. monono's `ctrl_code.c`, `ones8.v` in `tmds_encoder.sv`)
+    /// name (e.g. the consumer's `ctrl_code.c`, `ones8.v` in `tmds_encoder.sv`)
     /// emits as an `Op` node whose cone reaches a function-scope anonymous
     /// input; the raw `signal_reaches_anonymous_input` check would
     /// false-positive it as a partial-write register. The `.` heuristic
@@ -1465,7 +1465,7 @@ mod tests {
     /// mununu#506/#507 — a FLATTENED HIERARCHY symbol is dotted too, and must NOT
     /// be swept up by the function-argument filter.
     ///
-    /// This is why `sv lint` reported zero findings on monono's integrator while
+    /// This is why `sv lint` reported zero findings on the consumer's integrator while
     /// `verify-auto` refused a property on the same file: every hierarchical alias
     /// is `u_inst.sig`, so the blanket dotted-skip suppressed the whole design. They
     /// were not disagreeing — the lint was not looking.
@@ -1563,7 +1563,7 @@ mod tests {
         );
     }
 
-    // monono#partsel — the real slang lift of a plain-vector partial register
+    // mununu#469 — the real slang lift of a plain-vector partial register
     // assignment, pinned as an AGREEMENT between the lint and the lift rather than
     // as a fixed lift shape, because the shape is the PLUGIN's, not ours:
     //   * yosys-slang in oss-cad-suite 2025-12-31 (yosys 0.60+70) split `a_q`'s

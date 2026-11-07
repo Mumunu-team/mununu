@@ -251,7 +251,7 @@ pub fn cone_leaf_nids(file: &Btor2File, atoms: &[String]) -> HashSet<Nid> {
 /// the data-flow dependency relation AND `constraint` / `fair` / `justice`
 /// co-occurrence.
 ///
-/// # Why NID-indexed, not symbol-indexed (monono#partsel COI fix)
+/// # Why NID-indexed, not symbol-indexed (mununu#469 COI fix)
 ///
 /// The reachability runs directly over the BTOR2 operand DAG (node NIDs), NOT
 /// over a symbol dep graph. The previous symbol-keyed pipeline

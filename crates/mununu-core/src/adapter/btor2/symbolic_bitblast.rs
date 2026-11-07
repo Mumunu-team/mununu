@@ -455,7 +455,7 @@ impl BddBitBlaster {
     /// TIMEOUT that reads as a finding about the engine. Same shape as a mistyped CTXDSL atom
     /// evaluating vacuously TRUE: the input is invalid and the system does something reasonable
     /// instead of complaining. **A config error must be loud precisely BECAUSE the fallback is
-    /// sensible.** (Articulation is monono-8d's, 2026-09-15.)
+    /// sensible.** (Articulation is a consumer agent's, 2026-09-15.)
     fn resolve_var_order(raw: &str) -> (VarOrder, Option<String>) {
         let v = raw.trim();
         if v.is_empty() || v.eq_ignore_ascii_case("interleaved") {
@@ -6705,7 +6705,7 @@ impl ExactSession {
             }
         }
 
-        // monono#partsel — the same soundness posture for an atom that binds to a
+        // mununu#469 — the same soundness posture for an atom that binds to a
         // signal reaching an anonymous free INPUT (without being a bare input itself).
         // The yosys-slang lift of a plain-vector partial register assignment
         // (`q[hi:lo] <= d`) models `q`'s unwritten bits as free inputs (havoc) and
@@ -9886,7 +9886,7 @@ mod tests {
         );
     }
 
-    /// mununu#543 PROBE — reproduce monono's abort in-house, on THEIR model.
+    /// mununu#543 PROBE — reproduce the consumer's abort in-house, on THEIR model.
     ///
     /// Their bundle names the dying property exactly, every time: index 1 of 4,
     /// `a_stat_moves_only_on_a_toggle`
@@ -9906,7 +9906,7 @@ mod tests {
     ///
     /// ```bash
     /// for i in $(seq 1 40); do
-    ///   MUNUNU_PROBE_BTOR=/tmp/monono-543-repro/spr_cost.design.btor \
+    ///   MUNUNU_PROBE_BTOR=/tmp/the consumer-543-repro/spr_cost.design.btor \
     ///     cargo test -p mununu-core --lib -- --ignored probe_543_spr_cost >/dev/null 2>&1
     ///   echo "$i -> $?"
     /// done
@@ -9914,7 +9914,7 @@ mod tests {
     ///
     /// Exit 0 = survived. 101/134 = reproduced (panic / abort).
     #[test]
-    #[ignore = "mununu#543 probe — set MUNUNU_PROBE_BTOR to monono's spr_cost.design.btor"]
+    #[ignore = "mununu#543 probe — set MUNUNU_PROBE_BTOR to the consumer's spr_cost.design.btor"]
     fn probe_543_spr_cost_past_shadow_at_the_cap() {
         let Ok(path) = std::env::var("MUNUNU_PROBE_BTOR") else {
             eprintln!("[probe] MUNUNU_PROBE_BTOR unset — skipping");
@@ -10591,9 +10591,10 @@ mod tests {
             let il = t1.elapsed().as_millis();
             eprintln!("{name:<26} {cm:>12} {il:>12}  {measured}");
         }
-        // The real block, if the consumer's lift is staged.
-        let p = std::path::Path::new("/tmp/monono-543-repro/sdram_burst/sdram_burst.design.btor");
-        if let Ok(src) = std::fs::read_to_string(p)
+        // The real block, when the consumer's lift is staged: MUNUNU_PROBE_BTOR names it, as
+        // for the probe above (roadmap G5: no hard-coded staging path).
+        if let Ok(p) = std::env::var("MUNUNU_PROBE_BTOR")
+            && let Ok(src) = std::fs::read_to_string(&p)
             && let Ok(file) = parser::parse(&src)
         {
             let t0 = std::time::Instant::now();
@@ -12252,7 +12253,7 @@ mod tests {
         );
     }
 
-    /// monono#partsel — the yosys-slang lift of a PARTIAL register assignment
+    /// mununu#469 — the yosys-slang lift of a PARTIAL register assignment
     /// (`a_q[11:8] <= val`) as it actually reaches the engine. slang models only
     /// the *written* slice as a `state` cell (nid 19, 4-bit), turns the register's
     /// *unwritten* bits into ANONYMOUS free `input`s (nid 17, 8-bit; nid 21, 4-bit),
@@ -12260,7 +12261,7 @@ mod tests {
     /// that mixes them. A predicate over `a_q` therefore reads free inputs and the
     /// exact fixpoint used to answer a spurious `Holds` for `AG (a_q == 0)` (and
     /// `!o_partsel`) even though `a_q` is reachably non-zero — the exact soundness
-    /// bug monono's planted-bug canary caught. `b_q`, written in full, lifts to one
+    /// bug the consumer's planted-bug canary caught. `b_q`, written in full, lifts to one
     /// faithful state cell and decides correctly.
     ///
     /// This is the post-reset-init + reset-pinned BTOR2 (the shape verify-auto hands
@@ -12361,7 +12362,7 @@ mod tests {
         );
     }
 
-    /// monono#partsel COI fix — a PACKED 2-D partial write (`p[idx] <= d`) splits
+    /// mununu#469 COI fix — a PACKED 2-D partial write (`p[idx] <= d`) splits
     /// the register into ANONYMOUS `state` sub-cells with NO free inputs (`p`
     /// aliases a width-2 `concat` of two width-1 anonymous states, so the width
     /// filter drops the name off both). The OLD symbol-keyed cone-of-influence
@@ -12598,7 +12599,7 @@ mod tests {
     /// some reachable state has `drop_q >= 2`, and with a `+1`-only counter any value >= 3 must
     /// pass through 2.
     ///
-    /// Run first at the CHEAP tier (no monono sources, no slang, no container) per CLAUDE.md §14:
+    /// Run first at the CHEAP tier (no consumer sources, no slang, no container) per CLAUDE.md §14:
     /// if the contradiction is in the exact fixpoint itself, this finds it in milliseconds; if it
     /// does not reproduce, the mechanism needs the real design and THAT is the finding.
     #[test]
@@ -13369,7 +13370,7 @@ mod tests {
     /// and the property decides (see
     /// [`shadow_synth_flips_derived_input_antecedent_to_decided`]).
     ///
-    /// Fixture mirrors monono's `wb_mem_client`: `mem_rvalid_mine = mem_rvalid && got`
+    /// Fixture mirrors the consumer's `wb_mem_client`: `mem_rvalid_mine = mem_rvalid && got`
     /// where both `mem_rvalid` and `got` are primary inputs.
     ///
     /// Contrast [`exact_symbolic_refuses_primary_input_atom`] (name IS an input) and
@@ -13428,7 +13429,7 @@ mod tests {
         );
     }
 
-    /// The monono `wb_mem_client` shapes the mununu#476 shadow synthesis was written for — an
+    /// The the consumer `wb_mem_client` shapes the mununu#476 shadow synthesis was written for — an
     /// SVA `|=>` whose antecedent atom is combinational of primary inputs, single and
     /// multi-atom — decide by the inputs-in-the-state lift (mununu#656) alone since mununu#677
     /// removed the shadow: the atoms read the sampled inputs, and `[] (q == 0)` with `q' = 0`
@@ -14625,7 +14626,7 @@ mod tests {
     /// `A == B == 0` ⇒ immune, the race survives. `A > B == 0` ⇒ cache eviction under 2x
     /// footprint. **`A == B > 0` ⇒ allocator churn from having built `cm` AT ALL** — which nobody
     /// proposed, and which would survive every design that builds two orders in one process, the
-    /// apply-call race included. Without arm 0 that outcome is invisible. (Arm 0 is monono-45's
+    /// apply-call race included. Without arm 0 that outcome is invisible. (Arm 0 is a consumer agent's
     /// addition; I specified A/B with no control, one turn after writing that a control is what
     /// licenses reading the other rows.)
     ///

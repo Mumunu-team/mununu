@@ -778,7 +778,7 @@ pub struct RoutingRationale {
 ///    The cap is [`effective_bitblast_cap`](crate::adapter::btor2::symbolic_bitblast)'s
 ///    `max(40, min(cone, 192))`, so for every cone between 40 and 192 bits **`cap == cone_bits` by
 ///    construction** and `fits` is unconditionally true. `fits` is really `cone_bits <= 192`.
-///    monono's reported case — a 127-bit cone against a "127-bit cap", predicted decidable, outcome
+///    the consumer's reported case — a 127-bit cone against a "127-bit cap", predicted decidable, outcome
 ///    ⊥ — is the norm across that band, not a boundary case.
 /// 2. **Width does not predict convergence, and this is measured.** `AUTO_CAP_CEILING`'s own doc
 ///    records `twocount32`: a 65-bit cone, smaller than i2c's decidable 173, whose `EF` fixpoint
@@ -1508,7 +1508,7 @@ mod tests {
         assert!(
             !note.items[0].contains("decidable)"),
             "a routed property must not be reported as a decidability FORECAST — that phrasing is \
-             what made a run contradict itself for monono: {}",
+             what made a run contradict itself for the consumer: {}",
             note.items[0]
         );
         assert!(
