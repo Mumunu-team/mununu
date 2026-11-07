@@ -129,6 +129,10 @@ dhat = { version = "0.3", optional = true }
 # with `--features boolector`.
 boolector = { version = "0.4", optional = true, features = ["vendor-lgl"] }
 
+[target.'cfg(unix)'.dependencies]
+# Process-group kill of external solver members (mununu#875); already in the tree via std's deps.
+libc = "0.2"
+
 [dev-dependencies]
 # The MCP seam test drives the server through an in-process client (`client`) over a tokio duplex
 # pipe; the product build never carries the client side.
