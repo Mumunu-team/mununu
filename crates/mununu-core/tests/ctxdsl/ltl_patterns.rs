@@ -1,6 +1,6 @@
 //! Integration tests for LTL temporal logic patterns.
 //!
-//! These tests verify that common LTL patterns from `docs/ltl_templates/temporal_logic_patterns.md`
+//! These tests verify that common LTL patterns from `docs/archive/ltl_templates/temporal_logic_patterns.md`
 //! can be parsed, translated to μ-calculus, and realized correctly in the Context DSL.
 
 use mununu_core::clts::Clts;

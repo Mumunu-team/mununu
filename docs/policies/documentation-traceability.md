@@ -16,7 +16,7 @@ Every documentation page or section that describes a feature, flag, endpoint, fi
 
 The path is a real file in this workspace; line numbers are optional. A single-surface tag needs an inline justification (`surface: CLI-only — <reason>`).
 
-**Not covered.** Pedagogical sections (`> Concept: <one-line>`); planning or vision documents (`> Status: planning` at the top of the file); tutorial prose that anchors to the example file it walks through.
+**Not covered.** Pedagogical sections (`> Concept: <one-line>`); planning or vision documents (`> Status: planning` at the top of the file); the restored history under `docs/archive/` (`> Status: historical`, kept only for the references that cite it); tutorial prose that anchors to the example file it walks through.
 
 **Alive** means referenced (not just declared) by code reaching a surface, or a configuration file consumed by a shipping binary or test target. **Not acceptable:** `#[allow(dead_code)]` symbols, deleted-test references, non-default feature flags no surface enables, files outside the repo, closed-source dependencies, `mununu-private/`.
 

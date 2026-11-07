@@ -203,7 +203,7 @@ const DEFAULT_PROPERTY_BUDGET_MS: u64 = 15 * 60 * 1000;
 
 /// Default whole-run budget: **1 hour**.
 ///
-/// This is the one that addresses the reported incident. monono lost a full `make formal` run to
+/// This is the one that addresses the reported incident. the consumer lost a full `make formal` run to
 /// a SIX-HOUR hang; a per-property cap alone would not have saved them (42 properties x 15 min is
 /// still 10 hours in the worst case), but an hour-long run budget turns that six-hour loss into a
 /// report after one hour with the undecided tail marked `unknown`.

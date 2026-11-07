@@ -31,7 +31,7 @@ If $ARGUMENTS is empty, derive scope from `git diff --name-only HEAD~1 HEAD` fil
 | `.claude/skills/**/SKILL.md` | Skill prompts — anchor file/symbol references in the "Procedure" section |
 
 Explicit opt-outs:
-- `docs/architecture/**` (design notes — anchor where possible but not required)
+- `docs/archive/**` (historical docs restored for the references that cite them; each carries `> Status: historical` and is not anchored)
 - `docs/design/native-sv-abstraction.md` and every file starting with `> Status: planning` (planning docs)
 - `wiki/Home.md`, the table-of-contents page (anchor target is each linked page, not the index)
 

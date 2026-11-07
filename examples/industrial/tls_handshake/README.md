@@ -1,6 +1,6 @@
 # TLS handshake — annotations + corpus in a critical use case
 
-> **Industrial example** for [Document D — contract corpus + unified config](../../../docs/design/contract-corpus-and-config.md) §D.9. Closes the M3 arc by exercising the full **annotation → corpus → gap-downgrade** chain end-to-end against the mununu binary on `main`.
+> **Industrial example** for [Document D — contract corpus + unified config](../../../docs/archive/design/contract-corpus-and-config.md) §D.9. Closes the M3 arc by exercising the full **annotation → corpus → gap-downgrade** chain end-to-end against the mununu binary on `main`.
 
 ## What this example is
 

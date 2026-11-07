@@ -1,5 +1,5 @@
 //! Shared controllability classifier — task A4 of
-//! `docs/design/black-box-modules.md`.
+//! `docs/archive/design/black-box-modules.md`.
 //!
 //! The rule, restated from Document A §4:
 //!

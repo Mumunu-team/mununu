@@ -1,7 +1,7 @@
 //! Contract corpus — file-backed lookup of vetted black-box module
 //! contracts.
 //!
-//! Document D task D1 in `docs/design/contract-corpus-and-config.md`.
+//! Document D task D1 in `docs/archive/design/contract-corpus-and-config.md`.
 //! The corpus replaces the chaotic stub default (Document A §2) with a
 //! specific, vetted contract whenever an entry exists for the
 //! `(domain, name, parameters)` tuple at hand. Today the backend is a

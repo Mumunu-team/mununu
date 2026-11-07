@@ -8,7 +8,7 @@ End-to-end demonstration that `mununu verify` accepts a CrewAI
 translates the crew into per-agent automata (`Idle -> Executing -> Done`
 on `agent_<role>_start` / `agent_<role>_complete`) plus a sequential
 supervisor, all composed asynchronously per
-[Doc C §C.5](../../../docs/design/hw-sw-codesign-extraction.md).
+[Doc C §C.5](../../../docs/archive/design/hw-sw-codesign-extraction.md).
 
 ## What it demonstrates
 

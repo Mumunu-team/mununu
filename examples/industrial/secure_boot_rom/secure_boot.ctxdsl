@@ -2,7 +2,7 @@
 // =====================================================
 //
 // Industrial example for Document A — black-box modules in compositional
-// extraction. See `docs/design/black-box-modules.md` §9 for the full
+// extraction. See `docs/archive/design/black-box-modules.md` §9 for the full
 // narrative and `README.md` in this directory for the run sheet.
 //
 // The example models three components:

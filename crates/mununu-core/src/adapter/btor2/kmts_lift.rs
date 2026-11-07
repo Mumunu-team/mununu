@@ -693,7 +693,7 @@ fn initial_cube_indices(
 /// a combinational signal is a function of the state dimensions in its cone — `pulse_out == 1`
 /// with `pulse_out = sync_q ^ sync_d_q` — and a compound shares its registers with the atoms, so
 /// the product also admits cells no state inhabits: `{pulse_out == 0, sync_q != sync_d_q}` was
-/// initial on monono's `pulse_cdc` (its `sync_q` has no reset, so that bit is free), it has no
+/// initial on the consumer's `pulse_cdc` (its `sync_q` has no reset, so that bit is free), it has no
 /// outgoing edge, `downgrade_unsatisfiable_cells` masked it to ⊥, and a tautology read ⊥.
 ///
 /// Only when the dimensions are coupled ([`cube_dimensions_are_coupled`]) is Z3 asked, one
@@ -5477,7 +5477,7 @@ mod tests {
     /// function of `a` and `b`: with `a` free at reset the product admits `{out == 1, a == 0,
     /// b == 0}` and `{out == 0, a == 1, b == 0}`, cells no state inhabits. Such a cell is
     /// edgeless, `downgrade_unsatisfiable_cells` masks it to ⊥, and a property read at it is ⊥
-    /// — monono's `pulse_cdc` tautology came back `Unknown { unknown_cells: 2 }` this way once
+    /// — the consumer's `pulse_cdc` tautology came back `Unknown { unknown_cells: 2 }` this way once
     /// the loose binding was gone. The initial set must be the cells a reset state inhabits.
     #[test]
     fn x637_an_initial_cell_no_reset_state_inhabits_is_not_initial() {

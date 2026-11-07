@@ -991,7 +991,7 @@ mod tests {
         }
     }
 
-    /// The regression of the re-land (2026-10-09, monono's `pulse_cdc`): a consequent under a
+    /// The regression of the re-land (2026-10-09, the consumer's `pulse_cdc`): a consequent under a
     /// modality is read in the NEXT cycle, where the antecedent's signal is free again, so the
     /// same-cycle identity does not apply and the implication must be left alone — with an
     /// input antecedent (`|=>`, the shape that was rewritten and refuted) and with a state one.

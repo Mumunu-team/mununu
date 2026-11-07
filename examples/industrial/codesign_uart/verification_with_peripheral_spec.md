@@ -88,7 +88,7 @@ audit and are out of scope for this demonstration.
   this example reuses verbatim. Same state names, same labels.
 - `register_map.json` — the source-of-truth for the rendezvous-label
   alphabet (`rd_status_tx_busy`, `wr_data_byte`, `wr_ctrl_tx_start`).
-- `docs/design/hw-sw-codesign-extraction.md` §C.5 — the soundness
+- `docs/archive/design/hw-sw-codesign-extraction.md` §C.5 — the soundness
   posture for asynchronous composition (Doc C's mandate for HW/SW
   codesign).
 - Verification-gap audit answer (conversation 2026-05-15) — the

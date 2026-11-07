@@ -2143,7 +2143,7 @@ it: a plain-vector partial register assignment (`q[hi:lo] <= d`) leaves `q`'s ot
 bits undriven, so the yosys-slang front end models them as **free inputs** (havoc)
 and aliases the register name to the `concat` that mixes them. A state predicate
 over `q` would then read those free inputs, so the engine **refuses** (skips) such a
-property rather than emit an unsound verdict (the monono#partsel soundness guard —
+property rather than emit an unsound verdict (the mununu#469 soundness guard —
 see [`recoverability-vs-sva.md`](design/recoverability-vs-sva.md)). The packed-2-D
 `q[idx] <= d` split (anonymous *sub-registers*, no free inputs) is kept and decides;
 a fully-written register is faithful.

@@ -705,7 +705,7 @@ pub fn cone_reaches_input(file: &Btor2File, start: Nid) -> bool {
     false
 }
 
-/// monono#partsel soundness guard — does the combinational cone rooted at `start`
+/// mununu#469 soundness guard — does the combinational cone rooted at `start`
 /// reach an **anonymous** (symbol-less) primary `input`?
 ///
 /// A properly-lifted, flattened design names every real primary input after its
@@ -764,7 +764,7 @@ pub fn cone_reaches_anonymous_input(file: &Btor2File, start: Nid) -> bool {
     false
 }
 
-/// monono#partsel soundness guard — does the signal a property atom binds to
+/// mununu#469 soundness guard — does the signal a property atom binds to
 /// `NAME` reach an anonymous (undriven-register-bit) free input?
 ///
 /// Resolves `NAME` to its candidate binding node(s) — a `state` cell of that
@@ -2047,7 +2047,7 @@ mod tests {
 
     #[test]
     fn cone_reaches_anonymous_input_ignores_named_ports() {
-        // monono#partsel — `anon` (nid 3) is an ANONYMOUS input (an undriven
+        // mununu#469 — `anon` (nid 3) is an ANONYMOUS input (an undriven
         // register bit under the slang partial-assignment lift); `named` (nid 2) is
         // a real port. `cone_reaches_anonymous_input` fires only for the anonymous
         // one — a legitimate combinational of a NAMED input must NOT be refused.
@@ -2082,7 +2082,7 @@ mod tests {
 
     #[test]
     fn cone_reaches_anonymous_input_ignores_anonymous_split_subregisters() {
-        // monono#partsel (packed 2-D `p[idx] <= d`) — `p` is split into ANONYMOUS
+        // mununu#469 (packed 2-D `p[idx] <= d`) — `p` is split into ANONYMOUS
         // `state` cells (nid 3, 4). The NID-indexed cone-of-influence now KEEPS
         // those cells, so this case DECIDES rather than being refused: the
         // input-only guard must NOT fire on a state-only reconstruction (no free

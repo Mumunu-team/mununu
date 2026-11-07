@@ -108,7 +108,7 @@ fn no_covered_document_points_into_an_untracked_path() {
 #[test]
 fn the_scan_catches_plans_links_and_ignored_roots_only() {
     let ignored = vec!["experiments".to_string()];
-    let text = "see [x](../../.claude/plans/x.md)\nand [y](../experiments/y.md)\nand [z](../../docs/design/z.md)\n";
+    let text = "see [x](../../.claude/plans/x.md)\nand [y](../experiments/y.md)\nand [z](../../docs/design/kmts-theory.md)\n";
     let got: Vec<usize> = offending_lines(text, &ignored)
         .into_iter()
         .map(|(n, _)| n)

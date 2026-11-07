@@ -141,8 +141,7 @@ fn build_symbol_index_and_bitsets(
 /// - Third-party code may depend on these defaults
 ///
 /// For custom types without changing defaults, use `Clts<u16, u16>` or
-/// `Clts<u64, u64>` directly. See `docs/identifier_width_customization.md`
-/// for detailed guidance.
+/// `Clts<u64, u64>` directly.
 pub type DefaultStateIdx = u32;
 
 /// Default storage type for label identifiers.

@@ -306,7 +306,7 @@ run does, in *both* directions:
 section, and the commit message at `feat(exact): MUNUNU_BDD_VAR_ORDER=auto`, headlined it as *"the
 build phase is enough"* — a universal claim from two self-selected points. That is the **same error
 shape as the six predictors it replaced**: validated only on its own motivating case. Corrected here
-(monono-45 raised it, 2026-09-15, while the validation was in flight).
+(a consumer agent raised it, 2026-09-15, while the validation was in flight).
 
 **Why correlation is nevertheless expected — as a mechanism, not a result.** Build cost and fixpoint
 cost share a common cause: the size of the transition-relation diagram under that order. A larger
@@ -335,7 +335,7 @@ that should be repeatable.**
 
 ### ❌ FALSIFIED (2026-09-15): the consumer sweep — `auto` is 2 of 4, and the failure is architectural
 
-Run by monono-45 on binary `4b6193f`, arena pinned 67,108,864, **wall/CPU ratio 0.97–1.12 on every row**
+Run by a consumer agent on binary `4b6193f`, arena pinned 67,108,864, **wall/CPU ratio 0.97–1.12 on every row**
 (so no starved runs), **verdicts identical across all twelve arms** — 24 properties, zero movement, so
 canonicity held and no soundness question arises anywhere in this.
 
@@ -424,7 +424,7 @@ number away from the truth, in the direction that made the corrector's own recom
 better.** The weakness was named when the correction was sent — one block's ratio applied to another,
 the generalisation that has killed seven predictors here — and it stood as a correction anyway.
 
-> **Naming a caveat is not the same as heeding it.** (monono-45's retraction, 2026-09-15.)
+> **Naming a caveat is not the same as heeding it.** (a consumer agent's retraction, 2026-09-15.)
 
 Use 174 s. Both estimates are struck.
 
@@ -480,10 +480,10 @@ places. Live nodes 130 in all three.
 So **building second — into a process holding another live arena, or one whose allocator has been
 churned through a full build and freed — does not change the work by a single apply call.** The
 structural argument holds: the apply cache is per-manager and identically sized, so the challenger's
-recursion cannot see what else the process is carrying. monono-45's reading (that a work-based race
+recursion cannot see what else the process is carrying. a consumer agent's reading (that a work-based race
 would be misled by the same mechanism) is refuted by their own instrument.
 
-Arm 0 was monono-45's addition and it earned its place: without it, `A == B` would have been read as
+Arm 0 was a consumer agent's addition and it earned its place: without it, `A == B` would have been read as
 "immune" while both could have been inflated against a process that never built `cm`. That outcome —
 `A == B > 0`, allocator churn from building the incumbent AT ALL — would have killed every
 two-orders-in-one-process design including the race, and my original A/B had no way to see it.
@@ -509,7 +509,7 @@ should not matter, but that is reasoning, not measurement.
 
 #### ❓ An open question this raises about the apply-call race
 
-monono-45's reading is that an apply-call race would hit `tlm_tx`'s bimodality too, and would hide it
+a consumer agent's reading is that an apply-call race would hit `tlm_tx`'s bimodality too, and would hide it
 better, "because the counter would simply come back large." **Their own earlier measurement appears to
 refute that:** apply calls on `tlm_tx` interleaved came back **byte-identical (573,268) at load 1.7
 and at load 4–6**. If the work is invariant while the build *time* varies 20×, then the bimodality is

@@ -332,7 +332,7 @@ See the **[Memory soundness matrix](#memory-soundness-matrix)** below for the pe
 
 ## Memory soundness matrix
 
-> Source of truth: [`MemoryAbstractionPosture`](../crates/mununu-core/src/verify/config.rs) (verify-framework declaration), [`docs/design/black-box-modules.md`](design/black-box-modules.md) (chaotic-stub foundations, Doc A §A.4), [`docs/design/hw-sw-codesign-extraction.md`](design/hw-sw-codesign-extraction.md) (HW/SW codesign chaotic-stub formulation, Doc C §C.5) — surface: CLI+API+UI (declared in `verify.toml`, consumed by the orchestrator and surfaced in summaries).
+> Source of truth: [`MemoryAbstractionPosture`](../crates/mununu-core/src/verify/config.rs) (verify-framework declaration), [`docs/archive/design/black-box-modules.md`](design/black-box-modules.md) (chaotic-stub foundations, Doc A §A.4), [`docs/archive/design/hw-sw-codesign-extraction.md`](design/hw-sw-codesign-extraction.md) (HW/SW codesign chaotic-stub formulation, Doc C §C.5) — surface: CLI+API+UI (declared in `verify.toml`, consumed by the orchestrator and surfaced in summaries).
 
 Memory abstraction is the single biggest soundness-relevant choice in any non-trivial verification target. The matrix is unchanged by the KMTS pivot — the four canonical postures interact with the canonical KMTS recipe through the predicate set (per-address predicates of the form `mem.x.fresh = (mem[x] == fresh)`) rather than through legacy `Symbols` abstractions, but the soundness story per posture is identical.
 

@@ -1,7 +1,7 @@
 //! Composition primitives for CLTS instances.
 //!
 //! The implementation intentionally mirrors the semantics documented in
-//! `docs/clts_spec.md`: shared alphabet elements synchronise, while independent
+//! `docs/archive/clts_spec.md`: shared alphabet elements synchronise, while independent
 //! actions interleave depending on the selected composition mode. The concrete
 //! logic will arrive in a later turn; for now we sketch the public API and
 //! cover the expected behaviour with failing tests to guide the implementation.
@@ -629,7 +629,7 @@ fn completes_a_vector_piece(vectors: &[BTreeSet<String>], union: &[String]) -> b
 /// Compose two CLTS instances according to the requested semantics.
 ///
 /// The resulting CLTS contains only reachable product states, mirroring the
-/// semantics set out in `docs/clts_spec.md`.
+/// semantics set out in `docs/archive/clts_spec.md`.
 ///
 /// # Parameters
 ///

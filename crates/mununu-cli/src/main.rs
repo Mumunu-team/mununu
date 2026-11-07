@@ -74,7 +74,7 @@ struct CiArgs {
 /// [`CiArgs`].
 ///
 /// **These verbs already print JSON on SUCCESS** (`print_json_summary`), which is why the issue's
-/// table saying "structured output: none" is not what a run actually does. What rosf hit was the
+/// table saying "structured output: none" is not what a run actually does. What the consumer hit was the
 /// FLAG: they passed `--json` — the idiom `sv verify-auto` established — and got
 /// `error: unexpected argument '--json' found` with exit 2, then reasonably concluded there was no
 /// structured output at all.
@@ -215,7 +215,7 @@ const EXPECTATIONS_UNMET_EXIT: i32 = 4;
 
 /// Exit code for a command line the parser rejects (an unknown flag, a missing argument, a bad
 /// value): `EX_USAGE` from `sysexits.h`. Clap's default is `2`, which here means VIOLATED, and
-/// rosf read a mistyped flag as a violation that way (mununu#541).
+/// the consumer read a mistyped flag as a violation that way (mununu#541).
 const USAGE_EXIT: i32 = 64;
 
 /// The exit code of a command line the parser did not accept: `0` for a help or version request
@@ -2064,7 +2064,7 @@ enum SvCommand {
     CheckFsm(SvCheckFsmArgs),
     /// Lift SV and report — at CI time (~lift cost, no model checking) — every
     /// register whose partial-write lift the verifier cannot keep faithfully
-    /// (monono#partsel): a plain-vector `q[hi:lo] <= d` whose unwritten bits the
+    /// (mununu#469): a plain-vector `q[hi:lo] <= d` whose unwritten bits the
     /// front-end models as free inputs. These are exactly the registers a state
     /// predicate would be *refused* on (skipped, never mis-decided) by the formal
     /// gate — surfaced in ~0.1 s before the minutes-long verify. Read-only, changes
@@ -2464,7 +2464,7 @@ struct SvLiftArgs {
     /// and adds them alongside the primary input, so a single-file input
     /// that instantiates a submodule from a sibling directory
     /// (`mem_sched.sv` → `slot_arbiter` from a peer dir, 53/109 unliftable
-    /// files in monono's tree) resolves without hand-listing every
+    /// files in the consumer's tree) resolves without hand-listing every
     /// `--source`. The same `--exclude` list filters the scan. Deduplicates
     /// against the primary file and any explicit `--source` entries by
     /// canonical path (a search-path that contains the primary file will
@@ -4947,7 +4947,7 @@ fn render_verify_auto_text(
                 mununu_core::trace::compact_lines(involves)
             );
         }
-        // monono ask 26 — WHY this property is ⊥, on the property's own lines rather than in a
+        // mununu#553 — WHY this property is ⊥, on the property's own lines rather than in a
         // note. A consumer that filters notes (monono's formal lane did, wholesale) still sees
         // this, and for a resource abstain the text is the ENGINE'S OWN message, which names the
         // budget it hit and its numbers. Before this, a ⊥ arrived as a bare outcome plus a cube
@@ -7276,7 +7276,7 @@ fn sv_check_fsm(args: SvCheckFsmArgs) -> Result<(), String> {
 }
 
 /// `mununu sv lint` — lift SV then report the partial-write registers the verifier
-/// cannot keep faithfully (monono#partsel). CI-time preflight; changes no verdict.
+/// cannot keep faithfully (mununu#469). CI-time preflight; changes no verdict.
 /// A finding maps to the `violated` CI verdict, so the default `--fail-on violated`
 /// fails the build when the lift is unfaithful; `--fail-on none` makes it advisory.
 fn sv_lint(args: SvLintArgs) -> Result<(), String> {
@@ -8571,9 +8571,9 @@ use mununu_core::api::models::context_outcome as context_eval_outcome;
 /// Flags the `--controller-mode gr1` path cannot honour, each with what to do instead.
 ///
 /// mununu#541 — the gr1 path reads `context`, `adapter` and `emit_sv`, and previously IGNORED every
-/// other flag of its own subcommand **silently**, exiting 0. rosf measured that as
+/// other flag of its own subcommand **silently**, exiting 0. the consumer measured that as
 /// `--dump-json <FILE>` accepted, exit 0, and no file written. That is the accepted-and-ignored class
-/// mununu#499 and rosf#37 both landed on.
+/// mununu#499 and the consumer's own issue both landed on.
 ///
 /// This table is the guard, and it is the durable half of the fix: adding a flag to
 /// `ContextSynthesizeArgs` without deciding whether gr1 honours it now fails
@@ -10143,7 +10143,7 @@ mod json_output_contract_tests {
 
     /// mununu#541 — every `sv` property verb must accept `--json`.
     ///
-    /// rosf passed it because `sv verify-auto` established the idiom, got
+    /// the consumer passed it because `sv verify-auto` established the idiom, got
     /// `error: unexpected argument '--json' found` (exit 2), and concluded there was no structured
     /// output at all. The success path was already JSON; only the flag was missing. This asserts
     /// clap ACCEPTS it on each verb, so the idiom cannot silently regress on one of them.

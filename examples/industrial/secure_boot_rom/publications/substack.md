@@ -1,6 +1,6 @@
 # Verifying a secure boot ROM you cannot see all the way through
 
-> **Draft for Substack publication.** Source: `examples/industrial/secure_boot_rom/`. The transcript embedded below reproduces byte-for-byte by running `./examples/industrial/secure_boot_rom/validate.sh` against the pinned commit. **Do not publish until the four-gate validation checklist in `docs/design/black-box-modules.md` §10.3 passes.**
+> **Draft for Substack publication.** Source: `examples/industrial/secure_boot_rom/`. The transcript embedded below reproduces byte-for-byte by running `./examples/industrial/secure_boot_rom/validate.sh` against the pinned commit. **Do not publish until the four-gate validation checklist in `docs/archive/design/black-box-modules.md` §10.3 passes.**
 
 ---
 
@@ -207,6 +207,6 @@ This is post 1 of a four-part series. The remaining three each lead with a diffe
 
 The repo: [github.com/Mumunu-team/mununu](https://github.com/Mumunu-team/mununu).
 The example: [`examples/industrial/secure_boot_rom/`](https://github.com/Mumunu-team/mununu/tree/main/examples/industrial/secure_boot_rom).
-The design doc: [`docs/design/black-box-modules.md`](https://github.com/Mumunu-team/mununu/blob/main/docs/design/black-box-modules.md).
+The design doc: [`docs/archive/design/black-box-modules.md`](https://github.com/Mumunu-team/mununu/blob/main/docs/archive/design/black-box-modules.md).
 
 — Mariano Cerrutti

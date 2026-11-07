@@ -28,7 +28,7 @@ mununu's two pipelines land in the same shape: one IR (`AdapterIR`), one composi
 
 ## What the SoC example actually does
 
-The SoC has three modules. The `HostController` and `UART` are hand-authored CTXDSL automata representing the open RTL. The `DDR3_PHY_V2` is a 2-state chaotic stub modelling the closed IP — exactly the chaotic-stub default from [Document A](https://github.com/Mumunu-team/mununu/blob/main/docs/design/black-box-modules.md) §2. They compose asynchronously over a shared label alphabet: `req_burst`, `addr_valid`, `rdata`, `ddr_ready`, `ddr_busy`, and the UART's send/receive labels.
+The SoC has three modules. The `HostController` and `UART` are hand-authored CTXDSL automata representing the open RTL. The `DDR3_PHY_V2` is a 2-state chaotic stub modelling the closed IP — exactly the chaotic-stub default from [Document A](https://github.com/Mumunu-team/mununu/blob/main/docs/archive/design/black-box-modules.md) §2. They compose asynchronously over a shared label alphabet: `req_burst`, `addr_valid`, `rdata`, `ddr_ready`, `ddr_busy`, and the UART's send/receive labels.
 
 The first thing the example walks is how the DDR PHY's interface JSON came into existence. In a real flow, mununu's extractor would emit it automatically when it encountered `(* blackbox *)` in the SV. The example uses `mununu contract sidecars` — the library helper the adapters call — to produce the same JSON shape directly:
 
@@ -114,6 +114,6 @@ This is post 2 of a four-part series. Each remaining post leads with a different
 
 The repo: [github.com/Mumunu-team/mununu](https://github.com/Mumunu-team/mununu).
 The example: [`examples/industrial/dual_frontend_soc/`](https://github.com/Mumunu-team/mununu/tree/main/examples/industrial/dual_frontend_soc).
-The design doc: [`docs/design/rtl-frontend-unification.md`](https://github.com/Mumunu-team/mununu/blob/main/docs/design/rtl-frontend-unification.md).
+The design doc: [`docs/archive/design/rtl-frontend-unification.md`](https://github.com/Mumunu-team/mununu/blob/main/docs/archive/design/rtl-frontend-unification.md).
 
 — Mariano Cerrutti

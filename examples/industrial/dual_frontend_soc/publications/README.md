@@ -9,7 +9,7 @@ Drafts of the two derivative artefacts that publish the results of the Document 
 | [`substack.md`](substack.md) | Substack post — technical deep-dive | ~2,500 words |
 | [`linkedin.md`](linkedin.md) | LinkedIn post — executive summary | ~180 words |
 
-## Validation gate (per `docs/design/rtl-frontend-unification.md` §B.9.3)
+## Validation gate (per `docs/archive/design/rtl-frontend-unification.md` §B.9.3)
 
 Before either draft posts publicly, all four checks must pass.
 
