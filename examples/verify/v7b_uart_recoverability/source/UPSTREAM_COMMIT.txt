@@ -1,0 +1,3 @@
+# lowRISC/opentitan @ 21f062eb67c8749fec263739cd0f1eea14560a15 (the pin of ../../m1_opentitan_uart_tx/source, which this file is derived from)
+# <file>  <upstream path>
+uart_tx_stuck.sv  hw/ip/uart/rtl/uart_tx.sv  LOCAL: a derived work, not upstream RTL — one planted bug (`bit_cnt_d = bit_cnt_q` where upstream has `bit_cnt_q - 4'h1`, see README.md); the Apache-2.0 header is kept because the file is a modification of Apache-2.0 RTL

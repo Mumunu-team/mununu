@@ -396,7 +396,11 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for setup instructions and guidelines.
 
 ## License
 
-[Mununu Non-Commercial License](LICENSE)
+[Mununu Non-Commercial License](LICENSE) for the first-party work. The repository also
+carries third-party files under their own licences (OpenTitan and Ibex RTL under Apache-2.0,
+nrfx under BSD-3-Clause, btor2tools benchmarks under MIT): [`THIRD_PARTY.md`](THIRD_PARTY.md)
+lists every directory, its upstream and its pinned commit, and [`LICENSES/`](LICENSES/) holds
+the licence texts.
 
 ## References
 
