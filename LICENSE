@@ -3,6 +3,14 @@ Mununu Non-Commercial License
 
 Copyright (c) 2025 Mariano Cerrutti
 
+Scope
+-----
+
+This licence covers the first-party work in this repository. The files listed in
+`THIRD_PARTY.md` are the work of others: they remain under the licences named there
+(Apache-2.0, BSD-3-Clause, MIT), whose texts are in `LICENSES/` or beside the files,
+and they are not licensed under these terms.
+
 Permission is hereby granted, free of charge, to any person obtaining a copy of
 this software and associated documentation files (the "Software"), to use,
 copy, modify, merge, publish, and distribute the Software for **non-commercial

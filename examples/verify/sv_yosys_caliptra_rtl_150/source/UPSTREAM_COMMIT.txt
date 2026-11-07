@@ -1,0 +1,10 @@
+# chipsalliance/caliptra-rtl @ (commit not recorded when these files were vendored; see README.md)
+# The three files below are the Apache-2.0 upstream RTL around caliptra-rtl issue #150
+# (https://github.com/chipsalliance/caliptra-rtl/issues/150): the boot FSM before and after
+# its fix, and the package it depends on. Upstream paths follow the caliptra-rtl layout.
+# <file>  <upstream path>
+soc_ifc_boot_fsm_pre_fix.sv  src/soc_ifc/rtl/soc_ifc_boot_fsm.sv  (the variant with the bug)
+soc_ifc_boot_fsm_post_fix.sv  src/soc_ifc/rtl/soc_ifc_boot_fsm.sv  (the variant with the fix)
+soc_ifc_pkg.sv  src/soc_ifc/rtl/soc_ifc_pkg.sv
+# LOCAL, first-party (NOT vendored; their headers say so): caliptra_2ff_sync.sv, caliptra_sva.svh,
+# caliptra_top_reg_defines.svh, soc_ifc_reg_pkg.sv — stubs that let the boot FSM elaborate.
