@@ -33,9 +33,11 @@
 //!
 //! # Scope (slice 1)
 //!
-//! Pure-bitvector (`Theory::BvOnly`) designs. An array/memory design (HWMCC memory
-//! track) currently returns [`BmcError::Encode`]; wiring the `BvUfArray` theory is
-//! a follow-up. k-induction (unbounded SAFE proof) and IMC are the next slices.
+//! Pure-bitvector designs are encoded under `Theory::BvOnly`. A design with a memory
+//! (array-sorted state) is encoded under `Theory::BvUfArray` since N5 (2026-11-06): `read` →
+//! `select`, `write` → `store`, a memory's next state an extensional array equality, its `init`
+//! applied at frame 0 (constant fill or an array expression). The induction step quantifies
+//! over the memory's contents like any other state, so a k-inductive SAFE stays sound.
 
 #![deny(clippy::unwrap_used)] // docs/policies/failure-paths.md Rule 2: abstain, never panic
 use std::collections::HashMap;
@@ -43,9 +45,33 @@ use std::collections::HashMap;
 use crate::adapter::btor2::ast::{Btor2File, Nid, Node, Operand};
 use crate::adapter::btor2::cex_value::CexValue;
 use crate::adapter::sidecar::predicate_image::btor2_encode::{
-    Btor2SmtView, EncodeError, encode_design,
+    Btor2SmtView, EncodeError, encode_array_inits, encode_design_with_theory,
 };
-use z3::ast::{Ast, BV, Bool};
+use crate::adapter::sidecar::predicate_image::theory::Theory;
+use z3::ast::{Array, Ast, BV, Bool};
+
+/// N5 — encode a design for BMC / k-induction. A design with an array-sorted (memory) state is
+/// encoded under `Theory::BvUfArray` (QF_AUFBV: `read` → `select`, `write` → `store`, a memory's
+/// next state an extensional array equality); every other design stays `Theory::BvOnly`, so the
+/// pure bit-vector path is unchanged. Also returns each memory's `init` value; an `init` the
+/// encoder cannot carry is a refusal, never a free frame-0 memory (that would make a
+/// counterexample spurious).
+fn encode_for_bmc(file: &Btor2File) -> Result<(Btor2SmtView, HashMap<Nid, Array>), EncodeError> {
+    let has_memory = file.lines.iter().any(|l| match &l.node {
+        Node::State { sort, .. } => {
+            crate::adapter::btor2::parser::array_widths(file, *sort).is_some()
+        }
+        _ => false,
+    });
+    let theory = if has_memory {
+        Theory::BvUfArray
+    } else {
+        Theory::BvOnly
+    };
+    let view = encode_design_with_theory(file, theory)?;
+    let inits = encode_array_inits(file, &view)?;
+    Ok((view, inits))
+}
 
 /// Default unrolling / induction depth bound for the portfolio-facing native
 /// engine — mirrors [`crate::adapter::btormc::DEFAULT_KMAX`].
@@ -102,7 +128,7 @@ pub enum SafetyVerdict {
 #[derive(Debug, Clone)]
 pub enum BmcError {
     /// The design could not be encoded to a Z3 QF_BV transition relation (an
-    /// unsupported op, or an array/memory sort — the `BvUfArray` follow-up).
+    /// unsupported op, or a memory `init` the encoder cannot carry).
     Encode(EncodeError),
     /// The design declares no `bad` property — nothing to check.
     NoBadProperty,
@@ -203,6 +229,11 @@ struct Unroller<'a> {
     frame_state: Vec<HashMap<Nid, BV>>,
     /// `frame_input[j][nid]` — input `nid`'s value at frame `j`.
     frame_input: Vec<HashMap<Nid, BV>>,
+    /// N5 — `frame_arr[j][nid]` — memory `nid`'s contents at frame `j` (empty for a pure
+    /// bit-vector design).
+    frame_arr: Vec<HashMap<Nid, Array>>,
+    /// N5 — each memory's `init` value over the current-step variables ([`encode_array_inits`]).
+    array_inits: HashMap<Nid, Array>,
     /// The 1-bit constant `1`, reused for `bad`/`constraint` truth (`op == 1`).
     one1: BV,
 }
@@ -211,6 +242,7 @@ impl<'a> Unroller<'a> {
     /// Build fresh frame variables for depths `0..=n`.
     fn build(
         view: &'a Btor2SmtView,
+        array_inits: HashMap<Nid, Array>,
         bad_ops: &'a [Operand],
         constraint_ops: &'a [Operand],
         n: usize,
@@ -220,13 +252,58 @@ impl<'a> Unroller<'a> {
                 .map(|(nid, bv)| (*nid, BV::fresh_const(prefix, bv.get_size())))
                 .collect()
         };
+        // A memory's frame variable takes the declared array's own sorts; the encoder built it
+        // from the BTOR2 `sort array`, so both are present.
+        let fresh_arr = || -> HashMap<Nid, Array> {
+            view.state_curr_arr
+                .iter()
+                .filter_map(|(nid, arr)| {
+                    let sort = arr.get_sort();
+                    let (dom, rng) = (sort.array_domain()?, sort.array_range()?);
+                    Some((*nid, Array::fresh_const("bmc_m", &dom, &rng)))
+                })
+                .collect()
+        };
         Unroller {
             view,
             bad_ops,
             constraint_ops,
             frame_state: (0..=n).map(|_| fresh(&view.state_curr, "bmc_s")).collect(),
             frame_input: (0..=n).map(|_| fresh(&view.inputs, "bmc_i")).collect(),
+            frame_arr: (0..=n).map(|_| fresh_arr()).collect(),
+            array_inits,
             one1: BV::from_u64(1, 1),
+        }
+    }
+
+    /// Instantiate a current-cycle term at frame `j` (state cells, inputs and memories), and,
+    /// with `next`, the next-cycle cells at frame `j + 1`. The frame variables are fresh, so the
+    /// bit-vector and the array substitutions (one sort per `substitute` call) compose into the
+    /// simultaneous one.
+    fn at<T: Ast>(&self, term: &T, j: usize, next: bool) -> T {
+        let mut bv = self.curr_subs(j);
+        let mut arr: Vec<(&Array, &Array)> = self
+            .view
+            .state_curr_arr
+            .iter()
+            .filter_map(|(nid, a)| Some((a, self.frame_arr[j].get(nid)?)))
+            .collect();
+        if next {
+            for (nid, b) in &self.view.state_next {
+                bv.push((b, &self.frame_state[j + 1][nid]));
+            }
+            arr.extend(
+                self.view
+                    .state_next_arr
+                    .iter()
+                    .filter_map(|(nid, a)| Some((a, self.frame_arr[j + 1].get(nid)?))),
+            );
+        }
+        let t = term.substitute(&bv);
+        if arr.is_empty() {
+            t
+        } else {
+            t.substitute(&arr)
         }
     }
 
@@ -250,22 +327,17 @@ impl<'a> Unroller<'a> {
 
     /// The transition relation for frame `j → j+1`.
     fn transition_at(&self, j: usize) -> Bool {
-        let mut pairs = self.curr_subs(j);
-        for (nid, bv) in &self.view.state_next {
-            pairs.push((bv, &self.frame_state[j + 1][nid]));
-        }
-        self.view.transition.substitute(&pairs)
+        self.at(&self.view.transition, j, true)
     }
 
     /// `bad` at frame `j`: OR over all `bad` operands of `(operand == 1)`.
     fn bad_at(&self, j: usize) -> Bool {
-        let pairs = self.curr_subs(j);
         let disj: Vec<Bool> = self
             .bad_ops
             .iter()
             .filter_map(|op| {
                 self.curr_bv(op)
-                    .map(|bv| bv.substitute(&pairs).eq(&self.one1))
+                    .map(|bv| self.at(&bv, j, false).eq(&self.one1))
             })
             .collect();
         let refs: Vec<&Bool> = disj.iter().collect();
@@ -278,12 +350,11 @@ impl<'a> Unroller<'a> {
 
     /// Each `constraint` at frame `j`: `(operand == 1)`.
     fn constraints_at(&self, j: usize) -> Vec<Bool> {
-        let pairs = self.curr_subs(j);
         self.constraint_ops
             .iter()
             .filter_map(|op| {
                 self.curr_bv(op)
-                    .map(|bv| bv.substitute(&pairs).eq(&self.one1))
+                    .map(|bv| self.at(&bv, j, false).eq(&self.one1))
             })
             .collect()
     }
@@ -297,10 +368,17 @@ impl<'a> Unroller<'a> {
     /// the cell free, an over-approximation of the initial states and a spurious
     /// counterexample.
     fn assert_init(&self, solver: &z3::Solver, init_pairs: &[(Nid, Operand)]) {
-        let subs = self.curr_subs(0);
         for (state, value) in init_pairs {
             if let (Some(s0), Some(vbv)) = (self.frame_state[0].get(state), self.curr_bv(value)) {
-                solver.assert(s0.eq(vbv.substitute(&subs)));
+                solver.assert(s0.eq(self.at(&vbv, 0, false)));
+            }
+        }
+        // N5 — a memory with an `init` starts at that value; one without stays free (BTOR2's
+        // nondeterministic init). An `init` the encoder could not carry never reaches here: it
+        // refused the design.
+        for (state, init) in &self.array_inits {
+            if let Some(m0) = self.frame_arr[0].get(state) {
+                solver.assert(m0.eq(self.at(init, 0, false)));
             }
         }
     }
@@ -387,8 +465,8 @@ pub fn bmc_bad_reachable_witness(
     let n = max_k as usize;
     let cfg = z3::Config::new();
     z3::with_z3_config(&cfg, || {
-        let view = encode_design(file).map_err(BmcError::Encode)?;
-        let u = Unroller::build(&view, &bad_ops, &constraint_ops, n);
+        let (view, array_inits) = encode_for_bmc(file).map_err(BmcError::Encode)?;
+        let u = Unroller::build(&view, array_inits, &bad_ops, &constraint_ops, n);
 
         // A single init-constrained path: check `bad` at each frame, extend if clean.
         let solver = z3::Solver::new();
@@ -501,8 +579,8 @@ pub fn decide_bad_safety_cancellable(
     let n = max_k as usize;
     let cfg = z3::Config::new();
     z3::with_z3_config(&cfg, || {
-        let view = encode_design(file).map_err(BmcError::Encode)?;
-        let u = Unroller::build(&view, &bad_ops, &constraint_ops, n);
+        let (view, array_inits) = encode_for_bmc(file).map_err(BmcError::Encode)?;
+        let u = Unroller::build(&view, array_inits, &bad_ops, &constraint_ops, n);
 
         // N0.5 (2026-11-03) — a peer's decision is honoured INSIDE a query, not only at the
         // next depth boundary. Until now `cancel` was read between depths, so a k-induction
@@ -671,8 +749,9 @@ pub fn bmc_cex_until(
     let cfg = z3::Config::new();
     z3::with_z3_config(&cfg, || {
         // mununu#803 — an encoder refusal is a reason the caller records, not a silent miss.
-        let view = encode_design(file).map_err(|e| format!("native BMC: encode failed: {e:?}"))?;
-        let u = Unroller::build(&view, &bad_ops, &constraint_ops, n);
+        let (view, array_inits) =
+            encode_for_bmc(file).map_err(|e| format!("native BMC: encode failed: {e:?}"))?;
+        let u = Unroller::build(&view, array_inits, &bad_ops, &constraint_ops, n);
         let base = z3::Solver::new();
         let mut params = z3::Params::new();
         params.set_u32("timeout", per_query_ms);
@@ -717,6 +796,67 @@ mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
     use crate::adapter::btor2::parser;
+
+    /// A 4×4-bit memory written from the inputs (`we`, `addr`, `data`) and read at address 3;
+    /// `bad` = that cell holds 15. Zero-initialised, so reachable at depth 1 (write at frame 0,
+    /// visible at frame 1).
+    const MEM_WRITE_READ: &str = "1 sort bitvec 1\n2 sort bitvec 2\n3 sort bitvec 4\n\
+        4 sort array 2 3\n5 state 4 mem\n6 zero 3\n7 init 4 5 6\n8 input 1 we\n\
+        9 input 2 addr\n10 input 3 data\n11 write 4 5 9 10\n12 ite 4 8 11 5\n\
+        13 next 4 5 12\n14 const 2 11\n15 read 3 5 14\n16 ones 3\n17 eq 1 15 16\n18 bad 17\n";
+
+    /// A 4×4-bit memory that is never written; `bad` = cell 0 is non-zero. With `init` = 0 it is
+    /// SAFE (1-inductive); without an `init` the memory is free at frame 0 and `bad` is reachable
+    /// at depth 0.
+    fn mem_constant(with_init: bool) -> String {
+        format!(
+            "1 sort bitvec 1\n2 sort bitvec 2\n3 sort bitvec 4\n4 sort array 2 3\n\
+             5 state 4 mem\n6 zero 3\n{}8 zero 2\n9 read 3 5 8\n10 neq 1 9 6\n\
+             11 bad 10\n12 next 4 5 5\n",
+            if with_init { "7 init 4 5 6\n" } else { "" }
+        )
+    }
+
+    /// N5 — a memory design used to be refused (`BmcError::Encode`); native BMC now decides it
+    /// under QF_AUFBV and finds the shallowest counterexample.
+    #[test]
+    fn bmc_decides_a_write_then_read_on_a_memory() {
+        let file = parser::parse(MEM_WRITE_READ).expect("parse");
+        assert_eq!(
+            bmc_bad_reachable(&file, 4).expect("encodes under BvUfArray"),
+            BmcOutcome::Violated { depth: 1 }
+        );
+        assert!(matches!(
+            decide_bad_safety(&file, 4, Some(5_000)).expect("decides"),
+            SafetyVerdict::Violated { .. }
+        ));
+    }
+
+    /// N5 — the memory's `init` is applied at frame 0. Were it dropped, the memory would start
+    /// free and `bad` would fire at depth 0: a spurious counterexample on a safe design.
+    #[test]
+    fn a_memory_init_is_applied_so_a_safe_memory_is_proved_safe() {
+        let file = parser::parse(&mem_constant(true)).expect("parse");
+        assert_eq!(
+            bmc_bad_reachable(&file, 4).expect("encodes"),
+            BmcOutcome::NoCexWithin { k: 4 }
+        );
+        assert!(matches!(
+            decide_bad_safety(&file, 4, Some(5_000)).expect("decides"),
+            SafetyVerdict::Safe { .. }
+        ));
+    }
+
+    /// The negative control: without an `init` the memory is nondeterministic at frame 0
+    /// (BTOR2 semantics), so the same `bad` is reachable at depth 0.
+    #[test]
+    fn a_memory_without_init_starts_free() {
+        let file = parser::parse(&mem_constant(false)).expect("parse");
+        assert_eq!(
+            bmc_bad_reachable(&file, 4).expect("encodes"),
+            BmcOutcome::Violated { depth: 0 }
+        );
+    }
 
     /// N0.5 — a peer's decision interrupts the query in flight. The `bad` is the pigeonhole
     /// principle with 11 pigeons and 10 holes over 1-bit inputs — trivial to bit-blast and
