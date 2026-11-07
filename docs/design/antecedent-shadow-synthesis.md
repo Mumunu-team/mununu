@@ -199,7 +199,7 @@ Each asserts the expected verdict AND the presence of a shadow entry in the repo
 2. Run the differential oracle under `mununu-sva` image; require green before merge.
 3. Update `docs/verifying-rtl.md` and `docs/api-schemas/verdict.md` (from the Phase C wide-doc pass) to describe shadow-synth and the new report fields.
 4. Update `wiki/RTL-Verification-Pipeline.md` with the new pipeline diagram (SVA lift → cone analysis → shadow-synth → exact engine).
-5. Update the cross-repo prompt (`docs/consumer-briefings/2026-09-open-issue-sweep.md`) to say: refusal is now the fallback, not the default; shadow-synth is the primary path.
+5. Update the cross-repo prompt (the consumer briefing of that sweep; it was never written under a name of its own) to say: refusal is now the fallback, not the default; shadow-synth is the primary path.
 6. New policy file `docs/policies/cross-repo-impact.md` — enforce the Docker-rebuild-decision table format on every PR that changes engine behavior. Referenced from CLAUDE.md.
 7. File the follow-up mununu#477 (verify cube engine also handles input antecedents correctly — differential oracle for the differential oracle). Not blocking this PR.
 

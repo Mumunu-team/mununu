@@ -1,6 +1,6 @@
 # Secure boot ROM — black-box modules in a critical use case
 
-> **Industrial example** for [Document A — black-box modules in compositional extraction](../../../docs/design/black-box-modules.md) §9. Exercises every concept the document covers end-to-end against the mununu binary on `main`.
+> **Industrial example** for [Document A — black-box modules in compositional extraction](../../../docs/archive/design/black-box-modules.md) §9. Exercises every concept the document covers end-to-end against the mununu binary on `main`.
 
 ## What this example is
 

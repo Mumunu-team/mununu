@@ -88,5 +88,5 @@ neither blocking:
 Anything beyond the recognised idioms still falls back to linearisation
 with a structured warning. The hand-authored CTXDSL remains the
 canonical model whenever synthesis cannot represent a construct
-faithfully — see docs/design/c-extraction-correctness-scope.md.
+faithfully — see docs/archive/design/c-extraction-correctness-scope.md.
 EOF

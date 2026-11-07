@@ -115,7 +115,7 @@ Every page or section under `wiki/**`, `docs/**`, `README.md`, `examples/**/READ
 > Source of truth: [`<symbol or path>`](<relative path>#L<line>) — surface: CLI | API | UI | (CLI+API+UI)
 ```
 
-Exempt: `> Concept: <one-line>` sections and files tagged `> Status: planning`. Dead code, deleted tests, non-default features, files outside the repo and `mununu-private/` are not acceptable anchors. `/docs-traceability` verifies every anchor; the commit that renames or removes a symbol updates its anchors. **Cadence (advisory):** after more than 10 commits on `main` without a docs touch, the next commit ships a docs delta or records a `/docs-traceability` verdict — `make docs-audit` reports the count and the areas that moved.
+Exempt: `> Concept: <one-line>` sections, files tagged `> Status: planning`, and the restored history under `docs/archive/` (tagged `> Status: historical`). Dead code, deleted tests, non-default features, files outside the repo and `mununu-private/` are not acceptable anchors. `/docs-traceability` verifies every anchor; the commit that renames or removes a symbol updates its anchors. **Cadence (advisory):** after more than 10 commits on `main` without a docs touch, the next commit ships a docs delta or records a `/docs-traceability` verdict — `make docs-audit` reports the count and the areas that moved.
 
 ## Claims Integrity
 

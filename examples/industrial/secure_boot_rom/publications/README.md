@@ -9,7 +9,7 @@ Drafts of the two derivative artefacts that publish the results of the secure bo
 | [`substack.md`](substack.md) | Substack post — technical deep-dive | 2,800 words |
 | [`linkedin.md`](linkedin.md) | LinkedIn post — executive summary | ~180 words |
 
-## Validation gate (per `docs/design/black-box-modules.md` §10.3)
+## Validation gate (per `docs/archive/design/black-box-modules.md` §10.3)
 
 Before either draft is posted publicly, all four checks must pass. Status is updated by hand when each one is signed off.
 

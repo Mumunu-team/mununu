@@ -1,7 +1,7 @@
 //! HW/SW codesign — formal verification across the boundary.
 //!
 //! Implements Document C of mununu's four-document arc — see
-//! [`docs/design/hw-sw-codesign-extraction.md`](../../../../docs/design/hw-sw-codesign-extraction.md).
+//! [`docs/archive/design/hw-sw-codesign-extraction.md`](../../../../docs/archive/design/hw-sw-codesign-extraction.md).
 //!
 //! The conceptual model: peripheral RTL + firmware C, modelled as two
 //! reactive modules (Alur & Henzinger, *Reactive Modules*, FMSD 1999)

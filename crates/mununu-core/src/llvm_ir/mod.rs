@@ -2,7 +2,7 @@
 //! C-extraction principled lift.
 //!
 //! The shape and design is documented in
-//! [`docs/design/c-extraction-correctness-scope.md`](../../../docs/design/c-extraction-correctness-scope.md)
+//! [`docs/archive/design/c-extraction-correctness-scope.md`](../../../docs/archive/design/c-extraction-correctness-scope.md)
 //! and the implementation plan at
 //! `~/.claude/plans/i-want-you-to-distributed-orbit.md`.
 //!

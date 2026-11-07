@@ -1,6 +1,6 @@
 //! Gap markers — explicit "unknown" regions in a contract.
 //!
-//! Task A3 of `docs/design/black-box-modules.md`. When the discovery
+//! Task A3 of `docs/archive/design/black-box-modules.md`. When the discovery
 //! pipeline (task A5/A6) encounters a black-box module it cannot fully
 //! characterise, it emits one or more `GapMarker` records describing
 //! *what* is unknown and *why* it matters. These are then:

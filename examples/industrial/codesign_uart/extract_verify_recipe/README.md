@@ -116,7 +116,7 @@ The script evaluates three formulas:
 ## Soundness posture
 
 - The firmware extraction is **sound for safety** by the
-  [`docs/design/c-extraction-correctness-scope.md`](../../../../docs/design/c-extraction-correctness-scope.md)
+  [`docs/archive/design/c-extraction-correctness-scope.md`](../../../../docs/archive/design/c-extraction-correctness-scope.md)
   framing: LLVM-IR-based lifting over-approximates concrete C executions, and
   every register access in the synthesised automaton corresponds to an actual
   load/store the compiler emitted.

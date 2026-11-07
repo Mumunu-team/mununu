@@ -1,6 +1,6 @@
 # Dual-frontend SoC — RTL frontend unification, exercised
 
-> **Industrial example** for [Document B — RTL frontend unification](../../../docs/design/rtl-frontend-unification.md) §B.8. Exercises the seam-vs-core principle against the mununu binary on `main`: the open pieces of the SoC compose as ordinary mununu automata; the closed-IP DDR3 PHY is modelled as a 2-state chaotic stub with uncontrollable outputs, and the new `mununu contract sidecars` CLI produces the same JSON shape an auto-emitting adapter will produce once Document B's yosys-side integration ships.
+> **Industrial example** for [Document B — RTL frontend unification](../../../docs/archive/design/rtl-frontend-unification.md) §B.8. Exercises the seam-vs-core principle against the mununu binary on `main`: the open pieces of the SoC compose as ordinary mununu automata; the closed-IP DDR3 PHY is modelled as a 2-state chaotic stub with uncontrollable outputs, and the new `mununu contract sidecars` CLI produces the same JSON shape an auto-emitting adapter will produce once Document B's yosys-side integration ships.
 
 ## What this example is
 
@@ -18,7 +18,7 @@ A small SoC fragment with three components:
 └──────────────┘       └─────────────────────┘
 ```
 
-The host controller drives both the UART peripheral and the DDR3 PHY. The UART is fully open and its state machine is verifiable end-to-end. The DDR3 PHY is `(* blackbox *)` in real RTL; in this CTXDSL model it appears as a 2-state automaton (`Idle` / `Busy`) with an *uncontrollable* `ddr_ready` transition — exactly the chaotic-stub default from [Document A §2](../../../docs/design/black-box-modules.md#2-extracting-the-interface--unified-discovery-pipeline).
+The host controller drives both the UART peripheral and the DDR3 PHY. The UART is fully open and its state machine is verifiable end-to-end. The DDR3 PHY is `(* blackbox *)` in real RTL; in this CTXDSL model it appears as a 2-state automaton (`Idle` / `Busy`) with an *uncontrollable* `ddr_ready` transition — exactly the chaotic-stub default from [Document A §2](../../../docs/archive/design/black-box-modules.md#2-extracting-the-interface--unified-discovery-pipeline).
 
 ## What this example demonstrates
 

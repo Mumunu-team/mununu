@@ -55,7 +55,7 @@
 //       --controller-mode parity-game
 //
 // See also: examples/bus_arbiter_retry.ctxdsl (single-channel version),
-// wiki/Controller-Modes.md, docs/ltl_templates/temporal_logic_patterns.md.
+// wiki/Controller-Modes.md, docs/archive/ltl_templates/temporal_logic_patterns.md.
 
 context dual_arbiter_alt4 {
     automata {

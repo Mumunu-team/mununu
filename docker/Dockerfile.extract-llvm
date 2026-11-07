@@ -36,4 +36,4 @@ USER appuser
 WORKDIR /work
 
 # Placeholder — extraction script will be added in Phase 6
-ENTRYPOINT ["echo", "LLVM extraction frontend not yet implemented. See docs/architecture/extraction.md"]
+ENTRYPOINT ["echo", "LLVM extraction frontend not yet implemented. See docs/adapters/extraction.md"]

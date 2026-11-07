@@ -1,6 +1,6 @@
 //! SCC-based discharge check for assume/guarantee contracts.
 //!
-//! Task A2 of `docs/design/black-box-modules.md`. Given a `ContractSet`,
+//! Task A2 of `docs/archive/design/black-box-modules.md`. Given a `ContractSet`,
 //! builds the directed graph where each clause is a node and each
 //! `(discharger, dischargee)` edge means "this guarantee discharges that
 //! assumption," then runs Tarjan SCC to detect cycles. The verdict tells
