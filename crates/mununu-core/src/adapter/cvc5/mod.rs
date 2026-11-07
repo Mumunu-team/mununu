@@ -798,32 +798,13 @@ mod tests {
 
     #[test]
     fn locate_cvc5_returns_structured_error_when_binary_absent() {
-        // Force a definitely-missing path via the env var. The
-        // function MUST return a structured AdapterError (not
-        // panic) so callers can fall back gracefully.
-        // SAFETY: env vars are process-global; this test sets +
-        // unsets to avoid leaking the bogus path to other tests
-        // that may discover via PATH. Tests in the same crate
-        // run in parallel by default but `--test-threads=1`
-        // serializes if collisions show up.
-        // Use a path that's guaranteed not to exist + not
-        // executable.
-        let original = std::env::var("MUNUNU_CVC5_PATH").ok();
-        // SAFETY: required for env var manipulation in tests; the
-        // value is restored before the test returns.
-        unsafe {
-            std::env::set_var(
-                "MUNUNU_CVC5_PATH",
-                "/nonexistent/path/to/cvc5/binary/definitely/not/here",
-            );
-        }
+        // A bogus path, overridden for this thread only (mununu#880). The function must
+        // return a structured AdapterError, never panic, so callers fall back gracefully.
+        let _env = crate::adapter::env_var::override_for_test(
+            "MUNUNU_CVC5_PATH",
+            "/nonexistent/path/to/cvc5/binary/definitely/not/here",
+        );
         let result = locate_cvc5();
-        unsafe {
-            match original {
-                Some(v) => std::env::set_var("MUNUNU_CVC5_PATH", v),
-                None => std::env::remove_var("MUNUNU_CVC5_PATH"),
-            }
-        }
         assert!(
             result.is_err(),
             "locate_cvc5 MUST return Err when the binary is absent; got {result:?}"

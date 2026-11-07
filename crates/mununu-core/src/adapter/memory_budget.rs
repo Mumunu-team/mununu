@@ -199,7 +199,7 @@ pub fn read_memory_budget_env() -> Option<u64> {
 
 /// As [`read_memory_budget_env`], but also reports where the ceiling came from.
 pub fn effective_memory_budget() -> (Option<u64>, BudgetSource) {
-    let raw = std::env::var(MEMORY_BUDGET_ENV).ok();
+    let raw = crate::adapter::env_var::read(MEMORY_BUDGET_ENV);
     resolve_memory_budget(raw.as_deref(), detect_cgroup_memory_limit_bytes())
 }
 

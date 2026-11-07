@@ -960,28 +960,13 @@ mod tests {
 
     #[test]
     fn locate_verilator_returns_structured_error_when_binary_absent() {
-        // Force a definitely-missing path via the env var. The
-        // function MUST return a structured AdapterError (not panic)
-        // so callers can fall back gracefully.
-        // SAFETY: env vars are process-global; this test sets +
-        // restores to avoid leaking the bogus path to other tests
-        // that may discover via PATH.
-        let original = std::env::var("MUNUNU_VERILATOR_PATH").ok();
-        // SAFETY: required for env var manipulation in tests; the
-        // value is restored before the test returns.
-        unsafe {
-            std::env::set_var(
-                "MUNUNU_VERILATOR_PATH",
-                "/nonexistent/path/to/verilator/binary/definitely/not/here",
-            );
-        }
+        // A bogus path, overridden for this thread only (mununu#880). The function must
+        // return a structured AdapterError, never panic, so callers fall back gracefully.
+        let _env = crate::adapter::env_var::override_for_test(
+            "MUNUNU_VERILATOR_PATH",
+            "/nonexistent/path/to/verilator/binary/definitely/not/here",
+        );
         let result = locate_verilator();
-        unsafe {
-            match original {
-                Some(v) => std::env::set_var("MUNUNU_VERILATOR_PATH", v),
-                None => std::env::remove_var("MUNUNU_VERILATOR_PATH"),
-            }
-        }
         assert!(
             result.is_err(),
             "locate_verilator MUST return Err when the binary is absent; got {result:?}"

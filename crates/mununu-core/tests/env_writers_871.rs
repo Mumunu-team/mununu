@@ -4,25 +4,16 @@
 //! that sets a variable changes what every concurrent test reads. The #871 flake was one such
 //! write: a test briefly set `MUNUNU_MAX_PROCESS_MEMORY_BYTES` to 1 GiB, under a suite RSS of
 //! about 4.4 GiB, so a verify-auto test that hit a memory checkpoint inside that window
-//! abstained. That writer is gone. The ones below remain, each one a window in which another
-//! test sees a missing tool or writes its breadcrumbs into someone else's file. This list may
-//! only shrink (mununu#880): a new writer fails here, and should inject its value instead.
+//! abstained. That writer is gone, and so are the nine others (mununu#880): each former writer
+//! now sets a thread-local override through `adapter::env_var` that only its own thread reads.
+//! A new writer fails here; it should use that override instead.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
-/// `(file under src/, number of std::env::set_var / remove_var calls)`.
-const KNOWN_WRITERS: &[(&str, usize)] = &[
-    ("adapter/btor2/bit_blast.rs", 3),   // MUNUNU_VERILATOR_PATH
-    ("adapter/btor2/cegar.rs", 3),       // MUNUNU_CVC5_PATH, across a whole refinement loop
-    ("adapter/btormc/mod.rs", 2),        // MUNUNU_BTORMC_PATH
-    ("adapter/cvc5/mod.rs", 3),          // MUNUNU_CVC5_PATH
-    ("adapter/partial_json.rs", 7),      // MUNUNU_VERIFY_AUTO_PARTIAL_JSON
-    ("adapter/slang/mod.rs", 3),         // MUNUNU_SLANG_PATH
-    ("adapter/slang/verify_auto.rs", 8), // MUNUNU_SHADOW_BTOR2_DUMP, the partial-JSON path
-    ("adapter/verilator/mod.rs", 3),     // MUNUNU_VERILATOR_PATH
-    ("adapter/yosys/mod.rs", 3),         // MUNUNU_SV2V_PATH
-];
+/// `(file under src/, number of std::env::set_var / remove_var calls)`. Empty since mununu#880:
+/// every former writer goes through `adapter::env_var`'s thread-local override instead.
+const KNOWN_WRITERS: &[(&str, usize)] = &[];
 
 fn count_writers(dir: &Path, root: &Path, out: &mut BTreeMap<String, usize>) {
     for entry in std::fs::read_dir(dir).expect("src/ is readable") {

@@ -71,9 +71,9 @@ pub struct PonoBin {
 /// is an `Err`. Callers fall back gracefully (the portfolio member is simply
 /// unavailable, exactly like btormc / cvc5).
 pub fn locate_pono() -> Result<PonoBin, AdapterError> {
-    let path = std::env::var("MUNUNU_PONO_PATH")
+    let path = crate::adapter::env_var::read("MUNUNU_PONO_PATH")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("pono"));
+        .unwrap_or_else(|| PathBuf::from("pono"));
     match crate::adapter::probe_tool(&path, &["-h"]) {
         Ok(_) => Ok(PonoBin {
             path,
