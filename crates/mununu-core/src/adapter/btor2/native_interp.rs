@@ -860,7 +860,7 @@ fn locate_mathsat() -> Result<std::path::PathBuf, String> {
     let path = std::env::var("MUNUNU_MATHSAT_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("mathsat"));
-    match std::process::Command::new(&path).arg("-version").output() {
+    match crate::adapter::probe_tool(&path, &["-version"]) {
         Ok(_) => Ok(path),
         Err(e) => Err(format!(
             "mathsat unavailable ({e}); set MUNUNU_MATHSAT_PATH or use the `mununu-sva` image \

@@ -64,7 +64,7 @@ pub fn locate_ric3() -> Result<Ric3Bin, AdapterError> {
     let path = std::env::var("MUNUNU_RIC3_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("rIC3"));
-    match Command::new(&path).arg("--help").output() {
+    match crate::adapter::probe_tool(&path, &["--help"]) {
         Ok(_) => Ok(Ric3Bin { path }),
         Err(e) => Err(err(format!(
             "`{}` not invokable: {e}. Set MUNUNU_RIC3_PATH or install rIC3 (oss-cad-suite bundles it).",
