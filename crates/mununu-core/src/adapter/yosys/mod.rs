@@ -2567,8 +2567,8 @@ fn locate_yosys() -> Result<PathBuf, AdapterError> {
     }
     let candidates = ["yosys"];
     for c in candidates {
-        if let Ok(out) = Command::new(c).arg("-V").output()
-            && out.status.success()
+        if let Ok((status, _, _)) = crate::adapter::probe_tool(Path::new(c), &["-V"])
+            && status.success()
         {
             return Ok(PathBuf::from(c));
         }
@@ -2587,8 +2587,8 @@ fn locate_sv2v() -> Result<PathBuf, AdapterError> {
     if let Ok(path) = std::env::var("MUNUNU_SV2V_PATH") {
         return Ok(PathBuf::from(path));
     }
-    if let Ok(out) = Command::new("sv2v").arg("--version").output()
-        && out.status.success()
+    if let Ok((status, _, _)) = crate::adapter::probe_tool(Path::new("sv2v"), &["--version"])
+        && status.success()
     {
         return Ok(PathBuf::from("sv2v"));
     }
@@ -2809,19 +2809,13 @@ fn tool_version(bin: &Path, flag: &str, label: &str) -> Result<String, AdapterEr
     if let Some(banner) = cache.lock().ok().and_then(|m| m.get(&key).cloned()) {
         return Ok(banner);
     }
-    let out = Command::new(bin)
-        .arg(flag)
-        .output()
-        .map_err(|e| AdapterError {
+    let (_, stdout, stderr) =
+        crate::adapter::probe_tool(bin, &[flag]).map_err(|e| AdapterError {
             kind: AdapterErrorKind::ParseError,
             message: format!("adapter/yosys: failed to read {label} version: {e}"),
             location: None,
         })?;
-    let banner = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
+    let banner = format!("{stdout}{stderr}");
     if let Ok(mut m) = cache.lock() {
         m.insert(key, banner.clone());
     }

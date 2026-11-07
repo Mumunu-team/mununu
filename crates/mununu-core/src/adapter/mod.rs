@@ -609,6 +609,51 @@ impl std::error::Error for AdapterError {}
 /// status-check body so they cannot drift. Returns `(resolved path, parsed version)`;
 /// a missing binary or a failed probe is `Err(UnsupportedConstruct)` so callers degrade
 /// gracefully (the tool is simply unavailable).
+/// How long a tool gets to answer its discovery probe (`--version`, `--help`, `-V`) before it is
+/// reported as unavailable (mununu#876). The stock tools answer in milliseconds; this is the
+/// backstop for a wrapper that ignores the flag, or a binary that hangs on start (a licence
+/// check, a network filesystem). A probe used to be a bare `Command::output()`, so such a tool
+/// hung `mununu` before any member budget applied.
+pub(crate) const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Why a discovery probe produced no answer.
+#[derive(Debug)]
+pub(crate) enum ProbeFailure {
+    /// The binary could not be started (absent, not executable).
+    Spawn(std::io::Error),
+    /// It started and did not exit within [`PROBE_TIMEOUT`]; it was killed with its group.
+    Timeout,
+}
+
+impl std::fmt::Display for ProbeFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProbeFailure::Spawn(e) => write!(f, "{e}"),
+            ProbeFailure::Timeout => write!(
+                f,
+                "no answer within {} s (the process was killed)",
+                PROBE_TIMEOUT.as_secs()
+            ),
+        }
+    }
+}
+
+/// Run a tool's discovery probe under [`PROBE_TIMEOUT`]: `(status, stdout, stderr)` when it
+/// answers, else why not. The child runs in its own process group, so a wrapper's forks die with
+/// it (mununu#875).
+pub(crate) fn probe_tool(
+    path: &std::path::Path,
+    args: &[&str],
+) -> Result<(std::process::ExitStatus, String, String), ProbeFailure> {
+    let mut cmd = std::process::Command::new(path);
+    cmd.args(args);
+    match run_with_timeout(&mut cmd, None, PROBE_TIMEOUT) {
+        Ok(Some(out)) => Ok(out),
+        Ok(None) => Err(ProbeFailure::Timeout),
+        Err(e) => Err(ProbeFailure::Spawn(e)),
+    }
+}
+
 pub(crate) fn locate_tool(
     env_var: &str,
     default_bin: &str,
@@ -617,34 +662,29 @@ pub(crate) fn locate_tool(
     parse_version: impl Fn(&str) -> Option<String>,
 ) -> Result<(std::path::PathBuf, String), AdapterError> {
     use std::path::PathBuf;
-    use std::process::Command;
     let path = std::env::var(env_var)
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(default_bin));
-    let output = Command::new(&path)
-        .arg("--version")
-        .output()
-        .map_err(|e| AdapterError {
-            kind: AdapterErrorKind::UnsupportedConstruct,
-            message: format!(
-                "adapter/{adapter_tag}: failed to invoke `{} --version`: {e}. {install_hint}",
-                path.display()
-            ),
-            location: None,
-        })?;
-    if !output.status.success() {
+    let (status, stdout, _) = probe_tool(&path, &["--version"]).map_err(|e| AdapterError {
+        kind: AdapterErrorKind::UnsupportedConstruct,
+        message: format!(
+            "adapter/{adapter_tag}: failed to invoke `{} --version`: {e}. {install_hint}",
+            path.display()
+        ),
+        location: None,
+    })?;
+    if !status.success() {
         return Err(AdapterError {
             kind: AdapterErrorKind::UnsupportedConstruct,
             message: format!(
                 "adapter/{adapter_tag}: `{} --version` exited with status {}",
                 path.display(),
-                output.status
+                status
             ),
             location: None,
         });
     }
-    let version = parse_version(&String::from_utf8_lossy(&output.stdout))
-        .unwrap_or_else(|| "<unparseable>".to_string());
+    let version = parse_version(&stdout).unwrap_or_else(|| "<unparseable>".to_string());
     Ok((path, version))
 }
 

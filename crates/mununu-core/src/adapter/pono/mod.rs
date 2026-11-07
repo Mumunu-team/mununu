@@ -74,7 +74,7 @@ pub fn locate_pono() -> Result<PonoBin, AdapterError> {
     let path = std::env::var("MUNUNU_PONO_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("pono"));
-    match Command::new(&path).arg("-h").output() {
+    match crate::adapter::probe_tool(&path, &["-h"]) {
         Ok(_) => Ok(PonoBin {
             path,
             version: "<pono; no --version>".to_string(),
