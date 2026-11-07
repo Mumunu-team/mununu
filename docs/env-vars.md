@@ -12,6 +12,10 @@ grep -rhoE 'env::var(_os)?\("MUNUNU_[A-Z0-9_]+"' crates/ | grep -oE 'MUNUNU_[A-Z
   | while read v; do grep -q "\`$v\`" docs/env-vars.md || echo "UNDOCUMENTED: $v"; done
 ```
 
+and, both ways, by `crates/mununu-core/tests/env_vars_documented_d1.rs`: every `MUNUNU_*` name the
+crates read has a row here, and every row names a variable something reads (a row may say
+`scripts/…` when only a script reads it). `0` means **off** for every budget knob.
+
 ## General
 
 > Source of truth: [`crates/mununu-cli/src/main.rs`](../crates/mununu-cli/src/main.rs) — surface: CLI+API
@@ -25,6 +29,7 @@ grep -rhoE 'env::var(_os)?\("MUNUNU_[A-Z0-9_]+"' crates/ | grep -oE 'MUNUNU_[A-Z
 | `MUNUNU_DEPLOYMENT_CONFIG` | the deployment configuration (`mununu.toml`: template packs, `enabled_domains`) when neither `--deployment-config` nor `server --config` names one; an unreadable file is an error, not a fallback to the defaults ([`deployment`](../crates/mununu-core/src/deployment.rs)). |
 | `MUNUNU_UPDATE_API_SCHEMAS` (`=1`) | with `cargo test -p mununu-core --lib --features api api_schema_drift_ -- --test-threads=1`, rewrites `docs/api-schemas/*.schema.json` from the Rust types instead of failing on drift. |
 | `MUNUNU_R_S5_DUMP_PATH` | debug aid in the CLI loader: dumps the post-widening JSON of a sidecar load for inspection. |
+| `MUNUNU_VERSION_LINE` | **build-time**, not runtime: `build.rs` sets it and `clap` bakes it into `mununu --version` (`0.5.10 (24bb5d7)`, `-dirty` when the tree was); nothing reads it at run time (mununu#715). |
 
 ## Subprocess tools (locators and keep-temp switches)
 
@@ -50,10 +55,10 @@ Design notes: [`docs/design/bdd-variable-ordering.md`](design/bdd-variable-order
 |---|---|
 | `MUNUNU_BDD_MAX_BITS` | **bit cap**: register+input bits in the property cone before the engine abstains (`abstained on the BIT CAP`). The exact engine admits cones up to 40 bits by default and raises its own cap to fit the cone up to 192; above that it abstains with a reason unless told otherwise. The width it can actually decide depends on the shape — see the frontier table. Unset, the cap is `max(40, min(cone, 192))` (`default_cap_for_cone`); the recoverability verb and the ⊥ re-plan rescues retry a refused cone once at the 1024-bit ceiling (the cap ladder). The deciding width per shape is measured in [`verifying-rtl.md`](verifying-rtl.md#what-decides-at-what-width--the-measured-frontier). |
 | `MUNUNU_BDD_ARENA_NODES` | OxiDD arena size; scales the bit-blast node budget and the fixpoint budget. Defaults `1<<24` (≤ 40-bit cones) / `1<<26` (wider), since deciding consumer cones measured 92.5 % occupancy of the old arena; exhaustion inside one apply is an uncatchable abort (mununu#553). |
-| `MUNUNU_BDD_ITER_BUDGET` | fixpoint iteration budget (`abstained on the ITERATION budget`), default `1<<20` — the deterministic total-work bound. Raster-shaped cones follow `iters ≈ 1.95·h·v` (720p ≈ 230 %, 1080p ≈ 460 % of it); the squaring rescue below is what decides those. |
+| `MUNUNU_BDD_ITER_BUDGET` | fixpoint iteration budget (`abstained on the ITERATION budget`), default `1<<20` — the deterministic total-work bound; `0` = off (since B-1; it used to mean zero iterations, i.e. abstain at once). Raster-shaped cones follow `iters ≈ 1.95·h·v` (720p ≈ 230 %, 1080p ≈ 460 % of it); the squaring rescue below is what decides those. |
 | `MUNUNU_BDD_SQUARING` | the **squaring rescue**, on by default (`=0` disables): a pure-reachability fixpoint (`EF`/`AG` shape) still iterating after 4,096 steps is read off the transitive closure of the transition relation, built in its own arena by iterative squaring (`max(48, state bits + 1)` squarings); and a fair-EG ν (`verify-liveness --justice`'s `E_C G true`) past the threshold is read off the same closure as `EF(Core)`, `Core(s) = ⋀ₖ ∃t. R⁺(s,t) ∧ R⁺(t,s) ∧ lₖ(t)` (Touati–Brayton–Kurshan). A closure that does not compress is refused at 80 % of the arena and the iteration resumes. For an all-1-bit-state design the closure's variables follow the circuit visit rank (an AIG's latch order is not significance-monotone). |
-| `MUNUNU_BDD_FIXPOINT_NODES` | fixpoint live-node budget (`abstained on the fixpoint NODE budget`), default 80 % of the arena; `0` = no explicit cap. A resource guard, not a decidability predictor. |
-| `MUNUNU_BDD_FIXPOINT_ITERS` | the iteration half of the LATENCY bound (large *and* still growing); `0` disables that bound (the arena-safety net still applies). |
+| `MUNUNU_BDD_FIXPOINT_NODES` | fixpoint live-node budget (`abstained on the fixpoint NODE budget`), default 80 % of the arena; `0` = off (no cap). A resource guard, not a decidability predictor. |
+| `MUNUNU_BDD_FIXPOINT_ITERS` | the iteration half of the LATENCY bound (large *and* still growing); `0` = off for that bound (the arena-safety net still applies). |
 | `MUNUNU_BDD_FIXPOINT_REUSE` (`=0`) | disable the restart rule (a nested fixpoint of the same polarity restarts from its previous value); legacy evaluation. |
 | `MUNUNU_BDD_TIME_BUDGET_MS` | opt-in wall-clock budget for the fixpoint. **Default `0` = off**: a clock makes the VERDICT host-dependent, and that ⊥ is indistinguishable from a real one. The ladder's per-attempt deadlines are separate and bounded. |
 | `MUNUNU_EXACT_LADDER_MS` | the first stage's slice of the exact **ladder** (default 2000 ms): unrestricted → on a retryable abstention the reachable-state restriction with a 5 s probe → unrestricted remainder. Runs in `btor2 verify-liveness --justice`, `sv verify-auto`'s exact member and the ⊥ re-plan rescues. |
@@ -64,10 +69,11 @@ Design notes: [`docs/design/bdd-variable-ordering.md`](design/bdd-variable-order
 | `MUNUNU_BDD_CACHE_DIV` | apply-cache size as `arena / div` (default 4; `64` saves 60–80 % on shallow properties and costs +291 % on the representation-bound relational class — a knob, no automatic policy survived measurement). |
 | `MUNUNU_NO_ANTECEDENT_PROPAGATE` | disable antecedent constant propagation (`sig == K |-> C` has `K` propagated through `C`'s cone); per-request `--no-antecedent-propagate` / API `antecedent_propagate: false` (mununu#629). |
 | `MUNUNU_NO_INPUT_STATE` | disable **inputs in the state** (a property reading a primary input is decided over the product `(s, i)`); the refusal returns. Per-request `--no-input-state` / API `input_state: false` (mununu#656). |
-| `MUNUNU_NO_ANTECEDENT_SHADOW` | read by nothing since mununu#677 (the shadow synthesis was removed); accepted for compatibility. |
 | `MUNUNU_BDD_REPORT_PEAK`, `MUNUNU_BDD_REPORT_WORK` | one line per evaluation with the peak node count (after a collection) or the host-independent BDD-op counter (no collection — the one the profiling scripts set). A peak at or near the arena is a lower bound. |
 | `MUNUNU_BDD_STATS`, `MUNUNU_BDD_ORDER_DEBUG`, `MUNUNU_REPORT_BDD_LEVELS`, `MUNUNU_VALIDATE_BDD_LEVELS` | diagnostics: OxiDD apply-cache statistics (needs `--features oxidd-statistics`); the variable order as built with the `order_verdict` reading; the bit-blaster's level report; a level-consistency check. None changes a verdict. |
 | `MUNUNU_REPORT_BDD_ITERS` | one stderr line per exact-engine fixpoint step (`[mununu-bdd] step=… total=… live=… step_ms=…`): the instrument that brackets a step-level hang (mununu#816 — a step is one uninterruptible BDD apply, so the budget polls run only between steps). Off by default. |
+| `MUNUNU_ISOLATE_ENGINES` | run the BDD engines in a **child process** so an OxiDD stack overflow or abort is an exit code the parent turns into an abstention, not a dead run (mununu#543 W3, `adapter/engine_isolate.rs`). Off unless set. |
+| `MUNUNU_ISOLATE_CHILD` | set by the parent on the child it spawns, so the child does not isolate again; never set by hand. |
 
 ## Predicate-cube engines (`explicit`, `symbolic`) and the ⊥ re-plan
 
@@ -110,10 +116,13 @@ Design notes: [`docs/design/bdd-variable-ordering.md`](design/bdd-variable-order
 
 | variable | purpose |
 |---|---|
-| `MUNUNU_HWMCC_DIR`, `MUNUNU_HWMCC_FLAT`, `MUNUNU_HWMCC_GT`, `MUNUNU_HWMCC_MAXBYTES`, `MUNUNU_HWMCC_LIVE_DIR`, `MUNUNU_HWMCC_SKIP` | user-downloaded HWMCC corpora (bv track, flat BTOR2, ground truth `basename safe\|unsafe`, size cap, the LIVE set for `scripts/hwmcc_live_study.sh`); `MUNUNU_HWMCC_SKIP` = comma-separated name substrings the adjudication harness skips, and `MUNUNU_HWMCC_TIMEOUT_MS` (default 300 000) its per-instance run budget, so one crashing or hanging instance does not void the table (mununu#738). |
+| `MUNUNU_HWMCC_DIR`, `MUNUNU_HWMCC_FLAT`, `MUNUNU_HWMCC_GT`, `MUNUNU_HWMCC_MAXBYTES`, `MUNUNU_HWMCC_LIVE_DIR`, `MUNUNU_HWMCC_SKIP`, `MUNUNU_HWMCC_TIMEOUT_MS` | user-downloaded HWMCC corpora (bv track, flat BTOR2, ground truth `basename safe\|unsafe`, size cap, the LIVE set for `scripts/hwmcc_live_study.sh`); `MUNUNU_HWMCC_SKIP` = comma-separated name substrings the adjudication harness skips, and `MUNUNU_HWMCC_TIMEOUT_MS` (default 300 000) its per-instance run budget, so one crashing or hanging instance does not void the table (mununu#738). |
 | `MUNUNU_E2E_LIFT_DUMP` | path; `e2e_lifted_register_names_carry_no_per_run_temp_path` writes the edn IP's first lift there, to diff a lift by hand (mununu#806). |
 | `MUNUNU_DEBUG_DUMP` | path of a `MUNUNU_SHADOW_BTOR2_DUMP` file; the ignored probe `debug_antecedent_check_on_dump` (`verify_auto::fault_posture_debug`) runs the antecedent-vacuity question on it under both flags. |
 | `MUNUNU_DISCOVER_DIR`, `MUNUNU_DISCOVER_MAXBYTES`, `MUNUNU_SPCR_PROBE_DIR`, `MUNUNU_INTERP_PROBE` | external BTOR2 directories / files for the predicate-discovery, SPCR and interpolation sweeps. |
 | `MUNUNU_NATIVE_MAXK`, `MUNUNU_NATIVE_MS`, `MUNUNU_CENSUS_EXPLICIT` (`=1`), `MUNUNU_PARITY_ONLY` | the census / adjudication tests' bound, per-check budget, opt-in explicit-engine fallback, and name filter. |
 | `MUNUNU_PROBE_BTOR`, `MUNUNU_PROBE_BTOR2`, `MUNUNU_PROBE_ATOMS`, `MUNUNU_PROBE_GOOD`, `MUNUNU_PROBE_OP`, `MUNUNU_PROBE_DEPTH`, `MUNUNU_PROBE_RASTER`, `MUNUNU_PROBE_SECOND_SHADOW`, `MUNUNU_E1_ARM` | one-process-per-case reproduction probes (stack-depth, raster size, apply-call arms); exit 0 = survived, 101/134 = reproduced. |
 | `MUNUNU_R3_UPDATE_BASELINE` (`=1`) | rewrite the R3 Kleene baseline fixture instead of comparing against it. |
+| `MUNUNU_DIFF_TIER_EXPLORE` | the random-BTOR2 differential tier draws a fresh seed instead of replaying `TIER_SEED` (`make diff-tier-explore`); the gate run never sets it. |
+| `MUNUNU_IC3_FRAMES`, `MUNUNU_IC3_REFINE`, `MUNUNU_IC3_QTO` | the IC3ia probe in `btor2/abs_safety.rs` (frame cap 40, refinement cap 24, per-query ms 8000); read only under `MUNUNU_INTERP_PROBE`. |
+| `MUNUNU_INTERP_SUFFIX`, `MUNUNU_INTERP_ITERS`, `MUNUNU_INTERP_QTO`, `MUNUNU_INTERP_OVERALL` | the native interpolation probe in `btor2/native_interp.rs` (suffix depth 24, iterations 64, per-query ms 10 000, overall ms 60 000); read only under `MUNUNU_INTERP_PROBE`. |
