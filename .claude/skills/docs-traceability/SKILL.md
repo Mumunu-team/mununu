@@ -26,6 +26,7 @@ If $ARGUMENTS is empty, derive scope from `git diff --name-only HEAD~1 HEAD` fil
 | `wiki/**/*.md` | Public wiki — every page must anchor |
 | `docs/**/*.md` | In-repo documentation — every page must anchor unless tagged `> Status: planning` |
 | `README.md`, `crates/*/README.md` | Project + crate READMEs |
+| `CLAUDE.md` | The project instructions — every `docs/` or `wiki/` path it cites must exist and be tracked (roadmap D3; it was outside the scope until 2026-11-07) |
 | `examples/**/README.md` | Example walkthroughs — anchor to the example file path and the CLI/API/UI commands that load it |
 | `.claude/agents/**/*.md` | Agent prompts — anchor each capability claim |
 | `.claude/skills/**/SKILL.md` | Skill prompts — anchor file/symbol references in the "Procedure" section |
@@ -75,6 +76,8 @@ The skill validates:
    - `symbol-missing` — cited symbol not found in the path (or not within ±5 lines of the cited line)
    - `surface-malformed` — surface tag not in the allowed set, or single-surface tag missing justification
    - `surface-unreachable` — declared surface does not expose the symbol
+
+3a. **The mechanical pass already runs in CI.** `crates/mununu-core/tests/docs_references_resolve_d2.rs` fails when a `docs/…md` or `wiki/…md` path cited from `CLAUDE.md`, `README.md`, the crates, `examples/`, `docs/` or `wiki/` does not exist; `crates/mununu-core/tests/no_links_into_untracked_paths_g4.rs` fails when a covered document points into `.claude/plans/`, `.claude/reviews/` or a directory the root `.gitignore` names. Read their output first; this skill adds the anchor grammar, symbol and surface checks the tests do not make.
 
 3b. **Validate prose links.** Every Markdown link in a covered file whose target is a repository path (not a URL, not `mununu-private/…`) must resolve to a git-tracked file or directory; a link into a gitignored path (`plans` (a planning note, not tracked), `reviews` (a private review note), `experiments/`) is `link-untracked`. The G4 audit of 2026-11-07 found 44 such links and 0 broken anchor lines: the links were the whole finding, and anchor-only validation saw none of them.
 
