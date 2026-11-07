@@ -7833,13 +7833,25 @@ pub(crate) fn escalate_bottom_with_slice(
         // an escalation that may abort mid-BDD-blast. The main loop's Unknown
         // outcomes stay; we simply skip the remaining escalation attempts. Break
         // rather than continue: the ceiling only rises during the loop.
-        if crate::adapter::memory_budget::check_process_memory_budget().is_err() {
+        // mununu#871 — the stop is named on the row it stopped at: a silent `break` left the row's
+        // ⊥ looking like an engine abstain ("not classified"), not the ceiling that skipped it.
+        if let Err(hit) = crate::adapter::memory_budget::check_process_memory_budget() {
+            notes.push(escalation_stopped_note(
+                &prop.name,
+                "⊥ escalation",
+                EscalationStop::Memory(hit),
+            ));
             break;
         }
         // mununu#504 — time joins memory here, for the same reason and with the same `break`:
         // `escalate_bottom` is a SECOND full pass over the property list, so without a guard an
         // out-of-time run can spend as long again after the main loop has already stopped.
         if crate::adapter::run_budget::expired() {
+            notes.push(escalation_stopped_note(
+                &prop.name,
+                "⊥ escalation",
+                EscalationStop::Time,
+            ));
             break;
         }
         // mununu#726 — the row gets the per-property budget (a child of the run budget, which
@@ -8816,13 +8828,25 @@ pub(crate) fn rescue_skipped_via_exact(
         // NO budget guard at all (neither memory nor time), so it could run unbounded after both
         // earlier passes had already stopped. `break`, matching `escalate_bottom`: neither budget
         // recovers during the loop.
-        if crate::adapter::run_budget::expired()
-            || crate::adapter::memory_budget::check_process_memory_budget().is_err()
-        {
-            break;
-        }
         if !matches!(prop.outcome, VerifyOutcome::Skipped { .. }) {
             continue;
+        }
+        // mununu#871 — checked once a row would be attempted, so the note names that row.
+        if let Err(hit) = crate::adapter::memory_budget::check_process_memory_budget() {
+            notes.push(escalation_stopped_note(
+                &prop.name,
+                "exact rescue of skipped rows",
+                EscalationStop::Memory(hit),
+            ));
+            break;
+        }
+        if crate::adapter::run_budget::expired() {
+            notes.push(escalation_stopped_note(
+                &prop.name,
+                "exact rescue of skipped rows",
+                EscalationStop::Time,
+            ));
+            break;
         }
         let Ok(formula) = mu_parser::parse(&prop.formula) else {
             continue;
@@ -9244,6 +9268,46 @@ fn recoverability_bot_reason_note(
             .into(),
         items,
         property: None,
+    }
+}
+
+/// Why a later pass over the property list stopped early (mununu#871).
+enum EscalationStop {
+    Memory(crate::adapter::memory_budget::MemoryBudgetExceeded),
+    Time,
+}
+
+/// A pass that stopped on a budget names the row it stopped at, under the run-level note's kind
+/// (`memory-budget-exceeded` / `time-budget-exceeded`), so a consumer keying on the kind sees it.
+fn escalation_stopped_note(name: &str, pass: &str, why: EscalationStop) -> VerificationNote {
+    let (kind, cause) = match why {
+        EscalationStop::Memory(hit) => (
+            "memory-budget-exceeded",
+            format!(
+                "the process memory ceiling was reached ({} B in use, ceiling {} B, {})",
+                hit.current_rss_bytes,
+                hit.limit_bytes,
+                crate::adapter::memory_budget::ceiling_provenance(),
+            ),
+        ),
+        EscalationStop::Time => (
+            "time-budget-exceeded",
+            "the run's wall-clock budget was reached".to_string(),
+        ),
+    };
+    VerificationNote {
+        kind: kind.into(),
+        level: NoteLevel::ScopeCaveat,
+        summary: format!(
+            "`{name}`: the {pass} stopped here because {cause}; this row and every later one it \
+             would have attempted keep their earlier verdict"
+        ),
+        detail: "mununu#871 — the stop is a budget, not an engine: the rows it skipped were never \
+                 attempted by this pass, so their `unknown` / `skipped` says nothing about what \
+                 the engines can decide. Raise or disable the budget (`0`) to attempt them."
+            .into(),
+        items: Vec::new(),
+        property: Some(name.to_string()),
     }
 }
 
@@ -10890,6 +10954,54 @@ mod tests {
         assert!(
             notes.iter().any(|n| n.summary.contains("GF (fair == 1)")),
             "the note must name the fairness assumption applied"
+        );
+    }
+
+    /// mununu#871 — an escalation stopped by a budget says so on the row it stopped at. The
+    /// fair-cycle row of the test above, under an already-expired run budget: before the fix the
+    /// pass broke silently and the row's only note blamed an unclassified engine abstain.
+    #[test]
+    fn an_escalation_stopped_by_the_budget_names_the_row_it_skipped() {
+        let mut report = AutoVerifyReport {
+            properties: vec![PropertyVerdict {
+                name: "req_ack".to_string(),
+                label: None,
+                kind: crate::adapter::slang::translate::SvaKind::Assert,
+                formula: "nu Z. ((!(req == 1) || mu Y. ((ack == 1) || [] Y)) && [] Z)".to_string(),
+                outcome: VerifyOutcome::Unknown { unknown_cells: 1 },
+                seeded_predicates: Vec::new(),
+                counterexample: None,
+                bottom_reason: None,
+                decided_by: None,
+                vacuity: None,
+                portfolio: None,
+            }],
+            ..Default::default()
+        };
+        let spent = crate::adapter::run_budget::Budget::unbounded();
+        spent.cancel();
+        let _guard = crate::adapter::run_budget::enter(&spent);
+        let notes = escalate_bottom(
+            &mut report,
+            FAIR_GATED,
+            false,
+            &VerifyAutoOptions::default(),
+            &[],
+        );
+        assert!(
+            matches!(report.properties[0].outcome, VerifyOutcome::Unknown { .. }),
+            "nothing was attempted, so the row keeps its ⊥"
+        );
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.kind == "time-budget-exceeded"
+                    && n.property.as_deref() == Some("req_ack")),
+            "the stop must be named on the row; notes: {:?}",
+            notes
+                .iter()
+                .map(|n| (&n.kind, &n.property))
+                .collect::<Vec<_>>()
         );
     }
 
