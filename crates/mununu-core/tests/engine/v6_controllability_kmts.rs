@@ -85,7 +85,7 @@ fn v6_amba_arbiter_lifts_with_controllability_aware_dual_labels() {
         // ctrl-combos.
         max_input_bits: 8,
         must_edge_inference: MustEdgeInference::Off,
-        may_edge_inference: Default::default(),
+        may_edge_inference: mununu_core::adapter::btor2::kmts_lift::MayEdgeInference::Off,
         config_values: std::collections::HashMap::new(),
         compound_exprs: std::collections::HashMap::new(),
         derived_predicates: Vec::new(),
@@ -163,7 +163,7 @@ fn v6_amba_arbiter_lifts_with_mayonly_transitions_present() {
         max_cube_count: 1024,
         max_input_bits: 8,
         must_edge_inference: MustEdgeInference::Off,
-        may_edge_inference: Default::default(),
+        may_edge_inference: mununu_core::adapter::btor2::kmts_lift::MayEdgeInference::Off,
         config_values: std::collections::HashMap::new(),
         compound_exprs: std::collections::HashMap::new(),
         derived_predicates: Vec::new(),
@@ -218,7 +218,12 @@ fn v6_amba_arbiter_lift_produces_expected_cube_count() {
         register: "burst".into(),
         value: 0,
     }];
-    let lift_opts = PredicateCubeLiftOptions::default();
+    let lift_opts = PredicateCubeLiftOptions {
+        // The sampled may-relation by name, as these runs always used (the default is now the
+        // sound all-pairs one, 2026-11-06).
+        may_edge_inference: mununu_core::adapter::btor2::kmts_lift::MayEdgeInference::Off,
+        ..PredicateCubeLiftOptions::default()
+    };
 
     let result = predicate_cube_lift(predicates, AMBA_ARBITER_BTOR2, &adapter_options, &lift_opts)
         .expect("V.6 lift: must succeed");
@@ -250,7 +255,7 @@ fn v6_amba_arbiter_controllability_aware_skips_smt_post_pass() {
         max_cube_count: 1024,
         max_input_bits: 8,
         must_edge_inference: MustEdgeInference::SmtPerTarget,
-        may_edge_inference: Default::default(),
+        may_edge_inference: mununu_core::adapter::btor2::kmts_lift::MayEdgeInference::Off,
         config_values: std::collections::HashMap::new(),
         compound_exprs: std::collections::HashMap::new(),
         derived_predicates: Vec::new(),
@@ -289,7 +294,12 @@ fn v6_amba_arbiter_without_controllability_preserves_legacy_lift() {
         register: "burst".into(),
         value: 0,
     }];
-    let lift_opts = PredicateCubeLiftOptions::default();
+    let lift_opts = PredicateCubeLiftOptions {
+        // The sampled may-relation by name, as these runs always used (the default is now the
+        // sound all-pairs one, 2026-11-06).
+        may_edge_inference: mununu_core::adapter::btor2::kmts_lift::MayEdgeInference::Off,
+        ..PredicateCubeLiftOptions::default()
+    };
 
     let result = predicate_cube_lift(predicates, AMBA_ARBITER_BTOR2, &adapter_options, &lift_opts)
         .expect("V.6 legacy lift: must succeed");

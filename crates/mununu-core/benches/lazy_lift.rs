@@ -95,7 +95,12 @@ fn bench_eager_full_lift(c: &mut Criterion) {
     let mut group = c.benchmark_group("eager_full_lift");
     for n_preds in [2usize, 4, 6].iter() {
         let preds = build_predicates(*n_preds);
-        let opts = PredicateCubeLiftOptions::default();
+        let opts = PredicateCubeLiftOptions {
+            // The sampled may-relation by name, as these runs always used (the default is now the
+            // sound all-pairs one, 2026-11-06).
+            may_edge_inference: mununu_core::adapter::btor2::kmts_lift::MayEdgeInference::Off,
+            ..PredicateCubeLiftOptions::default()
+        };
         group.bench_with_input(BenchmarkId::from_parameter(n_preds), n_preds, |b, _| {
             b.iter(|| {
                 let result = predicate_cube_lift(
@@ -116,7 +121,12 @@ fn bench_lazy_per_cube_expand(c: &mut Criterion) {
     let mut group = c.benchmark_group("lazy_per_cube_expand");
     for n_preds in [2usize, 4, 6].iter() {
         let preds = build_predicates(*n_preds);
-        let opts = PredicateCubeLiftOptions::default();
+        let opts = PredicateCubeLiftOptions {
+            // The sampled may-relation by name, as these runs always used (the default is now the
+            // sound all-pairs one, 2026-11-06).
+            may_edge_inference: mununu_core::adapter::btor2::kmts_lift::MayEdgeInference::Off,
+            ..PredicateCubeLiftOptions::default()
+        };
         group.bench_with_input(BenchmarkId::from_parameter(n_preds), n_preds, |b, _| {
             b.iter(|| {
                 // Build a fresh LazyLift per iteration so
@@ -147,7 +157,12 @@ fn bench_lazy_cache_growth_proof(c: &mut Criterion) {
     // visible in the criterion summary.
     c.bench_function("lazy_cache_growth_proof", |b| {
         let preds = build_predicates(6); // 64 cubes
-        let opts = PredicateCubeLiftOptions::default();
+        let opts = PredicateCubeLiftOptions {
+            // The sampled may-relation by name, as these runs always used (the default is now the
+            // sound all-pairs one, 2026-11-06).
+            may_edge_inference: mununu_core::adapter::btor2::kmts_lift::MayEdgeInference::Off,
+            ..PredicateCubeLiftOptions::default()
+        };
         b.iter(|| {
             let mut lazy = LazyLift::from_btor2(
                 preds.clone(),
@@ -180,7 +195,12 @@ fn bench_eager_wrapper_vs_lazy_wrapper(c: &mut Criterion) {
     // should be cheaper.
     let mut group = c.benchmark_group("wrapper_one_cube");
     let preds = build_predicates(6); // 64 cubes
-    let opts = PredicateCubeLiftOptions::default();
+    let opts = PredicateCubeLiftOptions {
+        // The sampled may-relation by name, as these runs always used (the default is now the
+        // sound all-pairs one, 2026-11-06).
+        may_edge_inference: mununu_core::adapter::btor2::kmts_lift::MayEdgeInference::Off,
+        ..PredicateCubeLiftOptions::default()
+    };
     group.bench_function("eager_full_then_walk", |b| {
         b.iter(|| {
             let mut wrapper = EagerLazyLift::from_btor2(

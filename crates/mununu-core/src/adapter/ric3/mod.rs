@@ -153,10 +153,10 @@ pub fn run_ric3_with_output(
     // tool error (a parse rejection, a missing solver), surfaced so the portfolio can name it.
     if verdict == McVerdict::Unknown && !exit_code_is_a_verdict_or_clean(status.code()) {
         return Err(err(format!(
-            "`{}` exited with status {} and no verdict; stderr: {}",
+            "`{}` exited with status {} and no verdict: {}",
             bin.path.display(),
             status,
-            stderr.lines().last().unwrap_or("").trim()
+            crate::adapter::subprocess_failure_reason(&stderr, &stdout)
         )));
     }
     Ok((verdict, stdout))

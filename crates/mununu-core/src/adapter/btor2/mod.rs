@@ -44,7 +44,6 @@ pub mod native_bmc;
 #[cfg(feature = "boolector")]
 pub mod native_boolector;
 pub mod native_interp;
-pub mod native_spacer;
 pub mod parser;
 pub mod pin;
 pub mod predicate_expr;

@@ -697,7 +697,10 @@ fn run_controllability_aware_lift(
         max_cube_count: 1024,
         max_input_bits: 8,
         must_edge_inference: MustEdgeInference::Off,
-        may_edge_inference: Default::default(),
+        // SOUNDNESS: sampled may-relation, named (the default is now the sound all-pairs one).
+        // This lift returns summary counts and a comment-only CTXDSL, never a verdict, and
+        // all-pairs at this route's 1024-cube cap would be ~10^6 SMT calls per request.
+        may_edge_inference: crate::adapter::btor2::kmts_lift::MayEdgeInference::Off,
         config_values: std::collections::HashMap::new(),
         compound_exprs: std::collections::HashMap::new(),
         derived_predicates: Vec::new(),
@@ -809,7 +812,7 @@ fn btor2_cegar_handler_impl(request: Btor2CegarRequest) -> ApiResult<Json<Btor2C
 /// Decide `bad`-reachability of a BTOR2 design with the multi-engine safety
 /// portfolio (`POST /api/v1/btor2/verify`). Surface peer of the CLI
 /// `mununu btor2 verify`: runs every available sound engine (exact ⊕ native ⊕
-/// spacer ⊕ btormc ⊕ Pono) via the **parallel** driver — its wall-clock is bounded
+/// interpolation ⊕ btormc ⊕ Pono ⊕ rIC3) via the **parallel** driver — its wall-clock is bounded
 /// by the slowest single engine, keeping the request within the extended client's
 /// budget even when the subprocess members are present — and returns the merged
 /// verdict + per-engine breakdown. A `"contradiction"` verdict means two sound
@@ -857,6 +860,7 @@ fn btor2_verify_handler_impl(request: Btor2VerifyRequest) -> ApiResult<Json<Btor
                 reachable_by: by(crate::verdict::PropertyVerdict::Violated),
                 unreachable_by: by(crate::verdict::PropertyVerdict::Holds),
                 contradiction: false,
+                refused: Vec::new(),
                 detail,
                 fault: None,
                 target: None,
@@ -908,6 +912,7 @@ fn btor2_verify_handler_impl(request: Btor2VerifyRequest) -> ApiResult<Json<Btor
                 Vec::new()
             },
             contradiction: false,
+            refused: Vec::new(),
             detail: None,
             fault: Some(o.fault),
             target: o.target,
@@ -966,6 +971,7 @@ fn btor2_verify_handler_impl(request: Btor2VerifyRequest) -> ApiResult<Json<Btor
             .map(|s| s.to_string())
             .collect(),
         contradiction: outcome.verdict == ReachVerdict::Contradiction,
+        refused: crate::api::models::MemberRefusalView::list(&outcome),
         detail: None,
         fault: fault_label,
         target: None,
@@ -1556,6 +1562,7 @@ fn sv_verify_handler_impl(request: SvVerifyRequest) -> ApiResult<Json<Btor2Verif
             .map(|s| s.to_string())
             .collect(),
         contradiction: outcome.verdict == ReachVerdict::Contradiction,
+        refused: crate::api::models::MemberRefusalView::list(&outcome),
         detail: None,
         fault: None,
         target: None,

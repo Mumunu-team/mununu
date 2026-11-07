@@ -476,7 +476,8 @@ impl Default for PredicateCubeLiftOptions {
             max_cube_count: 1024,
             max_input_bits: 8,
             must_edge_inference: MustEdgeInference::Off,
-            may_edge_inference: MayEdgeInference::Off,
+            // The sound relation by default (2026-11-06, was `Off`): see [`MayEdgeInference`].
+            may_edge_inference: MayEdgeInference::SmtAllPairs,
             config_values: std::collections::HashMap::new(),
             compound_exprs: std::collections::HashMap::new(),
             derived_predicates: Vec::new(),
@@ -882,13 +883,13 @@ pub enum MustEdgeInference {
 /// for [`predicate_cube_lift`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MayEdgeInference {
-    /// Default — sampling-based may-edges (`max_input_bits` input
-    /// enumeration per canonical-representative cube). Fast, but an
-    /// **under-approximation of the may relation**: sampling only a
-    /// subset of inputs (and a single canonical representative per
-    /// cube) can MISS a real may-edge → unsound for safety. Preserves
-    /// the pre-MIG-3 behaviour exactly.
-    #[default]
+    /// Sampling-based may-edges (`max_input_bits` input enumeration per
+    /// canonical-representative cube). Fast, but an **under-approximation of
+    /// the may relation**: sampling only a subset of inputs (and a single
+    /// canonical representative per cube) can MISS a real may-edge → unsound
+    /// for safety. A caller must ask for it by name; it is no longer the
+    /// default (mununu#867 follow-up, 2026-11-06: a `..Default::default()`
+    /// used to select it silently).
     Off,
     /// MIG-3 — **sound** all-pairs SMT may-edges. For every
     /// (source-cube, target-cube) pair the lifter runs
@@ -915,6 +916,10 @@ pub enum MayEdgeInference {
     /// 3-valued verdicts (DR1 F5). The SmtAllPairs path uses the standard
     /// ∀∃ must for any non-Off inference; the per-variant ∀∀ / hyper-must
     /// distinctions remain on the sampling (`!SmtAllPairs`) path.
+    ///
+    /// The **default** since 2026-11-06 (it was `Off`): the sound relation is
+    /// what a caller gets unless it asks for the sampled one.
+    #[default]
     SmtAllPairs,
 }
 
@@ -4051,6 +4056,18 @@ fn postimage_sharp_edges(
 mod tests {
     use super::*;
 
+    /// mununu#867 follow-up — the sound all-pairs may-relation is what a caller gets by default;
+    /// the sampled under-approximation must be asked for by name. A `..Default::default()` used to
+    /// select the sampled one silently.
+    #[test]
+    fn the_default_may_relation_is_the_sound_one() {
+        assert_eq!(MayEdgeInference::default(), MayEdgeInference::SmtAllPairs);
+        assert_eq!(
+            PredicateCubeLiftOptions::default().may_edge_inference,
+            MayEdgeInference::SmtAllPairs
+        );
+    }
+
     // Shared 2-bit relational design for the P1 post-image tests: x'=x+1, y'=y+1 (x==y preserved),
     // predicates P0=(x==0) and the RELATIONAL P1=(x==y).
     fn p1_rel_design() -> (
@@ -5068,7 +5085,7 @@ mod tests {
             max_cube_count: 8,
             max_input_bits: 0,
             must_edge_inference: MustEdgeInference::Off,
-            may_edge_inference: Default::default(),
+            may_edge_inference: MayEdgeInference::Off,
             config_values: std::collections::HashMap::new(),
             compound_exprs: std::collections::HashMap::new(),
             derived_predicates: Vec::new(),
@@ -6328,7 +6345,7 @@ mod tests {
             max_cube_count: 1024,
             max_input_bits: 0,
             must_edge_inference: MustEdgeInference::Off,
-            may_edge_inference: Default::default(),
+            may_edge_inference: MayEdgeInference::Off,
             config_values: std::collections::HashMap::new(),
             compound_exprs: std::collections::HashMap::new(),
             derived_predicates: Vec::new(),
@@ -6401,7 +6418,7 @@ mod tests {
             max_cube_count: 1024,
             max_input_bits: 8,
             must_edge_inference: MustEdgeInference::SmtPerTarget,
-            may_edge_inference: Default::default(),
+            may_edge_inference: MayEdgeInference::Off,
             config_values: std::collections::HashMap::new(),
             compound_exprs: std::collections::HashMap::new(),
             derived_predicates: Vec::new(),
@@ -6462,7 +6479,7 @@ mod tests {
             max_cube_count: 1024,
             max_input_bits: 0,
             must_edge_inference: MustEdgeInference::SmtPerTarget,
-            may_edge_inference: Default::default(),
+            may_edge_inference: MayEdgeInference::Off,
             config_values: std::collections::HashMap::new(),
             compound_exprs: std::collections::HashMap::new(),
             derived_predicates: Vec::new(),
@@ -6496,7 +6513,7 @@ mod tests {
             max_cube_count: 1024,
             max_input_bits: 8,
             must_edge_inference: MustEdgeInference::SmtPerTarget,
-            may_edge_inference: Default::default(),
+            may_edge_inference: MayEdgeInference::Off,
             config_values: std::collections::HashMap::new(),
             compound_exprs: std::collections::HashMap::new(),
             derived_predicates: Vec::new(),
@@ -6558,7 +6575,7 @@ mod tests {
             max_cube_count: 1024,
             max_input_bits: 8,
             must_edge_inference: MustEdgeInference::SmtPerTargetStandard,
-            may_edge_inference: Default::default(),
+            may_edge_inference: MayEdgeInference::Off,
             config_values: std::collections::HashMap::new(),
             compound_exprs: std::collections::HashMap::new(),
             derived_predicates: Vec::new(),
@@ -6597,7 +6614,7 @@ mod tests {
             max_cube_count: 1024,
             max_input_bits: 8,
             must_edge_inference: MustEdgeInference::SmtPerTarget,
-            may_edge_inference: Default::default(),
+            may_edge_inference: MayEdgeInference::Off,
             config_values: std::collections::HashMap::new(),
             compound_exprs: std::collections::HashMap::new(),
             derived_predicates: Vec::new(),
@@ -6640,7 +6657,7 @@ mod tests {
             max_cube_count: 1024,
             max_input_bits: 8,
             must_edge_inference: MustEdgeInference::SmtHyperMust,
-            may_edge_inference: Default::default(),
+            may_edge_inference: MayEdgeInference::Off,
             config_values: std::collections::HashMap::new(),
             compound_exprs: std::collections::HashMap::new(),
             derived_predicates: Vec::new(),
@@ -6681,7 +6698,7 @@ mod tests {
                 max_cube_count: 1024,
                 max_input_bits: 0,
                 must_edge_inference: variant,
-                may_edge_inference: Default::default(),
+                may_edge_inference: MayEdgeInference::Off,
                 config_values: std::collections::HashMap::new(),
                 compound_exprs: std::collections::HashMap::new(),
                 derived_predicates: Vec::new(),
@@ -6724,7 +6741,7 @@ mod tests {
                 max_cube_count: 1024,
                 max_input_bits: 8,
                 must_edge_inference: variant,
-                may_edge_inference: Default::default(),
+                may_edge_inference: MayEdgeInference::Off,
                 config_values: std::collections::HashMap::new(),
                 compound_exprs: std::collections::HashMap::new(),
                 derived_predicates: Vec::new(),
@@ -6821,7 +6838,10 @@ mod tests {
             preds,
             COUNTER_BTOR2,
             &opts,
-            &PredicateCubeLiftOptions::default(),
+            &PredicateCubeLiftOptions {
+                may_edge_inference: MayEdgeInference::Off,
+                ..PredicateCubeLiftOptions::default()
+            },
         )
         .expect("lift succeeds");
         let labels = result.clts.alphabet();
@@ -6881,7 +6901,7 @@ mod tests {
             max_cube_count: 1024,
             max_input_bits: 8,
             must_edge_inference: MustEdgeInference::SmtHyperMust,
-            may_edge_inference: Default::default(),
+            may_edge_inference: MayEdgeInference::Off,
             config_values: std::collections::HashMap::new(),
             compound_exprs: std::collections::HashMap::new(),
             derived_predicates: Vec::new(),
@@ -6974,7 +6994,7 @@ mod tests {
             max_cube_count: 1024,
             max_input_bits: 8,
             must_edge_inference: MustEdgeInference::SmtHyperMust,
-            may_edge_inference: Default::default(),
+            may_edge_inference: MayEdgeInference::Off,
 
             config_values: std::collections::HashMap::new(),
             compound_exprs: std::collections::HashMap::new(),
@@ -7096,7 +7116,7 @@ mod tests {
             max_cube_count: 1024,
             max_input_bits: 0,
             must_edge_inference: MustEdgeInference::Off,
-            may_edge_inference: Default::default(),
+            may_edge_inference: MayEdgeInference::Off,
             config_values,
             compound_exprs: std::collections::HashMap::new(),
             derived_predicates: Vec::new(),
@@ -7138,7 +7158,7 @@ mod tests {
             max_cube_count: 1024,
             max_input_bits: 0,
             must_edge_inference: MustEdgeInference::Off,
-            may_edge_inference: Default::default(),
+            may_edge_inference: MayEdgeInference::Off,
             config_values,
             compound_exprs: std::collections::HashMap::new(),
             derived_predicates: Vec::new(),
@@ -7398,7 +7418,10 @@ mod tests {
             preds,
             R5B_MULTIVALUE_FIXTURE,
             &uf_opts,
-            &PredicateCubeLiftOptions::default(),
+            &PredicateCubeLiftOptions {
+                may_edge_inference: MayEdgeInference::Off,
+                ..PredicateCubeLiftOptions::default()
+            },
         )
         .expect("ok");
 

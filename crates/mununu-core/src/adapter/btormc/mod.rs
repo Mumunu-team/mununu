@@ -238,10 +238,10 @@ pub fn run_btormc_cancellable(
         return Err(AdapterError {
             kind: AdapterErrorKind::UnsupportedConstruct,
             message: format!(
-                "adapter/btormc: `{}` exited with status {} and no verdict; stderr: {}",
+                "adapter/btormc: `{}` exited with status {} and no verdict: {}",
                 bin.path.display(),
                 status,
-                stderr.trim()
+                crate::adapter::subprocess_failure_reason(&stderr, &stdout)
             ),
             location: None,
         });

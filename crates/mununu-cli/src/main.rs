@@ -699,9 +699,9 @@ enum Btor2Command {
     ///
     /// Runs every available sound engine over the BTOR2 design and merges
     /// them under the differential-oracle discipline: the exact BDD engine,
-    /// the in-house native (BMC + k-induction) and SPACER (IC3/PDR +
-    /// interpolation) engines — all in-process — plus the `btormc` and
-    /// `Pono` subprocess members when their binaries are on PATH. Prints the
+    /// the in-house native (BMC + k-induction) and McMillan interpolation
+    /// engines — all in-process — plus the `btormc`, `Pono` and `rIC3`
+    /// subprocess members when their binaries are on PATH. Prints the
     /// merged verdict (`reachable` / `unreachable` / `unknown` /
     /// `contradiction`) and which engines reached each conclusion. A
     /// `contradiction` means two sound engines disagree — a soundness alarm,
@@ -715,11 +715,6 @@ enum Btor2Command {
     ///
     /// surface: CLI-only — a file transform; the posture itself is CLI+API on the verify verbs.
     InjectFault(Btor2InjectFaultArgs),
-    /// Internal: run z3-SPACER on a BTOR2 read from stdin, print `safe`/`unsafe`/
-    /// `unknown`. The portfolio self-execs this to run SPACER in an isolated child
-    /// process (z3's Fixedpoint can flaky-segfault); not a user-facing verb.
-    #[command(hide = true)]
-    SpacerCheck(Btor2SpacerCheckArgs),
     /// Decide liveness: the one liveness verb (0.5 merges `-all`, `-under-fairness` and
     /// `verify-justice` into it).
     ///
@@ -1088,14 +1083,6 @@ struct Btor2LiftKmtsArgs {
 }
 
 /// Arguments for `mununu btor2 verify` — the multi-engine safety portfolio.
-/// Internal `btor2 spacer-check` args — BTOR2 is read from stdin.
-#[derive(Args, Debug)]
-struct Btor2SpacerCheckArgs {
-    /// z3-SPACER wall-clock timeout in milliseconds.
-    #[arg(long, default_value_t = 10_000)]
-    timeout_ms: u32,
-}
-
 #[derive(Args, Debug)]
 struct Btor2VerifyArgs {
     /// Path to the BTOR2 input file.
@@ -1103,7 +1090,7 @@ struct Btor2VerifyArgs {
     file: PathBuf,
     /// Decide with ONLY the mununu-owned engines (exact BDD, native BMC /
     /// k-induction, native McMillan interpolation, and the deep counterexample
-    /// search) — no external SPACER / btormc / Pono. Answers "what can mununu's own
+    /// search) — no external btormc / Pono / rIC3. Answers "what can mununu's own
     /// algorithms decide on their own?", for no-subprocess deployments and the
     /// soundness cross-check.
     ///
@@ -2291,7 +2278,7 @@ struct SvVerifyAutoArgs {
     no_auto_stub_flops: bool,
     /// Disable the ⊥ escalations. By default, a *safety* property the cube abstraction
     /// leaves ⊥ (and that is a reducible AG-invariant) is retried with the multi-engine
-    /// reachability portfolio (exact ⊕ native ⊕ spacer ⊕ btormc ⊕ Pono), and a *box-AF
+    /// reachability portfolio (exact ⊕ native ⊕ interpolation ⊕ btormc ⊕ Pono ⊕ rIC3), and a *box-AF
     /// liveness* property left ⊥ is retried via the liveness-to-safety reduction; pass
     /// this to report the cube's ⊥ verdict unchanged for both.
     #[arg(long = "no-rescue")]
@@ -3030,14 +3017,6 @@ fn main() {
         option_env!("MUNUNU_BUILD_SHA"),
         option_env!("MUNUNU_BUILD_DIRTY"),
     ));
-    // Export our own path so the reachability portfolio can run z3-SPACER in an
-    // ISOLATED child (`btor2 spacer-check`) — z3's Fixedpoint can flaky-segfault on some
-    // CHC encodings, and isolating it keeps a crash from taking down the whole verify.
-    // Set once here, before any threads, so the later concurrent reads are race-free.
-    if let Ok(exe) = std::env::current_exe() {
-        // SAFETY: single-threaded at process start; no other thread reads/writes env yet.
-        unsafe { std::env::set_var("MUNUNU_SELF_EXE", exe) };
-    }
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(e) => {
@@ -3616,7 +3595,6 @@ fn handle_btor2(command: Btor2Command) -> Result<(), String> {
         Btor2Command::Cegar(args) => btor2_cegar(args),
         Btor2Command::Verify(args) => btor2_verify(args),
         Btor2Command::InjectFault(args) => btor2_inject_fault(args),
-        Btor2Command::SpacerCheck(args) => btor2_spacer_check(args),
         Btor2Command::VerifyLiveness(args) => btor2_verify_liveness_merged(args),
         Btor2Command::FromAiger(args) => btor2_from_aiger(args),
         Btor2Command::VerifyRecoverability(args) => btor2_verify_recoverability(args),
@@ -4179,40 +4157,6 @@ fn per_response_decided_by(
         .collect()
 }
 
-/// `mununu btor2 verify` — decide `bad`-reachability with the multi-engine safety
-/// portfolio and print the canonical property verdict (`holds` = `bad` unreachable,
-/// `violated` = reachable, `unknown` = undecided) + the per-engine reachability
-/// breakdown as JSON. Surface peer of the API `POST /api/v1/btor2/verify`; both share
-/// the verdict label via [`mununu_core::verdict::PropertyVerdict`].
-/// Internal `btor2 spacer-check`: read a BTOR2 design from stdin, run z3-SPACER, print
-/// `safe` / `unsafe` / `unknown`. The reachability portfolio self-execs this so SPACER
-/// runs in a throwaway child — z3's Fixedpoint can flaky-segfault, and isolating it
-/// keeps a crash from taking down the whole verify. Always exits 0 on a clean run; a
-/// segfault in the child is what the parent reads as "abstain".
-fn btor2_spacer_check(args: Btor2SpacerCheckArgs) -> Result<(), String> {
-    use mununu_core::adapter::btor2::native_bmc::SafetyVerdict;
-    use std::io::Read;
-    let mut content = String::new();
-    std::io::stdin()
-        .read_to_string(&mut content)
-        .map_err(|e| format!("btor2 spacer-check: read stdin: {e}"))?;
-    // A parse failure abstains (`unknown`) rather than erroring — the parent treats any
-    // non-verdict output as abstain, so a hard error would just be noise on this path.
-    let verdict = match mununu_core::adapter::btor2::parser::parse(&content) {
-        Ok(file) => match mununu_core::adapter::btor2::native_spacer::decide_bad_safety_spacer(
-            &file,
-            Some(args.timeout_ms),
-        ) {
-            Ok(SafetyVerdict::Safe { .. }) => "safe",
-            Ok(SafetyVerdict::Violated { .. }) => "unsafe",
-            _ => "unknown",
-        },
-        Err(_) => "unknown",
-    };
-    println!("{verdict}");
-    Ok(())
-}
-
 /// `mununu btor2 inject-fault FILE --fault REG[:k]… [-o PATH]`.
 fn btor2_inject_fault(args: Btor2InjectFaultArgs) -> Result<(), String> {
     use mununu_core::adapter::btor2::fault::{FaultSpec, inject_faults};
@@ -4240,6 +4184,11 @@ fn btor2_inject_fault(args: Btor2InjectFaultArgs) -> Result<(), String> {
     }
 }
 
+/// `mununu btor2 verify` — decide `bad`-reachability with the multi-engine safety
+/// portfolio and print the canonical property verdict (`holds` = `bad` unreachable,
+/// `violated` = reachable, `unknown` = undecided) + the per-engine reachability
+/// breakdown as JSON. Surface peer of the API `POST /api/v1/btor2/verify`; both share
+/// the verdict label via [`mununu_core::verdict::PropertyVerdict`].
 fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
     use mununu_core::adapter::reach_portfolio::{
         decide_reach_owned_only, decide_reach_portfolio,
@@ -4354,7 +4303,7 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
         return Ok(());
     }
 
-    // `--owned-only`: mununu-owned engines only (no external SPACER/btormc/Pono).
+    // `--owned-only`: mununu-owned engines only (no external btormc/Pono/rIC3).
     // Otherwise the full parallel portfolio — identical merge to the sequential
     // driver, but wall-clock bounded by the slowest single engine. `--timeout-ms`
     // raises the subprocess (btormc/Pono) budget so their incremental SAT reaches
@@ -4401,6 +4350,8 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
         "unreachable_by": outcome.unreachable_by,
         "contradiction": outcome.verdict
             == mununu_core::adapter::reach_portfolio::ReachVerdict::Contradiction,
+        // mununu#873 — the members that refused the design, with the reason (the API's field).
+        "refused": mununu_core::api::models::MemberRefusalView::list(&outcome),
         "trace": trace,
         "trace_unavailable_within_k": trace_unavailable_within_k,
     });

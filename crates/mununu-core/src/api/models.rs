@@ -1107,6 +1107,11 @@ pub struct Btor2VerifyResponse {
     pub unreachable_by: Vec<String>,
     /// `true` when two sound engines disagree — a soundness alarm, not a guess.
     pub contradiction: bool,
+    /// mununu#873 — the members that refused the design (an encode error, an absent binary, an
+    /// over-cap cone), each with its reason. Absent when none refused; a member in no list ran and
+    /// abstained.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refused: Vec<MemberRefusalView>,
     /// The single engine's own diagnosis under `engine: "cube"`, when it has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
@@ -2468,6 +2473,17 @@ impl From<&crate::adapter::slang::verify_auto::AutoVerifyReport> for SvVerifyAut
                         witness: v.witness.clone(),
                         detail: v.detail.clone(),
                     }),
+                    portfolio: p.portfolio.as_ref().map(|a| PortfolioAttributionView {
+                        decided_by: a.decided_by.clone(),
+                        refused: a
+                            .refused
+                            .iter()
+                            .map(|(member, reason)| MemberRefusalView {
+                                member: member.clone(),
+                                reason: reason.clone(),
+                            })
+                            .collect(),
+                    }),
                     // A `⊥` ALWAYS carries a reason, with `unclassified-bottom` as the floor.
                     //
                     // `skip_serializing_if = "Option::is_none"` omits the key entirely, so `None`
@@ -2999,6 +3015,43 @@ pub struct PropertyVerdictView {
     /// — a vacuous HOLDS is a true HOLDS on the model — the field says what it is worth.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vacuity: Option<VacuityView>,
+    /// mununu#873 — when a reachability-portfolio rescue ran on this row: the members that
+    /// answered and the members that refused the design, with the reason. Absent when no
+    /// portfolio ran. `decided_by` above names the stage (`reach-rescue`); this names the
+    /// members. Members in neither list ran and abstained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub portfolio: Option<PortfolioAttributionView>,
+}
+
+/// mununu#873 — one row's reachability-portfolio members. See [`PropertyVerdictView::portfolio`].
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct PortfolioAttributionView {
+    /// The members that returned a definite answer (`exact`, `native`, `interp`, `btormc`,
+    /// `pono`, `ric3`, …). On a contradiction, members on both sides.
+    pub decided_by: Vec<String>,
+    /// The members that refused the design, each with its reason.
+    pub refused: Vec<MemberRefusalView>,
+}
+
+/// mununu#873 — one portfolio member's refusal of a design.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct MemberRefusalView {
+    pub member: String,
+    pub reason: String,
+}
+
+impl MemberRefusalView {
+    /// The refusals a reach portfolio recorded, in its reporting order.
+    pub fn list(reach: &crate::adapter::reach_portfolio::ReachOutcome) -> Vec<Self> {
+        reach
+            .refused
+            .iter()
+            .map(|(member, reason)| Self {
+                member: (*member).to_string(),
+                reason: reason.clone(),
+            })
+            .collect()
+    }
 }
 
 /// mununu#599 — how a recoverability guarantee that HOLDS stands against the rest of its report.
@@ -3145,6 +3198,7 @@ mod bottom_reason_view_tests {
             bottom_reason: reason,
             decided_by: None,
             vacuity: None,
+            portfolio: None,
         }
     }
 

@@ -14,8 +14,8 @@
 //!
 //! a νμ alternation (`PropertyClass::Liveness`). The **exact** 3-valued KMTS engine
 //! decides it directly but only within its enumeration cap; this module reduces it
-//! to a single `bad`-reachability query the scalable portfolio (native ⊕ spacer ⊕
-//! btormc ⊕ Pono) decides symbolically on wide designs, and the exact engine
+//! to a single `bad`-reachability query the scalable portfolio (native ⊕ interpolation ⊕
+//! btormc ⊕ Pono ⊕ rIC3) decides symbolically on wide designs, and the exact engine
 //! cross-checks the small cases.
 //!
 //! # Liveness-to-safety (Biere–Artho–Schuppan)

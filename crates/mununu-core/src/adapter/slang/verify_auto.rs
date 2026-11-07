@@ -240,6 +240,40 @@ pub struct PropertyVerdict {
     /// caveat. A consumer gate that reads `outcome == "holds"` must be able to read this next to
     /// it; a note can be filtered out, a field cannot.
     pub vacuity: Option<VacuityFinding>,
+    /// mununu#873 — the reachability portfolio's per-member account of this row, when a rescue
+    /// ran it: which members answered and which refused the design, with the reason. `None` when
+    /// no portfolio ran on the row.
+    ///
+    /// [`Self::decided_by`] names the STAGE (`reach-rescue`), and the deciding members used to
+    /// appear only inside a note's prose, while the refusals reached the report only when nothing
+    /// decided the row. A lever measurement ("was native BMC refused on this memory?") had to be
+    /// read from debug logs.
+    pub portfolio: Option<PortfolioAttribution>,
+}
+
+/// mununu#873 — what each reachability-portfolio member did on one row. The members in neither
+/// list ran and abstained (unknown, timeout, or cancelled after another member won).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PortfolioAttribution {
+    /// The members that returned a definite answer, in the portfolio's reporting order. Both
+    /// polarities: on a contradiction, members on both sides appear here.
+    pub decided_by: Vec<String>,
+    /// `(member, reason)` for every member that refused the design (an encode error, an absent
+    /// binary, an over-cap cone).
+    pub refused: Vec<(String, String)>,
+}
+
+impl PortfolioAttribution {
+    fn of(reach: &crate::adapter::reach_portfolio::ReachOutcome) -> Self {
+        Self {
+            decided_by: engines_of(reach).into_iter().map(str::to_string).collect(),
+            refused: reach
+                .refused
+                .iter()
+                .map(|(m, why)| ((*m).to_string(), why.clone()))
+                .collect(),
+        }
+    }
 }
 
 impl PropertyVerdict {
@@ -2741,7 +2775,7 @@ pub struct VerifyAutoOptions {
     pub portfolio: Option<PortfolioMode>,
     /// On a *safety* property the cube portfolio leaves `⊥`, escalate to the
     /// multi-engine reachability portfolio (reduce the AG-invariant to a `bad`-monitor
-    /// and decide it symbolically — exact ⊕ native ⊕ spacer ⊕ btormc ⊕ Pono). Only
+    /// and decide it symbolically — exact ⊕ native ⊕ interpolation ⊕ btormc ⊕ Pono ⊕ rIC3). Only
     /// fires on `⊥` reducible AG-invariants, so there is no common-path cost and
     /// liveness / recoverability are untouched. Default `true`; the CLI `--no-rescue`
     /// / API `rescue_bottom_safety: false` opts out.
@@ -4163,6 +4197,7 @@ fn abstained(
         counterexample: None,
         decided_by: None,
         vacuity: None,
+        portfolio: None,
     }
 }
 
@@ -4528,6 +4563,7 @@ pub(crate) fn merge_portfolio_reports(
         {
             prop.outcome = pv.outcome.clone();
             prop.counterexample = pv.counterexample.clone();
+            prop.portfolio = pv.portfolio.clone();
             // The per-property attribution was already computed here and immediately aggregated
             // into a COUNT on the next line — so the fact a consumer needs existed and was
             // discarded one statement after being derived. Keep it.
@@ -6737,6 +6773,7 @@ pub(crate) fn verify_auto_impl(
                     bottom_reason: None,
                     decided_by: None,
                     vacuity: None,
+                    portfolio: None,
                 });
                 continue;
             }
@@ -6776,6 +6813,7 @@ pub(crate) fn verify_auto_impl(
                     bottom_reason: None,
                     decided_by: None,
                     vacuity: None,
+                    portfolio: None,
                 });
                 continue;
             }
@@ -6801,6 +6839,7 @@ pub(crate) fn verify_auto_impl(
                 bottom_reason: None,
                 decided_by: Some("constant".into()),
                 vacuity: None,
+                portfolio: None,
             });
             continue;
         }
@@ -6884,6 +6923,7 @@ pub(crate) fn verify_auto_impl(
                 bottom_reason: None,
                 decided_by: None,
                 vacuity: None,
+                portfolio: None,
             });
             continue;
         }
@@ -6986,6 +7026,7 @@ pub(crate) fn verify_auto_impl(
                         counterexample: None,
                         decided_by: None,
                         vacuity: None,
+                        portfolio: None,
                     });
                     continue;
                 }
@@ -7092,6 +7133,7 @@ pub(crate) fn verify_auto_impl(
                     .then(|| exact_stage.to_string())
                     .or_else(|| fallback_decided_by.map(str::to_string)),
                 vacuity: None,
+                portfolio: None,
             });
             continue;
         }
@@ -7159,6 +7201,7 @@ pub(crate) fn verify_auto_impl(
                 bottom_reason: None,
                 decided_by: None,
                 vacuity: None,
+                portfolio: None,
             });
             continue;
         }
@@ -7179,6 +7222,7 @@ pub(crate) fn verify_auto_impl(
                 bottom_reason: None,
                 decided_by: None,
                 vacuity: None,
+                portfolio: None,
             });
             continue;
         }
@@ -7388,6 +7432,7 @@ pub(crate) fn verify_auto_impl(
                 }),
                 decided_by: None,
                 vacuity: None,
+                portfolio: None,
             });
             continue;
         }
@@ -7498,6 +7543,7 @@ pub(crate) fn verify_auto_impl(
             bottom_reason: cube_bottom_reason,
             decided_by: None,
             vacuity: None,
+            portfolio: None,
         });
     }
 
@@ -7860,6 +7906,7 @@ pub(crate) fn escalate_bottom_with_slice(
                     }
                 };
                 if let Some((verdict, reach)) = rescued {
+                    prop.portfolio = Some(PortfolioAttribution::of(&reach));
                     let engines = engines_of(&reach);
                     match verdict {
                         RescueVerdict::Holds => {
@@ -7941,6 +7988,7 @@ pub(crate) fn escalate_bottom_with_slice(
                         })
                 {
                     handled = true;
+                    prop.portfolio = Some(PortfolioAttribution::of(&reach));
                     let engines = engines_of(&reach);
                     match verdict {
                         LivenessVerdict::Holds => {
@@ -7977,6 +8025,7 @@ pub(crate) fn escalate_bottom_with_slice(
                         })
                 {
                     handled = true;
+                    prop.portfolio = Some(PortfolioAttribution::of(&reach));
                     let engines = engines_of(&reach);
                     match verdict {
                         LivenessVerdict::Holds => {
@@ -8129,6 +8178,9 @@ pub(crate) fn escalate_bottom_with_slice(
                         reset_pinned,
                     )
                 });
+                if let Ok((_, reach)) = &rescued {
+                    prop.portfolio = Some(PortfolioAttribution::of(reach));
+                }
                 match rescued {
                     // the dual's `bad` (= p) is reachable: the target IS reachable
                     Ok((RescueVerdict::Violated, reach)) => {
@@ -8993,12 +9045,12 @@ fn rescue_note(name: &str, verdict: &str, engines: &[&str]) -> VerificationNote 
             }
         ),
         detail: "The safety ⊥ was reduced to a `bad`-monitor and decided symbolically by the \
-                 multi-engine reachability portfolio (exact ⊕ native ⊕ spacer ⊕ btormc ⊕ Pono). \
+                 multi-engine reachability portfolio (exact ⊕ native ⊕ interpolation ⊕ btormc ⊕ Pono ⊕ rIC3). \
                  Sound: every portfolio member is sound, and a disagreement would surface a \
                  contradiction alarm rather than a verdict."
             .into(),
         items: Vec::new(),
-        property: None,
+        property: Some(name.to_string()),
     }
 }
 
@@ -9242,7 +9294,7 @@ fn fair_cycle_rescue_note(
                  request forever ungranted."
             .into(),
         items: Vec::new(),
-        property: None,
+        property: Some(name.to_string()),
     }
 }
 
@@ -9267,7 +9319,7 @@ fn liveness_rescue_note(name: &str, verdict: &str, engines: &[&str]) -> Verifica
                  box-AF shape; the diamond-EF recoverability response is not reduced here."
             .into(),
         items: Vec::new(),
-        property: None,
+        property: Some(name.to_string()),
     }
 }
 
@@ -9399,6 +9451,7 @@ mod tests {
                     bottom_reason: None,
                     decided_by: None,
                     vacuity: None,
+                    portfolio: None,
                 })
                 .collect(),
             ..Default::default()
@@ -9600,6 +9653,7 @@ mod tests {
             bottom_reason: None,
             decided_by: None,
             vacuity: None,
+            portfolio: None,
         };
         let build = |report: &AutoVerifyReport| {
             build_notes(
@@ -9666,6 +9720,7 @@ mod tests {
             bottom_reason: None,
             decided_by: None,
             vacuity: None,
+            portfolio: None,
         };
         let mut report = AutoVerifyReport {
             properties: vec![
@@ -9741,6 +9796,7 @@ mod tests {
             bottom_reason: None,
             decided_by: None,
             vacuity: None,
+            portfolio: None,
         };
         let mut quiet = AutoVerifyReport {
             properties: vec![row(
@@ -9804,6 +9860,7 @@ mod tests {
             bottom_reason: reason,
             decided_by: None,
             vacuity: None,
+            portfolio: None,
         };
         let first = AutoVerifyReport {
             properties: vec![row(VerifyOutcome::Holds, None)],
@@ -9859,6 +9916,7 @@ mod tests {
             bottom_reason: Some(BottomReason::UnclassifiedBottom),
             decided_by: None,
             vacuity: None,
+            portfolio: None,
         };
         let mut merged = AutoVerifyReport {
             properties: vec![row(VerifyOutcome::Unknown { unknown_cells: 1 })],
@@ -9914,6 +9972,7 @@ mod tests {
             bottom_reason: Some(reason),
             decided_by: None,
             vacuity: None,
+            portfolio: None,
         };
         let mut merged = AutoVerifyReport {
             properties: vec![
@@ -9977,6 +10036,7 @@ mod tests {
                 bottom_reason: None,
                 decided_by: None,
                 vacuity: None,
+                portfolio: None,
             }],
             ..Default::default()
         };
@@ -10029,6 +10089,7 @@ mod tests {
             bottom_reason: None,
             decided_by: None,
             vacuity: None,
+            portfolio: None,
         };
         let chain = "nu X. (((!((a == 1))) || ((b == 1) || [] ((b == 1) || [] (b == 1)))) && [] X)";
         let until = "nu X. (((!((a == 1))) || [] (nu Z. ((q == q__past) && ((r == 1) || [] Z)))) \
@@ -10050,7 +10111,7 @@ mod tests {
 
     // The safety-⊥ escalation reduces a reducible AG-invariant the cube left ⊥ to a
     // `bad`-monitor and decides it with the reachability portfolio — testable on a
-    // BTOR2 fixture without the SV toolchain (exact/native/spacer run in-process).
+    // BTOR2 fixture without the SV toolchain (exact/native run in-process).
     #[test]
     fn escalate_bottom_safety_rescues_a_reducible_invariant() {
         // `big` (4-bit) is init 0 and holds its value ⇒ AG(big == 0) HOLDS; the cube
@@ -10069,6 +10130,7 @@ mod tests {
                 bottom_reason: None,
                 decided_by: None,
                 vacuity: None,
+                portfolio: None,
             }],
             ..Default::default()
         };
@@ -10091,6 +10153,58 @@ mod tests {
         );
     }
 
+    /// mununu#873 — a row the portfolio DECIDES carries its members: who answered and who refused
+    /// the design, with the reason. A 256-bit register held at zero is over the exact engine's cap
+    /// (it refuses) and k-inductive for native BMC (it proves); before this the refusal was dropped
+    /// on a decided row and the deciding member was only named inside a note's prose.
+    #[test]
+    fn a_rescued_row_names_its_deciding_and_refusing_members() {
+        const DESIGN: &str =
+            "1 sort bitvec 256\n2 state 1 wide\n3 zero 1\n4 init 1 2 3\n5 next 1 2 2\n";
+        let mut report = AutoVerifyReport {
+            properties: vec![PropertyVerdict {
+                name: "wide_zero".to_string(),
+                label: None,
+                kind: crate::adapter::slang::translate::SvaKind::Assert,
+                formula: "nu X. ((wide == 0) && [] X)".to_string(),
+                outcome: VerifyOutcome::Unknown { unknown_cells: 1 },
+                seeded_predicates: Vec::new(),
+                counterexample: None,
+                bottom_reason: None,
+                decided_by: None,
+                vacuity: None,
+                portfolio: None,
+            }],
+            ..Default::default()
+        };
+        let notes = escalate_bottom(
+            &mut report,
+            DESIGN,
+            false,
+            &VerifyAutoOptions::default(),
+            &[],
+        );
+        let p = &report.properties[0];
+        assert!(matches!(p.outcome, VerifyOutcome::Holds), "{:?}", p.outcome);
+        let a = p
+            .portfolio
+            .as_ref()
+            .expect("a rescued row carries its portfolio members");
+        assert!(
+            a.decided_by.iter().any(|m| m == "native"),
+            "the deciding member is named: {a:?}"
+        );
+        assert!(
+            a.refused.iter().any(|(m, _)| m == "exact"),
+            "the exact engine's over-cap refusal reaches the row: {a:?}"
+        );
+        let note = notes
+            .iter()
+            .find(|n| n.kind == "portfolio-rescue")
+            .expect("the provenance note is still recorded");
+        assert_eq!(note.property.as_deref(), Some("wide_zero"));
+    }
+
     /// mununu#728 — a reason set upstream survives the residual-⊥ classifier. Here the row carries
     /// `BudgetExpired` and the budget is already spent, so the re-plan's loop breaks before any
     /// arm; before the fix the classifier then overwrote the field with a shape reason.
@@ -10111,6 +10225,7 @@ mod tests {
                 bottom_reason: Some(BottomReason::BudgetExpired),
                 decided_by: None,
                 vacuity: None,
+                portfolio: None,
             }],
             ..Default::default()
         };
@@ -10158,6 +10273,7 @@ mod tests {
                 bottom_reason: None,
                 decided_by: None,
                 vacuity: None,
+                portfolio: None,
             }],
             ..Default::default()
         };
@@ -10269,6 +10385,7 @@ mod tests {
                 bottom_reason: None,
                 decided_by: None,
                 vacuity: None,
+                portfolio: None,
             }],
             ..Default::default()
         };
@@ -10412,6 +10529,7 @@ mod tests {
                 bottom_reason: None,
                 decided_by: None,
                 vacuity: None,
+                portfolio: None,
             }],
             ..Default::default()
         };
@@ -10460,6 +10578,7 @@ mod tests {
                 bottom_reason: None,
                 decided_by: None,
                 vacuity: None,
+                portfolio: None,
             }],
             ..Default::default()
         };
@@ -10533,6 +10652,7 @@ mod tests {
                 bottom_reason: None,
                 decided_by: None,
                 vacuity: None,
+                portfolio: None,
             }],
             ..Default::default()
         };
@@ -10574,6 +10694,7 @@ mod tests {
                 bottom_reason: None,
                 decided_by: None,
                 vacuity: None,
+                portfolio: None,
             }],
             ..Default::default()
         };
@@ -10640,6 +10761,7 @@ mod tests {
                 bottom_reason: None,
                 decided_by: None,
                 vacuity: None,
+                portfolio: None,
             }],
             ..Default::default()
         };
@@ -10697,6 +10819,7 @@ mod tests {
                 bottom_reason: None,
                 decided_by: None,
                 vacuity: None,
+                portfolio: None,
             }],
             ..Default::default()
         };
@@ -10737,6 +10860,7 @@ mod tests {
                 bottom_reason: None,
                 decided_by: None,
                 vacuity: None,
+                portfolio: None,
             }],
             ..Default::default()
         };
@@ -10790,6 +10914,7 @@ mod tests {
                 bottom_reason: None,
                 decided_by: None,
                 vacuity: None,
+                portfolio: None,
             }],
             ..Default::default()
         };
@@ -10829,6 +10954,7 @@ mod tests {
                 bottom_reason: None,
                 decided_by: None,
                 vacuity: None,
+                portfolio: None,
             }],
             ..Default::default()
         };
@@ -10874,6 +11000,7 @@ mod tests {
                 bottom_reason: None,
                 decided_by: None,
                 vacuity: None,
+                portfolio: None,
             }],
             ..Default::default()
         };
@@ -10921,6 +11048,7 @@ mod tests {
                 bottom_reason: None,
                 decided_by: None,
                 vacuity: None,
+                portfolio: None,
             }],
             ..Default::default()
         };
@@ -10963,6 +11091,7 @@ mod tests {
             bottom_reason: None,
             decided_by: None,
             vacuity: None,
+            portfolio: None,
         }
     }
 
@@ -11146,6 +11275,7 @@ mod tests {
                 bottom_reason: None,
                 decided_by: None,
                 vacuity: None,
+                portfolio: None,
             }],
             ..Default::default()
         };
@@ -11215,6 +11345,7 @@ mod tests {
                 bottom_reason: None,
                 decided_by: None,
                 vacuity: None,
+                portfolio: None,
             }],
             ..Default::default()
         };
@@ -11263,6 +11394,7 @@ mod tests {
                 bottom_reason: None,
                 decided_by: None,
                 vacuity: None,
+                portfolio: None,
             }],
             ..Default::default()
         };
@@ -11305,6 +11437,7 @@ mod tests {
                 bottom_reason: None,
                 decided_by: None,
                 vacuity: None,
+                portfolio: None,
             }],
             ..Default::default()
         };
@@ -11613,6 +11746,7 @@ mod tests {
             bottom_reason: None,
             decided_by: None,
             vacuity: None,
+            portfolio: None,
         };
         let mut report = AutoVerifyReport {
             properties: vec![
@@ -11706,6 +11840,7 @@ mod tests {
             bottom_reason: None,
             decided_by: Some("exact-symbolic".into()),
             vacuity: None,
+            portfolio: None,
         };
         let fresh = || AutoVerifyReport {
             properties: vec![
@@ -11795,6 +11930,7 @@ mod tests {
             bottom_reason: None,
             decided_by: None,
             vacuity: None,
+            portfolio: None,
         };
         let mut report = AutoVerifyReport {
             properties: vec![
@@ -12031,6 +12167,7 @@ mod tests {
                 bottom_reason: None,
                 decided_by: Some("reach-portfolio".into()),
                 vacuity: None,
+                portfolio: None,
             }],
             notes: vec![real],
             ..Default::default()
@@ -12114,6 +12251,7 @@ mod tests {
             bottom_reason: None,
             decided_by: None,
             vacuity: None,
+            portfolio: None,
         }
     }
 
@@ -12281,6 +12419,7 @@ mod tests {
             bottom_reason: None,
             decided_by: None,
             vacuity: None,
+            portfolio: None,
         };
         let mut report = AutoVerifyReport {
             properties: vec![
@@ -12337,6 +12476,7 @@ mod tests {
             bottom_reason: None,
             decided_by: None,
             vacuity: None,
+            portfolio: None,
         };
         let mut report = AutoVerifyReport {
             properties: vec![
@@ -12382,6 +12522,7 @@ mod tests {
                 bottom_reason: None,
                 decided_by: None,
                 vacuity: None,
+                portfolio: None,
             }],
             ..Default::default()
         };
@@ -12677,6 +12818,7 @@ mod tests {
                 bottom_reason: None,
                 decided_by: None,
                 vacuity: None,
+                portfolio: None,
             }],
             ..Default::default()
         };
@@ -13145,6 +13287,7 @@ module uart_tx(); endmodule"#;
             bottom_reason: None,
             decided_by: Some("exact-symbolic".into()),
             vacuity: None,
+            portfolio: None,
         });
         attach_safety_witnesses(&mut report, TWO_BIT_PULSES, false);
         assert!(
@@ -13175,6 +13318,7 @@ module uart_tx(); endmodule"#;
             bottom_reason: None,
             decided_by: Some("exact-symbolic".into()),
             vacuity: None,
+            portfolio: None,
         });
         attach_safety_witnesses(&mut report, TWO_BIT_PULSES, false);
         let note = report.notes.iter().find(|n| {
@@ -13216,6 +13360,7 @@ module uart_tx(); endmodule"#;
                     .into(),
             ),
             vacuity: None,
+            portfolio: None,
         }
     }
 
@@ -13292,6 +13437,7 @@ module uart_tx(); endmodule"#;
             bottom_reason: None,
             decided_by: Some("exact-symbolic".into()),
             vacuity: None,
+            portfolio: None,
         });
         report.notes.push(witness_miss_note(
             "ann_guarantee_0",
@@ -13771,6 +13917,7 @@ module uart_tx(); endmodule"#;
                     bottom_reason: None,
                     decided_by: None,
                     vacuity: None,
+                    portfolio: None,
                 },
                 PropertyVerdict {
                     name: "p_unknown".into(),
@@ -13783,6 +13930,7 @@ module uart_tx(); endmodule"#;
                     bottom_reason: None,
                     decided_by: None,
                     vacuity: None,
+                    portfolio: None,
                 },
             ],
             unsupported: vec![("u".into(), "reason".into())],
@@ -13978,6 +14126,7 @@ module uart_tx(); endmodule"#;
                     bottom_reason: None,
                     decided_by: Some("explicit".into()),
                     vacuity: None,
+                    portfolio: None,
                 }],
                 unsupported: Vec::new(),
                 diagnostics: ModelDiagnostics::default(),
@@ -14132,6 +14281,7 @@ module uart_tx(); endmodule"#;
                 bottom_reason: None,
                 decided_by: None,
                 vacuity: None,
+                portfolio: None,
             }],
             unsupported: Vec::new(),
             diagnostics: ModelDiagnostics {
@@ -14189,6 +14339,7 @@ module uart_tx(); endmodule"#;
                 bottom_reason: None,
                 decided_by: None,
                 vacuity: None,
+                portfolio: None,
             }],
             unsupported: Vec::new(),
             diagnostics: ModelDiagnostics {
@@ -21364,6 +21515,7 @@ mod source_map_tests {
             bottom_reason: None,
             decided_by: None,
             vacuity: None,
+            portfolio: None,
         });
         report.diagnostics.trace_names.sources = vec![
             cell(
@@ -21423,6 +21575,7 @@ mod source_map_tests {
                 bottom_reason: None,
                 decided_by: None,
                 vacuity: None,
+                portfolio: None,
             });
             report
         };

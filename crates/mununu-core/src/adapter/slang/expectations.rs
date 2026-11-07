@@ -327,6 +327,7 @@ mod tests {
                     bottom_reason: None,
                     decided_by: None,
                     vacuity: None,
+                    portfolio: None,
                 })
                 .collect(),
             ..Default::default()
@@ -349,6 +350,7 @@ mod tests {
                     bottom_reason: None,
                     decided_by: None,
                     vacuity: None,
+                    portfolio: None,
                 })
                 .collect(),
             ..Default::default()

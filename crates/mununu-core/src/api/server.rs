@@ -111,7 +111,7 @@ pub fn create_router() -> Router {
         .route("/api/v1/verify", post(handlers::verify_project_handler))
         .route("/api/v1/btor2/cegar", post(handlers::btor2_cegar_handler))
         // Multi-engine safety portfolio — decide `bad`-reachability across every
-        // sound engine (exact ⊕ native ⊕ spacer ⊕ btormc ⊕ Pono), merged under the
+        // sound engine (exact ⊕ native ⊕ interpolation ⊕ btormc ⊕ Pono ⊕ rIC3), merged under the
         // differential-oracle discipline. Surface peer of the CLI `mununu btor2 verify`.
         .route("/api/v1/btor2/verify", post(handlers::btor2_verify_handler))
         // P2 response-liveness at scale — AG(request → AF grant) via liveness-to-

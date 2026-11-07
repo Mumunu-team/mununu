@@ -196,7 +196,7 @@ flowchart TD
   C -->|"νμ box-AF → Response-liveness<br/>(AG(req → AF grant))"| L2S["Liveness-to-safety + portfolio"]
   C -->|"νμ diamond → Recoverability<br/>(AG EF good) — SVA/LTL can't state"| CUBE["KMTS 3-valued branching cube"]
 
-  SAFE --> PORT["exact BDD · native BMC/k-induction · native interp (cvc5) ·<br/>Z3 SPACER (CHC)* · btormc* · Pono*  →  differential-oracle merge"]
+  SAFE --> PORT["exact BDD · native BMC/k-induction · native interp (cvc5) ·<br/>btormc* · Pono* · rIC3*  →  differential-oracle merge"]
   CUBE --> BR["exact 3-valued BDD (cone ≤192b by auto-cap) →<br/>predicate-cube + SMT hyper-must →<br/>Podelski–Rybalchenko ranking cert"]
 
   PORT --> V["True / False / ⊥"]
@@ -206,7 +206,7 @@ flowchart TD
   LTL["LTL assumptions/guarantees"] --> SYN["GR(1) fixpoints · parity game (Zielonka)"] --> CTRL["Synthesised controller (SV / CTXDSL / AIGER)"]
 ```
 
-_* = external subprocess (btormc, Pono); every other engine is mununu-owned (z3/cvc5 are linked libraries or interpolation calls)._
+_* = external subprocess (btormc, Pono, rIC3); every other engine is mununu-owned (z3/cvc5 are linked libraries or interpolation calls)._
 
 **Bit-level safety portfolio** — decides `AG ¬bad` (SVA `assert` / BTOR2 `bad`
 reachability). [`adapter/reach_portfolio.rs`](crates/mununu-core/src/adapter/reach_portfolio.rs)
@@ -217,23 +217,22 @@ guessing. Any timeout / absent tool / inconclusive is a sound `⊥`.
 "Owner" is *whose model-checking algorithm runs the search*, not merely which library is
 linked — an important distinction. mununu-owned means mununu drives the search loop and uses
 z3/cvc5 only as per-query oracles; external means an outside model checker runs the whole
-search (whether linked in-process, like Z3's SPACER, or a subprocess, like btormc/Pono).
+search (a subprocess, like btormc / Pono / rIC3).
 
 | Engine | Algorithm owner | Method |
 |---|---|---|
 | Exact BDD reachability | **mununu** (OxiDD, in-process) | exact up to the 192-bit auto-cap (40 by default), shape-bound within it; refuses an unsound "safe" on free init |
 | Native BMC + k-induction | **mununu** (drives the unroll; z3 answers per-depth SAT) | word-level counterexample + inductive proof |
 | Native McMillan interpolation | **mununu** (drives the forward-reach k-schedule; cvc5 answers per-interpolant queries) | last-resort; uniquely decides HWMCC `gen12/14/39` |
-| SPACER (IC3/PDR) via CHC | **external algorithm — Z3's SPACER** (an isolated child); mununu owns only the btor2→CHC *encoding* | Z3 solves the Horn-clause problem end-to-end; corroborate-only since mununu#740 (a lone SPACER verdict decides nothing) |
 | btormc | **external** (subprocess) | BMC + k-induction |
 | Pono | **external** (subprocess) | IC3/PDR (`ic3bits`) |
 | rIC3 | **external** (subprocess) | bit-level IC3/PDR (`-e ic3`) — the member that proves the inductive-invariant safety class (OpenTitan's duplicated-counter fault-flag chains) |
 
 So mununu-owned model-checking algorithms are the exact BDD engine, native BMC,
-native k-induction, and native McMillan interpolation; the `native_spacer` path is a **Z3
-SPACER frontend** — mununu builds the CHC encoding, Z3 runs the IC3/PDR search. (On the
-HWMCC run below, that means only 2 of the 41 decides come from a mununu-owned safety
-algorithm; the rest are Z3 SPACER, btormc, or Pono.)
+native k-induction, and native McMillan interpolation. (On the HWMCC run below, only 2 of
+the 41 decides came from a mununu-owned safety algorithm; the rest came from the external
+model checkers. That run predates N2, which removed Z3 SPACER from the portfolio on
+2026-11-06; SPACER had been corroborate-only since mununu#740.)
 
 **KMTS 3-valued branching cube** — the differentiator: it decides *branching-time*
 μ-calculus that SVA and LTL **cannot state**, most notably recoverability `AG EF good`
@@ -257,11 +256,10 @@ are reported, never silently dropped.
 The IC3ia predicate-abstraction ladder
 ([`adapter/btor2/abs_safety.rs`](crates/mununu-core/src/adapter/btor2/abs_safety.rs)) is a
 guarded research foundation, **not** a production decider — it abstains on real designs.
-On the HWMCC bit-level suite the external model checkers (Z3 SPACER, btormc, Pono) do the
+On the HWMCC bit-level suite the external model checkers (btormc, Pono, rIC3) do the
 bulk of the deciding; the mununu-owned safety algorithms contribute a handful (and the
 branching-time decides that no bv tool can state). Deployment vs ownership are separate:
-`btormc` / `Pono` / `cvc5` are external **subprocesses**; Z3's SPACER is an external
-**algorithm** run in-process via the linked z3 library. z3-as-an-SMT-solver (per-query,
+`btormc` / `Pono` / `rIC3` / `cvc5` are external **subprocesses**. z3-as-an-SMT-solver (per-query,
 inside native BMC/k-induction/interp) is mununu's search using z3 as an oracle — that part
 *is* mununu-owned. `slang` / `yosys` (yosys-slang) are SV *front-ends*, not solvers.
 
