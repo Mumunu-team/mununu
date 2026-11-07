@@ -270,11 +270,30 @@ fn run_interp(
 /// remainder as its wall, the subprocess members' wall IS the remainder (above 60 s btormc's
 /// depth cap lifts automatically, as before).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct MemberTimeouts {
+pub struct MemberTimeouts {
     pub native_query_ms: u32,
     pub interp_query_ms: u32,
     pub interp_overall_ms: u64,
     pub subprocess: std::time::Duration,
+}
+
+/// The full portfolio's member budgets (mununu#892). With a run budget in effect every member
+/// follows the time left, as before. Without one, a `--timeout-ms` RAISED above the subprocess
+/// default is read as the member budget for the owned members too — native's per-query bound and
+/// interpolation's bounds — the way `--owned-only` already computes it. Until this, the raised
+/// wall reached only the subprocess members and btormc's depth cap, and native stayed at its 5 s
+/// per-query default: two HWMCC'20 array rows were ⊥ in the full run with ten minutes of
+/// subprocess time and decided by native alone with sixty seconds of query time. At the default
+/// wall nothing changes.
+pub fn portfolio_member_timeouts(
+    remaining_ms: Option<u64>,
+    subprocess: std::time::Duration,
+) -> MemberTimeouts {
+    if remaining_ms.is_none() && subprocess > btormc::DEFAULT_TIMEOUT {
+        let raised = u64::try_from(subprocess.as_millis()).unwrap_or(u64::MAX);
+        return member_timeouts(Some(raised), subprocess);
+    }
+    member_timeouts(remaining_ms, subprocess)
 }
 
 pub(crate) fn member_timeouts(
@@ -411,7 +430,7 @@ pub fn decide_reach_portfolio_cancellable(
     if budget.expired() {
         return ReachOutcome::default();
     }
-    let t = member_timeouts(budget.remaining_ms(), subprocess_timeout);
+    let t = portfolio_member_timeouts(budget.remaining_ms(), subprocess_timeout);
     let subprocess_timeout = t.subprocess;
     let content = emit_btor2(file);
     // Raising the wall budget signals "reach deeper" — so lift btormc's depth cap too.

@@ -1105,10 +1105,12 @@ struct Btor2VerifyArgs {
     /// routes take none of `--fault`, `--target`, `--witness`, `--owned-only`.
     #[arg(long, value_enum, default_value_t = SafetyEngineArg::Portfolio)]
     engine: SafetyEngineArg,
-    /// Per-engine wall budget (ms), default 60000: the subprocess members (btormc / Pono) of
-    /// the full portfolio, or every engine under `--owned-only`. A larger value lets the
-    /// incremental-SAT model checkers and native interpolation reach deeper — e.g. `krebs.3`'s
-    /// depth-75 counterexample needs ~73000. (0.5: replaces `--owned-timeout-ms` too.)
+    /// Per-engine wall budget (ms), default 60000: the subprocess members (btormc / Pono / rIC3)
+    /// of the full portfolio, or every engine under `--owned-only`. A value ABOVE the default
+    /// also becomes the owned members' budget in the full portfolio — native BMC / k-induction's
+    /// per-query bound and interpolation's bounds — so a larger value lets every member reach
+    /// deeper, e.g. `krebs.3`'s depth-75 counterexample needs ~73000 (mununu#892; before it the
+    /// raised wall reached the subprocess members only). (0.5: replaces `--owned-timeout-ms` too.)
     #[arg(long, value_name = "MS")]
     timeout_ms: Option<u64>,
     /// On a `violated` verdict, also emit a concrete init→bad counterexample trace

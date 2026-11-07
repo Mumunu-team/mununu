@@ -195,6 +195,12 @@ decided by the reachability portfolio and never by the exact engine: the monitor
 design's state (a saved copy plus the loop flags), so its product is almost always over the bit
 cap — a rule, not an accident of sizes.
 
+A `--timeout-ms` **above** the 60 s default is also the owned members' budget in the full
+portfolio: native BMC / k-induction's per-query bound and the interpolation member's bounds follow
+it, as they already did under `--owned-only` (mununu#892). Before that fix the raised wall reached
+the subprocess members and btormc's depth cap only, and native kept its 5 s per-query default
+whatever the flag said.
+
 ### `sv verify-auto` fair-cycle bridge — `// @mununu_assume GF <atom>` (mununu#477)
 
 > Source of truth: [`escalate_bottom`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) — surface: (CLI+API+UI)
