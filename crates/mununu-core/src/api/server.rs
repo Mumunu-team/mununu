@@ -170,7 +170,7 @@ pub fn create_router() -> Router {
         // SV-direct auto FSM illegal-encoding scan (lift + scan, one call). Surface peer
         // of the CLI `sv check-fsm` and the BTOR2-direct `/api/v1/btor2/check-fsm`.
         .route("/api/v1/sv/check-fsm", post(handlers::sv_check_fsm_handler))
-        // SV-direct partial-write preflight (monono#partsel) — lift + report the
+        // SV-direct partial-write preflight (mununu#469) — lift + report the
         // registers the verifier can't keep faithfully, no model checking. Surface
         // peer of the CLI `sv lint`.
         .route("/api/v1/sv/lint", post(handlers::sv_lint_handler))

@@ -1827,7 +1827,7 @@ pub async fn sv_cdc_lint_handler(
     .await
 }
 
-/// monono#partsel preflight (#469) — lift SV and report the partial-write
+/// mununu#469 preflight (#469) — lift SV and report the partial-write
 /// registers the verifier cannot keep faithfully, with no model checking. Surface
 /// peer of the CLI `mununu sv lint`; read-only, changes no verdict.
 pub async fn sv_lint_handler(

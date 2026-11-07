@@ -117,7 +117,7 @@ mununu --quiet sv lint rtl/mod.sv
 mununu --quiet sv lint rtl/mod.sv --fail-on none
 ```
 
-The JSON on stdout lists each flagged `signal` with a `kind` of `"register"` (the root — the register itself) or `"output"` (a downstream combinational output of one). See [`docs/verifying-rtl.md`](verifying-rtl.md) for the soundness background (the monono#partsel guard).
+The JSON on stdout lists each flagged `signal` with a `kind` of `"register"` (the root — the register itself) or `"output"` (a downstream combinational output of one). See [`docs/verifying-rtl.md`](verifying-rtl.md) for the soundness background (the mununu#469 guard).
 
 ## Lint the clock-domain crossings of a multi-clock design
 

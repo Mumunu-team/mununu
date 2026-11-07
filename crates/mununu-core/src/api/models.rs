@@ -1761,7 +1761,7 @@ impl SvLiftRequest {
 
 /// Request for `POST /api/v1/sv/lint` — the SV-direct partial-write preflight.
 /// Lifts SystemVerilog and reports every register whose partial-write lift the
-/// verifier cannot keep faithfully (monono#partsel), with no model checking.
+/// verifier cannot keep faithfully (mununu#469), with no model checking.
 /// Surface peer of the CLI `mununu sv lint`.
 #[derive(Debug, Deserialize)]
 pub struct SvLintRequest {
@@ -2640,7 +2640,7 @@ impl From<&crate::adapter::slang::verify_auto::AutoVerifyReport> for SvVerifyAut
 /// # Why these exist as types
 ///
 /// All three `sv` property verbs printed JSON before this — built inline with `serde_json::json!`,
-/// so the field set was whatever the format string happened to say that week. rosf consumes mununu
+/// so the field set was whatever the format string happened to say that week. the consumer consumes mununu
 /// as a subprocess and asked for *"the schema-pinned document, never the transcript"*; a document
 /// with no type behind it is the transcript in a different font.
 ///
@@ -2824,7 +2824,7 @@ pub struct FaultSiteView {
     pub rows: Vec<String>,
 }
 
-/// monono ask 26 — WHY a property is `⊥`, machine-readable.
+/// mununu#553 — WHY a property is `⊥`, machine-readable.
 ///
 /// The complement to `unknown_cells`: that field says HOW MUCH of the cube space stayed
 /// undecided, this one says WHY nothing decided it. A consumer previously had the quantity and
@@ -2978,7 +2978,7 @@ pub struct PropertyVerdictView {
     /// outcome.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skip_reason: Option<String>,
-    /// monono ask 26 — why an `unknown` (⊥) property was not decided. `None` for a definite
+    /// mununu#553 — why an `unknown` (⊥) property was not decided. `None` for a definite
     /// outcome. See [`BottomReasonView`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bottom_reason: Option<BottomReasonView>,
@@ -3303,7 +3303,7 @@ mod bottom_reason_view_tests {
         assert_eq!(step.state[1].value, Some(2), "renaming keeps the value");
     }
 
-    /// monono ask 26 — the API surface must carry the reason too, not just the CLI.
+    /// mununu#553 — the API surface must carry the reason too, not just the CLI.
     ///
     /// Surface Parity: a capability ships on CLI *and* HTTP API in the same PR. The JSON-schema
     /// drift detector pins the SHAPE of this field; nothing else asserts the CONVERSION fills it,

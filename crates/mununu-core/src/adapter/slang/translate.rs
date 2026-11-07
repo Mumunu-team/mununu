@@ -5341,7 +5341,7 @@ mod tests {
     /// measured against `slang --ast-json`, not guessed).
     ///
     /// This used to report "constant bit-select `sig[k]` needs a bit-level model predicate",
-    /// pointing the reader at a workaround that cannot apply to array CONTENT. It cost monono
+    /// pointing the reader at a workaround that cannot apply to array CONTENT. It cost the consumer
     /// a block: they reduced a quantified clear-on-read property to a single literal index to
     /// make it expressible, and were refused anyway with the wrong reason.
     #[test]
@@ -6073,7 +6073,7 @@ mod tests {
 
     /// mununu#544 — every labelled assertion recovers the label its author wrote.
     ///
-    /// monono's measurement: `--expect "a_reseed_only_at_a_span_edge=holds"` exited 4 while
+    /// the consumer's measurement: `--expect "a_reseed_only_at_a_span_edge=holds"` exited 4 while
     /// `--expect "affine_spr_sva_sva_0=holds"` exited 0 on the same run — the index was the only
     /// name that worked, so inserting a property mid-file silently re-pointed every later pin.
     ///
@@ -6139,7 +6139,7 @@ mod tests {
         assert_eq!(
             super::block_label("6338700059712 a_reseed_only_at_a_span_edge").as_deref(),
             Some("a_reseed_only_at_a_span_edge"),
-            "monono's actual label shape"
+            "the consumer's actual label shape"
         );
     }
 

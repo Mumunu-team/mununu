@@ -3,7 +3,7 @@
 //! # Why this is mununu's job and not each consumer's
 //!
 //! A verification gate never wants "did it pass". It wants **"did exactly this happen"**. Driving
-//! mununu across 22 RTL blocks, monono converged on three assertions and rebuilt them in shell —
+//! mununu across 22 RTL blocks, the consumer converged on three assertions and rebuilt them in shell —
 //! and every project driving mununu will want them, will write them in shell, and will
 //! independently rediscover the same traps. The vocabulary is about *verdicts*, which is mununu's
 //! domain: nothing in it mentions the consumer's problem space.
@@ -18,7 +18,7 @@
 //!
 //! # The fourth verb, which must NOT exist
 //!
-//! monono wrote `expect_all_hold_except` — name properties allowed to come back undecided, with a
+//! the consumer wrote `expect_all_hold_except` — name properties allowed to come back undecided, with a
 //! reason — and **deleted it**. It was written for `sdram_ctrl`'s three abstaining assertions;
 //! those turned out to be **FALSE rather than hard**. The engine had abstained, the excuse made
 //! the abstention comfortable, and three wrong assertions sat behind it until they were restated
@@ -26,7 +26,7 @@
 //!
 //! So there is deliberately no "tolerate undecided" mode here. [`ExpectedVerdict::Unknown`] is the
 //! sound version of the same wish: it pins the ⊥ as a **claim** rather than excusing it, and it
-//! fails when the claim stops being true. That is not hypothetical — monono's `video_timing` twin
+//! fails when the claim stops being true. That is not hypothetical — the consumer's `video_timing` twin
 //! pinned `sva_1=UNKNOWN`, mununu#503 made it decidable, and the gate failed on the next run,
 //! which is exactly the outcome you want. A verb that accepted "any verdict here is fine" cannot
 //! do that, and a tolerated ⊥ actively prevents it.
@@ -658,7 +658,7 @@ mod tests {
     }
     /// mununu#544 — a claim may name a property by its SV LABEL.
     ///
-    /// monono measured `--expect "a_reseed_only_at_a_span_edge=holds"` exiting 4 while the
+    /// the consumer measured `--expect "a_reseed_only_at_a_span_edge=holds"` exiting 4 while the
     /// positional `affine_spr_sva_sva_0` exited 0 on the same run. The label is what the author
     /// wrote, so it survives a reorder; the index re-points on any insertion.
     #[test]
@@ -716,7 +716,7 @@ mod tests {
         );
     }
 
-    /// mununu#716 — a contrast twin pinned by its LABEL. rosf's `block_contract` twin reports
+    /// mununu#716 — a contrast twin pinned by its LABEL. the consumer's `block_contract` twin reports
     /// `name: "sva.counter_noclr_sva_sva_0"`, `label: "a_clr_lands"`; `--expect-violated
     /// a_clr_lands` resolved the label but then failed it as "not named as violated", because the
     /// completeness rule matched claims against `name` only.
