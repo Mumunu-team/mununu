@@ -281,63 +281,45 @@ mod tests {
         );
     }
 
-    /// Env-var parsing cases exercised as ONE sequential test — env is
-    /// process-global and cargo runs tests in parallel by default, so a
-    /// per-case test would race with a sibling test's set/remove and flake.
-    /// The four cases must appear in a single test body so they serialize
-    /// on the test's execution.
+    /// The four env-var cases, through the pure resolution function. This test used to set
+    /// `MUNUNU_MAX_PROCESS_MEMORY_BYTES` itself, ending on a 1 GiB ceiling. The variable is
+    /// process-global, and every verify-auto test in the same binary polls it at its memory
+    /// checkpoints, under an RSS of several GiB while the suite runs in parallel. A test that
+    /// hit a checkpoint inside that window abstained with `unknown` (mununu#871). Nothing here
+    /// writes the environment now.
     #[test]
-    fn env_var_parsing_sequences_the_four_cases() {
-        // SAFETY: this is the only test in the module that mutates env; all
-        // reads are self-contained after each set. `MUNUNU_MAX_PROCESS_MEMORY_BYTES`
-        // is not otherwise consumed by test code in mununu-core.
-        unsafe {
-            std::env::remove_var(MEMORY_BUDGET_ENV);
-        }
-        // mununu#504 C6 — "unset" is no longer unconditionally None: under a memory-limited
-        // cgroup it resolves to 0.8 x the limit. Asserting None here would pass on an
-        // unconstrained host and FAIL inside a limited container, so pin the invariant that
-        // actually holds everywhere — the env path agrees with the pure resolution function.
-        // The resolution TABLE itself is tested in the `resolve_memory_budget` cases above,
-        // which need no env or cgroup at all.
+    fn env_var_values_resolve_through_the_four_cases() {
+        let detected = detect_cgroup_memory_limit_bytes();
         assert_eq!(
-            read_memory_budget_env(),
-            resolve_memory_budget(None, detect_cgroup_memory_limit_bytes()).0,
-            "unset ⇒ whatever auto-detection yields on THIS machine (None when unconstrained)"
+            resolve_memory_budget(None, None).0,
+            None,
+            "unset, no container limit ⇒ disabled"
         );
-
-        unsafe {
-            std::env::set_var(MEMORY_BUDGET_ENV, "0");
-        }
         assert_eq!(
-            read_memory_budget_env(),
+            resolve_memory_budget(Some("0"), detected).0,
             None,
             "explicit `=0` ⇒ None (disabled, matches stale shell state)"
         );
-
-        unsafe {
-            std::env::set_var(MEMORY_BUDGET_ENV, "not_a_number");
-        }
         assert_eq!(
-            read_memory_budget_env(),
+            resolve_memory_budget(Some("not_a_number"), detected).0,
             None,
             "malformed ⇒ None (fail-open, never crash)"
         );
-
-        unsafe {
-            std::env::set_var(MEMORY_BUDGET_ENV, "1073741824"); // 1 GiB
-        }
         assert_eq!(
-            read_memory_budget_env(),
+            resolve_memory_budget(Some("1073741824"), detected).0,
             Some(1_073_741_824),
             "positive numeric ⇒ Some(bytes)"
         );
+    }
 
-        // Restore to unset so any subsequent test (in-module or cross-module
-        // running serially after this one) sees the default state.
-        unsafe {
-            std::env::remove_var(MEMORY_BUDGET_ENV);
-        }
+    /// The env path is the pure resolution applied to whatever the environment holds; read-only.
+    #[test]
+    fn the_env_path_agrees_with_the_pure_resolution() {
+        let raw = std::env::var(MEMORY_BUDGET_ENV).ok();
+        assert_eq!(
+            read_memory_budget_env(),
+            resolve_memory_budget(raw.as_deref(), detect_cgroup_memory_limit_bytes()).0
+        );
     }
 
     #[test]
