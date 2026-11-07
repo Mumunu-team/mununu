@@ -70,6 +70,22 @@
       ],
       "type": "object"
     },
+    "MemberRefusalView": {
+      "description": "mununu#873 — one portfolio member's refusal of a design.",
+      "properties": {
+        "member": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "member",
+        "reason"
+      ],
+      "type": "object"
+    },
     "RepairCandidate": {
       "description": "One repair candidate (2026-10-30): a register whose next-state function, freed at `cycles`, lets the property survive the trace with the trace's inputs fixed.",
       "properties": {
@@ -625,6 +641,13 @@
       "description": "Engines that found `bad` reachable (a real counterexample).",
       "items": {
         "type": "string"
+      },
+      "type": "array"
+    },
+    "refused": {
+      "description": "mununu#873 — the members that refused the design (an encode error, an absent binary, an over-cap cone), each with its reason. Absent when none refused; a member in no list ran and abstained.",
+      "items": {
+        "$ref": "#/definitions/MemberRefusalView"
       },
       "type": "array"
     },
