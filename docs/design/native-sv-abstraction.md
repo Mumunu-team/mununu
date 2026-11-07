@@ -154,7 +154,7 @@ Yosys decomposes large arithmetic into shift-and-add networks when `opt_share` a
 
 ## §4 Mapping SV semantics onto mununu's automaton model
 
-The mapping below is already mononu's existing convention (per [`CLAUDE.md`](../../CLAUDE.md) §Adapter / Emitter Capability Use). The doc states it explicitly because the BTOR2 lifter (§3.3) re-uses it from scratch — there is no behavioural drift, but the lifter must reach for each primitive deliberately rather than re-encoding source features as state-name suffixes.
+The mapping below is already mununu's existing convention (per [`CLAUDE.md`](../../CLAUDE.md) §Adapter / Emitter Capability Use). The doc states it explicitly because the BTOR2 lifter (§3.3) re-uses it from scratch — there is no behavioural drift, but the lifter must reach for each primitive deliberately rather than re-encoding source features as state-name suffixes.
 
 ### §4.1 Registers → state valuations
 

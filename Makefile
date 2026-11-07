@@ -22,13 +22,15 @@ DIFF_CASES ?= 512
         diff-tier-explore \
         coverage mem-profile sweep \
         bench-baseline bench-compare bench-record \
-        experiment replay publish-prep frontier-smoke
+        experiment replay publish-prep frontier-smoke \
+        verify-repro docs-audit tracker-audit
 
 help:
 	@echo "Build / test / lint:"
 	@echo "  build          - cargo build --release for mununu-cli and mununu-extract"
 	@echo "  test           - cargo test --workspace"
 	@echo "  test-fast      - cargo test --lib + integration tests, sub-minute (pre-commit gate)"
+	@echo "  tracker-audit  - open issues that a commit on main claims to close (non-zero when any)"
 	@echo "  e2e            - SVA-verification e2e suite, one test per process (#[ignore]d; run inside the mununu-sva image)"
 	@echo "  e2e-oneshot    - same suite in a single libtest process (an aborting test loses the run)"
 	@echo "  e2e-parallel   - same suite under cargo-nextest, one process per test, E2E_JOBS in flight"
@@ -297,7 +299,18 @@ replay:
 publish-prep:
 	scripts/check_repro.sh
 
-# Allow extra args after `make bench-record EXP=...` to fall through silently
-# (otherwise make tries to interpret each `--bench foo` as its own target).
+# `make bench-record EXP=... -- --bench foo` hands its extra words to the script through
+# MAKECMDGOALS, so each one must be an acceptable goal. This catch-all swallows them, and
+# ONLY when bench-record is among the goals: unscoped it made every typo'd target exit 0
+# (roadmap C2; `make definitely-not-a-target` exited 0 and printed `:`).
+ifneq ($(filter bench-record,$(MAKECMDGOALS)),)
 %:
 	@:
+endif
+
+# Roadmap C4 — the tracker and main must agree: an open issue that a commit on main or a merged
+# PR claims to close is a disagreement. The control runs first (C3): a known closed issue must
+# be reported, or the audit is vacuous and the target fails before the live check.
+tracker-audit:
+	scripts/tracker_audit.sh --control
+	scripts/tracker_audit.sh
