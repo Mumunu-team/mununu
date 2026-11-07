@@ -36,7 +36,7 @@ use std::time::{Duration, Instant};
 
 use crate::adapter::btor2::PredicateSpec;
 use crate::adapter::btor2::predicate_expr::{CmpOp, PredicateExpr};
-use crate::adapter::{AdapterError, AdapterErrorKind};
+use crate::adapter::{AdapterError, AdapterErrorKind, SpawnMember};
 
 /// R.5 Item 3 sub-item 3.2 (2026-06-03) — default bit-width
 /// assumed for register-equality predicates when constructing
@@ -296,7 +296,7 @@ pub fn invoke_cvc5_for_interpolant(
     // budget (a clean "no interpolant", not a mid-search kill), so a hard query fails
     // fast instead of pinning the discovery loop. Matched to the wall budget.
     let tlimit_ms = opts.timeout.as_millis().min(u128::from(u32::MAX)) as u32;
-    let mut child = Command::new(&bin.path)
+    let (mut child, group) = Command::new(&bin.path)
         .args([
             "--lang=smt2",
             "--produce-interpolants",
@@ -305,7 +305,7 @@ pub fn invoke_cvc5_for_interpolant(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
+        .spawn_member()
         .map_err(|e| AdapterError {
             kind: AdapterErrorKind::UnsupportedConstruct,
             location: None,
@@ -344,8 +344,7 @@ pub fn invoke_cvc5_for_interpolant(
             Some(s) => break s,
             None => {
                 if start.elapsed() >= opts.timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    group.kill_and_reap(&mut child);
                     let _ = writer.join();
                     return Err(AdapterError {
                         kind: AdapterErrorKind::UnsupportedConstruct,

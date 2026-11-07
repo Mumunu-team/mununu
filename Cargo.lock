@@ -1114,6 +1114,7 @@ dependencies = [
  "criterion",
  "dhat",
  "itoa",
+ "libc",
  "memory-stats",
  "num-bigint",
  "num-traits",

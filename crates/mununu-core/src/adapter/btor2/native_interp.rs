@@ -35,6 +35,7 @@ use std::collections::BTreeMap;
 
 use z3::ast::{Ast, BV, Bool};
 
+use crate::adapter::SpawnMember;
 use crate::adapter::btor2::ast::{Btor2File, Nid, Node, Operand};
 use crate::adapter::btor2::native_bmc;
 use crate::adapter::sidecar::predicate_image::btor2_encode::{Btor2SmtView, encode_design};
@@ -784,7 +785,7 @@ pub(crate) fn run_cvc5_raw_cancellable(
     use std::time::{Duration, Instant};
     let bin =
         crate::adapter::cvc5::locate_cvc5().map_err(|e| format!("cvc5 unavailable: {e:?}"))?;
-    let mut child = Command::new(&bin.path)
+    let (mut child, group) = Command::new(&bin.path)
         // `--tlimit` is cvc5's own per-run budget; the wall-clock kill below is the
         // hard backstop if it overruns. A timed-out query returns `Err` →
         // `Unavailable` → `Undecided` (sound abstain), never a spurious verdict.
@@ -796,7 +797,7 @@ pub(crate) fn run_cvc5_raw_cancellable(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
+        .spawn_member()
         .map_err(|e| format!("spawn cvc5: {e}"))?;
     child
         .stdin
@@ -816,8 +817,7 @@ pub(crate) fn run_cvc5_raw_cancellable(
                     && cancel_seen.get_or_insert_with(Instant::now).elapsed()
                         >= crate::adapter::MEMBER_CANCEL_GRACE;
                 if cancelled || Instant::now() > deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    group.kill_and_reap(&mut child);
                     killed = Some(if cancelled {
                         "cvc5 cancelled — another portfolio member decided first".to_string()
                     } else {
@@ -880,12 +880,12 @@ pub(crate) fn run_mathsat_raw(query: &str, timeout_ms: u32) -> Result<String, St
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
     let bin = locate_mathsat()?;
-    let mut child = Command::new(&bin)
+    let (mut child, group) = Command::new(&bin)
         .arg("-theory.bv.eager=false")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
+        .spawn_member()
         .map_err(|e| format!("spawn mathsat: {e}"))?;
     // The taken stdin is a temporary dropped at the end of this statement → EOF is sent.
     child
@@ -901,8 +901,7 @@ pub(crate) fn run_mathsat_raw(query: &str, timeout_ms: u32) -> Result<String, St
             Ok(Some(_)) => break,
             Ok(None) => {
                 if Instant::now() > deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    group.kill_and_reap(&mut child);
                     killed = true;
                     break;
                 }

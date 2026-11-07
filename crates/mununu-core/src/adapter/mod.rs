@@ -696,6 +696,152 @@ pub(crate) fn parse_lift_timeout_ms(v: Option<String>) -> Option<std::time::Dura
     }
 }
 
+/// Spawn an external solver so that killing it reaches every process it forked (mununu#875).
+///
+/// `Child::kill` signals the direct child only. A member whose configured path is a launcher
+/// that forks the solver instead of `exec`ing it (a capture, `nice` or `env` shim; a tool that
+/// forks its own workers) used to leave that solver running with no timeout and no owner, and
+/// the forked process, holding the stdout / stderr pipes open, kept the reader threads, and so
+/// the member, waiting past its timeout. On Unix the child now leads its own process group, and
+/// [`MemberGroup::kill_and_reap`] kills the group. Because the group no longer receives the
+/// terminal's Ctrl-C, a SIGINT / SIGTERM / SIGHUP handler kills every live member group before
+/// the process dies; it is installed only where the disposition is still the default, so an
+/// embedder's own handler is left alone.
+pub(crate) trait SpawnMember {
+    fn spawn_member(&mut self) -> std::io::Result<(std::process::Child, MemberGroup)>;
+}
+
+impl SpawnMember for std::process::Command {
+    fn spawn_member(&mut self) -> std::io::Result<(std::process::Child, MemberGroup)> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            self.process_group(0);
+            member_group::install_signal_cleanup();
+        }
+        let child = self.spawn()?;
+        let group = MemberGroup::register(&child);
+        Ok((child, group))
+    }
+}
+
+/// The process group of a spawned member; dropping it forgets the group for signal cleanup.
+pub(crate) struct MemberGroup {
+    #[cfg(unix)]
+    pgid: i32,
+    #[cfg(unix)]
+    slot: Option<usize>,
+}
+
+impl MemberGroup {
+    #[cfg(unix)]
+    fn register(child: &std::process::Child) -> Self {
+        // A pid beyond `i32::MAX` cannot occur on a Unix kernel; 0 disables the group kill.
+        let pgid = i32::try_from(child.id()).unwrap_or(0);
+        Self {
+            pgid,
+            slot: member_group::remember(pgid),
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn register(_child: &std::process::Child) -> Self {
+        Self {}
+    }
+
+    /// Kill the member and everything in its process group, then reap the child. The group is
+    /// killed before the reap, so its id cannot have been reused by an unrelated process.
+    pub(crate) fn kill_and_reap(&self, child: &mut std::process::Child) {
+        #[cfg(unix)]
+        member_group::kill(self.pgid);
+        let _ = child.kill(); // the direct child, also where the group kill is unavailable
+        let _ = child.wait();
+    }
+}
+
+impl Drop for MemberGroup {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(slot) = self.slot {
+            member_group::forget(slot);
+        }
+    }
+}
+
+#[cfg(unix)]
+mod member_group {
+    use std::sync::atomic::{AtomicI32, Ordering::SeqCst};
+
+    /// Live member groups, read by the signal handler. A fixed table of atomics, because a
+    /// handler may neither lock nor allocate. When it is full a member still gets its timeout
+    /// kill; only the signal-time cleanup misses it, and that is logged.
+    const SLOTS: usize = 256;
+    static LIVE: [AtomicI32; SLOTS] = [const { AtomicI32::new(0) }; SLOTS];
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+
+    pub(super) fn remember(pgid: i32) -> Option<usize> {
+        if pgid <= 0 {
+            return None;
+        }
+        let slot = LIVE
+            .iter()
+            .position(|s| s.compare_exchange(0, pgid, SeqCst, SeqCst).is_ok());
+        if slot.is_none() {
+            tracing::warn!(
+                pgid,
+                "more than {SLOTS} live solver processes: this one is not killed if mununu is interrupted"
+            );
+        }
+        slot
+    }
+
+    pub(super) fn forget(slot: usize) {
+        LIVE[slot].store(0, SeqCst);
+    }
+
+    pub(super) fn kill(pgid: i32) {
+        if pgid > 0 {
+            // SAFETY: `kill(2)` with a negative pid signals that process group; it has no
+            // memory-safety preconditions. ESRCH (the group is already gone) is the common case.
+            unsafe {
+                libc::kill(-pgid, libc::SIGKILL);
+            }
+        }
+    }
+
+    extern "C" fn on_terminating_signal(sig: libc::c_int) {
+        for s in &LIVE {
+            kill(s.load(SeqCst));
+        }
+        // SAFETY: `signal` and `raise` are async-signal-safe. Restoring the default action and
+        // re-raising terminates the process exactly as the signal would have without the handler.
+        unsafe {
+            libc::signal(sig, libc::SIG_DFL);
+            libc::raise(sig);
+        }
+    }
+
+    pub(super) fn install_signal_cleanup() {
+        INSTALL.call_once(|| {
+            for sig in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+                // SAFETY: a zeroed `sigaction` is a valid out-parameter; querying with a null
+                // new action changes nothing. The handler only touches atomics and calls
+                // async-signal-safe functions.
+                unsafe {
+                    let mut old: libc::sigaction = std::mem::zeroed();
+                    if libc::sigaction(sig, std::ptr::null(), &mut old) != 0
+                        || old.sa_sigaction != libc::SIG_DFL
+                    {
+                        continue; // ignored, or someone else's handler: leave it alone
+                    }
+                    let handler: extern "C" fn(libc::c_int) = on_terminating_signal;
+                    libc::signal(sig, handler as libc::sighandler_t);
+                }
+            }
+        });
+    }
+}
+
 pub(crate) fn run_with_timeout(
     command: &mut std::process::Command,
     stdin_data: Option<&[u8]>,
@@ -729,7 +875,7 @@ pub(crate) fn run_with_timeout_cancellable(
     use std::io::{Read, Write};
     use std::process::Stdio;
     use std::sync::atomic::Ordering::Relaxed;
-    let mut child = command
+    let (mut child, group) = command
         .stdin(if stdin_data.is_some() {
             Stdio::piped()
         } else {
@@ -737,7 +883,7 @@ pub(crate) fn run_with_timeout_cancellable(
         })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()?;
+        .spawn_member()?;
     // Feed stdin on its own thread (owned copy) so a large input can't deadlock
     // against a tool that interleaves reading stdin with writing stdout — the
     // writer, stdout-reader, and stderr-reader all run concurrently.
@@ -772,8 +918,7 @@ pub(crate) fn run_with_timeout_cancellable(
                 .elapsed()
                 >= MEMBER_CANCEL_GRACE;
         if cancelled || start.elapsed() >= timeout {
-            let _ = child.kill();
-            let _ = child.wait(); // reap; closing the pipes unblocks the readers
+            group.kill_and_reap(&mut child); // the group's pipes close, so the readers return
             break None;
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
