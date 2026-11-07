@@ -55,7 +55,7 @@ array-memory abstraction.
 (`mem[waddr_a_i] <= wdata_a_i`), which Yosys infers as a `$mem` → a
 BTOR2 array sort → the path this milestone validates. The full
 fixture-selection rationale + evidence is in the §10.1 precondition note
-(`.claude/plans/measurements/Phase10-fixture-selection-ibex-regfile-2026-06-13.md`).
+(`Phase10-fixture-selection-ibex-regfile-2026-06-13.md`, an untracked note).
 
 ## Files
 

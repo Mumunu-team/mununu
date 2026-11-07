@@ -79,4 +79,4 @@ becomes **`sat`** — the check discriminates.
 - The **NL → TLSF leg is done by an LLM** (`prompt.md`); `clock_gate.tlsf` is an
   example output. mununu owns the synthesis and verification legs.
 
-See `../../.claude/plans/gr1-domain-corpus.md` for the corpus plan.
+See `gr1-domain-corpus.md` (a planning note, not tracked) for the corpus plan.

@@ -6,7 +6,7 @@
 > `mununu verify` routing through the predicate-cube / 3-valued path. **P4/P5
 > were evaluated and NOT pursued** — see §8 (the load-bearing verification-path
 > unification was the goal, and it shipped at P1–P3). Roadmap context (local):
-> `.claude/plans/ir-track-p4-p5-scoping-2026-06-23.md`.
+> `ir-track-p4-p5-scoping-2026-06-23.md` (a planning note, not tracked).
 
 ## 1. Why
 
@@ -243,7 +243,7 @@ consuming it, the single generic `eval_node_generic` evaluator, and `mununu veri
 routing through the predicate-cube / 3-valued path. P4/P5 (lower a value-rich
 non-RTL frontend onto the seam, then retire the legacy abstraction types) were
 the *flexibility-proof* tail. A code-grounded measurement (`docs/design/sts-ir.md`
-§7.3's gate, recorded in `.claude/plans/ir-track-p4-p5-scoping-2026-06-23.md`)
+§7.3's gate, recorded in `ir-track-p4-p5-scoping-2026-06-23.md` (a planning note, not tracked))
 found them not worth building:
 
 1. **No verdict gain.** Promela (and the C-extraction subset) are already fully

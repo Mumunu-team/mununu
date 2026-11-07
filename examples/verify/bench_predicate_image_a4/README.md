@@ -1,7 +1,7 @@
 # Phase A.4 — Predicate-image discovery benchmark
 
 > **Status: curating.** Step 4.0 of
-> [`.claude/plans/phase-a4-predicate-image.md`](../../../.claude/plans/phase-a4-predicate-image.md).
+> `phase-a4-predicate-image.md` (a planning note, not tracked).
 > 10 fixtures listed in [`fixtures.toml`](fixtures.toml); the recall
 > harness that consumes this manifest lands in step 4.3.
 

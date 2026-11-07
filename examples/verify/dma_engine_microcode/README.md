@@ -2,7 +2,7 @@
 
 > **Source of truth:** [`crates/mununu-core/src/adapter/microcode/`](../../../crates/mununu-core/src/adapter/microcode/) — surface: CLI+API+UI.
 
-The industrial-impactful significant extraction named in [plan Part 5.5](../../../.claude/plans/i-want-you-to-distributed-orbit.md): a minimal DMA-engine microcode composed with a tracked-memory automaton and an IRQ-controller stub.
+The industrial-impactful significant extraction named in plan Part 5.5 (`i-want-you-to-distributed-orbit.md`, an untracked note): a minimal DMA-engine microcode composed with a tracked-memory automaton and an IRQ-controller stub.
 
 Every SoC ships a DMA engine. Every DMA engine fetches a descriptor, writes a payload, flushes, signals completion, acknowledges its interrupt. The safety properties verified here — **descriptor-fetch-leads-to-completion**, **payload-eventually-written**, **interrupt-can-clear** — are the canonical DMA correctness invariants every vendor must guarantee. The microcode adapter's job is to make those properties extractable from a 30-line JSON description that an upstream tool (Bluespec, Chisel, an in-house microcode synthesiser) can emit mechanically.
 

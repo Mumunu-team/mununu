@@ -2,7 +2,7 @@
 
 > **Source of truth:** [`crates/mununu-core/src/verify/`](../../../crates/mununu-core/src/verify/) (verify framework) and [`docs/abstraction.md`](../../../docs/abstraction.md) (per-subsystem abstraction recipe) — surface: CLI+API+UI.
 
-The minimum slice of the [4-core RISC-V verification plan](../../../.claude/plans/i-want-you-to-distributed-orbit.md) that proves the framework's bones for the full case. Two cores, one tracked cache line, MESI coherence, shared memory, a 3-step microprogram (`core_0` store → `fence_rw` → `core_1` load). No PLIC, no watchdog, no pipelines.
+The minimum slice of the 4-core RISC-V verification plan (`i-want-you-to-distributed-orbit.md`, an untracked note) that proves the framework's bones for the full case. Two cores, one tracked cache line, MESI coherence, shared memory, a 3-step microprogram (`core_0` store → `fence_rw` → `core_1` load). No PLIC, no watchdog, no pipelines.
 
 ## What it demonstrates
 

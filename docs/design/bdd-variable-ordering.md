@@ -212,7 +212,7 @@ blocks we already measured. It must rank **cell-major better for `sdram_burst`**
 better for `tlm_tx`**. If it does not reproduce measurements we already have, it is not our mechanism.
 No reordering algorithm is needed to run this check.
 
-Tracked as the **W-track** in [`.claude/plans/roadmap.md`](../../.claude/plans/roadmap.md).
+Tracked as the **W-track** in the private roadmap.
 
 Sources: [Bandwidth and Wavefront Reduction for Static Variable Ordering in Symbolic Model
 Checking](https://arxiv.org/abs/1511.08678) · [MINCE](http://www.aloul.net/Papers/faloul_iwls01_mince.pdf) ·

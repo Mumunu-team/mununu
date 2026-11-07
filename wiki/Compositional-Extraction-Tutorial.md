@@ -3,7 +3,7 @@
 Hands-on walkthrough for the compositional-extraction pipeline. Four paths:
 
 1. **Path A — Public synthetic fixture** (anyone with the repo can run; the recommended starting point).
-2. **Path B — Real MCP-server source** (uses local-only staging fixtures under `.claude/reviews/prospector/staging/`; demonstrates the workflow on real-world MCP-protocol implementations the prospector flagged).
+2. **Path B — Real MCP-server source** (uses local-only staging fixtures under the prospector staging artefact `staging` (private); demonstrates the workflow on real-world MCP-protocol implementations the prospector flagged).
 3. **Path C — New source via Phase B auto-detection** (use `--propose-composition` to seed the composition block from any source file).
 4. **Path D — Web UI hybrid** (CLI for extraction, mununu-ui for compose-block authoring + Phase B suggestions + visual verification).
 
@@ -107,7 +107,7 @@ cargo run --release -q -p mununu-cli -- context eval \
 
 ## Path B — Real MCP-server source
 
-The prospector backlog has surfaced four real-world MCP-protocol bugs, each with a hand-anchored extraction spec under `.claude/reviews/prospector/staging/<TARGET>/`. Those directories are **gitignored** (the `.claude/` tree holds session-local working files), but if your checkout has them, you can re-run them through the same compositional pipeline.
+The prospector backlog has surfaced four real-world MCP-protocol bugs, each with a hand-anchored extraction spec under the prospector staging artefact `staging` (private)<TARGET>/`. Those directories are **gitignored** (the `.claude/` tree holds session-local working files), but if your checkout has them, you can re-run them through the same compositional pipeline.
 
 ### Available targets (when present)
 
@@ -122,12 +122,12 @@ The prospector backlog has surfaced four real-world MCP-protocol bugs, each with
 
 ```bash
 # Verify the staging dir exists in your checkout
-test -d .claude/reviews/prospector/staging/MCP-005/ && echo "OK" || echo "MISSING — see Path A"
+test -d the prospector staging artefact `MCP-005` (private) && echo "OK" || echo "MISSING — see Path A"
 
 # Step 1 — extract using the prepared compositional config
 cargo run --release -q -p mununu-extract -- ast \
-    .claude/reviews/prospector/staging/MCP-005/manager_compositional_with_resources.extract.json \
-    --source .claude/reviews/prospector/staging/MCP-005/source/index.ts \
+    the prospector staging artefact `manager_compositional_with_resources.extract.json` (private) \
+    --source the prospector staging artefact `index.ts` (private) \
     --output /tmp/mcp005_compose.espec.json
 # Expected:
 #   Extracted: 3 automata, 0 properties
@@ -139,12 +139,12 @@ cargo run --release -q -p mununu-extract -- ast \
 # Step 2 — the auto-extracted espec doesn't ship properties; the
 # refined version under staging does. Use that for eval:
 cargo run --release -q -p mununu-cli -- context eval \
-    .claude/reviews/prospector/staging/MCP-005/composed_with_resources_refined.espec.json \
+    the prospector staging artefact `composed_with_resources_refined.espec.json` (private) \
     --formula no_clobber --automaton memory_write_race
 # Expected: 0/1 — race detected.
 
 cargo run --release -q -p mununu-cli -- context eval \
-    .claude/reviews/prospector/staging/MCP-005/composed_with_resources_refined.espec.json \
+    the prospector staging artefact `composed_with_resources_refined.espec.json` (private) \
     --formula clobber_reachable --automaton memory_write_race
 # Expected: 1/1 — clobber reachable, witness valid.
 ```
@@ -157,7 +157,7 @@ If you want to compare auto-extracted vs hand-baseline byte-for-byte:
 
 ```bash
 diff /tmp/mcp005_compose.espec.json \
-    .claude/reviews/prospector/staging/MCP-005/composed_with_resources.espec.json
+    the prospector staging artefact `composed_with_resources.espec.json` (private)
 ```
 
 The auto-extracted output should match the hand baseline modulo whitespace and the missing `properties[]` block (which is added during refinement).
@@ -167,7 +167,7 @@ The auto-extracted output should match the hand baseline modulo whitespace and t
 The other staging dirs follow the same shape:
 
 ```bash
-ls .claude/reviews/prospector/staging/MCP-001/
+ls the prospector staging artefact `MCP-001` (private)
 # Look for *_compositional*.extract.json or *.espec.json
 # Each fixture is documented in the staging dir's surrounding files
 # (extract_*.txt logs, eval-*.txt verdicts).
@@ -232,7 +232,7 @@ npm run dev
    - Click **Run extract**. The backend returns the multi-automaton espec (3 automata for the parallel-workers fixture: `worker_a`, `worker_b`, `shared_file`). The result message reads `Extracted 3 automaton/a. 0 warning(s).`
 5. **Compose Instances**: visual editor over the composition sub-block. Three things you can do here:
    - Click **Start from template (2-instance race)** to see a worked compositional config rendered in the validating editor.
-   - Click **Suggest from source (Phase B)** to scan `parallel_workers.ts` for concurrency idioms — the synthetic fixture has no `Promise.all` / `asyncio.gather` so this returns 0 findings (correct — Path A's source is intentionally minimal). Try the same button after loading a source with idioms (e.g., from `.claude/reviews/prospector/staging/MCP-001/source/tool_node_prefix.py`) and you'll see real findings with **Apply** buttons.
+   - Click **Suggest from source (Phase B)** to scan `parallel_workers.ts` for concurrency idioms — the synthetic fixture has no `Promise.all` / `asyncio.gather` so this returns 0 findings (correct — Path A's source is intentionally minimal). Try the same button after loading a source with idioms (e.g., from the prospector staging artefact `tool_node_prefix.py` (private)) and you'll see real findings with **Apply** buttons.
    - Author the composition JSON manually. The editor shows the live JSON-schema validation summary plus `Valid composition` confirmation when the shape is right.
    When you change the composition here and want it reflected in the extract config, go back to **Extract Model** and click **Sync composition from compose step** — it merges `compositionConfig` into `extractConfig.composition` in one click. Then re-run extract.
 6. **Edit Spec** (optional): refine the auto-extracted espec (add properties, tighten abstractions, adjust `mode: vulnerable / fixed / both` filters) in the SidecarEditor.

@@ -783,7 +783,7 @@ public release boundary.
 
 **mununu-shaped Rust sketch.** N/A. The Caliptra-specific empirical
 fixtures live under
-[`.claude/reviews/prospector/staging/RTL-002/`](../../.claude/reviews/prospector/staging/RTL-002/)
+[`examples/verify/sv_yosys_caliptra_rtl_150/`](../../examples/verify/sv_yosys_caliptra_rtl_150/)
 and `/tmp/caliptra_retry/`.
 
 **Map to mununu.** Empirical target for the decision-gate runtime
@@ -1287,7 +1287,7 @@ per-player game semantics: **PO-3 / R.6.8 CLOSED 2026-06-23** —
 routes `Control::{Controllable, Environment}` through `modal_trit_from_target`
 (the §7.2 per-player rule), so a *definite* controllability verdict is now
 sound (the audit empirically caught + fixed the two-pass over-claim; see
-`.claude/reviews/cube-modal-soundness/`). The advisory in
+`cube-modal-soundness` (a private review note)). The advisory in
 [`predicate-abstraction-recipe.md`](predicate-abstraction-recipe.md) §4.9
 + [`cube_modality_soundness_warnings`](../../crates/mununu-core/src/mu_calculus/mod.rs)
 now flags only the *structural* caveat (a plain verification cube's
@@ -1323,7 +1323,7 @@ This matrix is the contract between this doc and
 mapping) and §5 (current-vs-proposed comparison). Entries 1–18 cover
 the original pillow-plan / explicit-state pipeline. Entries 19–30 (the
 KMTS, AGR, and game-based / GKMTS sections appended in the D.0 deliverable of
-[`you-are-a-formal-vast-lake.md`](../../.claude/plans/you-are-a-formal-vast-lake.md))
+`you-are-a-formal-vast-lake.md` (a planning note, not tracked))
 cover the KMTS pivot's literature anchors and lift verbatim into
 [`native-sv-abstraction.md`](native-sv-abstraction.md),
 [`kmts-theory.md`](kmts-theory.md), and
@@ -1339,7 +1339,7 @@ cover the KMTS pivot's literature anchors and lift verbatim into
 | 6 | AVR NFM 2019 — SyGuS seed | Stage 3 | [`kripke.rs:scan_significant_constants`](../../crates/mununu-core/src/adapter/systemverilog/kripke.rs) | `adapter/sidecar/predicate_seed.rs` | A.4 |
 | 7 | AVR TACAS 2020 — tool | Phase B reference | n/a | `adapter/btor2/avr_bridge.rs` | B (conditional) |
 | 8 | Goel–Sakallah VMCAI 2021 — SyGuS lemmas | Future | n/a | `adapter/sidecar/sygus_extend.rs` | post-B |
-| 9 | Andraus–Sakallah Reveal 2008 — Datapath | Stage 2 | [`adapter/domain.rs`](../../crates/mununu-core/src/adapter/domain.rs) | [`adapter/partition/mod.rs::DatapathUf`](../../crates/mununu-core/src/adapter/partition/mod.rs) (type shipped, heuristic deferred) | A.3 follow-up — see [`phase-a3-followup-datapath-uf.md`](../../.claude/plans/phase-a3-followup-datapath-uf.md) |
+| 9 | Andraus–Sakallah Reveal 2008 — Datapath | Stage 2 | [`adapter/domain.rs`](../../crates/mununu-core/src/adapter/domain.rs) | [`adapter/partition/mod.rs::DatapathUf`](../../crates/mununu-core/src/adapter/partition/mod.rs) (type shipped, heuristic deferred) | A.3 follow-up — see `phase-a3-followup-datapath-uf.md` (a planning note, not tracked) |
 | 10 | Bryant–Kroening TACAS 2007 — BV abstraction | Stage 4 inner | [`kripke_smt.rs`](../../crates/mununu-core/src/adapter/systemverilog/kripke_smt.rs) | `adapter/sidecar/bv_abstraction.rs` | A.4 |
 | 11 | Hoder–Bjørner–de Moura CAV 2006 — Fast PA | Stage 4 algorithm | [`kripke_smt.rs:enumerate_values`](../../crates/mununu-core/src/adapter/systemverilog/kripke_smt.rs#L110) | `predicate_image.rs::all_abstract_edges` | A.4 |
 | 12 | Cimatti IC3-IA TACAS 2014 | Phase B substrate | n/a | external | B (conditional) |

@@ -28,7 +28,7 @@ The path is a real file in this workspace; line numbers are optional. A single-s
 
 > Source of truth: [`scripts/docs-audit.sh`](../../scripts/docs-audit.sh) (`make docs-audit`) — surface: CLI-only — a contributor instrument
 
-When more than **10 commits** have landed on `main` since the last commit touching `docs/`, `wiki/`, `README.md` or `examples/`, the next commit either includes a `docs/` or `wiki/` delta capturing the accumulated changes, or runs `/docs-traceability` and records the verdict (in the commit message or a `.claude/reviews/docs-traceability/` note).
+When more than **10 commits** have landed on `main` since the last commit touching `docs/`, `wiki/`, `README.md` or `examples/`, the next commit either includes a `docs/` or `wiki/` delta capturing the accumulated changes, or runs `/docs-traceability` and records the verdict (in the commit message or a `docs-traceability` (a private review note) note).
 
 ```bash
 make docs-audit                       # default threshold = 10 commits

@@ -225,7 +225,7 @@ the substrate every later stage reads.
 > `VerifyReport`).
 > **Status: live (Phase A.3 step 3.5).** COI half implemented and wired into
 > SV + BTOR2 adapters. Datapath UF substitution deferred to
-> [`phase-a3-followup-datapath-uf.md`](../../.claude/plans/phase-a3-followup-datapath-uf.md).
+> `phase-a3-followup-datapath-uf.md` (a planning note, not tracked).
 
 The `adapter::partition` module computes per-signal classifications
 (`Kept` / `Dropped { reason }` / `Datapath { uf_symbol }`) via the
@@ -625,4 +625,4 @@ synthesis side. This needs more thought before Phase B starts.
 - [`../abstraction.md`](../abstraction.md) — per-subsystem abstraction recipe; the user-facing companion to this design doc.
 - [`../synthesis.md`](../synthesis.md) — controller synthesis modes; the unchanged half of the pipeline.
 - [`../policies/claims-integrity.md`](../policies/claims-integrity.md) — applies when Phase A's first Caliptra PoC ships as a public example.
-- [`.claude/plans/create-a-plan-to-enumerated-pillow.md`](../../.claude/plans/create-a-plan-to-enumerated-pillow.md) — the governing plan; this doc is its Deliverable B.
+- `create-a-plan-to-enumerated-pillow.md` (a planning note, not tracked) — the governing plan; this doc is its Deliverable B.

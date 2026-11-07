@@ -95,5 +95,5 @@ GR(1)-fragment discipline the corpus plan calls out.
 - The **NL → TLSF leg is done by an LLM** (`prompt.md`); `flow_ctrl.tlsf` is an
   example output. mununu owns the synthesis and verification legs.
 
-See `../../.claude/plans/gr1-domain-corpus.md` for the corpus plan and
+See `gr1-domain-corpus.md` (a planning note, not tracked) for the corpus plan and
 `../agentic_rtl_loop/` for the first (arbiter) example.

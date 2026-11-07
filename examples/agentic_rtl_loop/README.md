@@ -124,5 +124,5 @@ explicit state monitors for the combinational/liveness properties.)
 - Verification here uses `btormc` (a mununu engine) directly on the lifted design;
   the productized verbs are `mununu sv verify-auto` and `mununu btor2 verify`.
 
-See `mununu/.claude/plans/gr1-agentic-loop-demo.md` for the engineering plan and
+See `mununu`gr1-agentic-loop-demo.md` (a planning note, not tracked) for the engineering plan and
 `docs/synthesis.md` for the GR(1) mode.
