@@ -272,6 +272,7 @@ mod tests {
                     bottom_reason: None,
                     decided_by: None,
                     vacuity: None,
+                    portfolio: None,
                 },
                 PropertyVerdict {
                     name: "p_violated".into(),
@@ -289,6 +290,7 @@ mod tests {
                     bottom_reason: None,
                     decided_by: None,
                     vacuity: None,
+                    portfolio: None,
                 },
                 PropertyVerdict {
                     name: "p_unknown".into(),
@@ -301,6 +303,7 @@ mod tests {
                     bottom_reason: None,
                     decided_by: None,
                     vacuity: None,
+                    portfolio: None,
                 },
                 PropertyVerdict {
                     name: "p_skipped".into(),
@@ -315,6 +318,7 @@ mod tests {
                     bottom_reason: None,
                     decided_by: None,
                     vacuity: None,
+                    portfolio: None,
                 },
             ],
             unsupported: vec![("u0".into(), "unsupported binary op: BinaryAnd".into())],

@@ -4350,6 +4350,8 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
         "unreachable_by": outcome.unreachable_by,
         "contradiction": outcome.verdict
             == mununu_core::adapter::reach_portfolio::ReachVerdict::Contradiction,
+        // mununu#873 — the members that refused the design, with the reason (the API's field).
+        "refused": mununu_core::api::models::MemberRefusalView::list(&outcome),
         "trace": trace,
         "trace_unavailable_within_k": trace_unavailable_within_k,
     });

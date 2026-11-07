@@ -860,6 +860,7 @@ fn btor2_verify_handler_impl(request: Btor2VerifyRequest) -> ApiResult<Json<Btor
                 reachable_by: by(crate::verdict::PropertyVerdict::Violated),
                 unreachable_by: by(crate::verdict::PropertyVerdict::Holds),
                 contradiction: false,
+                refused: Vec::new(),
                 detail,
                 fault: None,
                 target: None,
@@ -911,6 +912,7 @@ fn btor2_verify_handler_impl(request: Btor2VerifyRequest) -> ApiResult<Json<Btor
                 Vec::new()
             },
             contradiction: false,
+            refused: Vec::new(),
             detail: None,
             fault: Some(o.fault),
             target: o.target,
@@ -969,6 +971,7 @@ fn btor2_verify_handler_impl(request: Btor2VerifyRequest) -> ApiResult<Json<Btor
             .map(|s| s.to_string())
             .collect(),
         contradiction: outcome.verdict == ReachVerdict::Contradiction,
+        refused: crate::api::models::MemberRefusalView::list(&outcome),
         detail: None,
         fault: fault_label,
         target: None,
@@ -1559,6 +1562,7 @@ fn sv_verify_handler_impl(request: SvVerifyRequest) -> ApiResult<Json<Btor2Verif
             .map(|s| s.to_string())
             .collect(),
         contradiction: outcome.verdict == ReachVerdict::Contradiction,
+        refused: crate::api::models::MemberRefusalView::list(&outcome),
         detail: None,
         fault: None,
         target: None,

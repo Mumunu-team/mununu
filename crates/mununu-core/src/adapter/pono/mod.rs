@@ -169,10 +169,10 @@ pub fn run_pono_cancellable(
     // surface it as a malformed-input signal rather than inconclusiveness.
     if verdict == McVerdict::Unknown && !status.success() {
         return Err(err(format!(
-            "`{}` exited with status {} and no verdict; stderr: {}",
+            "`{}` exited with status {} and no verdict: {}",
             bin.path.display(),
             status,
-            stderr.trim()
+            crate::adapter::subprocess_failure_reason(&stderr, &stdout)
         )));
     }
     Ok(verdict)

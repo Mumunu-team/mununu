@@ -881,6 +881,7 @@ fn rows_off_their_pins_tolerates_only_a_host_dependent_bottom() {
         bottom_reason: bottom,
         decided_by: None,
         vacuity: None,
+        portfolio: None,
     };
     let unknown = || VerifyOutcome::Unknown { unknown_cells: 1 };
     let rows = vec![

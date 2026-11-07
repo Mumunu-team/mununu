@@ -1142,6 +1142,7 @@ mod tests {
             bottom_reason: None,
             decided_by: None,
             vacuity: None,
+            portfolio: None,
         };
         let rep = AutoVerifyReport {
             properties: vec![
@@ -1221,6 +1222,7 @@ mod tests {
                 bottom_reason: None,
                 decided_by: None,
                 vacuity: None,
+                portfolio: None,
             }],
             unsupported: Vec::new(),
             diagnostics: Default::default(),
@@ -1332,6 +1334,7 @@ mod tests {
                     bottom_reason: None,
                     decided_by: None,
                     vacuity: None,
+                    portfolio: None,
                 },
                 PropertyVerdict {
                     name: "p_ok".into(),
@@ -1344,6 +1347,7 @@ mod tests {
                     bottom_reason: None,
                     decided_by: None,
                     vacuity: None,
+                    portfolio: None,
                 },
             ],
             unsupported: Vec::new(),

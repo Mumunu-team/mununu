@@ -747,12 +747,18 @@ pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcom
     }
     // Exact BDD — the non-interruptible member; spawned so it can never block the return.
     {
-        let (content, decided, tx) = (Arc::clone(&content), Arc::clone(&decided), tx.clone());
+        let (content, decided, tx, refused) = (
+            Arc::clone(&content),
+            Arc::clone(&decided),
+            tx.clone(),
+            Arc::clone(&refused),
+        );
         let budget = budget.clone();
         std::thread::spawn(move || {
             let _g = crate::adapter::run_budget::enter(&budget);
-            // The owned-only driver reports verdicts only; a refusal is an abstention here.
-            let v = run_exact(&content).unwrap_or(None);
+            // mununu#873 — a refusal (over-cap cone, free init) is an abstention AND a recorded
+            // reason, as in the scoped driver; it used to be dropped here.
+            let v = settle(&refused, "exact", run_exact(&content));
             if v.is_some() {
                 decided.store(true, Relaxed);
             }

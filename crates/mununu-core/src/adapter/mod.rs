@@ -1039,3 +1039,53 @@ mod tests {
         assert_eq!(detect_format_by_extension(Path::new("payload.json")), None);
     }
 }
+
+/// mununu#873 — the reason a model-checker subprocess gave for exiting with no verdict, for a
+/// portfolio refusal. stderr when it has text; otherwise stdout, where pono writes its own
+/// rejection (`Unsupported variable sort in IC3Bits: …`) — quoting stderr alone recorded an empty
+/// reason on every HWMCC'20 array instance. Capped so a chatty tool cannot flood the report.
+pub(crate) fn subprocess_failure_reason(stderr: &str, stdout: &str) -> String {
+    const CAP: usize = 400;
+    let text = match stderr.trim() {
+        "" => stdout.trim(),
+        e => e,
+    };
+    let reason = match text.char_indices().nth(CAP) {
+        Some((at, _)) => format!("{}…", &text[..at]),
+        None => text.to_string(),
+    };
+    if reason.is_empty() {
+        "(no output on stderr or stdout)".to_string()
+    } else {
+        reason
+    }
+}
+
+#[cfg(test)]
+mod subprocess_failure_reason_tests {
+    use super::subprocess_failure_reason;
+
+    #[test]
+    fn a_tool_that_explains_itself_on_stdout_is_quoted() {
+        let stdout = "Unsupported variable sort in IC3Bits: mem:(Array (_ BitVec 2) (_ BitVec 30))\nerror\nb0\n";
+        assert!(subprocess_failure_reason("", stdout).starts_with("Unsupported variable sort"));
+    }
+
+    #[test]
+    fn stderr_wins_when_it_has_text_and_silence_says_so() {
+        assert_eq!(
+            subprocess_failure_reason("parse error\n", "sat"),
+            "parse error"
+        );
+        assert_eq!(
+            subprocess_failure_reason(" ", "\n"),
+            "(no output on stderr or stdout)"
+        );
+        assert!(
+            subprocess_failure_reason("", &"x".repeat(1000))
+                .chars()
+                .count()
+                <= 401
+        );
+    }
+}
