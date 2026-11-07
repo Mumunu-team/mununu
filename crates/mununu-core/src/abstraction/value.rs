@@ -1,7 +1,8 @@
 //! Abstract value representation for state unrolling.
 //!
-//! This module implements the complete abstract value type system as specified in
-//! `docs/archive/abstraction/variable_type_system_for_unrolling.md`.
+//! This module implements the complete abstract value type system for state unrolling. (The
+//! design note that specified it was never tracked in this repository; the types below are the
+//! specification.)
 //!
 //! The type system supports:
 //! - Concrete values: `IntConstant`, `BoolConstant`, `SymbolConstant`

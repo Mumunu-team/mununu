@@ -9,7 +9,7 @@ Drafts of the two derivative artefacts that publish the results of the TLS hands
 | [`substack.md`](substack.md) | Substack post — technical deep-dive | ~2,700 words |
 | [`linkedin.md`](linkedin.md) | LinkedIn post — executive summary | ~190 words |
 
-## Validation gate (per `docs/design/contract-corpus-and-config.md` §D.10)
+## Validation gate (per `docs/archive/design/contract-corpus-and-config.md` §D.10)
 
 Before either draft is posted publicly, all four checks must pass. Status is updated by hand when each one is signed off.
 

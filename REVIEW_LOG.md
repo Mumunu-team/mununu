@@ -128,7 +128,7 @@ Status: not started
 ### §1 Dependency DAG (your reconstruction)
 
 ```
-(write the DAG here after reading docs/architecture/ and crates/mununu-core/src/lib.rs)
+(write the DAG here after reading docs/design/ and crates/mununu-core/src/lib.rs)
 ```
 
 Back-edges noted:
@@ -773,7 +773,7 @@ Status: not started
 - [ ] Every architectural claim from Chapter 1A§4 has a verdict line (survived / falsified / partial / unanswered)
 - [ ] Every architecture question (1A§5 + AQ2.1–2.4 + AQ4.1–4.4 + AQ6.1–6.4 + AQ7.1–7.4 + AQ9.1–9.5 + AQ13.1–13.5) has a verdict line
 - [ ] All `arch`+`bug` findings are resolved OR have a filed follow-up (RFC stub or refactor plan)
-- [ ] CLAUDE.md or `docs/architecture/` updated with each surviving rationale
+- [ ] CLAUDE.md or `docs/design/` updated with each surviving rationale
 - [ ] Any theme with ≥3 findings has an RFC stub linked from this entry
 
 ### §1 Verdicts on architectural claims (from 1A §4)
@@ -827,7 +827,7 @@ Status: not started
 | Theme | Constituent finding IDs | Decision (accept / refactor / RFC) | Follow-up link |
 |-------|--------------------------|-------------------------------------|----------------|
 
-### §4 CLAUDE.md / docs/architecture/ updates
+### §4 CLAUDE.md / docs/design/ updates
 
 - [ ] Surviving rationale for each accepted claim recorded
 - Diff or commit sha:

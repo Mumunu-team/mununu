@@ -1,6 +1,6 @@
 # LinkedIn post — Verifying secure boot when you cannot see inside the crypto blocks
 
-> **Draft for LinkedIn.** Target: 150–200 words. Source artefact: `examples/industrial/secure_boot_rom/`. Do not publish until the four-gate validation checklist in `docs/design/black-box-modules.md` §10.3 passes.
+> **Draft for LinkedIn.** Target: 150–200 words. Source artefact: `examples/industrial/secure_boot_rom/`. Do not publish until the four-gate validation checklist in `docs/archive/design/black-box-modules.md` §10.3 passes.
 
 ---
 

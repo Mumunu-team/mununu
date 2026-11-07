@@ -206,6 +206,6 @@ A follow-up unification would: (a) author mu_formulas against the auto-extracted
 - [Nordic nRF52840 Product Specification §6.30 TWIM](https://docs.nordicsemi.com/bundle/ps_nrf52840/page/twim.html) — register layout, EasyDMA semantics, task/event ordering.
 - [Nordic Errata 211](https://docs.nordicsemi.com/bundle/errata_nRF52840_EngB/page/ERR/nRF52840/EngineeringB/latest/anomaly_840_211.html) — TWIM frequency-change ordering anomaly; pedigree for the planted-bug pattern in this example.
 - [Upstream nrfx repo](https://github.com/NordicSemiconductor/nrfx) — source of `nrf52840.svd` and `nrfx_twim.c`.
-- [`docs/design/hw-sw-codesign-extraction.md`](../../../docs/design/hw-sw-codesign-extraction.md) — Document C, which this example exercises end-to-end.
+- [`docs/archive/design/hw-sw-codesign-extraction.md`](../../../docs/archive/design/hw-sw-codesign-extraction.md) — Document C, which this example exercises end-to-end.
 - [`.claude/plans/pre-deal-shipping-nrf52-twim-flagship.md`](../../../.claude/plans/pre-deal-shipping-nrf52-twim-flagship.md) — the execution plan this directory implements (Phase 1).
 - [`examples/industrial/codesign_uart`](../codesign_uart/) — the original UART codesign example whose shape this flagship reuses (validate.sh + transcript.txt; same three-surface story).

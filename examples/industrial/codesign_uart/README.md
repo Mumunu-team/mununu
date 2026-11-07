@@ -1,6 +1,6 @@
 # UART codesign — formal verification across the HW/SW boundary
 
-> **Industrial example** for [Document C — HW/SW codesign extraction](../../../docs/design/hw-sw-codesign-extraction.md) §C.4 and §C.10. Exercises the **register-map sidecar → coupling synthesis → composed verification** chain end-to-end against the mununu binary on `main`. Closes the four-document arc (A → B → D → C) with the capstone use case.
+> **Industrial example** for [Document C — HW/SW codesign extraction](../../../docs/archive/design/hw-sw-codesign-extraction.md) §C.4 and §C.10. Exercises the **register-map sidecar → coupling synthesis → composed verification** chain end-to-end against the mununu binary on `main`. Closes the four-document arc (A → B → D → C) with the capstone use case.
 
 ## What this example is
 

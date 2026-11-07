@@ -6,7 +6,7 @@
 > UNSAT pair below is "LTS witness only — not reproduced in simulation."
 
 This directory illustrates the assume/guarantee contract pattern from
-[`docs/design/black-box-modules.md`](../../../docs/design/black-box-modules.md)
+[`docs/archive/design/black-box-modules.md`](../../../docs/archive/design/black-box-modules.md)
 applied to a fault-tolerance question: an adversary may flip exactly one
 bit of a functional unit's output per cycle; the design must not
 broadcast a corrupted result.

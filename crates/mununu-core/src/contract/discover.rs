@@ -1,5 +1,5 @@
 //! Discovery pipeline phase 1 — task A5 of
-//! `docs/design/black-box-modules.md`.
+//! `docs/archive/design/black-box-modules.md`.
 //!
 //! Phase 1 covers the first three fields of the contract object the
 //! pipeline emits per black-box module:

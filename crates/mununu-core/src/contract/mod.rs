@@ -1,6 +1,6 @@
 //! Per-component contracts (assume-guarantee) and discharge graph machinery.
 //!
-//! See `docs/design/black-box-modules.md` for the conceptual frame.
+//! See `docs/archive/design/black-box-modules.md` for the conceptual frame.
 //!
 //! This module is the minimal foundation for tasks A1 and A2 of that
 //! document's implementation plan: a `Contract` value type plus a

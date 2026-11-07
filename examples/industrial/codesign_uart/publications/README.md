@@ -13,7 +13,7 @@ Drafts for the M4.d derivative artefacts that publish the results of the codesig
 
 Both drafts follow the **example-led framing rule** captured in user feedback: lead with the real industrial problem, walk the worked example end-to-end, and surface new mununu capabilities only where the example actually exercises them. Feature catalogues belong in closing paragraphs, not headlines.
 
-## Validation gate (per `docs/design/hw-sw-codesign-extraction.md` §C.11.3)
+## Validation gate (per `docs/archive/design/hw-sw-codesign-extraction.md` §C.11.3)
 
 Before either draft is posted publicly, all four checks must pass.
 

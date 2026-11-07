@@ -11,7 +11,7 @@
 //! extractor still emits — they define the wire format the
 //! downstream codesign pipeline expects.
 //!
-//! See `docs/design/c-extraction-correctness-scope.md` for the
+//! See `docs/archive/design/c-extraction-correctness-scope.md` for the
 //! soundness framing that motivated the switch.
 
 use crate::codesign::coupling::{AccessKind, rendezvous_label_name};
