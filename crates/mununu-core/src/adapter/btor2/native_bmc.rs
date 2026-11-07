@@ -588,14 +588,20 @@ pub fn decide_bad_safety_cancellable(
         // 2026-10-28 attribution run native k-induction ran 40–100 s past rIC3's decision
         // (edn ep0: rIC3 45 s, native 148 s, row 148 s) — a row's wall is its slowest member.
         // A scoped watchdog thread polls the flag and interrupts the z3 context the two
-        // solvers run on, but ONLY while a `check()` is in flight (`in_query`): an interrupt
-        // on an idle context would poison the next query of whoever reuses this thread's
-        // context. An interrupted check returns `Unknown`, which the ladder already reads
-        // as an abstention at that depth — never a verdict. The thread is joined before the
-        // closure returns (`done`), so nothing outlives the solvers it may interrupt.
+        // solvers run on, but ONLY while a `check()` is in flight: an interrupt on an idle
+        // context would poison the next query of whoever reuses this thread's context. The
+        // thread is joined before the closure returns (`done`), so nothing outlives the
+        // solvers it may interrupt.
+        //
+        // mununu#878 — an interrupted check does NOT reliably return `Unknown`: under load a
+        // cut query came back with a definite answer, and native reported a `reachable` the
+        // exact oracle refutes (10 of 240 runs; 0 of 240 with the interrupt removed). So the
+        // ladder never reads a result once an interrupt has been issued ([`QueryGate`]), and
+        // the interrupt is issued only inside the gate's critical section, so it cannot land
+        // between one check ending and the next beginning.
         let ctx = z3::Context::thread_local();
         let handle = ctx.handle();
-        let in_query = std::sync::atomic::AtomicBool::new(false);
+        let gate = QueryGate::default();
         let done = std::sync::atomic::AtomicBool::new(false);
         std::thread::scope(|scope| {
             if let Some(c) = cancel {
@@ -608,24 +614,76 @@ pub fn decide_bad_safety_cancellable(
                         if c.load(Relaxed)
                             && seen.get_or_insert_with(std::time::Instant::now).elapsed()
                                 >= crate::adapter::MEMBER_CANCEL_GRACE
-                            && in_query.load(Relaxed)
                         {
-                            handle.interrupt();
+                            gate.interrupt_if_in_query(|| handle.interrupt());
                         }
                         std::thread::sleep(std::time::Duration::from_millis(20));
                     }
                 });
             }
             let out =
-                decide_bad_safety_ladder(&u, &init_pairs, n, max_k, timeout_ms, cancel, &in_query);
+                decide_bad_safety_ladder(&u, &init_pairs, n, max_k, timeout_ms, cancel, &gate);
             done.store(true, std::sync::atomic::Ordering::Relaxed);
             out
         })
     })
 }
 
+/// The handshake between the depth ladder and its cancel watchdog (mununu#878).
+///
+/// One lock covers "a `check()` is in flight" and "an interrupt was issued", so the watchdog
+/// interrupts only while a check is in flight, and a check that may have been touched by an
+/// interrupt is never read. The `interrupted` flag is sticky: an interrupt that lands while the
+/// next check is being set up still discards that check, since z3's cancel can outlive it.
+#[derive(Default)]
+struct QueryGate {
+    state: std::sync::Mutex<GateState>,
+}
+
+#[derive(Default)]
+struct GateState {
+    in_query: bool,
+    interrupted: bool,
+}
+
+impl QueryGate {
+    fn lock(&self) -> std::sync::MutexGuard<'_, GateState> {
+        // A poisoned lock only means a panicking holder; the two flags are still meaningful.
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Run one solver check inside the gate. `Unknown` once an interrupt has been issued, before
+    /// or during the check: an interrupted check's answer is not trusted, whatever it says.
+    fn check(&self, run: impl FnOnce() -> z3::SatResult) -> z3::SatResult {
+        {
+            let mut s = self.lock();
+            if s.interrupted {
+                return z3::SatResult::Unknown;
+            }
+            s.in_query = true;
+        }
+        let res = run();
+        let mut s = self.lock();
+        s.in_query = false;
+        if s.interrupted {
+            z3::SatResult::Unknown
+        } else {
+            res
+        }
+    }
+
+    /// The watchdog's side: interrupt only while a check is in flight, and record it first.
+    fn interrupt_if_in_query(&self, interrupt: impl FnOnce()) {
+        let mut s = self.lock();
+        if s.in_query {
+            s.interrupted = true;
+            interrupt();
+        }
+    }
+}
+
 /// The BMC + k-induction depth ladder of [`decide_bad_safety_cancellable`], on the thread's
-/// current z3 context; `in_query` is raised around every `check()` so the caller's watchdog
+/// current z3 context; every `check()` runs inside `gate` so the caller's watchdog
 /// can interrupt exactly those.
 fn decide_bad_safety_ladder(
     u: &Unroller,
@@ -634,7 +692,7 @@ fn decide_bad_safety_ladder(
     max_k: u32,
     timeout_ms: Option<u32>,
     cancel: Option<&std::sync::atomic::AtomicBool>,
-    in_query: &std::sync::atomic::AtomicBool,
+    gate: &QueryGate,
 ) -> Result<SafetyVerdict, BmcError> {
     {
         // Base: an init-constrained path (as in `bmc_bad_reachable`).
@@ -681,9 +739,7 @@ fn decide_bad_safety_ladder(
             // Base — reachable counterexample? Violated ONLY on a definite Sat.
             base.push();
             base.assert(u.bad_at(k));
-            in_query.store(true, std::sync::atomic::Ordering::Relaxed);
-            let base_res = base.check();
-            in_query.store(false, std::sync::atomic::Ordering::Relaxed);
+            let base_res = gate.check(|| base.check());
             base.pop(1);
             match base_res {
                 z3::SatResult::Sat => return Ok(SafetyVerdict::Violated { depth: k as u32 }),
@@ -694,9 +750,7 @@ fn decide_bad_safety_ladder(
             // (must NOT be read as "inductive"). Base has held through depth k above.
             step.push();
             step.assert(u.bad_at(k));
-            in_query.store(true, std::sync::atomic::Ordering::Relaxed);
-            let step_res = step.check();
-            in_query.store(false, std::sync::atomic::Ordering::Relaxed);
+            let step_res = gate.check(|| step.check());
             step.pop(1);
             match step_res {
                 z3::SatResult::Unsat => return Ok(SafetyVerdict::Safe { k: k as u32 }),
@@ -856,6 +910,48 @@ mod tests {
             bmc_bad_reachable(&file, 4).expect("encodes"),
             BmcOutcome::Violated { depth: 0 }
         );
+    }
+
+    /// mununu#878 — a check the watchdog interrupted is discarded, whatever z3 answered.
+    #[test]
+    fn an_interrupted_check_is_read_as_unknown_even_when_it_answers() {
+        let gate = QueryGate::default();
+        let mut fired = false;
+        let res = gate.check(|| {
+            gate.interrupt_if_in_query(|| fired = true);
+            z3::SatResult::Sat
+        });
+        assert!(fired, "the watchdog interrupts a check in flight");
+        assert_eq!(res, z3::SatResult::Unknown);
+    }
+
+    /// mununu#878 — once interrupted, a later check is not run: z3's cancel may outlive the query.
+    #[test]
+    fn after_an_interrupt_no_further_check_is_trusted() {
+        let gate = QueryGate::default();
+        let _ = gate.check(|| {
+            gate.interrupt_if_in_query(|| ());
+            z3::SatResult::Unsat
+        });
+        let mut ran = false;
+        let res = gate.check(|| {
+            ran = true;
+            z3::SatResult::Unsat
+        });
+        assert!(!ran, "a check after an interrupt must not run");
+        assert_eq!(res, z3::SatResult::Unknown);
+    }
+
+    /// mununu#878 — between checks the watchdog does nothing, so an idle context is never cut and
+    /// the answers of untouched checks stand.
+    #[test]
+    fn the_watchdog_never_interrupts_between_checks() {
+        let gate = QueryGate::default();
+        assert_eq!(gate.check(|| z3::SatResult::Sat), z3::SatResult::Sat);
+        let mut fired = false;
+        gate.interrupt_if_in_query(|| fired = true);
+        assert!(!fired, "no check is in flight");
+        assert_eq!(gate.check(|| z3::SatResult::Unsat), z3::SatResult::Unsat);
     }
 
     /// N0.5 — a peer's decision interrupts the query in flight. The `bad` is the pigeonhole
