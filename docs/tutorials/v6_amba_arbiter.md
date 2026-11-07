@@ -287,7 +287,7 @@ curl -X POST http://localhost:8080/api/v1/context/import \
 
 ### How to track progress
 
-- Master roadmap §11.4 V.6 sub-item 7: `~/.claude/plans/you-are-a-formal-vast-lake.md`.
+- Master roadmap §11.4 V.6 sub-item 7: `you-are-a-formal-vast-lake.md` (a planning note, not tracked).
 - Surface parity skill: run `/parity-check` to verify the V.6 surface
   ships on CLI + API + UI. As of 2026-06-09 the V.6 surface is:
   - **CLI**: `mununu btor2 cegar --controllable ... --predicate ...` ✓
@@ -330,8 +330,8 @@ curl -X POST http://localhost:8080/api/v1/context/import \
 ## See also
 
 - Fixture README: `examples/verify/v6_controllability_kmts/README.md`
-- R.6 replanning plan: `~/.claude/plans/r6-controllability-aware-kmts-game-abstraction.md`
-- Master roadmap §11.4 R.6 sub-track: `~/.claude/plans/you-are-a-formal-vast-lake.md`
+- R.6 replanning plan: `r6-controllability-aware-kmts-game-abstraction.md` (a planning note, not tracked)
+- Master roadmap §11.4 R.6 sub-track: `you-are-a-formal-vast-lake.md` (a planning note, not tracked)
 - R.6.6 lifter implementation: `crates/mununu-core/src/adapter/btor2/kmts_lift.rs:predicate_cube_lift`
 - R.6.3 modality-aware modal step: `crates/mununu-core/src/mu_calculus/evaluator.rs:eval_node_tri`
 - KMTS theory + the §7.2 rule table: `docs/design/kmts-theory.md`

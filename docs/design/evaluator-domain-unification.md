@@ -11,7 +11,7 @@
 > call `EvalContext`'s private methods, so a separate module would force exposing ~10 internals
 > crate-wide; encapsulation won over the file-name suggestion below. Gate met: 2083/2083 crate
 > tests pass (verdict-equivalence) + criterion "No change in performance detected" on
-> `mu_calculus_evaluate` |S|=2048 and |S|=8192. Record: `.claude/plans/measurements/P2-2-2026-06-19.md`.
+> `mu_calculus_evaluate` |S|=2048 and |S|=8192. Record: `P2-2-2026-06-19.md` (a planning note, not tracked).
 
 ## 1. Why
 
@@ -166,7 +166,7 @@ The existing `eval_node` / `eval_node_tri` become thin wrappers:
 |---|---|---|
 | **P2.1** (this note) | Design: the `Domain` trait, the generic-body sketch, the divergence-handlers, the decomposition. | — |
 | **P2.2** ✅ SHIPPED | Defined `EvalDomain` + `BoolDom` (Valuation = BitVec) + `eval_node_generic` + `eval_fixpoint_generic`; rewired `eval_node`/`eval_fixpoint` to delegate to `::<BoolDom>`; deleted the now-dead `bitwise_{and,or,not}` / `variable_bits` (→ `BoolDom` ops) + the standalone `eval_fixpoint`; `eval_modal` → `eval_modal_with_target_set`. `eval_node_tri` untouched. | **PASSED.** `cargo test -p mununu-core` = 2083/2083 (verdict-equivalence); criterion `mu_calculus_evaluate` |S|=2048 (+0.80%, p=0.09) and |S|=8192 (−1.64%, p=0.45) both "No change in performance detected". |
-| **P2.3** ✅ SHIPPED | Added `KleeneDom` (Valuation = TritSet, `MEMOISED = false`); `eval_node_tri` now delegates to `::<KleeneDom>`; deleted the hand-written 3v `eval_node_tri` match + `eval_fixpoint_tri` (divergences now in `KleeneDom`: `not` = must/may swap, `modal_image` = the two filtered passes, `seed_from_prior` = both halves). | **PASSED.** `cargo test -p mununu-core` = 2083/2083 incl. `r3_kleene_baseline` projection invariant; trit benches vs `p23-pre` — `shared_subexpr` −2…−4%, `modal_dense` no change (the dense/64 first-run "+18.57%" was a wide-CI noise outlier, confirmed no-change on isolated recheck), `fixpoint_invariant` −0.3…−2%. Record: `.claude/plans/measurements/P2-3-2026-06-19.md`. |
+| **P2.3** ✅ SHIPPED | Added `KleeneDom` (Valuation = TritSet, `MEMOISED = false`); `eval_node_tri` now delegates to `::<KleeneDom>`; deleted the hand-written 3v `eval_node_tri` match + `eval_fixpoint_tri` (divergences now in `KleeneDom`: `not` = must/may swap, `modal_image` = the two filtered passes, `seed_from_prior` = both halves). | **PASSED.** `cargo test -p mununu-core` = 2083/2083 incl. `r3_kleene_baseline` projection invariant; trit benches vs `p23-pre` — `shared_subexpr` −2…−4%, `modal_dense` no change (the dense/64 first-run "+18.57%" was a wide-CI noise outlier, confirmed no-change on isolated recheck), `fixpoint_invariant` −0.3…−2%. Record: `P2-3-2026-06-19.md` (a planning note, not tracked). |
 | **P2.4** | Retire the dead per-element `truth_domain` module (`TruthDomain`/`BoolDomain`/`KleeneDomain` + tests); update `docs/design/native-sv-abstraction.md` §6.4 + `kmts-theory.md` §4 anchors to point at the bulk `Domain`. | `cargo test` + `/docs-traceability`. |
 
 Each step is its own PR. P2.2 is the load-bearing, riskiest one (the model-checking hot path); it
@@ -198,7 +198,7 @@ git checkout <p2-branch> && cargo bench --bench mu_calculus -- --baseline p2-pre
 P2.2 keeps iff `mu_calculus_evaluate` (|S|=2048 and 8192) is within criterion noise of `p2-pre`
 (the HARD gate — a measured regression blocks the merge, per the §6.7 benchmark-validation
 discipline). P2.3 keeps iff the trit groups are within noise. The measurement record lands at
-`.claude/plans/measurements/P2-<step>-<date>.md`.
+`P2-` (a planning note, not tracked)<step>-<date>.md`.
 
 ## 7. Risk register (from the evaluator map)
 

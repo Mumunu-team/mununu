@@ -49,7 +49,7 @@ The skill recognizes two anchor styles. A section is considered anchored if it c
 
 The skill validates:
 
-1. **Path exists** — the `<relative path>` resolves from the repo root to a real file.
+1. **Path is tracked** — the `<relative path>` resolves from the repo root to a file **git tracks** (`git ls-files --error-unmatch <path>`). Present-but-untracked is `path-untracked`: a gitignored path, or one served by a local symlink (`plans` (a planning note, not tracked) on a machine with the private sync), exists for the author and for nobody who clones the repository (roadmap D3/G4, 2026-11-07).
 2. **Symbol exists when given** — if the anchor names a Rust symbol (`fn foo`, `struct Foo`, `enum Foo`, `const FOO`), grep for `(fn|struct|enum|const|trait|type)\s+<symbol>` in the cited file. If a line number is given, the symbol must appear within ±5 lines.
 3. **Surface tag is well-formed** — must be one of `CLI`, `API`, `UI`, `CLI+API`, `CLI+UI`, `API+UI`, `CLI+API+UI`, `CLI-only`, `API-only`, `UI-only`. Single-surface tags require a `— <justification>` suffix.
 4. **Surface reachability** — for each declared surface, the symbol or one of its callers must appear in that surface's entry points:
@@ -70,9 +70,13 @@ The skill validates:
 
 3. **Validate anchors.** For each Anchored section, run the four checks above. Record failures as:
    - `path-missing` — cited path does not exist
+   - `path-untracked` — cited path exists on this machine but git does not track it
+   - `link-untracked` — a Markdown link (not an anchor) into a path git does not track
    - `symbol-missing` — cited symbol not found in the path (or not within ±5 lines of the cited line)
    - `surface-malformed` — surface tag not in the allowed set, or single-surface tag missing justification
    - `surface-unreachable` — declared surface does not expose the symbol
+
+3b. **Validate prose links.** Every Markdown link in a covered file whose target is a repository path (not a URL, not `mununu-private/…`) must resolve to a git-tracked file or directory; a link into a gitignored path (`plans` (a planning note, not tracked), `reviews` (a private review note), `experiments/`) is `link-untracked`. The G4 audit of 2026-11-07 found 44 such links and 0 broken anchor lines: the links were the whole finding, and anchor-only validation saw none of them.
 
 4. **Flag orphans.** Every Orphan section is a finding. Suggest one of: (a) add an anchor, (b) mark `> Concept:`, (c) hoist the file to `> Status: planning`, (d) delete the section.
 

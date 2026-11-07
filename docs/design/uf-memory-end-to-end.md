@@ -8,7 +8,7 @@
 
 The §Phase 10 stage-3.c fork (2026-06-12) deferred end-to-end UF-memory verification. Of the four options surveyed (below, §"Why Option 4"), the chosen path is **Option 4 — the `BvTermBackend` unification**, sequenced **after stage 5**:
 
-1. **Stage 5 first (independent, ships the milestone):** Caliptra mbox's external SRAM via the black-box contract path — see `.claude/plans/measurements/Phase10-stage5-caliptra-mbox-blackbox-2026-06-12.md`. This is unrelated to the interpreter unification and must not be blocked by it.
+1. **Stage 5 first (independent, ships the milestone):** Caliptra mbox's external SRAM via the black-box contract path — see `Phase10-stage5-caliptra-mbox-blackbox-2026-06-12.md` (a planning note, not tracked). This is unrelated to the interpreter unification and must not be blocked by it.
 2. **Then Option 4 (its own track):** merge the concrete (`eval_op`) and SMT (`encode_op`) interpreters behind `BvTermBackend`; memory becomes a capability each backend implements. The already-shipped Z3 array encoder (`9c5fa09` + `3600cba`) is reframed as the `Z3Backend`'s array methods. UF migrates from the concrete Zero/Ones representative hack to real `z3::FuncDecl`.
 
 The internal-memory fixture for the Option-4 milestone is **ibex `ibex_register_file_ff`** (the natural internal-`$mem` design), not Caliptra mbox (external SRAM, handled by stage 5).
@@ -117,7 +117,7 @@ Total Option-4 track: ~8–10 sessions. Sequenced after stage 5; own design-doc-
 
 - Interpreter-layer map + the three unification moves (Option 4 = Move B): [`expression-interpretation-unification.md`](expression-interpretation-unification.md)
 - Routing dispatch + corrected stage-3.c: [`phase10-uf-routing.md`](phase10-uf-routing.md)
-- Stage-5 Option-B (Caliptra mbox black-box, ships first): `.claude/plans/measurements/Phase10-stage5-caliptra-mbox-blackbox-2026-06-12.md`
+- Stage-5 Option-B (Caliptra mbox black-box, ships first): `Phase10-stage5-caliptra-mbox-blackbox-2026-06-12.md` (a planning note, not tracked)
 - Array encoder (shipped, becomes `Z3Backend` array methods): commits `9c5fa09`, `3600cba`
 - Verdict-evaluator tagless-final precedent (the pattern Option 4 mirrors): [`evaluator.rs`](../../crates/mununu-core/src/mu_calculus/evaluator.rs) (the bulk `EvalDomain` trait + `BoolDom` / `KleeneDom`, unified P2.2/P2.3)
 - KMTS soundness foundation: [`kmts-theory.md`](kmts-theory.md)

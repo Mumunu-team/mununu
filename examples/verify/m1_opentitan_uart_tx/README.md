@@ -1,7 +1,7 @@
 # M.1 — OpenTitan `uart_tx` KMTS-lifter milestone
 
 > Second industrially-realistic validation milestone in the KMTS pivot
-> ([`.claude/plans/you-are-a-formal-vast-lake.md`](../../../.claude/plans/you-are-a-formal-vast-lake.md) §10.3 M.1).
+> (`you-are-a-formal-vast-lake.md` (a planning note, not tracked) §10.3 M.1).
 > Sits at the closing gate of R.2 + R.3 — the BTOR2 → KMTS lifter and
 > the KleeneDomain evaluator must process a real OpenTitan RTL module
 > with counters and produce a verdict on a declared property.

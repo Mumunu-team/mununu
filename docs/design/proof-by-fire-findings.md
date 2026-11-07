@@ -2,7 +2,7 @@
 
 > **Status: live audit log.** Empirical results of attempts to demonstrate
 > mununu's auto-extraction pipelines against real, public, documented bugs in
-> hardware / codesign / driver domains. Per the [active plan](../../../.claude/plans/create-a-plan-to-enumerated-patterson.md).
+> hardware / codesign / driver domains. Per the active plan (`create-a-plan-to-enumerated-patterson.md`, an untracked note).
 
 Start date: 2026-05-18. Each row is an honest record of an extraction attempt;
 no row claims Success without a shipped `examples/verify/<id>/` directory.
@@ -26,7 +26,7 @@ no row claims Success without a shipped `examples/verify/<id>/` directory.
 **Target.** Caliptra-RTL `soc_ifc_boot_fsm.sv` (Apache-2.0) at commit
 `b436906f0b16ae`. The bug — `unique casez (boot_fsm_ps)` over a 5-arm enum
 with no `default:` branch — is the most extensively documented real RTL bug
-mununu has staged (see `.claude/reviews/prospector/staging/RTL-002/`).
+mununu has staged (see `examples/verify/sv_yosys_caliptra_rtl_150/`).
 
 **What was attempted.** Direct pass through `mununu`'s sv-yosys driver via
 Yosys 0.59 (matches `mununu`'s required ≥ 0.40):
@@ -79,13 +79,13 @@ options are:
 
 **Resolution status: SV-parse blocker resolved. Caliptra retry still blocked, but on a different blocker (Finding 2 + a CLI gap).**
 
-Per the [active plan's Phase 1](../../../.claude/plans/create-a-plan-to-enumerated-patterson.md), sv2v ([zachjs/sv2v](https://github.com/zachjs/sv2v) v0.0.13) was integrated into the sv-yosys driver as an optional preprocessing pass. Opt-in via `MUNUNU_USE_SV2V=1` or `YosysOptions.use_sv2v = true`. Implementation lives in [`crates/mununu-core/src/adapter/yosys/mod.rs`](../../crates/mununu-core/src/adapter/yosys/mod.rs) (`locate_sv2v`, `run_sv2v`, `env_flag` helpers; pipe inserted before the Yosys subprocess). Three unit tests cover the integration: module-header `import pkg::*` parses through sv2v + Yosys; cross-file package imports resolve; missing-tool error is clean.
+Per the active plan's Phase 1 (`create-a-plan-to-enumerated-patterson.md`, an untracked note), sv2v ([zachjs/sv2v](https://github.com/zachjs/sv2v) v0.0.13) was integrated into the sv-yosys driver as an optional preprocessing pass. Opt-in via `MUNUNU_USE_SV2V=1` or `YosysOptions.use_sv2v = true`. Implementation lives in [`crates/mununu-core/src/adapter/yosys/mod.rs`](../../crates/mununu-core/src/adapter/yosys/mod.rs) (`locate_sv2v`, `run_sv2v`, `env_flag` helpers; pipe inserted before the Yosys subprocess). Three unit tests cover the integration: module-header `import pkg::*` parses through sv2v + Yosys; cross-file package imports resolve; missing-tool error is clean.
 
 **Caliptra retry under the new pipeline.** Reproduction:
 
 ```bash
 mkdir /tmp/caliptra_retry && cd /tmp/caliptra_retry
-cp ~/git_repo/mununu/.claude/reviews/prospector/staging/RTL-002/source/*.sv .
+cp examples/verify/sv_yosys_caliptra_rtl_150/source/*.sv .   # from the repository root
 # Plus minimal SVA-macro stub for caliptra_sva.svh (Yosys is Phase-1-SVA only;
 # concurrent SVA macros expand to no-ops):
 cat > caliptra_sva.svh <<'EOF'
@@ -255,7 +255,7 @@ This is a separate gap from the input-bit cap — the cap is correctly cleared b
 Phase A.4 of the parent pipeline-blocker plan landed the SMT
 predicate-image discovery algorithm end-to-end on the BTOR2 path
 (steps 4.0–4.4; see
-[`.claude/plans/phase-a4-predicate-image.md`](../../.claude/plans/phase-a4-predicate-image.md)
+`phase-a4-predicate-image.md` (a planning note, not tracked)
 for the per-step record). The headline algorithm + recall harness
 work as designed against the curated benchmark
 ([`examples/verify/bench_predicate_image_a4/`](../../examples/verify/bench_predicate_image_a4/) —
@@ -280,7 +280,7 @@ So the algorithm is correct in isolation, the bug-preserving Yosys
 synthesis is wired up as an opt-in, and the gap is the explicit-state
 engine's enumeration cap — exactly the case the original A.4 plan
 flagged as the A.4a fallback. The next step is
-[`phase-a4b-state-bit-cap-followup.md`](../../.claude/plans/phase-a4b-state-bit-cap-followup.md)
+`phase-a4b-state-bit-cap-followup.md` (a planning note, not tracked)
 which catalogs the four unlock paths (sidecar-side workaround;
 compose-and-decompose; Phase B IC3-IA; lift the cap — not viable).
 
@@ -305,7 +305,7 @@ unlock paths.
 > Predecessor: Phase 1.7 analysis (below).
 
 Phase A.3 of the parent pipeline-blocker plan
-([`.claude/plans/create-a-plan-to-enumerated-pillow.md`](../../.claude/plans/create-a-plan-to-enumerated-pillow.md))
+(`create-a-plan-to-enumerated-pillow.md`, an untracked note)
 shipped three composable changes that close the runtime-performance
 finding on Caliptra and unblock end-to-end discriminating verdicts:
 
@@ -450,7 +450,7 @@ without modifying that file.
 
 ```bash
 mkdir /tmp/caliptra_repro && cd /tmp/caliptra_repro
-cp ~/git_repo/mununu/.claude/reviews/prospector/staging/RTL-002/source/*.sv .
+cp examples/verify/sv_yosys_caliptra_rtl_150/source/*.sv .   # from the repository root
 yosys -q -p "read_verilog -formal -sv soc_ifc_pkg.sv soc_ifc_boot_fsm_pre_fix.sv"
 # expect: ERROR: Unimplemented compiler directive or undefined macro `CALIPTRA_TOP_REG_MBOX_CSR_BASE_ADDR.
 # ... (iteration through 4 errors; the fourth has no mitigation per the table above)

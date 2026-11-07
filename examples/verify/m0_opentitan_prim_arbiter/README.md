@@ -1,7 +1,7 @@
 # M.0 — OpenTitan `prim_arbiter_fixed` pipeline-reach milestone
 
 > First industrially-realistic validation milestone in the KMTS pivot
-> ([`.claude/plans/you-are-a-formal-vast-lake.md`](../../../.claude/plans/you-are-a-formal-vast-lake.md) §10.3 M.0).
+> (`you-are-a-formal-vast-lake.md` (a planning note, not tracked) §10.3 M.0).
 > Sits at the closing gate of R.0c — the R.0a + R.0b + R.0c stack
 > must process a small, real OpenTitan RTL module without error.
 
@@ -65,7 +65,7 @@ directly.) The script asserts at each stage and exits non-zero on failure.
 
 ## Milestone result
 
-See [`.claude/plans/milestones/M-0-result.md`](../../../.claude/plans/milestones/M-0-result.md)
+See `M-0-result.md` (a planning note, not tracked)
 for the per-stage record, recorded at M.0-pass time.
 
 ## Out of scope at M.0
@@ -81,7 +81,7 @@ Per the milestone catalogue:
 
 ## M.0 Fix B parameter choice
 
-Per [`.claude/plans/milestones/M-0-blocker-2026-05-21.md`](../../../.claude/plans/milestones/M-0-blocker-2026-05-21.md)
+Per `M-0-blocker-2026-05-21.md` (a planning note, not tracked)
 the upstream module is instantiated via
 [`source/prim_arbiter_fixed_m0_wrapper.sv`](source/prim_arbiter_fixed_m0_wrapper.sv)
 at **N=2 channels × DW=2-bit data**. Total input bits = 1 (`clk`) +
@@ -113,11 +113,11 @@ step 3 from `validate.sh`.
 ## If something fails
 
 Per the milestone blocker protocol
-([`.claude/plans/you-are-a-formal-vast-lake.md`](../../../.claude/plans/you-are-a-formal-vast-lake.md) §10.2):
+(`you-are-a-formal-vast-lake.md` (a planning note, not tracked) §10.2):
 
 - **STOP the roadmap.** The next R.x or S.x must not begin until the
   M.0 blocker is resolved.
-- **Produce `.claude/plans/milestones/M-0-blocker-<date>.md`** with:
+- **Produce `M-0-blocker-` (a planning note, not tracked)<date>.md`** with:
   which stage failed, which construct triggered it, the smallest
   reproducer (≤ 50 lines of SV), what the oracle expected, 1–2
   candidate fixes ranked by estimated effort.

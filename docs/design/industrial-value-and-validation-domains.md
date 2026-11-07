@@ -1,6 +1,6 @@
 # Industrial Value and Validation Domains
 
-> **Status: planning.** This document scopes the classes of industrial verification problems where mununu's KMTS-based 3-valued mu-calculus stack delivers value that incumbent SVA / BMC / commercial-property-checker flows structurally cannot reach. It maps mununu's shipped capabilities (R.1 + R.2 + R.3 + R.4 per the plan's §10.1) onto the load-bearing requirements of seven target domains, and queues seven validation phases (V.0–V.6; V.0–V.5 from the original KMTS plan, V.6 added by the [R.6 replanning pass](../../.claude/plans/r6-controllability-aware-kmts-game-abstraction.md) for controllability-aware synthesis) that anchor the claims to runnable fixtures. Per CLAUDE.md §Documentation Traceability, the capability-inventory section (§2) carries `> Source of truth:` anchors against live code; the domain sections (§3–§8.5) cite the planned fixture paths they ship with the V.x phases. Per the §Phase 5 framework integration of the plan, the GKMTS extension (R.4.5) and the parity-game 3-valued evaluator (R.5.0) precede most of the V.x domain work — V.0 (the "smallest possible coherence" demo) is the only V.x that can ship pre-R.5.
+> **Status: planning.** This document scopes the classes of industrial verification problems where mununu's KMTS-based 3-valued mu-calculus stack delivers value that incumbent SVA / BMC / commercial-property-checker flows structurally cannot reach. It maps mununu's shipped capabilities (R.1 + R.2 + R.3 + R.4 per the plan's §10.1) onto the load-bearing requirements of seven target domains, and queues seven validation phases (V.0–V.6; V.0–V.5 from the original KMTS plan, V.6 added by the R.6 replanning pass (`r6-controllability-aware-kmts-game-abstraction.md`, an untracked note) for controllability-aware synthesis) that anchor the claims to runnable fixtures. Per CLAUDE.md §Documentation Traceability, the capability-inventory section (§2) carries `> Source of truth:` anchors against live code; the domain sections (§3–§8.5) cite the planned fixture paths they ship with the V.x phases. Per the §Phase 5 framework integration of the plan, the GKMTS extension (R.4.5) and the parity-game 3-valued evaluator (R.5.0) precede most of the V.x domain work — V.0 (the "smallest possible coherence" demo) is the only V.x that can ship pre-R.5.
 
 ---
 
@@ -40,7 +40,7 @@ Five mununu primitives sit at the root of every V.x domain claim below:
 4. **CompositionSemantics: synchronous / asynchronous / mixed** — the same machinery composes a hardware FSM with a software task by interleaving, or composes two RTL modules with shared-net rendezvous. This is the substrate every domain below leans on.
 5. **3-valued KMTS semantics** — `Tristate { KleeneT, KleeneF, KleeneBot }` (R.1) for state AP labellings, `TransitionModality { Sharp, MayOnly }` (R.1) plus the R.4.5 addition `MustHyperOnly { targets: SmallVec<[StateId; 4]> }`, evaluated via either the cheap-path fixpoint `evaluate_tri` (R.3) or the planned parity-game `evaluate_3v_game` (R.5.0). `KleeneDom` implements the bulk `EvalDomain` trait per [`evaluator.rs`](../../crates/mununu-core/src/mu_calculus/evaluator.rs) (unified P2.2/P2.3).
 
-What's planned (per [`../../.claude/plans/you-are-a-formal-vast-lake.md`](../../.claude/plans/you-are-a-formal-vast-lake.md) §Phase 5):
+What's planned (per `you-are-a-formal-vast-lake.md` (a planning note, not tracked) §Phase 5):
 
 - **R.4.5** GKMTS extension (`MustHyperOnly` variant + composition rule + modal-operator widening to hyper-targets).
 - **R.5.0** 3-valued parity-game evaluator + `FailureSubgame` extraction.
@@ -246,7 +246,7 @@ mununu's capabilities map cleanly (parametric tile templates, sync barriers, asy
 
 ## §8.5 Domain 7: Controller synthesis over abstracted reactive systems (V.6)
 
-> Added 2026-06-08 by the R.6 replanning pass ([`../../.claude/plans/r6-controllability-aware-kmts-game-abstraction.md`](../../.claude/plans/r6-controllability-aware-kmts-game-abstraction.md)). Domains 1–6 are *verification* (single-agent KMTS); this domain is *synthesis* (two-player KMTS), which §1–§7 of this doc do not cover.
+> Added 2026-06-08 by the R.6 replanning pass (`r6-controllability-aware-kmts-game-abstraction.md`, an untracked note). Domains 1–6 are *verification* (single-agent KMTS); this domain is *synthesis* (two-player KMTS), which §1–§7 of this doc do not cover.
 
 ### Why this is hard for current tools
 

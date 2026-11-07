@@ -156,7 +156,7 @@ automatically with no hand-authored properties. Since the open frontend can't
 deliver the SVA, the planned mechanism is a **custom SVA → mu-calculus translator**
 that parses the SVA from source and emits mu-calculus bound to the auto-extracted
 model (plan + coverage criteria + tests:
-`.claude/plans/sva-to-mucalculus-translator-2026-06-25.md`). So mununu's value is
+`sva-to-mucalculus-translator-2026-06-25.md` (a planning note, not tracked)). So mununu's value is
 (1) extracting the *model* (works today; V.7-c proves it), (2) ingesting the
 design's SVA via the custom translator for a plug-and-play endpoint, and (3) —
 the differentiator — upgrading the reachability properties to the branching
@@ -167,11 +167,11 @@ recoverability/realizability questions SVA cannot express.
 - Track B ships the recoverability showcase (V.7) as the worked evidence for §3.
 - The **custom SVA → mu-calculus translator** (phases XL.0–XL.7) is the
   open-toolchain SVA-extraction path and the host for the I.3 upgrade
-  (`.claude/plans/sva-to-mucalculus-translator-2026-06-25.md`).
+  (`sva-to-mucalculus-translator-2026-06-25.md`, an untracked note).
 - Track I.3 turns §2's `cover`→`AG EF` gap into an automatic check on extracted
   designs — implemented as translator phase XL.2 (form + check `AG EF` for each
   TRUE `cover`/`EF`, with the Track-I countertrace on failure).
-- The Track-H gate (`.claude/plans/sva-auto-h0-gate-verdict-2026-06-25.md`)
+- The Track-H gate (`sva-auto-h0-gate-verdict-2026-06-25.md`, an untracked note)
   records §4's spike in full; the SVA-extraction criterion is reinstated, now
   scoped to the translator's coverage tiers + an honest coverage report.
 

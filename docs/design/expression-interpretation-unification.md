@@ -128,6 +128,6 @@ Do **not** start B/C mid-slot-4. Stage 3.b's dispatch (UF → `predicate_cube_li
 ## Cross-references
 
 - §Phase 10 UF routing (stage 3.b dispatch + corrected stage 3.c): [`phase10-uf-routing.md`](phase10-uf-routing.md)
-- §Phase 10 fixture selection (Caliptra mbox): [`../../../.claude/plans/measurements/Phase10-fixture-selection-caliptra-mbox-2026-06-12.md`](../../../.claude/plans/measurements/Phase10-fixture-selection-caliptra-mbox-2026-06-12.md)
+- §Phase 10 fixture selection (Caliptra mbox): `Phase10-fixture-selection-caliptra-mbox-2026-06-12.md` (a planning note, not tracked)
 - Verdict-evaluator tagless-final precedent: [`evaluator.rs`](../../crates/mununu-core/src/mu_calculus/evaluator.rs) (the bulk `EvalDomain` trait + `BoolDom` / `KleeneDom`)
-- §Phase 11 master roadmap: [`../../../.claude/plans/you-are-a-formal-vast-lake.md`](../../../.claude/plans/you-are-a-formal-vast-lake.md)
+- §Phase 11 master roadmap: `you-are-a-formal-vast-lake.md` (a planning note, not tracked)

@@ -134,7 +134,7 @@ foreach mod in $(submod -list):
     write_btor -x design_<mod>.btor    # one BTOR2 per submodule
 ```
 
-Per-module BTOR2 emission via `submod -name <mod>; write_btor` is ~200 LOC of script-generator change in [`yosys/mod.rs::build_script`](../../crates/mununu-core/src/adapter/yosys/mod.rs#L656) plus multi-output handling in `translate_sv` (the orchestrator that today calls the BTOR2 adapter exactly once). **BTOR2 over AIGER** is non-negotiable: AIGER throws away word-level structure, names, and types, forcing the lifter to do bit-blasting that predicate abstraction (§6) would then have to undo. The pillow plan's [§A.4a finding](../../.claude/plans/phase-a4-predicate-image.md) confirms BTOR2 + named registers gets the predicate-image algorithm correct on Caliptra; AIGER would not.
+Per-module BTOR2 emission via `submod -name <mod>; write_btor` is ~200 LOC of script-generator change in [`yosys/mod.rs::build_script`](../../crates/mununu-core/src/adapter/yosys/mod.rs#L656) plus multi-output handling in `translate_sv` (the orchestrator that today calls the BTOR2 adapter exactly once). **BTOR2 over AIGER** is non-negotiable: AIGER throws away word-level structure, names, and types, forcing the lifter to do bit-blasting that predicate abstraction (§6) would then have to undo. The pillow plan's §A.4a finding (`phase-a4-predicate-image.md`, an untracked note) confirms BTOR2 + named registers gets the predicate-image algorithm correct on Caliptra; AIGER would not.
 
 ### §3.3 Per-module lifter from BTOR2 to KMTS-aware `Clts`
 
@@ -631,7 +631,7 @@ Total effort: ~30 weeks sequential; ~18 weeks with R.0 / R.1 / D.0 / U.0 paralle
 
 **No silent skip.** If a fixture is genuinely unavailable (license revoked, repo moved), propose a replacement and the user approves before continuing.
 
-Blocker summaries live at `.claude/plans/milestones/M-<id>-blocker-<date>.md`; the user's decision is appended to the same file.
+Blocker summaries live at `M-` (a planning note, not tracked)<id>-blocker-<date>.md`; the user's decision is appended to the same file.
 
 ### §10.3 Industrially realistic validation milestones (M.0–M.6)
 

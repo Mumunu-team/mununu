@@ -56,7 +56,7 @@ existed.
 
 **Soundness update (2026-06-23 — PO-3 / R.6.8 CLOSED).** The
 controllability-aware *definite* verdict is now sound. The per-player
-audit (`.claude/reviews/cube-modal-soundness/`) caught and fixed a
+audit (`cube-modal-soundness`, an untracked note) caught and fixed a
 two-pass over-claim, and `evaluate_tri` now routes
 `Control::{Controllable, Environment}` through the de Alfaro–Godefroid–
 Jagadeesan per-player rule (`modal_trit_from_target`). Previously a
@@ -175,8 +175,8 @@ Expected output: `test result: ok. 5 passed`.
 
 ## See also
 
-- R.6 replanning plan: `.claude/plans/r6-controllability-aware-kmts-game-abstraction.md`
-- Master roadmap §11.4 R.6 sub-track: `.claude/plans/you-are-a-formal-vast-lake.md`
+- R.6 replanning plan: `r6-controllability-aware-kmts-game-abstraction.md` (a planning note, not tracked)
+- Master roadmap §11.4 R.6 sub-track: `you-are-a-formal-vast-lake.md` (a planning note, not tracked)
 - R.6.6 lifter implementation: `crates/mununu-core/src/adapter/btor2/kmts_lift.rs:predicate_cube_lift`
 - R.6.3 modality-aware modal step: `crates/mununu-core/src/mu_calculus/evaluator.rs:eval_node_tri`
 - V.6 entry in industrial-value-and-validation-domains.md: `docs/design/industrial-value-and-validation-domains.md` §8.5

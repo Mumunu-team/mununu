@@ -1,7 +1,7 @@
 # M.2 — OpenTitan `csrng_main_sm` KMTS-lifter milestone
 
 > Third industrially-realistic validation milestone in the KMTS
-> pivot ([`.claude/plans/you-are-a-formal-vast-lake.md`](../../../.claude/plans/you-are-a-formal-vast-lake.md)
+> pivot (`you-are-a-formal-vast-lake.md` (a planning note, not tracked)
 > §10.3 M.2). Sits at the closing gate of R.3 (KleeneDomain
 > evaluator) — the BTOR2 → KMTS lifter and the 3-valued evaluator
 > must process a real OpenTitan crypto-control FSM end-to-end and
@@ -9,7 +9,7 @@
 >
 > **Fixture history**: originally targeted `hmac_core.sv` (~505 LOC)
 > but per-transition BTOR2 evaluation cost was too expensive for
-> the milestone budget — see [`M-2-blocker-2026-05-26.md`](../../../.claude/plans/milestones/M-2-blocker-2026-05-26.md).
+> the milestone budget — see `M-2-blocker-2026-05-26.md` (a planning note, not tracked).
 > Per §10.2 user arbitration, the fixture was swapped (Path A) to
 > `csrng_main_sm.sv`: same OpenTitan-scale industrial intent, much
 > smaller BTOR2.
@@ -148,7 +148,7 @@ on the three sources and confirms a non-vacuous verdict.
 - The pipeline-wall-clock pass under 15 seconds — well within the
   §10.3 M.2 budget. The fixture-swap from hmac_core (50+ min) to
   csrng_main_sm reflects the BTOR2-line-count cost reality
-  documented in `.claude/plans/milestones/M-2-blocker-2026-05-26.md`.
+  documented in `M-2-blocker-2026-05-26.md` (a planning note, not tracked).
 - The adapter warning *"state_d defaults to zero"* is a known
   artifact of how sv2v elaborates the `main_sm_state_e state_d;`
   declaration — sv2v's elaboration treats `state_d` as a

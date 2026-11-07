@@ -25,7 +25,7 @@ Turning an authored contract into a *composable verifying automaton*
 (and thus an actual read-after-write verdict) is **task A6**
 (chaotic-CLTS synthesis from contracts), an explicit follow-up — not
 this milestone. See
-[`.claude/plans/measurements/Phase10-stage5-caliptra-mbox-blackbox-2026-06-12.md`](../../../../.claude/plans/measurements/Phase10-stage5-caliptra-mbox-blackbox-2026-06-12.md)
+`Phase10-stage5-caliptra-mbox-blackbox-2026-06-12.md` (a planning note, not tracked)
 for the full scoping.
 
 ## Why the black-box path (not the array encoder)

@@ -12,7 +12,7 @@
 > actions" list is now historical.
 >
 > Original status: analysis doc, Phase 1.7 of the
-> [pipeline-blocker plan](../../.claude/plans/create-a-plan-to-enumerated-patterson.md).
+> pipeline-blocker plan (`create-a-plan-to-enumerated-patterson.md`, an untracked note).
 > Read-only audit; the actions section recommends concrete next steps but
 > does not perform them. Companion to
 > [`proof-by-fire-findings.md`](proof-by-fire-findings.md) — this doc
@@ -116,7 +116,7 @@ A hand-populated `discovered_values` entry has the same downstream effect as one
 
 ## §2 — Caliptra signal × abstraction matrix and property catalog
 
-Source: [`/.claude/reviews/prospector/staging/RTL-002/source/soc_ifc_boot_fsm_pre_fix.sv`](../../.claude/reviews/prospector/staging/RTL-002/source/soc_ifc_boot_fsm_pre_fix.sv) at commit `b436906f0b16ae` (chipsalliance/caliptra-rtl).
+Source: [`examples/verify/sv_yosys_caliptra_rtl_150/source/soc_ifc_boot_fsm_pre_fix.sv`](../../examples/verify/sv_yosys_caliptra_rtl_150/source/soc_ifc_boot_fsm_pre_fix.sv) at commit `b436906f0b16ae` (chipsalliance/caliptra-rtl).
 
 ### 2.1 — Signal inventory
 
@@ -145,7 +145,7 @@ Source: [`/.claude/reviews/prospector/staging/RTL-002/source/soc_ifc_boot_fsm_pr
 | `synch_noncore_rst_b`, `synch_uc_rst_b` | 2 | 2FF reset synchronizers | **No** (feed outputs only) |
 | `fsm_iccm_unlock` | 1 | ICCM unlock flag | **No** (output-only) |
 
-Total raw observable state: ~27 bits. Hand-modelled CWE-1245 verification reduces this to ~10 bits ([`/.claude/reviews/prospector/staging/RTL-002/soc_ifc_boot_fsm_bug.sv`](../../.claude/reviews/prospector/staging/RTL-002/soc_ifc_boot_fsm_bug.sv)).
+Total raw observable state: ~27 bits. Hand-modelled CWE-1245 verification reduces this to ~10 bits ([`examples/verify/sv_yosys_caliptra_rtl_150/source/soc_ifc_boot_fsm_pre_fix.sv`](../../examples/verify/sv_yosys_caliptra_rtl_150/source/soc_ifc_boot_fsm_pre_fix.sv)).
 
 ### 2.2 — Signal × abstraction matrix
 
@@ -179,7 +179,7 @@ This is a 4 000× reduction in enumeration scale. The current bit-blaster should
 
 ### 2.3 — Property catalog
 
-Verbatim from [`/.claude/reviews/prospector/staging/RTL-002/soc_ifc_boot_fsm_bug.mununu.json`](../../.claude/reviews/prospector/staging/RTL-002/soc_ifc_boot_fsm_bug.mununu.json) (formulas as they appear in the hand-modelled sidecar):
+Verbatim from [`examples/verify/sv_yosys_caliptra_rtl_150/source/soc_ifc_boot_fsm_pre_fix.mununu.json`](../../examples/verify/sv_yosys_caliptra_rtl_150/source/soc_ifc_boot_fsm_pre_fix.mununu.json) (formulas as they appear in the hand-modelled sidecar):
 
 | Name | Formula (mu-calculus) | Expected: bug | Expected: fix |
 |---|---|---|---|
@@ -285,4 +285,4 @@ If Action A fails despite the matrix's predictions, then the engine-runtime work
 - [`docs/design/proof-by-fire-findings.md`](proof-by-fire-findings.md) — predecessor findings doc; Phase 1.6 runtime-performance note.
 - [`docs/abstraction.md`](../abstraction.md) — memory soundness matrix; the standard reference for declaring abstraction postures in `verify.toml` and `.mununu.json`.
 - [`docs/policies/claims-integrity.md`](../policies/claims-integrity.md) — applies if the Caliptra PoC ships as a public example.
-- [`.claude/reviews/prospector/staging/RTL-002/`](../../.claude/reviews/prospector/staging/RTL-002/) — hand-modelled CWE-1245 staging with the property formulas this doc references.
+- [`examples/verify/sv_yosys_caliptra_rtl_150/`](../../examples/verify/sv_yosys_caliptra_rtl_150/) — hand-modelled CWE-1245 staging with the property formulas this doc references.

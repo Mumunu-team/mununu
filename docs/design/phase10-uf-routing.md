@@ -149,8 +149,8 @@ Stage 3.b implementation may begin once the user accepts this design.
 
 ## Cross-references
 
-- §Phase 10 §10.1 fixture-selection: [`.claude/plans/measurements/Phase10-fixture-selection-caliptra-mbox-2026-06-12.md`](../../../.claude/plans/measurements/Phase10-fixture-selection-caliptra-mbox-2026-06-12.md)
-- §Phase 10 §10.2 stage 1 detection: [`.claude/plans/measurements/Phase10-stage1-detection-2026-05-25.md`](../../../.claude/plans/measurements/Phase10-stage1-detection-2026-05-25.md)
-- §Phase 10 §10.2 stage 2 schema: [`.claude/plans/measurements/Phase10-stage2-schema-2026-05-25.md`](../../../.claude/plans/measurements/Phase10-stage2-schema-2026-05-25.md)
+- §Phase 10 §10.1 fixture-selection: `Phase10-fixture-selection-caliptra-mbox-2026-06-12.md` (a planning note, not tracked)
+- §Phase 10 §10.2 stage 1 detection: `Phase10-stage1-detection-2026-05-25.md` (a planning note, not tracked)
+- §Phase 10 §10.2 stage 2 schema: `Phase10-stage2-schema-2026-05-25.md` (a planning note, not tracked)
 - Stage 3.a recognition layer: commit `46b15a3`, CI run 27425450696 green.
-- §Phase 11 master roadmap: [`~/.claude/plans/you-are-a-formal-vast-lake.md`](../../../.claude/plans/you-are-a-formal-vast-lake.md) §11.4 slot 4.
+- §Phase 11 master roadmap: `you-are-a-formal-vast-lake.md` (a planning note, not tracked) §11.4 slot 4.

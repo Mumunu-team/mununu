@@ -97,7 +97,7 @@ on the `-anyseq`-emitted BTOR2 surfaces the violating encodings), but
 the full `sv-yosys → BTOR2 → bit-blast → eval` pipeline cannot close
 the verdict because the bug-preserving `-anyseq` synthesis pass
 explodes the state space past the explicit-state engine's reach.
-This matches the [Phase A.4 plan's anticipated fallback](../../../.claude/plans/phase-a4-predicate-image.md#proof-by-fire-target-validation-contract):
+This matches the Phase A.4 plan's anticipated fallback (`phase-a4-predicate-image.md`, an untracked note):
 the gap is **measured**, not unknown.
 
 **Next-step options** (deferred to the A.4b follow-up plan):
@@ -197,7 +197,7 @@ Requirements:
 - CWE class referenced by the upstream maintainer: CWE-1245 (missing
   default in state machine).
 - mununu phase context:
-  [`.claude/plans/phase-a3-adapter-partition.md`](../../../.claude/plans/phase-a3-adapter-partition.md)
+  `phase-a3-adapter-partition.md` (a planning note, not tracked)
   step 3.7.
 
 ## See also
