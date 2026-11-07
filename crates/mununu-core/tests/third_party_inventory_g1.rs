@@ -29,18 +29,64 @@ const PROVENANCE_FILES: &[&str] = &["UPSTREAM_COMMIT.txt", "PROVENANCE.md", "ATT
 /// crate manifests that name dependency licences, not vendored code.
 const FIRST_PARTY_MARKER_DIRS: &[&str] = &["LICENSES", "crates/mununu-core"];
 
+/// The files to inspect: `git ls-files` when git can answer (a developer checkout), else a walk
+/// of the tree that skips `.git`, build output and the directories the root `.gitignore` names.
+/// In the dev image the checkout is a bind mount owned by another uid, where git refuses to
+/// run ("dubious ownership") or is absent; the test must not depend on it.
 fn tracked_files(root: &Path) -> Vec<PathBuf> {
-    let out = std::process::Command::new("git")
+    if let Ok(out) = std::process::Command::new("git")
         .args(["ls-files", "-z"])
         .current_dir(root)
         .output()
-        .expect("git ls-files");
-    assert!(out.status.success(), "git ls-files failed");
-    String::from_utf8_lossy(&out.stdout)
-        .split('\0')
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
+        && out.status.success()
+    {
+        return String::from_utf8_lossy(&out.stdout)
+            .split('\0')
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .collect();
+    }
+    walked_files(root)
+}
+
+/// Root `.gitignore` entries that name a path (`/experiments/`, `/target`), as relative paths.
+fn ignored_roots(root: &Path) -> Vec<PathBuf> {
+    let text = std::fs::read_to_string(root.join(".gitignore")).unwrap_or_default();
+    text.lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with('/') && !l.contains('*'))
+        .map(|l| PathBuf::from(l.trim_matches('/')))
         .collect()
+}
+
+fn walked_files(root: &Path) -> Vec<PathBuf> {
+    let ignored = ignored_roots(root);
+    let mut out = Vec::new();
+    let mut stack = vec![PathBuf::new()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(root.join(&dir)) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let rel = dir.join(entry.file_name());
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name == ".git"
+                || name == "target"
+                || name == ".ci-target"
+                || name == "node_modules"
+                || ignored.contains(&rel)
+            {
+                continue;
+            }
+            if entry.path().is_dir() {
+                stack.push(rel);
+            } else {
+                out.push(rel);
+            }
+        }
+    }
+    out
 }
 
 /// Vendored code and data: the extensions a third-party licence header can mark. Prose and
@@ -82,8 +128,12 @@ fn is_covered(dir: &Path, listed: &BTreeSet<PathBuf>) -> bool {
 /// Directories that need a `THIRD_PARTY.md` row: those holding a marked file or a provenance
 /// file, minus the first-party ground the markers also hit.
 fn directories_needing_a_row(root: &Path) -> BTreeSet<PathBuf> {
+    directories_needing_a_row_from(root, tracked_files(root))
+}
+
+fn directories_needing_a_row_from(root: &Path, files: Vec<PathBuf>) -> BTreeSet<PathBuf> {
     let mut dirs = BTreeSet::new();
-    for rel in tracked_files(root) {
+    for rel in files {
         let name = rel.file_name().and_then(|n| n.to_str()).unwrap_or("");
         let marked = PROVENANCE_FILES.contains(&name) || carries_marker(root, &rel);
         if !marked {
@@ -130,6 +180,25 @@ fn the_apache_licence_text_is_shipped_in_full() {
     ] {
         assert!(text.contains(needle), "the licence text lacks {needle:?}");
     }
+}
+
+/// The fallback walk must see what `git ls-files` sees: the directories needing a row are the
+/// same either way, so a CI run that falls back to the walk checks the same ground.
+#[test]
+fn the_fallback_walk_finds_the_same_directories_as_git() {
+    let root = repo_root();
+    let git_ok = std::process::Command::new("git")
+        .args(["ls-files", "-z"])
+        .current_dir(&root)
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !git_ok {
+        eprintln!("git cannot list this checkout; the walk is the only enumeration here");
+        return;
+    }
+    let via_walk = directories_needing_a_row_from(&root, walked_files(&root));
+    let via_git = directories_needing_a_row_from(&root, tracked_files(&root));
+    assert_eq!(via_walk, via_git);
 }
 
 /// Negative control: the coverage check must fail on a directory the document does not name.
