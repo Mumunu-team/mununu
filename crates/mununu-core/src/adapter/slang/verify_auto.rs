@@ -4482,10 +4482,10 @@ pub(crate) fn outcome_definite(o: &VerifyOutcome) -> Option<bool> {
 /// the differential proved this never fires on the corpus). Pure over the input reports, so it is
 /// unit-testable without the toolchain.
 ///
-/// `pub` (not `pub(crate)`) since J4b so its reproducer can live in an integration test:
-/// `make verify-repro` copies the test-bearing FILE from HEAD into the parent tree, so a test
-/// inside this file would carry the fix with it and pass on the parent — the co-location trap
-/// of mununu#853.
+/// `pub` (not `pub(crate)`) so a defect in the merge can have its reproducer in an integration
+/// test: `make verify-repro` copies the test-bearing FILE from HEAD into the parent tree, so a
+/// test inside this file would carry a fix with it and pass on the parent — the co-location trap
+/// of mununu#853. This commit changes visibility only, ahead of such a fix.
 pub fn merge_portfolio_reports(
     runs: &[(&str, Result<AutoVerifyReport, AdapterError>)],
     mode: PortfolioMode,
@@ -13142,7 +13142,9 @@ mod tests {
     /// not the first member's map (the exact engine runs no cube loop and records nothing; cloning
     /// it as the base shipped `wall_ms` absent on every row of the first bundle check).
     #[test]
-    fn the_merged_report_sums_the_members_walls_per_property() {
+    fn merged_report_walls_regression_lock() {
+        // The reproducer is tests/portfolio_merge_walls_j4b.rs (an integration test, so
+        // `verify-repro` can run it against the parent); this is the lock in the same file.
         let mut exact = mk_report(&[
             ("sva_1", VerifyOutcome::Unknown { unknown_cells: 1 }, None),
             ("sva_2", VerifyOutcome::Holds, None),
