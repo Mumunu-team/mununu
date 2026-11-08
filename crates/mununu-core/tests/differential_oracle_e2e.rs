@@ -2256,6 +2256,11 @@ fn e2e_sv_mutate_off_by_one_flips_a_threshold_property() {
 /// blocks): then it is retried on the design's own synthesis shim (which defines `INC_ASSERT`
 /// too, with a `_lift.sv` variant for each file that cannot be lifted under it) through
 /// `VerifyAutoOptions::lift_overrides`, and the design's `census:` line says `lift=shim`.
+///
+/// The LAST column (N5 census column, 2026-11-08) is `arrays=<n>[:names]`: the number of
+/// array-sorted states in the row's cone (`ModelDiagnostics::cone_array_states`), or
+/// `arrays=-` when no cone was computed. Under `MUNUNU_VERIFY_AUTO_ONLY_ROWS=-` no engine runs,
+/// so the pass measures the column alone (lift + extraction + cones).
 #[test]
 #[ignore = "census: requires slang + yosys (mununu-sva image); run with --ignored --nocapture"]
 fn e2e_opentitan_sva_census() {
@@ -2356,8 +2361,20 @@ fn e2e_opentitan_sva_census() {
                 .filter(|n| n.kind == "two-state-fold" || n.kind == "strong-sequence-reading")
                 .map(|n| n.kind.as_str())
                 .collect();
+            let arrays = report
+                .diagnostics
+                .cone_array_states
+                .iter()
+                .find(|(name, _)| *name == p.name)
+                .map_or_else(
+                    || "arrays=-".to_string(),
+                    |(_, a)| match a.as_slice() {
+                        [] => "arrays=0".to_string(),
+                        names => format!("arrays={}:{}", names.len(), names.join(",")),
+                    },
+                );
             println!(
-                "CENSUS\t{}\t{}\t{}\t{class}\t{}\t{}",
+                "CENSUS\t{}\t{}\t{}\t{class}\t{}\t{}\t{arrays}",
                 d.name,
                 p.name,
                 p.label.as_deref().unwrap_or("-"),

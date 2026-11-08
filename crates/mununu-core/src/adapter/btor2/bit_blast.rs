@@ -8909,6 +8909,67 @@ mod tests {
         assert!(names.contains(routing["pa"].as_str()));
     }
 
+    /// N5 census column (2026-11-08) — the row-facts `cone_array_states` is
+    /// `array_state_names` over a property's `cone_slice`. At that seam: a cone that reads a
+    /// memory names it; a bit-vector cone in the SAME file as that memory names none (the
+    /// negative control, so a predicate that reported every array in the file would fail); and
+    /// a file with no array at all names none.
+    #[test]
+    fn cone_array_states_names_the_memory_a_cone_reads_and_nothing_else() {
+        // `ent_q` captures `mem[addr]` (the F1 capture shape); `cnt` is an independent counter.
+        let with_memory = r#"
+1 sort bitvec 1
+2 sort bitvec 2
+3 sort array 2 2
+4 state 3 mem
+5 input 2 addr
+6 input 2 wdata
+7 input 1 we
+8 write 3 4 5 6
+9 ite 3 7 8 4
+10 next 3 4 9
+11 read 2 4 5
+12 state 2 ent_q
+13 next 2 12 11
+14 state 2 cnt
+15 one 2
+16 add 2 14 15
+17 next 2 14 16
+"#;
+        let file = parser::parse(with_memory).expect("parse");
+        let reads_memory = cone_slice(&file, &["ent_q".to_string()]);
+        assert_eq!(
+            reads_memory.array_state_names(),
+            vec!["mem".to_string()],
+            "ent_q's cone reads mem"
+        );
+        let bv_only = cone_slice(&file, &["cnt".to_string()]);
+        assert!(
+            bv_only.array_state_names().is_empty(),
+            "cnt's cone holds no memory, though the file does: {:?}",
+            bv_only.array_state_names()
+        );
+        // The whole file does hold the array: the slice, not the file, is what is measured.
+        assert_eq!(file.array_state_names(), vec!["mem".to_string()]);
+
+        // A file with no array sort at all (the shape of the alias test below).
+        let no_memory = r#"
+1 sort bitvec 1
+2 sort bitvec 4
+3 zero 2
+4 state 2
+5 init 2 4 3
+6 ones 2
+7 eq 1 4 6
+8 output 7 a_max_o
+9 uext 2 4 0 cnt_a
+"#;
+        let file = parser::parse(no_memory).expect("parse");
+        let slice = cone_slice(&file, &["a_max_o".to_string()]);
+        assert!(slice.states().count() > 0, "the cone keeps cnt_a");
+        assert!(slice.array_state_names().is_empty());
+    }
+
     /// R46-2 — `cone_slice` keeps the backward cone (what feeds the
     /// atom's state) AND the forward naming/observation aliases computed
     /// from it (the `uext … cnt_x` lines Yosys uses to name registers),

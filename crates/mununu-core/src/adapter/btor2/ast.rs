@@ -463,6 +463,53 @@ impl Btor2File {
             .filter(|l| matches!(l.node, Node::State { .. }))
     }
 
+    /// N5 census column (2026-11-08) — the `state`s of this file whose sort is an ARRAY, in
+    /// declaration order. Each is named by its own symbol, else by the first no-op zero-extension
+    /// alias that names it (`uext <sort> <state> 0 NAME`, Yosys' naming of anonymous cells),
+    /// else `nid<N>`.
+    ///
+    /// Applied to a property's `cone_slice`, this says whether the row's cone carries a memory —
+    /// the row-facts `cone_array_states` field. A diagnostic only: nothing on a verdict path
+    /// reads it.
+    pub fn array_state_names(&self) -> Vec<String> {
+        let is_array = |sort: Nid| {
+            self.lookup(sort).is_some_and(|l| {
+                matches!(
+                    l.node,
+                    Node::Sort {
+                        sort: Sort::Array { .. }
+                    }
+                )
+            })
+        };
+        let alias = |state: Nid| {
+            self.lines.iter().find_map(|l| match &l.node {
+                Node::Op {
+                    op: Op::Uext,
+                    args,
+                    symbol: Some(name),
+                    ..
+                } if args.first().map(Operand::nid) == Some(state)
+                    && l.immediates.first() == Some(&0) =>
+                {
+                    Some(name.clone())
+                }
+                _ => None,
+            })
+        };
+        self.states()
+            .filter_map(|l| match &l.node {
+                Node::State { sort, symbol } if is_array(*sort) => Some(
+                    symbol
+                        .clone()
+                        .or_else(|| alias(l.nid))
+                        .unwrap_or_else(|| format!("nid{}", l.nid)),
+                ),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Iterate over `bad` declarations.
     pub fn bads(&self) -> impl Iterator<Item = &Line> {
         self.lines
