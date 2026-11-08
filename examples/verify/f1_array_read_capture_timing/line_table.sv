@@ -33,16 +33,18 @@ module line_table #(
     logic [WIDTH-1:0] ent_q;
 
     // 1. the write: conditional, own index.
-    // The table is cleared at reset. Without an established initial state the tool withholds
-    // a definite VIOLATED on the twin (a free cycle-0 table over-approximates reachability and
-    // licenses only HOLDS), which is what the first measurement found; a power-on clear is what
-    // the consumer's controller does anyway, and it leaves the capture-timing question intact.
-    always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            for (int i = 0; i < LINES; i++) mem[i] <= '0;
-        end else if (we) begin
-            mem[waddr] <= wdata;
-        end
+    // The table's power-on value is an `initial` block, not a reset, on purpose. Run 1 (no init,
+    // no reset) left the twin's VIOLATED withheld as unestablished-initial-state: a free cycle-0
+    // table licenses HOLDS, never a definite VIOLATED. Run 2 cleared the table under the async
+    // reset, and yosys turned the memory into four registers (0 array sorts in the BTOR2; the
+    // exact engine decided it) — the array path, which is the whole question of #545, was never
+    // exercised. An `initial` clear keeps the array (`$meminit`, one uniform word, which the BTOR2
+    // backend writes as an `init` of the array sort) and gives it a known cycle-0 value.
+    initial begin
+        for (int i = 0; i < LINES; i++) mem[i] = '0;
+    end
+    always_ff @(posedge clk) begin
+        if (we) mem[waddr] <= wdata;
     end
 
     // 2. the read: unconditional, continuous, free index.

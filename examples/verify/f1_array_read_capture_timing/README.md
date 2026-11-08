@@ -43,7 +43,8 @@ claims to check, which is what `--cutpoint` on the read did for the consumer.
 |---|---|---|
 | design: both **hold**; twin: both **violated** | the array-aware engines decide the shape as written; #545 was a **routing** gap, closed by N5 | record it on #545 and close the thread; the consumer's blocks need no new mechanism |
 | design: ⊥ on either property | k-induction over the memory does not close (the read's value is unconstrained across the strobe); the shape needs a **value-only havoc at the read** that keeps its position | reopen #545 with this fixture as the reproducer; that is design work, and the fixture is its gate |
-| twin: ⊥ with `bottom_reason: unestablished-initial-state` | the table had no established initial state, so the tool withheld the definite VIOLATED (a free cycle-0 state licenses HOLDS, never VIOLATED); the twin's fault is not reached from a known state | establish the table's initial state in the fixture (done: a power-on clear in both variants) and re-run; not a finding against the lift |
+| twin: ⊥ with `bottom_reason: unestablished-initial-state` | the table had no established initial state, so the tool withheld the definite VIOLATED (a free cycle-0 state licenses HOLDS, never VIOLATED); the twin's fault is not reached from a known state | establish the table's initial state in the fixture with an `initial` clear (done in version 3) and re-run; not a finding against the lift |
+| any run with `cone_array_states = 0` on these rows (the row-facts column, mununu#900) | the table was **registerized** by the lift (a reset that writes every entry does this) and the run never exercised the array path | the run says nothing about #545, whatever its verdicts; fix the fixture, not the conclusion |
 | twin: anything else but violated | the lift has lost the capture's timing | a soundness finding against the lift, not against #545; file it with the BTOR2 dump |
 | any engine abstaining with a reason other than ⊥ | read `diagnostics` and the row's `portfolio.refused` before concluding anything | per the Failure Paths policy |
 
@@ -60,7 +61,17 @@ design's two rows **hold** (`decided_by: explicit`, 2/2 decided, `--expect` met)
 elaborate as shipped (the design's `bind` line sat in `line_table_sva.sv`, which the twin run also
 compiles; fixed, one bind per file) and, with that worked around, its two rows were **⊥** with
 `bottom_reason: unestablished-initial-state`: the table `mem` was never reset, so the tool withheld
-the definite VIOLATED. Both variants now clear the table at reset; the re-run decides.
+the definite VIOLATED. Both variants were then given a reset clear of the table (version 2, `a4b7ba2d`).
+
+**Run 2 (2026-11-08, second machine, `mununu 0.5.10 (94eebfe)` = main `8e7fdc9b`, fixture `a4b7ba2d`):**
+`validate.sh` exits 0 — design 2/2 **hold**, twin 2/2 **violated** with finite traces (4 and 3 steps,
+model-only, not replayed under Verilator) — **but every row is decided by `exact-symbolic`, and the
+row-facts column reads `cone_array_states = 0 []` on all four rows** (run 1's unreset fixture read
+`1 ['mem']`): the async-reset clear made yosys turn the table into four registers (0 array sorts in
+the BTOR2 dumps, five states), so run 2 measured a registerized table and says nothing about #545's
+shape. Version 3 (this one) replaces the reset clear by an `initial` clear, which keeps the array
+and establishes its cycle-0 value. **Run 3 is valid only if `cone_array_states` reads `1 ['mem']` on
+all four rows**; its verdicts then answer the table above.
 
 ## Reproduce
 
