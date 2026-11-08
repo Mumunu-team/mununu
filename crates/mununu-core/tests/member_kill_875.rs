@@ -74,14 +74,26 @@ fn a_timed_out_member_leaves_no_forked_solver_behind() {
     let bin = Ric3Bin {
         path: forking_launcher(dir.path(), &pidfile, false),
     };
-    let _ = run_ric3_cancellable(&bin, "", "ic3", Duration::from_millis(500), None);
+    // 2 s, not 500 ms: on a loaded host the launcher must still get to fork and write its pid
+    // before the member's timeout kills the group, or the test cannot observe the property.
+    let _ = run_ric3_cancellable(&bin, "", "ic3", Duration::from_millis(2000), None);
     let pid = wait_for_pid(&pidfile);
-    std::thread::sleep(Duration::from_millis(200));
-    let survived = alive(&pid);
+    // The group kill is issued when the member's timeout fires; on a loaded host the watchdog
+    // thread and the kernel's reaping can lag a fixed 200 ms (the pre-commit hook's parallel
+    // suite at a load average of 40 made this a flake, 2026-11-08). The property is "does not
+    // outlive the timeout", not "is gone within 200 ms": poll, with a bound a stuck solver can
+    // never meet — before the fix the forked `sleep 600` survived indefinitely.
+    let bound = Duration::from_secs(5);
+    let deadline = Instant::now() + bound;
+    let mut survived = alive(&pid);
+    while survived && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+        survived = alive(&pid);
+    }
     reap(&pid);
     assert!(
         !survived,
-        "the forked solver {pid} outlived its member's timeout"
+        "the forked solver {pid} outlived its member's timeout by more than {bound:?}"
     );
 }
 
@@ -96,7 +108,7 @@ fn a_forked_solver_holding_the_pipes_does_not_stall_the_member_past_its_timeout(
     // Run the member on its own thread so a stall fails the test instead of hanging it.
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = run_ric3_cancellable(&bin, "", "ic3", Duration::from_millis(500), None);
+        let _ = run_ric3_cancellable(&bin, "", "ic3", Duration::from_millis(2000), None);
         let _ = tx.send(());
     });
     let returned = rx.recv_timeout(Duration::from_secs(10));
