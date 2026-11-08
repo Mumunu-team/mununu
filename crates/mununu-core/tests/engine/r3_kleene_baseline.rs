@@ -239,8 +239,11 @@ fn r3_kleene_matches_bool_on_sharp_only_fixtures() {
         return;
     }
 
+    // A Windows checkout with `core.autocrlf` hands the file back with CRLF endings; the
+    // snapshot is LF. Compare the text, not the line endings (the first Windows run of the
+    // suite failed here with "line counts differ: 211 vs 211").
     let committed = match fs::read_to_string(baseline_path()) {
-        Ok(s) => s,
+        Ok(s) => s.replace("\r\n", "\n"),
         Err(_) => {
             // First-run bootstrap.
             fs::write(baseline_path(), &snapshot)
