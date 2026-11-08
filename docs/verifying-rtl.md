@@ -239,6 +239,43 @@ endmodule
 mununu sv verify-auto wb_mem_client.sv
 ```
 
+### An annotation inside a submodule follows it into every instance (mununu#897)
+
+> Source of truth: [`expand_annotation_instances`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) + [`TranslationReport::instance_prefixes`](../crates/mununu-core/src/adapter/slang/translate.rs) + [`MununuAnnotation::module`](../crates/mununu-core/src/mununu_annotations/mod.rs) — surface: (CLI+API)
+
+A `@mununu_guarantee` written inside a module names its registers by their local names
+(`fill0_q`). Verified with that module as `--top`, the names bind directly. Verified under a
+**parent** top, the lift carries the register as `<instance>.fill0_q` — and since mununu#897 the
+annotation follows: the scanner records the module each annotation sits in, the slang elaboration
+records every instance of every module with its hierarchical prefix (the same walk that already
+reports a sub-instance's `assert property` per instance), and the row is checked **once per
+instance**, named `<prefix>ann_guarantee_<n>` with its label prefixed the same way and its atoms
+qualified (`u_stage.fill0_q`). A module instantiated twice gives two rows; the top's own
+annotations are unchanged; a module with no instance under the top keeps its row as written (it
+will skip on the unbound name) and the `annotation-properties` note says so. Before this the row
+was `skipped: predicate references unknown register/signal fill0_q` the moment the module was
+verified in context — every annotation in a reused block stopped applying under the corpus's top.
+
+```systemverilog
+module sprite_stage (...);
+  logic [3:0] fill0_q;
+  // @mununu_guarantee(fill_bounded) nu X. ((fill0_q <= 12) && [] X)   // local names
+endmodule
+module stage_cdc (...);
+  sprite_stage u_stage (...);
+endmodule
+```
+
+```
+mununu sv verify-auto stage_cdc.sv --source sprite_stage.sv --top stage_cdc --json \
+  | jq -r '.properties[] | select(.name | startswith("u_stage.")) | "\(.name) \(.label) \(.outcome)"'
+# u_stage.ann_guarantee_0 u_stage.fill_bounded holds
+```
+
+Row **names** change only for annotations that previously skipped under a parent top (they gain
+the instance prefix); an expectation (`--expect`) or template reference written against the old
+positional name of such a row must take the prefixed one.
+
 ### Naming an annotation property: `@mununu_guarantee(<name>)` (mununu#550)
 
 > Source of truth: [`split_tag_name`](../crates/mununu-core/src/mununu_annotations/mod.rs) + [`scan_annotation_properties`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) — surface: (CLI+API)

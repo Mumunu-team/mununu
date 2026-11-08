@@ -288,6 +288,12 @@ pub struct TranslationReport {
     /// [`TranslateOptions::gate_reset`]. The verify-auto path pins these inputs
     /// inactive at the model level.
     pub reset_signals: Vec<ResetSignal>,
+    /// mununu#897 — every instance occurrence in the elaborated design as `(module, prefix)`:
+    /// the body's definition name and the hierarchical prefix its registers carry after the
+    /// flatten (`""` for the top, `"u_rx."`, `"gen_cnts[1].u_ack_sm."`). What lets an annotation
+    /// written inside a module be checked in every instance of it under the top. Empty when the
+    /// translation ran without a slang AST.
+    pub instance_prefixes: Vec<(String, String)>,
     /// Every `parameter` / `localparam` NAME declared anywhere in the design (from
     /// the slang AST). The verify-auto `--param` path validates each requested
     /// override name against this set — the slang front-end's `-G` override
@@ -499,7 +505,11 @@ pub fn translate_ast_json_with_source(
             .collect();
     MINT.with(|m| m.borrow_mut().subroutines = subroutines);
 
-    let mut report = TranslationReport::default();
+    let mut report = TranslationReport {
+        // mununu#897 — the occurrences the walk recorded, for the annotation path.
+        instance_prefixes: std::mem::take(&mut scopes.occurrence_modules),
+        ..TranslationReport::default()
+    };
     for (idx, found) in found.iter().enumerate() {
         let FoundAssertion {
             module,
@@ -787,6 +797,9 @@ struct Hierarchy {
     /// for any instance but the first, so the declaration is found by name in the instance the
     /// path reaches).
     names: std::collections::HashMap<u64, std::collections::HashMap<String, Vec<String>>>,
+    /// mununu#897 — every occurrence as `(module definition name, prefix)`, in walk order;
+    /// copied onto [`TranslationReport::instance_prefixes`].
+    occurrence_modules: Vec<(String, String)>,
 }
 
 impl Hierarchy {
@@ -953,6 +966,14 @@ fn collect_assertions<'a>(
                         None => String::new(),
                         Some(parent) => format!("{}{}{name}.", parent.prefix, at.rel),
                     };
+                    // mununu#897 — every occurrence by its MODULE (the body's definition name):
+                    // what lets an annotation written inside a module follow it into each
+                    // instance under the top, the way an `assert property` in it already does.
+                    if let Some(module) = body.get("name").and_then(Value::as_str) {
+                        scopes
+                            .occurrence_modules
+                            .push((module.to_string(), prefix.clone()));
+                    }
                     let scope = std::rc::Rc::new(Scope {
                         body: addr,
                         prefix,
@@ -6992,6 +7013,25 @@ mod tests {
     fn hierarchy_forms_translate_from_real_slang_json() {
         let report = translate_ast_json(include_str!("testdata/sva_hierarchy_forms.ast.json"))
             .expect("translates");
+        // mununu#897 — every occurrence by module: the top with the empty prefix, `leaf` once
+        // per instance (the generate array included), `chk` under its instance.
+        let prefixes_of = |module: &str| -> Vec<&str> {
+            report
+                .instance_prefixes
+                .iter()
+                .filter(|(m, _)| m == module)
+                .map(|(_, p)| p.as_str())
+                .collect()
+        };
+        assert_eq!(prefixes_of("top"), vec![""]);
+        let mut leaf = prefixes_of("leaf");
+        leaf.sort_unstable();
+        assert_eq!(
+            leaf,
+            vec!["g_arr[0].u_c.", "g_arr[1].u_c.", "u_a.", "u_b.", "u_d."],
+            "{:?}",
+            report.instance_prefixes
+        );
         let formula = |name: &str| {
             report
                 .translated
