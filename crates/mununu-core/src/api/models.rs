@@ -2509,16 +2509,20 @@ impl From<&crate::adapter::slang::verify_auto::AutoVerifyReport> for SvVerifyAut
                         witness: v.witness.clone(),
                         detail: v.detail.clone(),
                     }),
-                    portfolio: p.portfolio.as_ref().map(|a| PortfolioAttributionView {
-                        decided_by: a.decided_by.clone(),
-                        refused: a
-                            .refused
-                            .iter()
-                            .map(|(member, reason)| MemberRefusalView {
-                                member: member.clone(),
-                                reason: reason.clone(),
-                            })
-                            .collect(),
+                    portfolio: p.portfolio.as_ref().map(|a| {
+                        let views = |list: &[(String, String)]| -> Vec<MemberRefusalView> {
+                            list.iter()
+                                .map(|(member, reason)| MemberRefusalView {
+                                    member: member.clone(),
+                                    reason: reason.clone(),
+                                })
+                                .collect()
+                        };
+                        PortfolioAttributionView {
+                            decided_by: a.decided_by.clone(),
+                            refused: views(&a.refused),
+                            abstained: views(&a.abstained),
+                        }
                     }),
                     // A `⊥` ALWAYS carries a reason, with `unclassified-bottom` as the floor.
                     //
@@ -3100,9 +3104,15 @@ pub struct PortfolioAttributionView {
     pub decided_by: Vec<String>,
     /// The members that refused the design, each with its reason.
     pub refused: Vec<MemberRefusalView>,
+    /// mununu#893 — the members that abstained on a budget (the native member's deterministic
+    /// resource limit, or a wall clock), each with the cause in its own words. Not a refusal:
+    /// a larger budget may decide the row. Absent on older reports; empty when none stopped.
+    #[serde(default)]
+    pub abstained: Vec<MemberRefusalView>,
 }
 
-/// mununu#873 — one portfolio member's refusal of a design.
+/// mununu#873 — one portfolio member's refusal of a design (mununu#893: also one member's budget
+/// abstention, under `abstained`).
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct MemberRefusalView {
     pub member: String,
@@ -3269,6 +3279,36 @@ mod bottom_reason_view_tests {
             vacuity: None,
             portfolio: None,
         }
+    }
+
+    /// mununu#893 at the report seam: a member's budget abstention reaches the row's `portfolio`
+    /// under `abstained`, beside (not inside) the refusals.
+    #[test]
+    fn a_portfolio_budget_stop_reaches_the_row_as_abstained_not_refused() {
+        use crate::adapter::slang::verify_auto::PortfolioAttribution;
+        let report = AutoVerifyReport {
+            properties: vec![PropertyVerdict {
+                name: "p".into(),
+                portfolio: Some(PortfolioAttribution {
+                    decided_by: Vec::new(),
+                    refused: vec![("exact".into(), "over cap".into())],
+                    abstained: vec![("native".into(), "resource limit at depth 2".into())],
+                }),
+                ..bottom_prop(None)
+            }],
+            ..Default::default()
+        };
+        let view = SvVerifyAutoResponse::from(&report);
+        let a = view.properties[0].portfolio.as_ref().expect("attribution");
+        assert_eq!(a.refused.len(), 1);
+        assert_eq!(a.abstained.len(), 1);
+        assert_eq!(a.abstained[0].member, "native");
+        assert_eq!(a.abstained[0].reason, "resource limit at depth 2");
+        let json = serde_json::to_value(&view).unwrap();
+        assert_eq!(
+            json["properties"][0]["portfolio"]["abstained"][0]["member"],
+            "native"
+        );
     }
 
     /// Roadmap J3 at the report seam: a resumed row names the build its verdict came from and

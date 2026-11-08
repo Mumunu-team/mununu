@@ -201,6 +201,21 @@ it, as they already did under `--owned-only` (mununu#892). Before that fix the r
 the subprocess members and btormc's depth cap only, and native kept its 5 s per-query default
 whatever the flag said.
 
+**Native's per-query bound is not a clock** (mununu#893). The 5 s default — and the raised value
+under `--timeout-ms` — is a *nominal* allowance converted into a deterministic z3 resource limit
+(3 000 units per nominal millisecond, calibrated on the development laptop: 2.3–3.9 M units per
+second on a hard query), so the same query stops at the same point on every host and under any
+load. Before #893 it was a z3 `timeout`, and a query finishing in 4.9 s on one run and 5.1 s on the
+next flipped a row between ⊥ and `holds` (HWMCC'20 `zipcpu_dcache-p588`). A stop on the limit is
+an abstention **with its cause**: the row's `portfolio.abstained` lists `native` with the units and
+the depth, and the note is `portfolio-budget-stop` (not `portfolio-refused`: a refusal names a
+construct the member cannot carry and more budget will not help; a budget stop may be bought back
+with a larger `--timeout-ms`). `MUNUNU_NATIVE_QUERY_RLIMIT` sets the units directly (`0` = none);
+`MUNUNU_NATIVE_QUERY_TIMEOUT_MS` is an opt-in wall clock per query, off by default like
+`MUNUNU_BDD_TIME_BUDGET_MS`, and a stop on it is named as the wall. The run budgets
+(`MUNUNU_PROPERTY_BUDGET_MS`, `MUNUNU_VERIFY_BUDGET_MS`) still cap every query's wall when they are
+in effect — that is the user's own clock, reported as `budget-expired`.
+
 ### `sv verify-auto` fair-cycle bridge — `// @mununu_assume GF <atom>` (mununu#477)
 
 > Source of truth: [`escalate_bottom`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) — surface: (CLI+API+UI)

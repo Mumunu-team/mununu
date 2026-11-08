@@ -71,7 +71,7 @@
       "type": "object"
     },
     "MemberRefusalView": {
-      "description": "mununu#873 — one portfolio member's refusal of a design.",
+      "description": "mununu#873 — one portfolio member's refusal of a design (mununu#893: also one member's budget abstention, under `abstained`).",
       "properties": {
         "member": {
           "type": "string"

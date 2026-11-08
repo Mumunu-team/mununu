@@ -341,7 +341,7 @@
       "type": "object"
     },
     "MemberRefusalView": {
-      "description": "mununu#873 — one portfolio member's refusal of a design.",
+      "description": "mununu#873 — one portfolio member's refusal of a design (mununu#893: also one member's budget abstention, under `abstained`).",
       "properties": {
         "member": {
           "type": "string"
@@ -459,6 +459,14 @@
     "PortfolioAttributionView": {
       "description": "mununu#873 — one row's reachability-portfolio members. See [`PropertyVerdictView::portfolio`].",
       "properties": {
+        "abstained": {
+          "default": [],
+          "description": "mununu#893 — the members that abstained on a budget (the native member's deterministic resource limit, or a wall clock), each with the cause in its own words. Not a refusal: a larger budget may decide the row. Absent on older reports; empty when none stopped.",
+          "items": {
+            "$ref": "#/definitions/MemberRefusalView"
+          },
+          "type": "array"
+        },
         "decided_by": {
           "description": "The members that returned a definite answer (`exact`, `native`, `interp`, `btormc`, `pono`, `ric3`, …). On a contradiction, members on both sides.",
           "items": {

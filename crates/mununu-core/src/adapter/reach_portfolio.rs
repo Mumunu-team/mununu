@@ -99,6 +99,13 @@ pub struct ReachOutcome {
     /// one that searched and gave up — on OpenTitan csrng that cost a debug run and a probe on a
     /// dumped model to attribute.
     pub refused: Vec<(&'static str, String)>,
+    /// mununu#893 — members that ABSTAINED with a stated cause: a budget stop (the native member's
+    /// deterministic resource limit, or a wall clock), in the member's own words. Distinct from a
+    /// refusal (a construct the member does not carry — more budget will not help) and from a
+    /// clean `unknown` (the member searched to its bound). A consumer reads the three apart: a
+    /// refusal is routed around, a budget abstention may be bought back with a larger budget, a
+    /// clean unknown is the genuine search abstention.
+    pub abstained: Vec<(&'static str, String)>,
 }
 
 impl ReachOutcome {
@@ -116,6 +123,7 @@ impl ReachOutcome {
             reachable_by,
             unreachable_by,
             refused: Vec::new(),
+            abstained: Vec::new(),
         }
     }
 }
@@ -134,6 +142,9 @@ pub(crate) struct Members {
     pub ric3: Option<McVerdict>,
     /// `(member, reason)` for every member that refused the design (see [`ReachOutcome::refused`]).
     pub refused: Vec<(&'static str, String)>,
+    /// `(member, cause)` for every member that abstained on a budget (see
+    /// [`ReachOutcome::abstained`]).
+    pub abstained: Vec<(&'static str, String)>,
 }
 
 /// Record a member's refusal (an `Err`) and abstain; a clean result passes through.
@@ -160,6 +171,49 @@ fn note_refusal(
 ) {
     if let Ok(mut g) = refused.lock() {
         g.push((member, why));
+    }
+}
+
+/// mununu#893 — why an owned member stopped without a verdict: it REFUSED the design (a
+/// construct it does not carry) or it ABSTAINED on a budget (the deterministic resource limit, a
+/// wall clock). The two reach the report through different lists because they call for opposite
+/// responses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MemberStop {
+    Refused(String),
+    Abstained(String),
+}
+
+impl From<native_bmc::BmcError> for MemberStop {
+    fn from(e: native_bmc::BmcError) -> Self {
+        match e {
+            native_bmc::BmcError::BudgetExpired { .. }
+            | native_bmc::BmcError::ResourceLimit { .. } => MemberStop::Abstained(e.to_string()),
+            native_bmc::BmcError::Encode(_) | native_bmc::BmcError::NoBadProperty => {
+                MemberStop::Refused(e.to_string())
+            }
+        }
+    }
+}
+
+/// [`settle`] for a member that tells a refusal from a budget abstention: each cause lands in
+/// its own list, and the member abstains either way.
+fn settle_native<T>(
+    refused: &std::sync::Mutex<Vec<(&'static str, String)>>,
+    abstained: &std::sync::Mutex<Vec<(&'static str, String)>>,
+    member: &'static str,
+    r: Result<Option<T>, MemberStop>,
+) -> Option<T> {
+    match r {
+        Ok(v) => v,
+        Err(MemberStop::Refused(why)) => {
+            note_refusal(refused, member, why);
+            None
+        }
+        Err(MemberStop::Abstained(cause)) => {
+            note_refusal(abstained, member, cause);
+            None
+        }
     }
 }
 
@@ -201,7 +255,10 @@ fn run_native(
     file: &Btor2File,
     cancel: Option<&std::sync::atomic::AtomicBool>,
     query_ms: u32,
-) -> Result<Option<bool>, String> {
+) -> Result<Option<bool>, MemberStop> {
+    // mununu#893 — `query_ms` is the per-check allowance in NOMINAL milliseconds: a deterministic
+    // resource limit inside the member, never a wall clock; a stop on it comes back as an
+    // `Abstained` cause, a construct the encoder does not carry as a `Refused` one.
     timed(
         "native",
         || match native_bmc::decide_bad_safety_cancellable(
@@ -213,7 +270,7 @@ fn run_native(
             Ok(SafetyVerdict::Violated { .. }) => Ok(Some(true)),
             Ok(SafetyVerdict::Safe { .. }) => Ok(Some(false)),
             Ok(SafetyVerdict::Unknown { .. }) => Ok(None),
-            Err(e) => Err(e.to_string()),
+            Err(e) => Err(MemberStop::from(e)),
         },
     )
 }
@@ -302,7 +359,7 @@ pub(crate) fn member_timeouts(
 ) -> MemberTimeouts {
     match remaining_ms {
         None => MemberTimeouts {
-            native_query_ms: native_bmc::DEFAULT_TIMEOUT_MS,
+            native_query_ms: native_bmc::DEFAULT_QUERY_NOMINAL_MS,
             interp_query_ms: INTERP_QUERY_TIMEOUT_MS,
             interp_overall_ms: INTERP_OVERALL_TIMEOUT_MS,
             subprocess,
@@ -360,6 +417,9 @@ fn collect(m: Members) -> ReachOutcome {
     let mut refused = m.refused;
     refused.sort_by(|(a, _), (b, _)| rank(a).cmp(&rank(b)).then_with(|| a.cmp(b)));
     out.refused = refused;
+    let mut abstained = m.abstained;
+    abstained.sort_by(|(a, _), (b, _)| rank(a).cmp(&rank(b)).then_with(|| a.cmp(b)));
+    out.abstained = abstained;
     out
 }
 
@@ -458,6 +518,10 @@ pub fn decide_reach_portfolio_cancellable(
     // mununu#734 — every member's refusal lands here, in finishing order; `collect` carries them.
     let refused: std::sync::Mutex<Vec<(&'static str, String)>> = std::sync::Mutex::new(Vec::new());
     let refused = &refused;
+    // mununu#893 — and every budget abstention with its cause, in its own list.
+    let abstained: std::sync::Mutex<Vec<(&'static str, String)>> =
+        std::sync::Mutex::new(Vec::new());
+    let abstained = &abstained;
     let mut members = std::thread::scope(|scope| {
         // Forward an external cancellation — or the budget's expiry — into `decided`, which
         // every cancellable member already polls. Stops when the members are joined.
@@ -531,8 +595,9 @@ pub fn decide_reach_portfolio_cancellable(
         // serialising.
         let native_h = scope.spawn(move || {
             let _g = crate::adapter::run_budget::enter(budget);
-            let v = settle(
+            let v = settle_native(
                 refused,
+                abstained,
                 "native",
                 run_native(file, Some(decided), t.native_query_ms),
             );
@@ -568,11 +633,13 @@ pub fn decide_reach_portfolio_cancellable(
             pono,
             ric3,
             refused: Vec::new(),
+            abstained: Vec::new(),
         }
     });
     // A poisoned lock (a member panicked while recording) yields no refusal list; the panic is
     // the louder signal and the verdict never depends on the list (mununu#803, LOW).
     members.refused = refused.lock().map(|g| g.clone()).unwrap_or_default();
+    members.abstained = abstained.lock().map(|g| g.clone()).unwrap_or_default();
     collect(members)
 }
 
@@ -611,6 +678,8 @@ pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcom
     // mununu#803 — a member's refusal (an `Err`, not an abstention) is kept here as the scoped
     // driver keeps it; the detached threads share the list through an `Arc`.
     let refused: Arc<std::sync::Mutex<Vec<(&'static str, String)>>> = Arc::default();
+    // mununu#893 — the budget abstentions, with their cause, beside the refusals.
+    let abstained: Arc<std::sync::Mutex<Vec<(&'static str, String)>>> = Arc::default();
     use std::time::{Duration, Instant};
 
     // mununu#816 — the caller's run budget is a THREAD-LOCAL (`run_budget`'s documented
@@ -650,15 +719,19 @@ pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcom
 
     // Safety proof — shallow native BMC + k-induction.
     {
-        let (file, decided, tx, refused) = (
+        let (file, decided, tx, refused, abstained) = (
             Arc::clone(&file),
             Arc::clone(&decided),
             tx.clone(),
             Arc::clone(&refused),
+            Arc::clone(&abstained),
         );
         let budget = budget.clone();
         std::thread::spawn(move || {
             let _g = crate::adapter::run_budget::enter(&budget);
+            // mununu#893 — `timeout_ms` is the member's NOMINAL per-check allowance (a resource
+            // limit inside); a budget stop is an abstention with its cause, an encode error a
+            // refusal.
             let v = timed(
                 "native",
                 || match native_bmc::decide_bad_safety_cancellable(
@@ -671,7 +744,12 @@ pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcom
                     Ok(SafetyVerdict::Safe { .. }) => Some(false),
                     Ok(SafetyVerdict::Unknown { .. }) => None,
                     Err(e) => {
-                        note_refusal(&refused, "native", e.to_string());
+                        match MemberStop::from(e) {
+                            MemberStop::Refused(why) => note_refusal(&refused, "native", why),
+                            MemberStop::Abstained(cause) => {
+                                note_refusal(&abstained, "native", cause)
+                            }
+                        }
                         None
                     }
                 },
@@ -853,6 +931,7 @@ pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcom
     }
     let mut out = ReachOutcome::from_sets(reachable_by, unreachable_by);
     out.refused = refused.lock().map(|g| g.clone()).unwrap_or_default();
+    out.abstained = abstained.lock().map(|g| g.clone()).unwrap_or_default();
     out
 }
 
@@ -861,6 +940,61 @@ mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
     use crate::adapter::btor2::parser;
+
+    /// mununu#893 — a budget stop and a refusal reach different lists, and `collect` carries
+    /// both in the fixed engine order; a stop of either kind is still an abstention (`None`).
+    #[test]
+    fn a_budget_stop_is_an_abstention_with_a_cause_not_a_refusal() {
+        let refused = std::sync::Mutex::new(Vec::new());
+        let abstained = std::sync::Mutex::new(Vec::new());
+        let stop = native_bmc::BmcError::ResourceLimit {
+            k: 3,
+            units: 15_000_000,
+        };
+        let v: Option<bool> =
+            settle_native(&refused, &abstained, "native", Err(MemberStop::from(stop)));
+        assert_eq!(v, None);
+        assert!(
+            refused.lock().unwrap().is_empty(),
+            "a budget stop is not a refusal"
+        );
+        let abst = abstained.lock().unwrap().clone();
+        assert_eq!(abst.len(), 1);
+        assert_eq!(abst[0].0, "native");
+        assert!(
+            abst[0].1.contains("deterministic query budget") && abst[0].1.contains("depth 3"),
+            "{}",
+            abst[0].1
+        );
+        let v: Option<bool> = settle_native(
+            &refused,
+            &abstained,
+            "native",
+            Err(MemberStop::from(native_bmc::BmcError::NoBadProperty)),
+        );
+        assert_eq!(v, None);
+        assert_eq!(
+            refused.lock().unwrap().len(),
+            1,
+            "an encode-class error is a refusal"
+        );
+        assert_eq!(abstained.lock().unwrap().len(), 1);
+        // The wall budget is an abstention too, named as the wall.
+        assert_eq!(
+            MemberStop::from(native_bmc::BmcError::BudgetExpired { k: 1 }),
+            MemberStop::Abstained("native BMC: the wall-clock budget expired at depth 1".into())
+        );
+        let out = collect(Members {
+            abstained: vec![("interp", "x".into()), ("native", "y".into())],
+            ..Members::default()
+        });
+        assert_eq!(out.verdict, ReachVerdict::Unknown);
+        assert_eq!(
+            out.abstained,
+            vec![("native", "y".to_string()), ("interp", "x".to_string())],
+            "fixed engine order, whatever the finishing order"
+        );
+    }
 
     // Merge-logic unit tests (no subprocess): the first-definite + contradiction
     // rule is pure and testable without any external binary.
@@ -1037,7 +1171,7 @@ mod tests {
     fn member_timeouts_floor_is_todays_constants_and_follows_the_budget() {
         let sixty = std::time::Duration::from_secs(60);
         let floor = member_timeouts(None, sixty);
-        assert_eq!(floor.native_query_ms, native_bmc::DEFAULT_TIMEOUT_MS);
+        assert_eq!(floor.native_query_ms, native_bmc::DEFAULT_QUERY_NOMINAL_MS);
         assert_eq!(floor.interp_query_ms, INTERP_QUERY_TIMEOUT_MS);
         assert_eq!(floor.interp_overall_ms, INTERP_OVERALL_TIMEOUT_MS);
         assert_eq!(floor.subprocess, sixty);
