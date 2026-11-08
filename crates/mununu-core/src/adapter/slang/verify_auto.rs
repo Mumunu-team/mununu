@@ -4524,6 +4524,16 @@ pub fn merge_portfolio_reports(
 
     // The base (exact if available) supplies the property list, diagnostics, and notes.
     let mut merged = base.clone();
+    // J4: a property's wall is the SUM over the members that ran it. The base is whichever member
+    // came first — the exact engine never runs the cube loop that records the walls — so its clone
+    // alone carries an empty map; the first on-prem bundle check (2026-11-08) shipped `wall_ms`
+    // absent on every row because of exactly that.
+    merged.property_wall_ms.clear();
+    for (_, rep) in &oks {
+        for (name, ms) in &rep.property_wall_ms {
+            *merged.property_wall_ms.entry(name.clone()).or_insert(0) += ms;
+        }
+    }
     let mut decided_by: std::collections::BTreeMap<&str, u32> = std::collections::BTreeMap::new();
     let mut contradictions: Vec<String> = Vec::new();
 
@@ -13126,6 +13136,40 @@ mod tests {
             "a property that HOLDS is not ⊥ and must carry no bottom-reason, however loudly \
              another engine failed"
         );
+    }
+
+    /// J4 — the merged report's per-property wall is the sum over the members that ran the row,
+    /// not the first member's map (the exact engine runs no cube loop and records nothing; cloning
+    /// it as the base shipped `wall_ms` absent on every row of the first bundle check).
+    #[test]
+    fn merged_report_walls_regression_lock() {
+        // The reproducer is tests/portfolio_merge_walls_j4b.rs (an integration test, so
+        // `verify-repro` can run it against the parent); this is the lock in the same file.
+        let mut exact = mk_report(&[
+            ("sva_1", VerifyOutcome::Unknown { unknown_cells: 1 }, None),
+            ("sva_2", VerifyOutcome::Holds, None),
+        ]);
+        exact.property_wall_ms.insert("sva_2".into(), 40);
+        let mut cube = mk_report(&[
+            ("sva_1", VerifyOutcome::Holds, None),
+            ("sva_2", VerifyOutcome::Holds, None),
+        ]);
+        cube.property_wall_ms.insert("sva_1".into(), 120);
+        cube.property_wall_ms.insert("sva_2".into(), 5);
+        let runs = vec![("exact-symbolic", Ok(exact)), ("symbolic", Ok(cube))];
+        let merged = merge_portfolio_reports(&runs, PortfolioMode::Sequential).expect("merge ok");
+        assert_eq!(merged.property_wall_ms.get("sva_1"), Some(&120));
+        assert_eq!(merged.property_wall_ms.get("sva_2"), Some(&45));
+        // A base member that recorded nothing contributes nothing, and loses nothing.
+        let empty_base = mk_report(&[("sva_1", VerifyOutcome::Unknown { unknown_cells: 1 }, None)]);
+        let mut only = mk_report(&[("sva_1", VerifyOutcome::Holds, None)]);
+        only.property_wall_ms.insert("sva_1".into(), 77);
+        let merged = merge_portfolio_reports(
+            &[("exact-symbolic", Ok(empty_base)), ("symbolic", Ok(only))],
+            PortfolioMode::Sequential,
+        )
+        .expect("merge ok");
+        assert_eq!(merged.property_wall_ms.get("sva_1"), Some(&77));
     }
 
     /// Every engine errored → the merge surfaces the first (highest-precision) error, not a panic.
