@@ -79,11 +79,11 @@ jobs:
       - name: Build
         shell: bash
         run: cargo build --release -p mununu-cli -p mununu-extract
-      - name: Smoke-test the binaries on this OS
-        shell: bash
-        run: |
-          ext=""; [ "${{ matrix.archive }}" = "zip" ] && ext=".exe"
-          scripts/release_smoke.sh "target/release/mununu$ext" "target/release/mununu-extract$ext"
+      # The archives are self-contained: libz3 travels beside the binaries, which load it through
+      # `$ORIGIN` (Linux, patchelf) / `@executable_path` (macOS, install_name_tool + an ad-hoc
+      # re-sign, which arm64 macOS requires after the load command changes) / the DLL search path
+      # (Windows). v0.5.10 linked the runner's system Z3 by install name and failed to start on a
+      # host with another Z3 version — the first real-host test found it after publishing.
       - name: Package
         shell: bash
         run: |
@@ -91,15 +91,52 @@ jobs:
           ver="${GITHUB_REF_NAME}"
           case "$GITHUB_REF" in refs/tags/*) ;; *) ver="dry-run-$(git rev-parse --short HEAD)";; esac
           name="mununu-${ver}-${{ matrix.target }}"
+          echo "DIST=dist/$name" >> "$GITHUB_ENV"
           mkdir -p "dist/$name/LICENSES"
           ext=""; [ "${{ matrix.archive }}" = "zip" ] && ext=".exe"
           cp "target/release/mununu$ext" "target/release/mununu-extract$ext" "dist/$name/"
           cp LICENSE THIRD_PARTY.md "dist/$name/"
           cp LICENSES/* "dist/$name/LICENSES/"
           cp docs/licensing.md "dist/$name/LICENSING.md"
-          if [ "${{ matrix.archive }}" = "zip" ]; then
-            cp "$Z3_BIN/libz3.dll" "dist/$name/"
-          fi
+          case "${{ matrix.z3 }}" in
+            zip)
+              cp "$Z3_BIN/libz3.dll" "dist/$name/" ;;
+            brew)
+              dylib=$(otool -L "dist/$name/mununu" | awk '/libz3/ {print $1; exit}')
+              cp "$dylib" "dist/$name/"
+              for b in mununu mununu-extract; do
+                install_name_tool -change "$dylib" "@executable_path/$(basename "$dylib")" "dist/$name/$b"
+                codesign --force --sign - "dist/$name/$b"
+              done
+              otool -L "dist/$name/mununu" | grep z3 ;;
+            apt)
+              sudo apt-get install -y patchelf
+              so=$(ldconfig -p | awk '/libz3\.so\.4 / {print $NF; exit}')
+              cp "$so" "dist/$name/"
+              patchelf --set-rpath '$ORIGIN' "dist/$name/mununu" "dist/$name/mununu-extract"
+              patchelf --print-rpath "dist/$name/mununu" ;;
+          esac
+          ls -l "dist/$name"
+      # The proof of self-containment: the runner's own Z3 is removed before the packaged binary
+      # runs the smoke. If the bundled copy were not the one loaded, this step would fail.
+      - name: Remove the runner's Z3
+        shell: bash
+        run: |
+          case "${{ matrix.z3 }}" in
+            brew) brew uninstall --ignore-dependencies z3 ;;
+            apt)  sudo apt-get remove -y libz3-dev libz3-4 ;;
+            zip)  rm -rf "$Z3_BIN" ;;
+          esac
+      - name: Smoke-test the packaged binaries on this OS, without a system Z3
+        shell: bash
+        run: |
+          ext=""; [ "${{ matrix.archive }}" = "zip" ] && ext=".exe"
+          scripts/release_smoke.sh "$DIST/mununu$ext" "$DIST/mununu-extract$ext"
+      - name: Archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          name=$(basename "$DIST")
           cd dist
           if [ "${{ matrix.archive }}" = "zip" ]; then
             7z a -tzip "$name.zip" "$name" >/dev/null
@@ -136,9 +173,10 @@ jobs:
         with:
           generate_release_notes: true
           body: |
-            Five archives, each built and smoke-tested on its own OS (`scripts/release_smoke.sh`).
-            Each carries `mununu`, `mununu-extract`, `LICENSE`, `THIRD_PARTY.md`, `LICENSES/` and
-            `LICENSING.md`; the Windows zip also carries `libz3.dll`. On Linux and macOS the binary
-            links the system Z3: `apt-get install libz3-dev` / `brew install z3` first. The engine-only
-            tier: SystemVerilog verification needs the `mununu-sva` image (see `docs/release.md`).
+            Five self-contained archives, each built and smoke-tested on its own OS with the runner's
+            system Z3 removed first (`scripts/release_smoke.sh`). Each carries `mununu`, `mununu-extract`,
+            the Z3 shared library beside them (`libz3.so.4` / `libz3.<v>.dylib` / `libz3.dll`, MIT —
+            `LICENSES/Z3-MIT.txt`), `LICENSE`, `THIRD_PARTY.md`, `LICENSES/` and `LICENSING.md`. Linux
+            needs glibc ≥ 2.39 (built on Ubuntu 24.04). The engine-only tier: SystemVerilog
+            verification needs the `mununu-sva` image (see `docs/install.md`, `docs/release.md`).
           files: artifacts/*
