@@ -897,9 +897,20 @@ mod tests {
         let file = parser::parse(SAFE_1IND).expect("parse");
         let out = decide_reach_portfolio(&file);
         assert_eq!(out.verdict, ReachVerdict::Unreachable, "outcome: {out:?}");
+        // Which sound in-process member gets there first is a race: on this 1-bit design
+        // `exact` usually decides within milliseconds, and under a loaded parallel
+        // `cargo test` the portfolio cancels native before it reports. So the test asks
+        // that a sound in-process member decided, not which one, and that nothing
+        // (the interpolation member included) reports the design reachable.
         assert!(
-            out.unreachable_by.contains(&"native"),
-            "native k-induction proves the 1-inductive design safe: {out:?}"
+            out.unreachable_by
+                .iter()
+                .any(|m| *m == "exact" || *m == "native"),
+            "exact or native proves the 1-inductive design safe: {out:?}"
+        );
+        assert!(
+            out.reachable_by.is_empty(),
+            "no member may flip a definite base: {out:?}"
         );
         // At the merge level a definite base is likewise untouched by an interp abstain.
         assert_eq!(
