@@ -77,11 +77,179 @@ fn encode_for_bmc(file: &Btor2File) -> Result<(Btor2SmtView, HashMap<Nid, Array>
 /// engine — mirrors [`crate::adapter::btormc::DEFAULT_KMAX`].
 pub const DEFAULT_MAX_K: u32 = 40;
 
-/// Default per-check Z3 wall-clock budget (milliseconds) for the portfolio-facing
-/// native engine. A check that exceeds it returns `Unknown`, and the engine
-/// **abstains** (never a wrong verdict) — the in-process analogue of the
-/// subprocess members' kill-on-timeout.
-pub const DEFAULT_TIMEOUT_MS: u32 = 5_000;
+/// Default per-check budget of the portfolio-facing native engine, in **nominal milliseconds**
+/// (mununu#893). It is not a wall clock: it is converted to a deterministic z3 resource limit
+/// ([`UNITS_PER_NOMINAL_MS`] units per nominal millisecond), so the same query gets the same
+/// answer on every host and under any load — a slower machine takes longer to reach the same
+/// stop, it does not get a different verdict. Before #893 this was a 5 s z3 `timeout`, and a
+/// query finishing in 4.9 s on one run and 5.1 s on the next flipped a row between ⊥ and `holds`
+/// (HWMCC'20 `zipcpu_dcache-p588`). A check that exceeds the limit returns `Unknown` and the
+/// engine **abstains with the cause** ([`BmcError::ResourceLimit`]) — never a wrong verdict.
+pub const DEFAULT_QUERY_NOMINAL_MS: u32 = 5_000;
+
+/// z3 resource units per nominal millisecond — the calibration behind [`QueryBudget`]. Measured
+/// 2026-11-08 on the development laptop (Intel, z3 4.16) with the module's
+/// `probe_rlimit_semantics_and_calibration`: the pigeonhole query spent 4.63 M units in a 2.0 s
+/// wall stop and 0.31 M units in 77 ms, i.e. 2.3–3.9 M units per second; 3 000 units per
+/// nominal millisecond makes the 5 s default about five seconds there and two to three times
+/// that on the slower e2e host — deterministically. The constant is a unit conversion, never a
+/// verdict input: two hosts with different speeds reach the same stop.
+pub const UNITS_PER_NOMINAL_MS: u32 = 3_000;
+
+/// Overrides the resource limit directly, in z3 units (`0` = no resource limit).
+pub const QUERY_RLIMIT_ENV: &str = "MUNUNU_NATIVE_QUERY_RLIMIT";
+/// Opt-in per-check WALL clock, milliseconds (`0` / unset = none beyond the run budget). Like
+/// `MUNUNU_BDD_TIME_BUDGET_MS`, a clock makes the verdict host-dependent; it is off by default.
+pub const QUERY_TIMEOUT_ENV: &str = "MUNUNU_NATIVE_QUERY_TIMEOUT_MS";
+
+/// What one z3 check may spend: a deterministic resource limit and, optionally, a wall clock.
+/// The run budget's remainder (`run_budget`, mununu#726) is applied as a wall cap on every check
+/// whenever a budget is in effect, so the last check cannot overshoot the deadline — that cap is
+/// the user's own wall budget, reported as [`BmcError::BudgetExpired`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueryBudget {
+    /// z3 `rlimit` per check; `None` = unbounded.
+    pub rlimit: Option<u32>,
+    /// A per-check wall clock; `None` = none beyond the run budget's remainder.
+    pub timeout_ms: Option<u32>,
+}
+
+impl QueryBudget {
+    /// The budget for a nominal per-check allowance: the resource limit is
+    /// `nominal_ms × UNITS_PER_NOMINAL_MS` (saturating) unless [`QUERY_RLIMIT_ENV`] names the
+    /// units itself; the wall clock is [`QUERY_TIMEOUT_ENV`] when set. `None` = no nominal
+    /// allowance (unbounded, as [`bmc_bad_reachable`] runs).
+    pub fn for_nominal(nominal_ms: Option<u32>) -> Self {
+        let env_u32 = |name: &'static str| -> Option<u32> {
+            crate::adapter::env_var::read(name).and_then(|v| v.trim().parse::<u32>().ok())
+        };
+        let rlimit = match env_u32(QUERY_RLIMIT_ENV) {
+            Some(0) => None,
+            Some(units) => Some(units),
+            None => nominal_ms.map(|ms| ms.saturating_mul(UNITS_PER_NOMINAL_MS)),
+        };
+        let timeout_ms = env_u32(QUERY_TIMEOUT_ENV).filter(|ms| *ms > 0);
+        QueryBudget { rlimit, timeout_ms }
+    }
+
+    /// The wall this check may take right now: the opt-in per-check clock, clamped to the run
+    /// budget's remainder; with no clock, the remainder alone when a budget is in effect.
+    fn wall_ms_now(&self) -> Option<u32> {
+        let budgeted = crate::adapter::run_budget::current()
+            .remaining_ms()
+            .is_some();
+        match (self.timeout_ms, budgeted) {
+            (Some(ms), _) => Some(crate::adapter::run_budget::clamp_query_ms(ms)),
+            (None, true) => Some(crate::adapter::run_budget::clamp_query_ms(u32::MAX)),
+            (None, false) => None,
+        }
+    }
+
+    /// Set this check's parameters on `solvers`. Called before every check, because the wall cap
+    /// shrinks with the run budget.
+    fn apply(&self, solvers: &[&z3::Solver]) {
+        let mut params = z3::Params::new();
+        let mut any = false;
+        if let Some(units) = self.rlimit {
+            params.set_u32("rlimit", units);
+            any = true;
+        }
+        if let Some(ms) = self.wall_ms_now() {
+            params.set_u32("timeout", ms);
+            any = true;
+        }
+        if any {
+            for s in solvers {
+                s.set_params(&params);
+            }
+        }
+    }
+}
+
+/// Why a check came back `Unknown`: the wall clock, the resource limit, or neither (an incomplete
+/// theory, a genuine unknown). z3's reason string alone cannot tell the first two apart — a wall
+/// stop reads `"timeout"` when the SAT core's timer fires but `"canceled"` when it lands during
+/// preprocessing, and a resource stop reads `"canceled"` too — so the cause is read from what was
+/// CONFIGURED and what the check CONSUMED: the resource units the check used (z3's `rlimit count`,
+/// the delta across the check) reaching the limit is a resource stop; otherwise a configured wall
+/// is the wall. An interrupt by this engine's own [`QueryGate`] also reads "canceled"; the gate
+/// knows it interrupted, so the ladder asks it first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UnknownCause {
+    Timeout,
+    ResourceLimit,
+    Other,
+}
+
+/// `reason` is z3's `reason_unknown`, `units_used` the `rlimit count` delta across the check,
+/// `wall_applied` whether a wall clock (the opt-in one or the run budget's remainder) was set on
+/// the check.
+pub(crate) fn classify_stop(
+    reason: Option<&str>,
+    units_used: u64,
+    rlimit: Option<u32>,
+    wall_applied: bool,
+) -> UnknownCause {
+    let reason = reason.map(str::to_ascii_lowercase);
+    if reason.as_deref().is_some_and(|r| r.contains("timeout")) {
+        return UnknownCause::Timeout;
+    }
+    // z3 stops once the count passes the scoped limit; the statistic can trail it by a little,
+    // so 95 % of the limit already reads as the limit.
+    if let Some(limit) = rlimit
+        && units_used.saturating_mul(100) >= u64::from(limit).saturating_mul(95)
+    {
+        return UnknownCause::ResourceLimit;
+    }
+    let cancelled = reason
+        .as_deref()
+        .is_some_and(|r| r.contains("cancel") || r.contains("resource"));
+    if cancelled && wall_applied {
+        return UnknownCause::Timeout;
+    }
+    UnknownCause::Other
+}
+
+/// z3's cumulative resource counter for the solver's context (`rlimit count`); `0` before the
+/// first check. The delta across one check is what that check consumed.
+fn rlimit_count(solver: &z3::Solver) -> u64 {
+    match solver.get_statistics().value("rlimit count") {
+        Some(z3::StatisticsValue::UInt(n)) => u64::from(n),
+        Some(z3::StatisticsValue::Double(d)) if d.is_finite() && d > 0.0 => d as u64,
+        _ => 0,
+    }
+}
+
+/// mununu#893 — what an `Unknown` check means for the k-induction ladder at depth `k`: a peer's
+/// interrupt (the gate knows) or a genuine z3 unknown abstains at this depth; a budget stop is an
+/// ERROR that names its cause — the wall ([`BmcError::BudgetExpired`]) or the deterministic
+/// resource limit ([`BmcError::ResourceLimit`]). A `"canceled"` with no resource limit configured
+/// is not a resource stop and abstains.
+fn ladder_unknown(
+    k: usize,
+    gate: &QueryGate,
+    reason: Option<String>,
+    units_used: u64,
+    budget: &QueryBudget,
+) -> Result<SafetyVerdict, BmcError> {
+    let k32 = k as u32;
+    if gate.interrupted() {
+        return Ok(SafetyVerdict::Unknown { k: k32 });
+    }
+    let wall_applied = budget.wall_ms_now().is_some();
+    match (
+        classify_stop(reason.as_deref(), units_used, budget.rlimit, wall_applied),
+        budget.rlimit,
+    ) {
+        (UnknownCause::Timeout, _) => Err(BmcError::BudgetExpired { k: k32 }),
+        (UnknownCause::ResourceLimit, Some(units)) => {
+            Err(BmcError::ResourceLimit { k: k32, units })
+        }
+        (UnknownCause::ResourceLimit, None) | (UnknownCause::Other, _) => {
+            Ok(SafetyVerdict::Unknown { k: k32 })
+        }
+    }
+}
 
 /// The outcome of a bounded model-checking run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,6 +305,11 @@ pub enum BmcError {
     /// a timed-out frame says NOTHING about whether `bad` is reachable there, so it must never be
     /// read as "no counterexample".
     BudgetExpired { k: u32 },
+    /// mununu#893 — the deterministic per-check resource limit ([`QueryBudget::rlimit`], `units`
+    /// z3 resource units) ran out at depth `k`. The same query stops at the same point on every
+    /// host; a larger `--timeout-ms` (the nominal budget scales with it) or
+    /// [`QUERY_RLIMIT_ENV`] gives it more. Like a wall stop, it says NOTHING about the frame.
+    ResourceLimit { k: u32, units: u32 },
 }
 
 impl std::fmt::Display for BmcError {
@@ -147,6 +320,13 @@ impl std::fmt::Display for BmcError {
             BmcError::BudgetExpired { k } => {
                 write!(f, "native BMC: the wall-clock budget expired at depth {k}")
             }
+            BmcError::ResourceLimit { k, units } => write!(
+                f,
+                "native BMC: the deterministic query budget ({units} z3 resource units, about \
+                 {} ms nominal) ran out at depth {k}; a larger --timeout-ms scales it, \
+                 {QUERY_RLIMIT_ENV} sets it",
+                units / UNITS_PER_NOMINAL_MS.max(1)
+            ),
         }
     }
 }
@@ -477,23 +657,17 @@ pub fn bmc_bad_reachable_witness(
         // mununu#726 — under a thread-local budget every frame's query is bounded by the time
         // left (unbounded stays unbounded: the floor is today's behaviour), and the loop polls
         // the budget per depth. A query that times out is an ERROR, not "no cex at this depth".
-        let budgeted = crate::adapter::run_budget::current()
-            .remaining_ms()
-            .is_some();
+        // mununu#893 — no nominal allowance here (this entry is the unbounded BMC); the
+        // environment may still name a resource limit, and a stop on it is named as such.
+        let budget = QueryBudget::for_nominal(None);
         for k in 0..=n {
             if crate::adapter::run_budget::expired() {
                 return Err(BmcError::BudgetExpired { k: k as u32 });
             }
-            if budgeted {
-                let mut params = z3::Params::new();
-                params.set_u32(
-                    "timeout",
-                    crate::adapter::run_budget::clamp_query_ms(u32::MAX),
-                );
-                solver.set_params(&params);
-            }
+            budget.apply(&[&solver]);
             solver.push();
             solver.assert(u.bad_at(k));
+            let before = rlimit_count(&solver);
             let res = solver.check();
             match res {
                 z3::SatResult::Sat => {
@@ -506,8 +680,19 @@ pub fn bmc_bad_reachable_witness(
                 }
                 z3::SatResult::Unsat => {}
                 z3::SatResult::Unknown => {
+                    let cause = classify_stop(
+                        solver.get_reason_unknown().as_deref(),
+                        rlimit_count(&solver).saturating_sub(before),
+                        budget.rlimit,
+                        budget.wall_ms_now().is_some(),
+                    );
                     solver.pop(1);
-                    return Err(BmcError::BudgetExpired { k: k as u32 });
+                    return Err(match (cause, budget.rlimit) {
+                        (UnknownCause::ResourceLimit, Some(units)) => {
+                            BmcError::ResourceLimit { k: k as u32, units }
+                        }
+                        _ => BmcError::BudgetExpired { k: k as u32 },
+                    });
                 }
             }
             solver.pop(1);
@@ -540,36 +725,39 @@ pub fn bmc_bad_reachable_witness(
 /// SAME frame variables (shared Z3 consts, separate assertion stacks), so the
 /// step's free initial state does not clash with the base's pinned init.
 ///
-/// `timeout_ms` sets a per-check Z3 wall-clock budget: a check that exceeds it
-/// returns `Unknown`, and the engine **abstains** ([`SafetyVerdict::Unknown`]) —
-/// never a wrong verdict. `None` = unbounded (QF_BV is decidable, so it still
-/// terminates). This is what lets the portfolio bound the in-process member the
-/// way it kills a timed-out subprocess.
+/// `nominal_ms` is the per-check allowance in nominal milliseconds (mununu#893): it becomes a
+/// deterministic z3 resource limit ([`QueryBudget::for_nominal`]), not a wall clock, so a
+/// check that exceeds it stops at the same point on every host and the engine **abstains with
+/// the cause** (`Err(`[`BmcError::ResourceLimit`]`)`) — never a wrong verdict, never a silent
+/// `Unknown`. `None` = unbounded (QF_BV is decidable, so it still terminates). A wall stop
+/// (the run budget's remainder, or the opt-in [`QUERY_TIMEOUT_ENV`]) is
+/// `Err(`[`BmcError::BudgetExpired`]`)`; [`SafetyVerdict::Unknown`] is reserved for the depth
+/// bound, a cancellation by a peer, and a genuine z3 unknown.
 ///
 /// **Soundness of the SAT/UNSAT/UNKNOWN handling.** `Violated` is returned ONLY on
 /// a definite base `Sat`; `Safe` ONLY on a definite step `Unsat`. Any `Unknown`
-/// (a timeout, or Z3 giving up) abstains — crucially, a step `Unknown` must NOT be
+/// (a budget stop, or Z3 giving up) abstains — crucially, a step `Unknown` must NOT be
 /// read as "not satisfiable ⇒ inductive" (that would be a spurious `Safe`).
 pub fn decide_bad_safety(
     file: &Btor2File,
     max_k: u32,
-    timeout_ms: Option<u32>,
+    nominal_ms: Option<u32>,
 ) -> Result<SafetyVerdict, BmcError> {
-    decide_bad_safety_cancellable(file, max_k, timeout_ms, None)
+    decide_bad_safety_cancellable(file, max_k, nominal_ms, None)
 }
 
 /// [`decide_bad_safety`] with the reach portfolio's cooperative **cancel** flag (S1 of the
 /// engine-performance roadmap): checked before each depth, like [`bmc_cex_until`], so once a
 /// peer member has decided the engine abstains at the first depth boundary past the
 /// [`crate::adapter::MEMBER_CANCEL_GRACE`] instead of running the remaining
-/// `(max_k - k) × 2` queries at up to `timeout_ms` each. The grace keeps a run that is about
+/// `(max_k - k) × 2` queries at up to `nominal_ms` each. The grace keeps a run that is about
 /// to finish in the portfolio's attribution; a cancelled run is [`SafetyVerdict::Unknown`]
 /// at the depth it stopped — never a wrong verdict. The latency of a cancellation is bounded
-/// by the grace plus the query in flight (≤ `timeout_ms`).
+/// by the grace plus the query in flight (the [`QueryGate`] interrupts z3 itself).
 pub fn decide_bad_safety_cancellable(
     file: &Btor2File,
     max_k: u32,
-    timeout_ms: Option<u32>,
+    nominal_ms: Option<u32>,
     cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<SafetyVerdict, BmcError> {
     let (bad_ops, init_pairs, constraint_ops) = extract_props(file);
@@ -622,7 +810,7 @@ pub fn decide_bad_safety_cancellable(
                 });
             }
             let out =
-                decide_bad_safety_ladder(&u, &init_pairs, n, max_k, timeout_ms, cancel, &gate);
+                decide_bad_safety_ladder(&u, &init_pairs, n, max_k, nominal_ms, cancel, &gate);
             done.store(true, std::sync::atomic::Ordering::Relaxed);
             out
         })
@@ -650,6 +838,12 @@ impl QueryGate {
     fn lock(&self) -> std::sync::MutexGuard<'_, GateState> {
         // A poisoned lock only means a panicking holder; the two flags are still meaningful.
         self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Whether this gate has issued an interrupt — the one `"canceled"` z3 reason that is NOT a
+    /// resource-limit stop (mununu#893 asks the gate before reading z3's reason).
+    fn interrupted(&self) -> bool {
+        self.lock().interrupted
     }
 
     /// Run one solver check inside the gate. `Unknown` once an interrupt has been issued, before
@@ -690,7 +884,7 @@ fn decide_bad_safety_ladder(
     init_pairs: &[(Nid, Operand)],
     n: usize,
     max_k: u32,
-    timeout_ms: Option<u32>,
+    nominal_ms: Option<u32>,
     cancel: Option<&std::sync::atomic::AtomicBool>,
     gate: &QueryGate,
 ) -> Result<SafetyVerdict, BmcError> {
@@ -701,12 +895,9 @@ fn decide_bad_safety_ladder(
         // if `bad` at the current frame is then unsatisfiable, the property is
         // k-inductive.
         let step = z3::Solver::new();
-        if let Some(ms) = timeout_ms {
-            let mut params = z3::Params::new();
-            params.set_u32("timeout", ms);
-            base.set_params(&params);
-            step.set_params(&params);
-        }
+        // mununu#893 — the per-check budget is a deterministic resource limit (plus the run
+        // budget's wall remainder); applied before every check below, never only once.
+        let budget = QueryBudget::for_nominal(nominal_ms);
         u.assert_init(&base, init_pairs);
         for c in u.constraints_at(0) {
             base.assert(&c);
@@ -730,31 +921,41 @@ fn decide_bad_safety_ladder(
             if crate::adapter::run_budget::expired() {
                 return Ok(SafetyVerdict::Unknown { k: k as u32 });
             }
-            if let Some(ms) = timeout_ms {
-                let mut params = z3::Params::new();
-                params.set_u32("timeout", crate::adapter::run_budget::clamp_query_ms(ms));
-                base.set_params(&params);
-                step.set_params(&params);
-            }
+            budget.apply(&[&base, &step]);
             // Base — reachable counterexample? Violated ONLY on a definite Sat.
             base.push();
             base.assert(u.bad_at(k));
+            let base_before = rlimit_count(&base);
             let base_res = gate.check(|| base.check());
+            // z3's reason and count belong to the check just made: read them before the pop.
+            let base_reason = (base_res == z3::SatResult::Unknown)
+                .then(|| base.get_reason_unknown())
+                .flatten();
+            let base_used = rlimit_count(&base).saturating_sub(base_before);
             base.pop(1);
             match base_res {
                 z3::SatResult::Sat => return Ok(SafetyVerdict::Violated { depth: k as u32 }),
-                z3::SatResult::Unknown => return Ok(SafetyVerdict::Unknown { k: k as u32 }),
+                z3::SatResult::Unknown => {
+                    return ladder_unknown(k, gate, base_reason, base_used, &budget);
+                }
                 z3::SatResult::Unsat => {}
             }
             // Step — k-inductive? Safe ONLY on a definite Unsat; an Unknown abstains
             // (must NOT be read as "inductive"). Base has held through depth k above.
             step.push();
             step.assert(u.bad_at(k));
+            let step_before = rlimit_count(&step);
             let step_res = gate.check(|| step.check());
+            let step_reason = (step_res == z3::SatResult::Unknown)
+                .then(|| step.get_reason_unknown())
+                .flatten();
+            let step_used = rlimit_count(&step).saturating_sub(step_before);
             step.pop(1);
             match step_res {
                 z3::SatResult::Unsat => return Ok(SafetyVerdict::Safe { k: k as u32 }),
-                z3::SatResult::Unknown => return Ok(SafetyVerdict::Unknown { k: k as u32 }),
+                z3::SatResult::Unknown => {
+                    return ladder_unknown(k, gate, step_reason, step_used, &budget);
+                }
                 z3::SatResult::Sat => {}
             }
             if k < n {
@@ -807,9 +1008,9 @@ pub fn bmc_cex_until(
             encode_for_bmc(file).map_err(|e| format!("native BMC: encode failed: {e:?}"))?;
         let u = Unroller::build(&view, array_inits, &bad_ops, &constraint_ops, n);
         let base = z3::Solver::new();
-        let mut params = z3::Params::new();
-        params.set_u32("timeout", per_query_ms);
-        base.set_params(&params);
+        // mununu#893 — a deterministic resource limit per check (the nominal allowance), plus
+        // the run budget's wall remainder; the `deadline` below is this search's own wall.
+        let budget = QueryBudget::for_nominal(Some(per_query_ms));
         u.assert_init(&base, &init_pairs);
         for c in u.constraints_at(0) {
             base.assert(&c);
@@ -822,6 +1023,7 @@ pub fn bmc_cex_until(
             {
                 return Ok(None);
             }
+            budget.apply(&[&base]);
             base.push();
             base.assert(u.bad_at(k));
             let res = base.check();
@@ -954,20 +1156,10 @@ mod tests {
         assert_eq!(gate.check(|| z3::SatResult::Unsat), z3::SatResult::Unsat);
     }
 
-    /// N0.5 — a peer's decision interrupts the query in flight. The `bad` is the pigeonhole
-    /// principle with 11 pigeons and 10 holes over 1-bit inputs — trivial to bit-blast and
-    /// exponential for resolution, so z3's SAT core searches for tens of seconds before the
-    /// `unsat`; a probe with a 1.5 s per-query timeout establishes that on this host first
-    /// (factoring-style instances were tried: z3 settles a 64-bit prime's factorisation in
-    /// about a second; a 1536-bit multiplier is slow but its blasting is not a cancellation
-    /// point). When the probe times out, the cancelled run must come back within the 300 ms
-    /// the peer takes plus the member grace, abstaining; before the watchdog it waited the
-    /// whole 60 s. When the probe decides (a faster z3), the interrupt path is not exercised
-    /// here and the test says so rather than asserting on a fast machine.
-    #[test]
-    fn a_peer_decision_interrupts_the_query_in_flight() {
-        // x_{p,h}: pigeon p sits in hole h. Every pigeon sits somewhere; no hole holds two.
-        let (pigeons, holes) = (11usize, 10usize);
+    /// The pigeonhole principle as a BTOR2 `bad` over 1-bit inputs: `pigeons` pigeons, `holes`
+    /// holes, every pigeon somewhere, no hole holding two. Unsatisfiable, trivial to bit-blast,
+    /// exponential for resolution — z3's SAT core searches for tens of seconds at 11/10.
+    fn pigeonhole_btor2(pigeons: usize, holes: usize) -> String {
         let mut src = String::from("1 sort bitvec 1\n");
         let mut nid = 2i64;
         let mut x = vec![vec![0i64; holes]; pigeons];
@@ -1008,16 +1200,248 @@ mod tests {
             nid += 1;
         }
         src.push_str(&format!("{nid} bad {acc}\n"));
-        let src = src.as_str();
-        let file = parser::parse(src).expect("parses");
-        let probe_t0 = std::time::Instant::now();
-        let probe = decide_bad_safety(&file, 0, Some(1_500)).expect("encodes");
-        eprintln!("probe: {probe:?} in {:?}", probe_t0.elapsed());
-        if !matches!(probe, SafetyVerdict::Unknown { .. }) {
-            eprintln!(
-                "the factoring query decided in under 1.5 s ({probe:?}); the interrupt path is not exercised on this host"
+        src
+    }
+
+    /// mununu#893 — a budget stop is an ERROR that names its cause, never a silent `Unknown`;
+    /// the resource-limit stop counts work, not time, so two runs stop at the same point with
+    /// the same words. The opt-in wall clock is a different stop with a different name.
+    #[test]
+    fn a_resource_limit_stop_names_itself_and_is_the_same_twice() {
+        let file = parser::parse(&pigeonhole_btor2(11, 10)).expect("parses");
+        let _rl = crate::adapter::env_var::unset_for_test(QUERY_RLIMIT_ENV);
+        let _to = crate::adapter::env_var::unset_for_test(QUERY_TIMEOUT_ENV);
+        // 10 nominal ms = 30 000 units: far below the pigeonhole's cost on any host.
+        let (a, b) = (
+            decide_bad_safety(&file, 0, Some(10)),
+            decide_bad_safety(&file, 0, Some(10)),
+        );
+        for r in [&a, &b] {
+            match r {
+                Err(BmcError::ResourceLimit { k: 0, units }) => {
+                    assert_eq!(*units, 10 * UNITS_PER_NOMINAL_MS);
+                }
+                other => panic!("a resource-limit stop must be named: {other:?}"),
+            }
+        }
+        let (a, b) = (a.unwrap_err().to_string(), b.unwrap_err().to_string());
+        assert_eq!(a, b, "the same stop twice");
+        assert!(
+            a.contains("deterministic") && a.contains("30000") && a.contains("--timeout-ms"),
+            "the message names the budget and the lever: {a}"
+        );
+    }
+
+    /// The opt-in wall clock, with the resource limit switched off, is a wall stop and says so.
+    #[test]
+    fn an_opt_in_wall_stop_is_named_as_the_wall() {
+        let file = parser::parse(&pigeonhole_btor2(11, 10)).expect("parses");
+        let _rl = crate::adapter::env_var::override_for_test(QUERY_RLIMIT_ENV, "0");
+        let _to = crate::adapter::env_var::override_for_test(QUERY_TIMEOUT_ENV, "50");
+        match decide_bad_safety(&file, 0, Some(60_000)) {
+            Err(BmcError::BudgetExpired { k: 0 }) => {}
+            other => panic!("a wall stop must be named as the wall: {other:?}"),
+        }
+    }
+
+    /// The resource limit is per CHECK, not cumulative over the ladder: an 8-bit counter whose
+    /// `bad` (255) is beyond the bound and never k-inductive runs all 41 depths (82 checks) of
+    /// trivial queries under a limit a single check fits in and reaches the depth bound. A
+    /// cumulative limit would stop it as a resource-limit error long before.
+    #[test]
+    fn the_resource_limit_is_per_check_not_cumulative_over_the_ladder() {
+        const CNT8: &str = "1 sort bitvec 8\n2 zero 1\n3 state 1 cnt\n4 init 1 3 2\n5 one 1\n\
+                            6 add 1 3 5\n7 next 1 3 6\n8 ones 1\n9 sort bitvec 1\n\
+                            10 eq 9 3 8\n11 bad 10\n";
+        let file = parser::parse(CNT8).expect("parses");
+        let _rl = crate::adapter::env_var::override_for_test(QUERY_RLIMIT_ENV, "100000");
+        let _to = crate::adapter::env_var::unset_for_test(QUERY_TIMEOUT_ENV);
+        let v =
+            decide_bad_safety(&file, 40, Some(1)).expect("no budget stop under a per-check limit");
+        assert_eq!(
+            v,
+            SafetyVerdict::Unknown { k: 40 },
+            "the depth bound, not a stop"
+        );
+    }
+
+    #[test]
+    fn z3_reasons_classify_a_wall_stop_a_resource_stop_and_a_genuine_unknown() {
+        // "timeout" is the wall whatever else is configured.
+        assert_eq!(
+            classify_stop(Some("timeout"), 0, Some(1_000), true),
+            UnknownCause::Timeout
+        );
+        // "canceled" with the units at the limit is the resource stop, wall or no wall …
+        assert_eq!(
+            classify_stop(Some("canceled"), 1_000, Some(1_000), true),
+            UnknownCause::ResourceLimit
+        );
+        assert_eq!(
+            classify_stop(Some("canceled"), 960, Some(1_000), false),
+            UnknownCause::ResourceLimit,
+            "the statistic may trail the limit a little"
+        );
+        // … and "canceled" well under the limit with a wall configured is the wall (z3 says
+        // "canceled", not "timeout", when the clock lands during preprocessing).
+        assert_eq!(
+            classify_stop(Some("canceled"), 10, Some(1_000), true),
+            UnknownCause::Timeout
+        );
+        assert_eq!(
+            classify_stop(Some("canceled"), 10, None, true),
+            UnknownCause::Timeout
+        );
+        // "canceled" with neither budget configured is somebody else's interrupt: unknown.
+        assert_eq!(
+            classify_stop(Some("canceled"), 10, None, false),
+            UnknownCause::Other
+        );
+        assert_eq!(
+            classify_stop(
+                Some("(incomplete (theory arithmetic))"),
+                10,
+                Some(1_000),
+                true
+            ),
+            UnknownCause::Other
+        );
+        assert_eq!(classify_stop(None, 0, None, false), UnknownCause::Other);
+    }
+
+    /// The nominal allowance converts to units; the environment may name the units itself or
+    /// switch the limit off; the wall clock is opt-in.
+    #[test]
+    fn the_nominal_budget_converts_to_units_unless_the_environment_names_them() {
+        {
+            let _rl = crate::adapter::env_var::unset_for_test(QUERY_RLIMIT_ENV);
+            let _to = crate::adapter::env_var::unset_for_test(QUERY_TIMEOUT_ENV);
+            assert_eq!(
+                QueryBudget::for_nominal(Some(5_000)),
+                QueryBudget {
+                    rlimit: Some(15_000_000),
+                    timeout_ms: None,
+                }
             );
-            return;
+            assert_eq!(QueryBudget::for_nominal(None).rlimit, None);
+            assert_eq!(
+                QueryBudget::for_nominal(Some(u32::MAX)).rlimit,
+                Some(u32::MAX),
+                "saturates"
+            );
+        }
+        {
+            let _rl = crate::adapter::env_var::override_for_test(QUERY_RLIMIT_ENV, "4242");
+            let _to = crate::adapter::env_var::override_for_test(QUERY_TIMEOUT_ENV, "250");
+            assert_eq!(
+                QueryBudget::for_nominal(Some(5_000)),
+                QueryBudget {
+                    rlimit: Some(4242),
+                    timeout_ms: Some(250),
+                }
+            );
+        }
+        {
+            let _rl = crate::adapter::env_var::override_for_test(QUERY_RLIMIT_ENV, "0");
+            let _to = crate::adapter::env_var::override_for_test(QUERY_TIMEOUT_ENV, "0");
+            assert_eq!(
+                QueryBudget::for_nominal(Some(5_000)),
+                QueryBudget {
+                    rlimit: None,
+                    timeout_ms: None,
+                }
+            );
+        }
+    }
+
+    /// mununu#893 — the three facts the deterministic query budget rests on, printed, not
+    /// asserted (they are host and z3-version facts): whether a solver-level `rlimit` is accepted
+    /// and counted PER CHECK rather than cumulatively across the ladder's checks; what
+    /// `reason_unknown` says for an rlimit stop versus a wall-clock timeout; and how many resource
+    /// units this host spends per second on a hard query — the calibration behind
+    /// `UNITS_PER_NOMINAL_MS`. Run by hand:
+    /// `cargo test -p mununu-core --lib probe_rlimit -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn probe_rlimit_semantics_and_calibration() {
+        let cfg = z3::Config::new();
+        z3::with_z3_config(&cfg, || {
+            // (1) per-check or cumulative? 300 trivial checks on ONE solver under a tiny rlimit.
+            let s = z3::Solver::new();
+            let mut p = z3::Params::new();
+            p.set_u32("rlimit", 500);
+            s.set_params(&p);
+            let x = z3::ast::BV::new_const("x", 8);
+            let mut unknowns = 0usize;
+            for i in 0..300u64 {
+                s.push();
+                s.assert(x.eq(z3::ast::BV::from_u64(i % 256, 8)));
+                if s.check() == z3::SatResult::Unknown {
+                    unknowns += 1;
+                }
+                s.pop(1);
+            }
+            eprintln!(
+                "per-check probe: {unknowns} unknown of 300 trivial checks at rlimit 500 \
+                 (0 ⇒ the limit is per check)"
+            );
+            // (2) + (3): the reasons and the units/second on the pigeonhole query.
+            let file = parser::parse(&pigeonhole_btor2(11, 10)).expect("parses");
+            let (bad_ops, init_pairs, constraint_ops) = extract_props(&file);
+            let (view, array_inits) = encode_for_bmc(&file).expect("encodes");
+            let u = Unroller::build(&view, array_inits, &bad_ops, &constraint_ops, 0);
+            for (key, val) in [("timeout", 2_000u32), ("rlimit", 300_000u32)] {
+                let s = z3::Solver::new();
+                let mut p = z3::Params::new();
+                p.set_u32(key, val);
+                s.set_params(&p);
+                u.assert_init(&s, &init_pairs);
+                for c in u.constraints_at(0) {
+                    s.assert(&c);
+                }
+                s.assert(u.bad_at(0));
+                let t0 = std::time::Instant::now();
+                let res = s.check();
+                let took = t0.elapsed();
+                eprintln!(
+                    "{key}={val}: {res:?} in {took:?}; reason_unknown={:?}; rlimit count={:?}",
+                    s.get_reason_unknown(),
+                    s.get_statistics().value("rlimit count")
+                );
+            }
+        });
+    }
+
+    /// N0.5 — a peer's decision interrupts the query in flight. The `bad` is the pigeonhole
+    /// principle with 11 pigeons and 10 holes over 1-bit inputs — trivial to bit-blast and
+    /// exponential for resolution, so z3's SAT core searches for tens of seconds before the
+    /// `unsat`; a probe with a 1.5 s per-query timeout establishes that on this host first
+    /// (factoring-style instances were tried: z3 settles a 64-bit prime's factorisation in
+    /// about a second; a 1536-bit multiplier is slow but its blasting is not a cancellation
+    /// point). When the probe times out, the cancelled run must come back within the 300 ms
+    /// the peer takes plus the member grace, abstaining; before the watchdog it waited the
+    /// whole 60 s. When the probe decides (a faster z3), the interrupt path is not exercised
+    /// here and the test says so rather than asserting on a fast machine.
+    #[test]
+    fn a_peer_decision_interrupts_the_query_in_flight() {
+        let src = pigeonhole_btor2(11, 10);
+        let file = parser::parse(&src).expect("parses");
+        let probe_t0 = std::time::Instant::now();
+        // mununu#893 — the probe's budget is a resource limit now: a hard query stops with a
+        // named `ResourceLimit` (the signal that the interrupt path can be exercised); a decided
+        // probe means a z3 fast enough to settle it within the allowance.
+        let probe = decide_bad_safety(&file, 0, Some(1_500));
+        eprintln!("probe: {probe:?} in {:?}", probe_t0.elapsed());
+        match probe {
+            Err(BmcError::ResourceLimit { .. }) => {}
+            Ok(v) => {
+                eprintln!(
+                    "the pigeonhole query decided within the 1.5 s nominal allowance ({v:?}); the \
+                     interrupt path is not exercised on this host"
+                );
+                return;
+            }
+            Err(e) => panic!("the probe must encode and stop on its budget: {e}"),
         }
         let cancel = std::sync::atomic::AtomicBool::new(false);
         let started = std::time::Instant::now();

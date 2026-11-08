@@ -261,17 +261,24 @@ pub struct PortfolioAttribution {
     /// `(member, reason)` for every member that refused the design (an encode error, an absent
     /// binary, an over-cap cone).
     pub refused: Vec<(String, String)>,
+    /// mununu#893 — `(member, cause)` for every member that abstained on a budget: the native
+    /// member's deterministic resource limit or a wall clock, in its own words. Not a refusal
+    /// (more budget may decide it) and not a clean unknown (the member did not search to its
+    /// bound).
+    pub abstained: Vec<(String, String)>,
 }
 
 impl PortfolioAttribution {
     fn of(reach: &crate::adapter::reach_portfolio::ReachOutcome) -> Self {
+        let owned = |list: &[(&'static str, String)]| -> Vec<(String, String)> {
+            list.iter()
+                .map(|(m, why)| ((*m).to_string(), why.clone()))
+                .collect()
+        };
         Self {
             decided_by: engines_of(reach).into_iter().map(str::to_string).collect(),
-            refused: reach
-                .refused
-                .iter()
-                .map(|(m, why)| ((*m).to_string(), why.clone()))
-                .collect(),
+            refused: owned(&reach.refused),
+            abstained: owned(&reach.abstained),
         }
     }
 }
@@ -9123,23 +9130,48 @@ fn attribute_portfolio_abstention(
     {
         return;
     }
-    let items: Vec<String> = reach
+    let refusals: Vec<String> = reach
         .refused
         .iter()
         .map(|(member, why)| format!("{member}: {why}"))
         .collect();
-    let detail = if items.is_empty() {
-        "every portfolio member returned unknown within its budget (no refusal, no timeout)"
-            .to_string()
-    } else {
-        format!("refused by {}", items.join("; "))
+    // mununu#893 — a budget abstention is named apart from a refusal: a refusal is routed around,
+    // an abstention on the deterministic resource limit may be bought back with a larger budget.
+    let abstentions: Vec<String> = reach
+        .abstained
+        .iter()
+        .map(|(member, cause)| format!("{member} abstained: {cause}"))
+        .collect();
+    let detail = match (refusals.is_empty(), abstentions.is_empty()) {
+        (true, true) => {
+            "every portfolio member returned unknown within its budget (no refusal, no budget stop)"
+                .to_string()
+        }
+        (false, true) => format!("refused by {}", refusals.join("; ")),
+        (true, false) => format!(
+            "no refusal; a member stopped on its budget — {}",
+            abstentions.join("; ")
+        ),
+        (false, false) => format!(
+            "refused by {}; and {}",
+            refusals.join("; "),
+            abstentions.join("; ")
+        ),
     };
+    let items: Vec<String> = refusals.into_iter().chain(abstentions).collect();
     prop.bottom_reason = Some(BottomReason::EngineDidNotComplete {
         engine: "reach-portfolio".to_string(),
         detail: detail.clone(),
     });
+    // mununu#893 — a row no member refused but one stopped on its budget is a budget stop, not a
+    // refusal: the note's kind says which, so a consumer filtering by kind reads the right advice.
+    let kind = if reach.refused.is_empty() && !reach.abstained.is_empty() {
+        "portfolio-budget-stop"
+    } else {
+        "portfolio-refused"
+    };
     notes.push(VerificationNote {
-        kind: "portfolio-refused".to_string(),
+        kind: kind.to_string(),
         level: NoteLevel::ScopeCaveat,
         summary: format!(
             "`{}`: the reach portfolio decided nothing within an intact budget — {detail}",
@@ -9149,7 +9181,9 @@ fn attribute_portfolio_abstention(
                  portfolio that abstained in 40 ms because every member refused the design read \
                  exactly like one that searched and gave up. A refusal names a construct the member \
                  does not carry (a constant width, an array sort, a missing binary): fix or route \
-                 around it — more time will not help. An all-unknown with no refusal is the \
+                 around it — more time will not help. A budget stop (mununu#893: the native \
+                 member's deterministic resource limit, the same on every host) names the budget \
+                 it hit — a larger --timeout-ms scales it. An all-unknown with neither is the \
                  genuine search abstention."
             .to_string(),
         items,
@@ -10306,6 +10340,64 @@ mod tests {
             "{:?}",
             notes.iter().map(|n| &n.kind).collect::<Vec<_>>()
         );
+    }
+
+    /// mununu#893 — a row no member refused but one stopped on its budget is attributed as a
+    /// BUDGET STOP: the cause in the bottom reason, the note's kind `portfolio-budget-stop` (not
+    /// `portfolio-refused`, whose advice — "more time will not help" — would be wrong here), and
+    /// the member's words in the items.
+    #[test]
+    fn an_abstention_on_the_resource_limit_is_attributed_as_a_budget_stop_not_a_refusal() {
+        use crate::adapter::reach_portfolio::{ReachOutcome, ReachVerdict};
+        let mut prop = PropertyVerdict {
+            name: "p".to_string(),
+            label: None,
+            kind: crate::adapter::slang::translate::SvaKind::Assert,
+            formula: "AG p".to_string(),
+            outcome: VerifyOutcome::Unknown { unknown_cells: 0 },
+            seeded_predicates: Vec::new(),
+            counterexample: None,
+            bottom_reason: None,
+            decided_by: None,
+            vacuity: None,
+            portfolio: None,
+        };
+        let reach = ReachOutcome {
+            verdict: ReachVerdict::Unknown,
+            reachable_by: Vec::new(),
+            unreachable_by: Vec::new(),
+            refused: Vec::new(),
+            abstained: vec![(
+                "native",
+                "native BMC: the deterministic query budget (15000000 z3 resource units, about \
+                 5000 ms nominal) ran out at depth 2"
+                    .to_string(),
+            )],
+        };
+        let mut notes = Vec::new();
+        attribute_portfolio_abstention(&mut prop, &reach, false, &mut notes);
+        match &prop.bottom_reason {
+            Some(BottomReason::EngineDidNotComplete { engine, detail }) => {
+                assert_eq!(engine, "reach-portfolio");
+                assert!(
+                    detail.contains("no refusal") && detail.contains("native abstained"),
+                    "{detail}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].kind, "portfolio-budget-stop");
+        assert!(
+            notes[0].items[0].contains("depth 2"),
+            "{:?}",
+            notes[0].items
+        );
+        // The attribution carries the abstention beside the refusals.
+        let a = PortfolioAttribution::of(&reach);
+        assert!(a.refused.is_empty());
+        assert_eq!(a.abstained.len(), 1);
+        assert_eq!(a.abstained[0].0, "native");
     }
 
     /// PR C — the classifier agrees with the reducers: a bounded chain and a chain ending in a
