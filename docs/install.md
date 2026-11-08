@@ -8,7 +8,7 @@ says, per OS, which has been measured and how — nothing here is promised that 
 | tier | what you get | Linux | macOS | Windows |
 |---|---|---|---|---|
 | **T1 — the container** (`mununu-sva`) | everything, SystemVerilog verification included; the supported self-serve path and the one the SVA verdicts are validated in | native Docker Engine | Docker Desktop — **measured on Intel** (same verdicts as the Linux host, see below); Apple silicon runs the linux/amd64 image under emulation, **unmeasured** | Docker Desktop with the WSL2 backend — **unmeasured** |
-| **T2 — the native binary** (the release archives) | the engine-only tier: BTOR2 verbs, CTXDSL, synthesis, `mununu server`, `mununu licence` — no SystemVerilog lift | x86_64 and aarch64 archives, **smoke-tested on their runners** | Intel and Apple-silicon archives, **smoke-tested on their runners** | x86_64 zip, **smoke-tested on its runner**, self-contained (`libz3.dll` inside) |
+| **T2 — the native binary** (the release archives, self-contained: `libz3` travels beside the binaries) | the engine-only tier: BTOR2 verbs, CTXDSL, synthesis, `mununu server`, `mununu licence` — no SystemVerilog lift | x86_64 and aarch64 archives, **smoke-tested on their runners with the system Z3 removed**; glibc ≥ 2.39 | Intel and Apple-silicon archives, **smoke-tested the same way**; v0.5.10's archives needed Homebrew z3 5.1 — fixed from the next release | x86_64 zip, **smoke-tested on its runner**, self-contained (`libz3.dll` inside) |
 | **T3 — the native SV toolchain** | `sv verify-auto` end to end on the host: T2 + yosys with `read_slang`, slang, sv2v, Verilator, btormc, pono, cvc5 from [oss-cad-suite](https://github.com/YosysHQ/oss-cad-suite-build) | the image is this, pinned; a bare host is possible and **unmeasured** | possible, **unmeasured** | oss-cad-suite ships no Verilator for Windows, so counterexample replay needs WSL2 or T1 — **unmeasured** |
 
 "Smoke-tested" means [`scripts/release_smoke.sh`](../scripts/release_smoke.sh) ran on that OS: the
@@ -21,13 +21,16 @@ the e2e smoke subset passed inside the image with the verdicts the native-Linux 
 Download the archive for your OS and architecture from the [GitHub release](https://github.com/Mumunu-team/mununu/releases)
 (`mununu-<version>-<target>.tar.gz` / `.zip`, each with a `.sha256` beside it; the contents and
 how they were built are in [`release.md`](release.md)). Each archive holds `mununu`,
-`mununu-extract`, `LICENSE`, `THIRD_PARTY.md`, `LICENSES/` and `LICENSING.md`.
+`mununu-extract`, the Z3 shared library they load (`libz3.so.4` / `libz3.<v>.dylib` /
+`libz3.dll`; MIT, `LICENSES/Z3-MIT.txt`), `LICENSE`, `THIRD_PARTY.md`, `LICENSES/` and
+`LICENSING.md`. Nothing is installed first — keep the library beside the binaries.
+(v0.5.10's Linux and macOS archives were the exception: they linked the system Z3 by install name
+and need `libz3.so.4` / Homebrew z3 5.1; its release notes say so.)
 
 ### Linux (x86_64, aarch64)
 
 ```bash
-sudo apt-get install -y libz3-dev          # the binary links the system Z3 (Debian/Ubuntu; ≥ 4.13 preferred)
-tar xzf mununu-<version>-x86_64-unknown-linux-gnu.tar.gz
+tar xzf mununu-<version>-x86_64-unknown-linux-gnu.tar.gz   # glibc ≥ 2.39 (Ubuntu 24.04 or newer)
 cd mununu-<version>-x86_64-unknown-linux-gnu
 ./mununu --version && ./mununu licence status
 ```
@@ -35,7 +38,6 @@ cd mununu-<version>-x86_64-unknown-linux-gnu
 ### macOS (Intel, Apple silicon)
 
 ```bash
-brew install z3                            # the binary links Homebrew's Z3
 tar xzf mununu-<version>-aarch64-apple-darwin.tar.gz   # or x86_64-apple-darwin on Intel
 cd mununu-<version>-aarch64-apple-darwin
 xattr -d com.apple.quarantine mununu mununu-extract    # the binaries are not notarised; Gatekeeper quarantines downloads

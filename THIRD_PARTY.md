@@ -86,3 +86,9 @@ and `v6_controllability_kmts` hold hand-written fixtures; their headers say so (
 - `i2c_scl_padoen.btor` is a lift of an OpenCores core whose RTL is not in this repository; the
   lift does not reproduce the core's copyright notice. See the fixture directory's `PROVENANCE.md`.
 - Pin files are not all in one format (some carry only the commit): roadmap item G2.
+
+## Bundled in the release archives, not in this repository
+
+| what | where | licence |
+|---|---|---|
+| `libz3` (the Z3 theorem prover's shared library: `libz3.so.4` in the Linux archives, `libz3.<version>.dylib` in the macOS archives, `libz3.dll` in the Windows zip) | copied from the runner's Z3 package by [`.github/workflows/release.yml`](.github/workflows/release.yml) and placed beside the binaries, which load it through `$ORIGIN` / `@executable_path` | MIT, © Microsoft Corporation — [`LICENSES/Z3-MIT.txt`](LICENSES/Z3-MIT.txt), also shipped in every archive's `LICENSES/` |

@@ -7,18 +7,21 @@ which builds `mununu` and `mununu-extract` **natively on five runners** — one 
 cross-compiling, because Z3 is a linked library and cross-linking it needs a foreign `libz3` nobody
 has — smoke-tests each pair on its own OS, and publishes the five archives on one GitHub release.
 
-| archive | runner | Z3 |
+| archive | runner | Z3 in the archive |
 |---|---|---|
-| `x86_64-unknown-linux-gnu.tar.gz` | `ubuntu-latest` | system (`apt-get install libz3-dev`) |
-| `aarch64-unknown-linux-gnu.tar.gz` | `ubuntu-24.04-arm` | system (`apt-get install libz3-dev`) |
-| `x86_64-apple-darwin.tar.gz` | `macos-15-intel` | system (`brew install z3`) |
-| `aarch64-apple-darwin.tar.gz` | `macos-latest` | system (`brew install z3`) |
-| `x86_64-pc-windows-msvc.zip` | `windows-latest` | the official Z3 release zip; `libz3.dll` ships in the archive |
+| `x86_64-unknown-linux-gnu.tar.gz` | `ubuntu-latest` | `libz3.so.4` from the runner's apt package, loaded through `$ORIGIN` (patchelf) |
+| `aarch64-unknown-linux-gnu.tar.gz` | `ubuntu-24.04-arm` | same |
+| `x86_64-apple-darwin.tar.gz` | `macos-15-intel` | `libz3.<v>.dylib` from the runner's Homebrew, loaded through `@executable_path` (install_name_tool, ad-hoc re-signed) |
+| `aarch64-apple-darwin.tar.gz` | `macos-latest` | same |
+| `x86_64-pc-windows-msvc.zip` | `windows-latest` | `libz3.dll` from the official Z3 release zip |
 
-Each archive carries `mununu`, `mununu-extract`, `LICENSE`, `THIRD_PARTY.md`, `LICENSES/` and
-`LICENSING.md` (the licence-file page), plus a `.sha256` beside it. **On Linux and macOS the binary
-links the system Z3**, so `libz3` must be installed before it starts (`mununu --version` fails
-loudly without it); the Windows zip is self-contained. This is the engine-only tier (T2 in
+Each archive carries `mununu`, `mununu-extract`, the Z3 shared library beside them (MIT,
+`LICENSES/Z3-MIT.txt`), `LICENSE`, `THIRD_PARTY.md`, `LICENSES/` and `LICENSING.md` (the
+licence-file page), plus a `.sha256` beside it. **The archives are self-contained**: nothing is
+installed first. The workflow proves it on every runner by removing the runner's own Z3 before
+the packaged binary runs the smoke (v0.5.10 linked the runner's Z3 by install name and failed to
+start on a host with another version — found on a real host after publishing; its release notes
+say so). Linux needs glibc ≥ 2.39 (built on Ubuntu 24.04). This is the engine-only tier (T2 in
 [`toolchain.md`](toolchain.md)): BTOR2 verbs, CTXDSL, synthesis, `mununu server`, `mununu
 licence`. SystemVerilog verification (`sv verify-auto`) needs the SV toolchain, which the
 `mununu-sva` image carries ([`docker.md`](docker.md)).
@@ -26,7 +29,8 @@ licence`. SystemVerilog verification (`sv verify-auto`) needs the SV toolchain, 
 ## The smoke test
 
 [`scripts/release_smoke.sh <mununu> [<mununu-extract>]`](../scripts/release_smoke.sh) runs on every
-runner before packaging and on any install afterwards. It proves the binary starts and links its
+runner against the **packaged** binaries, after the runner's Z3 is removed, and on any install
+afterwards. It proves the binary starts and links its
 libraries (`--version` loads `libz3` on every OS), the licence surface answers (`licence status`,
 `missing` on a fresh host), the CTXDSL front end and the μ-calculus engines run (a summary of the
 counters example), and the BTOR2 verb decides a tiny design (`twocount2c`, which reaches `bad`). A
