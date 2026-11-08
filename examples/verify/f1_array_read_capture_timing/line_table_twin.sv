@@ -21,8 +21,16 @@ module line_table_twin #(
     logic [WIDTH-1:0] mem_rd;
     logic [WIDTH-1:0] ent_q;
 
-    always_ff @(posedge clk) begin
-        if (we) mem[waddr] <= wdata;
+    // The table is cleared at reset. Without an established initial state the tool withholds
+    // a definite VIOLATED on the twin (a free cycle-0 table over-approximates reachability and
+    // licenses only HOLDS), which is what the first measurement found; a power-on clear is what
+    // the consumer's controller does anyway, and it leaves the capture-timing question intact.
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            for (int i = 0; i < LINES; i++) mem[i] <= '0;
+        end else if (we) begin
+            mem[waddr] <= wdata;
+        end
     end
 
     assign mem_rd = mem[line];

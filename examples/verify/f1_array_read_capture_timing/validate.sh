@@ -12,7 +12,7 @@ cd "$(dirname "$0")"
 M="${MUNUNU:-mununu}"
 
 echo "== line_table (expect: both hold)"
-"$M" --quiet sv verify-auto line_table.sv --source line_table_sva.sv --top line_table \
+"$M" --quiet sv verify-auto line_table.sv --source line_table_sva.sv --source line_table_bind.sv --top line_table \
   --expect a_enable_holds_between_strobes=holds \
   --expect a_disable_holds_between_strobes=holds \
   --json > logs/line_table.json
