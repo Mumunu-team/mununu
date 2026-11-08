@@ -1,0 +1,121 @@
+# Roadmap I1 — does `main` build and pass its unit tests on macOS and Windows, and does each OS
+# run the SAME tests? `ci.yml` is Linux-only (the dev image); the release workflow builds five
+# targets but runs nothing. This workflow builds and tests the workspace natively on the three
+# OSes (T2, the engine-only tier: no SV toolchain, no e2e — those stay image-only) and then
+# compares the per-OS test counts: a green run that executed fewer tests than Linux is C3's bug
+# in a new coat, and `measurements/os-matrix-unix-only-tests.txt` is the only allowed difference.
+#
+# Cost: GitHub bills macOS minutes at 10x and Windows at 2x Linux, so this runs on pushes to
+# `main`, on release tags, on demand, and on a PR only when the PR touches this workflow or its
+# scripts — not on every PR.
+#
+# Z3 per OS (docs/toolchain.md § "Z3 on each OS"): apt on Linux, Homebrew on macOS, and on
+# Windows — which has no system libz3 — the Z3 project's official release zip, unpacked by this
+# workflow and handed to z3-sys through `Z3_LIBRARY_PATH_OVERRIDE` and PATH. No cargo feature:
+# z3-sys's `gh-release` / `vendored` features are mutually exclusive at build-script level, so a
+# feature for one of them would break every `--all-features` build in the repo.
+name: OS matrix
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+    paths:
+      - '.github/workflows/os-matrix.yml'
+      - 'scripts/os_matrix_compare.sh'
+      - 'scripts/test_count_gate.sh'
+      - 'measurements/os-matrix-unix-only-tests.txt'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: os-matrix-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+env:
+  CI: true
+  CARGO_TERM_COLOR: never
+jobs:
+  build-test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            os: ubuntu-latest
+            z3: apt
+          - name: macos
+            os: macos-latest
+            z3: brew
+          - name: windows
+            os: windows-latest
+            z3: zip
+    steps:
+      - uses: actions/checkout@v5
+      # rust-toolchain.toml pins the channel; `rustup show` installs it on a runner that lacks it.
+      - name: Install the pinned toolchain
+        shell: bash
+        run: rustup show
+      - name: Z3 (apt)
+        if: matrix.z3 == 'apt'
+        run: sudo apt-get update && sudo apt-get install -y libz3-dev
+      - name: Z3 (Homebrew)
+        if: matrix.z3 == 'brew'
+        run: brew install z3
+      # The official x64-win release: `bin/` holds z3.exe (z3-sys reads the version from it),
+      # libz3.dll (needed at test time, hence PATH) and the import library libz3.lib, copied to
+      # z3.lib because the crate links `z3`. The version is the one z3-sys 0.13 itself pins for
+      # its prebuilt route.
+      - name: Z3 (official release zip)
+        if: matrix.z3 == 'zip'
+        shell: pwsh
+        run: |
+          $v = '5.1.0'
+          Invoke-WebRequest "https://github.com/Z3Prover/z3/releases/download/z3-$v/z3-$v-x64-win.zip" -OutFile "$env:RUNNER_TEMP\z3.zip"
+          Expand-Archive "$env:RUNNER_TEMP\z3.zip" -DestinationPath $env:RUNNER_TEMP
+          $bin = "$env:RUNNER_TEMP\z3-$v-x64-win\bin"
+          Copy-Item "$bin\libz3.lib" "$bin\z3.lib"
+          "Z3_LIBRARY_PATH_OVERRIDE=$bin" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          $bin | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          & "$bin\z3.exe" --version
+      - name: Restore the dependency cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: os-matrix-${{ matrix.name }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Build
+        shell: bash
+        run: cargo build --workspace
+      - name: Test
+        shell: bash
+        run: cargo test --workspace --no-fail-fast 2>&1 | tee test-${{ matrix.name }}.log
+      # The count gate runs even after a failed test step, so the comparison below sees every OS.
+      - name: Count the tests that ran
+        if: always()
+        shell: bash
+        run: |
+          scripts/test_count_gate.sh --control
+          scripts/test_count_gate.sh test-${{ matrix.name }}.log | tee count-${{ matrix.name }}.txt
+      - name: Upload the count
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: count-${{ matrix.name }}
+          path: count-${{ matrix.name }}.txt
+          if-no-files-found: error
+  compare:
+    name: same tests on every OS
+    needs: build-test
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v6
+        with:
+          pattern: count-*
+          merge-multiple: true
+      - name: Compare the per-OS test counts
+        run: |
+          scripts/os_matrix_compare.sh --control
+          scripts/os_matrix_compare.sh count-*.txt

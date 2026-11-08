@@ -1,0 +1,6 @@
+# Roadmap I1 — the tests that legitimately exist on one OS and not another, one per line, each
+# with its reason after a tab. scripts/os_matrix_compare.sh allows the per-OS test counts in
+# .github/workflows/os-matrix.yml to differ by at most the number of lines here; a difference
+# this file does not explain fails the workflow. A test is listed here only when it tests an
+# OS-specific mechanism (a Unix signal, a process group); a test that merely spells a Unix path
+# is made to run everywhere instead. Empty = every OS runs every test.
