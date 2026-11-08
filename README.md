@@ -30,6 +30,9 @@ Mununu is a verification tool for analyzing and synthesizing controllers for rea
 
 ## Quick Start
 
+Prebuilt binaries for Linux, macOS and Windows, the container, and what has been measured on
+each: [`docs/install.md`](docs/install.md). From source:
+
 ```bash
 # Build from source
 git clone https://github.com/Mumunu-team/mununu.git
