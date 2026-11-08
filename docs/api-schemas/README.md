@@ -22,6 +22,7 @@ Each `*.schema.json` file is a JSON Schema (Draft-07) derived directly from the 
 | [`sv-verify-auto-response.schema.json`](sv-verify-auto-response.schema.json) | `POST /api/v1/sv/verify-auto` | Response body |
 | [`sv-mutate-request.schema.json`](sv-mutate-request.schema.json) | `POST /api/v1/sv/mutate` | Request body (mununu#725) |
 | [`sv-mutate-response.schema.json`](sv-mutate-response.schema.json) | `POST /api/v1/sv/mutate` | Response body |
+| [`licence-status.schema.json`](licence-status.schema.json) | `GET /api/v1/licence` — and `mununu licence status --json` | Response body (Track H1); its `summary` shape is the `licence` field of `/api/v1/health` and of `sv-verify-auto-response` |
 
 ### `sv` property verbs — CLI reports (mununu#541)
 

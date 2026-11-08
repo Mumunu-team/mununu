@@ -43,6 +43,7 @@ pub fn create_router() -> Router {
 
     Router::new()
         .route("/api/v1/health", get(handlers::health_check))
+        .route("/api/v1/licence", get(handlers::licence_handler))
         .route(
             "/api/v1/context/summarize",
             post(handlers::context_summarize_handler),

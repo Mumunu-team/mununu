@@ -2324,6 +2324,10 @@ pub struct SvVerifyAutoResponse {
     /// Present exactly when `build` is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_clean: Option<bool>,
+    /// Track H1 — the deployment's licence state when this report was produced (`valid`,
+    /// `grace`, `expired`, `invalid`, `missing`), with the tier and expiry when a file parsed.
+    /// Informational, like `build`: no state changes a verdict.
+    pub licence: crate::licence::LicenceSummary,
 }
 
 /// What `sv verify-auto` did with the design's `assume` statements.
@@ -2555,6 +2559,7 @@ impl From<&crate::adapter::slang::verify_auto::AutoVerifyReport> for SvVerifyAut
         SvVerifyAutoResponse {
             build: build.map(|b| b.sha.clone()),
             build_clean: build.map(|b| b.clean),
+            licence: crate::licence::status().summary(),
             assumptions,
             properties,
             unsupported: report
@@ -3204,6 +3209,42 @@ mod bottom_reason_view_tests {
 
     /// An `ltl` row reaches the wire as its author wrote it, tagged, with the mu-calculus beside
     /// it; a mu-calculus row is tagged so and carries nothing beside its formula (2026-10-29).
+    /// Track H1's falsifier at the report seam: the licence state reaches the report as its own
+    /// field, and nothing else in the document moves with it.
+    #[test]
+    fn the_report_carries_the_licence_state_and_nothing_else_moves_with_it() {
+        use crate::licence::ENV_VAR;
+        let report = AutoVerifyReport::default();
+        let split = |view: &SvVerifyAutoResponse| {
+            let mut json = serde_json::to_value(view).expect("the report serialises");
+            let licence = json
+                .as_object_mut()
+                .and_then(|o| o.remove("licence"))
+                .expect("every report carries `licence`");
+            (json, licence)
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let not_a_licence = dir.path().join("mununu.lic");
+        std::fs::write(&not_a_licence, "nonsense").expect("write");
+        let (rest_a, licence_a) = {
+            let _g = crate::adapter::env_var::override_for_test(
+                ENV_VAR,
+                not_a_licence.to_str().expect("utf-8 path"),
+            );
+            split(&SvVerifyAutoResponse::from(&report))
+        };
+        assert_eq!(licence_a["state"], "invalid", "{licence_a}");
+        let (rest_b, licence_b) = {
+            let _g = crate::adapter::env_var::override_for_test(ENV_VAR, "");
+            split(&SvVerifyAutoResponse::from(&report))
+        };
+        assert!(licence_b["state"].is_string(), "{licence_b}");
+        assert_eq!(
+            rest_a, rest_b,
+            "a licence state changed something other than `licence` in the report"
+        );
+    }
+
     #[test]
     fn an_ltl_row_shows_its_written_form_and_the_translation_beside_it() {
         use crate::adapter::slang::translate::{FormulaLanguage, WrittenFormula};

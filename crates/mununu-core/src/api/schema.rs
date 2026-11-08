@@ -104,6 +104,13 @@ pub fn sv_mutate_response_schema() -> serde_json::Value {
         .expect("SvMutateResponse schema must serialise as JSON")
 }
 
+/// Track H1 — JSON Schema for `GET /api/v1/licence` responses, which is also what
+/// `mununu licence status --json` prints.
+pub fn licence_status_schema() -> serde_json::Value {
+    serde_json::to_value(schema_for!(crate::licence::LicenceStatus))
+        .expect("LicenceStatus schema must serialise as JSON")
+}
+
 /// mununu#541 — JSON Schema for the `sv verify-recoverability` CLI report (`--json`).
 ///
 /// CLI-shaped rather than an HTTP body: the consumer drives mununu as a SUBPROCESS, so the document it
@@ -599,6 +606,14 @@ mod tests {
              Update the committed file: MUNUNU_UPDATE_API_SCHEMAS=1 \
              cargo test -p mununu-core --lib --features api api_schema_drift_ \n\
              Then ship a consumer briefing per docs/policies/cross-repo-impact.md.",
+        );
+    }
+
+    #[test]
+    fn api_schema_drift_licence_status() {
+        drift_check(
+            "docs/api-schemas/licence-status.schema.json",
+            &licence_status_schema(),
         );
     }
 
