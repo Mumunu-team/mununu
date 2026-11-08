@@ -1,6 +1,30 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "definitions": {
+    "EvaluationTerm": {
+      "description": "The evaluation term a host without a licence file is on.",
+      "properties": {
+        "days_left": {
+          "description": "Days until `ends`: `0` on the last day, negative after it.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "ends": {
+          "description": "The last day of the term, inclusive.",
+          "type": "string"
+        },
+        "started": {
+          "description": "The first run on this host, `YYYY-MM-DD` (the stamp's content).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "days_left",
+        "ends",
+        "started"
+      ],
+      "type": "object"
+    },
     "LicenceClaims": {
       "description": "What the issuer signed.",
       "properties": {
@@ -75,14 +99,21 @@
           "type": "string"
         },
         {
-          "description": "A file was found but is not a licence this binary accepts; `reason` says why.",
+          "description": "A file was found but is not a licence this binary accepts; `reason` says why. The evaluation term governs what runs (`evaluation` carries it).",
           "enum": [
             "invalid"
           ],
           "type": "string"
         },
         {
-          "description": "No licence file at any of the three locations.",
+          "description": "No licence file; within the evaluation term counted from this host's first run.",
+          "enum": [
+            "evaluation"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "No licence file and the first run could not be recorded (the home directory is not writable), so no term can be counted; `reason` says so.",
           "enum": [
             "missing"
           ],
@@ -130,6 +161,17 @@
         "integer",
         "null"
       ]
+    },
+    "evaluation": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/EvaluationTerm"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The evaluation term this host is on when no valid file governs (`evaluation`, `invalid`, and `expired` with no claims); absent when a valid or expired file governs or no term could be counted."
     },
     "note": {
       "description": "A tamper note: `issued` is after today, so the file or the host clock is wrong.",

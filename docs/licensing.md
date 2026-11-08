@@ -9,11 +9,26 @@ nothing needs a network — a site with no outbound connection is licensed the s
 laptop. The licence is a legal instrument plus an honest status line; it is not copy protection.
 
 **A licence never touches a verdict.** No engine, adapter, planner or evaluator reads the licence;
-a test (`crates/mununu-core/tests/licence_never_reaches_a_verdict_h1.rs`) keeps it that way. An
-expired, invalid or missing licence is *reported* — on the status surfaces below and in every
-report, next to the build identity — and the verdicts of a design are byte-identical in every
-licence state. What the tool does in each state beyond reporting it (warn, refuse to start) is a
-separate decision, and will ship with its own briefing; today every state runs.
+a test (`crates/mununu-core/tests/licence_never_reaches_a_verdict_h1.rs`) keeps it that way. The
+state is *reported* — on the status surfaces below and in every report, next to the build
+identity — and the verdicts of a design are byte-identical in every licence state. What the tool
+does in each state is decided once at start-up, by the CLI and the server, and nowhere else:
+
+| state | what happens |
+|---|---|
+| `valid` | runs |
+| `evaluation` — no licence file, within **30 days** of the first run on this host | runs; one stderr line on every start (`--quiet` hides it) |
+| `grace` — a file past `expires`, within its `grace_days` | runs; a loud stderr line on every start |
+| `expired` — a file past its grace days, or the 30-day evaluation over | `mununu` exits 1 with the renewal text; `mununu server` refuses to start |
+| `invalid` — a file this binary does not accept (bad signature, tampered, unknown key) | treated as no file: the evaluation term governs, and the line says why the file was refused |
+| `missing` — no file, and the first run could not be recorded | runs, says so |
+
+The evaluation term is counted from a stamp the first run writes, `~/.mununu/first-run`
+(`%USERPROFILE%\.mununu\first-run` on Windows), holding the date. A host whose home directory is
+not writable cannot be counted and is reported as `missing`: this is a legal instrument and an
+honest status line, not copy protection. `mununu licence status` always runs, in every state, so
+the reason for a refusal is always readable; the free tiers (academic, individual, open source)
+receive a licence file like everyone else — write to the maintainers.
 
 ## Where the file goes
 
@@ -50,12 +65,14 @@ licence: valid
 |---|---|
 | `valid` | signed by a trusted issuer key and within its term (`expires` is the last valid day, inclusive) |
 | `grace` | past `expires`, within the file's `grace_days` |
-| `expired` | past `expires` and past its grace days |
-| `invalid` | a file was found but is not a licence this binary accepts — `reason` says what is wrong (not a licence file, wrong format version, unknown issuer key id, signature does not match the claims, a bad date, unreadable); the claims are still shown when they parsed, so a file signed by a retired key still says whose it is |
-| `missing` | no file at any of the three locations |
+| `expired` | past `expires` and past its grace days — or no file and the 30-day evaluation over (then `claims` is absent and `evaluation` says when it ended) |
+| `invalid` | a file was found but is not a licence this binary accepts — `reason` says what is wrong (not a licence file, wrong format version, unknown issuer key id, signature does not match the claims, a bad date, unreadable); the claims are still shown when they parsed, so a file signed by a retired key still says whose it is; `evaluation` carries the term that governs instead |
+| `evaluation` | no file at any of the three locations, within the 30-day term from this host's first run; `evaluation: {started, ends, days_left}` |
+| `missing` | no file, and the first run could not be recorded (the home directory is not writable) — `reason` says why |
 
-`days_left` counts to `expires` (`0` on the last valid day, negative after it). A `note` appears
-when `issued` is after today: the file or the host clock is wrong. The schema is
+`days_left` counts to `expires` (`0` on the last valid day, negative after it); for the
+evaluation it counts to the term's end. A `note` appears when `issued` is after today: the file
+or the host clock is wrong. The schema is
 [`docs/api-schemas/licence-status.schema.json`](api-schemas/licence-status.schema.json).
 
 ## The format

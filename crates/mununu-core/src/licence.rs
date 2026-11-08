@@ -11,8 +11,23 @@
 //! `verify/` or the CTXDSL evaluator reads this module — `tests/licence_never_reaches_a_verdict_h1.rs`
 //! keeps it so. The status rides the channel the build identity uses (mununu#715): `mununu
 //! licence status`, `GET /api/v1/licence`, the `licence` field of `/api/v1/health` and of every
-//! `sv verify-auto` report. What the tool *does* in each state (run, warn, refuse to start) is
-//! policy, decided and shipped separately; this module only reports.
+//! `sv verify-auto` report.
+//!
+//! # Policy (H1b, decided 2026-11-08)
+//!
+//! What the tool does in each state is [`decide`], applied once at start-up by the CLI and the
+//! server and nowhere else — never on a verdict path:
+//!
+//! | state | behaviour |
+//! |---|---|
+//! | `valid` | runs |
+//! | no file → `evaluation` | runs for [`EVALUATION_DAYS`] counted from the first run on this host (`~/.mununu/first-run`), one stderr line on every start |
+//! | `grace` | runs, a loud stderr line |
+//! | `expired` (a file past its grace days, or the evaluation term over) | `mununu` exits 1 with the renewal text; `mununu server` refuses to start |
+//! | `invalid` (bad signature, tampered, unknown key) | treated as no file — the evaluation term governs — and says so |
+//! | `missing` | no file *and* the first run could not be recorded (an unwritable home): runs, says so |
+//!
+//! `mununu licence status` always runs, so the reason is always readable.
 //!
 //! # File format
 //!
@@ -53,6 +68,14 @@ pub const ENV_VAR: &str = "MUNUNU_LICENSE_FILE";
 
 /// The format version this binary reads.
 pub const FORMAT_VERSION: u32 = 1;
+
+/// The evaluation term without a licence file, in days from the first run on a host (business
+/// plan §19, the 2026-10-23 proposal, adopted 2026-11-08 with H1b).
+pub const EVALUATION_DAYS: i64 = 30;
+
+/// The first-run stamp's directory under the home directory, and the file in it.
+pub const STAMP_DIR: &str = ".mununu";
+pub const STAMP_FILE: &str = "first-run";
 
 /// An issuer's public key, named by the `key_id` a licence's claims carry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,10 +151,37 @@ pub enum LicenceState {
     Grace,
     /// Past `expires` and past its grace days.
     Expired,
-    /// A file was found but is not a licence this binary accepts; `reason` says why.
+    /// A file was found but is not a licence this binary accepts; `reason` says why. The
+    /// evaluation term governs what runs (`evaluation` carries it).
     Invalid,
-    /// No licence file at any of the three locations.
+    /// No licence file; within the evaluation term counted from this host's first run.
+    Evaluation,
+    /// No licence file and the first run could not be recorded (the home directory is not
+    /// writable), so no term can be counted; `reason` says so.
     Missing,
+}
+
+/// The evaluation term a host without a licence file is on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "api", derive(schemars::JsonSchema))]
+pub struct EvaluationTerm {
+    /// The first run on this host, `YYYY-MM-DD` (the stamp's content).
+    pub started: String,
+    /// The last day of the term, inclusive.
+    pub ends: String,
+    /// Days until `ends`: `0` on the last day, negative after it.
+    pub days_left: i64,
+}
+
+/// What the tool does in a licence state, decided once at start-up ([`decide`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Decision {
+    /// Run, say nothing.
+    Run,
+    /// Run, and print this line on stderr first.
+    Warn(String),
+    /// Do not run; print this and exit 1 (the server refuses to start).
+    Refuse(String),
 }
 
 /// The full status, as `mununu licence status --json` and `GET /api/v1/licence` report it.
@@ -157,6 +207,11 @@ pub struct LicenceStatus {
     /// A tamper note: `issued` is after today, so the file or the host clock is wrong.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// The evaluation term this host is on when no valid file governs (`evaluation`, `invalid`,
+    /// and `expired` with no claims); absent when a valid or expired file governs or no term
+    /// could be counted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evaluation: Option<EvaluationTerm>,
 }
 
 /// The three-field summary `/api/v1/health` and every report carry next to `build`.
@@ -173,6 +228,12 @@ pub struct LicenceSummary {
     pub expires: Option<String>,
 }
 
+fn no_file_reason() -> String {
+    format!(
+        "no licence file: none named by `[licensing] file` in mununu.toml, by {ENV_VAR}, or at {SYSTEM_PATH}"
+    )
+}
+
 impl LicenceStatus {
     fn invalid(source: Option<String>, claims: Option<LicenceClaims>, reason: String) -> Self {
         LicenceStatus {
@@ -182,20 +243,53 @@ impl LicenceStatus {
             days_left: None,
             reason: Some(reason),
             note: None,
+            evaluation: None,
         }
     }
 
-    /// The `missing` status, naming where a file was looked for.
-    pub fn missing() -> Self {
+    /// The `missing` status: no file, and no evaluation term could be counted (`why` says what
+    /// stopped the first-run stamp).
+    pub fn missing(why: &str) -> Self {
         LicenceStatus {
             state: LicenceState::Missing,
             source: None,
             claims: None,
             days_left: None,
             reason: Some(format!(
-                "no licence file: none named by `[licensing] file` in mununu.toml, by {ENV_VAR}, or at {SYSTEM_PATH}"
+                "{}; the first run could not be recorded: {why}",
+                no_file_reason()
             )),
             note: None,
+            evaluation: None,
+        }
+    }
+
+    /// No file: the evaluation term counted from `first_run` governs — `evaluation` within it,
+    /// `expired` (with no claims) after it.
+    pub fn on_evaluation(first_run: Day, today: Day) -> Self {
+        let term = evaluation_term(first_run, today);
+        let within = term.days_left >= 0;
+        LicenceStatus {
+            state: if within {
+                LicenceState::Evaluation
+            } else {
+                LicenceState::Expired
+            },
+            source: None,
+            claims: None,
+            days_left: Some(term.days_left),
+            reason: Some(if within {
+                no_file_reason()
+            } else {
+                format!(
+                    "the {EVALUATION_DAYS}-day evaluation that started on {} ended on {}; {}",
+                    term.started,
+                    term.ends,
+                    no_file_reason()
+                )
+            }),
+            note: None,
+            evaluation: Some(term),
         }
     }
 
@@ -203,10 +297,134 @@ impl LicenceStatus {
     pub fn summary(&self) -> LicenceSummary {
         LicenceSummary {
             state: self.state,
-            tier: self.claims.as_ref().map(|c| c.tier),
-            expires: self.claims.as_ref().map(|c| c.expires.clone()),
+            tier: self
+                .claims
+                .as_ref()
+                .map(|c| c.tier)
+                .or((self.state == LicenceState::Evaluation).then_some(Tier::Evaluation)),
+            expires: self
+                .claims
+                .as_ref()
+                .map(|c| c.expires.clone())
+                .or_else(|| self.evaluation.as_ref().map(|e| e.ends.clone())),
         }
     }
+}
+
+/// The evaluation term counted from a host's first run.
+pub fn evaluation_term(first_run: Day, today: Day) -> EvaluationTerm {
+    let ends = Day(first_run.0 + EVALUATION_DAYS - 1);
+    EvaluationTerm {
+        started: first_run.to_string(),
+        ends: ends.to_string(),
+        days_left: ends.0 - today.0,
+    }
+}
+
+/// What the tool does in this state. Pure: the CLI and the server call it once at start-up.
+pub fn decide(status: &LicenceStatus) -> Decision {
+    let renew = "a licence file makes mununu run again — see docs/licensing.md; `mununu licence status` shows what was found";
+    match status.state {
+        LicenceState::Valid => Decision::Run,
+        LicenceState::Grace => {
+            let c = status.claims.as_ref();
+            Decision::Warn(format!(
+                "the licence{} expired on {}; {} grace day(s) left, then mununu stops — renew now (docs/licensing.md)",
+                c.map(|c| format!(" for {}", c.licensee))
+                    .unwrap_or_default(),
+                c.map(|c| c.expires.as_str()).unwrap_or("?"),
+                c.map(|c| i64::from(c.grace_days) + status.days_left.unwrap_or(0))
+                    .unwrap_or(0)
+                    .max(0),
+            ))
+        }
+        LicenceState::Expired => match (&status.claims, &status.evaluation) {
+            (Some(c), _) => Decision::Refuse(format!(
+                "the licence for {} expired on {} and its {} grace days have passed; {renew}",
+                c.licensee, c.expires, c.grace_days
+            )),
+            (None, Some(t)) => Decision::Refuse(format!(
+                "the {EVALUATION_DAYS}-day evaluation on this host ended on {}; {renew}",
+                t.ends
+            )),
+            (None, None) => Decision::Refuse(format!("the licence has expired; {renew}")),
+        },
+        LicenceState::Evaluation => {
+            let left = status.evaluation.as_ref().map(|t| t.days_left).unwrap_or(0);
+            Decision::Warn(format!(
+                "evaluation: {left} day(s) left of {EVALUATION_DAYS} without a licence file (docs/licensing.md)"
+            ))
+        }
+        LicenceState::Invalid => match &status.evaluation {
+            Some(t) if t.days_left >= 0 => Decision::Warn(format!(
+                "the licence file is not accepted ({}); running as an evaluation, {} day(s) left (docs/licensing.md)",
+                status.reason.as_deref().unwrap_or("invalid"),
+                t.days_left
+            )),
+            Some(t) => Decision::Refuse(format!(
+                "the licence file is not accepted ({}) and the {EVALUATION_DAYS}-day evaluation on this host ended on {}; {renew}",
+                status.reason.as_deref().unwrap_or("invalid"),
+                t.ends
+            )),
+            None => Decision::Warn(format!(
+                "the licence file is not accepted ({}); no evaluation term could be counted (docs/licensing.md)",
+                status.reason.as_deref().unwrap_or("invalid")
+            )),
+        },
+        LicenceState::Missing => Decision::Warn(format!(
+            "no licence file and no evaluation term: {} (docs/licensing.md)",
+            status
+                .reason
+                .as_deref()
+                .unwrap_or("the first run could not be recorded")
+        )),
+    }
+}
+
+impl std::fmt::Display for Day {
+    /// `YYYY-MM-DD` (the inverse of [`Day::parse`]).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (y, m, d) = civil_from_days(self.0);
+        write!(f, "{y:04}-{m:02}-{d:02}")
+    }
+}
+
+/// Civil date of days since 1970-01-01 (Howard Hinnant's algorithm, the inverse of
+/// `days_from_civil`).
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+/// The first-run stamp: read `dir/first-run`, or write today's date into it on the first call.
+/// A stamp that will not parse is rewritten (and said so in the error-free path by being today).
+pub fn first_run_day(dir: &Path, today: Day) -> Result<Day, String> {
+    let path = dir.join(STAMP_FILE);
+    if let Ok(text) = std::fs::read_to_string(&path)
+        && let Ok(day) = Day::parse(text.trim())
+    {
+        return Ok(day);
+    }
+    std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    std::fs::write(&path, format!("{today}\n"))
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    Ok(today)
+}
+
+/// The stamp directory: `$HOME/.mununu` (`%USERPROFILE%\.mununu` on Windows).
+pub fn stamp_dir() -> Option<PathBuf> {
+    crate::adapter::env_var::read("HOME")
+        .or_else(|| crate::adapter::env_var::read("USERPROFILE"))
+        .filter(|h| !h.is_empty())
+        .map(|h| PathBuf::from(h).join(STAMP_DIR))
 }
 
 /// A calendar day as days since 1970-01-01 (UTC).
@@ -375,6 +593,7 @@ pub fn evaluate(
         days_left: Some(days_left),
         reason: None,
         note,
+        evaluation: None,
     }
 }
 
@@ -395,19 +614,50 @@ pub fn locate() -> Result<Option<PathBuf>, String> {
     Ok(None)
 }
 
-/// The status of this deployment's licence today, against the compiled-in issuer keys.
+/// The status of this deployment's licence today, against the compiled-in issuer keys, with
+/// the evaluation term from this host's first-run stamp where no valid file governs.
 pub fn status() -> LicenceStatus {
+    status_at(Day::today(), stamp_dir().as_deref())
+}
+
+/// [`status`] on a given day with a given stamp directory (`None` = no home directory).
+pub fn status_at(today: Day, stamp: Option<&Path>) -> LicenceStatus {
+    let term = |st: LicenceStatus| -> LicenceStatus {
+        // A file that is not accepted is treated as no file: the evaluation term governs.
+        match stamp.map(|d| first_run_day(d, today)) {
+            Some(Ok(first)) => LicenceStatus {
+                evaluation: Some(evaluation_term(first, today)),
+                ..st
+            },
+            _ => st,
+        }
+    };
     let path = match locate() {
         Ok(Some(p)) => p,
-        Ok(None) => return LicenceStatus::missing(),
-        Err(e) => return LicenceStatus::invalid(None, None, e),
+        Ok(None) => {
+            return match stamp.map(|d| first_run_day(d, today)) {
+                Some(Ok(first)) => LicenceStatus::on_evaluation(first, today),
+                Some(Err(why)) => LicenceStatus::missing(&why),
+                None => LicenceStatus::missing("no home directory (HOME / USERPROFILE unset)"),
+            };
+        }
+        Err(e) => return term(LicenceStatus::invalid(None, None, e)),
     };
     let source = Some(path.display().to_string());
     match std::fs::read_to_string(&path) {
-        Ok(text) => evaluate(&text, Day::today(), ISSUER_KEYS, source),
-        Err(e) => {
-            LicenceStatus::invalid(source, None, format!("cannot read the licence file: {e}"))
+        Ok(text) => {
+            let st = evaluate(&text, today, ISSUER_KEYS, source);
+            if st.state == LicenceState::Invalid {
+                term(st)
+            } else {
+                st
+            }
         }
+        Err(e) => term(LicenceStatus::invalid(
+            source,
+            None,
+            format!("cannot read the licence file: {e}"),
+        )),
     }
 }
 
@@ -659,14 +909,90 @@ mod tests {
     }
 
     #[test]
-    fn missing_names_the_three_places_it_looked() {
-        let s = LicenceStatus::missing();
+    fn a_day_prints_as_it_parses() {
+        for s in [
+            "1970-01-01",
+            "2000-02-29",
+            "2026-11-08",
+            "2099-12-31",
+            "1969-12-31",
+        ] {
+            assert_eq!(Day::parse(s).unwrap().to_string(), s);
+        }
+        assert_eq!(Day(TODAY.0 + 29).to_string(), "2026-12-07");
+    }
+
+    #[test]
+    fn the_first_run_stamp_is_written_once_and_read_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let stamp = dir.path().join(STAMP_DIR);
+        assert_eq!(first_run_day(&stamp, TODAY).unwrap(), TODAY);
+        assert_eq!(
+            std::fs::read_to_string(stamp.join(STAMP_FILE))
+                .unwrap()
+                .trim(),
+            "2026-11-08"
+        );
+        // A later day reads the first one back, never today.
+        assert_eq!(first_run_day(&stamp, Day(TODAY.0 + 40)).unwrap(), TODAY);
+        // A stamp that does not parse is rewritten as today.
+        std::fs::write(stamp.join(STAMP_FILE), "garbage").unwrap();
+        assert_eq!(
+            first_run_day(&stamp, Day(TODAY.0 + 2)).unwrap(),
+            Day(TODAY.0 + 2)
+        );
+        // An unwritable location is an error, never a silent day 0.
+        let err = first_run_day(Path::new("/nonexistent-root/.mununu"), TODAY).unwrap_err();
+        assert!(err.starts_with("cannot create"), "{err}");
+    }
+
+    #[test]
+    fn no_file_is_an_evaluation_until_the_term_ends_then_expired() {
+        let s = LicenceStatus::on_evaluation(TODAY, TODAY);
+        assert_eq!(s.state, LicenceState::Evaluation);
+        let t = s.evaluation.clone().unwrap();
+        assert_eq!(
+            (t.started.as_str(), t.ends.as_str(), t.days_left),
+            ("2026-11-08", "2026-12-07", 29)
+        );
+        assert_eq!(s.days_left, Some(29));
+        assert!(s.reason.as_deref().unwrap().starts_with("no licence file"));
+        assert_eq!(
+            s.summary(),
+            LicenceSummary {
+                state: LicenceState::Evaluation,
+                tier: Some(Tier::Evaluation),
+                expires: Some("2026-12-07".into())
+            }
+        );
+        // The last day of the term is still the evaluation; the day after is expired.
+        assert_eq!(
+            LicenceStatus::on_evaluation(TODAY, Day(TODAY.0 + 29)).state,
+            LicenceState::Evaluation
+        );
+        let gone = LicenceStatus::on_evaluation(TODAY, Day(TODAY.0 + 30));
+        assert_eq!(gone.state, LicenceState::Expired);
+        assert_eq!(gone.days_left, Some(-1));
+        assert!(gone.claims.is_none());
+        assert!(
+            gone.reason
+                .as_deref()
+                .unwrap()
+                .contains("ended on 2026-12-07"),
+            "{gone:?}"
+        );
+    }
+
+    #[test]
+    fn missing_is_no_file_and_no_term() {
+        let s = LicenceStatus::missing("cannot create /x/.mununu: read-only");
         assert_eq!(s.state, LicenceState::Missing);
         let reason = s.reason.clone().unwrap();
         assert!(
             reason.contains("[licensing] file")
                 && reason.contains(ENV_VAR)
                 && reason.contains(SYSTEM_PATH)
+                && reason.contains("read-only")
         );
         assert_eq!(
             s.summary(),
@@ -678,6 +1004,74 @@ mod tests {
         );
     }
 
+    /// The policy table, one row per state (the H1b decision of 2026-11-08).
+    #[test]
+    fn the_decision_follows_the_table() {
+        let k = keys();
+        let run = |text: &str, day: Day| evaluate(text, day, &k, None);
+        // valid → run, silently.
+        assert_eq!(
+            decide(&run(&issue(&claims("2026-11-01", "2027-11-01", 14)), TODAY)),
+            Decision::Run
+        );
+        // grace → run with a loud line naming the expiry and the days left.
+        let grace = run(&issue(&claims("2026-01-01", "2026-11-05", 7)), TODAY);
+        assert_eq!(grace.state, LicenceState::Grace);
+        match decide(&grace) {
+            Decision::Warn(m) => assert!(
+                m.contains("expired on 2026-11-05") && m.contains("4 grace day"),
+                "{m}"
+            ),
+            d => panic!("{d:?}"),
+        }
+        // an expired file → refuse, naming the licensee.
+        let expired = run(&issue(&claims("2026-01-01", "2026-10-01", 7)), TODAY);
+        assert_eq!(expired.state, LicenceState::Expired);
+        match decide(&expired) {
+            Decision::Refuse(m) => assert!(
+                m.contains("Example Ltd") && m.contains("docs/licensing.md"),
+                "{m}"
+            ),
+            d => panic!("{d:?}"),
+        }
+        // no file within the term → run with the evaluation line.
+        match decide(&LicenceStatus::on_evaluation(TODAY, Day(TODAY.0 + 10))) {
+            Decision::Warn(m) => assert!(m.contains("19 day(s) left of 30"), "{m}"),
+            d => panic!("{d:?}"),
+        }
+        // no file past the term → refuse.
+        match decide(&LicenceStatus::on_evaluation(TODAY, Day(TODAY.0 + 31))) {
+            Decision::Refuse(m) => assert!(
+                m.contains("evaluation on this host ended on 2026-12-07"),
+                "{m}"
+            ),
+            d => panic!("{d:?}"),
+        }
+        // an invalid file is treated as no file: the term decides, the reason is kept.
+        let mut invalid = LicenceStatus::invalid(
+            Some("x.lic".into()),
+            None,
+            "signature does not match the claims".into(),
+        );
+        invalid.evaluation = Some(evaluation_term(TODAY, Day(TODAY.0 + 3)));
+        match decide(&invalid) {
+            Decision::Warn(m) => assert!(
+                m.contains("signature does not match") && m.contains("26 day(s) left"),
+                "{m}"
+            ),
+            d => panic!("{d:?}"),
+        }
+        invalid.evaluation = Some(evaluation_term(TODAY, Day(TODAY.0 + 60)));
+        assert!(matches!(decide(&invalid), Decision::Refuse(_)));
+        invalid.evaluation = None;
+        assert!(matches!(decide(&invalid), Decision::Warn(_)));
+        // missing (no term could be counted) → run, say so.
+        assert!(matches!(
+            decide(&LicenceStatus::missing("read-only home")),
+            Decision::Warn(_)
+        ));
+    }
+
     #[test]
     fn the_env_var_names_the_file_when_the_deployment_does_not() {
         let dir = tempfile::tempdir().unwrap();
@@ -685,24 +1079,47 @@ mod tests {
         std::fs::write(&path, issue(&claims("2026-11-01", "2027-11-01", 0))).unwrap();
         let _g = crate::adapter::env_var::override_for_test(ENV_VAR, path.to_str().unwrap());
         assert_eq!(locate().unwrap(), Some(path.clone()));
-        // The compiled-in key did not sign it: the status is invalid, naming the test key id.
-        let s = status();
+        // The compiled-in key did not sign it: the status is invalid, naming the test key id, and
+        // the evaluation term from the stamp directory governs.
+        let stamp = dir.path().join(STAMP_DIR);
+        let s = status_at(TODAY, Some(&stamp));
         assert_eq!(s.state, LicenceState::Invalid, "{s:?}");
         assert!(
             s.reason
+                .as_deref()
                 .unwrap()
                 .contains("unknown issuer key id `test-issuer`")
         );
         assert_eq!(s.source, Some(path.display().to_string()));
+        assert_eq!(s.evaluation.as_ref().map(|t| t.days_left), Some(29));
+        // Without a stamp directory the term cannot be counted; the status says only invalid.
+        assert_eq!(status_at(TODAY, None).evaluation, None);
+    }
+
+    #[test]
+    fn no_file_reads_the_stamp_or_says_why_it_could_not() {
+        let dir = tempfile::tempdir().unwrap();
         let _g = crate::adapter::env_var::override_for_test(ENV_VAR, "");
-        // An empty variable is "not set".
-        let _ = locate();
+        let stamp = dir.path().join(STAMP_DIR);
+        let s = status_at(TODAY, Some(&stamp));
+        assert_eq!(s.state, LicenceState::Evaluation, "{s:?}");
+        assert_eq!(
+            status_at(Day(TODAY.0 + 30), Some(&stamp)).state,
+            LicenceState::Expired
+        );
+        let s = status_at(TODAY, Some(Path::new("/nonexistent-root/.mununu")));
+        assert_eq!(s.state, LicenceState::Missing);
+        assert!(
+            s.reason.as_deref().unwrap().contains("cannot create"),
+            "{s:?}"
+        );
+        assert_eq!(status_at(TODAY, None).state, LicenceState::Missing);
     }
 
     #[test]
     fn an_unreadable_named_file_is_invalid_not_missing() {
         let _g = crate::adapter::env_var::override_for_test(ENV_VAR, "/nonexistent/dir/mununu.lic");
-        let s = status();
+        let s = status_at(TODAY, None);
         assert_eq!(s.state, LicenceState::Invalid);
         assert!(
             s.reason
