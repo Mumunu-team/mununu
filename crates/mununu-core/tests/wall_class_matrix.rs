@@ -1516,3 +1516,127 @@ fn rom_ctrl_full_positional_strategy_maps_ack_per_state() {
             .any(|e| e.state_value == 518 && e.rank == 0)
     );
 }
+
+// ---- Safety on memory -----------------------------------------------------------------------------
+// The matrix above is recoverability only: every lever there is a recoverability solver with a
+// `target`. Its memory cases (`array_content_spcr`, `array_content_indep_idx`) therefore say
+// nothing about a SAFETY property over a design whose state includes an array. That is the class
+// #870 (N5, native BMC / k-induction on `BvUfArray`) opened. This section is its column set:
+// reach-portfolio levers on a `bad` node, judged against an oracle measured outside the lever.
+
+/// One safety-on-memory case. `file` is relative to `MUNUNU_HWMCC_ARRAY_DIR`, the HWMCC'20 BTOR2
+/// `array` track. The corpus has no licence file and the case is a Yosys translation of ZipCPU
+/// (GPL-3.0), so it is read from the corpus in place and nothing is vendored.
+struct SafetyCase {
+    name: &'static str,
+    class: &'static str,
+    file: &'static str,
+    oracle: Oracle,
+    /// Where the oracle comes from: the engines that decided it and how, outside this test.
+    oracle_by: &'static str,
+}
+
+fn safety_cases() -> Vec<SafetyCase> {
+    vec![SafetyCase {
+        name: "dcache_p059_safety",
+        class: "array-state-safety/HOLDS",
+        file: "2019/wolf/2019C/zipcpu_zipcpu_dcache-p059.btor",
+        oracle: Oracle::Holds,
+        // mununu-private e2e-history/n5-marginal-reach §2c–§2d (2026-11-07): native k-induction
+        // `holds` in 1–2 s on ab61ba0 and 24bb5d7. rIC3 `-e ic3` standalone UNSAT on the
+        // portfolio's exact emitted file (4 frames). btormc `--kind -kmax 1000` is undecided in 1 h.
+        oracle_by: "native k-induction + rIC3 IC3 (standalone, UNSAT)",
+    }]
+}
+
+/// Soundness + marginal reach of the reach-portfolio levers on safety-on-memory: `full` (the
+/// default `btor2 verify` portfolio, 60 s per subprocess member) and `owned` (mununu-owned
+/// engines only, 60 s). No lever may contradict the oracle; a `Holds` case must be decided by at
+/// least one lever. Reads an external corpus, so it is `#[ignore]`d. With `MUNUNU_HWMCC_ARRAY_DIR`
+/// unset it prints SKIPPED and returns.
+#[test]
+#[ignore = "external corpus: set MUNUNU_HWMCC_ARRAY_DIR to the HWMCC'20 btor2/array dir; run in mununu-sva"]
+fn wall_class_safety_on_memory() {
+    use mununu_core::adapter::btor2::parser::parse as parse_btor2;
+    use mununu_core::adapter::reach_portfolio::{
+        ReachOutcome, ReachVerdict, decide_reach_owned_only, decide_reach_portfolio,
+    };
+    let Some(dir) = std::env::var_os("MUNUNU_HWMCC_ARRAY_DIR") else {
+        eprintln!(
+            "SKIPPED wall_class_safety_on_memory: set MUNUNU_HWMCC_ARRAY_DIR (HWMCC'20 btor2/array)."
+        );
+        return;
+    };
+    fn cell(o: &ReachOutcome) -> String {
+        match o.verdict {
+            ReachVerdict::Unreachable => format!("H[{}]", o.unreachable_by.join("+")),
+            ReachVerdict::Reachable => format!("V[{}]", o.reachable_by.join("+")),
+            ReachVerdict::Unknown => "⊥".to_string(),
+            ReachVerdict::Contradiction => "CONTRA".to_string(),
+        }
+    }
+    println!(
+        "\n{:22} {:26} {:28} {:28}  oracle",
+        "case", "class", "full", "owned"
+    );
+    println!("{}", "-".repeat(120));
+    let mut violations = Vec::new();
+    let mut undecided = Vec::new();
+    for c in safety_cases() {
+        let path = std::path::Path::new(&dir).join(c.file);
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("{}: cannot read {}: {e}", c.name, path.display()));
+        let file = parse_btor2(&text).unwrap_or_else(|e| panic!("{}: parse: {e:?}", c.name));
+        let full = decide_reach_portfolio(&file);
+        let owned = decide_reach_owned_only(&file, 60_000);
+        println!(
+            "{:22} {:26} {:28} {:28}  {:?} ({})",
+            c.name,
+            c.class,
+            cell(&full),
+            cell(&owned),
+            c.oracle,
+            c.oracle_by
+        );
+        for (lever, o) in [("full", &full), ("owned", &owned)] {
+            let wrong = match c.oracle {
+                Oracle::Holds => matches!(
+                    o.verdict,
+                    ReachVerdict::Reachable | ReachVerdict::Contradiction
+                ),
+                Oracle::Violated | Oracle::NeverHolds => matches!(
+                    o.verdict,
+                    ReachVerdict::Unreachable | ReachVerdict::Contradiction
+                ),
+                Oracle::HardUnknown => o.verdict == ReachVerdict::Contradiction,
+            };
+            if wrong {
+                violations.push(format!(
+                    "{} / {lever}: {} vs {:?}",
+                    c.name,
+                    cell(o),
+                    c.oracle
+                ));
+            }
+            if !o.refused.is_empty() {
+                println!("    {lever} refused: {:?}", o.refused);
+            }
+        }
+        let decided = |o: &ReachOutcome| match c.oracle {
+            Oracle::Holds => o.verdict == ReachVerdict::Unreachable,
+            Oracle::Violated => o.verdict == ReachVerdict::Reachable,
+            _ => true,
+        };
+        if !(decided(&full) || decided(&owned)) {
+            undecided.push(c.name);
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "SOUNDNESS: a lever contradicts an oracle: {violations:?}"
+    );
+    assert!(
+        undecided.is_empty(),
+        "no lever decides these safety-on-memory cases (marginal-reach regression): {undecided:?}"
+    );
+}
