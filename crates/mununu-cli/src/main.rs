@@ -3060,9 +3060,36 @@ fn main() {
             std::process::exit(1);
         }
     }
+    enforce_licence(&cli);
     if let Err(err) = dispatch(cli.command) {
         eprintln!("{err}");
         std::process::exit(1);
+    }
+}
+
+/// Track H1b — the licence policy, applied once at start-up and nowhere else (a licence never
+/// touches a verdict): `valid` runs; the evaluation term and `grace` run with one stderr line;
+/// `expired` (a file past its grace days, or the evaluation term over) exits 1 with the renewal
+/// text — for `mununu server` that is "refuses to start". `mununu licence status` is never
+/// refused, so the reason is always readable. `--quiet` hides the evaluation line (it is
+/// informational and CI logs would carry it on every run), never the grace or refusal lines.
+fn enforce_licence(cli: &Cli) {
+    use mununu_core::licence::{Decision, LicenceState, decide, status};
+    if matches!(cli.command, Commands::Licence { .. }) {
+        return;
+    }
+    let status = status();
+    match decide(&status) {
+        Decision::Run => {}
+        Decision::Warn(line) => {
+            if !(cli.quiet && status.state == LicenceState::Evaluation) {
+                eprintln!("mununu: {line}");
+            }
+        }
+        Decision::Refuse(line) => {
+            eprintln!("mununu: {line}");
+            std::process::exit(1);
+        }
     }
 }
 
@@ -9612,8 +9639,8 @@ fn handle_library(command: LibraryCommand) -> Result<(), String> {
     }
 }
 
-/// `mununu licence status [--json]` — Track H1. Every state exits 0: the status is a report, and
-/// what the tool does in each state is policy that ships separately.
+/// `mununu licence status [--json]` — Track H1. Every state exits 0, and this command is the one
+/// `enforce_licence` never refuses: the reason a run was refused is always readable here.
 fn handle_licence(command: LicenceCommand) -> Result<(), String> {
     let LicenceCommand::Status { json } = command;
     let status = mununu_core::licence::status();
@@ -9636,12 +9663,24 @@ fn render_licence_status(status: &mununu_core::licence::LicenceStatus) -> String
         LicenceState::Grace => "grace",
         LicenceState::Expired => "expired",
         LicenceState::Invalid => "invalid",
+        LicenceState::Evaluation => "evaluation",
         LicenceState::Missing => "missing",
     };
     let mut out = match &status.reason {
         Some(reason) => format!("licence: {state} — {reason}\n"),
         None => format!("licence: {state}\n"),
     };
+    if let Some(t) = &status.evaluation {
+        let left = if t.days_left >= 0 {
+            format!("{} days left", t.days_left)
+        } else {
+            format!("ended {} days ago", -t.days_left)
+        };
+        out.push_str(&format!(
+            "  evaluation: started {} (first run on this host), ends {} ({left})\n",
+            t.started, t.ends
+        ));
+    }
     if let Some(c) = &status.claims {
         let tier = match c.tier {
             Tier::Evaluation => "evaluation",
@@ -10708,14 +10747,26 @@ mod build_identity_tests {
     /// `-dirty` marker when the build knew them, and nothing else.
     #[test]
     fn the_licence_status_renders_every_field_it_has() {
-        use mununu_core::licence::{LicenceClaims, LicenceState, LicenceStatus, Tier};
-        let missing = LicenceStatus::missing();
+        use mununu_core::licence::{Day, LicenceClaims, LicenceState, LicenceStatus, Tier};
+        let missing = LicenceStatus::missing("cannot create /x/.mununu: read-only");
         let text = crate::render_licence_status(&missing);
         assert!(
             text.starts_with("licence: missing — no licence file"),
             "{text}"
         );
         assert!(!text.contains("licensee:"));
+        // The evaluation term renders its own line.
+        let today = Day::parse("2026-11-08").unwrap();
+        let eval = LicenceStatus::on_evaluation(today, Day(today.0 + 10));
+        let text = crate::render_licence_status(&eval);
+        assert!(
+            text.starts_with("licence: evaluation — no licence file"),
+            "{text}"
+        );
+        assert!(
+            text.contains("  evaluation: started 2026-11-08 (first run on this host), ends 2026-12-07 (19 days left)\n"),
+            "{text}"
+        );
         let valid = LicenceStatus {
             state: LicenceState::Valid,
             source: Some("/etc/mununu/mununu.lic".into()),
@@ -10731,6 +10782,7 @@ mod build_identity_tests {
             days_left: Some(365),
             reason: None,
             note: None,
+            evaluation: None,
         };
         let text = crate::render_licence_status(&valid);
         for line in [
