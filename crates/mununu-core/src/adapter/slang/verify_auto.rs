@@ -4481,7 +4481,12 @@ pub(crate) fn outcome_definite(o: &VerifyOutcome) -> Option<bool> {
 /// `portfolio-soundness-alarm` note — never a silent pick (the runtime form of the parity gate;
 /// the differential proved this never fires on the corpus). Pure over the input reports, so it is
 /// unit-testable without the toolchain.
-pub(crate) fn merge_portfolio_reports(
+///
+/// `pub` (not `pub(crate)`) since J4b so its reproducer can live in an integration test:
+/// `make verify-repro` copies the test-bearing FILE from HEAD into the parent tree, so a test
+/// inside this file would carry the fix with it and pass on the parent — the co-location trap
+/// of mununu#853.
+pub fn merge_portfolio_reports(
     runs: &[(&str, Result<AutoVerifyReport, AdapterError>)],
     mode: PortfolioMode,
 ) -> Result<AutoVerifyReport, AdapterError> {
