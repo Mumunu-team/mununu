@@ -2211,6 +2211,14 @@ pub struct SvVerifyAutoRequest {
     /// `MUNUNU_NO_INPUT_STATE=1`).
     #[serde(default)]
     pub input_state: Option<bool>,
+    /// Roadmap J3 — the CONTENT (not a path: the server has no access to the client's disk) of
+    /// the NDJSON breadcrumb a killed run left (`MUNUNU_VERIFY_AUTO_PARTIAL_JSON`). Every property
+    /// whose last record is a definite verdict is not re-run and carries that verdict
+    /// (`resumed_from`, `decided_by: "resumed"`); the rest run. 400 when the breadcrumb was
+    /// written by another build of mununu, carries no build, or is not a breadcrumb. Mirrors the
+    /// CLI `--resume-from FILE`.
+    #[serde(default)]
+    pub resume_from: Option<String>,
     /// Fault-injection posture: registers the adversary may overwrite (`"REG"` / `"REG:k"`,
     /// one global budget, default 1; `"REG:unbounded"`). Mirrors the CLI `--fault`. Default empty.
     #[serde(default)]
@@ -2440,6 +2448,16 @@ impl From<&crate::adapter::slang::verify_auto::AutoVerifyReport> for SvVerifyAut
                         Some(reason.clone()),
                     ),
                 };
+                // J3 — a resumed row's detail says where the verdict came from; the cell count
+                // it would otherwise print is the breadcrumb's `0`, which is "not carried".
+                let resumed_from = report.resumed.get(&p.name).cloned();
+                let detail = match &resumed_from {
+                    Some(build) => Some(format!(
+                        "resumed from the breadcrumb of build {}",
+                        crate::adapter::resume::short(build)
+                    )),
+                    None => detail,
+                };
                 // 2026-10-29 — the row as written (an `ltl` annotation) takes the `formula`
                 // slot and the engine's mu-calculus moves beside it; every other row's formula
                 // IS that mu-calculus.
@@ -2485,6 +2503,7 @@ impl From<&crate::adapter::slang::verify_auto::AutoVerifyReport> for SvVerifyAut
                             diameter_log2: r.diameter_log2,
                             predicted_engine: r.predicted_engine.to_string(),
                         }),
+                    resumed_from,
                     vacuity: p.vacuity.as_ref().map(|v| VacuityView {
                         kind: v.kind.tag().to_string(),
                         witness: v.witness.clone(),
@@ -3048,6 +3067,13 @@ pub struct PropertyVerdictView {
     /// `plan-cost` note's facts). Telemetry, never a verdict; absent on routes that compute none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing: Option<RoutingView>,
+    /// Roadmap J3 — present when this row was not run: its verdict is the one a killed run of
+    /// the SAME build reached, read back from its breadcrumb (`--resume-from` / `resume_from`).
+    /// The value is that build's tag (the full commit sha, `-dirty` if the tree was not clean).
+    /// A resumed row has `decided_by: "resumed"` and carries no trace, vacuity, predicates or
+    /// `wall_ms`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resumed_from: Option<String>,
 }
 
 /// The planner's per-property routing facts (roadmap J4): what `plan-cost` says, as fields.
@@ -3243,6 +3269,48 @@ mod bottom_reason_view_tests {
             vacuity: None,
             portfolio: None,
         }
+    }
+
+    /// Roadmap J3 at the report seam: a resumed row names the build its verdict came from and
+    /// says so in `detail` (not the breadcrumb's meaningless cell count); a fresh row carries
+    /// neither.
+    #[test]
+    fn a_resumed_property_names_its_build_and_a_fresh_one_does_not() {
+        let build = "e7a5b21c0ffee0000000000000000000000000000";
+        let mut report = AutoVerifyReport {
+            properties: vec![
+                PropertyVerdict {
+                    name: "carried".into(),
+                    outcome: VerifyOutcome::Violated { false_cells: 0 },
+                    decided_by: Some("resumed".into()),
+                    ..bottom_prop(None)
+                },
+                PropertyVerdict {
+                    name: "fresh".into(),
+                    outcome: VerifyOutcome::Violated { false_cells: 3 },
+                    ..bottom_prop(None)
+                },
+            ],
+            ..Default::default()
+        };
+        report.resumed.insert("carried".into(), build.into());
+        let view = SvVerifyAutoResponse::from(&report);
+        let carried = &view.properties[0];
+        assert_eq!(carried.resumed_from.as_deref(), Some(build));
+        assert_eq!(carried.outcome, "violated");
+        assert_eq!(
+            carried.detail.as_deref(),
+            Some("resumed from the breadcrumb of build e7a5b21")
+        );
+        assert_eq!(carried.decided_by.as_deref(), Some("resumed"));
+        let fresh = &view.properties[1];
+        assert_eq!(fresh.resumed_from, None);
+        assert_eq!(fresh.detail.as_deref(), Some("3 cell(s)"));
+        let json = serde_json::to_value(&view).unwrap();
+        assert!(
+            json["properties"][1].get("resumed_from").is_none(),
+            "a fresh row has no `resumed_from` key at all"
+        );
     }
 
     /// An `ltl` row reaches the wire as its author wrote it, tagged, with the mu-calculus beside

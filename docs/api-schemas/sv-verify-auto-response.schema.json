@@ -569,6 +569,13 @@
           ],
           "description": "mununu#873 — when a reachability-portfolio rescue ran on this row: the members that answered and the members that refused the design, with the reason. Absent when no portfolio ran. `decided_by` above names the stage (`reach-rescue`); this names the members. Members in neither list ran and abstained."
         },
+        "resumed_from": {
+          "description": "Roadmap J3 — present when this row was not run: its verdict is the one a killed run of the SAME build reached, read back from its breadcrumb (`--resume-from` / `resume_from`). The value is that build's tag (the full commit sha, `-dirty` if the tree was not clean). A resumed row has `decided_by: \"resumed\"` and carries no trace, vacuity, predicates or `wall_ms`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "routing": {
           "anyOf": [
             {

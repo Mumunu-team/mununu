@@ -35,6 +35,12 @@
 //! **Not a substitute for the report.** It carries verdicts, not counterexamples, notes, or
 //! seeded predicates. A run that completes normally still emits the full report, and consumers
 //! should prefer it. The breadcrumb is for the run that does not get to finish.
+//!
+//! **Every record names the build that wrote it** (roadmap J3): `build` is the binary's identity
+//! ([`crate::build_info::build_tag`] — the full commit sha, `-dirty` when the tree was not clean),
+//! omitted when the process registered none. `sv verify-auto --resume-from <file>` reads the file
+//! back ([`crate::adapter::resume`]) and refuses a record from another build, so a verdict never
+//! outlives the engine that produced it.
 
 use std::io::Write;
 
@@ -47,12 +53,16 @@ pub const PARTIAL_JSON_ENV: &str = "MUNUNU_VERIFY_AUTO_PARTIAL_JSON";
 /// a newline cannot break the framing — an SVA label is source-derived text, and hand-built JSON
 /// would let it forge or split a record. The result is guaranteed to contain no raw newline, so
 /// one record is always exactly one line.
+///
+/// `build` (J3) is the writing binary's identity, omitted — not `null` — when the process has
+/// none, so a reader that resumes sees an absent key, which it refuses.
 pub fn breadcrumb_line(
     index: usize,
     name: &str,
     outcome: &str,
     phase: &str,
     elapsed_ms: Option<u64>,
+    build: Option<&str>,
 ) -> String {
     let mut obj = serde_json::Map::new();
     obj.insert("index".into(), serde_json::Value::from(index));
@@ -61,6 +71,9 @@ pub fn breadcrumb_line(
     obj.insert("phase".into(), serde_json::Value::from(phase));
     if let Some(ms) = elapsed_ms {
         obj.insert("elapsed_ms".into(), serde_json::Value::from(ms));
+    }
+    if let Some(b) = build {
+        obj.insert("build".into(), serde_json::Value::from(b));
     }
     serde_json::Value::Object(obj).to_string()
 }
@@ -72,6 +85,9 @@ pub struct Breadcrumb {
     /// How many properties have already been written, so [`Breadcrumb::record_pending`] can be
     /// called unconditionally and write only what is new.
     recorded: usize,
+    /// J3 — the build identity every record of this writer carries (read once at open from
+    /// [`crate::build_info::current`]; `None` in a process that registered none).
+    build: Option<String>,
 }
 
 impl Breadcrumb {
@@ -111,6 +127,7 @@ impl Breadcrumb {
             Ok(file) => Self {
                 file: Some(file),
                 recorded: 0,
+                build: crate::build_info::current().map(crate::build_info::build_tag),
             },
             Err(e) => {
                 tracing::warn!(
@@ -142,7 +159,14 @@ impl Breadcrumb {
         let Some(file) = self.file.as_mut() else {
             return;
         };
-        let line = breadcrumb_line(index, name, outcome, phase, elapsed_ms);
+        let line = breadcrumb_line(
+            index,
+            name,
+            outcome,
+            phase,
+            elapsed_ms,
+            self.build.as_deref(),
+        );
         if let Err(e) = writeln!(file, "{line}").and_then(|()| file.flush()) {
             tracing::warn!("{PARTIAL_JSON_ENV}: write failed ({e}); continuing without it");
             self.file = None; // stop retrying on every subsequent property
@@ -187,7 +211,14 @@ mod tests {
 
     #[test]
     fn a_record_is_exactly_one_line_of_valid_json() {
-        let line = breadcrumb_line(3, "fifo_sva_2", "holds", "main", Some(1250));
+        let line = breadcrumb_line(
+            3,
+            "fifo_sva_2",
+            "holds",
+            "main",
+            Some(1250),
+            Some("e7a5b21c0ffee"),
+        );
         assert!(
             !line.contains('\n'),
             "a record must not embed a raw newline"
@@ -198,15 +229,23 @@ mod tests {
         assert_eq!(v["outcome"], "holds");
         assert_eq!(v["phase"], "main");
         assert_eq!(v["elapsed_ms"], 1250);
+        assert_eq!(
+            v["build"], "e7a5b21c0ffee",
+            "J3 — the record names its build"
+        );
     }
 
     #[test]
     fn elapsed_is_omitted_rather_than_null_when_untimed() {
-        let line = breadcrumb_line(0, "p", "unknown", "main", None);
+        let line = breadcrumb_line(0, "p", "unknown", "main", None, None);
         let v: serde_json::Value = serde_json::from_str(&line).expect("valid JSON");
         assert!(
             v.get("elapsed_ms").is_none(),
             "an absent timing is an absent key, not a null a consumer must special-case"
+        );
+        assert!(
+            v.get("build").is_none(),
+            "J3 — a process without a build identity writes no `build` key, never a null or a guess"
         );
     }
 
@@ -215,7 +254,7 @@ mod tests {
         // SVA labels are source-derived text. Hand-built JSON would let this forge a record or
         // split one across lines; serde_json escapes it instead.
         let nasty = "evil\", \"outcome\": \"holds\", \"x\": \"\n{\"injected\": true}";
-        let line = breadcrumb_line(1, nasty, "violated", "main", None);
+        let line = breadcrumb_line(1, nasty, "violated", "main", None, None);
         assert!(!line.contains('\n'), "the embedded newline must be escaped");
         let v: serde_json::Value = serde_json::from_str(&line).expect("still one valid object");
         assert_eq!(v["property"], nasty, "the name round-trips verbatim");

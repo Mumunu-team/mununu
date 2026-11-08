@@ -166,6 +166,22 @@ mununu --quiet sv verify-auto rtl/mod.sv --json | jq '.diagnostics | {frontend, 
 
 Exit codes are the usual gate (`0` pass, `2` violated, `3` unknown under `--fail-on unknown`, `1` tool error, `64` usage error); `1` implies empty stdout, while `2`/`3` still emit the full document.
 
+### Resume a run the CI killed (roadmap J3)
+
+> Source of truth: [`adapter::resume::parse_breadcrumb`](../crates/mununu-core/src/adapter/resume.rs) — surface: (CLI+API)
+
+```bash
+# run 1 — the breadcrumb survives a SIGKILL; the last record per property is its verdict
+MUNUNU_VERIFY_AUTO_PARTIAL_JSON=verdicts.ndjson mununu sv verify-auto rtl/mod.sv --json > run1.json
+
+# run 2 — every row the SAME BUILD decided is carried (`resumed_from`), the rest re-run
+MUNUNU_VERIFY_AUTO_PARTIAL_JSON=verdicts.ndjson mununu sv verify-auto rtl/mod.sv \
+  --resume-from verdicts.ndjson --json \
+  | jq -r '.properties[] | "\(.name) \(.outcome) \(.resumed_from // "fresh")"'
+```
+
+A breadcrumb from another build of mununu is refused (exit `1`), never silently trusted; a resumed row carries its verdict only — no trace, no vacuity finding. Details: [`docs/verifying-rtl.md`](verifying-rtl.md#resuming-a-killed-run---resume-from-roadmap-j3).
+
 ### Assert the verdicts you claim (mununu#537)
 
 A gate rarely wants "did it pass" — it wants "did exactly this happen":

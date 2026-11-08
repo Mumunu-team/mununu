@@ -55,6 +55,18 @@ pub fn current() -> Option<&'static BuildIdentity> {
     IDENTITY.get()
 }
 
+/// The identity as one comparable string: the full sha, `-dirty` appended when the tree was not
+/// clean. Roadmap J3 — what a breadcrumb record carries as `build` and what `--resume-from`
+/// compares. Two dirty builds of the same commit compare equal: the identity cannot tell them
+/// apart, and that limit is documented where the comparison is made.
+pub fn build_tag(identity: &BuildIdentity) -> String {
+    format!(
+        "{}{}",
+        identity.sha,
+        if identity.clean { "" } else { "-dirty" }
+    )
+}
+
 /// The `--version` suffix: ` (e7a5b21)`, ` (e7a5b21-dirty)`, or empty when unknown.
 pub fn version_suffix(identity: Option<&BuildIdentity>) -> String {
     match identity {
@@ -79,6 +91,9 @@ mod tests {
         assert_eq!(version_suffix(Some(&id)), " (e7a5b21)");
         let dirty = identity_from(Some("e7a5b21c0ffee"), Some("1")).unwrap();
         assert_eq!(version_suffix(Some(&dirty)), " (e7a5b21-dirty)");
+        // J3 — the comparable tag is the FULL sha, the dirty bit spelled out.
+        assert_eq!(build_tag(&id), "e7a5b21c0ffee");
+        assert_eq!(build_tag(&dirty), "e7a5b21c0ffee-dirty");
     }
 
     #[test]

@@ -304,6 +304,14 @@
         "null"
       ]
     },
+    "resume_from": {
+      "default": null,
+      "description": "Roadmap J3 — the CONTENT (not a path: the server has no access to the client's disk) of the NDJSON breadcrumb a killed run left (`MUNUNU_VERIFY_AUTO_PARTIAL_JSON`). Every property whose last record is a definite verdict is not re-run and carries that verdict (`resumed_from`, `decided_by: \"resumed\"`); the rest run. 400 when the breadcrumb was written by another build of mununu, carries no build, or is not a breadcrumb. Mirrors the CLI `--resume-from FILE`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "tb_clock": {
       "default": null,
       "description": "The clock port the testbench toggles (default: the first of `clk`, `clk_i`, `clock`, `i_clk`, `aclk`, `clk_sys` the source declares).",

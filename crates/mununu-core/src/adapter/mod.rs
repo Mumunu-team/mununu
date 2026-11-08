@@ -65,6 +65,8 @@ pub mod promela;
 pub mod reach_portfolio;
 pub mod reach_rescue;
 pub mod recoverability;
+/// Roadmap J3 — resume `sv verify-auto` from the breadcrumb a killed run left behind.
+pub mod resume;
 pub mod ric3;
 /// N0.1 — the per-row facts of a finished run (`MUNUNU_VERIFY_AUTO_ROW_FACTS`), for the ledger.
 pub mod row_facts;

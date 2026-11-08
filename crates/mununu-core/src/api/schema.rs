@@ -395,6 +395,7 @@ mod tests {
             }],
             property_wall_ms: Default::default(),
             routing: Vec::new(),
+            resumed: Default::default(),
         };
 
         let doc = serde_json::to_value(SvVerifyAutoResponse::from(&report))

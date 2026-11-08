@@ -195,7 +195,9 @@ pub(crate) fn member_options(
     o.exact_symbolic = op.exact_symbolic;
     o.replan_defer = true;
     o.breadcrumb_append = index > 0;
-    o.skip_rows = skip_rows;
+    // J3 — the base's own skip set (the rows a breadcrumb resumed) holds on EVERY member, the
+    // first and the parallel ones included; the merge-so-far's decided rows are added to it.
+    o.skip_rows.extend(skip_rows);
     o
 }
 
@@ -953,6 +955,11 @@ fn plan_accuracy_note(
         let Some(prop) = report.properties.iter().find(|p| p.name == r.property) else {
             continue;
         };
+        // N0.1 / J3 — a row the run was told not to attempt (`only_rows`, a resumed row) says
+        // nothing about the routing: no engine ran, so it is neither a match nor a divergence.
+        if matches!(prop.bottom_reason, Some(BottomReason::NotAttempted)) {
+            continue;
+        }
         total += 1;
         // mununu#548 cause (b) — `routed` is NOT a decidability prediction. It used to be reported
         // as "(decidable)", which made a run contradict itself: a consumer read
@@ -1231,6 +1238,7 @@ mod tests {
             notes: Vec::new(),
             property_wall_ms: Default::default(),
             routing: Vec::new(),
+            resumed: Default::default(),
         }
     }
 
@@ -1359,6 +1367,7 @@ mod tests {
             notes: Vec::new(),
             property_wall_ms: Default::default(),
             routing: Vec::new(),
+            resumed: Default::default(),
         };
         let notes = skip_over_cap_notes(&report, btor2);
         let oom: Vec<_> = notes
@@ -1489,6 +1498,54 @@ mod tests {
         let note = routing_rationale_note(&r[0]);
         assert_eq!(note.kind, "plan-cost");
         assert!(note.summary.contains("in-cone counter") && note.summary.contains("ranking"));
+    }
+
+    /// Roadmap J3 — the base's own skip set (the rows a breadcrumb resumed) reaches EVERY member,
+    /// the first one and the parallel ones included; the merge-so-far's decided rows are added.
+    #[test]
+    fn member_options_keep_the_bases_resumed_rows_on_every_member() {
+        use super::{PRECISION_LADDER, member_options};
+        let mut base = opts_with(Some(PortfolioMode::Sequential), false, false);
+        base.skip_rows.insert("p_resumed".to_string());
+        for (i, op) in PRECISION_LADDER.iter().enumerate() {
+            let decided: std::collections::HashSet<String> = (i > 0)
+                .then(|| "p_decided".to_string())
+                .into_iter()
+                .collect();
+            let o = member_options(&base, op, i, decided.clone());
+            assert!(
+                o.skip_rows.contains("p_resumed"),
+                "{}: {:?}",
+                op.label,
+                o.skip_rows
+            );
+            assert_eq!(o.skip_rows.contains("p_decided"), i > 0, "{}", op.label);
+        }
+        // The parallel members pass an empty decided set and still skip the resumed row.
+        let o = member_options(&base, &PRECISION_LADDER[0], 0, Default::default());
+        assert_eq!(o.skip_rows.len(), 1);
+    }
+
+    /// Roadmap J3 — a row the run was told not to attempt says nothing about the routing: it is
+    /// neither a match nor a divergence, and a note over such rows alone is no note at all.
+    #[test]
+    fn plan_accuracy_ignores_a_row_the_run_did_not_attempt() {
+        let rationales = vec![RoutingRationale {
+            property: "p_resumed".into(),
+            class: crate::mu_calculus::PropertyClass::Safety,
+            cone_bits: 40,
+            cap: 192,
+            diameter_log2: None,
+            predicted_engine: "exact-symbolic",
+            why: "x".into(),
+        }];
+        let mut report = skipped_report("p_resumed", "AG p");
+        report.properties[0].outcome = VerifyOutcome::Unknown { unknown_cells: 0 };
+        report.properties[0].bottom_reason = Some(BottomReason::NotAttempted);
+        assert!(
+            plan_accuracy_note(&rationales, &report).is_none(),
+            "a not-attempted row routed to an engine is not a 0/1 divergence"
+        );
     }
 
     /// A property routed to an engine that did not decide it is recorded as a divergence — and the
