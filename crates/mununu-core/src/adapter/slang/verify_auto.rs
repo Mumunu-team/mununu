@@ -1059,6 +1059,14 @@ pub struct AutoVerifyReport {
     /// modules, the abstraction posture, the coverage summary), so the verdict's
     /// scope and caveats are explicit on every surface. Built by [`build_notes`].
     pub notes: Vec<VerificationNote>,
+    /// Roadmap J4 — the measured wall per property, milliseconds: the main pass plus any ⊥
+    /// re-plan arm, always recorded (the `[mununu-timing]` stderr line stays opt-in). The
+    /// estimator's calibration (J2) and the scheduler's input (J5); never read by an engine.
+    pub property_wall_ms: std::collections::BTreeMap<String, u64>,
+    /// Roadmap J4 — the planner's per-property routing rationale as data (the facts the
+    /// `plan-cost` note renders as prose): class, cone bits vs cap, diameter proxy, predicted
+    /// engine. Filled by the planner once per run; empty on the single-engine routes.
+    pub routing: Vec<crate::planner::RoutingRationale>,
 }
 
 /// The skip reason for a property whose atoms reference non-state signals,
@@ -6747,9 +6755,10 @@ pub(crate) fn verify_auto_impl(
         // that fires on legitimate work turns a slow success into a spurious `unknown` across
         // every consumer's gate, which is worse than having no cap. It is also useful on its own
         // — it answers "which property is eating the run?", which no existing diagnostic does.
-        let prop_t0 = std::env::var("MUNUNU_PROPERTY_TIMING")
-            .is_ok()
-            .then(std::time::Instant::now);
+        // J4 (2026-11-08): the wall is always measured and lands in `report.property_wall_ms`;
+        // the variable only decides whether the stderr line is printed.
+        let prop_t0 = std::time::Instant::now();
+        let print_timing = std::env::var("MUNUNU_PROPERTY_TIMING").is_ok();
         // mununu#504 — install the PER-PROPERTY budget for this iteration. `child` clamps to the
         // earlier of (now + per-property) and the run deadline, so a generous per-property value
         // cannot extend the run. RAII: the guard restores the previous budget on EVERY exit from
@@ -7530,12 +7539,14 @@ pub(crate) fn verify_auto_impl(
         // definite cube verdict is sound by over-approximation; the A.4 honest-⊥
         // downgrade (a stopgap for the retired sampling-may under-approximation)
         // is no longer needed.
-        if let Some(t0) = prop_t0 {
+        let prop_ms = u64::try_from(prop_t0.elapsed().as_millis()).unwrap_or(u64::MAX);
+        *report.property_wall_ms.entry(t.name.clone()).or_insert(0) += prop_ms;
+        if print_timing {
             eprintln!(
                 "[mununu-timing] property={} outcome={} elapsed_ms={} phase=main",
                 t.name,
                 outcome.label(),
-                t0.elapsed().as_millis()
+                prop_ms
             );
         }
         report.properties.push(PropertyVerdict {
@@ -7865,9 +7876,9 @@ pub(crate) fn escalate_bottom_with_slice(
         // further RESCUE SLICE (`MUNUNU_RESCUE_SLICE_MS`, 60 s by default) so twenty undecidable
         // rows cannot each spend fifteen minutes. The recoverability arm keeps the row budget: its
         // cube ladder legitimately runs minutes. `[mununu-timing] … phase=replan` names the lane.
-        let row_t0 = std::env::var_os("MUNUNU_PROPERTY_TIMING")
-            .is_some()
-            .then(std::time::Instant::now);
+        // J4: always measured (→ `report.property_wall_ms`); the stderr line stays opt-in.
+        let row_t0 = std::time::Instant::now();
+        let print_timing = std::env::var_os("MUNUNU_PROPERTY_TIMING").is_some();
         let row_budget = crate::adapter::run_budget::Budget::child(
             &crate::adapter::run_budget::current(),
             crate::adapter::run_budget::property_budget_ms(),
@@ -8252,12 +8263,17 @@ pub(crate) fn escalate_bottom_with_slice(
         {
             prop.bottom_reason = Some(BottomReason::BudgetExpired);
         }
-        if let Some(t0) = row_t0 {
+        let row_ms = u64::try_from(row_t0.elapsed().as_millis()).unwrap_or(u64::MAX);
+        *report
+            .property_wall_ms
+            .entry(prop.name.clone())
+            .or_insert(0) += row_ms;
+        if print_timing {
             eprintln!(
                 "[mununu-timing] property={} outcome={} elapsed_ms={} phase=replan lane={lane}",
                 prop.name,
                 prop.outcome.label(),
-                t0.elapsed().as_millis()
+                row_ms
             );
         }
     }
@@ -14060,6 +14076,8 @@ module uart_tx(); endmodule"#;
                 ..Default::default()
             },
             notes: Vec::new(),
+            property_wall_ms: Default::default(),
+            routing: Vec::new(),
         };
         let notes = build_notes(
             &report,
@@ -14249,6 +14267,8 @@ module uart_tx(); endmodule"#;
                 unsupported: Vec::new(),
                 diagnostics: ModelDiagnostics::default(),
                 notes: Vec::new(),
+                property_wall_ms: Default::default(),
+                routing: Vec::new(),
             }
             .pipe(|mut r| {
                 check_antecedent_vacuity(&mut r, model, false, &applied0.sec_cm_rows);
@@ -14300,6 +14320,8 @@ module uart_tx(); endmodule"#;
                 ..Default::default()
             },
             notes: Vec::new(),
+            property_wall_ms: Default::default(),
+            routing: Vec::new(),
         };
         let notes = build_notes(
             &with,
@@ -14410,6 +14432,8 @@ module uart_tx(); endmodule"#;
                 ..Default::default()
             },
             notes: Vec::new(),
+            property_wall_ms: Default::default(),
+            routing: Vec::new(),
         };
         let notes = build_notes(
             &report,
@@ -14468,6 +14492,8 @@ module uart_tx(); endmodule"#;
                 ..Default::default()
             },
             notes: Vec::new(),
+            property_wall_ms: Default::default(),
+            routing: Vec::new(),
         };
         let ap = |posture: &NotePosture| {
             build_notes(

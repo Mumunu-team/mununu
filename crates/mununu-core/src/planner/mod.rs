@@ -330,6 +330,8 @@ pub(crate) fn execute(
     // `plan()` from the shared prepared model, so it is not recomputed per operator (the reasoning
     // lives in the planner now, not in `verify_auto_impl`).
     let attach = |mut rep: AutoVerifyReport| -> AutoVerifyReport {
+        // J4: the same rationale as data, so a consumer reads the features without parsing prose.
+        rep.routing = plan.rationale.clone();
         for r in &plan.rationale {
             rep.notes.push(routing_rationale_note(r));
         }
@@ -1227,6 +1229,8 @@ mod tests {
             unsupported: Vec::new(),
             diagnostics: Default::default(),
             notes: Vec::new(),
+            property_wall_ms: Default::default(),
+            routing: Vec::new(),
         }
     }
 
@@ -1353,6 +1357,8 @@ mod tests {
             unsupported: Vec::new(),
             diagnostics: Default::default(),
             notes: Vec::new(),
+            property_wall_ms: Default::default(),
+            routing: Vec::new(),
         };
         let notes = skip_over_cap_notes(&report, btor2);
         let oom: Vec<_> = notes

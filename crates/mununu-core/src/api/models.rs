@@ -2472,6 +2472,19 @@ impl From<&crate::adapter::slang::verify_auto::AutoVerifyReport> for SvVerifyAut
                     unknown_cells,
                     skip_reason,
                     decided_by: p.decided_by.clone(),
+                    // J4: the measured wall and the planner's routing facts, as data.
+                    wall_ms: report.property_wall_ms.get(&p.name).copied(),
+                    routing: report
+                        .routing
+                        .iter()
+                        .find(|r| r.property == p.name)
+                        .map(|r| RoutingView {
+                            class: format!("{:?}", r.class),
+                            cone_bits: r.cone_bits,
+                            cap: r.cap,
+                            diameter_log2: r.diameter_log2,
+                            predicted_engine: r.predicted_engine.to_string(),
+                        }),
                     vacuity: p.vacuity.as_ref().map(|v| VacuityView {
                         kind: v.kind.tag().to_string(),
                         witness: v.witness.clone(),
@@ -3026,6 +3039,31 @@ pub struct PropertyVerdictView {
     /// members. Members in neither list ran and abstained.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub portfolio: Option<PortfolioAttributionView>,
+    /// Roadmap J4 — milliseconds this property took: its main pass plus any ⊥ re-plan arm,
+    /// summed. The property's own time; the design's lift is paid once per run and is not in
+    /// it. Absent when the row was never timed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wall_ms: Option<u64>,
+    /// Roadmap J4 — the planner's static routing prediction for this property, as data (the
+    /// `plan-cost` note's facts). Telemetry, never a verdict; absent on routes that compute none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing: Option<RoutingView>,
+}
+
+/// The planner's per-property routing facts (roadmap J4): what `plan-cost` says, as fields.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+pub struct RoutingView {
+    /// `Safety` | `Reachability` | `Liveness` | `Mixed` | `Propositional`.
+    pub class: String,
+    /// The exact engine's cone-of-influence bit width for the property's atoms.
+    pub cone_bits: u32,
+    /// The exact engine's effective bit cap for that cone.
+    pub cap: u32,
+    /// The widest in-cone down-counter (≈ 2^W diameter), when one is found.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diameter_log2: Option<u32>,
+    /// The engine the planner predicts will decide the property.
+    pub predicted_engine: String,
 }
 
 /// mununu#873 — one row's reachability-portfolio members. See [`PropertyVerdictView::portfolio`].
@@ -3209,6 +3247,55 @@ mod bottom_reason_view_tests {
 
     /// An `ltl` row reaches the wire as its author wrote it, tagged, with the mu-calculus beside
     /// it; a mu-calculus row is tagged so and carries nothing beside its formula (2026-10-29).
+    /// Roadmap J4 at the report seam: a timed, routed property shows `wall_ms` and `routing`;
+    /// an untimed, unrouted one shows neither — nothing is invented.
+    #[test]
+    fn a_property_carries_its_measured_wall_and_routing_facts_when_they_exist() {
+        let mut report = AutoVerifyReport {
+            properties: vec![
+                PropertyVerdict {
+                    name: "timed".into(),
+                    ..bottom_prop(None)
+                },
+                PropertyVerdict {
+                    name: "untimed".into(),
+                    ..bottom_prop(None)
+                },
+            ],
+            ..Default::default()
+        };
+        report.property_wall_ms.insert("timed".into(), 1234);
+        report.routing.push(crate::planner::RoutingRationale {
+            property: "timed".into(),
+            class: crate::mu_calculus::PropertyClass::Safety,
+            cone_bits: 3290,
+            cap: 192,
+            diameter_log2: Some(12),
+            predicted_engine: "reach-portfolio",
+            why: "cone over cap".into(),
+        });
+        let view = SvVerifyAutoResponse::from(&report);
+        let timed = &view.properties[0];
+        assert_eq!(timed.wall_ms, Some(1234));
+        assert_eq!(
+            timed.routing,
+            Some(RoutingView {
+                class: "Safety".into(),
+                cone_bits: 3290,
+                cap: 192,
+                diameter_log2: Some(12),
+                predicted_engine: "reach-portfolio".into(),
+            })
+        );
+        let untimed = &view.properties[1];
+        assert_eq!(untimed.wall_ms, None);
+        assert_eq!(untimed.routing, None);
+        let json = serde_json::to_value(&view).unwrap();
+        assert_eq!(json["properties"][0]["wall_ms"], 1234);
+        assert!(json["properties"][1].get("wall_ms").is_none());
+        assert!(json["properties"][1].get("routing").is_none());
+    }
+
     /// Track H1's falsifier at the report seam: the licence state reaches the report as its own
     /// field, and nothing else in the document moves with it.
     #[test]
