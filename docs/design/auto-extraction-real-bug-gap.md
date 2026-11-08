@@ -4,7 +4,7 @@
 > against a specific, narrow question. It does not change behaviour and does not propose
 > work; it documents what is and is not currently demonstrable. Paralleling the role
 > of the C-extractor scoping log at
-> `c-extraction-llvm-lift.md` (a planning note, not tracked).
+> [`c-extraction-llvm-lift.md`](../archive/plans/c-extraction-llvm-lift.md) (a planning note, published under `docs/archive/`).
 
 ## Question
 
@@ -53,7 +53,7 @@ hypothetical targets that have not been verified.
   end-to-end. Proven on `examples/industrial/codesign_uart/firmware.c` and
   `examples/industrial/codesign_nrf52_twim_i2c/firmware.c` /
   `firmware_buggy.c`. Phase status (L2 shipped, L3 onwards in progress) is tracked in
-  `c-extraction-llvm-lift.md` (a planning note, not tracked).
+  [`c-extraction-llvm-lift.md`](../archive/plans/c-extraction-llvm-lift.md) (a planning note, published under `docs/archive/`).
 - **`mununu-extract ast`** (tree-sitter, Python / TypeScript / Rust / Go): produces
   `.espec.json` extraction specs, not CTXDSL directly. The downstream
   `ExtractionAdapter` consumes those specs. Examples in `examples/ast_extract/stubs/`
@@ -124,7 +124,7 @@ can ingest, not by mununu engineering effort".
 
 ## See also
 
-- `c-extraction-llvm-lift.md` (a planning note, not tracked) — phase log for the C extractor.
+- [`c-extraction-llvm-lift.md`](../archive/plans/c-extraction-llvm-lift.md) (a planning note, published under `docs/archive/`) — phase log for the C extractor.
 - [`docs/policies/claims-integrity.md`](../policies/claims-integrity.md) — the rules
   this audit applies (especially Rules 1, 2, 4, 5, 10).
 - [`docs/abstraction.md`](../abstraction.md) — the soundness matrix that any future

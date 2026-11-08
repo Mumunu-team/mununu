@@ -1287,7 +1287,7 @@ per-player game semantics: **PO-3 / R.6.8 CLOSED 2026-06-23** —
 routes `Control::{Controllable, Environment}` through `modal_trit_from_target`
 (the §7.2 per-player rule), so a *definite* controllability verdict is now
 sound (the audit empirically caught + fixed the two-pass over-claim; see
-`cube-modal-soundness` (a private review note)). The advisory in
+[`cube-modal-soundness-2026-06-23-full-audit.md`](../archive/reviews/cube-modal-soundness-2026-06-23-full-audit.md), published under `docs/archive/`). The advisory in
 [`predicate-abstraction-recipe.md`](predicate-abstraction-recipe.md) §4.9
 + [`cube_modality_soundness_warnings`](../../crates/mununu-core/src/mu_calculus/mod.rs)
 now flags only the *structural* caveat (a plain verification cube's
