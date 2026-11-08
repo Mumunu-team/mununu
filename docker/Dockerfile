@@ -29,7 +29,7 @@ COPY src/ src/
 ARG MUNUNU_BUILD_SHA=""
 ARG MUNUNU_BUILD_DIRTY=""
 ENV MUNUNU_BUILD_SHA=${MUNUNU_BUILD_SHA} MUNUNU_BUILD_DIRTY=${MUNUNU_BUILD_DIRTY}
-RUN cargo build --release -p mununu-cli --features api
+RUN cargo build --release -p mununu-cli
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*

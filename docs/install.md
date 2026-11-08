@@ -69,17 +69,28 @@ It prints `release-smoke: ok` or says which of the four steps failed. The BTOR2 
 
 ## T1 — the container
 
-The `mununu-sva` image is the dev image plus one tag-pinned oss-cad-suite release (yosys with
-`read_slang`, slang, Verilator, btormc, pono, cvc5) and sv2v; it is the only place SystemVerilog
-verdicts are validated. Today it is built from the repository
-([`docker/Dockerfile.sva`](../docker/Dockerfile.sva); [`docker/README.md`](../docker/README.md) has
-the build and run lines); the on-prem bundle (roadmap H5) will ship it as a `docker save` tarball
-with a `docker compose` file, `mununu.toml` and `mununu.lic`.
+**The on-prem bundle** ([`deploy/README.md`](../deploy/README.md)) is the supported self-serve
+install: one image — the `mununu` binary, the pinned oss-cad-suite toolchain (yosys with
+`read_slang`, slang, Verilator, btormc, pono, cvc5) and the web UI served from the same origin as
+the API — one port, three files (`compose.yaml`, `mununu.toml`, your `mununu.lic`), delivered as
+a `docker save` tarball with its checksum for air-gapped sites. Built by
+[`scripts/bundle.sh`](../scripts/bundle.sh) from [`docker/Dockerfile.bundle`](../docker/Dockerfile.bundle).
+
+```bash
+docker load -i mununu-bundle-<version>.tar.gz && sha256sum -c mununu-bundle-<version>.tar.gz.sha256
+mkdir mununu && cd mununu && cp /path/to/{compose.yaml,mununu.toml} . && cp /path/to/your/mununu.lic . && mkdir work
+docker compose up -d && docker compose exec mununu mununu licence status      # → valid
+open http://localhost:8080                                                     # the UI; /api/v1 beside it
+docker compose exec mununu mununu sv verify-auto /work/design.sv --source /work/design_sva.sv --top design --json
+```
+
+The validation image `mununu-sva` ([`docker/Dockerfile.sva`](../docker/Dockerfile.sva); the dev image
+plus the same suite and sv2v) is where the e2e suite runs and SystemVerilog verdicts are validated;
+it is built from the repository, not shipped:
 
 ```bash
 docker build -f docker/Dockerfile.sva -t mununu-sva .
 docker run --rm -v "$(pwd)":/work -v mununu-target:/cargo-target mununu-sva make e2e      # the suite
-docker run --rm -p 127.0.0.1:8080:8080 mununu-sva mununu server --addr 0.0.0.0:8080         # the API, loopback only
 ```
 
 - **Linux**: native; the cgroup-aware memory ceiling (`MUNUNU_MAX_PROCESS_MEMORY_BYTES`, auto = 80 %

@@ -3,6 +3,7 @@
 | File | Purpose | Status |
 |---|---|---|
 | `Dockerfile.dev` | **Reproducible dev/test image.** Rust workspace toolchain only — source is mounted, not COPYed. Same `make <verb>` command works locally and in CI. | Active |
+| `Dockerfile.bundle` | **The on-prem bundle** (`mununu-bundle:<version>`, roadmap H5). The product binary (`--features api`) + ONE oss-cad-suite release (the tag `Dockerfile.sva` pins) + the web UI served at `/` from the same origin (`mununu server --ui-dir`), non-root, `/work` volume, healthcheck. Built by `scripts/bundle.sh` into a `docker save` tarball + sha256 beside `deploy/compose.yaml`, `deploy/mununu.toml` and the customer's `mununu.lic`; the install is `deploy/README.md`. The supported self-serve path; what a licence buys. | Active |
 | `Dockerfile.sva` | **SVA-verification validation image** (`mununu-sva`). `mununu-dev` + ONE tag-pinned [oss-cad-suite](https://github.com/YosysHQ/oss-cad-suite-build) release (yosys with the built-in `read_slang` + the yosys-slang plugin, slang, Verilator, btormc, pono, cvc5) + sv2v (the dev-only differential oracle of `test_support` builds, not the product lift). Runs the `#[ignore]`d slang-gated e2e suite (`make e2e`) and is the image downstream consumers (monono `make formal-docker`) verify in. Opt-in; not the CI gate. | Active |
 | `Dockerfile` | Production image. Multi-stage build, copies source, ships the `mununu` CLI/server binary as the entrypoint. | Active |
 | `Dockerfile.extract` | Production image for the `mununu-extract` tree-sitter frontend. Same multi-stage pattern. | Active |

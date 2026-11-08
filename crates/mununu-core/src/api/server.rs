@@ -22,8 +22,9 @@ use crate::api::handlers;
 /// Start the HTTP server
 pub async fn start_server(
     addr: SocketAddr,
+    ui_dir: Option<&std::path::Path>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let app = create_router();
+    let app = create_router_with_ui(ui_dir);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     eprintln!("Server listening on {}", addr);
@@ -31,6 +32,24 @@ pub async fn start_server(
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+/// The API router plus, when `ui_dir` names a directory, its static files at `/` — the
+/// mununu-ui build served from the same origin as the API (roadmap H5, the on-prem bundle: one
+/// port, no CORS story). Paths that are not files fall back to `index.html` so the client-side
+/// router works on a reload; `/api/v1/*` is matched first and stays the API's.
+pub fn create_router_with_ui(ui_dir: Option<&std::path::Path>) -> Router {
+    let app = create_router();
+    match ui_dir {
+        None => app,
+        Some(dir) => {
+            use tower_http::services::{ServeDir, ServeFile};
+            // `fallback`, not `not_found_service`: the latter wraps the fallback in a 404 (a
+            // "not found page"); a client-side route must come back 200 with the index.
+            let index = ServeFile::new(dir.join("index.html"));
+            app.fallback_service(ServeDir::new(dir).fallback(index))
+        }
+    }
 }
 
 /// Create the API router. Public so the MCP seam test can drive a route in-process
@@ -199,4 +218,67 @@ pub fn create_router() -> Router {
                     Duration::from_secs(30),
                 )),
         )
+}
+
+#[cfg(test)]
+mod ui_dir_tests {
+    //! H5 at the seam: the UI directory is served at `/`, assets by path, unknown paths fall
+    //! back to `index.html`, and the API keeps `/api/v1/*`; without a directory `/` is a 404.
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    async fn get(app: axum::Router, uri: &str) -> (StatusCode, String) {
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("a request"),
+            )
+            .await
+            .expect("the router answers");
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("a body");
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    #[tokio::test]
+    async fn the_ui_directory_is_served_beside_the_api_with_an_index_fallback() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("index.html"),
+            "<!doctype html><title>mununu ui</title>",
+        )
+        .expect("index");
+        std::fs::create_dir(dir.path().join("assets")).expect("assets dir");
+        std::fs::write(
+            dir.path().join("assets").join("app.js"),
+            "console.log('ui')",
+        )
+        .expect("asset");
+        let app = super::create_router_with_ui(Some(dir.path()));
+        let (status, body) = get(app.clone(), "/").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("mununu ui"), "{body}");
+        let (status, body) = get(app.clone(), "/assets/app.js").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("console.log"), "{body}");
+        // A client-side route reloads to the index, not to a 404.
+        let (status, body) = get(app.clone(), "/runs/42").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("mununu ui"), "{body}");
+        // The API is matched first and stays the API's.
+        let (status, body) = get(app, "/api/v1/health").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("\"status\":\"ok\""), "{body}");
+    }
+
+    #[tokio::test]
+    async fn without_a_ui_directory_the_root_is_not_found() {
+        let (status, _) = get(super::create_router_with_ui(None), "/").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
 }

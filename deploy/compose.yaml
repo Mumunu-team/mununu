@@ -1,0 +1,28 @@
+# mununu on-prem bundle — one container, one port (roadmap H5; docs/install.md § T1, deploy/README.md).
+#
+#   docker load -i mununu-bundle-<version>.tar.gz     # from the air-gap tarball, or `docker pull`
+#   cp /path/to/your/mununu.lic ./mununu.lic           # the licence file you were issued
+#   docker compose up -d
+#   open http://localhost:8080                          # the UI; the API is /api/v1 on the same port
+#
+# Designs go in ./work (mounted at /work); the CLI runs inside the container:
+#   docker compose exec mununu mununu sv verify-auto /work/design.sv --source /work/design_sva.sv --top design
+services:
+  mununu:
+    image: mununu-bundle:${MUNUNU_VERSION:-0.5.11}
+    # Loopback by default: put a TLS-terminating proxy in front to expose it to a team.
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ./mununu.toml:/etc/mununu/mununu.toml:ro
+      - ./mununu.lic:/etc/mununu/mununu.lic:ro
+      - ./work:/work
+    # The memory ceiling (MUNUNU_MAX_PROCESS_MEMORY_BYTES, auto) fires at 80 % of this limit and the
+    # remaining properties abstain with a note instead of the kernel killing the container.
+    mem_limit: 16g
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/api/v1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

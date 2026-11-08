@@ -635,6 +635,12 @@ enum Commands {
         /// `--deployment-config`.
         #[arg(long = "config", value_name = "FILE")]
         config: Option<PathBuf>,
+        /// Serve a static directory (the mununu-ui build: `index.html` + `assets/`) at `/` on the
+        /// same port as the API — one origin, no CORS (the on-prem bundle, roadmap H5). Paths that
+        /// are not files fall back to `index.html` for the client-side router; `/api/v1/*` stays
+        /// the API's. The directory must exist and hold an `index.html`.
+        #[arg(long = "ui-dir", value_name = "DIR")]
+        ui_dir: Option<PathBuf>,
     },
     /// Start the Model Context Protocol server: the tools `context_eval` (CTXDSL sources in,
     /// verdicts out — the request and response of `POST /api/v1/context/eval`, byte for byte)
@@ -3574,16 +3580,27 @@ fn dispatch(command: Commands) -> Result<(), String> {
         Commands::Verify(args) => handle_verify(args),
         Commands::Memory { command } => handle_memory(*command),
         Commands::Licence { command } => handle_licence(command),
-        Commands::Server { addr, .. } => {
+        Commands::Server { addr, ui_dir, .. } => {
             use std::net::SocketAddr;
             let addr: SocketAddr = addr
                 .parse()
                 .map_err(|e| format!("Invalid address: {}", e))?;
+            if let Some(dir) = &ui_dir {
+                // Refuse early, with the path: a server that silently serves 404s for the UI
+                // is the "silence is a defect" shape.
+                if !dir.join("index.html").is_file() {
+                    return Err(format!(
+                        "--ui-dir {}: no index.html there (expected the mununu-ui build: index.html + assets/)",
+                        dir.display()
+                    ));
+                }
+                eprintln!("Serving the UI from {} at /", dir.display());
+            }
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
                 .map_err(|e| format!("Failed to create runtime: {}", e))?;
-            rt.block_on(mununu_core::api::start_server(addr))
+            rt.block_on(mununu_core::api::start_server(addr, ui_dir.as_deref()))
                 .map_err(|e| format!("Server error: {}", e))?;
             Ok(())
         }
