@@ -393,6 +393,8 @@ mod tests {
                 // the field's OPTIONALITY is exercised, not just its presence.
                 property: None,
             }],
+            property_wall_ms: Default::default(),
+            routing: Vec::new(),
         };
 
         let doc = serde_json::to_value(SvVerifyAutoResponse::from(&report))

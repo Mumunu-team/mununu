@@ -569,6 +569,17 @@
           ],
           "description": "mununu#873 — when a reachability-portfolio rescue ran on this row: the members that answered and the members that refused the design, with the reason. Absent when no portfolio ran. `decided_by` above names the stage (`reach-rescue`); this names the members. Members in neither list ran and abstained."
         },
+        "routing": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RoutingView"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Roadmap J4 — the planner's static routing prediction for this property, as data (the `plan-cost` note's facts). Telemetry, never a verdict; absent on routes that compute none."
+        },
         "seeded_predicates": {
           "description": "The cube predicates auto-seeded for this property (atom strings).",
           "items": {
@@ -638,6 +649,15 @@
             }
           ],
           "description": "mununu#599 — a recoverability guarantee (`AG EF(P)`) that HOLDS, judged against the other verdicts in the same report. Present only on such a guarantee, and only when another property speaks to it; see [`VacuityView`].\n\n**Read this next to `outcome == \"holds\"`.** `AG EF good: HOLDS` beside its non-vacuity witness `EF good': VIOLATED` is the vacuous pass a two-sided gate exists to prevent; it used to be visible only to a reader who checked witnesses by habit. The verdict does not change — a vacuous HOLDS is a true HOLDS on the model — the field says what it is worth."
+        },
+        "wall_ms": {
+          "description": "Roadmap J4 — milliseconds this property took: its main pass plus any ⊥ re-plan arm, summed. The property's own time; the design's lift is paid once per run and is not in it. Absent when the row was never timed.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "required": [
@@ -804,6 +824,47 @@
         "log",
         "mismatches",
         "outcome"
+      ],
+      "type": "object"
+    },
+    "RoutingView": {
+      "description": "The planner's per-property routing facts (roadmap J4): what `plan-cost` says, as fields.",
+      "properties": {
+        "cap": {
+          "description": "The exact engine's effective bit cap for that cone.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "class": {
+          "description": "`Safety` | `Reachability` | `Liveness` | `Mixed` | `Propositional`.",
+          "type": "string"
+        },
+        "cone_bits": {
+          "description": "The exact engine's cone-of-influence bit width for the property's atoms.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "diameter_log2": {
+          "description": "The widest in-cone down-counter (≈ 2^W diameter), when one is found.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "predicted_engine": {
+          "description": "The engine the planner predicts will decide the property.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "cap",
+        "class",
+        "cone_bits",
+        "predicted_engine"
       ],
       "type": "object"
     },
