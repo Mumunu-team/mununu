@@ -2373,6 +2373,8 @@ fn sv_verify_auto_handler_impl(
         breadcrumb_append: false,
         skip_rows: std::collections::HashSet::new(),
         only_rows: None,
+        // J3 — the breadcrumb's content, checked before any lift; a refusal is a 400 below.
+        resume_from: request.resume_from.clone(),
         assume_mode,
         faults: crate::adapter::btor2::fault::FaultPosture::parse(
             &request.faults,

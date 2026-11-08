@@ -1067,6 +1067,10 @@ pub struct AutoVerifyReport {
     /// `plan-cost` note renders as prose): class, cone bits vs cap, diameter proxy, predicted
     /// engine. Filled by the planner once per run; empty on the single-engine routes.
     pub routing: Vec<crate::planner::RoutingRationale>,
+    /// Roadmap J3 — property → the build tag of the breadcrumb record whose verdict this row
+    /// carries instead of a fresh run (`decided_by: resumed`). Empty unless the run was given
+    /// `resume_from`. A resumed row has no counterexample, vacuity finding, predicates or wall.
+    pub resumed: std::collections::BTreeMap<String, String>,
 }
 
 /// The skip reason for a property whose atoms reference non-state signals,
@@ -2830,6 +2834,13 @@ pub struct VerifyAutoOptions {
     /// NO row (an empty set) to read every row's cone hash. From `MUNUNU_VERIFY_AUTO_ONLY_ROWS`
     /// at [`verify_auto`]; `None` runs every row.
     pub only_rows: Option<std::collections::HashSet<String>>,
+    /// Roadmap J3 — the CONTENT of a breadcrumb (`MUNUNU_VERIFY_AUTO_PARTIAL_JSON`) a killed run
+    /// left behind. Parsed before any lift by [`crate::adapter::resume::parse_breadcrumb`]: every
+    /// property whose last record is a definite verdict from THIS build joins `skip_rows` and its
+    /// verdict is overlaid on the final report (`decided_by: resumed`,
+    /// [`AutoVerifyReport::resumed`]); a breadcrumb from another build, or one without a build, is
+    /// refused as an error. The CLI's `--resume-from FILE`, the API's `resume_from`.
+    pub resume_from: Option<String>,
     /// #468 — apply a NAMED structural mutation to the prepared BTOR2 before
     /// verification (`prepare_model`), so `sv mutate` can assert the property
     /// verdicts FLIP (property adequacy). `None` (default) ⇒ no mutation, the model
@@ -2968,6 +2979,7 @@ impl Default for VerifyAutoOptions {
             breadcrumb_append: false,
             skip_rows: std::collections::HashSet::new(),
             only_rows: None,
+            resume_from: None,
             mutation: None,
             faults: None,
             antecedent_shadow: true,
@@ -4896,8 +4908,131 @@ pub(crate) fn parse_only_rows(v: &str) -> Option<std::collections::HashSet<Strin
     )
 }
 
-/// [`verify_auto`] after the environment's row selection: the dispatch as it was.
+/// [`verify_auto`] after the environment's row selection — roadmap J3's resume wraps the
+/// dispatch: the breadcrumb is read and checked BEFORE any lift (a refusal costs nothing), the
+/// rows it decided join `skip_rows` (every member of a portfolio honours the set, see
+/// [`crate::planner::member_options`]), and their verdicts are overlaid on the final report.
 fn verify_auto_with(
+    sources: &[(String, String)],
+    yosys_opts: &YosysOptions,
+    opts: &VerifyAutoOptions,
+) -> Result<AutoVerifyReport, AdapterError> {
+    let Some(text) = opts.resume_from.as_deref() else {
+        return verify_auto_dispatch(sources, yosys_opts, opts);
+    };
+    let current = crate::build_info::current().map(crate::build_info::build_tag);
+    let plan =
+        crate::adapter::resume::parse_breadcrumb(text, current.as_deref()).map_err(|refusal| {
+            AdapterError {
+                kind: AdapterErrorKind::ParseError,
+                message: format!("resume-from: {refusal}"),
+                location: None,
+            }
+        })?;
+    let mut resumed_opts = opts.clone();
+    resumed_opts.skip_rows.extend(plan.resumed.keys().cloned());
+    let mut report = verify_auto_dispatch(sources, yosys_opts, &resumed_opts)?;
+    apply_resume(&mut report, &plan);
+    record_resumed_breadcrumb(&report);
+    Ok(report)
+}
+
+/// J3 — overlay the breadcrumb's verdicts on the rows the run left `NotAttempted` for them, and
+/// say what happened in one `resumed-from-breadcrumb` note: the rows carried, the rows re-run
+/// because their records disagreed, and the breadcrumb rows this design no longer has. A row the
+/// plan names that the run nevertheless decided (it cannot, today — the skip set is honoured on
+/// every path — but a future path might) keeps the fresh verdict, and the note says so.
+pub(crate) fn apply_resume(
+    report: &mut AutoVerifyReport,
+    plan: &crate::adapter::resume::ResumePlan,
+) {
+    let mut carried: Vec<String> = Vec::new();
+    let mut fresh: Vec<String> = Vec::new();
+    for p in &mut report.properties {
+        let Some(rv) = plan.resumed.get(&p.name) else {
+            continue;
+        };
+        if !matches!(p.bottom_reason, Some(BottomReason::NotAttempted)) {
+            fresh.push(format!(
+                "{}: the run decided it anyway ({}); the fresh verdict is kept",
+                p.name,
+                p.outcome.label()
+            ));
+            continue;
+        }
+        p.outcome = rv.outcome.clone();
+        p.bottom_reason = None;
+        p.decided_by = Some("resumed".to_string());
+        p.counterexample = None;
+        p.vacuity = None;
+        p.portfolio = None;
+        carried.push(format!(
+            "{}: {} (phase `{}`)",
+            p.name,
+            rv.outcome.label(),
+            rv.phase
+        ));
+        report.resumed.insert(p.name.clone(), rv.build.clone());
+    }
+    let in_design: std::collections::HashSet<&str> =
+        report.properties.iter().map(|p| p.name.as_str()).collect();
+    let absent: Vec<String> = plan
+        .resumed
+        .keys()
+        .filter(|n| !in_design.contains(n.as_str()))
+        .map(|n| format!("{n}: in the breadcrumb, not in this design — ignored"))
+        .collect();
+    let disagreed: Vec<String> = plan
+        .disagreed
+        .iter()
+        .map(|n| format!("{n}: records disagree (holds and violated) — re-run, not resumed"))
+        .collect();
+    let mut items = carried;
+    items.extend(disagreed);
+    items.extend(absent);
+    items.extend(fresh);
+    report.notes.push(VerificationNote {
+        kind: "resumed-from-breadcrumb".to_string(),
+        level: NoteLevel::Info,
+        summary: format!(
+            "{} row(s) resumed from the breadcrumb of build {} ({} undecided there and re-run, {} \
+             disagreed between members and re-run)",
+            report.resumed.len(),
+            crate::adapter::resume::short(&plan.build),
+            plan.undecided.len(),
+            plan.disagreed.len()
+        ),
+        detail: "A resumed row carries the verdict the killed run reached with THIS build and \
+                 nothing else: no counterexample, vacuity finding, seeded predicates or wall. A \
+                 property whose breadcrumb records disagreed is re-run, because the merge would \
+                 have raised its engine-contradiction alarm and a resume must not pick a side. \
+                 Run without --resume-from for the trace of a resumed `violated` row."
+            .to_string(),
+        items,
+        property: None,
+    });
+}
+
+/// J3 — the resumed verdicts as `phase: "resumed"` breadcrumb records (append mode), so a
+/// breadcrumb written by THIS run — which otherwise holds `unknown` / `not-attempted` for the
+/// rows it did not run — can itself be resumed from. No-op without the env var.
+fn record_resumed_breadcrumb(report: &AutoVerifyReport) {
+    if report.resumed.is_empty() {
+        return;
+    }
+    let mut crumb = crate::adapter::partial_json::Breadcrumb::from_env_with_append(true);
+    if !crumb.is_active() {
+        return;
+    }
+    for (i, p) in report.properties.iter().enumerate() {
+        if report.resumed.contains_key(&p.name) {
+            crumb.record(i, &p.name, p.outcome.label(), "resumed", None);
+        }
+    }
+}
+
+/// The dispatch as it was before J3: portfolio through the planner, else the single engine.
+fn verify_auto_dispatch(
     sources: &[(String, String)],
     yosys_opts: &YosysOptions,
     opts: &VerifyAutoOptions,
@@ -13024,6 +13159,155 @@ mod tests {
         }
     }
 
+    fn j3_row(name: &str, outcome: VerifyOutcome, reason: Option<BottomReason>) -> PropertyVerdict {
+        PropertyVerdict {
+            name: name.into(),
+            label: None,
+            kind: crate::adapter::slang::translate::SvaKind::Assert,
+            formula: "AG p".into(),
+            outcome,
+            seeded_predicates: Vec::new(),
+            counterexample: None,
+            bottom_reason: reason,
+            decided_by: None,
+            vacuity: None,
+            portfolio: None,
+        }
+    }
+
+    /// Roadmap J3 — the overlay: a row the run left `not-attempted` FOR the breadcrumb takes the
+    /// breadcrumb's verdict, marked; a row the run decided keeps the fresh verdict; a breadcrumb
+    /// row this design no longer has is named, not invented; and the note says all of it.
+    #[test]
+    fn apply_resume_overlays_only_the_rows_the_run_left_to_the_breadcrumb() {
+        use crate::adapter::resume::{ResumePlan, ResumedVerdict};
+        let build = "e7a5b21c0ffee0000000000000000000000000000".to_string();
+        let rv = |outcome: VerifyOutcome| ResumedVerdict {
+            outcome,
+            build: build.clone(),
+            phase: "merged".into(),
+        };
+        let mut plan = ResumePlan {
+            build: build.clone(),
+            disagreed: vec!["p_disagreed".into()],
+            undecided: vec!["p_fresh".into()],
+            ..ResumePlan::default()
+        };
+        plan.resumed
+            .insert("p_holds".into(), rv(VerifyOutcome::Holds));
+        plan.resumed.insert(
+            "p_violated".into(),
+            rv(VerifyOutcome::Violated { false_cells: 0 }),
+        );
+        plan.resumed
+            .insert("p_renamed_away".into(), rv(VerifyOutcome::Holds));
+        plan.resumed
+            .insert("p_decided_anyway".into(), rv(VerifyOutcome::Holds));
+        let unknown = VerifyOutcome::Unknown { unknown_cells: 0 };
+        let mut report = AutoVerifyReport {
+            properties: vec![
+                j3_row("p_holds", unknown.clone(), Some(BottomReason::NotAttempted)),
+                j3_row(
+                    "p_violated",
+                    unknown.clone(),
+                    Some(BottomReason::NotAttempted),
+                ),
+                j3_row("p_fresh", VerifyOutcome::Holds, None),
+                j3_row(
+                    "p_disagreed",
+                    VerifyOutcome::Violated { false_cells: 2 },
+                    None,
+                ),
+                j3_row(
+                    "p_decided_anyway",
+                    VerifyOutcome::Violated { false_cells: 1 },
+                    None,
+                ),
+            ],
+            ..Default::default()
+        };
+        apply_resume(&mut report, &plan);
+
+        let row = |n: &str| {
+            report
+                .properties
+                .iter()
+                .find(|p| p.name == n)
+                .unwrap_or_else(|| panic!("{n}"))
+        };
+        assert_eq!(row("p_holds").outcome, VerifyOutcome::Holds);
+        assert_eq!(row("p_holds").bottom_reason, None);
+        assert_eq!(row("p_holds").decided_by.as_deref(), Some("resumed"));
+        assert_eq!(
+            row("p_violated").outcome,
+            VerifyOutcome::Violated { false_cells: 0 }
+        );
+        assert_eq!(
+            row("p_fresh").outcome,
+            VerifyOutcome::Holds,
+            "a row the breadcrumb left undecided keeps the fresh verdict"
+        );
+        assert_eq!(
+            row("p_decided_anyway").outcome,
+            VerifyOutcome::Violated { false_cells: 1 },
+            "a row the run decided is never overwritten by the breadcrumb"
+        );
+        assert_eq!(row("p_decided_anyway").decided_by, None);
+        assert_eq!(
+            report.resumed.keys().cloned().collect::<Vec<_>>(),
+            vec!["p_holds".to_string(), "p_violated".to_string()],
+            "only the carried rows are recorded as resumed"
+        );
+        assert_eq!(report.resumed["p_holds"], build);
+
+        let note = report
+            .notes
+            .iter()
+            .find(|n| n.kind == "resumed-from-breadcrumb")
+            .expect("the note");
+        assert!(
+            note.summary
+                .starts_with("2 row(s) resumed from the breadcrumb of build e7a5b21"),
+            "{}",
+            note.summary
+        );
+        assert!(note.summary.contains("1 undecided") && note.summary.contains("1 disagreed"));
+        let items = note.items.join("\n");
+        assert!(items.contains("p_holds: holds (phase `merged`)"), "{items}");
+        assert!(items.contains("p_disagreed: records disagree"), "{items}");
+        assert!(
+            items.contains("p_renamed_away: in the breadcrumb, not in this design"),
+            "{items}"
+        );
+        assert!(
+            items.contains("p_decided_anyway: the run decided it anyway (violated)"),
+            "{items}"
+        );
+    }
+
+    /// Roadmap J3 — a breadcrumb that cannot be resumed from is refused BEFORE any lift: the error
+    /// is the resume's, not a frontend's, and it costs nothing. (A library process registers no
+    /// build identity, so the refusal here is "no current build"; a binary with one refuses an
+    /// empty file as "nothing to resume" — both are the same seam.)
+    #[test]
+    fn an_unresumable_breadcrumb_is_refused_before_the_lift() {
+        let opts = VerifyAutoOptions {
+            resume_from: Some(String::new()),
+            ..Default::default()
+        };
+        let sources = vec![(
+            "nonsense.sv".to_string(),
+            "this is not SystemVerilog".to_string(),
+        )];
+        let err = verify_auto(&sources, &YosysOptions::default(), &opts).expect_err("refused");
+        assert_eq!(err.kind, AdapterErrorKind::ParseError);
+        assert!(
+            err.message.starts_with("resume-from: "),
+            "the refusal is the resume's, not the lift's: {}",
+            err.message
+        );
+    }
+
     /// The three causes a GATE must treat differently, pinned by the advice each one carries.
     ///
     /// Retrying with a bigger budget is right for exactly ONE of them. It cannot help a shape
@@ -14127,6 +14411,7 @@ module uart_tx(); endmodule"#;
             notes: Vec::new(),
             property_wall_ms: Default::default(),
             routing: Vec::new(),
+            resumed: Default::default(),
         };
         let notes = build_notes(
             &report,
@@ -14318,6 +14603,7 @@ module uart_tx(); endmodule"#;
                 notes: Vec::new(),
                 property_wall_ms: Default::default(),
                 routing: Vec::new(),
+                resumed: Default::default(),
             }
             .pipe(|mut r| {
                 check_antecedent_vacuity(&mut r, model, false, &applied0.sec_cm_rows);
@@ -14371,6 +14657,7 @@ module uart_tx(); endmodule"#;
             notes: Vec::new(),
             property_wall_ms: Default::default(),
             routing: Vec::new(),
+            resumed: Default::default(),
         };
         let notes = build_notes(
             &with,
@@ -14483,6 +14770,7 @@ module uart_tx(); endmodule"#;
             notes: Vec::new(),
             property_wall_ms: Default::default(),
             routing: Vec::new(),
+            resumed: Default::default(),
         };
         let notes = build_notes(
             &report,
@@ -14543,6 +14831,7 @@ module uart_tx(); endmodule"#;
             notes: Vec::new(),
             property_wall_ms: Default::default(),
             routing: Vec::new(),
+            resumed: Default::default(),
         };
         let ap = |posture: &NotePosture| {
             build_notes(

@@ -1655,6 +1655,28 @@ MUNUNU_VERIFY_AUTO_PARTIAL_JSON=/tmp/verdicts.ndjson mununu sv verify-auto desig
 
 **Not a substitute for the report.** It carries verdicts only — no counterexamples, notes, or seeded predicates. A run that finishes normally still emits the full report, and consumers should prefer it. This is for the run that does not get to finish.
 
+**Every record names its build** (roadmap J3, 2026-11): `"build": "<commit sha>"` (`-dirty` appended when the tree was not clean) is the identity of the binary that wrote the record — `mununu --version`'s commit — omitted when the binary has none. It is what the resume below checks.
+
+### Resuming a killed run: `--resume-from` (roadmap J3)
+
+> Source of truth: [`adapter::resume::parse_breadcrumb`](../crates/mununu-core/src/adapter/resume.rs) — surface: (CLI+API: `sv verify-auto --resume-from FILE` · `POST /api/v1/sv/verify-auto` `resume_from`)
+
+The breadcrumb is also the next run's input. `--resume-from FILE` reads it back, takes the **last record per property**, and every property whose last record is a definite verdict (`holds` / `violated`) is **not re-run**: the row carries that verdict with `decided_by: "resumed"` and `resumed_from: "<build tag>"` in `--json`, and a `resumed: from the breadcrumb of build …` line in the transcript. Every other row — `unknown`, `skipped`, absent from the file — runs as usual. The API takes the file's **content** in `resume_from` (the server has no access to the client's disk).
+
+```bash
+MUNUNU_VERIFY_AUTO_PARTIAL_JSON=verdicts.ndjson mununu sv verify-auto design.sv   # killed at property 18 of 25
+mununu sv verify-auto design.sv --resume-from verdicts.ndjson --json \
+  | jq -r '.properties[] | "\(.name) \(.outcome) \(.resumed_from // "fresh")"'
+```
+
+**Refused, not warned.** A breadcrumb written by **another build** of mununu is refused outright — exit `1` on the CLI, `400` on the API — and so are a record without a `build` (an older binary) and a binary without an identity (built without git and without `MUNUNU_BUILD_SHA`): a verdict is a fact about one engine (mununu#715: `--version` stayed `0.4.0` for a month while verdicts changed), and an equality that cannot be checked is not one. The message names the fix. Two dirty builds of the same commit compare equal; the identity cannot tell them apart.
+
+**Not resumed either:** a property whose records disagree (one portfolio member wrote `holds`, another `violated`). The merge would have raised its engine-contradiction alarm; resuming either side would hide it, so the row is re-run and named in the `resumed-from-breadcrumb` note, which also lists every carried row and every breadcrumb row this design no longer has.
+
+**What a resumed row does not carry.** The breadcrumb holds verdicts only. A resumed row has no counterexample, no vacuity finding, no seeded predicates and no `wall_ms`; its `detail` reads `resumed from the breadcrumb of build …`, and the planner's `plan-accuracy` tally leaves it out (no engine ran). For the trace of a resumed `violated` row, run without `--resume-from`.
+
+**Same file in and out.** The CLI reads `--resume-from` before the run opens its own breadcrumb (which truncates), so the two may name the same path; after the run the file holds this run's records plus one `"phase": "resumed"` record per carried row, so it can be resumed from again.
+
 ### Pinning a config input: `--pin`
 
 > Source of truth: [`partition_config_pins`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) — surface: (CLI+API+UI)

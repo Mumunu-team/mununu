@@ -2426,6 +2426,13 @@ struct SvVerifyAutoArgs {
     /// `trace.repair_candidates` / `trace.localization` in `--json`.
     #[arg(long = "localize")]
     localize: bool,
+    /// Resume from the breadcrumb a killed run left (`MUNUNU_VERIFY_AUTO_PARTIAL_JSON`): every
+    /// property whose LAST record is a definite verdict (`holds` / `violated`) is not re-run and
+    /// carries that verdict (`decided_by: resumed`, no counterexample); the rest run. Refused when
+    /// the breadcrumb was written by another build of mununu or carries no build identity. The
+    /// file is read before the run opens its own breadcrumb, so both may name the same path.
+    #[arg(long = "resume-from", value_name = "FILE")]
+    resume_from: Option<PathBuf>,
     /// Print a JSON report instead of the human-readable summary.
     #[arg(long)]
     json: bool,
@@ -4750,6 +4757,15 @@ fn sv_verify_auto(args: SvVerifyAutoArgs) -> Result<(), String> {
     let counter_bounds =
         mununu_core::adapter::slang::verify_auto::parse_counter_bounds(&args.counter_bound)?;
     let lift_overrides = lift.lift_overrides.clone();
+    // J3 — the breadcrumb is read here, before the run opens its own (which truncates), so
+    // `--resume-from` and `MUNUNU_VERIFY_AUTO_PARTIAL_JSON` may name the same file.
+    let resume_from = match &args.resume_from {
+        Some(path) => Some(
+            std::fs::read_to_string(path)
+                .map_err(|e| format!("--resume-from {}: {e}", path.display()))?,
+        ),
+        None => None,
+    };
     let opts = VerifyAutoOptions {
         max_iterations: args.max_iterations,
         must_edge_inference,
@@ -4798,6 +4814,7 @@ fn sv_verify_auto(args: SvVerifyAutoArgs) -> Result<(), String> {
         breadcrumb_append: false,
         skip_rows: std::collections::HashSet::new(),
         only_rows: None,
+        resume_from,
         assume_mode: match args.assumes {
             AssumesArg::Precondition => {
                 mununu_core::adapter::slang::verify_auto::AssumeMode::Precondition
@@ -5034,6 +5051,15 @@ fn render_verify_auto_text(
                 r.tag(),
                 r.determinism().tag(),
                 r.one_line()
+            );
+        }
+        // J3 — a verdict carried from a killed run's breadcrumb must not read like a fresh one:
+        // it names the build and says what did not travel with it.
+        if let Some(build) = report.resumed.get(&p.name) {
+            println!(
+                "        resumed: from the breadcrumb of build {} (verdict only — no \
+                 counterexample, vacuity or predicates; run without --resume-from for them)",
+                mununu_core::adapter::resume::short(build)
             );
         }
         // mununu#599 — what the rest of the report says about a recoverability guarantee's
