@@ -941,8 +941,12 @@ mod tests {
             first_run_day(&stamp, Day(TODAY.0 + 2)).unwrap(),
             Day(TODAY.0 + 2)
         );
-        // An unwritable location is an error, never a silent day 0.
-        let err = first_run_day(Path::new("/nonexistent-root/.mununu"), TODAY).unwrap_err();
+        // An unwritable location is an error, never a silent day 0. A directory under a regular
+        // FILE cannot be created by anyone, root included (the dev image runs its tests as root,
+        // where "/nonexistent-root" is perfectly creatable — the first CI run of this test).
+        let file = dir.path().join("a-file");
+        std::fs::write(&file, "x").unwrap();
+        let err = first_run_day(&file.join(STAMP_DIR), TODAY).unwrap_err();
         assert!(err.starts_with("cannot create"), "{err}");
     }
 
@@ -1107,7 +1111,10 @@ mod tests {
             status_at(Day(TODAY.0 + 30), Some(&stamp)).state,
             LicenceState::Expired
         );
-        let s = status_at(TODAY, Some(Path::new("/nonexistent-root/.mununu")));
+        // A stamp directory under a regular file: uncreatable for root too (CI runs as root).
+        let file = dir.path().join("a-file");
+        std::fs::write(&file, "x").unwrap();
+        let s = status_at(TODAY, Some(&file.join(STAMP_DIR)));
         assert_eq!(s.state, LicenceState::Missing);
         assert!(
             s.reason.as_deref().unwrap().contains("cannot create"),
