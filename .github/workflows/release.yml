@@ -1,89 +1,144 @@
+# Roadmap I2 — a release from `main`: five archives, each built and smoke-tested natively on its
+# own OS and architecture, then published together on a `v*` tag.
+#
+# What changed from the workflow that produced v0.4.0: that one ran `cargo build --features cli`
+# at the workspace ROOT, which builds the root package's legacy `mununu` bin (CTXDSL-only), not
+# `crates/mununu-cli` — the product the Docker images ship (`-p mununu-cli`) — and it installed no
+# Z3 on any runner. This one builds `-p mununu-cli -p mununu-extract` on a native runner per
+# target (no cross-compiling: Z3 is a linked library and cross-linking it needs a foreign libz3
+# nobody has), installs Z3 the way docs/toolchain.md § "Z3 on each OS" says, runs
+# scripts/release_smoke.sh on the built binaries, and packages them with the licence texts.
+#
+# `workflow_dispatch` is the dry run: it builds, smokes and uploads the archives as workflow
+# artifacts and creates NO release. The release job runs only on a tag.
 name: Release
-
 on:
   push:
     tags:
       - 'v*'
-
+  workflow_dispatch:
 permissions:
   contents: write
-
+env:
+  CARGO_TERM_COLOR: never
 jobs:
   build:
-    name: Build ${{ matrix.target }}
+    name: ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
+            z3: apt
             archive: tar.gz
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-24.04-arm
+            z3: apt
             archive: tar.gz
           - target: x86_64-apple-darwin
-            os: macos-latest
+            os: macos-15-intel
+            z3: brew
             archive: tar.gz
           - target: aarch64-apple-darwin
             os: macos-latest
+            z3: brew
             archive: tar.gz
           - target: x86_64-pc-windows-msvc
             os: windows-latest
+            z3: zip
             archive: zip
-
     steps:
       - uses: actions/checkout@v5
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Install cross-compilation tools
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-
-      - name: Build
-        run: cargo build --release --features cli --target ${{ matrix.target }}
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-
-      - name: Package (Unix)
-        if: matrix.archive == 'tar.gz'
-        run: |
-          cd target/${{ matrix.target }}/release
-          tar czf ../../../mununu-${{ github.ref_name }}-${{ matrix.target }}.tar.gz mununu
-          cd ../../..
-
-      - name: Package (Windows)
-        if: matrix.archive == 'zip'
+      - name: Install the pinned toolchain
+        shell: bash
+        run: rustup show
+      - name: Z3 (apt)
+        if: matrix.z3 == 'apt'
+        run: sudo apt-get update && sudo apt-get install -y libz3-dev
+      - name: Z3 (Homebrew)
+        if: matrix.z3 == 'brew'
+        run: brew install z3
+      # The official x64-win release: z3.exe (z3-sys reads the version from it), libz3.dll (the
+      # binary loads it at start, so it ships in the archive) and libz3.lib, copied to z3.lib
+      # because the crate links `z3`. Same recipe as os-matrix.yml.
+      - name: Z3 (official release zip)
+        if: matrix.z3 == 'zip'
         shell: pwsh
         run: |
-          Compress-Archive -Path target/${{ matrix.target }}/release/mununu.exe -DestinationPath mununu-${{ github.ref_name }}-${{ matrix.target }}.zip
-
-      - name: Upload artifact
+          $v = '5.1.0'
+          Invoke-WebRequest "https://github.com/Z3Prover/z3/releases/download/z3-$v/z3-$v-x64-win.zip" -OutFile "$env:RUNNER_TEMP\z3.zip"
+          Expand-Archive "$env:RUNNER_TEMP\z3.zip" -DestinationPath $env:RUNNER_TEMP
+          $bin = "$env:RUNNER_TEMP\z3-$v-x64-win\bin"
+          Copy-Item "$bin\libz3.lib" "$bin\z3.lib"
+          "Z3_LIBRARY_PATH_OVERRIDE=$bin" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "Z3_BIN=$bin" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          $bin | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          & "$bin\z3.exe" --version
+      - name: Build
+        shell: bash
+        run: cargo build --release -p mununu-cli -p mununu-extract
+      - name: Smoke-test the binaries on this OS
+        shell: bash
+        run: |
+          ext=""; [ "${{ matrix.archive }}" = "zip" ] && ext=".exe"
+          scripts/release_smoke.sh "target/release/mununu$ext" "target/release/mununu-extract$ext"
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          ver="${GITHUB_REF_NAME}"
+          case "$GITHUB_REF" in refs/tags/*) ;; *) ver="dry-run-$(git rev-parse --short HEAD)";; esac
+          name="mununu-${ver}-${{ matrix.target }}"
+          mkdir -p "dist/$name/LICENSES"
+          ext=""; [ "${{ matrix.archive }}" = "zip" ] && ext=".exe"
+          cp "target/release/mununu$ext" "target/release/mununu-extract$ext" "dist/$name/"
+          cp LICENSE THIRD_PARTY.md "dist/$name/"
+          cp LICENSES/* "dist/$name/LICENSES/"
+          cp docs/licensing.md "dist/$name/LICENSING.md"
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            cp "$Z3_BIN/libz3.dll" "dist/$name/"
+          fi
+          cd dist
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            7z a -tzip "$name.zip" "$name" >/dev/null
+            sha256sum "$name.zip" > "$name.zip.sha256"
+          else
+            tar czf "$name.tar.gz" "$name"
+            shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+          fi
+          ls -l
+      - name: Upload the archive
         uses: actions/upload-artifact@v6
         with:
           name: mununu-${{ matrix.target }}
-          path: mununu-${{ github.ref_name }}-${{ matrix.target }}.*
-
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+            dist/*.zip
+            dist/*.zip.sha256
+          if-no-files-found: error
   release:
-    name: Create Release
+    name: Create GitHub Release
     needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-
       - name: Download all artifacts
         uses: actions/download-artifact@v7
         with:
           path: artifacts
           merge-multiple: true
-
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
           generate_release_notes: true
+          body: |
+            Five archives, each built and smoke-tested on its own OS (`scripts/release_smoke.sh`).
+            Each carries `mununu`, `mununu-extract`, `LICENSE`, `THIRD_PARTY.md`, `LICENSES/` and
+            `LICENSING.md`; the Windows zip also carries `libz3.dll`. On Linux and macOS the binary
+            links the system Z3: `apt-get install libz3-dev` / `brew install z3` first. The engine-only
+            tier: SystemVerilog verification needs the `mununu-sva` image (see `docs/release.md`).
           files: artifacts/*
