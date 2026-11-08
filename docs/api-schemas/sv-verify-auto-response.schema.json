@@ -883,6 +883,42 @@
       ],
       "type": "object"
     },
+    "RunTimingView": {
+      "description": "J4c — the run's wall, split (milliseconds). `unattributed_ms` = `run_ms` − `lift_ms` − `properties_ms`, saturating at zero: the time outside the lift that no property's `wall_ms` carries — scheduling, merging, report building, and any engine-side work a row did not get charged for. The first real run inferred this figure from a log (495 s of 660 s on edn, before the per-row charging was made total); now it is a field, and a large value is a finding.",
+      "properties": {
+        "lift_ms": {
+          "description": "`None` when the run never lifted (an empty extraction).",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "properties_ms": {
+          "description": "The sum of every row's `wall_ms`.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "run_ms": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "unattributed_ms": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "properties_ms",
+        "run_ms",
+        "unattributed_ms"
+      ],
+      "type": "object"
+    },
     "SliceCycle": {
       "description": "One cycle of a counterexample's trace-relative slice (2026-10-30).",
       "properties": {
@@ -1446,6 +1482,17 @@
         "$ref": "#/definitions/PropertyVerdictView"
       },
       "type": "array"
+    },
+    "timing": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/RunTimingView"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "J4c — where the run's wall went: the whole run, the lift, the sum of the rows' `wall_ms`, and the remainder no row accounts for. Present when the run measured itself (every CLI and API run); absent on a report built elsewhere."
     },
     "unsupported": {
       "description": "Assertions that did not translate (reuses the extract-sva view shape; `kind` is `None` here).",

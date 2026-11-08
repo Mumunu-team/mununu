@@ -37,3 +37,21 @@
 ## Not covered here
 
 - The estimator itself (`--plan-only`, `POST /api/v1/sv/plan`, `estimate: {time_band, memory_class, confidence}`) — J2, after its falsifier reads.
+
+## Addendum 2026-11-08 — J4c: every row is charged, and the run's wall is split
+
+> Source of truth: the `pending_wall` charge at the top of the main loop in [`verify_auto_impl`](../../crates/mununu-core/src/adapter/slang/verify_auto.rs); [`RunTimingView`](../../crates/mununu-core/src/api/models.rs) — surface: CLI+API.
+
+The first real data run (edn, 67 rows, 660 s) showed the sum of `wall_ms` at 157 s with 495 s charged to no row. Two causes, one fix:
+
+- **Rows that left the main loop early were never charged.** The single accumulation sat at the end of the loop body, after thirteen `continue` sites — the exact member's rows, the `constant` fold, the recoverability ladder, every refusal. The wall is now charged at the top of the *next* iteration (and once after the loop), so every exit path is covered. `wall_ms` now appears on `constant` rows too (it is small) and on rows the exact member refused or decided.
+- **The run's own wall is a field.** `timing: {run_ms, lift_ms, properties_ms, unattributed_ms}` at the top level of the report (`unattributed_ms` = `run_ms` − `lift_ms` − Σ `wall_ms`, saturating). A large `unattributed_ms` is a finding to report, not a figure to infer from a log.
+
+| field | type | meaning |
+|---|---|---|
+| `timing.run_ms` | integer | the whole run, measured at the entry of `sv verify-auto` |
+| `timing.lift_ms` | integer, optional | the SV → BTOR2 lift and its re-lifts, paid once per run; absent when nothing was lifted |
+| `timing.properties_ms` | integer | Σ `properties[].wall_ms` |
+| `timing.unattributed_ms` | integer | what no row and not the lift accounts for |
+
+Consumers: additive; a strict report model adds the optional `timing` object. Expect `properties_ms` to rise on the same design versus a report before this change — rows that were silently free are now charged, verdicts are unchanged.
