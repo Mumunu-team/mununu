@@ -3461,6 +3461,156 @@ struct AnnotationScan {
     /// other rows are judged under the applied assumptions ([`plan_assumptions`] skips their
     /// relativization). Row names.
     assume_exempt: Vec<String>,
+    /// mununu#897 — the module each guarantee row was written in, by row name (`None` for a
+    /// row outside any module or a template instance): the key [`expand_annotation_instances`]
+    /// follows into the lift's instance paths.
+    guarantee_modules: Vec<(String, Option<String>)>,
+}
+
+/// mununu#897 — an annotation written inside a module applies to EVERY instance of that module
+/// under the top, as a sub-instance `assert property` already does: the row is cloned per
+/// occurrence, named `<prefix>ann_guarantee_<idx>` with its label prefixed the same way, and its
+/// atoms qualified with the prefix (`fill0_q` → `u_stage.fill0_q`, the lift's name for it). A row
+/// in the top itself (prefix `""`) is unchanged. A module with no occurrence under the top keeps
+/// its row as written — it will skip on the unbound name as before — and is named in `skipped`,
+/// so the report says why. `instance_prefixes` empty (no slang AST) leaves every row alone.
+///
+/// Before this the row was `skipped: predicate references unknown register/signal fill0_q` the
+/// moment the module was verified under a parent, and every annotation in a reused block stopped
+/// applying in context (a consumer's gate drives corpora by their top).
+fn expand_annotation_instances(scan: &mut AnnotationScan, instance_prefixes: &[(String, String)]) {
+    if instance_prefixes.is_empty() {
+        return;
+    }
+    let module_of = |row: &str| -> Option<String> {
+        scan.guarantee_modules
+            .iter()
+            .find(|(n, _)| n == row)
+            .and_then(|(_, m)| m.clone())
+    };
+    let mut out: Vec<crate::adapter::slang::translate::TranslatedAssertion> =
+        Vec::with_capacity(scan.guarantees.len());
+    let mut lines: Vec<(String, crate::trace::SourceLoc)> = Vec::new();
+    let mut exempt: Vec<String> = Vec::new();
+    let mut forms: Vec<(String, String)> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+    for g in std::mem::take(&mut scan.guarantees) {
+        let Some(module) = module_of(&g.name) else {
+            out.push(g);
+            continue;
+        };
+        let prefixes: Vec<&str> = instance_prefixes
+            .iter()
+            .filter(|(m, _)| *m == module)
+            .map(|(_, p)| p.as_str())
+            .collect();
+        if prefixes.is_empty() {
+            skipped.push(format!(
+                "{}: written in `{module}`, which is not instantiated under the top — the row is \
+                 checked as written and its local names will not bind",
+                g.name
+            ));
+            out.push(g);
+            continue;
+        }
+        for p in prefixes {
+            if p.is_empty() {
+                out.push(g.clone());
+                continue;
+            }
+            let mut row = g.clone();
+            row.name = format!("{p}{}", g.name);
+            row.label = g.label.as_ref().map(|l| format!("{p}{l}"));
+            row.formula = qualify_formula_atoms(&g.formula, p);
+            lines.extend(
+                scan.guarantee_lines
+                    .iter()
+                    .filter(|(n, _)| *n == g.name)
+                    .map(|(_, loc)| (row.name.clone(), loc.clone())),
+            );
+            if scan.assume_exempt.contains(&g.name) {
+                exempt.push(row.name.clone());
+            }
+            forms.extend(
+                scan.template_forms
+                    .iter()
+                    .filter(|(n, _)| *n == g.name)
+                    .map(|(_, f)| (row.name.clone(), f.clone())),
+            );
+            out.push(row);
+        }
+    }
+    scan.guarantees = out;
+    scan.guarantee_lines.extend(lines);
+    scan.assume_exempt.extend(exempt);
+    scan.template_forms.extend(forms);
+    scan.skipped.extend(skipped);
+}
+
+/// mununu#897 — qualify every atom register of a mu-calculus formula with an instance prefix:
+/// `nu X. ((q != 3) && [] X)` under `u_a.` → `nu X. ((u_a.q != 3) && [] X)`. The atoms are read
+/// from the parsed formula (never guessed from the text), a name already carrying a `.` is left
+/// alone, and a token that is a fixpoint binder (`nu X.`) or a path head (`X.`) is not an atom.
+/// A formula that does not parse is returned unchanged — its own parse error reports it.
+pub(crate) fn qualify_formula_atoms(formula: &str, prefix: &str) -> String {
+    use crate::mu_calculus::Node as MuNode;
+    if prefix.is_empty() {
+        return formula.to_string();
+    }
+    let Ok(parsed) = crate::mu_calculus::parser::parse(formula) else {
+        return formula.to_string();
+    };
+    let mut registers: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for node in parsed.nodes() {
+        if let MuNode::Predicate(atom) = node {
+            let expr =
+                crate::adapter::btor2::predicate_expr::parse_predicate_expr(atom).or_else(|_| {
+                    crate::adapter::btor2::predicate_expr::parse_predicate_atom_bool(atom)
+                });
+            if let Ok(expr) = expr {
+                let mut names = Vec::new();
+                atom_register_names(&expr, &mut names);
+                registers.extend(names.into_iter().filter(|n| !n.contains('.')));
+            }
+        }
+    }
+    if registers.is_empty() {
+        return formula.to_string();
+    }
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_' || c == '$' || c == '.';
+    let chars: Vec<char> = formula.chars().collect();
+    let mut out = String::with_capacity(formula.len() + 16);
+    let mut i = 0;
+    while i < chars.len() {
+        if is_ident(chars[i]) {
+            let start = i;
+            while i < chars.len() && is_ident(chars[i]) {
+                i += 1;
+            }
+            let tok: String = chars[start..i].iter().collect();
+            let next = chars[i..].iter().find(|c| !c.is_whitespace()).copied();
+            let prev_word: String = {
+                let mut j = start;
+                while j > 0 && chars[j - 1].is_whitespace() {
+                    j -= 1;
+                }
+                let end = j;
+                while j > 0 && chars[j - 1].is_alphabetic() {
+                    j -= 1;
+                }
+                chars[j..end].iter().collect()
+            };
+            let binder = matches!(prev_word.as_str(), "nu" | "mu") || next == Some('.');
+            if registers.contains(&tok) && !binder {
+                out.push_str(prefix);
+            }
+            out.push_str(&tok);
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    out
 }
 
 /// The modifiers a `guarantee` / `template` row's head may carry (2026-10-30).
@@ -3770,6 +3920,10 @@ fn scan_annotation_properties_with(
                                 recoverability_companion: None,
                                 written,
                             });
+                            // mununu#897 — the module the line sits in, for the per-instance
+                            // expansion once the lift's hierarchy is known.
+                            scan.guarantee_modules
+                                .push((format!("ann_guarantee_{idx}"), ann.module.clone()));
                             if mods.assume_exempt {
                                 scan.assume_exempt.push(format!("ann_guarantee_{idx}"));
                             }
@@ -5411,6 +5565,8 @@ pub(crate) fn extract_front(
     for g in &mut ann_scan.guarantees {
         g.formula = resolve_named_constants(&g.formula, &extraction.named_constants);
     }
+    // mununu#897 — an annotation inside a module follows it into every instance under the top.
+    expand_annotation_instances(&mut ann_scan, &extraction.instance_prefixes);
     let predicate_hints: Vec<String> = ann_scan
         .predicates
         .iter()
@@ -13304,6 +13460,226 @@ mod tests {
         for r in &all {
             assert!(!r.one_line().is_empty(), "{} has no rendering", r.tag());
         }
+    }
+
+    /// mununu#897 — the atom qualifier: every atom register takes the prefix, a hierarchical
+    /// name is left alone, a fixpoint binder is not an atom, and an unparsable formula comes back
+    /// unchanged.
+    #[test]
+    fn qualify_formula_atoms_prefixes_registers_and_nothing_else() {
+        assert_eq!(
+            qualify_formula_atoms("nu X. ((q != 3) && [] X)", "u_a."),
+            "nu X. ((u_a.q != 3) && [] X)"
+        );
+        // Two atoms, one of them register-vs-register: every register takes the prefix.
+        assert_eq!(
+            qualify_formula_atoms(
+                "nu X. (((cnt_q == 2) || (a == b)) && [] X)",
+                "g_arr[1].u_c."
+            ),
+            "nu X. (((g_arr[1].u_c.cnt_q == 2) || (g_arr[1].u_c.a == g_arr[1].u_c.b)) && [] X)"
+        );
+        assert_eq!(
+            qualify_formula_atoms("nu X. ((u_other.q != 3) && [] X)", "u_a."),
+            "nu X. ((u_other.q != 3) && [] X)",
+            "an already hierarchical atom is left alone"
+        );
+        // A register that shares its name with a fixpoint variable is not a supported formula
+        // (the parser reads the name as the variable); it comes back unchanged and its own
+        // binding failure reports it — pinned so a future parser change is noticed.
+        assert_eq!(
+            qualify_formula_atoms("nu q. ((q != 3) && [] q)", "u_a."),
+            "nu q. ((q != 3) && [] q)"
+        );
+        assert_eq!(
+            qualify_formula_atoms("not a formula ((", "u_a."),
+            "not a formula (("
+        );
+        assert_eq!(
+            qualify_formula_atoms("nu X. ((q == 0) && [] X)", ""),
+            "nu X. ((q == 0) && [] X)",
+            "the top's empty prefix changes nothing"
+        );
+    }
+
+    /// mununu#897 — one annotation in a module instantiated twice becomes two rows, named and
+    /// labelled by instance, atoms qualified, side tables duplicated; a top-level annotation is
+    /// unchanged; a module absent under the top keeps its row and is named in `skipped`.
+    #[test]
+    fn an_annotation_in_a_submodule_expands_to_one_row_per_instance() {
+        use crate::adapter::slang::translate::{SvaKind, TranslatedAssertion};
+        let row = |name: &str, label: Option<&str>, formula: &str| TranslatedAssertion {
+            name: name.into(),
+            label: label.map(str::to_string),
+            kind: SvaKind::Assert,
+            formula: formula.into(),
+            recoverability_companion: None,
+            written: None,
+        };
+        let loc = |line: u32| crate::trace::SourceLoc {
+            file: "design.sv".into(),
+            line,
+        };
+        let mut scan = AnnotationScan {
+            guarantees: vec![
+                row(
+                    "ann_guarantee_0",
+                    Some("in_leaf"),
+                    "nu X. ((q != 3) && [] X)",
+                ),
+                row("ann_guarantee_1", None, "AG (top_q == 0)"),
+                row("ann_guarantee_2", Some("orphan"), "AG (z == 0)"),
+            ],
+            guarantee_lines: vec![
+                ("ann_guarantee_0".into(), loc(5)),
+                ("ann_guarantee_1".into(), loc(20)),
+            ],
+            assume_exempt: vec!["ann_guarantee_0".into()],
+            template_forms: vec![("ann_guarantee_0".into(), "never_full".into())],
+            guarantee_modules: vec![
+                ("ann_guarantee_0".into(), Some("leaf".into())),
+                ("ann_guarantee_1".into(), Some("top".into())),
+                ("ann_guarantee_2".into(), Some("unused_mod".into())),
+            ],
+            ..AnnotationScan::default()
+        };
+        let prefixes = vec![
+            ("top".to_string(), String::new()),
+            ("leaf".to_string(), "u_a.".to_string()),
+            ("leaf".to_string(), "u_b.".to_string()),
+        ];
+        expand_annotation_instances(&mut scan, &prefixes);
+        let names: Vec<&str> = scan.guarantees.iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "u_a.ann_guarantee_0",
+                "u_b.ann_guarantee_0",
+                "ann_guarantee_1",
+                "ann_guarantee_2"
+            ]
+        );
+        let a = &scan.guarantees[0];
+        assert_eq!(a.label.as_deref(), Some("u_a.in_leaf"));
+        assert_eq!(a.formula, "nu X. ((u_a.q != 3) && [] X)");
+        assert_eq!(scan.guarantees[1].formula, "nu X. ((u_b.q != 3) && [] X)");
+        assert_eq!(
+            scan.guarantees[2].formula, "AG (top_q == 0)",
+            "the top's own annotation is untouched"
+        );
+        // The side tables keyed by row name follow the new names.
+        assert!(
+            scan.guarantee_lines
+                .iter()
+                .any(|(n, l)| n == "u_b.ann_guarantee_0" && l.line == 5)
+        );
+        assert!(
+            scan.assume_exempt
+                .iter()
+                .any(|n| n == "u_a.ann_guarantee_0")
+        );
+        assert!(
+            scan.assume_exempt
+                .iter()
+                .any(|n| n == "u_b.ann_guarantee_0")
+        );
+        assert!(
+            scan.template_forms
+                .iter()
+                .any(|(n, f)| n == "u_a.ann_guarantee_0" && f == "never_full")
+        );
+        assert_eq!(scan.skipped.len(), 1);
+        assert!(
+            scan.skipped[0].contains("ann_guarantee_2") && scan.skipped[0].contains("unused_mod"),
+            "{}",
+            scan.skipped[0]
+        );
+        // No hierarchy known (a non-slang translation): nothing moves.
+        let mut untouched = AnnotationScan {
+            guarantees: vec![row("ann_guarantee_0", None, "AG (q == 0)")],
+            guarantee_modules: vec![("ann_guarantee_0".into(), Some("leaf".into()))],
+            ..AnnotationScan::default()
+        };
+        expand_annotation_instances(&mut untouched, &[]);
+        assert_eq!(untouched.guarantees[0].name, "ann_guarantee_0");
+        assert!(untouched.skipped.is_empty());
+    }
+
+    /// mununu#897 END TO END (slang, `make e2e`): a `@mununu_guarantee` written inside `child`
+    /// decides under `parent` as top — one row per instance, named by instance — exactly as it
+    /// decides with `child` as top. Before this it skipped under the parent on the unbound name.
+    #[test]
+    #[ignore]
+    fn e2e_an_annotation_in_a_submodule_decides_in_every_instance_under_the_parent_top() {
+        use crate::adapter::yosys::SvFrontend;
+        let sv = "module child (input logic clk, input logic rst_n, input logic inc, output logic [1:0] q);\n\
+                  always_ff @(posedge clk or negedge rst_n)\n\
+                    if (!rst_n) q <= '0; else if (inc) q <= (q == 2'd2) ? 2'd0 : q + 2'd1;\n\
+                  // @mununu_guarantee(never_three) nu X. ((q != 3) && [] X)\n\
+                  endmodule\n\
+                  module parent (input logic clk, input logic rst_n, input logic inc_a, input logic inc_b,\n\
+                                 output logic [1:0] qa, output logic [1:0] qb);\n\
+                  child u_a (.clk, .rst_n, .inc(inc_a), .q(qa));\n\
+                  child u_b (.clk, .rst_n, .inc(inc_b), .q(qb));\n\
+                  endmodule\n";
+        let sources = vec![("design.sv".to_string(), sv.to_string())];
+        let (symbolic_engine, exact_symbolic, portfolio) = engine_selection(None);
+        let run = |top: &str| {
+            verify_auto(
+                &sources,
+                &YosysOptions {
+                    top: Some(top.to_string()),
+                    frontend: SvFrontend::Slang,
+                    ..Default::default()
+                },
+                &VerifyAutoOptions {
+                    symbolic_engine,
+                    exact_symbolic,
+                    portfolio,
+                    ..Default::default()
+                },
+            )
+            .unwrap_or_else(|e| panic!("verify_auto runs with top {top}: {}", e.message))
+        };
+        let as_child = run("child");
+        let under_parent = run("parent");
+        for r in [&as_child, &under_parent] {
+            for p in &r.properties {
+                eprintln!(
+                    "  {} ({:?}): {:?} {:?}",
+                    p.name, p.label, p.outcome, p.bottom_reason
+                );
+            }
+        }
+        let row = |r: &AutoVerifyReport, name: &str| {
+            r.properties
+                .iter()
+                .find(|p| p.name == name)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "row `{name}` in {:?}",
+                        r.properties.iter().map(|p| &p.name).collect::<Vec<_>>()
+                    )
+                })
+                .clone()
+        };
+        assert_eq!(
+            row(&as_child, "ann_guarantee_0").outcome,
+            VerifyOutcome::Holds
+        );
+        let a = row(&under_parent, "u_a.ann_guarantee_0");
+        let b = row(&under_parent, "u_b.ann_guarantee_0");
+        assert_eq!(a.outcome, VerifyOutcome::Holds, "{a:?}");
+        assert_eq!(b.outcome, VerifyOutcome::Holds, "{b:?}");
+        assert_eq!(a.label.as_deref(), Some("u_a.never_three"));
+        assert!(a.formula.contains("u_a.q"), "{}", a.formula);
+        assert!(
+            !under_parent
+                .properties
+                .iter()
+                .any(|p| p.name == "ann_guarantee_0"),
+            "the unqualified row is not reported under the parent"
+        );
     }
 
     fn j3_row(name: &str, outcome: VerifyOutcome, reason: Option<BottomReason>) -> PropertyVerdict {

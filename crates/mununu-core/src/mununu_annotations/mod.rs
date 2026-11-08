@@ -141,6 +141,13 @@ pub struct MununuAnnotation {
     /// Split here, interpreted by the consumer (an unknown key is the consumer's to refuse).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub modifiers: Vec<(String, String)>,
+    /// mununu#897 — the `module` the annotation line sits in (`module <name>` … `endmodule` in
+    /// the same text), `None` outside any module. An annotation written inside a module names
+    /// its registers by their local names; when that module is verified under a PARENT top the
+    /// lift carries them as `<instance>.<name>`, and this is what lets the row follow its module
+    /// into every instance instead of skipping on an unbound name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module: Option<String>,
 }
 
 /// A `@mununu_` line the extractor could not read (2026-10-30): a tag it does not know, or a
@@ -171,6 +178,7 @@ impl MununuAnnotation {
             source_line: None,
             name: None,
             modifiers: Vec::new(),
+            module: None,
         }
     }
 
@@ -190,6 +198,12 @@ impl MununuAnnotation {
 
     pub fn with_line(mut self, line: u32) -> Self {
         self.source_line = Some(line);
+        self
+    }
+
+    /// Record the module the annotation sits in (mununu#897).
+    pub fn with_module(mut self, module: Option<String>) -> Self {
+        self.module = module;
         self
     }
 
@@ -376,8 +390,27 @@ pub fn extract_from_sv_source_checked(text: &str) -> SvAnnotationScan {
             }),
         }
     };
+    // mununu#897 — the module each line sits in, from `module <name>` … `endmodule` at the start
+    // of a line (a line-level scan like the rest of this extractor; a `module` inside a comment
+    // starts with `//` and is not matched).
+    let mut current_module: Option<String> = None;
     for (idx, line) in text.lines().enumerate() {
         let line_no = (idx + 1) as u32;
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed
+            .strip_prefix("module ")
+            .or_else(|| trimmed.strip_prefix("macromodule "))
+        {
+            let name: String = rest
+                .trim_start()
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || matches!(c, '_' | '$'))
+                .collect();
+            current_module = (!name.is_empty()).then_some(name);
+        } else if trimmed.starts_with("endmodule") {
+            current_module = None;
+        }
+        let before = out.len();
         // First, scan for `(* mununu_xxx [= "value"] *)` attributes.
         let mut cursor = 0usize;
         while let Some(start) = line[cursor..].find("(*") {
@@ -407,6 +440,10 @@ pub fn extract_from_sv_source_checked(text: &str) -> SvAnnotationScan {
                 line_no,
                 &mut out,
             );
+        }
+        // mununu#897 — every annotation this line produced sits in the current module.
+        for ann in &mut out[before..] {
+            ann.module = current_module.clone();
         }
     }
     SvAnnotationScan {
@@ -596,6 +633,38 @@ pub fn extract_from_yosys_attributes(attrs: &serde_json::Value) -> Vec<MununuAnn
 
 #[cfg(test)]
 mod tests {
+    /// mununu#897 — each annotation knows the module it sits in; one outside any module knows
+    /// none; `endmodule` closes the scope; a `module` word inside a comment is not a module; the
+    /// attribute form is scoped the same way.
+    #[test]
+    fn an_annotation_records_the_module_it_sits_in() {
+        let text = "// @mununu_guarantee(file_level) AG (x == 0)\n\
+                    module child (input logic clk);\n\
+                      logic [1:0] q;\n\
+                      // module mention inside a comment\n\
+                      // @mununu_guarantee(in_child) nu X. ((q != 3) && [] X)\n\
+                    endmodule\n\
+                    macromodule parent (input logic clk);\n\
+                      child u_c (.clk);\n\
+                      (* mununu_guarantee = \"AG (u_c.q != 3)\" *) logic unused;\n\
+                    endmodule\n\
+                    // @mununu_guarantee(after_all) AG (y == 0)\n";
+        let anns = super::extract_from_sv_source(text);
+        let module_of = |name: &str| -> Option<Option<String>> {
+            anns.iter()
+                .find(|a| a.name.as_deref() == Some(name))
+                .map(|a| a.module.clone())
+        };
+        assert_eq!(module_of("file_level"), Some(None));
+        assert_eq!(module_of("in_child"), Some(Some("child".to_string())));
+        assert_eq!(module_of("after_all"), Some(None));
+        let attr = anns
+            .iter()
+            .find(|a| a.value.contains("u_c.q"))
+            .expect("the attribute form is scanned too");
+        assert_eq!(attr.module.as_deref(), Some("parent"));
+    }
+
     /// mununu#550 — the parenthesised name parses, and an unnamed annotation is unchanged.
     #[test]
     fn a_parenthesised_name_is_taken_off_the_tag() {
