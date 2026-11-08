@@ -12,6 +12,7 @@
 //!
 //! [licensing]
 //! file = "mununu.lic"                      # the signed licence file (Track H1, [`crate::licence`])
+//! ledger = "usage.ndjson"                  # opt-in local usage ledger (Track H3, [`crate::usage_ledger`])
 //! ```
 //!
 //! The configuration is process-wide: the CLI installs it once at start-up ([`install`]) and every
@@ -35,6 +36,11 @@ pub struct DeploymentConfig {
     /// The licence file `[licensing] file` names, resolved against this file's directory; the
     /// first place [`crate::licence::locate`] looks.
     pub licence_file: Option<PathBuf>,
+    /// Track H3 — the local usage ledger `[licensing] ledger` names (NDJSON, one record per
+    /// run, no design content), resolved against this file's directory; the first place
+    /// [`crate::usage_ledger::locate`] looks. `None` = the ledger is off unless the environment
+    /// names one.
+    pub usage_ledger: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -60,6 +66,8 @@ struct RawTemplates {
 struct RawLicensing {
     #[serde(default)]
     file: Option<PathBuf>,
+    #[serde(default)]
+    ledger: Option<PathBuf>,
 }
 
 impl DeploymentConfig {
@@ -83,12 +91,16 @@ impl DeploymentConfig {
             .into_iter()
             .map(resolve)
             .collect();
-        let licence_file = raw.licensing.and_then(|l| l.file).map(resolve);
+        let (licence_file, usage_ledger) = match raw.licensing {
+            Some(l) => (l.file.map(resolve), l.ledger.map(resolve)),
+            None => (None, None),
+        };
         Ok(DeploymentConfig {
             source: Some(path.to_path_buf()),
             template_files,
             enabled_domains: raw.enabled_domains,
             licence_file,
+            usage_ledger,
         })
     }
 }
@@ -123,10 +135,15 @@ mod tests {
     #[test]
     fn a_config_resolves_pack_paths_against_its_directory() {
         let c = DeploymentConfig::parse(
-            "enabled_domains = [\"rtl\"]\n[templates]\nfiles = [\"packs/a.json\", \"/abs/b.json\"]\n[licensing]\nfile = \"mununu.lic\"\n",
+            "enabled_domains = [\"rtl\"]\n[templates]\nfiles = [\"packs/a.json\", \"/abs/b.json\"]\n[licensing]\nfile = \"mununu.lic\"\nledger = \"usage.ndjson\"\n",
             Path::new("/etc/mununu/mununu.toml"),
         )
         .unwrap();
+        // H3 — the ledger path resolves like the licence file's.
+        assert_eq!(
+            c.usage_ledger,
+            Some(PathBuf::from("/etc/mununu/usage.ndjson"))
+        );
         assert_eq!(
             c.template_files,
             vec![
@@ -148,6 +165,7 @@ mod tests {
         assert!(err.contains("key"), "{err}");
         let none = DeploymentConfig::parse("[licensing]\n", Path::new("m.toml")).unwrap();
         assert_eq!(none.licence_file, None);
+        assert_eq!(none.usage_ledger, None, "H3 — the ledger is opt-in");
     }
 
     #[test]

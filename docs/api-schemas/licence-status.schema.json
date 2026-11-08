@@ -173,6 +173,13 @@
       ],
       "description": "The evaluation term this host is on when no valid file governs (`evaluation`, `invalid`, and `expired` with no claims); absent when a valid or expired file governs or no term could be counted."
     },
+    "ledger": {
+      "description": "Track H3 — the local usage ledger this deployment writes (`[licensing] ledger` or `MUNUNU_USAGE_LEDGER`), as a path; absent when the ledger is off. Filled by [`status`] only: the ledger is a deployment fact, not a property of the licence file.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "note": {
       "description": "A tamper note: `issued` is after today, so the file or the host clock is wrong.",
       "type": [

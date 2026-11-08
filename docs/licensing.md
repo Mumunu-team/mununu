@@ -75,6 +75,48 @@ evaluation it counts to the term's end. A `note` appears when `issued` is after 
 or the host clock is wrong. The schema is
 [`docs/api-schemas/licence-status.schema.json`](api-schemas/licence-status.schema.json).
 
+## The usage ledger (opt-in, local)
+
+> Source of truth: [`usage_ledger::record`](../crates/mununu-core/src/usage_ledger.rs) (`sv verify-auto` on the CLI and `POST /api/v1/sv/verify-auto` each write one record; `mununu licence status` / `GET /api/v1/licence` show the path as `ledger`) — surface: CLI+API
+
+Nothing phones home, so the evidence a renewal or a volume conversation stands on is a file **you**
+hold. Name it and every verification run appends one JSON line:
+
+```toml
+[licensing]
+file   = "mununu.lic"
+ledger = "/var/lib/mununu/usage.ndjson"   # or the environment variable MUNUNU_USAGE_LEDGER
+```
+
+```json
+{"ts":"2026-11-08T19:58:02Z","verb":"sv verify-auto","surface":"cli","version":"0.5.11","build":"74bca9f6…","licence_state":"valid","licence_tier":"team","licence_team":"acme-eng","result":"report","properties":44,"holds":40,"violated":2,"unknown":2,"skipped":0,"unsupported":1,"wall_ms":183420}
+```
+
+**What a record carries:** the time, the verb and surface, the binary's version and build, the
+licence state / tier / team (the invoice key), the run's result (`report`, or `error` when the
+run failed before a report — the counts are then zero), the property counts by verdict, the
+unsupported count, and the run's wall. **What it never carries:** a file name, a path, a module
+or property name, a formula, a counterexample or a note. The record type is a closed set of
+fields; a test pins the exact key list (`RECORD_KEYS`) and another builds a record from a report
+full of design names and checks that none of them reaches the line.
+
+The ledger is **off** unless named. A write that fails (a missing directory, a read-only volume) is
+reported — one stderr `warning:` line on the CLI, a `warn` in the server log — and the run is
+unaffected; a ledger must not be able to fail a verification. `mununu licence status` prints
+`ledger: <path>` or `ledger: off` with the two ways to turn it on.
+
+Reading it needs no tool:
+
+```bash
+grep -c '"verb":"sv verify-auto"' usage.ndjson                       # runs this month
+jq -s 'map(.properties) | add' usage.ndjson                            # properties verified
+jq -r 'select(.result=="error") | .ts' usage.ndjson                    # the runs that failed before a report
+jq -s 'group_by(.licence_team) | map({team: .[0].licence_team, runs: length})' usage.ndjson
+```
+
+The on-prem bundle mounts a directory for it (`deploy/compose.yaml`, commented out by default).
+Mail the file, feed your own dashboard, or delete it; it is yours.
+
 ## The format
 
 A JSON envelope over a signed payload:

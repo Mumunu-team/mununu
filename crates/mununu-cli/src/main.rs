@@ -4824,8 +4824,29 @@ fn sv_verify_auto(args: SvVerifyAutoArgs) -> Result<(), String> {
         },
     };
 
-    let report = verify_auto(&sources, &yopts, &opts)
-        .map_err(|e| format!("sv verify-auto: {}", e.message))?;
+    let started = std::time::Instant::now();
+    let outcome = verify_auto(&sources, &yopts, &opts);
+    // Track H3 — one usage-ledger record per run, success or failure, written HERE: below, the
+    // CI gate exits the process, and a record written after it would be lost on every red run.
+    // Counts and identities only, never design content (`usage_ledger`'s key-set test).
+    {
+        use mununu_core::usage_ledger::{LedgerWrite, Surface, UsageRecord};
+        let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let rec = UsageRecord::for_run(
+            "sv verify-auto",
+            Surface::Cli,
+            outcome.as_ref().ok(),
+            wall_ms,
+        );
+        if let LedgerWrite::Failed { path, error } = mununu_core::usage_ledger::record(&rec) {
+            eprintln!(
+                "warning: usage ledger {}: {error} — this run's record is lost; the run itself is \
+                 unaffected",
+                path.display()
+            );
+        }
+    }
+    let report = outcome.map_err(|e| format!("sv verify-auto: {}", e.message))?;
 
     // mununu#537 — evaluate the caller's claims against the report. `None` when nothing was
     // claimed, which leaves the ordinary verdict gate in charge.
@@ -9753,6 +9774,14 @@ fn render_licence_status(status: &mununu_core::licence::LicenceStatus) -> String
     if let Some(note) = &status.note {
         out.push_str(&format!("  note:      {note}\n"));
     }
+    // H3 — the usage ledger is opt-in; say where it is, or how to turn it on.
+    match &status.ledger {
+        Some(path) => out.push_str(&format!("  ledger:    {path}\n")),
+        None => out.push_str(
+            "  ledger:    off (opt-in: `[licensing] ledger = \"usage.ndjson\"` in mununu.toml, or \
+             MUNUNU_USAGE_LEDGER)\n",
+        ),
+    }
     out
 }
 
@@ -10826,6 +10855,7 @@ mod build_identity_tests {
             reason: None,
             note: None,
             evaluation: None,
+            ledger: None,
         };
         let text = crate::render_licence_status(&valid);
         for line in [
