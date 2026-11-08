@@ -102,3 +102,7 @@ scratchpad/
 # examples/industrial/*/publications/ are tracked on purpose.
 /publications/
 /scripts/*.plist
+
+# Roadmap H5 — the on-prem bundle: the UI build copied in by scripts/bundle.sh, and its output.
+/deploy/ui-dist/
+/dist-bundle/

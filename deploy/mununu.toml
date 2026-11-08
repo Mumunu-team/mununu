@@ -1,0 +1,15 @@
+# mununu on-prem bundle — the deployment configuration (deploy/README.md; the format is
+# crates/mununu-core/src/deployment.rs). compose.yaml mounts this file at /etc/mununu/mununu.toml.
+
+# The template domains this deployment shows (omit the line for all of them).
+enabled_domains = ["rtl", "universal"]
+
+[templates]
+# Template packs (TemplateCatalog JSON) layered over the built-in catalog — paths inside the
+# container, e.g. a pack kept beside your designs: ["/work/packs/our-rtl-safety.json"].
+files = []
+
+[licensing]
+# The licence file you were issued; compose mounts it here. Without it the bundle runs as a
+# 30-day evaluation counted from the container's first start (docs/licensing.md).
+file = "/etc/mununu/mununu.lic"
