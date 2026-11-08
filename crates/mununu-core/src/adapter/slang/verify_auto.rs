@@ -1078,6 +1078,14 @@ pub struct AutoVerifyReport {
     /// carries instead of a fresh run (`decided_by: resumed`). Empty unless the run was given
     /// `resume_from`. A resumed row has no counterexample, vacuity finding, predicates or wall.
     pub resumed: std::collections::BTreeMap<String, String>,
+    /// J4c — the whole run's wall, milliseconds, measured at the entry (`verify_auto`), the
+    /// resume parse and the row-facts write included. With `lift_ms` and the sum of
+    /// `property_wall_ms` it gives the time no property accounts for — the figure the first real
+    /// run had to infer from a log (495 s of 660 s on edn). `None` on a report built elsewhere.
+    pub run_ms: Option<u64>,
+    /// J4c — the lift (`prepare_model`: SV → BTOR2 and its re-lifts), paid once per run, not per
+    /// property. `None` when the run never lifted (an empty extraction's report says so).
+    pub lift_ms: Option<u64>,
 }
 
 /// The skip reason for a property whose atoms reference non-state signals,
@@ -4891,8 +4899,11 @@ pub fn verify_auto(
             only_rows: Some(rows),
             ..opts.clone()
         });
-    let report = verify_auto_with(sources, yosys_opts, selected.as_ref().unwrap_or(opts))?;
+    // J4c — the run's own wall, measured where the run begins and ends.
+    let run_t0 = std::time::Instant::now();
+    let mut report = verify_auto_with(sources, yosys_opts, selected.as_ref().unwrap_or(opts))?;
     crate::adapter::row_facts::write_from_env(&report);
+    report.run_ms = Some(u64::try_from(run_t0.elapsed().as_millis()).unwrap_or(u64::MAX));
     Ok(report)
 }
 
@@ -5050,13 +5061,18 @@ fn verify_auto_dispatch(
     // under the runtime soundness guard, attach the rationale telemetry). Verdict-equivalent to the
     // former inline `verify_auto_portfolio`; the routing reasoning now lives in the planner.
     if opts.portfolio.is_some() {
+        // J4c — the lift is paid once per run, here; the members share the prepared model.
+        let lift_t0 = std::time::Instant::now();
         return match prepare_model(sources, yosys_opts, opts)? {
             Prepared::Empty(report) => {
                 let mut report = *report;
+                report.lift_ms =
+                    Some(u64::try_from(lift_t0.elapsed().as_millis()).unwrap_or(u64::MAX));
                 finish_assumptions(&mut report);
                 Ok(report)
             }
             Prepared::Model(m) => {
+                let lift_ms = u64::try_from(lift_t0.elapsed().as_millis()).unwrap_or(u64::MAX);
                 let m = *m;
                 let task = crate::planner::VerificationTask {
                     sources,
@@ -5068,6 +5084,8 @@ fn verify_auto_dispatch(
                 // The merge builds its report from the operators'; the assumption summary is the
                 // prepared model's, whatever the merge kept.
                 report.assumptions = m.report.assumptions.clone();
+                // …and so is the lift's wall (the members lifted nothing).
+                report.lift_ms = Some(lift_ms);
                 finish_assumptions(&mut report);
                 Ok(report)
             }
@@ -6631,6 +6649,8 @@ pub(crate) fn verify_auto_impl(
     // ONCE by the planner (`prepare_model`) and shared across the precision-ladder operators (so the
     // two subprocesses + the prep run once, not per engine); `None` on the single-engine path, where
     // it is built inline here. A design with no properties returns its (complete) empty report.
+    // J4c — the lift's wall when this call lifts (the single-engine path); `None` on a shared model.
+    let mut lift_ms: Option<u64> = None;
     let PreparedModel {
         btor2,
         mut report,
@@ -6642,10 +6662,23 @@ pub(crate) fn verify_auto_impl(
         source_index,
     } = match prepared {
         Some(m) => m,
-        None => match prepare_model(sources, yosys_opts, opts)? {
-            Prepared::Empty(r) => return Ok(*r),
-            Prepared::Model(m) => *m,
-        },
+        None => {
+            // J4c — the single-engine path lifts here; the wall is the report's `lift_ms`.
+            let lift_t0 = std::time::Instant::now();
+            match prepare_model(sources, yosys_opts, opts)? {
+                Prepared::Empty(r) => {
+                    let mut r = *r;
+                    r.lift_ms =
+                        Some(u64::try_from(lift_t0.elapsed().as_millis()).unwrap_or(u64::MAX));
+                    return Ok(r);
+                }
+                Prepared::Model(m) => {
+                    lift_ms =
+                        Some(u64::try_from(lift_t0.elapsed().as_millis()).unwrap_or(u64::MAX));
+                    *m
+                }
+            }
+        }
     };
 
     // State-cell symbols of the augmented design — the seedable-atom universe.
@@ -6850,6 +6883,12 @@ pub(crate) fn verify_auto_impl(
         .as_ref()
         .filter(|f| !f.injected.is_empty())
         .and_then(|_| crate::adapter::btor2::parser::parse(&btor2).ok());
+    // J4c (2026-11-08) — the row whose wall is still being counted: charged at the top of the
+    // NEXT iteration (and once after the loop), whatever path this body leaves by. The single
+    // accumulation at the bottom of the body sat after thirteen `continue`s — the exact member's
+    // rows, the constant fold, the recoverability ladder, every refusal — so the first real run
+    // charged 495 s of a 660 s run to nobody (the box's J2 data run on edn).
+    let mut pending_wall: Option<(String, std::time::Instant)> = None;
     for t in &extraction.translated {
         // Flush whatever the PREVIOUS iteration decided, before this one starts its (possibly
         // very long, possibly fatal) work. One call here covers all nine `properties.push` sites
@@ -6861,6 +6900,12 @@ pub(crate) fn verify_auto_impl(
                 .map(|p| (p.name.as_str(), p.outcome.label())),
             "main",
         );
+        // J4c — charge the previous iteration's wall to its row (see `pending_wall` above).
+        if let Some((name, t0)) = pending_wall.take() {
+            *report.property_wall_ms.entry(name).or_insert(0) +=
+                u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX);
+        }
+        pending_wall = Some((t.name.clone(), std::time::Instant::now()));
         // Plan 4 / PR D3 (mununu#733) — an earlier sequential member decided this row; the merge
         // keeps that verdict, so this member records "not attempted" and spends nothing on it —
         // before the budget sentinels (no budget consumed, never mislabelled `BudgetExpired`) and as
@@ -7696,8 +7741,9 @@ pub(crate) fn verify_auto_impl(
         // definite cube verdict is sound by over-approximation; the A.4 honest-⊥
         // downgrade (a stopgap for the retired sampling-may under-approximation)
         // is no longer needed.
+        // J4c — the report's wall for this row is charged by `pending_wall` at the top of the
+        // next iteration (so every exit path is covered); this figure feeds the stderr line only.
         let prop_ms = u64::try_from(prop_t0.elapsed().as_millis()).unwrap_or(u64::MAX);
-        *report.property_wall_ms.entry(t.name.clone()).or_insert(0) += prop_ms;
         if print_timing {
             eprintln!(
                 "[mununu-timing] property={} outcome={} elapsed_ms={} phase=main",
@@ -7729,6 +7775,11 @@ pub(crate) fn verify_auto_impl(
     // `rescue_bottom_*` opt and only fires on its recognized shape. (P2.1b routes the
     // re-plan entry through the planner, delegating the edge-application to the existing
     // rescue subsystem — verdict-equivalent; P2.1c adds the soundness plan-invariants.)
+    // J4c — the last iteration's wall, for the same reason.
+    if let Some((name, t0)) = pending_wall.take() {
+        *report.property_wall_ms.entry(name).or_insert(0) +=
+            u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX);
+    }
     // C7 — the last iteration's verdict has not been flushed yet (the flush happens at the top of
     // the NEXT iteration, and there isn't one).
     breadcrumb.record_pending(
@@ -7907,6 +7958,10 @@ pub(crate) fn verify_auto_impl(
     }
     report.notes.extend(rescue_notes);
     report.notes.extend(exact_skip_notes);
+    // J4c — the lift this call paid (the single-engine path); the portfolio path sets its own.
+    if lift_ms.is_some() {
+        report.lift_ms = lift_ms;
+    }
     // The cost-annotated plan telemetry (`plan-cost` / `plan-accuracy`) is NO LONGER computed here:
     // it is the planner's job now (`plan` builds the rationale from the shared prepared model,
     // `execute` attaches it after the merge). This body is the pure per-engine leaf.
@@ -14504,6 +14559,8 @@ module uart_tx(); endmodule"#;
             property_wall_ms: Default::default(),
             routing: Vec::new(),
             resumed: Default::default(),
+            run_ms: None,
+            lift_ms: None,
         };
         let notes = build_notes(
             &report,
@@ -14696,6 +14753,8 @@ module uart_tx(); endmodule"#;
                 property_wall_ms: Default::default(),
                 routing: Vec::new(),
                 resumed: Default::default(),
+                run_ms: None,
+                lift_ms: None,
             }
             .pipe(|mut r| {
                 check_antecedent_vacuity(&mut r, model, false, &applied0.sec_cm_rows);
@@ -14750,6 +14809,8 @@ module uart_tx(); endmodule"#;
             property_wall_ms: Default::default(),
             routing: Vec::new(),
             resumed: Default::default(),
+            run_ms: None,
+            lift_ms: None,
         };
         let notes = build_notes(
             &with,
@@ -14863,6 +14924,8 @@ module uart_tx(); endmodule"#;
             property_wall_ms: Default::default(),
             routing: Vec::new(),
             resumed: Default::default(),
+            run_ms: None,
+            lift_ms: None,
         };
         let notes = build_notes(
             &report,
@@ -14924,6 +14987,8 @@ module uart_tx(); endmodule"#;
             property_wall_ms: Default::default(),
             routing: Vec::new(),
             resumed: Default::default(),
+            run_ms: None,
+            lift_ms: None,
         };
         let ap = |posture: &NotePosture| {
             build_notes(

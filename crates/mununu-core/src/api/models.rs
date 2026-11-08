@@ -2336,6 +2336,46 @@ pub struct SvVerifyAutoResponse {
     /// `grace`, `expired`, `invalid`, `missing`), with the tier and expiry when a file parsed.
     /// Informational, like `build`: no state changes a verdict.
     pub licence: crate::licence::LicenceSummary,
+    /// J4c — where the run's wall went: the whole run, the lift, the sum of the rows' `wall_ms`,
+    /// and the remainder no row accounts for. Present when the run measured itself (every CLI
+    /// and API run); absent on a report built elsewhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timing: Option<RunTimingView>,
+}
+
+/// J4c — the run's wall, split (milliseconds). `unattributed_ms` = `run_ms` − `lift_ms` −
+/// `properties_ms`, saturating at zero: the time outside the lift that no property's `wall_ms`
+/// carries — scheduling, merging, report building, and any engine-side work a row did not get
+/// charged for. The first real run inferred this figure from a log (495 s of 660 s on edn, before
+/// the per-row charging was made total); now it is a field, and a large value is a finding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct RunTimingView {
+    pub run_ms: u64,
+    /// `None` when the run never lifted (an empty extraction).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lift_ms: Option<u64>,
+    /// The sum of every row's `wall_ms`.
+    pub properties_ms: u64,
+    pub unattributed_ms: u64,
+}
+
+impl RunTimingView {
+    /// The split for a report, or `None` when the run did not measure itself.
+    pub fn derive(report: &crate::adapter::slang::verify_auto::AutoVerifyReport) -> Option<Self> {
+        let run_ms = report.run_ms?;
+        let properties_ms = report
+            .property_wall_ms
+            .values()
+            .fold(0u64, |acc, ms| acc.saturating_add(*ms));
+        Some(RunTimingView {
+            run_ms,
+            lift_ms: report.lift_ms,
+            properties_ms,
+            unattributed_ms: run_ms
+                .saturating_sub(report.lift_ms.unwrap_or(0))
+                .saturating_sub(properties_ms),
+        })
+    }
 }
 
 /// What `sv verify-auto` did with the design's `assume` statements.
@@ -2596,6 +2636,8 @@ impl From<&crate::adapter::slang::verify_auto::AutoVerifyReport> for SvVerifyAut
             build: build.map(|b| b.sha.clone()),
             build_clean: build.map(|b| b.clean),
             licence: crate::licence::status().summary(),
+            // J4c — the run's wall split; absent when the report did not measure itself.
+            timing: RunTimingView::derive(report),
             assumptions,
             properties,
             unsupported: report
@@ -3355,6 +3397,41 @@ mod bottom_reason_view_tests {
 
     /// An `ltl` row reaches the wire as its author wrote it, tagged, with the mu-calculus beside
     /// it; a mu-calculus row is tagged so and carries nothing beside its formula (2026-10-29).
+    /// J4c — the run's wall split: run − lift − Σ rows = the unattributed remainder, saturating;
+    /// absent when the report never measured its run.
+    #[test]
+    fn the_run_timing_split_is_the_remainder_no_row_accounts_for() {
+        let mut report = AutoVerifyReport {
+            run_ms: Some(1_000),
+            lift_ms: Some(200),
+            ..Default::default()
+        };
+        report.property_wall_ms.insert("a".into(), 120);
+        report.property_wall_ms.insert("b".into(), 180);
+        assert_eq!(
+            RunTimingView::derive(&report),
+            Some(RunTimingView {
+                run_ms: 1_000,
+                lift_ms: Some(200),
+                properties_ms: 300,
+                unattributed_ms: 500,
+            })
+        );
+        // Rows charged more than the run measured (clock skew across threads) saturate at zero.
+        report.property_wall_ms.insert("c".into(), 5_000);
+        assert_eq!(RunTimingView::derive(&report).unwrap().unattributed_ms, 0);
+        // No lift (an empty extraction) is a `None`, not a zero that looks measured.
+        report.lift_ms = None;
+        assert_eq!(RunTimingView::derive(&report).unwrap().lift_ms, None);
+        // A report that never measured its run has no split at all.
+        report.run_ms = None;
+        assert_eq!(RunTimingView::derive(&report), None);
+        let view = SvVerifyAutoResponse::from(&report);
+        assert!(view.timing.is_none());
+        let json = serde_json::to_value(&view).unwrap();
+        assert!(json.get("timing").is_none(), "absent, not null");
+    }
+
     /// Roadmap J4 at the report seam: a timed, routed property shows `wall_ms` and `routing`;
     /// an untimed, unrouted one shows neither — nothing is invented.
     #[test]

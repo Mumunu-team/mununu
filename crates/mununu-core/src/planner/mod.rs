@@ -1239,6 +1239,8 @@ mod tests {
             property_wall_ms: Default::default(),
             routing: Vec::new(),
             resumed: Default::default(),
+            run_ms: None,
+            lift_ms: None,
         }
     }
 
@@ -1368,6 +1370,8 @@ mod tests {
             property_wall_ms: Default::default(),
             routing: Vec::new(),
             resumed: Default::default(),
+            run_ms: None,
+            lift_ms: None,
         };
         let notes = skip_over_cap_notes(&report, btor2);
         let oom: Vec<_> = notes
