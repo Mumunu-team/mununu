@@ -569,6 +569,12 @@ pub struct ModelDiagnostics {
     /// changed. A renumbering elsewhere in the design moves it too — a false miss, never a
     /// false hit. Absent for a row whose formula does not parse or names no atom.
     pub cone_hashes: Vec<(String, String)>,
+    /// N5 census column (2026-11-08) — the array-sorted `state`s in each property's cone, by row
+    /// name: [`Btor2File::array_state_names`](crate::adapter::btor2::ast::Btor2File::array_state_names)
+    /// over the same `cone_slice` [`Self::cone_hashes`] hashes, so a row that has a hash has an
+    /// entry here (empty when its cone holds no memory). Written to the row-facts file as
+    /// `cone_array_states`. Not part of any wire report, and nothing on a verdict path reads it.
+    pub cone_array_states: Vec<(String, Vec<String>)>,
     /// The repair candidates of each violated row (2026-10-30, `--localize`), by row name: the
     /// registers whose next-state function, freed at some cycles with the counterexample's inputs
     /// fixed, let the property survive the trace, and what limited the search. Empty unless
@@ -2231,6 +2237,7 @@ fn attach_involves(
     let aliases = &report.diagnostics.trace_names.aliases;
     let mut involves = Vec::new();
     let mut cone_hashes = Vec::new();
+    let mut cone_array_states = Vec::new();
     for p in &report.properties {
         let Ok(formula) = crate::mu_calculus::parser::parse(&p.formula) else {
             continue;
@@ -2239,8 +2246,11 @@ fn attach_involves(
         if atoms.is_empty() {
             continue;
         }
-        // N0.1 — the cone's identity, whether or not a source map exists to name its lines.
-        cone_hashes.push((p.name.clone(), cone_hash(&file, &p.formula, &atoms)));
+        // N0.1 — the cone's identity, whether or not a source map exists to name its lines. The
+        // N5 census column reads the same slice: one cone per row, two facts about it.
+        let slice = crate::adapter::btor2::bit_blast::cone_slice(&file, &atoms);
+        cone_hashes.push((p.name.clone(), cone_hash(&slice, &p.formula)));
+        cone_array_states.push((p.name.clone(), slice.array_state_names()));
         if no_source_map {
             continue;
         }
@@ -2272,19 +2282,15 @@ fn attach_involves(
     }
     report.diagnostics.involves = involves;
     report.diagnostics.cone_hashes = cone_hashes;
+    report.diagnostics.cone_array_states = cone_array_states;
 }
 
 /// N0.1 — a property's cone identity: FNV-1a over its formula and the text of the BTOR2 slice
 /// it depends on (`cone_slice`: data flow plus constraint / fairness coupling, NIDs preserved).
 /// Anything that changes what decides the row changes it; a renumbering elsewhere changes it
 /// too (a false miss the ledger pays with one re-run, never a false hit). 16 hex digits.
-fn cone_hash(
-    file: &crate::adapter::btor2::ast::Btor2File,
-    formula: &str,
-    atoms: &[String],
-) -> String {
-    let slice = crate::adapter::btor2::bit_blast::cone_slice(file, atoms);
-    let text = crate::adapter::btor2::emit::emit_btor2(&slice);
+fn cone_hash(slice: &crate::adapter::btor2::ast::Btor2File, formula: &str) -> String {
+    let text = crate::adapter::btor2::emit::emit_btor2(slice);
     let mut bytes = Vec::with_capacity(formula.len() + 1 + text.len());
     bytes.extend_from_slice(formula.as_bytes());
     bytes.push(b'\n');

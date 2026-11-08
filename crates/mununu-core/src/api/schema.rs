@@ -353,6 +353,7 @@ mod tests {
                 )],
                 repairs: Vec::new(),
                 cone_hashes: Vec::new(),
+                cone_array_states: Vec::new(),
                 involves: vec![(
                     "ann_guarantee_0".into(),
                     vec![

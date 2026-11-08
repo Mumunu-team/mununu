@@ -6,7 +6,8 @@
 //! done): `index`, `property`, `label`, `kind`, `formula`, `outcome`, `decided_by`,
 //! `bottom_reason` and `cone_hash` — the identity of what decides the row
 //! (`ModelDiagnostics::cone_hashes`), which is what lets the ledger re-run only the rows whose
-//! cone changed. Seconds are not here: `MUNUNU_PROPERTY_TIMING` already prints them per row and
+//! cone changed — and, for the N5 census column (2026-11-08), `cone_array_states` /
+//! `cone_array_state_names`: how many array-sorted states that cone holds, and which. Seconds are not here: `MUNUNU_PROPERTY_TIMING` already prints them per row and
 //! phase, and the ledger sums those lines.
 //!
 //! Unlike the breadcrumb (`partial_json`) this is not SIGKILL-survivable and does not try to be:
@@ -22,7 +23,17 @@ pub const ROW_FACTS_ENV: &str = "MUNUNU_VERIFY_AUTO_ROW_FACTS";
 
 /// One record. `serde_json` rather than `format!`, so a label or formula with a quote or a
 /// newline cannot split or forge a line.
-pub fn facts_line(index: usize, p: &PropertyVerdict, cone_hash: Option<&str>) -> String {
+///
+/// N5 census column (2026-11-08): `cone_array_states` is the number of array-sorted states in
+/// the row's cone and `cone_array_state_names` their names
+/// (`ModelDiagnostics::cone_array_states`). Both are `null` for a row with no cone, which keeps
+/// "no memory in the cone" (`0`, `[]`) apart from "no cone computed".
+pub fn facts_line(
+    index: usize,
+    p: &PropertyVerdict,
+    cone_hash: Option<&str>,
+    cone_array_states: Option<&[String]>,
+) -> String {
     let kind = match p.kind {
         SvaKind::Assert => "assert",
         SvaKind::Assume => "assume",
@@ -47,6 +58,14 @@ pub fn facts_line(index: usize, p: &PropertyVerdict, cone_hash: Option<&str>) ->
         serde_json::Value::from(p.bottom_reason.as_ref().map(|r| r.tag())),
     );
     obj.insert("cone_hash".into(), serde_json::Value::from(cone_hash));
+    obj.insert(
+        "cone_array_states".into(),
+        serde_json::Value::from(cone_array_states.map(<[String]>::len)),
+    );
+    obj.insert(
+        "cone_array_state_names".into(),
+        serde_json::Value::from(cone_array_states.map(<[String]>::to_vec)),
+    );
     serde_json::Value::Object(obj).to_string()
 }
 
@@ -76,7 +95,13 @@ pub(crate) fn write_to_path(path: &str, report: &AutoVerifyReport) -> std::io::R
             .iter()
             .find(|(name, _)| *name == p.name)
             .map(|(_, h)| h.as_str());
-        out.push_str(&facts_line(i, p, hash));
+        let arrays = report
+            .diagnostics
+            .cone_array_states
+            .iter()
+            .find(|(name, _)| *name == p.name)
+            .map(|(_, a)| a.as_slice());
+        out.push_str(&facts_line(i, p, hash, arrays));
         out.push('\n');
     }
     std::fs::write(path, out)
@@ -114,7 +139,7 @@ mod tests {
             VerifyOutcome::Holds,
         );
         p.decided_by = Some("exact-symbolic".into());
-        let line = facts_line(3, &p, Some("00ff00ff00ff00ff"));
+        let line = facts_line(3, &p, Some("00ff00ff00ff00ff"), Some(&["mem".to_string()]));
         assert!(!line.contains('\n'));
         let v: serde_json::Value = serde_json::from_str(&line).unwrap();
         assert_eq!(v["index"], 3);
@@ -125,17 +150,23 @@ mod tests {
         assert_eq!(v["decided_by"], "exact-symbolic");
         assert_eq!(v["bottom_reason"], serde_json::Value::Null);
         assert_eq!(v["cone_hash"], "00ff00ff00ff00ff");
+        assert_eq!(v["cone_array_states"], 1);
+        assert_eq!(v["cone_array_state_names"], serde_json::json!(["mem"]));
         let mut bottom = row(
             "top_sva_1",
             None,
             VerifyOutcome::Unknown { unknown_cells: 1 },
         );
         bottom.bottom_reason = Some(BottomReason::NotAttempted);
-        let v: serde_json::Value = serde_json::from_str(&facts_line(0, &bottom, None)).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&facts_line(0, &bottom, None, None)).unwrap();
         assert_eq!(v["label"], serde_json::Value::Null);
         assert_eq!(v["outcome"], "unknown");
         assert_eq!(v["bottom_reason"], "not-attempted");
         assert_eq!(v["cone_hash"], serde_json::Value::Null);
+        // No cone computed is `null`, not `0`: "no memory" and "no cone" stay apart.
+        assert_eq!(v["cone_array_states"], serde_json::Value::Null);
+        assert_eq!(v["cone_array_state_names"], serde_json::Value::Null);
     }
 
     /// The file has one record per row in report order, each with its own cone hash (or none).
@@ -156,6 +187,10 @@ mod tests {
             .diagnostics
             .cone_hashes
             .push(("p1".into(), "0123456789abcdef".into()));
+        report
+            .diagnostics
+            .cone_array_states
+            .push(("p1".into(), Vec::new()));
         write_to_path(path.to_str().unwrap(), &report).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         let lines: Vec<serde_json::Value> = text
@@ -169,5 +204,7 @@ mod tests {
         assert_eq!(lines[1]["label"], "l1");
         assert_eq!(lines[1]["outcome"], "violated");
         assert_eq!(lines[1]["cone_hash"], "0123456789abcdef");
+        assert_eq!(lines[0]["cone_array_states"], serde_json::Value::Null);
+        assert_eq!(lines[1]["cone_array_states"], 0);
     }
 }
