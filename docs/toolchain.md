@@ -35,8 +35,16 @@ the PR touches the workflow or its scripts (macOS minutes cost 10× Linux). Each
 passes `scripts/test_count_gate.sh`, and `scripts/os_matrix_compare.sh` then requires the three
 counts to agree within the allowance of
 [`measurements/os-matrix-unix-only-tests.txt`](../measurements/os-matrix-unix-only-tests.txt) (the
-tests that test a Unix-only mechanism, by name; empty today). A lane that runs fewer tests and goes
-green is C3's bug in a new coat; a test is made to run everywhere, never `cfg`-skipped to go green.
+tests that test a Unix-only mechanism, by name). A lane that runs fewer tests and goes green is
+C3's bug in a new coat; a test is made to run everywhere, never `cfg`-skipped to go green.
+
+**First measurement (2026-11-08, the PR that added the workflow):** Linux 3746 tests passed, macOS
+3746 — identical suites; Windows built, linked Z3 from the zip, and ran 3740: three tests failed
+on the host separator or a CRLF checkout (fixed in the same PR: a test split a rendered path on
+`/`, a test spelled a `/`-joined expectation for a path the code joins with the host separator, a
+baseline file was compared byte-wise against an LF snapshot), and three tests do not exist there —
+the two `#![cfg(unix)]` binaries that drive a process group and a `/bin/sh` launcher — which is what
+the allowance file names, each with its issue.
 
 ## Bumping the toolchain
 

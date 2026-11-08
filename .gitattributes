@@ -1,0 +1,6 @@
+# Roadmap I1 — every checkout gets LF line endings, on Windows too. A test that compares a committed
+# fixture byte-wise with text the code produces (the R.3 verdict baseline, the API schemas) must
+# see the bytes that were committed, not a `core.autocrlf` rewrite of them; the first native
+# Windows run of the suite failed on exactly that. No tracked file carried CRLF when this was
+# added (`git ls-files --eol`), so nothing is renormalised.
+* text=auto eol=lf

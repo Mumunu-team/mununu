@@ -4,3 +4,11 @@
 # this file does not explain fails the workflow. A test is listed here only when it tests an
 # OS-specific mechanism (a Unix signal, a process group); a test that merely spells a Unix path
 # is made to run everywhere instead. Empty = every OS runs every test.
+#
+# Listed 2026-11-08 from the first Windows run (mununu#904 ports them): the two `#![cfg(unix)]`
+# binaries. member_kill_875 drives a Unix process group — on Windows a forked solver still
+# outlives its member's timeout, which is #904's first half, not a test to skip. probe_timeout_876
+# tests a portable mechanism through a /bin/sh launcher; its Windows launcher is #904's second half.
+member_kill_875::a_timed_out_member_leaves_no_forked_solver_behind	Unix process group; Windows = mununu#904 (Job Object)
+member_kill_875::a_forked_solver_holding_the_pipes_does_not_stall_the_member_past_its_timeout	Unix process group; Windows = mununu#904 (Job Object)
+probe_timeout_876::a_tool_that_hangs_on_its_probe_is_reported_unavailable_within_the_budget	/bin/sh launcher fixture; Windows launcher = mununu#904

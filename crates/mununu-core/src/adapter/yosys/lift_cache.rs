@@ -483,9 +483,17 @@ mod tests {
         std::fs::write(inc.join("nested").join("c.vh"), "c").unwrap();
         let missing = dir.path().join("absent");
         let files = collect_include_files(&[inc.clone(), missing, inc.clone()]).unwrap();
-        let names: Vec<&str> = files
+        // The rendered path uses the host's separator (`\` on Windows): take the file name
+        // through `Path`, not by splitting on `/`.
+        let names: Vec<String> = files
             .iter()
-            .map(|(p, _)| p.rsplit('/').next().unwrap())
+            .map(|(p, _)| {
+                std::path::Path::new(p)
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
             .collect();
         assert_eq!(names, ["a.svh", "b.svh", "c.vh"]);
         assert_eq!(files[2].1, "c");

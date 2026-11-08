@@ -5027,11 +5027,16 @@ mod lift_cache_tests {
         assert_eq!(m.attempt.frontend, "slang");
         assert!(!m.attempt.cwd_in_staging_dir);
         assert!(m.attempt.plugin.is_none() && m.attempt.sv2v.is_none());
+        // The staged file is rendered with the host's separator (`staging\work.sv` on Windows,
+        // which yosys there accepts): the manifest renders the plan the run executes on THIS
+        // host, so the expectation is built the same way, not spelled with `/`.
+        let work = Path::new("/mununu-lift-cache/staging").join("work.sv");
         assert!(
-            m.attempt.script.contains(
+            m.attempt.script.contains(&format!(
                 "read_slang --ignore-assertions --ignore-timing --empty-blackboxes --top m \
-                 -I/mununu-lift-cache/staging /mununu-lift-cache/staging/work.sv"
-            ),
+                 -I/mununu-lift-cache/staging {}",
+                work.display()
+            )),
             "{}",
             m.attempt.script
         );
