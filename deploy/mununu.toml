@@ -13,3 +13,7 @@ files = []
 # The licence file you were issued; compose mounts it here. Without it the bundle runs as a
 # 30-day evaluation counted from the container's first start (docs/licensing.md).
 file = "/etc/mununu/mununu.lic"
+# Opt-in local usage ledger: one JSON line per verification run (counts, build, licence — never
+# design content; docs/licensing.md § The usage ledger). Uncomment here AND the volume in
+# compose.yaml so the file outlives the container.
+# ledger = "/var/lib/mununu/usage.ndjson"

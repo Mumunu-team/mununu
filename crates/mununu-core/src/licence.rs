@@ -212,6 +212,11 @@ pub struct LicenceStatus {
     /// could be counted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evaluation: Option<EvaluationTerm>,
+    /// Track H3 — the local usage ledger this deployment writes (`[licensing] ledger` or
+    /// `MUNUNU_USAGE_LEDGER`), as a path; absent when the ledger is off. Filled by [`status`]
+    /// only: the ledger is a deployment fact, not a property of the licence file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ledger: Option<String>,
 }
 
 /// The three-field summary `/api/v1/health` and every report carry next to `build`.
@@ -244,6 +249,7 @@ impl LicenceStatus {
             reason: Some(reason),
             note: None,
             evaluation: None,
+            ledger: None,
         }
     }
 
@@ -261,6 +267,7 @@ impl LicenceStatus {
             )),
             note: None,
             evaluation: None,
+            ledger: None,
         }
     }
 
@@ -290,6 +297,7 @@ impl LicenceStatus {
             }),
             note: None,
             evaluation: Some(term),
+            ledger: None,
         }
     }
 
@@ -391,7 +399,7 @@ impl std::fmt::Display for Day {
 
 /// Civil date of days since 1970-01-01 (Howard Hinnant's algorithm, the inverse of
 /// `days_from_civil`).
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
+pub(crate) fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z - era * 146_097;
@@ -594,6 +602,7 @@ pub fn evaluate(
         reason: None,
         note,
         evaluation: None,
+        ledger: None,
     }
 }
 
@@ -617,7 +626,14 @@ pub fn locate() -> Result<Option<PathBuf>, String> {
 /// The status of this deployment's licence today, against the compiled-in issuer keys, with
 /// the evaluation term from this host's first-run stamp where no valid file governs.
 pub fn status() -> LicenceStatus {
-    status_at(Day::today(), stamp_dir().as_deref())
+    let mut st = status_at(Day::today(), stamp_dir().as_deref());
+    // H3 — where the usage ledger goes, if anywhere. A deployment-configuration error is already
+    // this status's `reason` (the licence's `locate` reads the same file), so `Err` adds nothing.
+    st.ledger = crate::usage_ledger::locate()
+        .ok()
+        .flatten()
+        .map(|p| p.display().to_string());
+    st
 }
 
 /// [`status`] on a given day with a given stamp directory (`None` = no home directory).

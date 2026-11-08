@@ -60,6 +60,10 @@ Not in it: sv2v (the dev-only differential oracle), the e2e suite, any Rust tool
   at 80 % of it and the remaining properties abstain with a note — raise the limit, not the ceiling.
 - The licence file is mounted at `/etc/mununu/mununu.lic` and named by `mununu.toml`. Without it the
   bundle runs as a 30-day evaluation counted from the container's first start ([`docs/licensing.md`](../docs/licensing.md)).
+- The usage ledger is **off** by default. To keep one (one JSON line per verification run: counts,
+  build, licence — never design content), uncomment `ledger = …` in `mununu.toml` and the
+  `./ledger:/var/lib/mununu` volume in `compose.yaml`, then `mkdir ledger`
+  ([`docs/licensing.md` § The usage ledger](../docs/licensing.md#the-usage-ledger-opt-in-local)).
 
 ## Building the bundle (maintainers)
 

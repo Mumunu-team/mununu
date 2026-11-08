@@ -17,6 +17,8 @@ services:
       - ./mununu.toml:/etc/mununu/mununu.toml:ro
       - ./mununu.lic:/etc/mununu/mununu.lic:ro
       - ./work:/work
+      # Opt-in usage ledger (set `ledger = "/var/lib/mununu/usage.ndjson"` in mununu.toml too):
+      # - ./ledger:/var/lib/mununu
     # The memory ceiling (MUNUNU_MAX_PROCESS_MEMORY_BYTES, auto) fires at 80 % of this limit and the
     # remaining properties abstain with a note instead of the kernel killing the container.
     mem_limit: 16g

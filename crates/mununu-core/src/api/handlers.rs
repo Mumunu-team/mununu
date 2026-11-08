@@ -2387,7 +2387,27 @@ fn sv_verify_auto_handler_impl(
         })?,
     };
 
-    let report = verify_auto(&sources, &yopts, &opts).map_err(|e| ApiError::BadRequest {
+    let started = std::time::Instant::now();
+    let outcome = verify_auto(&sources, &yopts, &opts);
+    // Track H3 — one usage-ledger record per run, success or failure; a failed write reaches the
+    // operator in the server log and never the client (the run is unaffected).
+    {
+        use crate::usage_ledger::{LedgerWrite, Surface, UsageRecord};
+        let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let rec = UsageRecord::for_run(
+            "sv verify-auto",
+            Surface::Api,
+            outcome.as_ref().ok(),
+            wall_ms,
+        );
+        if let LedgerWrite::Failed { path, error } = crate::usage_ledger::record(&rec) {
+            tracing::warn!(
+                "usage ledger {}: {error} — this run's record is lost; the run is unaffected",
+                path.display()
+            );
+        }
+    }
+    let report = outcome.map_err(|e| ApiError::BadRequest {
         message: format!("verify-auto: {}", e.message),
         details: None,
     })?;
