@@ -33,6 +33,7 @@ pub mod examples;
 pub mod guard;
 pub mod iter;
 pub mod library;
+pub mod licence;
 pub mod llvm_ir;
 pub mod ltl;
 pub mod mu_calculus;

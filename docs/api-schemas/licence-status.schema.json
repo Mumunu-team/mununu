@@ -1,0 +1,169 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "LicenceClaims": {
+      "description": "What the issuer signed.",
+      "properties": {
+        "expires": {
+          "description": "The last day the licence is valid, `YYYY-MM-DD` (UTC), inclusive.",
+          "type": "string"
+        },
+        "grace_days": {
+          "default": 0,
+          "description": "Days after `expires` during which the state is `grace` rather than `expired`.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "issued": {
+          "description": "The issue date, `YYYY-MM-DD` (UTC). A date after today is reported as a tamper note.",
+          "type": "string"
+        },
+        "key_id": {
+          "description": "Which issuer key signed this file.",
+          "type": "string"
+        },
+        "licensee": {
+          "description": "The legal licensee.",
+          "type": "string"
+        },
+        "team_id": {
+          "description": "The team the licence is for (one licence, one team).",
+          "type": "string"
+        },
+        "tier": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Tier"
+            }
+          ],
+          "description": "The tier."
+        }
+      },
+      "required": [
+        "expires",
+        "issued",
+        "key_id",
+        "licensee",
+        "team_id",
+        "tier"
+      ],
+      "type": "object"
+    },
+    "LicenceState": {
+      "description": "The state a licence is in. Every state is reported; none changes what the engines compute.",
+      "oneOf": [
+        {
+          "description": "Signed by a trusted key and within its term.",
+          "enum": [
+            "valid"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Past `expires`, within `grace_days`.",
+          "enum": [
+            "grace"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Past `expires` and past its grace days.",
+          "enum": [
+            "expired"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A file was found but is not a licence this binary accepts; `reason` says why.",
+          "enum": [
+            "invalid"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "No licence file at any of the three locations.",
+          "enum": [
+            "missing"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "Tier": {
+      "description": "The licence tier.",
+      "oneOf": [
+        {
+          "description": "A time-boxed evaluation, full features.",
+          "enum": [
+            "evaluation"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "One team, unlimited users and runs, CI included.",
+          "enum": [
+            "team"
+          ],
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "description": "The full status, as `mununu licence status --json` and `GET /api/v1/licence` report it.",
+  "properties": {
+    "claims": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/LicenceClaims"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The claims, when the payload parsed (present for `invalid` too when the file was readable as claims, so a wrong-key or expired file still says whose it is)."
+    },
+    "days_left": {
+      "description": "Days until `expires`: `0` on the last valid day, negative after it. Present when the dates parsed.",
+      "format": "int64",
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "note": {
+      "description": "A tamper note: `issued` is after today, so the file or the host clock is wrong.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "reason": {
+      "description": "Why the state is `invalid` or `missing`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "source": {
+      "description": "The file the status describes; absent when `missing`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "state": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/LicenceState"
+        }
+      ],
+      "description": "The state."
+    }
+  },
+  "required": [
+    "state"
+  ],
+  "title": "LicenceStatus",
+  "type": "object"
+}

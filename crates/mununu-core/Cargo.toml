@@ -128,6 +128,8 @@ dhat = { version = "0.3", optional = true }
 # `make ci` build stays Boolector-free. Built + tested in the `mununu-dev` image
 # with `--features boolector`.
 boolector = { version = "0.4", optional = true, features = ["vendor-lgl"] }
+ed25519-dalek = "2"
+base64 = "0.22"
 
 [target.'cfg(unix)'.dependencies]
 # Process-group kill of external solver members (mununu#875); already in the tree via std's deps.

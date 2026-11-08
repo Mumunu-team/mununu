@@ -103,12 +103,20 @@ fn check_verify_auto_engine(value: Option<&str>) -> ApiResult<()> {
     )
 }
 
-/// Health check endpoint
+/// Health check endpoint. `licence` is the three-field summary (state, tier, expires) so
+/// mununu-ui and an orchestrator read the licence state with no second call (Track H1).
 pub async fn health_check() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "status": "ok",
-        "service": "mununu-api"
+        "service": "mununu-api",
+        "licence": crate::licence::status().summary(),
     }))
+}
+
+/// `GET /api/v1/licence` — the deployment's licence status, the same type `mununu licence
+/// status --json` prints (Track H1). Informational: every state answers 200.
+pub async fn licence_handler() -> Json<crate::licence::LicenceStatus> {
+    Json(crate::licence::status())
 }
 
 /// List the property templates this deployment exposes (built-in, system, deployment packs), each

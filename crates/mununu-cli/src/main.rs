@@ -659,6 +659,25 @@ enum Commands {
         #[command(subcommand)]
         command: Box<Btor2Command>,
     },
+    /// The deployment's licence (Track H1): the signed `mununu.lic` file and its status. A
+    /// licence never touches a verdict; this reports, it does not gate.
+    #[command(alias = "license")]
+    Licence {
+        #[command(subcommand)]
+        command: LicenceCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum LicenceCommand {
+    /// Print the licence status: licensee, tier, expiry, days left, the signature verdict and
+    /// where the file was found (`[licensing] file` in mununu.toml, `MUNUNU_LICENSE_FILE`, or
+    /// `/etc/mununu/mununu.lic`). The same document as `GET /api/v1/licence`.
+    Status {
+        /// Output as JSON instead of human-readable text.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -3527,6 +3546,7 @@ fn dispatch(command: Commands) -> Result<(), String> {
         Commands::Codesign { command } => handle_codesign(*command),
         Commands::Verify(args) => handle_verify(args),
         Commands::Memory { command } => handle_memory(*command),
+        Commands::Licence { command } => handle_licence(command),
         Commands::Server { addr, .. } => {
             use std::net::SocketAddr;
             let addr: SocketAddr = addr
@@ -9592,6 +9612,68 @@ fn handle_library(command: LibraryCommand) -> Result<(), String> {
     }
 }
 
+/// `mununu licence status [--json]` — Track H1. Every state exits 0: the status is a report, and
+/// what the tool does in each state is policy that ships separately.
+fn handle_licence(command: LicenceCommand) -> Result<(), String> {
+    let LicenceCommand::Status { json } = command;
+    let status = mununu_core::licence::status();
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&status).map_err(|e| e.to_string())?
+        );
+        return Ok(());
+    }
+    print!("{}", render_licence_status(&status));
+    Ok(())
+}
+
+/// The human-readable form of a licence status.
+fn render_licence_status(status: &mununu_core::licence::LicenceStatus) -> String {
+    use mununu_core::licence::{LicenceState, Tier};
+    let state = match status.state {
+        LicenceState::Valid => "valid",
+        LicenceState::Grace => "grace",
+        LicenceState::Expired => "expired",
+        LicenceState::Invalid => "invalid",
+        LicenceState::Missing => "missing",
+    };
+    let mut out = match &status.reason {
+        Some(reason) => format!("licence: {state} — {reason}\n"),
+        None => format!("licence: {state}\n"),
+    };
+    if let Some(c) = &status.claims {
+        let tier = match c.tier {
+            Tier::Evaluation => "evaluation",
+            Tier::Team => "team",
+        };
+        out.push_str(&format!(
+            "  licensee:  {} (team {})\n",
+            c.licensee, c.team_id
+        ));
+        out.push_str(&format!("  tier:      {tier}\n"));
+        out.push_str(&format!("  issued:    {}\n", c.issued));
+        match status.days_left {
+            Some(d) if d >= 0 => {
+                out.push_str(&format!("  expires:   {} ({d} days left)\n", c.expires))
+            }
+            Some(d) => out.push_str(&format!(
+                "  expires:   {} ({} days ago; {} grace days)\n",
+                c.expires, -d, c.grace_days
+            )),
+            None => out.push_str(&format!("  expires:   {}\n", c.expires)),
+        }
+        out.push_str(&format!("  key id:    {}\n", c.key_id));
+    }
+    if let Some(source) = &status.source {
+        out.push_str(&format!("  source:    {source}\n"));
+    }
+    if let Some(note) = &status.note {
+        out.push_str(&format!("  note:      {note}\n"));
+    }
+    out
+}
+
 fn list_templates(args: TemplatesArgs) -> Result<(), String> {
     use mununu_core::adapter::templates::{TemplateDomain, TemplateRegistry};
 
@@ -10624,6 +10706,55 @@ fn internal_engine_eval(args: InternalEngineEvalArgs) -> Result<(), String> {
 mod build_identity_tests {
     /// mununu#715 — the version line is the package version, then the short commit and a
     /// `-dirty` marker when the build knew them, and nothing else.
+    #[test]
+    fn the_licence_status_renders_every_field_it_has() {
+        use mununu_core::licence::{LicenceClaims, LicenceState, LicenceStatus, Tier};
+        let missing = LicenceStatus::missing();
+        let text = crate::render_licence_status(&missing);
+        assert!(
+            text.starts_with("licence: missing — no licence file"),
+            "{text}"
+        );
+        assert!(!text.contains("licensee:"));
+        let valid = LicenceStatus {
+            state: LicenceState::Valid,
+            source: Some("/etc/mununu/mununu.lic".into()),
+            claims: Some(LicenceClaims {
+                licensee: "Example Ltd".into(),
+                team_id: "example-hw".into(),
+                tier: Tier::Team,
+                issued: "2026-11-08".into(),
+                expires: "2027-11-08".into(),
+                grace_days: 14,
+                key_id: "mununu-2026-11".into(),
+            }),
+            days_left: Some(365),
+            reason: None,
+            note: None,
+        };
+        let text = crate::render_licence_status(&valid);
+        for line in [
+            "licence: valid\n",
+            "  licensee:  Example Ltd (team example-hw)\n",
+            "  tier:      team\n",
+            "  expires:   2027-11-08 (365 days left)\n",
+            "  key id:    mununu-2026-11\n",
+            "  source:    /etc/mununu/mununu.lic\n",
+        ] {
+            assert!(text.contains(line), "missing {line:?} in:\n{text}");
+        }
+        let expired = LicenceStatus {
+            state: LicenceState::Expired,
+            days_left: Some(-20),
+            note: Some("issued 2099-01-01 is after today".into()),
+            ..valid
+        };
+        let text = crate::render_licence_status(&expired);
+        assert!(text.contains("licence: expired\n"), "{text}");
+        assert!(text.contains("(20 days ago; 14 grace days)"), "{text}");
+        assert!(text.contains("  note:      issued 2099-01-01"), "{text}");
+    }
+
     #[test]
     fn the_version_line_carries_the_build_identity_when_known() {
         let line = env!("MUNUNU_VERSION_LINE");

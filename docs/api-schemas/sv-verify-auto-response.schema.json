@@ -258,6 +258,81 @@
       ],
       "type": "object"
     },
+    "LicenceState": {
+      "description": "The state a licence is in. Every state is reported; none changes what the engines compute.",
+      "oneOf": [
+        {
+          "description": "Signed by a trusted key and within its term.",
+          "enum": [
+            "valid"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Past `expires`, within `grace_days`.",
+          "enum": [
+            "grace"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Past `expires` and past its grace days.",
+          "enum": [
+            "expired"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A file was found but is not a licence this binary accepts; `reason` says why.",
+          "enum": [
+            "invalid"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "No licence file at any of the three locations.",
+          "enum": [
+            "missing"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "LicenceSummary": {
+      "description": "The three-field summary `/api/v1/health` and every report carry next to `build`.",
+      "properties": {
+        "expires": {
+          "description": "The expiry date, when the claims parsed.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/LicenceState"
+            }
+          ],
+          "description": "The state."
+        },
+        "tier": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Tier"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The tier, when the claims parsed."
+        }
+      },
+      "required": [
+        "state"
+      ],
+      "type": "object"
+    },
     "MemberRefusalView": {
       "description": "mununu#873 — one portfolio member's refusal of a design.",
       "properties": {
@@ -860,6 +935,25 @@
       ],
       "type": "object"
     },
+    "Tier": {
+      "description": "The licence tier.",
+      "oneOf": [
+        {
+          "description": "A time-boxed evaluation, full features.",
+          "enum": [
+            "evaluation"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "One team, unlimited users and runs, CI included.",
+          "enum": [
+            "team"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "Trace": {
       "description": "The one counterexample shape of 0.5, shared by every verb that returns a path: RTL rows fill `state` / `inputs` / `faults`, CTXDSL rows fill `state_name` / `labels`. A two-player strategy stays its own object, and the counterstrategy graph stays a view.",
       "properties": {
@@ -1248,6 +1342,14 @@
       ],
       "description": "mununu#537 — the result of checking this run against the caller's declared expectations. `None` (and omitted) when no expectations were declared, in which case the ordinary verdict gate applies.\n\nPresent so a consumer learns **which** claim failed without parsing prose."
     },
+    "licence": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/LicenceSummary"
+        }
+      ],
+      "description": "Track H1 — the deployment's licence state when this report was produced (`valid`, `grace`, `expired`, `invalid`, `missing`), with the tier and expiry when a file parsed. Informational, like `build`: no state changes a verdict."
+    },
     "notes": {
       "default": [],
       "description": "H.J — human-facing provenance notes: every abstraction / scoping decision the run made (config concretizations, reset-gating, flop stubs, cut modules, the abstraction posture, the coverage summary), so a verdict's scope and caveats are explicit in the payload.",
@@ -1272,6 +1374,7 @@
   },
   "required": [
     "diagnostics",
+    "licence",
     "properties",
     "unsupported"
   ],

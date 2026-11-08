@@ -10,7 +10,8 @@
 //! [templates]
 //! files = ["packs/rtl-safety.json"]        # template packs, relative to this file
 //!
-//! [licensing]                              # reserved: parsed and ignored until pack signing lands
+//! [licensing]
+//! file = "mununu.lic"                      # the signed licence file (Track H1, [`crate::licence`])
 //! ```
 //!
 //! The configuration is process-wide: the CLI installs it once at start-up ([`install`]) and every
@@ -31,8 +32,9 @@ pub struct DeploymentConfig {
     pub template_files: Vec<PathBuf>,
     /// The template domains this deployment exposes (`None` = all).
     pub enabled_domains: Option<Vec<String>>,
-    /// Whether a `[licensing]` table is present (reserved; not enforced).
-    pub has_licensing: bool,
+    /// The licence file `[licensing] file` names, resolved against this file's directory; the
+    /// first place [`crate::licence::locate`] looks.
+    pub licence_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -43,7 +45,7 @@ struct RawConfig {
     #[serde(default)]
     templates: Option<RawTemplates>,
     #[serde(default)]
-    licensing: Option<toml::Value>,
+    licensing: Option<RawLicensing>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -51,6 +53,13 @@ struct RawConfig {
 struct RawTemplates {
     #[serde(default)]
     files: Vec<PathBuf>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawLicensing {
+    #[serde(default)]
+    file: Option<PathBuf>,
 }
 
 impl DeploymentConfig {
@@ -66,18 +75,20 @@ impl DeploymentConfig {
         let raw: RawConfig = toml::from_str(text)
             .map_err(|e| format!("deployment config {}: {e}", path.display()))?;
         let base = path.parent().unwrap_or_else(|| Path::new("."));
+        let resolve = |f: PathBuf| if f.is_absolute() { f } else { base.join(f) };
         let template_files = raw
             .templates
             .map(|t| t.files)
             .unwrap_or_default()
             .into_iter()
-            .map(|f| if f.is_absolute() { f } else { base.join(f) })
+            .map(resolve)
             .collect();
+        let licence_file = raw.licensing.and_then(|l| l.file).map(resolve);
         Ok(DeploymentConfig {
             source: Some(path.to_path_buf()),
             template_files,
             enabled_domains: raw.enabled_domains,
-            has_licensing: raw.licensing.is_some(),
+            licence_file,
         })
     }
 }
@@ -112,7 +123,7 @@ mod tests {
     #[test]
     fn a_config_resolves_pack_paths_against_its_directory() {
         let c = DeploymentConfig::parse(
-            "enabled_domains = [\"rtl\"]\n[templates]\nfiles = [\"packs/a.json\", \"/abs/b.json\"]\n[licensing]\nkey = \"x\"\n",
+            "enabled_domains = [\"rtl\"]\n[templates]\nfiles = [\"packs/a.json\", \"/abs/b.json\"]\n[licensing]\nfile = \"mununu.lic\"\n",
             Path::new("/etc/mununu/mununu.toml"),
         )
         .unwrap();
@@ -124,7 +135,19 @@ mod tests {
             ]
         );
         assert_eq!(c.enabled_domains, Some(vec!["rtl".to_string()]));
-        assert!(c.has_licensing);
+        assert_eq!(
+            c.licence_file,
+            Some(PathBuf::from("/etc/mununu/mununu.lic"))
+        );
+    }
+
+    #[test]
+    fn a_licensing_table_names_only_the_file() {
+        let err =
+            DeploymentConfig::parse("[licensing]\nkey = \"x\"\n", Path::new("m.toml")).unwrap_err();
+        assert!(err.contains("key"), "{err}");
+        let none = DeploymentConfig::parse("[licensing]\n", Path::new("m.toml")).unwrap();
+        assert_eq!(none.licence_file, None);
     }
 
     #[test]

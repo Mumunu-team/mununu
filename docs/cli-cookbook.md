@@ -69,6 +69,16 @@ See [`adapters/extraction.md`](adapters/extraction.md) for mode filtering, prope
 mununu templates --domain agentic     # list agentic-orchestration templates
 ```
 
+## Read the licence status
+
+```bash
+mununu licence status            # licensee, tier, expiry, days left, signature verdict, source
+mununu licence status --json     # the same document as GET /api/v1/licence
+```
+
+The file is `[licensing] file` in `mununu.toml`, `MUNUNU_LICENSE_FILE`, or `/etc/mununu/mununu.lic`;
+a licence never touches a verdict. See [`licensing.md`](licensing.md).
+
 ## Agentic orchestration models
 
 Agentic models live in `examples/agentic/` either as native CTXDSL or as XState JSON imported via the XState adapter. See [`adapters/agentic.md`](adapters/agentic.md) and `examples/agentic/README.md`.
