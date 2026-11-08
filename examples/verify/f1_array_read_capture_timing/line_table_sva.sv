@@ -1,4 +1,6 @@
-// The two capture-timing properties of mununu#545, bound in from outside.
+// The two capture-timing properties of mununu#545, bound in from outside. The bind statements
+// live in line_table_bind.sv and line_table_twin_bind.sv, one per file: a bind to a module that
+// is not in the compile is an elaboration error under slang, so each run passes only its own.
 //
 // Both are about WHEN the captured entry changes: between strobes it must not. Neither names
 // a table value. On line_table both hold; on line_table_twin (capture every cycle) both are
@@ -17,4 +19,3 @@ module line_table_sva (
         (!enable && !line_stb) |=> !enable);
 endmodule
 
-bind line_table line_table_sva u_sva (.*);

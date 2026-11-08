@@ -43,13 +43,24 @@ claims to check, which is what `--cutpoint` on the read did for the consumer.
 |---|---|---|
 | design: both **hold**; twin: both **violated** | the array-aware engines decide the shape as written; #545 was a **routing** gap, closed by N5 | record it on #545 and close the thread; the consumer's blocks need no new mechanism |
 | design: ⊥ on either property | k-induction over the memory does not close (the read's value is unconstrained across the strobe); the shape needs a **value-only havoc at the read** that keeps its position | reopen #545 with this fixture as the reproducer; that is design work, and the fixture is its gate |
-| twin: anything but violated | the lift has lost the capture's timing | a soundness finding against the lift, not against #545; file it with the BTOR2 dump |
+| twin: ⊥ with `bottom_reason: unestablished-initial-state` | the table had no established initial state, so the tool withheld the definite VIOLATED (a free cycle-0 state licenses HOLDS, never VIOLATED); the twin's fault is not reached from a known state | establish the table's initial state in the fixture (done: a power-on clear in both variants) and re-run; not a finding against the lift |
+| twin: anything else but violated | the lift has lost the capture's timing | a soundness finding against the lift, not against #545; file it with the BTOR2 dump |
 | any engine abstaining with a reason other than ⊥ | read `diagnostics` and the row's `portfolio.refused` before concluding anything | per the Failure Paths policy |
 
-`engine:` exact-symbolic refuses the array operator (`Read` is outside its bit-blast set, as the
-issue measured three ways); native BMC / k-induction under `QF_AUFBV` (N5) is the decider that
-can answer; the predicate-cube engines carry the array in the may-relation only. The properties
-are plain safety, so no must-side `∀`-array query is constructed.
+`engine:` whichever portfolio member decides; on a table this small the first run was decided by
+the `explicit` predicate-cube engine, not by native BMC / k-induction. The exact-symbolic ROBDD
+refuses the array operator (`Read` is outside its bit-blast set, as the issue measured three
+ways); native BMC / k-induction under `QF_AUFBV` (N5) is the member that answers when the cube
+engines cannot. The properties are plain safety, so no must-side `∀`-array query is constructed.
+
+## Measured so far
+
+**First run (2026-11-08, second machine, `mununu 0.5.10 (24bb5d7)`, fixture at `44125c7`):** the
+design's two rows **hold** (`decided_by: explicit`, 2/2 decided, `--expect` met). The twin did not
+elaborate as shipped (the design's `bind` line sat in `line_table_sva.sv`, which the twin run also
+compiles; fixed, one bind per file) and, with that worked around, its two rows were **⊥** with
+`bottom_reason: unestablished-initial-state`: the table `mem` was never reset, so the tool withheld
+the definite VIOLATED. Both variants now clear the table at reset; the re-run decides.
 
 ## Reproduce
 
