@@ -14,7 +14,7 @@ Audit test coverage for $ARGUMENTS (or the full workspace if no args).
 - **Integration tests**: `crates/mununu-core/tests/` and `tests/`
 - **Property tests**: `proptest` (should be used for pure functions with wide input domains)
 - **Benchmarks**: `criterion` in `benches/`
-- **CLI integration**: `assert_cmd` + `predicates` in `tests/cli_session.rs`
+- **CLI integration**: `assert_cmd` + `predicates` in `crates/mununu-cli/tests/cli_session.rs`
 
 ## Review Checklist
 

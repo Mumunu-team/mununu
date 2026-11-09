@@ -48,7 +48,7 @@ cargo fmt --check
 cargo test --workspace --all-features --doc    # doctests have their own compilation phase
 ```
 
-Per-crate `cargo check` does not compile the legacy root bin (`src/main.rs`, `--features cli`), crates that reach the type through workspace edges, test crates that construct it in fixtures, or doctests. Three incidents: `3923822` (K.2b, api-feature typo, fix `04beae6`); `cfee81d` (K.1b-unrolled, the root bin's `src/main.rs:3738` missed, fix `04f01f9`); the same commit's doctests in `abstraction/unrolling.rs`, which ran three commits red because the check did not include doctests (fix `4a07df7`). The full check is heavy — never run it beside a hook.
+Per-crate `cargo check` does not compile the legacy root bin (`src/main.rs`, `--features cli`; removed 2026-11-09, the workspace root is now a virtual manifest), crates that reach the type through workspace edges, test crates that construct it in fixtures, or doctests. Three incidents: `3923822` (K.2b, api-feature typo, fix `04beae6`); `cfee81d` (K.1b-unrolled, the root bin's `src/main.rs:3738` missed, fix `04f01f9`); the same commit's doctests in `abstraction/unrolling.rs`, which ran three commits red because the check did not include doctests (fix `4a07df7`). The full check is heavy — never run it beside a hook.
 
 ## Pre-commit hook serialisation (revised 2026-06-03)
 

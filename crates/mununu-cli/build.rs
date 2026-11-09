@@ -62,7 +62,7 @@ fn main() {
                         root.join(dir).join(head_ref).display()
                     );
                 }
-                for tracked in ["crates", "src", "Cargo.toml", "Cargo.lock"] {
+                for tracked in ["crates", "Cargo.toml", "Cargo.lock"] {
                     println!("cargo:rerun-if-changed={}", root.join(tracked).display());
                 }
             }

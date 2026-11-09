@@ -321,8 +321,9 @@ fn verify_json_output_round_trips_through_serde() -> Result<(), Box<dyn Error>> 
 
 #[test]
 fn verify_strict_mode_fails_on_violation() -> Result<(), Box<dyn Error>> {
-    // Pin a property to `false` so it's universally violated; --strict
-    // should then return a non-zero exit code.
+    // Pin a property to `false` so it's universally violated: the product CLI's verdict gate
+    // exits 2 on a violation by default (`--fail-on violated`). The legacy root binary needed
+    // `--strict` for that; it was removed on 2026-11-09 and the gate is the contract now.
     let temp = tempdir()?;
     let _ = write_two_source_verify_project(temp.path())?;
     let bad_toml = r#"
@@ -348,9 +349,9 @@ over = "Sys"
     fs::write(&toml_path, bad_toml)?;
 
     assert_cmd::cargo::cargo_bin_cmd!("mununu")
-        .args(["verify", toml_path.to_str().unwrap(), "--strict"])
+        .args(["verify", toml_path.to_str().unwrap()])
         .assert()
-        .failure()
+        .code(2)
         .stdout(predicate::str::contains("impossible: VIOLATED"));
     Ok(())
 }
