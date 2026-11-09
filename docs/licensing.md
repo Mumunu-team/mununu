@@ -93,7 +93,8 @@ ledger = "/var/lib/mununu/usage.ndjson"   # or the environment variable MUNUNU_U
 ```
 
 **What a record carries:** the time, the verb and surface, the binary's version and build, the
-licence state / tier / team (the invoice key), the run's result (`report`, or `error` when the
+licence state / tier / team (the invoice key; tier and team only from a file whose signature
+verified, never from an `invalid` one, mununu#938), the run's result (`report`, or `error` when the
 run failed before a report — the counts are then zero), the property counts by verdict, the
 unsupported count, and the run's wall. **What it never carries:** a file name, a path, a module
 or property name, a formula, a counterexample or a note. The record type is a closed set of

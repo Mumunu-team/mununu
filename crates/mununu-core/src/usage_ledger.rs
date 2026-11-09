@@ -124,8 +124,10 @@ impl UsageRecord {
             now_utc(),
             crate::build_info::current().map(crate::build_info::build_tag),
             wire_label(&licence.state),
-            licence.claims.as_ref().map(|c| wire_label(&c.tier)),
-            licence.claims.as_ref().map(|c| c.team_id.clone()),
+            // mununu#938 — signed claims only: an `invalid` file's team and tier are whatever
+            // its author wrote, and the ledger is the usage evidence a licence audit reads.
+            licence.verified_claims().map(|c| wire_label(&c.tier)),
+            licence.verified_claims().map(|c| c.team_id.clone()),
         )
     }
 
@@ -229,7 +231,11 @@ pub fn append(path: &Path, rec: &UsageRecord) -> Result<(), String> {
         .create(true)
         .open(path)
         .map_err(|e| e.to_string())?;
-    writeln!(file, "{}", rec.line()).map_err(|e| e.to_string())
+    // mununu#945 — one `write_all` of the whole line on an append handle: `writeln!` may issue
+    // several writes, and two runs finishing together (the API server) could interleave them.
+    let mut line = rec.line();
+    line.push('\n');
+    file.write_all(line.as_bytes()).map_err(|e| e.to_string())
 }
 
 /// An enum's wire spelling (`valid`, `team`, …): the same string every other surface prints,
@@ -462,5 +468,31 @@ mod tests {
             assert_eq!(locate().unwrap(), None);
             assert_eq!(record(&sample()), LedgerWrite::Off);
         }
+    }
+
+    /// mununu#945 — appends from concurrent runs (the API server) never interleave: every line of
+    /// the file is one whole record.
+    #[test]
+    fn concurrent_appends_leave_whole_lines() {
+        let dir = std::env::temp_dir().join(format!("mununu-945-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("usage.ndjson");
+        let rec = sample();
+        std::thread::scope(|s| {
+            for _ in 0..8 {
+                s.spawn(|| {
+                    for _ in 0..200 {
+                        append(&path, &rec).expect("append");
+                    }
+                });
+            }
+        });
+        let text = std::fs::read_to_string(&path).expect("read back");
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 1600);
+        for l in lines {
+            assert_eq!(l, rec.line(), "an interleaved or torn record");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -240,6 +240,19 @@ fn no_file_reason() -> String {
 }
 
 impl LicenceStatus {
+    /// mununu#938 — the claims only when their signature verified (`valid`, `grace`, `expired`).
+    /// An `invalid` status keeps the claims it could parse, so `licence status` can say whose the
+    /// file is, but nobody signed them: a record that must hold only signed facts (the usage
+    /// ledger, the audit evidence) reads them through this, never through `claims`.
+    pub fn verified_claims(&self) -> Option<&LicenceClaims> {
+        match self.state {
+            LicenceState::Valid | LicenceState::Grace | LicenceState::Expired => {
+                self.claims.as_ref()
+            }
+            LicenceState::Invalid | LicenceState::Evaluation | LicenceState::Missing => None,
+        }
+    }
+
     fn invalid(source: Option<String>, claims: Option<LicenceClaims>, reason: String) -> Self {
         LicenceStatus {
             state: LicenceState::Invalid,
