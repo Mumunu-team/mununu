@@ -1762,8 +1762,13 @@ counter, the wall follows the *verdict's* fixpoint depth: the bit-cap probes `fs
 separates them, so that cell says `minutes` with `low` confidence: size for the top of the band,
 never the bottom. Out of sample, the probes are mostly over-predicted, which is the safe direction.
 A property whose cone width could not be established (a memory-only cone, mununu#577) has no
-estimate rather than a guessed one. The estimate is a scheduler hint; nothing reads it on a verdict
-path.
+estimate rather than a guessed one, and says why: `no_estimate_reason` on the plan row and on the
+report row names one of three causes — the model or the formula did not parse for the planner, or
+the width is unknown (mununu#941). **The plan honours the run's row selection** (mununu#939): a row
+a `--resume-from` breadcrumb decided, one in the skip set, or one `MUNUNU_VERIFY_AUTO_ONLY_ROWS`
+leaves out is still listed — the run reports it, as not attempted — but carries `not_run` with the
+reason and counts under `not_run` in `bands`, not in a time band. A breadcrumb the run would refuse
+fails the plan the same way. The estimate is a scheduler hint; nothing reads it on a verdict path.
 
 ### Resuming a killed run: `--resume-from` (roadmap J3)
 

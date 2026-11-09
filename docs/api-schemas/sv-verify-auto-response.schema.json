@@ -590,6 +590,13 @@
           "description": "Positional name: `<module>_sva_<index>` (or `ann_guarantee_<index>`). An insertion mid-file re-points every later one — prefer `label` when pinning an expectation.",
           "type": "string"
         },
+        "no_estimate_reason": {
+          "description": "mununu#941 — why `routing` is absent when the planner ran but could not estimate this row (the model or the formula did not parse for it, or the cone width is unknown). Absent when `routing` is present, and on routes that consult no planner (a single-engine run).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "outcome": {
           "description": "`\"holds\"` | `\"violated\"` | `\"unknown\"` | `\"skipped\"`.",
           "type": "string"

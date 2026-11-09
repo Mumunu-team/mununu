@@ -48,3 +48,19 @@ The private scheduler (J5) that consumes the bands; per-customer recalibration f
 
 The in-cone counter the estimate, the `diameter_log2` routing field, the predicted engine and the `skip-diameter-bound` note read is now any register that steps itself, by a constant or by an input, of at least 12 bits; before, it was the counter abstraction's strict down-counter detector. Values move, shapes do not: `routing.diameter_log2` can now be set where it was `null` (OpenTitan `prim_count`'s 22-bit counter, say) and `null` where an 8-bit down-counter used to set it; rows that pick it up move from `seconds` to `minutes` / `low`; a recoverability row with a counter of 12 bits or more now predicts `ranking`. Verdicts do not change: the predicted engine only orders the precision ladder, which changes which engine is credited, never the verdict. Measured on the 18-design corpus against its recorded walls: 201 of 210 in band (was 205), under-estimates 4 → 0. No Docker rebuild is needed beyond picking up the release that carries it.
 
+## Update (mununu#939, #941, 2026-11-09) — `not_run` and `no_estimate_reason`
+
+Additive. Plan rows (`SvPlanResponse.properties[]`) gain `not_run` (why the run would not execute the row: resumed from the breadcrumb, in the skip set, or not selected by `MUNUNU_VERIFY_AUTO_ONLY_ROWS`) and `no_estimate_reason` (the model or the formula did not parse for the planner, or the cone width is unknown). `bands` counts not-run rows under a new `not_run` key instead of a time band, so a scheduler sizing from `bands` no longer budgets for rows that will not run. Report rows (`properties[]` of `sv verify-auto --json`) gain `no_estimate_reason` beside `routing`. A `resume_from` the run would refuse now fails the plan with the same `400`. Both schemas regenerated.
+
+| consumer | what this means for you | action |
+|---|---|---|
+| **rosf** | Sizing from `bands`: rows a resume or a row selection skips are under `not_run`. | If the plan model is strict, accept the two optional fields and the `not_run` band. |
+| **monono** | Same, through rosf. | None. |
+| **mununu-ui** | Not affected. | None. |
+
+| image | rebuild? | why |
+|---|---|---|
+| `mununu-sva` / the release images / the on-prem bundle | Yes, for the fields; nothing breaks without them. | Additive. |
+| rosf `docker/Dockerfile*` | No. | Consumer. |
+| monono `docker/Dockerfile.dev`, `Dockerfile.vexriscv` | No. | Consumer. |
+

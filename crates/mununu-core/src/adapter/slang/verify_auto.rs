@@ -1074,6 +1074,8 @@ pub struct AutoVerifyReport {
     /// `plan-cost` note renders as prose): class, cone bits vs cap, diameter proxy, predicted
     /// engine. Filled by the planner once per run; empty on the single-engine routes.
     pub routing: Vec<crate::planner::RoutingRationale>,
+    /// mununu#941 — the properties the planner could not estimate, each with its reason.
+    pub routing_misses: Vec<crate::planner::RoutingMiss>,
     /// Roadmap J3 — property → the build tag of the breadcrumb record whose verdict this row
     /// carries instead of a fresh run (`decided_by: resumed`). Empty unless the run was given
     /// `resume_from`. A resumed row has no counterexample, vacuity finding, predicates or wall.
@@ -5255,6 +5257,39 @@ fn record_resumed_breadcrumb(report: &AutoVerifyReport, run: Option<&str>) {
     }
 }
 
+/// N0.1 / mununu#939 — whether `only_rows` (by name or label) selects this row; `None` selects
+/// every row. The run and the plan both ask this, so they cannot disagree on a row.
+pub(crate) fn row_selected(
+    only_rows: Option<&std::collections::HashSet<String>>,
+    name: &str,
+    label: Option<&String>,
+) -> bool {
+    only_rows.is_none_or(|rows| rows.contains(name) || label.is_some_and(|l| rows.contains(l)))
+}
+
+/// mununu#939 — why the run would not execute this row, or `None` when it would: resumed from the
+/// breadcrumb (the run skips it), in the skip set, or not selected by `only_rows` — the run's own
+/// predicates, in its order.
+pub(crate) fn row_not_run_reason(
+    name: &str,
+    label: Option<&String>,
+    only_rows: Option<&std::collections::HashSet<String>>,
+    skip_rows: &std::collections::HashSet<String>,
+    resumed: &std::collections::BTreeMap<String, crate::adapter::resume::ResumedVerdict>,
+) -> Option<String> {
+    if let Some(rv) = resumed.get(name) {
+        return Some(format!(
+            "resumed from the breadcrumb ({}); not re-run",
+            rv.outcome.label()
+        ));
+    }
+    if skip_rows.contains(name) {
+        return Some("in the run's skip set; not attempted".to_string());
+    }
+    (!row_selected(only_rows, name, label))
+        .then(|| "not selected by MUNUNU_VERIFY_AUTO_ONLY_ROWS; not attempted".to_string())
+}
+
 /// Roadmap J2 — the plan of a run, without the run: the lift and the planner's per-property routing
 /// with its cost estimate, and no engine. `sv verify-auto --plan-only` and `POST /api/v1/sv/plan`.
 #[derive(Debug, Clone, Default)]
@@ -5264,6 +5299,12 @@ pub struct PlanReport {
     /// The planner's rationale (with [`crate::planner::RoutingRationale::estimate`]) per property
     /// whose cone width could be established; a property without one has no estimate (mununu#577).
     pub routing: Vec<crate::planner::RoutingRationale>,
+    /// mununu#941 — the properties with no estimate, each with its reason.
+    pub misses: Vec<crate::planner::RoutingMiss>,
+    /// mununu#939 — the properties the run would NOT execute, each with why: resumed from the
+    /// breadcrumb, or left out by the row selection (`MUNUNU_VERIFY_AUTO_ONLY_ROWS`, `skip_rows`).
+    /// They are still listed (the run reports them, as not attempted) but carry no band.
+    pub not_run: Vec<(String, String)>,
     /// Assertions that did not translate, as in the run's report.
     pub unsupported: Vec<(String, String)>,
     /// The lift's wall, milliseconds — paid once per run, not per property.
@@ -5277,6 +5318,31 @@ pub fn plan_auto(
     yosys_opts: &YosysOptions,
     opts: &VerifyAutoOptions,
 ) -> Result<PlanReport, AdapterError> {
+    // mununu#939 — the run's row selection, applied the way the run applies it: the
+    // `MUNUNU_VERIFY_AUTO_ONLY_ROWS` selection (by name or label), `skip_rows`, and the rows a
+    // `resume_from` breadcrumb decided — checked BEFORE the lift against this run's input
+    // identity, so a breadcrumb the run would refuse fails the plan the same way.
+    let only_rows = std::env::var("MUNUNU_VERIFY_AUTO_ONLY_ROWS")
+        .ok()
+        .and_then(|v| parse_only_rows(&v))
+        .or_else(|| opts.only_rows.clone());
+    let resumed = match opts.resume_from.as_deref() {
+        None => std::collections::BTreeMap::new(),
+        Some(text) => {
+            let current = crate::build_info::current().map(crate::build_info::build_tag);
+            let run = crate::adapter::resume::run_fingerprint(sources, yosys_opts, opts);
+            crate::adapter::resume::parse_breadcrumb(text, current.as_deref(), &run)
+                .map_err(|refusal| AdapterError {
+                    kind: AdapterErrorKind::ParseError,
+                    message: format!("resume-from: {refusal}"),
+                    location: None,
+                })?
+                .resumed
+        }
+    };
+    let not_run_reason = |name: &str, label: Option<&String>| {
+        row_not_run_reason(name, label, only_rows.as_ref(), &opts.skip_rows, &resumed)
+    };
     let t0 = std::time::Instant::now();
     let prepared = prepare_model(sources, yosys_opts, opts)?;
     let lift_ms = u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -5305,6 +5371,20 @@ pub fn plan_auto(
                     .rationale
                     .into_iter()
                     .filter(|r| reported(&r.property))
+                    .collect(),
+                misses: plan
+                    .misses
+                    .into_iter()
+                    .filter(|r| reported(&r.property))
+                    .collect(),
+                not_run: m
+                    .extraction
+                    .translated
+                    .iter()
+                    .filter(|t| reported(&t.name))
+                    .filter_map(|t| {
+                        not_run_reason(&t.name, t.label.as_ref()).map(|why| (t.name.clone(), why))
+                    })
                     .collect(),
                 unsupported: m.report.unsupported.clone(),
                 lift_ms,
@@ -7184,9 +7264,7 @@ pub(crate) fn verify_auto_impl(
         // `Unknown`, not `Skipped` (the cube-skip rescue and the over-cap notes act on `Skipped`).
         // N0.1 — and a row the run was told not to attempt (`only_rows`, by name or label) is the
         // same `NotAttempted` abstention: ⊥ by selection, not by an engine.
-        let not_selected = opts.only_rows.as_ref().is_some_and(|rows| {
-            !rows.contains(&t.name) && !t.label.as_ref().is_some_and(|l| rows.contains(l))
-        });
+        let not_selected = !row_selected(opts.only_rows.as_ref(), &t.name, t.label.as_ref());
         if opts.skip_rows.contains(&t.name) || not_selected {
             report
                 .properties
@@ -15093,6 +15171,7 @@ module uart_tx(); endmodule"#;
         // posture, and each model-level decision (reset-gating, flop stubs, cut
         // modules), plus a config-concretization ScopeCaveat when pins are given.
         let report = AutoVerifyReport {
+            routing_misses: Vec::new(),
             assumptions: Default::default(),
             properties: vec![
                 PropertyVerdict {
@@ -15308,6 +15387,7 @@ module uart_tx(); endmodule"#;
         // the vacuity post-pass: a HOLDS row on each model
         let row = |model: &str| {
             AutoVerifyReport {
+                routing_misses: Vec::new(),
                 assumptions: Default::default(),
                 properties: vec![PropertyVerdict {
                     name: "chain".into(),
@@ -15367,6 +15447,7 @@ module uart_tx(); endmodule"#;
     #[test]
     fn lift_retry_note_is_info_and_names_the_backend_loop() {
         let with = AutoVerifyReport {
+            routing_misses: Vec::new(),
             assumptions: Default::default(),
             properties: Vec::new(),
             unsupported: Vec::new(),
@@ -15473,6 +15554,7 @@ module uart_tx(); endmodule"#;
         // the cut list and the over-approximation posture. It documents that a HOLDS
         // is sound but a VIOLATED is sound only when guard-independent (orphan case).
         let report = AutoVerifyReport {
+            routing_misses: Vec::new(),
             assumptions: Default::default(),
             properties: vec![PropertyVerdict {
                 name: "p".into(),
@@ -15536,6 +15618,7 @@ module uart_tx(); endmodule"#;
         // A.3 — the abstraction-posture note is honest about the may-relation the
         // run actually used, rather than hardcoding "may-over-approximation".
         let report = AutoVerifyReport {
+            routing_misses: Vec::new(),
             assumptions: Default::default(),
             properties: vec![PropertyVerdict {
                 name: "recover".into(),
@@ -22837,5 +22920,41 @@ mod source_map_tests {
         let rows = parse_only_rows(" a_label, top_sva_2 ,,b ").expect("a list");
         assert_eq!(rows.len(), 3);
         assert!(rows.contains("a_label") && rows.contains("top_sva_2") && rows.contains("b"));
+    }
+
+    /// mununu#939 — the plan's "not run" reasons follow the run's own predicates and order.
+    #[test]
+    fn a_row_is_not_run_when_resumed_skipped_or_not_selected() {
+        let resumed: std::collections::BTreeMap<_, _> = [(
+            "p_resumed".to_string(),
+            crate::adapter::resume::ResumedVerdict {
+                outcome: VerifyOutcome::Holds,
+                build: "b".to_string(),
+                phase: "merged".to_string(),
+            },
+        )]
+        .into_iter()
+        .collect();
+        let skip: std::collections::HashSet<String> = ["p_skip".to_string()].into_iter().collect();
+        let only: std::collections::HashSet<String> = ["p_sel".to_string(), "lbl".to_string()]
+            .into_iter()
+            .collect();
+        let why = |n: &str, l: Option<&str>, only: Option<&std::collections::HashSet<String>>| {
+            row_not_run_reason(n, l.map(str::to_string).as_ref(), only, &skip, &resumed)
+        };
+        assert!(why("p_resumed", None, Some(&only)).is_some_and(|w| w.contains("resumed")));
+        assert!(why("p_skip", None, None).is_some_and(|w| w.contains("skip set")));
+        assert!(why("p_other", None, Some(&only)).is_some_and(|w| w.contains("ONLY_ROWS")));
+        assert_eq!(why("p_sel", None, Some(&only)), None);
+        assert_eq!(
+            why("p_x", Some("lbl"), Some(&only)),
+            None,
+            "selected by label"
+        );
+        assert_eq!(
+            why("p_other", None, None),
+            None,
+            "no selection runs every row"
+        );
     }
 }

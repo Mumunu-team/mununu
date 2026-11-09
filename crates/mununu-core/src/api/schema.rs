@@ -272,6 +272,7 @@ mod tests {
         // Exercise every outcome arm and every optional field, so the check is not vacuous on
         // a report that happens to omit the interesting parts.
         let report = AutoVerifyReport {
+            routing_misses: Vec::new(),
             assumptions: Default::default(),
             properties: vec![
                 PropertyVerdict {
