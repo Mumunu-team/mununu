@@ -72,9 +72,11 @@ fn hanging_launcher(dir: &std::path::Path, pidfile: &std::path::Path) -> std::pa
     std::fs::write(
         &ps,
         format!(
-            "$p = Start-Process -PassThru -NoNewWindow -RedirectStandardOutput NUL \
-             -RedirectStandardError NUL powershell -ArgumentList '-NoProfile','-Command',\
+            "$p = Start-Process -PassThru -NoNewWindow -RedirectStandardOutput '{}' \
+             -RedirectStandardError '{}' powershell -ArgumentList '-NoProfile','-Command',\
              'Start-Sleep 40'\r\nSet-Content -Path '{}' -Value $p.Id\r\nWait-Process -Id $p.Id\r\n",
+            dir.join("sleeper.out").display(),
+            dir.join("sleeper.err").display(),
             pidfile.display()
         ),
     )

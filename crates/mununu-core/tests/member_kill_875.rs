@@ -45,10 +45,16 @@ fn forking_launcher(dir: &Path, pidfile: &Path, keep_pipes: bool) -> PathBuf {
 /// the launcher's stdout / stderr (`-NoNewWindow`), as a forked solver holding the pipes would.
 #[cfg(windows)]
 fn forking_launcher(dir: &Path, pidfile: &Path, keep_pipes: bool) -> PathBuf {
+    // Two files, not `NUL` twice: Start-Process refuses one path for both streams, and the
+    // launcher then dies before it starts the sleeper (the first Windows run, 2026-11-09).
     let redirect = if keep_pipes {
-        ""
+        String::new()
     } else {
-        " -RedirectStandardOutput NUL -RedirectStandardError NUL"
+        format!(
+            " -RedirectStandardOutput '{}' -RedirectStandardError '{}'",
+            dir.join("solver.out").display(),
+            dir.join("solver.err").display()
+        )
     };
     let ps = dir.join("launcher.ps1");
     std::fs::write(
