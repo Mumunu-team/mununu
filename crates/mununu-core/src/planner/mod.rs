@@ -888,24 +888,6 @@ impl RoutingRationale {
                 "constant formula, decided without an engine (edn: 14 of 14 in seconds)",
             );
         }
-        if s.alternation >= 2 {
-            return e(
-                TimeBand::Minutes,
-                MemoryClass::Medium,
-                Confidence::Medium,
-                "alternating fixpoint (a μ under a ν): the recoverability ladder or a trap \
-                 certificate (edn: 2 of 3 in minutes, ~127 s; 1 in seconds)",
-            );
-        }
-        if s.arith_ops > 0 {
-            return e(
-                TimeBand::Minutes,
-                MemoryClass::Large,
-                Confidence::Low,
-                "multiplier / divider in the cone: the exact BDD walls near 19 b (Bryant) and the \
-                 rescue ladder runs about a minute (bit-cap probe `mult`: 58.9 s at 193 b)",
-            );
-        }
         if s.array_states > 0 {
             return e(
                 TimeBand::Minutes,
@@ -916,6 +898,32 @@ impl RoutingRationale {
             );
         }
         let fits = self.cone_bits <= self.cap;
+        // An alternating fixpoint costs minutes where the recoverability ladder runs — over the
+        // cap. In the cap the exact engine decides it directly: the differential corpus's 19
+        // in-cap alternating rows (6-38 b) all decided in 1 s or less (the box's out-of-sample
+        // check, 2026-11-09), so they fall to the in-cap cells below.
+        if s.alternation >= 2 && !fits {
+            return e(
+                TimeBand::Minutes,
+                MemoryClass::Medium,
+                Confidence::Medium,
+                "over-cap alternating fixpoint (a μ under a ν): the recoverability ladder or a \
+                 trap certificate (edn: 2 of 3 in minutes, ~127 s; 1 in seconds)",
+            );
+        }
+        // A multiplier is the BDD's wall (Bryant), so the cell applies where the exact engine
+        // runs — in the cap. Over the cap the reach portfolio's SAT-based members decide, and a
+        // multiplier is not their wall: edn's 23 over-cap rows with one measured 1.3-7.4 s, and
+        // this cell placed them in `minutes` (the box's end-to-end `--plan-only`, 2026-11-09).
+        if s.arith_ops > 0 && fits {
+            return e(
+                TimeBand::Minutes,
+                MemoryClass::Large,
+                Confidence::Low,
+                "in-cap multiplier / divider: the exact BDD walls near 19 b (Bryant) and the \
+                 rescue ladder runs about a minute (bit-cap probe `mult`: 58.9 s at 193 b)",
+            );
+        }
         // Over the cap only: in the cap the exact engine decides a relational atom directly (the
         // bit-cap probe `relational` decides `a == b` at 1 023 b in 0.2 s).
         if s.relational_atoms > 0 && !fits {
@@ -966,11 +974,18 @@ impl RoutingRationale {
                 "liveness with a counter or over the cap: a ranking certificate or the cube \
                  (few measured rows)",
             ),
+            (C::Mixed | C::Propositional, true, None) => e(
+                TimeBand::Seconds,
+                MemoryClass::Medium,
+                Confidence::Low,
+                "in-cap mixed / propositional, no counter: the exact engine decides it directly \
+                 (differential corpus: in-cap alternating rows 1 s or less)",
+            ),
             (C::Mixed | C::Propositional, _, _) => e(
                 TimeBand::Minutes,
                 MemoryClass::Medium,
                 Confidence::Low,
-                "mixed / propositional class: no measured rows yet",
+                "mixed / propositional with a counter or over the cap: few measured rows",
             ),
         }
     }
@@ -1844,7 +1859,17 @@ mod tests {
             )),
             (Tb::Seconds, Mc::Small, Cf::High)
         );
-        // an alternating fixpoint (edn's recoverability rows, ~127 s).
+        // in the cap the exact engine decides an alternating row (the differential corpus's 19
+        // in-cap alternating rows: 1 s or less); over the cap it is minutes (below).
+        assert_eq!(
+            band(j2_row(C::Liveness, 30, None, shape(|s| s.alternation = 2))).0,
+            Tb::Seconds
+        );
+        assert_eq!(
+            band(j2_row(C::Mixed, 30, None, shape(|s| s.alternation = 2))).0,
+            Tb::Seconds
+        );
+        // an over-cap alternating fixpoint (edn's recoverability rows, ~127 s).
         assert_eq!(
             band(j2_row(
                 C::Liveness,
@@ -1855,10 +1880,29 @@ mod tests {
             .0,
             Tb::Minutes
         );
-        // a multiplier: the arena may overflow.
+        // an in-cap multiplier: the BDD arena may overflow.
         assert_eq!(
             band(j2_row(C::Safety, 40, None, shape(|s| s.arith_ops = 1))),
             (Tb::Minutes, Mc::Large, Cf::Low)
+        );
+        // an over-cap one does not reach the BDD: the reach portfolio's cell decides (edn's 23
+        // over-cap rows with a multiplier measured 1.3-7.4 s); with a register comparison the
+        // relational cell gets its turn (edn's 16 such rows, 13-20 s).
+        assert_eq!(
+            band(j2_row(C::Safety, 3290, None, shape(|s| s.arith_ops = 9))).0,
+            Tb::Seconds
+        );
+        assert_eq!(
+            band(j2_row(
+                C::Safety,
+                3290,
+                None,
+                shape(|s| {
+                    s.arith_ops = 9;
+                    s.relational_atoms = 1
+                })
+            )),
+            (Tb::Minutes, Mc::Medium, Cf::Medium)
         );
         // a memory in the cone.
         assert_eq!(
@@ -1914,9 +1958,9 @@ mod tests {
             band(j2_row(C::Liveness, 3290, None, ShapeFacts::default())).0,
             Tb::Minutes
         );
-        // no measured rows: minutes, low.
+        // mixed over the cap: minutes, low.
         assert_eq!(
-            band(j2_row(C::Mixed, 10, None, ShapeFacts::default())),
+            band(j2_row(C::Mixed, 3290, None, ShapeFacts::default())),
             (Tb::Minutes, Mc::Medium, Cf::Low)
         );
         // every cell says where its numbers come from.

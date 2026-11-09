@@ -5273,14 +5273,24 @@ pub fn plan_auto(
         },
         Prepared::Model(m) => {
             let plan = crate::planner::plan(Some(&m), opts);
+            // The assumption-consistency check is a row the run folds into
+            // `report.assumptions.consistency` and removes (`finish_assumptions`), so the plan
+            // does not list it either — the plan names exactly the run's rows (the box's
+            // out-of-sample check found 16 planned rows against 15 reported on two designs).
+            let reported = |name: &str| name != ASSUMPTION_CONSISTENCY_PROPERTY;
             PlanReport {
                 properties: m
                     .extraction
                     .translated
                     .iter()
+                    .filter(|t| reported(&t.name))
                     .map(|t| (t.name.clone(), t.label.clone(), t.formula.clone()))
                     .collect(),
-                routing: plan.rationale,
+                routing: plan
+                    .rationale
+                    .into_iter()
+                    .filter(|r| reported(&r.property))
+                    .collect(),
                 unsupported: m.report.unsupported.clone(),
                 lift_ms,
             }
