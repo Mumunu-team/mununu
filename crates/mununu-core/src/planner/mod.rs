@@ -897,15 +897,6 @@ impl RoutingRationale {
                  certificate (edn: 2 of 3 in minutes, ~127 s; 1 in seconds)",
             );
         }
-        if s.arith_ops > 0 {
-            return e(
-                TimeBand::Minutes,
-                MemoryClass::Large,
-                Confidence::Low,
-                "multiplier / divider in the cone: the exact BDD walls near 19 b (Bryant) and the \
-                 rescue ladder runs about a minute (bit-cap probe `mult`: 58.9 s at 193 b)",
-            );
-        }
         if s.array_states > 0 {
             return e(
                 TimeBand::Minutes,
@@ -916,6 +907,19 @@ impl RoutingRationale {
             );
         }
         let fits = self.cone_bits <= self.cap;
+        // A multiplier is the BDD's wall (Bryant), so the cell applies where the exact engine
+        // runs — in the cap. Over the cap the reach portfolio's SAT-based members decide, and a
+        // multiplier is not their wall: edn's 23 over-cap rows with one measured 1.3-7.4 s, and
+        // this cell placed them in `minutes` (the box's end-to-end `--plan-only`, 2026-11-09).
+        if s.arith_ops > 0 && fits {
+            return e(
+                TimeBand::Minutes,
+                MemoryClass::Large,
+                Confidence::Low,
+                "in-cap multiplier / divider: the exact BDD walls near 19 b (Bryant) and the \
+                 rescue ladder runs about a minute (bit-cap probe `mult`: 58.9 s at 193 b)",
+            );
+        }
         // Over the cap only: in the cap the exact engine decides a relational atom directly (the
         // bit-cap probe `relational` decides `a == b` at 1 023 b in 0.2 s).
         if s.relational_atoms > 0 && !fits {
@@ -1855,10 +1859,29 @@ mod tests {
             .0,
             Tb::Minutes
         );
-        // a multiplier: the arena may overflow.
+        // an in-cap multiplier: the BDD arena may overflow.
         assert_eq!(
             band(j2_row(C::Safety, 40, None, shape(|s| s.arith_ops = 1))),
             (Tb::Minutes, Mc::Large, Cf::Low)
+        );
+        // an over-cap one does not reach the BDD: the reach portfolio's cell decides (edn's 23
+        // over-cap rows with a multiplier measured 1.3-7.4 s); with a register comparison the
+        // relational cell gets its turn (edn's 16 such rows, 13-20 s).
+        assert_eq!(
+            band(j2_row(C::Safety, 3290, None, shape(|s| s.arith_ops = 9))).0,
+            Tb::Seconds
+        );
+        assert_eq!(
+            band(j2_row(
+                C::Safety,
+                3290,
+                None,
+                shape(|s| {
+                    s.arith_ops = 9;
+                    s.relational_atoms = 1
+                })
+            )),
+            (Tb::Minutes, Mc::Medium, Cf::Medium)
         );
         // a memory in the cone.
         assert_eq!(

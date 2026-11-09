@@ -1734,8 +1734,10 @@ memories, inputs, fixpoint alternation, constancy, register-versus-register comp
 the class, cone width vs the cap, and the widest in-cone counter the planner already had. The cells
 were fitted and checked on one host's data (the second e2e machine, 2026-11-08/09): on the full
 OpenTitan `edn` IP the table places **65 of 67** rows in their measured band and predicts no
-`seconds` row that ran over 10 minutes — scored from each row's formula and recorded routing; the
-cone-side facts (multipliers, memories) are re-scored end to end with `--plan-only` on that host.
+`seconds` row that ran over 10 minutes. The first end-to-end `--plan-only` run scored 42 of 67:
+the multiplier cell fired on 39 over-cap rows, where the reach portfolio (SAT-based) decides and a
+multiplier is no wall (23 of them ran 1.3–7.4 s). That cell now applies in the cap only, where the
+exact BDD engine runs — the end-to-end counterfactual is 65 of 67.
 
 **What it cannot see, and says.** On an in-cap row decided by the exact engine with an in-cone
 counter, the wall follows the *verdict's* fixpoint depth: the bit-cap probes `fsm-timeout` (holds,

@@ -18,7 +18,7 @@
 | `sv verify-auto --plan-only [--json]` | lift + planner, no engine, exit 0; `--json` = the API document |
 | `POST /api/v1/sv/plan` | same request body as `/sv/verify-auto`; returns `SvPlanResponse` (`properties[{name, label, formula, routing?}]`, `unsupported`, `lift_ms`, `bands`) |
 
-Measured accuracy (one host, 2026-11-08/09): on the OpenTitan `edn` IP, 65 of 67 rows land in the predicted band; no row predicted `seconds` ran over 10 minutes. That score used each row's formula and recorded routing; the cone-side facts are re-scored end to end with `--plan-only` before it is quoted further. The named limit: in-cap exact rows with an in-cone counter take a time set by the verdict, not the shape — that cell is `minutes`, `low`.
+Measured accuracy (one host, 2026-11-08/09): on the OpenTitan `edn` IP, 65 of 67 rows land in the predicted band; no row predicted `seconds` ran over 10 minutes. That score used each row's formula and recorded routing; the first end-to-end `--plan-only` run scored 42 of 67 because the multiplier cell fired on over-cap rows (the reach portfolio decides those, and a multiplier is no wall for it). The follow-up PR limits the cell to in-cap rows: 65 of 67 end to end. The named limit: in-cap exact rows with an in-cone counter take a time set by the verdict, not the shape — that cell is `minutes`, `low`.
 
 ## Per consumer
 
