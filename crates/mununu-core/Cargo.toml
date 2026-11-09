@@ -89,7 +89,7 @@ schemars = { version = "0.8", optional = true }
 # declared by hand from the `schemars` 0.8 schemas the API already publishes (rmcp's own
 # `schemars` is 1.x), so the advertised `inputSchema` is byte-for-byte
 # `docs/api-schemas/context-eval-request.schema.json`.
-rmcp = { version = "3.5", optional = true, default-features = false, features = ["server", "transport-io"] }
+rmcp = { version = "3.9", optional = true, default-features = false, features = ["server", "transport-io"] }
 
 # AST extraction (optional — tree-sitter grammars for source code analysis)
 tree-sitter = { version = "0.24", optional = true }
@@ -144,7 +144,7 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_
 [dev-dependencies]
 # The MCP seam test drives the server through an in-process client (`client`) over a tokio duplex
 # pipe; the product build never carries the client side.
-rmcp = { version = "3.5", default-features = false, features = ["server", "client", "transport-io"] }
+rmcp = { version = "3.9", default-features = false, features = ["server", "client", "transport-io"] }
 criterion = "0.8"
 proptest = "1.9"
 tempfile = "3.24"
