@@ -17,7 +17,7 @@ allowed_tools:
   - WebFetch
 ---
 
-> **Git safety**: this agent must never invoke destructive git commands (`reset --hard`, `push --force`, `checkout -- <paths>`, `clean -f`, `stash drop`, `branch -D`) without explicit user instruction in the current session. See `CLAUDE.md` → Governance Rules → Git Operations & Destructive Commands.
+> **Git safety**: this agent must never invoke destructive git commands (`reset --hard`, `push --force`, `checkout -- <paths>`, `clean -f`, `stash drop`, `branch -D`) without explicit user instruction in the current session. See `CLAUDE.md` §Git Operations & Destructive Commands.
 
 You are a senior domain analyst for the mununu formal verification tool. Your job is to evaluate whether the project's examples and use cases are realistic, working, cohesive, and covering the right ground across all target domains.
 
@@ -45,7 +45,7 @@ Also check for XState adapter examples (`*.xstate.json`) which bridge both modes
 
 **Cross-cutting coverage dimensions** (apply to every domain, not just one):
 
-- **Corpus coverage** — domains lacking shipped `corpus/<domain>/<name>@<version>.json` entries (CLAUDE.md `### Black-Box Modules and Contracts`). For a domain to be "corpus-ready", at least one example must demonstrate `@mununu_interface contract://…` resolving to a real corpus hit.
+- **Corpus coverage** — domains lacking shipped `corpus/<domain>/<name>@<version>.json` entries (the contract discovery in `crates/mununu-core/src/contract/discover.rs` and the shipped corpus under `crates/mununu-core/src/corpus/`; the design note is history under `docs/archive/`). For a domain to be "corpus-ready", at least one example must demonstrate `@mununu_interface contract://…` resolving to a real corpus hit.
 - **Register-map coverage** — peripherals (in the RTL / codesign domains) that ship a `.sv` source but no register-map sidecar at `register_map.json`. A peripheral without a register map cannot participate in codesign verification.
 - **Annotation coverage** — black-box modules in any domain whose source/sidecar carries zero `@mununu_*` annotations. Annotation-free black-boxes default to chaotic stubs with `output_sequencing` gaps; the user gets a strictly worse verdict than they could.
 - **Three-surface examples** — every example must be reachable from CLI + HTTP + UI per `parity-check` rules. An example that only works on one surface is incomplete.
@@ -324,7 +324,7 @@ When proposing new examples (Phase 3), confirm the example is reachable from all
 
 For every Phase 2 / 3 finding that names a documented feature (anything described under `wiki/**`, `docs/**`, `README.md`, `crates/*/README.md`, or `examples/**/README.md`), invoke the `/docs-traceability` skill on the affected doc paths. Embed the skill's Markdown table verbatim under a new "Documentation Traceability" section of the report, placed immediately after "Tool Change Recommendations".
 
-The skill enforces `CLAUDE.md` → Governance Rules → **Documentation Traceability**: every doc section that describes a feature must point at a live Rust symbol or configuration file reachable from the CLI, HTTP API, or UI. This Phase complements Phase 5 — `/parity-check` confirms a feature *itself* is wired across surfaces; `/docs-traceability` confirms its *documentation* still resolves to existing code on those surfaces.
+The skill enforces `CLAUDE.md` §**Documentation Traceability**: every doc section that describes a feature must point at a live Rust symbol or configuration file reachable from the CLI, HTTP API, or UI. This Phase complements Phase 5 — `/parity-check` confirms a feature *itself* is wired across surfaces; `/docs-traceability` confirms its *documentation* still resolves to existing code on those surfaces.
 
 For each domain inventory in Phase 1, also spot-check that the matching wiki page (`wiki/Adapter-Formats.md`, `wiki/RTL-Verification-Pipeline.md`, `wiki/Agentic-Orchestration.md`, `wiki/Compositional-Extraction.md`) carries anchors to the adapter source files surfaced in §"Workspace Structure" of `CLAUDE.md`. Orphan pages — those describing a domain whose examples now total zero, or whose adapter source has been removed — must appear under "Cohesion Recommendations" with a recommended remediation (anchor, mark `> Status: planning`, or remove).
 

@@ -36,11 +36,46 @@
 # validated after a silent-upload, or an emergency hotfix), use
 # `git push --no-verify`. The user must authorize the bypass per
 # CLAUDE.md's Git Operations section.
+#
+# Docs-only pushes (2026-11-09). When nothing in the pushed range changes
+# what cargo builds — only Markdown, the agents and skills under .claude,
+# CI workflows, scripts, Docker files — the compile steps below prove
+# nothing the remote's `main` has not already proved for the identical
+# Rust tree, and on this host they are the heavy workload the
+# hook-serialisation rule (CLAUDE.md §CI Requirements) says not to start
+# beside another agent's build. Such a push runs fmt + machete only. The
+# detector ships with its negative control: `MUNUNU_PREPUSH_SELFTEST=1
+# scripts/pre-push` must report a Rust path as Rust-bearing and a docs
+# path as not, and that self-test runs first on every real push, so a
+# broken detector fails the push instead of skipping the checks (C3).
 
 set -e
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
+
+# A path is Rust-bearing when changing it can change what `cargo check` /
+# `cargo test --doc` compile: crate sources and manifests, the lock file,
+# the toolchain pin, cargo and nextest config, the root `tests/` tree.
+rust_bearing() {
+    grep -qE '^(crates/|Cargo\.toml$|Cargo\.lock$|rust-toolchain\.toml$|\.cargo/|\.config/|tests/|build\.rs$)'
+}
+
+prepush_selftest() {
+    printf 'crates/mununu-core/src/lib.rs\n' | rust_bearing \
+        || { echo "pre-push self-test FAILED: a crate source was not seen as Rust-bearing" >&2; return 1; }
+    printf 'Cargo.lock\n' | rust_bearing \
+        || { echo "pre-push self-test FAILED: Cargo.lock was not seen as Rust-bearing" >&2; return 1; }
+    if printf '.claude/agents/x.md\ndocs/a.md\nscripts/pre-push\n.github/workflows/ci.yml\n' | rust_bearing; then
+        echo "pre-push self-test FAILED: a docs-only list was seen as Rust-bearing" >&2; return 1
+    fi
+    echo "pre-push self-test ok (control: Rust path detected, docs-only list not)"
+}
+
+if [ "${MUNUNU_PREPUSH_SELFTEST:-}" = "1" ]; then
+    prepush_selftest
+    exit $?
+fi
 
 if [ "${MUNUNU_PREPUSH_FULL:-}" = "1" ]; then
     echo "Pre-push (FULL): MUNUNU_PREPUSH_FULL=1 — running full-workspace make ci..."
@@ -48,6 +83,42 @@ if [ "${MUNUNU_PREPUSH_FULL:-}" = "1" ]; then
     echo "Pre-push: checking for unused dependencies (cargo machete)..."
     cargo machete
     echo "All pre-push checks passed (full sweep)."
+    exit 0
+fi
+
+# The control first (see the header): a detector that cannot tell a Rust
+# path from a docs path must fail the push, never skip the checks.
+prepush_selftest
+
+# Collect every file the pushed ranges change. The hook reads
+# `<local ref> <local sha> <remote ref> <remote sha>` per ref on stdin; a
+# new branch has an all-zero remote sha and is measured against
+# origin/main's merge-base. No stdin (the script run by hand) or no
+# resolvable base → conservative: treat the push as Rust-bearing.
+PUSHED_FILES=""
+RANGE_KNOWN=0
+zero='0000000000000000000000000000000000000000'
+while read -r local_ref local_sha remote_ref remote_sha; do
+    [ -n "$local_sha" ] || continue
+    [ "$local_sha" = "$zero" ] && continue            # a branch deletion
+    if [ "$remote_sha" = "$zero" ]; then
+        base=$(git merge-base origin/main "$local_sha" 2>/dev/null || true)
+    else
+        base="$remote_sha"
+    fi
+    if [ -z "$base" ]; then RANGE_KNOWN=0; break; fi
+    RANGE_KNOWN=1
+    PUSHED_FILES="$PUSHED_FILES
+$(git diff --name-only "$base" "$local_sha")"
+done
+
+if [ "$RANGE_KNOWN" = "1" ] && ! printf '%s\n' "$PUSHED_FILES" | rust_bearing; then
+    echo "Pre-push: no Rust-bearing path in the pushed range (docs / agents / CI / scripts only)."
+    echo "Pre-push: cargo fmt --check (workspace)..."
+    cargo fmt --all -- --check
+    echo "Pre-push: checking for unused dependencies (cargo machete)..."
+    cargo machete
+    echo "All pre-push checks passed (docs-only push: compile steps skipped; CI runs the full gate)."
     exit 0
 fi
 

@@ -1,48 +1,38 @@
 ---
 name: security-audit
 description: >
-  Security audit of Rust code for vulnerabilities, unsafe usage,
-  dependency risks, and API exposure.
-  Use when asked to audit, check security, or review for vulnerabilities.
+  Security audit of mununu's Rust code: unsafe, subprocess tool invocation,
+  path handling (imports, design dirs, breadcrumbs, the UI static directory),
+  resource exhaustion and budgets, the HTTP / MCP API, the licence and usage
+  ledger surfaces, dependencies and advisories, deserialization of untrusted
+  inputs, and the private-files exposure rules. Use when asked to audit,
+  check security, or review for vulnerabilities; invoked by review-orchestrator.
 ---
 
-Perform a security audit of $ARGUMENTS (or the full workspace if no args).
+Perform a security audit of $ARGUMENTS (with no arguments, the branch against `main` plus the working tree; name the files you did not open). Rules: `CLAUDE.md` §Code Reuse, Dead Code, Performance, Security (OWASP line), §Private Files Policy (`docs/policies/private-files.md`), §Failure Paths (`docs/policies/failure-paths.md`).
 
-## Audit Checklist
+## Audit checklist
 
-1. **Unsafe Code**: review every `unsafe` block for memory safety justification. Expected locations:
-   - Tree-sitter FFI in `mununu-extract` — verify all pointer dereferences are bounded
-   - Flag any `unsafe` outside of FFI boundaries
+1. **Unsafe.** Expected: one block, the CLI's `std::env::set_var` (edition 2024) in `crates/mununu-cli/src/main.rs`. FFI reaches z3, OxiDD and tree-sitter through safe crates. Any other `unsafe` is a finding unless it is an FFI boundary with a `// SAFETY:` comment that argues the invariant.
 
-2. **Command Injection**: check any use of `std::process::Command` — arguments must not come from unsanitized user input. The CLI parses CTXDSL files; verify file paths are validated.
+2. **Subprocess tools** (`std::process::Command`): yosys + slang, sv2v (dev oracle only), btormc, pono, rIC3, Verilator, cvc5, docker. Arguments are separate `.arg()` calls built from parsed values, never a shell string; the tool path comes from the adapter's locate function (`MUNUNU_*_PATH` then `PATH`), never from a request body; the discovery probe runs under a 10 s budget (#876); a cancelled or timed-out member is killed with everything it forked (process group / Job Object, #875 / #922); tool output lands in a directory the run owns. A design's text never reaches a command line.
 
-3. **Path Traversal**: CTXDSL `@import` or file includes must not allow `../` escapes outside the workspace. Check `context_dsl/` parser for path handling.
+3. **Path handling.** CTXDSL imports and `@import`, `--design-dir`, sidecar paths, `--resume-from` (`adapter/resume.rs`: a breadcrumb is parsed NDJSON, build-checked before use), `MUNUNU_LIFT_CACHE_DIR` (content-addressed; a key collision is a soundness question, hand it over), and the newest surface **`mununu server --ui-dir`** (static files for the bundled UI): nothing outside the directory is served — `..`, absolute paths, symlinks out of the tree — check `api/server.rs` and test it with a traversal request.
 
-4. **Denial of Service**:
-   - BDD construction: check for exponential blowup guards (state count limits)
-   - LTL formula depth: verify recursion depth limits exist
-   - Input size limits on API endpoints (if `api` feature is enabled)
+4. **Denial of service and budgets.** Budgets are deterministic where they decide a verdict (`MUNUNU_BDD_TIME_BUDGET_MS` is off by default for that reason; the k-induction member uses a z3 `rlimit`, #917); node budgets and arena exhaustion abstain (`ResourceBudgetExceeded`, never a panic — `panic = "unwind"` in the workspace profile is load-bearing); API handlers re-parse per request and keep post-realization work light, never synthesis in a summary endpoint; request body size limits and timeouts on the axum routes; `/api/v1/sv/*` runs external tools, so the server binds loopback by default and `docs/docker.md` says `-p 127.0.0.1:8080:8080`; the MCP transport (`api/mcp.rs`, rmcp ≥ 3.9 for RUSTSEC-2026-0462) inherits the same limits.
 
-5. **API Security** (behind `api` feature flag):
-   - CORS configuration in `axum` setup — must not be `*` in production
-   - No authentication tokens logged or included in error responses
-   - Request body size limits on `axum` routes
-   - Timeout enforcement on long-running synthesis operations
+5. **Licence and ledger surfaces** (`crates/mununu-core/src/licence.rs`, `usage_ledger.rs`; `docs/licensing.md`). Verification is Ed25519 against the embedded public key; no private key material anywhere in the tree (`git grep -n 'PRIVATE KEY'`, 64-byte hex seeds); the evaluation / grace / expiry decision reads only the verified file's fields and names its clock assumption; `licence status` and `GET /api/v1/licence` expose nothing beyond the file's public fields; the ledger is opt-in, local, counts and identities only, with a **closed key set** — a new key, or a design-derived string in a record, is a finding; the licence check never reaches a verdict (`tests/licence_never_reaches_a_verdict_h1.rs` is the pin).
 
-6. **Secrets & Credentials**: search with Grep for hardcoded keys, tokens, passwords. Check `.gitignore` covers `.env` files.
+6. **Secrets, private names, machine-local data.** No tokens or passwords; `.gitignore` covers `.env`; no partner / customer / person names in tracked files, comments, commit messages or PR text — the denylist lives in `mununu-private/docs/security/private-names.txt` (grep when the sibling checkout is present, else say `not run`); no absolute paths, home directories, hostnames or account handles in tracked files (`git grep -nE '/Users/|/home/[a-z]|C:\\\\Users' -- . ':!target' ':!docs/archive'`); consumer briefings name a consumer by repository.
 
-7. **Dependencies**:
-   - Check `Cargo.lock` exists and is committed
-   - Flag any dependencies without pinned versions
-   - Note any dependencies with known advisories (check `cargo audit` output if available)
+7. **Dependencies.** `Cargo.lock` committed; CI runs `cargo audit` (the `security-audit` job), `cargo deny check licenses` (`deny.toml`, the copyleft gate), `cargo machete`; an advisory fix bumps the floor in `Cargo.toml` so the lock cannot drift back (rmcp 3.8 → 3.9, #927). Flag a `git` or `path` dependency, an unpinned major.
 
-8. **Serialization**: `serde_json` deserialization of adapter input (XState JSON, CrewAI JSON, etc.) — check for:
-   - Size limits on deserialized structures
-   - No `#[serde(deny_unknown_fields)]` missing on public-facing types
-   - No unbounded `Vec` or `HashMap` from untrusted input
+8. **Deserialization of untrusted input.** `serde_json` on sidecars, XState / CrewAI / LangGraph JSON, breadcrumbs, licence files, API bodies: size bounds, `#[serde(deny_unknown_fields)]` or an explicit unread-field report on public request types (`tests/api_unread_fields_865.rs`), no unbounded collections from a request; the API wire shapes are pinned by the drift test under `docs/api-schemas/`.
 
-9. **Integer Overflow**: arithmetic on state counts, label counts — verify `checked_*` or saturating ops where counts come from user input.
+9. **Integer arithmetic on design-controlled values.** Widths, counts, bit positions and nids from a design use `checked_*` / saturating ops or the arbitrary-width `Bv`; a `u128` shift on a 135-bit cell crashed in debug and computed a wrong bit in release (mununu#848) — any `as u32` / `as usize` narrowing on such a path is a finding.
 
-## Output Format
+10. **Logging.** `tracing` at info and above carries no design content, file contents or tokens; paths only when the user supplied them.
 
-Severity: **Critical** (fix now) / **High** / **Medium** / **Informational** — with file:line references.
+## Output format
+
+Severity **Critical** (exploitable or data-exposing now) / **High** / **Medium** / **Informational**, each with `path:line`, the checklist item, and the fix in one line. End with the checks not run and why.
