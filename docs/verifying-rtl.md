@@ -1731,7 +1731,9 @@ mununu sv verify-auto design.sv --plan-only --json | jq '.bands'      # {"minute
 **The table is keyed by static shape, and measured.** Width does not predict cost (EXP-0031); the
 features are read off each property's cone and formula without solving — multipliers / dividers,
 memories, inputs, fixpoint alternation, constancy, register-versus-register comparisons — beside
-the class, cone width vs the cap, and the widest in-cone counter the planner already had. The cells
+the class, cone width vs the cap, and the widest in-cone counter of at least 12 bits (any register
+that steps itself, by a constant or by an input; a narrower counter is a few thousand fixpoint
+steps at most and does not count, mununu#929). The cells
 were fitted and checked on one host's data (the second e2e machine, 2026-11-08/09): on the full
 OpenTitan `edn` IP the table places **65 of 67** rows in their measured band and predicts no
 `seconds` row that ran over 10 minutes. The first end-to-end `--plan-only` run scored 42 of 67:
@@ -1742,8 +1744,17 @@ the fix). **Out of sample**, on the 18-design differential corpus re-measured on
 **186 of 210** rows in band (88.6 %), none predicted `seconds` over 10 minutes. It found the same
 mechanism mismatch in the alternation cell (over-cap recoverability ladders cost minutes; in the cap
 the exact engine decides alternating rows in 1 s or less, 0 of 19 hit), now applied over the cap
-only. The remaining under-estimates are sibling `prim_count` rows with identical static facts and
-walls of 54 ms vs 163 s — the verdict-dependent depth no static feature sees.
+only. The remaining under-estimates were four `prim_count` rows inside `prim_esc_receiver` (up to
+163 s, estimated `seconds`): the planner's counter detector was the strict one the counter
+abstraction uses, which refuses a counter stepped by an input or compared against its twin. With
+a detector for any self-stepping register of at least 12 bits (mununu#929), re-planned against the
+same measured walls, the corpus scores **201 of 210 with no under-estimate left**, and edn stays at
+65 of 67. Counting every self-stepping register instead scored 158 of 210: 2–6-bit FIFO pointers
+and FSM counters sat on 54 rows that all decided in under 0.3 s. The nine misses are all
+over-estimates: eight `prim_count` siblings of the slow rows with identical static facts (54 ms —
+the verdict-dependent depth no static feature sees) and the single in-cap multiplier row. No row
+between 7 and 21 bits has been measured, so the 12-bit cut inside that gap is reasoned (a `W`-bit
+counter bounds the fixpoint at about `2^W` preimage steps), not fitted.
 
 **What it cannot see, and says.** On an in-cap row decided by the exact engine with an in-cone
 counter, the wall follows the *verdict's* fixpoint depth: the bit-cap probes `fsm-timeout` (holds,

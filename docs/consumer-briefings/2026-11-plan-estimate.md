@@ -43,3 +43,8 @@ Roadmap J2. Data from the second host's runs recorded in the private e2e history
 ## Not covered here
 
 The private scheduler (J5) that consumes the bands; per-customer recalibration from the usage ledger; a `btor2` plan verb (the estimate is computed over the lifted model, so it can follow).
+
+## Update (mununu#929, 2026-11-09)
+
+The in-cone counter the estimate, the `diameter_log2` routing field, the predicted engine and the `skip-diameter-bound` note read is now any register that steps itself, by a constant or by an input, of at least 12 bits; before, it was the counter abstraction's strict down-counter detector. Values move, shapes do not: `routing.diameter_log2` can now be set where it was `null` (OpenTitan `prim_count`'s 22-bit counter, say) and `null` where an 8-bit down-counter used to set it; rows that pick it up move from `seconds` to `minutes` / `low`; a recoverability row with a counter of 12 bits or more now predicts `ranking`. Verdicts do not change: the predicted engine only orders the precision ladder, which changes which engine is credited, never the verdict. Measured on the 18-design corpus against its recorded walls: 201 of 210 in band (was 205), under-estimates 4 → 0. No Docker rebuild is needed beyond picking up the release that carries it.
+
