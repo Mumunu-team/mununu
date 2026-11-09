@@ -9085,6 +9085,10 @@ pub(crate) fn rescue_skipped_via_exact(
         let Ok(formula) = mu_parser::parse(&prop.formula) else {
             continue;
         };
+        // J4d (2026-11-08) — this third pass runs the exact ladder per Skipped row (an
+        // inputs-in-the-state lift and a cap-ladder retry each) and charged nobody: on edn eight
+        // such rows cost ~26 s each, 207 of the 233 s the report could not attribute after J4c.
+        let row_t0 = std::time::Instant::now();
         let ladder = crate::adapter::btor2::symbolic_bitblast::exact_ladder(
             design_btor2,
             &formula,
@@ -9125,6 +9129,20 @@ pub(crate) fn rescue_skipped_via_exact(
             }
             // Err (over cap / intractable design): leave the property Skipped.
             Err(_) => {}
+        }
+        // J4d — the row pays for its own rescue attempt, decided or not; the stderr line
+        // follows the other phases' opt-in format.
+        let row_ms = u64::try_from(row_t0.elapsed().as_millis()).unwrap_or(u64::MAX);
+        *report
+            .property_wall_ms
+            .entry(prop.name.clone())
+            .or_insert(0) += row_ms;
+        if std::env::var_os("MUNUNU_PROPERTY_TIMING").is_some() {
+            eprintln!(
+                "[mununu-timing] property={} outcome={} elapsed_ms={row_ms} phase=skip-rescue",
+                prop.name,
+                prop.outcome.label()
+            );
         }
     }
     notes
@@ -10930,6 +10948,13 @@ mod tests {
         assert!(
             notes.iter().any(|n| n.kind == "exact-skip-rescue"),
             "an exact-skip-rescue provenance note should be recorded"
+        );
+        // J4d — the row pays for its own rescue attempt: the third pass used to charge nobody
+        // (207 of the 233 s a real run could not attribute after J4c were this pass).
+        assert!(
+            report.property_wall_ms.contains_key("no_deadlock"),
+            "the exact-skip rescue must charge the row it ran on: {:?}",
+            report.property_wall_ms
         );
     }
 
