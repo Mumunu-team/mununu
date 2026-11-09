@@ -769,11 +769,21 @@ impl SpawnMember for std::process::Command {
 }
 
 /// The process group of a spawned member; dropping it forgets the group for signal cleanup.
+/// On Windows (mununu#904) it is a Job Object the member is assigned to right after spawn: every
+/// process the member creates joins the job, `kill_and_reap` terminates the job, and the job is
+/// created with `KILL_ON_JOB_CLOSE`, so dropping the last handle — mununu exiting, even on a
+/// crash — kills the members too (the role the Unix signal handler plays). A process the member
+/// forks in the few microseconds between spawn and assignment escapes the job; a launcher forks
+/// after it starts, which is far later.
 pub(crate) struct MemberGroup {
     #[cfg(unix)]
     pgid: i32,
     #[cfg(unix)]
     slot: Option<usize>,
+    /// The job's handle as an integer (`0` = no job: creation or assignment failed, and the
+    /// member falls back to the direct-child kill, logged).
+    #[cfg(windows)]
+    job: usize,
 }
 
 impl MemberGroup {
@@ -787,7 +797,21 @@ impl MemberGroup {
         }
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    fn register(child: &std::process::Child) -> Self {
+        use std::os::windows::io::AsRawHandle;
+        let job = member_job::create_and_assign(child.as_raw_handle());
+        if job == 0 {
+            tracing::warn!(
+                pid = child.id(),
+                "could not put this solver member in a Job Object: a process it forks is not \
+                 killed with it on timeout (mununu#904)"
+            );
+        }
+        Self { job }
+    }
+
+    #[cfg(not(any(unix, windows)))]
     fn register(_child: &std::process::Child) -> Self {
         Self {}
     }
@@ -797,6 +821,8 @@ impl MemberGroup {
     pub(crate) fn kill_and_reap(&self, child: &mut std::process::Child) {
         #[cfg(unix)]
         member_group::kill(self.pgid);
+        #[cfg(windows)]
+        member_job::terminate(self.job);
         let _ = child.kill(); // the direct child, also where the group kill is unavailable
         let _ = child.wait();
     }
@@ -807,6 +833,66 @@ impl Drop for MemberGroup {
         #[cfg(unix)]
         if let Some(slot) = self.slot {
             member_group::forget(slot);
+        }
+        // Closing the last handle of a KILL_ON_JOB_CLOSE job kills what is still in it — a
+        // member that finished normally has nothing left, so this only reaches stragglers.
+        #[cfg(windows)]
+        member_job::close(self.job);
+    }
+}
+
+#[cfg(windows)]
+mod member_job {
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, TerminateJobObject,
+    };
+
+    /// Create a kill-on-close Job Object and assign `process` to it; the job's handle as an
+    /// integer, or `0` when any step fails (the caller logs and falls back).
+    pub(super) fn create_and_assign(process: std::os::windows::io::RawHandle) -> usize {
+        // SAFETY: plain Win32 calls with valid arguments: a null security descriptor and name
+        // create an anonymous job; `info` is a zero-initialised POD struct of the size passed;
+        // `process` is the live child's handle, owned by the `Child` for this call's duration.
+        unsafe {
+            let job: HANDLE = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if job.is_null() {
+                return 0;
+            }
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let set = SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                std::ptr::from_ref(&info).cast(),
+                u32::try_from(std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>())
+                    .unwrap_or(u32::MAX),
+            );
+            if set == 0 || AssignProcessToJobObject(job, process as HANDLE) == 0 {
+                CloseHandle(job);
+                return 0;
+            }
+            job as usize
+        }
+    }
+
+    pub(super) fn terminate(job: usize) {
+        if job != 0 {
+            // SAFETY: `job` is a job handle this module created and has not closed yet.
+            unsafe {
+                TerminateJobObject(job as HANDLE, 1);
+            }
+        }
+    }
+
+    pub(super) fn close(job: usize) {
+        if job != 0 {
+            // SAFETY: as above; closed exactly once, from `MemberGroup::drop`.
+            unsafe {
+                CloseHandle(job as HANDLE);
+            }
         }
     }
 }

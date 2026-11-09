@@ -135,6 +135,12 @@ base64 = "0.22"
 # Process-group kill of external solver members (mununu#875); already in the tree via std's deps.
 libc = "0.2"
 
+[target.'cfg(windows)'.dependencies]
+# mununu#904 — the Windows counterpart of the process-group kill: a Job Object per solver member
+# (`TerminateJobObject` kills everything the member forked). Already in the lock file through
+# other crates' Windows deps.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security"] }
+
 [dev-dependencies]
 # The MCP seam test drives the server through an in-process client (`client`) over a tokio duplex
 # pipe; the product build never carries the client side.
