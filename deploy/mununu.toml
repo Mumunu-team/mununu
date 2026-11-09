@@ -17,3 +17,10 @@ file = "/etc/mununu/mununu.lic"
 # design content; docs/licensing.md § The usage ledger). Uncomment here AND the volume in
 # compose.yaml so the file outlives the container.
 # ledger = "/var/lib/mununu/usage.ndjson"
+
+[server]
+# Browser origins, besides loopback, that may read the API's answers (the bundled UI is
+# same-origin and needs none). The API has no authentication: see deploy/README.md.
+cors_origins = []
+# Server-side paths a request names must lie under this directory (your designs, mounted at /work).
+file_root = "/work"

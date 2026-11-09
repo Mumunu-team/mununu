@@ -27,6 +27,15 @@ docker compose exec mununu mununu licence status      # → licence: valid
 Then **http://localhost:8080** is the UI and `http://localhost:8080/api/v1/…` the API. The port is
 bound to loopback by `compose.yaml`; put a TLS-terminating proxy in front to expose it to a team.
 
+**The API has no authentication.** Anyone who can reach the port can run verifications and read
+their results, so expose it only through a proxy that authenticates, or on a network where every
+host is trusted. Two settings in `mununu.toml`'s `[server]` table limit what a request can do:
+
+| key | default | effect |
+|---|---|---|
+| `cors_origins` | `[]` | browser origins, besides loopback (`localhost`, `127.0.0.1`, `[::1]`, any port), that may read the API's answers. The bundle's UI is same-origin and needs none. A page from any other origin gets no CORS headers (mununu#934). |
+| `file_root` | unset (the bundle sets `/work`) | every server-side path a request names (`sv_source_path`, `sidecar_path`, `base_dir`) must exist and resolve, after `..` and symlinks, to a location under it; otherwise the request is refused with `400` (mununu#935). Not yet covered: file paths written inside a `/api/v1/verify` config, which resolve against `base_dir` but may be absolute. |
+
 ## Verify a design
 
 Over the CLI, inside the container (designs in `./work`):

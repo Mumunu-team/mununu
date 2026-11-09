@@ -47,16 +47,80 @@ pub fn create_router_with_ui(ui_dir: Option<&std::path::Path>) -> Router {
             // `fallback`, not `not_found_service`: the latter wraps the fallback in a 404 (a
             // "not found page"); a client-side route must come back 200 with the index.
             let index = ServeFile::new(dir.join("index.html"));
-            app.fallback_service(ServeDir::new(dir).fallback(index))
+            // mununu#940 — an unknown `/api/…` path is an API error, not a client-side route:
+            // without this, a mistyped route came back as the UI's index.html with 200.
+            app.route("/api", axum::routing::any(api_not_found))
+                .route("/api/{*rest}", axum::routing::any(api_not_found))
+                .fallback_service(ServeDir::new(dir).fallback(index))
         }
     }
+}
+
+/// mununu#940 — the JSON 404 for an `/api/…` path no route matched (only reached under `--ui-dir`;
+/// without a UI the router's own 404 answers).
+async fn api_not_found(uri: axum::http::Uri) -> crate::api::error::ApiError {
+    crate::api::error::ApiError::NotFound {
+        resource: format!("API route `{}`", uri.path()),
+    }
+}
+
+/// mununu#934 — `http(s)://localhost`, `127.0.0.1` or `[::1]`, any port: a page served from this
+/// machine. Anything else (including `localhost.example.com`) is not loopback.
+pub(crate) fn is_loopback_origin(origin: &str) -> bool {
+    let Some(rest) = origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))
+    else {
+        return false;
+    };
+    let host = if let Some(v6) = rest.strip_prefix('[') {
+        match v6.split_once(']') {
+            Some((h, tail)) if tail.is_empty() || tail.starts_with(':') => {
+                return h == "::1" && port_ok(tail);
+            }
+            _ => return false,
+        }
+    } else {
+        match rest.split_once(':') {
+            Some((h, port)) => {
+                if !port_ok(&format!(":{port}")) {
+                    return false;
+                }
+                h
+            }
+            None => rest,
+        }
+    };
+    host == "localhost" || host == "127.0.0.1"
+}
+
+/// An origin's port part: empty or `:` + digits.
+fn port_ok(tail: &str) -> bool {
+    tail.is_empty()
+        || tail
+            .strip_prefix(':')
+            .is_some_and(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
 }
 
 /// Create the API router. Public so the MCP seam test can drive a route in-process
 /// (`tower::ServiceExt::oneshot`) and compare its body with the tool's `structuredContent`.
 pub fn create_router() -> Router {
+    // mununu#934 — the API has no authentication and runs tools, so a browser page from any
+    // origin must not be able to read its answers: loopback origins (the UI dev server, a local
+    // client) and the deployment's `[server] cors_origins` only. The bundle's UI is same-origin
+    // and needs neither. A configuration error leaves the loopback default (the server's start
+    // already reports it through the licence status's `reason`).
+    let allowed = crate::deployment::current()
+        .map(|c| c.cors_origins)
+        .unwrap_or_default();
     let cors = CorsLayer::new()
-        .allow_origin(Any)
+        .allow_origin(tower_http::cors::AllowOrigin::predicate(
+            move |origin: &axum::http::HeaderValue, _| {
+                origin
+                    .to_str()
+                    .is_ok_and(|o| is_loopback_origin(o) || allowed.iter().any(|a| a == o))
+            },
+        ))
         .allow_methods(Any)
         .allow_headers(Any);
 
@@ -282,5 +346,112 @@ mod ui_dir_tests {
     async fn without_a_ui_directory_the_root_is_not_found() {
         let (status, _) = get(super::create_router_with_ui(None), "/").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    async fn get_with_origin(
+        app: axum::Router,
+        uri: &str,
+        origin: &str,
+    ) -> Option<axum::http::HeaderValue> {
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("origin", origin)
+                    .body(Body::empty())
+                    .expect("a request"),
+            )
+            .await
+            .expect("the router answers");
+        response
+            .headers()
+            .get("access-control-allow-origin")
+            .cloned()
+    }
+
+    /// mununu#940 — under `--ui-dir`, an unknown `/api/…` path is a JSON 404, not the UI page.
+    #[tokio::test]
+    async fn an_unknown_api_path_is_a_json_404_under_the_ui() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("index.html"), "<title>mununu ui</title>").expect("index");
+        let app = super::create_router_with_ui(Some(dir.path()));
+        for uri in ["/api/v1/no-such-route", "/api", "/api/v2/health"] {
+            let (status, body) = get(app.clone(), uri).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{uri}: {body}");
+            assert!(
+                body.contains("NOT_FOUND") && !body.contains("mununu ui"),
+                "{uri}: {body}"
+            );
+        }
+        // The real routes still answer.
+        let (status, _) = get(app, "/api/v1/health").await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    /// mununu#936 — `..` and its percent-encoded form cannot leave the UI directory. (A symlink
+    /// inside the directory is followed: the directory is the operator's own UI build, so a link
+    /// in it is the operator's choice; the bundle ships none.)
+    #[tokio::test]
+    async fn traversal_out_of_the_ui_directory_is_refused() {
+        let outer = tempfile::tempdir().expect("tempdir");
+        std::fs::write(outer.path().join("secret.txt"), "TOP SECRET").expect("secret");
+        let ui = outer.path().join("ui");
+        std::fs::create_dir(&ui).expect("ui dir");
+        std::fs::write(ui.join("index.html"), "<title>mununu ui</title>").expect("index");
+        let app = super::create_router_with_ui(Some(&ui));
+        for uri in [
+            "/../secret.txt",
+            "/%2e%2e/secret.txt",
+            "/assets/%2e%2e/%2e%2e/secret.txt",
+            "/..%2fsecret.txt",
+        ] {
+            let (_, body) = get(app.clone(), uri).await;
+            assert!(
+                !body.contains("TOP SECRET"),
+                "{uri} served a file outside the UI directory"
+            );
+        }
+    }
+
+    /// mununu#934 — a loopback page may read the API's answers; a page from anywhere else may not.
+    #[tokio::test]
+    async fn only_loopback_origins_get_cors_access_by_default() {
+        let app = super::create_router();
+        for ok in [
+            "http://localhost:5173",
+            "http://127.0.0.1:8080",
+            "http://[::1]:3000",
+        ] {
+            assert_eq!(
+                get_with_origin(app.clone(), "/api/v1/health", ok)
+                    .await
+                    .as_ref()
+                    .and_then(|v| v.to_str().ok()),
+                Some(ok),
+                "{ok}"
+            );
+        }
+        for bad in [
+            "https://evil.example",
+            "http://localhost.evil.example",
+            "http://127.0.0.1.evil.example",
+            "null",
+        ] {
+            assert!(
+                get_with_origin(app.clone(), "/api/v1/health", bad)
+                    .await
+                    .is_none(),
+                "{bad} must not be allowed"
+            );
+        }
+    }
+
+    #[test]
+    fn loopback_origins_are_exactly_localhost_127_0_0_1_and_ipv6_loopback() {
+        use super::is_loopback_origin as l;
+        assert!(l("http://localhost") && l("https://localhost:8443") && l("http://127.0.0.1:1"));
+        assert!(l("http://[::1]") && l("http://[::1]:5173"));
+        assert!(!l("http://localhost:") && !l("http://localhost:80x") && !l("ftp://localhost"));
+        assert!(!l("http://[::2]:80") && !l("http://[::1]x") && !l("http://localhost.example"));
     }
 }

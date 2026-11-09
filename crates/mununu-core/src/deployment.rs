@@ -41,6 +41,13 @@ pub struct DeploymentConfig {
     /// [`crate::usage_ledger::locate`] looks. `None` = the ledger is off unless the environment
     /// names one.
     pub usage_ledger: Option<PathBuf>,
+    /// mununu#934 — `[server] cors_origins`: browser origins allowed beside loopback, exactly as
+    /// a browser sends them (`https://ui.example.com`). Empty = loopback only.
+    pub cors_origins: Vec<String>,
+    /// mununu#935 — `[server] file_root`: when set, every server-side path an API request names
+    /// must lie under it once canonicalised (the bundle sets `/work`). Unset = no confinement, the
+    /// behaviour of a developer's local server.
+    pub file_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -52,6 +59,17 @@ struct RawConfig {
     templates: Option<RawTemplates>,
     #[serde(default)]
     licensing: Option<RawLicensing>,
+    #[serde(default)]
+    server: Option<RawServer>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawServer {
+    #[serde(default)]
+    cors_origins: Vec<String>,
+    #[serde(default)]
+    file_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -95,12 +113,18 @@ impl DeploymentConfig {
             Some(l) => (l.file.map(resolve), l.ledger.map(resolve)),
             None => (None, None),
         };
+        let (cors_origins, file_root) = match raw.server {
+            Some(s) => (s.cors_origins, s.file_root.map(resolve)),
+            None => (Vec::new(), None),
+        };
         Ok(DeploymentConfig {
             source: Some(path.to_path_buf()),
             template_files,
             enabled_domains: raw.enabled_domains,
             licence_file,
             usage_ledger,
+            cors_origins,
+            file_root,
         })
     }
 }
@@ -173,5 +197,26 @@ mod tests {
         let err =
             DeploymentConfig::parse("enabled_domain = []\n", Path::new("m.toml")).unwrap_err();
         assert!(err.contains("enabled_domain"), "{err}");
+    }
+
+    /// mununu#934 / #935 — the `[server]` table, and the bundle's own `deploy/mununu.toml` parses
+    /// with the confinement it promises (`file_root = "/work"`).
+    #[test]
+    fn the_server_table_parses_and_the_bundle_config_confines_to_work() {
+        let cfg = DeploymentConfig::parse(
+            "[server]\ncors_origins = [\"https://ui.example.com\"]\nfile_root = \"designs\"\n",
+            Path::new("/etc/mununu/mununu.toml"),
+        )
+        .expect("parses");
+        assert_eq!(cfg.cors_origins, vec!["https://ui.example.com".to_string()]);
+        assert_eq!(cfg.file_root, Some(PathBuf::from("/etc/mununu/designs")));
+        let bundle = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/mununu.toml");
+        let cfg = DeploymentConfig::load(&bundle).expect("the bundle's mununu.toml parses");
+        assert_eq!(cfg.file_root, Some(PathBuf::from("/work")));
+        assert!(cfg.cors_origins.is_empty());
+        assert!(
+            DeploymentConfig::parse("[server]\nbind = 1\n", Path::new("m.toml")).is_err(),
+            "an unknown [server] key is an error, like every other table"
+        );
     }
 }
