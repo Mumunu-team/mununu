@@ -1220,31 +1220,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "mununu"
-version = "0.5.11"
-dependencies = [
- "assert_cmd",
- "clap",
- "criterion",
- "itoa",
- "mununu-core",
- "predicates",
- "proptest",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "mununu-cli"
 version = "0.5.11"
 dependencies = [
+ "assert_cmd",
  "bitvec",
  "clap",
  "mununu-core",
+ "predicates",
  "serde",
  "serde_json",
  "tempfile",

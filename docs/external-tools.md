@@ -376,7 +376,7 @@ After installing any of these tools, you can confirm mununu discovers them via:
 
 ```bash
 # Z3 (linked; check via cargo)
-cargo run -- --version
+cargo run -p mununu-cli -- --version
 
 # sv2v (dev-only differential oracle; not needed for the product lift)
 sv2v --version

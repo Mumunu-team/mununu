@@ -1,63 +1,11 @@
 [workspace]
-members = [".", "crates/mununu-core", "crates/mununu-cli", "crates/mununu-extract"]
+members = ["crates/mununu-core", "crates/mununu-cli", "crates/mununu-extract"]
 resolver = "3"
 
-[package]
-name = "mununu"
-version = "0.5.11"
-edition = "2024"
-rust-version = "1.91"
-authors = ["Mariano Cerrutti <vscorza@gmail.com>"]
-description = "CLTS Verification Tool - Formal verification for reactive systems"
-repository = "https://github.com/Mumunu-team/mununu"
-license-file = "LICENSE"
-# Mununu Non-Commercial License → never publishable to crates.io. Also marks this
-# as a private/own crate so the cargo-deny license gate skips it (deny.toml).
-publish = false
-keywords = ["formal-verification", "reactive-systems", "model-checking", "synthesis", "ltl"]
-categories = ["science", "algorithms", "development-tools"]
-
-[dependencies]
-# Re-export from mununu-core
-mununu-core = { path = "crates/mununu-core" }
-
-# Core (still needed for main.rs until P2)
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-
-# CLI (optional)
-clap = { version = "4.5", features = ["derive"], optional = true }
-tracing = { version = "0.1", optional = true }
-tracing-subscriber = { version = "0.3.22", optional = true, features = ["env-filter"] }
-
-# API (optional). The axum/tower/tower-http surface lives in mununu-core;
-# the root crate only needs tokio to drive the runtime.
-tokio = { version = "1", optional = true, features = ["full"] }
-
-
-[dev-dependencies]
-criterion = "0.8"
-proptest = "1.9"
-tempfile = "3.24"
-itoa = "1.0"
-assert_cmd = "2.1"
-predicates = "3.1"
-
-[features]
-default = ["cli"]
-cli = ["dep:clap", "dep:tracing", "dep:tracing-subscriber"]
-api = [
-    "dep:tokio",
-    "mununu-core/api",
-    "mununu-core/ast-extract",
-]
-syntcomp = []  # enables SYNTCOMP benchmark tests (requires mununu-private sibling repo)
-
-[[bin]]
-name = "mununu"
-path = "src/main.rs"
-required-features = ["cli"]
-
+# A virtual manifest (2026-11-09): the product binary is `crates/mununu-cli` (`mununu`); the
+# legacy root binary (`src/main.rs`, CTXDSL verbs only) that a bare `cargo build` here used to
+# build — and that shared the `target/*/mununu` path with the product, so whichever built last
+# won — is removed. Its CLI test moved to `crates/mununu-cli/tests/cli_session.rs`.
 [profile.release]
 lto = true
 codegen-units = 1

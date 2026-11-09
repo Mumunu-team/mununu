@@ -90,12 +90,12 @@ run_pkg_tests() {
 STAGED=$(git diff --cached --name-only --diff-filter=ACMR)
 TOUCHED_CRATES=$(echo "$STAGED" | grep -oE '^crates/[^/]+' | sort -u || true)
 
-# Root package (`.` workspace member, package name `mununu`) touched? Its
-# src/*.rs or the root Cargo.toml/Cargo.lock (dep-graph shift). Handled as
-# an extra crate in the loop below; the cross-crate `cargo check
-# --workspace` guards downstream build impact either way.
+# The workspace manifest or lock file touched (a dep-graph shift)? The root is a virtual
+# manifest since 2026-11-09 (the legacy root package `mununu` is gone), so there is no root
+# package to lint or test: the change forces the compile phase, and the cross-crate
+# `cargo check --workspace` below is its check.
 ROOT_TOUCHED=0
-if echo "$STAGED" | grep -qE '^(src/.*\.rs|Cargo\.toml|Cargo\.lock)$'; then
+if echo "$STAGED" | grep -qE '^(Cargo\.toml|Cargo\.lock)$'; then
     ROOT_TOUCHED=1
 fi
 
@@ -119,7 +119,7 @@ fi
 echo ""
 echo "Scoped phase — touched crates:"
 echo "$TOUCHED_CRATES" | sed 's/^/  - /'
-[ $ROOT_TOUCHED -eq 1 ] && echo "  - . (root package mununu)"
+[ $ROOT_TOUCHED -eq 1 ] && echo "  - . (workspace manifest / lock file)"
 echo ""
 
 # Cross-crate BUILD net: catches "a change here broke a consumer crate's
@@ -139,15 +139,6 @@ for crate_path in $TOUCHED_CRATES; do
     echo "Running tests for $crate (runner: $TEST_RUNNER)..."
     run_pkg_tests "$crate"
 done
-
-# Root package (`.` = package `mununu`) — not under crates/, so the loop
-# above doesn't cover it.
-if [ $ROOT_TOUCHED -eq 1 ]; then
-    echo "Running cargo clippy for root package (mununu) (lib+bins)..."
-    cargo clippy -p mununu -- -D warnings
-    echo "Running tests for root package (mununu) (runner: $TEST_RUNNER)..."
-    run_pkg_tests mununu
-fi
 
 # Workspace-wide doctests. Doctests compile + run quickly per item, and a
 # downstream crate's doctest can fail on an upstream API change even when
