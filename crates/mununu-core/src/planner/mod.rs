@@ -593,8 +593,8 @@ fn skip_over_cap_notes(report: &AutoVerifyReport, design_btor2: &str) -> Vec<Ver
             // down-counter of width W means the fixpoint may need ~2^W iterations, so exact
             // abstains on the ITERATION budget rather than the bit cap — a different, and more
             // actionable, Skip reason than "cone too wide". Emit a diameter-bound note when the
-            // proxy can tell (it covers the reload-at-threshold down-counter shape only — up-
-            // counters and non-counter diameters are honestly out of its reach); otherwise leave
+            // proxy can tell (it covers registers that step themselves, up or down, by any step,
+            // mununu#929 — a non-counter diameter is honestly out of its reach); otherwise leave
             // it to the existing Skip provenance (atom-less cube, unsupported op).
             if let Some(w) = facts.cone_counter_diameter_log2(&atoms) {
                 notes.push(diameter_bound_skip_note(&prop.name, w));
@@ -1694,11 +1694,11 @@ mod tests {
 
     #[test]
     fn skip_note_diameter_bound_flags_in_cone_down_counter() {
-        // A recoverability property Skipped whose cone FITS the cap (an 8-bit counter) but carries
-        // a down-counter → the abstention is attributed to the ITERATION budget (2^8 diameter),
-        // NOT the bit cap. This is the compute_engine_drain shape (proxy fires, exact abstained).
+        // A recoverability property Skipped whose cone FITS the cap (a 16-bit counter) but carries
+        // a down-counter → the abstention is attributed to the ITERATION budget (2^16 diameter),
+        // NOT the bit cap. (mununu#929: a counter under 12 bits is not diameter-bound.)
         let btor2 = "\
-1 sort bitvec 8
+1 sort bitvec 16
 2 sort bitvec 1
 3 state 1 cnt
 4 ones 1
@@ -1715,8 +1715,8 @@ mod tests {
         assert_eq!(notes.len(), 1, "the diameter-bound note fires: {notes:?}");
         assert_eq!(notes[0].kind, "skip-diameter-bound");
         assert!(
-            notes[0].summary.contains("DIAMETER") && notes[0].summary.contains("8-bit"),
-            "summary must attribute the Skip to the 8-bit-counter diameter: {}",
+            notes[0].summary.contains("DIAMETER") && notes[0].summary.contains("16-bit"),
+            "summary must attribute the Skip to the 16-bit-counter diameter: {}",
             notes[0].summary
         );
         assert!(
@@ -1764,9 +1764,9 @@ mod tests {
 
     #[test]
     fn annotate_routing_reads_the_facts_and_predicts_ranking_for_a_counter_recovery() {
-        // A down-counter recoverability: the cone FITS the cap (8-bit) but carries an in-cone
+        // A down-counter recoverability: the cone FITS the cap (16-bit) but carries an in-cone
         // counter → the diameter proxy fires → the planner predicts `ranking` (exact will abstain).
-        let btor2 = "1 sort bitvec 8\n2 sort bitvec 1\n3 state 1 cnt\n4 ones 1\n5 zero 1\n\
+        let btor2 = "1 sort bitvec 16\n2 sort bitvec 1\n3 state 1 cnt\n4 ones 1\n5 zero 1\n\
                      6 one 1\n7 eq 2 3 5\n8 sub 1 3 6\n9 ite 1 7 4 8\n10 next 1 3 9\n11 init 1 3 4\n";
         let props = vec![(
             "p_drain".to_string(),
@@ -1777,8 +1777,8 @@ mod tests {
         assert_eq!(r[0].class, crate::mu_calculus::PropertyClass::Liveness);
         assert_eq!(
             r[0].diameter_log2,
-            Some(8),
-            "the 8-bit in-cone counter is seen"
+            Some(16),
+            "the 16-bit in-cone counter is seen"
         );
         assert_eq!(r[0].predicted_engine, "ranking");
         // The rendered note carries the measured facts inline (article material).

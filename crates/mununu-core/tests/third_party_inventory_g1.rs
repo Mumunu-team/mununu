@@ -49,18 +49,30 @@ fn tracked_files(root: &Path) -> Vec<PathBuf> {
     walked_files(root)
 }
 
-/// Root `.gitignore` entries that name a path (`/experiments/`, `/target`), as relative paths.
-fn ignored_roots(root: &Path) -> Vec<PathBuf> {
+/// Root `.gitignore` entries without a wildcard, split as git reads them: an entry with a slash
+/// before its end (`/experiments/`, `.claude/reviews/`) is a path from the root; one without
+/// (`scratchpad/`, `build/`) is a directory name that matches at any depth. Until this split the
+/// walk honoured the first kind only when it began with `/`, so a checkout holding ignored local
+/// files under `.claude/reviews/` or `scratchpad/` walked directories git never lists.
+fn ignore_entries(root: &Path) -> (Vec<PathBuf>, Vec<String>) {
     let text = std::fs::read_to_string(root.join(".gitignore")).unwrap_or_default();
-    text.lines()
-        .map(str::trim)
-        .filter(|l| l.starts_with('/') && !l.contains('*'))
-        .map(|l| PathBuf::from(l.trim_matches('/')))
-        .collect()
+    let (mut paths, mut names) = (Vec::new(), Vec::new());
+    for l in text.lines().map(str::trim) {
+        if l.is_empty() || l.starts_with('#') || l.starts_with('!') || l.contains('*') {
+            continue;
+        }
+        let body = l.trim_end_matches('/');
+        if body.contains('/') {
+            paths.push(PathBuf::from(body.trim_start_matches('/')));
+        } else {
+            names.push(body.to_string());
+        }
+    }
+    (paths, names)
 }
 
 fn walked_files(root: &Path) -> Vec<PathBuf> {
-    let ignored = ignored_roots(root);
+    let (ignored, ignored_names) = ignore_entries(root);
     let mut out = Vec::new();
     let mut stack = vec![PathBuf::new()];
     while let Some(dir) = stack.pop() {
@@ -76,6 +88,8 @@ fn walked_files(root: &Path) -> Vec<PathBuf> {
                 || name == ".ci-target"
                 || name == "node_modules"
                 || ignored.contains(&rel)
+                || (entry.file_type().is_ok_and(|t| t.is_dir())
+                    && ignored_names.iter().any(|n| n.as_str() == name))
             {
                 continue;
             }

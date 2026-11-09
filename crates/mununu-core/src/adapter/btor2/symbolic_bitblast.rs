@@ -5513,8 +5513,8 @@ impl ExactModel {
     /// It is the sound superset of [`ModelFacts::cone_counter_diameter_log2`]: a near target
     /// saturates in a few steps (`Saturated(small)`), and a wide-diameter recovery of ANY shape —
     /// an up-counter, a down-drain, a deep sequential chain — `ExceedsBound(k_max)`, with no
-    /// over- or under-prediction (the counter proxy misses up-counters and over-fires on a
-    /// counter-in-cone whose property does not traverse it; this cannot, because it evaluates the
+    /// over- or under-prediction (the counter proxy misses a diameter that is not a
+    /// self-stepping register and over-fires on a counter-in-cone whose property does not traverse it; this cannot, because it evaluates the
     /// real transitions). Cheap: `k_max` preimages on the already-built relation, `k_max` small.
     ///
     /// USE: routing on the result is still a heuristic *cutoff* — `ExceedsBound(k_max)` soundly

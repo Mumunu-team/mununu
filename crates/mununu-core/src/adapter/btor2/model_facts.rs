@@ -48,7 +48,95 @@ pub(crate) struct ModelFacts<'m> {
     theory: OnceLock<Theory>,
     total_bits: OnceLock<Option<u32>>,
     free_inputs: OnceLock<Vec<InputFact>>,
-    counters: OnceLock<Vec<crate::adapter::btor2::bit_blast::DownCounterMeta>>,
+    stride_counters: OnceLock<Vec<(Nid, u32)>>,
+}
+
+/// mununu#929 — the narrowest counter the diameter proxy reports. A `W`-bit counter bounds the
+/// exact engine's fixpoint at about `2^W` preimage steps; at 12 bits that is 4,096 steps, which
+/// at the 1–10 ms a step the corpus shows is where a row crosses the 10-second band. Measured on
+/// either side (the 18-design corpus, 2026-11-09): 54 rows with 2–6-bit counters, slowest
+/// 0.28 s; 12 in-cap rows with a 22-bit counter, 4 of them 28–163 s; the 15-bit power-up
+/// counter of `docs/verifying-rtl.md` §`--param` abstains. No row between 7 and 21 bits has
+/// been measured, so the cut inside that gap is reasoned, not fitted.
+pub(crate) const DIAMETER_BOUND_MIN_WIDTH: u32 = 12;
+
+/// The view of a register that `nid` is, if any: the register's own nid when `nid` is the
+/// register or a `uext` / `sext` / `slice` / one-constant-arm `ite` chain over it. Bounded by
+/// `depth` so a pathological chain cannot recurse without end.
+fn register_view(file: &Btor2File, nid: Nid, depth: u32) -> Option<Nid> {
+    use crate::adapter::btor2::ast::{Node, Op};
+    let node = &file.lookup(nid)?.node;
+    match node {
+        Node::State { .. } => Some(nid),
+        _ if depth == 0 => None,
+        Node::Op {
+            op: Op::Uext | Op::Sext | Op::Slice,
+            args,
+            ..
+        } => register_view(file, args.first()?.nid(), depth - 1),
+        Node::Op {
+            op: Op::Ite, args, ..
+        } if args.len() >= 3 => {
+            let (then, els) = (args[1].nid(), args[2].nid());
+            let is_const = |n: Nid| {
+                crate::adapter::btor2::bit_blast::resolve_btor2_constant(file, n).is_some()
+            };
+            if is_const(els) {
+                register_view(file, then, depth - 1)
+            } else if is_const(then) {
+                register_view(file, els, depth - 1)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// mununu#929 — see [`ModelFacts::stride_counters`]. Walks each register's next-value DAG
+/// through operator nodes (stopping at states, inputs and constants) and looks for an
+/// `add` / `sub` with an operand that is a view of that register.
+fn detect_stride_counters(file: &Btor2File) -> Vec<(Nid, u32)> {
+    use crate::adapter::btor2::ast::{Node, Op};
+    use crate::adapter::btor2::parser;
+    const VIEW_DEPTH: u32 = 8;
+    let mut out = Vec::new();
+    for line in &file.lines {
+        let Node::State { sort, .. } = &line.node else {
+            continue;
+        };
+        let Some(width) = parser::bv_width(file, *sort).filter(|&w| w >= 2) else {
+            continue;
+        };
+        let cnt = line.nid;
+        let Some(next) = parser::find_next_value_operand(file, cnt) else {
+            continue;
+        };
+        let mut seen = std::collections::HashSet::new();
+        let mut stack = vec![next.nid()];
+        let mut steps = false;
+        while let Some(nid) = stack.pop() {
+            if !seen.insert(nid) {
+                continue;
+            }
+            let Some(Node::Op { op, args, .. }) = file.lookup(nid).map(|l| &l.node) else {
+                continue; // a state, input or constant leaf ends this branch
+            };
+            if matches!(op, Op::Add | Op::Sub)
+                && args
+                    .iter()
+                    .any(|a| register_view(file, a.nid(), VIEW_DEPTH) == Some(cnt))
+            {
+                steps = true;
+                break;
+            }
+            stack.extend(args.iter().map(|a| a.nid()));
+        }
+        if steps {
+            out.push((cnt, width));
+        }
+    }
+    out
 }
 
 impl<'m> ModelFacts<'m> {
@@ -59,7 +147,7 @@ impl<'m> ModelFacts<'m> {
             theory: OnceLock::new(),
             total_bits: OnceLock::new(),
             free_inputs: OnceLock::new(),
-            counters: OnceLock::new(),
+            stride_counters: OnceLock::new(),
         }
     }
 
@@ -130,12 +218,6 @@ impl<'m> ModelFacts<'m> {
         Some((cb, effective_bitblast_cap(cb)))
     }
 
-    /// Detected down-counters of the model (`detect_down_counter`), computed once.
-    pub(crate) fn counters(&self) -> &[crate::adapter::btor2::bit_blast::DownCounterMeta] {
-        self.counters
-            .get_or_init(|| crate::adapter::btor2::bit_blast::detect_down_counter(self.model))
-    }
-
     /// P2.2c (2026-07-28) — the CHEAP **diameter proxy**. The exact μ-engine's fixpoint cost is
     /// the state-space DIAMETER, not the cone bit-count: `compute_engine_wide` has a ~34-bit cone
     /// (well under the cap, so `cone_vs_cap` says "admit, cheap") yet a 2³² diameter that grinds
@@ -152,20 +234,54 @@ impl<'m> ModelFacts<'m> {
     /// (yes iff a wide counter feeds the cone) — sound as an ADVISORY note and as a
     /// deadline-shortening input (a genuine decision still finishes under a short deadline; only a
     /// real grind is cut sooner), but UNSOUND as a hard skip. See `cone_counter_diameter_log2_*`.
+    ///
+    /// mununu#929 — the proxy reads [`Self::stride_counters`], not the b1 `detect_down_counter`
+    /// it read until then. That detector is a SOUNDNESS gate for a lossy rewrite: it refuses a counter
+    /// whose step is not a constant, whose add is wider than the register, or that is compared
+    /// to anything but one constant. Those refusals are right for the rewrite and wrong for a
+    /// cost estimate, and OpenTitan's `prim_count` trips all three, so its rows read "no
+    /// counter" and were estimated in seconds while measuring up to 163 s.
+    ///
+    /// Only a counter of at least [`DIAMETER_BOUND_MIN_WIDTH`] bits counts. Reading every
+    /// self-stepping register was tried first and refuted on the 18-design corpus: it flagged
+    /// FIFO pointers and FSM counters of 2–6 bits on 54 rows that all decided in under 0.3 s,
+    /// and the J2 score fell from 205 to 158 of 210. The 22-bit `prim_count` counter carries
+    /// every row of that corpus over 10 s.
     pub(crate) fn cone_counter_diameter_log2(&self, seed_atoms: &[String]) -> Option<u32> {
-        let counters = self.counters();
+        let counters: Vec<(Nid, u32)> = self
+            .stride_counters()
+            .iter()
+            .copied()
+            .filter(|&(_, w)| w >= DIAMETER_BOUND_MIN_WIDTH)
+            .collect();
         if counters.is_empty() {
             return None;
         }
         if seed_atoms.is_empty() {
-            return counters.iter().map(|c| c.width).max();
+            return counters.iter().map(|&(_, w)| w).max();
         }
         let cone = cone_leaf_nids(self.model, seed_atoms);
         counters
             .iter()
-            .filter(|c| cone.contains(&c.nid))
-            .map(|c| c.width)
+            .filter(|(nid, _)| cone.contains(nid))
+            .map(|&(_, w)| w)
             .max()
+    }
+
+    /// mununu#929 — every register that steps itself: `(nid, width)` for each `state` of width
+    /// ≥ 2 whose next-value function contains an `add` / `sub` with an operand that is a VIEW of
+    /// the register itself. A view is the register, a `uext` / `sext` / `slice` of a view, or a
+    /// one-constant-arm `ite` of a view (yosys's async-reset mux). The step may be anything (an
+    /// input, another register) and the register may be read anywhere.
+    ///
+    /// Advisory only, and that is why it may be this loose: it feeds the diameter note, the
+    /// predicted engine and the J2 cost estimate, never a rewrite and never a verdict. A false
+    /// positive (an accumulator, a counter that is never near its wrap) costs an over-estimate,
+    /// the safe direction for J5 sizing; a false negative is the under-estimate #929 was.
+    /// Memoized.
+    pub(crate) fn stride_counters(&self) -> &[(Nid, u32)] {
+        self.stride_counters
+            .get_or_init(|| detect_stride_counters(self.model))
     }
 
     /// The pinnable primary-input surface — all free `input` leaves, widest first. Memoized.
@@ -389,7 +505,7 @@ mod tests {
     // diameter proxy must return the counter width for a cone that reaches `cnt`, and `None` for
     // one that does not (`flag`), and must ignore the sub-2-bit toggle (not a counter).
     const COUNTER_FIXTURE: &str = "\
-1 sort bitvec 8
+1 sort bitvec 16
 2 sort bitvec 1
 3 state 1 cnt
 4 ones 1
@@ -411,15 +527,18 @@ mod tests {
     fn cone_counter_diameter_log2_flags_in_cone_counter() {
         let file = parser::parse(COUNTER_FIXTURE).expect("parse");
         let facts = ModelFacts::new(&file);
-        // The 8-bit down-counter is detected and lies in its own cone ⇒ diameter proxy = 8.
+        // The 16-bit down-counter is detected and lies in its own cone ⇒ diameter proxy = 16.
         assert_eq!(
             facts.cone_counter_diameter_log2(&["cnt".to_string()]),
-            Some(8)
+            Some(16)
         );
         // Whole-design (empty atoms) also sees it.
-        assert_eq!(facts.cone_counter_diameter_log2(&[]), Some(8));
+        assert_eq!(facts.cone_counter_diameter_log2(&[]), Some(16));
         // Memoized detection agrees on a second read.
-        assert_eq!(facts.counters().len(), 1);
+        assert_eq!(
+            crate::adapter::btor2::bit_blast::detect_down_counter(&file).len(),
+            1
+        );
     }
 
     #[test]
@@ -435,12 +554,19 @@ mod tests {
     }
 
     #[test]
-    fn cone_counter_diameter_log2_none_without_counter() {
-        // COST_FIXTURE's `ctrl` is a free-running `+1` up-counter with no reload/threshold — not
-        // a `detect_down_counter` match — so the diameter proxy is None (the proxy only covers
-        // the reload-at-threshold down-counter shape, honestly not every wide register).
+    fn a_counter_below_the_cut_is_a_stride_counter_but_not_diameter_bound() {
+        // COST_FIXTURE's `ctrl` is a free-running 8-bit `+1` up-counter: not a b1
+        // `detect_down_counter` match (no threshold), but a self-stepping register (mununu#929).
+        // 2^8 steps is milliseconds for the exact engine (the corpus's 2–6-bit counters all
+        // decided under 0.3 s; `examples/recoverability/compute_engine.sv`'s 8-bit `cnt` in
+        // milliseconds), so the diameter proxy stays silent. `other` never steps itself.
         let file = parser::parse(COST_FIXTURE).expect("parse");
         let facts = ModelFacts::new(&file);
+        assert!(
+            crate::adapter::btor2::bit_blast::detect_down_counter(&file).is_empty(),
+            "the b1 detector stays strict"
+        );
+        assert_eq!(facts.stride_counters(), &[(3, 8)]);
         assert_eq!(
             facts.cone_counter_diameter_log2(&["ctrl".to_string()]),
             None
@@ -449,5 +575,62 @@ mod tests {
             facts.cone_counter_diameter_log2(&["other".to_string()]),
             None
         );
+    }
+
+    // mununu#929 — the shape of OpenTitan `prim_count` as yosys lifts it: a 22-bit counter
+    // stepped by an INPUT through a 23-bit add (`{1'b0, cnt} + {1'b0, step}`), sliced back, behind
+    // a reset mux, and compared against a twin register rather than a constant. The b1 detector
+    // refuses it on every one of those counts; the diameter proxy must not.
+    const PRIM_COUNT_SHAPE: &str = "\
+1 sort bitvec 1
+2 sort bitvec 22
+3 sort bitvec 23
+4 input 1 rst_ni
+5 input 1 incr_en
+6 input 2 step
+7 state 2 cnt
+8 zero 2
+9 ite 2 4 7 8
+10 uext 3 9 1
+11 uext 3 6 1
+12 add 3 10 11
+13 slice 2 12 3 0
+14 ite 2 5 13 9
+15 next 2 7 14
+16 state 2 twin
+17 sub 2 16 6
+18 ite 2 5 17 16
+19 next 2 16 18
+20 eq 1 7 16
+21 state 1 err
+22 next 1 21 20
+23 state 2 shadow
+24 next 2 23 7
+";
+
+    #[test]
+    fn cone_counter_diameter_log2_sees_prim_counts_counter() {
+        // The #929 reproducer: only APIs the parent commit has, so it fails there (None).
+        let file = parser::parse(PRIM_COUNT_SHAPE).expect("parse");
+        let facts = ModelFacts::new(&file);
+        assert!(
+            crate::adapter::btor2::bit_blast::detect_down_counter(&file).is_empty(),
+            "the b1 detector refuses this shape, which is the #929 miss"
+        );
+        assert_eq!(
+            facts.cone_counter_diameter_log2(&["err".to_string()]),
+            Some(22)
+        );
+    }
+
+    #[test]
+    fn stride_counters_are_the_registers_that_step_themselves() {
+        let file = parser::parse(PRIM_COUNT_SHAPE).expect("parse");
+        let facts = ModelFacts::new(&file);
+        let mut found: Vec<_> = facts.stride_counters().to_vec();
+        found.sort();
+        // `cnt` (add through uext + slice + reset mux) and `twin` (a plain sub by an input);
+        // `shadow` copies `cnt` without stepping and `err` is one bit.
+        assert_eq!(found, vec![(7, 22), (16, 22)]);
     }
 }
