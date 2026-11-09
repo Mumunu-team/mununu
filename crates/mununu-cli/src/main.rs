@@ -2433,6 +2433,12 @@ struct SvVerifyAutoArgs {
     /// file is read before the run opens its own breadcrumb, so both may name the same path.
     #[arg(long = "resume-from", value_name = "FILE")]
     resume_from: Option<PathBuf>,
+    /// Roadmap J2 — plan the run without running it: lift the design, and print what each
+    /// property is estimated to cost (a time band, a memory class, a confidence, and the measured
+    /// table row it came from). No engine runs; exits 0. With `--json`, the document is
+    /// `POST /api/v1/sv/plan`'s.
+    #[arg(long = "plan-only")]
+    plan_only: bool,
     /// Print a JSON report instead of the human-readable summary.
     #[arg(long)]
     json: bool,
@@ -4824,6 +4830,21 @@ fn sv_verify_auto(args: SvVerifyAutoArgs) -> Result<(), String> {
         },
     };
 
+    // Roadmap J2 — the plan only: the lift and the planner's estimate, no engine, exit 0.
+    if args.plan_only {
+        let plan = mununu_core::adapter::slang::verify_auto::plan_auto(&sources, &yopts, &opts)
+            .map_err(|e| format!("sv verify-auto --plan-only: {}", e.message))?;
+        let view = mununu_core::api::models::SvPlanResponse::from(&plan);
+        if args.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&view).map_err(|e| format!("serialize plan: {e}"))?
+            );
+        } else {
+            render_plan_text(&view);
+        }
+        return Ok(());
+    }
     let started = std::time::Instant::now();
     let outcome = verify_auto(&sources, &yopts, &opts);
     // Track H3 — one usage-ledger record per run, success or failure, written HERE: below, the
@@ -4890,6 +4911,41 @@ fn sv_verify_auto(args: SvVerifyAutoArgs) -> Result<(), String> {
     );
     ci_gate_exit(worst, args.ci.fail_on);
     Ok(())
+}
+
+/// Roadmap J2 — the plan as a table: one line per property, then the bands at a glance.
+fn render_plan_text(view: &mununu_core::api::models::SvPlanResponse) {
+    println!(
+        "plan: {} propert{}, lift {} ms (no engine ran)",
+        view.properties.len(),
+        if view.properties.len() == 1 {
+            "y"
+        } else {
+            "ies"
+        },
+        view.lift_ms
+    );
+    for p in &view.properties {
+        let name = p.label.as_deref().unwrap_or(&p.name);
+        match &p.routing {
+            Some(r) => println!(
+                "  {name}: {} / {} memory, {} confidence — {} ({} b, cap {}) — {}",
+                r.estimate.time_band,
+                r.estimate.memory_class,
+                r.estimate.confidence,
+                r.class,
+                r.cone_bits,
+                r.cap,
+                r.estimate.basis
+            ),
+            None => println!("  {name}: no estimate (the cone width could not be established)"),
+        }
+    }
+    let bands: Vec<String> = view.bands.iter().map(|(b, n)| format!("{b} {n}")).collect();
+    println!("bands: {}", bands.join(", "));
+    for u in &view.unsupported {
+        println!("  unsupported: {}: {}", u.name, u.reason);
+    }
 }
 
 /// mununu#537 — the human-readable expectation verdict, printed after the report.

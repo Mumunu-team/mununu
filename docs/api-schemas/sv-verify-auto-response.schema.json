@@ -183,6 +183,34 @@
       ],
       "type": "object"
     },
+    "EstimateView": {
+      "description": "Roadmap J2 — one property's cost estimate.",
+      "properties": {
+        "basis": {
+          "description": "The measured table row, with its evidence.",
+          "type": "string"
+        },
+        "confidence": {
+          "description": "`high` | `medium` | `low` — for `low`, size for the band's top.",
+          "type": "string"
+        },
+        "memory_class": {
+          "description": "`small` (no exact BDD work) | `medium` (within the default arena) | `large` (the arena may overflow, or the cap ladder runs).",
+          "type": "string"
+        },
+        "time_band": {
+          "description": "`seconds` (< 10 s) | `minutes` (< 10 min) | `hour` (< 1 h) | `wall`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "basis",
+        "confidence",
+        "memory_class",
+        "time_band"
+      ],
+      "type": "object"
+    },
     "ExpectationFailureView": {
       "description": "mununu#537 — one unmet claim. `property` is absent for a run-level claim (the count).",
       "properties": {
@@ -870,16 +898,34 @@
             "null"
           ]
         },
+        "estimate": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/EstimateView"
+            }
+          ],
+          "description": "Roadmap J2 — the cost estimate: a band, a memory class, a confidence and the measured table row it came from. A scheduler hint; nothing reads it on a verdict path."
+        },
         "predicted_engine": {
           "description": "The engine the planner predicts will decide the property.",
           "type": "string"
+        },
+        "shape": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ShapeFactsView"
+            }
+          ],
+          "description": "Roadmap J2 — the static shape the cost estimate is keyed by."
         }
       },
       "required": [
         "cap",
         "class",
         "cone_bits",
-        "predicted_engine"
+        "estimate",
+        "predicted_engine",
+        "shape"
       ],
       "type": "object"
     },
@@ -916,6 +962,54 @@
         "properties_ms",
         "run_ms",
         "unattributed_ms"
+      ],
+      "type": "object"
+    },
+    "ShapeFactsView": {
+      "description": "Roadmap J2 — the static shape of one property (read off its cone and formula, no solving).",
+      "properties": {
+        "alternation": {
+          "description": "The formula's fixpoint alternation depth (2 = a μ under a ν).",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "arith_ops": {
+          "description": "Multiplier / divider / remainder cells in the cone.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "array_states": {
+          "description": "Array-sorted states (memories) in the cone.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "constant": {
+          "description": "The formula is constant on every model.",
+          "type": "boolean"
+        },
+        "inputs": {
+          "description": "Primary inputs in the cone.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "relational_atoms": {
+          "description": "Register-versus-register comparison atoms (`a == b`).",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "alternation",
+        "arith_ops",
+        "array_states",
+        "constant",
+        "inputs",
+        "relational_atoms"
       ],
       "type": "object"
     },
