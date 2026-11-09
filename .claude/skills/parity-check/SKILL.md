@@ -33,7 +33,7 @@ If $ARGUMENTS is empty, derive scope from `git diff --name-only HEAD~1 HEAD`. Ot
 
 | Surface | Files |
 |---|---|
-| **CLI** | `crates/mununu-cli/src/main.rs` and `src/main.rs` (clap `Args` structs and command handlers — note that mununu ships *two* binaries named `mununu`; a feature that exists on one but not the other is itself a parity drift) |
+| **CLI** | `crates/mununu-cli/src/main.rs` (clap `Args` structs and command handlers). Since 2026-11-09 this is the only `mununu` binary — the legacy root `src/main.rs` is gone (mununu#925) — so the old "two binaries" drift class no longer exists. The MCP server (`mununu mcp`, `crates/mununu-core/src/api/mcp.rs`) is a third transport of the API's ops: a verb exposed as an MCP tool must have the same CLI and HTTP peers |
 | **HTTP API** | `crates/mununu-core/src/api/handlers.rs` (request/response signatures), `crates/mununu-core/src/api/models.rs` (types), `crates/mununu-core/src/api/server.rs` (routes) |
 | **UI** *(CTXDSL-related only)* | `mununu-ui/src/api/endpoints.ts` (typed clients), `mununu-ui/src/hooks/useCtxdslEditor.ts`, `mununu-ui/src/hooks/useSummary.ts`, and any other hook/component that consumes the endpoint |
 

@@ -16,7 +16,7 @@ mununu's verdicts must be sound AND its silence honest: an engine that cannot fi
 
 ## Scope
 
-Engine and adapter code under `crates/mununu-core/src/adapter/`, `crates/mununu-core/src/planner/`, `crates/mununu-core/src/mu_calculus/`. Test modules (`#[cfg(test)]`, `tests/`) are out of scope: a test may unwrap.
+Engine and adapter code under `crates/mununu-core/src/adapter/`, `crates/mununu-core/src/planner/`, `crates/mununu-core/src/mu_calculus/`, and the N-source orchestrator under `crates/mununu-core/src/verify/` (it merges per-source verdicts, so a dropped error there is a dropped verdict). Test modules (`#[cfg(test)]`, `tests/`) are out of scope: a test may unwrap.
 
 ## Class A — crash where an abstention was due
 

@@ -47,6 +47,10 @@ before a tag.
 
 ## Cutting one
 
+0. Run the review pass's policy gates on `main` since the last tag (the `review-orchestrator`
+   agent under `.claude/agents/`, tier A): a consumer briefing for every surface change, the
+   API-schema drift settled, the private-name and absolute-path scans clean, a `Repro:` trailer
+   on every fix. A red gate is a finding to fix before the tag, not a formality to note.
 1. Bump the version in the three `Cargo.toml`s on `main` (one PR); the `--version` line also
    carries the build identity (mununu#715).
 2. `git tag vX.Y.Z && git push origin vX.Y.Z` — the tag push is the publishing act.

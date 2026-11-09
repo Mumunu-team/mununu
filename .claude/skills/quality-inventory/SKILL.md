@@ -44,7 +44,7 @@ command -v cargo-nextest >/dev/null 2>&1 && echo "cargo-nextest: available" || e
 
 ```bash
 # Total SLOC (Rust files only, exclude tests and benches)
-find crates/ src/ -name '*.rs' ! -path '*/tests/*' ! -path '*/benches/*' | xargs wc -l | tail -1
+find crates/ -name '*.rs' ! -path '*/tests/*' ! -path '*/benches/*' | xargs wc -l | tail -1
 
 # Crate count
 ls -d crates/*/Cargo.toml 2>/dev/null | wc -l
@@ -56,7 +56,7 @@ cargo test --workspace -- --list 2>&1 | grep ': test$' | wc -l
 cargo clippy --workspace --all-targets --message-format=json 2>&1 | grep '"level":"warning"' | wc -l
 
 # Unsafe block count (non-test code)
-grep -r 'unsafe ' crates/ src/ --include='*.rs' -l 2>/dev/null | grep -v '#\[cfg(test)\]' | wc -l
+grep -r 'unsafe ' crates/ --include='*.rs' -l 2>/dev/null | grep -v '#\[cfg(test)\]' | wc -l
 ```
 
 ### Module Level (per top-level directory under src/)

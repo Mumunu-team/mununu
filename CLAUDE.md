@@ -182,15 +182,15 @@ Under `.claude/skills/**` (invoke as `/<name>`) and `.claude/agents/**` (spawn b
 |---|---|
 | `/parity-check` | Verifies a capability is wired across CLI + API (+ UI for CTXDSL). Run before calling a feature "done". |
 | `/docs-traceability` | Walks the covered Markdown and verifies every `Source of truth:` anchor. |
-| `/soundness-check` | Flags undocumented `eval_expr → None` choices and silent under-use of CLTS / CTXDSL primitives. |
+| `/soundness-check` | Flags undocumented evaluation fallbacks (`evaluate* → None` / defaults), a 2-valued model under an alternating property, an engine member outside the differential check, and silent under-use of CLTS / CTXDSL primitives. |
 | `/failure-path-audit` | Lists crash sites (`unwrap`/`expect`/`panic`/unchecked index in engine code) and silent failure paths (`Err → None`, `.ok()`, a cap with no reason) with the abstention or report field each should reach. Run on every change under `adapter/`. |
 | `/design-principles` | KISS / DRY / SOLID / YAGNI review of a target scope. |
 | `/rust-best-practices` | Idiomatic-Rust review: ownership, error handling, API shape. |
 | `/security-audit` | Vulnerabilities, `unsafe`, input handling. |
 | `/test-coverage` | Coverage, test quality, missing scenarios. |
 | `/quality-inventory` | One-shot SLOC / pub-count / nesting / dead-code inventory. |
-| `quality-session` | Metric-driven refactoring session with before/after measurement (not a point-in-time review). |
-| `review-orchestrator` | Runs the review skills and produces one consolidated report. |
+| `quality-session` | Metric-driven refactoring session with before/after measurement (not a point-in-time review); per-crate validation per step, one `make ci` at close, defers a target another lane is editing. |
+| `review-orchestrator` | The review pass on a branch, a PR or a subsystem: the mechanical policy gates (Repro trailers, briefings, schema drift, private names, untracked links, test-binary count, test hygiene, cadence), then the skills routed by path, then one report splitting merge-blocking from advisory. Read-only; reads CI instead of starting a build beside a hook. |
 | `domain-adequacy` | Checks a domain profile (agentic, codesign) covers its controllability / composition / label conventions. |
 | `sidecar-auditor` | Audits every sidecar implementation for redundancy and design; analysis and a phased plan, no edits. |
 | `verification-prospector` | Mines literature and corpora for verification targets; maintains the backlog. |

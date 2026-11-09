@@ -2,35 +2,40 @@
 name: rust-review
 description: >
   Reviews Rust code for idiomatic patterns, ownership/borrowing correctness,
-  error handling, performance, and adapter architecture compliance.
-  Use when asked to review, audit, or check Rust code quality.
+  error handling at the engine's abstention seams, hot-path allocation,
+  budget and cancellation propagation across threads, and feature gating.
+  Use when asked to review, audit, or check Rust code quality; also invoked
+  by review-orchestrator as `/rust-best-practices`.
 ---
 
-Perform a Rust best-practices review of $ARGUMENTS (or changed files via `git diff --name-only HEAD~1 HEAD | grep '\.rs$'` if no args).
+Perform a Rust best-practices review of $ARGUMENTS. With no arguments, the scope is the branch against `main` plus the working tree:
 
-This is a Cargo workspace with three crates: `mununu-core` (verification engine), `mununu-cli` (CLI), and `mununu-extract` (AST extraction via tree-sitter).
+```bash
+base=$(git merge-base origin/main HEAD); { git diff --name-only "$base" HEAD; git status --porcelain | awk '{print $2}'; } | grep '\.rs$' | sort -u
+```
 
-## Review Checklist
+The workspace (edition 2024, virtual root manifest since 2026-11-09 — there is no root `src/`): `crates/mununu-core` (the engine, adapters, planner, HTTP + MCP API behind the `api` / `mcp` features), `crates/mununu-cli` (the `mununu` binary), `crates/mununu-extract` (tree-sitter extraction). Z3 is a mandatory dependency of mununu-core; OxiDD is the ROBDD library. Architecture: `docs/design/engine-routing.md`, `docs/design/sts-ir.md`.
 
-1. **Ownership & Borrowing**: flag unnecessary `.clone()`, lifetime issues, `Rc`/`RefCell` overuse. The adapter system passes `&SharedIR` — check adapters don't take ownership unnecessarily.
+## Review checklist
 
-2. **Error Handling**: library code must use `thiserror` and `?` propagation. No bare `unwrap()` / `expect()` in `mununu-core` or `mununu-extract`. CLI code (`mununu-cli`) may use `expect()` with descriptive messages at top-level entry points only.
+1. **Ownership & borrowing.** Flag needless `.clone()`, `Rc`/`RefCell` where a borrow does, `Arc<Mutex<_>>` with no documented sharing. Adapters receive `&AdapterIR` (`crates/mununu-core/src/adapter/ir.rs`) and the engines receive the STS-IR (`crates/mununu-core/src/adapter/sts_ir.rs`) — a function that takes ownership of either to read it is a finding; a module that re-derives the IR it was handed is a design finding (hand it to `/design-principles`).
 
-3. **Idiomatic Patterns**: iterators over manual loops, `Option`/`Result` combinators, `impl Trait` for return types. Check adapter implementations follow the delegation pattern (parse native format -> build IR -> emit CTXDSL).
+2. **Error handling at the abstention seam** (`CLAUDE.md` §Failure Paths). The engine modules carry `#![deny(clippy::unwrap_used, clippy::expect_used)]` (`adapter/btor2/{symbolic_bitblast,bit_blast,native_bmc,native_interp,native_boolector,cegar,witness,bad_monitor,fault}.rs`, `adapter/{reach_portfolio,reach_rescue,fault_adversary}.rs`): a new `#[allow(clippy::unwrap_used)]` needs a comment naming the invariant; an `expect` message names an invariant the code itself established ("inserted above"), never a value a design or a tool controls. Library code propagates with `?` and `thiserror` types; the CLI may `expect` with a message at its top-level entry only. Whether a discarded error reaches the report is `/failure-path-audit`'s question — here, judge the idiom (a `match` with an `Err(_) => default` arm is the smell to point at).
 
-4. **Performance**: avoid allocations in BDD/LTL/mu-calculus hot paths (`clts/`, `ltl/`, `mu_calculus/`). Check for O(n^2) patterns in state enumeration. `bitvec` and `smallvec` should be preferred over `Vec<bool>` and small `Vec<T>`.
+3. **Idiomatic patterns.** Iterators over index loops; `Option`/`Result` combinators; `impl Trait` returns where the type is an implementation detail; `let … else` for early exits. The adapter shape is parse → IR → emit (`adapter/emit.rs` is the shared CTXDSL emitter); a new adapter that formats CTXDSL text itself duplicates it.
 
-5. **API Guidelines**: snake_case functions, CamelCase types. Builder pattern for complex config structs. `into_*` for ownership-consuming conversions, `as_*` for cheap borrows.
+4. **Hot paths.** No allocation inside the fixpoint and apply loops: `clts/`, `mu_calculus/` (the evaluator and the parity-game solvers), `composition/`, `adapter/btor2/{bit_blast,symbolic_bitblast,symbolic_engine}.rs` (the ROBDD engine), `adapter/btor2/native_bmc.rs` (query construction). Labels are `SmallVec<[LabelId; 4]>` in `clts/mod.rs`; prefer `bitvec` / `smallvec` to `Vec<bool>` / short `Vec<T>`. O(n²) over states or transitions in an enumeration is a finding; a measured claim beats a guess (`CLAUDE.md` §Falsifier First: under ~2× on this host is not evidence).
 
-6. **Unsafe Code**: every `unsafe` block must have a `// SAFETY:` comment. Tree-sitter FFI in `mununu-extract` is the primary expected location — flag any unsafe elsewhere.
+5. **Budgets and cancellation across threads.** The run budget is a thread-local (`adapter/run_budget.rs`): a `thread::spawn` or scoped thread in engine code that does not capture and re-enter the caller's budget runs unbounded (the #816 class); a solver query must read the cancellation gate so an interrupted query is never read as a verdict (`QueryGate`, #879); a subprocess member is killed with everything it forked (process group on Unix, Job Object on Windows, #875/#922) — both `cfg` branches need a test.
 
-7. **Adapter Architecture**: adapters in `src/adapter/` must:
-   - Implement the shared IR pipeline (parse -> IR -> emit)
-   - Include unit tests per construct, integration tests, and regression tests
-   - Not duplicate logic already in the shared IR emitter
+6. **API guidelines.** snake_case / CamelCase; `into_*` consumes, `as_*` borrows cheaply; a builder only for a struct whose fields interdepend (a builder on a three-field struct is YAGNI). A new `pub` field on a struct constructed in several files (`OriginalTransition`, `TransitionSpec`, `SignalAnnotation`, `CegarOptions`, `PredicateCubeLiftOptions`, `ExactSymbolicOptions`) triggers the pre-push workspace check (`CLAUDE.md` §CI Requirements) — note it.
 
-8. **Feature Flags**: check that optional dependencies (`tokio`, `axum`, `tower`) are gated behind the `api` feature flag. No unconditional heavy dependencies.
+7. **Unsafe.** The only `unsafe` in non-test code today is the CLI's `std::env::set_var` (unsafe under edition 2024, `crates/mununu-cli/src/main.rs`). FFI goes through safe crates (z3, oxidd, tree-sitter). Any new `unsafe` is a finding unless it is an FFI boundary with a `// SAFETY:` comment; a test never sets the process environment (`env_var::read` has a thread-local override, #880/#883).
 
-## Output Format
+8. **Feature gates.** `axum` / `tower` / `tower-http` / `tokio` / `schemars` behind `api`; `rmcp` behind `mcp` (which implies `api`); tree-sitter behind `ast-extract`; `boolector` opt-in. An unconditional heavy dependency, or one `cargo machete` reports unused, is a finding (`cargo machete` runs in the hooks and in CI).
 
-Group findings as: **Critical** / **Warning** / **Suggestion** — with `file_path:line_number` references.
+9. **Platform.** Paths through `std::path`, never string concatenation; `Command` arguments as separate `.arg()`s; line endings and `\r\n` tolerated in tool output parsers (the OS matrix runs the same tests on Linux, macOS and Windows).
+
+## Output format
+
+Group findings as **Critical** (a correctness, soundness or crash risk) / **Warning** / **Suggestion**, each with `path:line`. Do not restate a rule the finding does not cite.
