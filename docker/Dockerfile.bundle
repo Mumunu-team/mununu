@@ -22,7 +22,6 @@ WORKDIR /build
 ENV CARGO_INCREMENTAL=0
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
-COPY src/ src/
 ARG MUNUNU_BUILD_SHA=""
 ARG MUNUNU_BUILD_DIRTY=""
 ENV MUNUNU_BUILD_SHA=${MUNUNU_BUILD_SHA} MUNUNU_BUILD_DIRTY=${MUNUNU_BUILD_DIRTY}
@@ -50,6 +49,12 @@ COPY --from=builder /build/target/release/mununu /usr/local/bin/mununu
 # deployment configuration; compose mounts the customer's mununu.toml and mununu.lic over these.
 COPY deploy/ui-dist/ /srv/mununu-ui/
 COPY deploy/mununu.toml /etc/mununu/mununu.toml
+# The notices (THIRD_PARTY.md § "Bundled in the on-prem image", deploy/NOTICE.md): mununu's own
+# licence texts; the suite's are already in /opt/oss-cad-suite/license and Debian's in
+# /usr/share/doc/<package>/copyright; the UI's come with its build.
+COPY LICENSE THIRD_PARTY.md deploy/NOTICE.md /usr/share/doc/mununu/
+COPY LICENSES/ /usr/share/doc/mununu/LICENSES/
+COPY docs/licensing.md /usr/share/doc/mununu/LICENSING.md
 RUN useradd -m -u 1000 mununu && mkdir -p /work && chown mununu /work /etc/mununu
 USER mununu
 WORKDIR /work
