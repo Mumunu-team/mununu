@@ -42,3 +42,20 @@ Roadmap J3 (delivery lane), 2026-11-08. The breadcrumb itself is mununu#504 C7; 
 ## Not covered here
 
 The estimator (J2) and the scheduler (J5) that will read `wall_ms`; the per-run lift cost as a report field; a breadcrumb written by two different builds in one file (refused at the first foreign record, by design).
+
+## Update (mununu#933, 2026-11-09) — a breadcrumb is tied to the run's inputs
+
+Every breadcrumb record gains `"run": "<16 hex digits>"`, a stable hash of the run's inputs: sources (names and contents), top, lift options, and every verify option that can change a verdict. `--resume-from` / `resume_from` now also refuses a breadcrumb whose `run` differs from this run's, or whose records have no `run`. Exit `1` on the CLI and `400` on the API, as for another build. **This is a verdict-correctness fix:** before it, a breadcrumb from one design carried `holds` / `violated` onto every row with the same name in another design or an edited one.
+
+| consumer | what this means for you | action |
+|---|---|---|
+| **rosf** | A breadcrumb written before this release has no `run` and is refused; resume only the exact command that was killed (row selection and `--resume-from` itself are outside the hash). | Re-run once without `--resume-from` after upgrading. Accept the new `run` key if your breadcrumb reader is strict. |
+| **monono** | Same, through rosf. | None. |
+| **mununu-ui** | Not affected. | None. |
+
+| image | rebuild? | why |
+|---|---|---|
+| `mununu-sva` / the release images / the on-prem bundle | Yes, for the fix. | Correctness. |
+| rosf `docker/Dockerfile*` | No. | Consumer. |
+| monono `docker/Dockerfile.dev`, `Dockerfile.vexriscv` | No. | Consumer. |
+

@@ -4821,6 +4821,8 @@ fn sv_verify_auto(args: SvVerifyAutoArgs) -> Result<(), String> {
         skip_rows: std::collections::HashSet::new(),
         only_rows: None,
         resume_from,
+        // mununu#933 — `verify_auto` computes it from these inputs before dispatch.
+        run_fingerprint: None,
         assume_mode: match args.assumes {
             AssumesArg::Precondition => {
                 mununu_core::adapter::slang::verify_auto::AssumeMode::Precondition

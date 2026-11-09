@@ -278,8 +278,9 @@ fn replan_once(
 /// PR D3 — the final verdict of every property as a `merged` breadcrumb record (append mode: the
 /// members' own records precede it), so a consumer's "take the last record per property" reads the
 /// verdict that ships. No-op when `MUNUNU_VERIFY_AUTO_PARTIAL_JSON` is unset.
-fn record_merged_breadcrumb(report: &AutoVerifyReport) {
-    let mut crumb = crate::adapter::partial_json::Breadcrumb::from_env_with_append(true);
+fn record_merged_breadcrumb(report: &AutoVerifyReport, run: Option<&str>) {
+    let mut crumb =
+        crate::adapter::partial_json::Breadcrumb::from_env_with_append(true).with_run(run);
     if !crumb.is_active() {
         return;
     }
@@ -351,7 +352,7 @@ pub(crate) fn execute(
     let finish = |merged: Result<AutoVerifyReport, AdapterError>| {
         merged.map(|r| {
             let r = attach(replan_once(r, prepared, task.opts));
-            record_merged_breadcrumb(&r);
+            record_merged_breadcrumb(&r, task.opts.run_fingerprint.as_deref());
             r
         })
     };

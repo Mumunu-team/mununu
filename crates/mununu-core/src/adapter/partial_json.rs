@@ -63,6 +63,7 @@ pub fn breadcrumb_line(
     phase: &str,
     elapsed_ms: Option<u64>,
     build: Option<&str>,
+    run: Option<&str>,
 ) -> String {
     let mut obj = serde_json::Map::new();
     obj.insert("index".into(), serde_json::Value::from(index));
@@ -74,6 +75,11 @@ pub fn breadcrumb_line(
     }
     if let Some(b) = build {
         obj.insert("build".into(), serde_json::Value::from(b));
+    }
+    // mununu#933 — the run's input identity (`resume::run_fingerprint`), so a resume can refuse a
+    // breadcrumb written for other sources or options.
+    if let Some(r) = run {
+        obj.insert("run".into(), serde_json::Value::from(r));
     }
     serde_json::Value::Object(obj).to_string()
 }
@@ -88,6 +94,8 @@ pub struct Breadcrumb {
     /// J3 — the build identity every record of this writer carries (read once at open from
     /// [`crate::build_info::current`]; `None` in a process that registered none).
     build: Option<String>,
+    /// mununu#933 — the run's input identity every record carries (`None` = not stamped).
+    run: Option<String>,
 }
 
 impl Breadcrumb {
@@ -128,6 +136,7 @@ impl Breadcrumb {
                 file: Some(file),
                 recorded: 0,
                 build: crate::build_info::current().map(crate::build_info::build_tag),
+                run: None,
             },
             Err(e) => {
                 tracing::warn!(
@@ -140,6 +149,13 @@ impl Breadcrumb {
     }
 
     /// True when a breadcrumb is actually being written.
+    /// mununu#933 — stamp every record with the run's [`crate::adapter::resume::run_fingerprint`]
+    /// (`VerifyAutoOptions::run_fingerprint`). A record without one cannot be resumed from.
+    pub fn with_run(mut self, run: Option<&str>) -> Self {
+        self.run = run.map(str::to_string);
+        self
+    }
+
     pub fn is_active(&self) -> bool {
         self.file.is_some()
     }
@@ -166,6 +182,7 @@ impl Breadcrumb {
             phase,
             elapsed_ms,
             self.build.as_deref(),
+            self.run.as_deref(),
         );
         if let Err(e) = writeln!(file, "{line}").and_then(|()| file.flush()) {
             tracing::warn!("{PARTIAL_JSON_ENV}: write failed ({e}); continuing without it");
@@ -218,6 +235,7 @@ mod tests {
             "main",
             Some(1250),
             Some("e7a5b21c0ffee"),
+            Some("00000000c0ffee00"),
         );
         assert!(
             !line.contains('\n'),
@@ -233,11 +251,15 @@ mod tests {
             v["build"], "e7a5b21c0ffee",
             "J3 — the record names its build"
         );
+        assert_eq!(
+            v["run"], "00000000c0ffee00",
+            "mununu#933 — and the run's input identity"
+        );
     }
 
     #[test]
     fn elapsed_is_omitted_rather_than_null_when_untimed() {
-        let line = breadcrumb_line(0, "p", "unknown", "main", None, None);
+        let line = breadcrumb_line(0, "p", "unknown", "main", None, None, None);
         let v: serde_json::Value = serde_json::from_str(&line).expect("valid JSON");
         assert!(
             v.get("elapsed_ms").is_none(),
@@ -254,7 +276,7 @@ mod tests {
         // SVA labels are source-derived text. Hand-built JSON would let this forge a record or
         // split one across lines; serde_json escapes it instead.
         let nasty = "evil\", \"outcome\": \"holds\", \"x\": \"\n{\"injected\": true}";
-        let line = breadcrumb_line(1, nasty, "violated", "main", None, None);
+        let line = breadcrumb_line(1, nasty, "violated", "main", None, None, None);
         assert!(!line.contains('\n'), "the embedded newline must be escaped");
         let v: serde_json::Value = serde_json::from_str(&line).expect("still one valid object");
         assert_eq!(v["property"], nasty, "the name round-trips verbatim");
