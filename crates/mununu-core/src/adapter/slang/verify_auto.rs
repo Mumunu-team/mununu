@@ -3547,6 +3547,43 @@ fn expand_annotation_instances(scan: &mut AnnotationScan, instance_prefixes: &[(
     scan.skipped.extend(skipped);
 }
 
+/// mununu#897 follow-up — the occurrences as the LIFT sees them: the slang elaboration roots its
+/// hierarchy at the module nothing instantiates, while `--top` may name a module below it (verify
+/// `child` from a file whose `parent` instantiates it). Re-rooted on the top: the entries under an
+/// occurrence of the top keep their prefix relative to it (the top itself becomes `""`), every
+/// other entry is dropped — so an annotation in the top module stays its one unprefixed row, and
+/// one in a module below it fans out to the instances that exist under that top. Several
+/// occurrences of the top (instantiated twice above it) re-root the same subtree twice; the
+/// duplicates collapse. With no top, or a top absent from the elaboration, the list is unchanged.
+fn occurrences_under_top(
+    occurrences: &[(String, String)],
+    top: Option<&str>,
+) -> Vec<(String, String)> {
+    let Some(top) = top else {
+        return occurrences.to_vec();
+    };
+    let roots: Vec<&str> = occurrences
+        .iter()
+        .filter(|(m, _)| m == top)
+        .map(|(_, p)| p.as_str())
+        .collect();
+    if roots.is_empty() {
+        return occurrences.to_vec();
+    }
+    let mut out: Vec<(String, String)> = Vec::new();
+    for root in roots {
+        for (m, p) in occurrences {
+            if let Some(rel) = p.strip_prefix(root) {
+                let entry = (m.clone(), rel.to_string());
+                if !out.contains(&entry) {
+                    out.push(entry);
+                }
+            }
+        }
+    }
+    out
+}
+
 /// mununu#897 — qualify every atom register of a mu-calculus formula with an instance prefix:
 /// `nu X. ((q != 3) && [] X)` under `u_a.` → `nu X. ((u_a.q != 3) && [] X)`. The atoms are read
 /// from the parsed formula (never guessed from the text), a name already carrying a `.` is left
@@ -5537,6 +5574,7 @@ pub(crate) fn extract_front(
     sources: &[(String, String)],
     opts: &VerifyAutoOptions,
     params: &[(String, String)],
+    top: Option<&str>,
 ) -> Result<SharedExtraction, AdapterError> {
     // mununu#717 — the SAME `--param` overrides the lift applies, or the SVA describes the design
     // at its parameter defaults.
@@ -5566,7 +5604,11 @@ pub(crate) fn extract_front(
         g.formula = resolve_named_constants(&g.formula, &extraction.named_constants);
     }
     // mununu#897 — an annotation inside a module follows it into every instance under the top.
-    expand_annotation_instances(&mut ann_scan, &extraction.instance_prefixes);
+    // The slang elaboration picks its own root (the module nothing instantiates), which is not
+    // the lift's `--top` when the user verifies a module that something else instantiates: the
+    // occurrences are re-rooted on the selected top first (the box's e2e, 2026-11-09).
+    let occurrences = occurrences_under_top(&extraction.instance_prefixes, top);
+    expand_annotation_instances(&mut ann_scan, &occurrences);
     let predicate_hints: Vec<String> = ann_scan
         .predicates
         .iter()
@@ -5756,7 +5798,7 @@ pub(crate) fn prepare_model(
         declarations,
         ann_scan,
         predicate_hints,
-    } = extract_front(sources, opts, &yosys_opts.params)?;
+    } = extract_front(sources, opts, &yosys_opts.params, yosys_opts.top.as_deref())?;
     // Phase 4 — `assume` statements: split off, guarantees relativized (the monitor itself is
     // emitted below, once the expressions it reads are minted); a row whose annotation head says
     // `assumes=ignore` keeps its formula.
@@ -13628,6 +13670,64 @@ mod tests {
         expand_annotation_instances(&mut untouched, &[]);
         assert_eq!(untouched.guarantees[0].name, "ann_guarantee_0");
         assert!(untouched.skipped.is_empty());
+    }
+
+    /// mununu#897 follow-up — the occurrences are re-rooted on the selected top: verifying `child`
+    /// from a file whose `parent` instantiates it keeps `child` as the one `""` occurrence and
+    /// drops `parent`'s siblings; a deeper top re-roots its own subtree; no top, or an unknown
+    /// one, leaves the list alone. (Before this, `--top child` fanned the annotation out to
+    /// `u_a.` / `u_b.`, names the child-only lift does not have — found by the e2e on the box.)
+    #[test]
+    fn occurrences_are_rerooted_on_the_selected_top() {
+        let occ = |v: &[(&str, &str)]| -> Vec<(String, String)> {
+            v.iter()
+                .map(|(m, p)| (m.to_string(), p.to_string()))
+                .collect()
+        };
+        let elaborated = occ(&[
+            ("parent", ""),
+            ("child", "u_a."),
+            ("leaf", "u_a.u_l."),
+            ("child", "u_b."),
+            ("leaf", "u_b.u_l."),
+        ]);
+        assert_eq!(
+            occurrences_under_top(&elaborated, Some("child")),
+            occ(&[("child", ""), ("leaf", "u_l.")]),
+            "the top's subtree, relative to it, once even though `child` occurs twice above"
+        );
+        assert_eq!(
+            occurrences_under_top(&elaborated, Some("parent")),
+            elaborated,
+            "the elaboration's own root changes nothing"
+        );
+        assert_eq!(occurrences_under_top(&elaborated, None), elaborated);
+        assert_eq!(
+            occurrences_under_top(&elaborated, Some("not_a_module")),
+            elaborated
+        );
+        // End to end through the expansion: an annotation in `child` under `--top child` stays
+        // the one unprefixed row.
+        use crate::adapter::slang::translate::{SvaKind, TranslatedAssertion};
+        let mut scan = AnnotationScan {
+            guarantees: vec![TranslatedAssertion {
+                name: "ann_guarantee_0".into(),
+                label: Some("never_three".into()),
+                kind: SvaKind::Assert,
+                formula: "nu X. ((q != 3) && [] X)".into(),
+                recoverability_companion: None,
+                written: None,
+            }],
+            guarantee_modules: vec![("ann_guarantee_0".into(), Some("child".into()))],
+            ..AnnotationScan::default()
+        };
+        expand_annotation_instances(
+            &mut scan,
+            &occurrences_under_top(&elaborated, Some("child")),
+        );
+        assert_eq!(scan.guarantees.len(), 1);
+        assert_eq!(scan.guarantees[0].name, "ann_guarantee_0");
+        assert_eq!(scan.guarantees[0].formula, "nu X. ((q != 3) && [] X)");
     }
 
     /// mununu#897 END TO END (slang, `make e2e`): a `@mununu_guarantee` written inside `child`
