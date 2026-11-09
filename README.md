@@ -34,26 +34,28 @@ Prebuilt binaries for Linux, macOS and Windows, the container, and what has been
 each: [`docs/install.md`](docs/install.md). From source:
 
 ```bash
-# Build from source
+# Build from source — the product is the `mununu-cli` crate (the workspace root also holds a
+# legacy binary of the same name with the CTXDSL verbs only; `-p mununu-cli` is the one the
+# releases ship and the one every command below needs)
 git clone https://github.com/Mumunu-team/mununu.git
 cd mununu
-cargo build --release
+cargo build --release -p mununu-cli
 
 # Verify a handshake protocol
-cargo run -- context eval examples/hw/handshake.ctxdsl \
+cargo run -p mununu-cli -- context eval examples/hw/handshake.ctxdsl \
   --formula ack_reachable --automaton Handshake
 
 # Synthesize a controller (six extraction modes; see wiki/Controller-Modes.md)
-cargo run -- context synth examples/hw/handshake.ctxdsl \
+cargo run -p mununu-cli -- context synth examples/hw/handshake.ctxdsl \
   --formula safety_invariant --automaton Handshake \
   --controller-mode parity-game
 
 # Generate a graph visualization
-cargo run -- context graph examples/hw/handshake.ctxdsl \
+cargo run -p mununu-cli -- context graph examples/hw/handshake.ctxdsl \
   --output handshake.html
 
-# Start the API server (for use with mununu-ui)
-cargo run --features api -- server --addr 127.0.0.1:8080
+# Start the API server (the HTTP API is built into the CLI; `--ui-dir` serves mununu-ui on the same port)
+cargo run -p mununu-cli -- server --addr 127.0.0.1:8080
 ```
 
 ## Examples

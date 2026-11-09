@@ -47,6 +47,27 @@ export LIBRARY_PATH=/opt/homebrew/opt/z3/lib  # Apple Silicon
 apt install libz3-dev
 ```
 
+### Windows (x86_64)
+
+The release archive needs nothing: `libz3.dll` ships beside `mununu.exe` ([`docs/install.md`](install.md)).
+To **build** mununu on Windows, use the official Z3 release zip — the one the OS test matrix
+(`.github/workflows/os-matrix.yml`, roadmap I1) installs — not a Cargo feature: `z3-sys` 0.13's
+`vendored`, `vcpkg` and `gh-release` features are mutually exclusive in its build script, so a
+mununu-core feature for any of them breaks every `--all-features` build. In PowerShell:
+
+```powershell
+# https://github.com/Z3Prover/z3/releases — the x64-win zip matching docs/toolchain.md § "Z3 on each OS"
+Expand-Archive z3-*-x64-win.zip -DestinationPath C:\z3
+Copy-Item C:\z3\z3-*\bin\libz3.lib C:\z3\z3-*\bin\z3.lib       # the crate links `z3`, the zip ships `libz3`
+$env:Z3_LIBRARY_PATH_OVERRIDE = (Resolve-Path C:\z3\z3-*\bin)  # where z3-sys finds the library
+$env:PATH = "$env:Z3_LIBRARY_PATH_OVERRIDE;$env:PATH"           # z3.exe for the version probe, libz3.dll at run time
+cargo build --release -p mununu-cli
+```
+
+Measured: the matrix's Windows lane builds and runs the unit tests this way (3 743 of 3 746; the
+three absent are the Unix-only process-group tests, mununu#904). Unmeasured: a Windows **user**
+host — the maintainers have none yet.
+
 The `docker/Dockerfile.dev` image installs `libz3-dev` automatically — from **Debian trixie**
 (libz3 **4.13.3**) since 2026-09-22. That is deliberate: `z3-sys` 0.13 (the crate behind
 `z3 = "0.21"`) declares Z3 ≥ 4.13.3 as its minimum and detects the linked version at build
@@ -98,6 +119,27 @@ brew install yosys
 ```bash
 apt install yosys
 ```
+
+### Windows (x86_64) — the native SV toolchain, T3
+
+No Homebrew or apt: take the OSS-CAD-Suite **windows-x64** bundle (below; the same tag the
+`mununu-sva` image pins, `2026-08-24`), unzip it, and point mununu at its binaries — the paths
+take backslashes as Windows gives them:
+
+```powershell
+Expand-Archive oss-cad-suite-windows-x64-*.zip -DestinationPath C:\oss-cad-suite
+$env:MUNUNU_YOSYS_PATH = "C:\oss-cad-suite\oss-cad-suite\bin\yosys.exe"
+$env:MUNUNU_SLANG_PATH = "C:\oss-cad-suite\oss-cad-suite\bin\slang.exe"
+.\mununu.exe sv verify-auto design.sv --source design_sva.sv --top design --json
+```
+
+What the Windows bundle does **not** carry: Verilator. The counterexample replay
+(`--emit-testbench`) and the reset-state simulation seeding therefore have no native path on
+Windows; use WSL2 or the container (T1) for those steps — [`docs/install.md`](install.md) § T3
+says the same per tier. **Unmeasured** (roadmap I4): no Windows host has run the SV fragment's
+truth table natively yet; when one does, the measurement goes into `docs/install.md`'s tier
+table, and a stage Windows cannot run must end in the structured adapter error the failure-path
+policy promises, never a hang — that check is part of the same measurement.
 
 ### OSS-CAD-Suite (cross-platform, includes sby)
 The [OSS-CAD-Suite](https://github.com/YosysHQ/oss-cad-suite-build) ships Yosys + sby + many other YosysHQ tools as a self-contained release tarball. Recommended when you need both Yosys and sby together.
@@ -222,6 +264,14 @@ brew install verilator
 ```bash
 apt install verilator
 ```
+
+### Windows
+The OSS-CAD-Suite windows-x64 bundle ships no Verilator, and there is no supported native build
+for mununu's use on Windows. Anything that needs it — the reset-state simulation seeding here and
+the `--emit-testbench` counterexample replay — runs in WSL2 or in the `mununu-sva` container
+(`docs/install.md` § T1 / T3). Without it the verdicts are still computed; the replay and the
+seeding are absent and said so (the missing-tool behaviour below). Unmeasured on a Windows host
+(roadmap I4).
 
 ### Discovery
 1. `MUNUNU_VERILATOR_PATH` env var (explicit override).
