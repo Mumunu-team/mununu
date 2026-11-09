@@ -1292,6 +1292,7 @@ dependencies = [
  "tree-sitter-rust",
  "tree-sitter-typescript",
  "vcd",
+ "windows-sys 0.61.2",
  "z3",
 ]
 
