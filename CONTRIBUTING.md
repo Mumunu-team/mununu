@@ -68,3 +68,5 @@ Open an issue on GitHub with:
 ## License
 
 By contributing, you agree that your contributions will be licensed under the same [Mununu Non-Commercial License](LICENSE) as the project.
+
+**External contributions need a contributor licence agreement first.** Mununu is also offered under a commercial licence, which only the copyright holder can grant, and it can grant it only for code it holds the rights to. A pull request from outside the maintainers is therefore not merged until a contributor licence agreement is in force and the contributor has signed it. The agreement is being drafted; until it is published here, open an issue to discuss a change instead of a pull request.

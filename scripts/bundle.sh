@@ -21,6 +21,11 @@ if [ "${SKIP_UI:-0}" != 1 ]; then
   rm -rf deploy/ui-dist && cp -R "$ui/dist" deploy/ui-dist
 fi
 [ -f deploy/ui-dist/index.html ] || { echo "bundle.sh: deploy/ui-dist/index.html missing" >&2; exit 2; }
+# The UI build must carry its licence and the notices of the npm packages compiled into it
+# (mununu-ui's `npm run build` writes both); an image without them ships code without notices.
+for f in LICENSE.txt THIRD_PARTY_NOTICES.txt; do
+  [ -s "deploy/ui-dist/$f" ] || { echo "bundle.sh: deploy/ui-dist/$f missing — rebuild mununu-ui (npm run build writes it)" >&2; exit 2; }
+done
 echo "== image"
 docker build -f docker/Dockerfile.bundle -t "mununu-bundle:$ver" \
   --build-arg MUNUNU_BUILD_SHA="$sha" --build-arg MUNUNU_BUILD_DIRTY="$dirty" .
@@ -28,7 +33,9 @@ echo "== tarball"
 mkdir -p "$out"
 docker save "mununu-bundle:$ver" | gzip > "$out/mununu-bundle-$ver.tar.gz"
 ( cd "$out" && shasum -a 256 "mununu-bundle-$ver.tar.gz" > "mununu-bundle-$ver.tar.gz.sha256" )
-cp deploy/compose.yaml deploy/mununu.toml deploy/README.md "$out/"
+cp deploy/compose.yaml deploy/mununu.toml deploy/README.md deploy/NOTICE.md LICENSE THIRD_PARTY.md "$out/"
+cp docs/licensing.md "$out/LICENSING.md"
+mkdir -p "$out/LICENSES" && cp LICENSES/* "$out/LICENSES/"
 echo "== done"
 ls -l "$out"
 echo "install: see $out/README.md (docker load, the three files, docker compose up -d)"

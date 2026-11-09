@@ -54,6 +54,8 @@ Over the UI: open the page, load a CTXDSL model or an RTL design, run it — the
 
 Not in it: sv2v (the dev-only differential oracle), the e2e suite, any Rust toolchain.
 
+The licences of everything in the image, and where each text is inside it: [`NOTICE.md`](NOTICE.md), shipped beside the tarball and at `/usr/share/doc/mununu/NOTICE.md`.
+
 ## Memory and the licence
 
 - `mem_limit` in `compose.yaml`: the memory ceiling (`MUNUNU_MAX_PROCESS_MEMORY_BYTES`, auto) fires

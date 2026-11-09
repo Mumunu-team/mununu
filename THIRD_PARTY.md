@@ -92,3 +92,24 @@ and `v6_controllability_kmts` hold hand-written fixtures; their headers say so (
 | what | where | licence |
 |---|---|---|
 | `libz3` (the Z3 theorem prover's shared library: `libz3.so.4` in the Linux archives, `libz3.<version>.dylib` in the macOS archives, `libz3.dll` in the Windows zip) | copied from the runner's Z3 package by [`.github/workflows/release.yml`](.github/workflows/release.yml) and placed beside the binaries, which load it through `$ORIGIN` / `@executable_path` | MIT, © Microsoft Corporation — [`LICENSES/Z3-MIT.txt`](LICENSES/Z3-MIT.txt), also shipped in every archive's `LICENSES/` |
+
+## Bundled in the on-prem image, not in this repository
+
+> Source of truth: [`docker/Dockerfile.bundle`](docker/Dockerfile.bundle), [`scripts/bundle.sh`](scripts/bundle.sh) — surface: CLI-only — the image and tarball are built by a script, not served by the binary
+
+The on-prem bundle (`scripts/bundle.sh`, [`deploy/README.md`](deploy/README.md)) is a Docker
+image that carries more than the mununu binary. Everything in it beyond the first-party work stays
+under its own licence. The image and the tarball carry the texts; [`deploy/NOTICE.md`](deploy/NOTICE.md)
+says where each one is.
+
+| what | in the image | licence | texts |
+|---|---|---|---|
+| mununu's own notices | `/usr/share/doc/mununu/` | the [Mununu Non-Commercial License](LICENSE); Z3 MIT | `LICENSE`, `THIRD_PARTY.md`, `LICENSES/`, `LICENSING.md` there and beside the tarball |
+| oss-cad-suite, one pinned release (`OSS_CAD_SUITE_TAG` in the Dockerfile; the image label `io.github.mumunu-team.oss-cad-suite.tag`) | `/opt/oss-cad-suite/`, unmodified, as YosysHQ publishes it | per component: 57 texts. Most are permissive (yosys and the slang plugin ISC, cvc5 and pono BSD, btor2tools and Bitwuzla MIT). Several are copyleft: Verilator (LGPL-3 or Artistic-2), yices, rIC3 and the ghdl-yosys plugin (GPL-3), ghdl, iverilog and dfu-util (GPL-2), gtkwave and openocd (GPL), libpoly and xdot (LGPL-3), libusb (LGPL-2.1), libftdi (LGPL-2) | `/opt/oss-cad-suite/license/LICENSE.<component>`; the suite's own `share/manifest.json` maps files to components |
+| Debian trixie-slim base and the packages the Dockerfile installs (`libz3-4`, `g++`, `make`, `perl`, `curl`, `ca-certificates`) | the system tree | per package (the GNU toolchain GPL-3 with the GCC runtime exception, Perl GPL or Artistic, Z3 MIT, curl's own licence, …) | `/usr/share/doc/<package>/copyright` |
+| mununu-ui's static build and the npm packages compiled into it | `/srv/mununu-ui/` | mununu-ui's `LICENSE`; per npm package | `/srv/mununu-ui/LICENSE.txt` and `/srv/mununu-ui/THIRD_PARTY_NOTICES.txt` (generated at build time; `scripts/bundle.sh` refuses a UI build without them) |
+
+The suite's components run as separate processes; mununu does not link them. Their sources are
+published upstream (the YosysHQ release tag, each component's own repository). How a recipient of
+the bundle obtains the corresponding source of the copyleft components is an open question for
+counsel.
