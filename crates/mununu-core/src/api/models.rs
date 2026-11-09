@@ -2083,6 +2083,79 @@ pub struct TranslatedAssertionView {
     pub recoverability_companion: Option<String>,
 }
 
+/// Roadmap J2 — `POST /api/v1/sv/plan` and `sv verify-auto --plan-only --json`: what a run of the
+/// same request would verify and what each property is estimated to cost, from the lift and the
+/// planner alone — no engine runs.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct SvPlanResponse {
+    /// The binary's commit, as in the run's report (absent when it registered none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<String>,
+    /// Every property the run would verify, in report order.
+    pub properties: Vec<PlanPropertyView>,
+    /// Assertions that did not translate (as in the run's report).
+    pub unsupported: Vec<UnsupportedAssertionView>,
+    /// The lift's wall, milliseconds — paid once per run, not per property.
+    pub lift_ms: u64,
+    /// How many properties carry an estimate, per band — the run's shape at a glance.
+    pub bands: std::collections::BTreeMap<String, usize>,
+}
+
+/// Roadmap J2 — one property of a plan.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct PlanPropertyView {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    pub formula: String,
+    /// The planner's routing facts with the cost estimate; absent when the cone width could not be
+    /// established (no width, no prediction — mununu#577).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing: Option<RoutingView>,
+}
+
+impl From<&crate::adapter::slang::verify_auto::PlanReport> for SvPlanResponse {
+    fn from(plan: &crate::adapter::slang::verify_auto::PlanReport) -> Self {
+        let properties: Vec<PlanPropertyView> = plan
+            .properties
+            .iter()
+            .map(|(name, label, formula)| PlanPropertyView {
+                name: name.clone(),
+                label: label.clone(),
+                formula: formula.clone(),
+                routing: plan
+                    .routing
+                    .iter()
+                    .find(|r| &r.property == name)
+                    .map(RoutingView::of),
+            })
+            .collect();
+        let mut bands = std::collections::BTreeMap::new();
+        for p in &properties {
+            let band = p
+                .routing
+                .as_ref()
+                .map_or("none".to_string(), |r| r.estimate.time_band.clone());
+            *bands.entry(band).or_insert(0) += 1;
+        }
+        SvPlanResponse {
+            build: crate::build_info::current().map(|b| b.sha.clone()),
+            properties,
+            unsupported: plan
+                .unsupported
+                .iter()
+                .map(|(name, reason)| UnsupportedAssertionView {
+                    name: name.clone(),
+                    kind: None,
+                    reason: reason.clone(),
+                })
+                .collect(),
+            lift_ms: plan.lift_ms,
+            bands,
+        }
+    }
+}
+
 /// An assertion outside the supported fragment (mirrors `UnsupportedAssertion`).
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct UnsupportedAssertionView {
@@ -2536,13 +2609,7 @@ impl From<&crate::adapter::slang::verify_auto::AutoVerifyReport> for SvVerifyAut
                         .routing
                         .iter()
                         .find(|r| r.property == p.name)
-                        .map(|r| RoutingView {
-                            class: format!("{:?}", r.class),
-                            cone_bits: r.cone_bits,
-                            cap: r.cap,
-                            diameter_log2: r.diameter_log2,
-                            predicted_engine: r.predicted_engine.to_string(),
-                        }),
+                        .map(RoutingView::of),
                     resumed_from,
                     vacuity: p.vacuity.as_ref().map(|v| VacuityView {
                         kind: v.kind.tag().to_string(),
@@ -3136,6 +3203,70 @@ pub struct RoutingView {
     pub diameter_log2: Option<u32>,
     /// The engine the planner predicts will decide the property.
     pub predicted_engine: String,
+    /// Roadmap J2 — the static shape the cost estimate is keyed by.
+    pub shape: ShapeFactsView,
+    /// Roadmap J2 — the cost estimate: a band, a memory class, a confidence and the measured
+    /// table row it came from. A scheduler hint; nothing reads it on a verdict path.
+    pub estimate: EstimateView,
+}
+
+/// Roadmap J2 — the static shape of one property (read off its cone and formula, no solving).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ShapeFactsView {
+    /// Multiplier / divider / remainder cells in the cone.
+    pub arith_ops: u32,
+    /// Array-sorted states (memories) in the cone.
+    pub array_states: u32,
+    /// Primary inputs in the cone.
+    pub inputs: u32,
+    /// The formula's fixpoint alternation depth (2 = a μ under a ν).
+    pub alternation: u32,
+    /// The formula is constant on every model.
+    pub constant: bool,
+    /// Register-versus-register comparison atoms (`a == b`).
+    pub relational_atoms: u32,
+}
+
+/// Roadmap J2 — one property's cost estimate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct EstimateView {
+    /// `seconds` (< 10 s) | `minutes` (< 10 min) | `hour` (< 1 h) | `wall`.
+    pub time_band: String,
+    /// `small` (no exact BDD work) | `medium` (within the default arena) | `large` (the arena may
+    /// overflow, or the cap ladder runs).
+    pub memory_class: String,
+    /// `high` | `medium` | `low` — for `low`, size for the band's top.
+    pub confidence: String,
+    /// The measured table row, with its evidence.
+    pub basis: String,
+}
+
+impl RoutingView {
+    /// The view of one planner rationale (the report's `routing` and the plan endpoint share it).
+    pub fn of(r: &crate::planner::RoutingRationale) -> Self {
+        let e = r.estimate();
+        RoutingView {
+            class: format!("{:?}", r.class),
+            cone_bits: r.cone_bits,
+            cap: r.cap,
+            diameter_log2: r.diameter_log2,
+            predicted_engine: r.predicted_engine.to_string(),
+            shape: ShapeFactsView {
+                arith_ops: r.shape.arith_ops,
+                array_states: r.shape.array_states,
+                inputs: r.shape.inputs,
+                alternation: r.shape.alternation,
+                constant: r.shape.constant,
+                relational_atoms: r.shape.relational_atoms,
+            },
+            estimate: EstimateView {
+                time_band: e.time_band.tag().to_string(),
+                memory_class: e.memory_class.tag().to_string(),
+                confidence: e.confidence.tag().to_string(),
+                basis: e.basis.to_string(),
+            },
+        }
+    }
 }
 
 /// mununu#873 — one row's reachability-portfolio members. See [`PropertyVerdictView::portfolio`].
@@ -3432,6 +3563,60 @@ mod bottom_reason_view_tests {
         assert!(json.get("timing").is_none(), "absent, not null");
     }
 
+    /// Roadmap J2 at the plan seam: every property is listed in order, a routed one carries its
+    /// estimate, an unrouted one has none (no width, no prediction), and the bands count both.
+    #[test]
+    fn a_plan_lists_every_property_with_its_estimate_and_counts_the_bands() {
+        use crate::adapter::slang::verify_auto::PlanReport;
+        let plan = PlanReport {
+            properties: vec![
+                (
+                    "a".into(),
+                    Some("a_label".into()),
+                    "nu X. ((!(false)) && [] X)".into(),
+                ),
+                ("b".into(), None, "nu X. ((q == 0) && [] X)".into()),
+            ],
+            routing: vec![crate::planner::RoutingRationale {
+                property: "a".into(),
+                class: crate::mu_calculus::PropertyClass::Safety,
+                cone_bits: 3290,
+                cap: 192,
+                diameter_log2: None,
+                predicted_engine: "reach-portfolio",
+                why: String::new(),
+                shape: crate::planner::ShapeFacts {
+                    constant: true,
+                    ..Default::default()
+                },
+            }],
+            unsupported: vec![("c".into(), "outside the fragment".into())],
+            lift_ms: 2514,
+        };
+        let view = SvPlanResponse::from(&plan);
+        assert_eq!(view.properties.len(), 2);
+        assert_eq!(view.properties[0].label.as_deref(), Some("a_label"));
+        let est = &view.properties[0]
+            .routing
+            .as_ref()
+            .expect("routed")
+            .estimate;
+        assert_eq!(
+            (est.time_band.as_str(), est.confidence.as_str()),
+            ("seconds", "high")
+        );
+        assert!(view.properties[1].routing.is_none());
+        assert_eq!(view.bands.get("seconds"), Some(&1));
+        assert_eq!(view.bands.get("none"), Some(&1));
+        assert_eq!(view.unsupported.len(), 1);
+        assert_eq!(view.lift_ms, 2514);
+        let json = serde_json::to_value(&view).unwrap();
+        assert!(
+            json["properties"][1].get("routing").is_none(),
+            "absent, not null"
+        );
+    }
+
     /// Roadmap J4 at the report seam: a timed, routed property shows `wall_ms` and `routing`;
     /// an untimed, unrouted one shows neither — nothing is invented.
     #[test]
@@ -3458,6 +3643,7 @@ mod bottom_reason_view_tests {
             diameter_log2: Some(12),
             predicted_engine: "reach-portfolio",
             why: "cone over cap".into(),
+            shape: Default::default(),
         });
         let view = SvVerifyAutoResponse::from(&report);
         let timed = &view.properties[0];
@@ -3470,6 +3656,21 @@ mod bottom_reason_view_tests {
                 cap: 192,
                 diameter_log2: Some(12),
                 predicted_engine: "reach-portfolio".into(),
+                shape: ShapeFactsView {
+                    arith_ops: 0,
+                    array_states: 0,
+                    inputs: 0,
+                    alternation: 0,
+                    constant: false,
+                    relational_atoms: 0,
+                },
+                // J2 — an over-cap one-step safety row: the reach portfolio's `seconds` cell.
+                estimate: EstimateView {
+                    time_band: "seconds".into(),
+                    memory_class: "small".into(),
+                    confidence: "medium".into(),
+                    basis: report.routing[0].estimate().basis.into(),
+                },
             })
         );
         let untimed = &view.properties[1];

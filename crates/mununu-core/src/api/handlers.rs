@@ -2176,6 +2176,24 @@ pub async fn sv_verify_auto_handler(
     blocking(move || sv_verify_auto_handler_impl(request)).await
 }
 
+/// Roadmap J2 — the plan of an `sv verify-auto` request: the same body, the lift and the planner's
+/// cost estimate per property, and no engine. Surface peer of `mununu sv verify-auto --plan-only`.
+pub async fn sv_plan_handler(
+    Json(request): Json<SvVerifyAutoRequest>,
+) -> ApiResult<Json<SvPlanResponse>> {
+    blocking(move || {
+        let (sources, yopts, opts) = sv_verify_auto_inputs(&request)?;
+        let plan = crate::adapter::slang::verify_auto::plan_auto(&sources, &yopts, &opts).map_err(
+            |e| ApiError::BadRequest {
+                message: format!("sv plan: {}", e.message),
+                details: None,
+            },
+        )?;
+        Ok(Json(SvPlanResponse::from(&plan)))
+    })
+    .await
+}
+
 /// `emit_testbench`: one replay testbench per counterexample, inline in its property row.
 fn attach_testbenches(
     request: &SvVerifyAutoRequest,
@@ -2299,10 +2317,17 @@ fn attach_testbenches(
     Ok(())
 }
 
-fn sv_verify_auto_handler_impl(
-    request: SvVerifyAutoRequest,
-) -> ApiResult<Json<SvVerifyAutoResponse>> {
-    use crate::adapter::slang::verify_auto::{VerifyAutoOptions, verify_auto};
+/// The sources, lift options and verify options one `sv verify-auto` request describes — shared by
+/// the run (`POST /api/v1/sv/verify-auto`) and the plan (`POST /api/v1/sv/plan`, roadmap J2), so a
+/// plan is computed for exactly the run the same body would start.
+type VerifyAutoInputs = (
+    Vec<(String, String)>,
+    crate::adapter::yosys::YosysOptions,
+    crate::adapter::slang::verify_auto::VerifyAutoOptions,
+);
+
+fn sv_verify_auto_inputs(request: &SvVerifyAutoRequest) -> ApiResult<VerifyAutoInputs> {
+    use crate::adapter::slang::verify_auto::VerifyAutoOptions;
 
     let lift = sv_lift_of(&request.lift)?;
     let mut sources: Vec<(String, String)> = vec![(lift.primary_name.clone(), lift.source.clone())];
@@ -2387,6 +2412,15 @@ fn sv_verify_auto_handler_impl(
         })?,
     };
 
+    Ok((sources, yopts, opts))
+}
+
+fn sv_verify_auto_handler_impl(
+    request: SvVerifyAutoRequest,
+) -> ApiResult<Json<SvVerifyAutoResponse>> {
+    use crate::adapter::slang::verify_auto::verify_auto;
+
+    let (sources, yopts, opts) = sv_verify_auto_inputs(&request)?;
     let started = std::time::Instant::now();
     let outcome = verify_auto(&sources, &yopts, &opts);
     // Track H3 — one usage-ledger record per run, success or failure; a failed write reaches the

@@ -5240,6 +5240,54 @@ fn record_resumed_breadcrumb(report: &AutoVerifyReport) {
     }
 }
 
+/// Roadmap J2 — the plan of a run, without the run: the lift and the planner's per-property routing
+/// with its cost estimate, and no engine. `sv verify-auto --plan-only` and `POST /api/v1/sv/plan`.
+#[derive(Debug, Clone, Default)]
+pub struct PlanReport {
+    /// Every property the run would verify, `(name, label, formula)` in report order.
+    pub properties: Vec<(String, Option<String>, String)>,
+    /// The planner's rationale (with [`crate::planner::RoutingRationale::estimate`]) per property
+    /// whose cone width could be established; a property without one has no estimate (mununu#577).
+    pub routing: Vec<crate::planner::RoutingRationale>,
+    /// Assertions that did not translate, as in the run's report.
+    pub unsupported: Vec<(String, String)>,
+    /// The lift's wall, milliseconds — paid once per run, not per property.
+    pub lift_ms: u64,
+}
+
+/// [`PlanReport`] for these inputs: `prepare_model` (the same lift the run does) and
+/// [`crate::planner::plan`]'s rationale. Never runs an engine, so it costs the lift alone.
+pub fn plan_auto(
+    sources: &[(String, String)],
+    yosys_opts: &YosysOptions,
+    opts: &VerifyAutoOptions,
+) -> Result<PlanReport, AdapterError> {
+    let t0 = std::time::Instant::now();
+    let prepared = prepare_model(sources, yosys_opts, opts)?;
+    let lift_ms = u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX);
+    Ok(match prepared {
+        Prepared::Empty(report) => PlanReport {
+            unsupported: report.unsupported,
+            lift_ms,
+            ..PlanReport::default()
+        },
+        Prepared::Model(m) => {
+            let plan = crate::planner::plan(Some(&m), opts);
+            PlanReport {
+                properties: m
+                    .extraction
+                    .translated
+                    .iter()
+                    .map(|t| (t.name.clone(), t.label.clone(), t.formula.clone()))
+                    .collect(),
+                routing: plan.rationale,
+                unsupported: m.report.unsupported.clone(),
+                lift_ms,
+            }
+        }
+    })
+}
+
 /// The dispatch as it was before J3: portfolio through the planner, else the single engine.
 fn verify_auto_dispatch(
     sources: &[(String, String)],

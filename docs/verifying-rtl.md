@@ -1709,6 +1709,43 @@ MUNUNU_VERIFY_AUTO_PARTIAL_JSON=/tmp/verdicts.ndjson mununu sv verify-auto desig
 
 **Every record names its build** (roadmap J3, 2026-11): `"build": "<commit sha>"` (`-dirty` appended when the tree was not clean) is the identity of the binary that wrote the record — `mununu --version`'s commit — omitted when the binary has none. It is what the resume below checks.
 
+### Estimating a run before running it: `--plan-only` (roadmap J2)
+
+> Source of truth: [`RoutingRationale::estimate`](../crates/mununu-core/src/planner/mod.rs) + [`plan_auto`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) — surface: (CLI+API: `sv verify-auto --plan-only [--json]` · `POST /api/v1/sv/plan`)
+
+`sv verify-auto --plan-only` lifts the design and runs the planner, and **no engine**: it prints,
+per property, a **time band** (`seconds` < 10 s, `minutes` < 10 min, `hour`, `wall`), a
+**memory class** (`small`: no exact BDD work; `medium`: within the default arena; `large`: the
+arena may overflow or the cap ladder runs), a **confidence**, and the **basis** — the row of the
+measured table it came from, with that row's evidence. It costs the lift alone and exits 0. The API
+takes the same request body as `POST /api/v1/sv/verify-auto` at `POST /api/v1/sv/plan`; the CLI's
+`--json` prints the same document (`sv-plan-response.schema.json`). Every normal run's report
+carries the same `estimate` under each row's `routing`, beside the measured `wall_ms`, so a run
+checks its own plan.
+
+```bash
+mununu sv verify-auto design.sv --source design_sva.sv --top design --plan-only
+mununu sv verify-auto design.sv --plan-only --json | jq '.bands'      # {"minutes": 18, "seconds": 49}
+```
+
+**The table is keyed by static shape, and measured.** Width does not predict cost (EXP-0031); the
+features are read off each property's cone and formula without solving — multipliers / dividers,
+memories, inputs, fixpoint alternation, constancy, register-versus-register comparisons — beside
+the class, cone width vs the cap, and the widest in-cone counter the planner already had. The cells
+were fitted and checked on one host's data (the second e2e machine, 2026-11-08/09): on the full
+OpenTitan `edn` IP the table places **65 of 67** rows in their measured band and predicts no
+`seconds` row that ran over 10 minutes — scored from each row's formula and recorded routing; the
+cone-side facts (multipliers, memories) are re-scored end to end with `--plan-only` on that host.
+
+**What it cannot see, and says.** On an in-cap row decided by the exact engine with an in-cone
+counter, the wall follows the *verdict's* fixpoint depth: the bit-cap probes `fsm-timeout` (holds,
+0.3 s) and `fsm-timeout-stuck` (violated, 108.6 s) have the same shape and width. No static feature
+separates them, so that cell says `minutes` with `low` confidence: size for the top of the band,
+never the bottom. Out of sample, the probes are mostly over-predicted, which is the safe direction.
+A property whose cone width could not be established (a memory-only cone, mununu#577) has no
+estimate rather than a guessed one. The estimate is a scheduler hint; nothing reads it on a verdict
+path.
+
 ### Resuming a killed run: `--resume-from` (roadmap J3)
 
 > Source of truth: [`adapter::resume::parse_breadcrumb`](../crates/mununu-core/src/adapter/resume.rs) — surface: (CLI+API: `sv verify-auto --resume-from FILE` · `POST /api/v1/sv/verify-auto` `resume_from`)

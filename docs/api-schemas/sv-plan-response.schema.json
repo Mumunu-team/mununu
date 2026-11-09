@@ -1,0 +1,242 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "EstimateView": {
+      "description": "Roadmap J2 — one property's cost estimate.",
+      "properties": {
+        "basis": {
+          "description": "The measured table row, with its evidence.",
+          "type": "string"
+        },
+        "confidence": {
+          "description": "`high` | `medium` | `low` — for `low`, size for the band's top.",
+          "type": "string"
+        },
+        "memory_class": {
+          "description": "`small` (no exact BDD work) | `medium` (within the default arena) | `large` (the arena may overflow, or the cap ladder runs).",
+          "type": "string"
+        },
+        "time_band": {
+          "description": "`seconds` (< 10 s) | `minutes` (< 10 min) | `hour` (< 1 h) | `wall`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "basis",
+        "confidence",
+        "memory_class",
+        "time_band"
+      ],
+      "type": "object"
+    },
+    "PlanPropertyView": {
+      "description": "Roadmap J2 — one property of a plan.",
+      "properties": {
+        "formula": {
+          "type": "string"
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "routing": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RoutingView"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The planner's routing facts with the cost estimate; absent when the cone width could not be established (no width, no prediction — mununu#577)."
+        }
+      },
+      "required": [
+        "formula",
+        "name"
+      ],
+      "type": "object"
+    },
+    "RoutingView": {
+      "description": "The planner's per-property routing facts (roadmap J4): what `plan-cost` says, as fields.",
+      "properties": {
+        "cap": {
+          "description": "The exact engine's effective bit cap for that cone.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "class": {
+          "description": "`Safety` | `Reachability` | `Liveness` | `Mixed` | `Propositional`.",
+          "type": "string"
+        },
+        "cone_bits": {
+          "description": "The exact engine's cone-of-influence bit width for the property's atoms.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "diameter_log2": {
+          "description": "The widest in-cone down-counter (≈ 2^W diameter), when one is found.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "estimate": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/EstimateView"
+            }
+          ],
+          "description": "Roadmap J2 — the cost estimate: a band, a memory class, a confidence and the measured table row it came from. A scheduler hint; nothing reads it on a verdict path."
+        },
+        "predicted_engine": {
+          "description": "The engine the planner predicts will decide the property.",
+          "type": "string"
+        },
+        "shape": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ShapeFactsView"
+            }
+          ],
+          "description": "Roadmap J2 — the static shape the cost estimate is keyed by."
+        }
+      },
+      "required": [
+        "cap",
+        "class",
+        "cone_bits",
+        "estimate",
+        "predicted_engine",
+        "shape"
+      ],
+      "type": "object"
+    },
+    "ShapeFactsView": {
+      "description": "Roadmap J2 — the static shape of one property (read off its cone and formula, no solving).",
+      "properties": {
+        "alternation": {
+          "description": "The formula's fixpoint alternation depth (2 = a μ under a ν).",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "arith_ops": {
+          "description": "Multiplier / divider / remainder cells in the cone.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "array_states": {
+          "description": "Array-sorted states (memories) in the cone.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "constant": {
+          "description": "The formula is constant on every model.",
+          "type": "boolean"
+        },
+        "inputs": {
+          "description": "Primary inputs in the cone.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "relational_atoms": {
+          "description": "Register-versus-register comparison atoms (`a == b`).",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "alternation",
+        "arith_ops",
+        "array_states",
+        "constant",
+        "inputs",
+        "relational_atoms"
+      ],
+      "type": "object"
+    },
+    "UnsupportedAssertionView": {
+      "description": "An assertion outside the supported fragment (mirrors `UnsupportedAssertion`).",
+      "properties": {
+        "kind": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "reason"
+      ],
+      "type": "object"
+    }
+  },
+  "description": "Roadmap J2 — `POST /api/v1/sv/plan` and `sv verify-auto --plan-only --json`: what a run of the same request would verify and what each property is estimated to cost, from the lift and the planner alone — no engine runs.",
+  "properties": {
+    "bands": {
+      "additionalProperties": {
+        "format": "uint",
+        "minimum": 0.0,
+        "type": "integer"
+      },
+      "description": "How many properties carry an estimate, per band — the run's shape at a glance.",
+      "type": "object"
+    },
+    "build": {
+      "description": "The binary's commit, as in the run's report (absent when it registered none).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "lift_ms": {
+      "description": "The lift's wall, milliseconds — paid once per run, not per property.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "properties": {
+      "description": "Every property the run would verify, in report order.",
+      "items": {
+        "$ref": "#/definitions/PlanPropertyView"
+      },
+      "type": "array"
+    },
+    "unsupported": {
+      "description": "Assertions that did not translate (as in the run's report).",
+      "items": {
+        "$ref": "#/definitions/UnsupportedAssertionView"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "bands",
+    "lift_ms",
+    "properties",
+    "unsupported"
+  ],
+  "title": "SvPlanResponse",
+  "type": "object"
+}

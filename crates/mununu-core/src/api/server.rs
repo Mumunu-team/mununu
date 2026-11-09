@@ -175,6 +175,8 @@ pub fn create_router() -> Router {
             "/api/v1/sv/verify-auto",
             post(handlers::sv_verify_auto_handler),
         )
+        // Roadmap J2 — the same body, the plan only: per-property cost estimates, no engine.
+        .route("/api/v1/sv/plan", post(handlers::sv_plan_handler))
         // SV-direct verbs — lift SV (sv2v + Yosys) then decide a property in one call
         // (safety / response-liveness / recoverability). Surface peers of the CLI
         // `sv verify` / `verify-liveness` / `verify-recoverability`.

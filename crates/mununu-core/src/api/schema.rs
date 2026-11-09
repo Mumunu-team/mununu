@@ -50,6 +50,12 @@ pub fn sv_verify_auto_response_schema() -> serde_json::Value {
         .expect("SvVerifyAutoResponse schema must serialise as JSON")
 }
 
+/// JSON Schema for [`crate::api::models::SvPlanResponse`] (roadmap J2).
+pub fn sv_plan_response_schema() -> serde_json::Value {
+    serde_json::to_value(schema_for!(crate::api::models::SvPlanResponse))
+        .expect("SvPlanResponse schema must serialise as JSON")
+}
+
 /// JSON Schema for [`SvCdcLintRequest`].
 pub fn sv_cdc_lint_request_schema() -> serde_json::Value {
     serde_json::to_value(schema_for!(SvCdcLintRequest))
@@ -635,6 +641,14 @@ mod tests {
         drift_check(
             "docs/api-schemas/sv-verify-auto-response.schema.json",
             &sv_verify_auto_response_schema(),
+        );
+    }
+
+    #[test]
+    fn api_schema_drift_sv_plan_response() {
+        drift_check(
+            "docs/api-schemas/sv-plan-response.schema.json",
+            &sv_plan_response_schema(),
         );
     }
 

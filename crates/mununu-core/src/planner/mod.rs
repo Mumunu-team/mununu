@@ -767,6 +767,213 @@ pub struct RoutingRationale {
     pub predicted_engine: &'static str,
     /// The one-line rationale.
     pub why: String,
+    /// Roadmap J2 — the static shape facts the cost estimate is keyed by (all read off the cone,
+    /// no solving). Default (all zero / false) where they were not computed.
+    pub shape: ShapeFacts,
+}
+
+/// Roadmap J2 — what the property's cone and formula look like, statically: the features the
+/// measured cost table ([`RoutingRationale::estimate`]) is keyed by.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ShapeFacts {
+    /// Multiplier / divider / remainder cells in the cone — the exponential-BDD marker (Bryant).
+    pub arith_ops: u32,
+    /// Array-sorted states (memories) in the cone — the exact engine refuses them.
+    pub array_states: u32,
+    /// Primary inputs in the cone (inputs-in-the-state widens it).
+    pub inputs: u32,
+    /// The formula's fixpoint alternation depth (2 = a μ under a ν: recoverability).
+    pub alternation: u32,
+    /// The formula is constant on every model (decided without an engine).
+    pub constant: bool,
+    /// Register-versus-register comparison atoms (`a == b`, `a == b + k`, `a == a__past`): the
+    /// atom shape the predicate cube cannot seed as a dimension, so the exact skip-rescue pass
+    /// runs on the row as well (edn: all 16 such rows 13–20 s; 48 of the other 51 under 10 s).
+    pub relational_atoms: u32,
+}
+
+/// Roadmap J2 — a wall-time band: `seconds` < 10 s, `minutes` < 10 min, `hour` < 1 h, `wall` beyond.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeBand {
+    Seconds,
+    Minutes,
+    Hour,
+    Wall,
+}
+
+impl TimeBand {
+    pub fn tag(self) -> &'static str {
+        match self {
+            TimeBand::Seconds => "seconds",
+            TimeBand::Minutes => "minutes",
+            TimeBand::Hour => "hour",
+            TimeBand::Wall => "wall",
+        }
+    }
+}
+
+/// Roadmap J2 — the memory a row needs: `small` = no exact BDD work expected; `medium` = exact
+/// BDD within the default arena (the bit-cap probes peak at ≤ 12 M nodes); `large` = the arena
+/// may overflow (a multiplier) or the cap ladder runs. A sizing class, not a byte count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryClass {
+    Small,
+    Medium,
+    Large,
+}
+
+impl MemoryClass {
+    pub fn tag(self) -> &'static str {
+        match self {
+            MemoryClass::Small => "small",
+            MemoryClass::Medium => "medium",
+            MemoryClass::Large => "large",
+        }
+    }
+}
+
+/// Roadmap J2 — how much the table cell has been measured: `high` = every measured row in the
+/// band; `medium` = most; `low` = thin evidence or a named miss class — size for the band's top.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Confidence {
+    High,
+    Medium,
+    Low,
+}
+
+impl Confidence {
+    pub fn tag(self) -> &'static str {
+        match self {
+            Confidence::High => "high",
+            Confidence::Medium => "medium",
+            Confidence::Low => "low",
+        }
+    }
+}
+
+/// Roadmap J2 — the cost estimate of one property: a band, a memory class, a confidence, and the
+/// table row it came from. A scheduler hint, never a verdict input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Estimate {
+    pub time_band: TimeBand,
+    pub memory_class: MemoryClass,
+    pub confidence: Confidence,
+    /// The table row, with its evidence (which measured rows put it there).
+    pub basis: &'static str,
+}
+
+impl RoutingRationale {
+    /// Roadmap J2 — the cost estimate, from a table keyed by static shape and measured on the
+    /// second host (`mununu-private` `e2e-history/j2-falsifier/`, 2026-11-08/09: edn's 67 rows on
+    /// `19295f9`, the 21-test differential corpus's 705 rows, the EXP-0031 bit-cap probes). The
+    /// falsifier: 57 of edn's 67 rows in the predicted band, none predicted `seconds` running over
+    /// 10 min. Its named miss class: on an in-cap exact row with an in-cone counter the wall follows
+    /// the VERDICT's fixpoint depth (`fsm-timeout` 0.3 s vs `fsm-timeout-stuck` 108.6 s at the same
+    /// width), which no static feature sees — so that cell says `minutes` with `low` confidence,
+    /// and a scheduler sizes for the band's top. The cells are checked in order; the first match wins.
+    pub fn estimate(&self) -> Estimate {
+        use crate::mu_calculus::PropertyClass as C;
+        let e = |time_band, memory_class, confidence, basis| Estimate {
+            time_band,
+            memory_class,
+            confidence,
+            basis,
+        };
+        let s = &self.shape;
+        if s.constant {
+            return e(
+                TimeBand::Seconds,
+                MemoryClass::Small,
+                Confidence::High,
+                "constant formula, decided without an engine (edn: 14 of 14 in seconds)",
+            );
+        }
+        if s.alternation >= 2 {
+            return e(
+                TimeBand::Minutes,
+                MemoryClass::Medium,
+                Confidence::Medium,
+                "alternating fixpoint (a μ under a ν): the recoverability ladder or a trap \
+                 certificate (edn: 2 of 3 in minutes, ~127 s; 1 in seconds)",
+            );
+        }
+        if s.arith_ops > 0 {
+            return e(
+                TimeBand::Minutes,
+                MemoryClass::Large,
+                Confidence::Low,
+                "multiplier / divider in the cone: the exact BDD walls near 19 b (Bryant) and the \
+                 rescue ladder runs about a minute (bit-cap probe `mult`: 58.9 s at 193 b)",
+            );
+        }
+        if s.array_states > 0 {
+            return e(
+                TimeBand::Minutes,
+                MemoryClass::Medium,
+                Confidence::Low,
+                "memory in the cone: the exact engine refuses arrays, the cube or the reach \
+                 rescue decides (F1 fixture: under 0.2 s; thin evidence, so the band's top)",
+            );
+        }
+        let fits = self.cone_bits <= self.cap;
+        // Over the cap only: in the cap the exact engine decides a relational atom directly (the
+        // bit-cap probe `relational` decides `a == b` at 1 023 b in 0.2 s).
+        if s.relational_atoms > 0 && !fits {
+            return e(
+                TimeBand::Minutes,
+                MemoryClass::Medium,
+                Confidence::Medium,
+                "over-cap register-versus-register atom (`a == b`, a stability check against \
+                 `__past`): the predicate cube cannot seed it, so the exact skip-rescue pass \
+                 runs too (edn: 16 of 16 in minutes, 13-20 s)",
+            );
+        }
+        match (self.class, fits, self.diameter_log2) {
+            (C::Safety | C::Reachability, false, _) => e(
+                TimeBand::Seconds,
+                MemoryClass::Small,
+                Confidence::Medium,
+                "over-cap one-step `bad`-reachability, decided by the reach portfolio (edn: 33 \
+                 of 33 in seconds; differential corpus, all classes: 643 of 705 rows in \
+                 seconds, the slowest 65 s)",
+            ),
+            (C::Safety | C::Reachability, true, Some(_)) => e(
+                TimeBand::Minutes,
+                MemoryClass::Medium,
+                Confidence::Low,
+                "in-cap exact with an in-cone counter: the wall follows the verdict's fixpoint \
+                 depth (bit-cap probes: fsm-timeout 0.3 s vs fsm-timeout-stuck 108.6 s at the \
+                 same width, twocount 294.9 s at 830 b), so size for the band's top",
+            ),
+            (C::Safety | C::Reachability, true, None) => e(
+                TimeBand::Seconds,
+                MemoryClass::Medium,
+                Confidence::Medium,
+                "in-cap exact, no in-cone counter (bit-cap probes fsm-pair, relational, raster, \
+                 i2c, aes: 2 s or less)",
+            ),
+            (C::Liveness, true, None) => e(
+                TimeBand::Seconds,
+                MemoryClass::Medium,
+                Confidence::Low,
+                "in-cap liveness, no counter: exact decides the branching fixpoint (few \
+                 measured rows)",
+            ),
+            (C::Liveness, _, _) => e(
+                TimeBand::Minutes,
+                MemoryClass::Medium,
+                Confidence::Low,
+                "liveness with a counter or over the cap: a ranking certificate or the cube \
+                 (few measured rows)",
+            ),
+            (C::Mixed | C::Propositional, _, _) => e(
+                TimeBand::Minutes,
+                MemoryClass::Medium,
+                Confidence::Low,
+                "mixed / propositional class: no measured rows yet",
+            ),
+        }
+    }
 }
 
 /// The DECISION TABLE — the engine-ROUTING classification, made explicit. Pure function of the
@@ -900,9 +1107,68 @@ pub fn annotate_routing(
             diameter_log2,
             predicted_engine,
             why,
+            shape: shape_facts(&file, &formula, &atoms),
         });
     }
     out
+}
+
+/// Roadmap J2 — the static shape of one property: its cone's multipliers / dividers, memories and
+/// inputs (from the same cone slice the row facts read), and its formula's alternation and
+/// constancy. No solving.
+fn shape_facts(
+    file: &crate::adapter::btor2::ast::Btor2File,
+    formula: &crate::mu_calculus::Formula,
+    atoms: &[String],
+) -> ShapeFacts {
+    use crate::adapter::btor2::ast::{Node, Op};
+    let slice = crate::adapter::btor2::bit_blast::cone_slice(file, atoms);
+    let arith_ops = slice
+        .lines
+        .iter()
+        .filter(|l| {
+            matches!(
+                &l.node,
+                Node::Op {
+                    op: Op::Mul | Op::Sdiv | Op::Udiv | Op::Srem | Op::Urem | Op::Smod,
+                    ..
+                }
+            )
+        })
+        .count();
+    ShapeFacts {
+        arith_ops: u32::try_from(arith_ops).unwrap_or(u32::MAX),
+        array_states: u32::try_from(slice.array_state_names().len()).unwrap_or(u32::MAX),
+        inputs: u32::try_from(slice.inputs().count()).unwrap_or(u32::MAX),
+        alternation: u32::try_from(formula.alternation_depth()).unwrap_or(u32::MAX),
+        constant: formula.constant_value().is_some(),
+        relational_atoms: relational_atoms(formula),
+    }
+}
+
+/// Roadmap J2 — the formula's register-versus-register comparison atoms (`a == b`, `a == b + k`):
+/// the shape the predicate cube cannot seed as a dimension, so the row falls to the exact
+/// skip-rescue pass.
+fn relational_atoms(formula: &crate::mu_calculus::Formula) -> u32 {
+    use crate::adapter::btor2::predicate_expr::{PredicateExpr as P, parse_predicate_expr};
+    use crate::mu_calculus::Node;
+    fn count(e: &P) -> u32 {
+        match e {
+            P::CmpReg { .. } | P::CmpRegAddend { .. } => 1,
+            P::And(a, b) | P::Or(a, b) => count(a) + count(b),
+            P::Not(a) => count(a),
+            P::Cmp { .. } | P::Select { .. } => 0,
+        }
+    }
+    let n: usize = formula
+        .nodes()
+        .iter()
+        .filter_map(|node| match node {
+            Node::Predicate(a) => parse_predicate_expr(a).ok().map(|e| count(&e) as usize),
+            _ => None,
+        })
+        .sum();
+    u32::try_from(n).unwrap_or(u32::MAX)
 }
 
 /// Render one rationale as a `plan-cost` telemetry note.
@@ -1053,6 +1319,7 @@ mod tests {
             diameter_log2: None,
             predicted_engine: engine,
             why: String::new(),
+            shape: Default::default(),
         };
 
         // Planner expects `explicit` to decide two and `symbolic` one; exact none.
@@ -1092,6 +1359,7 @@ mod tests {
             diameter_log2: None,
             predicted_engine: engine,
             why: String::new(),
+            shape: Default::default(),
         };
         let tied =
             ladder_ordered_by_prediction(&[r("exact-symbolic"), r("symbolic"), r("explicit")]);
@@ -1530,6 +1798,180 @@ mod tests {
         assert_eq!(o.skip_rows.len(), 1);
     }
 
+    fn j2_row(
+        class: crate::mu_calculus::PropertyClass,
+        cone_bits: u32,
+        diameter: Option<u32>,
+        shape: super::ShapeFacts,
+    ) -> RoutingRationale {
+        RoutingRationale {
+            property: "p".into(),
+            class,
+            cone_bits,
+            cap: 192,
+            diameter_log2: diameter,
+            predicted_engine: "x",
+            why: String::new(),
+            shape,
+        }
+    }
+
+    /// Roadmap J2 — every cell of the measured table, in its precedence order, each pinned to the
+    /// rows that put it there (`mununu-private` `e2e-history/j2-falsifier/`).
+    #[test]
+    fn the_cost_table_gives_each_shape_its_measured_band() {
+        use super::{Confidence as Cf, MemoryClass as Mc, ShapeFacts, TimeBand as Tb};
+        use crate::mu_calculus::PropertyClass as C;
+        let band = |r: RoutingRationale| {
+            let e = r.estimate();
+            (e.time_band, e.memory_class, e.confidence)
+        };
+        let shape = |f: fn(&mut ShapeFacts)| {
+            let mut s = ShapeFacts::default();
+            f(&mut s);
+            s
+        };
+        // constant formula wins over everything (edn: 14/14 seconds).
+        assert_eq!(
+            band(j2_row(
+                C::Safety,
+                3290,
+                None,
+                shape(|s| {
+                    s.constant = true;
+                    s.relational_atoms = 3
+                })
+            )),
+            (Tb::Seconds, Mc::Small, Cf::High)
+        );
+        // an alternating fixpoint (edn's recoverability rows, ~127 s).
+        assert_eq!(
+            band(j2_row(
+                C::Liveness,
+                3290,
+                None,
+                shape(|s| s.alternation = 2)
+            ))
+            .0,
+            Tb::Minutes
+        );
+        // a multiplier: the arena may overflow.
+        assert_eq!(
+            band(j2_row(C::Safety, 40, None, shape(|s| s.arith_ops = 1))),
+            (Tb::Minutes, Mc::Large, Cf::Low)
+        );
+        // a memory in the cone.
+        assert_eq!(
+            band(j2_row(C::Safety, 40, None, shape(|s| s.array_states = 1))).0,
+            Tb::Minutes
+        );
+        // an over-cap register comparison (edn's stability checks: 16/16 minutes)…
+        assert_eq!(
+            band(j2_row(
+                C::Safety,
+                3290,
+                None,
+                shape(|s| s.relational_atoms = 1)
+            )),
+            (Tb::Minutes, Mc::Medium, Cf::Medium)
+        );
+        // …but in the cap the exact engine decides it (bit-cap probe `relational`, 0.2 s).
+        assert_eq!(
+            band(j2_row(
+                C::Safety,
+                100,
+                None,
+                shape(|s| s.relational_atoms = 1)
+            ))
+            .0,
+            Tb::Seconds
+        );
+        // over-cap one-step safety → the reach portfolio (edn: 33/33 seconds).
+        assert_eq!(
+            band(j2_row(C::Safety, 3290, None, ShapeFacts::default())),
+            (Tb::Seconds, Mc::Small, Cf::Medium)
+        );
+        // in-cap with a counter: the named miss class, the band's top, low confidence.
+        assert_eq!(
+            band(j2_row(C::Safety, 100, Some(9), ShapeFacts::default())),
+            (Tb::Minutes, Mc::Medium, Cf::Low)
+        );
+        // in-cap, no counter.
+        assert_eq!(
+            band(j2_row(C::Reachability, 100, None, ShapeFacts::default())).0,
+            Tb::Seconds
+        );
+        // liveness: in-cap without a counter seconds, otherwise minutes.
+        assert_eq!(
+            band(j2_row(C::Liveness, 100, None, ShapeFacts::default())).0,
+            Tb::Seconds
+        );
+        assert_eq!(
+            band(j2_row(C::Liveness, 100, Some(9), ShapeFacts::default())).0,
+            Tb::Minutes
+        );
+        assert_eq!(
+            band(j2_row(C::Liveness, 3290, None, ShapeFacts::default())).0,
+            Tb::Minutes
+        );
+        // no measured rows: minutes, low.
+        assert_eq!(
+            band(j2_row(C::Mixed, 10, None, ShapeFacts::default())),
+            (Tb::Minutes, Mc::Medium, Cf::Low)
+        );
+        // every cell says where its numbers come from.
+        assert!(
+            j2_row(C::Safety, 3290, None, ShapeFacts::default())
+                .estimate()
+                .basis
+                .contains("edn")
+        );
+    }
+
+    /// Roadmap J2 — the shape facts are read off the property's cone and formula: a multiplier and
+    /// a memory in the cone are counted, a cone that does not reach them is not; the formula side
+    /// counts register comparisons, alternation and constancy.
+    #[test]
+    fn shape_facts_read_the_cone_and_the_formula() {
+        // `p` = a * b (a multiplier), `m` a memory read into `r`, `q` an unrelated flop.
+        const SRC: &str = "1 sort bitvec 4\n2 sort bitvec 1\n3 sort array 1 1\n\
+                           4 input 1 a\n5 input 1 b\n6 state 1 p\n7 mul 1 4 5\n8 next 1 6 7\n\
+                           9 state 3 m\n10 state 1 r\n11 read 1 9 4\n12 next 1 10 11\n\
+                           13 state 2 q\n14 next 2 13 13\n";
+        let file = crate::adapter::btor2::parser::parse(SRC).expect("parses");
+        let f = |s: &str| crate::mu_calculus::parser::parse(s).expect("formula");
+        let mul = super::shape_facts(&file, &f("nu X. ((p != 3) && [] X)"), &["p".to_string()]);
+        assert_eq!(mul.arith_ops, 1, "{mul:?}");
+        assert_eq!(mul.inputs, 2, "{mul:?}");
+        assert_eq!(mul.alternation, 1);
+        assert!(!mul.constant);
+        let mem = super::shape_facts(
+            &file,
+            &f("nu X. ((r == p) && [] X)"),
+            &["r".to_string(), "p".to_string()],
+        );
+        assert_eq!(mem.array_states, 1, "{mem:?}");
+        assert_eq!(mem.relational_atoms, 1, "`r == p` is a register comparison");
+        let none = super::shape_facts(&file, &f("nu X. ((q == 0) && [] X)"), &["q".to_string()]);
+        assert_eq!(
+            (
+                none.arith_ops,
+                none.array_states,
+                none.inputs,
+                none.relational_atoms
+            ),
+            (0, 0, 0, 0)
+        );
+        let rec = super::shape_facts(
+            &file,
+            &f("nu Y. ((mu Z. ((q == 0) || <> Z)) && [] Y)"),
+            &["q".to_string()],
+        );
+        assert_eq!(rec.alternation, 2);
+        let k = super::shape_facts(&file, &f("nu X. ((!(false)) && [] X)"), &[]);
+        assert!(k.constant);
+    }
+
     /// Roadmap J3 — a row the run was told not to attempt says nothing about the routing: it is
     /// neither a match nor a divergence, and a note over such rows alone is no note at all.
     #[test]
@@ -1542,6 +1984,7 @@ mod tests {
             diameter_log2: None,
             predicted_engine: "exact-symbolic",
             why: "x".into(),
+            shape: Default::default(),
         }];
         let mut report = skipped_report("p_resumed", "AG p");
         report.properties[0].outcome = VerifyOutcome::Unknown { unknown_cells: 0 };
@@ -1566,6 +2009,7 @@ mod tests {
             diameter_log2: None,
             predicted_engine: "exact-symbolic",
             why: "x".into(),
+            shape: Default::default(),
         }];
         let report = skipped_report("p_drain", "nu Y.((mu X.(cnt == 0 || <> X)) && [] Y)");
         let note = plan_accuracy_note(&rationales, &report).expect("accuracy note");
