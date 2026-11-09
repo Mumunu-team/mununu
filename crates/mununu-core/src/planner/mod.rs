@@ -888,15 +888,6 @@ impl RoutingRationale {
                 "constant formula, decided without an engine (edn: 14 of 14 in seconds)",
             );
         }
-        if s.alternation >= 2 {
-            return e(
-                TimeBand::Minutes,
-                MemoryClass::Medium,
-                Confidence::Medium,
-                "alternating fixpoint (a μ under a ν): the recoverability ladder or a trap \
-                 certificate (edn: 2 of 3 in minutes, ~127 s; 1 in seconds)",
-            );
-        }
         if s.array_states > 0 {
             return e(
                 TimeBand::Minutes,
@@ -907,6 +898,19 @@ impl RoutingRationale {
             );
         }
         let fits = self.cone_bits <= self.cap;
+        // An alternating fixpoint costs minutes where the recoverability ladder runs — over the
+        // cap. In the cap the exact engine decides it directly: the differential corpus's 19
+        // in-cap alternating rows (6-38 b) all decided in 1 s or less (the box's out-of-sample
+        // check, 2026-11-09), so they fall to the in-cap cells below.
+        if s.alternation >= 2 && !fits {
+            return e(
+                TimeBand::Minutes,
+                MemoryClass::Medium,
+                Confidence::Medium,
+                "over-cap alternating fixpoint (a μ under a ν): the recoverability ladder or a \
+                 trap certificate (edn: 2 of 3 in minutes, ~127 s; 1 in seconds)",
+            );
+        }
         // A multiplier is the BDD's wall (Bryant), so the cell applies where the exact engine
         // runs — in the cap. Over the cap the reach portfolio's SAT-based members decide, and a
         // multiplier is not their wall: edn's 23 over-cap rows with one measured 1.3-7.4 s, and
@@ -970,11 +974,18 @@ impl RoutingRationale {
                 "liveness with a counter or over the cap: a ranking certificate or the cube \
                  (few measured rows)",
             ),
+            (C::Mixed | C::Propositional, true, None) => e(
+                TimeBand::Seconds,
+                MemoryClass::Medium,
+                Confidence::Low,
+                "in-cap mixed / propositional, no counter: the exact engine decides it directly \
+                 (differential corpus: in-cap alternating rows 1 s or less)",
+            ),
             (C::Mixed | C::Propositional, _, _) => e(
                 TimeBand::Minutes,
                 MemoryClass::Medium,
                 Confidence::Low,
-                "mixed / propositional class: no measured rows yet",
+                "mixed / propositional with a counter or over the cap: few measured rows",
             ),
         }
     }
@@ -1848,7 +1859,17 @@ mod tests {
             )),
             (Tb::Seconds, Mc::Small, Cf::High)
         );
-        // an alternating fixpoint (edn's recoverability rows, ~127 s).
+        // in the cap the exact engine decides an alternating row (the differential corpus's 19
+        // in-cap alternating rows: 1 s or less); over the cap it is minutes (below).
+        assert_eq!(
+            band(j2_row(C::Liveness, 30, None, shape(|s| s.alternation = 2))).0,
+            Tb::Seconds
+        );
+        assert_eq!(
+            band(j2_row(C::Mixed, 30, None, shape(|s| s.alternation = 2))).0,
+            Tb::Seconds
+        );
+        // an over-cap alternating fixpoint (edn's recoverability rows, ~127 s).
         assert_eq!(
             band(j2_row(
                 C::Liveness,
@@ -1937,9 +1958,9 @@ mod tests {
             band(j2_row(C::Liveness, 3290, None, ShapeFacts::default())).0,
             Tb::Minutes
         );
-        // no measured rows: minutes, low.
+        // mixed over the cap: minutes, low.
         assert_eq!(
-            band(j2_row(C::Mixed, 10, None, ShapeFacts::default())),
+            band(j2_row(C::Mixed, 3290, None, ShapeFacts::default())),
             (Tb::Minutes, Mc::Medium, Cf::Low)
         );
         // every cell says where its numbers come from.

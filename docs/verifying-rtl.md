@@ -1737,7 +1737,13 @@ OpenTitan `edn` IP the table places **65 of 67** rows in their measured band and
 `seconds` row that ran over 10 minutes. The first end-to-end `--plan-only` run scored 42 of 67:
 the multiplier cell fired on 39 over-cap rows, where the reach portfolio (SAT-based) decides and a
 multiplier is no wall (23 of them ran 1.3–7.4 s). That cell now applies in the cap only, where the
-exact BDD engine runs — the end-to-end counterfactual is 65 of 67.
+exact BDD engine runs — the end-to-end counterfactual is 65 of 67 (in-sample: those rows motivated
+the fix). **Out of sample**, on the 18-design differential corpus re-measured one design at a time:
+**186 of 210** rows in band (88.6 %), none predicted `seconds` over 10 minutes. It found the same
+mechanism mismatch in the alternation cell (over-cap recoverability ladders cost minutes; in the cap
+the exact engine decides alternating rows in 1 s or less, 0 of 19 hit), now applied over the cap
+only. The remaining under-estimates are sibling `prim_count` rows with identical static facts and
+walls of 54 ms vs 163 s — the verdict-dependent depth no static feature sees.
 
 **What it cannot see, and says.** On an in-cap row decided by the exact engine with an in-cone
 counter, the wall follows the *verdict's* fixpoint depth: the bit-cap probes `fsm-timeout` (holds,
