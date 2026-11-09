@@ -2856,6 +2856,11 @@ pub struct VerifyAutoOptions {
     /// [`AutoVerifyReport::resumed`]); a breadcrumb from another build, or one without a build, is
     /// refused as an error. The CLI's `--resume-from FILE`, the API's `resume_from`.
     pub resume_from: Option<String>,
+    /// mununu#933 — this run's [`crate::adapter::resume::run_fingerprint`], set by [`verify_auto`]
+    /// before dispatch and stamped on every breadcrumb record; a resume refuses a breadcrumb whose
+    /// records name another. `None` on a path that did not come through [`verify_auto`]: its records
+    /// carry no `run` and cannot be resumed from, which is the safe side.
+    pub run_fingerprint: Option<String>,
     /// #468 — apply a NAMED structural mutation to the prepared BTOR2 before
     /// verification (`prepare_model`), so `sv mutate` can assert the property
     /// verdicts FLIP (property adequacy). `None` (default) ⇒ no mutation, the model
@@ -2995,6 +3000,7 @@ impl Default for VerifyAutoOptions {
             skip_rows: std::collections::HashSet::new(),
             only_rows: None,
             resume_from: None,
+            run_fingerprint: None,
             mutation: None,
             faults: None,
             antecedent_shadow: true,
@@ -4952,7 +4958,8 @@ pub(crate) fn replan_merged(
             p.bottom_reason = None;
         }
     }
-    let mut breadcrumb = crate::adapter::partial_json::Breadcrumb::from_env_with_append(true);
+    let mut breadcrumb = crate::adapter::partial_json::Breadcrumb::from_env_with_append(true)
+        .with_run(opts.run_fingerprint.as_deref());
     let before: Vec<&'static str> = report
         .properties
         .iter()
@@ -5083,16 +5090,21 @@ pub fn verify_auto(
     // N0.1 — `MUNUNU_VERIFY_AUTO_ONLY_ROWS` narrows the run to the named rows (the executable
     // ledger's re-run of what changed); the row facts are written once the report is final,
     // whichever path produced it.
-    let selected = std::env::var("MUNUNU_VERIFY_AUTO_ONLY_ROWS")
+    let mut opts = std::env::var("MUNUNU_VERIFY_AUTO_ONLY_ROWS")
         .ok()
         .and_then(|v| parse_only_rows(&v))
         .map(|rows| VerifyAutoOptions {
             only_rows: Some(rows),
             ..opts.clone()
-        });
+        })
+        .unwrap_or_else(|| opts.clone());
+    // mununu#933 — the run's input identity, on every breadcrumb record and checked by a resume.
+    opts.run_fingerprint = Some(crate::adapter::resume::run_fingerprint(
+        sources, yosys_opts, &opts,
+    ));
     // J4c — the run's own wall, measured where the run begins and ends.
     let run_t0 = std::time::Instant::now();
-    let mut report = verify_auto_with(sources, yosys_opts, selected.as_ref().unwrap_or(opts))?;
+    let mut report = verify_auto_with(sources, yosys_opts, &opts)?;
     crate::adapter::row_facts::write_from_env(&report);
     report.run_ms = Some(u64::try_from(run_t0.elapsed().as_millis()).unwrap_or(u64::MAX));
     Ok(report)
@@ -5130,19 +5142,21 @@ fn verify_auto_with(
         return verify_auto_dispatch(sources, yosys_opts, opts);
     };
     let current = crate::build_info::current().map(crate::build_info::build_tag);
-    let plan =
-        crate::adapter::resume::parse_breadcrumb(text, current.as_deref()).map_err(|refusal| {
-            AdapterError {
-                kind: AdapterErrorKind::ParseError,
-                message: format!("resume-from: {refusal}"),
-                location: None,
-            }
-        })?;
+    let plan = crate::adapter::resume::parse_breadcrumb(
+        text,
+        current.as_deref(),
+        opts.run_fingerprint.as_deref().unwrap_or_default(),
+    )
+    .map_err(|refusal| AdapterError {
+        kind: AdapterErrorKind::ParseError,
+        message: format!("resume-from: {refusal}"),
+        location: None,
+    })?;
     let mut resumed_opts = opts.clone();
     resumed_opts.skip_rows.extend(plan.resumed.keys().cloned());
     let mut report = verify_auto_dispatch(sources, yosys_opts, &resumed_opts)?;
     apply_resume(&mut report, &plan);
-    record_resumed_breadcrumb(&report);
+    record_resumed_breadcrumb(&report, opts.run_fingerprint.as_deref());
     Ok(report)
 }
 
@@ -5225,11 +5239,12 @@ pub(crate) fn apply_resume(
 /// J3 — the resumed verdicts as `phase: "resumed"` breadcrumb records (append mode), so a
 /// breadcrumb written by THIS run — which otherwise holds `unknown` / `not-attempted` for the
 /// rows it did not run — can itself be resumed from. No-op without the env var.
-fn record_resumed_breadcrumb(report: &AutoVerifyReport) {
+fn record_resumed_breadcrumb(report: &AutoVerifyReport, run: Option<&str>) {
     if report.resumed.is_empty() {
         return;
     }
-    let mut crumb = crate::adapter::partial_json::Breadcrumb::from_env_with_append(true);
+    let mut crumb =
+        crate::adapter::partial_json::Breadcrumb::from_env_with_append(true).with_run(run);
     if !crumb.is_active() {
         return;
     }
@@ -7133,7 +7148,8 @@ pub(crate) fn verify_auto_impl(
     // bytes, including for properties mununu had already decided." Opt-in via
     // `MUNUNU_VERIFY_AUTO_PARTIAL_JSON=<path>`; disabled and zero-cost otherwise.
     let mut breadcrumb =
-        crate::adapter::partial_json::Breadcrumb::from_env_with_append(opts.breadcrumb_append);
+        crate::adapter::partial_json::Breadcrumb::from_env_with_append(opts.breadcrumb_append)
+            .with_run(opts.run_fingerprint.as_deref());
     // PR A1 — the injected model, parsed once, for the per-row cone test below.
     let fault_file = fault
         .as_ref()

@@ -2400,6 +2400,8 @@ fn sv_verify_auto_inputs(request: &SvVerifyAutoRequest) -> ApiResult<VerifyAutoI
         only_rows: None,
         // J3 — the breadcrumb's content, checked before any lift; a refusal is a 400 below.
         resume_from: request.resume_from.clone(),
+        // mununu#933 — `verify_auto` computes it from these inputs before dispatch.
+        run_fingerprint: None,
         assume_mode,
         faults: crate::adapter::btor2::fault::FaultPosture::parse(
             &request.faults,
