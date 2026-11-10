@@ -790,30 +790,56 @@ pub fn decide_bad_safety_cancellable(
         let ctx = z3::Context::thread_local();
         let handle = ctx.handle();
         let gate = QueryGate::default();
-        let done = std::sync::atomic::AtomicBool::new(false);
-        std::thread::scope(|scope| {
-            if let Some(c) = cancel {
-                scope.spawn(|| {
-                    use std::sync::atomic::Ordering::Relaxed;
-                    // The member grace applies here as at the depth boundary: a query that is
-                    // about to finish still lands; one still running past the grace is cut.
-                    let mut seen: Option<std::time::Instant> = None;
-                    while !done.load(Relaxed) {
-                        if c.load(Relaxed)
-                            && seen.get_or_insert_with(std::time::Instant::now).elapsed()
-                                >= crate::adapter::MEMBER_CANCEL_GRACE
-                        {
-                            gate.interrupt_if_in_query(|| handle.interrupt());
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(20));
+        with_cancel_watchdog(
+            cancel,
+            &gate,
+            || handle.interrupt(),
+            || decide_bad_safety_ladder(&u, &init_pairs, n, max_k, nominal_ms, cancel, &gate),
+        )
+    })
+}
+
+/// N0.5 / mununu#878 — run `body` with a scoped watchdog that, once `cancel` has been set for the
+/// member grace, calls `interrupt` while the gate reports a check in flight. The watchdog stops
+/// when `body` ends, however it ends.
+///
+/// mununu#951 — "however it ends" is the point. The stop flag used to be set after `body`
+/// returned normally; a panic in `body` left the watchdog polling forever, `thread::scope` waited
+/// on it, and the row hung instead of abstaining. The flag is now set by a guard that drops on
+/// unwind too, inside the scope, before the scope joins its threads.
+fn with_cancel_watchdog<T>(
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+    gate: &QueryGate,
+    interrupt: impl Fn() + Sync,
+    body: impl FnOnce() -> T,
+) -> T {
+    struct StopOnDrop<'a>(&'a std::sync::atomic::AtomicBool);
+    impl Drop for StopOnDrop<'_> {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    let done = std::sync::atomic::AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        if let Some(c) = cancel {
+            scope.spawn(|| {
+                use std::sync::atomic::Ordering::Relaxed;
+                // The member grace applies here as at the depth boundary: a query that is
+                // about to finish still lands; one still running past the grace is cut.
+                let mut seen: Option<std::time::Instant> = None;
+                while !done.load(Relaxed) {
+                    if c.load(Relaxed)
+                        && seen.get_or_insert_with(std::time::Instant::now).elapsed()
+                            >= crate::adapter::MEMBER_CANCEL_GRACE
+                    {
+                        gate.interrupt_if_in_query(&interrupt);
                     }
-                });
-            }
-            let out =
-                decide_bad_safety_ladder(&u, &init_pairs, n, max_k, nominal_ms, cancel, &gate);
-            done.store(true, std::sync::atomic::Ordering::Relaxed);
-            out
-        })
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            });
+        }
+        let _stop = StopOnDrop(&done);
+        body()
     })
 }
 
@@ -1939,5 +1965,40 @@ mod tests {
             .expect("the 100-bit state is listed");
         assert_eq!(state.bits(), 100);
         assert_eq!(state.to_hex(), "0x8000000000000000000000000");
+    }
+
+    /// mununu#951 — a panic inside the watched body ends the watchdog, so the scope returns (the
+    /// panic propagates) instead of hanging the row forever.
+    #[test]
+    fn a_panic_in_the_ladder_does_not_hang_its_watchdog() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let cancel = std::sync::atomic::AtomicBool::new(false);
+            let gate = QueryGate::default();
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                with_cancel_watchdog(
+                    Some(&cancel),
+                    &gate,
+                    || {},
+                    || -> () { panic!("a ladder bug") },
+                )
+            }));
+            let _ = tx.send(r.is_err());
+        });
+        let panicked = rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the watched scope must return; a hang here is mununu#951");
+        assert!(
+            panicked,
+            "the panic propagates to the caller, which abstains on it"
+        );
+    }
+
+    #[test]
+    fn the_watchdog_returns_the_bodys_value() {
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let gate = QueryGate::default();
+        assert_eq!(with_cancel_watchdog(Some(&cancel), &gate, || {}, || 7), 7);
+        assert_eq!(with_cancel_watchdog(None, &gate, || {}, || 8), 8);
     }
 }
