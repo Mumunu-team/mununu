@@ -12,6 +12,11 @@
 # Columns of the results file (TSV): name latches inputs ands rung verdict decided_by elapsed_ms
 # ground_truth agreement. `agreement` is `ok`, `DISAGREE` (a soundness flag — stop and look), or
 # `-` when no published solver decided the instance.
+#
+# The verb's own budget is `--timeout-ms` = BUDGET minus a 30 s margin (TIMEOUT_MS overrides), so
+# the engines see the lane budget rather than only the outer `timeout` kill: without it the l2s
+# rung's portfolio ran at its 60 s member defaults. JSON_DIR, when set, keeps each instance's full
+# report (`<name>.json`) so an `unknown` row's notes say why.
 set -uo pipefail
 DIR=${MUNUNU_HWMCC_LIVE_DIR:-$HOME/hwmcc17-live}
 BIN=${MUNUNU_BIN:-mununu}
@@ -19,6 +24,9 @@ MAX_LATCHES=${MAX_LATCHES:-192}
 MIN_LATCHES=${MIN_LATCHES:-0}
 BUDGET=${BUDGET:-600}          # seconds per instance (wall)
 RUNG=${RUNG:-both}
+TIMEOUT_MS=${TIMEOUT_MS:-$(( BUDGET > 60 ? (BUDGET - 30) * 1000 : BUDGET * 1000 ))}
+JSON_DIR=${JSON_DIR:-}
+[ -n "$JSON_DIR" ] && mkdir -p "$JSON_DIR"
 OUT=${OUT:-$DIR/results-mununu-$RUNG${NSHARDS:+-shard${SHARD:-0}}.tsv}
 CSV=$DIR/live.csv
 [ -f "$CSV" ] || { echo "no $CSV"; exit 2; }
@@ -36,7 +44,8 @@ for f in "$DIR"/*.aig; do
   [ "$L" -ge "$MIN_LATCHES" ] && [ "$L" -le "$MAX_LATCHES" ] || continue
   t0=$(date +%s%3N 2>/dev/null || python3 -c 'import time;print(int(time.time()*1000))')
   # shellcheck disable=SC2086
-  json=$(timeout "$BUDGET" "$BIN" btor2 verify-liveness --justice "$f" --rung "$RUNG" --json ${EXTRA_ARGS:-} 2>/dev/null); rc=$?
+  json=$(timeout "$BUDGET" "$BIN" btor2 verify-liveness --justice "$f" --rung "$RUNG" --timeout-ms "$TIMEOUT_MS" --json ${EXTRA_ARGS:-} 2>/dev/null); rc=$?
+  [ -n "$JSON_DIR" ] && printf '%s' "$json" > "$JSON_DIR/$name.json"
   t1=$(date +%s%3N 2>/dev/null || python3 -c 'import time;print(int(time.time()*1000))')
   if [ $rc -eq 124 ]; then verdict=timeout; by=-; ms=$((BUDGET*1000))
   elif [ -z "$json" ]; then verdict=error; by=-; ms=$((t1-t0))

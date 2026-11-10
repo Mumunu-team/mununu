@@ -185,8 +185,10 @@ The levers that measurement pointed at are applied by the exact engine's **ladde
 ([`exact_ladder`](../crates/mununu-core/src/adapter/btor2/symbolic_bitblast.rs)): one
 `ExactSession` per property (bit-blast once), then an unrestricted attempt for a short slice, the
 reachable-state restriction with a 5 s probe on a retryable abstention, and the unrestricted
-remainder. Under `--rung both` the verb runs the ladder for 30 s, then l2s, then the ladder with
-what `--timeout-ms` leaves; `--parallel-rungs` runs both at once and cancels the loser. The root
+remainder. Under `--rung both` the verb runs the ladder for 30 s, then l2s with **half** of what
+the slice leaves (the reach portfolio's members take their bounds from it), then the ladder with
+what remains; without `--timeout-ms` the l2s members run at their 60 s defaults and the abstention
+note says so, naming every member's refusal or budget abstention; `--parallel-rungs` runs both at once and cancels the loser. The root
 fixpoint's early exit is on for every verdict path. Measured: `cucab09` (91 bits) from an arena
 abstention at 137 s to HOLDS in 2.6 s, `cuabq2mfro` from 105 s to 4.3 s, verdict-identical by
 gate — see [the levers briefing](consumer-briefings/2026-10-exact-reachable-restriction.md) and

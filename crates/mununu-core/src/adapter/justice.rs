@@ -271,12 +271,26 @@ impl Drop for RungGuard {
     }
 }
 
+///
+/// `budget` bounds the reachability portfolio on the fair-cycle monitor: it is installed as a
+/// child [`run_budget`](crate::adapter::run_budget) budget for the call, and the portfolio derives
+/// every member's bound from the time left (`portfolio_member_timeouts`). `None` keeps the
+/// members' own defaults (60 s per subprocess member). Before this the rung took no budget, so
+/// `--timeout-ms` never reached it: on HWMCC'17 LIVE at a 3,600 s lane budget the l2s rung still
+/// gave each member 60 s.
 fn l2s_rung(
     named: &str,
     lits: &[String],
+    budget: Option<std::time::Duration>,
     cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> (PropertyVerdict, Vec<String>, Vec<String>) {
+    use crate::adapter::run_budget;
     let fair_atoms: Vec<Atom> = lits.iter().map(|n| atom(n)).collect();
+    let scoped = budget.map(|b| {
+        let ms = u64::try_from(b.as_millis()).unwrap_or(u64::MAX);
+        run_budget::Budget::child(&run_budget::current(), Some(ms))
+    });
+    let _guard = scoped.as_ref().map(run_budget::enter);
     match response_liveness_rescue_under_fairness_cancellable(
         named,
         &atom("mununu_true"),
@@ -295,10 +309,10 @@ fn l2s_rung(
             by.extend(outcome.reachable_by.iter().map(|s| s.to_string()));
             (PropertyVerdict::Violated, by, Vec::new())
         }
-        Some((LivenessVerdict::Inconclusive, _)) => (
+        Some((LivenessVerdict::Inconclusive, outcome)) => (
             PropertyVerdict::Unknown,
             Vec::new(),
-            vec!["l2s: the reachability portfolio left the fair-cycle monitor undecided".into()],
+            vec![l2s_undecided_note(budget, &outcome)],
         ),
         None => (
             PropertyVerdict::Unknown,
@@ -306,6 +320,31 @@ fn l2s_rung(
             vec!["l2s: the fair-cycle monitor could not be built".into()],
         ),
     }
+}
+
+/// The l2s rung's abstention note: the budget the portfolio ran under and every member's refusal
+/// or budget abstention, so a reader can tell "more time may help" from "no member carries this"
+/// (Failure Paths: the note used to say only "undecided", hiding a fixed 60 s member cap).
+fn l2s_undecided_note(
+    budget: Option<std::time::Duration>,
+    outcome: &crate::adapter::reach_portfolio::ReachOutcome,
+) -> String {
+    let mut note = match budget {
+        Some(b) => format!(
+            "l2s: the reachability portfolio left the fair-cycle monitor undecided within a {} ms budget",
+            b.as_millis()
+        ),
+        None => "l2s: the reachability portfolio left the fair-cycle monitor undecided at the \
+                 members' default budgets (60 s per subprocess member; `--timeout-ms` raises them)"
+            .to_string(),
+    };
+    for (member, why) in &outcome.refused {
+        note.push_str(&format!("; {member} refused: {why}"));
+    }
+    for (member, why) in &outcome.abstained {
+        note.push_str(&format!("; {member} abstained: {why}"));
+    }
+    note
 }
 
 /// Decide every justice set of `btor2` under `opts` (see [`JusticeOptions`]).
@@ -338,7 +377,7 @@ pub fn verify_justice_with(
                 Err(e) => notes.push(e),
             },
             JusticeRung::L2s => {
-                let (v, by, mut n) = l2s_rung(&named, &lits, None);
+                let (v, by, mut n) = l2s_rung(&named, &lits, total, None);
                 verdict = v;
                 decided_by = by;
                 notes.append(&mut n);
@@ -370,7 +409,7 @@ pub fn verify_justice_with(
                         let (named, lits) = (&named, &lits);
                         scope.spawn(move || {
                             let _live = RungGuard::enter();
-                            let (v, by, n) = l2s_rung(named, lits, Some(cancel));
+                            let (v, by, n) = l2s_rung(named, lits, total, Some(cancel));
                             let r = if v == PropertyVerdict::Unknown {
                                 Err(n.join(" | "))
                             } else {
@@ -417,7 +456,13 @@ pub fn verify_justice_with(
                     Err(e) => notes.push(e),
                 }
                 if verdict == PropertyVerdict::Unknown {
-                    let (v, by, mut n) = l2s_rung(&named, &lits, None);
+                    // The l2s rung gets HALF of what the exact slice left; the exact remainder
+                    // gets the rest plus whatever l2s did not use. Measured on HWMCC'17 LIVE
+                    // (2026-10): exact decisions came in ≤ 7 s, l2s lassos needed 68–258 s, and
+                    // the remainder rung is the only path for an exact fixpoint slower than the
+                    // slice — so neither side may take the whole budget.
+                    let l2s_budget = remaining(total).map(|r| r / 2);
+                    let (v, by, mut n) = l2s_rung(&named, &lits, l2s_budget, None);
                     verdict = v;
                     decided_by = by;
                     notes.append(&mut n);
@@ -681,6 +726,55 @@ mod policy_tests {
                 "a rung is still running after the call returned"
             );
         }
+    }
+
+    /// REPRODUCER — the justice budget must reach the l2s rung. Before the fix `l2s_rung` took no
+    /// budget, so the reachability portfolio ran its members at their 60 s defaults whatever
+    /// `--timeout-ms` said: on HWMCC'17 LIVE (2026-11-10, a 3,600 s lane) 42 of 54 `unknown` rows
+    /// stopped within 3 min with the lane budget unused. Observable without a subprocess: under a
+    /// spent budget the rung must abstain and say so; on the parent it ignores the budget and
+    /// decides the counter.
+    #[test]
+    fn the_l2s_rung_runs_under_the_justice_budget() {
+        let r = verify_justice_with(
+            COUNTER,
+            &JusticeOptions {
+                rung: JusticeRung::L2s,
+                budget_ms: Some(0),
+                parallel_rungs: false,
+            },
+        )
+        .expect("runs");
+        assert_eq!(r[0].verdict, PropertyVerdict::Unknown, "{:?}", r[0]);
+        assert!(
+            r[0].notes
+                .iter()
+                .any(|n| n.contains("within a 0 ms budget")),
+            "the note must name the budget the portfolio ran under: {:?}",
+            r[0].notes
+        );
+    }
+
+    #[test]
+    fn the_l2s_abstention_note_names_the_default_cap_and_every_member_reason() {
+        let outcome = crate::adapter::reach_portfolio::ReachOutcome {
+            refused: vec![("pono", "array sort unsupported".to_string())],
+            abstained: vec![("native", "resource limit at depth 9".to_string())],
+            ..Default::default()
+        };
+        let note = l2s_undecided_note(None, &outcome);
+        assert!(note.contains("60 s per subprocess member"), "{note}");
+        assert!(note.contains("--timeout-ms"), "{note}");
+        assert!(
+            note.contains("pono refused: array sort unsupported"),
+            "{note}"
+        );
+        assert!(
+            note.contains("native abstained: resource limit at depth 9"),
+            "{note}"
+        );
+        let bounded = l2s_undecided_note(Some(std::time::Duration::from_secs(5)), &outcome);
+        assert!(bounded.contains("within a 5000 ms budget"), "{bounded}");
     }
 
     #[test]
