@@ -548,9 +548,14 @@ fn context_import_handler_impl(
         sidecar_json: request.sidecar.clone(),
         sv_source_path: request
             .sv_source_path
-            .as_ref()
-            .map(std::path::PathBuf::from),
-        sidecar_path: request.sidecar_path.as_ref().map(std::path::PathBuf::from),
+            .as_deref()
+            .map(|p| confine_request_path("sv_source_path", p))
+            .transpose()?,
+        sidecar_path: request
+            .sidecar_path
+            .as_deref()
+            .map(|p| confine_request_path("sidecar_path", p))
+            .transpose()?,
         ..AdapterOptions::default()
     };
 
@@ -4211,13 +4216,71 @@ fn verify_project_handler_impl(
     if request.counterexample_max_steps.is_some() {
         config.counterexample_max_steps = request.counterexample_max_steps;
     }
-    let base_dir = std::path::PathBuf::from(&request.base_dir);
+    // mununu#935 — `base_dir` is confined; the file paths INSIDE the config are not yet (the
+    // orchestrator joins them onto `base_dir`, and an absolute one passes through the join).
+    let base_dir = confine_request_path("base_dir", &request.base_dir)?;
     crate::verify::verify_project(&config, &base_dir)
         .map(Json)
         .map_err(|e| ApiError::BadRequest {
             message: e.to_string(),
             details: None,
         })
+}
+
+/// mununu#935 — a server-side path an API request names, confined to the deployment's
+/// `[server] file_root` when one is set: the path (relative paths resolve against the root) must
+/// exist and canonicalise to a location under the canonical root, so neither `..` nor a symlink
+/// can leave it. Without a `file_root` the path is taken as given, as a developer's local server
+/// always has.
+pub(crate) fn confine_request_path(field: &str, raw: &str) -> Result<std::path::PathBuf, ApiError> {
+    let root = match crate::deployment::current() {
+        Ok(cfg) => cfg.file_root,
+        Err(e) => {
+            return Err(ApiError::BadRequest {
+                message: format!("`{field}`: the deployment configuration does not load: {e}"),
+                details: None,
+            });
+        }
+    };
+    confine_under(root.as_deref(), field, raw)
+}
+
+/// [`confine_request_path`] with the root passed in (the testable seam).
+pub(crate) fn confine_under(
+    root: Option<&std::path::Path>,
+    field: &str,
+    raw: &str,
+) -> Result<std::path::PathBuf, ApiError> {
+    let Some(root) = root else {
+        return Ok(std::path::PathBuf::from(raw));
+    };
+    let bad = |message: String| ApiError::BadRequest {
+        message,
+        details: None,
+    };
+    let root = root.canonicalize().map_err(|e| {
+        bad(format!(
+            "`{field}`: the server's file_root {} is unusable ({e})",
+            root.display()
+        ))
+    })?;
+    let p = std::path::Path::new(raw);
+    let joined = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        root.join(p)
+    };
+    let real = joined
+        .canonicalize()
+        .map_err(|e| bad(format!("`{field}` `{raw}`: {e}")))?;
+    if !real.starts_with(&root) {
+        return Err(bad(format!(
+            "`{field}` `{raw}` is outside the server's file_root ({}); paths a request names must \
+             lie under it",
+            root.display()
+        )));
+    }
+    Ok(real)
 }
 
 // ============================================================================
@@ -6219,5 +6282,39 @@ mod context_sanity_tests {
         assert_eq!(rep.automaton, "A");
         assert_eq!(rep.deadlocks.len(), 1, "{rep}");
         assert_eq!(rep.labels_never_fired, vec!["unused".to_string()]);
+    }
+
+    /// mununu#935 — under a `file_root`, a request path must canonicalise inside it: `..` and a
+    /// symlink out are refused, a relative path resolves against the root, and without a root
+    /// the path is taken as given.
+    #[test]
+    fn request_paths_are_confined_to_the_file_root() {
+        let outer = tempfile::tempdir().expect("tempdir");
+        std::fs::write(outer.path().join("secret.sv"), "module s; endmodule").expect("secret");
+        let root = outer.path().join("work");
+        std::fs::create_dir(&root).expect("root");
+        std::fs::write(root.join("d.sv"), "module d; endmodule").expect("design");
+        let inside = super::confine_under(Some(&root), "sv_source_path", "d.sv").expect("inside");
+        assert!(inside.ends_with("d.sv"), "{inside:?}");
+        let abs = root.join("d.sv");
+        assert!(super::confine_under(Some(&root), "f", abs.to_str().expect("utf8")).is_ok());
+        for escape in ["../secret.sv", "/etc/hosts"] {
+            let err = super::confine_under(Some(&root), "sv_source_path", escape)
+                .expect_err("escapes the root");
+            assert!(format!("{err}").contains("sv_source_path"), "{err}");
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(outer.path().join("secret.sv"), root.join("link.sv"))
+                .expect("symlink");
+            assert!(
+                super::confine_under(Some(&root), "f", "link.sv").is_err(),
+                "a symlink out of the root is refused"
+            );
+        }
+        assert_eq!(
+            super::confine_under(None, "f", "/anything").expect("no root"),
+            std::path::PathBuf::from("/anything")
+        );
     }
 }

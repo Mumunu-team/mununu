@@ -39,3 +39,23 @@ Roadmap H5 (#912, `74368a97`); build fix and notices #932 (`b0e8a0b0`); air-gapp
 ## Not covered here
 
 Authentication and the CORS policy (#934), confining request-body paths to `/work` (#935), traversal tests for `--ui-dir` (#936), the `/api` 404 fallback (#940), checksum-pinning the suite download (#937), and Track P's `mununu server --ui` with embedded assets.
+
+## Update (mununu#934, #935, #940, 2026-11-09) — CORS, request paths, the `/api` 404
+
+- **CORS (#934), every `mununu server`:** answers carry `Access-Control-Allow-Origin` only for a loopback origin (`localhost`, `127.0.0.1`, `[::1]`, any port) or one listed in `mununu.toml` `[server] cors_origins`. Before, any origin. Non-browser clients (rosf, monono, curl) are unaffected: CORS is enforced by browsers.
+- **Request paths (#935):** with `[server] file_root` set (the bundle sets `/work`), `sv_source_path`, `sidecar_path` and `base_dir` must resolve under it or the request is a `400`. Unset (every other server) changes nothing.
+- **`/api` 404 (#940), under `--ui-dir`:** an unknown `/api/…` path is a JSON `404 NOT_FOUND`, no longer the UI's `index.html` with `200`.
+
+| consumer | what this means for you | action |
+|---|---|---|
+| **mununu-ui** | The dev server (`localhost:5173`) is loopback and keeps working. A UI served from another origin needs that origin in `cors_origins`. | None for local use. |
+| **rosf** | Unaffected unless it calls the bundle with paths outside `/work`. | Keep request paths under the mounted `/work`. |
+| **monono** | Same as rosf. | None. |
+
+| image | rebuild? | why |
+|---|---|---|
+| the on-prem bundle | Yes. | The `[server]` defaults ship in its `mununu.toml`. |
+| `mununu-sva` / the release archives | Yes, for the CORS default. | Behaviour change on every server. |
+| rosf `docker/Dockerfile*` | No. | Consumer. |
+| monono `docker/Dockerfile.dev`, `Dockerfile.vexriscv` | No. | Consumer. |
+
