@@ -1233,7 +1233,9 @@ struct Btor2VerifyLivenessArgs {
     /// then the exact ladder with the remainder).
     #[arg(long, default_value = "both", requires = "justice")]
     rung: String,
-    /// `--justice`: wall-clock budget per justice set in milliseconds.
+    /// `--justice`: wall-clock budget per justice set in milliseconds. Bounds both rungs: under
+    /// `--rung both` the l2s portfolio gets half of what the exact slice leaves, the exact remainder
+    /// the rest. Unset, the l2s portfolio's members run at their defaults (60 s per subprocess).
     #[arg(long, value_name = "MS", requires = "justice")]
     timeout_ms: Option<u64>,
     /// `--justice` with `--rung both`: run both rungs concurrently, first definite verdict wins.
@@ -1256,7 +1258,9 @@ struct Btor2VerifyJusticeArgs {
     /// ladder with the remainder).
     #[arg(long, default_value = "both")]
     rung: String,
-    /// Wall-clock budget per justice set in milliseconds (default: the engines' own budgets).
+    /// Wall-clock budget per justice set in milliseconds (default: the engines' own budgets — the
+    /// l2s portfolio's members at 60 s per subprocess). Bounds both rungs: under `--rung both` the
+    /// l2s portfolio gets half of what the exact slice leaves, the exact remainder the rest.
     #[arg(long, value_name = "MS")]
     timeout_ms: Option<u64>,
     /// Under `--rung both`, run the exact ladder and the l2s rung concurrently; the first
