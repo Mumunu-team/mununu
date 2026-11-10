@@ -5092,8 +5092,7 @@ pub fn verify_auto(
     // N0.1 — `MUNUNU_VERIFY_AUTO_ONLY_ROWS` narrows the run to the named rows (the executable
     // ledger's re-run of what changed); the row facts are written once the report is final,
     // whichever path produced it.
-    let mut opts = std::env::var("MUNUNU_VERIFY_AUTO_ONLY_ROWS")
-        .ok()
+    let mut opts = crate::adapter::env_var::read("MUNUNU_VERIFY_AUTO_ONLY_ROWS")
         .and_then(|v| parse_only_rows(&v))
         .map(|rows| VerifyAutoOptions {
             only_rows: Some(rows),
@@ -5322,8 +5321,7 @@ pub fn plan_auto(
     // `MUNUNU_VERIFY_AUTO_ONLY_ROWS` selection (by name or label), `skip_rows`, and the rows a
     // `resume_from` breadcrumb decided — checked BEFORE the lift against this run's input
     // identity, so a breadcrumb the run would refuse fails the plan the same way.
-    let only_rows = std::env::var("MUNUNU_VERIFY_AUTO_ONLY_ROWS")
-        .ok()
+    let only_rows = crate::adapter::env_var::read("MUNUNU_VERIFY_AUTO_ONLY_ROWS")
         .and_then(|v| parse_only_rows(&v))
         .or_else(|| opts.only_rows.clone());
     let resumed = match opts.resume_from.as_deref() {

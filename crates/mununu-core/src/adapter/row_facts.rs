@@ -72,7 +72,7 @@ pub fn facts_line(
 /// Write the report's rows to [`ROW_FACTS_ENV`]'s path, when set; a failure is one warning.
 pub fn write_from_env(report: &AutoVerifyReport) {
     // The literal, not the const: `docs/env-vars.md`'s check greps for `env::var("MUNUNU_…")`.
-    let Ok(path) = std::env::var("MUNUNU_VERIFY_AUTO_ROW_FACTS") else {
+    let Some(path) = crate::adapter::env_var::read("MUNUNU_VERIFY_AUTO_ROW_FACTS") else {
         return;
     };
     if path.trim().is_empty() {

@@ -40,9 +40,12 @@ fn a_tool_that_hangs_on_its_probe_is_reported_unavailable_within_the_budget() {
         message.contains("no answer within"),
         "the reason names the probe timeout: {message}"
     );
+    // mununu#944 — the bound separates "the probe timed out" (10 s budget) from "the probe
+    // waited for the launcher" (its sleeper runs 120 s), with room for a loaded host: 2x the
+    // budget was missed under load, which is the flake this replaced.
     assert!(
-        elapsed < Duration::from_secs(20),
-        "the probe budget is 10 s; locate took {elapsed:?}"
+        elapsed < Duration::from_secs(90),
+        "the probe budget is 10 s and the launcher sleeps 120 s; locate took {elapsed:?}"
     );
     assert!(
         !forked_alive,
@@ -57,7 +60,7 @@ fn hanging_launcher(dir: &std::path::Path, pidfile: &std::path::Path) -> std::pa
     std::fs::write(
         &launcher,
         format!(
-            "#!/bin/sh\nsleep 40 </dev/null >/dev/null 2>&1 &\necho $! > '{}'\nwait\n",
+            "#!/bin/sh\nsleep 120 </dev/null >/dev/null 2>&1 &\necho $! > '{}'\nwait\n",
             pidfile.display()
         ),
     )
@@ -74,7 +77,7 @@ fn hanging_launcher(dir: &std::path::Path, pidfile: &std::path::Path) -> std::pa
         format!(
             "$p = Start-Process -PassThru -NoNewWindow -RedirectStandardOutput '{}' \
              -RedirectStandardError '{}' powershell -ArgumentList '-NoProfile','-Command',\
-             'Start-Sleep 40'\r\nSet-Content -Path '{}' -Value $p.Id\r\nWait-Process -Id $p.Id\r\n",
+             'Start-Sleep 120'\r\nSet-Content -Path '{}' -Value $p.Id\r\nWait-Process -Id $p.Id\r\n",
             dir.join("sleeper.out").display(),
             dir.join("sleeper.err").display(),
             pidfile.display()

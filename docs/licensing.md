@@ -1,6 +1,6 @@
 # The licence file (`mununu.lic`)
 
-> Source of truth: [`licence::status`](../crates/mununu-core/src/licence.rs#L394) (`mununu licence status`, `GET /api/v1/licence`, the `licence` field of `/api/v1/health` and of every `sv verify-auto` report) — surface: CLI+API
+> Source of truth: [`licence::status`](../crates/mununu-core/src/licence.rs) (`mununu licence status`, `GET /api/v1/licence`, the `licence` field of `/api/v1/health` and of every `sv verify-auto` report) — surface: CLI+API
 
 A self-hosted mununu is licensed by a **file**, not by a server: a signed `mununu.lic` names the
 licensee, the team, the tier and the term, and the binary checks its Ed25519 signature against

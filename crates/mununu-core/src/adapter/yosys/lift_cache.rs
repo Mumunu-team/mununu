@@ -208,7 +208,7 @@ impl LiftCache {
     /// The cache named by [`LIFT_CACHE_DIR_ENV`], or `None` when unset or empty.
     pub(super) fn from_env() -> Option<Self> {
         // The literal, not the const: `docs/env-vars.md`'s check greps for `env::var("MUNUNU_…")`.
-        let dir = std::env::var("MUNUNU_LIFT_CACHE_DIR").ok()?;
+        let dir = crate::adapter::env_var::read("MUNUNU_LIFT_CACHE_DIR")?;
         let dir = dir.trim();
         (!dir.is_empty()).then(|| LiftCache::at(PathBuf::from(dir)))
     }
