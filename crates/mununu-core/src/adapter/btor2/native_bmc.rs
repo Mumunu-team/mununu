@@ -148,13 +148,31 @@ impl QueryBudget {
     /// Set this check's parameters on `solvers`. Called before every check, because the wall cap
     /// shrinks with the run budget.
     fn apply(&self, solvers: &[&z3::Solver]) {
+        self.apply_until(solvers, None);
+    }
+
+    /// [`Self::apply`] with the caller's own wall `deadline` as a further cap (mununu#955: a
+    /// search bounded by a deadline must not let one check run past it). Returns whether any
+    /// wall clock was set on the check — what [`classify_stop`] needs to read a `"canceled"`.
+    fn apply_until(&self, solvers: &[&z3::Solver], deadline: Option<std::time::Instant>) -> bool {
+        let until_deadline = deadline.map(|d| {
+            let left = d
+                .saturating_duration_since(std::time::Instant::now())
+                .as_millis();
+            // 0 would mean "no timeout" to z3 — the opposite of a passed deadline.
+            u32::try_from(left).unwrap_or(u32::MAX).max(1)
+        });
+        let wall = match (self.wall_ms_now(), until_deadline) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
         let mut params = z3::Params::new();
         let mut any = false;
         if let Some(units) = self.rlimit {
             params.set_u32("rlimit", units);
             any = true;
         }
-        if let Some(ms) = self.wall_ms_now() {
+        if let Some(ms) = wall {
             params.set_u32("timeout", ms);
             any = true;
         }
@@ -163,6 +181,7 @@ impl QueryBudget {
                 s.set_params(&params);
             }
         }
+        wall.is_some()
     }
 }
 
@@ -231,12 +250,12 @@ fn ladder_unknown(
     reason: Option<String>,
     units_used: u64,
     budget: &QueryBudget,
+    wall_applied: bool,
 ) -> Result<SafetyVerdict, BmcError> {
     let k32 = k as u32;
     if gate.interrupted() {
         return Ok(SafetyVerdict::Unknown { k: k32 });
     }
-    let wall_applied = budget.wall_ms_now().is_some();
     match (
         classify_stop(reason.as_deref(), units_used, budget.rlimit, wall_applied),
         budget.rlimit,
@@ -947,7 +966,7 @@ fn decide_bad_safety_ladder(
             if crate::adapter::run_budget::expired() {
                 return Ok(SafetyVerdict::Unknown { k: k as u32 });
             }
-            budget.apply(&[&base, &step]);
+            let wall_applied = budget.apply_until(&[&base, &step], None);
             // Base — reachable counterexample? Violated ONLY on a definite Sat.
             base.push();
             base.assert(u.bad_at(k));
@@ -962,7 +981,7 @@ fn decide_bad_safety_ladder(
             match base_res {
                 z3::SatResult::Sat => return Ok(SafetyVerdict::Violated { depth: k as u32 }),
                 z3::SatResult::Unknown => {
-                    return ladder_unknown(k, gate, base_reason, base_used, &budget);
+                    return ladder_unknown(k, gate, base_reason, base_used, &budget, wall_applied);
                 }
                 z3::SatResult::Unsat => {}
             }
@@ -980,7 +999,7 @@ fn decide_bad_safety_ladder(
             match step_res {
                 z3::SatResult::Unsat => return Ok(SafetyVerdict::Safe { k: k as u32 }),
                 z3::SatResult::Unknown => {
-                    return ladder_unknown(k, gate, step_reason, step_used, &budget);
+                    return ladder_unknown(k, gate, step_reason, step_used, &budget, wall_applied);
                 }
                 z3::SatResult::Sat => {}
             }
@@ -1004,24 +1023,28 @@ fn decide_bad_safety_ladder(
 ///
 /// Unrolls the transition relation depth-by-depth on a single init-constrained solver,
 /// looking ONLY for a reachable `bad` (no k-induction step queries to slow it down or
-/// abort it). Returns `Some(depth)` on a concrete, sound `Violated`; `None` if no
-/// counterexample is found within budget.
+/// abort it). Returns `Ok(Some(depth))` on a concrete, sound `Violated`.
 ///
 /// The point of splitting this out: finding a concrete counterexample is *sound* and
 /// is usually far cheaper than synthesising an equivalent safety invariant, so a deep,
 /// time-boxed CEX search flips many designs that the shallow ([`DEFAULT_MAX_K`]) or
 /// proof-oriented engines leave `Unknown` straight to a definite `Violated`. `max_k`
-/// may therefore be set well above [`DEFAULT_MAX_K`]. `Err` names a refused design (the encoder
-/// declined); `Ok(None)` is an honest miss (the bound, the deadline, a cancellation, a query timeout).
-/// Bounded by the wall `deadline`
-/// and `cancel` (both checked before each depth) and by `per_query_ms` per z3 check.
+/// may therefore be set well above [`DEFAULT_MAX_K`].
+///
+/// `Ok(None)` is an honest miss that is not a budget stop: no counterexample within `max_k`, a
+/// peer's cancellation, or a genuine z3 unknown. A budget stop is an `Err` that names its cause,
+/// as in the k-induction ladder (mununu#955): [`BmcError::BudgetExpired`] when `deadline` (or the
+/// run budget) passed, [`BmcError::ResourceLimit`] when a check spent its `per_query_ms` nominal
+/// allowance. Every check is capped by the time left to `deadline`, and runs inside a
+/// [`QueryGate`] whose watchdog interrupts it once `cancel` has been set for the member grace.
+/// An encoder refusal is [`BmcError::Encode`].
 pub fn bmc_cex_until(
     file: &Btor2File,
     max_k: u32,
     per_query_ms: u32,
     deadline: std::time::Instant,
     cancel: &std::sync::atomic::AtomicBool,
-) -> Result<Option<u32>, String> {
+) -> Result<Option<u32>, BmcError> {
     let (bad_ops, init_pairs, constraint_ops) = extract_props(file);
     if bad_ops.is_empty() {
         return Ok(None);
@@ -1030,47 +1053,74 @@ pub fn bmc_cex_until(
     let cfg = z3::Config::new();
     z3::with_z3_config(&cfg, || {
         // mununu#803 — an encoder refusal is a reason the caller records, not a silent miss.
-        let (view, array_inits) =
-            encode_for_bmc(file).map_err(|e| format!("native BMC: encode failed: {e:?}"))?;
+        let (view, array_inits) = encode_for_bmc(file).map_err(BmcError::Encode)?;
         let u = Unroller::build(&view, array_inits, &bad_ops, &constraint_ops, n);
-        let base = z3::Solver::new();
-        // mununu#893 — a deterministic resource limit per check (the nominal allowance), plus
-        // the run budget's wall remainder; the `deadline` below is this search's own wall.
-        let budget = QueryBudget::for_nominal(Some(per_query_ms));
-        u.assert_init(&base, &init_pairs);
-        for c in u.constraints_at(0) {
-            base.assert(&c);
-        }
-        for k in 0..=n {
-            // Wall-clock / cancellation bound: abandon the search (return `None`, never
-            // a wrong verdict) when the deadline passes or a peer engine decides first.
-            if cancel.load(std::sync::atomic::Ordering::Relaxed)
-                || std::time::Instant::now() >= deadline
-            {
-                return Ok(None);
-            }
-            budget.apply(&[&base]);
-            base.push();
-            base.assert(u.bad_at(k));
-            let res = base.check();
-            base.pop(1);
-            match res {
-                // A concrete init→bad path at depth `k` — sound `Violated`.
-                z3::SatResult::Sat => return Ok(Some(k as u32)),
-                // This depth's query hit `per_query_ms`; deeper frames only get larger,
-                // so abstain rather than spin.
-                z3::SatResult::Unknown => return Ok(None),
-                z3::SatResult::Unsat => {}
-            }
-            if k < n {
-                base.assert(u.transition_at(k));
-                for c in u.constraints_at(k + 1) {
-                    base.assert(&c);
-                }
-            }
-        }
-        Ok(None)
+        let ctx = z3::Context::thread_local();
+        let handle = ctx.handle();
+        let gate = QueryGate::default();
+        with_cancel_watchdog(
+            Some(cancel),
+            &gate,
+            || handle.interrupt(),
+            || cex_search(&u, &init_pairs, n, per_query_ms, deadline, cancel, &gate),
+        )
     })
+}
+
+/// The depth loop of [`bmc_cex_until`], on the thread's current z3 context.
+fn cex_search(
+    u: &Unroller,
+    init_pairs: &[(Nid, Operand)],
+    n: usize,
+    per_query_ms: u32,
+    deadline: std::time::Instant,
+    cancel: &std::sync::atomic::AtomicBool,
+    gate: &QueryGate,
+) -> Result<Option<u32>, BmcError> {
+    let base = z3::Solver::new();
+    // mununu#893 — a deterministic resource limit per check (the nominal allowance), plus the run
+    // budget's wall remainder; mununu#955 — and the time left to this search's own `deadline`.
+    let budget = QueryBudget::for_nominal(Some(per_query_ms));
+    u.assert_init(&base, init_pairs);
+    for c in u.constraints_at(0) {
+        base.assert(&c);
+    }
+    for k in 0..=n {
+        // A peer decided: abstain (never a wrong verdict), and not a budget stop.
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            return Ok(None);
+        }
+        if std::time::Instant::now() >= deadline || crate::adapter::run_budget::expired() {
+            return Err(BmcError::BudgetExpired { k: k as u32 });
+        }
+        let wall_applied = budget.apply_until(&[&base], Some(deadline));
+        base.push();
+        base.assert(u.bad_at(k));
+        let before = rlimit_count(&base);
+        let res = gate.check(|| base.check());
+        // z3's reason and count belong to the check just made: read them before the pop.
+        let reason = (res == z3::SatResult::Unknown)
+            .then(|| base.get_reason_unknown())
+            .flatten();
+        let used = rlimit_count(&base).saturating_sub(before);
+        base.pop(1);
+        match res {
+            // A concrete init→bad path at depth `k` — sound `Violated`.
+            z3::SatResult::Sat => return Ok(Some(k as u32)),
+            // Deeper frames only get larger, so stop here — with the cause named.
+            z3::SatResult::Unknown => {
+                return ladder_unknown(k, gate, reason, used, &budget, wall_applied).map(|_| None);
+            }
+            z3::SatResult::Unsat => {}
+        }
+        if k < n {
+            base.assert(u.transition_at(k));
+            for c in u.constraints_at(k + 1) {
+                base.assert(&c);
+            }
+        }
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -1517,6 +1567,74 @@ mod tests {
         assert_eq!(bmc(REACH, 5), BmcOutcome::Violated { depth: 1 });
     }
 
+    /// mununu#955 — the deep counterexample search stops at its deadline, not when a check's
+    /// resource limit runs out, and says it stopped on a budget. PHP(11,10) at depth 0 costs far
+    /// more than 300 ms; with a 20 000 ms nominal allowance the parent ran the check for the full
+    /// ~60 M units (about 20 s here) and then answered a silent `Ok(None)`.
+    #[test]
+    fn the_deep_cex_search_stops_at_its_deadline_and_names_the_stop() {
+        use std::sync::atomic::AtomicBool;
+        let file = parser::parse(&pigeonhole_btor2(11, 10)).expect("parses");
+        let _rl = crate::adapter::env_var::unset_for_test(QUERY_RLIMIT_ENV);
+        let _to = crate::adapter::env_var::unset_for_test(QUERY_TIMEOUT_ENV);
+        let never = AtomicBool::new(false);
+        let started = std::time::Instant::now();
+        let deadline = started + std::time::Duration::from_millis(300);
+        let r = bmc_cex_until(&file, 0, 20_000, deadline, &never);
+        let took = started.elapsed();
+        assert!(
+            format!("{r:?}").contains("BudgetExpired"),
+            "a deadline stop must name itself: {r:?}"
+        );
+        assert!(
+            took < std::time::Duration::from_secs(5),
+            "the check ran {took:?} past a 300 ms deadline"
+        );
+    }
+
+    /// mununu#955 — a check that spends its deterministic resource limit is a named stop, the same
+    /// one the k-induction ladder reports (#893), not a silent miss.
+    #[test]
+    fn the_deep_cex_search_names_a_resource_limit_stop() {
+        use std::sync::atomic::AtomicBool;
+        let file = parser::parse(&pigeonhole_btor2(11, 10)).expect("parses");
+        let _rl = crate::adapter::env_var::unset_for_test(QUERY_RLIMIT_ENV);
+        let _to = crate::adapter::env_var::unset_for_test(QUERY_TIMEOUT_ENV);
+        let never = AtomicBool::new(false);
+        let far = std::time::Instant::now() + std::time::Duration::from_secs(600);
+        let r = bmc_cex_until(&file, 0, 10, far, &never);
+        assert!(
+            format!("{r:?}").contains("ResourceLimit { k: 0, units: 30000 }"),
+            "a resource-limit stop must name itself: {r:?}"
+        );
+    }
+
+    /// mununu#955 — a peer's decision cuts the check in flight (the [`QueryGate`] watchdog), and a
+    /// cancellation is an abstention, not a budget stop.
+    #[test]
+    fn the_deep_cex_search_honours_a_cancel_inside_a_check() {
+        use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+        let file = parser::parse(&pigeonhole_btor2(11, 10)).expect("parses");
+        let _rl = crate::adapter::env_var::unset_for_test(QUERY_RLIMIT_ENV);
+        let _to = crate::adapter::env_var::unset_for_test(QUERY_TIMEOUT_ENV);
+        let cancel = AtomicBool::new(false);
+        let far = std::time::Instant::now() + std::time::Duration::from_secs(600);
+        let started = std::time::Instant::now();
+        let r = std::thread::scope(|s| {
+            s.spawn(|| {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                cancel.store(true, Relaxed);
+            });
+            bmc_cex_until(&file, 0, 20_000, far, &cancel)
+        });
+        let took = started.elapsed();
+        assert!(matches!(r, Ok(None)), "a cancellation abstains: {r:?}");
+        assert!(
+            took < crate::adapter::MEMBER_CANCEL_GRACE + std::time::Duration::from_secs(5),
+            "the cancelled check ran {took:?}"
+        );
+    }
+
     #[test]
     fn bmc_cex_until_finds_cex_and_abstains_soundly() {
         use std::sync::atomic::AtomicBool;
@@ -1542,11 +1660,12 @@ mod tests {
             bmc_cex_until(&reach, 64, 5_000, far, &cancelled).unwrap(),
             None
         );
+        // mununu#955 — a passed deadline is a budget stop that names itself, not a silent miss.
         let past = far - std::time::Duration::from_secs(120);
-        assert_eq!(
-            bmc_cex_until(&reach, 64, 5_000, past, &never).unwrap(),
-            None
-        );
+        assert!(matches!(
+            bmc_cex_until(&reach, 64, 5_000, past, &never),
+            Err(BmcError::BudgetExpired { k: 0 })
+        ));
     }
 
     /// S1 (engine-performance roadmap) — the safety engine's cancel flag is checked before

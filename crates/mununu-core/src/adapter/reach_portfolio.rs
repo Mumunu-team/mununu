@@ -812,29 +812,28 @@ pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcom
     }
     #[cfg(not(feature = "boolector"))]
     {
-        let (file, decided, tx, refused) = (
+        let (file, decided, tx, refused, abstained) = (
             Arc::clone(&file),
             Arc::clone(&decided),
             tx.clone(),
             Arc::clone(&refused),
+            Arc::clone(&abstained),
         );
         let budget = budget.clone();
         std::thread::spawn(move || {
             let _g = crate::adapter::run_budget::enter(&budget);
+            // mununu#955 — a budget stop (the deadline, the resource limit) is an abstention with
+            // its cause, an encoder refusal a refusal, as for the native member above.
             let hit = timed("cex", || {
-                match native_bmc::bmc_cex_until(
+                let r = native_bmc::bmc_cex_until(
                     &file,
                     OWNED_DEEP_CEX_MAX_K,
                     OWNED_CEX_QUERY_MS,
                     deadline,
                     &decided,
-                ) {
-                    Ok(hit) => hit.is_some(),
-                    Err(why) => {
-                        note_refusal(&refused, "cex", why);
-                        false
-                    }
-                }
+                )
+                .map_err(MemberStop::from);
+                settle_native(&refused, &abstained, "cex", r).is_some()
             });
             if hit {
                 decided.store(true, Relaxed);
