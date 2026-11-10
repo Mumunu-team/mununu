@@ -44,6 +44,20 @@
         "name": {
           "type": "string"
         },
+        "no_estimate_reason": {
+          "description": "mununu#941 — why `routing` is absent (the model or the formula did not parse for the planner, or the cone width could not be established). Absent when `routing` is present.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "not_run": {
+          "description": "mununu#939 — the run would not execute this row, and why (resumed from the breadcrumb, or left out by the row selection). Such a row is counted under `not_run` in `bands`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "routing": {
           "anyOf": [
             {

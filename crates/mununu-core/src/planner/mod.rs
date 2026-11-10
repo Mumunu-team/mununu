@@ -58,6 +58,8 @@ pub struct PhysicalPlan {
     /// Per-property routing rationale (empty when the plan was built without a prepared model —
     /// e.g. the plan unit-tests). Computed by [`plan`] from the prepared model's facts.
     pub rationale: Vec<RoutingRationale>,
+    /// mununu#941 — the properties with no rationale, each with its reason.
+    pub misses: Vec<RoutingMiss>,
 }
 
 /// The logical verification task — the planner's input.
@@ -145,8 +147,8 @@ pub(crate) fn plan(prepared: Option<&PreparedModel>, opts: &VerifyAutoOptions) -
     // deciding engine + why for each property (the decision table). Empty when no model is supplied
     // (the plan unit-tests build the ladder alone). This is what `execute` attaches as telemetry —
     // and, since mununu#543 (W1), what ORDERS the ladder.
-    let rationale = prepared
-        .map(|m| annotate_routing(&m.btor2, &m.properties()))
+    let (rationale, misses) = prepared
+        .map(|m| annotate_routing_explained(&m.btor2, &m.properties()))
         .unwrap_or_default();
     let (ops, mode) = match opts.portfolio {
         Some(mode) => (ladder_ordered_by_prediction(&rationale), mode),
@@ -163,6 +165,7 @@ pub(crate) fn plan(prepared: Option<&PreparedModel>, opts: &VerifyAutoOptions) -
         ops,
         mode,
         rationale,
+        misses,
     }
 }
 
@@ -335,6 +338,7 @@ pub(crate) fn execute(
     let attach = |mut rep: AutoVerifyReport| -> AutoVerifyReport {
         // J4: the same rationale as data, so a consumer reads the features without parsing prose.
         rep.routing = plan.rationale.clone();
+        rep.routing_misses = plan.misses.clone();
         for r in &plan.rationale {
             rep.notes.push(routing_rationale_note(r));
         }
@@ -1091,17 +1095,54 @@ pub fn annotate_routing(
     design_btor2: &str,
     properties: &[(String, String)],
 ) -> Vec<RoutingRationale> {
+    annotate_routing_explained(design_btor2, properties).0
+}
+
+/// mununu#941 — a property the planner could not estimate, and why. Three causes used to end the
+/// same way (no rationale, `routing: null`), and the CLI named only one of them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutingMiss {
+    pub property: String,
+    pub reason: &'static str,
+}
+
+/// The model did not parse as BTOR2 for the planner.
+pub const MISS_MODEL_UNPARSED: &str =
+    "the lifted model did not parse for the planner, so no property has an estimate";
+/// The row's formula did not parse as a μ-calculus formula for the planner.
+pub const MISS_FORMULA_UNPARSED: &str = "the formula did not parse for the planner";
+/// mununu#577 — the cone's width could not be established.
+pub const MISS_CONE_WIDTH_UNKNOWN: &str =
+    "the cone width could not be established (a cone that reads a memory, mununu#577)";
+
+/// [`annotate_routing`] plus, for every property it could not estimate, the reason.
+pub fn annotate_routing_explained(
+    design_btor2: &str,
+    properties: &[(String, String)],
+) -> (Vec<RoutingRationale>, Vec<RoutingMiss>) {
     use crate::adapter::btor2::model_facts::ModelFacts;
     use crate::adapter::btor2::symbolic_bitblast::formula_seed_atoms;
     use crate::mu_calculus::parser as mu_parser;
 
+    let miss = |name: &str, reason: &'static str| RoutingMiss {
+        property: name.to_string(),
+        reason,
+    };
     let Ok(file) = crate::adapter::btor2::parser::parse(design_btor2) else {
-        return Vec::new();
+        return (
+            Vec::new(),
+            properties
+                .iter()
+                .map(|(n, _)| miss(n, MISS_MODEL_UNPARSED))
+                .collect(),
+        );
     };
     let facts = ModelFacts::new(&file);
     let mut out = Vec::new();
+    let mut misses = Vec::new();
     for (name, formula_str) in properties {
         let Ok(formula) = mu_parser::parse(formula_str) else {
+            misses.push(miss(name, MISS_FORMULA_UNPARSED));
             continue;
         };
         let class = formula.property_class();
@@ -1111,6 +1152,7 @@ pub fn annotate_routing(
         // design whose width had never been established. An absent rationale is the honest
         // output; a fabricated one is what sent a reader chasing the wrong half of a bug.
         let Some((cone_bits, cap)) = facts.cone_vs_cap(&atoms) else {
+            misses.push(miss(name, MISS_CONE_WIDTH_UNKNOWN));
             continue;
         };
         let diameter_log2 = facts.cone_counter_diameter_log2(&atoms);
@@ -1126,7 +1168,7 @@ pub fn annotate_routing(
             shape: shape_facts(&file, &formula, &atoms),
         });
     }
-    out
+    (out, misses)
 }
 
 /// Roadmap J2 — the static shape of one property: its cone's multipliers / dividers, memories and
@@ -1501,6 +1543,7 @@ mod tests {
         use crate::adapter::slang::translate::SvaKind;
         use crate::adapter::slang::verify_auto::PropertyVerdict;
         AutoVerifyReport {
+            routing_misses: Vec::new(),
             assumptions: Default::default(),
             properties: vec![PropertyVerdict {
                 name: name.into(),
@@ -1614,6 +1657,7 @@ mod tests {
 6 next 1 3 5
 ";
         let report = AutoVerifyReport {
+            routing_misses: Vec::new(),
             assumptions: Default::default(),
             properties: vec![
                 PropertyVerdict {
@@ -2095,5 +2139,24 @@ mod tests {
             "and must NOT claim the engine decides definitely — the comparison it rests on is \
              `127 <= 127`, true by construction: {why}"
         );
+    }
+
+    /// mununu#941 — each of the three causes of a missing estimate is named.
+    #[test]
+    fn a_property_without_an_estimate_gets_its_reason() {
+        let props = |f: &str| vec![("p".to_string(), f.to_string())];
+        let (r, m) = annotate_routing_explained("not btor2 at all", &props("nu X. (true && [] X)"));
+        assert!(r.is_empty());
+        assert_eq!(m[0].reason, MISS_MODEL_UNPARSED);
+        let counter = "1 sort bitvec 4\n2 state 1 cnt\n3 one 1\n4 add 1 2 3\n5 next 1 2 4\n";
+        let (_, m) = annotate_routing_explained(counter, &props("nu X. ((( && [] X)"));
+        assert_eq!(m[0].reason, MISS_FORMULA_UNPARSED);
+        let memory = "1 sort bitvec 4\n2 sort bitvec 8\n3 sort array 1 2\n4 state 1 cnt\n5 one 1\n\
+                      6 add 1 4 5\n7 next 1 4 6\n8 state 3 mem\n9 read 2 8 4 val\n";
+        let (r, m) = annotate_routing_explained(memory, &props("nu X. ((val == 0) && [] X)"));
+        assert!(r.is_empty(), "{r:?}");
+        assert_eq!(m[0].reason, MISS_CONE_WIDTH_UNKNOWN);
+        let (r, m) = annotate_routing_explained(counter, &props("nu X. ((cnt == 0) && [] X)"));
+        assert_eq!((r.len(), m.len()), (1, 0), "an estimable row has no miss");
     }
 }

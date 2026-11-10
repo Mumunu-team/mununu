@@ -2112,6 +2112,14 @@ pub struct PlanPropertyView {
     /// established (no width, no prediction — mununu#577).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing: Option<RoutingView>,
+    /// mununu#941 — why `routing` is absent (the model or the formula did not parse for the
+    /// planner, or the cone width could not be established). Absent when `routing` is present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_estimate_reason: Option<String>,
+    /// mununu#939 — the run would not execute this row, and why (resumed from the breadcrumb, or
+    /// left out by the row selection). Such a row is counted under `not_run` in `bands`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_run: Option<String>,
 }
 
 impl From<&crate::adapter::slang::verify_auto::PlanReport> for SvPlanResponse {
@@ -2128,14 +2136,27 @@ impl From<&crate::adapter::slang::verify_auto::PlanReport> for SvPlanResponse {
                     .iter()
                     .find(|r| &r.property == name)
                     .map(RoutingView::of),
+                no_estimate_reason: plan
+                    .misses
+                    .iter()
+                    .find(|m| &m.property == name)
+                    .map(|m| m.reason.to_string()),
+                not_run: plan
+                    .not_run
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, why)| why.clone()),
             })
             .collect();
         let mut bands = std::collections::BTreeMap::new();
         for p in &properties {
-            let band = p
-                .routing
-                .as_ref()
-                .map_or("none".to_string(), |r| r.estimate.time_band.clone());
+            let band = if p.not_run.is_some() {
+                "not_run".to_string()
+            } else {
+                p.routing
+                    .as_ref()
+                    .map_or("none".to_string(), |r| r.estimate.time_band.clone())
+            };
             *bands.entry(band).or_insert(0) += 1;
         }
         SvPlanResponse {
@@ -2610,6 +2631,11 @@ impl From<&crate::adapter::slang::verify_auto::AutoVerifyReport> for SvVerifyAut
                         .iter()
                         .find(|r| r.property == p.name)
                         .map(RoutingView::of),
+                    no_estimate_reason: report
+                        .routing_misses
+                        .iter()
+                        .find(|m| m.property == p.name)
+                        .map(|m| m.reason.to_string()),
                     resumed_from,
                     vacuity: p.vacuity.as_ref().map(|v| VacuityView {
                         kind: v.kind.tag().to_string(),
@@ -3180,6 +3206,11 @@ pub struct PropertyVerdictView {
     /// `plan-cost` note's facts). Telemetry, never a verdict; absent on routes that compute none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing: Option<RoutingView>,
+    /// mununu#941 — why `routing` is absent when the planner ran but could not estimate this row
+    /// (the model or the formula did not parse for it, or the cone width is unknown). Absent when
+    /// `routing` is present, and on routes that consult no planner (a single-engine run).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_estimate_reason: Option<String>,
     /// Roadmap J3 — present when this row was not run: its verdict is the one a killed run of
     /// the SAME build reached, read back from its breadcrumb (`--resume-from` / `resume_from`).
     /// The value is that build's tag (the full commit sha, `-dirty` if the tree was not clean).
@@ -3563,12 +3594,51 @@ mod bottom_reason_view_tests {
         assert!(json.get("timing").is_none(), "absent, not null");
     }
 
+    /// mununu#939 / #941 — a row the run will not execute says so and counts under `not_run`; a
+    /// row with no estimate says why.
+    #[test]
+    fn a_plan_row_says_why_it_will_not_run_or_has_no_estimate() {
+        use crate::adapter::slang::verify_auto::PlanReport;
+        let plan = PlanReport {
+            properties: vec![
+                ("r".into(), None, "nu X. ((q == 0) && [] X)".into()),
+                ("m".into(), None, "nu X. ((val == 0) && [] X)".into()),
+            ],
+            routing: Vec::new(),
+            misses: vec![crate::planner::RoutingMiss {
+                property: "m".into(),
+                reason: crate::planner::MISS_CONE_WIDTH_UNKNOWN,
+            }],
+            not_run: vec![(
+                "r".into(),
+                "resumed from the breadcrumb (holds); not re-run".into(),
+            )],
+            unsupported: Vec::new(),
+            lift_ms: 1,
+        };
+        let view = SvPlanResponse::from(&plan);
+        assert!(
+            view.properties[0]
+                .not_run
+                .as_deref()
+                .is_some_and(|w| w.contains("resumed"))
+        );
+        assert_eq!(
+            view.properties[1].no_estimate_reason.as_deref(),
+            Some(crate::planner::MISS_CONE_WIDTH_UNKNOWN)
+        );
+        assert_eq!(view.bands.get("not_run"), Some(&1));
+        assert_eq!(view.bands.get("none"), Some(&1));
+    }
+
     /// Roadmap J2 at the plan seam: every property is listed in order, a routed one carries its
     /// estimate, an unrouted one has none (no width, no prediction), and the bands count both.
     #[test]
     fn a_plan_lists_every_property_with_its_estimate_and_counts_the_bands() {
         use crate::adapter::slang::verify_auto::PlanReport;
         let plan = PlanReport {
+            misses: Vec::new(),
+            not_run: Vec::new(),
             properties: vec![
                 (
                     "a".into(),

@@ -4929,6 +4929,10 @@ fn render_plan_text(view: &mununu_core::api::models::SvPlanResponse) {
     );
     for p in &view.properties {
         let name = p.label.as_deref().unwrap_or(&p.name);
+        if let Some(why) = &p.not_run {
+            println!("  {name}: not run — {why}");
+            continue;
+        }
         match &p.routing {
             Some(r) => println!(
                 "  {name}: {} / {} memory, {} confidence — {} ({} b, cap {}) — {}",
@@ -4940,7 +4944,12 @@ fn render_plan_text(view: &mununu_core::api::models::SvPlanResponse) {
                 r.cap,
                 r.estimate.basis
             ),
-            None => println!("  {name}: no estimate (the cone width could not be established)"),
+            None => println!(
+                "  {name}: no estimate ({})",
+                p.no_estimate_reason
+                    .as_deref()
+                    .unwrap_or("the planner gave no reason")
+            ),
         }
     }
     let bands: Vec<String> = view.bands.iter().map(|(b, n)| format!("{b} {n}")).collect();
