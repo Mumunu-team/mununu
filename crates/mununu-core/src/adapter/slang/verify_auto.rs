@@ -1073,9 +1073,9 @@ pub struct AutoVerifyReport {
     /// Roadmap J4 — the planner's per-property routing rationale as data (the facts the
     /// `plan-cost` note renders as prose): class, cone bits vs cap, diameter proxy, predicted
     /// engine. Filled by the planner once per run; empty on the single-engine routes.
-    pub routing: Vec<crate::planner::RoutingRationale>,
+    pub routing: Vec<crate::routing::RoutingRationale>,
     /// mununu#941 — the properties the planner could not estimate, each with its reason.
-    pub routing_misses: Vec<crate::planner::RoutingMiss>,
+    pub routing_misses: Vec<crate::routing::RoutingMiss>,
     /// Roadmap J3 — property → the build tag of the breadcrumb record whose verdict this row
     /// carries instead of a fresh run (`decided_by: resumed`). Empty unless the run was given
     /// `resume_from`. A resumed row has no counterexample, vacuity finding, predicates or wall.
@@ -4921,7 +4921,7 @@ pub fn merge_portfolio_reports(
 }
 
 /// Plan 2 / PR C (2026-10-18) — the ⊥ re-plan on the MERGED portfolio report, run ONCE by the
-/// planner after every member ([`crate::planner::execute`]); each member runs with
+/// planner after every member (`planner::execute`); each member runs with
 /// [`VerifyAutoOptions::replan_defer`] and leaves its ⊥ rows alone. The merged ⊥ rows are exactly
 /// the rows NO engine decided, so the rescue is paid once per row and never on a row another
 /// engine's main pass settles. Before this every member re-planned its own ⊥ rows — measured on
@@ -4967,7 +4967,7 @@ pub(crate) fn replan_merged(
         .iter()
         .map(|p| p.outcome.label())
         .collect();
-    let notes = crate::planner::replan(report, design_btor2, reset_pinned, opts, fairness_atoms);
+    let notes = escalate_bottom(report, design_btor2, reset_pinned, opts, fairness_atoms);
     for (i, p) in report.properties.iter().enumerate() {
         if before.get(i).copied() != Some(p.outcome.label()) {
             breadcrumb.record(i, &p.name, p.outcome.label(), "escalated", None);
@@ -4982,133 +4982,6 @@ pub(crate) fn replan_merged(
     flag_self_contradictory_verdicts(report);
     flag_vacuous_guarantees(report);
     refresh_vacuity_notes(report);
-}
-
-/// One property's baseline-vs-mutant verdict under a mutation (`sv mutate`).
-#[derive(Debug, Clone)]
-pub struct PropertyFlip {
-    /// The property (assertion) name — the join key between baseline and mutant.
-    pub name: String,
-    /// The SVA label (`a_trip_latches: assert property …`), when the source gives one.
-    pub label: Option<String>,
-    /// The canonical verdict on the design as-lifted.
-    pub baseline: String,
-    /// The canonical verdict on the mutated design.
-    pub mutant: String,
-    /// `baseline != mutant` — the mutation was *caught* by this property.
-    pub flipped: bool,
-}
-
-/// The result of an `sv mutate` run: whether a NAMED structural mutation flips the
-/// property verdicts. A **flip** confirms the property constrains the mutated
-/// behaviour; an **unflipped** property is the property-adequacy finding — the
-/// spec does not pin that fault down (vacuous w.r.t. the mutation). Per
-/// [claims-integrity §2] this is a statement about the PROPERTIES, never a bug
-/// report about the design.
-#[derive(Debug, Clone)]
-pub struct MutateReport {
-    /// The applied mutation's label (`stick:<reg>` / `drop-reset:<reg>`).
-    pub mutation: String,
-    /// Per-property baseline-vs-mutant comparison (baseline order).
-    pub properties: Vec<PropertyFlip>,
-    /// Number of properties the mutation flipped (caught it).
-    pub flipped: usize,
-    /// Number the mutation did NOT flip (the adequacy finding).
-    pub unflipped: usize,
-}
-
-impl MutateReport {
-    /// The mutation run's verdict: `holds` when at least one property caught the mutant (a flip),
-    /// `violated` when it survived every property — the spec gap a CI gate fails on.
-    pub fn outcome(&self) -> &'static str {
-        if self.flipped > 0 {
-            "holds"
-        } else {
-            "violated"
-        }
-    }
-}
-
-/// `sv mutate` core — verify the design **twice** (as-lifted baseline, then with
-/// `mutation` applied in `prepare_model`) and diff the per-property verdicts by
-/// name. A mutation that names a missing register / does not apply is a hard error
-/// from the mutant lift (never a silent no-op). `base_opts.mutation` is ignored
-/// (forced `None` for the baseline, `Some(mutation)` for the mutant).
-pub fn mutate_and_compare(
-    sources: &[(String, String)],
-    yosys_opts: &YosysOptions,
-    base_opts: &VerifyAutoOptions,
-    mutation: crate::adapter::btor2::mutate::Mutation,
-) -> Result<MutateReport, AdapterError> {
-    let mut baseline_opts = base_opts.clone();
-    baseline_opts.mutation = None;
-    let baseline = verify_auto(sources, yosys_opts, &baseline_opts)?;
-
-    let mut mutant_opts = base_opts.clone();
-    mutant_opts.mutation = Some(mutation.clone());
-    let mutant = verify_auto(sources, yosys_opts, &mutant_opts)?;
-
-    let mutant_by_name: std::collections::HashMap<&str, &VerifyOutcome> = mutant
-        .properties
-        .iter()
-        .map(|p| (p.name.as_str(), &p.outcome))
-        .collect();
-
-    let properties: Vec<PropertyFlip> = baseline
-        .properties
-        .iter()
-        .map(|b| {
-            let baseline = b.outcome.label();
-            // A property present at baseline but absent from the mutant reads as
-            // `skipped` (the mutation dropped it) — still a flip if baseline was definite.
-            let mutant = mutant_by_name
-                .get(b.name.as_str())
-                .map_or("skipped", |o| o.label());
-            PropertyFlip {
-                name: b.name.clone(),
-                label: b.label.clone(),
-                baseline: baseline.to_string(),
-                mutant: mutant.to_string(),
-                flipped: baseline != mutant,
-            }
-        })
-        .collect();
-
-    let flipped = properties.iter().filter(|p| p.flipped).count();
-    let unflipped = properties.len() - flipped;
-    Ok(MutateReport {
-        mutation: mutation.as_label(),
-        properties,
-        flipped,
-        unflipped,
-    })
-}
-
-pub fn verify_auto(
-    sources: &[(String, String)],
-    yosys_opts: &YosysOptions,
-    opts: &VerifyAutoOptions,
-) -> Result<AutoVerifyReport, AdapterError> {
-    // N0.1 — `MUNUNU_VERIFY_AUTO_ONLY_ROWS` narrows the run to the named rows (the executable
-    // ledger's re-run of what changed); the row facts are written once the report is final,
-    // whichever path produced it.
-    let mut opts = crate::adapter::env_var::read("MUNUNU_VERIFY_AUTO_ONLY_ROWS")
-        .and_then(|v| parse_only_rows(&v))
-        .map(|rows| VerifyAutoOptions {
-            only_rows: Some(rows),
-            ..opts.clone()
-        })
-        .unwrap_or_else(|| opts.clone());
-    // mununu#933 — the run's input identity, on every breadcrumb record and checked by a resume.
-    opts.run_fingerprint = Some(crate::adapter::resume::run_fingerprint(
-        sources, yosys_opts, &opts,
-    ));
-    // J4c — the run's own wall, measured where the run begins and ends.
-    let run_t0 = std::time::Instant::now();
-    let mut report = verify_auto_with(sources, yosys_opts, &opts)?;
-    crate::adapter::row_facts::write_from_env(&report);
-    report.run_ms = Some(u64::try_from(run_t0.elapsed().as_millis()).unwrap_or(u64::MAX));
-    Ok(report)
 }
 
 /// `MUNUNU_VERIFY_AUTO_ONLY_ROWS` (N0.1): `-` selects no row (the facts of every row for the
@@ -5128,37 +5001,6 @@ pub(crate) fn parse_only_rows(v: &str) -> Option<std::collections::HashSet<Strin
             .map(String::from)
             .collect(),
     )
-}
-
-/// [`verify_auto`] after the environment's row selection — roadmap J3's resume wraps the
-/// dispatch: the breadcrumb is read and checked BEFORE any lift (a refusal costs nothing), the
-/// rows it decided join `skip_rows` (every member of a portfolio honours the set, see
-/// [`crate::planner::member_options`]), and their verdicts are overlaid on the final report.
-fn verify_auto_with(
-    sources: &[(String, String)],
-    yosys_opts: &YosysOptions,
-    opts: &VerifyAutoOptions,
-) -> Result<AutoVerifyReport, AdapterError> {
-    let Some(text) = opts.resume_from.as_deref() else {
-        return verify_auto_dispatch(sources, yosys_opts, opts);
-    };
-    let current = crate::build_info::current().map(crate::build_info::build_tag);
-    let plan = crate::adapter::resume::parse_breadcrumb(
-        text,
-        current.as_deref(),
-        opts.run_fingerprint.as_deref().unwrap_or_default(),
-    )
-    .map_err(|refusal| AdapterError {
-        kind: AdapterErrorKind::ParseError,
-        message: format!("resume-from: {refusal}"),
-        location: None,
-    })?;
-    let mut resumed_opts = opts.clone();
-    resumed_opts.skip_rows.extend(plan.resumed.keys().cloned());
-    let mut report = verify_auto_dispatch(sources, yosys_opts, &resumed_opts)?;
-    apply_resume(&mut report, &plan);
-    record_resumed_breadcrumb(&report, opts.run_fingerprint.as_deref());
-    Ok(report)
 }
 
 /// J3 — overlay the breadcrumb's verdicts on the rows the run left `NotAttempted` for them, and
@@ -5240,7 +5082,7 @@ pub(crate) fn apply_resume(
 /// J3 — the resumed verdicts as `phase: "resumed"` breadcrumb records (append mode), so a
 /// breadcrumb written by THIS run — which otherwise holds `unknown` / `not-attempted` for the
 /// rows it did not run — can itself be resumed from. No-op without the env var.
-fn record_resumed_breadcrumb(report: &AutoVerifyReport, run: Option<&str>) {
+pub(crate) fn record_resumed_breadcrumb(report: &AutoVerifyReport, run: Option<&str>) {
     if report.resumed.is_empty() {
         return;
     }
@@ -5289,162 +5131,8 @@ pub(crate) fn row_not_run_reason(
         .then(|| "not selected by MUNUNU_VERIFY_AUTO_ONLY_ROWS; not attempted".to_string())
 }
 
-/// Roadmap J2 — the plan of a run, without the run: the lift and the planner's per-property routing
-/// with its cost estimate, and no engine. `sv verify-auto --plan-only` and `POST /api/v1/sv/plan`.
-#[derive(Debug, Clone, Default)]
-pub struct PlanReport {
-    /// Every property the run would verify, `(name, label, formula)` in report order.
-    pub properties: Vec<(String, Option<String>, String)>,
-    /// The planner's rationale (with [`crate::planner::RoutingRationale::estimate`]) per property
-    /// whose cone width could be established; a property without one has no estimate (mununu#577).
-    pub routing: Vec<crate::planner::RoutingRationale>,
-    /// mununu#941 — the properties with no estimate, each with its reason.
-    pub misses: Vec<crate::planner::RoutingMiss>,
-    /// mununu#939 — the properties the run would NOT execute, each with why: resumed from the
-    /// breadcrumb, or left out by the row selection (`MUNUNU_VERIFY_AUTO_ONLY_ROWS`, `skip_rows`).
-    /// They are still listed (the run reports them, as not attempted) but carry no band.
-    pub not_run: Vec<(String, String)>,
-    /// Assertions that did not translate, as in the run's report.
-    pub unsupported: Vec<(String, String)>,
-    /// The lift's wall, milliseconds — paid once per run, not per property.
-    pub lift_ms: u64,
-}
-
-/// [`PlanReport`] for these inputs: `prepare_model` (the same lift the run does) and
-/// [`crate::planner::plan`]'s rationale. Never runs an engine, so it costs the lift alone.
-pub fn plan_auto(
-    sources: &[(String, String)],
-    yosys_opts: &YosysOptions,
-    opts: &VerifyAutoOptions,
-) -> Result<PlanReport, AdapterError> {
-    // mununu#939 — the run's row selection, applied the way the run applies it: the
-    // `MUNUNU_VERIFY_AUTO_ONLY_ROWS` selection (by name or label), `skip_rows`, and the rows a
-    // `resume_from` breadcrumb decided — checked BEFORE the lift against this run's input
-    // identity, so a breadcrumb the run would refuse fails the plan the same way.
-    let only_rows = crate::adapter::env_var::read("MUNUNU_VERIFY_AUTO_ONLY_ROWS")
-        .and_then(|v| parse_only_rows(&v))
-        .or_else(|| opts.only_rows.clone());
-    let resumed = match opts.resume_from.as_deref() {
-        None => std::collections::BTreeMap::new(),
-        Some(text) => {
-            let current = crate::build_info::current().map(crate::build_info::build_tag);
-            let run = crate::adapter::resume::run_fingerprint(sources, yosys_opts, opts);
-            crate::adapter::resume::parse_breadcrumb(text, current.as_deref(), &run)
-                .map_err(|refusal| AdapterError {
-                    kind: AdapterErrorKind::ParseError,
-                    message: format!("resume-from: {refusal}"),
-                    location: None,
-                })?
-                .resumed
-        }
-    };
-    let not_run_reason = |name: &str, label: Option<&String>| {
-        row_not_run_reason(name, label, only_rows.as_ref(), &opts.skip_rows, &resumed)
-    };
-    let t0 = std::time::Instant::now();
-    let prepared = prepare_model(sources, yosys_opts, opts)?;
-    let lift_ms = u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX);
-    Ok(match prepared {
-        Prepared::Empty(report) => PlanReport {
-            unsupported: report.unsupported,
-            lift_ms,
-            ..PlanReport::default()
-        },
-        Prepared::Model(m) => {
-            let plan = crate::planner::plan(Some(&m), opts);
-            // The assumption-consistency check is a row the run folds into
-            // `report.assumptions.consistency` and removes (`finish_assumptions`), so the plan
-            // does not list it either — the plan names exactly the run's rows (the box's
-            // out-of-sample check found 16 planned rows against 15 reported on two designs).
-            let reported = |name: &str| name != ASSUMPTION_CONSISTENCY_PROPERTY;
-            PlanReport {
-                properties: m
-                    .extraction
-                    .translated
-                    .iter()
-                    .filter(|t| reported(&t.name))
-                    .map(|t| (t.name.clone(), t.label.clone(), t.formula.clone()))
-                    .collect(),
-                routing: plan
-                    .rationale
-                    .into_iter()
-                    .filter(|r| reported(&r.property))
-                    .collect(),
-                misses: plan
-                    .misses
-                    .into_iter()
-                    .filter(|r| reported(&r.property))
-                    .collect(),
-                not_run: m
-                    .extraction
-                    .translated
-                    .iter()
-                    .filter(|t| reported(&t.name))
-                    .filter_map(|t| {
-                        not_run_reason(&t.name, t.label.as_ref()).map(|why| (t.name.clone(), why))
-                    })
-                    .collect(),
-                unsupported: m.report.unsupported.clone(),
-                lift_ms,
-            }
-        }
-    })
-}
-
-/// The dispatch as it was before J3: portfolio through the planner, else the single engine.
-fn verify_auto_dispatch(
-    sources: &[(String, String)],
-    yosys_opts: &YosysOptions,
-    opts: &VerifyAutoOptions,
-) -> Result<AutoVerifyReport, AdapterError> {
-    // PORTFOLIO dispatch — when a portfolio mode is set, run the common-IR-hub pipeline:
-    // `prepare_model` once → `plan()` (the ladder + the per-property cost RATIONALE, computed from
-    // the shared prepared model) → `execute()` (drive each operator over the shared model, merge
-    // under the runtime soundness guard, attach the rationale telemetry). Verdict-equivalent to the
-    // former inline `verify_auto_portfolio`; the routing reasoning now lives in the planner.
-    if opts.portfolio.is_some() {
-        // J4c — the lift is paid once per run, here; the members share the prepared model.
-        let lift_t0 = std::time::Instant::now();
-        return match prepare_model(sources, yosys_opts, opts)? {
-            Prepared::Empty(report) => {
-                let mut report = *report;
-                report.lift_ms =
-                    Some(u64::try_from(lift_t0.elapsed().as_millis()).unwrap_or(u64::MAX));
-                finish_assumptions(&mut report);
-                Ok(report)
-            }
-            Prepared::Model(m) => {
-                let lift_ms = u64::try_from(lift_t0.elapsed().as_millis()).unwrap_or(u64::MAX);
-                let m = *m;
-                let task = crate::planner::VerificationTask {
-                    sources,
-                    yosys_opts,
-                    opts,
-                };
-                let plan = crate::planner::plan(Some(&m), opts);
-                let mut report = crate::planner::execute(&plan, &m, &task)?;
-                // The merge builds its report from the operators'; the assumption summary is the
-                // prepared model's, whatever the merge kept.
-                report.assumptions = m.report.assumptions.clone();
-                // …and so is the lift's wall (the members lifted nothing).
-                report.lift_ms = Some(lift_ms);
-                finish_assumptions(&mut report);
-                Ok(report)
-            }
-        };
-    }
-
-    // Single-engine path (a user-picked `--engine`): the direct `verify_auto_impl(None)` form —
-    // it checks A.6 (exact + no-reset-gating rejection) at the top, BEFORE any lift, then builds
-    // the model inline and runs the one engine. No cost rationale — the predicted engine is
-    // trivially the one the user selected. (Only the portfolio uses the plan/execute pipeline.)
-    let mut report = verify_auto_impl(sources, yosys_opts, opts, None)?;
-    finish_assumptions(&mut report);
-    Ok(report)
-}
-
 /// The SV → BTOR2 lift output (incl. the `auto_stub_flops` re-lift), factored out so the
-/// execution planner ([`crate::planner::execute`]) can run the lift **once** and share it
+/// execution planner (`planner::execute`) can run the lift **once** and share it
 /// across the precision-ladder operators. The yosys lift is the dominant redundant cost of
 /// the per-operator portfolio body — a 3-engine ladder otherwise re-elaborates the identical
 /// SV up to three times. The cheap Rust prep (SVA extraction, reset detection / pinning,
@@ -5883,9 +5571,9 @@ pub(crate) struct PreparedModel {
     /// The fully-prepared BTOR2 (lift + reset-init + shadow + reset/config pins).
     pub btor2: String,
     /// The report skeleton — carries `unsupported` + the lift/reset diagnostics.
-    report: AutoVerifyReport,
+    pub(crate) report: AutoVerifyReport,
     /// The translated properties (+ merged `@mununu_guarantee`).
-    extraction: crate::adapter::slang::translate::TranslationReport,
+    pub(crate) extraction: crate::adapter::slang::translate::TranslationReport,
     /// Abstraction-predicate hints (W1/W2).
     predicate_hints: Vec<String>,
     /// The `@mununu_*` annotation scan (drives the annotation note).
@@ -8116,13 +7804,13 @@ pub(crate) fn verify_auto_impl(
     }
 
     // ⊥ RE-PLAN (verification-execution-planner P2.1b): the planner's reactive re-plan
-    // step. When the main-path plan leaves a property ⊥, `planner::replan` dispatches it by
+    // step. When the main-path plan leaves a property ⊥, `escalate_bottom` dispatches it by
     // property_class to a sound reduction (safety→reach_rescue, box-AF→l2s, νμ
     // recoverability→exact+COI / cube+hyper-must) — the re-plan edges. Runs before the
     // notes/coverage build so the counts reflect any rescue; each edge is gated by its own
-    // `rescue_bottom_*` opt and only fires on its recognized shape. (P2.1b routes the
-    // re-plan entry through the planner, delegating the edge-application to the existing
-    // rescue subsystem — verdict-equivalent; P2.1c adds the soundness plan-invariants.)
+    // `rescue_bottom_*` opt and only fires on its recognized shape. (P2.1b routed this call
+    // through a `planner::replan` shim that only forwarded here; mununu#964 removed it so the
+    // engine layer never calls back into the planner.)
     // J4c — the last iteration's wall, for the same reason.
     if let Some((name, t0)) = pending_wall.take() {
         *report.property_wall_ms.entry(name).or_insert(0) +=
@@ -8154,7 +7842,7 @@ pub(crate) fn verify_auto_impl(
     let rescue_notes = if opts.replan_defer {
         Vec::new()
     } else {
-        crate::planner::replan(
+        escalate_bottom(
             &mut report,
             &btor2,
             reset_pinned,
@@ -8179,7 +7867,9 @@ pub(crate) fn verify_auto_impl(
     // seeding and decides it. Only fires on a cube run under reset-gating (the exact main
     // path already ran exact; A.6 requires reset gating). Sound: exact is the differential
     // oracle — a Skipped property is upgraded only on a DEFINITE Holds/Violated.
-    let exact_skip_notes = crate::planner::rescue_skipped(&mut report, &btor2, opts);
+    let mut exact_skip_notes = rescue_skipped_via_exact(&mut report, &btor2, opts);
+    // P2.2a — an actionable diagnostic for what remains Skipped (a note, never a verdict change).
+    exact_skip_notes.extend(skip_over_cap_notes(&report, &btor2));
 
     // H.J — provenance notes: surface every abstraction/scoping decision this run
     // made (config concretizations, posture, reset-gating, flop stubs, cut
@@ -9359,6 +9049,209 @@ fn bottom_reason_note(name: &str, reason: BottomReason) -> VerificationNote {
     }
 }
 
+/// P2.2a/b — **residual-register-aware** actionable Skip diagnostic (the `ModelFacts`
+/// consumer). For each property STILL Skipped after the exact attempt, use `ModelFacts` to
+/// check whether the exact engine bailed because the property's cone exceeds the bit cap
+/// (`cone_bits > cap`); if so, attach a note naming the cone width and the cap.
+///
+/// The **key fact** (P2.2b, measure-first 2026-07-26) is the *residual* — the register bits
+/// that remain even after pinning **every** in-cone free input
+/// (`residual = cone_bits − Σ pinnable_input_widths`). This is what decides whether
+/// `--pin` pinning can actually help:
+///
+/// - `residual ≤ cap` — **input-inflated** cone: pinning the in-cone inputs drops the cone to
+///   ~`residual` bits ≤ cap, so `--pin SIGNAL=VALUE` (a scoped verdict) decides it.
+///   The note lists the pinnable inputs and how far pinning gets.
+/// - `residual > cap` — **register-dominated** cone: even pinning ALL in-cone inputs leaves
+///   `residual` register bits over the cap, so `--pin` **cannot** decide it. The note
+///   says so and points at the real levers (structural compression: one-hot re-encode /
+///   counter abstraction; or cutpoint, posture-permitting).
+///
+/// A measure-first sweep (i2c 122 / gost 360 / present_cipher 144 residual register bits, all
+/// above the 64-bit cap) showed the corpus's over-cap cones are register-dominated — so the
+/// earlier "just pin the wide inputs" advice over-promised. This diagnostic tells the truth
+/// per property instead of assuming input-inflation. Verdict-equivalent — a diagnostic, never
+/// a verdict change.
+pub(crate) fn skip_over_cap_notes(
+    report: &AutoVerifyReport,
+    design_btor2: &str,
+) -> Vec<VerificationNote> {
+    use crate::adapter::btor2::model_facts::ModelFacts;
+    use crate::adapter::btor2::symbolic_bitblast::formula_seed_atoms;
+
+    let Ok(file) = crate::adapter::btor2::parser::parse(design_btor2) else {
+        return Vec::new();
+    };
+    let facts = ModelFacts::new(&file);
+    let mut notes = Vec::new();
+    for prop in &report.properties {
+        let VerifyOutcome::Skipped { reason } = &prop.outcome else {
+            continue;
+        };
+        // mununu#462 — a bit-blast that ABSTAINED (BDD arena exhausted) mid-evaluation, rather
+        // than at admission: name the cone's state-bit width and the width lever (`--param`).
+        // This is the state-bit-count analogue of the skip-diameter-bound note. Matches both the
+        // cube-path oom() string and the exact-build string (both contain "arena exhausted").
+        if reason.contains("arena exhausted") {
+            // mununu#577 — `0` here used to mean two different things: "the cone really is
+            // zero bits" and "the width could not be established". The note now only claims a
+            // width it actually has.
+            let cone_bits = crate::mu_calculus::parser::parse(&prop.formula)
+                .ok()
+                .and_then(|f| facts.cone_vs_cap(&formula_seed_atoms(&f)))
+                .map(|(cb, _)| cb);
+            notes.push(bitblast_oom_skip_note(&prop.name, cone_bits));
+            continue;
+        }
+        let Ok(formula) = crate::mu_calculus::parser::parse(&prop.formula) else {
+            continue;
+        };
+        let atoms = formula_seed_atoms(&formula);
+        // mununu#577 — an UNKNOWN cone width must not read as "fits the cap". Previously
+        // `leaf_cells()` swallowed its error into an empty vec, so an array-bearing design
+        // measured 0 bits and `cone_bits <= cap` was trivially true — on a nine-register design.
+        // With the width unknown there is nothing to say about the cap, so say nothing.
+        let Some((cone_bits, cap)) = facts.cone_vs_cap(&atoms) else {
+            continue;
+        };
+        if cone_bits <= cap {
+            // Not a bit-CAP issue (the cone fits). Consult the DIAMETER proxy (P2.2c): an in-cone
+            // down-counter of width W means the fixpoint may need ~2^W iterations, so exact
+            // abstains on the ITERATION budget rather than the bit cap — a different, and more
+            // actionable, Skip reason than "cone too wide". Emit a diameter-bound note when the
+            // proxy can tell (it covers registers that step themselves, up or down, by any step,
+            // mununu#929 — a non-counter diameter is honestly out of its reach); otherwise leave
+            // it to the existing Skip provenance (atom-less cube, unsupported op).
+            if let Some(w) = facts.cone_counter_diameter_log2(&atoms) {
+                notes.push(diameter_bound_skip_note(&prop.name, w));
+            }
+            continue;
+        }
+        let inputs = facts.pinnable_cone_inputs(&atoms);
+        let input_bits: u32 = inputs.iter().map(|i| i.width).sum();
+        // The register bits that remain even after pinning EVERY in-cone input — the true test
+        // of whether config-value pinning can bring the cone under the cap.
+        let residual = cone_bits.saturating_sub(input_bits);
+        let items: Vec<String> = inputs
+            .iter()
+            .take(8)
+            .map(|i| format!("{}({} bits)", i.name, i.width))
+            .collect();
+        let detail = if residual <= cap {
+            // Input-inflated: pinning these inputs fits the cap → config-value decides.
+            format!(
+                "The exact engine bit-blasts a property's cone-of-influence; this cone exceeds \
+                 the bit cap, so it bailed to Skipped. The cone is INPUT-inflated: pinning the \
+                 {} in-cone free input(s) below ({input_bits} bits) to representative constants \
+                 (`--pin SIGNAL=VALUE`) drops the cone to ~{residual} register bits (≤ \
+                 the {cap}-bit cap), so exact decides — a verdict scoped to the pinned \
+                 configuration.",
+                inputs.len()
+            )
+        } else {
+            // Register-dominated: even pinning all inputs leaves > cap register bits.
+            format!(
+                "The exact engine bit-blasts a property's cone-of-influence; this cone exceeds \
+                 the bit cap, so it bailed to Skipped. This cone is REGISTER-dominated: even \
+                 pinning ALL {} in-cone free input(s) ({input_bits} bits) leaves ~{residual} \
+                 register bits (still > the {cap}-bit cap), so `--pin` CANNOT bring it \
+                 under the cap. The decidable lever here is sound register reduction — \
+                 structural compression (one-hot re-encode, counter abstraction) or a cutpoint \
+                 (safety-posture only; unsound for νμ) — not input concretization.",
+                inputs.len()
+            )
+        };
+        notes.push(VerificationNote {
+            kind: "skip-over-cap-reason".into(),
+            level: NoteLevel::ScopeCaveat,
+            summary: format!(
+                "`{}`: Skipped — the exact cone is {cone_bits} register+input bits (> the \
+                 {cap}-bit cap); {} even fully input-pinned ({residual} residual register \
+                 bits {} {cap}).",
+                prop.name,
+                if residual <= cap {
+                    "config-value decidable"
+                } else {
+                    "register-dominated"
+                },
+                if residual <= cap { "≤" } else { ">" },
+            ),
+            detail,
+            items,
+            property: None,
+        });
+    }
+    notes
+}
+
+/// P2.2c — the diameter-proxy Skip note: a property Skipped with its cone UNDER the bit cap, whose
+/// cone carries a `W`-bit down-counter (⟹ up to 2^W fixpoint iterations). It tells the user the
+/// abstention was the ITERATION budget (the reachable DIAMETER), not the bit cap — the sound lever
+/// here is a well-founded RANKING certificate (a `verify-recoverability` escalation / the
+/// recoverability rescue), not register reduction. Advisory only (a note, never a verdict change).
+/// Test-only re-exports so the note-invariant test in `adapter::slang::verify_auto` can assert
+/// across BOTH modules that emit per-property notes (mununu#548 O-2). Keeping the builders private
+/// otherwise is deliberate — they are planner internals.
+fn diameter_bound_skip_note(name: &str, counter_log2: u32) -> VerificationNote {
+    VerificationNote {
+        kind: "skip-diameter-bound".into(),
+        level: NoteLevel::ScopeCaveat,
+        summary: format!(
+            "`{name}`: Skipped — the cone fits the bit cap, but an in-cone {counter_log2}-bit \
+             counter gives a ~2^{counter_log2} state-space DIAMETER, so the exact fixpoint \
+             abstains on the iteration budget (not the bit cap)."
+        ),
+        detail: "The exact μ-engine decides by fixpoint iteration; its cost is the reachable \
+                 DIAMETER, which bit-count cannot see (`bit-count ≠ tractability`). A wide in-cone \
+                 down-counter bounds a descent of up to 2^W steps past the iteration budget, so the \
+                 engine abstains after grinding rather than on admission. The decidable lever for a \
+                 well-founded descent is a RANKING certificate (a `verify-recoverability` \
+                 escalation / the recoverability rescue), not register reduction or input \
+                 concretization — and if the descent is not well-founded toward the target, the \
+                 property is a genuine diameter wall (an honest ⊥)."
+            .into(),
+        items: Vec::new(),
+        property: Some(name.to_string()),
+    }
+}
+
+/// mununu#462 — the bit-blast OOM Skip note: a property whose BDD bit-blast exhausted its node
+/// arena mid-evaluation (not at admission), so the engine ABSTAINED (Skipped) rather than
+/// `.unwrap()`-panicking / SIGABRT-ing and taking the WHOLE run — and every OTHER property still
+/// reports. Names the cone's state-bit width and points at the width lever (`--param`, which
+/// re-elaborates with a smaller parameterised counter/register so its bits fit) and the fallback
+/// (`--engine explicit`). The state-bit-count analogue of `diameter_bound_skip_note`. Advisory
+/// only (a note, never a verdict change).
+fn bitblast_oom_skip_note(name: &str, cone_bits: Option<u32>) -> VerificationNote {
+    // mununu#577 — `None` is "the width was never established", which is NOT the same claim as
+    // "the cone is wide". The old signature took a `u32` and read `0` as the latter, so a model
+    // whose leaves could not be computed was described as wide on no evidence.
+    let cone = match cone_bits {
+        Some(b) if b > 0 => format!("~{b}-bit state cone"),
+        _ => "state cone of unestablished width".to_string(),
+    };
+    VerificationNote {
+        kind: "skip-bitblast-oom".into(),
+        level: NoteLevel::ScopeCaveat,
+        summary: format!(
+            "`{name}`: Skipped — the BDD bit-blast exhausted its node arena on a {cone} (a SIZE \
+             threshold; the input is structurally fine); the engine abstained on this property so every \
+             other property in the run still reports."
+        ),
+        detail: "The symbolic engine bit-blasts a property's cone-of-influence into a BDD; a wide \
+                 counter/register cone (e.g. several 32-bit counters, each doubled by its `$past` \
+                 shadow) can outgrow the node budget mid-fixpoint. This is a size threshold — \
+                 shrink the state and it decides. The direct lever is `--param NAME=VALUE`, which \
+                 re-elaborates the design with a smaller width parameter (e.g. `--param \
+                 BW_WIDTH=4`) so the counter bits fit the arena; the verdict is then scoped to that \
+                 parameter value. The engine-level fallback is `--engine explicit`. Only this \
+                 property abstained — the rest of the run is unaffected."
+            .into(),
+        items: Vec::new(),
+        property: Some(name.to_string()),
+    }
+}
+
 /// Lever (b) — exact-symbolic rescue for cube-SKIPPED properties.
 ///
 /// The predicate-cube engine skips a property it cannot seed — most commonly an
@@ -10016,6 +9909,8 @@ fn liveness_rescue_note(name: &str, verdict: &str, engines: &[&str]) -> Verifica
 
 #[cfg(test)]
 mod tests {
+    // mununu#964 — the entry points live in the planner; the engine tests drive them from there.
+    use crate::planner::{MutateReport, PropertyFlip, verify_auto};
     /// mununu#459 — `partition_config_pins` classifies user pins into applied vs unusable. A pin
     /// is applied when the config pass pins it OR reset-gating already pinned it to the same value;
     /// it is unusable when its name is not a model input (misspelled / non-input) or, being a real
@@ -13004,8 +12899,8 @@ mod tests {
             bottom_reason_note("sva_2", BottomReason::SafetyShapeNotReducible),
             bottom_reason_note("sva_2", BottomReason::NoStateModelNonSafety),
             bottom_reason_note("sva_2", BottomReason::UnclassifiedBottom),
-            crate::planner::diameter_bound_skip_note_for_test("sva_2", 5),
-            crate::planner::bitblast_oom_skip_note_for_test("sva_2", Some(40)),
+            diameter_bound_skip_note("sva_2", 5),
+            bitblast_oom_skip_note("sva_2", Some(40)),
         ];
         for n in &builders {
             let names_a_property = n.summary.starts_with("`sva_2`:");

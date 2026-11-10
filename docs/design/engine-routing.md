@@ -48,11 +48,11 @@ no bound (historical behaviour).
 | `btor2 verify --fault … [--target ATOM]` (k-fault adversary, one player — the attacker also drives every input) | `fault::inject_faults` (structural budget, topological order) → with a target: `AG !target` through the reach rescue + `safety_witness`; else `decide_reach_portfolio` + BMC witness → **reach portfolio** | none |
 | `btor2 game --fault …` (k-fault adversary, two players — fault inputs controllable, the design's inputs the environment) | `inject_faults` after `game_sound_posture_model` → `exact_two_player_reach_realizable` / strategy → **exact-symbolic** (`cpre_controllable`, ∀env ∃ctrl; cap 40 → 192, 1024 by hand) | none |
 
-> Source of truth: [`engine_selection`](../../crates/mununu-core/src/adapter/slang/verify_auto.rs#L2024) + [`verify_auto_portfolio`](../../crates/mununu-core/src/adapter/slang/verify_auto.rs#L1469) (the 3-engine sequential/parallel portfolio) — surface: CLI+API.
+> Source of truth: [`engine_selection`](../../crates/mununu-core/src/adapter/slang/verify_auto.rs#L2964) + [`planner::execute`](../../crates/mununu-core/src/planner/mod.rs#L336) (the 3-engine sequential/parallel portfolio) — surface: CLI+API.
 
 **The cube-SKIPPED → exact rescue.** A pinned cube engine (`--engine explicit`/`symbolic`) *skips* a property whose formula it cannot seed — an **atom-less** modal obligation like no-deadlock `nu X.(<> true && [] X)` has no state-cell/combinational atom to build a cube dimension from. The full-state exact engine needs no seeding, so after the cube pass every still-`Skipped` property gets one exact-symbolic attempt and is upgraded in place on a **definite** verdict. It runs only under reset-gating (the exact engine's A.6 precondition) and only on a cube run (the exact main path already ran exact). Sound: the exact engine is the differential oracle, so the upgrade is pure precision, never a contradiction. (This closes the i2c_slave-class gap where the deadlock-freedom obligation was reported `Skipped` under `--engine explicit`.)
 
-> Source of truth: [`rescue_skipped_via_exact`](../../crates/mununu-core/src/adapter/slang/verify_auto.rs#L6161) — surface: (CLI+API+UI)
+> Source of truth: [`rescue_skipped_via_exact`](../../crates/mununu-core/src/adapter/slang/verify_auto.rs#L9278) — surface: (CLI+API+UI)
 
 **The predicate-avoidance rule (P0.2), confirmed by the 2026-07-08 csrng spike:**
 

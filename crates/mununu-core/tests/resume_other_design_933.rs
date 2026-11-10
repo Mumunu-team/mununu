@@ -9,8 +9,9 @@
 //! One test in its own binary: it registers a process-wide build identity, which no other test in
 //! this binary can then observe differently.
 
-use mununu_core::adapter::slang::verify_auto::{VerifyAutoOptions, verify_auto};
+use mununu_core::adapter::slang::verify_auto::VerifyAutoOptions;
 use mununu_core::adapter::yosys::YosysOptions;
+use mununu_core::planner::verify_auto;
 
 #[test]
 fn a_breadcrumb_written_for_another_design_is_refused_before_the_lift() {

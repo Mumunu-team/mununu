@@ -4742,7 +4742,8 @@ fn read_lift_overrides(entries: &[String]) -> Result<Vec<(String, String)>, Stri
 
 fn sv_verify_auto(args: SvVerifyAutoArgs) -> Result<(), String> {
     use mununu_core::adapter::btor2::kmts_lift::MustEdgeInference;
-    use mununu_core::adapter::slang::verify_auto::{PortfolioMode, VerifyAutoOptions, verify_auto};
+    use mununu_core::adapter::slang::verify_auto::{PortfolioMode, VerifyAutoOptions};
+    use mununu_core::planner::verify_auto;
 
     let lift = read_sv_lift(&args.lift)?;
     let primary_name = lift.primary_name.clone();
@@ -4838,7 +4839,7 @@ fn sv_verify_auto(args: SvVerifyAutoArgs) -> Result<(), String> {
 
     // Roadmap J2 — the plan only: the lift and the planner's estimate, no engine, exit 0.
     if args.plan_only {
-        let plan = mununu_core::adapter::slang::verify_auto::plan_auto(&sources, &yopts, &opts)
+        let plan = mununu_core::planner::plan_auto(&sources, &yopts, &opts)
             .map_err(|e| format!("sv verify-auto --plan-only: {}", e.message))?;
         let view = mununu_core::api::models::SvPlanResponse::from(&plan);
         if args.json {
@@ -7535,10 +7536,9 @@ fn sv_cdc_lint(args: SvCdcLintArgs) -> Result<(), String> {
 fn sv_mutate(args: SvMutateArgs) -> Result<(), String> {
     use mununu_core::adapter::btor2::kmts_lift::MustEdgeInference;
     use mununu_core::adapter::btor2::mutate::{Mutation, list_targets};
-    use mununu_core::adapter::slang::verify_auto::{
-        PortfolioMode, VerifyAutoOptions, mutate_and_compare,
-    };
+    use mununu_core::adapter::slang::verify_auto::{PortfolioMode, VerifyAutoOptions};
     use mununu_core::adapter::yosys::{YosysOptions, sv_to_btor2};
+    use mununu_core::planner::mutate_and_compare;
 
     let file = args.lift.primary_display();
     let lift = read_sv_lift(&args.lift)?;

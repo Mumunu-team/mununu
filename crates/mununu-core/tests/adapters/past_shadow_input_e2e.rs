@@ -32,8 +32,9 @@
 //!
 //! Docker-gated (`mununu-sva`): needs slang + yosys. Run with `--ignored`.
 
-use mununu_core::adapter::slang::verify_auto::{VerifyAutoOptions, VerifyOutcome, verify_auto};
+use mununu_core::adapter::slang::verify_auto::{VerifyAutoOptions, VerifyOutcome};
 use mununu_core::adapter::yosys::{SvFrontend, YosysOptions};
+use mununu_core::planner::verify_auto;
 
 /// The capture register. `din` is an INPUT — that is the whole point.
 const DUT: &str = r#"

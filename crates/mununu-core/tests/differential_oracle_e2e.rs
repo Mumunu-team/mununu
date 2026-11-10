@@ -20,11 +20,10 @@ use mununu_core::adapter::btor2::symbolic_bitblast::{
 use mununu_core::adapter::btormc::{
     DEFAULT_KMAX, DEFAULT_TIMEOUT, McVerdict, locate_btormc, run_btormc,
 };
-use mununu_core::adapter::slang::verify_auto::{
-    PortfolioMode, VerifyAutoOptions, VerifyOutcome, verify_auto,
-};
+use mununu_core::adapter::slang::verify_auto::{PortfolioMode, VerifyAutoOptions, VerifyOutcome};
 use mununu_core::adapter::yosys::{SvFrontend, YosysOptions};
 use mununu_core::mu_calculus::parser;
+use mununu_core::planner::verify_auto;
 use std::path::{Path, PathBuf};
 
 /// A register that LOADS a nonzero value (10) from a free input `ld`, whose user-visible
@@ -2146,7 +2145,7 @@ endmodule
 #[ignore = "requires slang + yosys (mununu-sva image); run with --ignored"]
 fn e2e_sv_mutate_stick_flips_recoverability() {
     use mununu_core::adapter::btor2::mutate::Mutation;
-    use mununu_core::adapter::slang::verify_auto::mutate_and_compare;
+    use mununu_core::planner::mutate_and_compare;
 
     let src = format!(
         "// @mununu_guarantee nu Y. ((mu X. ((cnt == 3) or <> X)) and [] Y)\n{COUNTER3_SV}"
@@ -2208,7 +2207,7 @@ endmodule
 #[ignore = "requires slang + yosys (mununu-sva image); run with --ignored"]
 fn e2e_sv_mutate_off_by_one_flips_a_threshold_property() {
     use mununu_core::adapter::btor2::mutate::Mutation;
-    use mununu_core::adapter::slang::verify_auto::mutate_and_compare;
+    use mununu_core::planner::mutate_and_compare;
 
     let src = format!("// @mununu_guarantee nu X. ((cnt != 9) and [] X)\n{WRAP_CTR_SV}");
     let sources = [("wrapctr.sv".to_string(), src)];
@@ -3382,7 +3381,7 @@ fn e2e_opentitan_ip_edn_sec_cm_posture() {
 #[ignore = "requires slang + Yosys + z3 (use the mununu-sva docker image); run with --ignored --nocapture"]
 fn e2e_opentitan_ip_edn_stick_flips_the_error_record() {
     use mununu_core::adapter::btor2::mutate::Mutation;
-    use mununu_core::adapter::slang::verify_auto::mutate_and_compare;
+    use mununu_core::planner::mutate_and_compare;
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../examples/verify/ip_opentitan_edn/source");
     let read = |f: &str| {

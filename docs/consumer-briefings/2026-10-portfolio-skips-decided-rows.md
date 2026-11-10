@@ -1,6 +1,6 @@
 # Consumer briefing — a later portfolio member no longer re-runs a row an earlier one decided (2026-10)
 
-> Source of truth: [`decided_rows`](../../crates/mununu-core/src/planner/mod.rs) + [`VerifyAutoOptions::skip_rows`](../../crates/mununu-core/src/adapter/slang/verify_auto.rs) — surface: (CLI+API) — `sv verify-auto` / `POST /api/v1/sv/verify-auto` under the default sequential portfolio
+> Source of truth: [`decided_rows`](../../crates/mununu-core/src/planner/mod.rs#L221) + [`VerifyAutoOptions::skip_rows`](../../crates/mununu-core/src/adapter/slang/verify_auto.rs#L2847) — surface: (CLI+API) — `sv verify-auto` / `POST /api/v1/sv/verify-auto` under the default sequential portfolio
 
 **Audience:** monono, rosf and anyone timing `sv verify-auto` runs or reading the `MUNUNU_VERIFY_AUTO_PARTIAL_JSON` breadcrumb. Plan 4, PR D3 (mununu#733); follows #732 and #735.
 

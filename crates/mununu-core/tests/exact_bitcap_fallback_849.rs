@@ -10,10 +10,9 @@
 //! without the fix; it uses only API the parent already has. `#[ignore]`d: it lifts SystemVerilog
 //! through yosys-slang, which CI does not carry; the e2e sweep runs it in mununu-sva (#952).
 
-use mununu_core::adapter::slang::verify_auto::{
-    PortfolioMode, VerifyAutoOptions, VerifyOutcome, verify_auto,
-};
+use mununu_core::adapter::slang::verify_auto::{PortfolioMode, VerifyAutoOptions, VerifyOutcome};
 use mununu_core::adapter::yosys::YosysOptions;
+use mununu_core::planner::verify_auto;
 
 /// Two 100-bit registers that count up together from 0 and 1: they never meet, so
 /// `AG EF (data_q == target_q)` is VIOLATED, and the 200-bit cone is over the 192-bit cap.

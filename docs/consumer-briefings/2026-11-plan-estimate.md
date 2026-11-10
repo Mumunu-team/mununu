@@ -1,6 +1,6 @@
 # Consumer briefing — cost estimates per property, and a plan-only mode (roadmap J2, 2026-11)
 
-> Source of truth: [`RoutingRationale::estimate`](../../crates/mununu-core/src/planner/mod.rs), [`plan_auto`](../../crates/mununu-core/src/adapter/slang/verify_auto.rs), [`SvPlanResponse`](../../crates/mununu-core/src/api/models.rs) — surface: CLI+API (`sv verify-auto --plan-only [--json]`, `POST /api/v1/sv/plan`; the `routing.estimate` field of every `sv verify-auto` report).
+> Source of truth: [`RoutingRationale::estimate`](../../crates/mununu-core/src/routing.rs#L129), [`plan_auto`](../../crates/mununu-core/src/planner/entry.rs#L194), [`SvPlanResponse`](../../crates/mununu-core/src/api/models.rs) — surface: CLI+API (`sv verify-auto --plan-only [--json]`, `POST /api/v1/sv/plan`; the `routing.estimate` field of every `sv verify-auto` report).
 
 > **Audience:** rosf and monono (gate runtimes, CI sizing), mununu-ui (shows rows), anyone scheduling runs.
 >

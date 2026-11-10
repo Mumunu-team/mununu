@@ -40,6 +40,7 @@ pub mod mu_calculus;
 pub mod mununu_annotations;
 pub mod persistence;
 pub mod planner;
+pub mod routing;
 /// Track H3 — the opt-in local usage ledger: one record per run, no design content.
 pub mod usage_ledger;
 pub mod verdict;

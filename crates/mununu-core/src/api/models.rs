@@ -2122,8 +2122,8 @@ pub struct PlanPropertyView {
     pub not_run: Option<String>,
 }
 
-impl From<&crate::adapter::slang::verify_auto::PlanReport> for SvPlanResponse {
-    fn from(plan: &crate::adapter::slang::verify_auto::PlanReport) -> Self {
+impl From<&crate::planner::PlanReport> for SvPlanResponse {
+    fn from(plan: &crate::planner::PlanReport) -> Self {
         let properties: Vec<PlanPropertyView> = plan
             .properties
             .iter()
@@ -3598,7 +3598,7 @@ mod bottom_reason_view_tests {
     /// row with no estimate says why.
     #[test]
     fn a_plan_row_says_why_it_will_not_run_or_has_no_estimate() {
-        use crate::adapter::slang::verify_auto::PlanReport;
+        use crate::planner::PlanReport;
         let plan = PlanReport {
             properties: vec![
                 ("r".into(), None, "nu X. ((q == 0) && [] X)".into()),
@@ -3635,7 +3635,7 @@ mod bottom_reason_view_tests {
     /// estimate, an unrouted one has none (no width, no prediction), and the bands count both.
     #[test]
     fn a_plan_lists_every_property_with_its_estimate_and_counts_the_bands() {
-        use crate::adapter::slang::verify_auto::PlanReport;
+        use crate::planner::PlanReport;
         let plan = PlanReport {
             misses: Vec::new(),
             not_run: Vec::new(),
