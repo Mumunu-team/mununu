@@ -622,7 +622,7 @@ fn decides(r: &Result<PropertyVerdict, String>, want: PropertyVerdict) -> bool {
 }
 
 #[test]
-#[ignore = "validation harness: wide cones + cube-craig needs MathSAT (mununu-sva-pono)"]
+#[ignore = "manual: validation harness: wide cones + cube-craig needs MathSAT (mununu-sva-pono)"]
 fn wall_class_matrix() {
     let mathsat = std::env::var_os("MUNUNU_MATHSAT_PATH").is_some();
     println!(
@@ -1075,7 +1075,7 @@ fn edn_boot_handshake_is_a_positional_env_strategy_case() {
 /// SYNTHETIC-ONLY capability (the binary-landscape risk) → T2/T3 stay documented-not-headlined.
 /// `#[ignore]` — run on demand: `cargo test -p mununu-core --test wall_class_matrix -- --ignored --nocapture env_strategy_positional_marginal_reach_scan`
 #[test]
-#[ignore]
+#[ignore = "manual: a marginal-reach scan over the wall-class set; run with --ignored --nocapture in mununu-sva"]
 #[allow(clippy::type_complexity)] // the scan's row tuple is local + self-documenting
 fn env_strategy_positional_marginal_reach_scan() {
     use mununu_core::adapter::btor2::symbolic_bitblast::exact_env_strategy_exists;
@@ -1555,7 +1555,7 @@ fn safety_cases() -> Vec<SafetyCase> {
 /// least one lever. Reads an external corpus, so it is `#[ignore]`d. With `MUNUNU_HWMCC_ARRAY_DIR`
 /// unset it prints SKIPPED and returns.
 #[test]
-#[ignore = "external corpus: set MUNUNU_HWMCC_ARRAY_DIR to the HWMCC'20 btor2/array dir; run in mununu-sva"]
+#[ignore = "manual: external corpus: set MUNUNU_HWMCC_ARRAY_DIR to the HWMCC'20 btor2/array dir; run in mununu-sva"]
 fn wall_class_safety_on_memory() {
     use mununu_core::adapter::btor2::parser::parse as parse_btor2;
     use mununu_core::adapter::reach_portfolio::{

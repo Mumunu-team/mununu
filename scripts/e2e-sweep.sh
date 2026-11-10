@@ -36,16 +36,28 @@ echo "== building e2e test binaries =="
 # the kind of opaque failure this script exists to prevent.
 build_bin() { # $1 = cargo target args (word-split intentionally), $2 = binary-name match
   # shellcheck disable=SC2086
-  $CARGO test $1 --all-features --no-run --message-format=json \
+  $CARGO test $1 --no-run --message-format=json \
     | grep -o "\"executable\":\"[^\"]*$2[^\"]*\"" | tail -1 | cut -d'"' -f4
 }
-lib_bin=$(build_bin "-p mununu-core --lib" "mununu_core")
-oracle_bin=$(build_bin "-p mununu-core --test differential_oracle_e2e" "differential_oracle_e2e")
 
-if [ -z "${lib_bin:-}" ]; then
-  echo "FATAL: could not locate the mununu-core lib test binary — see the build output above." >&2
-  exit 2
-fi
+# The binaries, from the one list every e2e runner reads (mununu#952/#953).
+LIST="$(dirname "$0")/e2e-binaries.txt"
+declare -a bin_paths=() bin_labels=()
+while read -r target features; do
+  case "$target" in ''|'#'*) continue ;; esac
+  features="${features:---all-features}"
+  if [ "$target" = lib ]; then
+    args="-p mununu-core --lib $features"; match="mununu_core"
+  else
+    args="-p mununu-core --test $target $features"; match="$target"
+  fi
+  path=$(build_bin "$args" "$match")
+  if [ -z "$path" ]; then
+    echo "FATAL: could not locate the $target test binary — see the build output above." >&2
+    exit 2
+  fi
+  bin_paths+=("$path"); bin_labels+=("$target")
+done < "$LIST"
 
 pass=0; fail=0; crash=0
 declare -a failed_names=() crashed_names=()
@@ -87,8 +99,9 @@ run_binary() {
   done <<< "$names"
 }
 
-run_binary "$lib_bin" "mununu-core lib e2e"
-run_binary "${oracle_bin:-}" "differential_oracle_e2e"
+for i in "${!bin_paths[@]}"; do
+  run_binary "${bin_paths[$i]}" "${bin_labels[$i]}"
+done
 
 echo
 echo "=========================================================="

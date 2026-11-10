@@ -81,8 +81,8 @@ fn reachability_differential(btor2: &str, ef_formula: &str) -> ReachDifferential
 }
 
 #[test]
-#[ignore = "requires btormc (mununu-sva image); run with --ignored"]
-fn diff_reachability_exact_vs_btormc_agree_on_uext_aliased_register() {
+#[ignore = "requires the mununu-sva image (btormc); run by the e2e sweep"]
+fn e2e_diff_reachability_exact_vs_btormc_agree_on_uext_aliased_register() {
     // The #242-catcher. `reg == 10` is reachable (assert `ld` once from init `reg == 0`).
     // Post-fix both oracles say reachable; PRE-#242-fix the exact engine froze the register
     // and reported it UNREACHABLE while btormc reported it reachable — a divergence this
@@ -127,8 +127,8 @@ const BTOR2TOOLS_SUITE: &[(&str, Option<bool>)] = &[
 ];
 
 #[test]
-#[ignore = "requires btormc (mununu-sva image); run with --ignored"]
-fn hwmcc_style_coverage_study() {
+#[ignore = "requires the mununu-sva image (btormc); run by the e2e sweep"]
+fn e2e_hwmcc_style_coverage_study() {
     let bin = locate_btormc().expect("btormc present (mununu-sva)");
     let root =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/btor2/btor2tools_suite");
@@ -348,7 +348,7 @@ fn native_engine_adjudication_over_btor2tools_suite() {
 /// reports coverage (decided / abstained) and which engine carried each verdict.
 /// Unset `MUNUNU_HWMCC_DIR` ⇒ the test no-ops (nothing to adjudicate).
 #[test]
-#[ignore = "provide MUNUNU_HWMCC_DIR (user-downloaded HWMCC benchmarks); run in mununu-sva"]
+#[ignore = "manual: provide MUNUNU_HWMCC_DIR (user-downloaded HWMCC benchmarks); run in mununu-sva"]
 fn hwmcc_adjudication_over_user_dir() {
     use mununu_core::adapter::btor2::parser::parse as parse_btor2;
     use mununu_core::adapter::reach_portfolio::{
@@ -522,7 +522,7 @@ fn hwmcc_adjudication_over_user_dir() {
 /// `MUNUNU_NATIVE_MS` override the native depth / per-check budget (default 100 /
 /// 30000 ms). Verdicts: `sat` (reachable) / `unsat` (unreachable / safe) / `?`.
 #[test]
-#[ignore = "study runner: provide MUNUNU_HWMCC_DIR; driven by scripts/hwmcc_bv_study.sh"]
+#[ignore = "manual: study runner: provide MUNUNU_HWMCC_DIR; driven by scripts/hwmcc_bv_study.sh"]
 fn hwmcc_inhouse_timing() {
     use mununu_core::adapter::btor2::native_bmc::{SafetyVerdict, decide_bad_safety};
     use mununu_core::adapter::btor2::parser::parse as parse_btor2;
@@ -1450,8 +1450,8 @@ const CORPUS: &[CorpusDesign] = &[
 ];
 
 #[test]
-#[ignore = "requires slang + yosys (mununu-sva image); run with --ignored"]
-fn diff_corpus_monotone_verdict_ledger() {
+#[ignore = "requires the mununu-sva image (slang + yosys); run by the e2e sweep"]
+fn e2e_diff_corpus_monotone_verdict_ledger() {
     let mut all_improvements = Vec::new();
     for d in CORPUS {
         all_improvements.extend(check_corpus_design(d));
@@ -1488,7 +1488,7 @@ fn observe_engine(
 /// for each engine, the raw input for the "how many T/F/⊥, why the ⊥s, and the path forward"
 /// census. Never asserts (a wrong verdict is caught by the strict ledger gate above).
 #[test]
-#[ignore = "requires slang + yosys (mununu-sva image); run with --ignored"]
+#[ignore = "manual: requires slang + yosys (mununu-sva image); run with --ignored"]
 fn diff_corpus_verdict_census() {
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
@@ -1597,8 +1597,8 @@ fn diff_corpus_verdict_census() {
 /// (comma-separated design names) restricts the run to a subset — the fast FSMs for a quick read;
 /// unset runs the whole corpus (slow: the big closures cost minutes per engine).
 #[test]
-#[ignore = "requires slang + yosys (mununu-sva image); run with --ignored"]
-fn diff_corpus_cegar_vs_symbolic_engine_parity() {
+#[ignore = "requires the mununu-sva image (slang + yosys); run by the e2e sweep"]
+fn e2e_diff_corpus_cegar_vs_symbolic_engine_parity() {
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
 
@@ -1875,7 +1875,7 @@ fn e2e_portfolio_decides_what_the_default_engine_misses() {
 /// bind to no state register; this prints the names yosys actually emits so the atoms can be
 /// re-pointed. Non-failing; run when refining those atoms.
 #[test]
-#[ignore = "requires slang + yosys (mununu-sva image); run with --ignored"]
+#[ignore = "manual: requires slang + yosys (mununu-sva image); run with --ignored"]
 fn dump_state_registers_atom_binding_todo() {
     use mununu_core::adapter::btor2::parser::{collect_symbols, parse as parse_btor2};
     use mununu_core::adapter::yosys::sv_to_btor2;
@@ -1945,8 +1945,8 @@ endmodule
 "#;
 
 #[test]
-#[ignore = "requires slang + yosys + verilator (mununu-sva image); run with --ignored"]
-fn p3_verilator_replays_ag_ef_trap_counterexample() {
+#[ignore = "requires the mununu-sva image (slang + yosys + verilator); run by the e2e sweep"]
+fn e2e_p3_verilator_replays_ag_ef_trap_counterexample() {
     use mununu_core::adapter::verilator::{
         TraceReplayConfig, VerilatorOptions, VerilatorTempDir, build_trace_replay_tb_cpp,
         compile_verilator, locate_verilator, parse_reset_simulation_dump,
@@ -2958,7 +2958,7 @@ fn e2e_opentitan_ip_edn_full() {
 /// refusal — the test-binary twin of `mununu btor2 verify <file>`, for comparing the two contexts
 /// on a dumped rescue monitor (`MUNUNU_RESCUE_MONITOR_DUMP`).
 #[test]
-#[ignore = "diagnostic; needs MUNUNU_PROBE_BTOR2 and the image's engines"]
+#[ignore = "manual: diagnostic; needs MUNUNU_PROBE_BTOR2 and the image's engines"]
 fn probe_reach_portfolio_on_env_btor2() {
     use mununu_core::adapter::reach_portfolio::decide_reach_portfolio_parallel_with_timeout;
     use mununu_core::adapter::run_budget::{Budget, enter};

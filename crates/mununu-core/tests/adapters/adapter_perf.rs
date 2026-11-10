@@ -33,7 +33,7 @@ fn gen_tlsf(n_inputs: usize, n_outputs: usize) -> String {
 }
 
 #[test]
-#[ignore]
+#[ignore = "manual: a timing measurement, host-load dependent; run with --ignored --nocapture"]
 fn perf_tlsf_scaling() {
     use mununu_core::adapter::tlsf::TlsfAdapter;
     use mununu_core::adapter::{AdapterOptions, FormatAdapter};

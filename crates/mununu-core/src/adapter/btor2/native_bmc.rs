@@ -1388,7 +1388,7 @@ mod tests {
     /// `UNITS_PER_NOMINAL_MS`. Run by hand:
     /// `cargo test -p mununu-core --lib probe_rlimit -- --ignored --nocapture`.
     #[test]
-    #[ignore]
+    #[ignore = "manual: a z3 rlimit calibration probe; run with --ignored --nocapture"]
     fn probe_rlimit_semantics_and_calibration() {
         let cfg = z3::Config::new();
         z3::with_z3_config(&cfg, || {

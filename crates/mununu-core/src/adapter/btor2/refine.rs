@@ -1064,7 +1064,7 @@ mod tests {
     /// and still discover `data==target` — the same invariant as the state-register case. `#[ignore]`d
     /// (needs MathSAT; run in `mununu-sva` with `MUNUNU_MATHSAT_PATH`).
     #[test]
-    #[ignore = "requires MathSAT (mununu-sva image); run with --ignored + MUNUNU_MATHSAT_PATH"]
+    #[ignore = "manual: requires MathSAT (mununu-sva image); run with --ignored + MUNUNU_MATHSAT_PATH"]
     fn must_precondition_resolves_combinational_good() {
         // MathSAT is not in the `mununu-sva` image (it ships in `mununu-sva-pono`).
         // Skip rather than fail: an absent optional tool is not a regression, and a
@@ -1112,7 +1112,7 @@ mod tests {
     /// the discovered predicates per design — how often does it find a non-trivial
     /// relational / bound invariant on REAL designs? `#[ignore]`d.
     #[test]
-    #[ignore = "sweeps an external BTOR2 dir named by MUNUNU_DISCOVER_DIR"]
+    #[ignore = "manual: sweeps an external BTOR2 dir named by MUNUNU_DISCOVER_DIR"]
     fn sweep_discovery_on_external_designs() {
         let Ok(dir) = std::env::var("MUNUNU_DISCOVER_DIR") else {
             eprintln!("SKIPPED: opt-in sweep — set MUNUNU_DISCOVER_DIR to run it.");

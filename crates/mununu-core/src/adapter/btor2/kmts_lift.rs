@@ -5242,7 +5242,7 @@ mod tests {
     /// relation), and it crossed 10 s under a full parallel `cargo test`
     /// on the slow one. That is why it is not part of the default run.
     #[test]
-    #[ignore = "wall-clock measurement; host-load dependent"]
+    #[ignore = "manual: wall-clock measurement; host-load dependent"]
     fn r2_5_cap_exceeding_fixture_lift_time() {
         let result = r2_5_lift_cap_exceeding_fixture();
         println!("R.2.5 cap-exceeding lift_time = {:?}", result.lift_time);

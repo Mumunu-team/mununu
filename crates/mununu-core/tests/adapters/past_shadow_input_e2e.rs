@@ -130,8 +130,8 @@ fn capture_outcome(dut: &str) -> VerifyOutcome {
 }
 
 #[test]
-#[ignore = "requires slang + yosys (mununu-sva image); run with --ignored"]
-fn a_past_over_a_primary_input_is_decided_not_skipped() {
+#[ignore = "requires the mununu-sva image (slang + yosys); run by the e2e sweep"]
+fn e2e_a_past_over_a_primary_input_is_decided_not_skipped() {
     let outcome = capture_outcome(DUT);
     if let VerifyOutcome::Skipped { reason } = &outcome {
         panic!(
@@ -147,8 +147,8 @@ fn a_past_over_a_primary_input_is_decided_not_skipped() {
 }
 
 #[test]
-#[ignore = "requires slang + yosys (mununu-sva image); run with --ignored"]
-fn the_contrast_twin_does_not_hold_so_the_property_is_not_vacuous() {
+#[ignore = "requires the mununu-sva image (slang + yosys); run by the e2e sweep"]
+fn e2e_the_contrast_twin_does_not_hold_so_the_property_is_not_vacuous() {
     // The gate a vacuous property fails. If `din__past` were unbound the atom
     // would be trivially true and BOTH designs would come back `Holds`; the good
     // one holds and this one does not, so the atom is genuinely constraining.
@@ -179,8 +179,8 @@ fn the_contrast_twin_does_not_hold_so_the_property_is_not_vacuous() {
 }
 
 #[test]
-#[ignore = "requires slang + yosys (mununu-sva image); run with --ignored"]
-fn the_shadow_flop_is_actually_in_the_model() {
+#[ignore = "requires the mununu-sva image (slang + yosys); run by the e2e sweep"]
+fn e2e_the_shadow_flop_is_actually_in_the_model() {
     // The structural half of the same claim, independent of any verdict: the
     // model gained a register (the design has one flop, `d0_q`; the model has
     // two), and the translated formula names the shadow.
@@ -254,8 +254,8 @@ fn formula_for(sva: &str) -> String {
 }
 
 #[test]
-#[ignore = "requires slang + yosys (mununu-sva image); run with --ignored"]
-fn only_a_same_cycle_past_reads_the_invented_history() {
+#[ignore = "requires the mununu-sva image (slang + yosys); run by the e2e sweep"]
+fn e2e_only_a_same_cycle_past_reads_the_invented_history() {
     let atom = "(d0_q == din__past)";
     let boxed = format!("[] {atom}");
 

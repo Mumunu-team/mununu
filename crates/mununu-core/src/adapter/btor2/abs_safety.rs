@@ -1184,7 +1184,7 @@ mod tests {
     /// verdict + wall-clock — does IC3's cheap blocking + rare interpolation decide
     /// it? Ignored by default (needs an external file + cvc5).
     #[test]
-    #[ignore = "reads an external BTOR2 file named by MUNUNU_INTERP_PROBE"]
+    #[ignore = "manual: manual: reads an external BTOR2 file named by MUNUNU_INTERP_PROBE"]
     fn probe_ic3_on_external_design() {
         let Ok(path) = std::env::var("MUNUNU_INTERP_PROBE") else {
             eprintln!(

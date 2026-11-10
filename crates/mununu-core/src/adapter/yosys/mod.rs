@@ -4233,8 +4233,8 @@ endmodule
     // yosys-gated (`#[ignore]`, like the other lift e2e tests); the script-level
     // mechanism is covered by the non-ignored `build_script_*_forwards_*` tests.
     #[test]
-    #[ignore = "requires yosys on PATH or MUNUNU_YOSYS_PATH"]
-    fn extra_include_dirs_resolves_fragment_without_standalone_compile() {
+    #[ignore = "requires the mununu-sva image (yosys); run by the e2e sweep"]
+    fn e2e_extra_include_dirs_resolves_fragment_without_standalone_compile() {
         let tmp = TempDir::new("mununu-inc-e2e").expect("tempdir");
         let inc = tmp.path().join("inc");
         std::fs::create_dir_all(&inc).expect("mkdir inc");
@@ -4273,8 +4273,8 @@ endmodule
     // only allowed in constant functions!"), the real corpus lift blocker (AssertLLM2 `xgate`)
     // — elaborates under `read_slang`. yosys + read_slang gated → the `mununu-sva` image.
     #[test]
-    #[ignore = "requires yosys with read_slang (run in the mununu-sva image)"]
-    fn slang_lifts_a_non_constant_while_loop() {
+    #[ignore = "requires the mununu-sva image (yosys + slang); run by the e2e sweep"]
+    fn e2e_slang_lifts_a_non_constant_while_loop() {
         let src = "module m(input [3:0] n, output reg [7:0] y);\n\
                    integer i;\n\
                    always @* begin\n\

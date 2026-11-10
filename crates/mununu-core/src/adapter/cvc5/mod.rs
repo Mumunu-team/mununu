@@ -198,13 +198,17 @@ pub fn build_interpolation_query(
         out.push_str(&format!("(assert {conj})\n"));
     }
 
-    // Target cube facts (B side) — passed as the get-interpolant
-    // formula. CVC5's contract: returns I such that A ⊨ I and
-    // I ⊨ ¬B. We pass the target cube's conjunction as B; the
-    // returned interpolant separates source from target.
-    let target_conj =
-        render_cube_conjunction(predicates, target_cube).unwrap_or_else(|| "true".to_string());
-    out.push_str(&format!("(get-interpolant I {target_conj})\n"));
+    // Target cube facts (B side). cvc5's `(get-interpolant I C)` returns I with A ⊨ I and
+    // I ⊨ C — the conjecture is what I must IMPLY, so a separator of A from B is asked for with
+    // C = ¬B. Passing B itself (as this did until mununu#952's sweep first ran the end-to-end
+    // test) made every disjoint pair `fail`: cvc5 1.0.1 in mununu-sva answered no interpolant.
+    // No target facts (B = true) asks for I ⊨ false, which has none: the cubes are not
+    // separable over these predicates.
+    let conjecture = match render_cube_conjunction(predicates, target_cube) {
+        Some(b) => format!("(not {b})"),
+        None => "false".to_string(),
+    };
+    out.push_str(&format!("(get-interpolant I {conjecture})\n"));
     out.push_str("(exit)\n");
     out
 }
@@ -819,8 +823,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires cvc5 binary installed; run with --ignored when available"]
-    fn locate_cvc5_succeeds_when_binary_available() {
+    #[ignore = "requires the mununu-sva image (cvc5); run by the e2e sweep"]
+    fn e2e_locate_cvc5_succeeds_when_binary_available() {
         // R.5 Item 3 sub-item 3.1 — integration test that's
         // ignored by default. Run with `cargo test -- --ignored`
         // when CVC5 is installed locally (e.g. `brew install
@@ -859,12 +863,12 @@ mod tests {
     #[test]
     fn r5_subitem_32_render_empty_predicates_yields_trivial_query() {
         // Edge case: no predicates ⇒ empty conjunction ⇒ no
-        // assert; the get-interpolant target is `true`.
+        // assert; the conjecture is `false` (nothing separates two cubes over no predicates).
         let got = build_interpolation_query(&[], 0, 0);
         let expected = "\
 (set-logic QF_BV)
 (set-option :produce-interpolants true)
-(get-interpolant I true)
+(get-interpolant I false)
 (exit)
 ";
         assert_eq!(got, expected);
@@ -882,7 +886,7 @@ mod tests {
 (set-option :produce-interpolants true)
 (declare-fun reg_a () (_ BitVec 32))
 (assert (= reg_a (_ bv0 32)))
-(get-interpolant I (not (= reg_a (_ bv0 32))))
+(get-interpolant I (not (not (= reg_a (_ bv0 32)))))
 (exit)
 ";
         assert_eq!(got, expected);
@@ -900,7 +904,7 @@ mod tests {
 (set-option :produce-interpolants true)
 (declare-fun reg_a () (_ BitVec 32))
 (assert (not (= reg_a (_ bv0 32))))
-(get-interpolant I (= reg_a (_ bv0 32)))
+(get-interpolant I (not (= reg_a (_ bv0 32))))
 (exit)
 ";
         assert_eq!(got, expected);
@@ -919,7 +923,7 @@ mod tests {
 (declare-fun reg_a () (_ BitVec 32))
 (declare-fun reg_b () (_ BitVec 32))
 (assert (and (= reg_a (_ bv0 32)) (= reg_b (_ bv1 32))))
-(get-interpolant I (and (not (= reg_a (_ bv0 32))) (not (= reg_b (_ bv1 32)))))
+(get-interpolant I (not (and (not (= reg_a (_ bv0 32))) (not (= reg_b (_ bv1 32))))))
 (exit)
 ";
         assert_eq!(got, expected);
@@ -941,7 +945,7 @@ mod tests {
 (set-option :produce-interpolants true)
 (declare-fun reg_a () (_ BitVec 32))
 (assert (and (= reg_a (_ bv0 32)) (not (= reg_a (_ bv1 32)))))
-(get-interpolant I (and (not (= reg_a (_ bv0 32))) (= reg_a (_ bv1 32))))
+(get-interpolant I (not (and (not (= reg_a (_ bv0 32))) (= reg_a (_ bv1 32)))))
 (exit)
 ";
         assert_eq!(got, expected);
@@ -1277,8 +1281,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires cvc5 binary installed; run with --ignored when available"]
-    fn r5_subitem_33_invoke_cvc5_for_known_interpolation_query() {
+    #[ignore = "requires the mununu-sva image (cvc5); run by the e2e sweep"]
+    fn e2e_r5_subitem_33_invoke_cvc5_for_known_interpolation_query() {
         // R.5 Item 3 sub-item 3.3 — end-to-end integration
         // test. Ignored by default; run with `cargo test --
         // --ignored` after `brew install cvc5`.
@@ -1309,8 +1313,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires cvc5 binary installed; run with --ignored when available"]
-    fn r5_subitem_33_invoke_cvc5_timeout_kills_subprocess() {
+    #[ignore = "requires the mununu-sva image (cvc5); run by the e2e sweep"]
+    fn e2e_r5_subitem_33_invoke_cvc5_timeout_kills_subprocess() {
         // R.5 Item 3 sub-item 3.3 — timeout integration test.
         // Pass a 1ms timeout that's guaranteed to be exceeded
         // even by CVC5's startup time; verifies the subprocess

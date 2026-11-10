@@ -1,0 +1,13 @@
+# The mununu-core test binaries the e2e sweep builds (mununu#952/#953). Every e2e runner reads
+# this list — scripts/e2e-sweep.sh, `make e2e-oneshot`, `make e2e-parallel` — and in each it
+# runs the `#[ignore]`d tests whose name contains `e2e_`. The policy test
+# ignored_tests_have_a_runner fails `make ci` on an ignored test neither selected here nor
+# declared `manual:`.
+#
+# <target> [cargo feature args]   — `lib` = the crate's unit tests; default `--all-features`.
+# `adapters` cannot take --all-features: its `syntcomp` module includes mununu-private fixtures
+# at compile time and does not build in the image.
+lib
+differential_oracle_e2e
+exact_bitcap_fallback_849
+adapters --features test_support

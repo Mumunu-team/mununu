@@ -12,7 +12,7 @@ grep -rhoE 'env::var(_os)?\("MUNUNU_[A-Z0-9_]+"' crates/ | grep -oE 'MUNUNU_[A-Z
   | while read v; do grep -q "\`$v\`" docs/env-vars.md || echo "UNDOCUMENTED: $v"; done
 ```
 
-and, both ways, by `crates/mununu-core/tests/env_vars_documented_d1.rs`: every `MUNUNU_*` name the
+and, both ways, by `crates/mununu-core/tests/policy/env_vars_documented_d1.rs`: every `MUNUNU_*` name the
 crates read has a row here, and every row names a variable something reads (a row may say
 `scripts/…` when only a script reads it). `0` means **off** for every budget knob.
 

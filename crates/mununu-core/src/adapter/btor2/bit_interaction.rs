@@ -493,7 +493,7 @@ mod tests {
     /// time) — and the falsifier for the whole track is that the graph must NOT say "interleaved"
     /// there. Its 52 symbolic-amount shifts at 33 bits should read as near-complete.
     #[test]
-    #[ignore = "probe: W-3' order verdicts; run with --ignored --nocapture"]
+    #[ignore = "manual: probe: W-3' order verdicts; run with --ignored --nocapture"]
     fn probe_w3_order_verdict_against_measured_outcomes() {
         let cases: Vec<(&str, String, &str)> = vec![
             (

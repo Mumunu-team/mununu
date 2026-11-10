@@ -7,7 +7,7 @@ hand-independent model-checking benchmarks (some, e.g. `ponylink-*`, are extract
 from published hardware) used here as an **independent reachability oracle**: each
 carries `bad` properties whose reachability `mununu`'s exact engine
 (`exact_bad_reachable`) is cross-checked against **btormc** in
-`hwmcc_style_coverage_study` (differential_oracle_e2e.rs). Untouched — only read,
+`e2e_hwmcc_style_coverage_study` (differential_oracle_e2e.rs). Untouched — only read,
 never rewritten (claims-integrity: models-from-source).
 
 ## License

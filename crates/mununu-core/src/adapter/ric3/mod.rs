@@ -225,8 +225,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires rIC3 (MUNUNU_RIC3_PATH or $PATH); run with --ignored in mununu-sva"]
-    fn decide_via_ric3_emits_and_decides() {
+    #[ignore = "requires the mununu-sva image (rIC3); run by the e2e sweep"]
+    fn e2e_decide_via_ric3_emits_and_decides() {
         let reach = parser::parse(REACH).expect("parse reach");
         assert_eq!(
             decide_via_ric3(&reach, DEFAULT_ENGINE, DEFAULT_TIMEOUT, None).unwrap(),

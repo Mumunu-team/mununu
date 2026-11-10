@@ -229,8 +229,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires pono (MUNUNU_PONO_PATH or $PATH); run with --ignored in mununu-sva"]
-    fn decide_via_pono_emits_and_decides() {
+    #[ignore = "requires the mununu-sva image (pono); run by the e2e sweep"]
+    fn e2e_decide_via_pono_emits_and_decides() {
         // The L2-seam → Pono path end-to-end via `ic3bits` (IC3 proves both ways):
         // a reachable-bad model is Violated, a safe one is Safe.
         let reach = parser::parse(REACH).expect("parse reach");

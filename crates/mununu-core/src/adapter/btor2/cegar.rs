@@ -2577,8 +2577,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires Z3 (SMT must/may edges); run in the mununu-sva/dev image with --ignored"]
-    fn a5_trap_fsm_pinned_reset_error_is_false_free_reset_is_true() {
+    #[ignore = "requires the mununu-sva image (z3); run by the e2e sweep"]
+    fn e2e_a5_trap_fsm_pinned_reset_error_is_false_free_reset_is_true() {
         use crate::mu_calculus::trit::Trit;
         // Reset PINNED (held): error is a permanent trap ⇒ AG EF idle is definite
         // FALSE at the error cube. The sound recoverability verdict.
@@ -5022,8 +5022,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires cvc5 binary installed; run with --ignored when available"]
-    fn r5_subitem_34_craig_invokes_cvc5_end_to_end() {
+    #[ignore = "requires the mununu-sva image (cvc5); run by the e2e sweep"]
+    fn e2e_r5_subitem_34_craig_invokes_cvc5_end_to_end() {
         // R.5 Item 3 sub-item 3.4 (2026-06-04) — when CVC5 is
         // available + the Craig source is selected, the CEGAR
         // loop invokes CVC5 + emits predicates with the

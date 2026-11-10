@@ -9,7 +9,7 @@ nothing needs a network — a site with no outbound connection is licensed the s
 laptop. The licence is a legal instrument plus an honest status line; it is not copy protection.
 
 **A licence never touches a verdict.** No engine, adapter, planner or evaluator reads the licence;
-a test (`crates/mununu-core/tests/licence_never_reaches_a_verdict_h1.rs`) keeps it that way. The
+a test (`crates/mununu-core/tests/policy/licence_never_reaches_a_verdict_h1.rs`) keeps it that way. The
 state is *reported* — on the status surfaces below and in every report, next to the build
 identity — and the verdicts of a design are byte-identical in every licence state. What the tool
 does in each state is decided once at start-up, by the CLI and the server, and nowhere else:
