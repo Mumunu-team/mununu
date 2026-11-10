@@ -2610,9 +2610,7 @@ fn locate_sv2v() -> Result<PathBuf, AdapterError> {
 /// `bad` nodes are needed here). Named registers and ports get `instance.signal` BTOR2 names,
 /// so cutpoints / `--pin` over named signals resolve by name.
 fn slang_plugin_arg() -> Option<String> {
-    std::env::var("MUNUNU_YOSYS_SLANG_PLUGIN")
-        .ok()
-        .filter(|p| !p.trim().is_empty())
+    crate::adapter::env_var::read("MUNUNU_YOSYS_SLANG_PLUGIN").filter(|p| !p.trim().is_empty())
 }
 
 /// The actionable tail of a yosys failure, read off its stderr and log: `read_slang` is not a

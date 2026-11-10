@@ -13,7 +13,7 @@ Perform a security audit of $ARGUMENTS (with no arguments, the branch against `m
 
 ## Audit checklist
 
-1. **Unsafe.** Expected: one block, the CLI's `std::env::set_var` (edition 2024) in `crates/mununu-cli/src/main.rs`. FFI reaches z3, OxiDD and tree-sitter through safe crates. Any other `unsafe` is a finding unless it is an FFI boundary with a `// SAFETY:` comment that argues the invariant.
+1. **Unsafe.** Expected: the CLI's `std::env::set_var` (edition 2024) in `crates/mununu-cli/src/main.rs`, and six process-supervision FFI blocks in `crates/mununu-core/src/adapter/mod.rs`, each with its `// SAFETY:` comment: three Win32 Job Object calls in `mod member_job` (create and assign, terminate, close) and three POSIX calls in `mod member_group` (`kill(2)` on a process group, the `signal` / `raise` re-raise, the `sigaction` query). Integration tests may `set_var` in a single-test binary. FFI reaches z3, OxiDD and tree-sitter through safe crates. Any other `unsafe` is a finding unless it is an FFI boundary with a `// SAFETY:` comment that argues the invariant.
 
 2. **Subprocess tools** (`std::process::Command`): yosys + slang, sv2v (dev oracle only), btormc, pono, rIC3, Verilator, cvc5, docker. Arguments are separate `.arg()` calls built from parsed values, never a shell string; the tool path comes from the adapter's locate function (`MUNUNU_*_PATH` then `PATH`), never from a request body; the discovery probe runs under a 10 s budget (#876); a cancelled or timed-out member is killed with everything it forked (process group / Job Object, #875 / #922); tool output lands in a directory the run owns. A design's text never reaches a command line.
 
