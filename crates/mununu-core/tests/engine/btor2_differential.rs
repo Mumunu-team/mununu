@@ -4,7 +4,9 @@
 //! - `exact_bad_reachable` (full-state ROBDD, complete on these widths) is the oracle;
 //! - `decide_bad_safety` (native BMC + k-induction on z3) must never contradict it: a
 //!   `Violated` must be a real counterexample (the exact engine says reachable), a `Safe`
-//!   a real proof (unreachable). `Unknown` is allowed.
+//!   a real proof (unreachable). `Unknown` is allowed per case, but the gate fails unless
+//!   native decides at least [`MIN_DECIDED_PERCENT`] of the draw with both verdicts
+//!   present, and two negative controls show the gate can fail (mununu#954).
 //!
 //! The generator is deliberately plain text: every design it writes is a legal BTOR2
 //! file a human can paste into `mununu btor2 verify`, and a failing case prints it. It is
@@ -21,6 +23,7 @@
 //! happened to find (mununu#852 turned two unrelated PRs red that way). Fresh draws are
 //! `make diff-tier-explore`, off the gate; a disagreement it finds is filed with its printed
 //! design and pinned as a deterministic test. `PROPTEST_RNG_SEED=<n>` replays another draw.
+use mununu_core::adapter::btor2::ast::Btor2File;
 use mununu_core::adapter::btor2::native_bmc::{SafetyVerdict, decide_bad_safety};
 use mununu_core::adapter::btor2::parser;
 use mununu_core::adapter::btor2::symbolic_bitblast::exact_bad_reachable;
@@ -234,30 +237,167 @@ pub fn design_strategy() -> BoxedStrategy<Design> {
         .boxed()
 }
 
-proptest! {
-    #![proptest_config(ProptestConfig {
-        cases: std::env::var("PROPTEST_CASES")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(48),
-        rng_seed: tier_seed(),
-        ..ProptestConfig::default()
-    })]
+/// What one tier run decided. Counted only on a run that found no contradiction, so a case
+/// proptest re-ran while shrinking is never counted twice.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct Tally {
+    safe: usize,
+    violated: usize,
+    unknown: usize,
+}
 
-    /// Every generated design parses, and the two engines agree whenever both decide.
-    #[test]
-    fn native_bmc_never_contradicts_the_exact_engine(d in design_strategy()) {
-        let file = parser::parse(&d.text).unwrap_or_else(|e| panic!("generated BTOR2 does not parse: {e}\n{}", d.text));
-        let exact = exact_bad_reachable(&d.text)
-            .unwrap_or_else(|e| panic!("exact engine refused a generated design: {e}\n{}", d.text));
-        let native = decide_bad_safety(&file, 16, Some(2_000))
-            .unwrap_or_else(|e| panic!("native engine refused a generated design: {e:?}\n{}", d.text));
-        match native {
-            SafetyVerdict::Violated { depth } => prop_assert!(
-                exact, "native says bad reachable at depth {depth}, exact says unreachable\n{}", d.text),
-            SafetyVerdict::Safe { k } => prop_assert!(
-                !exact, "native says {k}-inductive safe, exact says bad reachable\n{}", d.text),
-            SafetyVerdict::Unknown { .. } => {}
-        }
+/// The gate's floor on the fixed draw ([`TIER_SEED`], 48 cases), so a native that abstains
+/// everywhere — or one that only ever answers one way — fails the gate instead of passing it
+/// vacuously (mununu#954). Set 2026-11-10 when the draw decided 47/48 (12 Safe, 35 Violated);
+/// the verdicts are deterministic (rlimit, #893), so the headroom is a regression budget, not noise.
+const MIN_DECIDED_PERCENT: usize = 80;
+
+/// `Err` names what the tally is missing: too few decided cases, or no Safe, or no Violated.
+fn check_floor(t: Tally) -> Result<(), String> {
+    let total = t.safe + t.violated + t.unknown;
+    let decided = t.safe + t.violated;
+    if total == 0 {
+        return Err("the tier ran no cases".into());
     }
+    if decided * 100 < total * MIN_DECIDED_PERCENT {
+        return Err(format!(
+            "native decided {decided}/{total} cases, under the {MIN_DECIDED_PERCENT}% floor: {t:?}"
+        ));
+    }
+    if t.safe == 0 || t.violated == 0 {
+        return Err(format!(
+            "the draw must exercise both verdicts, got {t:?} — a one-sided tier cannot catch a \
+             flipped verdict on the other side"
+        ));
+    }
+    Ok(())
+}
+
+/// Draw `cases` designs from the tier's seed, decide each with the exact oracle and `native`,
+/// and fail (with the proptest-shrunk design) on the first contradiction; otherwise return
+/// what `native` decided.
+fn run_tier(
+    cases: u32,
+    max_shrink_iters: u32,
+    native: impl Fn(&Btor2File) -> SafetyVerdict,
+) -> Result<Tally, String> {
+    use std::cell::Cell;
+    let config = ProptestConfig {
+        cases,
+        rng_seed: tier_seed(),
+        max_shrink_iters,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    };
+    let mut runner = proptest::test_runner::TestRunner::new(config);
+    let tally = Cell::new(Tally::default());
+    runner
+        .run(&design_strategy(), |d| {
+            let file = parser::parse(&d.text)
+                .unwrap_or_else(|e| panic!("generated BTOR2 does not parse: {e}\n{}", d.text));
+            let exact = exact_bad_reachable(&d.text).unwrap_or_else(|e| {
+                panic!("exact engine refused a generated design: {e}\n{}", d.text)
+            });
+            let mut t = tally.get();
+            match native(&file) {
+                SafetyVerdict::Violated { depth } => {
+                    prop_assert!(
+                        exact,
+                        "native says bad reachable at depth {depth}, exact says unreachable\n{}",
+                        d.text
+                    );
+                    t.violated += 1;
+                }
+                SafetyVerdict::Safe { k } => {
+                    prop_assert!(
+                        !exact,
+                        "native says {k}-inductive safe, exact says bad reachable\n{}",
+                        d.text
+                    );
+                    t.safe += 1;
+                }
+                SafetyVerdict::Unknown { .. } => t.unknown += 1,
+            }
+            tally.set(t);
+            Ok(())
+        })
+        .map_err(|e| e.to_string())?;
+    // A failing case is shrunk by re-running it, so the tally is exact only when nothing failed.
+    Ok(tally.get())
+}
+
+fn cases_from_env() -> u32 {
+    std::env::var("PROPTEST_CASES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(48)
+}
+
+fn native_bmc(file: &Btor2File) -> SafetyVerdict {
+    decide_bad_safety(file, 16, Some(2_000))
+        .unwrap_or_else(|e| panic!("native engine refused a generated design: {e:?}"))
+}
+
+/// Every generated design parses, the two engines agree whenever both decide, and native
+/// decides enough of the draw, both ways, for the agreement to mean something.
+#[test]
+fn native_bmc_never_contradicts_the_exact_engine() {
+    let tally = run_tier(cases_from_env(), 1024, native_bmc).unwrap_or_else(|e| panic!("{e}"));
+    eprintln!("btor2_differential: {tally:?}");
+    // The floor is measured on the gate's draw; an explorer draw or another case count only
+    // reports it.
+    let explorer = std::env::var_os("MUNUNU_DIFF_TIER_EXPLORE").is_some()
+        || std::env::var_os("PROPTEST_RNG_SEED").is_some()
+        || std::env::var_os("PROPTEST_CASES").is_some();
+    match check_floor(tally) {
+        Ok(()) => {}
+        Err(e) if explorer => eprintln!("btor2_differential: floor not met on this draw: {e}"),
+        Err(e) => panic!("{e}"),
+    }
+}
+
+/// Negative control: a native that flips every Violated into Safe must turn the gate red
+/// through the same runner — the contradiction path is live, not just written.
+#[test]
+fn the_gate_fails_when_native_flips_a_verdict() {
+    let flipped = |f: &Btor2File| match native_bmc(f) {
+        SafetyVerdict::Violated { depth } => SafetyVerdict::Safe { k: depth },
+        v => v,
+    };
+    let err = run_tier(cases_from_env(), 0, flipped)
+        .expect_err("a native that calls a reachable bad Safe must fail the gate");
+    assert!(err.contains("exact says bad reachable"), "{err}");
+}
+
+/// Negative control: a native that abstains on every case contradicts nothing, so only the
+/// floor can catch it — and must.
+#[test]
+fn the_gate_fails_when_native_abstains_everywhere() {
+    let tally = run_tier(cases_from_env(), 0, |_| SafetyVerdict::Unknown { k: 0 })
+        .expect("an abstaining native contradicts nothing");
+    assert_eq!(tally.safe + tally.violated, 0);
+    let err = check_floor(tally).expect_err("an all-abstain tally must fail the floor");
+    assert!(err.contains("under the"), "{err}");
+}
+
+/// The floor's other arms, without engines.
+#[test]
+fn the_floor_rejects_a_one_sided_or_empty_tally() {
+    assert!(check_floor(Tally::default()).is_err());
+    let one_sided = Tally {
+        safe: 40,
+        violated: 0,
+        unknown: 0,
+    };
+    assert!(
+        check_floor(one_sided)
+            .unwrap_err()
+            .contains("both verdicts")
+    );
+    let ok = Tally {
+        safe: 20,
+        violated: 20,
+        unknown: 8,
+    };
+    assert_eq!(check_floor(ok), Ok(()));
 }
