@@ -1885,7 +1885,7 @@ define void @bad_index(i32 %0) {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "manual: a debug dump; run with --ignored --nocapture"]
     fn debug_dump_plan() {
         let m = crate::llvm_ir::parse_module(FIRMWARE_IR).unwrap();
         let f = &m.functions[0];
@@ -1898,7 +1898,7 @@ define void @bad_index(i32 %0) {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "manual: a debug dump; run with --ignored --nocapture"]
     fn debug_dump_firmware_ir() {
         let m = crate::llvm_ir::parse_module(FIRMWARE_IR).unwrap();
         for f in &m.functions {

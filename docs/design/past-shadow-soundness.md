@@ -105,7 +105,7 @@ invisible to every `|=>` shape — which is every data-integrity property, becau
 "sample an antecedent, check the result one cycle later" is what `|=>` means — and
 visible to `|->`.
 
-Pinned by `only_a_same_cycle_past_reads_the_invented_history` in
+Pinned by `e2e_only_a_same_cycle_past_reads_the_invented_history` in
 [`tests/past_shadow_input_e2e.rs`](../../crates/mununu-core/tests/past_shadow_input_e2e.rs),
 so a future change to the lift that moved the atom out from under `[]` would fail
 a test rather than silently widen the approximation.

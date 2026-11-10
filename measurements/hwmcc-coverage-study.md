@@ -1,6 +1,6 @@
 # HWMCC-style coverage study — exact engine vs btormc on a real BTOR2 suite
 
-> Source of truth: [`hwmcc_style_coverage_study`](../crates/mununu-core/tests/differential_oracle_e2e.rs) + [`exact_bad_reachable`](../crates/mununu-core/src/adapter/btor2/symbolic_bitblast.rs) — surface: (test / engine).
+> Source of truth: [`e2e_hwmcc_style_coverage_study`](../crates/mununu-core/tests/differential_oracle_e2e.rs) + [`exact_bad_reachable`](../crates/mununu-core/src/adapter/btor2/symbolic_bitblast.rs) — surface: (test / engine).
 
 ## What this measures
 

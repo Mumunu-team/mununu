@@ -1765,7 +1765,7 @@ mod tests {
     /// (becomes array-free) vs abstains on. Used to measure SPCR's applicability to real corpora
     /// (e.g. the HWMCC20 arrays track). `#[ignore]` — run explicitly with the env var set.
     #[test]
-    #[ignore]
+    #[ignore = "manual: a probe over an external BTOR2 directory; run with --ignored --nocapture"]
     fn spcr_applicability_probe_over_dir() {
         let Ok(dir) = std::env::var("MUNUNU_SPCR_PROBE_DIR") else {
             eprintln!("SKIPPED: opt-in probe — set MUNUNU_SPCR_PROBE_DIR to run it.");

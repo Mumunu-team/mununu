@@ -372,8 +372,8 @@ mod tests {
 ";
 
     #[test]
-    #[ignore = "requires btormc (MUNUNU_BTORMC_PATH or $PATH); run with --ignored in mununu-sva"]
-    fn run_btormc_reach_is_violated() {
+    #[ignore = "requires the mununu-sva image (btormc); run by the e2e sweep"]
+    fn e2e_run_btormc_reach_is_violated() {
         let bin = locate_btormc().expect("btormc present");
         assert_eq!(
             run_btormc(&bin, REACH_BTOR2, DEFAULT_KMAX, DEFAULT_TIMEOUT).unwrap(),
@@ -382,8 +382,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires btormc (MUNUNU_BTORMC_PATH or $PATH); run with --ignored in mununu-sva"]
-    fn run_btormc_safe_is_safe() {
+    #[ignore = "requires the mununu-sva image (btormc); run by the e2e sweep"]
+    fn e2e_run_btormc_safe_is_safe() {
         let bin = locate_btormc().expect("btormc present");
         // `--kind` (set by run_btormc) is what lets this conclude Safe.
         assert_eq!(
@@ -393,8 +393,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires btormc (MUNUNU_BTORMC_PATH or $PATH); run with --ignored in mununu-sva"]
-    fn decide_via_btormc_emits_and_decides() {
+    #[ignore = "requires the mununu-sva image (btormc); run by the e2e sweep"]
+    fn e2e_decide_via_btormc_emits_and_decides() {
         // The full L2-seam → subprocess path: parse → emit_btor2 → btormc. A
         // reachable-bad model must come back Violated; a safe one Safe. This is
         // the emit hand-off end-to-end (the emitted text is btormc's input).

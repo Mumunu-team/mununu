@@ -207,7 +207,7 @@ fn scalable_gr1_smoke() {
 /// Run with:
 ///   cargo test scalable_gr1_large -- --ignored --nocapture
 #[test]
-#[ignore]
+#[ignore = "manual: a large-instance scaling run; cargo test scalable_gr1_large -- --ignored --nocapture"]
 fn scalable_gr1_large() {
     println!("\n{:=<70}", "");
     println!("Scalable GR(1) — Track C (large states, n=2 pairs)");

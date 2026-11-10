@@ -6604,7 +6604,7 @@ mod fault_posture_debug {
     //! `MUNUNU_DEBUG_DUMP=<dumped model> cargo test … debug_antecedent_check_on_dump -- --ignored
     //! --nocapture`: run the antecedent-vacuity question on a dumped model for two flags.
     #[test]
-    #[ignore = "a hand-run probe on a `MUNUNU_SHADOW_BTOR2_DUMP` file"]
+    #[ignore = "manual: a hand-run probe on a `MUNUNU_SHADOW_BTOR2_DUMP` file"]
     fn debug_antecedent_check_on_dump() {
         let Ok(path) = std::env::var("MUNUNU_DEBUG_DUMP") else {
             return;

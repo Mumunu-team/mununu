@@ -9730,7 +9730,7 @@ mod tests {
     /// PROBE — what `exact_bad_reachable` returns on a file, INCLUDING the `Err` that the owned
     /// portfolio's `run_exact` drops with `.ok()`. `MUNUNU_PROBE_BTOR2=<file>`.
     #[test]
-    #[ignore = "probe: set MUNUNU_PROBE_BTOR2 to a BTOR2 file; prints the exact member's verdict or error"]
+    #[ignore = "manual: probe: set MUNUNU_PROBE_BTOR2 to a BTOR2 file; prints the exact member's verdict or error"]
     fn probe_exact_bad_reachable_verbatim() {
         let Ok(path) = std::env::var("MUNUNU_PROBE_BTOR2") else {
             eprintln!("[probe] MUNUNU_PROBE_BTOR2 unset — skipping");
@@ -9914,7 +9914,7 @@ mod tests {
     ///
     /// Exit 0 = survived. 101/134 = reproduced (panic / abort).
     #[test]
-    #[ignore = "mununu#543 probe — set MUNUNU_PROBE_BTOR to the consumer's spr_cost.design.btor"]
+    #[ignore = "manual: mununu#543 probe — set MUNUNU_PROBE_BTOR to the consumer's spr_cost.design.btor"]
     fn probe_543_spr_cost_past_shadow_at_the_cap() {
         let Ok(path) = std::env::var("MUNUNU_PROBE_BTOR") else {
             eprintln!("[probe] MUNUNU_PROBE_BTOR unset — skipping");
@@ -10009,7 +10009,7 @@ mod tests {
     /// is the 2^K fixpoint DIAMETER, which no ordering changes). `MUNUNU_PROBE_BTOR2` additionally
     /// measures a real lift's transition-system BDD.
     #[test]
-    #[ignore = "measurement — actual BDD node count + height of the counter transition system"]
+    #[ignore = "manual: measurement — actual BDD node count + height of the counter transition system"]
     fn measure_bdd_actual_size() {
         fn counter_btor2(k: u32) -> String {
             let max = (1u128 << k) - 1;
@@ -10185,7 +10185,7 @@ mod tests {
     /// `EF(target)` diamond-preimage fixpoint, no budgets, wall clock irrelevant (it reads
     /// neither `iter_budget` nor `deadline`).
     #[test]
-    #[ignore = "probe: mununu#553 option-3 measurement; run with --ignored --nocapture"]
+    #[ignore = "manual: probe: mununu#553 option-3 measurement; run with --ignored --nocapture"]
     fn probe_553_iteration_cost_by_cone_shape() {
         /// Wrapping modulus-`m` counter: `cnt = (cnt == m-1) ? 0 : cnt + 1`. The backward reach
         /// diameter to `cnt == m-1` is exactly `m-1` — DEEP but FINITE, the video_timing shape.
@@ -10335,7 +10335,7 @@ mod tests {
     /// engine: `exact-symbolic` (full-state ROBDD, OxiDD) — static ordering input only; computes no
     /// BDD and changes no verdict.
     #[test]
-    #[ignore = "probe: W-1a weighted event span; run with --ignored --nocapture"]
+    #[ignore = "manual: probe: W-1a weighted event span; run with --ignored --nocapture"]
     fn probe_w1_weighted_event_span_of_both_orders() {
         /// Leaf cells (state/input) with widths — from the SAME source the real ordering uses
         /// (`BtorSts::leaf_cells`), so the metric is computed over the variables the engine would
@@ -10567,7 +10567,7 @@ mod tests {
     /// a case where interleaving wins and one where it loses. Ranking one correctly is consistent
     /// with coincidence.
     #[test]
-    #[ignore = "probe: does build time predict total time? run with --ignored --nocapture"]
+    #[ignore = "manual: probe: does build time predict total time? run with --ignored --nocapture"]
     fn probe_build_phase_predicts_order_cost() {
         let cases: Vec<(&str, String, &str)> = vec![(
             "barrel shift 12b",
@@ -10642,7 +10642,7 @@ mod tests {
     /// relation's node count, each squaring step's size and time, and both walls.
     /// `MUNUNU_PROBE_RASTER=h,v` picks the shape (default 800,200).
     #[test]
-    #[ignore = "A2 spike: relation size and squaring cost on the raster; run with --ignored --nocapture"]
+    #[ignore = "manual: A2 spike: relation size and squaring cost on the raster; run with --ignored --nocapture"]
     fn probe_a2_iterative_squaring_on_the_raster() {
         use crate::adapter::btor2::predicate_expr::parse_predicate_expr;
         use crate::mu_calculus::parser as mu_parser;
@@ -10819,7 +10819,7 @@ mod tests {
     /// of `new_manager(arena, cache, 1)` + one variable for the engine's two tiers and for
     /// smaller caches.
     #[test]
-    #[ignore = "B3 spike: manager creation cost by arena and apply-cache size; run with --ignored --nocapture"]
+    #[ignore = "manual: B3 spike: manager creation cost by arena and apply-cache size; run with --ignored --nocapture"]
     fn probe_b3_manager_creation_cost() {
         use oxidd::bdd;
         for (arena, cache) in [
@@ -10855,7 +10855,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "probe: mununu#553 discriminating shape; run with --ignored --nocapture"]
+    #[ignore = "manual: probe: mununu#553 discriminating shape; run with --ignored --nocapture"]
     fn probe_553_raster_wrap_is_deep_and_wide() {
         /// `hcount` wraps at `h`; `vcount` advances on that wrap and wraps at `v`. Backward reach to
         /// the frame-end state is ~`h*v` steps — deep — over a cone wide enough not to compress.
@@ -10958,7 +10958,7 @@ mod tests {
     ///
     /// engine: `exact-symbolic` (full-state ROBDD, OxiDD), bit-blast + `EF(bad)` fixpoint.
     #[test]
-    #[ignore = "probe: mununu#553 variable-order sensitivity; run with --ignored --nocapture"]
+    #[ignore = "manual: probe: mununu#553 variable-order sensitivity; run with --ignored --nocapture"]
     fn probe_553_var_order_on_wide_class() {
         let order = std::env::var("MUNUNU_BDD_VAR_ORDER").unwrap_or_else(|_| "interleaved".into());
         eprintln!("\n===== #553 var-order probe — ORDER = {order} =====");
@@ -14645,7 +14645,7 @@ mod tests {
     /// done; done
     /// ```
     #[test]
-    #[ignore = "E-1 probe: one arm per process via MUNUNU_E1_ARM=0|A|B; needs --features oxidd-statistics"]
+    #[ignore = "manual: E-1 probe: one arm per process via MUNUNU_E1_ARM=0|A|B; needs --features oxidd-statistics"]
     fn probe_e1_apply_calls_by_arm() {
         let arm = std::env::var("MUNUNU_E1_ARM").unwrap_or_else(|_| "0".into());
         let file = symbolic_shift_12();

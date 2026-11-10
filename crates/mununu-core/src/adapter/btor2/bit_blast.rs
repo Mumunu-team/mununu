@@ -6989,7 +6989,7 @@ mod tests {
     /// the residual register wall for value-comparing recoverability is datapath-dependence,
     /// not width the F1/F2/F4 re-encoders can reclaim.
     #[test]
-    #[ignore]
+    #[ignore = "manual: a cone-shape probe; run with --ignored --nocapture"]
     fn probe_cone_register_width_decomposition() {
         use crate::adapter::btor2::ast::{Line, Nid, Node, Op};
         use crate::adapter::btor2::dep_graph::cone_leaf_nids;
@@ -7280,7 +7280,7 @@ mod tests {
     ///
     /// `MUNUNU_PROBE_BTOR2=<file> MUNUNU_PROBE_ATOMS=<sig[,sig...]>`; no atoms ⇒ whole design.
     #[test]
-    #[ignore = "MK.0 probe — set MUNUNU_PROBE_BTOR2 + MUNUNU_PROBE_ATOMS"]
+    #[ignore = "manual: MK.0 probe — set MUNUNU_PROBE_BTOR2 + MUNUNU_PROBE_ATOMS"]
     fn probe_mixed_precision_reach_c_partition() {
         use crate::adapter::btor2::ast::{Nid, Node, Op};
         use crate::adapter::btor2::dep_graph::cone_leaf_nids;
@@ -7558,7 +7558,7 @@ mod tests {
     /// abstraction, i.e. FSM-predicate-coarseness (the one case a concrete control skeleton fixes).
     /// `MUNUNU_PROBE_BTOR2=<file> MUNUNU_PROBE_GOOD="REG == VALUE"`.
     #[test]
-    #[ignore = "MK.0 cross-check — set MUNUNU_PROBE_BTOR2 + MUNUNU_PROBE_GOOD"]
+    #[ignore = "manual: MK.0 cross-check — set MUNUNU_PROBE_BTOR2 + MUNUNU_PROBE_GOOD"]
     fn probe_recoverability_bot_diagnosis() {
         let Ok(path) = std::env::var("MUNUNU_PROBE_BTOR2") else {
             eprintln!(
@@ -7635,7 +7635,7 @@ mod tests {
     /// parameter drives the size (a COUNTER dimension is tight: 2^K reachable; an FSM dimension is
     /// its state count N, independent of its bit-encoding width).
     #[test]
-    #[ignore = "measurement — synthetic control-automaton scaling (explicit BFS)"]
+    #[ignore = "manual: measurement — synthetic control-automaton scaling (explicit BFS)"]
     fn measure_control_automaton_scaling() {
         use std::collections::{HashSet, VecDeque};
 
@@ -7769,7 +7769,7 @@ mod tests {
     /// 1 of `measure_control_automaton_scaling`), so `Π R_counter` is a MEASURED lower bound on the
     /// reachable |S|. `MUNUNU_PROBE_BTOR2=<file>` (whole design).
     #[test]
-    #[ignore = "measurement — real-design structural automaton size"]
+    #[ignore = "manual: measurement — real-design structural automaton size"]
     fn measure_structural_automaton_size() {
         use crate::adapter::btor2::ast::{Node, Op};
         let Ok(path) = std::env::var("MUNUNU_PROBE_BTOR2") else {

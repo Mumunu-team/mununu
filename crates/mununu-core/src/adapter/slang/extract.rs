@@ -163,8 +163,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires the slang CLI (MUNUNU_SLANG_PATH or $PATH); run with --ignored"]
-    fn extracts_inline_sva_end_to_end() {
+    #[ignore = "requires the mununu-sva image (slang); run by the e2e sweep"]
+    fn e2e_extracts_inline_sva_end_to_end() {
         let sv = (
             "tiny.sv".to_string(),
             "module tiny (input logic clk, input logic a, input logic b);\n\

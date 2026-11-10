@@ -910,7 +910,7 @@ mod tests {
     ///
     /// Exit 0 = survived that depth. Abort / exit 134 = that depth overflows.
     #[test]
-    #[ignore = "mununu#543 probe — aborts by design; set MUNUNU_PROBE_DEPTH (and MUNUNU_PROBE_OP)"]
+    #[ignore = "manual: mununu#543 probe — aborts by design; set MUNUNU_PROBE_DEPTH (and MUNUNU_PROBE_OP)"]
     fn probe_543_predicate_expr_depth() {
         let depth: usize = std::env::var("MUNUNU_PROBE_DEPTH")
             .ok()

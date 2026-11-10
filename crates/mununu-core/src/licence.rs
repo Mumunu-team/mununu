@@ -8,7 +8,7 @@
 //! runners).
 //!
 //! **A licence never touches a verdict.** Nothing under `adapter/`, `mu_calculus/`, `planner/`,
-//! `verify/` or the CTXDSL evaluator reads this module — `tests/licence_never_reaches_a_verdict_h1.rs`
+//! `verify/` or the CTXDSL evaluator reads this module — `tests/policy/licence_never_reaches_a_verdict_h1.rs`
 //! keeps it so. The status rides the channel the build identity uses (mununu#715): `mununu
 //! licence status`, `GET /api/v1/licence`, the `licence` field of `/api/v1/health` and of every
 //! `sv verify-auto` report.

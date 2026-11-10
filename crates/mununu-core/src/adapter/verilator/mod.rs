@@ -981,8 +981,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires verilator binary installed; run with --ignored when available"]
-    fn locate_verilator_succeeds_when_binary_available() {
+    #[ignore = "requires the mununu-sva image (verilator); run by the e2e sweep"]
+    fn e2e_locate_verilator_succeeds_when_binary_available() {
         // R-S2b.1 integration test that's ignored by default. Run
         // with `cargo test -- --ignored` when Verilator is
         // installed locally (e.g. `brew install verilator` first).
@@ -1213,8 +1213,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires verilator + make installed; run with --ignored when available"]
-    fn compile_verilator_produces_runnable_binary_on_trivial_module() {
+    #[ignore = "requires the mununu-sva image (verilator + make); run by the e2e sweep"]
+    fn e2e_compile_verilator_produces_runnable_binary_on_trivial_module() {
         // End-to-end integration test: a minimal SV module + a
         // no-op testbench compile cleanly + produce a binary that
         // exits 0 when run. Gated because Verilator is contributor-
@@ -1609,8 +1609,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires verilator + make installed; run with --ignored when available"]
-    fn run_reset_simulation_returns_post_reset_counter_value() {
+    #[ignore = "requires the mununu-sva image (verilator + make); run by the e2e sweep"]
+    fn e2e_run_reset_simulation_returns_post_reset_counter_value() {
         // End-to-end runner test on a small synchronous counter:
         // - reset is active-low, held for 1 cycle (counter → 0).
         // - settle 2 cycles deasserted (counter → 2).

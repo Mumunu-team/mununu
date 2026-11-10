@@ -428,8 +428,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires the slang CLI (MUNUNU_SLANG_PATH or $PATH); run with --ignored"]
-    fn run_ast_json_emits_assertions_when_slang_available() {
+    #[ignore = "requires the mununu-sva image (slang); run by the e2e sweep"]
+    fn e2e_run_ast_json_emits_assertions_when_slang_available() {
         let bin = locate_slang().expect("slang available for the integration test");
         let dir = std::env::temp_dir().join("mununu_slang_xl1_test");
         std::fs::create_dir_all(&dir).unwrap();

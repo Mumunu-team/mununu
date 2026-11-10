@@ -1145,7 +1145,7 @@ mod tests {
     /// on a truly-unsafe design and no `Unsafe` on a truly-safe one. Prints the
     /// decide-rate. `#[ignore]`d — needs cvc5 + the external corpus.
     #[test]
-    #[ignore = "sweeps the external HWMCC corpus named by MUNUNU_HWMCC_GT/FLAT"]
+    #[ignore = "manual: sweeps the external HWMCC corpus named by MUNUNU_HWMCC_GT/FLAT"]
     fn differential_soundness_hwmcc() {
         let (Ok(gt_path), Ok(flat)) = (
             std::env::var("MUNUNU_HWMCC_GT"),
@@ -1223,7 +1223,7 @@ mod tests {
     /// Probe the full safety verdict on a real HWMCC design (path in
     /// `MUNUNU_INTERP_PROBE`) — the Phase-1 make-or-break. `#[ignore]`d.
     #[test]
-    #[ignore = "reads an external BTOR2 file named by MUNUNU_INTERP_PROBE"]
+    #[ignore = "manual: reads an external BTOR2 file named by MUNUNU_INTERP_PROBE"]
     fn probe_safety_verdict_on_external_design() {
         let Ok(path) = std::env::var("MUNUNU_INTERP_PROBE") else {
             eprintln!(
@@ -1264,7 +1264,7 @@ mod tests {
     /// cvc5 synthesises a useful-shaped predicate over the design's registers — the
     /// Phase-1 make-or-break signal. `#[ignore]`d: needs cvc5 + an external file.
     #[test]
-    #[ignore = "reads an external BTOR2 file named by MUNUNU_INTERP_PROBE"]
+    #[ignore = "manual: reads an external BTOR2 file named by MUNUNU_INTERP_PROBE"]
     fn probe_one_step_interpolant_on_external_design() {
         let Ok(path) = std::env::var("MUNUNU_INTERP_PROBE") else {
             eprintln!(

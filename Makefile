@@ -145,9 +145,12 @@ e2e e2e-oneshot e2e-parallel: export MUNUNU_LIFT_CACHE_DIR ?= $(or $(CARGO_TARGE
 e2e:
 	./scripts/e2e-sweep.sh
 
+# Each binary of scripts/e2e-binaries.txt (`lib` = the unit tests), with its feature args.
 e2e-oneshot:
-	$(CARGO) test -p mununu-core --lib --all-features e2e_ -- --ignored --nocapture
-	$(CARGO) test -p mununu-core --test differential_oracle_e2e --all-features -- --ignored --nocapture
+	@grep -v -e '^#' -e '^ *$$' scripts/e2e-binaries.txt | while read -r t f; do \
+	  sel=$$([ "$$t" = lib ] && echo --lib || echo "--test $$t"); \
+	  $(CARGO) test -p mununu-core $$sel $${f:---all-features} e2e_ -- --ignored --nocapture || exit 1; \
+	done
 
 # N0.3 (2026-11-03) — the same suite under cargo-nextest: one process per test, which is
 # exactly the isolation scripts/e2e-sweep.sh builds by hand (an abort is one failed row,
@@ -161,14 +164,18 @@ e2e-oneshot:
 # `--no-fail-fast` keeps every row; a crashed test is reported with its signal. Output is
 # captured per test (nextest's `--no-capture` would run the tests SERIALLY) and a failing
 # test's output is printed as it fails and again in the final summary. The two binaries are
-# the sweep's (the lib and the oracle): `--all-features` on the whole package would also
-# build the `adapters` group, whose feature-gated syntcomp module includes `mununu-private`
-# fixtures at compile time and does not build in the image.
+# the sweep's, from scripts/e2e-binaries.txt: one nextest run per binary with that binary's
+# feature args (`--all-features` on the `adapters` group would build its syntcomp module, which
+# includes `mununu-private` fixtures at compile time and does not build in the image). Every
+# binary runs even after one fails; the target fails if any did.
 E2E_JOBS ?= 4
 e2e-parallel:
-	$(CARGO) nextest run -p mununu-core --all-features --lib --test differential_oracle_e2e \
+	@grep -v -e '^#' -e '^ *$$' scripts/e2e-binaries.txt | { rc=0; while read -r t f; do \
+	  sel=$$([ "$$t" = lib ] && echo --lib || echo "--test $$t"); \
+	  $(CARGO) nextest run -p mununu-core $${f:---all-features} $$sel \
 	    --run-ignored ignored-only -E 'test(/e2e_/)' --test-threads $(E2E_JOBS) --no-fail-fast \
-	    --failure-output immediate-final --success-output never
+	    --failure-output immediate-final --success-output never || rc=1; \
+	done; exit $$rc; }
 
 # N0.1 (2026-11-03) — the executable ledger (measurements/ledger/README.md): every design's rows
 # get their cone hash for the price of a lift; only NEW / CHANGED / RETIRED rows re-run, under

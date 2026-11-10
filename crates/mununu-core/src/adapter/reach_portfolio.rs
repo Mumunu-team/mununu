@@ -1290,8 +1290,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires btormc + pono (mununu-sva); run with --ignored"]
-    fn portfolio_agrees_across_engines_in_sva() {
+    #[ignore = "requires the mununu-sva image (btormc + pono); run by the e2e sweep"]
+    fn e2e_portfolio_agrees_across_engines_in_sva() {
         // In mununu-sva all three engines run. On a small reachable counter they
         // must AGREE (all Reachable) — no contradiction alarm — demonstrating the
         // cross-check with the subprocess members live.
@@ -1343,7 +1343,7 @@ mod tests {
     /// `MUNUNU_HWMCC_GT` (`basename safe|unsafe` per line) and fails on any mismatch —
     /// the soundness net. `#[ignore]`d (reads an external corpus, minutes-to-hours).
     #[test]
-    #[ignore = "owned-only HWMCC ceiling sweep; set MUNUNU_HWMCC_FLAT (+ optional MUNUNU_HWMCC_GT), MUNUNU_OWNED_TIMEOUT_MS default 240000"]
+    #[ignore = "manual: owned-only HWMCC ceiling sweep; set MUNUNU_HWMCC_FLAT (+ optional MUNUNU_HWMCC_GT), MUNUNU_OWNED_TIMEOUT_MS default 240000"]
     fn owned_only_hwmcc_ceiling() {
         let Ok(flat) = std::env::var("MUNUNU_HWMCC_FLAT") else {
             eprintln!("SKIPPED: external-corpus sweep — set MUNUNU_HWMCC_FLAT to run it.");

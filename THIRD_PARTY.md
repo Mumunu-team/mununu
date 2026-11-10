@@ -4,7 +4,7 @@
 > They are **not** under the [Mununu Non-Commercial License](LICENSE); each stays under the
 > licence named in its row, whose text is in [`LICENSES/`](LICENSES/) or beside the files. Everything
 > not listed here is first-party and under `LICENSE`. The test
-> `crates/mununu-core/tests/third_party_inventory_g1.rs` fails when a directory with a
+> `crates/mununu-core/tests/policy/third_party_inventory_g1.rs` fails when a directory with a
 > third-party licence header or a provenance file is missing from this page.
 
 **What you may do with one of these files.** Find its directory in the tables; the row names the

@@ -8,12 +8,12 @@
 //! Its own top-level integration test (target `exact_bitcap_fallback_849`), outside
 //! `verify_auto.rs` where the fix lives, so `make verify-repro IGNORED=1` builds the parent
 //! without the fix; it uses only API the parent already has. `#[ignore]`d: it lifts SystemVerilog
-//! through sv2v + Yosys, which CI does not carry.
+//! through yosys-slang, which CI does not carry; the e2e sweep runs it in mununu-sva (#952).
 
 use mununu_core::adapter::slang::verify_auto::{
     PortfolioMode, VerifyAutoOptions, VerifyOutcome, verify_auto,
 };
-use mununu_core::adapter::yosys::{SvFrontend, YosysOptions};
+use mununu_core::adapter::yosys::YosysOptions;
 
 /// Two 100-bit registers that count up together from 0 and 1: they never meet, so
 /// `AG EF (data_q == target_q)` is VIOLATED, and the 200-bit cone is over the 192-bit cap.
@@ -38,8 +38,8 @@ mod exact_bitcap_fallback_849 {
     use super::*;
 
     #[test]
-    #[ignore = "requires sv2v + Yosys + z3; run with --ignored --nocapture"]
-    fn a_recoverability_row_decided_by_the_fallback_after_an_exact_bit_cap_refusal_says_why_it_ships_no_path()
+    #[ignore = "requires the mununu-sva image (yosys + slang + z3); run by the e2e sweep"]
+    fn e2e_a_recoverability_row_decided_by_the_fallback_after_an_exact_bit_cap_refusal_says_why_it_ships_no_path()
      {
         let sources = vec![(
             "wide_never_meet.sv".to_string(),
@@ -47,7 +47,6 @@ mod exact_bitcap_fallback_849 {
         )];
         let yopts = YosysOptions {
             top: Some("wide_never_meet".to_string()),
-            frontend: SvFrontend::Verilog,
             ..Default::default()
         };
         // The CLI's and the API's default engine: the sequential portfolio, exact first.
