@@ -1179,13 +1179,14 @@ pub struct Btor2VerifyLivenessRequest {
 pub struct Btor2VerifyJusticeRequest {
     /// BTOR2 source content, or ASCII AIGER 1.9 (`aag …`).
     pub content: String,
-    /// `"exact"`, `"l2s"` or `"both"` (default).
+    /// `"exact"`, `"l2s"`, `"kliveness"` or `"both"` (default: exact ≤ 30 s → l2s → k-liveness →
+    /// exact remainder).
     #[serde(default)]
     pub rung: Option<String>,
     /// Wall-clock budget per justice set in milliseconds (default: the engines' own budgets).
     #[serde(default)]
     pub timeout_ms: Option<u64>,
-    /// Under `both`, run the exact ladder and the l2s rung concurrently (first definite wins).
+    /// Under `both`, run the exact, l2s and k-liveness rungs concurrently (first definite wins).
     #[serde(default)]
     pub parallel_rungs: Option<bool>,
 }

@@ -1229,16 +1229,17 @@ struct Btor2VerifyLivenessArgs {
     /// Decide the design's own `justice` lines (HWMCC semantics) instead of a response property.
     #[arg(long, conflicts_with_all = ["request", "responses"])]
     justice: bool,
-    /// `--justice`: `exact`, `l2s` or `both` (the default: the exact ladder for 30 s, then l2s,
-    /// then the exact ladder with the remainder).
+    /// `--justice`: `exact`, `l2s`, `kliveness` or `both` (the default: the exact ladder for 30 s,
+    /// then l2s, then k-liveness, then the exact ladder with the remainder).
     #[arg(long, default_value = "both", requires = "justice")]
     rung: String,
-    /// `--justice`: wall-clock budget per justice set in milliseconds. Bounds both rungs: under
-    /// `--rung both` the l2s portfolio gets half of what the exact slice leaves, the exact remainder
-    /// the rest. Unset, the l2s portfolio's members run at their defaults (60 s per subprocess).
+    /// `--justice`: wall-clock budget per justice set in milliseconds. Bounds every rung: under
+    /// `--rung both` l2s gets half of what the exact slice leaves, k-liveness half of what l2s
+    /// leaves, the exact remainder the rest. Unset, the portfolio members run at their defaults
+    /// (60 s per subprocess).
     #[arg(long, value_name = "MS", requires = "justice")]
     timeout_ms: Option<u64>,
-    /// `--justice` with `--rung both`: run both rungs concurrently, first definite verdict wins.
+    /// `--justice` with `--rung both`: run the three rungs concurrently, first definite verdict wins.
     #[arg(long, requires = "justice")]
     parallel_rungs: bool,
     /// `--justice`: emit the per-set report as JSON only.
@@ -1254,17 +1255,19 @@ struct Btor2VerifyJusticeArgs {
     #[arg(value_name = "FILE")]
     file: PathBuf,
     /// `exact` (ROBDD fair-cycle fixpoint), `l2s` (liveness-to-safety + the reachability
-    /// portfolio) or `both` (the default: the exact ladder for 30 s, then l2s, then the exact
-    /// ladder with the remainder).
+    /// portfolio), `kliveness` (a bound on the fair rounds proved as safety by IC3 / k-induction;
+    /// proofs only) or `both` (the default: the exact ladder for 30 s, then l2s, then k-liveness,
+    /// then the exact ladder with the remainder).
     #[arg(long, default_value = "both")]
     rung: String,
     /// Wall-clock budget per justice set in milliseconds (default: the engines' own budgets — the
-    /// l2s portfolio's members at 60 s per subprocess). Bounds both rungs: under `--rung both` the
-    /// l2s portfolio gets half of what the exact slice leaves, the exact remainder the rest.
+    /// portfolio members at 60 s per subprocess). Bounds every rung: under `--rung both` l2s gets
+    /// half of what the exact slice leaves, k-liveness half of what l2s leaves, the exact
+    /// remainder the rest.
     #[arg(long, value_name = "MS")]
     timeout_ms: Option<u64>,
-    /// Under `--rung both`, run the exact ladder and the l2s rung concurrently; the first
-    /// definite verdict wins and the other is cancelled.
+    /// Under `--rung both`, run the exact ladder, the l2s rung and the k-liveness rung
+    /// concurrently; the first definite verdict wins and the others are cancelled.
     #[arg(long)]
     parallel_rungs: bool,
     /// Emit the per-justice-set report as JSON only.

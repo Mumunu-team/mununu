@@ -481,6 +481,70 @@ pub fn decide_reach_portfolio_cancellable(
     subprocess_timeout: std::time::Duration,
     cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> ReachOutcome {
+    decide_reach_portfolio_with_members(file, subprocess_timeout, cancel, ReachMembers::ALL)
+}
+
+/// Which members [`decide_reach_portfolio_with_members`] starts. [`ReachMembers::ALL`] is the
+/// shipped portfolio; a caller that knows the query's shape may leave members out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReachMembers {
+    /// The exact ROBDD engine (in-process, on the calling thread; no cancellation point —
+    /// mununu#816: a single BDD apply cannot be interrupted, so a member that cannot finish holds
+    /// the portfolio past its budget).
+    pub exact: bool,
+    /// Native BMC / k-induction (in-process z3).
+    pub native: bool,
+    /// Owned McMillan interpolation (in-process).
+    pub interp: bool,
+    /// btormc (subprocess BMC — finds `bad` reachable, never proves).
+    pub btormc: bool,
+    /// Pono (subprocess, `ic3bits`).
+    pub pono: bool,
+    /// rIC3 (subprocess).
+    pub ric3: bool,
+    /// rIC3's `-e` engine; [`ric3::PORTFOLIO_ENGINE`] runs its own multi-configuration portfolio.
+    pub ric3_engine: &'static str,
+}
+
+impl ReachMembers {
+    /// Every member — the shipped portfolio, byte-for-byte the behaviour of
+    /// [`decide_reach_portfolio_cancellable`] before this type existed.
+    pub const ALL: Self = Self {
+        exact: true,
+        native: true,
+        interp: true,
+        btormc: true,
+        pono: true,
+        ric3: true,
+        ric3_engine: ric3::DEFAULT_ENGINE,
+    };
+    /// The proof-directed set for a `bad` that is a BOUND on a monitor (Track V's k-liveness
+    /// rung): IC3 (rIC3 in its portfolio mode, Pono) and k-induction. No exact (bit-blasting the
+    /// whole design for a question a small inductive invariant settles, and uninterruptible —
+    /// measured: the full portfolio did not return in 400 s on a monitor rIC3 proved in 14 s),
+    /// no btormc (a bound's `reachable` is not a verdict here, only "try a wider counter", and
+    /// IC3 finds those traces as fast), no interpolation (its query budget is tuned for the
+    /// safety rows).
+    pub const PROOF_DIRECTED: Self = Self {
+        exact: false,
+        native: true,
+        interp: false,
+        btormc: false,
+        pono: true,
+        ric3: true,
+        ric3_engine: ric3::PORTFOLIO_ENGINE,
+    };
+}
+
+/// [`decide_reach_portfolio_cancellable`] restricted to `members`. A member left out is simply
+/// not started — it neither refuses nor abstains, so the outcome's lists name only members that
+/// ran. The merge, the budget handling and the cancellation are unchanged.
+pub fn decide_reach_portfolio_with_members(
+    file: &Btor2File,
+    subprocess_timeout: std::time::Duration,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+    members: ReachMembers,
+) -> ReachOutcome {
     use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
     // mununu#726 — read the thread-local budget ONCE: an already-expired budget decides nothing
     // (deterministic: no member is spawned), and the members' bounds follow the time left. The
@@ -536,94 +600,109 @@ pub fn decide_reach_portfolio_cancellable(
                 }
             });
         }
-        let btormc_h = scope.spawn(move || {
-            let _g = crate::adapter::run_budget::enter(budget);
-            let v = timed("btormc", || {
-                btormc::decide_via_btormc(file, btormc_kmax, subprocess_timeout, Some(decided))
+        let btormc_h = members.btormc.then(|| {
+            scope.spawn(move || {
+                let _g = crate::adapter::run_budget::enter(budget);
+                let v = timed("btormc", || {
+                    btormc::decide_via_btormc(file, btormc_kmax, subprocess_timeout, Some(decided))
+                        .map(Some)
+                        .map_err(|e| e.message)
+                });
+                let v = settle(refused, "btormc", v);
+                if matches!(v, Some(McVerdict::Violated) | Some(McVerdict::Safe)) {
+                    decided.store(true, Relaxed);
+                }
+                v
+            })
+        });
+        let pono_h = members.pono.then(|| {
+            scope.spawn(move || {
+                let _g = crate::adapter::run_budget::enter(budget);
+                let v = timed("pono", || {
+                    pono::decide_via_pono(
+                        file,
+                        pono::DEFAULT_ENGINE,
+                        subprocess_timeout,
+                        Some(decided),
+                    )
                     .map(Some)
                     .map_err(|e| e.message)
-            });
-            let v = settle(refused, "btormc", v);
-            if matches!(v, Some(McVerdict::Violated) | Some(McVerdict::Safe)) {
-                decided.store(true, Relaxed);
-            }
-            v
-        });
-        let pono_h = scope.spawn(move || {
-            let _g = crate::adapter::run_budget::enter(budget);
-            let v = timed("pono", || {
-                pono::decide_via_pono(
-                    file,
-                    pono::DEFAULT_ENGINE,
-                    subprocess_timeout,
-                    Some(decided),
-                )
-                .map(Some)
-                .map_err(|e| e.message)
-            });
-            let v = settle(refused, "pono", v);
-            if matches!(v, Some(McVerdict::Violated) | Some(McVerdict::Safe)) {
-                decided.store(true, Relaxed);
-            }
-            v
+                });
+                let v = settle(refused, "pono", v);
+                if matches!(v, Some(McVerdict::Violated) | Some(McVerdict::Safe)) {
+                    decided.store(true, Relaxed);
+                }
+                v
+            })
         });
         // Plan 4 / PR D2 (mununu#736) — rIC3's bit-level IC3: the member that proves the
         // inductive-invariant safety class (OpenTitan's duplicated-counter fault-flag chains, which
         // k-induction cannot close from a free step state).
         // Trusted like btormc / pono: it reads the same emitted BTOR2 and answers with a certificate-
         // capable verdict; the HWMCC adjudication ran clean before it was promoted.
-        let ric3_h = scope.spawn(move || {
-            let _g = crate::adapter::run_budget::enter(budget);
-            let v = timed("ric3", || {
-                ric3::decide_via_ric3(
-                    file,
-                    ric3::DEFAULT_ENGINE,
-                    subprocess_timeout,
-                    Some(decided),
-                )
-                .map(Some)
-                .map_err(|e| e.message)
-            });
-            let v = settle(refused, "ric3", v);
-            if matches!(v, Some(McVerdict::Violated) | Some(McVerdict::Safe)) {
-                decided.store(true, Relaxed);
-            }
-            v
+        let ric3_h = members.ric3.then(|| {
+            scope.spawn(move || {
+                let _g = crate::adapter::run_budget::enter(budget);
+                let v = timed("ric3", || {
+                    ric3::decide_via_ric3(
+                        file,
+                        members.ric3_engine,
+                        subprocess_timeout,
+                        Some(decided),
+                    )
+                    .map(Some)
+                    .map_err(|e| e.message)
+                });
+                let v = settle(refused, "ric3", v);
+                if matches!(v, Some(McVerdict::Violated) | Some(McVerdict::Safe)) {
+                    decided.store(true, Relaxed);
+                }
+                v
+            })
         });
         // The native engine is in-process Z3 work — on its own
         // thread so it overlaps the exact engine + the subprocess members rather than
         // serialising.
-        let native_h = scope.spawn(move || {
-            let _g = crate::adapter::run_budget::enter(budget);
-            let v = settle_native(
-                refused,
-                abstained,
-                "native",
-                run_native(file, Some(decided), t.native_query_ms),
-            );
-            if v.is_some() {
-                decided.store(true, Relaxed);
-            }
-            v
+        let native_h = members.native.then(|| {
+            scope.spawn(move || {
+                let _g = crate::adapter::run_budget::enter(budget);
+                let v = settle_native(
+                    refused,
+                    abstained,
+                    "native",
+                    run_native(file, Some(decided), t.native_query_ms),
+                );
+                if v.is_some() {
+                    decided.store(true, Relaxed);
+                }
+                v
+            })
         });
         // Owned McMillan interpolation — now a FIRST-CLASS concurrent member (was
         // last-resort). Polls `decided` and bails out early once a faster member decides.
-        let interp_h = scope.spawn(move || {
-            let _g = crate::adapter::run_budget::enter(budget);
-            run_interp(file, decided, t.interp_query_ms, t.interp_overall_ms)
+        let interp_h = members.interp.then(|| {
+            scope.spawn(move || {
+                let _g = crate::adapter::run_budget::enter(budget);
+                run_interp(file, decided, t.interp_query_ms, t.interp_overall_ms)
+            })
         });
         // The exact engine is in-process BDD work — run it on this thread while the
         // other members run on theirs.
-        let exact = settle(refused, "exact", run_exact(&content));
+        let exact = if members.exact {
+            settle(refused, "exact", run_exact(&content))
+        } else {
+            None
+        };
         if exact.is_some() {
             decided.store(true, Relaxed);
         }
-        // A panicked member thread abstains (None) rather than poisoning the merge.
-        let native = native_h.join().unwrap_or(None);
-        let btormc = btormc_h.join().unwrap_or(None);
-        let pono = pono_h.join().unwrap_or(None);
-        let ric3 = ric3_h.join().unwrap_or(None);
-        let interp = interp_h.join().unwrap_or(None);
+        // A panicked member thread abstains (None) rather than poisoning the merge; a member not
+        // started is None too.
+        let native = native_h.and_then(|h| h.join().unwrap_or(None));
+        let btormc = btormc_h.and_then(|h| h.join().unwrap_or(None));
+        let pono = pono_h.and_then(|h| h.join().unwrap_or(None));
+        let ric3 = ric3_h.and_then(|h| h.join().unwrap_or(None));
+        let interp = interp_h.and_then(|h| h.join().unwrap_or(None));
         finished.store(true, Relaxed);
         Members {
             exact,

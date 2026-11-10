@@ -35,6 +35,7 @@ pub mod dep_graph;
 pub mod emit;
 pub mod fault;
 pub mod input_state;
+pub mod kliveness_monitor;
 pub mod kmts_lift;
 pub mod l2s_monitor;
 pub mod minted_expr;
