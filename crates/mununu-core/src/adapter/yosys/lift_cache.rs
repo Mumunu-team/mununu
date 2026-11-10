@@ -8,13 +8,15 @@
 //! **What is keyed** — everything the tools are *told*, rendered by the same planner that
 //! stages the real run ([`super::plan_lift`] against a placeholder directory): the staged
 //! sources after `strip_port_net_types`, the exact yosys script, whether yosys runs inside the
-//! staging directory, every file under an include directory a tool may read, the tool
-//! identities (`yosys -V` banner, a plugin's path, size and mtime; the dev-only oracle's sv2v
-//! argv and `--version`), the crate version and [`LIFT_CACHE_FORMAT`]. A change to any of it is
-//! a miss.
+//! staging directory, every file under an include directory a tool may read and every file
+//! `include`d by absolute path (byte for byte), the tool identities (`yosys -V` banner and the
+//! binary's size and mtime, the slang plugin's resolved size and mtime; the dev-only oracle's
+//! sv2v argv and `--version`), the crate version and [`LIFT_CACHE_FORMAT`]. A change to any of
+//! it is a miss; an input the key cannot see (an `include` of a macro or a `..` path, a plugin
+//! that cannot be found) is a bypass, never a guess (mununu#956).
 //!
 //! **What is stored** — the raw outputs of a *successful* lift (`design.btor`, `hier.json`,
-//! `clocks.json`) plus the process facts (front end used, backend retry, the staged primary
+//! `clocks.json`; a lift missing either JSON snapshot is an error and is never stored, #957) plus the process facts (front end used, backend retry, the staged primary
 //! path). Everything mununu computes *from* those — clock domains,
 //! the multi-clock refusal, blackbox names, port directions — runs on a hit exactly as on a
 //! miss, so a change to that Rust code takes effect without invalidating the cache.
@@ -41,8 +43,10 @@ pub const LIFT_CACHE_DIR_ENV: &str = "MUNUNU_LIFT_CACHE_DIR";
 /// a new environment variable handed to yosys, a flag outside the script text, a different
 /// working directory rule. The script, the oracle's sv2v argv and the tool banners are in the
 /// manifest, so a change to any of those misses on its own. 2 (N1, 2026-11-04): one attempt per
-/// lift, the slang-only product front end.
-pub(super) const LIFT_CACHE_FORMAT: u32 = 2;
+/// lift, the slang-only product front end. 3 (mununu#956/#957, 2026-11-10): include contents
+/// keyed as raw bytes, absolutely-`include`d files keyed, tool binaries keyed by size and mtime,
+/// and only lifts that wrote both JSON snapshots are stored.
+pub(super) const LIFT_CACHE_FORMAT: u32 = 3;
 
 /// Caps on the include-directory walk: above either, the manifest is not built and the lift
 /// bypasses the cache (a walk that large would cost more than the lift it saves).
@@ -59,31 +63,57 @@ pub(super) struct ToolIdentity {
 
 impl ToolIdentity {
     /// A plugin file's identity from its metadata (no subprocess): size and modification time.
-    /// A bare name (yosys resolves `-m slang` from its plugin dir) is identified by the pinned
-    /// image's plugin file when it exists, else by the name alone.
-    pub(super) fn of_plugin(arg: &str) -> ToolIdentity {
-        let candidate = if Path::new(arg).exists() {
-            PathBuf::from(arg)
-        } else {
-            PathBuf::from("/opt/oss-cad-suite/share/yosys/plugins/slang.so")
-        };
-        let identity = match std::fs::metadata(&candidate) {
-            Ok(m) => {
-                let mtime = m
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                format!("len={},mtime={mtime}", m.len())
+    /// A path is taken as given; a bare name (`-m slang`) is looked up where yosys looks it up,
+    /// `<yosys>/../share/yosys/plugins/<name>.so`, then in the pinned image's plugin dir. A
+    /// plugin found in neither cannot be keyed: `Err`, and the lift bypasses the cache
+    /// (mununu#956 — it was keyed by the name alone, so a rebuilt plugin served the old lift).
+    pub(super) fn of_plugin(arg: &str, yosys: &Path) -> Result<ToolIdentity, String> {
+        let mut candidates = vec![PathBuf::from(arg)];
+        let bare = !arg.contains('/') && !arg.contains('\\');
+        if bare {
+            let file = if arg.ends_with(".so") {
+                arg.to_string()
+            } else {
+                format!("{arg}.so")
+            };
+            if let Some(bin_dir) = resolve_binary(yosys).as_deref().and_then(Path::parent) {
+                candidates.push(bin_dir.join("../share/yosys/plugins").join(&file));
             }
-            Err(_) => "unresolved".to_string(),
-        };
-        ToolIdentity {
-            path: arg.to_string(),
-            identity,
+            candidates.push(Path::new("/opt/oss-cad-suite/share/yosys/plugins").join(&file));
         }
+        let found = candidates.iter().find(|c| c.is_file()).ok_or_else(|| {
+            format!("the slang plugin `{arg}` was not found where yosys loads it from")
+        })?;
+        Ok(ToolIdentity {
+            path: arg.to_string(),
+            identity: file_stamp(found)?,
+        })
     }
+}
+
+/// `len=…,mtime=…` of a file: what identifies a rebuilt binary or plugin without running it.
+/// `Err` when the metadata cannot be read — the caller bypasses the cache.
+pub(super) fn file_stamp(path: &Path) -> Result<String, String> {
+    let m = std::fs::metadata(path).map_err(|e| format!("cannot stat {}: {e}", path.display()))?;
+    let mtime = m
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .ok_or_else(|| format!("{} has no modification time", path.display()))?;
+    Ok(format!("len={},mtime={mtime}", m.len()))
+}
+
+/// The file a tool name runs: a path as given, a bare name found on `$PATH`. `None` when it
+/// cannot be found.
+pub(super) fn resolve_binary(bin: &Path) -> Option<PathBuf> {
+    if bin.components().count() > 1 {
+        return bin.is_file().then(|| bin.to_path_buf());
+    }
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|d| d.join(bin))
+        .find(|c| c.is_file())
 }
 
 /// The dev-only oracle's sv2v pass: the binary and the exact argument vector (`test_support`
@@ -118,7 +148,8 @@ pub(super) struct LiftManifest {
     /// The staged sources as the tools read them, relative to the staging directory, the
     /// primary (`work.sv`) first.
     pub staged: Vec<(String, String)>,
-    /// Every file under an include directory a tool may read, `(path, content)`, sorted.
+    /// Every file under an include directory a tool may read, and every absolutely-`include`d
+    /// file, `(path, content)` with the content in [`key_bytes`] form, sorted.
     pub include_files: Vec<(String, String)>,
 }
 
@@ -342,15 +373,114 @@ pub(super) fn collect_include_files(dirs: &[PathBuf]) -> Result<Vec<(String, Str
                 }
                 let content = std::fs::read(&path)
                     .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-                files.push((
-                    path.to_string_lossy().into_owned(),
-                    String::from_utf8_lossy(&content).into_owned(),
-                ));
+                files.push((path.to_string_lossy().into_owned(), key_bytes(&content)));
             }
         }
     }
     files.sort();
     Ok(files)
+}
+
+/// A file's content as the manifest keys it: `t:<text>` when it is UTF-8, `x:<hex>` when it is
+/// not. Byte-exact either way — the lossy decode it replaces mapped distinct invalid sequences
+/// to the same U+FFFD, so an edit could keep the key (mununu#956).
+pub(super) fn key_bytes(content: &[u8]) -> String {
+    match std::str::from_utf8(content) {
+        Ok(text) => format!("t:{text}"),
+        Err(_) => {
+            let mut out = String::with_capacity(2 + 2 * content.len());
+            out.push_str("x:");
+            for b in content {
+                out.push_str(&format!("{b:02x}"));
+            }
+            out
+        }
+    }
+}
+
+/// The `` `include `` directives of `text` a cache key cannot see through the include-dir
+/// walk: each absolute path is read, keyed into `files` (and scanned in turn); a directive whose
+/// target is not a string literal (a macro), or whose path climbs with `..`, cannot be keyed:
+/// `Err`, and the lift bypasses the cache (mununu#956 — an absolute include outside every keyed
+/// directory was not in the key, so an edit to it served the old lift). A relative literal is
+/// resolved by the tool against the including file's directory or an include dir — both keyed.
+pub(super) fn key_include_directives(
+    texts: &[&str],
+    files: &mut Vec<(String, String)>,
+) -> Result<(), String> {
+    let mut pending: Vec<String> = texts.iter().map(|t| t.to_string()).collect();
+    let mut bytes: u64 = 0;
+    while let Some(text) = pending.pop() {
+        for target in include_targets(&text)? {
+            let path = Path::new(&target);
+            if path
+                .components()
+                .any(|c| c == std::path::Component::ParentDir)
+            {
+                return Err(format!(
+                    "`include \"{target}\"` climbs out of the keyed directories"
+                ));
+            }
+            if !path.is_absolute() || files.iter().any(|(p, _)| *p == target) {
+                continue;
+            }
+            let content =
+                std::fs::read(path).map_err(|e| format!("cannot read `include {target}: {e}"))?;
+            bytes += content.len() as u64;
+            if files.len() + 1 > MAX_INCLUDE_FILES || bytes > MAX_INCLUDE_BYTES {
+                return Err(format!(
+                    "absolute includes exceed the cache's walk cap ({MAX_INCLUDE_FILES} files / \
+                     {} MiB)",
+                    MAX_INCLUDE_BYTES / (1024 * 1024)
+                ));
+            }
+            if let Ok(text) = std::str::from_utf8(&content) {
+                pending.push(text.to_string());
+            }
+            files.push((target.clone(), key_bytes(&content)));
+        }
+    }
+    files.sort();
+    Ok(())
+}
+
+/// The targets of the `` `include `` directives in `text`: the literal between `"…"` or `<…>`.
+/// `Err` on a directive with any other argument (a macro the key cannot evaluate). A mention
+/// after `//` on its line is skipped; one inside a block comment is read — a spurious target
+/// only widens the key or bypasses it.
+fn include_targets(text: &str) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    for (at, _) in text.match_indices("`include") {
+        let line_start = text[..at].rfind('\n').map_or(0, |i| i + 1);
+        if text[line_start..at].contains("//") {
+            continue; // a line comment's mention, not a directive
+        }
+        let rest = &text[at + "`include".len()..];
+        if rest
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_')
+        {
+            continue; // `` `include_foo `` is another macro
+        }
+        let rest = rest.trim_start();
+        let close = match rest.chars().next() {
+            Some('"') => '"',
+            Some('<') => '>',
+            _ => {
+                let arg: String = rest.chars().take(40).collect();
+                return Err(format!(
+                    "`include {arg}… names no literal path the cache can key"
+                ));
+            }
+        };
+        let body = &rest[1..];
+        let end = body
+            .find(close)
+            .ok_or_else(|| "an unterminated `include path".to_string())?;
+        out.push(body[..end].to_string());
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -464,11 +594,24 @@ mod tests {
         assert_ne!(LiftCacheKey::new(&m).unwrap().index(), base.index());
         let mut m = manifest("module m; endmodule");
         m.include_files
-            .push(("/inc/a.svh".into(), "`define A 1".into()));
+            .push(("/inc/a.svh".into(), key_bytes(b"`define A 1")));
         assert_ne!(LiftCacheKey::new(&m).unwrap().index(), base.index());
         let mut m = manifest("module m; endmodule");
         m.yosys.identity = "Yosys 0.69".into();
         assert_ne!(LiftCacheKey::new(&m).unwrap().index(), base.index());
+    }
+
+    /// mununu#956: two include files that differ only in invalid UTF-8 bytes key apart (the
+    /// lossy decode mapped both to U+FFFD).
+    #[test]
+    fn include_files_differing_only_in_invalid_utf8_key_apart() {
+        let walk = |bytes: &[u8]| {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("a.bin"), bytes).unwrap();
+            let files = collect_include_files(&[dir.path().to_path_buf()]).unwrap();
+            files[0].1.clone()
+        };
+        assert_ne!(walk(b"x\xff"), walk(b"x\xfe"));
     }
 
     /// The include walk reads every regular file under the dirs, sorted, skips a missing dir,
@@ -496,7 +639,7 @@ mod tests {
             })
             .collect();
         assert_eq!(names, ["a.svh", "b.svh", "c.vh"]);
-        assert_eq!(files[2].1, "c");
+        assert_eq!(files[2].1, "t:c");
         let many = dir.path().join("many");
         std::fs::create_dir_all(&many).unwrap();
         for i in 0..=MAX_INCLUDE_FILES {

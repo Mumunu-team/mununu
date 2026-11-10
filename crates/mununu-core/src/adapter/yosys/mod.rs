@@ -52,7 +52,8 @@ use crate::adapter::{
 use lift_cache::Sv2vManifest;
 use lift_cache::{
     AttemptManifest, CachedLift, LIFT_CACHE_FORMAT, LiftCache, LiftCacheKey, LiftCacheOutcome,
-    LiftManifest, ToolIdentity, collect_include_files, frontend_from_tag, frontend_tag,
+    LiftManifest, ToolIdentity, collect_include_files, file_stamp, frontend_from_tag, frontend_tag,
+    key_include_directives, resolve_binary,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -490,12 +491,16 @@ fn run_sv_flatten_btor2_with(
 fn lift_cache_key(content: &str, yopts: &YosysOptions) -> Result<LiftCacheKey, String> {
     let yosys = locate_yosys().map_err(|e| e.message)?;
     let banner = yosys_banner(&yosys).map_err(|e| e.message)?;
+    // The binary's size and mtime beside its banner: a yosys rebuilt at the same version
+    // banner is another tool (mununu#956).
+    let bin = resolve_binary(&yosys)
+        .ok_or_else(|| format!("cannot resolve the yosys binary `{}`", yosys.display()))?;
     let manifest = lift_manifest(
         content,
         yopts,
         ToolIdentity {
             path: yosys.display().to_string(),
-            identity: banner,
+            identity: format!("{banner}\n{}", file_stamp(&bin)?),
         },
     )?;
     LiftCacheKey::new(&manifest)
@@ -544,6 +549,11 @@ fn lift_manifest(
     };
     #[cfg(not(feature = "test_support"))]
     let sv2v = None;
+    let plugin = plan
+        .plugin
+        .as_deref()
+        .map(|arg| ToolIdentity::of_plugin(arg, Path::new(&yosys.path)))
+        .transpose()?;
     Ok(LiftManifest {
         format: LIFT_CACHE_FORMAT,
         crate_version: env!("CARGO_PKG_VERSION"),
@@ -552,11 +562,24 @@ fn lift_manifest(
             frontend: frontend_tag(plan.frontend_used),
             script: plan.script,
             cwd_in_staging_dir: plan.yosys_cwd.is_some(),
-            plugin: plan.plugin.as_deref().map(ToolIdentity::of_plugin),
+            plugin,
             sv2v,
         },
+        include_files: {
+            let mut files = collect_include_files(&include_dirs)?;
+            let walked: Vec<String> = files
+                .iter()
+                .filter_map(|(_, c)| c.strip_prefix("t:").map(str::to_string))
+                .collect();
+            let texts: Vec<&str> = staged
+                .iter()
+                .map(|(_, t)| t.as_str())
+                .chain(walked.iter().map(String::as_str))
+                .collect();
+            key_include_directives(&texts, &mut files)?;
+            files
+        },
         staged,
-        include_files: collect_include_files(&include_dirs)?,
     })
 }
 
@@ -906,15 +929,18 @@ fn run_sv_flatten_btor2_concrete(
         location: None,
     })?;
 
-    // Best-effort hierarchy snapshot (port directions + blackbox scan);
-    // empty when Yosys did not emit it.
-    let hier_json = std::fs::read_to_string(&plan.hier_json_path).unwrap_or_default();
+    // The hierarchy snapshot (port directions + blackbox scan) and the flattened netlist (the
+    // clock-domain scan) are written by every script `build_script` renders. One that is
+    // missing after yosys succeeded is a lift that went wrong, not an empty design: read as
+    // empty, it switched off the multi-clock refusal and the black-box scan silently, and the
+    // lift cache stored that (mununu#957). A lift error instead — never cached.
+    let hier_json = read_lift_snapshot(&plan.hier_json_path, "hierarchy")?;
 
     // The BTOR2 model has ONE implicit clock: every `next` fires on it. A design whose flops sit
     // in two domains was lifted as if they ticked together — silently, because the old refusal
     // matched clock-shaped input NAMES (`clk`, `clk_i`, …) and `clk_src`/`clk_dst` passed.
     let flat_netlist_json =
-        std::fs::read_to_string(clock_json_path(&plan.btor_path)).unwrap_or_default();
+        read_lift_snapshot(&clock_json_path(&plan.btor_path), "flattened netlist")?;
     let clock_domains = clock_domains(&flat_netlist_json);
     refuse_merged_clock_domains(&clock_domains, yopts)?;
 
@@ -928,6 +954,28 @@ fn run_sv_flatten_btor2_concrete(
         flat_netlist_json,
         cache: LiftCacheOutcome::Off,
     })
+}
+
+/// A JSON snapshot the lift's script writes, read back; missing or empty is a lift error that
+/// names the file (mununu#957).
+fn read_lift_snapshot(path: &Path, what: &str) -> Result<String, AdapterError> {
+    match std::fs::read_to_string(path) {
+        Ok(text) if !text.trim().is_empty() => Ok(text),
+        Ok(_) => Err(lift_snapshot_error(path, what, "it is empty")),
+        Err(e) => Err(lift_snapshot_error(path, what, &e.to_string())),
+    }
+}
+
+fn lift_snapshot_error(path: &Path, what: &str, why: &str) -> AdapterError {
+    AdapterError {
+        kind: AdapterErrorKind::ParseError,
+        message: format!(
+            "adapter/yosys: yosys ran but its {what} snapshot {} cannot be used ({why}); without \
+             it the multi-clock refusal and the black-box scan would be skipped",
+            path.display()
+        ),
+        location: None,
+    }
 }
 
 /// The multi-clock refusal: more than one domain is an error unless
@@ -2797,12 +2845,17 @@ fn sv2v_version(sv2v: &Path) -> Result<String, AdapterError> {
     tool_version(sv2v, "--version", "sv2v")
 }
 
-/// A tool's version banner, memoised per (binary, flag) for the life of the process — the
-/// binaries are pinned per image, and a lift that asks for the same banner twice would
-/// otherwise spawn the tool twice.
+/// A tool's version banner, memoised per (binary, flag, size + mtime) for the life of the
+/// process — a lift that asks for the same banner twice would otherwise spawn the tool twice.
+/// The binary's stamp is in the memo key so a tool replaced while the process runs (a long-lived
+/// server, an image rebuilt under it) is asked again (mununu#956).
 fn tool_version(bin: &Path, flag: &str, label: &str) -> Result<String, AdapterError> {
-    static BANNERS: OnceLock<Mutex<HashMap<(PathBuf, String), String>>> = OnceLock::new();
-    let key = (bin.to_path_buf(), flag.to_string());
+    #[allow(clippy::type_complexity)]
+    static BANNERS: OnceLock<Mutex<HashMap<(PathBuf, String, String), String>>> = OnceLock::new();
+    let stamp = resolve_binary(bin)
+        .and_then(|p| file_stamp(&p).ok())
+        .unwrap_or_default();
+    let key = (bin.to_path_buf(), flag.to_string(), stamp);
     let cache = BANNERS.get_or_init(Default::default);
     if let Some(banner) = cache.lock().ok().and_then(|m| m.get(&key).cloned()) {
         return Ok(banner);
@@ -5005,6 +5058,82 @@ mod lift_cache_tests {
             path: "yosys".into(),
             identity: "Yosys 0.68 (test)".into(),
         }
+    }
+
+    /// mununu#956: a file `include`d by absolute path sits outside every keyed include dir; an
+    /// edit to it must move the key, or a hit serves the model of the old file.
+    #[test]
+    fn an_edit_to_an_absolutely_included_file_moves_the_lift_cache_key() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let defs = dir.path().join("defs.svh");
+        std::fs::write(&defs, "`define W 4\n").expect("write");
+        let src = format!(
+            "`include \"{}\"\nmodule m(input [`W-1:0] d, output [`W-1:0] q); assign q = d; endmodule\n",
+            defs.display()
+        );
+        let yopts = YosysOptions {
+            top: Some("m".into()),
+            ..Default::default()
+        };
+        let key = || {
+            LiftCacheKey::new(&lift_manifest(&src, &yopts, yosys_id()).expect("manifest"))
+                .expect("key")
+                .index()
+                .to_string()
+        };
+        let before = key();
+        assert_eq!(key(), before, "deterministic while nothing moved");
+        std::fs::write(&defs, "`define W 8\n").expect("write");
+        assert_ne!(key(), before, "the absolutely-included file is keyed");
+    }
+
+    /// mununu#956: an `include` whose argument is a macro names a file the key cannot find —
+    /// the lift bypasses the cache (the manifest is refused) rather than key without it.
+    #[test]
+    fn an_include_the_key_cannot_resolve_bypasses_the_lift_cache() {
+        let yopts = YosysOptions {
+            top: Some("m".into()),
+            ..Default::default()
+        };
+        for src in [
+            "`define F \"defs.svh\"\n`include `F\nmodule m; endmodule\n",
+            "`include \"../defs.svh\"\nmodule m; endmodule\n",
+        ] {
+            let err = lift_manifest(src, &yopts, yosys_id()).expect_err("bypass");
+            assert!(err.contains("include"), "{err}");
+        }
+        // A mention after `//` is not a directive.
+        let ok = "// see `include F for the defines\nmodule m; endmodule\n";
+        assert!(lift_manifest(ok, &yopts, yosys_id()).is_ok());
+    }
+
+    /// mununu#957: yosys exits 0 but writes neither JSON snapshot — the lift is an error naming
+    /// the file, not a model with the multi-clock refusal and the black-box scan switched off.
+    #[cfg(unix)]
+    #[test]
+    fn a_lift_whose_json_snapshots_are_missing_is_an_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fake = dir.path().join("yosys");
+        // Writes `design.btor` (the path after the last `write_btor`) and nothing else.
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = -p ]; then shift; out=\"${1##*write_btor }\"; fi\n  shift\ndone\nprintf '1 sort bitvec 1\\n' > \"$out\"\n",
+        )
+        .expect("write fake yosys");
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let _env = crate::adapter::env_var::override_for_test(
+            "MUNUNU_YOSYS_PATH",
+            fake.to_string_lossy().into_owned(),
+        );
+        let yopts = YosysOptions {
+            top: Some("m".into()),
+            ..Default::default()
+        };
+        let Err(err) = run_sv_flatten_btor2_with("module m; endmodule\n", &yopts, None) else {
+            panic!("a lift with no snapshots is refused");
+        };
+        assert!(err.message.contains("snapshot"), "{}", err.message);
     }
 
     /// Without a tool on the host: the manifest of a lift carries the staged primary as
