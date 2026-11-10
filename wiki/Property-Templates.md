@@ -37,7 +37,7 @@ Templates resolve to standard `PropertyFormula::MuCalculus(String)` at instantia
 
 ## Behavioral property patterns by design class
 
-> Source of truth: [`scan_annotation_properties`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/adapter/slang/verify_auto.rs#L995) — surface: (CLI+API+UI)
+> Source of truth: [`scan_annotation_properties`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/adapter/slang/verify_auto.rs#L3812) — surface: (CLI+API+UI)
 
 Beyond the atomic templates above, common **behavior classes** warrant recurring *branching-time* patterns —
 `AG EF` recoverability, `EF` reachability, error-recovery round-trips — that a plain safety invariant cannot
@@ -85,7 +85,7 @@ Example — an I²C master (protocol + shared-bus classes), `<error>` = `AL == 1
 
 ## Abstraction-predicate hints (`@mununu_predicate`)
 
-> Source of truth: [`MununuTag::Predicate`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/mununu_annotations/mod.rs) / [`seed_from_formula`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/adapter/slang/verify_auto.rs) — surface: (CLI+API+UI)
+> Source of truth: [`MununuTag::Predicate`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/mununu_annotations/mod.rs) / [`seed_from_formula`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/adapter/slang/verify_auto.rs#L3199) — surface: (CLI+API+UI)
 
 When a cube ⊥ is caused by a *missing* abstraction predicate — the property's own atoms don't pin the
 inductive invariant that decides it — you can **seed extra cube dimensions** without changing the property.
@@ -178,7 +178,7 @@ Bounded response (`within K cycles`) stays with SVA (`a |-> ##[1:K] b`), which v
 
 #### Persisted next to the design: `@mununu_template` (2026-10-30)
 
-> Source of truth: [`scan_annotation_properties_with`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/adapter/slang/verify_auto.rs) — surface: CLI+API (every `--source` of `sv verify-auto` and `POST /api/v1/sv/verify-auto`)
+> Source of truth: [`scan_annotation_properties_with`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/adapter/slang/verify_auto.rs#L3821) — surface: CLI+API (every `--source` of `sv verify-auto` and `POST /api/v1/sv/verify-auto`)
 
 The same instances can be written as annotations in the RTL (or in any `--source`), so they travel
 with the design instead of a command line — the flags above are rendered as these internally:

@@ -50,7 +50,7 @@ refinement mode.
 
 ## Engine portfolio (`--engine portfolio-sequential` / `portfolio-parallel`)
 
-> **Source of truth:** [`verify_auto_portfolio`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/adapter/slang/verify_auto.rs#L1318), [`EngineArg::PortfolioSequential`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-cli/src/main.rs#L213), [`engine: "portfolio-*"`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/api/handlers.rs#L814), [`verifyAuto engine`](https://github.com/Mumunu-team/mununu-ui/blob/main/src/components/extraction/SvVerifyAutoRunner.tsx#L221) — surface: CLI+API+UI (`mununu sv verify-auto --engine portfolio-sequential`, `POST /api/v1/sv/verify-auto` with `"engine": "portfolio-parallel"`, the verify-auto UI engine selector).
+> **Source of truth:** [`planner::execute`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/planner/mod.rs#L336), [`EngineArg::PortfolioSequential`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-cli/src/main.rs#L213), [`engine: "portfolio-*"`](https://github.com/Mumunu-team/mununu/blob/main/crates/mununu-core/src/api/handlers.rs#L814), [`verifyAuto engine`](https://github.com/Mumunu-team/mununu-ui/blob/main/src/components/extraction/SvVerifyAutoRunner.tsx#L221) — surface: CLI+API+UI (`mununu sv verify-auto --engine portfolio-sequential`, `POST /api/v1/sv/verify-auto` with `"engine": "portfolio-parallel"`, the verify-auto UI engine selector).
 
 **`portfolio-sequential` is the `sv verify-auto` default** (2026-07-06): the exact-first,
 cube-fallback schedule is the most precise sound choice and no slower than the former `explicit`

@@ -1932,10 +1932,9 @@ fn parse_config_values(
 
 fn sv_mutate_handler_impl(request: SvMutateRequest) -> ApiResult<Json<SvMutateResponse>> {
     use crate::adapter::btor2::mutate::{Mutation, list_targets};
-    use crate::adapter::slang::verify_auto::{
-        VerifyAutoOptions, engine_selection, mutate_and_compare,
-    };
+    use crate::adapter::slang::verify_auto::{VerifyAutoOptions, engine_selection};
     use crate::adapter::yosys::sv_to_btor2;
+    use crate::planner::mutate_and_compare;
 
     let lift = sv_lift_of(&request.lift)?;
     let mut sources: Vec<(String, String)> = vec![(lift.primary_name.clone(), lift.source.clone())];
@@ -2188,12 +2187,12 @@ pub async fn sv_plan_handler(
 ) -> ApiResult<Json<SvPlanResponse>> {
     blocking(move || {
         let (sources, yopts, opts) = sv_verify_auto_inputs(&request)?;
-        let plan = crate::adapter::slang::verify_auto::plan_auto(&sources, &yopts, &opts).map_err(
-            |e| ApiError::BadRequest {
+        let plan = crate::planner::plan_auto(&sources, &yopts, &opts).map_err(|e| {
+            ApiError::BadRequest {
                 message: format!("sv plan: {}", e.message),
                 details: None,
-            },
-        )?;
+            }
+        })?;
         Ok(Json(SvPlanResponse::from(&plan)))
     })
     .await
@@ -2425,7 +2424,7 @@ fn sv_verify_auto_inputs(request: &SvVerifyAutoRequest) -> ApiResult<VerifyAutoI
 fn sv_verify_auto_handler_impl(
     request: SvVerifyAutoRequest,
 ) -> ApiResult<Json<SvVerifyAutoResponse>> {
-    use crate::adapter::slang::verify_auto::verify_auto;
+    use crate::planner::verify_auto;
 
     let (sources, yopts, opts) = sv_verify_auto_inputs(&request)?;
     let started = std::time::Instant::now();

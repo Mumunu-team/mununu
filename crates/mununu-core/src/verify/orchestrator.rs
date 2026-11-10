@@ -467,7 +467,8 @@ fn sv_safety_cube_results(
     src: &crate::verify::config::SourceSection,
     base_dir: &Path,
 ) -> Vec<SafetyCubeResult> {
-    use crate::adapter::slang::verify_auto::{VerifyAutoOptions, VerifyOutcome, verify_auto};
+    use crate::adapter::slang::verify_auto::{VerifyAutoOptions, VerifyOutcome};
+    use crate::planner::verify_auto;
 
     let Some(primary) = src.files.first() else {
         return Vec::new();

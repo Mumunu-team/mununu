@@ -22,11 +22,19 @@
 
 use crate::adapter::slang::verify_auto::{
     AutoVerifyReport, BottomReason, NoteLevel, PortfolioMode, PreparedModel, VerificationNote,
-    VerifyAutoOptions, VerifyOutcome, escalate_bottom, merge_portfolio_reports, outcome_definite,
-    replan_merged, rescue_skipped_via_exact, verify_auto_impl,
+    VerifyAutoOptions, VerifyOutcome, merge_portfolio_reports, outcome_definite, replan_merged,
+    verify_auto_impl,
 };
+mod entry;
 use crate::adapter::yosys::YosysOptions;
 use crate::adapter::{AdapterError, AdapterErrorKind};
+pub use crate::routing::{
+    Confidence, Estimate, MISS_CONE_WIDTH_UNKNOWN, MISS_FORMULA_UNPARSED, MISS_MODEL_UNPARSED,
+    MemoryClass, RoutingMiss, RoutingRationale, ShapeFacts, TimeBand,
+};
+pub use entry::{
+    MutateReport, PlanReport, PropertyFlip, mutate_and_compare, plan_auto, verify_auto,
+};
 
 /// One physical engine operator — a single-engine [`verify_auto`] pass.
 ///
@@ -438,32 +446,6 @@ pub(crate) fn execute(
     }
 }
 
-/// The planner's reactive **re-plan** step (verification-execution-planner §4.5 step 4 /
-/// roadmap P2.1b) — when the main-path plan ([`execute`]) leaves a property `⊥`, feed the
-/// reason back and route it to a sound reduction. The re-plan **edges**, dispatched by
-/// property class (each gated by its own `rescue_bottom_*` opt, firing only on its shape):
-///
-/// - **safety** `AG`-invariant → the reachability portfolio (reduce to a `bad`-monitor);
-/// - **box-AF response** `AG(a→AF b)` → liveness-to-safety (l2s) → the portfolio;
-/// - **νμ recoverability** `AG EF good` → a trap certificate first (a reachable value of `good`'s
-///   register closed under every transition refutes it — VIOLATED only,
-///   [`crate::adapter::trap_certificate`]), then exact+COI (reset-pinned) or cube+`smt-hyper-must`.
-///
-/// P2.1b routes the re-plan **entry** through the planner (so both halves of the
-/// orchestration — main-path [`plan`]/[`execute`] and this reactive step — are planner-owned)
-/// while **delegating the edge application** to the existing rescue subsystem
-/// ([`escalate_bottom`]). Verdict-equivalent. P2.1c adds the soundness plan-invariants here
-/// (cube-νμ exact-corroboration; property-class-aware transfer reporting).
-pub fn replan(
-    report: &mut AutoVerifyReport,
-    design_btor2: &str,
-    reset_pinned: bool,
-    opts: &VerifyAutoOptions,
-    fairness_atoms: &[crate::adapter::liveness_rescue::Atom],
-) -> Vec<VerificationNote> {
-    escalate_bottom(report, design_btor2, reset_pinned, opts, fairness_atoms)
-}
-
 /// A **composed** recoverability plan — the point of a *planner*: mechanisms combine. It runs the
 /// SOUND, transferable levers as one plan on the (caller-scoped) model:
 ///
@@ -514,237 +496,6 @@ pub fn solve_recoverability_combined(
     )
 }
 
-/// The companion re-plan edge for cube-**Skipped** (not `⊥`) properties: an atom-less modal
-/// formula the cube cannot seed gets one full-state exact-symbolic attempt, upgraded on a
-/// definite verdict (lever b). Gated to the cube path under reset-gating. Delegates to the
-/// existing [`rescue_skipped_via_exact`] — verdict-equivalent.
-pub fn rescue_skipped(
-    report: &mut AutoVerifyReport,
-    design_btor2: &str,
-    opts: &VerifyAutoOptions,
-) -> Vec<VerificationNote> {
-    let mut notes = rescue_skipped_via_exact(report, design_btor2, opts);
-    // P2.2a — the first ModelFacts consumer: an actionable diagnostic for what remains
-    // Skipped. Verdict-equivalent (a note, never a verdict change); P2.2b will *act* on the
-    // same cone-vs-cap facts to auto-pin and re-decide.
-    notes.extend(skip_over_cap_notes(report, design_btor2));
-    notes
-}
-
-/// P2.2a/b — **residual-register-aware** actionable Skip diagnostic (the `ModelFacts`
-/// consumer). For each property STILL Skipped after the exact attempt, use `ModelFacts` to
-/// check whether the exact engine bailed because the property's cone exceeds the bit cap
-/// (`cone_bits > cap`); if so, attach a note naming the cone width and the cap.
-///
-/// The **key fact** (P2.2b, measure-first 2026-07-26) is the *residual* — the register bits
-/// that remain even after pinning **every** in-cone free input
-/// (`residual = cone_bits − Σ pinnable_input_widths`). This is what decides whether
-/// `--pin` pinning can actually help:
-///
-/// - `residual ≤ cap` — **input-inflated** cone: pinning the in-cone inputs drops the cone to
-///   ~`residual` bits ≤ cap, so `--pin SIGNAL=VALUE` (a scoped verdict) decides it.
-///   The note lists the pinnable inputs and how far pinning gets.
-/// - `residual > cap` — **register-dominated** cone: even pinning ALL in-cone inputs leaves
-///   `residual` register bits over the cap, so `--pin` **cannot** decide it. The note
-///   says so and points at the real levers (structural compression: one-hot re-encode /
-///   counter abstraction; or cutpoint, posture-permitting).
-///
-/// A measure-first sweep (i2c 122 / gost 360 / present_cipher 144 residual register bits, all
-/// above the 64-bit cap) showed the corpus's over-cap cones are register-dominated — so the
-/// earlier "just pin the wide inputs" advice over-promised. This diagnostic tells the truth
-/// per property instead of assuming input-inflation. Verdict-equivalent — a diagnostic, never
-/// a verdict change.
-fn skip_over_cap_notes(report: &AutoVerifyReport, design_btor2: &str) -> Vec<VerificationNote> {
-    use crate::adapter::btor2::model_facts::ModelFacts;
-    use crate::adapter::btor2::symbolic_bitblast::formula_seed_atoms;
-
-    let Ok(file) = crate::adapter::btor2::parser::parse(design_btor2) else {
-        return Vec::new();
-    };
-    let facts = ModelFacts::new(&file);
-    let mut notes = Vec::new();
-    for prop in &report.properties {
-        let VerifyOutcome::Skipped { reason } = &prop.outcome else {
-            continue;
-        };
-        // mununu#462 — a bit-blast that ABSTAINED (BDD arena exhausted) mid-evaluation, rather
-        // than at admission: name the cone's state-bit width and the width lever (`--param`).
-        // This is the state-bit-count analogue of the skip-diameter-bound note. Matches both the
-        // cube-path oom() string and the exact-build string (both contain "arena exhausted").
-        if reason.contains("arena exhausted") {
-            // mununu#577 — `0` here used to mean two different things: "the cone really is
-            // zero bits" and "the width could not be established". The note now only claims a
-            // width it actually has.
-            let cone_bits = crate::mu_calculus::parser::parse(&prop.formula)
-                .ok()
-                .and_then(|f| facts.cone_vs_cap(&formula_seed_atoms(&f)))
-                .map(|(cb, _)| cb);
-            notes.push(bitblast_oom_skip_note(&prop.name, cone_bits));
-            continue;
-        }
-        let Ok(formula) = crate::mu_calculus::parser::parse(&prop.formula) else {
-            continue;
-        };
-        let atoms = formula_seed_atoms(&formula);
-        // mununu#577 — an UNKNOWN cone width must not read as "fits the cap". Previously
-        // `leaf_cells()` swallowed its error into an empty vec, so an array-bearing design
-        // measured 0 bits and `cone_bits <= cap` was trivially true — on a nine-register design.
-        // With the width unknown there is nothing to say about the cap, so say nothing.
-        let Some((cone_bits, cap)) = facts.cone_vs_cap(&atoms) else {
-            continue;
-        };
-        if cone_bits <= cap {
-            // Not a bit-CAP issue (the cone fits). Consult the DIAMETER proxy (P2.2c): an in-cone
-            // down-counter of width W means the fixpoint may need ~2^W iterations, so exact
-            // abstains on the ITERATION budget rather than the bit cap — a different, and more
-            // actionable, Skip reason than "cone too wide". Emit a diameter-bound note when the
-            // proxy can tell (it covers registers that step themselves, up or down, by any step,
-            // mununu#929 — a non-counter diameter is honestly out of its reach); otherwise leave
-            // it to the existing Skip provenance (atom-less cube, unsupported op).
-            if let Some(w) = facts.cone_counter_diameter_log2(&atoms) {
-                notes.push(diameter_bound_skip_note(&prop.name, w));
-            }
-            continue;
-        }
-        let inputs = facts.pinnable_cone_inputs(&atoms);
-        let input_bits: u32 = inputs.iter().map(|i| i.width).sum();
-        // The register bits that remain even after pinning EVERY in-cone input — the true test
-        // of whether config-value pinning can bring the cone under the cap.
-        let residual = cone_bits.saturating_sub(input_bits);
-        let items: Vec<String> = inputs
-            .iter()
-            .take(8)
-            .map(|i| format!("{}({} bits)", i.name, i.width))
-            .collect();
-        let detail = if residual <= cap {
-            // Input-inflated: pinning these inputs fits the cap → config-value decides.
-            format!(
-                "The exact engine bit-blasts a property's cone-of-influence; this cone exceeds \
-                 the bit cap, so it bailed to Skipped. The cone is INPUT-inflated: pinning the \
-                 {} in-cone free input(s) below ({input_bits} bits) to representative constants \
-                 (`--pin SIGNAL=VALUE`) drops the cone to ~{residual} register bits (≤ \
-                 the {cap}-bit cap), so exact decides — a verdict scoped to the pinned \
-                 configuration.",
-                inputs.len()
-            )
-        } else {
-            // Register-dominated: even pinning all inputs leaves > cap register bits.
-            format!(
-                "The exact engine bit-blasts a property's cone-of-influence; this cone exceeds \
-                 the bit cap, so it bailed to Skipped. This cone is REGISTER-dominated: even \
-                 pinning ALL {} in-cone free input(s) ({input_bits} bits) leaves ~{residual} \
-                 register bits (still > the {cap}-bit cap), so `--pin` CANNOT bring it \
-                 under the cap. The decidable lever here is sound register reduction — \
-                 structural compression (one-hot re-encode, counter abstraction) or a cutpoint \
-                 (safety-posture only; unsound for νμ) — not input concretization.",
-                inputs.len()
-            )
-        };
-        notes.push(VerificationNote {
-            kind: "skip-over-cap-reason".into(),
-            level: NoteLevel::ScopeCaveat,
-            summary: format!(
-                "`{}`: Skipped — the exact cone is {cone_bits} register+input bits (> the \
-                 {cap}-bit cap); {} even fully input-pinned ({residual} residual register \
-                 bits {} {cap}).",
-                prop.name,
-                if residual <= cap {
-                    "config-value decidable"
-                } else {
-                    "register-dominated"
-                },
-                if residual <= cap { "≤" } else { ">" },
-            ),
-            detail,
-            items,
-            property: None,
-        });
-    }
-    notes
-}
-
-/// P2.2c — the diameter-proxy Skip note: a property Skipped with its cone UNDER the bit cap, whose
-/// cone carries a `W`-bit down-counter (⟹ up to 2^W fixpoint iterations). It tells the user the
-/// abstention was the ITERATION budget (the reachable DIAMETER), not the bit cap — the sound lever
-/// here is a well-founded RANKING certificate (a `verify-recoverability` escalation / the
-/// recoverability rescue), not register reduction. Advisory only (a note, never a verdict change).
-/// Test-only re-exports so the note-invariant test in `adapter::slang::verify_auto` can assert
-/// across BOTH modules that emit per-property notes (mununu#548 O-2). Keeping the builders private
-/// otherwise is deliberate — they are planner internals.
-#[cfg(test)]
-pub(crate) fn diameter_bound_skip_note_for_test(name: &str, counter_log2: u32) -> VerificationNote {
-    diameter_bound_skip_note(name, counter_log2)
-}
-
-/// See [`diameter_bound_skip_note_for_test`].
-#[cfg(test)]
-pub(crate) fn bitblast_oom_skip_note_for_test(
-    name: &str,
-    cone_bits: Option<u32>,
-) -> VerificationNote {
-    bitblast_oom_skip_note(name, cone_bits)
-}
-
-fn diameter_bound_skip_note(name: &str, counter_log2: u32) -> VerificationNote {
-    VerificationNote {
-        kind: "skip-diameter-bound".into(),
-        level: NoteLevel::ScopeCaveat,
-        summary: format!(
-            "`{name}`: Skipped — the cone fits the bit cap, but an in-cone {counter_log2}-bit \
-             counter gives a ~2^{counter_log2} state-space DIAMETER, so the exact fixpoint \
-             abstains on the iteration budget (not the bit cap)."
-        ),
-        detail: "The exact μ-engine decides by fixpoint iteration; its cost is the reachable \
-                 DIAMETER, which bit-count cannot see (`bit-count ≠ tractability`). A wide in-cone \
-                 down-counter bounds a descent of up to 2^W steps past the iteration budget, so the \
-                 engine abstains after grinding rather than on admission. The decidable lever for a \
-                 well-founded descent is a RANKING certificate (a `verify-recoverability` \
-                 escalation / the recoverability rescue), not register reduction or input \
-                 concretization — and if the descent is not well-founded toward the target, the \
-                 property is a genuine diameter wall (an honest ⊥)."
-            .into(),
-        items: Vec::new(),
-        property: Some(name.to_string()),
-    }
-}
-
-/// mununu#462 — the bit-blast OOM Skip note: a property whose BDD bit-blast exhausted its node
-/// arena mid-evaluation (not at admission), so the engine ABSTAINED (Skipped) rather than
-/// `.unwrap()`-panicking / SIGABRT-ing and taking the WHOLE run — and every OTHER property still
-/// reports. Names the cone's state-bit width and points at the width lever (`--param`, which
-/// re-elaborates with a smaller parameterised counter/register so its bits fit) and the fallback
-/// (`--engine explicit`). The state-bit-count analogue of `diameter_bound_skip_note`. Advisory
-/// only (a note, never a verdict change).
-fn bitblast_oom_skip_note(name: &str, cone_bits: Option<u32>) -> VerificationNote {
-    // mununu#577 — `None` is "the width was never established", which is NOT the same claim as
-    // "the cone is wide". The old signature took a `u32` and read `0` as the latter, so a model
-    // whose leaves could not be computed was described as wide on no evidence.
-    let cone = match cone_bits {
-        Some(b) if b > 0 => format!("~{b}-bit state cone"),
-        _ => "state cone of unestablished width".to_string(),
-    };
-    VerificationNote {
-        kind: "skip-bitblast-oom".into(),
-        level: NoteLevel::ScopeCaveat,
-        summary: format!(
-            "`{name}`: Skipped — the BDD bit-blast exhausted its node arena on a {cone} (a SIZE \
-             threshold; the input is structurally fine); the engine abstained on this property so every \
-             other property in the run still reports."
-        ),
-        detail: "The symbolic engine bit-blasts a property's cone-of-influence into a BDD; a wide \
-                 counter/register cone (e.g. several 32-bit counters, each doubled by its `$past` \
-                 shadow) can outgrow the node budget mid-fixpoint. This is a size threshold — \
-                 shrink the state and it decides. The direct lever is `--param NAME=VALUE`, which \
-                 re-elaborates the design with a smaller width parameter (e.g. `--param \
-                 BW_WIDTH=4`) so the counter bits fit the arena; the verdict is then scoped to that \
-                 parameter value. The engine-level fallback is `--engine explicit`. Only this \
-                 property abstained — the rest of the run is unaffected."
-            .into(),
-        items: Vec::new(),
-        property: Some(name.to_string()),
-    }
-}
-
 // ---- P2.2d: cost-annotated plan telemetry (per-property routing rationale) --------------------
 //
 // The planner's per-property cost reasoning, made explicit: from the measured facts
@@ -753,248 +504,6 @@ fn bitblast_oom_skip_note(name: &str, cone_bits: Option<u32>) -> VerificationNot
 // verdict change (the precision ladder + reactive rescue still decide). See
 // `.claude/plans/cost-annotated-plan-telemetry.md` (P-1 / option 2a). This is the article's
 // "watch the planner reason about cost" spine and the agent/PWA loop's actionable "why + what next".
-
-/// One property's predicted routing + rationale (P2.2d). A prediction, not a verdict.
-#[derive(Debug, Clone)]
-pub struct RoutingRationale {
-    /// Property name.
-    pub property: String,
-    /// Fixpoint class (safety / reachability / liveness-νμ / mixed / propositional).
-    pub class: crate::mu_calculus::PropertyClass,
-    /// The exact engine's cone-of-influence bit width for the property's atoms.
-    pub cone_bits: u32,
-    /// The exact engine's effective bit cap for that cone.
-    pub cap: u32,
-    /// The structural diameter proxy — the widest in-cone down-counter (`Some(W)` ⇒ ~2^W
-    /// diameter), or `None`. Free/static (`ModelFacts::cone_counter_diameter_log2`).
-    pub diameter_log2: Option<u32>,
-    /// The engine the planner predicts will decide this property.
-    pub predicted_engine: &'static str,
-    /// The one-line rationale.
-    pub why: String,
-    /// Roadmap J2 — the static shape facts the cost estimate is keyed by (all read off the cone,
-    /// no solving). Default (all zero / false) where they were not computed.
-    pub shape: ShapeFacts,
-}
-
-/// Roadmap J2 — what the property's cone and formula look like, statically: the features the
-/// measured cost table ([`RoutingRationale::estimate`]) is keyed by.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct ShapeFacts {
-    /// Multiplier / divider / remainder cells in the cone — the exponential-BDD marker (Bryant).
-    pub arith_ops: u32,
-    /// Array-sorted states (memories) in the cone — the exact engine refuses them.
-    pub array_states: u32,
-    /// Primary inputs in the cone (inputs-in-the-state widens it).
-    pub inputs: u32,
-    /// The formula's fixpoint alternation depth (2 = a μ under a ν: recoverability).
-    pub alternation: u32,
-    /// The formula is constant on every model (decided without an engine).
-    pub constant: bool,
-    /// Register-versus-register comparison atoms (`a == b`, `a == b + k`, `a == a__past`): the
-    /// atom shape the predicate cube cannot seed as a dimension, so the exact skip-rescue pass
-    /// runs on the row as well (edn: all 16 such rows 13–20 s; 48 of the other 51 under 10 s).
-    pub relational_atoms: u32,
-}
-
-/// Roadmap J2 — a wall-time band: `seconds` < 10 s, `minutes` < 10 min, `hour` < 1 h, `wall` beyond.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TimeBand {
-    Seconds,
-    Minutes,
-    Hour,
-    Wall,
-}
-
-impl TimeBand {
-    pub fn tag(self) -> &'static str {
-        match self {
-            TimeBand::Seconds => "seconds",
-            TimeBand::Minutes => "minutes",
-            TimeBand::Hour => "hour",
-            TimeBand::Wall => "wall",
-        }
-    }
-}
-
-/// Roadmap J2 — the memory a row needs: `small` = no exact BDD work expected; `medium` = exact
-/// BDD within the default arena (the bit-cap probes peak at ≤ 12 M nodes); `large` = the arena
-/// may overflow (a multiplier) or the cap ladder runs. A sizing class, not a byte count.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MemoryClass {
-    Small,
-    Medium,
-    Large,
-}
-
-impl MemoryClass {
-    pub fn tag(self) -> &'static str {
-        match self {
-            MemoryClass::Small => "small",
-            MemoryClass::Medium => "medium",
-            MemoryClass::Large => "large",
-        }
-    }
-}
-
-/// Roadmap J2 — how much the table cell has been measured: `high` = every measured row in the
-/// band; `medium` = most; `low` = thin evidence or a named miss class — size for the band's top.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Confidence {
-    High,
-    Medium,
-    Low,
-}
-
-impl Confidence {
-    pub fn tag(self) -> &'static str {
-        match self {
-            Confidence::High => "high",
-            Confidence::Medium => "medium",
-            Confidence::Low => "low",
-        }
-    }
-}
-
-/// Roadmap J2 — the cost estimate of one property: a band, a memory class, a confidence, and the
-/// table row it came from. A scheduler hint, never a verdict input.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Estimate {
-    pub time_band: TimeBand,
-    pub memory_class: MemoryClass,
-    pub confidence: Confidence,
-    /// The table row, with its evidence (which measured rows put it there).
-    pub basis: &'static str,
-}
-
-impl RoutingRationale {
-    /// Roadmap J2 — the cost estimate, from a table keyed by static shape and measured on the
-    /// second host (`mununu-private` `e2e-history/j2-falsifier/`, 2026-11-08/09: edn's 67 rows on
-    /// `19295f9`, the 21-test differential corpus's 705 rows, the EXP-0031 bit-cap probes). The
-    /// falsifier: 57 of edn's 67 rows in the predicted band, none predicted `seconds` running over
-    /// 10 min. Its named miss class: on an in-cap exact row with an in-cone counter the wall follows
-    /// the VERDICT's fixpoint depth (`fsm-timeout` 0.3 s vs `fsm-timeout-stuck` 108.6 s at the same
-    /// width), which no static feature sees — so that cell says `minutes` with `low` confidence,
-    /// and a scheduler sizes for the band's top. The cells are checked in order; the first match wins.
-    pub fn estimate(&self) -> Estimate {
-        use crate::mu_calculus::PropertyClass as C;
-        let e = |time_band, memory_class, confidence, basis| Estimate {
-            time_band,
-            memory_class,
-            confidence,
-            basis,
-        };
-        let s = &self.shape;
-        if s.constant {
-            return e(
-                TimeBand::Seconds,
-                MemoryClass::Small,
-                Confidence::High,
-                "constant formula, decided without an engine (edn: 14 of 14 in seconds)",
-            );
-        }
-        if s.array_states > 0 {
-            return e(
-                TimeBand::Minutes,
-                MemoryClass::Medium,
-                Confidence::Low,
-                "memory in the cone: the exact engine refuses arrays, the cube or the reach \
-                 rescue decides (F1 fixture: under 0.2 s; thin evidence, so the band's top)",
-            );
-        }
-        let fits = self.cone_bits <= self.cap;
-        // An alternating fixpoint costs minutes where the recoverability ladder runs — over the
-        // cap. In the cap the exact engine decides it directly: the differential corpus's 19
-        // in-cap alternating rows (6-38 b) all decided in 1 s or less (the box's out-of-sample
-        // check, 2026-11-09), so they fall to the in-cap cells below.
-        if s.alternation >= 2 && !fits {
-            return e(
-                TimeBand::Minutes,
-                MemoryClass::Medium,
-                Confidence::Medium,
-                "over-cap alternating fixpoint (a μ under a ν): the recoverability ladder or a \
-                 trap certificate (edn: 2 of 3 in minutes, ~127 s; 1 in seconds)",
-            );
-        }
-        // A multiplier is the BDD's wall (Bryant), so the cell applies where the exact engine
-        // runs — in the cap. Over the cap the reach portfolio's SAT-based members decide, and a
-        // multiplier is not their wall: edn's 23 over-cap rows with one measured 1.3-7.4 s, and
-        // this cell placed them in `minutes` (the box's end-to-end `--plan-only`, 2026-11-09).
-        if s.arith_ops > 0 && fits {
-            return e(
-                TimeBand::Minutes,
-                MemoryClass::Large,
-                Confidence::Low,
-                "in-cap multiplier / divider: the exact BDD walls near 19 b (Bryant) and the \
-                 rescue ladder runs about a minute (bit-cap probe `mult`: 58.9 s at 193 b)",
-            );
-        }
-        // Over the cap only: in the cap the exact engine decides a relational atom directly (the
-        // bit-cap probe `relational` decides `a == b` at 1 023 b in 0.2 s).
-        if s.relational_atoms > 0 && !fits {
-            return e(
-                TimeBand::Minutes,
-                MemoryClass::Medium,
-                Confidence::Medium,
-                "over-cap register-versus-register atom (`a == b`, a stability check against \
-                 `__past`): the predicate cube cannot seed it, so the exact skip-rescue pass \
-                 runs too (edn: 16 of 16 in minutes, 13-20 s)",
-            );
-        }
-        match (self.class, fits, self.diameter_log2) {
-            (C::Safety | C::Reachability, false, _) => e(
-                TimeBand::Seconds,
-                MemoryClass::Small,
-                Confidence::Medium,
-                "over-cap one-step `bad`-reachability, decided by the reach portfolio (edn: 33 \
-                 of 33 in seconds; differential corpus, all classes: 643 of 705 rows in \
-                 seconds, the slowest 65 s)",
-            ),
-            (C::Safety | C::Reachability, true, Some(_)) => e(
-                TimeBand::Minutes,
-                MemoryClass::Medium,
-                Confidence::Low,
-                "in-cap exact with an in-cone counter: the wall follows the verdict's fixpoint \
-                 depth (bit-cap probes: fsm-timeout 0.3 s vs fsm-timeout-stuck 108.6 s at the \
-                 same width, twocount 294.9 s at 830 b), so size for the band's top",
-            ),
-            (C::Safety | C::Reachability, true, None) => e(
-                TimeBand::Seconds,
-                MemoryClass::Medium,
-                Confidence::Medium,
-                "in-cap exact, no in-cone counter (bit-cap probes fsm-pair, relational, raster, \
-                 i2c, aes: 2 s or less)",
-            ),
-            (C::Liveness, true, None) => e(
-                TimeBand::Seconds,
-                MemoryClass::Medium,
-                Confidence::Low,
-                "in-cap liveness, no counter: exact decides the branching fixpoint (few \
-                 measured rows)",
-            ),
-            (C::Liveness, _, _) => e(
-                TimeBand::Minutes,
-                MemoryClass::Medium,
-                Confidence::Low,
-                "liveness with a counter or over the cap: a ranking certificate or the cube \
-                 (few measured rows)",
-            ),
-            (C::Mixed | C::Propositional, true, None) => e(
-                TimeBand::Seconds,
-                MemoryClass::Medium,
-                Confidence::Low,
-                "in-cap mixed / propositional, no counter: the exact engine decides it directly \
-                 (differential corpus: in-cap alternating rows 1 s or less)",
-            ),
-            (C::Mixed | C::Propositional, _, _) => e(
-                TimeBand::Minutes,
-                MemoryClass::Medium,
-                Confidence::Low,
-                "mixed / propositional with a counter or over the cap: few measured rows",
-            ),
-        }
-    }
-}
 
 /// The DECISION TABLE — the engine-ROUTING classification, made explicit. Pure function of the
 /// facts; returns `(routed_engine, why)`. `"⊥"` means no engine is routed to it at all.
@@ -1097,23 +606,6 @@ pub fn annotate_routing(
 ) -> Vec<RoutingRationale> {
     annotate_routing_explained(design_btor2, properties).0
 }
-
-/// mununu#941 — a property the planner could not estimate, and why. Three causes used to end the
-/// same way (no rationale, `routing: null`), and the CLI named only one of them.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RoutingMiss {
-    pub property: String,
-    pub reason: &'static str,
-}
-
-/// The model did not parse as BTOR2 for the planner.
-pub const MISS_MODEL_UNPARSED: &str =
-    "the lifted model did not parse for the planner, so no property has an estimate";
-/// The row's formula did not parse as a μ-calculus formula for the planner.
-pub const MISS_FORMULA_UNPARSED: &str = "the formula did not parse for the planner";
-/// mununu#577 — the cone's width could not be established.
-pub const MISS_CONE_WIDTH_UNKNOWN: &str =
-    "the cone width could not be established (a cone that reads a memory, mununu#577)";
 
 /// [`annotate_routing`] plus, for every property it could not estimate, the reason.
 pub fn annotate_routing_explained(
@@ -1584,7 +1076,7 @@ mod tests {
 6 next 1 3 5
 ";
         let report = skipped_report("p_reg", "mu X.(big == 0 || <> X)");
-        let notes = skip_over_cap_notes(&report, btor2);
+        let notes = crate::adapter::slang::verify_auto::skip_over_cap_notes(&report, btor2);
         assert_eq!(
             notes.len(),
             1,
@@ -1617,7 +1109,7 @@ mod tests {
 7 next 2 4 6
 ";
         let report = skipped_report("p_io", "mu X.(flag == 1 || <> X)");
-        let notes = skip_over_cap_notes(&report, btor2);
+        let notes = crate::adapter::slang::verify_auto::skip_over_cap_notes(&report, btor2);
         assert_eq!(
             notes.len(),
             1,
@@ -1701,7 +1193,7 @@ mod tests {
             run_ms: None,
             lift_ms: None,
         };
-        let notes = skip_over_cap_notes(&report, btor2);
+        let notes = crate::adapter::slang::verify_auto::skip_over_cap_notes(&report, btor2);
         let oom: Vec<_> = notes
             .iter()
             .filter(|n| n.kind == "skip-bitblast-oom")
@@ -1756,7 +1248,7 @@ mod tests {
 11 init 1 3 4
 ";
         let report = skipped_report("p_drain", "nu Y.((mu X.(cnt == 0 || <> X)) && [] Y)");
-        let notes = skip_over_cap_notes(&report, btor2);
+        let notes = crate::adapter::slang::verify_auto::skip_over_cap_notes(&report, btor2);
         assert_eq!(notes.len(), 1, "the diameter-bound note fires: {notes:?}");
         assert_eq!(notes[0].kind, "skip-diameter-bound");
         assert!(
@@ -1778,7 +1270,7 @@ mod tests {
         let btor2 =
             "1 sort bitvec 1\n2 state 1 flag\n3 not 1 2\n4 next 1 2 3\n5 zero 1\n6 init 1 2 5\n";
         let report = skipped_report("p_flag", "nu Y.((mu X.(flag == 1 || <> X)) && [] Y)");
-        let notes = skip_over_cap_notes(&report, btor2);
+        let notes = crate::adapter::slang::verify_auto::skip_over_cap_notes(&report, btor2);
         assert!(
             notes.is_empty(),
             "no counter in cone ⇒ no diameter note (honest silence): {notes:?}"
