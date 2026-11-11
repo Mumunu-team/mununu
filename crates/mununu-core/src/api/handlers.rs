@@ -4215,9 +4215,11 @@ fn verify_project_handler_impl(
     if request.counterexample_max_steps.is_some() {
         config.counterexample_max_steps = request.counterexample_max_steps;
     }
-    // mununu#935 — `base_dir` is confined; the file paths INSIDE the config are not yet (the
-    // orchestrator joins them onto `base_dir`, and an absolute one passes through the join).
-    let base_dir = confine_request_path("base_dir", &request.base_dir)?;
+    // mununu#935 — `base_dir` and every file path INSIDE the config are confined: the
+    // orchestrator joins config paths onto `base_dir`, and an absolute one passes through the join.
+    let root = file_root()?;
+    let base_dir = confine_under(root.as_deref(), "base_dir", &request.base_dir)?;
+    confine_config_paths(&mut config, root.as_deref(), &base_dir)?;
     crate::verify::verify_project(&config, &base_dir)
         .map(Json)
         .map_err(|e| ApiError::BadRequest {
@@ -4232,16 +4234,65 @@ fn verify_project_handler_impl(
 /// can leave it. Without a `file_root` the path is taken as given, as a developer's local server
 /// always has.
 pub(crate) fn confine_request_path(field: &str, raw: &str) -> Result<std::path::PathBuf, ApiError> {
-    let root = match crate::deployment::current() {
-        Ok(cfg) => cfg.file_root,
-        Err(e) => {
-            return Err(ApiError::BadRequest {
-                message: format!("`{field}`: the deployment configuration does not load: {e}"),
-                details: None,
-            });
-        }
-    };
+    let root = file_root().map_err(|e| match e {
+        ApiError::BadRequest { message, details } => ApiError::BadRequest {
+            message: format!("`{field}`: {message}"),
+            details,
+        },
+        other => other,
+    })?;
     confine_under(root.as_deref(), field, raw)
+}
+
+/// The deployment's `[server] file_root`, `None` when unset.
+fn file_root() -> Result<Option<std::path::PathBuf>, ApiError> {
+    crate::deployment::current()
+        .map(|cfg| cfg.file_root)
+        .map_err(|e| ApiError::BadRequest {
+            message: format!("the deployment configuration does not load: {e}"),
+            details: None,
+        })
+}
+
+/// mununu#935 — confine every server-side path a verify config names
+/// ([`crate::verify::config::VerifyConfig::try_map_paths`]) to `root`, resolving a relative one
+/// against the (already confined, canonical) `base_dir` the orchestrator will join it onto. Each
+/// is rewritten to its canonical form — relative to `base_dir` when it lies under it, so the
+/// report names files as the config did, absolute otherwise — so neither `..`, a symlink nor an
+/// absolute path reaches a read outside the root. A config that names an executable
+/// (`options.clang`) is refused under a root. Without a root nothing changes.
+pub(crate) fn confine_config_paths(
+    config: &mut crate::verify::config::VerifyConfig,
+    root: Option<&std::path::Path>,
+    base_dir: &std::path::Path,
+) -> Result<(), ApiError> {
+    if root.is_none() {
+        return Ok(());
+    }
+    let exec = config.executable_options();
+    if !exec.is_empty() {
+        return Err(ApiError::BadRequest {
+            message: format!(
+                "{} names an executable for the server to run; a server with a file_root does not \
+                 take one from a request (configure the tool on the server instead)",
+                exec.join(", ")
+            ),
+            details: None,
+        });
+    }
+    config.try_map_paths(|field, p| {
+        let joined = if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            base_dir.join(p)
+        };
+        let raw = joined.to_string_lossy();
+        let real = confine_under(root, field, &raw)?;
+        Ok(match real.strip_prefix(base_dir) {
+            Ok(rel) if !rel.as_os_str().is_empty() => rel.to_path_buf(),
+            _ => real,
+        })
+    })
 }
 
 /// [`confine_request_path`] with the root passed in (the testable seam).
@@ -6315,5 +6366,127 @@ mod context_sanity_tests {
             super::confine_under(None, "f", "/anything").expect("no root"),
             std::path::PathBuf::from("/anything")
         );
+    }
+
+    /// mununu#935 — the file paths INSIDE a verify config are confined too: every field
+    /// `try_map_paths` visits refuses `..`, an absolute path and a symlink out of the root; one
+    /// inside stays relative to `base_dir`, so the report names it as the config did; an
+    /// executable option is refused under a root. Negative control: with no root the config is
+    /// untouched, escapes included — the developer's local server keeps its behaviour.
+    #[test]
+    fn config_paths_are_confined_to_the_file_root() {
+        use crate::verify::config::VerifyConfig;
+        let outer = tempfile::tempdir().expect("tempdir");
+        std::fs::write(outer.path().join("secret.json"), "{}").expect("secret");
+        let root = outer.path().join("work");
+        let proj = root.join("proj");
+        std::fs::create_dir_all(proj.join("inc")).expect("project dir");
+        for f in ["a.btor2", "sidecar.json", "rm.json", "pack.json"] {
+            std::fs::write(proj.join(f), "x").expect("file");
+        }
+        let root = root.canonicalize().expect("canonical root");
+        let base = super::confine_under(Some(&root), "base_dir", "proj").expect("base_dir");
+        let secret = outer.path().join("secret.json");
+        let secret = secret.to_str().expect("utf8");
+        // TOML literal strings ('…'): a Windows path's backslashes are not escapes there.
+        let config = |file: &str, sidecar: &str, inc: &str, rm: &str, pack: &str, clang: bool| {
+            let clang = if clang { "clang = \"/bin/sh\"\n" } else { "" };
+            VerifyConfig::from_toml(&format!(
+                "[project]\nname = \"p\"\n[templates]\nfiles = ['{pack}']\n\
+                 [alphabet]\nstrategy = \"register_map\"\nregister_map = '{rm}'\n\
+                 [[sources]]\nid = \"a\"\nadapter = \"btor2\"\nfiles = ['{file}']\n\
+                 [sources.options]\nsidecar = '{sidecar}'\ninclude_paths = ['{inc}']\n\
+                 register_map = '{rm}'\n{clang}\
+                 [composition]\nsemantics = \"synchronous\"\nmembers = [\"a\"]\n"
+            ))
+            .expect("config parses")
+        };
+        let ok = || {
+            config(
+                "a.btor2",
+                "sidecar.json",
+                "inc",
+                "rm.json",
+                "pack.json",
+                false,
+            )
+        };
+
+        let mut inside = ok();
+        super::confine_config_paths(&mut inside, Some(&root), &base).expect("all inside");
+        assert_eq!(inside, ok(), "paths inside the root stay as written");
+
+        let escapes: [(&str, VerifyConfig); 6] = [
+            (
+                "sources[0].files[0]",
+                config(
+                    "../../secret.json",
+                    "sidecar.json",
+                    "inc",
+                    "rm.json",
+                    "pack.json",
+                    false,
+                ),
+            ),
+            (
+                "sources[0].options.sidecar",
+                config("a.btor2", secret, "inc", "rm.json", "pack.json", false),
+            ),
+            (
+                "sources[0].options.include_paths[0]",
+                config(
+                    "a.btor2",
+                    "sidecar.json",
+                    "../..",
+                    "rm.json",
+                    "pack.json",
+                    false,
+                ),
+            ),
+            (
+                "alphabet.register_map",
+                config("a.btor2", "sidecar.json", "inc", secret, "pack.json", false),
+            ),
+            (
+                "templates.files[0]",
+                config("a.btor2", "sidecar.json", "inc", "rm.json", secret, false),
+            ),
+            (
+                "sources[0].options.clang",
+                config(
+                    "a.btor2",
+                    "sidecar.json",
+                    "inc",
+                    "rm.json",
+                    "pack.json",
+                    true,
+                ),
+            ),
+        ];
+        for (field, mut cfg) in escapes {
+            let untouched = cfg.clone();
+            let err = super::confine_config_paths(&mut cfg, Some(&root), &base)
+                .expect_err("escapes the root");
+            // `register_map` sits in two places; the alphabet one is visited first.
+            assert!(format!("{err}").contains(field), "{field}: {err}");
+            let mut no_root = untouched.clone();
+            super::confine_config_paths(&mut no_root, None, &base).expect("no root");
+            assert_eq!(no_root, untouched, "{field}: no root, no rewrite");
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(secret, proj.join("link.btor2")).expect("symlink");
+            let mut cfg = config(
+                "link.btor2",
+                "sidecar.json",
+                "inc",
+                "rm.json",
+                "pack.json",
+                false,
+            );
+            let err = super::confine_config_paths(&mut cfg, Some(&root), &base)
+                .expect_err("a symlink out of the root is refused");
+            assert!(format!("{err}").contains("sources[0].files[0]"), "{err}");
+        }
     }
 }

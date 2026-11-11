@@ -5221,19 +5221,12 @@ mod lift_cache_tests {
 
     /// mununu#957: yosys exits 0 but writes neither JSON snapshot — the lift is an error naming
     /// the file, not a model with the multi-clock refusal and the black-box scan switched off.
-    #[cfg(unix)]
+    /// Runs on every OS (the OS matrix's same-tests rule): the fake yosys is a `/bin/sh` script on
+    /// Unix and a `.bat` + PowerShell pair on Windows.
     #[test]
     fn a_lift_whose_json_snapshots_are_missing_is_an_error() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().expect("tempdir");
-        let fake = dir.path().join("yosys");
-        // Writes `design.btor` (the path after the last `write_btor`) and nothing else.
-        std::fs::write(
-            &fake,
-            "#!/bin/sh\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = -p ]; then shift; out=\"${1##*write_btor }\"; fi\n  shift\ndone\nprintf '1 sort bitvec 1\\n' > \"$out\"\n",
-        )
-        .expect("write fake yosys");
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let fake = fake_yosys_writing_only_btor(dir.path());
         let _env = crate::adapter::env_var::override_for_test(
             "MUNUNU_YOSYS_PATH",
             fake.to_string_lossy().into_owned(),
@@ -5246,6 +5239,43 @@ mod lift_cache_tests {
             panic!("a lift with no snapshots is refused");
         };
         assert!(err.message.contains("snapshot"), "{}", err.message);
+    }
+
+    /// A fake yosys that writes `design.btor` — the path after the last `write_btor` in its `-p`
+    /// script — and nothing else.
+    #[cfg(unix)]
+    fn fake_yosys_writing_only_btor(dir: &std::path::Path) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let fake = dir.join("yosys");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = -p ]; then shift; out=\"${1##*write_btor }\"; fi\n  shift\ndone\nprintf '1 sort bitvec 1\\n' > \"$out\"\n",
+        )
+        .expect("write fake yosys");
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        fake
+    }
+
+    #[cfg(windows)]
+    fn fake_yosys_writing_only_btor(dir: &std::path::Path) -> std::path::PathBuf {
+        let ps = dir.join("yosys.ps1");
+        std::fs::write(
+            &ps,
+            "$m = [regex]::Matches(($args -join ' '), 'write_btor\\s+\"?([^\";\\s]+)')\r\n\
+             $out = $m[$m.Count - 1].Groups[1].Value\r\n\
+             Set-Content -NoNewline -Path $out -Value \"1 sort bitvec 1`n\"\r\n",
+        )
+        .expect("write fake yosys");
+        let bat = dir.join("yosys.bat");
+        std::fs::write(
+            &bat,
+            format!(
+                "@powershell -NoProfile -ExecutionPolicy Bypass -File \"{}\" %*\r\n",
+                ps.display()
+            ),
+        )
+        .expect("write fake yosys launcher");
+        bat
     }
 
     /// Without a tool on the host: the manifest of a lift carries the staged primary as
