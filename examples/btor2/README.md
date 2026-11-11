@@ -15,6 +15,8 @@ The BTOR2 reader applies four transformations on top of Yosys's elaboration to p
 
 ## The example corpus
 
+> **The `.btor` files carry the properties; the `.sv` lift does not (since 2026-11-04).** Every `bad` line below comes from an immediate `assert` inside a procedural block, and the product SV lift (`sv-yosys`, yosys-slang's `read_slang --ignore-assertions` since the slang-only lift, mununu#847) does not lift immediate assertions. Without that flag yosys-slang refuses every temporal property as a hard elaboration error, so the flag stays. Lifting a `.sv` here gives the design with **no** `safety_bad_*` property. Evaluate the checked-in `.btor` (regenerated with `read_verilog -formal`, below), or write the property as SVA `assert property` and use `sv verify-auto`. The `.sv` statements of what each example "emits" describe the `.btor`. See [`docs/consumer-briefings/2026-11-slang-only-lift.md`](../../docs/consumer-briefings/2026-11-slang-only-lift.md).
+
 Each example demonstrates a different BTOR2 line-type and SV idiom. All four elaborate via the canonical `sv-yosys` driver script and produce models well under the `MAX_STATE_BITS = 20` cap.
 
 ### `safety_demo.sv` — counter with violatable assertion
@@ -58,17 +60,17 @@ Temporal SVA is verified by `sv verify-auto` (slang elaboration + mununu's own t
 ## CLI
 
 ```bash
-# Auto-detected by extension (uses Yosys for .sv, BTOR2 reader for .btor):
+# The BTOR2 reader on the checked-in .btor (it carries the `bad` line):
 mununu context summarize examples/btor2/safety_demo.btor
-mununu context eval examples/btor2/safety_demo.sv \
-    --adapter sv-yosys --formula safety_bad_0 --automaton Circuit
-
-# Explicit BTOR2 adapter on a hand-edited .btor:
 mununu context eval examples/btor2/safety_demo.btor \
     --adapter btor2 --formula safety_bad_0 --automaton Circuit
+
+# The SV lift of the same design: the model, without the immediate assertion
+# (see the note above — there is no `safety_bad_0` to evaluate on this form):
+mununu context summarize examples/btor2/safety_demo.sv --adapter sv-yosys
 ```
 
-Both forms yield the same model and verdict. The `sv-yosys` form requires a stock Yosys ≥ 0.40 on `$PATH` (or `MUNUNU_YOSYS_PATH` set); see [`adapter::yosys::translate_sv`](../../crates/mununu-core/src/adapter/yosys/mod.rs) for the driver.
+Before the slang-only lift both forms yielded the same model and verdict. The `sv-yosys` form requires a stock Yosys ≥ 0.40 on `$PATH` (or `MUNUNU_YOSYS_PATH` set); see [`adapter::yosys::translate_sv`](../../crates/mununu-core/src/adapter/yosys/mod.rs) for the driver.
 
 ## Regenerating `.btor` files from source
 
@@ -87,10 +89,10 @@ The pipeline mirrors [`adapter::yosys::build_script`](../../crates/mununu-core/s
 ## API
 
 ```bash
-SV=$(cat examples/btor2/safety_demo.sv)
+BTOR=$(cat examples/btor2/safety_demo.btor)
 CTXDSL=$(curl -s -X POST http://127.0.0.1:8080/api/v1/context/import \
     -H 'Content-Type: application/json' \
-    -d "$(jq -n --arg c "$SV" '{format:"sv-yosys", content:$c}')" \
+    -d "$(jq -n --arg c "$BTOR" '{format:"btor2", content:$c}')" \
   | jq -r '.ctxdsl')
 curl -s -X POST http://127.0.0.1:8080/api/v1/context/eval \
     -H 'Content-Type: application/json' \
@@ -99,7 +101,7 @@ curl -s -X POST http://127.0.0.1:8080/api/v1/context/eval \
           formula:"safety_bad_0", automaton:"Circuit"}')"
 ```
 
-Replacing `"sv-yosys"` with `"btor2"` and `$SV` with the contents of `safety_demo.btor` is equivalent.
+`format:"sv-yosys"` with the `.sv` imports the design without the assertion (see the note above).
 
 ## UI
 

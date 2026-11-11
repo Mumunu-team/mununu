@@ -10599,17 +10599,19 @@ mod tests {
     /// mununu#734 — a reach portfolio that decides nothing within an intact budget names its cause:
     /// on a design whose memory is initialised from an array-sorted INPUT every in-process member
     /// refuses (native BMC since N5 encodes memories, but not that `init`; the exact engine and
-    /// interpolation have no array support) and the subprocess members are
-    /// absent on the host, so the row's ⊥ carries `EngineDidNotComplete { engine: "reach-portfolio" }`
-    /// with the members' own words and a `portfolio-refused` note — not `unclassified`, not
-    /// `budget-expired`. On OpenTitan csrng the same situation (a 64-bit constant limit) cost a debug
-    /// run and a probe on a dumped model to attribute.
+    /// interpolation have no array support), so when no subprocess member decides either, the row's
+    /// ⊥ carries `EngineDidNotComplete { engine: "reach-portfolio" }` with the members' own words and
+    /// a `portfolio-refused` note — not `unclassified`, not `budget-expired`. On OpenTitan csrng the
+    /// same situation (a 64-bit constant limit) cost a debug run and a probe on a dumped model to
+    /// attribute.
+    ///
+    /// mununu#981 — the outcome depends on the host: with btormc / Pono / rIC3 on `PATH` (the
+    /// `mununu-sva` image) a subprocess member proves the row, which is right (`q` never leaves 0).
+    /// Both arms assert: decided ⇒ `Holds`, named by a subprocess member; ⊥ ⇒ the attribution
+    /// above. The attribution itself is pinned host-independently by
+    /// `the_owned_members_refusal_is_attributed_to_them_on_any_host` below.
     #[test]
     fn escalate_bottom_attributes_an_instant_inconclusive_to_the_refusing_members() {
-        const ARRAY_DESIGN: &str = "1 sort bitvec 1\n2 sort bitvec 2\n3 sort array 2 1\n\
-                                    4 state 3 mem\n5 zero 1\n6 state 1 q\n7 init 1 6 5\n\
-                                    8 next 1 6 6\n9 next 3 4 4\n10 input 3 seed\n\
-                                    11 init 3 4 10\n";
         let mut report = AutoVerifyReport {
             properties: vec![PropertyVerdict {
                 name: "q_zero".to_string(),
@@ -10634,12 +10636,85 @@ mod tests {
             &[],
         );
         let p = &report.properties[0];
-        assert!(
-            matches!(p.outcome, VerifyOutcome::Unknown { .. }),
-            "{:?}",
-            p.outcome
-        );
+        if !matches!(p.outcome, VerifyOutcome::Unknown { .. }) {
+            // A subprocess member decided: the verdict must be the true one, by a member the
+            // in-process set does not contain.
+            assert_eq!(p.outcome, VerifyOutcome::Holds, "{p:?}");
+            let members = p
+                .portfolio
+                .as_ref()
+                .map(|a| a.decided_by.clone())
+                .unwrap_or_default();
+            assert!(
+                members
+                    .iter()
+                    .any(|m| ["btormc", "pono", "ric3"].contains(&m.as_str())),
+                "decided by a subprocess member: {members:?} ({p:?})"
+            );
+            return;
+        }
         match &p.bottom_reason {
+            Some(BottomReason::EngineDidNotComplete { engine, detail }) => {
+                assert_eq!(engine, "reach-portfolio");
+                assert!(
+                    detail.contains("native") && detail.to_lowercase().contains("array"),
+                    "the refusing member and its reason are named: {detail}"
+                );
+            }
+            other => panic!("expected the portfolio's refusal as the reason, got {other:?}"),
+        }
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.kind == "portfolio-refused" && !n.items.is_empty()),
+            "{:?}",
+            notes.iter().map(|n| &n.kind).collect::<Vec<_>>()
+        );
+    }
+
+    /// The design of the test above: memory initialised from an array-sorted INPUT.
+    const ARRAY_DESIGN: &str = "1 sort bitvec 1\n2 sort bitvec 2\n3 sort array 2 1\n\
+                                4 state 3 mem\n5 zero 1\n6 state 1 q\n7 init 1 6 5\n\
+                                8 next 1 6 6\n9 next 3 4 4\n10 input 3 seed\n\
+                                11 init 3 4 10\n";
+
+    /// mununu#981 — the seam of the test above, on any host: the owned-only portfolio never starts
+    /// a subprocess member, so its outcome on `ARRAY_DESIGN`'s monitor is the in-process members' refusals
+    /// with their real words (derived from the real call, not invented), and the attribution turns
+    /// them into the reach-portfolio ⊥ and a `portfolio-refused` note.
+    #[test]
+    fn the_owned_members_refusal_is_attributed_to_them_on_any_host() {
+        use crate::adapter::reach_portfolio::{ReachVerdict, decide_reach_owned_only};
+        // The portfolio's input at the real call site: the design plus the formula's `bad`
+        // monitor (`reach_rescue::safety_bad_model`), not the bare design.
+        let formula =
+            crate::mu_calculus::parser::parse("nu X. ((q == 0) && [] X)").expect("parses");
+        let (monitored, _) =
+            crate::adapter::reach_rescue::safety_bad_model(ARRAY_DESIGN, &formula, false)
+                .expect("the monitor builds");
+        let file = crate::adapter::btor2::parser::parse(&monitored).expect("parses");
+        let reach = decide_reach_owned_only(&file, 30_000);
+        assert_eq!(reach.verdict, ReachVerdict::Unknown, "{reach:?}");
+        assert!(
+            reach.refused.iter().any(|(m, _)| *m == "native"),
+            "native refuses the array-input init: {reach:?}"
+        );
+        let mut prop = PropertyVerdict {
+            name: "q_zero".to_string(),
+            label: None,
+            kind: crate::adapter::slang::translate::SvaKind::Assert,
+            formula: "nu X. ((q == 0) && [] X)".to_string(),
+            outcome: VerifyOutcome::Unknown { unknown_cells: 1 },
+            seeded_predicates: Vec::new(),
+            counterexample: None,
+            bottom_reason: None,
+            decided_by: None,
+            vacuity: None,
+            portfolio: None,
+        };
+        let mut notes = Vec::new();
+        attribute_portfolio_abstention(&mut prop, &reach, false, &mut notes);
+        match &prop.bottom_reason {
             Some(BottomReason::EngineDidNotComplete { engine, detail }) => {
                 assert_eq!(engine, "reach-portfolio");
                 assert!(
