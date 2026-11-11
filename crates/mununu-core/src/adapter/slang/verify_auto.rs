@@ -5057,6 +5057,16 @@ pub(crate) fn apply_resume(
     items.extend(disagreed);
     items.extend(absent);
     items.extend(fresh);
+    // mununu#965 — the report-level cross-checks read the shipped verdicts, so they run again
+    // with the resumed ones in place: a resumed HOLDS beside a fresh witness gets its vacuity
+    // finding, and a resumed verdict that contradicts a fresh one is withheld, exactly as in an
+    // unbroken run. Only the portfolio-side finding (a sec-cm antecedent the reach portfolio
+    // proved unreachable) needs the engines, and the note says it is not re-checked.
+    if !report.resumed.is_empty() {
+        flag_self_contradictory_verdicts(report);
+        flag_vacuous_guarantees(report);
+        refresh_vacuity_notes(report);
+    }
     report.notes.push(VerificationNote {
         kind: "resumed-from-breadcrumb".to_string(),
         level: NoteLevel::Info,
@@ -5069,7 +5079,10 @@ pub(crate) fn apply_resume(
             plan.disagreed.len()
         ),
         detail: "A resumed row carries the verdict the killed run reached with THIS build and \
-                 nothing else: no counterexample, vacuity finding, seeded predicates or wall. A \
+                 nothing else: no counterexample, portfolio, seeded predicates or wall. Its \
+                 vacuity and contradiction checks are re-run against the other verdicts in this \
+                 report; the antecedent-unreachable check of a security-countermeasure chain \
+                 needs the reach portfolio and is not re-checked for a resumed row. A \
                  property whose breadcrumb records disagreed is re-run, because the merge would \
                  have raised its engine-contradiction alarm and a resume must not pick a side. \
                  Run without --resume-from for the trace of a resumed `violated` row."
@@ -13941,6 +13954,62 @@ mod tests {
             vacuity: None,
             portfolio: None,
         }
+    }
+
+    /// mununu#965 — a resumed recoverability HOLDS is judged against the fresh verdicts like any
+    /// other: beside a fresh `EF(st_q != 0)` VIOLATED its target is invariant, and the resumed row
+    /// says so on its own `vacuity` field and in a `vacuous-guarantee` note. On the parent it
+    /// shipped `vacuity: None`, indistinguishable from a checked, non-vacuous HOLDS.
+    #[test]
+    fn a_resumed_holds_is_checked_for_vacuity_against_the_fresh_verdicts() {
+        use crate::adapter::resume::{ResumePlan, ResumedVerdict};
+        let build = "e7a5b21c0ffee0000000000000000000000000000".to_string();
+        let mut plan = ResumePlan {
+            build: build.clone(),
+            ..ResumePlan::default()
+        };
+        plan.resumed.insert(
+            "g".into(),
+            ResumedVerdict {
+                outcome: VerifyOutcome::Holds,
+                build,
+                phase: "merged".into(),
+            },
+        );
+        let mut g = pv(
+            "g",
+            "nu Y.((mu X.((st_q == 0) || <> X)) && [] Y)",
+            VerifyOutcome::Unknown { unknown_cells: 0 },
+        );
+        g.bottom_reason = Some(BottomReason::NotAttempted);
+        let mut report = AutoVerifyReport {
+            properties: vec![
+                g,
+                pv(
+                    "w_dual",
+                    "mu Z.((st_q != 0) || <> Z)",
+                    VerifyOutcome::Violated { false_cells: 1 },
+                ),
+            ],
+            ..Default::default()
+        };
+        apply_resume(&mut report, &plan);
+        let g = &report.properties[0];
+        assert_eq!(g.decided_by.as_deref(), Some("resumed"));
+        assert!(matches!(g.outcome, VerifyOutcome::Holds));
+        let v = g
+            .vacuity
+            .as_ref()
+            .expect("the resumed HOLDS is judged for vacuity");
+        assert_eq!(v.kind, VacuityKind::InvariantTarget);
+        assert_eq!(v.witness, "w_dual");
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|n| n.kind == "vacuous-guarantee" && n.property.as_deref() == Some("g")),
+            "the note form follows the field"
+        );
     }
 
     /// Roadmap J3 — the overlay: a row the run left `not-attempted` FOR the breadcrumb takes the

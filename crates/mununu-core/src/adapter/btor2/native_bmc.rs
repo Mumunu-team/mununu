@@ -445,25 +445,36 @@ impl<'a> Unroller<'a> {
         bad_ops: &'a [Operand],
         constraint_ops: &'a [Operand],
         n: usize,
-    ) -> Self {
+    ) -> Result<Self, BmcError> {
         let fresh = |src: &HashMap<Nid, BV>, prefix: &str| -> HashMap<Nid, BV> {
             src.iter()
                 .map(|(nid, bv)| (*nid, BV::fresh_const(prefix, bv.get_size())))
                 .collect()
         };
         // A memory's frame variable takes the declared array's own sorts; the encoder built it
-        // from the BTOR2 `sort array`, so both are present.
+        // from the BTOR2 `sort array`, so both are present. mununu#965: a memory without them is
+        // an encode error, never dropped — a dropped memory has no frame variable, so every frame
+        // would read its initial contents (frozen), and a `bad` behind a write would read Safe.
+        let sorts = view
+            .state_curr_arr
+            .iter()
+            .map(|(nid, arr)| {
+                let sort = arr.get_sort();
+                match (sort.array_domain(), sort.array_range()) {
+                    (Some(dom), Some(rng)) => Ok((*nid, dom, rng)),
+                    _ => Err(BmcError::Encode(EncodeError::MemoryWithoutArraySort {
+                        nid: *nid,
+                    })),
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let fresh_arr = || -> HashMap<Nid, Array> {
-            view.state_curr_arr
+            sorts
                 .iter()
-                .filter_map(|(nid, arr)| {
-                    let sort = arr.get_sort();
-                    let (dom, rng) = (sort.array_domain()?, sort.array_range()?);
-                    Some((*nid, Array::fresh_const("bmc_m", &dom, &rng)))
-                })
+                .map(|(nid, dom, rng)| (*nid, Array::fresh_const("bmc_m", dom, rng)))
                 .collect()
         };
-        Unroller {
+        Ok(Unroller {
             view,
             bad_ops,
             constraint_ops,
@@ -472,7 +483,7 @@ impl<'a> Unroller<'a> {
             frame_arr: (0..=n).map(|_| fresh_arr()).collect(),
             array_inits,
             one1: BV::from_u64(1, 1),
-        }
+        })
     }
 
     /// Instantiate a current-cycle term at frame `j` (state cells, inputs and memories), and,
@@ -665,7 +676,7 @@ pub fn bmc_bad_reachable_witness(
     let cfg = z3::Config::new();
     z3::with_z3_config(&cfg, || {
         let (view, array_inits) = encode_for_bmc(file).map_err(BmcError::Encode)?;
-        let u = Unroller::build(&view, array_inits, &bad_ops, &constraint_ops, n);
+        let u = Unroller::build(&view, array_inits, &bad_ops, &constraint_ops, n)?;
 
         // A single init-constrained path: check `bad` at each frame, extend if clean.
         let solver = z3::Solver::new();
@@ -787,7 +798,7 @@ pub fn decide_bad_safety_cancellable(
     let cfg = z3::Config::new();
     z3::with_z3_config(&cfg, || {
         let (view, array_inits) = encode_for_bmc(file).map_err(BmcError::Encode)?;
-        let u = Unroller::build(&view, array_inits, &bad_ops, &constraint_ops, n);
+        let u = Unroller::build(&view, array_inits, &bad_ops, &constraint_ops, n)?;
 
         // N0.5 (2026-11-03) — a peer's decision is honoured INSIDE a query, not only at the
         // next depth boundary. Until now `cancel` was read between depths, so a k-induction
@@ -1054,7 +1065,7 @@ pub fn bmc_cex_until(
     z3::with_z3_config(&cfg, || {
         // mununu#803 — an encoder refusal is a reason the caller records, not a silent miss.
         let (view, array_inits) = encode_for_bmc(file).map_err(BmcError::Encode)?;
-        let u = Unroller::build(&view, array_inits, &bad_ops, &constraint_ops, n);
+        let u = Unroller::build(&view, array_inits, &bad_ops, &constraint_ops, n)?;
         let ctx = z3::Context::thread_local();
         let handle = ctx.handle();
         let gate = QueryGate::default();
@@ -1465,7 +1476,8 @@ mod tests {
             let file = parser::parse(&pigeonhole_btor2(11, 10)).expect("parses");
             let (bad_ops, init_pairs, constraint_ops) = extract_props(&file);
             let (view, array_inits) = encode_for_bmc(&file).expect("encodes");
-            let u = Unroller::build(&view, array_inits, &bad_ops, &constraint_ops, 0);
+            let u = Unroller::build(&view, array_inits, &bad_ops, &constraint_ops, 0)
+                .expect("the pigeonhole design has no memory");
             for (key, val) in [("timeout", 2_000u32), ("rlimit", 300_000u32)] {
                 let s = z3::Solver::new();
                 let mut p = z3::Params::new();

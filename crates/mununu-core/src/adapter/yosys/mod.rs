@@ -3048,7 +3048,14 @@ fn emit_cutpoints(signals: &[String]) -> String {
 /// yosys-slang lowers immediate and boolean `assert property` to `$check` cells but refuses
 /// any temporal property (`|=>`, `##1`, `$rose`, `s_eventually`) as "unsupported SVA feature",
 /// a hard elaboration error, and offers no finer switch; sv2v dropped immediate assertions
-/// too, so no product path ever lifted them), `--ignore-timing` (slang is stricter than `read_verilog` about
+/// too, so no product path ever lifted them; SOUNDNESS (mununu#965, measured 2026-11-11 on the
+/// same yosys in `mununu-sva`): the flag drops `assume`s as well — immediate and concurrent, 0
+/// `constraint` lines where, without it, they become `$check` cells — so the lifted model is an
+/// OVER-approximation of the assumed environment. Concurrent `assume property` statements are put
+/// back by the slang `extract_sva` path (`plan_assumptions`, `--assumes precondition`); an
+/// immediate `assume` in procedural code is extracted by neither path. Without it: a universal
+/// (`AG` / `nu`) `holds` still transfers, a counterexample may violate the dropped assume, and an
+/// existential or branching `holds` (`EF`, `AG EF`) does not transfer), `--ignore-timing` (slang is stricter than `read_verilog` about
 /// `#`-delay timing controls, which are not part of the design's cycle behaviour — SOUNDNESS:
 /// read_verilog-equivalent, not an extra abstraction; without it ~18 corpus designs failed to
 /// lift, 2026-07-25), `--empty-blackboxes` (an empty module is a black box — what yosys made of a

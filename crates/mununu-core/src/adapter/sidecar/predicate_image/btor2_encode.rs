@@ -50,6 +50,11 @@ pub enum EncodeError {
     /// rather than silently truncating.
     #[error("BTOR2 NID {nid}: constant value does not fit in declared sort width.")]
     ConstantOutOfRange { nid: i64 },
+    /// mununu#965 — a memory state whose encoded term has no array domain / range. The encoder
+    /// builds every memory from a BTOR2 `sort array`, so this is defence-in-depth; dropping the
+    /// memory instead would freeze it across frames and could make a reachable `bad` read Safe.
+    #[error("BTOR2 NID {nid}: memory state has no array sort; it cannot be unrolled.")]
+    MemoryWithoutArraySort { nid: i64 },
 }
 
 /// A signal exposed by the encoded design — state cell, input, or
