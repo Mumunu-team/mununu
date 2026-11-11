@@ -395,7 +395,33 @@ fn emit_l2s_core(
     };
     e.push(format!("bad {bad_cond}"));
 
-    Ok(format!("{}\n{}\n", content.trim_end(), e.lines.join("\n")))
+    // mununu#980 — the original text minus its `justice` / `fair` lines, as the k-liveness
+    // monitor does: the monitor's question is its one `bad`, and the fairness it needs is already
+    // folded into `fairness_atoms`. A leftover `justice` line made rIC3 1.5.2's frontend panic
+    // ("unsupport justice op!", SIGABRT at 0 s) on every l2s query of a justice design, so the
+    // rIC3 member never contributed to one (31/31 l2s notes naming it in m3c). Dropping them
+    // changes no answer a safety member gives: none of them checks a justice section.
+    let dropped: std::collections::HashSet<Nid> = file
+        .lines
+        .iter()
+        .filter(|l| matches!(l.node, Node::Justice { .. } | Node::Fair { .. }))
+        .map(|l| l.nid)
+        .collect();
+    let mut text = String::with_capacity(content.len() + e.lines.len() * 24);
+    for line in content.trim_end().lines() {
+        let nid = line
+            .split_whitespace()
+            .next()
+            .and_then(|t| t.parse::<Nid>().ok());
+        if nid.is_some_and(|n| dropped.contains(&n)) {
+            continue;
+        }
+        text.push_str(line);
+        text.push('\n');
+    }
+    text.push_str(&e.lines.join("\n"));
+    text.push('\n');
+    Ok(text)
 }
 
 #[cfg(test)]
@@ -442,6 +468,39 @@ mod tests {
                 .any(|l| matches!(l.node, Node::Bad { .. })),
             "a bad line is present"
         );
+    }
+
+    /// mununu#980 — a design's own `justice` / `fair` lines are not carried into the monitor:
+    /// the safety members see exactly one `bad` and no justice section (rIC3 1.5.2 aborts on a
+    /// `justice` line). The fairness is still in the monitor, as its fair-seen latches.
+    #[test]
+    fn the_monitor_drops_the_designs_justice_and_fair_lines() {
+        let design = format!("{RESPONDER}9 justice 1 2\n10 fair 5\n11 output 2 st_out\n");
+        let out = emit_response_l2s_monitor_under_fairness(
+            &design,
+            ("req", CmpOp::Eq, 1),
+            ("st", CmpOp::Eq, 1),
+            &[("req", CmpOp::Eq, 1)],
+            false,
+        )
+        .expect("emit");
+        let file = parser::parse(&out).expect("emitted BTOR2 re-parses");
+        assert!(
+            !file
+                .lines
+                .iter()
+                .any(|l| matches!(l.node, Node::Justice { .. } | Node::Fair { .. })),
+            "no justice / fair line survives:\n{out}"
+        );
+        assert_eq!(
+            file.lines
+                .iter()
+                .filter(|l| matches!(l.node, Node::Bad { .. }))
+                .count(),
+            1,
+            "exactly one bad:\n{out}"
+        );
+        assert!(out.contains("st_out"), "every other original line is kept");
     }
 
     #[test]
