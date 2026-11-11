@@ -1394,33 +1394,43 @@ mod subprocess_failure_reason_tests {
     use super::subprocess_failure_reason;
 
     /// mununu#980 — a member killed by SIGABRT reads as an abort, not a refusal; an ordinary
-    /// non-zero exit keeps the plain form.
-    #[cfg(unix)]
+    /// non-zero exit keeps the plain form. Runs on every OS (the OS matrix's same-tests rule):
+    /// the signal half is Unix-only, as signals are.
     #[test]
     fn a_signal_death_is_named_an_abort_and_an_exit_code_is_not() {
-        use std::os::unix::process::ExitStatusExt;
         let tool = std::path::Path::new("rIC3");
-        let aborted = super::no_verdict_line(
-            tool,
-            std::process::ExitStatus::from_raw(libc::SIGABRT),
-            "assertion failed",
-            "",
-        );
-        assert!(
-            aborted.contains("ABORTED by signal 6 (SIGABRT)") && aborted.contains("not a refusal"),
-            "{aborted}"
-        );
-        assert!(aborted.ends_with("assertion failed"), "{aborted}");
-        let exited = super::no_verdict_line(
-            tool,
-            std::process::ExitStatus::from_raw(1 << 8),
-            "",
-            "parse error",
-        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            let aborted = super::no_verdict_line(
+                tool,
+                std::process::ExitStatus::from_raw(libc::SIGABRT),
+                "assertion failed",
+                "",
+            );
+            assert!(
+                aborted.contains("ABORTED by signal 6 (SIGABRT)")
+                    && aborted.contains("not a refusal"),
+                "{aborted}"
+            );
+            assert!(aborted.ends_with("assertion failed"), "{aborted}");
+        }
+        #[cfg(unix)]
+        let exit_one = {
+            use std::os::unix::process::ExitStatusExt;
+            std::process::ExitStatus::from_raw(1 << 8)
+        };
+        #[cfg(windows)]
+        let exit_one = {
+            use std::os::windows::process::ExitStatusExt;
+            std::process::ExitStatus::from_raw(1)
+        };
+        let exited = super::no_verdict_line(tool, exit_one, "", "parse error");
         assert!(
             exited.contains("exited with status") && !exited.contains("ABORTED"),
             "{exited}"
         );
+        assert!(exited.ends_with("parse error"), "{exited}");
     }
 
     #[test]
