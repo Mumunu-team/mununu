@@ -1235,6 +1235,11 @@ pub struct Btor2VerifyLivenessResponse {
     /// With `justice`: whether the content was ASCII AIGER lowered to BTOR2.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub converted_from_aiger: Option<bool>,
+    /// Track V (V2) — why an UNDECIDED row is undecided: each portfolio member's refusal or budget
+    /// abstention (`"<member> refused: …"` / `"<member>: …"`), and the k-liveness fallback's note.
+    /// Empty — and omitted — on a decided row.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 /// Request for the conjunctive response-liveness endpoint
@@ -2886,6 +2891,11 @@ pub struct SvVerifyLivenessReport {
     /// Which portfolio engines reached a conclusion. Empty when none did, which is not the same as
     /// the property being undecided for a modelling reason — read `outcome` for that.
     pub decided_by: Vec<String>,
+    /// Track V (V2) — why an UNDECIDED row is undecided: each portfolio member's refusal or budget
+    /// abstention (`"<member> refused: …"` / `"<member>: …"`), and the k-liveness fallback's note.
+    /// Empty — and omitted — on a decided row.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 /// mununu#541 — the `sv verify-liveness --response` CLI report, schema-pinned.
@@ -2909,6 +2919,11 @@ pub struct SvLivenessResponseView {
     pub response: String,
     /// Which engines reached a conclusion for this conjunct.
     pub decided_by: Vec<String>,
+    /// Track V (V2) — why an UNDECIDED row is undecided: each portfolio member's refusal or budget
+    /// abstention (`"<member> refused: …"` / `"<member>: …"`), and the k-liveness fallback's note.
+    /// Empty — and omitted — on a decided row.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 /// One provenance note (mirrors

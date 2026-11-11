@@ -83,15 +83,16 @@ fn err(message: String) -> AdapterError {
     }
 }
 
-/// A BTOR2-text line appender that hands out fresh NIDs above the design's max.
-struct Emit {
-    next: Nid,
-    lines: Vec<String>,
+/// A BTOR2-text line appender that hands out fresh NIDs above the design's max (shared with
+/// the response k-liveness monitor, [`crate::adapter::btor2::kliveness_monitor`]).
+pub(crate) struct Emit {
+    pub(crate) next: Nid,
+    pub(crate) lines: Vec<String>,
 }
 
 impl Emit {
     /// Append `"<fresh-nid> <body>"` and return the fresh NID.
-    fn push(&mut self, body: impl AsRef<str>) -> Nid {
+    pub(crate) fn push(&mut self, body: impl AsRef<str>) -> Nid {
         let nid = self.next;
         self.next += 1;
         self.lines.push(format!("{nid} {}", body.as_ref()));
@@ -102,7 +103,7 @@ impl Emit {
 /// Emit the request / grant atom `signal ⋈ value` as a 1-bit node, returning its
 /// NID. `signal` may resolve to a state cell (value-alias / reset-mux aware) or a
 /// primary input.
-fn emit_atom(
+pub(crate) fn emit_atom(
     file: &crate::adapter::btor2::ast::Btor2File,
     e: &mut Emit,
     bool_sort: Nid,

@@ -16,7 +16,9 @@
 //! (in `mununu-sva-pono` with `MUNUNU_MATHSAT_PATH` set, the `cube-craig` column comes alive).
 
 use mununu_core::adapter::btor2::cegar::PredicateSource;
+use mununu_core::adapter::btor2::kliveness_monitor::KlivenessLadder;
 use mununu_core::adapter::btor2::pin::pin_inputs_to_constants;
+use mununu_core::adapter::liveness_rescue::{parse_response_atom, response_kliveness};
 use mununu_core::adapter::recoverability::{
     verify_recoverability, verify_recoverability_scalable,
     verify_recoverability_scalable_with_source, verify_recoverability_spcr_only,
@@ -626,16 +628,17 @@ fn decides(r: &Result<PropertyVerdict, String>, want: PropertyVerdict) -> bool {
 fn wall_class_matrix() {
     let mathsat = std::env::var_os("MUNUNU_MATHSAT_PATH").is_some();
     println!(
-        "\n{:32} {:26} {:>6} {:>6} {:>6} {:>6} {:>7} {:>6}",
-        "case", "class", "dflt", "wp", "craig", "spcr", "comb", "trap"
+        "\n{:32} {:26} {:>6} {:>6} {:>6} {:>6} {:>7} {:>6} {:>6}",
+        "case", "class", "dflt", "wp", "craig", "spcr", "comb", "trap", "kl-af"
     );
-    println!("{}", "-".repeat(105));
+    println!("{}", "-".repeat(112));
 
     let mut soundness_violations = Vec::new();
     let mut craig_unique = Vec::new();
     let mut spcr_decided = Vec::new(); // array-content cases the SPCR pre-pass decides (its reach)
     let mut combined_fullspace = Vec::new(); // ⊥-singletons → combined decides with NO pins (transfers)
     let mut trap_unique = Vec::new(); // every other lever non-VIOLATED → the trap certificate refutes
+    let mut klaf_unique = Vec::new(); // every other lever non-HOLDS → the k-liveness strengthening proves
 
     let mut rtl_classes = std::collections::BTreeSet::new();
     let mut synthetic_classes = std::collections::BTreeSet::new();
@@ -677,8 +680,19 @@ fn wall_class_matrix() {
         // construction: it never produces Holds. `reset_pinned` = the case pins its reset, so a
         // `state_q` alias behind the async-reset mux resolves to its state cell.
         let trap = trap_certificate_verdict(&model, c.target, !c.pin.is_empty());
+        // Track V (V2/V3) — the k-liveness response rung on the universal strengthening
+        // `AG(¬target → AF target)`, which implies `AG EF target`: HOLDS-only by construction (its
+        // HOLDS transfers; anything else is ⊥ — a violated strengthening says nothing about the
+        // branching property, recovery may be optional). engine: proof-directed reach portfolio
+        // (rIC3 portfolio mode, Pono `ic3bits`, native k-induction) on the commit-and-count monitor.
+        let klaf = parse_response_atom(c.target).map(|good| {
+            match response_kliveness(&model, &good.negated(), &good, &[], !c.pin.is_empty(), None) {
+                KlivenessLadder::Holds { .. } => PropertyVerdict::Holds,
+                _ => PropertyVerdict::Unknown,
+            }
+        });
         println!(
-            "{:32} {:26} {:>6} {:>6} {:>6} {:>6} {:>7} {:>6}",
+            "{:32} {:26} {:>6} {:>6} {:>6} {:>6} {:>7} {:>6} {:>6}",
             c.name,
             c.class,
             v(&dflt),
@@ -686,7 +700,8 @@ fn wall_class_matrix() {
             v(&craig),
             v(&spcr),
             v(&combined),
-            v(&trap)
+            v(&trap),
+            v(&klaf)
         );
 
         // SOUNDNESS invariant — no lever may contradict the oracle. The `combined` plan is included:
@@ -699,6 +714,7 @@ fn wall_class_matrix() {
             ("spcr", &spcr),
             ("combined", &combined),
             ("trap", &trap),
+            ("kl-af", &klaf),
         ] {
             let bad = match c.oracle {
                 Oracle::Holds => is_viol(r),
@@ -765,12 +781,25 @@ fn wall_class_matrix() {
         {
             trap_unique.push(c.name);
         }
+
+        // The k-liveness strengthening's MARGINAL reach: a case no other lever proves that it proves.
+        if is_holds(&klaf)
+            && ![&dflt, &wp, &craig, &spcr, &combined]
+                .iter()
+                .any(|r| is_holds(r))
+        {
+            klaf_unique.push(c.name);
+        }
     }
 
-    println!("{}", "-".repeat(105));
+    println!("{}", "-".repeat(112));
     assert!(
         soundness_violations.is_empty(),
         "SOUNDNESS VIOLATIONS (a lever contradicted the oracle): {soundness_violations:?}"
+    );
+
+    println!(
+        "k-liveness strengthening (kl-af) UNIQUELY proved (every other lever non-HOLDS): {klaf_unique:?}"
     );
 
     if trap_unique.is_empty() {

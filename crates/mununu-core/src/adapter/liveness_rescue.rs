@@ -65,6 +65,9 @@
 //! the mununu-sva toolchain, per the [`crate::adapter::reach_rescue`] no-target
 //! lesson).
 
+use crate::adapter::btor2::kliveness_monitor::{
+    KlivenessLadder, emit_response_kliveness_monitor, kliveness_ladder,
+};
 use crate::adapter::btor2::l2s_monitor::{
     emit_l2s_monitor_from_formula, emit_response_l2s_monitor,
     emit_response_l2s_monitor_under_fairness,
@@ -86,6 +89,26 @@ pub struct Atom {
     pub op: CmpOp,
     /// The literal right-hand side.
     pub value: u128,
+}
+
+impl Atom {
+    /// The complement `signal ⋈̄ value` (`==` ↔ `!=`, `<` ↔ `>=`, `<=` ↔ `>`) — exact on a
+    /// bitvector, so `¬(s ⋈ v)` and `s ⋈̄ v` hold on the same states.
+    pub fn negated(&self) -> Atom {
+        let op = match self.op {
+            CmpOp::Eq => CmpOp::Ne,
+            CmpOp::Ne => CmpOp::Eq,
+            CmpOp::Lt => CmpOp::Ge,
+            CmpOp::Ge => CmpOp::Lt,
+            CmpOp::Le => CmpOp::Gt,
+            CmpOp::Gt => CmpOp::Le,
+        };
+        Atom {
+            signal: self.signal.clone(),
+            op,
+            value: self.value,
+        }
+    }
 }
 
 /// A reducible response-liveness property `AG(a → AF b)` over two single atoms, or the
@@ -468,12 +491,136 @@ pub fn response_liveness_rescue_atoms(
     .ok()?;
     let file = parser::parse(&monitored).ok()?;
     let outcome = decide_reach_portfolio(&file);
+    Some(kliveness_after_l2s(
+        design_btor2,
+        ante,
+        cons,
+        &[],
+        reset_pinned,
+        outcome,
+    ))
+}
+
+/// Track V, V2 — the response verbs' proof fallback. When the l2s portfolio left the monitor
+/// undecided (`Unknown`; a `Contradiction` is an alarm and is left as is), try the k-liveness width
+/// ladder on [`emit_response_kliveness_monitor`]: a proved bound is HOLDS, reported as
+/// `unreachable_by = ["kliveness", "k=<k>", <members>…]`; anything else leaves the l2s verdict
+/// (Inconclusive) and records why under `abstained` as `("kliveness", <note>)`, so the reason
+/// reaches the report. A decided l2s row never reaches the ladder — its time is unchanged.
+///
+/// engine: proof-directed reach portfolio (rIC3 in its own portfolio mode, Pono `ic3bits`, native
+/// k-induction) on the commit-and-count monitor of `¬φ`, widths 1…16 bits, each member under
+/// `btormc::DEFAULT_TIMEOUT` or the time left in the current run budget; the ladder stops at the
+/// first width no member decides — role: decider on proofs, after l2s (the complete method).
+///
+/// SOUNDNESS: HOLDS only, from an `Unreachable` on the monitor, which is sound on the concrete
+/// design (no abstraction): no path completes 2^w − 1 fair rounds of a never-granted committed
+/// request, so no fair violating path exists. A reachable bound is a long-pending request, not a
+/// violation; this function never turns it into VIOLATED.
+fn kliveness_after_l2s(
+    design_btor2: &str,
+    ante: &Atom,
+    cons: &Atom,
+    fair: &[(&str, CmpOp, u128)],
+    reset_pinned: bool,
+    mut outcome: ReachOutcome,
+) -> (LivenessVerdict, ReachOutcome) {
     let verdict = match outcome.verdict {
-        ReachVerdict::Unreachable => LivenessVerdict::Holds,
-        ReachVerdict::Reachable => LivenessVerdict::Violated,
-        ReachVerdict::Unknown | ReachVerdict::Contradiction => LivenessVerdict::Inconclusive,
+        ReachVerdict::Unreachable => return (LivenessVerdict::Holds, outcome),
+        ReachVerdict::Reachable => return (LivenessVerdict::Violated, outcome),
+        ReachVerdict::Contradiction => return (LivenessVerdict::Inconclusive, outcome),
+        ReachVerdict::Unknown => LivenessVerdict::Inconclusive,
     };
-    Some((verdict, outcome))
+    match response_kliveness(design_btor2, ante, cons, fair, reset_pinned, None) {
+        KlivenessLadder::Holds { bound, members } => {
+            outcome.verdict = ReachVerdict::Unreachable;
+            outcome.unreachable_by = vec!["kliveness", bound];
+            outcome.unreachable_by.extend(members);
+            (LivenessVerdict::Holds, outcome)
+        }
+        KlivenessLadder::Failed(note) => {
+            outcome.abstained.push(("kliveness", note));
+            (verdict, outcome)
+        }
+        KlivenessLadder::Undecided {
+            tried,
+            member_notes,
+        } => {
+            let mut note = format!(
+                "kliveness: no bound on a never-granted request proved at the members' default \
+                 budgets ({}); a reachable bound is not a violation — l2s decides the lasso side",
+                if tried.is_empty() {
+                    "no width attempted".to_string()
+                } else {
+                    tried.join(", ")
+                }
+            );
+            for m in member_notes {
+                note.push_str("; ");
+                note.push_str(&m);
+            }
+            outcome.abstained.push(("kliveness", note));
+            (verdict, outcome)
+        }
+    }
+}
+
+/// Track V, V2 — why an undecided response row is undecided, for the report: every member's
+/// refusal (`"<member> refused: <why>"`) and stated abstention (`"<member>: <why>"`, the k-liveness
+/// fallback's note among them). EMPTY on a decided row, so a decided row's report is unchanged.
+/// Failure Paths: the response verbs used to report only `decided_by`, so an undecided row read the
+/// same whether every member refused the design or all searched to their bound.
+pub fn undecided_notes(outcome: &ReachOutcome) -> Vec<String> {
+    if matches!(
+        outcome.verdict,
+        ReachVerdict::Unreachable | ReachVerdict::Reachable
+    ) {
+        return Vec::new();
+    }
+    outcome
+        .refused
+        .iter()
+        .map(|(m, why)| format!("{m} refused: {why}"))
+        .chain(
+            outcome
+                .abstained
+                .iter()
+                .map(|(m, why)| format!("{m}: {why}")),
+        )
+        .collect()
+}
+
+/// Track V, V2 — the k-liveness width ladder alone on `(⋀_j GF fair_j) → AG(ante → AF cons)`
+/// (the commit-and-count monitor of
+/// [`emit_response_kliveness_monitor`](crate::adapter::btor2::kliveness_monitor::emit_response_kliveness_monitor)).
+/// [`KlivenessLadder::Holds`] is a proof; nothing else is a verdict. The response verbs reach it
+/// only after l2s leaves the row undecided; V3's recoverability pre-check calls it on the
+/// strengthening `AG(¬good → AF good)`.
+///
+/// engine: proof-directed reach portfolio (rIC3 in its own portfolio mode, Pono `ic3bits`, native
+/// k-induction), widths 1…16 bits, each member under `btormc::DEFAULT_TIMEOUT` or the time left in
+/// the current run budget — role: decider on proofs.
+pub fn response_kliveness(
+    design_btor2: &str,
+    ante: &Atom,
+    cons: &Atom,
+    fair: &[(&str, CmpOp, u128)],
+    reset_pinned: bool,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> KlivenessLadder {
+    kliveness_ladder(
+        &|w| {
+            emit_response_kliveness_monitor(
+                design_btor2,
+                (&ante.signal, ante.op, ante.value),
+                (&cons.signal, cons.op, cons.value),
+                fair,
+                reset_pinned,
+                w,
+            )
+        },
+        cancel,
+    )
 }
 
 /// mununu#477 Option B — decide `(⋀_j GF fair_j) → AG(ante → AF cons)` via the
@@ -497,14 +644,26 @@ pub fn response_liveness_rescue_under_fairness(
     fairness_atoms: &[Atom],
     reset_pinned: bool,
 ) -> Option<(LivenessVerdict, ReachOutcome)> {
-    response_liveness_rescue_under_fairness_cancellable(
+    let (_, outcome) = response_liveness_rescue_under_fairness_cancellable(
         design_btor2,
         ante,
         cons,
         fairness_atoms,
         reset_pinned,
         None,
-    )
+    )?;
+    let fair: Vec<(&str, CmpOp, u128)> = fairness_atoms
+        .iter()
+        .map(|a| (a.signal.as_str(), a.op, a.value))
+        .collect();
+    Some(kliveness_after_l2s(
+        design_btor2,
+        ante,
+        cons,
+        &fair,
+        reset_pinned,
+        outcome,
+    ))
 }
 
 /// [`response_liveness_rescue_under_fairness`] with an external cancellation flag threaded into

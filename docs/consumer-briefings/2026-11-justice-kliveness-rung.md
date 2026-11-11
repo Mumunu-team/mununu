@@ -1,6 +1,6 @@
 # Consumer briefing — the k-liveness rung for justice properties (Track V, 2026-11)
 
-> Source of truth: [`kliveness_rung`](../../crates/mununu-core/src/adapter/justice.rs#L353), [`emit_kliveness_monitor`](../../crates/mununu-core/src/adapter/btor2/kliveness_monitor.rs#L49), [`ReachMembers`](../../crates/mununu-core/src/adapter/reach_portfolio.rs#L490) — surface: CLI+API (`btor2 verify-liveness --justice --rung kliveness|both`, `btor2 verify-justice`, the justice form of `POST /api/v1/btor2/verify-liveness` with `rung`).
+> Source of truth: [`kliveness_rung`](../../crates/mununu-core/src/adapter/justice.rs#L347), [`emit_kliveness_monitor`](../../crates/mununu-core/src/adapter/btor2/kliveness_monitor.rs#L77), [`ReachMembers`](../../crates/mununu-core/src/adapter/reach_portfolio.rs#L490) — surface: CLI+API (`btor2 verify-liveness --justice --rung kliveness|both`, `btor2 verify-justice`, the justice form of `POST /api/v1/btor2/verify-liveness` with `rung`).
 
 > **Audience:** anyone running the justice verbs (HWMCC-style `justice` / `fair` lines, AIGER 1.9) on the CLI or the API; lanes driving `scripts/hwmcc_live_study.sh`.
 >
