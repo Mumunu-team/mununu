@@ -2810,18 +2810,24 @@ fn yosys_log_errors(log: &Path) -> String {
 /// yosys without it (a brew 0.59) skips those tests, as a host without yosys always did; the
 /// `mununu-sva` image runs them. `help <unknown>` exits 0 and prints "No such command or cell
 /// type" — and `-q` silences that line — so the output is read, not the status alone.
+///
+/// mununu#981 — under `MUNUNU_REQUIRE_TOOLS=1` (the nightly's in-image unit pass) an absent tool
+/// FAILS the calling test instead of skipping it: on a host that is supposed to have the tools,
+/// a skip reported as a pass is how ten tool-gated tests went unseen.
 #[cfg(test)]
 pub(crate) fn yosys_can_read_slang() -> bool {
     let mut cmd = Command::new("yosys");
     if let Some(p) = slang_plugin_arg() {
         cmd.arg("-m").arg(p);
     }
-    cmd.args(["-p", "help read_slang"])
+    let present = cmd
+        .args(["-p", "help read_slang"])
         .output()
         .map(|o| {
             o.status.success() && !String::from_utf8_lossy(&o.stdout).contains("No such command")
         })
-        .unwrap_or(false)
+        .unwrap_or(false);
+    crate::adapter::require_tool("yosys with read_slang", present)
 }
 
 /// sv2v's argument vector: `-I<dir>` per include dir, then the sources. One function for the

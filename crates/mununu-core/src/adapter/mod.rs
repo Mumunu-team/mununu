@@ -48,6 +48,22 @@ pub mod domain;
 pub mod emit;
 pub mod engine_isolate;
 pub(crate) mod env_var;
+
+/// mununu#981 — the tool gate of a tool-dependent test: returns `present`, unless
+/// `MUNUNU_REQUIRE_TOOLS=1` is set and the tool is absent, which panics with the tool's name.
+/// The nightly's in-image unit pass sets it, so a test that would skip there (the image lost a
+/// tool, a probe broke) fails visibly instead of reporting a pass. Public for the integration
+/// tests' probes; not a product knob.
+#[doc(hidden)]
+pub fn require_tool(tool: &str, present: bool) -> bool {
+    if !present && env_var::read("MUNUNU_REQUIRE_TOOLS").is_some_and(|v| v.trim() == "1") {
+        panic!(
+            "MUNUNU_REQUIRE_TOOLS=1 but {tool} is not available here: a tool-gated test would \
+             skip and report a pass (mununu#981)"
+        );
+    }
+    present
+}
 pub mod extraction;
 pub mod fault_adversary;
 pub mod fsm_scan;

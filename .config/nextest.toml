@@ -10,3 +10,12 @@
 [[profile.default.overrides]]
 filter = 'test(/e2e_opentitan_ip_|e2e_opentitan_sva_census|e2e_reach_rescue_reducibility_census|e2e_portfolio_decides_what_the_default_engine_misses/)'
 threads-required = "num-test-threads"
+
+# mununu#981 — tests that assert a WALL CLOCK run alone. Under the full parallel suite in
+# `mununu-sva` (the nightly's in-image unit pass, 3,781 tests on 4 threads) these two failed on
+# both tries: `squaring_rescue_…` measured 5.38 s against its 5 s pin, and `interp_loop_…`'s
+# cvc5 query ran out ("no interpolant … interpolation gap"); alone each passes. Their claims are
+# about the engine, not about how busy the box is.
+[[profile.default.overrides]]
+filter = 'test(squaring_rescue_decides_what_the_iteration_budget_refuses) | test(interp_loop_proves_even_counter_safe_via_kschedule)'
+threads-required = "num-test-threads"

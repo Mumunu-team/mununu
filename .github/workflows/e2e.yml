@@ -104,3 +104,17 @@ jobs:
           docker run --rm \
             -v ${{ github.workspace }}:/work mununu-sva:latest \
             make e2e
+
+      # mununu#981 — the NON-ignored suite with the tools present. `make ci` on the PR runner
+      # has no yosys / cvc5 / btormc / Pono / rIC3, so every tool-gated unit and integration test
+      # skips there and reports PASS. Ten of them failed in this image for weeks unseen (a lift
+      # regression among them). This step is where they run for real, every night;
+      # MUNUNU_REQUIRE_TOOLS=1 turns a skip into a failure, so a tool the image loses shows up as
+      # red, not as a quiet pass. `if: always()` so an e2e failure does not hide this signal (and
+      # the reverse). `--retries 1` reports a load-sensitive test as FLAKY, not as a failure.
+      - name: Run the unit and integration suite in the sva image, tools required
+        if: always()
+        run: |
+          docker run --rm -e MUNUNU_REQUIRE_TOOLS=1 \
+            -v ${{ github.workspace }}:/work mununu-sva:latest \
+            cargo nextest run --workspace --no-fail-fast --retries 1

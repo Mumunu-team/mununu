@@ -1011,6 +1011,9 @@ mod tests {
         let file = parser::parse(D).expect("parse");
         let preds = discover_relational_predicates(&file, 8, 5_000);
         if preds.is_empty() {
+            // mununu#981: under MUNUNU_REQUIRE_TOOLS=1 (cvc5 is in the image) an empty discovery
+            // fails instead of skipping.
+            crate::adapter::require_tool("cvc5 (an interpolant for cnt <= 5)", false);
             eprintln!("SKIP (cvc5 absent / grammar): none discovered");
             return;
         }
