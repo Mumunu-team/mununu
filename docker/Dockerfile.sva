@@ -65,7 +65,9 @@ FROM mununu-dev:latest
 #
 # Bump procedure:
 #   curl -s https://api.github.com/repos/YosysHQ/oss-cad-suite-build/releases/latest | grep tag_name
-#   1. set OSS_CAD_SUITE_TAG / _DATE (the tag is dashed, the asset is not);
+#   1. set OSS_CAD_SUITE_TAG / _DATE (the tag is dashed, the asset is not) and
+#      OSS_CAD_SUITE_SHA256 (the asset's `digest` in the release API; the build
+#      refuses a tarball that does not match), here and in docker/Dockerfile.bundle;
 #   2. build; the assertion step prints the versions it found — copy them into
 #      YOSYS_VERSION / VERILATOR_VERSION / SLANG_VERSION and build again;
 #   3. run the e2e sweep in the new image (CLAUDE.md §"SVA-verification e2e
@@ -79,7 +81,11 @@ ARG OSS_CAD_SUITE_DATE=20260824
 ARG YOSYS_VERSION=0.68
 ARG VERILATOR_VERSION=5.051
 ARG SLANG_VERSION=11.0
+ARG OSS_CAD_SUITE_SHA256=9d7f79975ef624e1119fc9690fd9b9839b67026925aff3e2a1192d861b8dbb7c
 ARG SV2V_VERSION=v0.0.13
+# sv2v's release records no asset digest; this is the sha256 of the zip as downloaded
+# 2026-11-11. A bump of SV2V_VERSION recomputes it.
+ARG SV2V_SHA256=552799a1d76cd177b9b4cc63a3e77823a3d2a6eb4ec006569288abeff28e1ff8
 
 # libz3-dev (z3-sys links system libz3; some base images predate
 # `mununu-dev`'s libz3-dev layer, so install it here too) + unzip for the
@@ -91,20 +97,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         unzip \
     && rm -rf /var/lib/apt/lists/*
 
-# The suite, streamed straight into /opt (no 1 GB temp file in the layer). The
+# The suite, downloaded, checked against OSS_CAD_SUITE_SHA256 and unpacked into
+# /opt in one RUN (the tarball is removed in the same layer, so it never ships). The
 # binaries carry an rpath to their own lib tree, so only PATH needs extending —
 # NO global LD_LIBRARY_PATH, which would shadow the system libz3 the Rust
 # binary links. `perl` (full, for Verilator's FindBin wrapper) is already in
 # `mununu-dev` via build-essential.
-RUN curl -fsSL \
+RUN curl -fsSL -o /tmp/oss-cad-suite.tgz \
       "https://github.com/YosysHQ/oss-cad-suite-build/releases/download/${OSS_CAD_SUITE_TAG}/oss-cad-suite-linux-x64-${OSS_CAD_SUITE_DATE}.tgz" \
-    | tar xz -C /opt
+    && echo "${OSS_CAD_SUITE_SHA256}  /tmp/oss-cad-suite.tgz" | sha256sum -c - \
+    && tar xzf /tmp/oss-cad-suite.tgz -C /opt \
+    && rm /tmp/oss-cad-suite.tgz
 
 # sv2v (SystemVerilog-2017 → Verilog-2005 normaliser) — the dev-only differential
 # oracle of `test_support` builds, not the product lift; not in the suite;
 # Linux prebuilt from its GitHub release.
 RUN curl -fsSL -o /tmp/sv2v.zip \
         "https://github.com/zachjs/sv2v/releases/download/${SV2V_VERSION}/sv2v-Linux.zip" \
+    && echo "${SV2V_SHA256}  /tmp/sv2v.zip" | sha256sum -c - \
     && mkdir -p /tmp/sv2v && unzip -q /tmp/sv2v.zip -d /tmp/sv2v \
     && find /tmp/sv2v -name sv2v -type f -exec cp {} /usr/local/bin/sv2v \; \
     && chmod +x /usr/local/bin/sv2v \
