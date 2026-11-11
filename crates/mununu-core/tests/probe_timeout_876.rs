@@ -96,8 +96,20 @@ fn hanging_launcher(dir: &std::path::Path, pidfile: &std::path::Path) -> std::pa
     bat
 }
 
+/// A process that has exited is not alive even while its zombie waits to be reaped. mununu#981:
+/// in a container whose PID 1 does not reap orphans (`docker run` without `--init`), the killed
+/// solver's zombie stays in the table and `kill -0` succeeds on it, so this test failed
+/// deterministically in `mununu-sva` while the solver was gone. On Linux, `/proc/<pid>/stat`'s
+/// state field says `Z`; elsewhere `kill -0` is the probe.
 #[cfg(unix)]
 fn alive(pid: &str) -> bool {
+    if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        && let Some(state) = stat
+            .rsplit_once(") ")
+            .and_then(|(_, rest)| rest.chars().next())
+    {
+        return state != 'Z' && state != 'X';
+    }
     std::process::Command::new("kill")
         .args(["-0", pid])
         .stderr(std::process::Stdio::null())

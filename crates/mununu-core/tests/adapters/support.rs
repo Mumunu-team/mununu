@@ -13,11 +13,14 @@ pub(crate) fn slang_lift_available() -> bool {
     {
         cmd.arg("-m").arg(plugin);
     }
-    cmd.args(["-p", "help read_slang"])
+    let present = cmd
+        .args(["-p", "help read_slang"])
         .output()
         .map(|o| {
             // `help <unknown>` exits 0 and prints "No such command or cell type" instead.
             o.status.success() && !String::from_utf8_lossy(&o.stdout).contains("No such command")
         })
-        .unwrap_or(false)
+        .unwrap_or(false);
+    // mununu#981: under MUNUNU_REQUIRE_TOOLS=1 an absent tool fails instead of skipping.
+    mununu_core::adapter::require_tool("yosys with read_slang", present)
 }

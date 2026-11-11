@@ -29,6 +29,13 @@ make e2e                                                  # the whole sweep, one
 
 **History.** The nightly `.github/workflows/e2e.yml` produced no signal from its addition (2026-07-06) until 2026-09-18: every scheduled run failed at "Build mununu-sva image" because the Dockerfile did `COPY --from=hw-verif:latest`, an image built once from the sibling `hw-verification-uba` repo and never published. The same stale sibling is why the image ran yosys 0.60 while rosf/monono ran 0.68. Restored 2026-09-18 with the tag-pinned public release. Until the nightly has a readable history, the local sweep in the image is the e2e signal to act on.
 
+**The tool-gated unit and integration tests run in the image every night (mununu#981, 2026-11-11).** Outside the `#[ignore]`d set, a test that needs yosys / cvc5 / btormc / Pono / rIC3 either probes for the tool and skips, or silently runs a smaller engine set when the tool is absent. `make ci` on the PR runner (`mununu-dev`) has none of those tools, so all such tests passed there, while ten of them failed in `mununu-sva` for weeks: a lift regression (the per-module discovery flattened under `read_slang`), an overstated fault attack, and four tests whose assertions only held without the tool. That broke the gate contract in reverse: `make ci` passed where CI should have failed. The fix has three parts.
+- **The nightly runs the non-ignored workspace suite inside `mununu-sva`** (`.github/workflows/e2e.yml`, the step after `make e2e`, `if: always()`). That run is the gate for tool-gated tests; the PR runner is not.
+- **It sets `MUNUNU_REQUIRE_TOOLS=1`.** A probe that finds its tool absent then fails the test (`adapter::require_tool`), so a tool the image loses shows up as red instead of a quiet pass.
+- **A test whose verdict depends on which engines exist asserts on both hosts** (one arm per host, both asserting), and pins its engine-independent half at a seam that runs anywhere.
+
+To reproduce the run locally: `docker run --rm -e MUNUNU_REQUIRE_TOOLS=1 -v "$(pwd)":/work -v mununu-target:/cargo-target mununu-sva cargo nextest run --workspace --no-fail-fast`.
+
 **Host caveat.** slang ships prebuilts only for `linux-x86_64` and `macos-arm64`; on an Intel macOS host the Linux image is the supported way. `MUNUNU_SLANG_PATH` honours a local build.
 
 ### Validate any slang / SVA-touching change in the image — never on the bare host (rule, added 2026-07-13)
