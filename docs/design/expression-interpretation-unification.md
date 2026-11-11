@@ -15,7 +15,7 @@ mununu interprets the same BTOR2 operator set in **five places** that grew indep
 | 1 | [`bit_blast.rs::eval_op`](../../crates/mununu-core/src/adapter/btor2/bit_blast.rs) (~:3960) | BTOR2 AST | concrete `BvValue` | explicit-state enum **+ predicate-cube sampling** | 43 |
 | 2 | [`predicate_image/btor2_encode.rs::encode_op`](../../crates/mununu-core/src/adapter/sidecar/predicate_image/btor2_encode.rs) (~:356) | BTOR2 AST | `z3::ast::BV` | must-edge SMT (`smt_must_edge.rs`) + value enumeration | 38 |
 | 3 | [`systemverilog/kripke_smt.rs::expr_to_z3`](../../crates/mununu-core/src/adapter/systemverilog/kripke_smt.rs) (~:559) | **SystemVerilog** `Expr` AST | `z3::ast::BV` | RTL value discovery | 18 |
-| 4 | [`cvc5/mod.rs::build_interpolation_query`](../../crates/mununu-core/src/adapter/cvc5/mod.rs) (~:197) | predicate cubes only | SMT-LIB text | Craig interpolation | n/a — renders equalities, not arbitrary expressions |
+| 4 | ~~`cvc5/mod.rs::build_interpolation_query`~~ — removed 2026-11-11 (mununu#977); the transition-aware query in [`cegar.rs::craig_refinement_over_transition`](../../crates/mununu-core/src/adapter/btor2/cegar.rs) replaced it | predicate cubes only | SMT-LIB text | Craig interpolation | n/a |
 | 5 | "UF wrapping" ([`bit_blast.rs` ~:3804](../../crates/mununu-core/src/adapter/btor2/bit_blast.rs)) | — | — | **not an interpreter** — substitutes concrete Zero/Ones into #1 | — |
 
 ### Three facts that frame the solution
