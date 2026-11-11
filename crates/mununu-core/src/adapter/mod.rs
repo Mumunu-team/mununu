@@ -1351,9 +1351,87 @@ pub(crate) fn subprocess_failure_reason(stderr: &str, stdout: &str) -> String {
     }
 }
 
+/// mununu#980 — the no-verdict line of a solver member, with a signal death named as a crash. A
+/// tool killed by a signal (`signal: 6` = SIGABRT: an internal assertion or error) did not refuse
+/// the design — it crashed on it, and the portfolio note must let a reader tell the two apart: a
+/// refusal is a construct the member does not carry, an abort is a defect to reproduce. On a
+/// non-Unix host, or for an ordinary exit code, the line is the plain "exited with status" form.
+pub(crate) fn no_verdict_line(
+    tool: &std::path::Path,
+    status: std::process::ExitStatus,
+    stderr: &str,
+    stdout: &str,
+) -> String {
+    let reason = subprocess_failure_reason(stderr, stdout);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = status.signal() {
+            let name = match sig {
+                libc::SIGABRT => " (SIGABRT)",
+                libc::SIGSEGV => " (SIGSEGV)",
+                libc::SIGBUS => " (SIGBUS)",
+                libc::SIGFPE => " (SIGFPE)",
+                libc::SIGILL => " (SIGILL)",
+                libc::SIGKILL => " (SIGKILL)",
+                _ => "",
+            };
+            return format!(
+                "`{}` ABORTED by signal {sig}{name} with no verdict — a crash inside the tool, not a \
+                 refusal of the design: {reason}",
+                tool.display()
+            );
+        }
+    }
+    format!(
+        "`{}` exited with status {status} and no verdict: {reason}",
+        tool.display()
+    )
+}
+
 #[cfg(test)]
 mod subprocess_failure_reason_tests {
     use super::subprocess_failure_reason;
+
+    /// mununu#980 — a member killed by SIGABRT reads as an abort, not a refusal; an ordinary
+    /// non-zero exit keeps the plain form. Runs on every OS (the OS matrix's same-tests rule):
+    /// the signal half is Unix-only, as signals are.
+    #[test]
+    fn a_signal_death_is_named_an_abort_and_an_exit_code_is_not() {
+        let tool = std::path::Path::new("rIC3");
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            let aborted = super::no_verdict_line(
+                tool,
+                std::process::ExitStatus::from_raw(libc::SIGABRT),
+                "assertion failed",
+                "",
+            );
+            assert!(
+                aborted.contains("ABORTED by signal 6 (SIGABRT)")
+                    && aborted.contains("not a refusal"),
+                "{aborted}"
+            );
+            assert!(aborted.ends_with("assertion failed"), "{aborted}");
+        }
+        #[cfg(unix)]
+        let exit_one = {
+            use std::os::unix::process::ExitStatusExt;
+            std::process::ExitStatus::from_raw(1 << 8)
+        };
+        #[cfg(windows)]
+        let exit_one = {
+            use std::os::windows::process::ExitStatusExt;
+            std::process::ExitStatus::from_raw(1)
+        };
+        let exited = super::no_verdict_line(tool, exit_one, "", "parse error");
+        assert!(
+            exited.contains("exited with status") && !exited.contains("ABORTED"),
+            "{exited}"
+        );
+        assert!(exited.ends_with("parse error"), "{exited}");
+    }
 
     #[test]
     fn a_tool_that_explains_itself_on_stdout_is_quoted() {
