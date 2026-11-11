@@ -1506,31 +1506,28 @@ mod tests {
     /// `unsat`; a probe with a 1.5 s per-query timeout establishes that on this host first
     /// (factoring-style instances were tried: z3 settles a 64-bit prime's factorisation in
     /// about a second; a 1536-bit multiplier is slow but its blasting is not a cancellation
-    /// point). When the probe times out, the cancelled run must come back within the 300 ms
-    /// the peer takes plus the member grace, abstaining; before the watchdog it waited the
-    /// whole 60 s. When the probe decides (a faster z3), the interrupt path is not exercised
-    /// here and the test says so rather than asserting on a fast machine.
+    /// point). The cancelled run must come back abstaining, well before the 60 s it would
+    /// otherwise spend; before the watchdog it waited the whole 60 s.
+    ///
+    /// mununu#961 — the probe stops on z3's deterministic resource limit (#893), not a wall:
+    /// PHP(11,10) costs ~60 M units against the probe's 1.5 s × `UNITS_PER_NOMINAL_MS` = 4.5 M,
+    /// so it stops on every host and the test always reaches its assertions (it used to return
+    /// early with none when the probe decided). The bound is 10 s, which separates "interrupted"
+    /// from "waited the 60 s" on a loaded host; the former 0.3 s + grace + 0.7 s did not.
     #[test]
     fn a_peer_decision_interrupts_the_query_in_flight() {
+        let _rl = crate::adapter::env_var::unset_for_test(QUERY_RLIMIT_ENV);
+        let _to = crate::adapter::env_var::unset_for_test(QUERY_TIMEOUT_ENV);
         let src = pigeonhole_btor2(11, 10);
         let file = parser::parse(&src).expect("parses");
         let probe_t0 = std::time::Instant::now();
-        // mununu#893 — the probe's budget is a resource limit now: a hard query stops with a
-        // named `ResourceLimit` (the signal that the interrupt path can be exercised); a decided
-        // probe means a z3 fast enough to settle it within the allowance.
         let probe = decide_bad_safety(&file, 0, Some(1_500));
         eprintln!("probe: {probe:?} in {:?}", probe_t0.elapsed());
-        match probe {
-            Err(BmcError::ResourceLimit { .. }) => {}
-            Ok(v) => {
-                eprintln!(
-                    "the pigeonhole query decided within the 1.5 s nominal allowance ({v:?}); the \
-                     interrupt path is not exercised on this host"
-                );
-                return;
-            }
-            Err(e) => panic!("the probe must encode and stop on its budget: {e}"),
-        }
+        assert!(
+            matches!(probe, Err(BmcError::ResourceLimit { .. })),
+            "PHP(11,10) must exhaust the probe's resource limit on every host, so the interrupt \
+             path is exercised: {probe:?}"
+        );
         let cancel = std::sync::atomic::AtomicBool::new(false);
         let started = std::time::Instant::now();
         let verdict = std::thread::scope(|s| {
@@ -1547,11 +1544,8 @@ mod tests {
             "an interrupted query must abstain, got {verdict:?}"
         );
         assert!(
-            elapsed
-                < std::time::Duration::from_millis(300)
-                    + crate::adapter::MEMBER_CANCEL_GRACE
-                    + std::time::Duration::from_millis(700),
-            "the in-flight query was not interrupted within the grace: {elapsed:?}"
+            elapsed < std::time::Duration::from_secs(10),
+            "the in-flight query was not interrupted (the uninterrupted run takes 60 s): {elapsed:?}"
         );
     }
 
