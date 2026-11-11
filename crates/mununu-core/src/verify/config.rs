@@ -637,6 +637,27 @@ impl fmt::Display for ConfigIssue {
     }
 }
 
+/// mununu#935 — the `[[sources]].options` keys whose value names a server-side file or directory
+/// (a string, or an array of strings for `include_paths`), resolved against `base_dir` by the
+/// orchestrator. [`VerifyConfig::try_map_paths`] visits them.
+pub const PATH_OPTION_KEYS: &[&str] = &["include_paths", "register_map", "sidecar"];
+/// mununu#935 — the `[[sources]].options` keys whose value names an executable the server runs.
+pub const EXECUTABLE_OPTION_KEYS: &[&str] = &["clang"];
+/// mununu#935 — the `[[sources]].options` keys the orchestrator reads that name no file. Kept
+/// so the seam test can tell a new key nobody classified from one that is plainly not a path.
+pub const PLAIN_OPTION_KEYS: &[&str] = &[
+    "cmsis_stubs",
+    "defines",
+    "mode",
+    "multi_module",
+    "synthesize_automaton",
+    "top",
+];
+
+fn path_to_option(p: PathBuf) -> String {
+    p.to_string_lossy().into_owned()
+}
+
 const VALID_STRATEGIES: &[&str] = &["direct", "renamings", "register_map"];
 const VALID_SEMANTICS: &[&str] = &["synchronous", "asynchronous", "superset"];
 
@@ -658,6 +679,70 @@ impl VerifyConfig {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// mununu#935 — every server-side path this config names, offered to `f` with a field name
+    /// (`sources[0].files[1]`, `sources[2].options.include_paths[0]`, `alphabet.register_map`,
+    /// `templates.files[0]`) and replaced by what `f` returns. The API's verify handler passes a
+    /// closure that confines each path to the deployment's `file_root`, so the orchestrator's
+    /// `base_dir.join` — which lets an absolute path through — only ever sees confined paths.
+    ///
+    /// The `[[sources]].options` keys visited are [`PATH_OPTION_KEYS`]; the seam test
+    /// `every_option_key_the_orchestrator_reads_is_classified` fails when the orchestrator reads
+    /// a key none of the three key lists names. A non-string value under a path key is left alone:
+    /// the orchestrator ignores it too (`as_str` / `Value::String` matches).
+    pub fn try_map_paths<E>(
+        &mut self,
+        mut f: impl FnMut(&str, &std::path::Path) -> Result<PathBuf, E>,
+    ) -> Result<(), E> {
+        if let Some(t) = self.templates.as_mut() {
+            for (i, p) in t.files.iter_mut().enumerate() {
+                *p = f(&format!("templates.files[{i}]"), p)?;
+            }
+        }
+        if let Some(p) = self.alphabet.register_map.as_mut() {
+            *p = f("alphabet.register_map", p)?;
+        }
+        for (s, src) in self.sources.iter_mut().enumerate() {
+            for (i, p) in src.files.iter_mut().enumerate() {
+                *p = f(&format!("sources[{s}].files[{i}]"), p)?;
+            }
+            for key in PATH_OPTION_KEYS {
+                let field = format!("sources[{s}].options.{key}");
+                match src.options.get_mut(*key) {
+                    Some(toml::Value::String(v)) => {
+                        *v = path_to_option(f(&field, std::path::Path::new(v.as_str()))?);
+                    }
+                    Some(toml::Value::Array(arr)) => {
+                        for (i, item) in arr.iter_mut().enumerate() {
+                            if let toml::Value::String(v) = item {
+                                *v = path_to_option(f(
+                                    &format!("{field}[{i}]"),
+                                    std::path::Path::new(v.as_str()),
+                                )?);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// mununu#935 — the `[[sources]].options` entries that name an executable the server would
+    /// run ([`EXECUTABLE_OPTION_KEYS`]), as field names. A server with a `file_root` refuses a
+    /// config that sets any: a request must not choose the binary the server executes.
+    pub fn executable_options(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for (s, src) in self.sources.iter().enumerate() {
+            for key in EXECUTABLE_OPTION_KEYS {
+                if src.options.contains_key(*key) {
+                    out.push(format!("sources[{s}].options.{key}"));
+                }
+            }
+        }
+        out
     }
 
     /// Parse a TOML document.
@@ -929,6 +1014,37 @@ fn is_valid_identifier(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// mununu#935 — the seam between "the orchestrator reads an option" and "the API confines
+    /// it": every `.get("<key>")` in the orchestrator's non-test code must be named by exactly one
+    /// of [`PATH_OPTION_KEYS`] (confined), [`EXECUTABLE_OPTION_KEYS`] (refused under a root) or
+    /// [`PLAIN_OPTION_KEYS`]. A new path-bearing option nobody classified would otherwise be read
+    /// unconfined. The options map does not leave `orchestrator.rs` (no other module takes a
+    /// `BTreeMap<String, toml::Value>`), so that file is the whole read surface.
+    #[test]
+    fn every_option_key_the_orchestrator_reads_is_classified() {
+        let src = include_str!("orchestrator.rs");
+        let body = src.split("#[cfg(test)]").next().expect("non-test part");
+        let mut read: Vec<&str> = body
+            .split(".get(\"")
+            .skip(1)
+            .filter_map(|rest| rest.split_once("\")").map(|(k, _)| k))
+            .collect();
+        read.sort_unstable();
+        read.dedup();
+        assert!(
+            read.contains(&"include_paths") && read.contains(&"clang"),
+            "{read:?}"
+        );
+        let lists = [PATH_OPTION_KEYS, EXECUTABLE_OPTION_KEYS, PLAIN_OPTION_KEYS];
+        for key in &read {
+            let n = lists.iter().filter(|l| l.contains(key)).count();
+            assert_eq!(
+                n, 1,
+                "option `{key}` is classified {n} times; add it to one list"
+            );
+        }
+    }
 
     const VALID_DIRECT: &str = r#"
 [project]
