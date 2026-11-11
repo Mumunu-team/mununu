@@ -513,23 +513,16 @@ under-seeded `P0` was missing. It becomes a new predicate:
 PredicateSpec { name: "charged", register: "lvl", relation: Uge, value: 6 }
 ```
 
-> **Implementation status (two honesty notes).**
-> 1. The query above is the *transition-aware* form refinement needs. mununu's
->    shipped
->    [`build_interpolation_query`](../../crates/mununu-core/src/adapter/cvc5/mod.rs)
->    MVP renders the simpler **cube-conjunction** form; the transition-relation
->    formulation (recipe §4) is the documented target.
-> 2. The MVP
->    [`parse_cvc5_interpolant_response`](../../crates/mununu-core/src/adapter/cvc5/mod.rs)
->    accepts **atomic equalities only** (`(= reg val)`); an inequality
->    interpolant like `(bvuge lvl …)` is not yet parsed, so today this exact
->    predicate is more likely **seeded** from the formula's own AP (`lvl >= 6` is
->    a comparison AP, recipe §2.1) or from a COI constant (recipe §2.2) than
->    *discovered*. When the parser grows comparison support, this is the
->    interpolant it returns; until then the loop falls back to
->    `WeakestPrecondition` on a compound interpolant. The arithmetic in the model
->    (`add` / `ugte`) is real today; the inequality-interpolant *round-trip* is
->    the R.5 target.
+> **Implementation status (updated 2026-11-11, mununu#977).** The query above
+> is the *transition-aware* form, and it is the one the CEGAR loop runs:
+> [`craig_refinement_over_transition`](../../crates/mununu-core/src/adapter/btor2/cegar.rs)
+> poses it over the exact transition, and
+> [`parse_interpolant_to_predicate_expr`](../../crates/mununu-core/src/adapter/cvc5/mod.rs)
+> decodes relational and compound interpolants (`!=`, reg-reg, bounds), so an
+> inequality like `(bvuge lvl …)` can come back as a compound predicate. The
+> older cube-conjunction query (`build_interpolation_query`, with its
+> equality-only parser) was removed in #977: both of its sides were cubes over the
+> current predicates, so it could only restate one of them.
 
 ## §5 — Refined abstraction `P1 = { committed, charged : lvl >= 6 }`
 

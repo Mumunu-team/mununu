@@ -52,7 +52,7 @@ In mununu, the `A ∧ B ⊨ ⊥` that we already produce is the **concrete-disch
 
 When this is UNSAT, the abstract may-trace `b_0 … b_n` is spurious. Split the conjunction at the frontier step `j` where the predicate set first fails to distinguish: `A` = the prefix `s_0..s_j` constraints, `B` = the suffix `s_{j+1}..s_n` + `violation`. The interpolant `I_j` over the shared variables (the state bits live at step `j`) is, by McMillan's theorem, a predicate that (a) every concrete prefix-reachable state satisfies and (b) is inconsistent with the spurious suffix. **`I_j` is the predicate to add to `P`.** That is the whole idea, and it is the cleanest possible answer to recipe doc §4.5's open "extract a candidate predicate via interpolation."
 
-The operational detail McMillan stresses — *interpolants come from the refutation proof, not a second solver call* — is why our integration point is an interpolating SMT backend, not a post-hoc query. We already have the seam: [cegar.rs:1042](../../crates/mununu-core/src/adapter/btor2/cegar.rs#L1042) calls `invoke_cvc5_for_interpolant`. cvc5's `get-interpolant` (and Z3's `SMT-LIB get-interpolant` / `Interpolant` API) is exactly McMillan's "read it off the proof" packaged as a solver command. The R.5-follow-up work is wiring that return value into a `PredicateSpec`, not implementing proof-theoretic interpolation ourselves.
+The operational detail McMillan stresses — *interpolants come from the refutation proof, not a second solver call* — is why our integration point is an interpolating SMT backend, not a post-hoc query. We already have the seam: the CEGAR loop's [`craig_refinement_over_transition`](../../crates/mununu-core/src/adapter/btor2/cegar.rs) poses `get-interpolant` over the exact transition (the earlier cube-only `invoke_cvc5_for_interpolant` call was removed in mununu#977). cvc5's `get-interpolant` (and Z3's `SMT-LIB get-interpolant` / `Interpolant` API) is exactly McMillan's "read it off the proof" packaged as a solver command. The R.5-follow-up work is wiring that return value into a `PredicateSpec`, not implementing proof-theoretic interpolation ourselves.
 
 **What to take from paper 1:** the interpolant is *the* principled replacement for the WP heuristic. WP gives you a predicate that is locally correct but blind to relevance (it'll happily add the whole cone); the interpolant is minimal-by-construction over the shared frontier. When you read §4.5 of the recipe doc afterwards, read "interpolant" as "the McMillan object extracted at the spurious frontier `j`."
 
@@ -136,7 +136,7 @@ refine_step(spurious may-trace τ through a ⊥-region):
     return Refine(preds, must_jobs)
 ```
 
-Every line of that already has a home in the codebase or the recipe doc; the only net-new engineering is the `interpolant(A_j, B_j)` call (wire `invoke_cvc5_for_interpolant`'s result into a `PredicateSpec`) and the partition heuristic. The papers are what let you write those two pieces with a soundness argument instead of a guess.
+Every line of that already has a home in the codebase or the recipe doc; the only net-new engineering is the `interpolant(A_j, B_j)` call (today `craig_refinement_over_transition`, decoded by `parse_interpolant_to_predicate_expr`) and the partition heuristic. The papers are what let you write those two pieces with a soundness argument instead of a guess.
 
 ## 6. Reading-order recap
 

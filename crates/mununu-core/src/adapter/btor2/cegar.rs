@@ -940,40 +940,29 @@ pub fn cegar_refine_loop(
     // uses `effective_max_iterations` so early termination on
     // UF-spurious cases is structurally guaranteed.
     let mut effective_max_iterations = cegar_opts.max_iterations;
-    // R.5 Item 3 sub-item 3.4 (2026-06-04) — locate the CVC5
-    // binary once at loop start when the predicate source is
-    // CraigInterpolation. Cached for the loop's lifetime.
-    // - `Some(bin)` ⇒ Craig path will run via CVC5.
-    // - `None` + `cvc5_unavailable_warning_emitted = true` ⇒ the
-    //   CraigInterpolation arm falls back to WP for the whole
-    //   run; the warning is emitted exactly once.
-    // Loop iterations re-use the cache.
-    let cvc5_bin: Option<crate::adapter::cvc5::Cvc5Bin> = if matches!(
+    // R.5 Item 3 sub-item 3.4 (2026-06-04) — when the predicate source is CraigInterpolation,
+    // check once at loop start that cvc5 can be located: the transition-aware refinement
+    // (`craig_refinement_over_transition`) runs it per query, and without it every iteration
+    // falls back to WP. The warning says so once, instead of each query failing silently.
+    if matches!(
         cegar_opts.predicate_source,
         PredicateSource::CraigInterpolation
-    ) {
-        match crate::adapter::cvc5::locate_cvc5() {
-            Ok(bin) => Some(bin),
-            Err(e) => {
-                warnings.push(crate::adapter::AdapterWarning {
-                    kind: crate::adapter::WarningKind::ApproximateTranslation,
-                    location: None,
-                    message: format!(
-                        "adapter/btor2/cegar (Item 3 sub-item 3.4): \
-                             PredicateSource::CraigInterpolation selected but cvc5 binary \
-                             not available: {}. Falling back to WeakestPrecondition heuristic \
-                             for the duration of this run. Install cvc5 (Homebrew: \
-                             `brew install cvc5`; Debian: `apt install cvc5`) or set \
-                             MUNUNU_CVC5_PATH to use Craig interpolation.",
-                        e.message
-                    ),
-                });
-                None
-            }
-        }
-    } else {
-        None
-    };
+    ) && let Err(e) = crate::adapter::cvc5::locate_cvc5()
+    {
+        warnings.push(crate::adapter::AdapterWarning {
+            kind: crate::adapter::WarningKind::ApproximateTranslation,
+            location: None,
+            message: format!(
+                "adapter/btor2/cegar (Item 3 sub-item 3.4): \
+                     PredicateSource::CraigInterpolation selected but cvc5 binary \
+                     not available: {}. Falling back to WeakestPrecondition heuristic \
+                     for the duration of this run. Install cvc5 (Homebrew: \
+                     `brew install cvc5`; Debian: `apt install cvc5`) or set \
+                     MUNUNU_CVC5_PATH to use Craig interpolation.",
+                e.message
+            ),
+        });
+    }
     // CVC5 invocation options; sub-item 3.5 will expose this via
     // the sidecar.
     let cvc5_opts = crate::adapter::cvc5::InterpolantQueryOptions::default();
@@ -1538,24 +1527,10 @@ pub fn cegar_refine_loop(
                 if !out.is_empty() {
                     out
                 } else {
-                    // No transition-aware progress → the legacy propositional Craig query (F.2,
-                    // kept as a fallback pending removal), then WP — never silently terminate.
-                    let legacy = if let Some(bin) = &cvc5_bin {
-                        craig_interpolation_predicates(
-                            subgame,
-                            &current_predicates,
-                            &lift_result.clts,
-                            bin,
-                            &cvc5_opts,
-                        )
-                    } else {
-                        Vec::new()
-                    };
-                    if !legacy.is_empty() {
-                        legacy
-                    } else {
-                        weakest_precondition_predicates(subgame, &current_predicates, btor2_content)
-                    }
+                    // No transition-aware progress → WP, never a silent stop. mununu#977: the
+                    // legacy propositional Craig query that sat here could only restate a current
+                    // predicate (A and B were both cubes over them), so it was removed.
+                    weakest_precondition_predicates(subgame, &current_predicates, btor2_content)
                 }
             }
         };
@@ -1684,90 +1659,9 @@ fn eval_err_to_adapter_err(e: EvaluationError) -> AdapterError {
     }
 }
 
-/// R.5 Item 3 sub-item 3.4 (2026-06-04) — Craig interpolation
-/// predicate source. For each classifying may-but-not-must
-/// transition in the failure subgame, invoke CVC5 to compute
-/// a separating predicate between the source cube and the
-/// target cube.
-///
-/// **Inputs**:
-/// - `subgame.classifying_transitions`: `(source_state_index,
-///   transition_index)` pairs. The lifter ensures
-///   `state_index == cube_index`.
-/// - `current_predicates`: the predicate set defining the cube
-///   space (so the SMT-LIB query knows the bit positions).
-/// - `clts`: needed to look up the target cube from the
-///   `transition_index`.
-/// - `cvc5_bin`: located via `adapter::cvc5::locate_cvc5` once
-///   at loop start (cached by the caller).
-/// - `opts`: subprocess timeout etc.
-///
-/// **Returns**: list of `PredicateSpec`s — one per classifying
-/// transition where CVC5 produced a parsable equality
-/// interpolant. Empty when no transitions yielded interpolants
-/// (CEGAR loop falls back to WP per the dispatch in
-/// `cegar_refine_loop`).
-///
-/// **Dedup**: predicates that match an existing entry in
-/// `current_predicates` by (register, value) are skipped —
-/// re-adding them would not refine the cube space.
-fn craig_interpolation_predicates(
-    subgame: &FailureSubgame,
-    current_predicates: &[PredicateSpec],
-    clts: &crate::clts::Clts<crate::clts::DefaultStateIdx, crate::clts::DefaultLabelIdx>,
-    cvc5_bin: &crate::adapter::cvc5::Cvc5Bin,
-    opts: &crate::adapter::cvc5::InterpolantQueryOptions,
-) -> Vec<PredicateSpec> {
-    if subgame.classifying_transitions.is_empty() {
-        return Vec::new();
-    }
-    use crate::clts::StateId;
-    let mut out: Vec<PredicateSpec> = Vec::new();
-    let mut seen_pairs: std::collections::HashSet<(String, u64)> = current_predicates
-        .iter()
-        .map(|p| (p.register.clone(), p.value))
-        .collect();
-    for (src_idx, t_idx, _owner) in &subgame.classifying_transitions {
-        // R.6.5 — owning-player tag ignored by the Craig path's MVP;
-        // R.6.5.b will branch on it to pick the refinement direction
-        // (env ⇒ shrink R_may; ctrl ⇒ grow R_must).
-        let Some(src_id) = StateId::<crate::clts::DefaultStateIdx>::from_index(*src_idx) else {
-            continue;
-        };
-        let transitions = clts.outgoing(src_id);
-        let Some(transition) = transitions.get(*t_idx) else {
-            continue;
-        };
-        let target_idx = transition.target().index();
-        let query = crate::adapter::cvc5::build_interpolation_query(
-            current_predicates,
-            *src_idx,
-            target_idx,
-        );
-        match crate::adapter::cvc5::invoke_cvc5_for_interpolant(cvc5_bin, &query, opts) {
-            Ok(Some(mut spec)) => {
-                if !seen_pairs.contains(&(spec.register.clone(), spec.value)) {
-                    seen_pairs.insert((spec.register.clone(), spec.value));
-                    // Tag the predicate with the source state for
-                    // diagnostics, mirroring the WP helper's naming.
-                    spec.name = format!("craig_s{}_t{}", src_idx, t_idx);
-                    out.push(spec);
-                }
-            }
-            Ok(None) | Err(_) => {
-                // CVC5 reported no interpolant, or compound/unparsable
-                // form, or subprocess failure. The CEGAR loop's
-                // dispatch falls back to WP when this helper returns
-                // empty across all transitions.
-            }
-        }
-    }
-    out
-}
-
 /// The predicate REGION for a cube index over the SIMPLE predicate dimensions — bit `i` of
 /// `cube` is predicate `i`'s polarity (`predicates[i] == value` when set, `!=` when clear),
-/// mirroring `predicate_cube_lift`'s indexing (see `render_cube_conjunction`). Compound
+/// mirroring `predicate_cube_lift`'s indexing. Compound
 /// dimensions occupy the HIGH bits and are OMITTED: a weaker (fewer-conjunct) source region only
 /// WEAKENS the interpolation query's A side, so any predicate it yields is still a SOUND
 /// separator — at worst less precise, never unsound.
