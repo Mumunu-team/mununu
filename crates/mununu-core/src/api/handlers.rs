@@ -6388,14 +6388,15 @@ mod context_sanity_tests {
         let base = super::confine_under(Some(&root), "base_dir", "proj").expect("base_dir");
         let secret = outer.path().join("secret.json");
         let secret = secret.to_str().expect("utf8");
+        // TOML literal strings ('…'): a Windows path's backslashes are not escapes there.
         let config = |file: &str, sidecar: &str, inc: &str, rm: &str, pack: &str, clang: bool| {
             let clang = if clang { "clang = \"/bin/sh\"\n" } else { "" };
             VerifyConfig::from_toml(&format!(
-                "[project]\nname = \"p\"\n[templates]\nfiles = [\"{pack}\"]\n\
-                 [alphabet]\nstrategy = \"register_map\"\nregister_map = \"{rm}\"\n\
-                 [[sources]]\nid = \"a\"\nadapter = \"btor2\"\nfiles = [\"{file}\"]\n\
-                 [sources.options]\nsidecar = \"{sidecar}\"\ninclude_paths = [\"{inc}\"]\n\
-                 register_map = \"{rm}\"\n{clang}\
+                "[project]\nname = \"p\"\n[templates]\nfiles = ['{pack}']\n\
+                 [alphabet]\nstrategy = \"register_map\"\nregister_map = '{rm}'\n\
+                 [[sources]]\nid = \"a\"\nadapter = \"btor2\"\nfiles = ['{file}']\n\
+                 [sources.options]\nsidecar = '{sidecar}'\ninclude_paths = ['{inc}']\n\
+                 register_map = '{rm}'\n{clang}\
                  [composition]\nsemantics = \"synchronous\"\nmembers = [\"a\"]\n"
             ))
             .expect("config parses")

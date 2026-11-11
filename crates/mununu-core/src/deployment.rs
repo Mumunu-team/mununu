@@ -212,7 +212,20 @@ mod tests {
         assert_eq!(cfg.file_root, Some(PathBuf::from("/etc/mununu/designs")));
         let bundle = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/mununu.toml");
         let cfg = DeploymentConfig::load(&bundle).expect("the bundle's mununu.toml parses");
+        // mununu#999 — `/work` is absolute only on Unix; on Windows it is relative (no drive),
+        // so the documented rule joins it to the config file's drive (`D:/work`). The bundle is
+        // a Linux container config, so the Unix reading is the one it ships with.
+        #[cfg(unix)]
         assert_eq!(cfg.file_root, Some(PathBuf::from("/work")));
+        #[cfg(not(unix))]
+        {
+            let root = cfg.file_root.as_deref().expect("the bundle sets file_root");
+            assert!(
+                root.is_absolute() && root.ends_with("work"),
+                "{}",
+                root.display()
+            );
+        }
         assert!(cfg.cors_origins.is_empty());
         assert!(
             DeploymentConfig::parse("[server]\nbind = 1\n", Path::new("m.toml")).is_err(),

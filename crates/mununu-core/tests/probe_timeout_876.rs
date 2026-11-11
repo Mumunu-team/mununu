@@ -29,7 +29,12 @@ fn a_tool_that_hangs_on_its_probe_is_reported_unavailable_within_the_budget() {
     let elapsed = started.elapsed();
 
     let forked = std::fs::read_to_string(&pidfile).unwrap_or_default();
-    let forked_alive = !forked.trim().is_empty() && alive(forked.trim());
+    // mununu#998 — SIGKILL to the group is asynchronous: `killpg` returns before the sleeper
+    // has died, and the sleeper holds no pipe, so the probe does not wait for it. Read at once,
+    // it was still alive on the OS-matrix runner (3 in 300 tries in a Linux container; all dead
+    // within 5 s). A leaked sleeper runs 120 s, so a 10 s grace still separates the two.
+    let forked_alive =
+        !forked.trim().is_empty() && survives(forked.trim(), Duration::from_secs(10));
     if forked_alive {
         reap(forked.trim());
     }
@@ -94,6 +99,18 @@ fn hanging_launcher(dir: &std::path::Path, pidfile: &std::path::Path) -> std::pa
     )
     .unwrap();
     bat
+}
+
+/// Whether `pid` is still alive after `grace`, polled; `false` as soon as it is gone.
+fn survives(pid: &str, grace: Duration) -> bool {
+    let start = Instant::now();
+    while alive(pid) {
+        if start.elapsed() >= grace {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    false
 }
 
 /// A process that has exited is not alive even while its zombie waits to be reaped. mununu#981:
