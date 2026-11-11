@@ -353,6 +353,19 @@ fn parse_doxygen_block(body: &str, block_start_line: u32) -> Vec<MununuAnnotatio
     out
 }
 
+/// `text` with its leading SystemVerilog attribute instances (`(* … *)`, any number) removed.
+/// An unclosed `(*` leaves the text as it was: the line is then not a module header.
+fn strip_attribute_instances(text: &str) -> &str {
+    let mut rest = text;
+    while let Some(after) = rest.strip_prefix("(*") {
+        match after.find("*)") {
+            Some(end) => rest = after[end + 2..].trim_start(),
+            None => return text,
+        }
+    }
+    rest
+}
+
 /// Extract all mununu annotations from raw SystemVerilog source text.
 ///
 /// Recognises:
@@ -397,10 +410,20 @@ pub fn extract_from_sv_source_checked(text: &str) -> SvAnnotationScan {
     for (idx, line) in text.lines().enumerate() {
         let line_no = (idx + 1) as u32;
         let trimmed = line.trim_start();
-        if let Some(rest) = trimmed
+        // mununu#965 — a header may carry attribute instances first (`(* keep *) module m`) and
+        // a lifetime after the keyword (`module automatic m`); without stripping them the line
+        // was not a header, the annotations inside fell back to the enclosing (top) scope, and
+        // an atom could bind a same-named net of the parent.
+        let header = strip_attribute_instances(trimmed);
+        if let Some(rest) = header
             .strip_prefix("module ")
-            .or_else(|| trimmed.strip_prefix("macromodule "))
+            .or_else(|| header.strip_prefix("macromodule "))
         {
+            let rest = rest.trim_start();
+            let rest = rest
+                .strip_prefix("automatic ")
+                .or_else(|| rest.strip_prefix("static "))
+                .unwrap_or(rest);
             let name: String = rest
                 .trim_start()
                 .chars()
@@ -663,6 +686,29 @@ mod tests {
             .find(|a| a.value.contains("u_c.q"))
             .expect("the attribute form is scanned too");
         assert_eq!(attr.module.as_deref(), Some("parent"));
+    }
+
+    /// mununu#965 — a module header that opens with attribute instances, or names a lifetime,
+    /// still opens the module's scope; an unclosed `(*` is not a header.
+    #[test]
+    fn a_module_header_with_attributes_or_a_lifetime_opens_its_scope() {
+        let text = "(* keep_hierarchy *) (* dont_touch = \"true\" *) module child (input clk);\n\
+                      // @mununu_guarantee(in_attr_child) AG (q == 0)\n\
+                    endmodule\n\
+                    module automatic other (input clk);\n\
+                      // @mununu_guarantee(in_automatic) AG (q == 0)\n\
+                    endmodule\n\
+                    (* unclosed module ghost;\n\
+                    // @mununu_guarantee(outside) AG (q == 0)\n";
+        let anns = super::extract_from_sv_source(text);
+        let module_of = |name: &str| -> Option<Option<String>> {
+            anns.iter()
+                .find(|a| a.name.as_deref() == Some(name))
+                .map(|a| a.module.clone())
+        };
+        assert_eq!(module_of("in_attr_child"), Some(Some("child".to_string())));
+        assert_eq!(module_of("in_automatic"), Some(Some("other".to_string())));
+        assert_eq!(module_of("outside"), Some(None));
     }
 
     /// mununu#550 — the parenthesised name parses, and an unnamed annotation is unchanged.
