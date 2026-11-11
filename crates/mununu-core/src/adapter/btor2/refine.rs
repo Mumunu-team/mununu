@@ -1014,9 +1014,20 @@ mod tests {
             eprintln!("SKIP (cvc5 absent / grammar): none discovered");
             return;
         }
-        let found_bound = preds.iter().any(|p| {
-            matches!(p, PredicateExpr::Cmp { register, op, value }
-                if register == "cnt" && matches!(op, CmpOp::Le | CmpOp::Lt) && *value >= 5)
+        // `cnt <= 5` in either spelling: cvc5 returns the interpolant as `¬(cnt > 5)` (measured
+        // in `mununu-sva`, mununu#981, cvc5 1.0.1-dev), the same predicate over bit-vectors — and
+        // the same split of the state space for the abstraction.
+        let found_bound = preds.iter().any(|p| match p {
+            PredicateExpr::Cmp {
+                register,
+                op,
+                value,
+            } => register == "cnt" && matches!(op, CmpOp::Le | CmpOp::Lt) && *value >= 5,
+            PredicateExpr::Not(inner) => {
+                matches!(&**inner, PredicateExpr::Cmp { register, op, value }
+                if register == "cnt" && matches!(op, CmpOp::Gt | CmpOp::Ge) && *value >= 5)
+            }
+            _ => false,
         });
         assert!(
             found_bound,

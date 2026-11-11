@@ -1652,10 +1652,40 @@ mod tests {
         assert_eq!(miss.stage, "shape", "{miss}");
         assert!(miss.to_string().starts_with("shape: "), "{miss}");
         // The bound is a stage too: `cnt` (2 bits, counting from 0) reaches 3 only at step 3, so
-        // a search bounded at the monitor's own depth finds no path and says so.
+        // a NATIVE search bounded at the monitor's own depth finds no path and says so. mununu#981:
+        // `max_k` bounds only the native search — a routed rIC3 witness ships at its own depth
+        // (`bad_reachable_witness_routed`'s contract, mununu#744) — so with rIC3 on `PATH` the same
+        // call returns the genuine depth-3 path. Both arms assert.
         let deep = parse("nu Z. ((cnt != 3) && [] Z)");
-        let miss = safety_witness(COUNTER, &deep, false, 0).unwrap_err();
-        assert_eq!(miss.stage, "bound", "{miss}");
+        match safety_witness(COUNTER, &deep, false, 0) {
+            Err(miss) => assert_eq!(miss.stage, "bound", "{miss}"),
+            Ok(trace) => {
+                let cnt_at = |i: usize| {
+                    trace.states[i]
+                        .iter()
+                        .find(|(k, _)| k == "cnt")
+                        .and_then(|(_, v)| v.as_u64())
+                };
+                assert!(
+                    trace.states.len() >= 4
+                        && (0..trace.states.len()).any(|i| cnt_at(i) == Some(3)),
+                    "a routed witness is a real path to cnt == 3: {trace:?}"
+                );
+            }
+        }
+        // The native search's own bound, on any host: the `bound` stage is what it reports.
+        let (monitored, depth) = safety_bad_model(COUNTER, &deep, false).unwrap();
+        let file = parser::parse(&monitored).unwrap();
+        let depth = u32::try_from(depth).unwrap();
+        let (outcome, _) =
+            crate::adapter::btor2::native_bmc::bmc_bad_reachable_witness(&file, depth).unwrap();
+        assert!(
+            matches!(
+                outcome,
+                crate::adapter::btor2::native_bmc::BmcOutcome::NoCexWithin { .. }
+            ),
+            "{outcome:?}"
+        );
         // And the finder's own refusal is the `search` stage with its reason: `7` does not fit
         // the 2-bit `cnt`, which the native encoder rejects as an out-of-range constant.
         let wide = parse("nu Z. ((cnt != 7) && [] Z)");

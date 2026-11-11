@@ -4607,42 +4607,38 @@ endmodule
         );
     }
 
-    /// End-to-end Phase 1 demo: round-trips `examples/btor2/safety_demo.sv`
-    /// through Yosys and verifies the SVA assertion lands as a `safety_bad_*`
-    /// μ-calculus property in the resulting CTXDSL.
-    ///
-    /// This is the canonical Phase 1 acceptance test — if it fails, either
-    /// the Yosys script or the BTOR2 reader regressed. The example file is
-    /// intentionally checked in so the test exercises a real on-disk
-    /// artifact, not an inline string.
+    /// `examples/btor2/safety_demo.sv` through the product lift. It used to assert that the
+    /// immediate `assert (cnt != 2'b11)` lands as a `safety_bad_*` property; under the slang-only
+    /// lift (N1, mununu#847) `read_slang --ignore-assertions` drops immediate assertions by design
+    /// (without the flag yosys-slang refuses every temporal property as a hard elaboration error;
+    /// `docs/consumer-briefings/2026-11-slang-only-lift.md`). mununu#981: the old assertion passed
+    /// only where yosys was absent and the test skipped. It now pins the shipped behaviour: the
+    /// design lifts, its counter and `warn` output survive, and no `bad` is invented from the
+    /// dropped assertion.
     #[test]
-    fn phase1_demo_safety_assertion_surfaces_as_property() {
+    fn phase1_demo_lifts_and_its_immediate_assertion_is_not_lifted() {
         if !yosys_available() {
             eprintln!("skipping: yosys not on PATH");
             return;
         }
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../examples/btor2/safety_demo.sv");
-        let sv = match std::fs::read_to_string(&path) {
-            Ok(s) => s,
-            Err(_) => {
-                eprintln!("skipping: example file not found at {}", path.display());
-                return;
-            }
-        };
+        let sv = std::fs::read_to_string(&path).expect("the example is checked in");
         let opts = AdapterOptions::default();
         let yopts = YosysOptions {
             top: Some("safety_demo".into()),
             ..Default::default()
         };
         let out = translate_sv(&sv, &opts, &yopts).expect("yosys translate");
-        assert!(
-            out.source_info.property_count >= 1,
-            "expected at least one safety property"
+        assert_eq!(
+            out.source_info.property_count, 0,
+            "an immediate assert is not lifted under read_slang --ignore-assertions"
         );
+        assert!(!out.ctxdsl.contains("safety_bad_"), "{}", out.ctxdsl);
         assert!(
-            out.ctxdsl.contains("safety_bad_"),
-            "expected a `safety_bad_*` formula in the emitted CTXDSL"
+            out.ctxdsl.contains("cnt"),
+            "the counter survives: {}",
+            out.ctxdsl
         );
     }
 
