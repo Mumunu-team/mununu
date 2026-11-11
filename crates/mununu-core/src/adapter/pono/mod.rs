@@ -168,11 +168,8 @@ pub fn run_pono_cancellable(
     // A clean Unknown is valid; a hard error (non-zero exit, no verdict) is not —
     // surface it as a malformed-input signal rather than inconclusiveness.
     if verdict == McVerdict::Unknown && !status.success() {
-        return Err(err(format!(
-            "`{}` exited with status {} and no verdict: {}",
-            bin.path.display(),
-            status,
-            crate::adapter::subprocess_failure_reason(&stderr, &stdout)
+        return Err(err(crate::adapter::no_verdict_line(
+            &bin.path, status, &stderr, &stdout,
         )));
     }
     Ok(verdict)

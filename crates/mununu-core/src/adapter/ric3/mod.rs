@@ -162,11 +162,8 @@ pub fn run_ric3_with_output(
     // A verdict exits 10 / 20 and a clean undecided exits 0; anything else with no verdict is a
     // tool error (a parse rejection, a missing solver), surfaced so the portfolio can name it.
     if verdict == McVerdict::Unknown && !exit_code_is_a_verdict_or_clean(status.code()) {
-        return Err(err(format!(
-            "`{}` exited with status {} and no verdict: {}",
-            bin.path.display(),
-            status,
-            crate::adapter::subprocess_failure_reason(&stderr, &stdout)
+        return Err(err(crate::adapter::no_verdict_line(
+            &bin.path, status, &stderr, &stdout,
         )));
     }
     Ok((verdict, stdout))
