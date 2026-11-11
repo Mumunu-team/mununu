@@ -186,10 +186,24 @@ The levers that measurement pointed at are applied by the exact engine's **ladde
 `ExactSession` per property (bit-blast once), then an unrestricted attempt for a short slice, the
 reachable-state restriction with a 5 s probe on a retryable abstention, and the unrestricted
 remainder. Under `--rung both` the verb runs the ladder for 30 s, then l2s with **half** of what
-the slice leaves (the reach portfolio's members take their bounds from it), then the ladder with
-what remains; without `--timeout-ms` the l2s members run at their 60 s defaults and the abstention
-note says so, naming every member's refusal or budget abstention; `--parallel-rungs` runs both at once and cancels the loser. The root
-fixpoint's early exit is on for every verdict path. Measured: `cucab09` (91 bits) from an arena
+the slice leaves (the reach portfolio's members take their bounds from it), then **k-liveness**
+(`--rung kliveness`; [`kliveness_rung`](../crates/mununu-core/src/adapter/justice.rs#L353)) with half of
+what l2s leaves, then the ladder with what remains; without `--timeout-ms` the members run at their
+60 s defaults and each abstention note says so, naming every member's refusal or budget abstention; `--parallel-rungs` runs both at once and cancels the loser. The root
+fixpoint's early exit is on for every verdict path.
+
+**k-liveness (Track V, 2026-11-10)** is the proof-side rung: a justice set is decided by bounding
+how many *fair rounds* a path can complete — a round ends once every justice and fairness literal
+has been seen since the previous one — and proving `rounds ≤ k` as plain `bad`-reachability
+([`emit_kliveness_monitor`](../crates/mununu-core/src/adapter/btor2/kliveness_monitor.rs#L49): one
+seen-bit per literal and a counter, no shadow state). The query goes to the proof-directed members
+only (rIC3 in its own portfolio mode, Pono, native k-induction — no exact, no BMC), for widths
+1, 2, 4, 8, 12, 16 bits. `Unreachable` at any width is HOLDS, sound on the concrete design and
+complete on finite state (a reachable cycle that completes a round gives infinitely many, so some
+width always suffices); `Reachable` is **not** a violation — the rung tries the next width and
+never reports VIOLATED, which stays with l2s and the exact rung. Measured on HWMCC'17 LIVE
+instances the exact rung abstains on (node budget) and l2s leaves open at 3,600 s: `cuabq4fro`
+proved at k = 15 in 1 s, `cutarb8ro` at k = 255 in 14 s (iimc: 22 s and 3 s). Measured: `cucab09` (91 bits) from an arena
 abstention at 137 s to HOLDS in 2.6 s, `cuabq2mfro` from 105 s to 4.3 s, verdict-identical by
 gate — see [the levers briefing](consumer-briefings/2026-10-exact-reachable-restriction.md) and
 [the gating briefing](consumer-briefings/2026-10-lever-gating-ladder.md). The l2s rung is

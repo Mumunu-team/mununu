@@ -41,7 +41,10 @@ pub enum JusticeRung {
     Exact,
     /// Liveness-to-safety + the reachability portfolio only.
     L2s,
-    /// Exact first; l2s when the exact engine abstains (the default).
+    /// k-liveness (Track V): a bound on the fair rounds, proved as safety by the proof-directed
+    /// members ([`crate::adapter::reach_portfolio::ReachMembers::PROOF_DIRECTED`]); HOLDS only.
+    Kliveness,
+    /// Exact first; l2s, then k-liveness, when the exact engine abstains (the default).
     Both,
 }
 
@@ -50,9 +53,10 @@ impl JusticeRung {
         match s.trim().to_ascii_lowercase().as_str() {
             "exact" => Ok(Self::Exact),
             "l2s" => Ok(Self::L2s),
+            "kliveness" | "k-liveness" => Ok(Self::Kliveness),
             "both" | "auto" => Ok(Self::Both),
             other => Err(format!(
-                "unknown justice rung `{other}` — expected `exact`, `l2s` or `both`"
+                "unknown justice rung `{other}` — expected `exact`, `l2s`, `kliveness` or `both`"
             )),
         }
     }
@@ -193,8 +197,9 @@ pub struct JusticeOptions {
     pub rung: JusticeRung,
     /// The whole run's wall-clock budget per justice set (`None` = the engines' own budgets).
     pub budget_ms: Option<u64>,
-    /// Run the exact ladder and the l2s rung CONCURRENTLY, first definite verdict wins and the
-    /// other is cancelled; `false` = `exact ≤ EXACT_SLICE → l2s → exact with the remainder`.
+    /// Run the exact ladder, the l2s rung and the k-liveness rung CONCURRENTLY, first definite
+    /// verdict wins and the others are cancelled; `false` = `exact ≤ EXACT_SLICE → l2s →
+    /// kliveness → exact with the remainder`.
     pub parallel_rungs: bool,
 }
 
@@ -251,7 +256,6 @@ fn exact_rung(
     }
 }
 
-/// The l2s rung on one justice set.
 /// Rung threads of the parallel policy still running (mununu#689). Incremented when a rung
 /// starts, decremented by [`RungGuard`] when it ends — on every path, including a panic.
 static LIVE_RUNGS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -271,6 +275,7 @@ impl Drop for RungGuard {
     }
 }
 
+/// The l2s rung on one justice set.
 ///
 /// `budget` bounds the reachability portfolio on the fair-cycle monitor: it is installed as a
 /// child [`run_budget`](crate::adapter::run_budget) budget for the call, and the portfolio derives
@@ -320,6 +325,140 @@ fn l2s_rung(
             vec!["l2s: the fair-cycle monitor could not be built".into()],
         ),
     }
+}
+
+/// The counter widths the k-liveness rung tries, in order (k = 2^w − 1 rounds). Measured on
+/// HWMCC'17 LIVE (V0, 2026-11-10): `cuabq4fro` proved at w = 4 in 1 s, `cutarb8ro` at w = 8 in
+/// 14 s; `cujc128ro` was still reachable at w = 8. Small widths first because a proof at a small
+/// bound is the common case and a `reachable` at a small width is found in well under a second.
+const KLIVENESS_WIDTHS: &[u32] = &[1, 2, 4, 8, 12, 16];
+
+/// Track V — the k-liveness rung on one justice set (Claessen–Sörensson): for each width in
+/// [`KLIVENESS_WIDTHS`], the monitor of
+/// [`emit_kliveness_monitor`](crate::adapter::btor2::kliveness_monitor::emit_kliveness_monitor)
+/// is decided as `bad`-reachability by the proof-directed members
+/// ([`ReachMembers::PROOF_DIRECTED`](crate::adapter::reach_portfolio::ReachMembers)).
+/// `Unreachable` at any width ⇒ HOLDS (sound on the concrete design: no path completes that many
+/// fair rounds, so no fair path exists). `Reachable` is NOT a violation — it says the bound is
+/// too small — so the rung moves to the next width; a member's `Unknown` under an expired budget
+/// ends the ladder. **This rung never reports VIOLATED**; the lasso side stays with l2s.
+///
+/// engine: proof-directed reach portfolio (rIC3 in its own portfolio mode, Pono `ic3bits`, native
+/// k-induction) on the round-counter monitor — role: decider on proofs; the exact rung and l2s
+/// cross-check it where they also answer.
+///
+/// `budget` is the rung's whole wall budget, shared across the widths (a child
+/// [`run_budget`](crate::adapter::run_budget) budget, so every member's bound follows the time
+/// left); `None` keeps the members' own defaults per width.
+fn kliveness_rung(
+    design: &str,
+    justice_index: usize,
+    budget: Option<std::time::Duration>,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> (PropertyVerdict, Vec<String>, Vec<String>) {
+    use crate::adapter::btor2::kliveness_monitor::emit_kliveness_monitor;
+    use crate::adapter::reach_portfolio::{
+        ReachMembers, ReachVerdict, decide_reach_portfolio_with_members,
+    };
+    use crate::adapter::run_budget;
+    let scoped = budget.map(|b| {
+        let ms = u64::try_from(b.as_millis()).unwrap_or(u64::MAX);
+        run_budget::Budget::child(&run_budget::current(), Some(ms))
+    });
+    let _guard = scoped.as_ref().map(run_budget::enter);
+    let mut tried: Vec<String> = Vec::new();
+    let mut member_notes: Vec<String> = Vec::new();
+    for &w in KLIVENESS_WIDTHS {
+        if run_budget::expired()
+            || cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+        {
+            break;
+        }
+        let monitor = match emit_kliveness_monitor(design, justice_index, w) {
+            Ok(m) => m,
+            Err(e) => {
+                return (
+                    PropertyVerdict::Unknown,
+                    Vec::new(),
+                    vec![format!(
+                        "kliveness: the round-counter monitor could not be built: {}",
+                        e.message
+                    )],
+                );
+            }
+        };
+        let file = match parser::parse(&monitor) {
+            Ok(f) => f,
+            Err(e) => {
+                return (
+                    PropertyVerdict::Unknown,
+                    Vec::new(),
+                    vec![format!(
+                        "kliveness: the monitor did not parse: {}",
+                        e.message
+                    )],
+                );
+            }
+        };
+        let k = (1u128 << w) - 1;
+        let outcome = decide_reach_portfolio_with_members(
+            &file,
+            crate::adapter::btormc::DEFAULT_TIMEOUT,
+            cancel,
+            ReachMembers::PROOF_DIRECTED,
+        );
+        for (m, why) in outcome.refused.iter().chain(outcome.abstained.iter()) {
+            member_notes.push(format!("{m} at k={k}: {why}"));
+        }
+        match outcome.verdict {
+            ReachVerdict::Unreachable => {
+                let mut by = vec!["kliveness".to_string(), format!("k={k}")];
+                by.extend(outcome.unreachable_by.iter().map(|s| s.to_string()));
+                return (PropertyVerdict::Holds, by, Vec::new());
+            }
+            ReachVerdict::Reachable => tried.push(format!("k={k} reachable")),
+            ReachVerdict::Contradiction => {
+                return (
+                    PropertyVerdict::Unknown,
+                    Vec::new(),
+                    vec![format!(
+                        "kliveness: the members CONTRADICT each other on the k={k} bound (soundness alarm)"
+                    )],
+                );
+            }
+            ReachVerdict::Unknown => {
+                // A wider bound is strictly harder to prove and its `reachable` trace strictly
+                // deeper, so a width no member decides ends the ladder: the rest of the budget
+                // goes to the next rung rather than to widths that cannot do better.
+                tried.push(format!("k={k} undecided"));
+                break;
+            }
+        }
+    }
+    let mut note = match budget {
+        Some(b) => format!(
+            "kliveness: no fair-round bound proved within a {} ms budget ({})",
+            b.as_millis(),
+            if tried.is_empty() {
+                "no width attempted".to_string()
+            } else {
+                tried.join(", ")
+            }
+        ),
+        None => format!(
+            "kliveness: no fair-round bound proved at the members' default budgets ({}); a reachable bound is not a violation — l2s decides the lasso side",
+            if tried.is_empty() {
+                "no width attempted".to_string()
+            } else {
+                tried.join(", ")
+            }
+        ),
+    };
+    for m in member_notes {
+        note.push_str("; ");
+        note.push_str(&m);
+    }
+    (PropertyVerdict::Unknown, Vec::new(), vec![note])
 }
 
 /// The l2s rung's abstention note: the budget the portfolio ran under and every member's refusal
@@ -382,6 +521,12 @@ pub fn verify_justice_with(
                 decided_by = by;
                 notes.append(&mut n);
             }
+            JusticeRung::Kliveness => {
+                let (v, by, mut n) = kliveness_rung(&named, index, total, None);
+                verdict = v;
+                decided_by = by;
+                notes.append(&mut n);
+            }
             JusticeRung::Both if opts.parallel_rungs => {
                 // Both rungs at once; the first definite verdict wins and the other is
                 // CANCELLED and JOINED before this returns. mununu#689: the rungs used to run on
@@ -418,8 +563,23 @@ pub fn verify_justice_with(
                             let _ = tx.send(("l2s", r));
                         })
                     };
+                    let kl_h = {
+                        let tx = tx.clone();
+                        let cancel = &*cancel;
+                        let named = &named;
+                        scope.spawn(move || {
+                            let _live = RungGuard::enter();
+                            let (v, by, n) = kliveness_rung(named, index, total, Some(cancel));
+                            let r = if v == PropertyVerdict::Unknown {
+                                Err(n.join(" | "))
+                            } else {
+                                Ok((v, "kliveness", by))
+                            };
+                            let _ = tx.send(("kliveness", r));
+                        })
+                    };
                     drop(tx);
-                    let mut pending = 2;
+                    let mut pending = 3;
                     while pending > 0 {
                         let Ok((who, r)) = rx.recv() else { break };
                         pending -= 1;
@@ -441,10 +601,11 @@ pub fn verify_justice_with(
                     // did) instead of re-panicking out of the scope.
                     let _ = exact_h.join();
                     let _ = l2s_h.join();
+                    let _ = kl_h.join();
                 });
             }
             JusticeRung::Both => {
-                // exact ≤ EXACT_SLICE → l2s → exact with the remainder.
+                // exact ≤ EXACT_SLICE → l2s → kliveness → exact with the remainder.
                 let slice = Duration::from_millis(EXACT_SLICE_MS);
                 let first = remaining(total).map_or(slice, |r| r.min(slice));
                 match exact_rung(&named, &lits, Some(first), None) {
@@ -463,6 +624,18 @@ pub fn verify_justice_with(
                     // slice — so neither side may take the whole budget.
                     let l2s_budget = remaining(total).map(|r| r / 2);
                     let (v, by, mut n) = l2s_rung(&named, &lits, l2s_budget, None);
+                    verdict = v;
+                    decided_by = by;
+                    notes.append(&mut n);
+                }
+                if verdict == PropertyVerdict::Unknown
+                    && !remaining(total).is_some_and(|r| r.is_zero())
+                {
+                    // Track V — the k-liveness rung takes half of what l2s left (the proof side:
+                    // l2s finds the lassos, this finds the bounds); the exact remainder gets the
+                    // rest. Unbudgeted runs give it the members' defaults per width.
+                    let kl_budget = remaining(total).map(|r| r / 2);
+                    let (v, by, mut n) = kliveness_rung(&named, index, kl_budget, None);
                     verdict = v;
                     decided_by = by;
                     notes.append(&mut n);
@@ -775,6 +948,84 @@ mod policy_tests {
         );
         let bounded = l2s_undecided_note(Some(std::time::Duration::from_secs(5)), &outcome);
         assert!(bounded.contains("within a 5000 ms budget"), "{bounded}");
+    }
+
+    /// Track V — the k-liveness rung proves the stuck design: `¬s` holds only at reset, so
+    /// exactly one fair round ever completes; `k = 1` is reachable (the rung moves on) and
+    /// `k = 3` is not (HOLDS). The test pins the verdict and the label, not the width.
+    #[test]
+    fn the_kliveness_rung_proves_the_stuck_design_and_names_the_bound() {
+        let r = verify_justice_with(
+            STUCK,
+            &JusticeOptions {
+                rung: JusticeRung::Kliveness,
+                budget_ms: Some(60_000),
+                parallel_rungs: false,
+            },
+        )
+        .expect("runs");
+        assert_eq!(r[0].verdict, PropertyVerdict::Holds, "{:?}", r[0]);
+        assert_eq!(
+            r[0].decided_by.first().map(String::as_str),
+            Some("kliveness"),
+            "{:?}",
+            r[0]
+        );
+        assert!(
+            r[0].decided_by.iter().any(|s| s.starts_with("k=")),
+            "the bound is named: {:?}",
+            r[0].decided_by
+        );
+    }
+
+    /// The counter has a fair cycle: every bound is reachable, and the rung must say so as an
+    /// ABSTENTION that names the widths it tried — never VIOLATED (a finite count is not a
+    /// violation). Exact / l2s decide that side.
+    #[test]
+    fn the_kliveness_rung_never_reports_violated_on_a_fair_cycle() {
+        // 10 s: the small bounds are found reachable in well under a second; a deep bound's
+        // trace (k = 255 is ~1,000 steps on this counter) is where IC3 stalls and the budget is
+        // what ends the rung — the test pins the abstention, not the depth reached.
+        let r = verify_justice_with(
+            COUNTER,
+            &JusticeOptions {
+                rung: JusticeRung::Kliveness,
+                budget_ms: Some(10_000),
+                parallel_rungs: false,
+            },
+        )
+        .expect("runs");
+        assert_eq!(r[0].verdict, PropertyVerdict::Unknown, "{:?}", r[0]);
+        assert!(
+            r[0].notes
+                .iter()
+                .any(|n| n.contains("k=1 reachable") && n.contains("k=3 reachable")),
+            "the note names the bounds tried: {:?}",
+            r[0].notes
+        );
+    }
+
+    /// The sequential default on the counter is unchanged by the new rung: the exact slice
+    /// decides VIOLATED first and k-liveness never runs.
+    #[test]
+    fn the_sequential_policy_still_decides_the_counter_on_the_exact_slice() {
+        let r = verify_justice_with(
+            COUNTER,
+            &JusticeOptions {
+                rung: JusticeRung::Both,
+                budget_ms: Some(60_000),
+                parallel_rungs: false,
+            },
+        )
+        .expect("runs");
+        assert_eq!(r[0].verdict, PropertyVerdict::Violated, "{:?}", r[0]);
+        assert_eq!(r[0].decided_by, vec![LADDER_STAGE_UNRESTRICTED.to_string()]);
+    }
+
+    #[test]
+    fn the_rung_name_parses_on_both_spellings() {
+        assert_eq!(JusticeRung::parse("kliveness"), Ok(JusticeRung::Kliveness));
+        assert_eq!(JusticeRung::parse("K-Liveness"), Ok(JusticeRung::Kliveness));
     }
 
     #[test]

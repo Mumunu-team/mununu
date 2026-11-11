@@ -45,8 +45,15 @@ use crate::adapter::btormc::{McVerdict, count_bad_properties};
 use crate::adapter::{AdapterError, AdapterErrorKind};
 
 /// The single engine the member runs (`rIC3 -e ic3`): IC3/PDR over the bit-level transition
-/// system. The default `portfolio` mode forks ~11 solver processes and is not used here.
+/// system. The default `portfolio` mode forks ~11 solver processes and is not used by the shipped
+/// reach portfolio; [`PORTFOLIO_ENGINE`] opts into it deliberately.
 pub const DEFAULT_ENGINE: &str = "ic3";
+
+/// rIC3's own multi-configuration portfolio (no `-e`: several IC3 variants, k-induction and BMC
+/// in parallel, first answer wins). Track V's k-liveness rung uses it on its monitor — measured
+/// 2026-11-10: `cutarb8ro`'s bound was proved by the variant `--ic3-drop-po=false
+/// --ic3-parent-lemma=false --rseed 3` in 14 s where plain `-e ic3` is one of the losers.
+pub const PORTFOLIO_ENGINE: &str = "";
 
 /// Default wall-clock budget for a single rIC3 run (the reach portfolio's subprocess wall).
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
@@ -91,7 +98,8 @@ pub fn exit_code_is_a_verdict_or_clean(code: Option<i32>) -> bool {
     matches!(code, Some(0 | 10 | 20))
 }
 
-/// Run `rIC3 -e <engine> <file>` on a BTOR2 description and parse the verdict.
+/// Run `rIC3 -e <engine> <file>` (no `-e` for [`PORTFOLIO_ENGINE`]) on a BTOR2 description and
+/// parse the verdict.
 pub fn run_ric3_cancellable(
     bin: &Ric3Bin,
     btor2: &str,
@@ -129,7 +137,9 @@ pub fn run_ric3_with_output(
         ))
     })?;
     let mut command = Command::new(&bin.path);
-    command.arg("-e").arg(engine);
+    if !engine.is_empty() {
+        command.arg("-e").arg(engine);
+    }
     if witness {
         command.arg("--witness");
     }
