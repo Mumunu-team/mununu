@@ -34,7 +34,7 @@ host is trusted. Two settings in `mununu.toml`'s `[server]` table limit what a r
 | key | default | effect |
 |---|---|---|
 | `cors_origins` | `[]` | browser origins, besides loopback (`localhost`, `127.0.0.1`, `[::1]`, any port), that may read the API's answers. The bundle's UI is same-origin and needs none. A page from any other origin gets no CORS headers (mununu#934). |
-| `file_root` | unset (the bundle sets `/work`) | every server-side path a request names (`sv_source_path`, `sidecar_path`, `base_dir`) must exist and resolve, after `..` and symlinks, to a location under it; otherwise the request is refused with `400` (mununu#935). Not yet covered: file paths written inside a `/api/v1/verify` config, which resolve against `base_dir` but may be absolute. |
+| `file_root` | unset (the bundle sets `/work`) | every server-side path a request names (`sv_source_path`, `sidecar_path`, `base_dir`) must exist and resolve, after `..` and symlinks, to a location under it; otherwise the request is refused with `400` (mununu#935). The same holds for every file path inside a `/api/v1/verify` config (`[[sources]] files`, the `sidecar` / `include_paths` / `register_map` options, `[alphabet] register_map`, `[templates] files`), relative ones resolved against `base_dir`; a config that names an executable (`options.clang`) is refused, since a request does not choose what the server runs. |
 
 ## Verify a design
 
