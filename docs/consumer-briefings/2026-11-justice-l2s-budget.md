@@ -1,6 +1,6 @@
 # Consumer briefing — `--timeout-ms` now reaches the justice verb's l2s rung (2026-11)
 
-> Source of truth: [`l2s_rung`](../../crates/mununu-core/src/adapter/justice.rs#L281) and [`l2s_undecided_note`](../../crates/mununu-core/src/adapter/justice.rs#L328) — surface: CLI+API (`btor2 verify-liveness --justice`, `btor2 verify-justice`, the justice form of `POST /api/v1/btor2/verify-liveness`).
+> Source of truth: [`l2s_rung`](../../crates/mununu-core/src/adapter/justice.rs#L286) and [`l2s_undecided_note`](../../crates/mununu-core/src/adapter/justice.rs#L406) — surface: CLI+API (`btor2 verify-liveness --justice`, `btor2 verify-justice`, the justice form of `POST /api/v1/btor2/verify-liveness`).
 
 > **Audience:** anyone running `btor2 verify-justice` / `btor2 verify-liveness --justice` or the justice form of `POST /api/v1/btor2/verify-liveness` with a budget (`--timeout-ms` / `timeout_ms`); lanes driving `scripts/hwmcc_live_study.sh`.
 >

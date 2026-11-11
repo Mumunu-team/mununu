@@ -1101,6 +1101,7 @@ fn btor2_verify_liveness_handler_impl(
             decided_by: Vec::new(),
             justice: r.justice,
             converted_from_aiger: Some(r.converted_from_aiger),
+            notes: Vec::new(),
         }));
     }
     if !request.responses.is_empty() {
@@ -1156,6 +1157,7 @@ fn btor2_verify_liveness_handler_impl(
             .collect(),
         justice: Vec::new(),
         converted_from_aiger: None,
+        notes: crate::adapter::liveness_rescue::undecided_notes(&outcome),
     }))
 }
 
@@ -1196,6 +1198,15 @@ fn btor2_verify_liveness_all_handler_impl(
             .collect(),
         justice: Vec::new(),
         converted_from_aiger: None,
+        notes: outcomes
+            .iter()
+            .enumerate()
+            .flat_map(|(i, o)| {
+                crate::adapter::liveness_rescue::undecided_notes(o)
+                    .into_iter()
+                    .map(move |n| format!("response #{i}: {n}"))
+            })
+            .collect(),
     }))
 }
 
@@ -1254,6 +1265,7 @@ fn btor2_verify_liveness_under_fairness_handler_impl(
             .collect(),
         justice: Vec::new(),
         converted_from_aiger: None,
+        notes: crate::adapter::liveness_rescue::undecided_notes(&outcome),
     }))
 }
 
@@ -1648,6 +1660,7 @@ fn sv_verify_liveness_handler_impl(
             .collect(),
         justice: Vec::new(),
         converted_from_aiger: None,
+        notes: crate::adapter::liveness_rescue::undecided_notes(&outcome),
     }))
 }
 
@@ -1679,6 +1692,15 @@ fn sv_verify_liveness_all_handler_impl(
             .collect(),
         justice: Vec::new(),
         converted_from_aiger: None,
+        notes: outcomes
+            .iter()
+            .enumerate()
+            .flat_map(|(i, o)| {
+                crate::adapter::liveness_rescue::undecided_notes(o)
+                    .into_iter()
+                    .map(move |n| format!("response #{i}: {n}"))
+            })
+            .collect(),
     }))
 }
 

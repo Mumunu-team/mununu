@@ -52,7 +52,7 @@ mununu btor2 verify design.btor2 --fault state_q:1   # under the fault-injection
 
 ### `btor2 verify-liveness` — response liveness `AG(request → AF grant)`
 
-> Source of truth: [`response_liveness_rescue_atoms`](../crates/mununu-core/src/adapter/liveness_rescue.rs#L292) — surface: (CLI+API+UI)
+> Source of truth: [`response_liveness_rescue_atoms`](../crates/mununu-core/src/adapter/liveness_rescue.rs#L479) — surface: (CLI+API+UI)
 
 Decides the canonical request/grant property — "whenever `request` holds, `grant` is
 eventually reached on **every** path" — by a sound liveness-to-safety reduction
@@ -67,7 +67,7 @@ mununu btor2 verify-liveness design.btor2 --request "st == 1" --grant "st == 2"
 
 ### `btor2 verify-liveness --fairness` — response liveness under a `GF` fairness assumption (mununu#477)
 
-> Source of truth: [`response_liveness_rescue_under_fairness`](../crates/mununu-core/src/adapter/liveness_rescue.rs#L329) — surface: (CLI+API+UI)
+> Source of truth: [`response_liveness_rescue_under_fairness`](../crates/mununu-core/src/adapter/liveness_rescue.rs#L640) — surface: (CLI+API+UI)
 
 Decides `(⋀ⱼ GF fairⱼ) → AG(request → AF grant)` via the Emerson–Lei extension of the plain l2s: one `fairⱼ_seen` latch per fairness atom (each mirroring the existing `b_seen`), conjuncted into `bad = looped ∧ ¬b_seen ∧ ⋀ⱼ fairⱼ_seen`. A reachable `bad` ⇒ a lasso exists that satisfies every fairness constraint AND leaves a request forever ungranted ⇒ VIOLATED. Empty `--fairness` recovers `verify-liveness` exactly, byte-for-byte on the emitted monitor. Sound + complete for the response shape (a useless fairness atom env satisfies trivially does NOT rescue a genuinely starving design — the `fair_gated_is_not_rescued_by_useless_fairness` soundness control validates this).
 
@@ -83,6 +83,38 @@ mununu btor2 verify-liveness --fairness design.btor2 \
     --request "req == 1" --grant "ack == 1" \
     --fairness "fair_1 == 1" --fairness "fair_2 == 1"
 ```
+
+### The proof fallback: k-liveness after l2s (Track V, 2026-11)
+
+> Source of truth: [`response_kliveness`](../crates/mununu-core/src/adapter/liveness_rescue.rs#L603) · [`emit_response_kliveness_monitor`](../crates/mununu-core/src/adapter/btor2/kliveness_monitor.rs#L124) · [`kliveness_ladder`](../crates/mununu-core/src/adapter/btor2/kliveness_monitor.rs#L314) · [`undecided_notes`](../crates/mununu-core/src/adapter/liveness_rescue.rs#L573) — surface: CLI+API (`btor2 verify-liveness` in all three forms, `sv verify-liveness`, `POST /api/v1/btor2/verify-liveness`, `POST /api/v1/sv/verify-liveness`)
+
+l2s is complete but its proofs are hard: the safety checker has to find an invariant over the
+design and a shadow copy of it. When l2s leaves a response row **undecided**, every verb above now
+tries a second, proof-only method before reporting `unknown`. It is the k-liveness bound of the
+justice verb's `kliveness` rung, applied to the response shape:
+
+- **The monitor** is the Büchi automaton for the violation `F(request ∧ G ¬grant)`. A fresh
+  input picks ("commits to") one request. The commitment dies for good the first time a grant
+  follows it, a grant in the request's own cycle included. A round counter then counts the
+  rounds in which the commitment is alive and every `--fairness` atom has been seen. This is a
+  count of persistence, not of how often a request is pending: a design that grants every
+  request is bounded at one round even if requests never stop.
+- **HOLDS only.** If no path completes `2^w − 1` rounds (proved for widths 1, 2, 4, 8, 12, 16 bits
+  by rIC3 in its portfolio mode, Pono `ic3bits` or native k-induction), no fair path leaves a
+  request ungranted forever: the property holds on the concrete design. A bound that is reachable
+  is a long-pending request, not a counterexample, so this method never reports `violated`; the
+  lasso side stays with l2s.
+- **Only on an undecided row.** A row l2s decides never reaches it, so its verdict and time are
+  unchanged. An undecided row pays at most the ladder: each width runs under the members' 60 s
+  cap, and the ladder stops at the first width no member decides.
+- **The report.** A proof reads `"decided_by": ["kliveness", "k=15", "ric3"]`. An undecided row
+  now carries `notes`: each member's refusal or budget abstention, and the k-liveness note
+  (which bounds it tried, `k=… reachable` / `k=… undecided`). Before this change the response verbs
+  reported only `decided_by`, so an undecided row looked the same whether every member refused the
+  design or all of them searched to their bound. Decided rows have no `notes` field.
+
+Verify-auto's response rescue (`escalate_bottom`) does not use the fallback yet; that is the
+planner-wiring step, measured separately.
 
 ### `btor2 verify-recoverability` — recoverability `AG EF good`
 
@@ -187,7 +219,7 @@ The levers that measurement pointed at are applied by the exact engine's **ladde
 reachable-state restriction with a 5 s probe on a retryable abstention, and the unrestricted
 remainder. Under `--rung both` the verb runs the ladder for 30 s, then l2s with **half** of what
 the slice leaves (the reach portfolio's members take their bounds from it), then **k-liveness**
-(`--rung kliveness`; [`kliveness_rung`](../crates/mununu-core/src/adapter/justice.rs#L353)) with half of
+(`--rung kliveness`; [`kliveness_rung`](../crates/mununu-core/src/adapter/justice.rs#L347)) with half of
 what l2s leaves, then the ladder with what remains; without `--timeout-ms` the members run at their
 60 s defaults and each abstention note says so, naming every member's refusal or budget abstention; `--parallel-rungs` runs both at once and cancels the loser. The root
 fixpoint's early exit is on for every verdict path.
@@ -195,7 +227,7 @@ fixpoint's early exit is on for every verdict path.
 **k-liveness (Track V, 2026-11-10)** is the proof-side rung: a justice set is decided by bounding
 how many *fair rounds* a path can complete — a round ends once every justice and fairness literal
 has been seen since the previous one — and proving `rounds ≤ k` as plain `bad`-reachability
-([`emit_kliveness_monitor`](../crates/mununu-core/src/adapter/btor2/kliveness_monitor.rs#L49): one
+([`emit_kliveness_monitor`](../crates/mununu-core/src/adapter/btor2/kliveness_monitor.rs#L77): one
 seen-bit per literal and a counter, no shadow state). The query goes to the proof-directed members
 only (rIC3 in its own portfolio mode, Pono, native k-induction — no exact, no BMC), for widths
 1, 2, 4, 8, 12, 16 bits. `Unreachable` at any width is HOLDS, sound on the concrete design and

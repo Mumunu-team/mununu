@@ -13,6 +13,13 @@
       "description": "The design file as given on the command line.",
       "type": "string"
     },
+    "notes": {
+      "description": "Track V (V2) — why an UNDECIDED row is undecided: each portfolio member's refusal or budget abstention (`\"<member> refused: …\"` / `\"<member>: …\"`), and the k-liveness fallback's note. Empty — and omitted — on a decided row.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
     "outcome": {
       "description": "`holds` | `violated` | `unknown` | `skipped`.",
       "type": "string"

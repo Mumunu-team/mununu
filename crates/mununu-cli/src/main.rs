@@ -4119,6 +4119,7 @@ fn btor2_verify_liveness(args: Btor2LivenessOneArgs) -> Result<(), String> {
         "decided_by": outcome.reachable_by.iter().chain(outcome.unreachable_by.iter())
             .collect::<Vec<_>>(),
     });
+    let summary = with_undecided_notes(summary, &outcome);
     println!(
         "{}",
         serde_json::to_string_pretty(&summary).map_err(|e| format!("serialize summary: {e}"))?
@@ -4213,12 +4214,26 @@ fn btor2_verify_liveness_under_fairness(
         "decided_by": outcome.reachable_by.iter().chain(outcome.unreachable_by.iter())
             .collect::<Vec<_>>(),
     });
+    let summary = with_undecided_notes(summary, &outcome);
     println!(
         "{}",
         serde_json::to_string_pretty(&summary).map_err(|e| format!("serialize summary: {e}"))?
     );
     ci_gate_exit(PropertyVerdict::from(verdict).as_str(), args.ci.fail_on);
     Ok(())
+}
+
+/// Track V (V2) — add `notes` (why the row is undecided) to a `btor2 verify-liveness` summary; a
+/// decided row's summary is returned unchanged.
+fn with_undecided_notes(
+    mut summary: serde_json::Value,
+    outcome: &mununu_core::adapter::reach_portfolio::ReachOutcome,
+) -> serde_json::Value {
+    let notes = mununu_core::adapter::liveness_rescue::undecided_notes(outcome);
+    if !notes.is_empty() {
+        summary["notes"] = serde_json::json!(notes);
+    }
+    summary
 }
 
 /// Build the per-response `[{ response, decided_by }]` JSON for the
@@ -4239,6 +4254,7 @@ fn per_response_decided_by(
                 .chain(o.unreachable_by.iter())
                 .map(|e| e.to_string())
                 .collect(),
+            notes: mununu_core::adapter::liveness_rescue::undecided_notes(o),
         })
         .collect()
 }
@@ -7295,6 +7311,7 @@ fn sv_verify_liveness_impl(args: SvVerifyLivenessArgs) -> Result<(), String> {
             .chain(outcome.unreachable_by.iter())
             .map(|e| e.to_string())
             .collect(),
+        notes: mununu_core::adapter::liveness_rescue::undecided_notes(&outcome),
     };
     print_typed_report(&report)?;
     ci_gate_exit(PropertyVerdict::from(verdict).as_str(), args.ci.fail_on);
