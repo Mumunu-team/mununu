@@ -13,6 +13,10 @@
 ARG RUST_VERSION=1.95
 ARG OSS_CAD_SUITE_TAG=2026-08-24
 ARG OSS_CAD_SUITE_DATE=20260824
+# The tarball's sha256, checked before it is unpacked; a bump of TAG / DATE changes it too (the
+# release's asset digest: `gh api repos/YosysHQ/oss-cad-suite-build/releases/tags/<TAG>
+# --jq '.assets[] | select(.name|endswith("<DATE>.tgz") and contains("linux-x64")) | .digest'`).
+ARG OSS_CAD_SUITE_SHA256=9d7f79975ef624e1119fc9690fd9b9839b67026925aff3e2a1192d861b8dbb7c
 
 FROM rust:${RUST_VERSION}-slim-trixie AS builder
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -32,16 +36,21 @@ RUN cargo build --release -p mununu-cli
 FROM debian:trixie-slim
 ARG OSS_CAD_SUITE_TAG
 ARG OSS_CAD_SUITE_DATE
+ARG OSS_CAD_SUITE_SHA256
 # libz3-4: the binary links it. curl: the healthcheck. g++ / make / perl: Verilator's
 # counterexample replay compiles the generated C++ model at run time.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl libz3-4 g++ make perl \
     && rm -rf /var/lib/apt/lists/*
-# The suite, streamed into /opt. Its binaries carry an rpath to their own lib tree, so only PATH
-# is extended — no LD_LIBRARY_PATH, which would shadow the system libz3 the binary links.
-RUN curl -fsSL \
+# The suite, downloaded, checked against its pinned sha256 and unpacked into /opt in one layer
+# (the tarball is removed in the same RUN, so the layer holds only the tree). Its binaries carry
+# an rpath to their own lib tree, so only PATH is extended — no LD_LIBRARY_PATH, which would
+# shadow the system libz3 the binary links.
+RUN curl -fsSL -o /tmp/oss-cad-suite.tgz \
       "https://github.com/YosysHQ/oss-cad-suite-build/releases/download/${OSS_CAD_SUITE_TAG}/oss-cad-suite-linux-x64-${OSS_CAD_SUITE_DATE}.tgz" \
-    | tar xz -C /opt
+    && echo "${OSS_CAD_SUITE_SHA256}  /tmp/oss-cad-suite.tgz" | sha256sum -c - \
+    && tar xzf /tmp/oss-cad-suite.tgz -C /opt \
+    && rm /tmp/oss-cad-suite.tgz
 ENV PATH="/opt/oss-cad-suite/bin:${PATH}"
 LABEL io.github.mumunu-team.oss-cad-suite.tag="${OSS_CAD_SUITE_TAG}"
 COPY --from=builder /build/target/release/mununu /usr/local/bin/mununu

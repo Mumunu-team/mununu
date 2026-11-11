@@ -72,7 +72,12 @@ jobs:
         shell: pwsh
         run: |
           $v = '5.1.0'
+          # The zip's sha256 (the release's asset digest); a bump of $v changes it, in both
+          # release.yml and os-matrix.yml. The DLL inside ships in the release archive.
+          $sha = '6ff368eaa2f9dc18acf244e736a074df877026bfc83abede6f327ebb95680535'
           Invoke-WebRequest "https://github.com/Z3Prover/z3/releases/download/z3-$v/z3-$v-x64-win.zip" -OutFile "$env:RUNNER_TEMP\z3.zip"
+          $got = (Get-FileHash "$env:RUNNER_TEMP\z3.zip" -Algorithm SHA256).Hash.ToLower()
+          if ($got -ne $sha) { throw "z3-$v-x64-win.zip: sha256 $got, expected $sha" }
           Expand-Archive "$env:RUNNER_TEMP\z3.zip" -DestinationPath $env:RUNNER_TEMP
           $bin = "$env:RUNNER_TEMP\z3-$v-x64-win\bin"
           Copy-Item "$bin\libz3.lib" "$bin\z3.lib"
