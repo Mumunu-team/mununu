@@ -1817,6 +1817,7 @@ fn translate_sv_per_module_impl(
         ),
         location: None,
     })?;
+    let hier_body = collapse_slang_instance_modules(&hier_body);
     let submodules = enumerate_submodules(&hier_body, yopts.top.as_deref());
     if submodules.is_empty() {
         return Err(AdapterError {
@@ -1973,7 +1974,15 @@ fn build_discovery_script(
     hier_json_out: &Path,
     params: &[(String, String)],
 ) -> String {
-    let read = read_slang_cmd(sources, top, params, &[]);
+    // mununu#981 — `read_slang` flattens the elaborated design into the top by default, so the
+    // snapshot had ONE module and the per-module / multi-module lift found no submodule.
+    // `--keep-hierarchy` keeps one module per instance, named `<type>$<instance path>`;
+    // [`collapse_slang_instance_modules`] maps those back to the module type the per-module pass
+    // re-elaborates.
+    let read = format!(
+        "{} --keep-hierarchy",
+        read_slang_cmd(sources, top, params, &[])
+    );
     let hier = match top {
         Some(t) => format!("hierarchy -check -top {t}"),
         None => "hierarchy -check -auto-top".to_string(),
@@ -2129,6 +2138,53 @@ fn yosys_run_outcome_to_result(
         });
     }
     Ok(())
+}
+
+/// The module type of a `read_slang --keep-hierarchy` module name: yosys-slang names each
+/// instance's module `<type>$<instance path>` (`producer$producer_consumer_top.u_producer`).
+/// A name with no `$`, or one yosys itself mangled (`$paramod…`, leading `$`), is returned as is.
+fn slang_module_type(name: &str) -> &str {
+    if name.starts_with('$') {
+        return name;
+    }
+    name.split_once('$').map_or(name, |(ty, _)| ty)
+}
+
+/// mununu#981 — rewrite a `read_slang --keep-hierarchy` snapshot so every per-instance module
+/// `<type>$<path>` becomes its type: each cell's `type` is mapped, and the `modules` map keeps one
+/// body per type (the first by name — the map is sorted; the other instances' bodies are dropped,
+/// their cells still point at the type). The per-module pass then re-elaborates each TYPE with
+/// `read_slang --top <type>`, the shape the `read_verilog` discovery produced before the
+/// slang-only lift (N1). A snapshot that fails to parse is returned unchanged (the readers are
+/// best-effort on it already).
+fn collapse_slang_instance_modules(hier_json: &str) -> String {
+    let Ok(mut root) = serde_json::from_str::<serde_json::Value>(hier_json) else {
+        return hier_json.to_string();
+    };
+    let Some(modules) = root.get_mut("modules").and_then(|m| m.as_object_mut()) else {
+        return hier_json.to_string();
+    };
+    if !modules.keys().any(|k| slang_module_type(k) != k) {
+        return hier_json.to_string();
+    }
+    let mut collapsed = serde_json::Map::new();
+    for (name, mut body) in std::mem::take(modules) {
+        if let Some(cells) = body.get_mut("cells").and_then(|c| c.as_object_mut()) {
+            for cell in cells.values_mut() {
+                if let Some(ty) = cell.get_mut("type")
+                    && let Some(t) = ty.as_str()
+                {
+                    let mapped = slang_module_type(t).to_string();
+                    *ty = serde_json::Value::String(mapped);
+                }
+            }
+        }
+        collapsed
+            .entry(slang_module_type(&name).to_string())
+            .or_insert(body);
+    }
+    *modules = collapsed;
+    root.to_string()
 }
 
 /// Enumerate submodule names from a Yosys `write_json` hierarchy
@@ -3624,6 +3680,60 @@ endmodule
         "producer": { "ports": { "valid": { "direction": "output", "bits": [2] } } }
       }
     }"#;
+
+    /// mununu#981 — the seam between `read_slang --keep-hierarchy`'s snapshot and the per-module
+    /// readers: a per-instance module name `<type>$<path>` reads as its type everywhere (the module
+    /// map, every cell's `type`), two instances of one type collapse to one module, and yosys's own
+    /// `$paramod…` names and an already-plain snapshot are left alone. The snapshot shape is the one
+    /// yosys 0.68+120 writes for `producer_consumer_top` (measured in `mununu-sva`).
+    #[test]
+    fn a_keep_hierarchy_snapshot_reads_as_module_types() {
+        let snap = r#"{"modules":{
+            "producer_consumer_top":{"attributes":{"top":"00000000000000000000000000000001"},
+              "ports":{},"cells":{
+                "u_producer":{"type":"producer$producer_consumer_top.u_producer","connections":{"valid":[2]}},
+                "u_buffer":{"type":"bounded_buffer$producer_consumer_top.u_buffer","connections":{"push":[2]}},
+                "u_buffer2":{"type":"bounded_buffer$producer_consumer_top.u_buffer2","connections":{"push":[2]}}},
+              "netnames":{"valid":{"bits":[2]}}},
+            "producer$producer_consumer_top.u_producer":{"attributes":{},"ports":{"valid":{"direction":"output","bits":[2]}},"cells":{}},
+            "bounded_buffer$producer_consumer_top.u_buffer":{"attributes":{},"ports":{"push":{"direction":"input","bits":[2]}},"cells":{}},
+            "bounded_buffer$producer_consumer_top.u_buffer2":{"attributes":{},"ports":{"push":{"direction":"input","bits":[2]}},"cells":{}},
+            "$paramod$abc\\fifo":{"attributes":{},"ports":{},"cells":{}}}}"#;
+        let c = collapse_slang_instance_modules(snap);
+        let subs = enumerate_submodules(&c, Some("producer_consumer_top"));
+        assert_eq!(subs, vec!["bounded_buffer", "producer"], "{c}");
+        let conns = parse_instance_connections(&c, Some("producer_consumer_top"));
+        let types: Vec<(&str, &str)> = conns
+            .iter()
+            .map(|i| (i.instance.as_str(), i.module_type.as_str()))
+            .collect();
+        assert_eq!(
+            types,
+            vec![
+                ("u_buffer", "bounded_buffer"),
+                ("u_buffer2", "bounded_buffer"),
+                ("u_producer", "producer")
+            ]
+        );
+        assert_eq!(
+            conns[2].port_to_net.get("valid").map(String::as_str),
+            Some("valid")
+        );
+        let dirs = parse_port_directions_per_module(&c, None);
+        assert!(dirs.contains_key("producer") && dirs.contains_key("bounded_buffer"));
+        assert!(
+            c.contains("$paramod$abc"),
+            "yosys's own mangling is untouched: {c}"
+        );
+        // Negative control: the raw snapshot gives the readers instance-suffixed types, which the
+        // composition driver cannot match against the per-module lifts' type names.
+        let raw = parse_instance_connections(snap, Some("producer_consumer_top"));
+        assert!(raw.iter().all(|i| i.module_type.contains('$')), "{raw:?}");
+        // A plain snapshot (no keep-hierarchy names) comes back byte-identical.
+        let plain = r#"{"modules":{"top":{"cells":{"u":{"type":"leaf"}}},"leaf":{}}}"#;
+        assert_eq!(collapse_slang_instance_modules(plain), plain);
+        assert_eq!(collapse_slang_instance_modules("not json"), "not json");
+    }
 
     #[test]
     fn parse_instance_connections_resolves_shared_net() {
