@@ -60,6 +60,9 @@ pub struct RepairQuery {
     pub en_input: String,
     /// The override's value input.
     pub val_input: String,
+    /// The override budget the query was built with (the injected gate's; [`overrides`] reads the
+    /// witness through it).
+    pub bound: FaultBound,
     /// The depth the query runs at: the trace's last frame.
     pub k: u32,
 }
@@ -314,6 +317,7 @@ pub fn repair_query(
         model: rebuild(lines),
         en_input: inj.en_input.clone(),
         val_input: inj.val_input.clone(),
+        bound,
         k,
     })
 }
@@ -342,27 +346,19 @@ pub struct Localization {
     pub errors: Vec<(String, String)>,
 }
 
-/// The override's frames and values in a BMC witness.
+/// The override's frames and values in a BMC witness — the frames the injected gate FIRES on
+/// ([`super::fault::gated_fires`]), not every frame whose enable is set: past the budget the gate
+/// blocks the override, and a witness may still set the enable there (mununu#981).
 fn overrides(trace: &super::native_bmc::BmcTrace, q: &RepairQuery) -> (Vec<usize>, Vec<String>) {
-    let mut cycles = Vec::new();
-    let mut values = Vec::new();
-    for (t, frame) in trace.inputs.iter().enumerate() {
-        let en = frame
-            .iter()
-            .find(|(n, _)| *n == q.en_input)
-            .and_then(|(_, v)| v.as_u64());
-        if en == Some(1) {
-            cycles.push(t);
-            values.push(
-                frame
-                    .iter()
-                    .find(|(n, _)| *n == q.val_input)
-                    .map(|(_, v)| v.to_hex())
-                    .unwrap_or_else(|| "?".to_string()),
-            );
-        }
-    }
-    (cycles, values)
+    super::fault::gated_fires(
+        trace,
+        &[(q.en_input.as_str(), q.val_input.as_str())],
+        0,
+        q.bound,
+    )
+    .into_iter()
+    .map(|(t, _, v)| (t, v.to_hex()))
+    .unzip()
 }
 
 /// Run the repair queries for each of `candidates` (registers, by the model's names), in order,

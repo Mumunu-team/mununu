@@ -912,27 +912,91 @@ pub struct FaultEvent {
     pub value: CexValue,
 }
 
-/// The injections in a BMC trace — every frame whose `mununu_fault_en_i` input is 1, with the
-/// `mununu_fault_val_i` of that frame. (Whether the budget let it fire is in the design; a frame
-/// whose `en` is 1 past the budget injected nothing — the reader checks the register.)
-pub fn faults_in_trace(trace: &BmcTrace, injected: &[InjectedFault]) -> Vec<FaultEvent> {
+/// The injections a BMC trace actually performs: the frames where the injected gate FIRES, with
+/// the `mununu_fault_val_i` of that frame. The gate is [`inject_faults`]'s, evaluated on the
+/// trace: `fire_i = en_i ∧ warm ∧ (cnt + popcount(en ∧ warm) ≤ k)`, with `warm` and `cnt` read
+/// from the frame's `mununu_fault_warm` / `mununu_fault_cnt` state values (replayed from the
+/// frame index and the events so far when a frame does not carry them).
+///
+/// An enable alone is not an injection: a witness is free to set `en_i` on a frame the gate
+/// blocks (inside the warm-up, past the budget), and an external engine's witness does
+/// (mununu#981: rIC3 / btormc traces set it on blocked frames, and the report listed three
+/// "faults" under a budget of one). The last frame is skipped: its inputs drive no transition,
+/// so nothing written there reaches the violation.
+pub fn faults_in_trace(
+    trace: &BmcTrace,
+    injected: &[InjectedFault],
+    spec: &FaultSpec,
+) -> Vec<FaultEvent> {
+    let sites: Vec<(&str, &str)> = injected
+        .iter()
+        .map(|f| (f.en_input.as_str(), f.val_input.as_str()))
+        .collect();
+    gated_fires(trace, &sites, spec.warmup, spec.bound)
+        .into_iter()
+        .map(|(cycle, i, value)| FaultEvent {
+            cycle,
+            site: injected[i].register.clone(),
+            value,
+        })
+        .collect()
+}
+
+/// The frames on which [`inject_faults`]'s gate fires in `trace`, as `(frame, site index, value)`
+/// for `sites` = `(enable input, value input)` in injection order — the one evaluation of the gate
+/// every trace reader shares ([`faults_in_trace`], the repair localiser's override frames). See
+/// [`faults_in_trace`] for the rule and why an enable alone is not an injection.
+pub fn gated_fires(
+    trace: &BmcTrace,
+    sites: &[(&str, &str)],
+    warmup: u32,
+    bound: FaultBound,
+) -> Vec<(usize, usize, CexValue)> {
     let mut out = Vec::new();
-    for (cycle, frame) in trace.inputs.iter().enumerate() {
-        let by_name: HashMap<&str, &CexValue> =
-            frame.iter().map(|(k, v)| (k.as_str(), v)).collect();
-        for site in injected {
-            if by_name
-                .get(site.en_input.as_str())
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0)
-                != 0
-                && let Some(v) = by_name.get(site.val_input.as_str())
-            {
-                out.push(FaultEvent {
-                    cycle,
-                    site: site.register.clone(),
-                    value: (*v).clone(),
-                });
+    let mut fired_so_far: u64 = 0;
+    let transitions = trace.states.len().saturating_sub(1).min(trace.inputs.len());
+    for (cycle, frame) in trace.inputs.iter().take(transitions).enumerate() {
+        let inputs: HashMap<&str, &CexValue> = frame.iter().map(|(k, v)| (k.as_str(), v)).collect();
+        let state = |sym: &str| -> Option<u64> {
+            trace
+                .states
+                .get(cycle)?
+                .iter()
+                .find(|(k, _)| k == sym)
+                .and_then(|(_, v)| v.as_u64())
+        };
+        let warm = warmup == 0
+            || state(WARM_SYMBOL).map_or(cycle as u64 >= u64::from(warmup), |c| {
+                c >= u64::from(warmup)
+            });
+        if !warm {
+            continue;
+        }
+        let enabled: Vec<usize> = sites
+            .iter()
+            .enumerate()
+            .filter(|(_, (en, _))| {
+                inputs
+                    .get(en)
+                    .and_then(|v| v.as_u64())
+                    .is_some_and(|e| e != 0)
+            })
+            .map(|(i, _)| i)
+            .collect();
+        let within = match bound {
+            FaultBound::Unbounded => true,
+            FaultBound::AtMost(k) => {
+                let cnt = state(CNT_SYMBOL).unwrap_or(fired_so_far);
+                cnt + enabled.len() as u64 <= u64::from(k)
+            }
+        };
+        if !within {
+            continue;
+        }
+        for i in enabled {
+            fired_so_far += 1;
+            if let Some(v) = inputs.get(sites[i].1) {
+                out.push((cycle, i, (*v).clone()));
             }
         }
     }
@@ -1230,6 +1294,102 @@ mod tests {
         assert!(e.contains("mununu_fault_"), "{e}");
     }
 
+    /// mununu#981 — the seam between a witness and the report's `attack`: a trace may set an
+    /// enable on a frame the injected gate blocks (inside the warm-up, past the budget, on the last
+    /// frame where no transition follows), and an external engine's witness does. Only the frames
+    /// the gate FIRES on are injections. The trace is hand-built, so the rule is checked without an
+    /// engine; the frame layout is the gate's own (`mununu_fault_warm`, `mununu_fault_cnt`).
+    #[test]
+    fn an_enable_the_gate_blocks_is_not_reported_as_a_fault() {
+        let v = |x: u64| CexValue::from_u64(x, 2);
+        let b = |x: u64| CexValue::from_u64(x, 1);
+        let inj = vec![InjectedFault {
+            register: "st".into(),
+            nid: 1,
+            width: 2,
+            en_input: format!("{EN_PREFIX}0"),
+            val_input: format!("{VAL_PREFIX}0"),
+        }];
+        let frame = |en: u64, val: u64| {
+            vec![
+                (format!("{EN_PREFIX}0"), b(en)),
+                (format!("{VAL_PREFIX}0"), v(val)),
+            ]
+        };
+        let st = |warm: u64, cnt: u64| {
+            vec![
+                (WARM_SYMBOL.to_string(), v(warm)),
+                (CNT_SYMBOL.to_string(), b(cnt)),
+            ]
+        };
+        // warm-up 2, budget 1: frame 1 is inside the warm-up, frame 2 fires, frame 3 is past
+        // the budget, frame 4 is the last frame (no transition out of it).
+        let trace = BmcTrace {
+            states: vec![st(0, 0), st(1, 0), st(2, 0), st(2, 1), st(2, 1)],
+            inputs: vec![
+                frame(0, 0),
+                frame(1, 3),
+                frame(1, 0),
+                frame(1, 2),
+                frame(1, 1),
+            ],
+        };
+        let s = spec(&["st:1"], 2);
+        let events = faults_in_trace(&trace, &inj, &s);
+        assert_eq!(
+            events,
+            vec![FaultEvent {
+                cycle: 2,
+                site: "st".into(),
+                value: v(0)
+            }],
+            "only the frame the gate fires on is an injection"
+        );
+        // Negative control: the pre-#981 rule (every frame with the enable set) would report four.
+        let ungated = trace
+            .inputs
+            .iter()
+            .filter(|f| {
+                f.iter()
+                    .any(|(k, x)| k.starts_with(EN_PREFIX) && x.as_u64() == Some(1))
+            })
+            .count();
+        assert_eq!(ungated, 4);
+        // Without the gate's state cells in the frames the gate is replayed from the frame index
+        // and the events so far — the same single injection.
+        let bare = BmcTrace {
+            states: vec![Vec::new(); 5],
+            inputs: trace.inputs.clone(),
+        };
+        assert_eq!(faults_in_trace(&bare, &inj, &s), events);
+        // Two sites enabled in one frame cost two: under a budget of one neither fires.
+        let two = vec![
+            inj[0].clone(),
+            InjectedFault {
+                register: "st_b".into(),
+                nid: 2,
+                width: 2,
+                en_input: format!("{EN_PREFIX}1"),
+                val_input: format!("{VAL_PREFIX}1"),
+            },
+        ];
+        let both = |val: u64| {
+            let mut f = frame(1, val);
+            f.push((format!("{EN_PREFIX}1"), b(1)));
+            f.push((format!("{VAL_PREFIX}1"), v(val)));
+            f
+        };
+        let t2 = BmcTrace {
+            states: vec![Vec::new(); 2],
+            inputs: vec![both(0), both(0)],
+        };
+        assert!(faults_in_trace(&t2, &two, &spec(&["st", "st_b:1"], 0)).is_empty());
+        assert_eq!(
+            faults_in_trace(&t2, &two, &spec(&["st", "st_b:2"], 0)).len(),
+            2
+        );
+    }
+
     #[test]
     fn faults_in_trace_lists_each_frame_whose_enable_is_set() {
         let (model, inj) = injected(UNWIRED, &spec(&["a"], 1));
@@ -1237,7 +1397,7 @@ mod tests {
         let (outcome, trace) = bmc_bad_reachable_witness(&file, 12).expect("runs");
         assert!(matches!(outcome, BmcOutcome::Violated { .. }));
         let trace = trace.expect("a violated BMC carries its trace");
-        let events = faults_in_trace(&trace, &inj);
+        let events = faults_in_trace(&trace, &inj, &spec(&["a"], 1));
         assert!(
             !events.is_empty(),
             "the escape needs an injection: {events:?}"

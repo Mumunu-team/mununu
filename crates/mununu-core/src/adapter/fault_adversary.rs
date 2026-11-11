@@ -86,7 +86,7 @@ pub fn verify_fault_reach(
                 match safety_witness(&model, &formula, false, witness_max_k) {
                     Ok(trace) => {
                         let d = trace.states.len().saturating_sub(1);
-                        (faults_in_trace(&trace, &injected), Some(d))
+                        (faults_in_trace(&trace, &injected, spec), Some(d))
                     }
                     Err(miss) => {
                         tracing::warn!(%miss, "fault adversary: an attack exists but no path shipped");
@@ -117,9 +117,10 @@ pub fn verify_fault_reach(
             };
             let (attack, depth) = if verdict == "violated" {
                 match bad_reachable_witness_routed(&injected_file, witness_max_k) {
-                    Ok((BmcOutcome::Violated { depth }, Some(trace))) => {
-                        (faults_in_trace(&trace, &injected), Some(depth as usize))
-                    }
+                    Ok((BmcOutcome::Violated { depth }, Some(trace))) => (
+                        faults_in_trace(&trace, &injected, spec),
+                        Some(depth as usize),
+                    ),
                     _ => (Vec::new(), None),
                 }
             } else {
