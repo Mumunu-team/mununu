@@ -345,6 +345,11 @@ a.card .card-link { color: var(--accent); font-weight: 600; }
 .site-footer { border-top: 1px solid var(--line); padding-block: 2rem 2.6rem; font-size: 0.92rem; color: var(--ink-2); }
 .site-footer .wrap { display: grid; gap: 0.9rem; }
 .footer-links { display: flex; gap: 1.4rem; flex-wrap: wrap; padding: 0; margin: 0; list-style: none; }
+/* NVIDIA Inception member badge: the official artwork, unaltered, on a white ground with clear
+   space of about a quarter of its height on every side (the programme's brand rule). */
+.footer-inception { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; margin: 0.4rem 0 0; }
+.footer-inception a { display: inline-flex; border-radius: var(--radius); padding: 0.75rem 0.9rem; background: #FFFFFF; }
+.footer-inception img { display: block; height: 3.25rem; width: auto; }
 .badge-alpha {
   display: inline-block; font-family: var(--mono); font-size: 0.72rem; font-weight: 700;
   letter-spacing: 0.09em; color: #7A5511; background: var(--bounded-bg);

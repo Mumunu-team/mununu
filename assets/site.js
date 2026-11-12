@@ -50,6 +50,7 @@
     "legend.demo": '<span class="chip chip--demo">DEMO</span><span>Ejemplo construido. Ilustra la capacidad; no es un hallazgo en silicio real.</span>',
     "footer.honest": "— software temprano, veredictos honestos.",
     "footer.soundness": "Solidez del núcleo verificada por máquina en Lean 4 e Isabelle/HOL.",
+    "footer.inception": "Miembro del programa NVIDIA Inception.",
     "footer.source": "Código fuente",
     "footer.copyright": "© 2026 Mununu. Todos los derechos reservados."
   };
