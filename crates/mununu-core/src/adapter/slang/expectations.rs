@@ -301,7 +301,9 @@ fn absent_reason(report: &AutoVerifyReport, name: &str, want: &str) -> String {
 fn describe(outcome: &VerifyOutcome) -> String {
     match outcome {
         VerifyOutcome::Holds => "holds".to_string(),
-        VerifyOutcome::Violated { false_cells } => format!("violated ({false_cells} cell(s))"),
+        VerifyOutcome::Violated { .. } => {
+            format!("violated ({})", outcome.cells_phrase().unwrap_or_default())
+        }
         VerifyOutcome::Unknown { unknown_cells } => format!("unknown/⊥ ({unknown_cells} cell(s))"),
         VerifyOutcome::Skipped { reason } => format!("skipped ({reason})"),
     }

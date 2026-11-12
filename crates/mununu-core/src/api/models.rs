@@ -2577,10 +2577,12 @@ impl From<&crate::adapter::slang::verify_auto::AutoVerifyReport> for SvVerifyAut
                 // are what a gate should read.
                 let (outcome, detail, false_cells, unknown_cells, skip_reason) = match &p.outcome {
                     VerifyOutcome::Holds => ("holds", None, None, None, None),
-                    VerifyOutcome::Violated { false_cells } => (
+                    // mununu#946: a violation decided without counting cells omits the count
+                    // rather than reporting a zero that reads as one.
+                    VerifyOutcome::Violated { .. } => (
                         "violated",
-                        Some(format!("{false_cells} cell(s)")),
-                        Some(*false_cells),
+                        p.outcome.cells_phrase(),
+                        p.outcome.false_cells_counted(),
                         None,
                         None,
                     ),
@@ -3155,8 +3157,10 @@ pub struct PropertyVerdictView {
     /// consumers keep working; a gate that needs the figure should read `false_cells` /
     /// `unknown_cells` / `skip_reason` rather than parsing this string.
     pub detail: Option<String>,
-    /// mununu#536 — the cell count behind a `violated` verdict, machine-readable.
-    /// `None` for every other outcome.
+    /// mununu#536 — the cell count behind a `violated` verdict, machine-readable. Omitted for
+    /// every other outcome, and for a `violated` row whose deciding path counts no cells (a
+    /// resumed row, a constant formula, a reach-portfolio verdict; `detail` then reads
+    /// `"cell count not computed"`) — mununu#946.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub false_cells: Option<usize>,
     /// mununu#536 — the cell count behind an `unknown` (⊥) verdict, machine-readable.
@@ -3572,6 +3576,55 @@ mod bottom_reason_view_tests {
             json["properties"][1].get("resumed_from").is_none(),
             "a fresh row has no `resumed_from` key at all"
         );
+    }
+
+    /// mununu#946 at the report seam: a `violated` row decided without counting cells (resumed,
+    /// constant, portfolio — all `false_cells: 0`) omits `false_cells` instead of reporting a zero
+    /// that reads as a count, and says so in `detail`; a counted row keeps its figure.
+    #[test]
+    fn a_violation_decided_without_counting_cells_omits_the_count() {
+        let mut report = AutoVerifyReport {
+            properties: vec![
+                PropertyVerdict {
+                    name: "carried".into(),
+                    outcome: VerifyOutcome::Violated { false_cells: 0 },
+                    decided_by: Some("resumed".into()),
+                    ..bottom_prop(None)
+                },
+                PropertyVerdict {
+                    name: "by_portfolio".into(),
+                    outcome: VerifyOutcome::Violated { false_cells: 0 },
+                    decided_by: Some("reach-rescue".into()),
+                    ..bottom_prop(None)
+                },
+                PropertyVerdict {
+                    name: "counted".into(),
+                    outcome: VerifyOutcome::Violated { false_cells: 3 },
+                    ..bottom_prop(None)
+                },
+            ],
+            ..Default::default()
+        };
+        report
+            .resumed
+            .insert("carried".into(), "e7a5b21c0ffee".into());
+        let view = SvVerifyAutoResponse::from(&report);
+        assert_eq!(view.properties[0].false_cells, None);
+        assert_eq!(view.properties[1].false_cells, None);
+        assert_eq!(
+            view.properties[1].detail.as_deref(),
+            Some("cell count not computed")
+        );
+        assert_eq!(view.properties[2].false_cells, Some(3));
+        let json = serde_json::to_value(&view).unwrap();
+        for i in [0, 1] {
+            assert!(
+                json["properties"][i].get("false_cells").is_none(),
+                "row {i}: no `false_cells` key, not a zero"
+            );
+            assert_eq!(json["properties"][i]["outcome"], "violated");
+        }
+        assert_eq!(json["properties"][2]["false_cells"], 3);
     }
 
     /// An `ltl` row reaches the wire as its author wrote it, tagged, with the mu-calculus beside

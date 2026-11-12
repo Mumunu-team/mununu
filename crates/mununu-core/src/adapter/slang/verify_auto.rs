@@ -166,6 +166,11 @@ pub enum VerifyOutcome {
     /// No definite-false and no ⊥ cube cells — the property holds on the abstraction.
     Holds,
     /// Some cube cells are definite-false (a violation witness exists).
+    ///
+    /// `false_cells` is the cube count when the deciding path counts cells, and `0` when it does
+    /// not (a resumed row, a constant formula, a reach-portfolio or rescue verdict). A counted
+    /// violation always has at least one false cell, so `0` never is a count: read it through
+    /// [`VerifyOutcome::false_cells_counted`] (mununu#946).
     Violated { false_cells: usize },
     /// The verdict carries ⊥ (unknown) cells — the abstraction couldn't decide.
     Unknown { unknown_cells: usize },
@@ -183,6 +188,30 @@ impl VerifyOutcome {
             VerifyOutcome::Violated { .. } => "violated",
             VerifyOutcome::Unknown { .. } => "unknown",
             VerifyOutcome::Skipped { .. } => "skipped",
+        }
+    }
+
+    /// mununu#946 — the counted false-cell figure behind a `violated` verdict, or `None` when
+    /// the verdict carries no count (`false_cells: 0`, see [`VerifyOutcome::Violated`]) or is
+    /// not `violated`.
+    pub fn false_cells_counted(&self) -> Option<usize> {
+        match self {
+            VerifyOutcome::Violated { false_cells } if *false_cells > 0 => Some(*false_cells),
+            _ => None,
+        }
+    }
+
+    /// The cell figure of a `violated` or `unknown` verdict as prose: `"N cell(s)"`, or
+    /// `"cell count not computed"` for a violation decided without counting cells (mununu#946).
+    /// `None` for `holds` and `skipped`.
+    pub fn cells_phrase(&self) -> Option<String> {
+        match self {
+            VerifyOutcome::Violated { .. } => Some(match self.false_cells_counted() {
+                Some(n) => format!("{n} cell(s)"),
+                None => "cell count not computed".to_string(),
+            }),
+            VerifyOutcome::Unknown { unknown_cells } => Some(format!("{unknown_cells} cell(s)")),
+            VerifyOutcome::Holds | VerifyOutcome::Skipped { .. } => None,
         }
     }
 }
