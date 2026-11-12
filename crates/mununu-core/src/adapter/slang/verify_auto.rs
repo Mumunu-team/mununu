@@ -11242,6 +11242,70 @@ mod tests {
         assert!(v.counterexample.is_none());
     }
 
+    /// mununu#960 — the J4c invariant at the main loop: EVERY property of a run ends with a
+    /// `property_wall_ms` entry, whichever path its iteration leaves by. Three rows on a prepared
+    /// model (no toolchain): one the row selection leaves out (the `NotAttempted` early
+    /// `continue`), one that HOLDS and one that is VIOLATED (the engine paths). Before J4c, rows
+    /// behind a `continue` were charged to nobody.
+    #[test]
+    fn every_row_of_a_run_is_charged_its_wall_whatever_path_it_leaves_by() {
+        use crate::adapter::slang::translate::{SvaKind, TranslatedAssertion, TranslationReport};
+        const COUNTER: &str = "1 sort bitvec 2\n2 sort bitvec 1\n3 zero 1\n4 one 1\n\
+                               5 state 1 cnt\n6 init 1 5 3\n7 add 1 5 4\n8 next 1 5 7\n";
+        let row = |name: &str, formula: &str| TranslatedAssertion {
+            name: name.to_string(),
+            label: None,
+            kind: SvaKind::Assert,
+            formula: formula.to_string(),
+            recoverability_companion: None,
+            written: None,
+        };
+        let prepared = PreparedModel {
+            btor2: COUNTER.to_string(),
+            report: AutoVerifyReport::default(),
+            extraction: TranslationReport {
+                translated: vec![
+                    row("r_left_out", "nu X.((cnt != 1) && [] X)"),
+                    row("r_holds", "nu X.(<> true && [] X)"),
+                    row("r_violated", "nu X.((cnt != 2) && [] X)"),
+                ],
+                ..Default::default()
+            },
+            predicate_hints: Vec::new(),
+            ann_scan: AnnotationScan::default(),
+            applied_config_values: Vec::new(),
+            fault: None,
+            source_index: Err("no source index in this test".to_string()),
+        };
+        let opts = VerifyAutoOptions {
+            only_rows: Some(["r_holds".to_string(), "r_violated".to_string()].into()),
+            ..Default::default()
+        };
+        let report = verify_auto_impl(&[], &YosysOptions::default(), &opts, Some(prepared))
+            .expect("the prepared model verifies");
+        let outcome = |n: &str| {
+            report
+                .properties
+                .iter()
+                .find(|p| p.name == n)
+                .map(|p| p.outcome.label())
+                .unwrap_or_else(|| panic!("{n} is reported"))
+        };
+        // The three paths were really taken.
+        assert_eq!(outcome("r_holds"), "holds");
+        assert_eq!(outcome("r_violated"), "violated");
+        assert_ne!(outcome("r_left_out"), "holds");
+        for p in &report.properties {
+            assert!(
+                report.property_wall_ms.contains_key(&p.name),
+                "`{}` ({}) has no wall: {:?}",
+                p.name,
+                p.outcome.label(),
+                report.property_wall_ms
+            );
+        }
+    }
+
     #[test]
     fn rescue_skipped_via_exact_decides_atomless_no_deadlock() {
         const COUNTER: &str = "1 sort bitvec 2\n2 sort bitvec 1\n3 zero 1\n4 one 1\n\
