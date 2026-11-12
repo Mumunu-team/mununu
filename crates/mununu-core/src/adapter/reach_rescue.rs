@@ -1686,11 +1686,16 @@ mod tests {
             ),
             "{outcome:?}"
         );
-        // And the finder's own refusal is the `search` stage with its reason: `7` does not fit
-        // the 2-bit `cnt`, which the native encoder rejects as an out-of-range constant.
+        // mununu#1012 — a constant past the signal's width is no longer an encoder refusal: `7`
+        // does not fit the 2-bit `cnt`, so `cnt != 7` is TRUE in every state, the property is a
+        // tautology, and there is no path to a violation — the `bound` stage, like the deep case
+        // above. (This used to be the `search` stage: the monitor carried `constd <2-bit> 7`,
+        // which the native encoder rejected, and an engine reading it at width read `cnt != 3`.)
         let wide = parse("nu Z. ((cnt != 7) && [] Z)");
         let miss = safety_witness(COUNTER, &wide, false, 10).unwrap_err();
-        assert_eq!(miss.stage, "search", "{miss}");
-        assert!(miss.reason.contains("encode"), "{miss}");
+        assert_eq!(
+            miss.stage, "bound",
+            "a tautology has no violation path: {miss}"
+        );
     }
 }

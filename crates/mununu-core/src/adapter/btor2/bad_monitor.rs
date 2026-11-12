@@ -96,6 +96,57 @@ fn negate_cmp(op: CmpOp) -> CmpOp {
     }
 }
 
+/// mununu#1012 — the fixed answer of `signal OP value` when `value` does not fit the signal's
+/// `width` bits (`None` when it fits, or the width is unknown or 128+): the signal is at most
+/// `2^width - 1 < value`, so `==`, `>`, `>=` are false and `!=`, `<`, `<=` are true. Shared by
+/// every BTOR2 monitor emitter that compares a signal against an atom's constant.
+pub(crate) fn out_of_range_cmp(width: Option<u32>, op: CmpOp, value: u128) -> Option<bool> {
+    match width {
+        Some(w) if w < 128 && value >> w != 0 => {
+            Some(matches!(op, CmpOp::Ne | CmpOp::Lt | CmpOp::Le))
+        }
+        _ => None,
+    }
+}
+
+/// mununu#1012 — the 1-bit node for `signal OP value`, sound when `value` does not fit the
+/// signal's width. A `constd` at the signal's sort keeps only the low bits (every engine reads a
+/// constant at its sort's width), so `k < 8` on a 3-bit `k` used to compile to `k < 0` — false
+/// everywhere: a tautological `assume` read as contradictory (every HOLDS on the design vacuous),
+/// and an `assert` of the same shape as `AG false`. An out-of-range constant fixes the answer:
+/// the signal is at most `2^w - 1 < value`, so `==`, `>`, `>=` are false and `!=`, `<`, `<=` are
+/// true; the node is that constant. `symbol`, when given, names the node either way.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn emit_cmp_const(
+    file: &crate::adapter::btor2::ast::Btor2File,
+    sig_nid: Nid,
+    sig_sort: Nid,
+    op: CmpOp,
+    value: u128,
+    bool_sort: Nid,
+    next_nid: &mut Nid,
+    appended: &mut Vec<String>,
+    symbol: Option<&str>,
+) -> Nid {
+    let name = symbol.map(|s| format!(" {s}")).unwrap_or_default();
+    if let Some(truth) = out_of_range_cmp(parser::bv_width(file, sig_sort), op, value) {
+        let n = *next_nid;
+        *next_nid += 1;
+        appended.push(format!("{n} constd {bool_sort} {}{name}", u8::from(truth)));
+        return n;
+    }
+    let const_nid = *next_nid;
+    *next_nid += 1;
+    appended.push(format!("{const_nid} constd {sig_sort} {value}"));
+    let n = *next_nid;
+    *next_nid += 1;
+    appended.push(format!(
+        "{n} {} {bool_sort} {sig_nid} {const_nid}{name}",
+        btor2_cmp_keyword(op)
+    ));
+    n
+}
+
 /// Find an existing `sort bitvec 1` line, or append one. Returns its NID.
 pub(crate) fn find_or_make_bool_sort(
     file: &crate::adapter::btor2::ast::Btor2File,
@@ -243,17 +294,18 @@ pub fn emit_ag_state_atom_monitor(
     let mut appended: Vec<String> = Vec::new();
     let bool_sort = find_or_make_bool_sort(&file, &mut next_nid, &mut appended);
 
-    let value_const = next_nid;
-    next_nid += 1;
-    appended.push(format!("{value_const} constd {sig_sort} {value}"));
-
     // bad = !(signal ⋈ value) = (signal <negated-⋈> value); named for `observe`.
-    let bad_kw = btor2_cmp_keyword(negate_cmp(op));
-    let bad_cond = next_nid;
-    next_nid += 1;
-    appended.push(format!(
-        "{bad_cond} {bad_kw} {bool_sort} {sig_nid} {value_const} {BAD_COND_SYMBOL}"
-    ));
+    let bad_cond = emit_cmp_const(
+        &file,
+        sig_nid,
+        sig_sort,
+        negate_cmp(op),
+        value,
+        bool_sort,
+        &mut next_nid,
+        &mut appended,
+        Some(BAD_COND_SYMBOL),
+    );
 
     let bad_line = next_nid;
     appended.push(format!("{bad_line} bad {bad_cond}"));
@@ -313,12 +365,17 @@ pub fn emit_ag_state_in_set_monitor_by_nid(
     // neq_c = (signal != c) for each legal encoding c.
     let mut terms: Vec<Nid> = Vec::with_capacity(legal.len());
     for &c in legal {
-        let const_nid = next_nid;
-        next_nid += 1;
-        appended.push(format!("{const_nid} constd {sig_sort} {c}"));
-        let neq_nid = next_nid;
-        next_nid += 1;
-        appended.push(format!("{neq_nid} neq {bool_sort} {sig_nid} {const_nid}"));
+        let neq_nid = emit_cmp_const(
+            &file,
+            sig_nid,
+            sig_sort,
+            CmpOp::Ne,
+            u128::from(c),
+            bool_sort,
+            &mut next_nid,
+            &mut appended,
+            None,
+        );
         terms.push(neq_nid);
     }
 
@@ -429,26 +486,30 @@ pub fn emit_ag_implies_next_monitor(
     let bool_sort = find_or_make_bool_sort(&file, &mut next_nid, &mut appended);
 
     // ante holds (positive comparison) — latched into mununu_ante_prev.
-    let ante_const = next_nid;
-    next_nid += 1;
-    appended.push(format!("{ante_const} constd {ante_sort} {}", ante.value));
-    let ante_cmp = next_nid;
-    next_nid += 1;
-    appended.push(format!(
-        "{ante_cmp} {} {bool_sort} {ante_nid} {ante_const}",
-        btor2_cmp_keyword(ante.op)
-    ));
+    let ante_cmp = emit_cmp_const(
+        &file,
+        ante_nid,
+        ante_sort,
+        ante.op,
+        ante.value,
+        bool_sort,
+        &mut next_nid,
+        &mut appended,
+        None,
+    );
 
     // cons fails (negated comparison), evaluated at the current cycle.
-    let cons_const = next_nid;
-    next_nid += 1;
-    appended.push(format!("{cons_const} constd {cons_sort} {}", cons.value));
-    let cons_fail = next_nid;
-    next_nid += 1;
-    appended.push(format!(
-        "{cons_fail} {} {bool_sort} {cons_nid} {cons_const}",
-        btor2_cmp_keyword(negate_cmp(cons.op))
-    ));
+    let cons_fail = emit_cmp_const(
+        &file,
+        cons_nid,
+        cons_sort,
+        negate_cmp(cons.op),
+        cons.value,
+        bool_sort,
+        &mut next_nid,
+        &mut appended,
+        None,
+    );
 
     // mununu_ante_prev latch: init 0, next = ante_cmp. (`init` requires the state
     // NID > the value NID, so `zero` is emitted before the state.)
@@ -530,15 +591,17 @@ pub fn emit_latched_predicate_state_named(
     let bool_sort = find_or_make_bool_sort(&file, &mut next_nid, &mut appended);
 
     // a = (signal op value)
-    let a_const = next_nid;
-    next_nid += 1;
-    appended.push(format!("{a_const} constd {sig_sort} {}", atom.value));
-    let a_cmp = next_nid;
-    next_nid += 1;
-    appended.push(format!(
-        "{a_cmp} {} {bool_sort} {sig_nid} {a_const}",
-        btor2_cmp_keyword(atom.op)
-    ));
+    let a_cmp = emit_cmp_const(
+        &file,
+        sig_nid,
+        sig_sort,
+        atom.op,
+        atom.value,
+        bool_sort,
+        &mut next_nid,
+        &mut appended,
+        None,
+    );
 
     // `symbol` latch: init 0, next = a_cmp. (`init` needs the state NID > the value NID, so
     // `zero` is emitted before the state — the same ordering emit_ag_implies_next_monitor relies on.)
@@ -689,14 +752,17 @@ pub(crate) fn compile_boolean_subtree(
                              internal net"
                         ))
                     })?;
-                let const_nid = *next_nid;
-                *next_nid += 1;
-                appended.push(format!("{const_nid} constd {sig_sort} {value}"));
-                let cmp_kw = btor2_cmp_keyword(op);
-                let n = *next_nid;
-                *next_nid += 1;
-                appended.push(format!("{n} {cmp_kw} {bool_sort} {sig_nid} {const_nid}"));
-                Ok(n)
+                Ok(emit_cmp_const(
+                    file,
+                    sig_nid,
+                    sig_sort,
+                    op,
+                    u128::from(value),
+                    bool_sort,
+                    next_nid,
+                    appended,
+                    None,
+                ))
             }
             // Plan C (2026-10-21) — `lhs OP rhs` over two signals of the SAME width (the
             // relational compare an unpacked port's case split emits, `data_o == data_i__bits31_28`).
@@ -1452,6 +1518,55 @@ mod tests {
         AgOracle, ag_implies_next, ag_state_atom, reachable_register_states,
     };
     use std::collections::HashMap;
+
+    /// mununu#1012 — the out-of-range table: a constant past the signal's width fixes the answer.
+    #[test]
+    fn a_constant_past_the_signals_width_fixes_the_comparison() {
+        for (op, truth) in [
+            (CmpOp::Eq, false),
+            (CmpOp::Ne, true),
+            (CmpOp::Lt, true),
+            (CmpOp::Le, true),
+            (CmpOp::Gt, false),
+            (CmpOp::Ge, false),
+        ] {
+            assert_eq!(out_of_range_cmp(Some(3), op, 8), Some(truth), "{op:?}");
+            assert_eq!(out_of_range_cmp(Some(3), op, 7), None, "7 fits 3 bits");
+        }
+        assert_eq!(out_of_range_cmp(None, CmpOp::Lt, 8), None, "unknown width");
+        assert_eq!(out_of_range_cmp(Some(128), CmpOp::Lt, u128::MAX), None);
+    }
+
+    /// mununu#1012 — on a 3-bit counter `AG(k < 8)` is a tautology: its monitor's `bad` is never
+    /// reachable. The parent emitted `constd <3-bit sort> 8`: native BMC refuses that monitor
+    /// (`ConstantOutOfRange`, measured — this test fails there on its `expect`), and the exact
+    /// engine reads the constant at its sort's width as 0, so `bad = !(k < 0)` fires at once —
+    /// the contradictory-assume reading of the issue. The control `AG(k < 7)` is still violated.
+    #[test]
+    fn a_tautology_over_a_narrow_register_is_not_violated() {
+        const COUNTER3: &str = "1 sort bitvec 3\n2 zero 1\n3 one 1\n4 state 1 k\n\
+                                5 init 1 4 2\n6 add 1 4 3\n7 next 1 4 6\n";
+        let reach = |value: u128| {
+            let out =
+                emit_ag_state_atom_monitor(COUNTER3, "k", CmpOp::Lt, value, false).expect("emits");
+            let file = parser::parse(&out).expect("re-parses");
+            crate::adapter::btor2::native_bmc::bmc_bad_reachable(&file, 10).expect("bmc runs")
+        };
+        assert!(
+            matches!(
+                reach(8),
+                crate::adapter::btor2::native_bmc::BmcOutcome::NoCexWithin { .. }
+            ),
+            "AG(k < 8) on a 3-bit k must not be violated"
+        );
+        assert!(
+            matches!(
+                reach(7),
+                crate::adapter::btor2::native_bmc::BmcOutcome::Violated { depth: 7 }
+            ),
+            "the control AG(k < 7) is violated when k reaches 7"
+        );
+    }
 
     // 2-bit FSM cycling 0→1→2→0 (never 3); deterministic (input-free). Same shape
     // as concrete_oracle's CYCLE_FSM so the monitor + the oracle see one design.
