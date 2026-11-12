@@ -188,6 +188,56 @@ fn a_timed_out_member_leaves_no_forked_solver_behind() {
     );
 }
 
+/// mununu#962 — the CANCEL path, not the timeout: a peer's decision sets the member's cancel
+/// flag mid-run, and the member must come back long before its own timeout with the forked
+/// solver gone, killed with its group (`run_with_timeout_cancellable` → `kill_and_reap` after
+/// `MEMBER_CANCEL_GRACE`). The member timeout is 120 s and the forked `sleep` 600 s, so a cancel
+/// that reached only the launcher, or no process at all, cannot pass.
+#[test]
+fn a_cancelled_member_returns_early_and_leaves_no_forked_solver_behind() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let pidfile = dir.path().join("solver.pid");
+    let bin = Ric3Bin {
+        path: forking_launcher(dir.path(), &pidfile, false),
+    };
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    let started = Instant::now();
+    let (verdict, pid) = std::thread::scope(|s| {
+        let member = s.spawn(|| {
+            run_ric3_cancellable(&bin, "", "ic3", Duration::from_secs(120), Some(&cancel))
+        });
+        // Cancel only once the solver exists, so the kill has a forked process to reach.
+        let pid = wait_for_pid(&pidfile);
+        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        (member.join().expect("the member thread"), pid)
+    });
+    let took = started.elapsed();
+    let bound = Duration::from_secs(5);
+    let deadline = Instant::now() + bound;
+    let mut survived = alive(&pid);
+    while survived && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+        survived = alive(&pid);
+    }
+    reap(&pid);
+    assert!(
+        matches!(
+            verdict,
+            Ok(mununu_core::adapter::btormc::McVerdict::Unknown)
+        ),
+        "a cancelled member abstains: {verdict:?}"
+    );
+    assert!(
+        took < Duration::from_secs(60),
+        "the cancel did not stop the member before its 120 s timeout: {took:?}"
+    );
+    assert!(
+        !survived,
+        "the forked solver {pid} outlived its member's cancellation by more than {bound:?}"
+    );
+}
+
 #[test]
 fn a_forked_solver_holding_the_pipes_does_not_stall_the_member_past_its_timeout() {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
