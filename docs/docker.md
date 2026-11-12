@@ -29,6 +29,14 @@
     CMD curl -f http://localhost:PORT/health || exit 1
   ```
   Kubernetes / ECS uses this to gate traffic.
+  The probe's binary must be in the image: install `curl` in the runtime stage if the check uses it.
+- **Run an init as PID 1 when the service spawns subprocesses** (mununu#991). A process re-parented
+  to PID 1 (a solver forked by a timed-out, killed member) is reaped only if PID 1 `wait`s for it;
+  `mununu` does not, so each one stays a zombie for the container's lifetime and holds a pid.
+  Install `tini` and use `ENTRYPOINT ["/usr/bin/tini", "--", "mununu"]`, as `docker/Dockerfile` and
+  `docker/Dockerfile.bundle` do. `scripts/check-container-reaps.sh <image>` checks an image: it
+  leaves one orphan behind in the running server and counts zombies. An `--entrypoint mununu`
+  override bypasses tini; that is fine for a one-shot CLI run, whose zombies go with the container.
 
 ## ARG vs ENV
 
