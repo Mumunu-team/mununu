@@ -94,6 +94,11 @@ fn walked_files(root: &Path) -> Vec<PathBuf> {
                 continue;
             }
             if entry.path().is_dir() {
+                // A nested checkout (an agent's worktree under `.claude/worktrees/`, a clone
+                // beside the sources) is not part of this one, and `git ls-files` never lists it.
+                if entry.path().join(".git").exists() {
+                    continue;
+                }
                 stack.push(rel);
             } else {
                 out.push(rel);

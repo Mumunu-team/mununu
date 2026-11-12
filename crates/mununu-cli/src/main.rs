@@ -5029,7 +5029,9 @@ fn verify_outcome_str(outcome: &mununu_core::adapter::slang::verify_auto::Verify
     use mununu_core::adapter::slang::verify_auto::VerifyOutcome;
     match outcome {
         VerifyOutcome::Holds => "HOLDS".to_string(),
-        VerifyOutcome::Violated { false_cells } => format!("VIOLATED ({false_cells} cell(s))"),
+        VerifyOutcome::Violated { .. } => {
+            format!("VIOLATED ({})", outcome.cells_phrase().unwrap_or_default())
+        }
         VerifyOutcome::Unknown { unknown_cells } => {
             format!("UNKNOWN/\u{22a5} ({unknown_cells} cell(s))")
         }

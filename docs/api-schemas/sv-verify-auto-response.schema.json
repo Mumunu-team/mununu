@@ -552,7 +552,7 @@
           ]
         },
         "false_cells": {
-          "description": "mununu#536 — the cell count behind a `violated` verdict, machine-readable. `None` for every other outcome.",
+          "description": "mununu#536 — the cell count behind a `violated` verdict, machine-readable. Omitted for every other outcome, and for a `violated` row whose deciding path counts no cells (a resumed row, a constant formula, a reach-portfolio verdict; `detail` then reads `\"cell count not computed\"`) — mununu#946.",
           "format": "uint",
           "minimum": 0.0,
           "type": [
