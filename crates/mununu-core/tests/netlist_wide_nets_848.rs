@@ -3,8 +3,11 @@
 //! panic in a debug build, or a wrong value with no panic) and passes on the fix.
 //!
 //! Its own top-level integration test (target `netlist_wide_nets_848`), outside `netlist.rs`
-//! where the fix lives, so `make verify-repro` builds the parent evaluator without the fix; it
-//! uses only API the parent already has, so it compiles there.
+//! where the fix lives, so `make verify-repro` builds the parent evaluator without the fix. Every
+//! test here uses only API the parent already has, so the binary compiles there: confirmed by
+//! hand on `da0365d2~1`, where all six fail (mununu#963). Keep it that way — the sibling that
+//! reads `SliceReport::too_wide`, introduced in the same squash, lives in `netlist.rs`'s own
+//! tests, because one test the parent cannot compile makes the whole binary INCONCLUSIVE.
 
 use mununu_core::adapter::yosys::netlist::{Evaluation, Netlist};
 use serde_json::{Value, json};
@@ -136,32 +139,5 @@ mod wide_nets_848 {
         );
         let ev = n.evaluate(&m(&[]), &m(&[]));
         assert_eq!(ev.next_of(&n, "r"), None);
-    }
-
-    /// Two registers that each fit the carrier, compared as one 140-bit word: the `$eq` leaves
-    /// its output unknown (an `i128` word cannot hold the operand), the selector it drives keeps
-    /// both arms, and the slice names the cell — not the registers, which were carried fine.
-    /// (The sibling the failure-path audit found; it uses `SliceReport::too_wide`, so it compiles
-    /// from the commit that introduced the field.)
-    #[test]
-    fn a_word_operand_wider_than_the_carrier_names_its_cell_in_the_slice() {
-        let wide: Vec<u64> = (100..170).chain(200..270).collect();
-        let n = top(
-            json!({"y": {"direction": "output", "bits": [4]}}),
-            json!({
-                "q1": {"type": "$dff", "parameters": {}, "port_directions": dirs(DFF_DIRS),
-                       "connections": {"CLK": [2], "D": ids(100, 70), "Q": ids(100, 70)}},
-                "q2": {"type": "$dff", "parameters": {}, "port_directions": dirs(DFF_DIRS),
-                       "connections": {"CLK": [2], "D": ids(200, 70), "Q": ids(200, 70)}},
-                "e": {"type": "$eq", "parameters": {}, "port_directions": dirs(BINOP_DIRS),
-                      "connections": {"A": wide.clone(), "B": wide, "Y": [5]}},
-                "s": {"type": "$mux", "parameters": {}, "port_directions": dirs(MUX_DIRS),
-                      "attributes": {"src": "m.sv:5.3-5.20"},
-                      "connections": {"A": ["0"], "B": ["1"], "S": [5], "Y": [4]}}}),
-            json!({"r1": {"bits": ids(100, 70)}, "r2": {"bits": ids(200, 70)},
-                   "y": {"bits": [4]}}),
-        );
-        let s = n.slice(&[(m(&[("r1", 0), ("r2", 0)]), m(&[]))], &["y".to_string()]);
-        assert_eq!(s.too_wide.iter().collect::<Vec<_>>(), vec!["e"]);
     }
 }
