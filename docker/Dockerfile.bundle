@@ -38,9 +38,12 @@ ARG OSS_CAD_SUITE_TAG
 ARG OSS_CAD_SUITE_DATE
 ARG OSS_CAD_SUITE_SHA256
 # libz3-4: the binary links it. curl: the healthcheck. g++ / make / perl: Verilator's
-# counterexample replay compiles the generated C++ model at run time.
+# counterexample replay compiles the generated C++ model at run time. tini: PID 1 (mununu#991) —
+# a timed-out subprocess member's forked solvers are re-parented to PID 1, and mununu does not
+# reap them, so without an init each one stays a zombie for the server's lifetime
+# (`scripts/check-container-reaps.sh` measures it).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl libz3-4 g++ make perl \
+        ca-certificates curl libz3-4 g++ make perl tini \
     && rm -rf /var/lib/apt/lists/*
 # The suite, downloaded, checked against its pinned sha256 and unpacked into /opt in one layer
 # (the tarball is removed in the same RUN, so the layer holds only the tree). Its binaries carry
@@ -70,5 +73,5 @@ WORKDIR /work
 VOLUME ["/work"]
 HEALTHCHECK --interval=30s --timeout=5s CMD curl -sf http://localhost:8080/api/v1/health || exit 1
 EXPOSE 8080
-ENTRYPOINT ["mununu"]
+ENTRYPOINT ["/usr/bin/tini", "--", "mununu"]
 CMD ["server", "--addr", "0.0.0.0:8080", "--config", "/etc/mununu/mununu.toml", "--ui-dir", "/srv/mununu-ui"]
