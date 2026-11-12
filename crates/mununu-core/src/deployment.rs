@@ -45,8 +45,9 @@ pub struct DeploymentConfig {
     /// a browser sends them (`https://ui.example.com`). Empty = loopback only.
     pub cors_origins: Vec<String>,
     /// mununu#935 — `[server] file_root`: when set, every server-side path an API request names
-    /// must lie under it once canonicalised (the bundle sets `/work`). Unset = no confinement, the
-    /// behaviour of a developer's local server.
+    /// must lie under it once canonicalised (the bundle sets `/work`), and (mununu#994) an inline
+    /// source's `` `include `` may name only a file sent with the request. Unset = no confinement,
+    /// the behaviour of a developer's local server.
     pub file_root: Option<PathBuf>,
 }
 
