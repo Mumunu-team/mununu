@@ -28,6 +28,8 @@ licence`. SystemVerilog verification (`sv verify-auto`) needs the SV toolchain, 
 
 ## The smoke test
 
+> Source of truth: [`scripts/release_smoke.sh`](../scripts/release_smoke.sh) — surface: CLI+API
+
 [`scripts/release_smoke.sh <mununu> [<mununu-extract>]`](../scripts/release_smoke.sh) runs on every
 runner against the **packaged** binaries, after the runner's Z3 is removed, and on any install
 afterwards. It proves the binary starts and links its
@@ -40,12 +42,16 @@ CTXDSL-only `mununu`, not `crates/mununu-cli`.
 
 ## Dry run
 
+> Source of truth: [`release.yml`](../.github/workflows/release.yml#L19) (`workflow_dispatch`) — surface: CLI+API
+
 `workflow_dispatch` on `release.yml` (Actions → Release → Run workflow, any branch) builds, smokes
 and uploads the five archives as workflow artifacts named `mununu-dry-run-<sha>-<target>` and
 creates no release. It is how a change to the workflow, the smoke or the packaging is measured
 before a tag.
 
 ## Cutting one
+
+> Source of truth: [`release.yml`](../.github/workflows/release.yml#L17) (the `v*` tag trigger) — surface: CLI+API
 
 0. Run the review pass's policy gates on `main` since the last tag (the `review-orchestrator`
    agent under `.claude/agents/`, tier A): a consumer briefing for every surface change, the

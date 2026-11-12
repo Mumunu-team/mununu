@@ -18,6 +18,8 @@ the e2e smoke subset passed inside the image with the verdicts the native-Linux 
 
 ## T2 — the native binary
 
+> Source of truth: [`release.yml`](../.github/workflows/release.yml#L15) (the five archive lanes and what each packs) — surface: CLI+API
+
 Download the archive for your OS and architecture from the [GitHub release](https://github.com/Mumunu-team/mununu/releases)
 (`mununu-<version>-<target>.tar.gz` / `.zip`, each with a `.sha256` beside it; the contents and
 how they were built are in [`release.md`](release.md)). Each archive holds `mununu`,
@@ -29,6 +31,8 @@ and need `libz3.so.4` / Homebrew z3 5.1; its release notes say so.)
 
 ### Linux (x86_64, aarch64)
 
+> Source of truth: [`release.yml`](../.github/workflows/release.yml#L15) (the `x86_64` / `aarch64-unknown-linux-gnu` lanes) — surface: CLI+API
+
 ```bash
 tar xzf mununu-<version>-x86_64-unknown-linux-gnu.tar.gz   # glibc ≥ 2.39 (Ubuntu 24.04 or newer)
 cd mununu-<version>-x86_64-unknown-linux-gnu
@@ -36,6 +40,8 @@ cd mununu-<version>-x86_64-unknown-linux-gnu
 ```
 
 ### macOS (Intel, Apple silicon)
+
+> Source of truth: [`release.yml`](../.github/workflows/release.yml#L15) (the `x86_64` / `aarch64-apple-darwin` lanes) — surface: CLI+API
 
 ```bash
 tar xzf mununu-<version>-aarch64-apple-darwin.tar.gz   # or x86_64-apple-darwin on Intel
@@ -45,6 +51,8 @@ xattr -d com.apple.quarantine mununu mununu-extract    # the binaries are not no
 ```
 
 ### Windows (x86_64)
+
+> Source of truth: [`release.yml`](../.github/workflows/release.yml#L15) (the `x86_64-pc-windows-msvc` lane) — surface: CLI+API
 
 Unzip `mununu-<version>-x86_64-pc-windows-msvc.zip`; `libz3.dll` is in the folder beside
 `mununu.exe`, so nothing else is installed. In PowerShell:
@@ -57,6 +65,8 @@ SmartScreen may ask once; the binaries are not signed.
 
 ### The full check, from a checkout
 
+> Source of truth: [`scripts/release_smoke.sh`](../scripts/release_smoke.sh) — surface: CLI+API
+
 The archive carries no examples. From a clone of this repository, the same smoke the release
 runners passed:
 
@@ -68,6 +78,8 @@ It prints `release-smoke: ok` or says which of the four steps failed. The BTOR2 
 `native` among the engines that decided — that is the proof Z3 linked *and ran* on your host.
 
 ## T1 — the container
+
+> Source of truth: [`docker/Dockerfile.bundle`](../docker/Dockerfile.bundle) (the on-prem image) and [`docker/Dockerfile.sva`](../docker/Dockerfile.sva) (the validation image) — surface: CLI+API
 
 **The on-prem bundle** ([`deploy/README.md`](../deploy/README.md)) is the supported self-serve
 install: one image — the `mununu` binary, the pinned oss-cad-suite toolchain (yosys with
@@ -107,6 +119,8 @@ docker run --rm -v "$(pwd)":/work -v mununu-target:/cargo-target mununu-sva make
 
 ## T3 — the native SV toolchain
 
+> Source of truth: [`locate_yosys`](../crates/mununu-core/src/adapter/yosys/mod.rs#L2693) (`MUNUNU_YOSYS_PATH`, then `PATH`; the other tools follow the same `MUNUNU_<TOOL>_PATH` rule) — surface: CLI+API
+
 [`external-tools.md`](external-tools.md) lists every tool, the discovery variables
 (`MUNUNU_<TOOL>_PATH`) and per-platform install lines. The short form: install the
 [oss-cad-suite](https://github.com/YosysHQ/oss-cad-suite-build) release the image pins (its tag is
@@ -117,6 +131,8 @@ has been measured against the image's verdicts; the policy stays: an SVA `holds`
 presumed vacuous until reproduced in `mununu-sva`.
 
 ## Memory, licence, where things are set
+
+> Source of truth: [`MEMORY_BUDGET_ENV`](../crates/mununu-core/src/adapter/memory_budget.rs#L44), [`licence::locate`](../crates/mununu-core/src/licence.rs#L625), [`deployment::install`](../crates/mununu-core/src/deployment.rs#L137) — surface: CLI+API
 
 - **Memory ceiling** — `MUNUNU_MAX_PROCESS_MEMORY_BYTES` ([`env-vars.md`](env-vars.md)): auto from the
   cgroup limit inside a container; on a native macOS or Windows host there is no cgroup, so the

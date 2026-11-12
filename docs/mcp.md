@@ -14,6 +14,8 @@ over the realized CLTS; the counterstrategy by formula inversion); the transport
 
 ## The two tools
 
+> Source of truth: [`CONTEXT_EVAL`, `TEMPLATES`](../crates/mununu-core/src/api/mcp.rs#L43) — surface: CLI+API
+
 | tool | mirrors | input | output |
 |---|---|---|---|
 | `context_eval` | `POST /api/v1/context/eval` | the route's request body ([`context-eval-request.schema.json`](api-schemas/context-eval-request.schema.json)): `context` (the CTXDSL file, inline), `sidecars`, `formula` or `template_ref`, `automaton`, `counterstrategy`, `minimize_counterstrategy`, `hide`, `minimize`, `stubs` (these three are not supported: a set one is a tool error naming it, mununu#862), `sanity` | `structuredContent` = the route's response ([`context-eval-response.schema.json`](api-schemas/context-eval-response.schema.json)), `outputSchema` advertised from the same type; one text block with the compact summary — the `outcome`, then one line per result, `formula_name @ automaton: outcome` |
@@ -29,6 +31,8 @@ this server; they are not built here.
 
 ## Errors and the budget
 
+> Source of truth: [`MununuMcp`'s budgeted call](../crates/mununu-core/src/api/mcp.rs#L167) (`--request-timeout`) — surface: CLI+API
+
 A design problem — a CTXDSL syntax error, an unknown formula or automaton, a template that does not
 instantiate — is a **tool result with `isError: true`**, never a protocol-level JSON-RPC error. Its text
 and its `structuredContent` are the same `{ "success": false, "error": { "code", "message", "details" } }`
@@ -41,6 +45,8 @@ own in the background, as a timed-out HTTP request's does. The budget is a trans
 changes what the tool *reports*, never what the engine *decides*.
 
 ## Client configuration
+
+> Source of truth: [`Commands::Mcp`](../crates/mununu-cli/src/main.rs#L649) — surface: CLI+API
 
 Claude Code:
 
@@ -72,6 +78,8 @@ instantiate, and every report the process produces carries the deployment identi
 
 ## A call, end to end
 
+> Source of truth: [`call_tool`](../crates/mununu-core/src/api/mcp.rs#L205) — surface: CLI+API
+
 ```json
 {
   "name": "context_eval",
@@ -92,6 +100,8 @@ returns the text `holds` / `reachability @ Counter: holds` and, as `structuredCo
 
 ## Posture
 
+> Concept: the transport's security posture (local stdio, no file access, no verdict path of its own).
+
 - **Local only.** The stdio transport has no network surface at all. A streamable-HTTP transport
   (`/mcp` under `mununu server`) is a follow-up; if it lands it binds `127.0.0.1` by default like the
   HTTP server.
@@ -101,6 +111,8 @@ returns the text `holds` / `reachability @ Counter: holds` and, as `structuredCo
   (the `mununu mcp` subcommand starts it; the tool is the HTTP handler's op).
 
 ## Out of scope today
+
+> Concept: what the MCP server does not expose yet.
 
 - Streamable HTTP (`--transport http`) — follow-up; the subcommand accepts `stdio` only.
 - The `sv` / `btor2` verbs, `context/synth`, `context/graph`, `context/import`, `context/predicates`
