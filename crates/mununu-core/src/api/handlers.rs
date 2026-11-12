@@ -2299,7 +2299,7 @@ fn attach_testbenches(
                 Ok(())
             })();
             let run = staged.and_then(|()| run_replay(&dir, true));
-            if std::env::var_os("MUNUNU_KEEP_VERILATOR_TMP").is_none() {
+            if crate::adapter::env_var::read("MUNUNU_KEEP_VERILATOR_TMP").is_none() {
                 let _ = std::fs::remove_dir_all(&dir);
             }
             ReplayResultView::from_run(bench.checks, run)

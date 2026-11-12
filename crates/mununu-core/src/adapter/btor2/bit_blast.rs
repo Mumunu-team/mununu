@@ -5339,7 +5339,7 @@ fn apply_btor2_init_smart_defaults(
     options: &AdapterOptions,
 ) {
     let enabled = options.smart_init_defaults
-        || std::env::var("MUNUNU_BTOR2_SMART_INIT_DEFAULTS")
+        || crate::adapter::env_var::read("MUNUNU_BTOR2_SMART_INIT_DEFAULTS")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
     if !enabled {

@@ -394,7 +394,7 @@ pub fn bmc_bad_reachable_boolector(
 ) -> Result<(BmcOutcome, Option<BmcTrace>), BoolectorError> {
     let maps = build_maps(file)?;
     // `MUNUNU_BOOLECTOR_TRACE` — eprintln each `sat()`'s wall time (per-bound diagnostics).
-    let trace = std::env::var_os("MUNUNU_BOOLECTOR_TRACE").is_some();
+    let trace = crate::adapter::env_var::read("MUNUNU_BOOLECTOR_TRACE").is_some();
     let btor = Rc::new(Btor::new());
     btor.set_opt(BtorOption::Incremental(true));
     // Model generation stays ON: it costs nothing on the UNSAT bound checks (a model is

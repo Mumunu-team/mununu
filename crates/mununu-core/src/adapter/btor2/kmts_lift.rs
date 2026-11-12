@@ -3519,9 +3519,7 @@ enum PostimageBackend {
 /// `MUNUNU_CUBE_POSTIMAGE_BACKEND` = `smt` | `bdd`; anything else is the default.
 fn postimage_backend() -> PostimageBackend {
     parse_postimage_backend(
-        std::env::var("MUNUNU_CUBE_POSTIMAGE_BACKEND")
-            .ok()
-            .as_deref(),
+        crate::adapter::env_var::read("MUNUNU_CUBE_POSTIMAGE_BACKEND").as_deref(),
     )
 }
 
@@ -3770,8 +3768,7 @@ fn compute_all_may_edges_bdd(
 /// the pre-S3 single loop), else the host's parallelism capped at 8 — each worker holds its own
 /// z3 context and encoding of the design, so the cap bounds memory, not just threads.
 fn postimage_workers() -> usize {
-    std::env::var("MUNUNU_CUBE_POSTIMAGE_THREADS")
-        .ok()
+    crate::adapter::env_var::read("MUNUNU_CUBE_POSTIMAGE_THREADS")
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|&t| t >= 1)
         .unwrap_or_else(|| {

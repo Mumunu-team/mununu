@@ -383,7 +383,7 @@ impl VerilatorTempDir {
             ),
             location: None,
         })?;
-        let keep = std::env::var("MUNUNU_KEEP_VERILATOR_TMP")
+        let keep = crate::adapter::env_var::read("MUNUNU_KEEP_VERILATOR_TMP")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
         Ok(VerilatorTempDir { path: base, keep })

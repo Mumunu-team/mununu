@@ -241,14 +241,17 @@ pub fn parse_budget_ms(v: Option<String>) -> Option<u64> {
 /// `0` disables.
 pub fn property_budget_ms() -> Option<u64> {
     parse_budget_ms_with_default(
-        std::env::var(PROPERTY_BUDGET_ENV).ok(),
+        crate::adapter::env_var::read(PROPERTY_BUDGET_ENV),
         DEFAULT_PROPERTY_BUDGET_MS,
     )
 }
 
 /// The whole-run budget: `MUNUNU_VERIFY_BUDGET_MS`, else [`DEFAULT_RUN_BUDGET_MS`]. `0` disables.
 pub fn run_budget_ms() -> Option<u64> {
-    parse_budget_ms_with_default(std::env::var(RUN_BUDGET_ENV).ok(), DEFAULT_RUN_BUDGET_MS)
+    parse_budget_ms_with_default(
+        crate::adapter::env_var::read(RUN_BUDGET_ENV),
+        DEFAULT_RUN_BUDGET_MS,
+    )
 }
 
 /// Default rescue slice: **60 seconds** — the wall the reach portfolio already ran under
@@ -267,7 +270,7 @@ const DEFAULT_RESCUE_SLICE_MS: u64 = 60 * 1000;
 /// (the per-property budget alone bounds the rescue).
 pub fn rescue_slice_ms() -> Option<u64> {
     parse_budget_ms_with_default(
-        std::env::var(RESCUE_SLICE_ENV).ok(),
+        crate::adapter::env_var::read(RESCUE_SLICE_ENV),
         DEFAULT_RESCUE_SLICE_MS,
     )
 }

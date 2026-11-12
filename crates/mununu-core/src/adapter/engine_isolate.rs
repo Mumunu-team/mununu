@@ -68,7 +68,8 @@ const CHILD_GUARD_ENV: &str = "MUNUNU_ISOLATE_CHILD";
 
 /// Is engine isolation requested, and are we the parent (not an isolated child)?
 pub(crate) fn enabled() -> bool {
-    std::env::var(ISOLATE_ENV).is_ok() && std::env::var(CHILD_GUARD_ENV).is_err()
+    crate::adapter::env_var::read(ISOLATE_ENV).is_some()
+        && crate::adapter::env_var::read(CHILD_GUARD_ENV).is_none()
 }
 
 /// The hidden verb a child is invoked with.

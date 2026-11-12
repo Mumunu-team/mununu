@@ -832,7 +832,7 @@ fn run_sv_flatten_btor2_concrete(
     let log_path = plan.btor_path.with_file_name("yosys.log");
     let run_script = |script: &str| -> Result<std::process::Output, AdapterError> {
         let mut yosys_cmd = Command::new(&yosys);
-        if std::env::var_os("MUNUNU_DEBUG_YOSYS_SCRIPT").is_some() {
+        if crate::adapter::env_var::read("MUNUNU_DEBUG_YOSYS_SCRIPT").is_some() {
             eprintln!(
                 "MUNUNU_DEBUG yosys cwd={:?}\nMUNUNU_DEBUG script={script}",
                 plan.yosys_cwd
@@ -3248,7 +3248,7 @@ impl TempDir {
         let mut base = std::env::temp_dir();
         base.push(format!("{prefix}-{pid}-{tid_digits}-{seq}-{nanos}"));
         std::fs::create_dir_all(&base).map_err(io_err)?;
-        let keep = std::env::var("MUNUNU_KEEP_YOSYS_TMP")
+        let keep = crate::adapter::env_var::read("MUNUNU_KEEP_YOSYS_TMP")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
         Ok(TempDir { path: base, keep })

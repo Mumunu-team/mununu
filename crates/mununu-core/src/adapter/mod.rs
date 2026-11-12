@@ -738,7 +738,7 @@ const DEFAULT_LIFT_TIMEOUT_MS: u64 = 15 * 60 * 1000;
 
 /// The lift subprocess cap. `None` ⇒ uncapped (`MUNUNU_LIFT_TIMEOUT_MS=0`).
 pub(crate) fn lift_timeout() -> Option<std::time::Duration> {
-    parse_lift_timeout_ms(std::env::var(LIFT_TIMEOUT_ENV).ok())
+    parse_lift_timeout_ms(crate::adapter::env_var::read(LIFT_TIMEOUT_ENV))
 }
 
 /// Pure parse of `MUNUNU_LIFT_TIMEOUT_MS`, extracted so the ladder is unit-testable without

@@ -279,7 +279,7 @@ pub(crate) fn effective_bitblast_cap_with(cone_bits: u32, cap_override: Option<u
 /// unparseable one is `None` with a warning — `MUNUNU_BDD_MAX_BITS=4O` used to take the default
 /// without a word (mununu#803, LOW).
 fn env_parsed<T: std::str::FromStr>(name: &str) -> Option<T> {
-    let raw = std::env::var(name).ok()?;
+    let raw = crate::adapter::env_var::read(name)?;
     match raw.parse::<T>() {
         Ok(v) => Some(v),
         Err(_) => {
@@ -428,8 +428,9 @@ impl BddBitBlaster {
         bit_index: Option<&std::collections::HashMap<Nid, Vec<u32>>>,
         cap_override: Option<u32>,
     ) -> Result<Self, String> {
-        let (order, warning) =
-            Self::resolve_var_order(&std::env::var("MUNUNU_BDD_VAR_ORDER").unwrap_or_default());
+        let (order, warning) = Self::resolve_var_order(
+            &crate::adapter::env_var::read("MUNUNU_BDD_VAR_ORDER").unwrap_or_default(),
+        );
         if let Some(w) = warning {
             eprintln!("{w}");
         }
@@ -695,7 +696,7 @@ impl BddBitBlaster {
                  (mununu#543)"
             ));
         }
-        if std::env::var("MUNUNU_REPORT_BDD_LEVELS").is_ok() {
+        if crate::adapter::env_var::read("MUNUNU_REPORT_BDD_LEVELS").is_some() {
             eprintln!(
                 "[mununu-bdd] build: total_bits={total_bits} cap={cap} vars={built_vars} \
                  levels={built_levels} arena={arena_nodes} budget={node_budget}"
@@ -798,7 +799,7 @@ impl BddBitBlaster {
         // cell (name, kind, width, the original indices of a narrowed cell's bits, the BDD
         // positions), then the bit-interaction reading of the design. The instrument the #642
         // root cause needed; the earlier documented knob of this name never existed.
-        if std::env::var_os("MUNUNU_BDD_ORDER_DEBUG").is_some() {
+        if crate::adapter::env_var::read("MUNUNU_BDD_ORDER_DEBUG").is_some() {
             let mut ki = 0usize;
             for (nid, symbol, is_state, width) in &leaf_specs {
                 if !is_kept(*nid) {
@@ -856,8 +857,9 @@ impl BddBitBlaster {
         let mut blaster = BddBitBlaster {
             _manager: manager,
             declared_vars: std::sync::atomic::AtomicU32::new(total_bits),
-            report_levels: std::env::var("MUNUNU_REPORT_BDD_LEVELS").is_ok(),
-            validate_levels_flag: std::env::var("MUNUNU_VALIDATE_BDD_LEVELS").is_ok(),
+            report_levels: crate::adapter::env_var::read("MUNUNU_REPORT_BDD_LEVELS").is_some(),
+            validate_levels_flag: crate::adapter::env_var::read("MUNUNU_VALIDATE_BDD_LEVELS")
+                .is_some(),
             constraint_bdd: tt.clone(), // real value computed after walk_design (Pass 5)
             tt,
             ff,
@@ -3003,7 +3005,7 @@ pub enum DiameterEstimate {
 /// Note "disabled" is never "unbounded in practice": the arena-safety net still applies, because
 /// exceeding the arena is a crash rather than a budget question.
 fn budget_from_env(var: &str, default: usize) -> usize {
-    let (value, warning) = resolve_budget(std::env::var(var).ok().as_deref(), default);
+    let (value, warning) = resolve_budget(crate::adapter::env_var::read(var).as_deref(), default);
     if let Some(w) = warning {
         eprintln!("[mununu] {var}={w}");
     }
@@ -3783,7 +3785,7 @@ impl Squarer {
 /// against the 10 M+ budgets, but it is why the budget bail point is not promised to be
 /// identical across thread counts.
 fn bdd_threads() -> u32 {
-    parse_bdd_threads(std::env::var("MUNUNU_BDD_THREADS").ok().as_deref())
+    parse_bdd_threads(crate::adapter::env_var::read("MUNUNU_BDD_THREADS").as_deref())
 }
 
 /// The knob's parse, separated from the env read so it can be tested without touching the
@@ -3828,7 +3830,7 @@ const BDD_THREADS_DEFAULT: u32 = 1;
 /// abort). So the size is a knob: a lane whose properties are shallow (small FSMs, cube lifts)
 /// can set `/64` and take the 60–80 %; the default stays at the size that never loses.
 fn bdd_cache_div() -> usize {
-    parse_bdd_cache_div(std::env::var("MUNUNU_BDD_CACHE_DIV").ok().as_deref())
+    parse_bdd_cache_div(crate::adapter::env_var::read("MUNUNU_BDD_CACHE_DIV").as_deref())
 }
 
 /// The knob's parse, separated from the env read so it is testable without the process
@@ -3848,8 +3850,7 @@ const BDD_CACHE_DIV_DEFAULT: usize = 4;
 /// Measured: the monolithic relation of the 41–91-bit LIVE arbiters refused at 14.7–16.2 M
 /// allocated nodes against the `1 << 24` arena's 13.4 M budget.
 fn reach_arena() -> usize {
-    std::env::var("MUNUNU_BDD_REACH_ARENA")
-        .ok()
+    crate::adapter::env_var::read("MUNUNU_BDD_REACH_ARENA")
         .and_then(|v| v.parse().ok())
         .unwrap_or(1 << 25)
 }
@@ -3858,8 +3859,7 @@ fn reach_arena() -> usize {
 /// default 30 000). Past it the restriction is DECLINED and evaluation proceeds unrestricted (the
 /// baseline path), so the clock changes which path runs, never a verdict.
 fn reach_budget_ms() -> u64 {
-    std::env::var("MUNUNU_BDD_REACH_BUDGET_MS")
-        .ok()
+    crate::adapter::env_var::read("MUNUNU_BDD_REACH_BUDGET_MS")
         .and_then(|v| v.parse().ok())
         .unwrap_or(30_000)
 }
@@ -3902,8 +3902,7 @@ const FIXPOINT_ITER_SOFT_DEFAULT: usize = 5_000;
 fn fixpoint_iter_soft() -> usize {
     // B-1: `0` now DISABLES, as this function's doc comment has always claimed. The code
     // previously returned the DEFAULT for `0`, so the documentation was wrong about its own knob.
-    match std::env::var("MUNUNU_BDD_FIXPOINT_ITERS")
-        .ok()
+    match crate::adapter::env_var::read("MUNUNU_BDD_FIXPOINT_ITERS")
         .and_then(|s| s.parse::<usize>().ok())
     {
         Some(0) => usize::MAX,
@@ -3937,8 +3936,7 @@ fn fixpoint_iter_soft() -> usize {
 /// whole-run wall budgets then fire instead, producing a host-dependent `unknown`: mununu#553's own
 /// defect, one layer up. A generous bound does not merely cost time here, it reintroduces the bug.
 fn fixpoint_node_budget() -> usize {
-    match std::env::var("MUNUNU_BDD_FIXPOINT_NODES")
-        .ok()
+    match crate::adapter::env_var::read("MUNUNU_BDD_FIXPOINT_NODES")
         .and_then(|s| s.parse::<usize>().ok())
     {
         // `0` disables the latency bound's node half (⇒ it never fires); the arena-safety net
@@ -3959,8 +3957,7 @@ fn fixpoint_node_budget() -> usize {
 /// abstentions. This remains for a caller who wants a hard time ceiling anyway — and says so in its
 /// abstention message, because such a verdict is not reproducible.
 fn exact_time_budget() -> Option<std::time::Duration> {
-    let ms = std::env::var("MUNUNU_BDD_TIME_BUDGET_MS")
-        .ok()
+    let ms = crate::adapter::env_var::read("MUNUNU_BDD_TIME_BUDGET_MS")
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(0);
     (ms != 0).then(|| std::time::Duration::from_millis(ms))
@@ -4239,7 +4236,7 @@ impl BddBitBlaster {
             input_varnos,
             squarer_rank,
             squarer: std::cell::RefCell::new(None),
-            squaring: std::env::var("MUNUNU_BDD_SQUARING")
+            squaring: crate::adapter::env_var::read("MUNUNU_BDD_SQUARING")
                 .map(|v| v != "0")
                 .unwrap_or(true),
             squaring_after_iters: SQUARING_AFTER_ITERS,
@@ -4254,7 +4251,7 @@ impl BddBitBlaster {
             iter_budget: fixpoint_iter_budget(),
             iters: std::cell::Cell::new(0),
             work: std::cell::Cell::new(0),
-            fixpoint_reuse: std::env::var("MUNUNU_BDD_FIXPOINT_REUSE")
+            fixpoint_reuse: crate::adapter::env_var::read("MUNUNU_BDD_FIXPOINT_REUSE")
                 .map(|v| v != "0")
                 .unwrap_or(true),
             manager: self._manager.clone(),
@@ -4271,7 +4268,7 @@ impl BddBitBlaster {
             early_exits: std::cell::Cell::new(0),
             collections: std::cell::Cell::new(0),
             last_step: std::cell::Cell::new(None),
-            report_iters: std::env::var_os("MUNUNU_REPORT_BDD_ITERS").is_some(),
+            report_iters: crate::adapter::env_var::read("MUNUNU_REPORT_BDD_ITERS").is_some(),
             init_hint: std::cell::RefCell::new(None),
             reach_arena: reach_arena(),
             care_subst: std::cell::RefCell::new(None),
@@ -4949,11 +4946,11 @@ impl ExactModel {
         // the hit RATE is the only one of the candidate explanations that measures the recursion's
         // behaviour rather than the diagram's shape.
         #[cfg(feature = "oxidd-statistics")]
-        if std::env::var_os("MUNUNU_BDD_STATS").is_some() {
+        if crate::adapter::env_var::read("MUNUNU_BDD_STATS").is_some() {
             eprintln!("[mununu#553] --- OxiDD apply-cache counters ---");
             oxidd::bdd::print_stats();
         }
-        if std::env::var_os("MUNUNU_BDD_REPORT_PEAK").is_some() {
+        if crate::adapter::env_var::read("MUNUNU_BDD_REPORT_PEAK").is_some() {
             // mununu#557 residue — the peak is ALLOCATED-INCLUDING-DEAD, so on a cone at GC
             // equilibrium it tracks the ARENA rather than the diagram (measured 84-90% occupancy
             // across 33 M / 67 M / 134 M arenas on one block).
@@ -4991,7 +4988,7 @@ impl ExactModel {
                 self.node_soft,
                 self.work.get()
             );
-        } else if std::env::var_os("MUNUNU_BDD_REPORT_WORK").is_some() {
+        } else if crate::adapter::env_var::read("MUNUNU_BDD_REPORT_WORK").is_some() {
             // B2 (engine-performance roadmap) — the same counters WITHOUT the collection the peak
             // report runs to measure the residual. That `gc()` sweeps the whole arena table once
             // per evaluation; on the heat-check corpus it read as 16–25% of self time and
@@ -5942,7 +5939,7 @@ impl AbstentionKind {
 
 /// mununu#602 — `MUNUNU_COI=signal` selects the whole-register cone (the pre-#602 granularity).
 pub(crate) fn signal_level_coi_from_env() -> bool {
-    std::env::var("MUNUNU_COI").is_ok_and(|v| v.eq_ignore_ascii_case("signal"))
+    crate::adapter::env_var::read("MUNUNU_COI").is_some_and(|v| v.eq_ignore_ascii_case("signal"))
 }
 
 /// Opts-accepting variant of [`exact_symbolic_verdict`]. Same semantics; the
@@ -6428,7 +6425,7 @@ impl ExactSession {
         // inputs then IS the substitution). Equivalence-preserving per implication; see the module.
         let propagated = {
             let opt_out = !opts.antecedent_propagate_enabled
-                || std::env::var("MUNUNU_NO_ANTECEDENT_PROPAGATE").is_ok();
+                || crate::adapter::env_var::read("MUNUNU_NO_ANTECEDENT_PROPAGATE").is_some();
             if opt_out {
                 None
             } else {
@@ -6523,8 +6520,8 @@ impl ExactSession {
             std::collections::HashSet::new();
         let mut prepare_notes: Vec<String> = Vec::new();
         let file = {
-            let opt_out =
-                !opts.input_state_enabled || std::env::var("MUNUNU_NO_INPUT_STATE").is_ok();
+            let opt_out = !opts.input_state_enabled
+                || crate::adapter::env_var::read("MUNUNU_NO_INPUT_STATE").is_some();
             match (!opt_out)
                 .then(|| {
                     crate::adapter::btor2::input_state::lift_atom_inputs_excluding(
@@ -7031,8 +7028,7 @@ pub struct LadderOutcome {
 /// The first stage's wall-clock budget (`MUNUNU_EXACT_LADDER_MS`, default 2 000 ms): the
 /// unrestricted attempt that decides the easy cases before any lever is paid for.
 fn ladder_stage1_ms() -> u64 {
-    std::env::var("MUNUNU_EXACT_LADDER_MS")
-        .ok()
+    crate::adapter::env_var::read("MUNUNU_EXACT_LADDER_MS")
         .and_then(|v| v.parse().ok())
         .unwrap_or(2_000)
 }
