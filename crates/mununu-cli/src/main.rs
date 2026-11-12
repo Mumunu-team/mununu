@@ -4645,6 +4645,17 @@ fn render_extract_sva_text(report: &mununu_core::adapter::slang::translate::Tran
             .collect();
         println!("  required __past shadow registers: {}", shadows.join(", "));
     }
+    // mununu#988 / mununu#1001 — never translated, so never checked or applied: say so.
+    if !report.immediate_assertions.is_empty() {
+        println!(
+            "  {} immediate assertion(s) in procedural code, not translated (rewrite as \
+             `assert property` / `assume property` to have them checked or applied):",
+            report.immediate_assertions.len()
+        );
+        for s in &report.immediate_assertions {
+            println!("    {}", s.describe());
+        }
+    }
 }
 
 fn render_extract_sva_json(report: &mununu_core::adapter::slang::translate::TranslationReport) {
@@ -4676,10 +4687,23 @@ fn render_extract_sva_json(report: &mununu_core::adapter::slang::translate::Tran
         .iter()
         .map(|s| serde_json::json!({ "base": s.base, "width": s.width, "depth": s.depth }))
         .collect();
+    let immediate_assertions: Vec<serde_json::Value> = report
+        .immediate_assertions
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "kind": sva_kind_str(s.kind),
+                "scope": s.scope,
+                "label": s.label,
+                "at": s.loc.as_ref().map(|l| format!("{}:{}", l.file, l.line)),
+            })
+        })
+        .collect();
     let out = serde_json::json!({
         "translated": translated,
         "unsupported": unsupported,
         "required_shadows": required_shadows,
+        "immediate_assertions": immediate_assertions,
     });
     println!(
         "{}",

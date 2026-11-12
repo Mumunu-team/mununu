@@ -1,0 +1,937 @@
+{
+  "design": {
+    "name": "$root",
+    "kind": "Root",
+    "addr": 93825484108128,
+    "members": [
+      {
+        "name": "",
+        "kind": "CompilationUnit",
+        "addr": 93825484176912
+      },
+      {
+        "name": "m",
+        "kind": "Instance",
+        "source_file": "immediate_assertions.sv",
+        "source_line": 10,
+        "source_column": 8,
+        "addr": 93825484178408,
+        "body": {
+          "name": "m",
+          "kind": "InstanceBody",
+          "source_file": "immediate_assertions.sv",
+          "source_line": 10,
+          "source_column": 8,
+          "addr": 93825484177184,
+          "members": [
+            {
+              "name": "EXTRA",
+              "kind": "Parameter",
+              "source_file": "immediate_assertions.sv",
+              "source_line": 10,
+              "source_column": 26,
+              "addr": 93825484177360,
+              "type": "bit",
+              "initializer": {
+                "source_file_start": "immediate_assertions.sv",
+                "source_file_end": "immediate_assertions.sv",
+                "source_line_start": 10,
+                "source_line_end": 10,
+                "source_column_start": 34,
+                "source_column_end": 35,
+                "kind": "Conversion",
+                "type": "bit",
+                "operand": {
+                  "source_file_start": "immediate_assertions.sv",
+                  "source_file_end": "immediate_assertions.sv",
+                  "source_line_start": 10,
+                  "source_line_end": 10,
+                  "source_column_start": 34,
+                  "source_column_end": 35,
+                  "kind": "IntegerLiteral",
+                  "type": "int",
+                  "value": "0",
+                  "constant": "0"
+                },
+                "constant": "1'b0"
+              },
+              "value": "1'b0",
+              "isLocal": false,
+              "isPort": true,
+              "isBody": false
+            },
+            {
+              "name": "clk",
+              "kind": "Port",
+              "source_file": "immediate_assertions.sv",
+              "source_line": 10,
+              "source_column": 50,
+              "addr": 93825484178544,
+              "type": "logic",
+              "direction": "In",
+              "internalSymbol": "93825484178664 clk"
+            },
+            {
+              "name": "clk",
+              "kind": "Net",
+              "source_file": "immediate_assertions.sv",
+              "source_line": 10,
+              "source_column": 50,
+              "addr": 93825484178664,
+              "type": "logic",
+              "netType": {
+                "name": "wire",
+                "kind": "NetType",
+                "addr": 93825484068016,
+                "type": "logic"
+              }
+            },
+            {
+              "name": "d",
+              "kind": "Port",
+              "source_file": "immediate_assertions.sv",
+              "source_line": 10,
+              "source_column": 73,
+              "addr": 93825484178824,
+              "type": "logic[1:0]",
+              "direction": "In",
+              "internalSymbol": "93825484178944 d"
+            },
+            {
+              "name": "d",
+              "kind": "Net",
+              "source_file": "immediate_assertions.sv",
+              "source_line": 10,
+              "source_column": 73,
+              "addr": 93825484178944,
+              "type": "logic[1:0]",
+              "netType": {
+                "name": "wire",
+                "kind": "NetType",
+                "addr": 93825484068016,
+                "type": "logic"
+              }
+            },
+            {
+              "name": "q",
+              "kind": "Port",
+              "source_file": "immediate_assertions.sv",
+              "source_line": 10,
+              "source_column": 95,
+              "addr": 93825484179104,
+              "type": "logic[1:0]",
+              "direction": "Out",
+              "internalSymbol": "93825484179224 q"
+            },
+            {
+              "name": "q",
+              "kind": "Variable",
+              "source_file": "immediate_assertions.sv",
+              "source_line": 10,
+              "source_column": 95,
+              "addr": 93825484179224,
+              "type": "logic[1:0]",
+              "lifetime": "Static"
+            },
+            {
+              "name": "",
+              "kind": "ProceduralBlock",
+              "source_file": "immediate_assertions.sv",
+              "source_line": 11,
+              "source_column": 3,
+              "addr": 93825484177592,
+              "procedureKind": "AlwaysFF",
+              "body": {
+                "source_file_start": "immediate_assertions.sv",
+                "source_file_end": "immediate_assertions.sv",
+                "source_line_start": 11,
+                "source_line_end": 14,
+                "source_column_start": 13,
+                "source_column_end": 6,
+                "kind": "Timed",
+                "timing": {
+                  "source_file_start": "immediate_assertions.sv",
+                  "source_file_end": "immediate_assertions.sv",
+                  "source_line_start": 11,
+                  "source_line_end": 11,
+                  "source_column_start": 15,
+                  "source_column_end": 26,
+                  "kind": "SignalEvent",
+                  "expr": {
+                    "source_file_start": "immediate_assertions.sv",
+                    "source_file_end": "immediate_assertions.sv",
+                    "source_line_start": 11,
+                    "source_line_end": 11,
+                    "source_column_start": 23,
+                    "source_column_end": 26,
+                    "kind": "NamedValue",
+                    "type": "logic",
+                    "symbol": "93825484178664 clk"
+                  },
+                  "edge": "PosEdge"
+                },
+                "stmt": {
+                  "source_file_start": "immediate_assertions.sv",
+                  "source_file_end": "immediate_assertions.sv",
+                  "source_line_start": 11,
+                  "source_line_end": 14,
+                  "source_column_start": 28,
+                  "source_column_end": 6,
+                  "kind": "Block",
+                  "blockKind": "Sequential",
+                  "body": {
+                    "source_file_start": "immediate_assertions.sv",
+                    "source_file_end": "immediate_assertions.sv",
+                    "source_line_start": 11,
+                    "source_line_end": 14,
+                    "source_column_start": 28,
+                    "source_column_end": 6,
+                    "kind": "List",
+                    "list": [
+                      {
+                        "source_file_start": "immediate_assertions.sv",
+                        "source_file_end": "immediate_assertions.sv",
+                        "source_line_start": 12,
+                        "source_line_end": 12,
+                        "source_column_start": 5,
+                        "source_column_end": 12,
+                        "kind": "ExpressionStatement",
+                        "expr": {
+                          "source_file_start": "immediate_assertions.sv",
+                          "source_file_end": "immediate_assertions.sv",
+                          "source_line_start": 12,
+                          "source_line_end": 12,
+                          "source_column_start": 5,
+                          "source_column_end": 11,
+                          "kind": "Assignment",
+                          "type": "logic[1:0]",
+                          "left": {
+                            "source_file_start": "immediate_assertions.sv",
+                            "source_file_end": "immediate_assertions.sv",
+                            "source_line_start": 12,
+                            "source_line_end": 12,
+                            "source_column_start": 5,
+                            "source_column_end": 6,
+                            "kind": "NamedValue",
+                            "type": "logic[1:0]",
+                            "symbol": "93825484179224 q"
+                          },
+                          "right": {
+                            "source_file_start": "immediate_assertions.sv",
+                            "source_file_end": "immediate_assertions.sv",
+                            "source_line_start": 12,
+                            "source_line_end": 12,
+                            "source_column_start": 10,
+                            "source_column_end": 11,
+                            "kind": "NamedValue",
+                            "type": "logic[1:0]",
+                            "symbol": "93825484178944 d"
+                          },
+                          "isNonBlocking": true
+                        }
+                      },
+                      {
+                        "source_file_start": "immediate_assertions.sv",
+                        "source_file_end": "immediate_assertions.sv",
+                        "source_line_start": 13,
+                        "source_line_end": 13,
+                        "source_column_start": 5,
+                        "source_column_end": 25,
+                        "kind": "ImmediateAssertion",
+                        "cond": {
+                          "source_file_start": "immediate_assertions.sv",
+                          "source_file_end": "immediate_assertions.sv",
+                          "source_line_start": 13,
+                          "source_line_end": 13,
+                          "source_column_start": 13,
+                          "source_column_end": 23,
+                          "kind": "BinaryOp",
+                          "type": "logic",
+                          "op": "Inequality",
+                          "left": {
+                            "source_file_start": "immediate_assertions.sv",
+                            "source_file_end": "immediate_assertions.sv",
+                            "source_line_start": 13,
+                            "source_line_end": 13,
+                            "source_column_start": 13,
+                            "source_column_end": 14,
+                            "kind": "NamedValue",
+                            "type": "logic[1:0]",
+                            "symbol": "93825484178944 d"
+                          },
+                          "right": {
+                            "source_file_start": "immediate_assertions.sv",
+                            "source_file_end": "immediate_assertions.sv",
+                            "source_line_start": 13,
+                            "source_line_end": 13,
+                            "source_column_start": 18,
+                            "source_column_end": 23,
+                            "kind": "Conversion",
+                            "type": "logic[1:0]",
+                            "operand": {
+                              "source_file_start": "immediate_assertions.sv",
+                              "source_file_end": "immediate_assertions.sv",
+                              "source_line_start": 13,
+                              "source_line_end": 13,
+                              "source_column_start": 18,
+                              "source_column_end": 23,
+                              "kind": "IntegerLiteral",
+                              "type": "bit[1:0]",
+                              "value": "2'b11",
+                              "constant": "2'b11"
+                            },
+                            "constant": "2'b11"
+                          }
+                        },
+                        "ifTrue": {
+                          "source_file_start": "immediate_assertions.sv",
+                          "source_file_end": "immediate_assertions.sv",
+                          "source_line_start": 13,
+                          "source_line_end": 13,
+                          "source_column_start": 24,
+                          "source_column_end": 25,
+                          "kind": "Empty"
+                        },
+                        "assertionKind": "Assume",
+                        "isDeferred": false,
+                        "isFinal": false
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "name": "a_imm",
+              "kind": "StatementBlock",
+              "source_file": "immediate_assertions.sv",
+              "source_line": 16,
+              "source_column": 5,
+              "addr": 93825484177800
+            },
+            {
+              "name": "",
+              "kind": "ProceduralBlock",
+              "source_file": "immediate_assertions.sv",
+              "source_line": 15,
+              "source_column": 3,
+              "addr": 93825484177696,
+              "procedureKind": "AlwaysComb",
+              "body": {
+                "source_file_start": "immediate_assertions.sv",
+                "source_file_end": "immediate_assertions.sv",
+                "source_line_start": 15,
+                "source_line_end": 18,
+                "source_column_start": 15,
+                "source_column_end": 6,
+                "kind": "Block",
+                "blockKind": "Sequential",
+                "body": {
+                  "source_file_start": "immediate_assertions.sv",
+                  "source_file_end": "immediate_assertions.sv",
+                  "source_line_start": 15,
+                  "source_line_end": 18,
+                  "source_column_start": 15,
+                  "source_column_end": 6,
+                  "kind": "List",
+                  "list": [
+                    {
+                      "source_file_start": "immediate_assertions.sv",
+                      "source_file_end": "immediate_assertions.sv",
+                      "source_line_start": 16,
+                      "source_line_end": 16,
+                      "source_column_start": 5,
+                      "source_column_end": 32,
+                      "kind": "Block",
+                      "blockKind": "Sequential",
+                      "block": "93825484177800 a_imm",
+                      "body": {
+                        "source_file_start": "immediate_assertions.sv",
+                        "source_file_end": "immediate_assertions.sv",
+                        "source_line_start": 16,
+                        "source_line_end": 16,
+                        "source_column_start": 5,
+                        "source_column_end": 32,
+                        "kind": "ImmediateAssertion",
+                        "cond": {
+                          "source_file_start": "immediate_assertions.sv",
+                          "source_file_end": "immediate_assertions.sv",
+                          "source_line_start": 16,
+                          "source_line_end": 16,
+                          "source_column_start": 20,
+                          "source_column_end": 30,
+                          "kind": "BinaryOp",
+                          "type": "logic",
+                          "op": "Inequality",
+                          "left": {
+                            "source_file_start": "immediate_assertions.sv",
+                            "source_file_end": "immediate_assertions.sv",
+                            "source_line_start": 16,
+                            "source_line_end": 16,
+                            "source_column_start": 20,
+                            "source_column_end": 21,
+                            "kind": "NamedValue",
+                            "type": "logic[1:0]",
+                            "symbol": "93825484179224 q"
+                          },
+                          "right": {
+                            "source_file_start": "immediate_assertions.sv",
+                            "source_file_end": "immediate_assertions.sv",
+                            "source_line_start": 16,
+                            "source_line_end": 16,
+                            "source_column_start": 25,
+                            "source_column_end": 30,
+                            "kind": "Conversion",
+                            "type": "logic[1:0]",
+                            "operand": {
+                              "source_file_start": "immediate_assertions.sv",
+                              "source_file_end": "immediate_assertions.sv",
+                              "source_line_start": 16,
+                              "source_line_end": 16,
+                              "source_column_start": 25,
+                              "source_column_end": 30,
+                              "kind": "IntegerLiteral",
+                              "type": "bit[1:0]",
+                              "value": "2'b10",
+                              "constant": "2'b10"
+                            },
+                            "constant": "2'b10"
+                          }
+                        },
+                        "ifTrue": {
+                          "source_file_start": "immediate_assertions.sv",
+                          "source_file_end": "immediate_assertions.sv",
+                          "source_line_start": 16,
+                          "source_line_end": 16,
+                          "source_column_start": 31,
+                          "source_column_end": 32,
+                          "kind": "Empty"
+                        },
+                        "assertionKind": "Assert",
+                        "isDeferred": false,
+                        "isFinal": false
+                      }
+                    },
+                    {
+                      "source_file_start": "immediate_assertions.sv",
+                      "source_file_end": "immediate_assertions.sv",
+                      "source_line_start": 17,
+                      "source_line_end": 17,
+                      "source_column_start": 5,
+                      "source_column_end": 24,
+                      "kind": "ImmediateAssertion",
+                      "cond": {
+                        "source_file_start": "immediate_assertions.sv",
+                        "source_file_end": "immediate_assertions.sv",
+                        "source_line_start": 17,
+                        "source_line_end": 17,
+                        "source_column_start": 12,
+                        "source_column_end": 22,
+                        "kind": "BinaryOp",
+                        "type": "logic",
+                        "op": "Equality",
+                        "left": {
+                          "source_file_start": "immediate_assertions.sv",
+                          "source_file_end": "immediate_assertions.sv",
+                          "source_line_start": 17,
+                          "source_line_end": 17,
+                          "source_column_start": 12,
+                          "source_column_end": 13,
+                          "kind": "NamedValue",
+                          "type": "logic[1:0]",
+                          "symbol": "93825484179224 q"
+                        },
+                        "right": {
+                          "source_file_start": "immediate_assertions.sv",
+                          "source_file_end": "immediate_assertions.sv",
+                          "source_line_start": 17,
+                          "source_line_end": 17,
+                          "source_column_start": 17,
+                          "source_column_end": 22,
+                          "kind": "Conversion",
+                          "type": "logic[1:0]",
+                          "operand": {
+                            "source_file_start": "immediate_assertions.sv",
+                            "source_file_end": "immediate_assertions.sv",
+                            "source_line_start": 17,
+                            "source_line_end": 17,
+                            "source_column_start": 17,
+                            "source_column_end": 22,
+                            "kind": "IntegerLiteral",
+                            "type": "bit[1:0]",
+                            "value": "2'b1",
+                            "constant": "2'b1"
+                          },
+                          "constant": "2'b1"
+                        }
+                      },
+                      "ifTrue": {
+                        "source_file_start": "immediate_assertions.sv",
+                        "source_file_end": "immediate_assertions.sv",
+                        "source_line_start": 17,
+                        "source_line_end": 17,
+                        "source_column_start": 23,
+                        "source_column_end": 24,
+                        "kind": "Empty"
+                      },
+                      "assertionKind": "CoverProperty",
+                      "isDeferred": false,
+                      "isFinal": false
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "name": "u_a",
+              "kind": "Instance",
+              "source_file": "immediate_assertions.sv",
+              "source_line": 19,
+              "source_column": 7,
+              "addr": 93825484179384,
+              "body": {
+                "name": "sub",
+                "kind": "InstanceBody",
+                "source_file": "immediate_assertions.sv",
+                "source_line": 6,
+                "source_column": 8,
+                "addr": 93825484179512,
+                "members": [
+                  {
+                    "name": "clk",
+                    "kind": "Port",
+                    "source_file": "immediate_assertions.sv",
+                    "source_line": 6,
+                    "source_column": 24,
+                    "addr": 93825484193912,
+                    "type": "logic",
+                    "direction": "In",
+                    "internalSymbol": "93825484194032 clk"
+                  },
+                  {
+                    "name": "clk",
+                    "kind": "Net",
+                    "source_file": "immediate_assertions.sv",
+                    "source_line": 6,
+                    "source_column": 24,
+                    "addr": 93825484194032,
+                    "type": "logic",
+                    "netType": {
+                      "name": "wire",
+                      "kind": "NetType",
+                      "addr": 93825484068016,
+                      "type": "logic"
+                    }
+                  },
+                  {
+                    "name": "x",
+                    "kind": "Port",
+                    "source_file": "immediate_assertions.sv",
+                    "source_line": 6,
+                    "source_column": 47,
+                    "addr": 93825484194192,
+                    "type": "logic[1:0]",
+                    "direction": "In",
+                    "internalSymbol": "93825484194312 x"
+                  },
+                  {
+                    "name": "x",
+                    "kind": "Net",
+                    "source_file": "immediate_assertions.sv",
+                    "source_line": 6,
+                    "source_column": 47,
+                    "addr": 93825484194312,
+                    "type": "logic[1:0]",
+                    "netType": {
+                      "name": "wire",
+                      "kind": "NetType",
+                      "addr": 93825484068016,
+                      "type": "logic"
+                    }
+                  },
+                  {
+                    "name": "",
+                    "kind": "ProceduralBlock",
+                    "source_file": "immediate_assertions.sv",
+                    "source_line": 7,
+                    "source_column": 3,
+                    "addr": 93825484179752,
+                    "procedureKind": "AlwaysFF",
+                    "body": {
+                      "source_file_start": "immediate_assertions.sv",
+                      "source_file_end": "immediate_assertions.sv",
+                      "source_line_start": 7,
+                      "source_line_end": 7,
+                      "source_column_start": 13,
+                      "source_column_end": 48,
+                      "kind": "Timed",
+                      "timing": {
+                        "source_file_start": "immediate_assertions.sv",
+                        "source_file_end": "immediate_assertions.sv",
+                        "source_line_start": 7,
+                        "source_line_end": 7,
+                        "source_column_start": 15,
+                        "source_column_end": 26,
+                        "kind": "SignalEvent",
+                        "expr": {
+                          "source_file_start": "immediate_assertions.sv",
+                          "source_file_end": "immediate_assertions.sv",
+                          "source_line_start": 7,
+                          "source_line_end": 7,
+                          "source_column_start": 23,
+                          "source_column_end": 26,
+                          "kind": "NamedValue",
+                          "type": "logic",
+                          "symbol": "93825484194032 clk"
+                        },
+                        "edge": "PosEdge"
+                      },
+                      "stmt": {
+                        "source_file_start": "immediate_assertions.sv",
+                        "source_file_end": "immediate_assertions.sv",
+                        "source_line_start": 7,
+                        "source_line_end": 7,
+                        "source_column_start": 28,
+                        "source_column_end": 48,
+                        "kind": "ImmediateAssertion",
+                        "cond": {
+                          "source_file_start": "immediate_assertions.sv",
+                          "source_file_end": "immediate_assertions.sv",
+                          "source_line_start": 7,
+                          "source_line_end": 7,
+                          "source_column_start": 36,
+                          "source_column_end": 46,
+                          "kind": "BinaryOp",
+                          "type": "logic",
+                          "op": "Inequality",
+                          "left": {
+                            "source_file_start": "immediate_assertions.sv",
+                            "source_file_end": "immediate_assertions.sv",
+                            "source_line_start": 7,
+                            "source_line_end": 7,
+                            "source_column_start": 36,
+                            "source_column_end": 37,
+                            "kind": "NamedValue",
+                            "type": "logic[1:0]",
+                            "symbol": "93825484194312 x"
+                          },
+                          "right": {
+                            "source_file_start": "immediate_assertions.sv",
+                            "source_file_end": "immediate_assertions.sv",
+                            "source_line_start": 7,
+                            "source_line_end": 7,
+                            "source_column_start": 41,
+                            "source_column_end": 46,
+                            "kind": "Conversion",
+                            "type": "logic[1:0]",
+                            "operand": {
+                              "source_file_start": "immediate_assertions.sv",
+                              "source_file_end": "immediate_assertions.sv",
+                              "source_line_start": 7,
+                              "source_line_end": 7,
+                              "source_column_start": 41,
+                              "source_column_end": 46,
+                              "kind": "IntegerLiteral",
+                              "type": "bit[1:0]",
+                              "value": "2'b10",
+                              "constant": "2'b10"
+                            },
+                            "constant": "2'b10"
+                          }
+                        },
+                        "ifTrue": {
+                          "source_file_start": "immediate_assertions.sv",
+                          "source_file_end": "immediate_assertions.sv",
+                          "source_line_start": 7,
+                          "source_line_end": 7,
+                          "source_column_start": 47,
+                          "source_column_end": 48,
+                          "kind": "Empty"
+                        },
+                        "assertionKind": "Assert",
+                        "isDeferred": false,
+                        "isFinal": false
+                      }
+                    }
+                  }
+                ],
+                "definition": "93825484071024 sub"
+              },
+              "connections": [
+                {
+                  "port": {
+                    "name": "clk",
+                    "kind": "Port",
+                    "source_file": "immediate_assertions.sv",
+                    "source_line": 6,
+                    "source_column": 24,
+                    "addr": 93825484193912,
+                    "type": "logic",
+                    "direction": "In",
+                    "internalSymbol": "93825484194032 clk"
+                  },
+                  "expr": {
+                    "source_file_start": "immediate_assertions.sv",
+                    "source_file_end": "immediate_assertions.sv",
+                    "source_line_start": 19,
+                    "source_line_end": 19,
+                    "source_column_start": 17,
+                    "source_column_end": 20,
+                    "kind": "NamedValue",
+                    "type": "logic",
+                    "symbol": "93825484178664 clk"
+                  }
+                },
+                {
+                  "port": {
+                    "name": "x",
+                    "kind": "Port",
+                    "source_file": "immediate_assertions.sv",
+                    "source_line": 6,
+                    "source_column": 47,
+                    "addr": 93825484194192,
+                    "type": "logic[1:0]",
+                    "direction": "In",
+                    "internalSymbol": "93825484194312 x"
+                  },
+                  "expr": {
+                    "source_file_start": "immediate_assertions.sv",
+                    "source_file_end": "immediate_assertions.sv",
+                    "source_line_start": 19,
+                    "source_line_end": 19,
+                    "source_column_start": 26,
+                    "source_column_end": 27,
+                    "kind": "NamedValue",
+                    "type": "logic[1:0]",
+                    "symbol": "93825484178944 d"
+                  }
+                }
+              ]
+            },
+            {
+              "name": "u_b",
+              "kind": "Instance",
+              "source_file": "immediate_assertions.sv",
+              "source_line": 20,
+              "source_column": 7,
+              "addr": 93825484179856,
+              "body": "93825484179512 sub",
+              "connections": [
+                {
+                  "port": {
+                    "name": "clk",
+                    "kind": "Port",
+                    "source_file": "immediate_assertions.sv",
+                    "source_line": 6,
+                    "source_column": 24,
+                    "addr": 93825484203496,
+                    "type": "logic",
+                    "direction": "In",
+                    "internalSymbol": "93825484203616 clk"
+                  },
+                  "expr": {
+                    "source_file_start": "immediate_assertions.sv",
+                    "source_file_end": "immediate_assertions.sv",
+                    "source_line_start": 20,
+                    "source_line_end": 20,
+                    "source_column_start": 17,
+                    "source_column_end": 20,
+                    "kind": "NamedValue",
+                    "type": "logic",
+                    "symbol": "93825484178664 clk"
+                  }
+                },
+                {
+                  "port": {
+                    "name": "x",
+                    "kind": "Port",
+                    "source_file": "immediate_assertions.sv",
+                    "source_line": 6,
+                    "source_column": 47,
+                    "addr": 93825484203776,
+                    "type": "logic[1:0]",
+                    "direction": "In",
+                    "internalSymbol": "93825484203896 x"
+                  },
+                  "expr": {
+                    "source_file_start": "immediate_assertions.sv",
+                    "source_file_end": "immediate_assertions.sv",
+                    "source_line_start": 20,
+                    "source_line_end": 20,
+                    "source_column_start": 26,
+                    "source_column_end": 27,
+                    "kind": "NamedValue",
+                    "type": "logic[1:0]",
+                    "symbol": "93825484179224 q"
+                  }
+                }
+              ]
+            },
+            {
+              "name": "ap",
+              "kind": "StatementBlock",
+              "source_file": "immediate_assertions.sv",
+              "source_line": 24,
+              "source_column": 3,
+              "addr": 93825484178248
+            },
+            {
+              "name": "",
+              "kind": "ProceduralBlock",
+              "source_file": "immediate_assertions.sv",
+              "source_line": 24,
+              "source_column": 3,
+              "addr": 93825484178144,
+              "procedureKind": "Always",
+              "body": {
+                "source_file_start": "immediate_assertions.sv",
+                "source_file_end": "immediate_assertions.sv",
+                "source_line_start": 24,
+                "source_line_end": 24,
+                "source_column_start": 3,
+                "source_column_end": 51,
+                "kind": "Block",
+                "blockKind": "Sequential",
+                "block": "93825484178248 ap",
+                "body": {
+                  "source_file_start": "immediate_assertions.sv",
+                  "source_file_end": "immediate_assertions.sv",
+                  "source_line_start": 24,
+                  "source_line_end": 24,
+                  "source_column_start": 3,
+                  "source_column_end": 51,
+                  "kind": "ConcurrentAssertion",
+                  "propertySpec": {
+                    "source_file_start": "immediate_assertions.sv",
+                    "source_file_end": "immediate_assertions.sv",
+                    "source_line_start": 24,
+                    "source_line_end": 24,
+                    "source_column_start": 24,
+                    "source_column_end": 49,
+                    "kind": "Clocking",
+                    "clocking": {
+                      "source_file_start": "immediate_assertions.sv",
+                      "source_file_end": "immediate_assertions.sv",
+                      "source_line_start": 24,
+                      "source_line_end": 24,
+                      "source_column_start": 26,
+                      "source_column_end": 37,
+                      "kind": "SignalEvent",
+                      "expr": {
+                        "source_file_start": "immediate_assertions.sv",
+                        "source_file_end": "immediate_assertions.sv",
+                        "source_line_start": 24,
+                        "source_line_end": 24,
+                        "source_column_start": 34,
+                        "source_column_end": 37,
+                        "kind": "NamedValue",
+                        "type": "logic",
+                        "symbol": "93825484178664 clk"
+                      },
+                      "edge": "PosEdge"
+                    },
+                    "expr": {
+                      "source_file_start": "immediate_assertions.sv",
+                      "source_file_end": "immediate_assertions.sv",
+                      "source_line_start": 24,
+                      "source_line_end": 24,
+                      "source_column_start": 39,
+                      "source_column_end": 49,
+                      "kind": "Simple",
+                      "expr": {
+                        "source_file_start": "immediate_assertions.sv",
+                        "source_file_end": "immediate_assertions.sv",
+                        "source_line_start": 24,
+                        "source_line_end": 24,
+                        "source_column_start": 39,
+                        "source_column_end": 49,
+                        "kind": "BinaryOp",
+                        "type": "logic",
+                        "op": "Inequality",
+                        "left": {
+                          "source_file_start": "immediate_assertions.sv",
+                          "source_file_end": "immediate_assertions.sv",
+                          "source_line_start": 24,
+                          "source_line_end": 24,
+                          "source_column_start": 39,
+                          "source_column_end": 40,
+                          "kind": "NamedValue",
+                          "type": "logic[1:0]",
+                          "symbol": "93825484179224 q"
+                        },
+                        "right": {
+                          "source_file_start": "immediate_assertions.sv",
+                          "source_file_end": "immediate_assertions.sv",
+                          "source_line_start": 24,
+                          "source_line_end": 24,
+                          "source_column_start": 44,
+                          "source_column_end": 49,
+                          "kind": "Conversion",
+                          "type": "logic[1:0]",
+                          "operand": {
+                            "source_file_start": "immediate_assertions.sv",
+                            "source_file_end": "immediate_assertions.sv",
+                            "source_line_start": 24,
+                            "source_line_end": 24,
+                            "source_column_start": 44,
+                            "source_column_end": 49,
+                            "kind": "IntegerLiteral",
+                            "type": "bit[1:0]",
+                            "value": "2'b11",
+                            "constant": "2'b11"
+                          },
+                          "constant": "2'b11"
+                        }
+                      }
+                    }
+                  },
+                  "ifTrue": {
+                    "source_file_start": "immediate_assertions.sv",
+                    "source_file_end": "immediate_assertions.sv",
+                    "source_line_start": 24,
+                    "source_line_end": 24,
+                    "source_column_start": 50,
+                    "source_column_end": 51,
+                    "kind": "Empty"
+                  },
+                  "assertionKind": "Assert"
+                }
+              }
+            }
+          ],
+          "definition": "93825484183536 m"
+        },
+        "connections": [
+        ]
+      }
+    ]
+  },
+  "definitions": [
+    {
+      "name": "m",
+      "kind": "Definition",
+      "source_file": "immediate_assertions.sv",
+      "source_line": 10,
+      "source_column": 8,
+      "addr": 93825484183536,
+      "defaultNetType": "93825484068016 wire",
+      "definitionKind": "Module",
+      "defaultLifetime": "Static",
+      "unconnectedDrive": "None",
+      "cellDefine": false
+    },
+    {
+      "name": "sub",
+      "kind": "Definition",
+      "source_file": "immediate_assertions.sv",
+      "source_line": 6,
+      "source_column": 8,
+      "addr": 93825484071024,
+      "defaultNetType": "93825484068016 wire",
+      "definitionKind": "Module",
+      "defaultLifetime": "Static",
+      "unconnectedDrive": "None",
+      "cellDefine": false
+    }
+  ]
+}

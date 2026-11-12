@@ -2167,6 +2167,16 @@ fn sv_extract_sva_handler_impl(
                 depth: s.depth,
             })
             .collect(),
+        immediate_assertions: report
+            .immediate_assertions
+            .iter()
+            .map(|s| ImmediateAssertionView {
+                kind: kind_str(s.kind),
+                scope: s.scope.clone(),
+                label: s.label.clone(),
+                at: s.loc.as_ref().map(|l| format!("{}:{}", l.file, l.line)),
+            })
+            .collect(),
     };
     Ok(Json(response))
 }

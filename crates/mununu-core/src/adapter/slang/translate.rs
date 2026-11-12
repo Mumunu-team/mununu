@@ -328,6 +328,49 @@ pub struct TranslationReport {
     /// on, with that value. `@mununu_guarantee` and template atoms resolve a constant named on the
     /// right of a comparison (`state_q == SCRAM`) through it.
     pub named_constants: std::collections::BTreeMap<String, i64>,
+    /// mununu#988 / mununu#1001 — every immediate assertion in the elaborated design, one per
+    /// instance occurrence, in walk order. None of them is checked or applied (see
+    /// [`ImmediateAssertionSite`]); verify-auto turns them into `dropped-immediate-assertion`
+    /// notes. Empty when the translation ran without a slang AST.
+    pub immediate_assertions: Vec<ImmediateAssertionSite>,
+}
+
+/// mununu#988 / mununu#1001 — an immediate `assert` / `assume` / `cover` (`ImmediateAssertion`
+/// in slang's AST) the run does not check.
+///
+/// The lift reads the design with `read_slang --ignore-assertions`, which drops every procedural
+/// assertion, and the translator reads only `ConcurrentAssertion` nodes, so these reach neither the
+/// model nor the property set. They are recorded so the report can say so: a dropped `assert` is a
+/// property nobody checked, and a dropped `assume` is an environment constraint the model does not
+/// apply (an over-approximation of the assumed environment).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImmediateAssertionSite {
+    pub kind: SvaKind,
+    /// `<instance prefix><enclosing scope>`, the stem a concurrent assertion's name carries.
+    pub scope: String,
+    /// The SV label, when the statement has one (`a_imm: assert (…)`).
+    pub label: Option<String>,
+    /// The statement's first line, when the AST was dumped with `--ast-json-source-info`.
+    pub loc: Option<crate::trace::SourceLoc>,
+}
+
+impl ImmediateAssertionSite {
+    /// `assume m.sv:4`, `assert a_imm (m.sv:7)`, `cover in u_rx.m` — one report item.
+    pub fn describe(&self) -> String {
+        let kind = match self.kind {
+            SvaKind::Assert => "assert",
+            SvaKind::Assume => "assume",
+            SvaKind::Cover => "cover",
+        };
+        let at = match &self.loc {
+            Some(l) => format!("{}:{}", l.file, l.line),
+            None => format!("in {}", self.scope),
+        };
+        match &self.label {
+            Some(label) => format!("{kind} {label} ({at})"),
+            None => format!("{kind} {at}"),
+        }
+    }
 }
 
 /// An expression a formula reads as the atom `name` (= `expr.minted_name()`).
@@ -427,6 +470,29 @@ pub(crate) fn assertion_sites(
         .collect()
 }
 
+/// mununu#988 / mununu#1001 — every immediate assertion in the elaborated design, from the same
+/// walk [`translate_ast_json_with_source`] records them with, so the two lists line up entry for
+/// entry on the same design.
+pub(crate) fn immediate_assertion_sites(root: &Value) -> Vec<ImmediateAssertionSite> {
+    let mut scopes = Hierarchy::default();
+    let bodies = collect_instance_bodies(root);
+    let mut found: Vec<FoundAssertion<'_>> = Vec::new();
+    collect_assertions(
+        root,
+        &Walk {
+            enclosing: "design",
+            label: None,
+            scope: None,
+            rel: String::new(),
+            genvars: Vec::new(),
+        },
+        &bodies,
+        &mut scopes,
+        &mut found,
+    );
+    scopes.immediates
+}
+
 /// [`translate_ast_json_with_options`] with the PREPROCESSED source the JSON was dumped from
 /// (`--ast-json-source-info` spans index into it) — what a hierarchical reference into a module
 /// instantiated more than once is read from (mununu#722, [`scope_refs`]). `None` keeps every
@@ -508,6 +574,7 @@ pub fn translate_ast_json_with_source(
     let mut report = TranslationReport {
         // mununu#897 — the occurrences the walk recorded, for the annotation path.
         instance_prefixes: std::mem::take(&mut scopes.occurrence_modules),
+        immediate_assertions: std::mem::take(&mut scopes.immediates),
         ..TranslationReport::default()
     };
     for (idx, found) in found.iter().enumerate() {
@@ -800,6 +867,9 @@ struct Hierarchy {
     /// mununu#897 — every occurrence as `(module definition name, prefix)`, in walk order;
     /// copied onto [`TranslationReport::instance_prefixes`].
     occurrence_modules: Vec<(String, String)>,
+    /// mununu#988 / mununu#1001 — the immediate assertions the walk passed, in walk order;
+    /// copied onto [`TranslationReport::immediate_assertions`].
+    immediates: Vec<ImmediateAssertionSite>,
 }
 
 impl Hierarchy {
@@ -947,6 +1017,34 @@ fn collect_assertions<'a>(
                     scope: at.scope.clone(),
                     genvars: at.genvars.clone(),
                 }),
+                // mununu#988 / mununu#1001 — recorded, not translated: see `ImmediateAssertionSite`.
+                // An unknown `assertionKind` is recorded as an `assert` — the reading that says a
+                // property went unchecked, rather than none at all.
+                Some("ImmediateAssertion") => {
+                    let kind = match map.get("assertionKind").and_then(Value::as_str) {
+                        Some("Assume") => SvaKind::Assume,
+                        Some(s) if s.starts_with("Cover") => SvaKind::Cover,
+                        _ => SvaKind::Assert,
+                    };
+                    let prefix = at.scope.as_ref().map_or("", |s| s.prefix.as_str());
+                    // A line of the preprocessed unit is no line the user wrote: left out, and
+                    // verify-auto takes it from the source-index run instead.
+                    let loc = map
+                        .get("source_file_start")
+                        .and_then(Value::as_str)
+                        .filter(|f| !f.ends_with(super::PREPROCESSED_UNIT))
+                        .zip(map.get("source_line_start").and_then(Value::as_u64))
+                        .map(|(file, line)| crate::trace::SourceLoc {
+                            file: file.rsplit('/').next().unwrap_or(file).to_string(),
+                            line: u32::try_from(line).unwrap_or(u32::MAX),
+                        });
+                    scopes.immediates.push(ImmediateAssertionSite {
+                        kind,
+                        scope: format!("{prefix}{}", at.enclosing),
+                        label: at.label.map(str::to_string),
+                        loc,
+                    });
+                }
                 Some("Instance") => {
                     let name = map.get("name").and_then(Value::as_str).unwrap_or("");
                     let body = match map.get("body") {
@@ -7929,5 +8027,47 @@ mod tests {
             }
         }
         assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+    }
+
+    /// mununu#988 / mununu#1001 — every immediate `assert` / `assume` / `cover` is recorded, one
+    /// per instance occurrence, with its kind, label and line; none becomes a property. On the
+    /// parent the walk read only `ConcurrentAssertion` nodes and the list did not exist: the five
+    /// statements below left no trace in the report.
+    #[test]
+    fn every_immediate_assertion_is_recorded_once_per_instance() {
+        let report = translate_ast_json(include_str!("testdata/immediate_assertions.ast.json"))
+            .expect("the fixture translates");
+        let got: Vec<String> = report
+            .immediate_assertions
+            .iter()
+            .map(ImmediateAssertionSite::describe)
+            .collect();
+        assert_eq!(
+            got,
+            [
+                "assume immediate_assertions.sv:13",
+                "assert a_imm (immediate_assertions.sv:16)",
+                "cover immediate_assertions.sv:17",
+                "assert immediate_assertions.sv:7",
+                "assert immediate_assertions.sv:7",
+            ],
+            "{:#?}",
+            report.immediate_assertions
+        );
+        // The two instances of `sub` are told apart by their prefix.
+        let subs: Vec<&str> = report.immediate_assertions[3..]
+            .iter()
+            .map(|s| s.scope.as_str())
+            .collect();
+        assert_ne!(subs[0], subs[1], "{subs:?}");
+        // Only the concurrent `ap` is a property.
+        assert_eq!(report.total(), 1);
+        // The source-index run walks the same statements in the same order: what lets
+        // verify-auto take their lines from it.
+        let index = crate::adapter::slang::source_index_from_ast(include_str!(
+            "testdata/immediate_assertions.ast.json"
+        ))
+        .expect("the fixture is JSON");
+        assert_eq!(index.immediates, report.immediate_assertions);
     }
 }

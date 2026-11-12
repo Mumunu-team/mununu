@@ -142,6 +142,10 @@ pub fn run_ast_json(
 ///
 /// The preprocessed unit is written beside the first staged file (`__mununu_preprocessed.sv`) so
 /// relative `include` paths keep resolving the same way.
+/// The file [`run_ast_json_with_source`] writes the preprocessed unit to. A source position in
+/// its AST is a line of that text, not of any file the user wrote.
+pub(crate) const PREPROCESSED_UNIT: &str = "__mununu_preprocessed.sv";
+
 pub fn run_ast_json_with_source(
     bin: &SlangBin,
     files: &[PathBuf],
@@ -168,7 +172,7 @@ pub fn run_ast_json_with_source(
         .and_then(|f| f.parent())
         .map(Path::to_path_buf)
         .unwrap_or_else(std::env::temp_dir);
-    let pp_path = dir.join("__mununu_preprocessed.sv");
+    let pp_path = dir.join(PREPROCESSED_UNIT);
     std::fs::write(&pp_path, &text).map_err(|e| AdapterError {
         kind: AdapterErrorKind::ParseError,
         message: format!(
@@ -472,6 +476,9 @@ pub struct SourceIndex {
     pub writes: std::collections::BTreeMap<String, Vec<crate::trace::SourceLoc>>,
     /// Per concurrent assertion: its report name (the translator's), its label, its line.
     pub assertions: Vec<(String, Option<String>, crate::trace::SourceLoc)>,
+    /// mununu#988 / mununu#1001 — every immediate assertion, in the translator's walk order,
+    /// with its line in the file the user wrote.
+    pub immediates: Vec<translate::ImmediateAssertionSite>,
 }
 
 /// Run slang once more with `--ast-json-source-info` and read the [`SourceIndex`] from its AST.
@@ -518,6 +525,7 @@ pub fn source_index_from_ast(json: &str) -> Option<SourceIndex> {
     };
     let mut index = SourceIndex {
         assertions: translate::assertion_sites(&root),
+        immediates: translate::immediate_assertion_sites(&root),
         ..SourceIndex::default()
     };
     let mut seen = std::collections::BTreeSet::new();
