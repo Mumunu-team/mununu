@@ -82,7 +82,7 @@ pub fn extract_sva_with_declarations(
 
     let mut files: Vec<PathBuf> = Vec::with_capacity(sources.len());
     for (name, content) in sources {
-        let path = dir.path().join(name);
+        let path = crate::adapter::staged_path(dir.path(), name)?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| AdapterError {
                 kind: AdapterErrorKind::ParseError,

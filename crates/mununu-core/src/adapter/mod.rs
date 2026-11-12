@@ -1356,6 +1356,36 @@ pub(crate) fn subprocess_failure_reason(stderr: &str, stdout: &str) -> String {
 /// the design — it crashed on it, and the portfolio note must let a reader tell the two apart: a
 /// refusal is a construct the member does not carry, an abort is a defect to reproduce. On a
 /// non-Unix host, or for an ordinary exit code, the line is the plain "exited with status" form.
+/// A source a caller NAMED, staged under `dir`: `dir/<name>`, or a refusal when the name would
+/// leave `dir`.
+///
+/// Every SV staging path joins a request-supplied file name (`additional_sources[].name`,
+/// `source_name`, `lift_overrides[].name`) onto its temp dir. `Path::join` with an absolute name
+/// REPLACES the dir, and a `..` component climbs out of it, so an unchecked name lets a request
+/// write a file anywhere the process can. Only plain components (and `.`) are accepted: no root,
+/// no prefix, no `..`, not empty.
+pub(crate) fn staged_path(
+    dir: &std::path::Path,
+    name: &str,
+) -> Result<std::path::PathBuf, AdapterError> {
+    use std::path::Component;
+    let p = std::path::Path::new(name);
+    let plain = p
+        .components()
+        .all(|c| matches!(c, Component::Normal(_) | Component::CurDir));
+    if name.is_empty() || !plain || !p.components().any(|c| matches!(c, Component::Normal(_))) {
+        return Err(AdapterError {
+            kind: AdapterErrorKind::ParseError,
+            message: format!(
+                "source name `{name}` is not a relative file name: a staged source is named by \
+                 plain path components (no leading `/`, no `..`)"
+            ),
+            location: None,
+        });
+    }
+    Ok(dir.join(p))
+}
+
 pub(crate) fn no_verdict_line(
     tool: &std::path::Path,
     status: std::process::ExitStatus,
@@ -1387,6 +1417,42 @@ pub(crate) fn no_verdict_line(
         "`{}` exited with status {status} and no verdict: {reason}",
         tool.display()
     )
+}
+
+#[cfg(test)]
+mod staged_path_tests {
+    use super::staged_path;
+
+    /// mununu#994 sibling — a request-supplied source name stays under the staging dir: plain
+    /// components are joined, and a root, a `..` or an empty name is refused. On the parent every
+    /// staging site used `dir.join(name)`, which an absolute name REPLACES and `..` climbs out of.
+    #[test]
+    fn a_source_name_that_would_leave_the_staging_dir_is_refused() {
+        let dir = std::path::Path::new("stage");
+        assert_eq!(
+            staged_path(dir, "pkg/defs.vh").expect("plain"),
+            dir.join("pkg/defs.vh")
+        );
+        assert_eq!(
+            staged_path(dir, "./a.sv").expect("curdir"),
+            dir.join("a.sv")
+        );
+        let abs = if cfg!(windows) {
+            r"C:\x\a.sv"
+        } else {
+            "/tmp/a.sv"
+        };
+        for bad in [abs, "../a.sv", "pkg/../../a.sv", "", ".", "/"] {
+            let err = staged_path(dir, bad).expect_err(bad);
+            assert!(
+                err.message.contains("not a relative file name"),
+                "{bad}: {}",
+                err.message
+            );
+        }
+        // `Path::join` is what made this a defect: an absolute name replaces the dir.
+        assert_eq!(dir.join(abs), std::path::Path::new(abs));
+    }
 }
 
 #[cfg(test)]

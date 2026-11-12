@@ -221,6 +221,58 @@ fn include_targets(content: &str) -> Vec<String> {
     out
 }
 
+/// mununu#994 — every `` `include `` in `content` that could reach outside the directories a
+/// lift searches, as `(1-based line, the directive's argument as written)`.
+///
+/// slang resolves an absolute `` `include "/etc/x" `` whatever its `-I` list says, and a failed
+/// parse quotes the included text in its diagnostics, which an error response carries back. A
+/// text scan cannot follow a macro, so it accepts only what it can confine: a double-quoted
+/// literal naming a relative path of plain components. Everything else is reported — an absolute
+/// path, a `..` component, the `<…>` form, a macro-built target, a directive with no argument.
+/// Comments are blanked first, so a commented-out directive is not one; a directive inside a
+/// `` `define `` body is reported, since expanding the macro would run it.
+// Read only by the server's request check; the scan itself is tested in every build.
+#[cfg_attr(not(feature = "api"), allow(dead_code))]
+pub(crate) fn unconfined_includes(content: &str) -> Vec<(usize, String)> {
+    use std::path::Component;
+    let text = strip_comments(content);
+    let b = text.as_bytes();
+    let mut out = Vec::new();
+    let kw = b"`include";
+    let mut i = 0;
+    while i + kw.len() <= b.len() {
+        if &b[i..i + kw.len()] != kw || b.get(i + kw.len()).is_some_and(|c| is_ident_char(*c)) {
+            i += 1;
+            continue;
+        }
+        let line = b[..i].iter().filter(|&&c| c == b'\n').count() + 1;
+        let mut j = i + kw.len();
+        while j < b.len() && (b[j] == b' ' || b[j] == b'\t') {
+            j += 1;
+        }
+        let arg_end = b[j..]
+            .iter()
+            .position(|&c| c == b'\n')
+            .map_or(b.len(), |k| j + k);
+        let arg = String::from_utf8_lossy(&b[j..arg_end]).trim().to_string();
+        let confined = (b.get(j) == Some(&b'"'))
+            .then(|| b[j + 1..arg_end].iter().position(|&c| c == b'"'))
+            .flatten()
+            .and_then(|k| std::str::from_utf8(&b[j + 1..j + 1 + k]).ok())
+            .is_some_and(|target| {
+                let p = std::path::Path::new(target);
+                !target.is_empty()
+                    && p.components()
+                        .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+            });
+        if !confined {
+            out.push((line, arg));
+        }
+        i = j.max(i + kw.len());
+    }
+    out
+}
+
 /// Is module `m` *instantiated* anywhere in `content` (excluding its own
 /// declaration site)? Conservative: matches the `m <inst> (` and `m #(` shapes;
 /// a missed instantiation only widens the top-candidate set.
@@ -492,6 +544,31 @@ pub fn discover_sv_files(
 
 #[cfg(test)]
 mod tests {
+    use super::unconfined_includes;
+
+    /// mununu#994 — only a quoted relative path of plain components is confined; every other
+    /// form a text scan cannot follow is reported with its line.
+    #[test]
+    fn an_include_that_could_leave_the_search_path_is_reported() {
+        let src = "`include \"defs.vh\"\n\
+                   `include \"pkg/regs.svh\"\n\
+                   `include \"./local.vh\"\n\
+                   `include \"/etc/hostname\"\n\
+                   `include \"../../secret.vh\"\n\
+                   `include <sys.vh>\n\
+                   `include `INC_PATH\n\
+                   `define PULL `include \"/tmp/x\"\n\
+                   // `include \"/etc/commented\"\n\
+                   `include\n\
+                   `includes_not_a_directive\n\
+                   module m; endmodule\n";
+        let got = unconfined_includes(src);
+        let lines: Vec<usize> = got.iter().map(|(l, _)| *l).collect();
+        assert_eq!(lines, [4, 5, 6, 7, 8, 10], "{got:?}");
+        assert_eq!(got[0].1, "\"/etc/hostname\"");
+        assert!(unconfined_includes("module m; endmodule\n").is_empty());
+    }
+
     use super::*;
 
     fn f(name: &str, content: &str) -> (PathBuf, String) {

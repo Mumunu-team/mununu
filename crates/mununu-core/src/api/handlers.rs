@@ -579,6 +579,14 @@ fn context_import_handler_impl(
         "sv-yosys" | "yosys" => {
             // Yosys-driven SV elaboration via child process. Parity with the
             // CLI `--adapter sv-yosys` flag.
+            confine_inline_includes(
+                std::iter::once(("source", request.content.as_str())).chain(
+                    request
+                        .additional_sources
+                        .iter()
+                        .map(|f| (f.name.as_str(), f.content.as_str())),
+                ),
+            )?;
             let yopts = if !request.additional_sources.is_empty() {
                 let mut additional = std::collections::HashMap::new();
                 for src in &request.additional_sources {
@@ -1817,8 +1825,62 @@ fn sv_check_fsm_handler_impl(request: SvCheckFsmRequest) -> ApiResult<Json<Btor2
 
 /// The core lift of an `sv` request's `lift` object; a malformed entry is a 400.
 fn sv_lift_of(lift: &SvLiftRequest) -> ApiResult<crate::adapter::sv_verify::SvLift> {
-    lift.to_sv_lift().map_err(|message| ApiError::BadRequest {
+    let core = lift.to_sv_lift().map_err(|message| ApiError::BadRequest {
         message,
+        details: None,
+    })?;
+    confine_inline_includes(
+        std::iter::once((core.primary_name.as_str(), core.source.as_str())).chain(
+            core.additional_sources
+                .iter()
+                .chain(&core.lift_overrides)
+                .map(|(n, c)| (n.as_str(), c.as_str())),
+        ),
+    )?;
+    Ok(core)
+}
+
+/// mununu#994 — under a `[server] file_root`, the inline SV of a request may `include` only
+/// files staged with it.
+///
+/// #935 confines every path a request NAMES; this is the half a request's CONTENT names. slang
+/// resolves an absolute `` `include `` whatever its `-I` list says, and a failed parse quotes the
+/// included text in the diagnostics an error response carries, so `` `include "/etc/…" `` read
+/// a file outside the root back to the caller (reproduced on slang 11.0.448 in `mununu-sva`,
+/// 2026-11-12). Without a `file_root` the server is a developer's own and takes the source as
+/// given, as it takes paths.
+fn confine_inline_includes<'a>(
+    sources: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> ApiResult<()> {
+    confine_includes_under(file_root()?.as_deref(), sources)
+}
+
+/// [`confine_inline_includes`] with the root passed in (the testable seam).
+pub(crate) fn confine_includes_under<'a>(
+    root: Option<&std::path::Path>,
+    sources: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> ApiResult<()> {
+    if root.is_none() {
+        return Ok(());
+    }
+    let refused: Vec<String> = sources
+        .into_iter()
+        .flat_map(|(name, content)| {
+            crate::adapter::yosys::source_manifest::unconfined_includes(content)
+                .into_iter()
+                .map(move |(line, arg)| format!("{name}:{line}: `include {arg}"))
+        })
+        .collect();
+    if refused.is_empty() {
+        return Ok(());
+    }
+    Err(ApiError::BadRequest {
+        message: format!(
+            "a server with a file_root accepts an `include in inline source only as a quoted \
+             relative path to a file sent with the request (no leading `/`, no `..`, no `<…>`, no \
+             macro-built target); refused: {}",
+            refused.join("; ")
+        ),
         details: None,
     })
 }
@@ -2132,6 +2194,7 @@ fn sv_extract_sva_handler_impl(
     for f in &request.additional_sources {
         sources.push((f.name.clone(), f.content.clone()));
     }
+    confine_inline_includes(sources.iter().map(|(n, c)| (n.as_str(), c.as_str())))?;
 
     let report = extract_sva(&sources).map_err(|e| ApiError::BadRequest {
         message: format!("SVA extraction (slang): {}", e.message),
@@ -2288,7 +2351,7 @@ fn attach_testbenches(
                 files.push(("Makefile".to_string(), bench.makefile.as_str()));
                 files.push(("replay.gtkw".to_string(), gtkw.as_str()));
                 for (name, content) in files {
-                    let path = dir.join(&name);
+                    let path = crate::adapter::staged_path(&dir, &name).map_err(|e| e.message)?;
                     if let Some(parent) = path.parent() {
                         std::fs::create_dir_all(parent)
                             .map_err(|e| format!("{}: {e}", parent.display()))?;
@@ -6332,6 +6395,40 @@ mod context_sanity_tests {
         assert_eq!(rep.automaton, "A");
         assert_eq!(rep.deadlocks.len(), 1, "{rep}");
         assert_eq!(rep.labels_never_fired, vec!["unused".to_string()]);
+    }
+
+    /// mununu#994 — under a `file_root`, an inline source's `` `include `` may name only a file
+    /// sent with the request; the refusal names each directive by source and line. Without a
+    /// root the source is taken as given. On the parent the absolute include went through to
+    /// slang, whose diagnostic quotes the included file's text in the error body.
+    #[test]
+    fn an_inline_include_outside_the_request_is_refused_under_a_file_root() {
+        let root = tempfile::tempdir().expect("root");
+        let top = "module m;\n`include \"defs.vh\"\n`include \"/etc/hostname\"\nendmodule\n";
+        let extra = "`include \"../outside.vh\"\n";
+        let sources = [("m.sv", top), ("defs.vh", extra)];
+        let err = super::confine_includes_under(Some(root.path()), sources)
+            .expect_err("refused under a root");
+        let ApiError::BadRequest { message, .. } = err else {
+            panic!("a 400: {err:?}")
+        };
+        assert!(
+            message.contains("m.sv:3: `include \"/etc/hostname\""),
+            "{message}"
+        );
+        assert!(
+            message.contains("defs.vh:1: `include \"../outside.vh\""),
+            "{message}"
+        );
+        assert!(
+            !message.contains("m.sv:2"),
+            "a relative include is fine: {message}"
+        );
+        assert!(
+            super::confine_includes_under(Some(root.path()), [("m.sv", "`include \"a.vh\"\n")])
+                .is_ok()
+        );
+        assert!(super::confine_includes_under(None, sources).is_ok());
     }
 
     /// mununu#935 — under a `file_root`, a request path must canonicalise inside it: `..` and a

@@ -666,7 +666,10 @@ fn plan_lift(content: &str, yopts: &YosysOptions, dir: &Path) -> Result<LiftPlan
     // to isolated single-module verification). No-op on sources without them.
     let mut staged = vec![(primary.clone(), strip_port_net_types(content))];
     for (name, src) in &yopts.additional_sources {
-        staged.push((dir.join(name), strip_port_net_types(src)));
+        staged.push((
+            crate::adapter::staged_path(dir, name)?,
+            strip_port_net_types(src),
+        ));
     }
     let sources: Vec<PathBuf> = staged.iter().map(|(p, _)| p.clone()).collect();
 
@@ -1784,7 +1787,7 @@ fn translate_sv_per_module_impl(
 
     let mut sources = vec![primary.clone()];
     for (name, src) in &yopts.additional_sources {
-        let p = tmp.path().join(name);
+        let p = crate::adapter::staged_path(tmp.path(), name)?;
         if let Some(parent) = p.parent() {
             std::fs::create_dir_all(parent).map_err(io_err)?;
         }
