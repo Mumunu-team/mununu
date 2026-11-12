@@ -33,6 +33,15 @@ set -e
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
+# A checkout whose root has no Cargo.toml — in this repository the gh-pages
+# site branch — has nothing for cargo to check: every cargo step below would
+# fail on the missing manifest, never on the change (2026-11-12: the site's
+# badge commit needed --no-verify twice for that reason). Such a tree passes.
+if [ ! -f Cargo.toml ]; then
+    echo "Pre-commit: no Cargo.toml at the repository root (a non-Rust branch such as gh-pages); nothing for cargo to check."
+    exit 0
+fi
+
 if [ "${MUNUNU_PRECOMMIT_FULL:-}" = "1" ]; then
     echo "Pre-commit (FULL): MUNUNU_PRECOMMIT_FULL=1 — running full-workspace make ci..."
     make ci
