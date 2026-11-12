@@ -5538,6 +5538,10 @@ pub(crate) fn extract_front(
             },
             params,
         )?;
+    // mununu#988 / mununu#1001 — the immediate assertions with the lines the user wrote, before
+    // anything reads them: the assumption plan and the notes then name the same statements alike.
+    extraction.immediate_assertions =
+        immediate_sites_with_lines(&extraction.immediate_assertions, declarations.as_ref().ok());
     // Templates become `@mununu_template` annotations of a synthetic source the lift never
     // reads, so a flag and a hand-written instance go through the same parse, naming and
     // duplicate check (2026-10-30; before, the flag was rendered as a `@mununu_guarantee` of the
@@ -8051,10 +8055,7 @@ pub(crate) fn verify_auto_impl(
         .extend(strong_reading_notes(&extraction.strong_readings));
     report
         .notes
-        .extend(dropped_immediate_notes(&immediate_sites_with_lines(
-            &extraction.immediate_assertions,
-            source_index.as_ref().ok(),
-        )));
+        .extend(dropped_immediate_notes(&extraction.immediate_assertions));
     // mununu#490 — a process-memory ceiling was configured AND we hit it before
     // finishing every property. Surface the abstention as a first-class note so a
     // downstream gate sees "this run was truncated by the ceiling" rather than
