@@ -10,6 +10,8 @@ tarball, `mununu.toml`, and your `mununu.lic`.
 
 ## Install (air-gapped or not)
 
+> Source of truth: [`compose.yaml`](compose.yaml) and [`DeploymentConfig`](../crates/mununu-core/src/deployment.rs#L44) (`[server] cors_origins`, `file_root`) — surface: CLI+API
+
 ```bash
 # 1. the image — from the tarball you received (no internet needed) …
 docker load -i mununu-bundle-<version>.tar.gz
@@ -38,6 +40,8 @@ host is trusted. Two settings in `mununu.toml`'s `[server]` table limit what a r
 
 ## Verify a design
 
+> Source of truth: [`create_router_with_ui`](../crates/mununu-core/src/api/server.rs#L41) (the API and the UI on one origin) — surface: CLI+API+UI
+
 Over the CLI, inside the container (designs in `./work`):
 
 ```bash
@@ -54,6 +58,8 @@ Over the UI: open the page, load a CTXDSL model or an RTL design, run it — the
 
 ## What is in the image
 
+> Source of truth: [`docker/Dockerfile.bundle`](../docker/Dockerfile.bundle) — surface: CLI+API
+
 | part | from | why |
 |---|---|---|
 | `mununu` (`--features api`) | built in the image's first stage on the pinned Rust toolchain against Debian trixie's libz3 4.13 | the product: CLI, API, `licence`, the server |
@@ -67,6 +73,8 @@ The licences of everything in the image, and where each text is inside it: [`NOT
 
 ## Memory and the licence
 
+> Source of truth: [`compose.yaml`](compose.yaml#L24) (`mem_limit`), [`MEMORY_BUDGET_ENV`](../crates/mununu-core/src/adapter/memory_budget.rs#L44), [`licence::locate`](../crates/mununu-core/src/licence.rs#L625) — surface: CLI+API
+
 - `mem_limit` in `compose.yaml`: the memory ceiling (`MUNUNU_MAX_PROCESS_MEMORY_BYTES`, auto) fires
   at 80 % of it and the remaining properties abstain with a note — raise the limit, not the ceiling.
 - The licence file is mounted at `/etc/mununu/mununu.lic` and named by `mununu.toml`. Without it the
@@ -77,6 +85,8 @@ The licences of everything in the image, and where each text is inside it: [`NOT
   ([`docs/licensing.md` § The usage ledger](../docs/licensing.md#the-usage-ledger-opt-in-local)).
 
 ## Building the bundle (maintainers)
+
+> Source of truth: [`scripts/bundle.sh`](../scripts/bundle.sh) — surface: CLI-only — a maintainer build script, not a product capability
 
 ```bash
 scripts/bundle.sh                 # UI build → image → dist-bundle/<version>/{tarball, sha256, compose.yaml, mununu.toml, README.md}

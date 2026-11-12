@@ -1,6 +1,6 @@
 # The licence file (`mununu.lic`)
 
-> Source of truth: [`licence::status`](../crates/mununu-core/src/licence.rs) (`mununu licence status`, `GET /api/v1/licence`, the `licence` field of `/api/v1/health` and of every `sv verify-auto` report) — surface: CLI+API
+> Source of truth: [`licence::status`](../crates/mununu-core/src/licence.rs#L641) (`mununu licence status`, `GET /api/v1/licence`, the `licence` field of `/api/v1/health` and of every `sv verify-auto` report) — surface: CLI+API
 
 A self-hosted mununu is licensed by a **file**, not by a server: a signed `mununu.lic` names the
 licensee, the team, the tier and the term, and the binary checks its Ed25519 signature against
@@ -32,6 +32,8 @@ receive a licence file like everyone else — write to the maintainers.
 
 ## Where the file goes
 
+> Source of truth: [`licence::locate`](../crates/mununu-core/src/licence.rs#L625) (`[licensing] file`, then `MUNUNU_LICENSE_FILE`, then `SYSTEM_PATH`) — surface: CLI+API
+
 The first match wins:
 
 1. `[licensing] file = "mununu.lic"` in the deployment's `mununu.toml` (relative to that file;
@@ -43,6 +45,8 @@ The first match wins:
 No file at any of the three is the `missing` state, reported as such.
 
 ## Reading the status
+
+> Source of truth: [`licence::status`](../crates/mununu-core/src/licence.rs#L641) (`mununu licence status`, `GET /api/v1/licence`) — surface: CLI+API
 
 ```bash
 mununu licence status            # human-readable (also: mununu license status)
@@ -119,6 +123,8 @@ The on-prem bundle mounts a directory for it (`deploy/compose.yaml`, commented o
 Mail the file, feed your own dashboard, or delete it; it is yours.
 
 ## The format
+
+> Source of truth: [`LicenceFile`](../crates/mununu-core/src/licence.rs#L134) — surface: CLI+API
 
 A JSON envelope over a signed payload:
 
