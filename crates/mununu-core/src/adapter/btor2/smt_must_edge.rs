@@ -83,7 +83,7 @@ pub enum SmtMustVerdict {
 /// cube that grinds on a wide combinational cone (e.g. i2c's 196-bit freed-input cone) into a
 /// fast, deterministic ⊥ instead of a hang.
 pub(crate) fn cube_smt_rlimit() -> Option<u32> {
-    parse_cube_smt_rlimit(std::env::var("MUNUNU_CUBE_SMT_RLIMIT").ok())
+    parse_cube_smt_rlimit(crate::adapter::env_var::read("MUNUNU_CUBE_SMT_RLIMIT"))
 }
 
 /// Pure parse of the `MUNUNU_CUBE_SMT_RLIMIT` value (extracted so it is unit-testable

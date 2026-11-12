@@ -1531,8 +1531,7 @@ fn discover_assumptions(
     use crate::adapter::btor2::pin::pin_inputs_to_constants;
     const MAX_INPUT_BITS: u32 = 3; // ≤ 8 values per input — a narrow control/enable, not a datapath
     const MAX_CANDIDATE_PINS: usize = 48;
-    let budget_ms: u128 = std::env::var("MUNUNU_ASSUMPTION_BUDGET_MS")
-        .ok()
+    let budget_ms: u128 = crate::adapter::env_var::read("MUNUNU_ASSUMPTION_BUDGET_MS")
         .and_then(|s| s.parse().ok())
         .unwrap_or(90_000);
     let start = std::time::Instant::now();
@@ -1684,8 +1683,7 @@ pub fn discover_game_env_assumption(
     };
     const MAX_INPUT_BITS: u32 = 3; // ≤ 8 values — a narrow control/ack/enable, not a datapath
     const MAX_CANDIDATE_PINS: usize = 48;
-    let budget_ms: u128 = std::env::var("MUNUNU_ASSUMPTION_BUDGET_MS")
-        .ok()
+    let budget_ms: u128 = crate::adapter::env_var::read("MUNUNU_ASSUMPTION_BUDGET_MS")
         .and_then(|s| s.parse().ok())
         .unwrap_or(90_000);
     let start = std::time::Instant::now();
@@ -1808,8 +1806,7 @@ pub fn discover_game_fairness_assumption(
     };
     const MAX_INPUT_BITS: u32 = 3; // ≤ 8 values — a narrow ack/enable, not a datapath
     const MAX_CANDIDATE_PINS: usize = 48;
-    let budget_ms: u128 = std::env::var("MUNUNU_ASSUMPTION_BUDGET_MS")
-        .ok()
+    let budget_ms: u128 = crate::adapter::env_var::read("MUNUNU_ASSUMPTION_BUDGET_MS")
         .and_then(|s| s.parse().ok())
         .unwrap_or(90_000);
     let start = std::time::Instant::now();
@@ -1918,8 +1915,7 @@ fn discover_game_fairness_conjunction(
     };
     const MAX_INPUT_BITS: u32 = 3;
     const MAX_CONJ_BITS: u32 = 6; // ≤ 64 value-combinations; the νμ over k latches is pricier than a pin
-    let budget_ms: u128 = std::env::var("MUNUNU_ASSUMPTION_BUDGET_MS")
-        .ok()
+    let budget_ms: u128 = crate::adapter::env_var::read("MUNUNU_ASSUMPTION_BUDGET_MS")
         .and_then(|s| s.parse().ok())
         .unwrap_or(90_000);
     let start = std::time::Instant::now();
@@ -2069,8 +2065,7 @@ fn discover_game_env_conjunction(
     use crate::adapter::btor2::symbolic_bitblast::exact_two_player_reach_realizable;
     const MAX_INPUT_BITS: u32 = 3;
     const MAX_CONJ_BITS: u32 = 12; // ≤ 4096 combinations searched
-    let budget_ms: u128 = std::env::var("MUNUNU_ASSUMPTION_BUDGET_MS")
-        .ok()
+    let budget_ms: u128 = crate::adapter::env_var::read("MUNUNU_ASSUMPTION_BUDGET_MS")
         .and_then(|s| s.parse().ok())
         .unwrap_or(90_000);
     let start = std::time::Instant::now();
@@ -2688,7 +2683,7 @@ pub fn verify_recoverability_scalable(
 /// The default CEGAR predicate source: the `MUNUNU_CRAIG_REFINE` opt-in (WP otherwise). Used by
 /// every non-planner caller (CLI / API / tests) so their behaviour is unchanged.
 pub fn default_craig_source() -> PredicateSource {
-    if std::env::var_os("MUNUNU_CRAIG_REFINE").is_some() {
+    if crate::adapter::env_var::read("MUNUNU_CRAIG_REFINE").is_some() {
         PredicateSource::CraigInterpolation
     } else {
         PredicateSource::WeakestPrecondition
@@ -3608,7 +3603,7 @@ pub fn verify_safety_scalable(btor2_content: &str) -> Result<PropertyVerdict, St
     const DISCOVERY_LAST_RESORT_WATERMARK: usize = 2;
     if compound_seeds.len() < DISCOVERY_LAST_RESORT_WATERMARK
         && specs.len() + compound_seeds.len() < MAX_AUTO_SEED
-        && std::env::var_os("MUNUNU_NO_INTERP_DISCOVERY").is_none()
+        && crate::adapter::env_var::read("MUNUNU_NO_INTERP_DISCOVERY").is_none()
     {
         for expr in crate::adapter::btor2::refine::discover_relational_predicates(&file, 8, 4_000) {
             if specs.len() + compound_seeds.len() >= MAX_AUTO_SEED {
