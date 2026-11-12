@@ -17547,14 +17547,6 @@ module uart_tx(); endmodule"#;
         ));
     }
 
-    /// OpenTitan coverage, Phase 4 — `assume` statements as preconditions, in all three modes,
-    /// plus a contradictory set. `cnt` counts `inc`; `held` is last cycle's `req`.
-    ///
-    /// - precondition (default): under `assume !inc`, `cnt == 0` HOLDS (its twin `cnt == 1` stays
-    ///   VIOLATED); under `assume req |=> req`, `held |-> req` HOLDS; the set is `consistent`.
-    /// - check: the guarantees are VIOLATED and each assumption is checked (VIOLATED).
-    /// - ignore: the guarantees are VIOLATED and the assumptions are listed as not applied.
-    /// - `assume req` + `assume !req`: `contradictory`, and every HOLDS is flagged vacuous.
     /// mununu#1001 / mununu#988 — the issue's design end to end: an immediate `assume` the lift
     /// drops, an immediate `assert`, and a concurrent property false only where the assume would
     /// have excluded. The run cannot apply the assume, so the row is VIOLATED — and the report
@@ -17617,6 +17609,14 @@ module uart_tx(); endmodule"#;
         );
     }
 
+    /// OpenTitan coverage, Phase 4 — `assume` statements as preconditions, in all three modes,
+    /// plus a contradictory set. `cnt` counts `inc`; `held` is last cycle's `req`.
+    ///
+    /// - precondition (default): under `assume !inc`, `cnt == 0` HOLDS (its twin `cnt == 1` stays
+    ///   VIOLATED); under `assume req |=> req`, `held |-> req` HOLDS; the set is `consistent`.
+    /// - check: the guarantees are VIOLATED and each assumption is checked (VIOLATED).
+    /// - ignore: the guarantees are VIOLATED and the assumptions are listed as not applied.
+    /// - `assume req` + `assume !req`: `contradictory`, and every HOLDS is flagged vacuous.
     #[test]
     #[ignore = "requires slang + sv2v + Yosys + z3 (use the mununu-sva docker image); run with --ignored"]
     fn e2e_assumes_are_applied_as_preconditions() {
