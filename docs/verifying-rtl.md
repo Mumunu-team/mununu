@@ -2047,6 +2047,18 @@ mean, and says so in a per-property `strong-sequence-reading` note. A VIOLATED i
 or `strong(…)` to state the intent and drop the note; an explicit `weak(##[1:$] b)` is refused,
 because it checks nothing.
 
+**Immediate assertions are reported, not checked** (mununu#988, mununu#1001). The lift reads the
+design with `read_slang --ignore-assertions`, and only concurrent assertions are extracted, so an
+`assert (…)`, `assume (…)` or `cover (…)` inside an `always` block is neither checked nor applied.
+The report says so. Immediate `assert` and `cover` statements are listed in a
+`dropped-immediate-assertion` note. Each immediate `assume` is listed in `assumptions.unapplied`
+and in a `dropped-immediate-assume` soundness note: the model allows what the assume excludes, so a
+universal HOLDS transfers, a VIOLATED may break the assume, and an existential or branching HOLDS
+does not. `sv extract-sva` lists them under `immediate_assertions`. Rewrite them as `assert property`
+/ `assume property` / `cover property` to have them checked or applied.
+
+> Source of truth: [`ImmediateAssertionSite`](../crates/mununu-core/src/adapter/slang/translate.rs) — surface: CLI+API
+
 **Ranged antecedents are decided by the exact engine.** The lowering is ordinary nested-box
 safety, and the default `portfolio-sequential` engine decides it — VIOLATED with a witness when a
 later match end fails. With `--engine explicit` (the predicate cube alone) a HOLDS still decides,

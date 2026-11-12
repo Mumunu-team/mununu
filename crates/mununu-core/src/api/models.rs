@@ -2070,6 +2070,22 @@ pub struct SvExtractSvaResponse {
     pub translated: Vec<TranslatedAssertionView>,
     pub unsupported: Vec<UnsupportedAssertionView>,
     pub required_shadows: Vec<ShadowSignalView>,
+    /// mununu#988 / mununu#1001 — immediate `assert` / `assume` / `cover` statements in procedural
+    /// code, one per instance occurrence. None is translated: verify-auto neither checks nor
+    /// applies them, and says so in its notes.
+    pub immediate_assertions: Vec<ImmediateAssertionView>,
+}
+
+/// An immediate assertion the extraction does not translate (mirrors `ImmediateAssertionSite`).
+#[derive(Debug, Serialize)]
+pub struct ImmediateAssertionView {
+    /// `"assert"` | `"assume"` | `"cover"`.
+    pub kind: String,
+    /// `<instance prefix><enclosing scope>`.
+    pub scope: String,
+    pub label: Option<String>,
+    /// `file:line` of the statement, when slang reported one.
+    pub at: Option<String>,
 }
 
 /// A successfully translated assertion (mirrors `TranslatedAssertion`).

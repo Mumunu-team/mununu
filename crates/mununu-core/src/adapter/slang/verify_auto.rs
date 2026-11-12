@@ -671,6 +671,69 @@ fn two_state_fold_notes(
         .collect()
 }
 
+/// The translator's immediate assertions with their lines from the source-index run (the
+/// translator's AST is the preprocessed unit's, whose lines are not the user's). The two walks
+/// run over the same elaborated design, so the lists agree entry for entry; when they do not
+/// (a source-index run that failed or saw another design), the translator's list is kept as is,
+/// placed by scope and label alone.
+fn immediate_sites_with_lines(
+    sites: &[crate::adapter::slang::translate::ImmediateAssertionSite],
+    index: Option<&crate::adapter::slang::SourceIndex>,
+) -> Vec<crate::adapter::slang::translate::ImmediateAssertionSite> {
+    match index {
+        Some(ix)
+            if ix.immediates.len() == sites.len()
+                && ix
+                    .immediates
+                    .iter()
+                    .zip(sites)
+                    .all(|(a, b)| a.kind == b.kind && a.scope == b.scope && a.label == b.label) =>
+        {
+            ix.immediates.clone()
+        }
+        _ => sites.to_vec(),
+    }
+}
+
+/// mununu#988 / mununu#1001 — the immediate assertions the run did not check, as at most two
+/// model-level notes: `dropped-immediate-assertion` for `assert` / `cover` (properties nobody
+/// checked) and `dropped-immediate-assume` for `assume` (constraints the model does not apply).
+fn dropped_immediate_notes(
+    sites: &[crate::adapter::slang::translate::ImmediateAssertionSite],
+) -> Vec<VerificationNote> {
+    let (assumes, checks): (Vec<_>, Vec<_>) = sites.iter().partition(|s| s.kind == SvaKind::Assume);
+    let mut notes = Vec::new();
+    if !checks.is_empty() {
+        notes.push(VerificationNote {
+            kind: "dropped-immediate-assertion".into(),
+            level: NoteLevel::ScopeCaveat,
+            summary: format!(
+                "{} immediate assert / cover statement(s) in procedural code were not checked",
+                checks.len()
+            ),
+            detail: "The lift reads the design with `read_slang --ignore-assertions`, which drops                      every immediate assertion, and verify-auto extracts only concurrent ones.                      These statements are not in the property set: rewrite each as a concurrent                      `assert property` / `cover property` (or an `@mununu_guarantee`) to have it                      checked."
+                .into(),
+            items: checks.iter().map(|s| s.describe()).collect(),
+            property: None,
+        });
+    }
+    if !assumes.is_empty() {
+        notes.push(VerificationNote {
+            kind: "dropped-immediate-assume".into(),
+            level: NoteLevel::SoundnessCaveat,
+            summary: format!(
+                "{} immediate assume statement(s) in procedural code were not applied",
+                assumes.len()
+            ),
+            detail: "The model allows the behaviour these assumptions exclude, so it                      over-approximates the assumed environment. A universal HOLDS (assert                      property, AG, nu) still holds under them. A VIOLATED may be a counterexample                      that breaks one of them. An existential or branching HOLDS (cover, EF, AG EF)                      does not transfer. Rewrite each as a concurrent `assume property` to have it                      applied as a precondition."
+                .into(),
+            items: assumes.iter().map(|s| s.describe()).collect(),
+            property: None,
+        });
+    }
+    notes
+}
+
 /// One per-property `strong-sequence-reading` scope note per unbounded `##[m:$]` the translator
 /// read as an eventuality. IEEE 1800-2017 makes a sequence in an `assert` weak by default, and a
 /// weak unbounded sequence is satisfied by every infinite trace; reading it strongly is what its
@@ -815,6 +878,43 @@ pub(crate) const ASSUMPTION_CONSISTENCY_PROPERTY: &str = "mununu_assumption_cons
 /// consistency property is appended. Pure (no model): the monitor is emitted later, once the
 /// expressions it reads are minted.
 fn plan_assumptions(
+    ex: &mut crate::adapter::slang::translate::TranslationReport,
+    mode: AssumeMode,
+    exempt: &[String],
+) -> (AssumptionReport, Vec<(String, String)>) {
+    let (mut rep, candidates) = plan_concurrent_assumptions(ex, mode, exempt);
+    // mununu#1001 — an immediate `assume (…)` in procedural code is never extracted, so it is
+    // never applied: it is listed as unapplied with the reason, whatever the mode.
+    let immediates: Vec<String> = ex
+        .immediate_assertions
+        .iter()
+        .filter(|s| s.kind == SvaKind::Assume)
+        .map(|s| s.describe())
+        .collect();
+    if !immediates.is_empty() {
+        if rep.mode.is_empty() {
+            // The concurrent planner saw no `assume` and said so on each exempt row; there is
+            // one, it is just not applied.
+            rep.mode = mode.label().to_string();
+            for (_, why) in &mut rep.exempt {
+                *why = "no assumption was applicable: the modifier changed nothing".to_string();
+            }
+        }
+        rep.unapplied.extend(
+            immediates
+                .into_iter()
+                .map(|n| (n, IMMEDIATE_ASSUME_REASON.to_string())),
+        );
+    }
+    (rep, candidates)
+}
+
+/// Why an immediate `assume` is in [`AssumptionReport::unapplied`] (mununu#1001).
+const IMMEDIATE_ASSUME_REASON: &str =
+    "an immediate assume in procedural code is not extracted; only `assume property` is applied";
+
+/// [`plan_assumptions`] over the concurrent `assume property` statements alone.
+fn plan_concurrent_assumptions(
     ex: &mut crate::adapter::slang::translate::TranslationReport,
     mode: AssumeMode,
     exempt: &[String],
@@ -7949,6 +8049,12 @@ pub(crate) fn verify_auto_impl(
     report
         .notes
         .extend(strong_reading_notes(&extraction.strong_readings));
+    report
+        .notes
+        .extend(dropped_immediate_notes(&immediate_sites_with_lines(
+            &extraction.immediate_assertions,
+            source_index.as_ref().ok(),
+        )));
     // mununu#490 — a process-memory ceiling was configured AND we hit it before
     // finishing every property. Surface the abstention as a first-class note so a
     // downstream gate sees "this run was truncated by the ceiling" rather than
@@ -16544,6 +16650,104 @@ module uart_tx(); endmodule"#;
         assert_eq!(subtree_past_depth(&f, f.root(), &minted), 2);
     }
 
+    /// mununu#1001 / mununu#988 — an immediate `assume` reaches the report as unapplied, in every
+    /// mode, even when the design has no concurrent `assume`; immediate statements become the two
+    /// model-level notes; their lines come from the source-index run when its walk agrees. On the
+    /// parent none of this existed: the run said nothing about any of them.
+    #[test]
+    fn an_immediate_assertion_is_reported_as_unchecked_and_an_immediate_assume_as_unapplied() {
+        use crate::adapter::slang::translate::{
+            ImmediateAssertionSite, TranslatedAssertion, TranslationReport,
+        };
+        let site = |kind: SvaKind, line: Option<u32>| ImmediateAssertionSite {
+            kind,
+            scope: "m".to_string(),
+            label: None,
+            loc: line.map(|line| crate::trace::SourceLoc {
+                file: "m.sv".to_string(),
+                line,
+            }),
+        };
+        let sites = vec![
+            site(SvaKind::Assume, None),
+            site(SvaKind::Assert, None),
+            site(SvaKind::Cover, None),
+        ];
+        let report = || TranslationReport {
+            translated: vec![TranslatedAssertion {
+                name: "m_sva_0".to_string(),
+                label: Some("ap".to_string()),
+                kind: SvaKind::Assert,
+                formula: "nu X. ((!(q == 3)) && [] X)".to_string(),
+                recoverability_companion: None,
+                written: None,
+            }],
+            immediate_assertions: sites.clone(),
+            ..TranslationReport::default()
+        };
+        for mode in [
+            AssumeMode::Precondition,
+            AssumeMode::Check,
+            AssumeMode::Ignore,
+        ] {
+            let mut ex = report();
+            let (rep, candidates) = plan_assumptions(&mut ex, mode, &["m_sva_0".to_string()]);
+            assert_eq!(rep.mode, mode.label(), "{mode:?}");
+            assert!(candidates.is_empty(), "{mode:?}");
+            assert_eq!(
+                rep.unapplied,
+                [(
+                    "assume in m".to_string(),
+                    IMMEDIATE_ASSUME_REASON.to_string()
+                )],
+                "{mode:?}"
+            );
+            // The guarantee is left as written: nothing was applied to relativize it against.
+            assert_eq!(ex.translated.len(), 1, "{mode:?}");
+            assert_eq!(ex.translated[0].formula, "nu X. ((!(q == 3)) && [] X)");
+            assert!(
+                rep.exempt
+                    .iter()
+                    .all(|(_, why)| !why.contains("no assume statement")),
+                "{mode:?}: {:?}",
+                rep.exempt
+            );
+        }
+
+        let notes = dropped_immediate_notes(&sites);
+        let kinds: Vec<(&str, NoteLevel)> =
+            notes.iter().map(|n| (n.kind.as_str(), n.level)).collect();
+        assert_eq!(
+            kinds,
+            [
+                ("dropped-immediate-assertion", NoteLevel::ScopeCaveat),
+                ("dropped-immediate-assume", NoteLevel::SoundnessCaveat),
+            ]
+        );
+        assert_eq!(notes[0].items, ["assert in m", "cover in m"]);
+        assert_eq!(notes[1].items, ["assume in m"]);
+        assert!(notes.iter().all(|n| n.property.is_none()));
+        assert!(dropped_immediate_notes(&[]).is_empty());
+
+        // Lines from the source-index run when it walked the same statements, never otherwise.
+        let with_lines = vec![
+            site(SvaKind::Assume, Some(13)),
+            site(SvaKind::Assert, Some(16)),
+            site(SvaKind::Cover, Some(17)),
+        ];
+        let index = crate::adapter::slang::SourceIndex {
+            immediates: with_lines.clone(),
+            ..Default::default()
+        };
+        assert_eq!(immediate_sites_with_lines(&sites, Some(&index)), with_lines);
+        let other = crate::adapter::slang::SourceIndex {
+            immediates: with_lines[..2].to_vec(),
+            ..Default::default()
+        };
+        assert_eq!(immediate_sites_with_lines(&sites, Some(&other)), sites);
+        assert_eq!(immediate_sites_with_lines(&sites, None), sites);
+    }
+
     #[test]
     fn assumptions_are_split_off_and_the_guarantees_relativized_per_mode() {
         use crate::adapter::slang::translate::{TranslatedAssertion, TranslationReport};
@@ -17350,6 +17554,68 @@ module uart_tx(); endmodule"#;
     /// - check: the guarantees are VIOLATED and each assumption is checked (VIOLATED).
     /// - ignore: the guarantees are VIOLATED and the assumptions are listed as not applied.
     /// - `assume req` + `assume !req`: `contradictory`, and every HOLDS is flagged vacuous.
+    /// mununu#1001 / mununu#988 — the issue's design end to end: an immediate `assume` the lift
+    /// drops, an immediate `assert`, and a concurrent property false only where the assume would
+    /// have excluded. The run cannot apply the assume, so the row is VIOLATED — and the report
+    /// now says why: the assume is unapplied, with a soundness note, and the immediate `assert`
+    /// has its own note. On the parent the row was VIOLATED with no word about either.
+    #[test]
+    #[ignore = "requires slang + sv2v + Yosys + z3 (use the mununu-sva docker image); run with --ignored"]
+    fn e2e_immediate_assertions_are_reported_not_dropped_silently() {
+        let design = "module m(input logic clk, input logic [1:0] d, output logic [1:0] q);\n\
+                      always_ff @(posedge clk) begin\n\
+                        q <= d;\n\
+                        assume (d != 2'b11);\n\
+                      end\n\
+                      always_comb a_imm: assert (q != 2'b10);\n\
+                      ap: assert property (@(posedge clk) q != 2'b11);\n\
+                    endmodule\n";
+        let sources = vec![("m.sv".to_string(), design.to_string())];
+        let yopts = YosysOptions {
+            top: Some("m".to_string()),
+            ..Default::default()
+        };
+        let opts = VerifyAutoOptions {
+            portfolio: Some(PortfolioMode::Sequential),
+            ..Default::default()
+        };
+        let report = verify_auto(&sources, &yopts, &opts).expect("verify_auto runs");
+        for n in &report.notes {
+            eprintln!("note {}: {} {:?}", n.kind, n.summary, n.items);
+        }
+        eprintln!("assumptions: {:?}", report.assumptions);
+        let ap = report
+            .properties
+            .iter()
+            .find(|p| p.label.as_deref() == Some("ap"))
+            .expect("the concurrent row");
+        assert!(
+            matches!(ap.outcome, VerifyOutcome::Violated { .. }),
+            "{:?}",
+            ap.outcome
+        );
+        assert_eq!(report.properties.len(), 1, "only `ap` is a row");
+        let note = |kind: &str| {
+            report
+                .notes
+                .iter()
+                .find(|n| n.kind == kind)
+                .unwrap_or_else(|| panic!("no `{kind}` note"))
+        };
+        assert_eq!(note("dropped-immediate-assume").items, ["assume m.sv:4"]);
+        assert_eq!(
+            note("dropped-immediate-assertion").items,
+            ["assert a_imm (m.sv:6)"]
+        );
+        assert_eq!(
+            report.assumptions.unapplied,
+            [(
+                "assume m.sv:4".to_string(),
+                IMMEDIATE_ASSUME_REASON.to_string()
+            )]
+        );
+    }
+
     #[test]
     #[ignore = "requires slang + sv2v + Yosys + z3 (use the mununu-sva docker image); run with --ignored"]
     fn e2e_assumes_are_applied_as_preconditions() {
