@@ -647,7 +647,7 @@
     {
       "id": "rtl_inevitable",
       "display_name": "Inevitable (RTL)",
-      "description": "On every path from reset a cycle where TARGET holds is reached: AF TARGET. The two-sided witness of an invariant: `rtl_invariant P=flag_q == 0` says the flag never fires, `rtl_inevitable TARGET=flag_q == 1` says it always does — on a healthy design the first HOLDS and the second is VIOLATED, which is what shows the invariant is not vacuous.",
+      "description": "On every path from reset a cycle where TARGET holds is reached: AF TARGET (a path that ends in a state with no successor also satisfies it). It is NOT a non-vacuity witness for an invariant: when `rtl_invariant P` HOLDS no reachable state satisfies not-P, so `rtl_inevitable TARGET=not-P` can only hold on a model whose every path from reset deadlocks; the pair detects a deadlocked model, nothing more. To show an invariant is not vacuous, check that the signals driving it can move: `rtl_reachable` over the dual of the driver's reset value (`EF(driver != v)`), the gate the benchmark ledger uses.",
       "kind": "liveness",
       "role": "standalone",
       "domains": ["rtl"],

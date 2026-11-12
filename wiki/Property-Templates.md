@@ -171,7 +171,7 @@ With a single `--template`, the `ID.` prefix on `--template-arg` keys may be dro
 | `rtl_response(TRIGGER, RESPONSE)` | `AG (TRIGGER -> AF RESPONSE)` | inevitability on every path |
 | `rtl_recoverable(TARGET)` | `AG EF TARGET` | recoverability; pin the reset inactive, or reset recovers everything |
 | `rtl_reachable(TARGET)` | `EF TARGET` | a cover |
-| `rtl_inevitable(TARGET)` | `AF TARGET` | on every path from reset; the two-sided witness of an `rtl_invariant` (2026-11-03) |
+| `rtl_inevitable(TARGET)` | `AF TARGET` | on every path from reset (2026-11-03). Not a non-vacuity witness for `rtl_invariant P`: once `AG P` holds, `AF !P` can hold only on a model that deadlocks. For non-vacuity use `rtl_reachable` over the dual of the driver's reset value, `EF(driver != v)` (mununu#958) |
 | `rtl_always_eventually(TARGET)` | `AG AF TARGET` | every path keeps returning to TARGET; stronger than `rtl_recoverable` (2026-11-03) |
 
 Bounded response (`within K cycles`) stays with SVA (`a |-> ##[1:K] b`), which verify-auto translates.
