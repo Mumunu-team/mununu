@@ -668,6 +668,40 @@ pub fn verify_justice_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The #985 tier's shrunk design: `r0` runs 0, 0, 1, 1, … on every path, so the constraint
+    /// `r0 == 0` fails at step 2 and no infinite path satisfies the constraints: the justice
+    /// set {¬i0, i0} HOLDS. The constraint reads only `r0`, outside the literals' cone; the
+    /// exact rung's cone slice used to drop it and report Violated.
+    const DISJOINT_DYING_CONSTRAINT: &str = "1 sort bitvec 1\n2 state 1 r0\n3 state 1 r1\n\
+        4 input 1 i0\n5 constd 1 0\n6 init 1 2 5\n7 constd 1 0\n8 init 1 3 7\n9 next 1 2 3\n\
+        10 constd 1 1\n11 next 1 3 10\n12 not 1 4\n13 not 1 4\n14 not 1 13\n15 constd 1 0\n\
+        16 eq 1 2 15\n17 constraint 16\n18 justice 2 12 14\n";
+
+    #[test]
+    fn a_constraint_disjoint_from_the_literals_still_kills_every_path() {
+        let v = verify_justice(DISJOINT_DYING_CONSTRAINT, JusticeRung::Exact).unwrap();
+        assert_eq!(v[0].verdict, PropertyVerdict::Holds, "{:?}", v[0]);
+        // Control: without the constraint the toggling input is a fair path.
+        let free: String = DISJOINT_DYING_CONSTRAINT
+            .lines()
+            .filter(|l| !l.contains("constraint"))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        let v = verify_justice(&free, JusticeRung::Exact).unwrap();
+        assert_eq!(v[0].verdict, PropertyVerdict::Violated, "{:?}", v[0]);
+    }
+
+    /// The `fair` sibling: `r0` goes 0 → 1 and stays, so `fair (r0 == 0)` holds only
+    /// finitely often and no path is fair, although {¬i0, i0} toggles freely and `r0` is
+    /// outside the literals' cone.
+    #[test]
+    fn a_fair_line_disjoint_from_the_literals_still_removes_every_fair_path() {
+        let d = "1 sort bitvec 1\n2 state 1 r0\n3 zero 1\n4 init 1 2 3\n5 one 1\n6 next 1 2 5\n\
+                 7 input 1 i0\n8 not 1 7\n9 not 1 2\n10 fair 9\n11 justice 2 7 8\n";
+        let v = verify_justice(d, JusticeRung::Exact).unwrap();
+        assert_eq!(v[0].verdict, PropertyVerdict::Holds, "{:?}", v[0]);
+    }
     use crate::adapter::btor2::symbolic_bitblast::exact_symbolic_verdict_with_witness_and_options;
 
     /// A free-running 2-bit counter: `lo ∧ hi` recurs forever → a fair cycle exists → VIOLATED (sat).

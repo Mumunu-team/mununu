@@ -1126,8 +1126,12 @@ pub(crate) fn cone_slice(file: &Btor2File, atoms: &[String]) -> Btor2File {
     // every constraint / fairness line whose operand DAG touches the current
     // cone (and all signals it references), until neither step grows `keep`.
     // `keep` only ever grows and is bounded by the line count, so this
-    // terminates. Constraints/fairness disjoint from the cone are correctly
-    // left out — they cannot restrict any in-cone signal.
+    // terminates. A `constraint` / `fair` line joins even when it is disjoint
+    // from the cone (found by the #985 tier): it restricts which PATHS exist — a disjoint
+    // constraint that fails at step 2 makes every path finite, a disjoint
+    // `fair` the rest of the design cannot meet removes every fair path — so
+    // dropping it changes the product's verdict. Only another property's
+    // `justice` set disjoint from the cone is left out.
     loop {
         while let Some(nid) = work.pop() {
             if !keep.insert(nid) {
@@ -1159,7 +1163,10 @@ pub(crate) fn cone_slice(file: &Btor2File, atoms: &[String]) -> Btor2File {
                 Node::Justice { signals } => signals.iter().map(|s| s.nid()).collect(),
                 _ => continue,
             };
-            if operands.iter().any(|&op| dag_touches_keep(file, op, &keep)) {
+            // A `constraint` / `fair` joins unconditionally (a global path restriction,
+            // found by the #985 tier); another property's `justice` only when it touches the cone.
+            let global = matches!(line.node, Node::Constraint { .. } | Node::Fair { .. });
+            if global || operands.iter().any(|&op| dag_touches_keep(file, op, &keep)) {
                 work.push(line.nid);
                 work.extend(operands);
                 grew = true;
@@ -9138,12 +9145,13 @@ mod tests {
         );
     }
 
-    /// R46-6a — a constraint whose signals are ALL out-of-cone (it
-    /// constrains a different cluster's registers) does NOT pull anything
-    /// in: it cannot restrict any in-cone signal, so dropping it stays
-    /// sound and the clustering reduction is preserved.
+    /// A constraint whose signals are ALL out-of-cone (it constrains a
+    /// different cluster's registers) still joins the slice: it restricts
+    /// which paths exist, so dropping it can turn a verdict (the #985 tier's
+    /// finding, 2026-11-12; R46-6a's version of this test asserted the
+    /// opposite).
     #[test]
-    fn cone_slice_drops_constraint_disjoint_from_cone() {
+    fn cone_slice_keeps_a_constraint_disjoint_from_the_cone() {
         let src = r#"
 1 sort bitvec 1
 2 zero 1
@@ -9178,16 +9186,16 @@ mod tests {
             "in-cone register retained; got {state_syms:?}"
         );
         assert!(
-            !state_syms.contains("reg_b") && !state_syms.contains("reg_c"),
-            "a constraint over only out-of-cone registers must NOT pull them \
-             into the slice (it cannot restrict the cone); got {state_syms:?}"
+            state_syms.contains("reg_b") && state_syms.contains("reg_c"),
+            "a constraint over only out-of-cone registers must pull them into \
+             the slice; got {state_syms:?}"
         );
         assert!(
-            !sliced
+            sliced
                 .lines
                 .iter()
                 .any(|l| matches!(l.node, Node::Constraint { .. })),
-            "the cone-disjoint constraint must be dropped"
+            "the cone-disjoint constraint must survive the slice"
         );
     }
 

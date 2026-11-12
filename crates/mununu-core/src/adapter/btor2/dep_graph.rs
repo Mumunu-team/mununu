@@ -277,10 +277,12 @@ pub fn cone_leaf_nids(file: &Btor2File, atoms: &[String]) -> HashSet<Nid> {
 ///   out-of-cone leaf feeding a kept register's `next` would otherwise be pinned
 ///   wrongly). `init` is (near-always) a constant and is left unfollowed,
 ///   matching the previous Next-only closure.
-/// - **assume/fairness**: a `constraint`/`fair`/`justice` whose COMBINATIONAL
-///   cone touches the current cone restricts the reachable state space, so its
-///   signals join the cone (the selective pullback below). Omitting it would
-///   silently drop an assumption and turn the reduction unsound.
+/// - **assume/fairness**: every `constraint` / `fair` restricts which paths exist,
+///   so its signals join the cone even when they are disjoint from it (found by the #985 tier:
+///   a disjoint constraint that fails at step 2 makes every path finite); another
+///   property's `justice` set joins when its COMBINATIONAL cone touches the
+///   current cone. Omitting either would silently drop an assumption and turn the
+///   reduction unsound.
 ///
 /// Time O(N + E) integer reachability (a dense `seen`/`leaves` over line NIDs),
 /// no per-symbol `String` hashing / dep-graph allocation.
@@ -355,16 +357,20 @@ fn cone_closure(file: &Btor2File, atoms: &[String]) -> (HashSet<Nid>, HashSet<Ni
     let mut leaves: HashSet<Nid> = HashSet::new();
     drain_cone(file, &next_val, &mut work, &mut seen, &mut leaves);
 
-    // Selective constraint / fair / justice pullback (R46-6a): a constraint whose
-    // COMBINATIONAL cone shares a leaf with the current cone joins it; iterate to
-    // a fixpoint (`pulled` grows monotonically, bounded by the constraint count).
+    // Constraint / fair / justice pullback (R46-6a; the unconditional half from the #985 tier, 2026-11-12):
+    // every `constraint` and `fair` line joins the cone — they restrict which paths EXIST (a
+    // constraint the disjoint part fails at step 2 makes every path finite; a `fair` it cannot
+    // meet infinitely often removes every fair path), so even one whose signals are all
+    // outside the cone changes the product's verdict. Another property's `justice` set joins
+    // only when its combinational cone shares a leaf with the current cone. Iterate to a
+    // fixpoint (`pulled` grows monotonically, bounded by the line count).
     let mut pulled: HashSet<Nid> = HashSet::new();
     loop {
         let mut grew = false;
         for line in &file.lines {
-            let sigs: Vec<Nid> = match &line.node {
-                Node::Constraint { signal } | Node::Fair { signal } => vec![signal.nid()],
-                Node::Justice { signals } => signals.iter().map(|s| s.nid()).collect(),
+            let (sigs, global): (Vec<Nid>, bool) = match &line.node {
+                Node::Constraint { signal } | Node::Fair { signal } => (vec![signal.nid()], true),
+                Node::Justice { signals } => (signals.iter().map(|s| s.nid()).collect(), false),
                 _ => continue,
             };
             for sig in sigs {
@@ -372,7 +378,7 @@ fn cone_closure(file: &Btor2File, atoms: &[String]) -> (HashSet<Nid>, HashSet<Ni
                     continue;
                 }
                 let comb = cone_combinational_leaf_nids(file, sig);
-                if comb.iter().any(|n| leaves.contains(n)) {
+                if global || comb.iter().any(|n| leaves.contains(n)) {
                     pulled.insert(sig);
                     work.push(sig);
                     grew = true;
@@ -799,15 +805,16 @@ pub fn bit_cone(file: &Btor2File, atoms: &[String]) -> Option<HashMap<Nid, Vec<b
     if !drain(&mut work, &mut cone) {
         return None;
     }
-    // Selective `constraint` / `fair` / `justice` pullback, as the signal-level cone does: a
-    // side condition that shares a leaf BIT with the cone restricts it and joins whole.
+    // `constraint` / `fair` / `justice` pullback, as the signal-level cone does: every
+    // `constraint` and `fair` joins whole (a global path restriction; found by the #985 tier); another
+    // property's `justice` set joins when it shares a leaf BIT with the cone.
     let mut pulled: HashSet<Nid> = HashSet::new();
     loop {
         let mut grew = false;
         for line in &file.lines {
-            let sigs: Vec<Nid> = match &line.node {
-                Node::Constraint { signal } | Node::Fair { signal } => vec![signal.nid()],
-                Node::Justice { signals } => signals.iter().map(|s| s.nid()).collect(),
+            let (sigs, global): (Vec<Nid>, bool) = match &line.node {
+                Node::Constraint { signal } | Node::Fair { signal } => (vec![signal.nid()], true),
+                Node::Justice { signals } => (signals.iter().map(|s| s.nid()).collect(), false),
                 _ => continue,
             };
             for sig in sigs {
@@ -821,7 +828,7 @@ pub fn bit_cone(file: &Btor2File, atoms: &[String]) -> Option<HashMap<Nid, Vec<b
                     continue;
                 };
                 let bits: Vec<(Nid, usize)> = s.iter().flatten().copied().collect();
-                if bits.iter().any(|b| cone.contains(b)) {
+                if global || bits.iter().any(|b| cone.contains(b)) {
                     pulled.insert(sig);
                     work.extend(bits);
                     grew = true;
@@ -1139,9 +1146,11 @@ mod tests {
     }
 
     #[test]
-    fn state_cone_nids_ignores_constraint_disjoint_from_cone() {
-        // A constraint over only out-of-cone registers does not pull them
-        // in — it cannot restrict the cone, so dropping it stays sound.
+    fn state_cone_nids_retains_a_constraint_disjoint_from_the_cone() {
+        // A constraint over only out-of-cone registers still restricts which
+        // paths exist (one that fails at some step makes every path finite),
+        // so its registers join the cone (the #985 tier's finding, 2026-11-12;
+        // this test used to assert the opposite).
         let src = r#"
 1 sort bitvec 1
 2 zero 1
@@ -1163,9 +1172,9 @@ mod tests {
         let keep = state_cone_nids(&file, &["reg_a".to_string()]);
         assert!(keep.contains(&3), "reg_a (nid 3) in cone; got {keep:?}");
         assert!(
-            !keep.contains(&7) && !keep.contains(&10),
-            "a constraint over only out-of-cone registers must not pull them \
-             into the cone; got {keep:?}"
+            keep.contains(&7) && keep.contains(&10),
+            "a constraint over only out-of-cone registers must pull them into \
+             the cone; got {keep:?}"
         );
     }
 
@@ -1271,16 +1280,19 @@ mod bit_cone_tests {
         assert_eq!(kept(&c, 3), Vec::<usize>::new());
     }
 
-    /// A `constraint` that shares a bit with the cone joins it whole; one that does not stays
-    /// out. An array in the cone gives `None` (the signal-level path's memory havoc applies).
+    /// A `constraint` joins the bit cone whole, whether or not it shares a bit with it (a
+    /// disjoint constraint still restricts which paths exist). An array in the cone gives
+    /// `None` (the signal-level path's memory havoc applies).
     #[test]
     fn x602_side_conditions_and_arrays() {
         let btor2 = "1 sort bitvec 8\n2 input 1 a\n3 input 1 b\n4 sort bitvec 1\n\
                      5 slice 4 2 0 0 a0\n6 slice 4 2 7 7 a7\n7 slice 4 3 0 0 b0\n\
                      8 and 4 6 7\n9 constraint 8\n";
-        // Atom reads a[0]; the constraint is over a[7] and b[0] — disjoint, stays out.
+        // Atom reads a[0]; the constraint is over a[7] and b[0] — disjoint, joins anyway.
         let c = cone_of(btor2, &["a0"]);
-        assert_eq!(bit_cone_bits(&c), 1);
+        assert_eq!(bit_cone_bits(&c), 3);
+        assert_eq!(kept(&c, 2), vec![0, 7]);
+        assert_eq!(kept(&c, 3), vec![0]);
         // Atom reads a[7]; the constraint shares it and pulls b[0] in.
         let c = cone_of(btor2, &["a7"]);
         assert_eq!(kept(&c, 2), vec![7]);
