@@ -124,6 +124,15 @@ fn emit_atom(
                  input, or a named output, so the response monitor cannot bind it"
             ))
         })?;
+    // mununu#1012 — a constant past the signal's width fixes the comparison; a `constd` at the
+    // signal's sort would keep only its low bits.
+    if let Some(truth) = crate::adapter::btor2::bad_monitor::out_of_range_cmp(
+        parser::bv_width(file, sort),
+        op,
+        value,
+    ) {
+        return Ok(e.push(format!("constd {bool_sort} {}", u8::from(truth))));
+    }
     let cst = e.push(format!("constd {sort} {value}"));
     Ok(e.push(format!("{} {bool_sort} {nid} {cst}", btor2_cmp_keyword(op))))
 }
