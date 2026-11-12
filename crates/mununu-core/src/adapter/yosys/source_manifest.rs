@@ -542,6 +542,55 @@ pub fn discover_sv_files(
     Ok(out)
 }
 
+/// mununu#988 — the immediate `assert (…)` / `assume (…)` / `cover (…)` statements in one SV
+/// source, as `(keyword, 1-based line)`, in source order.
+///
+/// `read_slang --ignore-assertions` drops every one of them, so a lift that reports
+/// `property_count: 0` must say they were there. A token scan, not a parse: comments are blanked
+/// first ([`strip_comments`]), the keyword must stand alone (`$assertoff`, `my_assert(` do not
+/// count), and the next token must be `(`, `#0 (` or `final (` — so `assert property`,
+/// `cover sequence` and `restrict property` (concurrent) are never counted. An `include`d file is
+/// not read: the count is of this text.
+pub(crate) fn immediate_assertion_lines(content: &str) -> Vec<(&'static str, usize)> {
+    let text = strip_comments(content);
+    // Bytes throughout: a byte index into a `str` may fall inside a multi-byte character.
+    let b = text.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        let kw = ["assert", "assume", "cover"]
+            .into_iter()
+            .find(|k| b[i..].starts_with(k.as_bytes()));
+        let boundary_before = i == 0 || !is_ident_char(b[i - 1]);
+        let Some(kw) = kw.filter(|_| boundary_before) else {
+            i += 1;
+            continue;
+        };
+        let mut j = i + kw.len();
+        if j < b.len() && is_ident_char(b[j]) {
+            i = j;
+            continue;
+        }
+        let skip_ws = |mut j: usize| {
+            while j < b.len() && b[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            j
+        };
+        j = skip_ws(j);
+        if b[j..].starts_with(b"#0") {
+            j = skip_ws(j + 2);
+        } else if b[j..].starts_with(b"final") && !b.get(j + 5).is_some_and(|c| is_ident_char(*c)) {
+            j = skip_ws(j + 5);
+        }
+        if b.get(j) == Some(&b'(') {
+            out.push((kw, b[..i].iter().filter(|&&c| c == b'\n').count() + 1));
+        }
+        i += kw.len();
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::unconfined_includes;
@@ -567,6 +616,33 @@ mod tests {
         assert_eq!(lines, [4, 5, 6, 7, 8, 10], "{got:?}");
         assert_eq!(got[0].1, "\"/etc/hostname\"");
         assert!(unconfined_includes("module m; endmodule\n").is_empty());
+    }
+
+    use super::immediate_assertion_lines;
+
+    /// mununu#988 — the immediate forms are counted with their lines; the concurrent forms, a
+    /// commented-out statement, a longer identifier and a system task are not; a non-ASCII
+    /// comment does not throw the scan off a character boundary.
+    #[test]
+    fn immediate_assertions_are_found_by_keyword_and_line() {
+        let src = "module m(input logic clk, input logic [1:0] d);\n\
+                   // é — a non-ASCII comment; assert (d) here is commented out\n\
+                   always_ff @(posedge clk) begin\n\
+                     assume (d != 2'b11);\n\
+                     a_imm: assert (d != 2'b10);\n\
+                   end\n\
+                   always_comb assert #0 (d != 0);\n\
+                   always_comb cover final(d == 1);\n\
+                   ap: assert property (@(posedge clk) d != 3);\n\
+                   cp: cover property (@(posedge clk) d == 2);\n\
+                   initial begin my_assert(1); $assertoff; end\n\
+                   /* assume (0); */\n\
+                   endmodule\n";
+        assert_eq!(
+            immediate_assertion_lines(src),
+            [("assume", 4), ("assert", 5), ("assert", 7), ("cover", 8)]
+        );
+        assert!(immediate_assertion_lines("").is_empty());
     }
 
     use super::*;

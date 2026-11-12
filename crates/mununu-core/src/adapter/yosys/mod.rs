@@ -1159,6 +1159,28 @@ pub fn translate_sv(
         }
     }
 
+    // mununu#988 — the lift dropped every immediate assertion (`--ignore-assertions`, see
+    // `read_slang_command`): say so, or a design whose only checks are immediate ones lifts to a
+    // model with no property and no word about why.
+    let immediates = source_manifest::immediate_assertion_lines(content);
+    if !immediates.is_empty() {
+        let listed: Vec<String> = immediates
+            .iter()
+            .map(|(kw, line)| format!("{kw} at line {line}"))
+            .collect();
+        out.warnings.push(crate::adapter::AdapterWarning {
+            kind: crate::adapter::WarningKind::UnsupportedConstruct,
+            message: format!(
+                "adapter/yosys: {} immediate assertion(s) dropped by the lift ({}); the model \
+                 carries no property for them. Write them as concurrent `assert property` / \
+                 `assume property` and run `mununu sv verify-auto` to have them checked",
+                immediates.len(),
+                listed.join(", ")
+            ),
+            location: None,
+        });
+    }
+
     Ok(out)
 }
 
@@ -3056,7 +3078,8 @@ fn emit_cutpoints(signals: &[String]) -> String {
 /// `constraint` lines where, without it, they become `$check` cells — so the lifted model is an
 /// OVER-approximation of the assumed environment. Concurrent `assume property` statements are put
 /// back by the slang `extract_sva` path (`plan_assumptions`, `--assumes precondition`); an
-/// immediate `assume` in procedural code is extracted by neither path. Without it: a universal
+/// immediate `assume` in procedural code is extracted by neither path — verify-auto reports each
+/// one (`assumptions.unapplied`, a `dropped-immediate-assume` note; mununu#1001). Without it: a universal
 /// (`AG` / `nu`) `holds` still transfers, a counterexample may violate the dropped assume, and an
 /// existential or branching `holds` (`EF`, `AG EF`) does not transfer), `--ignore-timing` (slang is stricter than `read_verilog` about
 /// `#`-delay timing controls, which are not part of the design's cycle behaviour — SOUNDNESS:
