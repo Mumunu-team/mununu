@@ -90,6 +90,33 @@ fn expr_strategy(regs: usize, inputs: usize, width: u32, depth: u32) -> BoxedStr
     .boxed()
 }
 
+/// A 1-bit property signal over the design.
+#[derive(Debug, Clone)]
+enum Literal {
+    RegEq(usize, u64),
+    LowBit(Expr),
+    /// The complement of a literal (the justice tier's alternating sets `{l, ¬l}`).
+    Neg(Box<Literal>),
+}
+
+impl From<(Option<(usize, u64)>, Option<Expr>)> for Literal {
+    fn from(choice: (Option<(usize, u64)>, Option<Expr>)) -> Self {
+        match choice {
+            (Some((i, c)), _) => Literal::RegEq(i, c),
+            (None, Some(e)) => Literal::LowBit(e),
+            (None, None) => Literal::RegEq(0, 0),
+        }
+    }
+}
+
+fn literal_strategy(regs: usize, inputs: usize, width: u32) -> BoxedStrategy<Literal> {
+    prop_oneof![
+        (0..regs, 0..(1u64 << width)).prop_map(|(i, c)| Literal::RegEq(i, c)),
+        expr_strategy(regs, inputs, width, 2).prop_map(Literal::LowBit),
+    ]
+    .boxed()
+}
+
 /// Emit `e` into `lines`, returning its nid. Every register, input and intermediate
 /// shares one width so the menu needs no slicing; the `ite` condition is the low bit
 /// of its first operand (`slice` to width 1).
@@ -104,6 +131,75 @@ struct Emitter {
 }
 
 impl Emitter {
+    /// Sorts, registers, inputs, inits and nexts: everything but the property lines.
+    fn body(width: u32, regs: usize, inputs: usize, inits: &[u64], nexts: &[Expr]) -> Self {
+        let mut em = Emitter {
+            lines: Vec::new(),
+            next_nid: 1,
+            sort_w: 0,
+            sort_1: 0,
+            width,
+            reg_nids: Vec::new(),
+            in_nids: Vec::new(),
+        };
+        em.sort_w = em.push(format!("sort bitvec {width}"));
+        em.sort_1 = if width == 1 {
+            em.sort_w
+        } else {
+            em.push("sort bitvec 1".to_string())
+        };
+        for i in 0..regs {
+            let s = em.sort_w;
+            let n = em.push(format!("state {s} r{i}"));
+            em.reg_nids.push(n);
+        }
+        for i in 0..inputs {
+            let s = em.sort_w;
+            let n = em.push(format!("input {s} i{i}"));
+            em.in_nids.push(n);
+        }
+        for (i, c) in inits.iter().enumerate() {
+            let s = em.sort_w;
+            let cn = em.push(format!("constd {s} {c}"));
+            let r = em.reg_nids[i];
+            em.push(format!("init {s} {r} {cn}"));
+        }
+        for (i, e) in nexts.iter().enumerate() {
+            let n = em.emit(e);
+            let s = em.sort_w;
+            let r = em.reg_nids[i];
+            em.push(format!("next {s} {r} {n}"));
+        }
+        em
+    }
+
+    /// A 1-bit signal: `register == constant`, or the low bit of an expression.
+    fn literal(&mut self, l: &Literal) -> i64 {
+        match l {
+            Literal::RegEq(i, c) => {
+                let s = self.sort_w;
+                let cn = self.push(format!("constd {s} {c}"));
+                let r = self.reg_nids[*i];
+                let s1 = self.sort_1;
+                self.push(format!("eq {s1} {r} {cn}"))
+            }
+            Literal::LowBit(e) => {
+                let n = self.emit(e);
+                if self.width == 1 {
+                    n
+                } else {
+                    let s1 = self.sort_1;
+                    self.push(format!("slice {s1} {n} 0 0"))
+                }
+            }
+            Literal::Neg(inner) => {
+                let n = self.literal(inner);
+                let s1 = self.sort_1;
+                self.push(format!("not {s1} {n}"))
+            }
+        }
+    }
+
     fn push(&mut self, s: String) -> i64 {
         let nid = self.next_nid;
         self.lines.push(format!("{nid} {s}"));
@@ -173,62 +269,8 @@ pub fn design_strategy() -> BoxedStrategy<Design> {
             (Just(width), Just(regs), Just(inputs), nexts, inits, bad)
         })
         .prop_map(|(width, regs, inputs, nexts, inits, bad)| {
-            let mut em = Emitter {
-                lines: Vec::new(),
-                next_nid: 1,
-                sort_w: 0,
-                sort_1: 0,
-                width,
-                reg_nids: Vec::new(),
-                in_nids: Vec::new(),
-            };
-            em.sort_w = em.push(format!("sort bitvec {width}"));
-            em.sort_1 = if width == 1 {
-                em.sort_w
-            } else {
-                em.push("sort bitvec 1".to_string())
-            };
-            for i in 0..regs {
-                let s = em.sort_w;
-                let n = em.push(format!("state {s} r{i}"));
-                em.reg_nids.push(n);
-            }
-            for i in 0..inputs {
-                let s = em.sort_w;
-                let n = em.push(format!("input {s} i{i}"));
-                em.in_nids.push(n);
-            }
-            for (i, c) in inits.iter().enumerate() {
-                let s = em.sort_w;
-                let cn = em.push(format!("constd {s} {c}"));
-                let r = em.reg_nids[i];
-                em.push(format!("init {s} {r} {cn}"));
-            }
-            for (i, e) in nexts.iter().enumerate() {
-                let n = em.emit(e);
-                let s = em.sort_w;
-                let r = em.reg_nids[i];
-                em.push(format!("next {s} {r} {n}"));
-            }
-            let bad_nid = match bad {
-                (Some((i, c)), _) => {
-                    let s = em.sort_w;
-                    let cn = em.push(format!("constd {s} {c}"));
-                    let r = em.reg_nids[i];
-                    let s1 = em.sort_1;
-                    em.push(format!("eq {s1} {r} {cn}"))
-                }
-                (_, Some(e)) => {
-                    let n = em.emit(&e);
-                    if width == 1 {
-                        n
-                    } else {
-                        let s1 = em.sort_1;
-                        em.push(format!("slice {s1} {n} 0 0"))
-                    }
-                }
-                _ => unreachable!(),
-            };
+            let mut em = Emitter::body(width, regs, inputs, &inits, &nexts);
+            let bad_nid = em.literal(&Literal::from(bad));
             em.push(format!("bad {bad_nid}"));
             Design {
                 text: em.lines.join("\n") + "\n",
@@ -400,4 +442,288 @@ fn the_floor_rejects_a_one_sided_or_empty_tally() {
         unknown: 8,
     };
     assert_eq!(check_floor(ok), Ok(()));
+}
+
+// ── The justice pair (mununu#985): the k-liveness rung against the exact fair-cycle fixpoint ──
+//
+// The k-liveness rung (#984) is a new HOLDS-producing path for the justice verbs: a round
+// counter over the justice set (and every `fair` literal), proved bounded as plain `bad`
+// safety. A wrong monitor proves a design that has a fair infinite path. The oracle is the
+// exact rung (`JusticeRung::Exact`, the fair-EG fixpoint over the full state space), complete
+// on these widths. The decider here is the monitor plus the in-process native k-induction,
+// not the shipped proof-directed portfolio: rIC3 and Pono are subprocesses that may be absent
+// (the tier would pass by skipping, #981), and the property under test is the monitor's
+// soundness, which every member inherits.
+
+use mununu_core::adapter::btor2::kliveness_monitor::emit_kliveness_monitor;
+use mununu_core::adapter::justice::{JusticeRung, verify_justice};
+use mununu_core::verdict::PropertyVerdict;
+
+/// A random design with one `justice` set (1–3 literals, or a complementary pair), optionally a `fair` literal and a
+/// `constraint`.
+pub fn justice_design_strategy() -> BoxedStrategy<Design> {
+    (1u32..=3, 1usize..=3, 0usize..=2)
+        .prop_flat_map(|(width, regs, inputs)| {
+            let nexts = proptest::collection::vec(expr_strategy(regs, inputs, width, 3), regs);
+            let inits = proptest::collection::vec(0..(1u64 << width), regs);
+            // a third of the sets are `{l, ¬l}`: they hold iff `l` stops toggling, the case a
+            // same-step conjunction gets wrong.
+            let set = prop_oneof![
+                2 => proptest::collection::vec(literal_strategy(regs, inputs, width), 1..=3),
+                1 => literal_strategy(regs, inputs, width)
+                    .prop_map(|l| vec![l.clone(), Literal::Neg(Box::new(l))]),
+            ];
+            let fair = proptest::option::weighted(0.3, literal_strategy(regs, inputs, width));
+            let constraint =
+                proptest::option::weighted(0.15, literal_strategy(regs, inputs, width));
+            (
+                Just(width),
+                Just(regs),
+                Just(inputs),
+                nexts,
+                inits,
+                set,
+                fair,
+                constraint,
+            )
+        })
+        .prop_map(
+            |(width, regs, inputs, nexts, inits, set, fair, constraint)| {
+                let mut em = Emitter::body(width, regs, inputs, &inits, &nexts);
+                let lits: Vec<i64> = set.iter().map(|l| em.literal(l)).collect();
+                if let Some(f) = fair {
+                    let n = em.literal(&f);
+                    em.push(format!("fair {n}"));
+                }
+                if let Some(c) = constraint {
+                    let n = em.literal(&c);
+                    em.push(format!("constraint {n}"));
+                }
+                let list: Vec<String> = lits.iter().map(i64::to_string).collect();
+                em.push(format!("justice {} {}", lits.len(), list.join(" ")));
+                Design {
+                    text: em.lines.join("\n") + "\n",
+                }
+            },
+        )
+        .boxed()
+}
+
+/// The widths the tier climbs (`k = 2^w − 1` rounds); stops at the first width native leaves
+/// undecided, as the shipped ladder does.
+const KL_WIDTHS: &[u32] = &[1, 2, 4];
+
+/// What a k-liveness decider says about one justice set: `Some(w)` = proved at counter width
+/// `w` (the set holds), `None` = no proof.
+type KlDecider = dyn Fn(&str) -> Option<u32>;
+
+/// The rung's monitor on `text`, proved by native k-induction, width by width.
+fn kliveness_native(text: &str) -> Option<u32> {
+    for &w in KL_WIDTHS {
+        let monitor = emit_kliveness_monitor(text, 0, w)
+            .unwrap_or_else(|e| panic!("the monitor refused a generated design: {e}\n{text}"));
+        let file = parser::parse(&monitor)
+            .unwrap_or_else(|e| panic!("the monitor does not parse: {e}\n{monitor}"));
+        match native_bmc(&file) {
+            SafetyVerdict::Safe { .. } => return Some(w),
+            SafetyVerdict::Violated { .. } => continue,
+            SafetyVerdict::Unknown { .. } => return None,
+        }
+    }
+    None
+}
+
+/// The exact rung's verdict on the design's one justice set.
+fn exact_justice(text: &str) -> PropertyVerdict {
+    let v = verify_justice(text, JusticeRung::Exact)
+        .unwrap_or_else(|e| panic!("the exact rung refused a generated design: {e}\n{text}"));
+    assert_eq!(v.len(), 1, "one justice set per design\n{text}");
+    v[0].verdict
+}
+
+/// One justice-tier run's counts, on a run with no contradiction.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct JusticeTally {
+    /// k-liveness proved the set; exact agrees (Holds).
+    proved: usize,
+    /// No k-liveness proof; exact Holds (a bound the ladder did not reach, or native abstained).
+    unproved_holds: usize,
+    /// Exact Violated (a fair infinite path); k-liveness correctly never proved it.
+    violated: usize,
+    /// Exact undecided.
+    exact_unknown: usize,
+}
+
+/// The floor on the fixed draw: the rung must prove a share of the sets exact says hold, and
+/// the draw must contain violated sets, or the "never proves a violated set" check is vacuous.
+/// Set 2026-11-12 when the gate draw (48 cases) gave 24 proved / 9 unproved holds / 15
+/// violated; the explorer's constraint-free draws prove 158–169 of ~220 holds per 400.
+///
+/// **Known explorer finding (2026-11-12):** with a `constraint` whose signals are all outside
+/// the justice literals' cone, the EXACT rung reports `Violated` on a design with no
+/// constraint-satisfying infinite path: the cone slice's selective pullback drops the disjoint
+/// constraint. k-liveness is the one that is right there. The gate draw does not contain such
+/// a case; the fix (pull back every `constraint` / `fair`) pins the shrunk design.
+const MIN_PROVED_PERCENT_OF_HOLDS: usize = 50;
+
+fn check_justice_floor(t: JusticeTally) -> Result<(), String> {
+    let holds = t.proved + t.unproved_holds;
+    if t.violated == 0 {
+        return Err(format!("the draw has no violated justice set: {t:?}"));
+    }
+    if holds == 0 || t.proved * 100 < holds * MIN_PROVED_PERCENT_OF_HOLDS {
+        return Err(format!(
+            "k-liveness proved {}/{holds} of the sets exact says hold, under the \
+             {MIN_PROVED_PERCENT_OF_HOLDS}% floor: {t:?}",
+            t.proved
+        ));
+    }
+    if t.exact_unknown > 0 {
+        return Err(format!(
+            "the exact oracle left {} sets undecided: {t:?}",
+            t.exact_unknown
+        ));
+    }
+    Ok(())
+}
+
+/// Draw `cases` justice designs from the tier's seed and fail on the first set the decider
+/// proves while exact finds a fair infinite path.
+fn run_justice_tier(
+    cases: u32,
+    max_shrink_iters: u32,
+    kl: &KlDecider,
+) -> Result<JusticeTally, String> {
+    use std::cell::Cell;
+    let config = ProptestConfig {
+        cases,
+        rng_seed: tier_seed(),
+        max_shrink_iters,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    };
+    let mut runner = proptest::test_runner::TestRunner::new(config);
+    let tally = Cell::new(JusticeTally::default());
+    runner
+        .run(&justice_design_strategy(), |d| {
+            let exact = exact_justice(&d.text);
+            let proved = kl(&d.text);
+            let mut t = tally.get();
+            match (exact, proved) {
+                (PropertyVerdict::Violated, Some(w)) => {
+                    prop_assert!(
+                        false,
+                        "k-liveness proved the set at width {w}, exact finds a fair infinite \
+                         path\n{}",
+                        d.text
+                    );
+                }
+                (PropertyVerdict::Violated, None) => t.violated += 1,
+                (PropertyVerdict::Holds, Some(_)) => t.proved += 1,
+                (PropertyVerdict::Holds, None) => t.unproved_holds += 1,
+                _ => t.exact_unknown += 1,
+            }
+            tally.set(t);
+            Ok(())
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(tally.get())
+}
+
+/// A k-liveness proof never contradicts the exact fair-cycle fixpoint, and the rung proves
+/// enough of the draw for that to mean something.
+#[test]
+fn kliveness_never_proves_a_justice_set_exact_violates() {
+    let tally = run_justice_tier(cases_from_env(), 1024, &kliveness_native)
+        .unwrap_or_else(|e| panic!("{e}"));
+    eprintln!("btor2_differential (justice): {tally:?}");
+    let explorer = std::env::var_os("MUNUNU_DIFF_TIER_EXPLORE").is_some()
+        || std::env::var_os("PROPTEST_RNG_SEED").is_some()
+        || std::env::var_os("PROPTEST_CASES").is_some();
+    match check_justice_floor(tally) {
+        Ok(()) => {}
+        Err(e) if explorer => eprintln!("btor2_differential (justice): floor not met: {e}"),
+        Err(e) => panic!("{e}"),
+    }
+}
+
+/// The design with its justice SET collapsed to one literal, the conjunction of the set's
+/// literals at the same step. Its k-liveness monitor is the wrong construction #984 pinned:
+/// it counts steps where every literal holds at once, not rounds in which each held at some
+/// step, so it under-counts and proves sets whose literals alternate.
+fn conjoin_justice_set(text: &str) -> String {
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    let pos = lines
+        .iter()
+        .position(|l| l.split_whitespace().nth(1) == Some("justice"))
+        .expect("one justice line");
+    let toks: Vec<String> = lines[pos].split_whitespace().map(str::to_string).collect();
+    let lits = &toks[3..];
+    let bool_sort = lines
+        .iter()
+        .find_map(|l| {
+            let t: Vec<&str> = l.split_whitespace().collect();
+            (t.len() == 4 && t[1] == "sort" && t[2] == "bitvec" && t[3] == "1")
+                .then(|| t[0].to_string())
+        })
+        .expect("a 1-bit sort");
+    let mut next: i64 = lines
+        .iter()
+        .filter_map(|l| l.split_whitespace().next()?.parse().ok())
+        .max()
+        .unwrap_or(0)
+        + 1;
+    lines.remove(pos);
+    let mut acc = lits[0].clone();
+    for l in &lits[1..] {
+        lines.push(format!("{next} and {bool_sort} {acc} {l}"));
+        acc = next.to_string();
+        next += 1;
+    }
+    lines.push(format!("{next} justice 1 {acc}"));
+    lines.join("\n") + "\n"
+}
+
+/// Negative control: the same-step-conjunction monitor must turn the gate red through the same
+/// runner, on a set whose literals alternate.
+#[test]
+fn the_justice_gate_fails_on_a_same_step_conjunction_monitor() {
+    let wrong = |text: &str| kliveness_native(&conjoin_justice_set(text));
+    let err = run_justice_tier(cases_from_env(), 0, &wrong)
+        .expect_err("a monitor that counts same-step conjunctions must fail the gate");
+    assert!(err.contains("exact finds a fair infinite path"), "{err}");
+}
+
+/// Negative control: a decider that never proves anything contradicts nothing; the floor
+/// must catch it.
+#[test]
+fn the_justice_gate_fails_when_kliveness_never_proves() {
+    let tally = run_justice_tier(cases_from_env(), 0, &|_| None)
+        .expect("a silent decider contradicts nothing");
+    assert_eq!(tally.proved, 0);
+    let err = check_justice_floor(tally).expect_err("a never-proving rung must fail the floor");
+    assert!(err.contains("under the"), "{err}");
+}
+
+/// The conjunction rewrite itself, on a hand design: a toggle whose justice set {r0, ¬r0}
+/// has a fair path (exact Violated) and whose conjunction r0 ∧ ¬r0 never holds.
+#[test]
+fn the_conjunction_rewrite_collapses_an_alternating_set() {
+    let toggle = "1 sort bitvec 1\n2 state 1 r0\n3 zero 1\n4 init 1 2 3\n5 not 1 2\n6 next 1 2 5\n7 justice 2 2 5\n";
+    assert_eq!(exact_justice(toggle), PropertyVerdict::Violated);
+    assert_eq!(
+        kliveness_native(toggle),
+        None,
+        "the rung must not prove the toggle"
+    );
+    let conj = conjoin_justice_set(toggle);
+    assert!(
+        conj.contains("and 1 2 5") && conj.contains("justice 1 8"),
+        "{conj}"
+    );
+    assert_eq!(
+        kliveness_native(&conj),
+        Some(1),
+        "the wrong monitor proves it at k = 1"
+    );
 }
