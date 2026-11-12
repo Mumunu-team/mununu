@@ -922,6 +922,55 @@ pub struct SliceReport {
     pub no_value: BTreeSet<String>,
 }
 
+/// mununu#848 / #963 — the slice's `too_wide` report. It was the sibling in
+/// `tests/netlist_wide_nets_848.rs`; it reads `SliceReport::too_wide`, which the #848 squash
+/// introduced, so in that binary it kept the parent from compiling and `make verify-repro` from
+/// checking the six real reproducers. It is a regression test, so it lives here.
+#[cfg(test)]
+mod too_wide_slice_tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    fn ids(from: u64, n: u64) -> Value {
+        Value::from((from..from + n).collect::<Vec<u64>>())
+    }
+
+    fn dirs(s: &str) -> Value {
+        serde_json::from_str(s).expect("port directions parse")
+    }
+
+    const MUX_DIRS: &str = r#"{"A": "input", "B": "input", "S": "input", "Y": "output"}"#;
+    const BINOP_DIRS: &str = r#"{"A": "input", "B": "input", "Y": "output"}"#;
+    const DFF_DIRS: &str = r#"{"CLK": "input", "D": "input", "Q": "output"}"#;
+
+    /// Two registers that each fit the carrier, compared as one 140-bit word: the `$eq` leaves
+    /// its output unknown (an `i128` word cannot hold the operand), the selector it drives keeps
+    /// both arms, and the slice names the cell — not the registers, which were carried fine.
+    #[test]
+    fn a_word_operand_wider_than_the_carrier_names_its_cell_in_the_slice() {
+        let wide: Vec<u64> = (100..170).chain(200..270).collect();
+        let j = json!({"modules": {"m": {
+            "attributes": {"top": 1},
+            "ports": {"y": {"direction": "output", "bits": [4]}},
+            "cells": {
+                "q1": {"type": "$dff", "parameters": {}, "port_directions": dirs(DFF_DIRS),
+                       "connections": {"CLK": [2], "D": ids(100, 70), "Q": ids(100, 70)}},
+                "q2": {"type": "$dff", "parameters": {}, "port_directions": dirs(DFF_DIRS),
+                       "connections": {"CLK": [2], "D": ids(200, 70), "Q": ids(200, 70)}},
+                "e": {"type": "$eq", "parameters": {}, "port_directions": dirs(BINOP_DIRS),
+                      "connections": {"A": wide.clone(), "B": wide, "Y": [5]}},
+                "s": {"type": "$mux", "parameters": {}, "port_directions": dirs(MUX_DIRS),
+                      "attributes": {"src": "m.sv:5.3-5.20"},
+                      "connections": {"A": ["0"], "B": ["1"], "S": [5], "Y": [4]}}},
+            "netnames": {"r1": {"bits": ids(100, 70)}, "r2": {"bits": ids(200, 70)},
+                         "y": {"bits": [4]}}}}});
+        let n = Netlist::parse(&j.to_string()).expect("parses");
+        let regs: HashMap<String, u128> = [("r1".to_string(), 0), ("r2".to_string(), 0)].into();
+        let s = n.slice(&[(regs, HashMap::new())], &["y".to_string()]);
+        assert_eq!(s.too_wide.iter().collect::<Vec<_>>(), vec!["e"]);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
