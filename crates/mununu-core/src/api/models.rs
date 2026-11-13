@@ -1741,6 +1741,8 @@ pub struct SvLiftRequest {
     pub cutpoints: Vec<String>,
     /// Lift a multi-clock design onto the model's one implicit clock instead of refusing it.
     /// An UNDER-approximation: the domains only ever tick together, so a HOLDS does not transfer.
+    /// Also lets through a design clocked only by a derived (gated, divided, muxed) clock, which
+    /// then ticks on every step.
     #[serde(default)]
     pub merge_clock_domains: bool,
 }
@@ -3003,8 +3005,9 @@ pub struct ModelDiagnosticsView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lift_retry: Option<String>,
     /// The clock domains `merge_clock_domains` lifted onto one clock, each
-    /// `"<net> (<edge>, <n> cells)"`; empty for a single-clock design. Non-empty means every
-    /// verdict assumes the domains tick together (the `clock-domains-merged` note).
+    /// `"<net> (<edge>, <n> cells)"`, a derived clock suffixed `", derived: driven by \`<cell>\`"`;
+    /// empty for a design on one root clock. Non-empty means every verdict assumes the domains
+    /// tick together, and a derived one on every step (the `clock-domains-merged` note).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub merged_clock_domains: Vec<String>,
     /// mununu#536 — config inputs pinned for this run, each `"<signal>=<value>"`. A verdict

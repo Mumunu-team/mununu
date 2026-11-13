@@ -556,8 +556,9 @@ pub struct ModelDiagnostics {
     /// run succeeded (every lift that succeeded before 2026-10-22 is byte-identical).
     pub lift_retry: Option<String>,
     /// The clock domains the lift MERGED onto the model's one implicit clock, each
-    /// `"<net> (<edge>, <n> cells)"` — non-empty only when the design has more than one domain
-    /// and `--merge-clock-domains` let it through (otherwise the lift refuses it). Every verdict
+    /// `"<net> (<edge>, <n> cells)"` — non-empty only when the design has more than one domain,
+    /// or one DERIVED domain (`…, derived: driven by \`$and\``, roadmap B2), and
+    /// `--merge-clock-domains` let it through (otherwise the lift refuses it). Every verdict
     /// then holds only for runs where all domains tick together (the `clock-domains-merged`
     /// soundness caveat).
     pub merged_clock_domains: Vec<String>,
@@ -2554,21 +2555,31 @@ fn build_notes(
     // The lift rerun its yosys script with `opt_clean` after the BTOR backend reported a
     // topological loop (2026-10-22, OpenTitan csrng through yosys-slang's `$buf` cells). Info:
     // the model is the same design, and a reader diffing two runs wants to know the script moved.
-    if d.merged_clock_domains.len() > 1 {
+    if !d.merged_clock_domains.is_empty() {
         notes.push(VerificationNote {
             kind: "clock-domains-merged".into(),
             level: NoteLevel::SoundnessCaveat,
-            summary: format!(
-                "lift: {} clock domains merged onto one clock — every verdict assumes they tick \
-                 together.",
-                d.merged_clock_domains.len()
-            ),
+            summary: if d.merged_clock_domains.len() > 1 {
+                format!(
+                    "lift: {} clock domains merged onto one clock — every verdict assumes they \
+                     tick together.",
+                    d.merged_clock_domains.len()
+                )
+            } else {
+                // Roadmap B2 — one domain, on a derived clock.
+                "lift: a derived clock merged onto the model's clock — every verdict assumes it \
+                 ticks on every step."
+                    .to_string()
+            },
             detail: "`--merge-clock-domains` lifted a multi-clock design onto the model's one \
                      implicit clock. That is an UNDER-approximation of the real interleavings: a \
                      crossing defect that needs one domain to tick while another does not (a \
                      lost pulse, an incoherent multi-bit bus) cannot occur in this model, so a \
                      HOLDS does not transfer to the design. A VIOLATED is a run of the design in \
-                     which the domains happen to tick together."
+                     which the domains happen to tick together. A domain marked `derived` (a \
+                     gated, divided or muxed clock) ticks here on every step: for a gated clock \
+                     that is the run where the enable stays high; a divided clock cannot tick \
+                     every step, so neither verdict transfers."
                 .to_string(),
             items: d.merged_clock_domains.clone(),
             property: None,
@@ -5932,7 +5943,9 @@ pub(crate) fn prepare_model(
     let mut trace_names = trace_names;
     fill_declarations(&mut trace_names, &declarations);
     report.diagnostics.trace_names = trace_names;
-    if clock_domains.len() > 1 {
+    // Roadmap B2 — a lone DERIVED domain (a gated or divided clock) that `--merge-clock-domains`
+    // let through is merged onto the model's clock as surely as a second domain is.
+    if clock_domains.len() > 1 || clock_domains.iter().any(|d| d.derived_from.is_some()) {
         report.diagnostics.merged_clock_domains = clock_domains
             .iter()
             .map(|d| crate::adapter::yosys::describe_clock_domains(std::slice::from_ref(d)))

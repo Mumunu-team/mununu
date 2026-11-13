@@ -85,7 +85,7 @@
         },
         "merge_clock_domains": {
           "default": false,
-          "description": "Lift a multi-clock design onto the model's one implicit clock instead of refusing it. An UNDER-approximation: the domains only ever tick together, so a HOLDS does not transfer.",
+          "description": "Lift a multi-clock design onto the model's one implicit clock instead of refusing it. An UNDER-approximation: the domains only ever tick together, so a HOLDS does not transfer. Also lets through a design clocked only by a derived (gated, divided, muxed) clock, which then ticks on every step.",
           "type": "boolean"
         },
         "params": {

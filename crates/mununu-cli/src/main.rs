@@ -2534,7 +2534,8 @@ struct SvLiftArgs {
     /// Lift a multi-clock design onto the model's one implicit clock instead of refusing it.
     /// An UNDER-approximation: the domains only ever tick together, so a crossing defect cannot
     /// occur and a HOLDS does not transfer (reported as the `clock-domains-merged` soundness
-    /// caveat).
+    /// caveat). Also lets through a design clocked only by a derived (gated, divided, muxed)
+    /// clock, which then ticks on every step.
     #[arg(long = "merge-clock-domains")]
     merge_clock_domains: bool,
     /// Extra include-search directory (`-I<dir>`), repeatable. Resolves
