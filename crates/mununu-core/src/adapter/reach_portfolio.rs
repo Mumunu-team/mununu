@@ -645,6 +645,27 @@ impl ReachMembers {
         ric3_bmc: false,
         ric3_engine: ric3::PORTFOLIO_ENGINE,
     };
+
+    /// Every member that stops when cancelled: [`Self::ALL`] without the exact ROBDD member, which
+    /// has no cancellation point (mununu#816). For a caller that RACES this portfolio and joins it
+    /// once something else wins (the justice verb's `--parallel-rungs`): with the exact member in,
+    /// a cancelled portfolio keeps running until that member's own budget runs out, and the
+    /// race returns only then. mununu#986 measured 261 s for a verdict the exact rung had in
+    /// 0.4 s.
+    /// [`Self::PROOF_DIRECTED`] with rIC3 as ONE `-e ic3` process instead of its own
+    /// multi-configuration portfolio. For the k-liveness rung when it RACES the other justice
+    /// rungs (`--parallel-rungs`). rIC3's portfolio mode forks about 11 solvers, and on a 4-CPU host
+    /// they starved the l2s rung beside it. mununu#986 (16-row probe, 4 CPUs): with this, 4 of the
+    /// 7 rows the race had lost came back, and all 5 k-liveness proofs held.
+    pub const PROOF_DIRECTED_RACED: Self = Self {
+        ric3_engine: ric3::DEFAULT_ENGINE,
+        ..Self::PROOF_DIRECTED
+    };
+
+    pub const CANCELLABLE: Self = Self {
+        exact: false,
+        ..Self::ALL
+    };
 }
 
 /// [`decide_reach_portfolio_cancellable`] restricted to `members`. A member left out is simply
@@ -1366,6 +1387,33 @@ mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
     use crate::adapter::btor2::parser;
+
+    /// mununu#986 — the member sets a RACED rung runs. The parallel justice policy joins the
+    /// losers, so it needs every member to stop on cancel (no exact). Its k-liveness rung runs rIC3
+    /// as ONE `-e ic3` process. Each set is the shipped set with exactly that one field changed.
+    #[test]
+    fn the_raced_member_sets_differ_from_the_shipped_ones_in_one_field() {
+        assert_eq!(
+            ReachMembers::CANCELLABLE,
+            ReachMembers {
+                exact: false,
+                ..ReachMembers::ALL
+            }
+        );
+        const { assert!(ReachMembers::ALL.exact, "the shipped portfolio keeps exact") };
+        assert_eq!(
+            ReachMembers::PROOF_DIRECTED_RACED,
+            ReachMembers {
+                ric3_engine: ric3::DEFAULT_ENGINE,
+                ..ReachMembers::PROOF_DIRECTED
+            }
+        );
+        assert_eq!(
+            ReachMembers::PROOF_DIRECTED.ric3_engine,
+            ric3::PORTFOLIO_ENGINE
+        );
+        const { assert!(!ReachMembers::PROOF_DIRECTED_RACED.exact) };
+    }
 
     /// mununu#893 — a budget stop and a refusal reach different lists, and `collect` carries
     /// both in the fixed engine order; a stop of either kind is still an abstention (`None`).

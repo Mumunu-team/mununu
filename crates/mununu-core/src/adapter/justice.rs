@@ -288,6 +288,7 @@ fn l2s_rung(
     lits: &[String],
     budget: Option<std::time::Duration>,
     cancel: Option<&std::sync::atomic::AtomicBool>,
+    members: crate::adapter::reach_portfolio::ReachMembers,
 ) -> (PropertyVerdict, Vec<String>, Vec<String>) {
     use crate::adapter::run_budget;
     let fair_atoms: Vec<Atom> = lits.iter().map(|n| atom(n)).collect();
@@ -303,6 +304,7 @@ fn l2s_rung(
         &fair_atoms,
         false,
         cancel,
+        members,
     ) {
         Some((LivenessVerdict::Holds, outcome)) => {
             let mut by = vec!["l2s".to_string()];
@@ -349,6 +351,7 @@ fn kliveness_rung(
     justice_index: usize,
     budget: Option<std::time::Duration>,
     cancel: Option<&std::sync::atomic::AtomicBool>,
+    members: crate::adapter::reach_portfolio::ReachMembers,
 ) -> (PropertyVerdict, Vec<String>, Vec<String>) {
     use crate::adapter::btor2::kliveness_monitor::{
         KlivenessLadder, emit_kliveness_monitor, kliveness_ladder,
@@ -362,6 +365,7 @@ fn kliveness_rung(
     let (tried, member_notes) = match kliveness_ladder(
         &|w| emit_kliveness_monitor(design, justice_index, w),
         cancel,
+        members,
     ) {
         KlivenessLadder::Holds { bound, members } => {
             let mut by = vec!["kliveness".to_string(), bound.to_string()];
@@ -459,13 +463,25 @@ pub fn verify_justice_with(
                 Err(e) => notes.push(e),
             },
             JusticeRung::L2s => {
-                let (v, by, mut n) = l2s_rung(&named, &lits, total, None);
+                let (v, by, mut n) = l2s_rung(
+                    &named,
+                    &lits,
+                    total,
+                    None,
+                    crate::adapter::reach_portfolio::ReachMembers::ALL,
+                );
                 verdict = v;
                 decided_by = by;
                 notes.append(&mut n);
             }
             JusticeRung::Kliveness => {
-                let (v, by, mut n) = kliveness_rung(&named, index, total, None);
+                let (v, by, mut n) = kliveness_rung(
+                    &named,
+                    index,
+                    total,
+                    None,
+                    crate::adapter::reach_portfolio::ReachMembers::PROOF_DIRECTED,
+                );
                 verdict = v;
                 decided_by = by;
                 notes.append(&mut n);
@@ -497,7 +513,17 @@ pub fn verify_justice_with(
                         let (named, lits) = (&named, &lits);
                         scope.spawn(move || {
                             let _live = RungGuard::enter();
-                            let (v, by, n) = l2s_rung(named, lits, total, Some(cancel));
+                            // mununu#986: without the exact member, which cannot be
+                            // cancelled. The exact rung races beside this one with the whole
+                            // budget, so that member's question is still asked; with it in, a
+                            // cancelled l2s rung held the join until its own budget ran out.
+                            let (v, by, n) = l2s_rung(
+                                named,
+                                lits,
+                                total,
+                                Some(cancel),
+                                crate::adapter::reach_portfolio::ReachMembers::CANCELLABLE,
+                            );
                             let r = if v == PropertyVerdict::Unknown {
                                 Err(n.join(" | "))
                             } else {
@@ -512,7 +538,15 @@ pub fn verify_justice_with(
                         let named = &named;
                         scope.spawn(move || {
                             let _live = RungGuard::enter();
-                            let (v, by, n) = kliveness_rung(named, index, total, Some(cancel));
+                            // mununu#986: rIC3 as one `-e ic3` process, not its ~11-solver
+                            // portfolio, which starved the l2s rung racing beside it.
+                            let (v, by, n) = kliveness_rung(
+                                named,
+                                index,
+                                total,
+                                Some(cancel),
+                                crate::adapter::reach_portfolio::ReachMembers::PROOF_DIRECTED_RACED,
+                            );
                             let r = if v == PropertyVerdict::Unknown {
                                 Err(n.join(" | "))
                             } else {
@@ -530,7 +564,9 @@ pub fn verify_justice_with(
                             Ok((v, stage, mut by)) => {
                                 verdict = v;
                                 if who == "exact" {
+                                    // `by` is the exact rung's notes (its cone size, …).
                                     decided_by.push(stage.to_string());
+                                    notes.append(&mut by);
                                 } else {
                                     decided_by.append(&mut by);
                                 }
@@ -566,7 +602,13 @@ pub fn verify_justice_with(
                     // the remainder rung is the only path for an exact fixpoint slower than the
                     // slice — so neither side may take the whole budget.
                     let l2s_budget = remaining(total).map(|r| r / 2);
-                    let (v, by, mut n) = l2s_rung(&named, &lits, l2s_budget, None);
+                    let (v, by, mut n) = l2s_rung(
+                        &named,
+                        &lits,
+                        l2s_budget,
+                        None,
+                        crate::adapter::reach_portfolio::ReachMembers::ALL,
+                    );
                     verdict = v;
                     decided_by = by;
                     notes.append(&mut n);
@@ -578,7 +620,13 @@ pub fn verify_justice_with(
                     // l2s finds the lassos, this finds the bounds); the exact remainder gets the
                     // rest. Unbudgeted runs give it the members' defaults per width.
                     let kl_budget = remaining(total).map(|r| r / 2);
-                    let (v, by, mut n) = kliveness_rung(&named, index, kl_budget, None);
+                    let (v, by, mut n) = kliveness_rung(
+                        &named,
+                        index,
+                        kl_budget,
+                        None,
+                        crate::adapter::reach_portfolio::ReachMembers::PROOF_DIRECTED,
+                    );
                     verdict = v;
                     decided_by = by;
                     notes.append(&mut n);
@@ -876,6 +924,60 @@ mod policy_tests {
                 "a rung is still running after the call returned"
             );
         }
+    }
+
+    /// A justice set the exact rung decides from a 1-bit cone (`a` is a free input's register, so
+    /// `GF ¬a` fails on the path that keeps `a` high), beside a DISJOINT 32-bit register squared
+    /// every step. The exact rung slices `x` away. The l2s monitor carries every register, so an
+    /// exact ROBDD member in l2s's portfolio would build `x · x` and run to its budget.
+    const EXACT_FAST_L2S_EXACT_SLOW: &str = "1 sort bitvec 1
+2 sort bitvec 32
+3 state 1 a
+4 constd 1 0
+5 init 1 3 4
+6 input 1 i
+7 next 1 3 6
+8 state 2 x
+9 input 2 j
+10 mul 2 8 8
+11 add 2 10 9
+12 next 2 8 11
+13 not 1 3
+14 justice 1 13
+";
+
+    /// REPRODUCER (mununu#986) — the parallel policy returns when the first rung wins, not when
+    /// the slowest loser's budget runs out. On the parent, l2s's portfolio ran the exact ROBDD
+    /// member, which has no cancellation point (mununu#816), so the join waited for it: measured
+    /// in `mununu-sva` with 4 CPUs, exact alone answers this design in 0.1 s, and the parallel
+    /// policy returned in 24.8 s. On HWMCC'17 LIVE, 23 of the 129 m3d rows were lost and 54 got ≥2× slower.
+    /// The same test pins that the winning exact rung keeps its notes (the parent dropped them).
+    #[test]
+    fn the_parallel_policy_returns_when_the_exact_rung_wins_without_waiting_for_l2s() {
+        let _serial = PARALLEL_POLICY.lock().unwrap_or_else(|e| e.into_inner());
+        let start = std::time::Instant::now();
+        let r = verify_justice_with(
+            EXACT_FAST_L2S_EXACT_SLOW,
+            &JusticeOptions {
+                rung: JusticeRung::Both,
+                budget_ms: Some(60_000),
+                parallel_rungs: true,
+            },
+        )
+        .expect("runs");
+        let elapsed = start.elapsed();
+        assert_eq!(r[0].verdict, PropertyVerdict::Violated, "{:?}", r[0]);
+        assert!(
+            elapsed < std::time::Duration::from_secs(8),
+            "the parallel policy took {elapsed:?} for a verdict the exact rung has in ~0.1 s: a \
+             cancelled rung held the join ({:?})",
+            r[0]
+        );
+        assert!(
+            r[0].notes.iter().any(|n| n.contains("exact cone")),
+            "the winning exact rung's notes were dropped: {:?}",
+            r[0].notes
+        );
     }
 
     /// REPRODUCER — the justice budget must reach the l2s rung. Before the fix `l2s_rung` took no
