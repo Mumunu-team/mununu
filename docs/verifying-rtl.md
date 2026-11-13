@@ -221,8 +221,14 @@ remainder. Under `--rung both` the verb runs the ladder for 30 s, then l2s with 
 the slice leaves (the reach portfolio's members take their bounds from it), then **k-liveness**
 (`--rung kliveness`; [`kliveness_rung`](../crates/mununu-core/src/adapter/justice.rs#L347)) with half of
 what l2s leaves, then the ladder with what remains; without `--timeout-ms` the members run at their
-60 s defaults and each abstention note says so, naming every member's refusal or budget abstention; `--parallel-rungs` runs both at once and cancels the loser. The root
-fixpoint's early exit is on for every verdict path.
+60 s defaults and each abstention note says so, naming every member's refusal or budget abstention.
+`--parallel-rungs` ([`verify_justice_with`](../crates/mununu-core/src/adapter/justice.rs#L485)) races the three
+rungs on threads, returns the first definite verdict and cancels the rest. In the race the l2s portfolio
+runs without its exact member, which has no cancellation point (#816), and k-liveness runs rIC3 as one
+`-e ic3` process instead of its portfolio (#986). **It is not a speed-up on a small host:** on the 129
+HWMCC'17 LIVE rows at 4 CPUs and 300 s it decides 90 rows to the sequential order's 100 (13 lost, 3
+gained, no verdict disagrees), and rows the exact rung decides alone run a median 5.7× slower, because
+the rungs' solvers share the cores. The root fixpoint's early exit is on for every verdict path.
 
 **k-liveness (Track V, 2026-11-10)** is the proof-side rung: a justice set is decided by bounding
 how many *fair rounds* a path can complete — a round ends once every justice and fairness literal
