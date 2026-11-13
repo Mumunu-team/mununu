@@ -488,9 +488,10 @@ pub fn decide_reach_portfolio_cancellable(
 /// shipped portfolio; a caller that knows the query's shape may leave members out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReachMembers {
-    /// The exact ROBDD engine (in-process, on the calling thread; no cancellation point —
-    /// mununu#816: a single BDD apply cannot be interrupted, so a member that cannot finish holds
-    /// the portfolio past its budget).
+    /// The exact ROBDD engine (in-process, on a detached thread; no cancellation point inside one
+    /// BDD apply — mununu#816). Since mununu#996 the join leaves it behind once a trusted verdict
+    /// is in (plus [`STRAGGLER_GRACE`]) or the run budget expires, so it no longer holds the
+    /// portfolio past the first decider.
     pub exact: bool,
     /// Native BMC / k-induction (in-process z3).
     pub native: bool,
@@ -545,6 +546,19 @@ pub fn decide_reach_portfolio_with_members(
     cancel: Option<&std::sync::atomic::AtomicBool>,
     members: ReachMembers,
 ) -> ReachOutcome {
+    decide_with_members_using(file, subprocess_timeout, cancel, members, run_exact)
+}
+
+/// [`decide_reach_portfolio_with_members`] with the exact member's runner as a parameter: the
+/// shipped driver passes [`run_exact`]; a test passes a runner that does not return, which is
+/// what one long OxiDD apply looks like from the join (mununu#996).
+fn decide_with_members_using(
+    file: &Btor2File,
+    subprocess_timeout: std::time::Duration,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+    members: ReachMembers,
+    exact_runner: fn(&str) -> Result<Option<bool>, String>,
+) -> ReachOutcome {
     use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
     // mununu#726 — read the thread-local budget ONCE: an already-expired budget decides nothing
     // (deterministic: no member is spawned), and the members' bounds follow the time left. The
@@ -574,8 +588,8 @@ pub fn decide_reach_portfolio_with_members(
     // the slowest member's timeout. A member still running when the flag is set is not
     // cross-checked, exactly as in the owned-only driver; every member is individually
     // sound, so the decision itself is.
-    let decided = AtomicBool::new(false);
-    let decided = &decided;
+    let decided_flag = std::sync::Arc::new(AtomicBool::new(false));
+    let decided: &AtomicBool = &decided_flag;
     let finished = AtomicBool::new(false);
     let finished = &finished;
     let budget = &budget;
@@ -586,6 +600,29 @@ pub fn decide_reach_portfolio_with_members(
     let abstained: std::sync::Mutex<Vec<(&'static str, String)>> =
         std::sync::Mutex::new(Vec::new());
     let abstained = &abstained;
+    // mununu#996 — the exact member runs on a DETACHED thread and reports over a channel, so the
+    // join can leave it behind. It has no cancellation point inside one OxiDD apply (#816 polls
+    // the budget only between stages), and when it ran on the calling thread it held the
+    // portfolio past every other member: measured on HWMCC'20 `krebs.3.prop1-func-interl`,
+    // btormc was VIOLATED at 157 s and the run had not returned at 420 s. The join now waits for
+    // it only until a trusted verdict is in (plus the straggler grace), or the run budget
+    // expires; an abandoned exact thread keeps running in the background until its next budget
+    // poll or its end, as the owned-only driver's detached members already do. A member still
+    // running when the join returns is not cross-checked — the same trade as S1's cancelled
+    // subprocess members; every member is individually sound, so the decision itself is.
+    let exact_rx = members.exact.then(|| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (decided, budget) = (std::sync::Arc::clone(&decided_flag), budget.clone());
+        std::thread::spawn(move || {
+            let _g = crate::adapter::run_budget::enter(&budget);
+            let r = exact_runner(&content);
+            if matches!(r, Ok(Some(_))) {
+                decided.store(true, Relaxed);
+            }
+            let _ = tx.send(r);
+        });
+        rx
+    });
     let mut members = std::thread::scope(|scope| {
         // Forward an external cancellation — or the budget's expiry — into `decided`, which
         // every cancellable member already polls. Stops when the members are joined.
@@ -686,16 +723,31 @@ pub fn decide_reach_portfolio_with_members(
                 run_interp(file, decided, t.interp_query_ms, t.interp_overall_ms)
             })
         });
-        // The exact engine is in-process BDD work — run it on this thread while the
-        // other members run on theirs.
-        let exact = if members.exact {
-            settle(refused, "exact", run_exact(&content))
-        } else {
-            None
+        // The exact member reports on its channel; wait for it no longer than the others need.
+        let exact = match exact_rx.map(|rx| await_straggler(&rx, decided, budget, STRAGGLER_GRACE))
+        {
+            None => None,
+            Some(StragglerWait::Finished(r)) => settle(refused, "exact", r),
+            Some(StragglerWait::Abandoned(Abandon::OtherDecided)) => None,
+            Some(StragglerWait::Abandoned(Abandon::BudgetExpired)) => {
+                note_refusal(
+                    abstained,
+                    "exact",
+                    "abandoned at the run budget's deadline: one BDD operation was still running \
+                     (a single OxiDD apply does not poll the budget, mununu#996)"
+                        .to_string(),
+                );
+                None
+            }
+            Some(StragglerWait::Abandoned(Abandon::Lost)) => {
+                note_refusal(
+                    refused,
+                    "exact",
+                    "exact: the member's thread ended without a result (it panicked)".to_string(),
+                );
+                None
+            }
         };
-        if exact.is_some() {
-            decided.store(true, Relaxed);
-        }
         // A panicked member thread abstains (None) rather than poisoning the merge; a member not
         // started is None too.
         let native = native_h.and_then(|h| h.join().unwrap_or(None));
@@ -720,6 +772,69 @@ pub fn decide_reach_portfolio_with_members(
     members.refused = refused.lock().map(|g| g.clone()).unwrap_or_default();
     members.abstained = abstained.lock().map(|g| g.clone()).unwrap_or_default();
     collect(members)
+}
+
+/// How long the join waits for a member that has not reported once a trusted verdict is in:
+/// long enough for a co-completing member to land (and a contradiction to surface), never the
+/// straggler's own budget. Shared by both drivers.
+const STRAGGLER_GRACE: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Why the join stopped waiting for a member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Abandon {
+    /// Another member's trusted verdict (or the caller's cancellation) was in and the grace ran
+    /// out — the member is simply not needed, as a cancelled subprocess member is not.
+    OtherDecided,
+    /// The run budget expired with the member still running: a budget abstention (mununu#893).
+    BudgetExpired,
+    /// The member's thread ended without sending (it panicked).
+    Lost,
+}
+
+#[derive(Debug)]
+enum StragglerWait<T> {
+    Finished(T),
+    Abandoned(Abandon),
+}
+
+/// mununu#996 — wait for one member's result on `rx`, but only until `decided` is set (by a
+/// trusted verdict, the budget watcher, or the caller's cancellation) and `grace` has passed
+/// since, or the member's thread is gone. The pure seam of the join: the shipped driver and the
+/// tests drive the same function.
+fn await_straggler<T>(
+    rx: &std::sync::mpsc::Receiver<T>,
+    decided: &std::sync::atomic::AtomicBool,
+    budget: &crate::adapter::run_budget::Budget,
+    grace: std::time::Duration,
+) -> StragglerWait<T> {
+    use std::sync::atomic::Ordering::Relaxed;
+    use std::sync::mpsc::RecvTimeoutError;
+    use std::time::{Duration, Instant};
+    const POLL: Duration = Duration::from_millis(10);
+    let mut grace_end: Option<(Instant, Abandon)> = None;
+    loop {
+        let wait = grace_end.map_or(POLL, |(end, _)| {
+            end.saturating_duration_since(Instant::now()).min(POLL)
+        });
+        match rx.recv_timeout(wait) {
+            Ok(v) => return StragglerWait::Finished(v),
+            Err(RecvTimeoutError::Disconnected) => return StragglerWait::Abandoned(Abandon::Lost),
+            Err(RecvTimeoutError::Timeout) => {}
+        }
+        match grace_end {
+            Some((end, why)) if Instant::now() >= end => return StragglerWait::Abandoned(why),
+            Some(_) => {}
+            None if decided.load(Relaxed) => {
+                let why = if budget.expired() {
+                    Abandon::BudgetExpired
+                } else {
+                    Abandon::OtherDecided
+                };
+                grace_end = Some((Instant::now() + grace, why));
+            }
+            None => {}
+        }
+    }
 }
 
 /// Depth cap for the owned-standalone deep counterexample search — well above
@@ -983,7 +1098,6 @@ pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcom
     // overall `deadline` still caps it). Was a non-blocking `try_recv` only, which missed a
     // straggler that hadn't landed at the exact instant the first verdict arrived (DET-2).
     if definite {
-        const STRAGGLER_GRACE: Duration = Duration::from_millis(250);
         let grace_deadline = (Instant::now() + STRAGGLER_GRACE).min(deadline);
         while reports < N_MEMBERS {
             let now = Instant::now();
@@ -1184,6 +1298,112 @@ mod tests {
         assert!(
             out.unreachable_by.is_empty(),
             "no engine should call the reachable counter unreachable"
+        );
+    }
+
+    /// mununu#996 — the join's seam. A member that never reports (one long OxiDD apply) is left
+    /// behind once a trusted verdict is in and the grace has passed; it is not waited on.
+    #[test]
+    fn a_member_that_never_reports_is_abandoned_once_another_has_decided() {
+        use crate::adapter::run_budget::Budget;
+        use std::sync::atomic::AtomicBool;
+        let (_tx, rx) = std::sync::mpsc::channel::<Result<Option<bool>, String>>();
+        let decided = AtomicBool::new(true);
+        let t0 = std::time::Instant::now();
+        let w = await_straggler(&rx, &decided, &Budget::unbounded(), STRAGGLER_GRACE);
+        assert!(
+            matches!(w, StragglerWait::Abandoned(Abandon::OtherDecided)),
+            "{w:?}"
+        );
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(5),
+            "{:?}",
+            t0.elapsed()
+        );
+    }
+
+    /// Negative control for the seam: with nothing decided the join waits, and a result that
+    /// lands after the wait began is taken — an undecided portfolio still hears the exact member.
+    #[test]
+    fn an_undecided_join_waits_for_the_member_and_takes_its_result() {
+        use crate::adapter::run_budget::Budget;
+        use std::sync::atomic::AtomicBool;
+        let (tx, rx) = std::sync::mpsc::channel::<Result<Option<bool>, String>>();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(600));
+            let _ = tx.send(Ok(Some(true)));
+        });
+        let decided = AtomicBool::new(false);
+        let w = await_straggler(&rx, &decided, &Budget::unbounded(), STRAGGLER_GRACE);
+        assert!(
+            matches!(w, StragglerWait::Finished(Ok(Some(true)))),
+            "{w:?}"
+        );
+    }
+
+    /// A member left behind at the budget's deadline is a budget abstention, and a member whose
+    /// thread died without sending is lost, not silently undecided.
+    #[test]
+    fn an_abandoned_member_says_why_it_was_left_behind() {
+        use crate::adapter::run_budget::Budget;
+        use std::sync::atomic::AtomicBool;
+        let (_tx, rx) = std::sync::mpsc::channel::<Result<Option<bool>, String>>();
+        let decided = AtomicBool::new(true);
+        let w = await_straggler(&rx, &decided, &Budget::with_ms(0), STRAGGLER_GRACE);
+        assert!(
+            matches!(w, StragglerWait::Abandoned(Abandon::BudgetExpired)),
+            "{w:?}"
+        );
+        let (tx, rx) = std::sync::mpsc::channel::<Result<Option<bool>, String>>();
+        drop(tx);
+        let w = await_straggler(
+            &rx,
+            &AtomicBool::new(false),
+            &Budget::unbounded(),
+            STRAGGLER_GRACE,
+        );
+        assert!(
+            matches!(w, StragglerWait::Abandoned(Abandon::Lost)),
+            "{w:?}"
+        );
+    }
+
+    /// mununu#996 at the driver: the exact member stands for the `krebs.3` apply — it does not
+    /// return — while the native member finds the counter's `bad` at depth 7. The portfolio
+    /// returns native's verdict promptly instead of joining the exact member.
+    #[test]
+    fn the_portfolio_returns_a_decided_verdict_without_joining_a_stuck_exact_member() {
+        fn stuck_exact(_: &str) -> Result<Option<bool>, String> {
+            std::thread::sleep(std::time::Duration::from_secs(3600));
+            Ok(None)
+        }
+        const COUNTER: &str = "1 sort bitvec 3\n2 zero 1\n3 state 1\n4 init 1 3 2\n5 one 1\n\
+                               6 add 1 3 5\n7 next 1 3 6\n8 ones 1\n9 sort bitvec 1\n\
+                               10 eq 9 3 8\n11 bad 10\n";
+        let file = parser::parse(COUNTER).expect("parse");
+        let members = ReachMembers {
+            exact: true,
+            native: true,
+            interp: false,
+            btormc: false,
+            pono: false,
+            ric3: false,
+            ric3_engine: ric3::DEFAULT_ENGINE,
+        };
+        let t0 = std::time::Instant::now();
+        let out = decide_with_members_using(
+            &file,
+            std::time::Duration::from_secs(60),
+            None,
+            members,
+            stuck_exact,
+        );
+        assert_eq!(out.verdict, ReachVerdict::Reachable, "{out:?}");
+        assert_eq!(out.reachable_by, vec!["native"], "{out:?}");
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(60),
+            "the join waited for the stuck exact member: {:?}",
+            t0.elapsed()
         );
     }
 
