@@ -11,6 +11,13 @@
           },
           "type": "array"
         },
+        "notes": {
+          "description": "Track V (V2) — why an UNDECIDED row is undecided: each portfolio member's refusal or budget abstention (`\"<member> refused: …\"` / `\"<member>: …\"`), and the k-liveness fallback's note. Empty — and omitted — on a decided row.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "response": {
           "description": "The response as written on the command line (`\"req == 1 => ack == 1\"`).",
           "type": "string"

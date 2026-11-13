@@ -327,14 +327,8 @@ fn l2s_rung(
     }
 }
 
-/// The counter widths the k-liveness rung tries, in order (k = 2^w − 1 rounds). Measured on
-/// HWMCC'17 LIVE (V0, 2026-11-10): `cuabq4fro` proved at w = 4 in 1 s, `cutarb8ro` at w = 8 in
-/// 14 s; `cujc128ro` was still reachable at w = 8. Small widths first because a proof at a small
-/// bound is the common case and a `reachable` at a small width is found in well under a second.
-const KLIVENESS_WIDTHS: &[u32] = &[1, 2, 4, 8, 12, 16];
-
 /// Track V — the k-liveness rung on one justice set (Claessen–Sörensson): for each width in
-/// [`KLIVENESS_WIDTHS`], the monitor of
+/// [`KLIVENESS_WIDTHS`](crate::adapter::btor2::kliveness_monitor::KLIVENESS_WIDTHS), the monitor of
 /// [`emit_kliveness_monitor`](crate::adapter::btor2::kliveness_monitor::emit_kliveness_monitor)
 /// is decided as `bad`-reachability by the proof-directed members
 /// ([`ReachMembers::PROOF_DIRECTED`](crate::adapter::reach_portfolio::ReachMembers)).
@@ -356,9 +350,8 @@ fn kliveness_rung(
     budget: Option<std::time::Duration>,
     cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> (PropertyVerdict, Vec<String>, Vec<String>) {
-    use crate::adapter::btor2::kliveness_monitor::emit_kliveness_monitor;
-    use crate::adapter::reach_portfolio::{
-        ReachMembers, ReachVerdict, decide_reach_portfolio_with_members,
+    use crate::adapter::btor2::kliveness_monitor::{
+        KlivenessLadder, emit_kliveness_monitor, kliveness_ladder,
     };
     use crate::adapter::run_budget;
     let scoped = budget.map(|b| {
@@ -366,75 +359,21 @@ fn kliveness_rung(
         run_budget::Budget::child(&run_budget::current(), Some(ms))
     });
     let _guard = scoped.as_ref().map(run_budget::enter);
-    let mut tried: Vec<String> = Vec::new();
-    let mut member_notes: Vec<String> = Vec::new();
-    for &w in KLIVENESS_WIDTHS {
-        if run_budget::expired()
-            || cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed))
-        {
-            break;
+    let (tried, member_notes) = match kliveness_ladder(
+        &|w| emit_kliveness_monitor(design, justice_index, w),
+        cancel,
+    ) {
+        KlivenessLadder::Holds { bound, members } => {
+            let mut by = vec!["kliveness".to_string(), bound.to_string()];
+            by.extend(members.iter().map(|s| s.to_string()));
+            return (PropertyVerdict::Holds, by, Vec::new());
         }
-        let monitor = match emit_kliveness_monitor(design, justice_index, w) {
-            Ok(m) => m,
-            Err(e) => {
-                return (
-                    PropertyVerdict::Unknown,
-                    Vec::new(),
-                    vec![format!(
-                        "kliveness: the round-counter monitor could not be built: {}",
-                        e.message
-                    )],
-                );
-            }
-        };
-        let file = match parser::parse(&monitor) {
-            Ok(f) => f,
-            Err(e) => {
-                return (
-                    PropertyVerdict::Unknown,
-                    Vec::new(),
-                    vec![format!(
-                        "kliveness: the monitor did not parse: {}",
-                        e.message
-                    )],
-                );
-            }
-        };
-        let k = (1u128 << w) - 1;
-        let outcome = decide_reach_portfolio_with_members(
-            &file,
-            crate::adapter::btormc::DEFAULT_TIMEOUT,
-            cancel,
-            ReachMembers::PROOF_DIRECTED,
-        );
-        for (m, why) in outcome.refused.iter().chain(outcome.abstained.iter()) {
-            member_notes.push(format!("{m} at k={k}: {why}"));
-        }
-        match outcome.verdict {
-            ReachVerdict::Unreachable => {
-                let mut by = vec!["kliveness".to_string(), format!("k={k}")];
-                by.extend(outcome.unreachable_by.iter().map(|s| s.to_string()));
-                return (PropertyVerdict::Holds, by, Vec::new());
-            }
-            ReachVerdict::Reachable => tried.push(format!("k={k} reachable")),
-            ReachVerdict::Contradiction => {
-                return (
-                    PropertyVerdict::Unknown,
-                    Vec::new(),
-                    vec![format!(
-                        "kliveness: the members CONTRADICT each other on the k={k} bound (soundness alarm)"
-                    )],
-                );
-            }
-            ReachVerdict::Unknown => {
-                // A wider bound is strictly harder to prove and its `reachable` trace strictly
-                // deeper, so a width no member decides ends the ladder: the rest of the budget
-                // goes to the next rung rather than to widths that cannot do better.
-                tried.push(format!("k={k} undecided"));
-                break;
-            }
-        }
-    }
+        KlivenessLadder::Failed(note) => return (PropertyVerdict::Unknown, Vec::new(), vec![note]),
+        KlivenessLadder::Undecided {
+            tried,
+            member_notes,
+        } => (tried, member_notes),
+    };
     let mut note = match budget {
         Some(b) => format!(
             "kliveness: no fair-round bound proved within a {} ms budget ({})",
