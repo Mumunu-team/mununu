@@ -175,6 +175,34 @@ fn settle<T>(
     }
 }
 
+/// A subprocess member's (btormc, pono, rIC3, rIC3-BMC) result, settled. An `Err` is a refusal
+/// (as [`settle`]); an `Unknown` while no other member has decided is a budget stop, recorded in
+/// `abstained` so the portfolio's ⊥ names it (mununu#997, the sibling of #1022's owned-member
+/// fix: until then a subprocess member that ran out its budget left no trace). An `Unknown`
+/// after another member decided is the cancellation, never recorded.
+fn settle_subprocess(
+    refused: &std::sync::Mutex<Vec<(&'static str, String)>>,
+    abstained: &std::sync::Mutex<Vec<(&'static str, String)>>,
+    decided: &std::sync::atomic::AtomicBool,
+    member: &'static str,
+    timeout: std::time::Duration,
+    r: Result<Option<McVerdict>, String>,
+) -> Option<McVerdict> {
+    let v = settle(refused, member, r);
+    if v == Some(McVerdict::Unknown) && !decided.load(std::sync::atomic::Ordering::Relaxed) {
+        note_refusal(
+            abstained,
+            member,
+            format!(
+                "returned no verdict within its {} ms subprocess budget (a timeout, or the tool \
+                 ended undecided)",
+                timeout.as_millis()
+            ),
+        );
+    }
+    v
+}
+
 /// Record one member's refusal. A poisoned lock (a member panicked while recording) loses the
 /// list; the panic itself is the louder signal, and the verdict never depends on this list.
 fn note_refusal(
@@ -731,7 +759,8 @@ fn decide_with_members_using(
                         .map(Some)
                         .map_err(|e| e.message)
                 });
-                let v = settle(refused, "btormc", v);
+                let v =
+                    settle_subprocess(refused, abstained, decided, "btormc", subprocess_timeout, v);
                 if matches!(v, Some(McVerdict::Violated) | Some(McVerdict::Safe)) {
                     decided.store(true, Relaxed);
                 }
@@ -751,7 +780,8 @@ fn decide_with_members_using(
                     .map(Some)
                     .map_err(|e| e.message)
                 });
-                let v = settle(refused, "pono", v);
+                let v =
+                    settle_subprocess(refused, abstained, decided, "pono", subprocess_timeout, v);
                 if matches!(v, Some(McVerdict::Violated) | Some(McVerdict::Safe)) {
                     decided.store(true, Relaxed);
                 }
@@ -776,7 +806,8 @@ fn decide_with_members_using(
                     .map(Some)
                     .map_err(|e| e.message)
                 });
-                let v = settle(refused, "ric3", v);
+                let v =
+                    settle_subprocess(refused, abstained, decided, "ric3", subprocess_timeout, v);
                 if matches!(v, Some(McVerdict::Violated) | Some(McVerdict::Safe)) {
                     decided.store(true, Relaxed);
                 }
@@ -794,7 +825,14 @@ fn decide_with_members_using(
                         .map(Some)
                         .map_err(|e| e.message)
                 });
-                let v = settle(refused, "ric3-bmc", v);
+                let v = settle_subprocess(
+                    refused,
+                    abstained,
+                    decided,
+                    "ric3-bmc",
+                    subprocess_timeout,
+                    v,
+                );
                 if matches!(v, Some(McVerdict::Violated)) {
                     decided.store(true, Relaxed);
                 }
@@ -1945,23 +1983,32 @@ mod tests {
             ric3_bmc: true,
             ric3_engine: ric3::DEFAULT_ENGINE,
         };
-        let run = |src: &str| {
+        // On a design this small depth 0 takes microseconds, so the dynamic step's first jump
+        // lands near depth 416 666 and unrolling it took 5–26 s in the image (rIC3 1.5.2, four
+        // runs): the reachable case gets room; the safe case only has to not prove.
+        let run = |src: &str, secs: u64| {
             decide_reach_portfolio_with_members(
                 &parser::parse(src).expect("parse"),
-                std::time::Duration::from_secs(20),
+                std::time::Duration::from_secs(secs),
                 None,
                 only_bmc,
             )
         };
-        let reach = run(COUNTER);
+        let reach = run(COUNTER, 120);
         assert_eq!(reach.verdict, ReachVerdict::Reachable, "{reach:?}");
         assert_eq!(reach.reachable_by, vec!["ric3-bmc"], "{reach:?}");
-        let safe = run(SAFE);
+        let safe = run(SAFE, 5);
         assert!(
             safe.unreachable_by.is_empty(),
             "the BMC member proved nothing: {safe:?}"
         );
         assert!(safe.refused.is_empty(), "{safe:?}");
+        // The silence fixed alongside: a member that ran out its budget says so.
+        assert_eq!(
+            safe.abstained.iter().map(|(m, _)| *m).collect::<Vec<_>>(),
+            vec!["ric3-bmc"],
+            "{safe:?}"
+        );
     }
 
     #[test]
