@@ -534,6 +534,17 @@ impl ReachMembers {
         ric3: true,
         ric3_engine: ric3::PORTFOLIO_ENGINE,
     };
+
+    /// Every member that stops when cancelled: [`Self::ALL`] without the exact ROBDD member, which
+    /// has no cancellation point (mununu#816). For a caller that RACES this portfolio and joins it
+    /// once something else wins (the justice verb's `--parallel-rungs`): with the exact member in,
+    /// a cancelled portfolio keeps running until that member's own budget runs out, and the
+    /// race returns only then. mununu#986 measured 261 s for a verdict the exact rung had in
+    /// 0.4 s.
+    pub const CANCELLABLE: Self = Self {
+        exact: false,
+        ..Self::ALL
+    };
 }
 
 /// [`decide_reach_portfolio_cancellable`] restricted to `members`. A member left out is simply
