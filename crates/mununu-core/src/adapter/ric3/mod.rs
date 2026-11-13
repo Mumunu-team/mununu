@@ -55,6 +55,14 @@ pub const DEFAULT_ENGINE: &str = "ic3";
 /// --ic3-parent-lemma=false --rseed 3` in 14 s where plain `-e ic3` is one of the losers.
 pub const PORTFOLIO_ENGINE: &str = "";
 
+/// mununu#997 — rIC3's bit-level BMC with the DYNAMIC step: instead of visiting every depth in
+/// turn it asks for `bad` anywhere in a growing window, so one deep satisfiable query replaces the
+/// hard shallow frames. Measured 2026-11-12 on HWMCC'20 `mul9` (rIC3 1.5.2, 300 s each): plain
+/// `-e bmc` stalls at depth 2, `-e bmc --bmc-dyn-step` finds the counterexample at depth 238 in
+/// 62 s, and no other portfolio member decides the row.
+pub const BMC_DYN_STEP_ENGINE: &str = "bmc";
+const BMC_DYN_STEP_ARGS: &[&str] = &["--bmc-dyn-step"];
+
 /// Default wall-clock budget for a single rIC3 run (the reach portfolio's subprocess wall).
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -121,6 +129,20 @@ pub fn run_ric3_with_output(
     timeout: Duration,
     cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<(McVerdict, String), AdapterError> {
+    run_ric3_args(bin, btor2, engine, &[], witness, timeout, cancel)
+}
+
+/// [`run_ric3_with_output`] with extra engine flags after `-e <engine>`. The flags are constants
+/// of this module, never user input.
+fn run_ric3_args(
+    bin: &Ric3Bin,
+    btor2: &str,
+    engine: &str,
+    extra: &[&str],
+    witness: bool,
+    timeout: Duration,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<(McVerdict, String), AdapterError> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     // rIC3 reads a FILE and picks the format from the suffix: `.btor2`.
@@ -140,6 +162,7 @@ pub fn run_ric3_with_output(
     if !engine.is_empty() {
         command.arg("-e").arg(engine);
     }
+    command.args(extra);
     if witness {
         command.arg("--witness");
     }
@@ -182,6 +205,103 @@ pub fn decide_via_ric3(
     run_ric3_cancellable(&bin, &btor2, engine, timeout, cancel)
 }
 
+/// mununu#997 — the dynamic-step BMC member: `rIC3 -e bmc --bmc-dyn-step`. It only ever FINDS a
+/// counterexample, so only `Violated` is a verdict.
+pub fn decide_via_ric3_bmc_dyn_step(
+    file: &crate::adapter::btor2::ast::Btor2File,
+    timeout: Duration,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<McVerdict, AdapterError> {
+    let btor2 = sticky_bads(&crate::adapter::btor2::emit::emit_btor2_for_subprocess(
+        file,
+    ));
+    let bin = locate_ric3()?;
+    let (v, _) = run_ric3_args(
+        &bin,
+        &btor2,
+        BMC_DYN_STEP_ENGINE,
+        BMC_DYN_STEP_ARGS,
+        false,
+        timeout,
+        cancel,
+    )?;
+    Ok(bmc_member_verdict(v))
+}
+
+/// mununu#997 — make every `bad` STICKY: `seen` starts 0, `next(seen) = seen | bad`, and the
+/// property becomes `seen | bad`, true at depth k iff the original bad held at some depth ≤ k.
+///
+/// `--bmc-dyn-step` checks only the depths it lands on: on a 3-bit counter it checked depth 0,
+/// then 454545, 909090, … and never found the depth-7 counterexample that `-e bmc` finds at
+/// once (measured in mununu-sva, rIC3 1.5.2). A design whose bad recurs, not persists, slips
+/// between samples. Sticky, each sampled depth covers every earlier one.
+///
+/// SOUNDNESS: reachability-preserving in both directions for the member's only verdict. A path
+/// to the sticky bad at depth k carries an original bad at some j ≤ k on a prefix whose
+/// constraints all hold (BMC enforces them through k ⊇ through j), so it is a real violation;
+/// and an original bad at j makes the sticky one true at j. Constraints that fail after j can
+/// hide a sampled depth (completeness only, never a wrong `Violated`). The text is the
+/// subprocess emitter's, so every operand is defined before the appended lines.
+fn sticky_bads(btor2: &str) -> String {
+    let nid_of = |l: &str| l.split_whitespace().next()?.parse::<i64>().ok();
+    let mut next = btor2.lines().filter_map(nid_of).max().unwrap_or(0) + 1;
+    let mut fresh = || {
+        let n = next;
+        next += 1;
+        n
+    };
+    let mut kept = String::new();
+    let mut bads: Vec<(String, Option<String>)> = Vec::new();
+    let mut bool_sort = None;
+    for line in btor2.lines() {
+        let tok: Vec<&str> = line.split_whitespace().collect();
+        match tok.as_slice() {
+            [_, "bad", sig, rest @ ..] => {
+                bads.push(((*sig).to_string(), rest.first().map(|s| (*s).to_string())));
+                continue;
+            }
+            [n, "sort", "bitvec", "1", ..] if bool_sort.is_none() => {
+                bool_sort = Some(n.to_string())
+            }
+            _ => {}
+        }
+        kept.push_str(line);
+        kept.push('\n');
+    }
+    if bads.is_empty() {
+        return btor2.to_string();
+    }
+    let b = bool_sort.unwrap_or_else(|| {
+        let n = fresh();
+        kept.push_str(&format!("{n} sort bitvec 1\n"));
+        n.to_string()
+    });
+    let zero = fresh();
+    kept.push_str(&format!("{zero} zero {b}\n"));
+    for (i, (sig, sym)) in bads.iter().enumerate() {
+        let (seen, init, any, nx, bad) = (fresh(), fresh(), fresh(), fresh(), fresh());
+        kept.push_str(&format!("{seen} state {b} mununu_bad_seen_{i}\n"));
+        kept.push_str(&format!("{init} init {b} {seen} {zero}\n"));
+        kept.push_str(&format!("{any} or {b} {seen} {sig}\n"));
+        kept.push_str(&format!("{nx} next {b} {seen} {any}\n"));
+        match sym {
+            Some(s) => kept.push_str(&format!("{bad} bad {any} {s}\n")),
+            None => kept.push_str(&format!("{bad} bad {any}\n")),
+        }
+    }
+    kept
+}
+
+/// SOUNDNESS: a bounded search proves nothing about the depths it did not reach, so the BMC
+/// member's `UNSAT` (should rIC3 ever print one for a window) is UNDER-approximated to `Unknown`:
+/// the member may only contribute `Violated`, which is a concrete counterexample.
+fn bmc_member_verdict(v: McVerdict) -> McVerdict {
+    match v {
+        McVerdict::Violated => McVerdict::Violated,
+        McVerdict::Safe | McVerdict::Unknown => McVerdict::Unknown,
+    }
+}
+
 fn err(message: String) -> AdapterError {
     AdapterError {
         kind: AdapterErrorKind::UnsupportedConstruct,
@@ -193,6 +313,61 @@ fn err(message: String) -> AdapterError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// mununu#997 — the BMC member contributes counterexamples only; an `UNSAT` is not a proof.
+    #[test]
+    fn the_bmc_member_never_reports_a_safety_proof() {
+        assert_eq!(bmc_member_verdict(McVerdict::Violated), McVerdict::Violated);
+        assert_eq!(bmc_member_verdict(McVerdict::Safe), McVerdict::Unknown);
+        assert_eq!(bmc_member_verdict(McVerdict::Unknown), McVerdict::Unknown);
+    }
+
+    /// mununu#997 — the dynamic step samples depths, so the member hands rIC3 a design whose bad
+    /// is sticky. On a counter whose bad RECURS (c = 7 at depths 7, 15, 23, …) the monitor turns
+    /// on right after the first bad and never turns off, so every sampled depth ≥ 7 sees it — the
+    /// case the raw design lost between samples (rIC3 1.5.2 checked 0, 454545, 909090, …).
+    #[test]
+    fn a_sticky_bad_stays_on_after_the_first_violation() {
+        const RECURRING: &str = "1 sort bitvec 3\n2 zero 1\n3 state 1 c\n4 init 1 3 2\n5 one 1\n\
+                                 6 add 1 3 5\n7 next 1 3 6\n8 ones 1\n9 sort bitvec 1\n\
+                                 10 eq 9 3 8\n11 bad 10 at_seven\n";
+        let sticky = sticky_bads(RECURRING);
+        assert_eq!(sticky.matches(" bad ").count(), 1, "{sticky}");
+        assert!(
+            sticky.contains(" at_seven\n"),
+            "the property keeps its name: {sticky}"
+        );
+        let file = parser::parse(&sticky).expect("the sticky design parses");
+        assert_eq!(
+            crate::adapter::btor2::symbolic_bitblast::exact_bad_reachable(&sticky),
+            crate::adapter::btor2::symbolic_bitblast::exact_bad_reachable(RECURRING),
+            "reachability is preserved"
+        );
+        let mut s = std::collections::HashMap::from([
+            ("c".to_string(), 0u128),
+            ("mununu_bad_seen_0".to_string(), 0u128),
+        ]);
+        for k in 0..24u32 {
+            assert_eq!(
+                s["mununu_bad_seen_0"],
+                u128::from(k >= 8),
+                "depth {k}: {s:?}"
+            );
+            s = crate::adapter::btor2::bit_blast::simulate_one_step(
+                &file,
+                &s,
+                &std::collections::HashMap::new(),
+            )
+            .expect("steps");
+        }
+    }
+
+    /// A design with no `bad` is handed through unchanged.
+    #[test]
+    fn a_design_without_a_bad_is_unchanged() {
+        const NO_BAD: &str = "1 sort bitvec 1\n2 zero 1\n3 state 1 q\n4 init 1 3 2\n5 next 1 3 2\n";
+        assert_eq!(sticky_bads(NO_BAD), NO_BAD);
+    }
     use crate::adapter::btor2::parser;
 
     const REACH: &str = "1 sort bitvec 3\n2 zero 1\n3 state 1\n4 init 1 3 2\n5 one 1\n6 add 1 3 5\n\

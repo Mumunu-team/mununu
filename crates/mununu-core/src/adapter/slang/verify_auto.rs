@@ -10816,7 +10816,7 @@ mod tests {
             assert!(
                 members
                     .iter()
-                    .any(|m| ["btormc", "pono", "ric3"].contains(&m.as_str())),
+                    .any(|m| ["btormc", "pono", "ric3", "ric3-bmc"].contains(&m.as_str())),
                 "decided by a subprocess member: {members:?} ({p:?})"
             );
             return;

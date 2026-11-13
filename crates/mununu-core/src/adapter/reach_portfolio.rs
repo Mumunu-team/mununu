@@ -11,7 +11,9 @@
 //!   subprocess: mununu's own scalable safety member;
 //! - **btormc** (BMC + k-induction) on deep counterexamples;
 //! - **Pono** (IC3/PDR) on IC3-provable / violated instances;
-//! - **rIC3** (bit-level IC3/PDR) on the inductive-invariant safety class.
+//! - **rIC3** (bit-level IC3/PDR) on the inductive-invariant safety class;
+//! - **rIC3's dynamic-step BMC** (`ric3-bmc`, `-e bmc --bmc-dyn-step`, mununu#997) on deep
+//!   counterexamples whose shallow frames are hard: counterexamples only, never a proof.
 //!
 //! Plus the in-house **interpolation** engine ([`native_interp`], owned McMillan-style
 //! forward reachability with an interpolation k-schedule). It synthesises inductive
@@ -146,6 +148,8 @@ pub(crate) struct Members {
     pub pono: Option<McVerdict>,
     /// Plan 4 / PR D2 — rIC3 `-e ic3`, bit-level IC3/PDR over the emitted BTOR2 (mununu#736).
     pub ric3: Option<McVerdict>,
+    /// mununu#997 — rIC3 `-e bmc --bmc-dyn-step`: counterexamples only.
+    pub ric3_bmc: Option<McVerdict>,
     /// `(member, reason)` for every member that refused the design (see [`ReachOutcome::refused`]).
     pub refused: Vec<(&'static str, String)>,
     /// `(member, cause)` for every member that abstained on a budget (see
@@ -169,6 +173,34 @@ fn settle<T>(
             None
         }
     }
+}
+
+/// A subprocess member's (btormc, pono, rIC3, rIC3-BMC) result, settled. An `Err` is a refusal
+/// (as [`settle`]); an `Unknown` while no other member has decided is a budget stop, recorded in
+/// `abstained` so the portfolio's ⊥ names it (mununu#997, the sibling of #1022's owned-member
+/// fix: until then a subprocess member that ran out its budget left no trace). An `Unknown`
+/// after another member decided is the cancellation, never recorded.
+fn settle_subprocess(
+    refused: &std::sync::Mutex<Vec<(&'static str, String)>>,
+    abstained: &std::sync::Mutex<Vec<(&'static str, String)>>,
+    decided: &std::sync::atomic::AtomicBool,
+    member: &'static str,
+    timeout: std::time::Duration,
+    r: Result<Option<McVerdict>, String>,
+) -> Option<McVerdict> {
+    let v = settle(refused, member, r);
+    if v == Some(McVerdict::Unknown) && !decided.load(std::sync::atomic::Ordering::Relaxed) {
+        note_refusal(
+            abstained,
+            member,
+            format!(
+                "returned no verdict within its {} ms subprocess budget (a timeout, or the tool \
+                 ended undecided)",
+                timeout.as_millis()
+            ),
+        );
+    }
+    v
 }
 
 /// Record one member's refusal. A poisoned lock (a member panicked while recording) loses the
@@ -461,7 +493,12 @@ fn collect(m: Members) -> ReachOutcome {
         }
     }
     // Subprocess members report an `McVerdict`.
-    for (name, v) in [("btormc", m.btormc), ("pono", m.pono), ("ric3", m.ric3)] {
+    for (name, v) in [
+        ("btormc", m.btormc),
+        ("pono", m.pono),
+        ("ric3", m.ric3),
+        ("ric3-bmc", m.ric3_bmc),
+    ] {
         match v {
             Some(McVerdict::Violated) => reachable_by.push(name),
             Some(McVerdict::Safe) => unreachable_by.push(name),
@@ -473,10 +510,12 @@ fn collect(m: Members) -> ReachOutcome {
     // fixed engine order so two runs of one design produce one outcome (the drivers' equality
     // tests compare whole outcomes).
     let rank = |member: &str| {
-        ["exact", "native", "interp", "btormc", "pono", "ric3"]
-            .iter()
-            .position(|m| *m == member)
-            .unwrap_or(usize::MAX)
+        [
+            "exact", "native", "interp", "btormc", "pono", "ric3", "ric3-bmc",
+        ]
+        .iter()
+        .position(|m| *m == member)
+        .unwrap_or(usize::MAX)
     };
     let mut refused = m.refused;
     refused.sort_by(|(a, _), (b, _)| rank(a).cmp(&rank(b)).then_with(|| a.cmp(b)));
@@ -570,6 +609,8 @@ pub struct ReachMembers {
     pub pono: bool,
     /// rIC3 (subprocess).
     pub ric3: bool,
+    /// mununu#997 — rIC3's dynamic-step BMC (subprocess; finds `bad` reachable, never proves).
+    pub ric3_bmc: bool,
     /// rIC3's `-e` engine; [`ric3::PORTFOLIO_ENGINE`] runs its own multi-configuration portfolio.
     pub ric3_engine: &'static str,
 }
@@ -584,6 +625,7 @@ impl ReachMembers {
         btormc: true,
         pono: true,
         ric3: true,
+        ric3_bmc: true,
         ric3_engine: ric3::DEFAULT_ENGINE,
     };
     /// The proof-directed set for a `bad` that is a BOUND on a monitor (Track V's k-liveness
@@ -600,6 +642,7 @@ impl ReachMembers {
         btormc: false,
         pono: true,
         ric3: true,
+        ric3_bmc: false,
         ric3_engine: ric3::PORTFOLIO_ENGINE,
     };
 }
@@ -716,7 +759,8 @@ fn decide_with_members_using(
                         .map(Some)
                         .map_err(|e| e.message)
                 });
-                let v = settle(refused, "btormc", v);
+                let v =
+                    settle_subprocess(refused, abstained, decided, "btormc", subprocess_timeout, v);
                 if matches!(v, Some(McVerdict::Violated) | Some(McVerdict::Safe)) {
                     decided.store(true, Relaxed);
                 }
@@ -736,7 +780,8 @@ fn decide_with_members_using(
                     .map(Some)
                     .map_err(|e| e.message)
                 });
-                let v = settle(refused, "pono", v);
+                let v =
+                    settle_subprocess(refused, abstained, decided, "pono", subprocess_timeout, v);
                 if matches!(v, Some(McVerdict::Violated) | Some(McVerdict::Safe)) {
                     decided.store(true, Relaxed);
                 }
@@ -761,8 +806,34 @@ fn decide_with_members_using(
                     .map(Some)
                     .map_err(|e| e.message)
                 });
-                let v = settle(refused, "ric3", v);
+                let v =
+                    settle_subprocess(refused, abstained, decided, "ric3", subprocess_timeout, v);
                 if matches!(v, Some(McVerdict::Violated) | Some(McVerdict::Safe)) {
+                    decided.store(true, Relaxed);
+                }
+                v
+            })
+        });
+        // mununu#997 — rIC3's dynamic-step BMC: one deep window query instead of every depth in
+        // turn, the only member that reaches HWMCC'20 `mul9`'s depth-238 counterexample. It only
+        // ever contributes `Violated` (`decide_via_ric3_bmc_dyn_step` maps an UNSAT to Unknown).
+        let ric3_bmc_h = members.ric3_bmc.then(|| {
+            scope.spawn(move || {
+                let _g = crate::adapter::run_budget::enter(budget);
+                let v = timed("ric3-bmc", || {
+                    ric3::decide_via_ric3_bmc_dyn_step(file, subprocess_timeout, Some(decided))
+                        .map(Some)
+                        .map_err(|e| e.message)
+                });
+                let v = settle_subprocess(
+                    refused,
+                    abstained,
+                    decided,
+                    "ric3-bmc",
+                    subprocess_timeout,
+                    v,
+                );
+                if matches!(v, Some(McVerdict::Violated)) {
                     decided.store(true, Relaxed);
                 }
                 v
@@ -833,6 +904,7 @@ fn decide_with_members_using(
         let btormc = btormc_h.and_then(|h| h.join().unwrap_or(None));
         let pono = pono_h.and_then(|h| h.join().unwrap_or(None));
         let ric3 = ric3_h.and_then(|h| h.join().unwrap_or(None));
+        let ric3_bmc = ric3_bmc_h.and_then(|h| h.join().unwrap_or(None));
         let interp = interp_h.and_then(|h| h.join().unwrap_or(None));
         finished.store(true, Relaxed);
         Members {
@@ -842,6 +914,7 @@ fn decide_with_members_using(
             btormc,
             pono,
             ric3,
+            ric3_bmc,
             refused: Vec::new(),
             abstained: Vec::new(),
             undecided: Vec::new(),
@@ -1556,6 +1629,7 @@ mod tests {
             btormc: false,
             pono: false,
             ric3: false,
+            ric3_bmc: false,
             ric3_engine: ric3::DEFAULT_ENGINE,
         };
         let t0 = std::time::Instant::now();
@@ -1611,6 +1685,7 @@ mod tests {
             btormc: false,
             pono: false,
             ric3: false,
+            ric3_bmc: false,
             ric3_engine: ric3::DEFAULT_ENGINE,
         };
         let out = decide_reach_portfolio_with_members(
@@ -1888,6 +1963,54 @@ mod tests {
         );
     }
 
+    /// mununu#997 — the dynamic-step BMC member, alone, in the image: it finds the reachable
+    /// counter's `bad`, and on a design whose `bad` is unreachable it never claims a proof.
+    #[test]
+    #[ignore = "requires the mununu-sva image (rIC3); run by the e2e sweep"]
+    fn e2e_the_dynamic_step_bmc_member_finds_counterexamples_and_never_proves() {
+        const COUNTER: &str = "1 sort bitvec 3\n2 zero 1\n3 state 1\n4 init 1 3 2\n5 one 1\n\
+                               6 add 1 3 5\n7 next 1 3 6\n8 ones 1\n9 sort bitvec 1\n\
+                               10 eq 9 3 8\n11 bad 10\n";
+        const SAFE: &str = "1 sort bitvec 1\n2 zero 1\n3 state 1 q\n4 init 1 3 2\n\
+                            5 next 1 3 2\n6 bad 3\n";
+        let only_bmc = ReachMembers {
+            exact: false,
+            native: false,
+            interp: false,
+            btormc: false,
+            pono: false,
+            ric3: false,
+            ric3_bmc: true,
+            ric3_engine: ric3::DEFAULT_ENGINE,
+        };
+        // On a design this small depth 0 takes microseconds, so the dynamic step's first jump
+        // lands near depth 416 666 and unrolling it took 5–26 s in the image (rIC3 1.5.2, four
+        // runs): the reachable case gets room; the safe case only has to not prove.
+        let run = |src: &str, secs: u64| {
+            decide_reach_portfolio_with_members(
+                &parser::parse(src).expect("parse"),
+                std::time::Duration::from_secs(secs),
+                None,
+                only_bmc,
+            )
+        };
+        let reach = run(COUNTER, 120);
+        assert_eq!(reach.verdict, ReachVerdict::Reachable, "{reach:?}");
+        assert_eq!(reach.reachable_by, vec!["ric3-bmc"], "{reach:?}");
+        let safe = run(SAFE, 5);
+        assert!(
+            safe.unreachable_by.is_empty(),
+            "the BMC member proved nothing: {safe:?}"
+        );
+        assert!(safe.refused.is_empty(), "{safe:?}");
+        // The silence fixed alongside: a member that ran out its budget says so.
+        assert_eq!(
+            safe.abstained.iter().map(|(m, _)| *m).collect::<Vec<_>>(),
+            vec!["ric3-bmc"],
+            "{safe:?}"
+        );
+    }
+
     #[test]
     fn owned_only_excludes_external_engines_on_small_counter() {
         // The owned-standalone driver decides the small reachable counter via the
@@ -1908,7 +2031,7 @@ mod tests {
                 "owned-only listed a non-owned engine {name}: {out:?}"
             );
         }
-        for ext in ["btormc", "pono", "ric3"] {
+        for ext in ["btormc", "pono", "ric3", "ric3-bmc"] {
             assert!(
                 !out.reachable_by.contains(&ext) && !out.unreachable_by.contains(&ext),
                 "owned-only must never list {ext}: {out:?}"
