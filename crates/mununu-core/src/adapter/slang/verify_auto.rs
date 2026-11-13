@@ -295,6 +295,9 @@ pub struct PortfolioAttribution {
     /// (more budget may decide it) and not a clean unknown (the member did not search to its
     /// bound).
     pub abstained: Vec<(String, String)>,
+    /// mununu#1022 — `(member, progress)` for every member that searched to its own bound
+    /// without a verdict (native: the depth and k reached).
+    pub undecided: Vec<(String, String)>,
 }
 
 impl PortfolioAttribution {
@@ -308,6 +311,7 @@ impl PortfolioAttribution {
             decided_by: engines_of(reach).into_iter().map(str::to_string).collect(),
             refused: owned(&reach.refused),
             abstained: owned(&reach.abstained),
+            undecided: owned(&reach.undecided),
         }
     }
 }
@@ -9621,7 +9625,22 @@ fn attribute_portfolio_abstention(
             abstentions.join("; ")
         ),
     };
-    let items: Vec<String> = refusals.into_iter().chain(abstentions).collect();
+    // mununu#1022 — how far each member that searched to its bound got, after the reasons above.
+    let progress: Vec<String> = reach
+        .undecided
+        .iter()
+        .map(|(member, how_far)| format!("{member} undecided: {how_far}"))
+        .collect();
+    let detail = if progress.is_empty() {
+        detail
+    } else {
+        format!("{detail}; {}", progress.join("; "))
+    };
+    let items: Vec<String> = refusals
+        .into_iter()
+        .chain(abstentions)
+        .chain(progress)
+        .collect();
     prop.bottom_reason = Some(BottomReason::EngineDidNotComplete {
         engine: "reach-portfolio".to_string(),
         detail: detail.clone(),
@@ -10913,6 +10932,7 @@ mod tests {
                  5000 ms nominal) ran out at depth 2"
                     .to_string(),
             )],
+            undecided: Vec::new(),
         };
         let mut notes = Vec::new();
         attribute_portfolio_abstention(&mut prop, &reach, false, &mut notes);
@@ -10938,6 +10958,53 @@ mod tests {
         assert!(a.refused.is_empty());
         assert_eq!(a.abstained.len(), 1);
         assert_eq!(a.abstained[0].0, "native");
+    }
+
+    /// mununu#1022 — a ⊥ row whose portfolio members all searched to their bounds says how far
+    /// each got, in the bottom reason, the note's items and the attribution.
+    #[test]
+    fn a_portfolio_bottom_names_how_far_each_undecided_member_got() {
+        use crate::adapter::reach_portfolio::{ReachOutcome, ReachVerdict};
+        let mut prop = PropertyVerdict {
+            name: "p".to_string(),
+            label: None,
+            kind: crate::adapter::slang::translate::SvaKind::Assert,
+            formula: "AG p".to_string(),
+            outcome: VerifyOutcome::Unknown { unknown_cells: 0 },
+            seeded_predicates: Vec::new(),
+            counterexample: None,
+            bottom_reason: None,
+            decided_by: None,
+            vacuity: None,
+            portfolio: None,
+        };
+        let reach = ReachOutcome {
+            verdict: ReachVerdict::Unknown,
+            undecided: vec![(
+                "native",
+                "BMC found no counterexample through depth 40 and k-induction found no proof up \
+                 to k = 40 (bound 40)"
+                    .to_string(),
+            )],
+            ..Default::default()
+        };
+        let mut notes = Vec::new();
+        attribute_portfolio_abstention(&mut prop, &reach, false, &mut notes);
+        match &prop.bottom_reason {
+            Some(BottomReason::EngineDidNotComplete { detail, .. }) => {
+                assert!(
+                    detail.contains("native undecided") && detail.contains("depth 40"),
+                    "{detail}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(
+            notes[0].items.iter().any(|i| i.contains("k = 40")),
+            "{:?}",
+            notes[0].items
+        );
+        assert_eq!(PortfolioAttribution::of(&reach).undecided.len(), 1);
     }
 
     /// PR C — the classifier agrees with the reducers: a bounded chain and a chain ending in a

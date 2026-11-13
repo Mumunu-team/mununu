@@ -351,7 +351,12 @@ pub fn kliveness_ladder(
             cancel,
             ReachMembers::PROOF_DIRECTED,
         );
-        for (m, why) in outcome.refused.iter().chain(outcome.abstained.iter()) {
+        for (m, why) in outcome
+            .refused
+            .iter()
+            .chain(outcome.abstained.iter())
+            .chain(outcome.undecided.iter())
+        {
             member_notes.push(format!("{m} at {label}: {why}"));
         }
         match outcome.verdict {

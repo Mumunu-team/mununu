@@ -106,6 +106,11 @@ pub struct ReachOutcome {
     /// refusal is routed around, a budget abstention may be bought back with a larger budget, a
     /// clean unknown is the genuine search abstention.
     pub abstained: Vec<(&'static str, String)>,
+    /// mununu#1022 — members that searched to their own bound and found neither a counterexample
+    /// nor a proof, with how far they got (native: the depth / k reached; interpolation: its
+    /// reason). Not a refusal and not a budget stop: a deeper bound or a different engine may
+    /// decide the row. A member cancelled because another one decided first is in no list.
+    pub undecided: Vec<(&'static str, String)>,
 }
 
 impl ReachOutcome {
@@ -124,6 +129,7 @@ impl ReachOutcome {
             unreachable_by,
             refused: Vec::new(),
             abstained: Vec::new(),
+            undecided: Vec::new(),
         }
     }
 }
@@ -145,6 +151,9 @@ pub(crate) struct Members {
     /// `(member, cause)` for every member that abstained on a budget (see
     /// [`ReachOutcome::abstained`]).
     pub abstained: Vec<(&'static str, String)>,
+    /// `(member, progress)` for every member that searched to its bound (see
+    /// [`ReachOutcome::undecided`]).
+    pub undecided: Vec<(&'static str, String)>,
 }
 
 /// Record a member's refusal (an `Err`) and abstain; a clean result passes through.
@@ -182,6 +191,8 @@ fn note_refusal(
 pub(crate) enum MemberStop {
     Refused(String),
     Abstained(String),
+    /// mununu#1022 — searched to its bound, no verdict; the progress in the member's words.
+    Undecided(String),
 }
 
 impl From<native_bmc::BmcError> for MemberStop {
@@ -201,11 +212,16 @@ impl From<native_bmc::BmcError> for MemberStop {
 fn settle_native<T>(
     refused: &std::sync::Mutex<Vec<(&'static str, String)>>,
     abstained: &std::sync::Mutex<Vec<(&'static str, String)>>,
+    undecided: &std::sync::Mutex<Vec<(&'static str, String)>>,
     member: &'static str,
     r: Result<Option<T>, MemberStop>,
 ) -> Option<T> {
     match r {
         Ok(v) => v,
+        Err(MemberStop::Undecided(progress)) => {
+            note_refusal(undecided, member, progress);
+            None
+        }
         Err(MemberStop::Refused(why)) => {
             note_refusal(refused, member, why);
             None
@@ -269,9 +285,25 @@ fn run_native(
         ) {
             Ok(SafetyVerdict::Violated { .. }) => Ok(Some(true)),
             Ok(SafetyVerdict::Safe { .. }) => Ok(Some(false)),
-            Ok(SafetyVerdict::Unknown { .. }) => Ok(None),
+            // A cancelled run also ends `Unknown` (at the depth it stopped): that one is in no
+            // list, as a cancelled subprocess member is not.
+            Ok(SafetyVerdict::Unknown { .. })
+                if cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed)) =>
+            {
+                Ok(None)
+            }
+            Ok(SafetyVerdict::Unknown { k }) => Err(MemberStop::Undecided(native_unknown(k))),
             Err(e) => Err(MemberStop::from(e)),
         },
+    )
+}
+
+/// mununu#1022 — the native member's progress when it searched to its bound without a verdict.
+fn native_unknown(k: u32) -> String {
+    format!(
+        "BMC found no counterexample through depth {k} and k-induction found no proof up to \
+         k = {k} (bound {})",
+        native_bmc::DEFAULT_MAX_K
     )
 }
 
@@ -300,6 +332,7 @@ fn run_interp(
     cancel: &std::sync::atomic::AtomicBool,
     query_ms: u32,
     overall_ms: u64,
+    undecided: &std::sync::Mutex<Vec<(&'static str, String)>>,
 ) -> Option<bool> {
     timed(
         "interp",
@@ -313,7 +346,13 @@ fn run_interp(
         ) {
             InterpSafetyVerdict::Unsafe { .. } => Some(true),
             InterpSafetyVerdict::Safe { .. } => Some(false),
-            InterpSafetyVerdict::Undecided { .. } => None,
+            // mununu#1022 — its reason reaches the report unless it stopped on a peer's verdict.
+            InterpSafetyVerdict::Undecided { reason } => {
+                if !cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    note_refusal(undecided, "interp", reason);
+                }
+                None
+            }
         },
     )
 }
@@ -420,6 +459,9 @@ fn collect(m: Members) -> ReachOutcome {
     let mut abstained = m.abstained;
     abstained.sort_by(|(a, _), (b, _)| rank(a).cmp(&rank(b)).then_with(|| a.cmp(b)));
     out.abstained = abstained;
+    let mut undecided = m.undecided;
+    undecided.sort_by(|(a, _), (b, _)| rank(a).cmp(&rank(b)).then_with(|| a.cmp(b)));
+    out.undecided = undecided;
     out
 }
 
@@ -600,6 +642,10 @@ fn decide_with_members_using(
     let abstained: std::sync::Mutex<Vec<(&'static str, String)>> =
         std::sync::Mutex::new(Vec::new());
     let abstained = &abstained;
+    // mununu#1022 — and every member that searched to its bound, with its progress.
+    let undecided: std::sync::Mutex<Vec<(&'static str, String)>> =
+        std::sync::Mutex::new(Vec::new());
+    let undecided = &undecided;
     // mununu#996 — the exact member runs on a DETACHED thread and reports over a channel, so the
     // join can leave it behind. It has no cancellation point inside one OxiDD apply (#816 polls
     // the budget only between stages), and when it ran on the calling thread it held the
@@ -706,6 +752,7 @@ fn decide_with_members_using(
                 let v = settle_native(
                     refused,
                     abstained,
+                    undecided,
                     "native",
                     run_native(file, Some(decided), t.native_query_ms),
                 );
@@ -720,7 +767,13 @@ fn decide_with_members_using(
         let interp_h = members.interp.then(|| {
             scope.spawn(move || {
                 let _g = crate::adapter::run_budget::enter(budget);
-                run_interp(file, decided, t.interp_query_ms, t.interp_overall_ms)
+                run_interp(
+                    file,
+                    decided,
+                    t.interp_query_ms,
+                    t.interp_overall_ms,
+                    undecided,
+                )
             })
         });
         // The exact member reports on its channel; wait for it no longer than the others need.
@@ -765,12 +818,14 @@ fn decide_with_members_using(
             ric3,
             refused: Vec::new(),
             abstained: Vec::new(),
+            undecided: Vec::new(),
         }
     });
     // A poisoned lock (a member panicked while recording) yields no refusal list; the panic is
     // the louder signal and the verdict never depends on the list (mununu#803, LOW).
     members.refused = refused.lock().map(|g| g.clone()).unwrap_or_default();
     members.abstained = abstained.lock().map(|g| g.clone()).unwrap_or_default();
+    members.undecided = undecided.lock().map(|g| g.clone()).unwrap_or_default();
     collect(members)
 }
 
@@ -874,6 +929,8 @@ pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcom
     let refused: Arc<std::sync::Mutex<Vec<(&'static str, String)>>> = Arc::default();
     // mununu#893 — the budget abstentions, with their cause, beside the refusals.
     let abstained: Arc<std::sync::Mutex<Vec<(&'static str, String)>>> = Arc::default();
+    // mununu#1022 — the members that searched to their bound, with their progress.
+    let undecided: Arc<std::sync::Mutex<Vec<(&'static str, String)>>> = Arc::default();
     use std::time::{Duration, Instant};
 
     // mununu#816 — the caller's run budget is a THREAD-LOCAL (`run_budget`'s documented
@@ -913,12 +970,13 @@ pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcom
 
     // Safety proof — shallow native BMC + k-induction.
     {
-        let (file, decided, tx, refused, abstained) = (
+        let (file, decided, tx, refused, abstained, undecided) = (
             Arc::clone(&file),
             Arc::clone(&decided),
             tx.clone(),
             Arc::clone(&refused),
             Arc::clone(&abstained),
+            Arc::clone(&undecided),
         );
         let budget = budget.clone();
         std::thread::spawn(move || {
@@ -936,13 +994,19 @@ pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcom
                 ) {
                     Ok(SafetyVerdict::Violated { .. }) => Some(true),
                     Ok(SafetyVerdict::Safe { .. }) => Some(false),
-                    Ok(SafetyVerdict::Unknown { .. }) => None,
+                    Ok(SafetyVerdict::Unknown { k }) => {
+                        if !decided.load(Relaxed) {
+                            note_refusal(&undecided, "native", native_unknown(k));
+                        }
+                        None
+                    }
                     Err(e) => {
                         match MemberStop::from(e) {
                             MemberStop::Refused(why) => note_refusal(&refused, "native", why),
                             MemberStop::Abstained(cause) => {
                                 note_refusal(&abstained, "native", cause)
                             }
+                            MemberStop::Undecided(p) => note_refusal(&undecided, "native", p),
                         }
                         None
                     }
@@ -956,7 +1020,12 @@ pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcom
     }
     // Safety proof — McMillan interpolation.
     {
-        let (file, decided, tx) = (Arc::clone(&file), Arc::clone(&decided), tx.clone());
+        let (file, decided, tx, undecided) = (
+            Arc::clone(&file),
+            Arc::clone(&decided),
+            tx.clone(),
+            Arc::clone(&undecided),
+        );
         let budget = budget.clone();
         std::thread::spawn(move || {
             let _g = crate::adapter::run_budget::enter(&budget);
@@ -972,7 +1041,12 @@ pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcom
                 ) {
                     InterpSafetyVerdict::Unsafe { .. } => Some(true),
                     InterpSafetyVerdict::Safe { .. } => Some(false),
-                    InterpSafetyVerdict::Undecided { .. } => None,
+                    InterpSafetyVerdict::Undecided { reason } => {
+                        if !decided.load(Relaxed) {
+                            note_refusal(&undecided, "interp", reason);
+                        }
+                        None
+                    }
                 },
             );
             if v.is_some() {
@@ -1006,12 +1080,13 @@ pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcom
     }
     #[cfg(not(feature = "boolector"))]
     {
-        let (file, decided, tx, refused, abstained) = (
+        let (file, decided, tx, refused, abstained, undecided) = (
             Arc::clone(&file),
             Arc::clone(&decided),
             tx.clone(),
             Arc::clone(&refused),
             Arc::clone(&abstained),
+            Arc::clone(&undecided),
         );
         let budget = budget.clone();
         std::thread::spawn(move || {
@@ -1027,7 +1102,7 @@ pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcom
                     &decided,
                 )
                 .map_err(MemberStop::from);
-                settle_native(&refused, &abstained, "cex", r).is_some()
+                settle_native(&refused, &abstained, &undecided, "cex", r).is_some()
             });
             if hit {
                 decided.store(true, Relaxed);
@@ -1058,10 +1133,11 @@ pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcom
     drop(tx); // the collector's `rx` disconnects once every member thread has finished.
 
     // Four members: native, interp, {boolector | z3-cex}, exact.
-    const N_MEMBERS: usize = 4;
+    const N_MEMBERS: usize = OWNED_MEMBERS.len();
     let mut reachable_by: Vec<&'static str> = Vec::new();
     let mut unreachable_by: Vec<&'static str> = Vec::new();
     let mut reports = 0usize;
+    let mut reported: Vec<&'static str> = Vec::new();
     let mut definite = false;
     // Wait for a definite verdict, or all members to abstain, or the deadline.
     while reports < N_MEMBERS && !definite {
@@ -1072,6 +1148,7 @@ pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcom
         match rx.recv_timeout(deadline - now) {
             Ok((name, v)) => {
                 reports += 1;
+                reported.push(name);
                 match v {
                     Some(true) => {
                         reachable_by.push(name);
@@ -1107,6 +1184,7 @@ pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcom
             match rx.recv_timeout(grace_deadline - now) {
                 Ok((name, v)) => {
                     reports += 1;
+                    reported.push(name);
                     match v {
                         Some(true) => reachable_by.push(name),
                         Some(false) => unreachable_by.push(name),
@@ -1121,11 +1199,69 @@ pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcom
             }
         }
     }
+    // mununu#1022 — no verdict by the deadline: give the members the same short grace to land
+    // their own budget stops (each re-entered the budget and stops on it), then name every member
+    // that still has not reported. Before this an owned-only `unknown` at the wall said nothing
+    // about any member.
+    if !definite && reports < N_MEMBERS {
+        let grace_deadline = Instant::now() + STRAGGLER_GRACE;
+        while reports < N_MEMBERS {
+            let now = Instant::now();
+            if now >= grace_deadline {
+                break;
+            }
+            match rx.recv_timeout(grace_deadline - now) {
+                Ok((name, v)) => {
+                    reports += 1;
+                    reported.push(name);
+                    match v {
+                        Some(true) => reachable_by.push(name),
+                        Some(false) => unreachable_by.push(name),
+                        None => {}
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        if reachable_by.is_empty() && unreachable_by.is_empty() {
+            for (m, cause) in unreported_at_deadline(&reported, timeout_ms) {
+                note_refusal(&abstained, m, cause);
+            }
+        }
+    }
     let mut out = ReachOutcome::from_sets(reachable_by, unreachable_by);
     out.refused = refused.lock().map(|g| g.clone()).unwrap_or_default();
     out.abstained = abstained.lock().map(|g| g.clone()).unwrap_or_default();
+    out.undecided = undecided.lock().map(|g| g.clone()).unwrap_or_default();
     out
 }
+
+/// mununu#1022 — the owned-only members that had not reported when the collector gave up at its
+/// deadline, each with the cause the report carries.
+fn unreported_at_deadline(
+    reported: &[&'static str],
+    timeout_ms: u32,
+) -> Vec<(&'static str, String)> {
+    OWNED_MEMBERS
+        .into_iter()
+        .filter(|m| !reported.contains(m))
+        .map(|m| {
+            (
+                m,
+                format!(
+                    "still running at the owned-only wall deadline ({timeout_ms} ms); no result \
+                     was collected"
+                ),
+            )
+        })
+        .collect()
+}
+
+/// The owned-only driver's members, in its reporting order: the names its threads send.
+#[cfg(feature = "boolector")]
+const OWNED_MEMBERS: [&str; 4] = ["native", "interp", "boolector", "exact"];
+#[cfg(not(feature = "boolector"))]
+const OWNED_MEMBERS: [&str; 4] = ["native", "interp", "cex", "exact"];
 
 #[cfg(test)]
 mod tests {
@@ -1139,12 +1275,18 @@ mod tests {
     fn a_budget_stop_is_an_abstention_with_a_cause_not_a_refusal() {
         let refused = std::sync::Mutex::new(Vec::new());
         let abstained = std::sync::Mutex::new(Vec::new());
+        let undecided = std::sync::Mutex::new(Vec::new());
         let stop = native_bmc::BmcError::ResourceLimit {
             k: 3,
             units: 15_000_000,
         };
-        let v: Option<bool> =
-            settle_native(&refused, &abstained, "native", Err(MemberStop::from(stop)));
+        let v: Option<bool> = settle_native(
+            &refused,
+            &abstained,
+            &undecided,
+            "native",
+            Err(MemberStop::from(stop)),
+        );
         assert_eq!(v, None);
         assert!(
             refused.lock().unwrap().is_empty(),
@@ -1161,6 +1303,7 @@ mod tests {
         let v: Option<bool> = settle_native(
             &refused,
             &abstained,
+            &undecided,
             "native",
             Err(MemberStop::from(native_bmc::BmcError::NoBadProperty)),
         );
@@ -1405,6 +1548,69 @@ mod tests {
             "the join waited for the stuck exact member: {:?}",
             t0.elapsed()
         );
+    }
+
+    /// mununu#1022 — an 8-bit counter stepping by 2 from 0 never reaches 255, but 127 bad-free
+    /// odd predecessors stand behind it, so k-induction cannot close at the native bound (40).
+    const EVEN_COUNTER: &str = "1 sort bitvec 8\n2 zero 1\n3 state 1 c\n4 init 1 3 2\n\
+                                5 constd 1 2\n6 add 1 3 5\n7 next 1 3 6\n8 ones 1\n\
+                                9 sort bitvec 1\n10 eq 9 3 8\n11 bad 10\n";
+
+    /// The native member that searches to its bound says how far it got, and a cancelled one is
+    /// in no list.
+    #[test]
+    fn a_native_member_that_searched_to_its_bound_reports_its_progress() {
+        let file = parser::parse(EVEN_COUNTER).expect("parse");
+        match run_native(&file, None, 5_000) {
+            Err(MemberStop::Undecided(p)) => {
+                assert!(p.contains("depth 40") && p.contains("k = 40"), "{p}");
+            }
+            other => panic!("expected an undecided native member, got {other:?}"),
+        }
+        let cancelled = std::sync::atomic::AtomicBool::new(true);
+        assert!(matches!(
+            run_native(&file, Some(&cancelled), 5_000),
+            Ok(None)
+        ));
+    }
+
+    /// At the driver: with only the native member running, its progress reaches the outcome's
+    /// `undecided` list, not `abstained` or `refused`.
+    #[test]
+    fn the_portfolio_carries_an_undecided_members_progress() {
+        let file = parser::parse(EVEN_COUNTER).expect("parse");
+        let members = ReachMembers {
+            exact: false,
+            native: true,
+            interp: false,
+            btormc: false,
+            pono: false,
+            ric3: false,
+            ric3_engine: ric3::DEFAULT_ENGINE,
+        };
+        let out = decide_reach_portfolio_with_members(
+            &file,
+            std::time::Duration::from_secs(60),
+            None,
+            members,
+        );
+        assert_eq!(out.verdict, ReachVerdict::Unknown, "{out:?}");
+        assert_eq!(out.undecided.len(), 1, "{out:?}");
+        assert_eq!(out.undecided[0].0, "native");
+        assert!(
+            out.refused.is_empty() && out.abstained.is_empty(),
+            "{out:?}"
+        );
+    }
+
+    /// The owned-only collector names every member that had not reported at its deadline.
+    #[test]
+    fn the_owned_driver_names_the_members_still_running_at_its_deadline() {
+        let left = unreported_at_deadline(&["native", "interp"], 300_000);
+        let names: Vec<_> = left.iter().map(|(m, _)| *m).collect();
+        assert_eq!(names, vec![OWNED_MEMBERS[2], "exact"]);
+        assert!(left[1].1.contains("300000 ms"), "{}", left[1].1);
+        assert!(unreported_at_deadline(&OWNED_MEMBERS, 1).is_empty());
     }
 
     /// mununu#726 — an already-expired thread-local budget decides nothing and spawns nothing:

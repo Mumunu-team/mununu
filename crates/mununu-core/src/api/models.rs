@@ -1112,6 +1112,15 @@ pub struct Btor2VerifyResponse {
     /// abstained.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub refused: Vec<MemberRefusalView>,
+    /// mununu#1022 — the members that abstained on a budget (a resource limit, a wall clock, or
+    /// still running at the owned-only deadline), each with its cause. Absent when none did.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub abstained: Vec<MemberRefusalView>,
+    /// mununu#1022 — the members that searched to their own bound without a verdict, each with
+    /// how far it got (native: the depth and k reached). Absent when none did; a member cancelled
+    /// after another decided is in no list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub undecided: Vec<MemberRefusalView>,
     /// The single engine's own diagnosis under `engine: "cube"`, when it has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
@@ -2679,6 +2688,7 @@ impl From<&crate::adapter::slang::verify_auto::AutoVerifyReport> for SvVerifyAut
                             decided_by: a.decided_by.clone(),
                             refused: views(&a.refused),
                             abstained: views(&a.abstained),
+                            undecided: views(&a.undecided),
                         }
                     }),
                     // A `⊥` ALWAYS carries a reason, with `unclassified-bottom` as the floor.
@@ -3349,6 +3359,10 @@ pub struct PortfolioAttributionView {
     /// a larger budget may decide the row. Absent on older reports; empty when none stopped.
     #[serde(default)]
     pub abstained: Vec<MemberRefusalView>,
+    /// mununu#1022 — the members that searched to their own bound without a verdict, each with
+    /// how far it got. Absent on older reports; empty when none did.
+    #[serde(default)]
+    pub undecided: Vec<MemberRefusalView>,
 }
 
 /// mununu#873 — one portfolio member's refusal of a design (mununu#893: also one member's budget
@@ -3362,9 +3376,21 @@ pub struct MemberRefusalView {
 impl MemberRefusalView {
     /// The refusals a reach portfolio recorded, in its reporting order.
     pub fn list(reach: &crate::adapter::reach_portfolio::ReachOutcome) -> Vec<Self> {
-        reach
-            .refused
-            .iter()
+        Self::of(&reach.refused)
+    }
+
+    /// mununu#1022 — the budget abstentions a reach portfolio recorded.
+    pub fn list_abstained(reach: &crate::adapter::reach_portfolio::ReachOutcome) -> Vec<Self> {
+        Self::of(&reach.abstained)
+    }
+
+    /// mununu#1022 — the members that searched to their bound, with their progress.
+    pub fn list_undecided(reach: &crate::adapter::reach_portfolio::ReachOutcome) -> Vec<Self> {
+        Self::of(&reach.undecided)
+    }
+
+    fn of(list: &[(&'static str, String)]) -> Vec<Self> {
+        list.iter()
             .map(|(member, reason)| Self {
                 member: (*member).to_string(),
                 reason: reason.clone(),
@@ -3533,6 +3559,7 @@ mod bottom_reason_view_tests {
                     decided_by: Vec::new(),
                     refused: vec![("exact".into(), "over cap".into())],
                     abstained: vec![("native".into(), "resource limit at depth 2".into())],
+                    undecided: vec![("interp".into(), "no fixpoint within 24 iterations".into())],
                 }),
                 ..bottom_prop(None)
             }],
@@ -3548,6 +3575,11 @@ mod bottom_reason_view_tests {
         assert_eq!(
             json["properties"][0]["portfolio"]["abstained"][0]["member"],
             "native"
+        );
+        // mununu#1022 — a member that searched to its bound reaches the row with its progress.
+        assert_eq!(
+            json["properties"][0]["portfolio"]["undecided"][0]["reason"],
+            "no fixpoint within 24 iterations"
         );
     }
 
