@@ -332,29 +332,54 @@ fn run_interp(
     cancel: &std::sync::atomic::AtomicBool,
     query_ms: u32,
     overall_ms: u64,
+    refused: &std::sync::Mutex<Vec<(&'static str, String)>>,
     undecided: &std::sync::Mutex<Vec<(&'static str, String)>>,
 ) -> Option<bool> {
-    timed(
-        "interp",
-        || match native_interp::verify_safety_interp_cancellable(
-            file,
-            INTERP_MAX_SUFFIX,
-            INTERP_MAX_ITERS,
-            query_ms,
-            overall_ms,
+    timed("interp", || {
+        interp_member(
+            refused,
+            undecided,
             cancel,
-        ) {
-            InterpSafetyVerdict::Unsafe { .. } => Some(true),
-            InterpSafetyVerdict::Safe { .. } => Some(false),
-            // mununu#1022 — its reason reaches the report unless it stopped on a peer's verdict.
-            InterpSafetyVerdict::Undecided { reason } => {
-                if !cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                    note_refusal(undecided, "interp", reason);
-                }
-                None
+            native_interp::interp_available(),
+            || {
+                native_interp::verify_safety_interp_cancellable(
+                    file,
+                    INTERP_MAX_SUFFIX,
+                    INTERP_MAX_ITERS,
+                    query_ms,
+                    overall_ms,
+                    cancel,
+                )
+            },
+        )
+    })
+}
+
+/// mununu#1022 — the interpolation member's run: a cvc5 that cannot be located is a REFUSAL,
+/// found before the search and so recorded on every run whatever a peer did (as every other
+/// member locates its tool first); a search that ends undecided is `undecided`, unless the member
+/// stopped because a peer had already decided.
+fn interp_member(
+    refused: &std::sync::Mutex<Vec<(&'static str, String)>>,
+    undecided: &std::sync::Mutex<Vec<(&'static str, String)>>,
+    cancel: &std::sync::atomic::AtomicBool,
+    available: Result<(), String>,
+    search: impl FnOnce() -> InterpSafetyVerdict,
+) -> Option<bool> {
+    if let Err(why) = available {
+        note_refusal(refused, "interp", why);
+        return None;
+    }
+    match search() {
+        InterpSafetyVerdict::Unsafe { .. } => Some(true),
+        InterpSafetyVerdict::Safe { .. } => Some(false),
+        InterpSafetyVerdict::Undecided { reason } => {
+            if !cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                note_refusal(undecided, "interp", reason);
             }
-        },
-    )
+            None
+        }
+    }
 }
 
 /// mununu#726 — the members' time bounds for one portfolio run, derived from the thread-local
@@ -772,6 +797,7 @@ fn decide_with_members_using(
                     decided,
                     t.interp_query_ms,
                     t.interp_overall_ms,
+                    refused,
                     undecided,
                 )
             })
@@ -1020,35 +1046,34 @@ pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcom
     }
     // Safety proof — McMillan interpolation.
     {
-        let (file, decided, tx, undecided) = (
+        let (file, decided, tx, refused, undecided) = (
             Arc::clone(&file),
             Arc::clone(&decided),
             tx.clone(),
+            Arc::clone(&refused),
             Arc::clone(&undecided),
         );
         let budget = budget.clone();
         std::thread::spawn(move || {
             let _g = crate::adapter::run_budget::enter(&budget);
-            let v = timed(
-                "interp",
-                || match native_interp::verify_safety_interp_cancellable(
-                    &file,
-                    INTERP_MAX_SUFFIX,
-                    64,
-                    INTERP_QUERY_TIMEOUT_MS,
-                    u64::from(timeout_ms),
+            let v = timed("interp", || {
+                interp_member(
+                    &refused,
+                    &undecided,
                     &decided,
-                ) {
-                    InterpSafetyVerdict::Unsafe { .. } => Some(true),
-                    InterpSafetyVerdict::Safe { .. } => Some(false),
-                    InterpSafetyVerdict::Undecided { reason } => {
-                        if !decided.load(Relaxed) {
-                            note_refusal(&undecided, "interp", reason);
-                        }
-                        None
-                    }
-                },
-            );
+                    native_interp::interp_available(),
+                    || {
+                        native_interp::verify_safety_interp_cancellable(
+                            &file,
+                            INTERP_MAX_SUFFIX,
+                            64,
+                            INTERP_QUERY_TIMEOUT_MS,
+                            u64::from(timeout_ms),
+                            &decided,
+                        )
+                    },
+                )
+            });
             if v.is_some() {
                 decided.store(true, Relaxed);
             }
@@ -1600,6 +1625,57 @@ mod tests {
         assert!(
             out.refused.is_empty() && out.abstained.is_empty(),
             "{out:?}"
+        );
+    }
+
+    /// mununu#1022 — interpolation that could not run is a refusal recorded whatever a peer did,
+    /// before any search (so two runs of one design report the same lists — CI's
+    /// `parallel_with_timeout_delegates_and_agrees` raced on it); a search that ran out is
+    /// `undecided` unless a peer had decided.
+    #[test]
+    fn an_interp_member_that_could_not_run_is_a_refusal_not_an_undecided_search() {
+        use std::sync::atomic::AtomicBool;
+        let (refused, undecided) = (
+            std::sync::Mutex::new(Vec::new()),
+            std::sync::Mutex::new(Vec::new()),
+        );
+        let ran = std::cell::Cell::new(false);
+        let v = interp_member(
+            &refused,
+            &undecided,
+            &AtomicBool::new(true),
+            Err("cvc5 missing".to_string()),
+            || {
+                ran.set(true);
+                InterpSafetyVerdict::Safe { iterations: 1 }
+            },
+        );
+        assert_eq!(v, None);
+        assert!(!ran.get(), "no search without cvc5");
+        let undecided_search = || InterpSafetyVerdict::Undecided {
+            reason: "no fixpoint".to_string(),
+        };
+        interp_member(
+            &refused,
+            &undecided,
+            &AtomicBool::new(false),
+            Ok(()),
+            undecided_search,
+        );
+        interp_member(
+            &refused,
+            &undecided,
+            &AtomicBool::new(true),
+            Ok(()),
+            undecided_search,
+        );
+        assert_eq!(
+            *refused.lock().unwrap(),
+            vec![("interp", "cvc5 missing".to_string())]
+        );
+        assert_eq!(
+            *undecided.lock().unwrap(),
+            vec![("interp", "no fixpoint".to_string())]
         );
     }
 
