@@ -333,6 +333,20 @@ pub fn one_step_interpolant(file: &Btor2File) -> OneStepInterp {
     })
 }
 
+/// The prefix of an [`InterpSafetyVerdict::Undecided`] reason for a cvc5 call that failed: absent,
+/// unusable, or a query past its time limit. A budget stop and a missing tool both read this way
+/// inside a search, so the portfolio tells the refusal apart with [`interp_available`] up front.
+pub const UNAVAILABLE_PREFIX: &str = "interpolation unavailable: ";
+
+/// mununu#1022 — whether the interpolation engine can run at all: `Err(reason)` when cvc5 cannot
+/// be located. The portfolio calls it before the search, so a missing cvc5 is a refusal on every
+/// run, not only on the runs where no peer had decided first.
+pub fn interp_available() -> Result<(), String> {
+    crate::adapter::cvc5::locate_cvc5()
+        .map(|_| ())
+        .map_err(|e| format!("{UNAVAILABLE_PREFIX}cvc5 unavailable: {e:?}"))
+}
+
 /// Verdict of the interpolation-based safety engine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InterpSafetyVerdict {
@@ -665,7 +679,7 @@ pub(crate) fn verify_safety_interp_cancellable(
                     }
                     InterpStep::Unavailable(e) => {
                         return InterpSafetyVerdict::Undecided {
-                            reason: format!("interpolation unavailable: {e}"),
+                            reason: format!("{UNAVAILABLE_PREFIX}{e}"),
                         };
                     }
                 }

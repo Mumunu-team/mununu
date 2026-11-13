@@ -4454,6 +4454,9 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
             == mununu_core::adapter::reach_portfolio::ReachVerdict::Contradiction,
         // mununu#873 — the members that refused the design, with the reason (the API's field).
         "refused": mununu_core::api::models::MemberRefusalView::list(&outcome),
+        // mununu#1022 — the budget stops and the members that searched to their bound.
+        "abstained": mununu_core::api::models::MemberRefusalView::list_abstained(&outcome),
+        "undecided": mununu_core::api::models::MemberRefusalView::list_undecided(&outcome),
         "trace": trace,
         "trace_unavailable_within_k": trace_unavailable_within_k,
     });

@@ -615,6 +615,13 @@
   },
   "description": "Response for `POST /api/v1/btor2/verify` — the merged portfolio verdict plus which engines reached each definite conclusion. Mirrors [`crate::adapter::reach_portfolio::ReachOutcome`].",
   "properties": {
+    "abstained": {
+      "description": "mununu#1022 — the members that abstained on a budget (a resource limit, a wall clock, or still running at the owned-only deadline), each with its cause. Absent when none did.",
+      "items": {
+        "$ref": "#/definitions/MemberRefusalView"
+      },
+      "type": "array"
+    },
     "contradiction": {
       "description": "`true` when two sound engines disagree — a soundness alarm, not a guess.",
       "type": "boolean"
@@ -677,6 +684,13 @@
         "integer",
         "null"
       ]
+    },
+    "undecided": {
+      "description": "mununu#1022 — the members that searched to their own bound without a verdict, each with how far it got (native: the depth and k reached). Absent when none did; a member cancelled after another decided is in no list.",
+      "items": {
+        "$ref": "#/definitions/MemberRefusalView"
+      },
+      "type": "array"
     },
     "unreachable_by": {
       "description": "Engines that proved `bad` unreachable (a real safety proof).",

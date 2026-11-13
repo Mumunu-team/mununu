@@ -508,6 +508,14 @@
             "$ref": "#/definitions/MemberRefusalView"
           },
           "type": "array"
+        },
+        "undecided": {
+          "default": [],
+          "description": "mununu#1022 — the members that searched to their own bound without a verdict, each with how far it got. Absent on older reports; empty when none did.",
+          "items": {
+            "$ref": "#/definitions/MemberRefusalView"
+          },
+          "type": "array"
         }
       },
       "required": [

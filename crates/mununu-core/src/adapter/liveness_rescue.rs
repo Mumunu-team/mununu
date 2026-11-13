@@ -587,6 +587,13 @@ pub fn undecided_notes(outcome: &ReachOutcome) -> Vec<String> {
                 .iter()
                 .map(|(m, why)| format!("{m}: {why}")),
         )
+        // mununu#1022 — and how far each member that searched to its bound got.
+        .chain(
+            outcome
+                .undecided
+                .iter()
+                .map(|(m, how_far)| format!("{m} undecided: {how_far}")),
+        )
         .collect()
 }
 
