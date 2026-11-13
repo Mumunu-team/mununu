@@ -301,23 +301,24 @@ pub enum KlivenessLadder {
 }
 
 /// The k-liveness width ladder: for each width in [`KLIVENESS_WIDTHS`], the monitor `monitor(w)`
-/// is decided as `bad`-reachability by the proof-directed members
-/// ([`ReachMembers::PROOF_DIRECTED`](crate::adapter::reach_portfolio::ReachMembers)). `Unreachable`
+/// is decided as `bad`-reachability by `members`. Normally that is
+/// [`ReachMembers::PROOF_DIRECTED`](crate::adapter::reach_portfolio::ReachMembers::PROOF_DIRECTED).
+/// When the rung races others (`--parallel-rungs`, mununu#986) it is
+/// [`ReachMembers::PROOF_DIRECTED_RACED`](crate::adapter::reach_portfolio::ReachMembers::PROOF_DIRECTED_RACED). `Unreachable`
 /// ⇒ [`KlivenessLadder::Holds`]; `Reachable` moves to the next width (a bound too small is not a
 /// violation); the first width no member decides ENDS the ladder (a wider bound is strictly harder
 /// to prove and its trace strictly deeper), as does an expired
 /// [`run_budget`](crate::adapter::run_budget) or `cancel`.
 ///
-/// engine: proof-directed reach portfolio (rIC3 in its own portfolio mode, Pono `ic3bits`, native
-/// k-induction) on the round-counter monitor, each member under `btormc::DEFAULT_TIMEOUT` or the
+/// engine: proof-directed reach portfolio (rIC3 in its own portfolio mode, or `-e ic3` when raced;
+/// Pono `ic3bits`; native k-induction) on the round-counter monitor, each member under `btormc::DEFAULT_TIMEOUT` or the
 /// time left in the current run budget — role: decider on proofs.
 pub fn kliveness_ladder(
     monitor: &dyn Fn(u32) -> Result<String, AdapterError>,
     cancel: Option<&std::sync::atomic::AtomicBool>,
+    members: crate::adapter::reach_portfolio::ReachMembers,
 ) -> KlivenessLadder {
-    use crate::adapter::reach_portfolio::{
-        ReachMembers, ReachVerdict, decide_reach_portfolio_with_members,
-    };
+    use crate::adapter::reach_portfolio::{ReachVerdict, decide_reach_portfolio_with_members};
     use crate::adapter::run_budget;
     let mut tried: Vec<String> = Vec::new();
     let mut member_notes: Vec<String> = Vec::new();
@@ -349,7 +350,7 @@ pub fn kliveness_ladder(
             &file,
             crate::adapter::btormc::DEFAULT_TIMEOUT,
             cancel,
-            ReachMembers::PROOF_DIRECTED,
+            members,
         );
         for (m, why) in outcome.refused.iter().chain(outcome.abstained.iter()) {
             member_notes.push(format!("{m} at {label}: {why}"));
@@ -598,6 +599,7 @@ mod tests {
         let r = kliveness_ladder(
             &|w| emit_response_kliveness_monitor(STALLER, REQ, DONE, &[], false, w),
             None,
+            crate::adapter::reach_portfolio::ReachMembers::PROOF_DIRECTED,
         );
         assert!(!matches!(r, KlivenessLadder::Holds { .. }), "{r:?}");
     }

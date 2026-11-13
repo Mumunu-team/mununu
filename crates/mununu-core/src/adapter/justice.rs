@@ -351,6 +351,7 @@ fn kliveness_rung(
     justice_index: usize,
     budget: Option<std::time::Duration>,
     cancel: Option<&std::sync::atomic::AtomicBool>,
+    members: crate::adapter::reach_portfolio::ReachMembers,
 ) -> (PropertyVerdict, Vec<String>, Vec<String>) {
     use crate::adapter::btor2::kliveness_monitor::{
         KlivenessLadder, emit_kliveness_monitor, kliveness_ladder,
@@ -364,6 +365,7 @@ fn kliveness_rung(
     let (tried, member_notes) = match kliveness_ladder(
         &|w| emit_kliveness_monitor(design, justice_index, w),
         cancel,
+        members,
     ) {
         KlivenessLadder::Holds { bound, members } => {
             let mut by = vec!["kliveness".to_string(), bound.to_string()];
@@ -469,7 +471,13 @@ pub fn verify_justice_with(
                 notes.append(&mut n);
             }
             JusticeRung::Kliveness => {
-                let (v, by, mut n) = kliveness_rung(&named, index, total, None);
+                let (v, by, mut n) = kliveness_rung(
+                    &named,
+                    index,
+                    total,
+                    None,
+                    crate::adapter::reach_portfolio::ReachMembers::PROOF_DIRECTED,
+                );
                 verdict = v;
                 decided_by = by;
                 notes.append(&mut n);
@@ -526,7 +534,15 @@ pub fn verify_justice_with(
                         let named = &named;
                         scope.spawn(move || {
                             let _live = RungGuard::enter();
-                            let (v, by, n) = kliveness_rung(named, index, total, Some(cancel));
+                            // mununu#986: rIC3 as one `-e ic3` process, not its ~11-solver
+                            // portfolio, which starved the l2s rung racing beside it.
+                            let (v, by, n) = kliveness_rung(
+                                named,
+                                index,
+                                total,
+                                Some(cancel),
+                                crate::adapter::reach_portfolio::ReachMembers::PROOF_DIRECTED_RACED,
+                            );
                             let r = if v == PropertyVerdict::Unknown {
                                 Err(n.join(" | "))
                             } else {
@@ -600,7 +616,13 @@ pub fn verify_justice_with(
                     // l2s finds the lassos, this finds the bounds); the exact remainder gets the
                     // rest. Unbudgeted runs give it the members' defaults per width.
                     let kl_budget = remaining(total).map(|r| r / 2);
-                    let (v, by, mut n) = kliveness_rung(&named, index, kl_budget, None);
+                    let (v, by, mut n) = kliveness_rung(
+                        &named,
+                        index,
+                        kl_budget,
+                        None,
+                        crate::adapter::reach_portfolio::ReachMembers::PROOF_DIRECTED,
+                    );
                     verdict = v;
                     decided_by = by;
                     notes.append(&mut n);

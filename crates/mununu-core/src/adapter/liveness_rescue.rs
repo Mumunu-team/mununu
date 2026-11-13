@@ -620,6 +620,7 @@ pub fn response_kliveness(
             )
         },
         cancel,
+        crate::adapter::reach_portfolio::ReachMembers::PROOF_DIRECTED,
     )
 }
 
