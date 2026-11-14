@@ -787,8 +787,8 @@ fn replay(
     let probed = parser::parse(&with_bad_probe(text)).map_err(|e| e.to_string())?;
     let mut state: std::collections::HashMap<String, u128> = initial.iter().cloned().collect();
     state.insert("mununu_bad_probe".into(), 0);
-    for f in 0..=depth as usize {
-        let ins: std::collections::HashMap<String, u128> = inputs[f].iter().cloned().collect();
+    for (f, frame) in inputs.iter().enumerate().take(depth as usize + 1) {
+        let ins: std::collections::HashMap<String, u128> = frame.iter().cloned().collect();
         let out =
             simulate_one_step_observe(&probed, &state, &ins, &[]).map_err(|e| e.to_string())?;
         if !out.admissible {

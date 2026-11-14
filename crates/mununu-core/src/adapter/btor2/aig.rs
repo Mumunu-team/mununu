@@ -987,8 +987,8 @@ mod tests {
             let m = mask(w);
             let names = ["udiv", "urem", "sdiv", "srem", "smod", "uaddo", "usubo", "saddo", "ssubo", "umulo", "smulo", "sdivo"];
             let (expect, rw) = match op {
-                0 => (if b == 0 { m } else { a / b }, w),
-                1 => (if b == 0 { a } else { a % b }, w),
+                0 => (a.checked_div(b).unwrap_or(m), w),
+                1 => (a.checked_rem(b).unwrap_or(a), w),
                 2 => (if sb == 0 { if sa < 0 { 1 } else { m } } else { (sa.wrapping_div(sb) as u64) & m }, w),
                 3 => (if sb == 0 { a } else { (sa.wrapping_rem(sb) as u64) & m }, w),
                 4 => (if sb == 0 { a } else {
