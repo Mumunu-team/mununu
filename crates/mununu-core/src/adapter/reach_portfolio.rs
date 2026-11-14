@@ -2187,7 +2187,7 @@ mod tests {
             safe.refused.is_empty() && safe.abstained.is_empty(),
             "{safe:?}"
         );
-        assert!(ReachMembers::ALL.sat_bmc && !ReachMembers::PROOF_DIRECTED.sat_bmc);
+        const { assert!(ReachMembers::ALL.sat_bmc && !ReachMembers::PROOF_DIRECTED.sat_bmc) };
     }
 
     #[test]
