@@ -14,6 +14,9 @@
 //! - **rIC3** (bit-level IC3/PDR) on the inductive-invariant safety class;
 //! - **rIC3's dynamic-step BMC** (`ric3-bmc`, `-e bmc --bmc-dyn-step`, mununu#997) on deep
 //!   counterexamples whose shallow frames are hard: counterexamples only, never a proof.
+//! - the owned **SAT BMC** (`sat-bmc`, [`sat_bmc`](crate::adapter::btor2::sat_bmc), N5.4): the
+//!   same dynamic-step idea on in-process CaDiCaL over the AIG model, in both the full and the
+//!   owned-only drivers; counterexamples only, never a proof.
 //!
 //! Plus the in-house **interpolation** engine ([`native_interp`], owned McMillan-style
 //! forward reachability with an interpolation k-schedule). It synthesises inductive
@@ -144,6 +147,8 @@ pub(crate) struct Members {
     pub exact: Option<bool>,
     pub native: Option<bool>,
     pub interp: Option<bool>,
+    /// N5.4 — the owned SAT BMC (CaDiCaL, dynamic step): counterexamples only.
+    pub sat_bmc: Option<bool>,
     pub btormc: Option<McVerdict>,
     pub pono: Option<McVerdict>,
     /// Plan 4 / PR D2 — rIC3 `-e ic3`, bit-level IC3/PDR over the emitted BTOR2 (mununu#736).
@@ -330,6 +335,44 @@ fn run_native(
     )
 }
 
+/// N5.4 (Track N) — the deepest frame the owned SAT BMC member checks. The dynamic step jumps
+/// geometrically, so the bound costs nothing on a design whose counterexample is shallow; the
+/// deepest one it decided on HWMCC'20 is `mul9` at 126 (rIC3's dynamic step found 238).
+const SAT_BMC_MAX_DEPTH: u32 = 1_000;
+
+/// N5.4 — the owned **SAT BMC** member: bit-level BMC over the AIG model on in-process CaDiCaL
+/// ([`sat_bmc`](crate::adapter::btor2::sat_bmc)) with the dynamic step, the owned counterpart of
+/// `ric3-bmc`. Counterexamples only: `Ok(Some(true))` reachable, never `Some(false)` (a bounded
+/// search proves nothing). A model the AIG backend cannot build (arrays) is a refusal; a stop at
+/// the wall is a budget abstention; a search refuted through [`SAT_BMC_MAX_DEPTH`] is undecided;
+/// a stop because another member decided is in no list.
+fn run_sat_bmc(
+    file: &Btor2File,
+    deadline: std::time::Instant,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Result<Option<bool>, MemberStop> {
+    use crate::adapter::btor2::sat_bmc::{self, DynamicStep, SatBmcOptions, SatBmcOutcome};
+    let cancelled = || cancel.load(std::sync::atomic::Ordering::Relaxed);
+    let opts = SatBmcOptions {
+        max_depth: SAT_BMC_MAX_DEPTH,
+        deadline: Some(deadline),
+        cancel: Some(std::sync::Arc::clone(&cancel)),
+        dynamic_step: Some(DynamicStep::default()),
+        ..Default::default()
+    };
+    timed("sat-bmc", || match sat_bmc::sat_bmc(file, &opts) {
+        Ok(SatBmcOutcome::Violated { .. }) => Ok(Some(true)),
+        Ok(SatBmcOutcome::Stopped { .. }) if cancelled() => Ok(None),
+        Ok(SatBmcOutcome::Stopped { depth, reason }) => Err(MemberStop::Abstained(format!(
+            "SAT BMC stopped ({reason}); every depth below {depth} refuted"
+        ))),
+        Ok(SatBmcOutcome::NoCounterexample { depth }) => Err(MemberStop::Undecided(format!(
+            "SAT BMC found no counterexample through depth {depth} (its bound)"
+        ))),
+        Err(why) => Err(MemberStop::Refused(format!("sat-bmc: {why}"))),
+    })
+}
+
 /// mununu#1022 — the native member's progress when it searched to its bound without a verdict.
 fn native_unknown(k: u32) -> String {
     format!(
@@ -485,6 +528,7 @@ fn collect(m: Members) -> ReachOutcome {
         ("exact", m.exact),
         ("native", m.native),
         ("interp", m.interp),
+        ("sat-bmc", m.sat_bmc),
     ] {
         match v {
             Some(true) => reachable_by.push(name),
@@ -511,7 +555,7 @@ fn collect(m: Members) -> ReachOutcome {
     // tests compare whole outcomes).
     let rank = |member: &str| {
         [
-            "exact", "native", "interp", "btormc", "pono", "ric3", "ric3-bmc",
+            "exact", "native", "interp", "sat-bmc", "btormc", "pono", "ric3", "ric3-bmc",
         ]
         .iter()
         .position(|m| *m == member)
@@ -603,6 +647,9 @@ pub struct ReachMembers {
     pub native: bool,
     /// Owned McMillan interpolation (in-process).
     pub interp: bool,
+    /// N5.4 — the owned SAT BMC with the dynamic step (in-process CaDiCaL; finds `bad`
+    /// reachable, never proves).
+    pub sat_bmc: bool,
     /// btormc (subprocess BMC — finds `bad` reachable, never proves).
     pub btormc: bool,
     /// Pono (subprocess, `ic3bits`).
@@ -622,6 +669,7 @@ impl ReachMembers {
         exact: true,
         native: true,
         interp: true,
+        sat_bmc: true,
         btormc: true,
         pono: true,
         ric3: true,
@@ -639,6 +687,7 @@ impl ReachMembers {
         exact: false,
         native: true,
         interp: false,
+        sat_bmc: false,
         btormc: false,
         pono: true,
         ric3: true,
@@ -839,6 +888,27 @@ fn decide_with_members_using(
                 v
             })
         });
+        // N5.4 — the owned SAT BMC, the in-process counterpart of `ric3-bmc`: one deep window
+        // query at a time under a doubling conflict budget, walled by the subprocess budget and
+        // cancelled by `decided`. It only ever contributes `Violated`.
+        let sat_bmc_h = members.sat_bmc.then(|| {
+            let cancel = std::sync::Arc::clone(&decided_flag);
+            scope.spawn(move || {
+                let _g = crate::adapter::run_budget::enter(budget);
+                let deadline = std::time::Instant::now() + subprocess_timeout;
+                let v = settle_native(
+                    refused,
+                    abstained,
+                    undecided,
+                    "sat-bmc",
+                    run_sat_bmc(file, deadline, cancel),
+                );
+                if v == Some(true) {
+                    decided.store(true, Relaxed);
+                }
+                v
+            })
+        });
         // The native engine is in-process Z3 work — on its own
         // thread so it overlaps the exact engine + the subprocess members rather than
         // serialising.
@@ -906,11 +976,13 @@ fn decide_with_members_using(
         let ric3 = ric3_h.and_then(|h| h.join().unwrap_or(None));
         let ric3_bmc = ric3_bmc_h.and_then(|h| h.join().unwrap_or(None));
         let interp = interp_h.and_then(|h| h.join().unwrap_or(None));
+        let sat_bmc = sat_bmc_h.and_then(|h| h.join().unwrap_or(None));
         finished.store(true, Relaxed);
         Members {
             exact,
             native,
             interp,
+            sat_bmc,
             btormc,
             pono,
             ric3,
@@ -1208,6 +1280,30 @@ pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcom
             let _ = tx.send(("cex", if hit { Some(true) } else { None }));
         });
     }
+    // N5.4 — the owned SAT BMC with the dynamic step, beside the z3 / Boolector deep-CEX member:
+    // it reaches the deep counterexamples whose shallow frames stall a per-depth search
+    // (HWMCC'20 `mul9`, `krebs.3`, `circular_pointer_w32_d32`, none decided by the other owned
+    // members at 300 s, item 6 F0). Only ever contributes `Violated`.
+    {
+        let (file, decided, tx, refused, abstained, undecided) = (
+            Arc::clone(&file),
+            Arc::clone(&decided),
+            tx.clone(),
+            Arc::clone(&refused),
+            Arc::clone(&abstained),
+            Arc::clone(&undecided),
+        );
+        let budget = budget.clone();
+        std::thread::spawn(move || {
+            let _g = crate::adapter::run_budget::enter(&budget);
+            let r = run_sat_bmc(&file, deadline, Arc::clone(&decided));
+            let v = settle_native(&refused, &abstained, &undecided, "sat-bmc", r);
+            if v == Some(true) {
+                decided.store(true, Relaxed);
+            }
+            let _ = tx.send(("sat-bmc", v));
+        });
+    }
     // Exact BDD — the non-interruptible member; spawned so it can never block the return.
     {
         let (content, decided, tx, refused) = (
@@ -1230,7 +1326,7 @@ pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcom
     }
     drop(tx); // the collector's `rx` disconnects once every member thread has finished.
 
-    // Four members: native, interp, {boolector | z3-cex}, exact.
+    // Five members: native, interp, {boolector | z3-cex}, sat-bmc, exact.
     const N_MEMBERS: usize = OWNED_MEMBERS.len();
     let mut reachable_by: Vec<&'static str> = Vec::new();
     let mut unreachable_by: Vec<&'static str> = Vec::new();
@@ -1357,9 +1453,9 @@ fn unreported_at_deadline(
 
 /// The owned-only driver's members, in its reporting order: the names its threads send.
 #[cfg(feature = "boolector")]
-const OWNED_MEMBERS: [&str; 4] = ["native", "interp", "boolector", "exact"];
+const OWNED_MEMBERS: [&str; 5] = ["native", "interp", "boolector", "sat-bmc", "exact"];
 #[cfg(not(feature = "boolector"))]
-const OWNED_MEMBERS: [&str; 4] = ["native", "interp", "cex", "exact"];
+const OWNED_MEMBERS: [&str; 5] = ["native", "interp", "cex", "sat-bmc", "exact"];
 
 #[cfg(test)]
 mod tests {
@@ -1626,6 +1722,7 @@ mod tests {
             exact: true,
             native: true,
             interp: false,
+            sat_bmc: false,
             btormc: false,
             pono: false,
             ric3: false,
@@ -1682,6 +1779,7 @@ mod tests {
             exact: false,
             native: true,
             interp: false,
+            sat_bmc: false,
             btormc: false,
             pono: false,
             ric3: false,
@@ -1759,8 +1857,8 @@ mod tests {
     fn the_owned_driver_names_the_members_still_running_at_its_deadline() {
         let left = unreported_at_deadline(&["native", "interp"], 300_000);
         let names: Vec<_> = left.iter().map(|(m, _)| *m).collect();
-        assert_eq!(names, vec![OWNED_MEMBERS[2], "exact"]);
-        assert!(left[1].1.contains("300000 ms"), "{}", left[1].1);
+        assert_eq!(names, vec![OWNED_MEMBERS[2], "sat-bmc", "exact"]);
+        assert!(left[2].1.contains("300000 ms"), "{}", left[2].1);
         assert!(unreported_at_deadline(&OWNED_MEMBERS, 1).is_empty());
     }
 
@@ -1977,6 +2075,7 @@ mod tests {
             exact: false,
             native: false,
             interp: false,
+            sat_bmc: false,
             btormc: false,
             pono: false,
             ric3: false,
@@ -2011,6 +2110,86 @@ mod tests {
         );
     }
 
+    /// N5.4 — the owned SAT BMC member's four exits, each in its own list: a counterexample is
+    /// `Some(true)`, a refuted bound is `undecided` (never a proof), a cancelled run is in no list,
+    /// an array design is a refusal.
+    #[test]
+    fn the_sat_bmc_member_finds_counterexamples_never_proves_and_names_every_stop() {
+        use std::sync::{Arc, atomic::AtomicBool};
+        const COUNTER: &str = "1 sort bitvec 3\n2 zero 1\n3 state 1\n4 init 1 3 2\n5 one 1\n\
+                               6 add 1 3 5\n7 next 1 3 6\n8 ones 1\n9 sort bitvec 1\n\
+                               10 eq 9 3 8\n11 bad 10\n";
+        const SAFE: &str = "1 sort bitvec 1\n2 zero 1\n3 state 1 q\n4 init 1 3 2\n\
+                            5 next 1 3 2\n6 bad 3\n";
+        const ARRAY: &str = "1 sort bitvec 1\n2 sort array 1 1\n3 state 2 m\n4 zero 1\n\
+                             5 read 1 3 4\n6 bad 5\n";
+        let later = || std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let go = || Arc::new(AtomicBool::new(false));
+        let parse = |s: &str| parser::parse(s).expect("parse");
+        assert_eq!(run_sat_bmc(&parse(COUNTER), later(), go()), Ok(Some(true)));
+        match run_sat_bmc(&parse(SAFE), later(), go()) {
+            Err(MemberStop::Undecided(p)) => assert!(p.contains("depth 1000"), "{p}"),
+            other => panic!("a bounded search must not prove: {other:?}"),
+        }
+        assert_eq!(
+            run_sat_bmc(&parse(SAFE), later(), Arc::new(AtomicBool::new(true))),
+            Ok(None),
+            "a member cancelled because a peer decided is in no list"
+        );
+        assert!(
+            matches!(
+                run_sat_bmc(&parse(ARRAY), later(), go()),
+                Err(MemberStop::Refused(why)) if why.starts_with("sat-bmc:")
+            ),
+            "an array design is refused by name"
+        );
+    }
+
+    /// N5.4 at the driver: the SAT BMC member alone decides the counter and is credited by name;
+    /// on the safe design the outcome is `Unknown` with its progress in `undecided`.
+    #[test]
+    fn the_portfolio_credits_the_sat_bmc_member_and_carries_its_bound() {
+        const COUNTER: &str = "1 sort bitvec 3\n2 zero 1\n3 state 1\n4 init 1 3 2\n5 one 1\n\
+                               6 add 1 3 5\n7 next 1 3 6\n8 ones 1\n9 sort bitvec 1\n\
+                               10 eq 9 3 8\n11 bad 10\n";
+        const SAFE: &str = "1 sort bitvec 1\n2 zero 1\n3 state 1 q\n4 init 1 3 2\n\
+                            5 next 1 3 2\n6 bad 3\n";
+        let only = ReachMembers {
+            exact: false,
+            native: false,
+            interp: false,
+            sat_bmc: true,
+            btormc: false,
+            pono: false,
+            ric3: false,
+            ric3_bmc: false,
+            ric3_engine: ric3::DEFAULT_ENGINE,
+        };
+        let run = |src: &str| {
+            decide_reach_portfolio_with_members(
+                &parser::parse(src).expect("parse"),
+                std::time::Duration::from_secs(60),
+                None,
+                only,
+            )
+        };
+        let reach = run(COUNTER);
+        assert_eq!(reach.verdict, ReachVerdict::Reachable, "{reach:?}");
+        assert_eq!(reach.reachable_by, vec!["sat-bmc"], "{reach:?}");
+        let safe = run(SAFE);
+        assert_eq!(safe.verdict, ReachVerdict::Unknown, "{safe:?}");
+        assert_eq!(
+            safe.undecided.iter().map(|(m, _)| *m).collect::<Vec<_>>(),
+            vec!["sat-bmc"],
+            "{safe:?}"
+        );
+        assert!(
+            safe.refused.is_empty() && safe.abstained.is_empty(),
+            "{safe:?}"
+        );
+        assert!(ReachMembers::ALL.sat_bmc && !ReachMembers::PROOF_DIRECTED.sat_bmc);
+    }
+
     #[test]
     fn owned_only_excludes_external_engines_on_small_counter() {
         // The owned-standalone driver decides the small reachable counter via the
@@ -2027,7 +2206,7 @@ mod tests {
         assert!(!out.reachable_by.is_empty(), "{out:?}");
         for name in out.reachable_by.iter().chain(out.unreachable_by.iter()) {
             assert!(
-                ["exact", "native", "interp", "boolector", "cex"].contains(name),
+                ["exact", "native", "interp", "boolector", "cex", "sat-bmc"].contains(name),
                 "owned-only listed a non-owned engine {name}: {out:?}"
             );
         }
