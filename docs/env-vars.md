@@ -110,6 +110,7 @@ Design notes: [`docs/design/bdd-variable-ordering.md`](design/bdd-variable-order
 | `MUNUNU_VERIFY_AUTO_ONLY_ROWS` | comma-separated property names or labels: only those rows run, every other row is `unknown` with `bottom_reason: not-attempted` and the ⊥ re-plan leaves it alone; `-` runs no row (the cone hashes of every row for the price of the lift). The ledger's re-run of the rows whose cone changed (N0.1). Unset = every row. |
 | `MUNUNU_SPCR_OUT_DIR` | emit the array-free design the SPCR pass produced, for a manual marginal-reach check. |
 | `MUNUNU_INTERP_DUMP` | path for the failing cvc5 interpolation query of the native interpolation engine — distinguishes an interpolation incompleteness from a serialisation bug. |
+| `MUNUNU_KLIVENESS_MONITOR_DUMP` | path prefix: the k-liveness ladder writes each round-counter monitor it builds to `<prefix>.k<width>.btor2` (justice rung and the response verbs' fallback), so another engine can decide the same monitor, e.g. `btor2 verify --owned-only`. Diagnostic only; never changes a verdict. |
 | `MUNUNU_OWNED_TIMEOUT_MS` | per-check timeout of the owned (in-process) reachability members. |
 | `MUNUNU_BOOLECTOR_TRACE` (`=1`) | per-bound `sat()` wall times of the native Boolector BMC member. |
 
