@@ -106,6 +106,12 @@ tree-sitter-rust = { version = "0.23", optional = true }
 #   cargo build --features z3/bundled
 z3 = { version = "0.21" }
 
+# N5.0 (Track N) — CaDiCaL 1.9.5, in-process, the SAT core of the owned bit-level engines (the
+# AIG → CNF BMC now, the owned IC3 next). Chosen over `rustsat-cadical` because it builds with a C++
+# compiler alone: `rustsat-cadical` runs bindgen on every build, which needs libclang on every
+# host and image (the `mununu-sva` image has none; measured 2026-11-13). MIT.
+cadical = "0.1.16"
+
 # Optional / feature-gated:
 #   `test_support`: deterministic CLTS generators (chain/ring/grid/hypercube/...)
 #       used by tests, proptests, stress tests, and the bench harness fixtures.
