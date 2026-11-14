@@ -851,6 +851,16 @@ enum SafetyEngineArg {
     Ic3,
 }
 
+/// N5.0 — which engine `btor2 verify --bmc-only` runs.
+#[derive(Clone, Debug, Copy, clap::ValueEnum, Default, PartialEq, Eq)]
+enum BmcEngineArg {
+    /// Native bit-precise BMC on z3 (QF_BV).
+    #[default]
+    Native,
+    /// The owned bit-level BMC: AIG → CNF → CaDiCaL (N5.0).
+    Sat,
+}
+
 /// R-F5.4.2b (2026-07-03) — which predicate-cube engine evaluates the
 /// property. Mirrors the two edge-construction strategies.
 #[derive(Clone, Debug, Copy, clap::ValueEnum, Default, PartialEq, Eq)]
@@ -1166,6 +1176,15 @@ struct Btor2VerifyArgs {
     /// Step bound for `--bmc-only` (default 20).
     #[arg(long, value_name = "K", default_value_t = 20)]
     bmc_k: u32,
+    /// The engine `--bmc-only` runs: `native` (default; bit-precise BMC on z3 QF_BV) or `sat`
+    /// (N5.0: the owned bit-level BMC, the design bit-blasted to an AIG and unrolled into
+    /// CaDiCaL, in-process). Both search every depth up to `--bmc-k`; `--timeout-ms` is the
+    /// `sat` engine's wall deadline, and a stopped search says where and why.
+    ///
+    /// surface: CLI-only — an engine-evaluation switch of the CLI-only `--bmc-only`; the
+    /// owned SAT engine reaches the API through the portfolio once it joins it (N5.4).
+    #[arg(long, value_enum, default_value_t = BmcEngineArg::Native)]
+    bmc_engine: BmcEngineArg,
     /// Fault-injection posture on the BTOR2 (`REG[:k]`, repeatable; the one global budget,
     /// default 1): the design is rewritten as `btor2 inject-fault` does before the portfolio
     /// runs. `reachable` then reads "an attack within the budget reaches `bad`" (the attacker
@@ -4382,20 +4401,48 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
     // bounded-miter path for wide-datapath equivalence checks whose full proof is intractable.
     if args.bmc_only {
         use mununu_core::adapter::btor2::native_bmc::{self, BmcOutcome};
-        let (verdict, depth) = match native_bmc::bmc_bad_reachable(&file, args.bmc_k) {
-            Ok(BmcOutcome::Violated { depth }) => ("violated", Some(depth)),
-            Ok(BmcOutcome::NoCexWithin { .. }) => ("unknown", None),
-            Err(e) => return Err(format!("bmc-only: {e:?}")),
+        use mununu_core::adapter::btor2::sat_bmc::{SatBmcOptions, SatBmcOutcome, sat_bmc};
+        let (verdict, depth, member, stopped) = match args.bmc_engine {
+            BmcEngineArg::Native => match native_bmc::bmc_bad_reachable(&file, args.bmc_k) {
+                Ok(BmcOutcome::Violated { depth }) => ("violated", Some(depth), "native-bmc", None),
+                Ok(BmcOutcome::NoCexWithin { .. }) => ("unknown", None, "native-bmc", None),
+                Err(e) => return Err(format!("bmc-only: {e:?}")),
+            },
+            BmcEngineArg::Sat => {
+                let opts = SatBmcOptions {
+                    max_depth: args.bmc_k,
+                    deadline: args
+                        .timeout_ms
+                        .map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms)),
+                    ..Default::default()
+                };
+                match sat_bmc(&file, &opts)
+                    .map_err(|e| format!("bmc-only --bmc-engine sat: {e}"))?
+                {
+                    SatBmcOutcome::Violated { depth, .. } => {
+                        ("violated", Some(depth), "sat-bmc", None)
+                    }
+                    SatBmcOutcome::NoCounterexample { .. } => ("unknown", None, "sat-bmc", None),
+                    // Silence is a defect: a search that stopped short says at which depth and why.
+                    SatBmcOutcome::Stopped { depth, reason } => (
+                        "unknown",
+                        None,
+                        "sat-bmc",
+                        Some(format!("stopped at depth {depth}: {reason}")),
+                    ),
+                }
+            }
         };
         let summary = serde_json::json!({
             "file": args.file.display().to_string(),
-            "engines": format!("bmc-only(k={})", args.bmc_k),
+            "engines": format!("bmc-only(k={}, {member})", args.bmc_k),
             "fault": fault_label,
             "outcome": verdict,
-            "reachable_by": if verdict == "violated" { vec!["native-bmc"] } else { Vec::<&str>::new() },
+            "reachable_by": if verdict == "violated" { vec![member] } else { Vec::<&str>::new() },
             "unreachable_by": Vec::<&str>::new(),
             "contradiction": false,
             "bmc_depth": depth,
+            "bmc_stopped": stopped,
         });
         println!(
             "{}",

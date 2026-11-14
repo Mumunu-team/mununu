@@ -727,3 +727,156 @@ fn the_conjunction_rewrite_collapses_an_alternating_set() {
         "the wrong monitor proves it at k = 1"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// N5.0 — the owned bit-level BMC (AIG → CNF → CaDiCaL) against the exact engine, both ways.
+//
+// A generated design has at most 9 state bits, so a search to depth 2^bits covers every
+// reachable state: on this tier the bounded engine is complete, and its answer must EQUAL the
+// exact engine's, not merely not contradict it. Every counterexample is replayed on the concrete
+// simulator (a probe register latches `bad`), so a wrong trace fails too, not only a wrong verdict.
+// ---------------------------------------------------------------------------------------------
+
+use mununu_core::adapter::btor2::ast::Node;
+use mununu_core::adapter::btor2::bit_blast::simulate_one_step_observe;
+use mununu_core::adapter::btor2::sat_bmc::{SatBmcOptions, SatBmcOutcome, sat_bmc};
+
+fn state_bits(file: &Btor2File) -> u32 {
+    file.lines
+        .iter()
+        .filter_map(|l| match &l.node {
+            Node::State { sort, .. } => parser::bv_width(file, *sort),
+            _ => None,
+        })
+        .sum()
+}
+
+/// `text` with a 1-bit probe register `mununu_bad_probe` whose `next` is the (single) `bad`
+/// signal: after stepping frame k, the probe holds `bad` at frame k.
+fn with_bad_probe(text: &str) -> String {
+    let max = text
+        .lines()
+        .filter_map(|l| l.split_whitespace().next()?.parse::<i64>().ok())
+        .max()
+        .unwrap_or(0);
+    let sig = text
+        .lines()
+        .find_map(|l| {
+            let t: Vec<&str> = l.split_whitespace().collect();
+            (t.get(1) == Some(&"bad")).then(|| t[2].to_string())
+        })
+        .expect("a bad line");
+    format!(
+        "{text}{} sort bitvec 1\n{} state {} mununu_bad_probe\n{} next {} {} {sig}\n",
+        max + 1,
+        max + 2,
+        max + 1,
+        max + 3,
+        max + 1,
+        max + 2
+    )
+}
+
+/// Replay a SAT-BMC counterexample on the concrete simulator; `Err` says where it breaks.
+fn replay(
+    text: &str,
+    depth: u32,
+    initial: &[(String, u128)],
+    inputs: &[Vec<(String, u128)>],
+) -> Result<(), String> {
+    let probed = parser::parse(&with_bad_probe(text)).map_err(|e| e.to_string())?;
+    let mut state: std::collections::HashMap<String, u128> = initial.iter().cloned().collect();
+    state.insert("mununu_bad_probe".into(), 0);
+    for f in 0..=depth as usize {
+        let ins: std::collections::HashMap<String, u128> = inputs[f].iter().cloned().collect();
+        let out =
+            simulate_one_step_observe(&probed, &state, &ins, &[]).map_err(|e| e.to_string())?;
+        if !out.admissible {
+            return Err(format!("a constraint fails at frame {f}"));
+        }
+        state = out.next_state;
+    }
+    match state.get("mununu_bad_probe") {
+        Some(1) => Ok(()),
+        other => Err(format!("bad is {other:?} at depth {depth} on replay")),
+    }
+}
+
+#[test]
+fn sat_bmc_equals_the_exact_engine_and_its_traces_replay() {
+    let config = ProptestConfig {
+        cases: cases_from_env().max(96),
+        rng_seed: tier_seed(),
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    };
+    let mut runner = proptest::test_runner::TestRunner::new(config);
+    let tally = std::cell::Cell::new((0usize, 0usize));
+    runner
+        .run(&design_strategy(), |d| {
+            let file = parser::parse(&d.text).expect("parses");
+            let exact = exact_bad_reachable(&d.text).expect("exact decides");
+            let bound = 1u32 << state_bits(&file);
+            let out = sat_bmc(
+                &file,
+                &SatBmcOptions {
+                    max_depth: bound,
+                    ..Default::default()
+                },
+            )
+            .unwrap_or_else(|e| panic!("sat-bmc refused a generated design: {e}\n{}", d.text));
+            let (mut v, mut n) = tally.get();
+            match out {
+                SatBmcOutcome::Violated {
+                    depth,
+                    initial,
+                    inputs,
+                    ..
+                } => {
+                    prop_assert!(
+                        exact,
+                        "sat-bmc: violated at {depth}, exact: unreachable\n{}",
+                        d.text
+                    );
+                    if let Err(e) = replay(&d.text, depth, &initial, &inputs) {
+                        prop_assert!(false, "the trace does not replay: {e}\n{}", d.text);
+                    }
+                    v += 1;
+                }
+                SatBmcOutcome::NoCounterexample { .. } => {
+                    prop_assert!(
+                        !exact,
+                        "sat-bmc: none to depth {bound}, exact: reachable\n{}",
+                        d.text
+                    );
+                    n += 1;
+                }
+                SatBmcOutcome::Stopped { depth, reason } => {
+                    prop_assert!(
+                        false,
+                        "sat-bmc stopped at {depth} with no budget set: {reason}"
+                    );
+                }
+            }
+            tally.set((v, n));
+            Ok(())
+        })
+        .unwrap_or_else(|e| panic!("{e}"));
+    let (v, n) = tally.get();
+    eprintln!("sat_bmc tier: {v} violated (replayed), {n} unreachable");
+    assert!(
+        v > 0 && n > 0,
+        "the draw must exercise both answers: {v} violated, {n} unreachable"
+    );
+}
+
+/// Negative control: the replay must reject a trace that does not reach `bad`.
+#[test]
+fn the_replay_rejects_a_trace_that_misses_bad() {
+    let text = "1 sort bitvec 3\n2 zero 1\n3 state 1 c\n4 init 1 3 2\n5 one 1\n6 add 1 3 5\n\
+                7 next 1 3 6\n8 ones 1\n9 sort bitvec 1\n10 eq 9 3 8\n11 bad 10\n";
+    let initial = vec![("c".to_string(), 0)];
+    let inputs = vec![Vec::new(); 8];
+    assert!(replay(text, 7, &initial, &inputs).is_ok());
+    assert!(replay(text, 6, &initial, &inputs).is_err());
+}
