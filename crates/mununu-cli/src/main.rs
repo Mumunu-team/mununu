@@ -859,6 +859,9 @@ enum BmcEngineArg {
     Native,
     /// The owned bit-level BMC: AIG → CNF → CaDiCaL (N5.0).
     Sat,
+    /// The same engine with the dynamic step (item 6, C1): one query per growing window of
+    /// depths under a conflict budget, for deep counterexamples behind hard shallow frames.
+    SatDyn,
 }
 
 /// R-F5.4.2b (2026-07-03) — which predicate-cube engine evaluates the
@@ -1176,15 +1179,22 @@ struct Btor2VerifyArgs {
     /// Step bound for `--bmc-only` (default 20).
     #[arg(long, value_name = "K", default_value_t = 20)]
     bmc_k: u32,
-    /// The engine `--bmc-only` runs: `native` (default; bit-precise BMC on z3 QF_BV) or `sat`
+    /// The engine `--bmc-only` runs: `native` (default; bit-precise BMC on z3 QF_BV), `sat`
     /// (N5.0: the owned bit-level BMC, the design bit-blasted to an AIG and unrolled into
-    /// CaDiCaL, in-process). Both search every depth up to `--bmc-k`; `--timeout-ms` is the
+    /// CaDiCaL, in-process) or `sat-dyn` (the same engine with the dynamic step: one query per
+    /// growing window of depths, for deep counterexamples behind hard shallow frames). Both search every depth up to `--bmc-k`; `--timeout-ms` is the
     /// `sat` engine's wall deadline, and a stopped search says where and why.
     ///
     /// surface: CLI-only — an engine-evaluation switch of the CLI-only `--bmc-only`; the
     /// owned SAT engine reaches the API through the portfolio once it joins it (N5.4).
     #[arg(long, value_enum, default_value_t = BmcEngineArg::Native)]
     bmc_engine: BmcEngineArg,
+    /// With `--bmc-engine sat|sat-dyn`: on a `violated`, write the counterexample as a BTOR2
+    /// witness (the HWMCC format `btorsim -c` replays) to this path.
+    ///
+    /// surface: CLI-only — the witness of the CLI-only evaluation switch.
+    #[arg(long, value_name = "PATH")]
+    bmc_witness_out: Option<std::path::PathBuf>,
     /// Fault-injection posture on the BTOR2 (`REG[:k]`, repeatable; the one global budget,
     /// default 1): the design is rewritten as `btor2 inject-fault` does before the portfolio
     /// runs. `reachable` then reads "an attack within the budget reaches `bad`" (the attacker
@@ -4401,24 +4411,35 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
     // bounded-miter path for wide-datapath equivalence checks whose full proof is intractable.
     if args.bmc_only {
         use mununu_core::adapter::btor2::native_bmc::{self, BmcOutcome};
-        use mununu_core::adapter::btor2::sat_bmc::{SatBmcOptions, SatBmcOutcome, sat_bmc};
+        use mununu_core::adapter::btor2::sat_bmc::{SatBmcOptions, SatBmcOutcome};
         let (verdict, depth, member, stopped) = match args.bmc_engine {
             BmcEngineArg::Native => match native_bmc::bmc_bad_reachable(&file, args.bmc_k) {
                 Ok(BmcOutcome::Violated { depth }) => ("violated", Some(depth), "native-bmc", None),
                 Ok(BmcOutcome::NoCexWithin { .. }) => ("unknown", None, "native-bmc", None),
                 Err(e) => return Err(format!("bmc-only: {e:?}")),
             },
-            BmcEngineArg::Sat => {
+            BmcEngineArg::Sat | BmcEngineArg::SatDyn => {
                 let opts = SatBmcOptions {
+                    dynamic_step: (args.bmc_engine == BmcEngineArg::SatDyn)
+                        .then(mununu_core::adapter::btor2::sat_bmc::DynamicStep::default),
                     max_depth: args.bmc_k,
                     deadline: args
                         .timeout_ms
                         .map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms)),
                     ..Default::default()
                 };
-                match sat_bmc(&file, &opts)
-                    .map_err(|e| format!("bmc-only --bmc-engine sat: {e}"))?
-                {
+                let model = mununu_core::adapter::btor2::aig::AigModel::build(&file)
+                    .map_err(|e| format!("bmc-only --bmc-engine sat: {e}"))?;
+                let outcome = mununu_core::adapter::btor2::sat_bmc::sat_bmc_model(&model, &opts)
+                    .map_err(|e| format!("bmc-only --bmc-engine sat: {e}"))?;
+                if let (Some(path), Some(w)) = (
+                    &args.bmc_witness_out,
+                    mununu_core::adapter::btor2::sat_bmc::btor2_witness(&model, &outcome),
+                ) {
+                    std::fs::write(path, w)
+                        .map_err(|e| format!("--bmc-witness-out {}: {e}", path.display()))?;
+                }
+                match outcome {
                     SatBmcOutcome::Violated { depth, .. } => {
                         ("violated", Some(depth), "sat-bmc", None)
                     }
