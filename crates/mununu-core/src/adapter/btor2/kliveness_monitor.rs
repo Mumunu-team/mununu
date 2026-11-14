@@ -282,6 +282,29 @@ pub const KLIVENESS_WIDTHS: &[(u32, &str)] = &[
     (16, "k=65535"),
 ];
 
+/// The env var naming a path prefix for the monitors the ladder builds (item 6's C4: hand a
+/// monitor to another engine, e.g. `btor2 verify --owned-only`). Path-valued, like
+/// `MUNUNU_SHADOW_BTOR2_DUMP` and `MUNUNU_INTERP_DUMP`.
+pub const MONITOR_DUMP_ENV: &str = "MUNUNU_KLIVENESS_MONITOR_DUMP";
+
+/// Write the width-`w` monitor to `<prefix>.k<w>.btor2` (each ladder run overwrites the files of
+/// the widths it builds). Diagnostic only: a failure warns once on stderr and is otherwise
+/// ignored, so a dump can never change a verdict.
+pub fn dump_monitor(prefix: Option<&str>, w: u32, text: &str) {
+    let Some(prefix) = prefix.map(str::trim).filter(|p| !p.is_empty()) else {
+        return;
+    };
+    let path = format!("{prefix}.k{w}.btor2");
+    let body = format!(
+        "; mununu k-liveness round-counter monitor, counter width {w} (k = 2^{w} - 1 rounds),\n\
+         ; as the ladder decides it: `bad` reachable = the bound is too small, unreachable = holds.\n\
+         {text}"
+    );
+    if let Err(e) = std::fs::write(&path, body) {
+        eprintln!("warning: {MONITOR_DUMP_ENV}: could not write {path}: {e}");
+    }
+}
+
 /// What the width ladder concluded.
 #[derive(Debug)]
 pub enum KlivenessLadder {
@@ -336,6 +359,11 @@ pub fn kliveness_ladder(
                 ));
             }
         };
+        dump_monitor(
+            crate::adapter::env_var::read(MONITOR_DUMP_ENV).as_deref(),
+            w,
+            &text,
+        );
         let file = match parser::parse(&text) {
             Ok(f) => f,
             Err(e) => {
@@ -612,5 +640,26 @@ mod tests {
         assert!(emit_kliveness_monitor(COUNTER, 1, 4).is_err());
         assert!(emit_kliveness_monitor(COUNTER, 0, 0).is_err());
         assert!(emit_kliveness_monitor(COUNTER, 0, 33).is_err());
+    }
+
+    /// C4's seam: the dumped monitor is the ladder's monitor, one parseable file per width; no
+    /// prefix writes nothing.
+    #[test]
+    fn the_monitor_dump_writes_one_parseable_file_per_width() {
+        let dir = std::env::temp_dir().join(format!("mununu-kl-dump-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("tempdir");
+        let prefix = dir.join("mon");
+        let m = emit_kliveness_monitor(COUNTER, 0, 4).expect("emits");
+        dump_monitor(Some(prefix.to_str().expect("utf-8")), 4, &m);
+        let written = std::fs::read_to_string(dir.join("mon.k4.btor2")).expect("written");
+        assert!(
+            written.ends_with(&m),
+            "the file carries the monitor verbatim"
+        );
+        crate::adapter::btor2::parser::parse(&written).expect("the dump parses as BTOR2");
+        dump_monitor(None, 4, &m);
+        dump_monitor(Some("  "), 8, &m);
+        assert!(!dir.join("mon.k8.btor2").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
