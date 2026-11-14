@@ -40,6 +40,34 @@ pub struct SatBmcOptions {
     pub deadline: Option<Instant>,
     /// An external cancellation, polled by the solver.
     pub cancel: Option<Arc<AtomicBool>>,
+    /// Item 6's C1: the dynamic step instead of one query per depth (see [`DynamicStep`]).
+    pub dynamic_step: Option<DynamicStep>,
+}
+
+/// Item 6's C1 — the dynamic step (rIC3's `--bmc-dyn-step` idea, owned).
+///
+/// Each query asks for ANY not-yet-refuted `bad` up to a target depth, under a conflict budget.
+/// UNSAT refutes every pending depth at once. A query that runs out of budget refutes nothing,
+/// but is not a failure: its depths stay pending, and the next, deeper query covers them too.
+/// The target jumps ahead geometrically. This is the lever for designs whose shallow UNSAT
+/// frames are hard and whose counterexample is deep: HWMCC'20 `mul9` stalls plain BMC at depth 2,
+/// and its counterexample is at depth 238.
+///
+/// SOUNDNESS: a SAT answer is a concrete path to a `bad` at the earliest depth whose `bad` is
+/// true in the model, so `Violated` stays exact. `NoCounterexample` is reported only once every
+/// depth up to `max_depth` was refuted; otherwise the outcome is `Stopped`.
+#[derive(Clone, Debug)]
+pub struct DynamicStep {
+    /// The first query's conflict budget; it doubles after every query that runs out of budget.
+    pub first_conflicts: i32,
+}
+
+impl Default for DynamicStep {
+    fn default() -> Self {
+        Self {
+            first_conflicts: 20_000,
+        }
+    }
 }
 
 /// What the search established.
@@ -249,6 +277,153 @@ impl<'m> Unroller<'m> {
     }
 }
 
+/// The counterexample the solver's model holds, for a `bad` that is true at frame `f`.
+fn counterexample(u: &Unroller, model: &AigModel, f: usize, bad_index: usize) -> SatBmcOutcome {
+    let initial = model
+        .states
+        .iter()
+        .map(|s| (Unroller::name(&s.symbol, "st", s.nid), u.word(&s.leaves, 0)))
+        .collect();
+    let inputs = (0..=f)
+        .map(|fr| {
+            model
+                .inputs
+                .iter()
+                .map(|i| {
+                    (
+                        Unroller::name(&i.symbol, "in", i.nid),
+                        u.word(&i.leaves, fr),
+                    )
+                })
+                .collect()
+        })
+        .collect();
+    SatBmcOutcome::Violated {
+        depth: f as u32,
+        bad_index,
+        initial,
+        inputs,
+    }
+}
+
+/// The [`DynamicStep`] search.
+fn dynamic_search(
+    u: &mut Unroller,
+    model: &AigModel,
+    opts: &SatBmcOptions,
+    step: &DynamicStep,
+    halted: &dyn Fn() -> bool,
+    stopped: &dyn Fn(u32, &str) -> SatBmcOutcome,
+) -> Result<SatBmcOutcome, String> {
+    // `(frame, bad index, literal)` for every bad not yet refuted.
+    let mut pending: Vec<(usize, usize, i32)> = Vec::new();
+    // Every depth below `refuted_below` is refuted; `encoded` frames are in the solver.
+    let (mut refuted_below, mut encoded) = (0u32, 0u32);
+    let mut jump = 1u32;
+    let mut conflicts = step.first_conflicts.max(1);
+    loop {
+        if halted() {
+            return Ok(stopped(refuted_below, "stopped"));
+        }
+        let target = encoded
+            .saturating_add(jump)
+            .min(opts.max_depth.saturating_add(1));
+        for k in encoded..target {
+            let f = k as usize;
+            for &c in &model.constraints {
+                let cl = u.encode(c, f)?;
+                u.solver.add_clause([cl]);
+            }
+            for (bi, &b) in model.bads.iter().enumerate() {
+                let l = u.encode(b, f)?;
+                pending.push((f, bi, l));
+            }
+        }
+        encoded = target;
+        let any = u.fresh();
+        u.solver
+            .add_clause(std::iter::once(-any).chain(pending.iter().map(|&(_, _, l)| l)));
+        u.solver
+            .set_limit("conflicts", conflicts)
+            .map_err(|e| format!("sat-bmc: {}", e.msg))?;
+        match u.solver.solve_with([any]) {
+            Some(true) => {
+                let hit = pending
+                    .iter()
+                    .filter(|&&(_, _, l)| u.solver.value(l) == Some(true))
+                    .min_by_key(|&&(f, bi, _)| (f, bi))
+                    .copied();
+                let (f, bi, _) = hit.ok_or_else(|| {
+                    "sat-bmc: the dynamic-step query was SAT with no pending bad true".to_string()
+                })?;
+                return Ok(counterexample(u, model, f, bi));
+            }
+            Some(false) => {
+                for &(_, _, l) in &pending {
+                    u.solver.add_clause([-l]);
+                }
+                pending.clear();
+                refuted_below = encoded;
+                if encoded > opts.max_depth {
+                    return Ok(SatBmcOutcome::NoCounterexample {
+                        depth: opts.max_depth,
+                    });
+                }
+            }
+            None => {
+                if halted() {
+                    return Ok(stopped(refuted_below, "stopped"));
+                }
+                // Out of budget: nothing refuted, the window grows. At the last depth the only
+                // way forward is a bigger budget.
+                conflicts = conflicts.saturating_mul(2);
+            }
+        }
+        // The query's `any` stays in the solver, inert: it is only ever assumed true.
+        u.solver.add_clause([-any]);
+        jump = jump.saturating_mul(2);
+    }
+}
+
+/// A `Violated` outcome as a BTOR2 witness (the HWMCC format `btorsim -c` checks): `sat`, the
+/// bad property `b<i>`, frame 0's state assignments by state position, then each frame's input
+/// assignments by input position, MSB-first binary. `None` for any other outcome.
+pub fn btor2_witness(model: &AigModel, outcome: &SatBmcOutcome) -> Option<String> {
+    let SatBmcOutcome::Violated {
+        bad_index,
+        initial,
+        inputs,
+        ..
+    } = outcome
+    else {
+        return None;
+    };
+    let bits = |v: u128, w: usize| -> String {
+        (0..w)
+            .rev()
+            .map(|i| {
+                if i < 128 && (v >> i) & 1 == 1 {
+                    '1'
+                } else {
+                    '0'
+                }
+            })
+            .collect()
+    };
+    let mut out = format!("sat\nb{bad_index}\n#0\n");
+    for (i, (s, (_, v))) in model.states.iter().zip(initial).enumerate() {
+        out.push_str(&format!("{i} {}\n", bits(*v, s.leaves.len())));
+    }
+    for (f, frame) in inputs.iter().enumerate() {
+        out.push_str(&format!("@{f}\n"));
+        for (i, (inp, (_, v))) in model.inputs.iter().zip(frame).enumerate() {
+            out.push_str(&format!("{i} {}\n", bits(*v, inp.leaves.len())));
+        }
+    }
+    out.push_str(".\n");
+    Some(out)
+}
+
 /// Bit-level BMC on `file` up to `opts.max_depth`. `Err` = the design cannot be modelled (arrays,
 /// an operator the AIG backend refuses), with the reason.
 pub fn sat_bmc(file: &Btor2File, opts: &SatBmcOptions) -> Result<SatBmcOutcome, String> {
@@ -290,6 +465,9 @@ pub fn sat_bmc_model(model: &AigModel, opts: &SatBmcOptions) -> Result<SatBmcOut
             depth: opts.max_depth,
         });
     }
+    if let Some(dyn_step) = &opts.dynamic_step {
+        return dynamic_search(&mut u, model, opts, dyn_step, &halted, &stopped);
+    }
     for k in 0..=opts.max_depth {
         if halted() {
             return Ok(stopped(k, "stopped"));
@@ -322,31 +500,7 @@ pub fn sat_bmc_model(model: &AigModel, opts: &SatBmcOptions) -> Result<SatBmcOut
                     .iter()
                     .position(|&l| u.solver.value(l) == Some(true))
                     .unwrap_or(0);
-                let initial = model
-                    .states
-                    .iter()
-                    .map(|s| (Unroller::name(&s.symbol, "st", s.nid), u.word(&s.leaves, 0)))
-                    .collect();
-                let inputs = (0..=f)
-                    .map(|fr| {
-                        model
-                            .inputs
-                            .iter()
-                            .map(|i| {
-                                (
-                                    Unroller::name(&i.symbol, "in", i.nid),
-                                    u.word(&i.leaves, fr),
-                                )
-                            })
-                            .collect()
-                    })
-                    .collect();
-                return Ok(SatBmcOutcome::Violated {
-                    depth: k,
-                    bad_index,
-                    initial,
-                    inputs,
-                });
+                return Ok(counterexample(&u, model, f, bad_index));
             }
             Some(false) => u.solver.add_clause([-any]),
             None => {
@@ -477,5 +631,81 @@ mod tests {
         );
         let bad = u.encode(model.bads[0], 3000).unwrap();
         assert_eq!(u.solver.solve_with([bad]), Some(true));
+    }
+
+    fn run_dyn(text: &str, max_depth: u32, first_conflicts: i32) -> SatBmcOutcome {
+        sat_bmc(
+            &parser::parse(text).unwrap(),
+            &SatBmcOptions {
+                max_depth,
+                dynamic_step: Some(DynamicStep { first_conflicts }),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    }
+
+    /// The dynamic step finds the same first-depth counterexample: a window that covers depth 7
+    /// reports the earliest pending bad true in the model, not the window's end.
+    #[test]
+    fn the_dynamic_step_reports_the_earliest_true_depth_in_its_window() {
+        // A saturating counter: once 7, it stays 7, so every depth ≥ 7 is a model of `bad`.
+        let sat_counter = "1 sort bitvec 3\n2 zero 1\n3 state 1 c\n4 init 1 3 2\n5 one 1\n\
+                           6 add 1 3 5\n8 ones 1\n9 sort bitvec 1\n10 eq 9 3 8\n\
+                           11 ite 1 10 3 6\n12 next 1 3 11\n13 bad 10\n";
+        match run_dyn(sat_counter, 100, 1_000) {
+            SatBmcOutcome::Violated { depth, .. } => assert_eq!(depth, 7),
+            other => panic!("{other:?}"),
+        }
+        match run_dyn(COUNTER, 100, 1_000) {
+            SatBmcOutcome::Violated { depth, .. } => assert_eq!(depth % 8, 7),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Refuting every window up to the bound is the only way to `NoCounterexample`.
+    #[test]
+    fn the_dynamic_step_refutes_to_the_bound_or_says_it_stopped() {
+        assert_eq!(
+            run_dyn(COUNTER, 6, 1_000),
+            SatBmcOutcome::NoCounterexample { depth: 6 }
+        );
+        let cancel = Arc::new(AtomicBool::new(true));
+        let out = sat_bmc(
+            &parser::parse(COUNTER).unwrap(),
+            &SatBmcOptions {
+                max_depth: 100,
+                cancel: Some(cancel),
+                dynamic_step: Some(DynamicStep::default()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(matches!(out, SatBmcOutcome::Stopped { .. }), "{out:?}");
+    }
+
+    /// The witness is the standard format: the repo's own witness parser reads it and its
+    /// concrete replay reaches the (named) `bad`.
+    #[test]
+    fn the_witness_parses_and_replays_to_bad() {
+        use crate::adapter::btor2::witness::{parse_btor2_witness, trace_from_witness};
+        let named = COUNTER.replace(
+            "10 eq 9 3 8\n11 bad 10\n",
+            "10 eq 9 3 8 at_seven\n11 bad 10\n",
+        );
+        let file = parser::parse(&named).unwrap();
+        let model = AigModel::build(&file).unwrap();
+        let out = sat_bmc_model(
+            &model,
+            &SatBmcOptions {
+                max_depth: 20,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let w = btor2_witness(&model, &out).expect("violated has a witness");
+        let parsed = parse_btor2_witness(&w).expect("parses");
+        trace_from_witness(&file, &parsed).expect("replays to bad");
+        assert!(btor2_witness(&model, &SatBmcOutcome::NoCounterexample { depth: 3 }).is_none());
     }
 }
