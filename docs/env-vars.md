@@ -112,6 +112,7 @@ Design notes: [`docs/design/bdd-variable-ordering.md`](design/bdd-variable-order
 | `MUNUNU_INTERP_DUMP` | path for the failing cvc5 interpolation query of the native interpolation engine — distinguishes an interpolation incompleteness from a serialisation bug. |
 | `MUNUNU_KLIVENESS_MONITOR_DUMP` | path prefix: the k-liveness ladder writes each round-counter monitor it builds to `<prefix>.k<width>.btor2` (justice rung and the response verbs' fallback), so another engine can decide the same monitor, e.g. `btor2 verify --owned-only`. Diagnostic only; never changes a verdict. |
 | `MUNUNU_OWNED_TIMEOUT_MS` | per-check timeout of the owned (in-process) reachability members. |
+| `MUNUNU_REACH_IC3` (`=1`) | adds the owned IC3 member (`ic3`, Track N N5.1: CaDiCaL IC3/PDR, proves and refutes) to the full reach portfolio and to `--owned-only`; off by default until its N5.3 gate. Its `Safe` ships only after a direct check of the invariant in a fresh solver, its `Violated` only after a replay on the concrete simulator. |
 | `MUNUNU_BOOLECTOR_TRACE` (`=1`) | per-bound `sat()` wall times of the native Boolector BMC member. |
 
 ## Test-harness knobs (read only by `#[ignore]`d tests and probes)

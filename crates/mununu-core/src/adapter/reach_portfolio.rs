@@ -149,6 +149,9 @@ pub(crate) struct Members {
     pub interp: Option<bool>,
     /// N5.4 — the owned SAT BMC (CaDiCaL, dynamic step): counterexamples only.
     pub sat_bmc: Option<bool>,
+    /// N5.1 — the owned IC3 (CaDiCaL): proves and refutes, each verdict checked before it ships;
+    /// opt-in (`MUNUNU_REACH_IC3=1`) until its N5.3 gate.
+    pub ic3: Option<bool>,
     pub btormc: Option<McVerdict>,
     pub pono: Option<McVerdict>,
     /// Plan 4 / PR D2 — rIC3 `-e ic3`, bit-level IC3/PDR over the emitted BTOR2 (mununu#736).
@@ -373,6 +376,44 @@ fn run_sat_bmc(
     })
 }
 
+/// N5.1 — the owned **IC3** member ([`ic3`](crate::adapter::btor2::ic3)): `Ok(Some(false))` is an
+/// inductive invariant that passed its direct check in a fresh solver, `Ok(Some(true))` a
+/// counterexample concretised step by step and replayed on the concrete simulator. A design the
+/// AIG backend cannot model (arrays) is a refusal (`ic3:`); a stop at the wall, or a verdict that
+/// failed its own check, is an abstention with the cause; a stop because another member decided
+/// is in no list.
+fn run_ic3(
+    file: &Btor2File,
+    deadline: std::time::Instant,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Result<Option<bool>, MemberStop> {
+    use crate::adapter::btor2::ic3::{self, Ic3Options, Ic3Outcome, Replay};
+    let cancelled = || cancel.load(std::sync::atomic::Ordering::Relaxed);
+    let opts = Ic3Options {
+        deadline: Some(deadline),
+        cancel: Some(std::sync::Arc::clone(&cancel)),
+        max_frames: None,
+    };
+    timed("ic3", || match ic3::ic3(file, &opts) {
+        Ok(Ic3Outcome::Safe { .. }) => Ok(Some(false)),
+        Ok(Ic3Outcome::Violated { depth, replay, .. }) => {
+            if let Replay::Unavailable(why) = replay {
+                tracing::info!(
+                    depth,
+                    why,
+                    "ic3: the counterexample ships without a simulator replay"
+                );
+            }
+            Ok(Some(true))
+        }
+        Ok(Ic3Outcome::Stopped { .. }) if cancelled() => Ok(None),
+        Ok(Ic3Outcome::Stopped { frames, reason }) => Err(MemberStop::Abstained(format!(
+            "IC3 stopped at frame {frames} ({reason})"
+        ))),
+        Err(why) => Err(MemberStop::Refused(format!("ic3: {why}"))),
+    })
+}
+
 /// mununu#1022 — the native member's progress when it searched to its bound without a verdict.
 fn native_unknown(k: u32) -> String {
     format!(
@@ -529,6 +570,7 @@ fn collect(m: Members) -> ReachOutcome {
         ("native", m.native),
         ("interp", m.interp),
         ("sat-bmc", m.sat_bmc),
+        ("ic3", m.ic3),
     ] {
         match v {
             Some(true) => reachable_by.push(name),
@@ -555,7 +597,7 @@ fn collect(m: Members) -> ReachOutcome {
     // tests compare whole outcomes).
     let rank = |member: &str| {
         [
-            "exact", "native", "interp", "sat-bmc", "btormc", "pono", "ric3", "ric3-bmc",
+            "exact", "native", "interp", "sat-bmc", "ic3", "btormc", "pono", "ric3", "ric3-bmc",
         ]
         .iter()
         .position(|m| *m == member)
@@ -631,7 +673,13 @@ pub fn decide_reach_portfolio_cancellable(
     subprocess_timeout: std::time::Duration,
     cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> ReachOutcome {
-    decide_reach_portfolio_with_members(file, subprocess_timeout, cancel, ReachMembers::ALL)
+    decide_reach_portfolio_with_members(file, subprocess_timeout, cancel, ReachMembers::shipped())
+}
+
+/// N5.1 — `MUNUNU_REACH_IC3=1` opts the owned IC3 member into the full portfolio and into
+/// `--owned-only`; off by default until its N5.3 gate.
+pub(crate) fn ic3_opted_in() -> bool {
+    crate::adapter::env_var::read("MUNUNU_REACH_IC3").is_some_and(|v| v.trim() == "1")
 }
 
 /// Which members [`decide_reach_portfolio_with_members`] starts. [`ReachMembers::ALL`] is the
@@ -650,6 +698,10 @@ pub struct ReachMembers {
     /// N5.4 — the owned SAT BMC with the dynamic step (in-process CaDiCaL; finds `bad`
     /// reachable, never proves).
     pub sat_bmc: bool,
+    /// N5.1 — the owned IC3 (in-process CaDiCaL): proves and refutes, each verdict checked before
+    /// it ships. Off in every constant set; [`ReachMembers::shipped`] turns it on under
+    /// `MUNUNU_REACH_IC3=1` until its N5.3 gate.
+    pub ic3: bool,
     /// btormc (subprocess BMC — finds `bad` reachable, never proves).
     pub btormc: bool,
     /// Pono (subprocess, `ic3bits`).
@@ -670,6 +722,7 @@ impl ReachMembers {
         native: true,
         interp: true,
         sat_bmc: true,
+        ic3: false,
         btormc: true,
         pono: true,
         ric3: true,
@@ -688,12 +741,24 @@ impl ReachMembers {
         native: true,
         interp: false,
         sat_bmc: false,
+        ic3: false,
         btormc: false,
         pono: true,
         ric3: true,
         ric3_bmc: false,
         ric3_engine: ric3::PORTFOLIO_ENGINE,
     };
+
+    /// [`ReachMembers::ALL`] with the owned IC3 member on or off.
+    pub const fn with_ic3(self, on: bool) -> Self {
+        Self { ic3: on, ..self }
+    }
+
+    /// What the shipped drivers start: [`ReachMembers::ALL`], plus the owned IC3 when opted in
+    /// ([`ic3_opted_in`]).
+    pub fn shipped() -> Self {
+        Self::ALL.with_ic3(ic3_opted_in())
+    }
 }
 
 /// [`decide_reach_portfolio_cancellable`] restricted to `members`. A member left out is simply
@@ -922,6 +987,27 @@ fn decide_with_members_using(
                 v
             })
         });
+        // N5.1 — the owned IC3: proves and refutes, under the subprocess wall, cancelled by
+        // `decided`. Its `Safe` is an invariant re-checked in a fresh solver and its `Violated` a
+        // trace replayed on the concrete simulator before either reaches this join.
+        let ic3_h = members.ic3.then(|| {
+            let cancel = std::sync::Arc::clone(&decided_flag);
+            scope.spawn(move || {
+                let _g = crate::adapter::run_budget::enter(budget);
+                let deadline = std::time::Instant::now() + subprocess_timeout;
+                let v = settle_native(
+                    refused,
+                    abstained,
+                    undecided,
+                    "ic3",
+                    run_ic3(file, deadline, cancel),
+                );
+                if v.is_some() {
+                    decided.store(true, Relaxed);
+                }
+                v
+            })
+        });
         // The native engine is in-process Z3 work — on its own
         // thread so it overlaps the exact engine + the subprocess members rather than
         // serialising.
@@ -990,12 +1076,14 @@ fn decide_with_members_using(
         let ric3_bmc = ric3_bmc_h.and_then(|h| h.join().unwrap_or(None));
         let interp = interp_h.and_then(|h| h.join().unwrap_or(None));
         let sat_bmc = sat_bmc_h.and_then(|h| h.join().unwrap_or(None));
+        let ic3 = ic3_h.and_then(|h| h.join().unwrap_or(None));
         finished.store(true, Relaxed);
         Members {
             exact,
             native,
             interp,
             sat_bmc,
+            ic3,
             btormc,
             pono,
             ric3,
@@ -1033,11 +1121,12 @@ fn stopped_by_wall_unrecorded(started: &ReachMembers, m: &Members) -> Vec<&'stat
     // A subprocess member's `Some(Unknown)` is no verdict: past the wall its own timeout note is
     // skipped (`settle_subprocess` records it only while `decided` is clear).
     let definite = |v: Option<McVerdict>| matches!(v, Some(McVerdict::Violated | McVerdict::Safe));
-    let ran: [(&'static str, bool, bool); 8] = [
+    let ran: [(&'static str, bool, bool); 9] = [
         ("exact", started.exact, m.exact.is_some()),
         ("native", started.native, m.native.is_some()),
         ("interp", started.interp, m.interp.is_some()),
         ("sat-bmc", started.sat_bmc, m.sat_bmc.is_some()),
+        ("ic3", started.ic3, m.ic3.is_some()),
         ("btormc", started.btormc, definite(m.btormc)),
         ("pono", started.pono, definite(m.pono)),
         ("ric3", started.ric3, definite(m.ric3)),
@@ -1194,6 +1283,8 @@ pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcom
     let decided = Arc::new(AtomicBool::new(false));
     let deadline = Instant::now() + Duration::from_millis(u64::from(timeout_ms));
     let (tx, rx) = mpsc::channel::<(&'static str, Option<bool>)>();
+    // The members this run starts, each sending its name once ([`owned_members`]).
+    let members = owned_members();
 
     // Safety proof — shallow native BMC + k-induction.
     {
@@ -1360,6 +1451,29 @@ pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcom
             let _ = tx.send(("sat-bmc", v));
         });
     }
+    // N5.1 — the owned IC3, opt-in (`MUNUNU_REACH_IC3=1`) until its N5.3 gate: the first owned
+    // member that PROVES. Its `Safe` is an invariant re-checked in a fresh solver, its `Violated`
+    // a trace replayed on the concrete simulator; either failure abstains with the cause.
+    if members.contains(&"ic3") {
+        let (file, decided, tx, refused, abstained, undecided) = (
+            Arc::clone(&file),
+            Arc::clone(&decided),
+            tx.clone(),
+            Arc::clone(&refused),
+            Arc::clone(&abstained),
+            Arc::clone(&undecided),
+        );
+        let budget = budget.clone();
+        std::thread::spawn(move || {
+            let _g = crate::adapter::run_budget::enter(&budget);
+            let r = run_ic3(&file, deadline, Arc::clone(&decided));
+            let v = settle_native(&refused, &abstained, &undecided, "ic3", r);
+            if v.is_some() {
+                decided.store(true, Relaxed);
+            }
+            let _ = tx.send(("ic3", v));
+        });
+    }
     // Exact BDD — the non-interruptible member; spawned so it can never block the return.
     {
         let (content, decided, tx, refused) = (
@@ -1382,15 +1496,14 @@ pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcom
     }
     drop(tx); // the collector's `rx` disconnects once every member thread has finished.
 
-    // Five members: native, interp, {boolector | z3-cex}, sat-bmc, exact.
-    const N_MEMBERS: usize = OWNED_MEMBERS.len();
+    let n_members = members.len();
     let mut reachable_by: Vec<&'static str> = Vec::new();
     let mut unreachable_by: Vec<&'static str> = Vec::new();
     let mut reports = 0usize;
     let mut reported: Vec<&'static str> = Vec::new();
     let mut definite = false;
     // Wait for a definite verdict, or all members to abstain, or the deadline.
-    while reports < N_MEMBERS && !definite {
+    while reports < n_members && !definite {
         let now = Instant::now();
         if now >= deadline {
             break;
@@ -1426,7 +1539,7 @@ pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcom
     // straggler that hadn't landed at the exact instant the first verdict arrived (DET-2).
     if definite {
         let grace_deadline = (Instant::now() + STRAGGLER_GRACE).min(deadline);
-        while reports < N_MEMBERS {
+        while reports < n_members {
             let now = Instant::now();
             if now >= grace_deadline {
                 break;
@@ -1453,9 +1566,9 @@ pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcom
     // their own budget stops (each re-entered the budget and stops on it), then name every member
     // that still has not reported. Before this an owned-only `unknown` at the wall said nothing
     // about any member.
-    if !definite && reports < N_MEMBERS {
+    if !definite && reports < n_members {
         let grace_deadline = Instant::now() + STRAGGLER_GRACE;
-        while reports < N_MEMBERS {
+        while reports < n_members {
             let now = Instant::now();
             if now >= grace_deadline {
                 break;
@@ -1474,7 +1587,7 @@ pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcom
             }
         }
         if reachable_by.is_empty() && unreachable_by.is_empty() {
-            for (m, cause) in unreported_at_deadline(&reported, timeout_ms) {
+            for (m, cause) in unreported_at_deadline(&members, &reported, timeout_ms) {
                 note_refusal(&abstained, m, cause);
             }
         }
@@ -1489,11 +1602,13 @@ pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcom
 /// mununu#1022 — the owned-only members that had not reported when the collector gave up at its
 /// deadline, each with the cause the report carries.
 fn unreported_at_deadline(
+    members: &[&'static str],
     reported: &[&'static str],
     timeout_ms: u32,
 ) -> Vec<(&'static str, String)> {
-    OWNED_MEMBERS
-        .into_iter()
+    members
+        .iter()
+        .copied()
         .filter(|m| !reported.contains(m))
         .map(|m| {
             (
@@ -1507,11 +1622,25 @@ fn unreported_at_deadline(
         .collect()
 }
 
-/// The owned-only driver's members, in its reporting order: the names its threads send.
+/// The owned-only driver's members, in its reporting order: the names its threads send;
+/// [`owned_members`] appends the opt-in `ic3`.
 #[cfg(feature = "boolector")]
 const OWNED_MEMBERS: [&str; 5] = ["native", "interp", "boolector", "sat-bmc", "exact"];
 #[cfg(not(feature = "boolector"))]
 const OWNED_MEMBERS: [&str; 5] = ["native", "interp", "cex", "sat-bmc", "exact"];
+
+/// [`OWNED_MEMBERS`], plus `ic3` when the owned IC3 is opted in (`MUNUNU_REACH_IC3=1`).
+fn owned_members() -> Vec<&'static str> {
+    owned_members_for(ic3_opted_in())
+}
+
+fn owned_members_for(ic3: bool) -> Vec<&'static str> {
+    let mut m = OWNED_MEMBERS.to_vec();
+    if ic3 {
+        m.push("ic3");
+    }
+    m
+}
 
 #[cfg(test)]
 mod tests {
@@ -1779,6 +1908,7 @@ mod tests {
             native: true,
             interp: false,
             sat_bmc: false,
+            ic3: false,
             btormc: false,
             pono: false,
             ric3: false,
@@ -1821,6 +1951,7 @@ mod tests {
             native: false,
             interp: false,
             sat_bmc: false,
+            ic3: false,
             btormc: false,
             pono: false,
             ric3: false,
@@ -1857,6 +1988,7 @@ mod tests {
             native: None,
             interp: Some(false),
             sat_bmc: None,
+            ic3: None,
             btormc: Some(McVerdict::Unknown),
             pono: Some(McVerdict::Safe),
             ric3: None,
@@ -1909,6 +2041,7 @@ mod tests {
             native: true,
             interp: false,
             sat_bmc: false,
+            ic3: false,
             btormc: false,
             pono: false,
             ric3: false,
@@ -1984,11 +2117,20 @@ mod tests {
     /// The owned-only collector names every member that had not reported at its deadline.
     #[test]
     fn the_owned_driver_names_the_members_still_running_at_its_deadline() {
-        let left = unreported_at_deadline(&["native", "interp"], 300_000);
+        let left = unreported_at_deadline(&OWNED_MEMBERS, &["native", "interp"], 300_000);
         let names: Vec<_> = left.iter().map(|(m, _)| *m).collect();
         assert_eq!(names, vec![OWNED_MEMBERS[2], "sat-bmc", "exact"]);
         assert!(left[2].1.contains("300000 ms"), "{}", left[2].1);
-        assert!(unreported_at_deadline(&OWNED_MEMBERS, 1).is_empty());
+        assert!(unreported_at_deadline(&OWNED_MEMBERS, &OWNED_MEMBERS, 1).is_empty());
+        // N5.1 — the opt-in member is waited for only when it was started.
+        let with = owned_members_for(true);
+        assert_eq!(with.last(), Some(&"ic3"));
+        assert_eq!(owned_members_for(false), OWNED_MEMBERS.to_vec());
+        let left = unreported_at_deadline(&with, &OWNED_MEMBERS, 7);
+        assert_eq!(
+            left.iter().map(|(m, _)| *m).collect::<Vec<_>>(),
+            vec!["ic3"]
+        );
     }
 
     /// mununu#726 — an already-expired thread-local budget decides nothing and spawns nothing:
@@ -2205,6 +2347,7 @@ mod tests {
             native: false,
             interp: false,
             sat_bmc: false,
+            ic3: false,
             btormc: false,
             pono: false,
             ric3: false,
@@ -2288,6 +2431,7 @@ mod tests {
             native: false,
             interp: false,
             sat_bmc: true,
+            ic3: false,
             btormc: false,
             pono: false,
             ric3: false,
@@ -2319,6 +2463,86 @@ mod tests {
         const { assert!(ReachMembers::ALL.sat_bmc && !ReachMembers::PROOF_DIRECTED.sat_bmc) };
     }
 
+    /// N5.1 — the owned IC3 member's exits, each in its own list: a proof is `Some(false)`, a
+    /// counterexample `Some(true)`, a cancelled run is in no list, a stop at the wall is an
+    /// abstention naming it, an array design a refusal.
+    #[test]
+    fn the_ic3_member_proves_refutes_and_names_every_stop() {
+        use std::sync::{Arc, atomic::AtomicBool};
+        const COUNTER: &str = "1 sort bitvec 3\n2 zero 1\n3 state 1\n4 init 1 3 2\n5 one 1\n\
+                               6 add 1 3 5\n7 next 1 3 6\n8 ones 1\n9 sort bitvec 1\n\
+                               10 eq 9 3 8\n11 bad 10\n";
+        const SAFE: &str = "1 sort bitvec 1\n2 zero 1\n3 state 1 q\n4 init 1 3 2\n\
+                            5 next 1 3 2\n6 bad 3\n";
+        const ARRAY: &str = "1 sort bitvec 1\n2 sort array 1 1\n3 state 2 m\n4 zero 1\n\
+                             5 read 1 3 4\n6 bad 5\n";
+        let later = || std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let go = || Arc::new(AtomicBool::new(false));
+        let parse = |s: &str| parser::parse(s).expect("parse");
+        assert_eq!(run_ic3(&parse(COUNTER), later(), go()), Ok(Some(true)));
+        assert_eq!(run_ic3(&parse(SAFE), later(), go()), Ok(Some(false)));
+        assert_eq!(
+            run_ic3(&parse(SAFE), later(), Arc::new(AtomicBool::new(true))),
+            Ok(None),
+            "a member cancelled because a peer decided is in no list"
+        );
+        match run_ic3(&parse(SAFE), std::time::Instant::now(), go()) {
+            Err(MemberStop::Abstained(cause)) => assert!(cause.contains("deadline"), "{cause}"),
+            other => panic!("a run past its deadline abstains with the cause: {other:?}"),
+        }
+        assert!(
+            matches!(
+                run_ic3(&parse(ARRAY), later(), go()),
+                Err(MemberStop::Refused(why)) if why.starts_with("ic3:")
+            ),
+            "an array design is refused by name"
+        );
+    }
+
+    /// N5.1 at the driver: the IC3 member alone decides both the counter (reachable) and the safe
+    /// design (unreachable) and is credited by name; it is off in every constant set.
+    #[test]
+    fn the_portfolio_credits_the_ic3_member_on_both_verdicts() {
+        const COUNTER: &str = "1 sort bitvec 3\n2 zero 1\n3 state 1\n4 init 1 3 2\n5 one 1\n\
+                               6 add 1 3 5\n7 next 1 3 6\n8 ones 1\n9 sort bitvec 1\n\
+                               10 eq 9 3 8\n11 bad 10\n";
+        const SAFE: &str = "1 sort bitvec 1\n2 zero 1\n3 state 1 q\n4 init 1 3 2\n\
+                            5 next 1 3 2\n6 bad 3\n";
+        let only = ReachMembers {
+            exact: false,
+            native: false,
+            interp: false,
+            sat_bmc: false,
+            ic3: true,
+            btormc: false,
+            pono: false,
+            ric3: false,
+            ric3_bmc: false,
+            ric3_engine: ric3::DEFAULT_ENGINE,
+        };
+        let run = |src: &str| {
+            decide_reach_portfolio_with_members(
+                &parser::parse(src).expect("parse"),
+                std::time::Duration::from_secs(60),
+                None,
+                only,
+            )
+        };
+        let reach = run(COUNTER);
+        assert_eq!(reach.verdict, ReachVerdict::Reachable, "{reach:?}");
+        assert_eq!(reach.reachable_by, vec!["ic3"], "{reach:?}");
+        let safe = run(SAFE);
+        assert_eq!(safe.verdict, ReachVerdict::Unreachable, "{safe:?}");
+        assert_eq!(safe.unreachable_by, vec!["ic3"], "{safe:?}");
+        assert!(
+            safe.refused.is_empty() && safe.abstained.is_empty() && safe.undecided.is_empty(),
+            "{safe:?}"
+        );
+        const { assert!(!ReachMembers::ALL.ic3 && !ReachMembers::PROOF_DIRECTED.ic3) };
+        assert!(ReachMembers::ALL.with_ic3(true).ic3);
+        assert!(!ReachMembers::ALL.with_ic3(false).ic3);
+    }
+
     #[test]
     fn owned_only_excludes_external_engines_on_small_counter() {
         // The owned-standalone driver decides the small reachable counter via the
@@ -2335,7 +2559,16 @@ mod tests {
         assert!(!out.reachable_by.is_empty(), "{out:?}");
         for name in out.reachable_by.iter().chain(out.unreachable_by.iter()) {
             assert!(
-                ["exact", "native", "interp", "boolector", "cex", "sat-bmc"].contains(name),
+                [
+                    "exact",
+                    "native",
+                    "interp",
+                    "boolector",
+                    "cex",
+                    "sat-bmc",
+                    "ic3"
+                ]
+                .contains(name),
                 "owned-only listed a non-owned engine {name}: {out:?}"
             );
         }

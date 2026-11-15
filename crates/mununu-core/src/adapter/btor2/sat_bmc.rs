@@ -271,10 +271,20 @@ impl<'m> Unroller<'m> {
             .sum()
     }
 
-    /// The concrete simulator's step name: the symbol, else `st_n<nid>` / `in_n<nid>`.
+    /// The concrete simulator's step name ([`cell_name`]).
     fn name(symbol: &Option<String>, prefix: &str, nid: crate::adapter::btor2::ast::Nid) -> String {
-        symbol.clone().unwrap_or_else(|| format!("{prefix}_n{nid}"))
+        cell_name(symbol, prefix, nid)
     }
+}
+
+/// The concrete simulator's name for a state or input cell: the symbol, else `st_n<nid>` /
+/// `in_n<nid>` — the key every owned bit-level engine's trace uses (`sat-bmc`, `ic3`).
+pub(crate) fn cell_name(
+    symbol: &Option<String>,
+    prefix: &str,
+    nid: crate::adapter::btor2::ast::Nid,
+) -> String {
+    symbol.clone().unwrap_or_else(|| format!("{prefix}_n{nid}"))
 }
 
 /// The counterexample the solver's model holds, for a `bad` that is true at frame `f`.
@@ -398,6 +408,17 @@ pub fn btor2_witness(model: &AigModel, outcome: &SatBmcOutcome) -> Option<String
     else {
         return None;
     };
+    Some(btor2_witness_for(model, *bad_index, initial, inputs))
+}
+
+/// [`btor2_witness`] from a trace's parts: the falsified `bad`, frame 0's state values and each
+/// frame's input values, in model order (what every owned bit-level engine's trace carries).
+pub fn btor2_witness_for(
+    model: &AigModel,
+    bad_index: usize,
+    initial: &[(String, u128)],
+    inputs: &[Vec<(String, u128)>],
+) -> String {
     let bits = |v: u128, w: usize| -> String {
         (0..w)
             .rev()
@@ -421,7 +442,7 @@ pub fn btor2_witness(model: &AigModel, outcome: &SatBmcOutcome) -> Option<String
         }
     }
     out.push_str(".\n");
-    Some(out)
+    out
 }
 
 /// Bit-level BMC on `file` up to `opts.max_depth`. `Err` = the design cannot be modelled (arrays,
