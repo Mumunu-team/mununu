@@ -786,20 +786,33 @@ fn decide_with_members_using(
         });
         rx
     });
+    // mununu#1039 — the portfolio's own wall: the members' budget plus the straggler grace (so a
+    // subprocess member reports its own timeout first). Until #1039 nothing enforced it when no
+    // run budget was set (`btor2 verify --timeout-ms`): the native member's per-check allowance is
+    // a z3 rlimit, deterministic but not a wall, and on a loaded host one check ran 70 s past the
+    // wall, or past an outer `timeout`, which then killed the run before any JSON was written.
+    let wall_deadline = std::time::Instant::now() + subprocess_timeout + STRAGGLER_GRACE;
+    let wall_fired = AtomicBool::new(false);
+    let wall_fired = &wall_fired;
+    let started = members;
     let mut members = std::thread::scope(|scope| {
-        // Forward an external cancellation — or the budget's expiry — into `decided`, which
-        // every cancellable member already polls. Stops when the members are joined.
-        if cancel.is_some() || budget.remaining_ms().is_some() {
-            scope.spawn(move || {
-                while !finished.load(Relaxed) {
-                    if cancel.is_some_and(|c| c.load(Relaxed)) || budget.expired() {
-                        decided.store(true, Relaxed);
-                        break;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(2));
+        // Forward an external cancellation, the budget's expiry, or the portfolio's wall into
+        // `decided`, which every cancellable member already polls (native's watchdog interrupts
+        // the z3 check in flight, mununu#878). Stops when the members are joined.
+        scope.spawn(move || {
+            while !finished.load(Relaxed) {
+                if cancel.is_some_and(|c| c.load(Relaxed)) || budget.expired() {
+                    decided.store(true, Relaxed);
+                    break;
                 }
-            });
-        }
+                if std::time::Instant::now() >= wall_deadline {
+                    wall_fired.store(true, Relaxed);
+                    decided.store(true, Relaxed);
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        });
         let btormc_h = members.btormc.then(|| {
             scope.spawn(move || {
                 let _g = crate::adapter::run_budget::enter(budget);
@@ -997,7 +1010,50 @@ fn decide_with_members_using(
     members.refused = refused.lock().map(|g| g.clone()).unwrap_or_default();
     members.abstained = abstained.lock().map(|g| g.clone()).unwrap_or_default();
     members.undecided = undecided.lock().map(|g| g.clone()).unwrap_or_default();
+    // mununu#1039 — silence is a defect: a member the wall stopped, with no verdict and no stop
+    // of its own on record, is a budget abstention with that cause.
+    if wall_fired.load(Relaxed) {
+        let wall_ms = subprocess_timeout.as_millis();
+        for name in stopped_by_wall_unrecorded(&started, &members) {
+            members.abstained.push((
+                name,
+                format!(
+                    "stopped at the portfolio's wall deadline ({wall_ms} ms, --timeout-ms) \
+                     before it reached a verdict"
+                ),
+            ));
+        }
+    }
     collect(members)
+}
+
+/// mununu#1039 — the members that were started, returned no verdict, and appear in none of the
+/// outcome's lists: the ones the portfolio's wall stopped without a recorded cause.
+fn stopped_by_wall_unrecorded(started: &ReachMembers, m: &Members) -> Vec<&'static str> {
+    // A subprocess member's `Some(Unknown)` is no verdict: past the wall its own timeout note is
+    // skipped (`settle_subprocess` records it only while `decided` is clear).
+    let definite = |v: Option<McVerdict>| matches!(v, Some(McVerdict::Violated | McVerdict::Safe));
+    let ran: [(&'static str, bool, bool); 8] = [
+        ("exact", started.exact, m.exact.is_some()),
+        ("native", started.native, m.native.is_some()),
+        ("interp", started.interp, m.interp.is_some()),
+        ("sat-bmc", started.sat_bmc, m.sat_bmc.is_some()),
+        ("btormc", started.btormc, definite(m.btormc)),
+        ("pono", started.pono, definite(m.pono)),
+        ("ric3", started.ric3, definite(m.ric3)),
+        ("ric3-bmc", started.ric3_bmc, definite(m.ric3_bmc)),
+    ];
+    let recorded = |name: &str| {
+        m.refused
+            .iter()
+            .chain(&m.abstained)
+            .chain(&m.undecided)
+            .any(|(n, _)| *n == name)
+    };
+    ran.into_iter()
+        .filter(|&(name, on, has_verdict)| on && !has_verdict && !recorded(name))
+        .map(|(name, ..)| name)
+        .collect()
 }
 
 /// How long the join waits for a member that has not reported once a trusted verdict is in:
@@ -1743,6 +1799,79 @@ mod tests {
             t0.elapsed() < std::time::Duration::from_secs(60),
             "the join waited for the stuck exact member: {:?}",
             t0.elapsed()
+        );
+    }
+
+    /// mununu#1039 at the driver: with no run budget (`btor2 verify --timeout-ms`), a member that
+    /// runs past the portfolio's wall no longer holds the run. The stuck member stands for the
+    /// native z3 check that ran 70 s past a 300 s wall on HWMCC'20 `mul9`. The portfolio returns
+    /// at the wall plus the grace, and the stopped member is named with its cause.
+    #[test]
+    fn the_portfolio_returns_at_its_wall_and_names_the_member_it_stopped() {
+        fn slow_exact(_: &str) -> Result<Option<bool>, String> {
+            std::thread::sleep(std::time::Duration::from_secs(20));
+            Ok(None)
+        }
+        const COUNTER: &str = "1 sort bitvec 3\n2 zero 1\n3 state 1\n4 init 1 3 2\n5 one 1\n\
+                               6 add 1 3 5\n7 next 1 3 6\n8 ones 1\n9 sort bitvec 1\n\
+                               10 eq 9 3 8\n11 bad 10\n";
+        let file = parser::parse(COUNTER).expect("parse");
+        let members = ReachMembers {
+            exact: true,
+            native: false,
+            interp: false,
+            sat_bmc: false,
+            btormc: false,
+            pono: false,
+            ric3: false,
+            ric3_bmc: false,
+            ric3_engine: ric3::DEFAULT_ENGINE,
+        };
+        let t0 = std::time::Instant::now();
+        let out = decide_with_members_using(
+            &file,
+            std::time::Duration::from_millis(200),
+            None,
+            members,
+            slow_exact,
+        );
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(10),
+            "the portfolio ran past its wall: {:?}",
+            t0.elapsed()
+        );
+        assert_eq!(out.verdict, ReachVerdict::Unknown, "{out:?}");
+        assert!(
+            out.abstained
+                .iter()
+                .any(|(m, why)| *m == "exact" && why.contains("wall deadline (200 ms")),
+            "the stopped member is not named: {out:?}"
+        );
+    }
+
+    /// The post-join sweep names exactly the started members with no verdict and no recorded stop.
+    #[test]
+    fn the_wall_sweep_names_only_silent_started_members() {
+        let m = Members {
+            exact: None,
+            native: None,
+            interp: Some(false),
+            sat_bmc: None,
+            btormc: Some(McVerdict::Unknown),
+            pono: Some(McVerdict::Safe),
+            ric3: None,
+            ric3_bmc: None,
+            refused: vec![("sat-bmc", "x".into())],
+            abstained: Vec::new(),
+            undecided: Vec::new(),
+        };
+        let started = ReachMembers {
+            ric3_bmc: false,
+            ..ReachMembers::ALL
+        };
+        assert_eq!(
+            stopped_by_wall_unrecorded(&started, &m),
+            vec!["exact", "native", "btormc", "ric3"]
         );
     }
 
