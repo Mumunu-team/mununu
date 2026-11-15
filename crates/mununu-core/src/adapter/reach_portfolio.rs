@@ -308,6 +308,7 @@ fn run_native(
     file: &Btor2File,
     cancel: Option<&std::sync::atomic::AtomicBool>,
     query_ms: u32,
+    wall: Option<std::time::Instant>,
 ) -> Result<Option<bool>, MemberStop> {
     // mununu#893 — `query_ms` is the per-check allowance in NOMINAL milliseconds: a deterministic
     // resource limit inside the member, never a wall clock; a stop on it comes back as an
@@ -329,7 +330,7 @@ fn run_native(
             {
                 Ok(None)
             }
-            Ok(SafetyVerdict::Unknown { k }) => Err(MemberStop::Undecided(native_unknown(k))),
+            Ok(SafetyVerdict::Unknown { k }) => Err(MemberStop::Undecided(native_unknown(k, wall))),
             Err(e) => Err(MemberStop::from(e)),
         },
     )
@@ -374,12 +375,25 @@ fn run_sat_bmc(
 }
 
 /// mununu#1022 — the native member's progress when it searched to its bound without a verdict.
-fn native_unknown(k: u32) -> String {
-    format!(
+///
+/// mununu#1038 — the bound is a fixed depth, not the budget, so the member can stop with most of
+/// the portfolio's wall unused; the time left at the stop is part of the reason. (Raising the
+/// bound was measured not to help: uncapped, plain and simple-path k-induction proved neither
+/// HWMCC'20 k-liveness monitor of #1038 by depth 37–78 in 30–60 min, while each step grew to
+/// minutes. The wall there is IC3-class, not depth.)
+fn native_unknown(k: u32, wall: Option<std::time::Instant>) -> String {
+    let mut why = format!(
         "BMC found no counterexample through depth {k} and k-induction found no proof up to \
          k = {k} (bound {})",
         native_bmc::DEFAULT_MAX_K
-    )
+    );
+    if let Some(left) = wall.and_then(|w| w.checked_duration_since(std::time::Instant::now())) {
+        why.push_str(&format!(
+            "; it stopped at its depth bound with {:.1} s of the wall left",
+            left.as_secs_f64()
+        ));
+    }
+    why
 }
 
 /// Budget for the interpolation member. In the parallel driver it runs concurrently
@@ -933,7 +947,7 @@ fn decide_with_members_using(
                     abstained,
                     undecided,
                     "native",
-                    run_native(file, Some(decided), t.native_query_ms),
+                    run_native(file, Some(decided), t.native_query_ms, Some(wall_deadline)),
                 );
                 if v.is_some() {
                     decided.store(true, Relaxed);
@@ -1223,7 +1237,7 @@ pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcom
                     Ok(SafetyVerdict::Safe { .. }) => Some(false),
                     Ok(SafetyVerdict::Unknown { k }) => {
                         if !decided.load(Relaxed) {
-                            note_refusal(&undecided, "native", native_unknown(k));
+                            note_refusal(&undecided, "native", native_unknown(k, Some(deadline)));
                         }
                         None
                     }
@@ -1886,7 +1900,7 @@ mod tests {
     #[test]
     fn a_native_member_that_searched_to_its_bound_reports_its_progress() {
         let file = parser::parse(EVEN_COUNTER).expect("parse");
-        match run_native(&file, None, 5_000) {
+        match run_native(&file, None, 5_000, None) {
             Err(MemberStop::Undecided(p)) => {
                 assert!(p.contains("depth 40") && p.contains("k = 40"), "{p}");
             }
@@ -1894,13 +1908,13 @@ mod tests {
         }
         let cancelled = std::sync::atomic::AtomicBool::new(true);
         assert!(matches!(
-            run_native(&file, Some(&cancelled), 5_000),
+            run_native(&file, Some(&cancelled), 5_000, None),
             Ok(None)
         ));
     }
 
     /// At the driver: with only the native member running, its progress reaches the outcome's
-    /// `undecided` list, not `abstained` or `refused`.
+    /// `undecided` list, not `abstained` or `refused`, with the wall it left unused (#1038).
     #[test]
     fn the_portfolio_carries_an_undecided_members_progress() {
         let file = parser::parse(EVEN_COUNTER).expect("parse");
@@ -1924,6 +1938,9 @@ mod tests {
         assert_eq!(out.verdict, ReachVerdict::Unknown, "{out:?}");
         assert_eq!(out.undecided.len(), 1, "{out:?}");
         assert_eq!(out.undecided[0].0, "native");
+        // mununu#1038 — the stop is at the depth bound, long before the 60 s wall: the reason
+        // says how much of the wall it left unused.
+        assert!(out.undecided[0].1.contains("s of the wall left"), "{out:?}");
         assert!(
             out.refused.is_empty() && out.abstained.is_empty(),
             "{out:?}"
