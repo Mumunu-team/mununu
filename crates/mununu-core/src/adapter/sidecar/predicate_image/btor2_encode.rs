@@ -1009,20 +1009,64 @@ fn encode_op(
             let cond_bool = cond.eq(&zero).not();
             Ok(cond_bool.ite(&then_bv, &else_bv))
         }
-        // Unsupported in Phase A.4 BvOnly — array ops + divisions +
-        // overflow detectors. Match the bit-blaster's behaviour:
-        // refuse with a clear error.
-        Op::Sdiv | Op::Udiv | Op::Smod | Op::Srem | Op::Urem => {
-            Err(EncodeError::UnsupportedOperator {
-                nid,
-                op_name: "division/modulo (sdiv/udiv/smod/srem/urem)",
-            })
+        // mununu#1037 — division / remainder: BTOR2's semantics are SMT-LIB's, including the
+        // total extension at a zero divisor (`udiv x 0 = ~0`, `urem x 0 = x`, `sdiv` / `srem` /
+        // `smod` as SMT-LIB defines them over `bvudiv` / `bvurem`), so each is the z3 primitive.
+        // Exact, no approximation. Until #1037 these refused, and the native member refused every
+        // design that had one (HWMCC'20 `anderson.3`, `elevator.4`).
+        Op::Udiv => Ok(get(0)?.bvudiv(&get(1)?)),
+        Op::Urem => Ok(get(0)?.bvurem(&get(1)?)),
+        Op::Sdiv => Ok(get(0)?.bvsdiv(&get(1)?)),
+        Op::Srem => Ok(get(0)?.bvsrem(&get(1)?)),
+        Op::Smod => Ok(get(0)?.bvsmod(&get(1)?)),
+        // mununu#1037 — the overflow predicates (a 1-bit result), by extend-and-compare: compute
+        // the operation one width wider (two for the products) and test whether the result
+        // still fits. The same definitions as the AIG backend's gadgets (`btor2/aig.rs`).
+        Op::Uaddo => {
+            let (a, b) = (get(0)?, get(1)?);
+            let n = a.get_size();
+            Ok(a.zero_ext(1).bvadd(b.zero_ext(1)).extract(n, n))
         }
-        Op::Saddo | Op::Ssubo | Op::Smulo | Op::Uaddo | Op::Usubo | Op::Umulo | Op::Sdivo => {
-            Err(EncodeError::UnsupportedOperator {
-                nid,
-                op_name: "overflow detector",
-            })
+        Op::Usubo => Ok(bool_to_bv1(get(0)?.bvult(&get(1)?))),
+        Op::Saddo | Op::Ssubo => {
+            let (a, b) = (get(0)?, get(1)?);
+            let n = a.get_size();
+            let (wa, wb) = (a.sign_ext(1), b.sign_ext(1));
+            let wide = if op == Op::Saddo {
+                wa.bvadd(&wb)
+            } else {
+                wa.bvsub(&wb)
+            };
+            // Fits in n signed bits iff the top two bits of the (n + 1)-bit result agree.
+            Ok(wide.extract(n, n).bvxor(wide.extract(n - 1, n - 1)))
+        }
+        Op::Umulo => {
+            let (a, b) = (get(0)?, get(1)?);
+            let n = a.get_size();
+            let p = a.zero_ext(n).bvmul(b.zero_ext(n));
+            let zero = z3::ast::BV::from_u64(0, n);
+            Ok(bool_to_bv1(p.extract(2 * n - 1, n).eq(&zero).not()))
+        }
+        Op::Smulo => {
+            let (a, b) = (get(0)?, get(1)?);
+            let n = a.get_size();
+            let p = a.sign_ext(n).bvmul(b.sign_ext(n));
+            // Fits iff the 2n-bit product is the sign extension of its low n bits.
+            let fits = p.eq(p.extract(n - 1, 0).sign_ext(n));
+            Ok(bool_to_bv1(fits.not()))
+        }
+        Op::Sdivo => {
+            // The one overflowing case: INT_MIN / −1.
+            let (a, b) = (get(0)?, get(1)?);
+            let n = a.get_size();
+            // 1 << (n − 1), at any width (no zero-width term at n = 1, no u64 limit).
+            let int_min =
+                z3::ast::BV::from_u64(1, n).bvshl(z3::ast::BV::from_u64(u64::from(n - 1), n));
+            let minus_one = z3::ast::BV::from_u64(0, n).bvnot();
+            Ok(bool_to_bv1(z3::ast::Bool::and(&[
+                &a.eq(&int_min),
+                &b.eq(&minus_one),
+            ])))
         }
         Op::Read | Op::Write => Err(EncodeError::ArraySortUnsupportedInBvOnly { nid }),
     }
@@ -1537,6 +1581,69 @@ mod tests {
 11 read 3 9 7
 12 next 3 6 11
 "#;
+
+    /// mununu#1037 — the op's value through the encoder: a one-op design over two inputs,
+    /// `encode_design`'s term for the op node with the inputs substituted, simplified to a constant.
+    fn via_encoder(op: &str, w: u32, rw: u32, a: u64, b: u64) -> u64 {
+        use z3::ast::Ast;
+        let src = format!(
+            "1 sort bitvec {w}\n2 sort bitvec {rw}\n3 input 1 a\n4 input 1 b\n\
+             5 state 2 r\n6 {op} 2 3 4\n7 next 2 5 6\n"
+        );
+        let file = crate::adapter::btor2::parser::parse(&src).expect("parse");
+        let cfg = z3::Config::new();
+        z3::with_z3_config(&cfg, || {
+            let view = encode_design(&file).expect("the op encodes");
+            let (ia, ib) = (&view.inputs[&3], &view.inputs[&4]);
+            let (ca, cb) = (z3::ast::BV::from_u64(a, w), z3::ast::BV::from_u64(b, w));
+            view.signal_bvs[&6]
+                .substitute(&[(ia, &ca), (ib, &cb)])
+                .simplify()
+                .as_u64()
+                .expect("a constant after substitution")
+        })
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(400))]
+
+        /// mununu#1037 — division, remainder and the overflow predicates encode to SMT-LIB's
+        /// definitions (the shared reference the AIG backend is tested against), at every
+        /// operand width 1–8, a zero divisor included.
+        #[test]
+        fn division_and_overflow_encode_to_their_smtlib_definitions(
+            w in 1u32..=8, op in 0usize..12, a in proptest::prelude::any::<u64>(),
+            b in proptest::prelude::any::<u64>()
+        ) {
+            use crate::adapter::btor2::aig::smtlib_reference;
+            let m = if w >= 64 { u64::MAX } else { (1u64 << w) - 1 };
+            let (a, b) = (a & m, b & m);
+            let name = smtlib_reference::OPS[op];
+            let (expect, rw) = smtlib_reference::eval(name, w, a, b);
+            proptest::prop_assert_eq!(via_encoder(name, w, rw, a, b), expect, "{} w={} a={} b={}", name, w, a, b);
+        }
+    }
+
+    /// The edge cases the random table rarely draws, pinned: zero divisors, INT_MIN / −1.
+    #[test]
+    fn division_edge_cases_encode_exactly() {
+        assert_eq!(via_encoder("udiv", 4, 4, 7, 0), 0xF);
+        assert_eq!(via_encoder("urem", 4, 4, 7, 0), 7);
+        assert_eq!(via_encoder("sdiv", 4, 4, 0x9, 0), 1, "negative / 0 = 1");
+        assert_eq!(
+            via_encoder("sdiv", 4, 4, 0x8, 0xF),
+            0x8,
+            "INT_MIN / -1 wraps"
+        );
+        assert_eq!(via_encoder("sdivo", 4, 1, 0x8, 0xF), 1);
+        assert_eq!(
+            via_encoder("sdivo", 1, 1, 1, 1),
+            1,
+            "1-bit: -1 / -1 overflows"
+        );
+        assert_eq!(via_encoder("smod", 4, 4, 0xD, 4), 1, "-3 smod 4 = 1");
+        assert_eq!(via_encoder("srem", 4, 4, 0xD, 4), 0xD, "-3 srem 4 = -3");
+    }
 
     #[test]
     fn bvonly_rejects_array_design() {

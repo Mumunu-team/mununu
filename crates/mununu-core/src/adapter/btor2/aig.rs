@@ -871,6 +871,78 @@ impl AigModel {
     }
 }
 
+/// The SMT-LIB definitions of BTOR2's division, remainder and overflow operators over `u64` /
+/// `i64`, for operand widths up to 8: the reference every BV backend that encodes them is tested
+/// against (this module's AIG gadgets, the z3 encoder, mununu#1037).
+#[cfg(test)]
+#[allow(clippy::panic)]
+pub(crate) mod smtlib_reference {
+    /// The operators [`eval`] defines.
+    pub(crate) const OPS: [&str; 12] = [
+        "udiv", "urem", "sdiv", "srem", "smod", "uaddo", "usubo", "saddo", "ssubo", "umulo",
+        "smulo", "sdivo",
+    ];
+
+    fn mask(w: u32) -> u64 {
+        if w >= 64 { u64::MAX } else { (1u64 << w) - 1 }
+    }
+
+    fn sx(v: u64, w: u32) -> i64 {
+        let s = 64 - w;
+        ((v << s) as i64) >> s
+    }
+
+    /// `op(a, b)` at width `w` (operands already masked), and the result width.
+    pub(crate) fn eval(op: &str, w: u32, a: u64, b: u64) -> (u64, u32) {
+        let (sa, sb) = (sx(a, w), sx(b, w));
+        let m = mask(w);
+        let min = sx(1 << (w - 1), w);
+        let max = (m >> 1) as i64;
+        match op {
+            "udiv" => (a.checked_div(b).unwrap_or(m), w),
+            "urem" => (a.checked_rem(b).unwrap_or(a), w),
+            "sdiv" => (
+                if sb == 0 {
+                    if sa < 0 { 1 } else { m }
+                } else {
+                    (sa.wrapping_div(sb) as u64) & m
+                },
+                w,
+            ),
+            "srem" => (
+                if sb == 0 {
+                    a
+                } else {
+                    (sa.wrapping_rem(sb) as u64) & m
+                },
+                w,
+            ),
+            "smod" => (
+                if sb == 0 {
+                    a
+                } else {
+                    let r = sa.wrapping_rem(sb);
+                    let r = if r != 0 && ((r < 0) != (sb < 0)) {
+                        r + sb
+                    } else {
+                        r
+                    };
+                    (r as u64) & m
+                },
+                w,
+            ),
+            "uaddo" => (u64::from(a + b > m), 1),
+            "usubo" => (u64::from(a < b), 1),
+            "saddo" => (u64::from(!(min..=max).contains(&(sa + sb))), 1),
+            "ssubo" => (u64::from(!(min..=max).contains(&(sa - sb))), 1),
+            "umulo" => (u64::from(a * b > m), 1),
+            "smulo" => (u64::from(!(min..=max).contains(&(sa * sb))), 1),
+            "sdivo" => (u64::from(sa == min && sb == -1), 1),
+            other => panic!("no SMT-LIB reference for {other}"),
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -881,11 +953,6 @@ mod tests {
 
     fn mask(w: u32) -> u64 {
         if w >= 64 { u64::MAX } else { (1u64 << w) - 1 }
-    }
-
-    fn sx(v: u64, w: u32) -> i64 {
-        let s = 64 - w;
-        ((v << s) as i64) >> s
     }
 
     /// The op's result through the AIG: a one-op design, both operands as inputs.
@@ -977,34 +1044,16 @@ mod tests {
         }
 
         /// Division, remainder and the overflow predicates have no concrete evaluator; the
-        /// reference is SMT-LIB's definition over i64 / u64.
+        /// reference is SMT-LIB's definition ([`smtlib_reference`]).
         #[test]
         fn division_and_overflow_match_smtlib(
             w in 1u32..=8, op in 0usize..12, a in any::<u64>(), b in any::<u64>()
         ) {
             let (a, b) = (a & mask(w), b & mask(w));
-            let (sa, sb) = (sx(a, w), sx(b, w));
-            let m = mask(w);
-            let names = ["udiv", "urem", "sdiv", "srem", "smod", "uaddo", "usubo", "saddo", "ssubo", "umulo", "smulo", "sdivo"];
-            let (expect, rw) = match op {
-                0 => (a.checked_div(b).unwrap_or(m), w),
-                1 => (a.checked_rem(b).unwrap_or(a), w),
-                2 => (if sb == 0 { if sa < 0 { 1 } else { m } } else { (sa.wrapping_div(sb) as u64) & m }, w),
-                3 => (if sb == 0 { a } else { (sa.wrapping_rem(sb) as u64) & m }, w),
-                4 => (if sb == 0 { a } else {
-                        let r = sa.wrapping_rem(sb);
-                        let r = if r != 0 && ((r < 0) != (sb < 0)) { r + sb } else { r };
-                        (r as u64) & m }, w),
-                5 => (u64::from(a + b > m), 1),
-                6 => (u64::from(a < b), 1),
-                7 => { let s = sa + sb; (u64::from(s < sx(1 << (w - 1), w) || s > (m >> 1) as i64), 1) }
-                8 => { let s = sa - sb; (u64::from(s < sx(1 << (w - 1), w) || s > (m >> 1) as i64), 1) }
-                9 => (u64::from(a * b > m), 1),
-                10 => { let p = sa * sb; (u64::from(p < sx(1 << (w - 1), w) || p > (m >> 1) as i64), 1) }
-                _ => (u64::from(sa == sx(1 << (w - 1), w) && sb == -1), 1),
-            };
-            let d = design(names[op], w, w, rw, "");
-            prop_assert_eq!(via_aig(&d, a, b), expect, "{} w={} a={} b={}", names[op], w, a, b);
+            let name = smtlib_reference::OPS[op];
+            let (expect, rw) = smtlib_reference::eval(name, w, a, b);
+            let d = design(name, w, w, rw, "");
+            prop_assert_eq!(via_aig(&d, a, b), expect, "{} w={} a={} b={}", name, w, a, b);
         }
     }
 
