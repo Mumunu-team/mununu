@@ -1182,8 +1182,9 @@ struct Btor2VerifyArgs {
     /// The engine `--bmc-only` runs: `native` (default; bit-precise BMC on z3 QF_BV), `sat`
     /// (N5.0: the owned bit-level BMC, the design bit-blasted to an AIG and unrolled into
     /// CaDiCaL, in-process) or `sat-dyn` (the same engine with the dynamic step: one query per
-    /// growing window of depths, for deep counterexamples behind hard shallow frames). Both search every depth up to `--bmc-k`; `--timeout-ms` is the
-    /// `sat` engine's wall deadline, and a stopped search says where and why.
+    /// growing window of depths, for deep counterexamples behind hard shallow frames). Each
+    /// searches every depth up to `--bmc-k`; `--timeout-ms` is every engine's wall deadline
+    /// (native's since mununu#1039), and a stopped search says where and why.
     ///
     /// surface: CLI-only — an engine-evaluation switch of the CLI-only `--bmc-only`; the
     /// owned SAT engine reaches the API through the portfolio once it joins it (N5.4).
@@ -4413,10 +4414,33 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
         use mununu_core::adapter::btor2::native_bmc::{self, BmcOutcome};
         use mununu_core::adapter::btor2::sat_bmc::{SatBmcOptions, SatBmcOutcome};
         let (verdict, depth, member, stopped) = match args.bmc_engine {
-            BmcEngineArg::Native => match native_bmc::bmc_bad_reachable(&file, args.bmc_k) {
-                Ok(BmcOutcome::Violated { depth }) => ("violated", Some(depth), "native-bmc", None),
-                Ok(BmcOutcome::NoCexWithin { .. }) => ("unknown", None, "native-bmc", None),
-                Err(e) => return Err(format!("bmc-only: {e:?}")),
+            // mununu#1039 — with `--timeout-ms` the native search is wall-bounded too: every check
+            // is capped by the time left and a stop says at which depth and why. Without it the
+            // search is the unbounded `bmc_bad_reachable`, as before (one check had run 2 h 51 min
+            // past a 300 000 ms `--timeout-ms` that only the `sat` engines read).
+            BmcEngineArg::Native => match args.timeout_ms {
+                Some(ms) => {
+                    let per_query = u32::try_from(ms).unwrap_or(u32::MAX);
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+                    let never = std::sync::atomic::AtomicBool::new(false);
+                    match native_bmc::bmc_cex_until(&file, args.bmc_k, per_query, deadline, &never)
+                    {
+                        Ok(Some(depth)) => ("violated", Some(depth), "native-bmc", None),
+                        Ok(None) => ("unknown", None, "native-bmc", None),
+                        Err(
+                            e @ (native_bmc::BmcError::BudgetExpired { .. }
+                            | native_bmc::BmcError::ResourceLimit { .. }),
+                        ) => ("unknown", None, "native-bmc", Some(format!("stopped: {e}"))),
+                        Err(e) => return Err(format!("bmc-only: {e:?}")),
+                    }
+                }
+                None => match native_bmc::bmc_bad_reachable(&file, args.bmc_k) {
+                    Ok(BmcOutcome::Violated { depth }) => {
+                        ("violated", Some(depth), "native-bmc", None)
+                    }
+                    Ok(BmcOutcome::NoCexWithin { .. }) => ("unknown", None, "native-bmc", None),
+                    Err(e) => return Err(format!("bmc-only: {e:?}")),
+                },
             },
             BmcEngineArg::Sat | BmcEngineArg::SatDyn => {
                 let opts = SatBmcOptions {
