@@ -1099,21 +1099,32 @@ mod tests {
             trace_replay_failed: vec![("sat-bmc", "a `constraint` fails at frame 1".to_string())],
             ..ReachOutcome::default()
         };
-        // Owned-only with `sat-bmc` struck out leaves only `ic3` as a carrier; `ic3` is not opted
-        // in here… but the fallback set is explicit (TRACE_CARRIERS), so it runs under the time
-        // left: give it a budget already spent after the note is composed, via a bound of 5 on
-        // native BMC, and check the note.
-        let w = witness_for_violation(&file, 5, None, &outcome, true);
-        assert!(w.trace.is_none() || w.by == Some("ic3"), "{w:?}");
-        if w.trace.is_none() {
-            let reason = w.unavailable_reason.unwrap();
-            assert!(
-                reason.contains("sat-bmc: its witness did not replay")
-                    && reason.contains("not run again"),
-                "{reason}"
-            );
-            assert!(reason.contains("within 5 cycles"), "{reason}");
-        }
+        // Owned-only with `sat-bmc` struck out leaves `ic3` as the only carrier (the fallback set
+        // is explicit, TRACE_CARRIERS); on the 3000-deep counter it runs to the deadline — 2 s
+        // here, not the 60 s default wall it used to spend (#1049 review) — and its stop is
+        // named beside the strike-out; the native re-derivation then has no time left, or
+        // searches its bound of 5: either way no trace, and the reason says what each did.
+        let t0 = std::time::Instant::now();
+        let w = witness_for_violation(
+            &file,
+            5,
+            Some(t0 + Duration::from_secs(2)),
+            &outcome,
+            true,
+        );
+        let elapsed = t0.elapsed();
+        assert!(w.trace.is_none(), "{w:?}");
+        let reason = w.unavailable_reason.unwrap();
+        assert!(
+            reason.contains("sat-bmc: its witness did not replay") && reason.contains("not run again"),
+            "{reason}"
+        );
+        assert!(reason.contains("ic3:"), "{reason}");
+        assert!(
+            reason.contains("within 5 cycles") || reason.contains("budget"),
+            "{reason}"
+        );
+        assert!(elapsed < Duration::from_secs(10), "took {elapsed:?}");
     }
 
     /// The witness search runs INSIDE the budget its thread already has (a `verify-auto`
