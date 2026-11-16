@@ -1076,6 +1076,11 @@ pub struct Btor2VerifyRequest {
     /// The BMC bound for `witness` (the CLI's `--witness-max-k`, default 200).
     #[serde(default)]
     pub witness_max_k: Option<u32>,
+    /// mununu#1045 — the wall for the whole request, milliseconds (the CLI's `--timeout-ms`): the
+    /// portfolio runs under it and the `witness` re-derivation on what it left. Absent = no wall
+    /// beyond the members' own defaults.
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
 }
 
 /// One injection of an attack witness (`attack[]`).
@@ -1139,6 +1144,10 @@ pub struct Btor2VerifyResponse {
     /// `violated` (another engine found a deeper one).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trace_unavailable_within_k: Option<u32>,
+    /// mununu#1045 — with `witness` and a `violated` verdict but no `trace`: why (the bound was
+    /// searched, the time budget ran out, the design could not be encoded, …). Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_unavailable_reason: Option<String>,
 }
 
 /// Request for the response-liveness endpoint

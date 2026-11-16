@@ -889,6 +889,7 @@ fn btor2_verify_handler_impl(request: Btor2VerifyRequest) -> ApiResult<Json<Btor
                 target: None,
                 trace: None,
                 trace_unavailable_within_k: None,
+                trace_unavailable_reason: None,
             }));
         }
         Some(other) => {
@@ -943,6 +944,7 @@ fn btor2_verify_handler_impl(request: Btor2VerifyRequest) -> ApiResult<Json<Btor
             target: o.target,
             trace: (o.verdict == "violated").then(|| Trace::attack(o.depth, &o.attack)),
             trace_unavailable_within_k: None,
+            trace_unavailable_reason: None,
         }));
     }
     // `faults`: the fault-injection rewrite before any engine (the CLI `--fault`).
@@ -971,20 +973,34 @@ fn btor2_verify_handler_impl(request: Btor2VerifyRequest) -> ApiResult<Json<Btor
             .0
     };
 
-    let outcome = decide_reach_portfolio(&file);
-    // `witness`: on a violation, the shallowest reset → `bad` path, re-derived by native BMC.
-    let (trace, trace_unavailable_within_k) =
-        if request.witness && outcome.verdict == ReachVerdict::Reachable {
-            let k = request.witness_max_k.unwrap_or(200);
-            match crate::adapter::btor2::witness::bad_reachable_witness_routed(&file, k) {
-                Ok((crate::adapter::btor2::native_bmc::BmcOutcome::Violated { .. }, Some(t))) => {
-                    (Some(Trace::from_bmc(&t)), None)
-                }
-                _ => (None, Some(k)),
-            }
-        } else {
-            (None, None)
-        };
+    // mununu#1045 — `timeout_ms` (the CLI's `--timeout-ms`) bounds the whole request: the
+    // portfolio's wall, and the `witness` re-derivation runs on what it left. Absent = the
+    // previous unbounded behaviour.
+    let deadline = request
+        .timeout_ms
+        .map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+    let outcome = match request.timeout_ms {
+        Some(ms) => crate::adapter::reach_portfolio::decide_reach_portfolio_parallel_with_timeout(
+            &file,
+            std::time::Duration::from_millis(ms),
+        ),
+        None => decide_reach_portfolio(&file),
+    };
+    // `witness`: on a violation, the shallowest reset → `bad` path (rIC3, then native BMC);
+    // without one, `trace_unavailable_reason` says why.
+    let witness = (request.witness && outcome.verdict == ReachVerdict::Reachable).then(|| {
+        crate::adapter::btor2::witness::witness_for_violation(
+            &file,
+            request.witness_max_k.unwrap_or(200),
+            deadline,
+        )
+    });
+    let trace = witness
+        .as_ref()
+        .and_then(|w| w.trace.as_ref())
+        .map(Trace::from_bmc);
+    let trace_unavailable_within_k = witness.as_ref().and_then(|w| w.unavailable_within_k);
+    let trace_unavailable_reason = witness.and_then(|w| w.unavailable_reason);
     Ok(Json(Btor2VerifyResponse {
         outcome: crate::verdict::PropertyVerdict::from(outcome.verdict)
             .as_str()
@@ -1004,6 +1020,7 @@ fn btor2_verify_handler_impl(request: Btor2VerifyRequest) -> ApiResult<Json<Btor
         target: None,
         trace,
         trace_unavailable_within_k,
+        trace_unavailable_reason,
     }))
 }
 
@@ -1609,6 +1626,7 @@ fn sv_verify_handler_impl(request: SvVerifyRequest) -> ApiResult<Json<Btor2Verif
         target: None,
         trace: None,
         trace_unavailable_within_k: None,
+        trace_unavailable_reason: None,
     }))
 }
 
@@ -5690,6 +5708,7 @@ members = ["x"]
             target: None,
             witness: false,
             witness_max_k: None,
+            timeout_ms: None,
             engine: None,
         };
         let Json(out) = btor2_verify_handler(Json(request))
@@ -5722,6 +5741,7 @@ members = ["x"]
             target: None,
             witness: false,
             witness_max_k: None,
+            timeout_ms: None,
             engine: Some(engine.to_string()),
         };
         let Json(out) = btor2_verify_handler(Json(request("cube")))
@@ -5749,12 +5769,38 @@ members = ["x"]
             target: None,
             witness: false,
             witness_max_k: None,
+            timeout_ms: None,
             engine: None,
         };
         let err = btor2_verify_handler(Json(request))
             .await
             .expect_err("malformed BTOR2 must be rejected");
         assert!(matches!(err, ApiError::BadRequest { .. }));
+    }
+
+    /// mununu#1045 — the API peer of `--timeout-ms --witness`: the request's wall bounds the
+    /// call, and a `violated` verdict without a trace says why (here the bound was searched).
+    #[tokio::test]
+    async fn btor2_verify_handler_names_why_a_violation_ships_without_a_trace() {
+        // `cnt == 40` is 40 steps deep; the witness bound is 5.
+        let btor2 = "1 sort bitvec 8\n2 sort bitvec 1\n3 state 1 cnt\n4 zero 1\n5 init 1 3 4\n\
+                     6 one 1\n7 add 1 3 6\n8 next 1 3 7\n9 constd 1 40\n10 eq 2 3 9\n11 bad 10\n";
+        let request = Btor2VerifyRequest {
+            content: btor2.to_string(),
+            faults: vec![],
+            fault_warmup: None,
+            target: None,
+            witness: true,
+            witness_max_k: Some(5),
+            timeout_ms: Some(60_000),
+            engine: None,
+        };
+        let Json(resp) = btor2_verify_handler(Json(request)).await.unwrap();
+        assert_eq!(resp.outcome, "violated");
+        assert!(resp.trace.is_none());
+        assert_eq!(resp.trace_unavailable_within_k, Some(5));
+        let reason = resp.trace_unavailable_reason.unwrap();
+        assert!(reason.contains("within 5 cycles"), "{reason}");
     }
 
     // A 4-state staller: st 0=idle,1=req,3=stuck; 2=grant unreachable. req -> stuck ->

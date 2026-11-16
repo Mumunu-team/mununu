@@ -1154,7 +1154,8 @@ struct Btor2VerifyArgs {
     /// On a `violated` verdict, also emit a concrete init→bad counterexample trace
     /// (per-cycle state + input assignments) in the summary JSON. Re-derives the
     /// SHALLOWEST witness via the native bit-precise BMC engine (bounded to
-    /// `--witness-max-k` cycles); omitted if that bound doesn't reach the `bad` node.
+    /// `--witness-max-k` cycles, and to what `--timeout-ms` left after the verdict); when
+    /// no trace ships, `trace_unavailable_reason` says why (mununu#1045).
     /// This is the actionable payload for an LLM RTL-refinement loop — verdict + the
     /// exact stimulus that trips the assertion.
     ///
@@ -4503,6 +4504,11 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
     // driver, but wall-clock bounded by the slowest single engine. `--timeout-ms`
     // raises the subprocess (btormc/Pono) budget so their incremental SAT reaches
     // deeper counterexamples.
+    // mununu#1045 — `--timeout-ms` bounds the WHOLE call: the `--witness` re-derivation below
+    // runs on whatever the verdict left.
+    let deadline = args
+        .timeout_ms
+        .map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
     let outcome = if args.owned_only {
         let ms = args.timeout_ms.unwrap_or(60_000);
         decide_reach_owned_only(&file, u32::try_from(ms).unwrap_or(u32::MAX))
@@ -4513,28 +4519,27 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
     };
 
     // `--witness`: on a `violated` (Reachable) verdict, re-derive the shallowest
-    // concrete init→bad trace with the bit-precise native BMC engine. The portfolio
-    // itself only reports WHICH engines proved reachability; the actionable payload —
-    // the exact per-cycle stimulus that trips the assertion — is what an LLM
-    // refinement loop consumes. Bounded to `--witness-max-k`; if the bound doesn't
-    // reach the `bad` node (a very deep CEX another engine found), the witness is
-    // simply omitted (null) rather than fabricated.
-    let (trace, trace_unavailable_within_k) = if args.witness
-        && outcome.verdict == mununu_core::adapter::reach_portfolio::ReachVerdict::Reachable
-    {
-        use mununu_core::adapter::btor2::native_bmc::BmcOutcome;
-        use mununu_core::adapter::btor2::witness::bad_reachable_witness_routed;
-        match bad_reachable_witness_routed(&file, args.witness_max_k) {
-            Ok((BmcOutcome::Violated { .. }, Some(t))) => {
-                (Some(mununu_core::api::models::Trace::from_bmc(&t)), None)
-            }
-            // Reachable per the portfolio but the bounded native re-derivation didn't
-            // reach it within `--witness-max-k` — report the bound honestly.
-            _ => (None, Some(args.witness_max_k)),
-        }
-    } else {
-        (None, None)
-    };
+    // concrete init→bad trace (rIC3 under the rescue slice, then the bit-precise native BMC).
+    // The portfolio itself only reports WHICH engines proved reachability; the actionable
+    // payload — the exact per-cycle stimulus that trips the assertion — is what an LLM
+    // refinement loop consumes. Bounded to `--witness-max-k` cycles and to what is left of
+    // `--timeout-ms`; without a trace, `trace_unavailable_reason` says why (mununu#1045), and
+    // `trace_unavailable_within_k` is set only when the bound itself was searched.
+    let witness = (args.witness
+        && outcome.verdict == mununu_core::adapter::reach_portfolio::ReachVerdict::Reachable)
+        .then(|| {
+            mununu_core::adapter::btor2::witness::witness_for_violation(
+                &file,
+                args.witness_max_k,
+                deadline,
+            )
+        });
+    let trace = witness
+        .as_ref()
+        .and_then(|w| w.trace.as_ref())
+        .map(mununu_core::api::models::Trace::from_bmc);
+    let trace_unavailable_within_k = witness.as_ref().and_then(|w| w.unavailable_within_k);
+    let trace_unavailable_reason = witness.and_then(|w| w.unavailable_reason);
 
     let summary = serde_json::json!({
         "file": args.file.display().to_string(),
@@ -4552,6 +4557,7 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
         "undecided": mununu_core::api::models::MemberRefusalView::list_undecided(&outcome),
         "trace": trace,
         "trace_unavailable_within_k": trace_unavailable_within_k,
+        "trace_unavailable_reason": trace_unavailable_reason,
     });
     println!(
         "{}",

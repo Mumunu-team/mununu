@@ -676,6 +676,13 @@
       ],
       "description": "The counterexample: with a `target` and a `violated` verdict, the shallowest attack found (`kind: \"attack\"`, the injections on `steps[].faults`); with `witness` and a `violated` verdict, the shallowest reset → `bad` path (`kind: \"finite\"`)."
     },
+    "trace_unavailable_reason": {
+      "description": "mununu#1045 — with `witness` and a `violated` verdict but no `trace`: why (the bound was searched, the time budget ran out, the design could not be encoded, …). Absent otherwise.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "trace_unavailable_within_k": {
       "description": "With `witness`: the bound within which no path was re-derived although the verdict is `violated` (another engine found a deeper one).",
       "format": "uint32",
