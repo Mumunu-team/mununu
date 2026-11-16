@@ -1105,18 +1105,13 @@ mod tests {
         // named beside the strike-out; the native re-derivation then has no time left, or
         // searches its bound of 5: either way no trace, and the reason says what each did.
         let t0 = std::time::Instant::now();
-        let w = witness_for_violation(
-            &file,
-            5,
-            Some(t0 + Duration::from_secs(2)),
-            &outcome,
-            true,
-        );
+        let w = witness_for_violation(&file, 5, Some(t0 + Duration::from_secs(2)), &outcome, true);
         let elapsed = t0.elapsed();
         assert!(w.trace.is_none(), "{w:?}");
         let reason = w.unavailable_reason.unwrap();
         assert!(
-            reason.contains("sat-bmc: its witness did not replay") && reason.contains("not run again"),
+            reason.contains("sat-bmc: its witness did not replay")
+                && reason.contains("not run again"),
             "{reason}"
         );
         assert!(reason.contains("ic3:"), "{reason}");
