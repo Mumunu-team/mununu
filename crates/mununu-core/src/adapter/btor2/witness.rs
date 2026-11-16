@@ -21,8 +21,8 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use crate::adapter::btor2::ast::{Btor2File, Nid, Node, Operand};
-use crate::adapter::btor2::bit_blast::{ProbedStep, simulate_one_step_probe};
+use crate::adapter::btor2::ast::{Btor2File, ConstValue, Nid, Node, Operand};
+use crate::adapter::btor2::bit_blast::{ProbedStep, eval_const_value, simulate_one_step_probe};
 use crate::adapter::btor2::cex_value::CexValue;
 use crate::adapter::btor2::native_bmc::{
     BmcError, BmcOutcome, BmcTrace, bmc_bad_reachable_witness,
@@ -158,7 +158,8 @@ struct Cell {
 /// Replay a parsed witness on `file`: the initial frame from `#0`, every later state frame
 /// recomputed through the concrete simulator ([`simulate_one_step_probe`]) from the previous frame
 /// and that frame's inputs. Every frame is checked rather than taken on the tool's word: the `#0`
-/// values satisfy every `init`; every `constraint` holds on every frame; a `#k` value the witness
+/// values satisfy every `init` (a state the witness leaves out of `#0` takes its constant `init`,
+/// else 0); every `constraint` holds on every frame; a `#k` value the witness
 /// gives for a register WITH `next` agrees with the simulator, and a register WITHOUT `next` takes
 /// it (the register is free there; left out, it holds its value — one of its free choices); and
 /// the falsified `bad`'s operand is true at the last frame, read by its node, whether or not it has
@@ -287,7 +288,9 @@ pub fn trace_from_witness(file: &Btor2File, w: &Btor2Witness) -> Result<BmcTrace
         })
     };
 
-    // Frame 0 — a state the tool left out is 0, the simulator's `setundef -zero` convention.
+    // Frame 0 — a state the tool left out takes its constant `init` when it has one, else 0 (the
+    // simulator's `setundef -zero` convention); a relational `init` is checked after the first
+    // step like every other, so an omitted state it does not allow at 0 is still refused.
     let mut regs: HashMap<String, u128> = HashMap::new();
     for (idx, bits) in &w.init {
         let cell = states
@@ -295,6 +298,39 @@ pub fn trace_from_witness(file: &Btor2File, w: &Btor2Witness) -> Result<BmcTrace
             .ok_or_else(|| format!("state index {idx} out of range ({} states)", states.len()))?;
         let what = format!("state {}", cell.key);
         regs.insert(cell.key.clone(), parse_bits(bits, cell.width, &what)?);
+    }
+    let consts: HashMap<Nid, &ConstValue> = file
+        .lines
+        .iter()
+        .filter_map(|l| match &l.node {
+            Node::Const { value, .. } => Some((l.nid, value)),
+            _ => None,
+        })
+        .collect();
+    for (key, width, value) in &inits {
+        if regs.contains_key(key) {
+            continue;
+        }
+        let Some(c) = consts.get(&value.nid()) else {
+            continue;
+        };
+        let v = eval_const_value(c, *width)
+            .ok()
+            .and_then(|bv| bv.to_u128())
+            .ok_or_else(|| {
+                format!("state `{key}`: its `init` constant does not fit {width} bits")
+            })?;
+        let mask = if *width >= 128 {
+            u128::MAX
+        } else {
+            (1u128 << *width) - 1
+        };
+        let v = if value.is_negated() {
+            !v & mask
+        } else {
+            v & mask
+        };
+        regs.insert(key.clone(), v);
     }
     let mut state_frames = vec![frame_of(&states, &regs)];
     let mut input_frames = Vec::with_capacity(w.frames.len());
@@ -538,6 +574,27 @@ mod tests {
         let held = parse_btor2_witness("sat\nb0\n#0\n0 0\n@0\n0 1\n@1\n0 1\n.\n").unwrap();
         let err = trace_from_witness(&file, &held).unwrap_err();
         assert!(err.contains("does not make bad #0 true"), "{err}");
+    }
+
+    /// `cnt` starts at 3; a witness that leaves `cnt` out of `#0` takes that `init`, not 0 (an
+    /// honest witness may omit a state whose value its `init` fixes).
+    #[test]
+    fn a_state_left_out_of_frame_0_takes_its_constant_init() {
+        let text = DESIGN.replace("10 zero 8\n", "10 constd 8 3\n");
+        let file = parser::parse(&text).unwrap();
+        let w = parse_btor2_witness("sat\nb0\n#0\n0 0\n@0\n0 1\n@1\n0 1\n.\n").unwrap();
+        let t = trace_from_witness(&file, &w).expect("the omitted state takes its init");
+        assert_eq!(
+            t.states[0],
+            vec![
+                ("cnt".to_string(), CexValue::from_u64(3, 4)),
+                ("s".to_string(), CexValue::from_u64(0, 1)),
+            ]
+        );
+        assert_eq!(
+            t.states[1][0],
+            ("cnt".to_string(), CexValue::from_u64(4, 4))
+        );
     }
 
     #[test]
