@@ -2170,6 +2170,7 @@ mod tests {
 
     /// N5.4 — the wire rows of the replay failures mark the member whose verdict is the whole
     /// `violated`.
+    #[cfg(feature = "api")]
     #[test]
     fn a_replay_failure_marks_the_sole_decider() {
         use crate::api::models::TraceReplayFailureView;

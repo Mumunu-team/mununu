@@ -4370,6 +4370,10 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
     if let Some(target) = &args.target {
         use mununu_core::adapter::btor2::fault::FaultSpec;
         let spec = FaultSpec::parse_many(&args.fault, args.fault_warmup)?;
+        // `--timeout-ms` bounds the attack's trace search too (it polls this thread's budget,
+        // mununu#1045); without it, the members' own defaults.
+        let budget = mununu_core::adapter::run_budget::Budget::with_ms_opt(args.timeout_ms);
+        let _budget = mununu_core::adapter::run_budget::enter(&budget);
         let o = mununu_core::adapter::fault_adversary::verify_fault_reach(
             &content,
             &spec,
@@ -4383,8 +4387,10 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
             "target": o.target,
             "outcome": o.verdict,
             "decided_by": o.decided_by,
-            "trace": (o.verdict == "violated")
+            "trace": (o.verdict == "violated" && o.depth.is_some())
                 .then(|| mununu_core::api::models::Trace::attack(o.depth, &o.attack)),
+            "trace_by": o.trace_by,
+            "trace_unavailable_reason": o.trace_unavailable_reason,
         });
         println!(
             "{}",

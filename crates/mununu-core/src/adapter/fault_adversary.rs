@@ -39,6 +39,11 @@ pub struct FaultReachOutcome {
     pub attack: Vec<FaultEvent>,
     /// The witness depth in cycles (`None` without a witness).
     pub depth: Option<usize>,
+    /// N5.4 — the member whose counterexample the attack is (`None` without one).
+    pub trace_by: Option<&'static str>,
+    /// mununu#1045 — on `violated` without a witness: why (each member's miss, the bound, the
+    /// budget). `None` otherwise.
+    pub trace_unavailable_reason: Option<String>,
 }
 
 /// Decide whether an attacker with the posture `spec` reaches `target` (a boolean atom such as
@@ -69,7 +74,7 @@ pub fn verify_fault_reach(
     match target {
         Some(atom) => {
             use crate::adapter::reach_rescue::{
-                RescueVerdict, reach_portfolio_rescue_diagnosed, safety_witness,
+                RescueVerdict, reach_portfolio_rescue_diagnosed, safety_witness_by,
             };
             let model = emit::emit_btor2(&injected_file);
             let invariant = format!("nu Z. ((!({atom})) && [] Z)");
@@ -82,19 +87,23 @@ pub fn verify_fault_reach(
                 RescueVerdict::Violated => ("violated", outcome.reachable_by.clone()),
                 _ => ("unknown", Vec::new()),
             };
-            let (attack, depth) = if verdict == "violated" {
-                match safety_witness(&model, &formula, false, witness_max_k) {
-                    Ok(trace) => {
+            let (attack, depth, trace_by, trace_unavailable_reason) = if verdict == "violated" {
+                // N5.4 seam: the trace-carrying members, then native BMC, under this thread's
+                // budget; a miss reaches the report (it was a log line).
+                match safety_witness_by(&model, &formula, false, witness_max_k) {
+                    Ok((trace, by)) => {
                         let d = trace.states.len().saturating_sub(1);
-                        (faults_in_trace(&trace, &injected, spec), Some(d))
+                        (
+                            faults_in_trace(&trace, &injected, spec),
+                            Some(d),
+                            Some(by),
+                            None,
+                        )
                     }
-                    Err(miss) => {
-                        tracing::warn!(%miss, "fault adversary: an attack exists but no path shipped");
-                        (Vec::new(), None)
-                    }
+                    Err(miss) => (Vec::new(), None, None, Some(miss.to_string())),
                 }
             } else {
-                (Vec::new(), None)
+                (Vec::new(), None, None, None)
             };
             Ok(FaultReachOutcome {
                 verdict,
@@ -103,28 +112,44 @@ pub fn verify_fault_reach(
                 target: Some(atom.to_string()),
                 attack,
                 depth,
+                trace_by,
+                trace_unavailable_reason,
             })
         }
         None => {
-            use crate::adapter::btor2::native_bmc::BmcOutcome;
-            use crate::adapter::btor2::witness::bad_reachable_witness_routed;
-            use crate::adapter::reach_portfolio::{ReachVerdict, decide_reach_portfolio};
-            let outcome = decide_reach_portfolio(&injected_file);
+            use crate::adapter::btor2::witness::witness_for_violation;
+            use crate::adapter::reach_portfolio::{
+                ReachMembers, ReachVerdict, decide_reach_portfolio_with_members,
+            };
+            // N5.4 — the members carry their counterexample out of the run (the attack is always
+            // asked for here), else the fallback re-derives it.
+            let outcome = decide_reach_portfolio_with_members(
+                &injected_file,
+                crate::adapter::btormc::DEFAULT_TIMEOUT,
+                None,
+                ReachMembers::shipped().with_witness(true),
+            );
             let (verdict, decided_by) = match outcome.verdict {
                 ReachVerdict::Reachable => ("violated", outcome.reachable_by.clone()),
                 ReachVerdict::Unreachable => ("holds", outcome.unreachable_by.clone()),
                 _ => ("unknown", Vec::new()),
             };
-            let (attack, depth) = if verdict == "violated" {
-                match bad_reachable_witness_routed(&injected_file, witness_max_k) {
-                    Ok((BmcOutcome::Violated { depth }, Some(trace))) => (
-                        faults_in_trace(&trace, &injected, spec),
-                        Some(depth as usize),
-                    ),
-                    _ => (Vec::new(), None),
+            let (attack, depth, trace_by, trace_unavailable_reason) = if verdict == "violated" {
+                let w = witness_for_violation(&injected_file, witness_max_k, None, &outcome, false);
+                match w.trace {
+                    Some(trace) => {
+                        let d = trace.states.len().saturating_sub(1);
+                        (
+                            faults_in_trace(&trace, &injected, spec),
+                            Some(d),
+                            w.by,
+                            None,
+                        )
+                    }
+                    None => (Vec::new(), None, None, w.unavailable_reason),
                 }
             } else {
-                (Vec::new(), None)
+                (Vec::new(), None, None, None)
             };
             Ok(FaultReachOutcome {
                 verdict,
@@ -133,6 +158,8 @@ pub fn verify_fault_reach(
                 target: None,
                 attack,
                 depth,
+                trace_by,
+                trace_unavailable_reason,
             })
         }
     }
@@ -198,6 +225,22 @@ mod tests {
         assert_eq!(o.attack[0].site, "st");
         assert_eq!(o.attack[0].value.as_u64(), Some(0));
         assert!(o.attack[0].cycle >= 2, "after the warm-up: {o:?}");
+        // N5.4 — the attack names the member whose counterexample it is; no miss to report.
+        assert!(o.trace_by.is_some(), "{o:?}");
+        assert_eq!(o.trace_unavailable_reason, None);
+    }
+
+    /// The plain `--fault` arm (the design's own `bad`): the members carry the attack out of the
+    /// run (N5.4) and it names its member.
+    #[test]
+    fn the_plain_fault_arm_carries_its_attack_and_names_the_member() {
+        let design = format!("{TRAP_ESCAPE}19 zero 2\n20 eq 1 7 19\n21 and 1 15 20\n22 bad 21\n");
+        let o = verify_fault_reach(&design, &spec(&["st:1"], 2), None, 20).expect("decides");
+        assert_eq!(o.verdict, "violated", "{o:?}");
+        assert_eq!(o.attack.len(), 1, "{o:?}");
+        assert_eq!(o.attack[0].site, "st");
+        assert!(o.trace_by.is_some() && o.depth.is_some(), "{o:?}");
+        assert_eq!(o.trace_unavailable_reason, None);
     }
 
     #[test]

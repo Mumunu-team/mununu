@@ -918,11 +918,14 @@ fn btor2_verify_handler_impl(request: Btor2VerifyRequest) -> ApiResult<Json<Btor
             request.fault_warmup.unwrap_or(10),
         )
         .map_err(bad)?;
+        // `timeout_ms` bounds the attack's trace search (it polls this thread's budget).
+        let budget = crate::adapter::run_budget::Budget::with_ms_opt(request.timeout_ms);
+        let _budget = crate::adapter::run_budget::enter(&budget);
         let o = crate::adapter::fault_adversary::verify_fault_reach(
             &request.content,
             &spec,
             Some(target),
-            200,
+            request.witness_max_k.unwrap_or(200),
         )
         .map_err(bad)?;
         return Ok(Json(Btor2VerifyResponse {
@@ -944,10 +947,13 @@ fn btor2_verify_handler_impl(request: Btor2VerifyRequest) -> ApiResult<Json<Btor
             detail: None,
             fault: Some(o.fault),
             target: o.target,
-            trace: (o.verdict == "violated").then(|| Trace::attack(o.depth, &o.attack)),
+            // An attack trace only when one was found (an empty `attack` trace on a `violated`
+            // verdict used to ship when the search missed); otherwise the reason.
+            trace: (o.verdict == "violated" && o.depth.is_some())
+                .then(|| Trace::attack(o.depth, &o.attack)),
             trace_unavailable_within_k: None,
-            trace_by: None,
-            trace_unavailable_reason: None,
+            trace_by: o.trace_by.map(str::to_string),
+            trace_unavailable_reason: o.trace_unavailable_reason,
             trace_replay_failed: Vec::new(),
         }));
     }
