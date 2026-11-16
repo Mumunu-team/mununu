@@ -1152,12 +1152,15 @@ struct Btor2VerifyArgs {
     #[arg(long, value_name = "MS")]
     timeout_ms: Option<u64>,
     /// On a `violated` verdict, also emit a concrete init→bad counterexample trace
-    /// (per-cycle state + input assignments) in the summary JSON. Re-derives the
-    /// SHALLOWEST witness via the native bit-precise BMC engine (bounded to
-    /// `--witness-max-k` cycles, and to what `--timeout-ms` left after the verdict); when
-    /// no trace ships, `trace_unavailable_reason` says why (mununu#1045).
-    /// This is the actionable payload for an LLM RTL-refinement loop — verdict + the
-    /// exact stimulus that trips the assertion.
+    /// (per-cycle state + input assignments) in the summary JSON: the counterexample the
+    /// deciding member found, replayed on the concrete simulator (`trace_by` names the
+    /// member; it is that member's path, NOT necessarily the shallowest — N5.4). When no
+    /// member carried one, it is re-derived: the trace-carrying members again, then the
+    /// native bit-precise BMC from depth 0 (the shallowest), bounded to `--witness-max-k`
+    /// cycles and to what `--timeout-ms` left after the verdict; when no trace ships,
+    /// `trace_unavailable_reason` says why (mununu#1045), and a member whose own witness did
+    /// not replay is in `trace_replay_failed`. This is the actionable payload for an LLM
+    /// RTL-refinement loop — verdict + the exact stimulus that trips the assertion.
     ///
     /// surface: CLI-only — a diagnostic augmentation of the CLI-only `btor2 verify`;
     /// the default portfolio verdict remains the CLI+API+UI path.
@@ -4324,10 +4327,6 @@ fn btor2_inject_fault(args: Btor2InjectFaultArgs) -> Result<(), String> {
 /// breakdown as JSON. Surface peer of the API `POST /api/v1/btor2/verify`; both share
 /// the verdict label via [`mununu_core::verdict::PropertyVerdict`].
 fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
-    use mununu_core::adapter::reach_portfolio::{
-        decide_reach_owned_only, decide_reach_portfolio,
-        decide_reach_portfolio_parallel_with_timeout,
-    };
     use mununu_core::verdict::PropertyVerdict;
 
     let content = std::fs::read_to_string(&args.file)
@@ -4509,22 +4508,39 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
     let deadline = args
         .timeout_ms
         .map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+    // N5.4 — with `--witness` the members carry the deciding member's counterexample out of the
+    // run (`ReachMembers::witness`), so the trace below is usually theirs, replayed, at no extra
+    // search; without the flag every member runs its default path, as before.
     let outcome = if args.owned_only {
         let ms = args.timeout_ms.unwrap_or(60_000);
-        decide_reach_owned_only(&file, u32::try_from(ms).unwrap_or(u32::MAX))
-    } else if let Some(ms) = args.timeout_ms {
-        decide_reach_portfolio_parallel_with_timeout(&file, std::time::Duration::from_millis(ms))
+        mununu_core::adapter::reach_portfolio::decide_reach_owned_only_with_witness(
+            &file,
+            u32::try_from(ms).unwrap_or(u32::MAX),
+            args.witness,
+        )
     } else {
-        decide_reach_portfolio(&file)
+        let wall = args
+            .timeout_ms
+            .map(std::time::Duration::from_millis)
+            .unwrap_or(mununu_core::adapter::btormc::DEFAULT_TIMEOUT);
+        mununu_core::adapter::reach_portfolio::decide_reach_portfolio_with_members(
+            &file,
+            wall,
+            None,
+            mununu_core::adapter::reach_portfolio::ReachMembers::shipped()
+                .with_witness(args.witness),
+        )
     };
 
-    // `--witness`: on a `violated` (Reachable) verdict, re-derive the shallowest
-    // concrete init→bad trace (rIC3 under the rescue slice, then the bit-precise native BMC).
-    // The portfolio itself only reports WHICH engines proved reachability; the actionable
-    // payload — the exact per-cycle stimulus that trips the assertion — is what an LLM
-    // refinement loop consumes. Bounded to `--witness-max-k` cycles and to what is left of
-    // `--timeout-ms`; without a trace, `trace_unavailable_reason` says why (mununu#1045), and
-    // `trace_unavailable_within_k` is set only when the bound itself was searched.
+    // `--witness`: on a `violated` (Reachable) verdict, the concrete init→bad trace: the one the
+    // deciding member carried out (N5.4; `trace_by` names it — its own counterexample, not
+    // necessarily the shallowest), else re-derived (the trace-carrying members again, then the
+    // bit-precise native BMC from depth 0). The portfolio itself only reports WHICH engines
+    // proved reachability; the actionable payload — the exact per-cycle stimulus that trips the
+    // assertion — is what an LLM refinement loop consumes. Bounded to `--witness-max-k` cycles
+    // and to what is left of `--timeout-ms`; without a trace, `trace_unavailable_reason` says
+    // why (mununu#1045), and `trace_unavailable_within_k` is set only when the bound itself was
+    // searched. A member whose own witness did not replay is in `trace_replay_failed`.
     let witness = (args.witness
         && outcome.verdict == mununu_core::adapter::reach_portfolio::ReachVerdict::Reachable)
         .then(|| {
@@ -4532,14 +4548,22 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
                 &file,
                 args.witness_max_k,
                 deadline,
+                &outcome,
+                args.owned_only,
             )
         });
     let trace = witness
         .as_ref()
         .and_then(|w| w.trace.as_ref())
         .map(mununu_core::api::models::Trace::from_bmc);
+    let trace_by = witness.as_ref().and_then(|w| w.by);
     let trace_unavailable_within_k = witness.as_ref().and_then(|w| w.unavailable_within_k);
     let trace_unavailable_reason = witness.and_then(|w| w.unavailable_reason);
+    let trace_replay_failed = if args.witness {
+        mununu_core::api::models::TraceReplayFailureView::list(&outcome)
+    } else {
+        Vec::new()
+    };
 
     let summary = serde_json::json!({
         "file": args.file.display().to_string(),
@@ -4556,8 +4580,10 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
         "abstained": mununu_core::api::models::MemberRefusalView::list_abstained(&outcome),
         "undecided": mununu_core::api::models::MemberRefusalView::list_undecided(&outcome),
         "trace": trace,
+        "trace_by": trace_by,
         "trace_unavailable_within_k": trace_unavailable_within_k,
         "trace_unavailable_reason": trace_unavailable_reason,
+        "trace_replay_failed": trace_replay_failed,
     });
     println!(
         "{}",

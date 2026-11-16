@@ -60,7 +60,7 @@
 #![deny(clippy::unwrap_used)] // docs/policies/failure-paths.md Rule 2: abstain, never panic
 use crate::adapter::btor2::ast::Btor2File;
 use crate::adapter::btor2::emit::emit_btor2;
-use crate::adapter::btor2::native_bmc::{self, SafetyVerdict};
+use crate::adapter::btor2::native_bmc::{self, BmcTrace, SafetyVerdict};
 use crate::adapter::btor2::native_interp::{self, InterpSafetyVerdict};
 use crate::adapter::btor2::symbolic_bitblast::exact_bad_reachable;
 use crate::adapter::btormc::{self, McVerdict};
@@ -116,6 +116,36 @@ pub struct ReachOutcome {
     /// reason). Not a refusal and not a budget stop: a deeper bound or a different engine may
     /// decide the row. A member cancelled because another one decided first is in no list.
     pub undecided: Vec<(&'static str, String)>,
+    /// N5.4 — the counterexample a member that found `bad` reachable carried out of the run,
+    /// replayed on the concrete simulator before it got here; only when the run was started
+    /// with [`ReachMembers::witness`]. The first in the fixed engine order among the members
+    /// that finished with one — which members finish before the cancel is a matter of timing,
+    /// so `by` (and the trace) may differ between two runs of one design; each is a replayed
+    /// counterexample of the design, not necessarily the shallowest.
+    pub trace: Option<CarriedTrace>,
+    /// N5.4 — members that found `bad` reachable but whose OWN witness did not replay on the
+    /// design (`(member, why)`): evidence against that member's verdict (an encode or emit
+    /// defect, or a tool's witness for a different model), or a design the simulator cannot
+    /// carry (a cell wider than 128 bits — the reason says which). The verdict is unchanged; a
+    /// consumer reads the member's verdict as unconfirmed, and as the whole verdict when that
+    /// member is the only one in `reachable_by`.
+    pub trace_replay_failed: Vec<(&'static str, String)>,
+}
+
+/// N5.4 — a counterexample carried out of the portfolio by the member that found it, replayed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CarriedTrace {
+    /// The member whose witness this is (`sat-bmc`, `ic3`, `btormc`, `ric3`, `ric3-bmc`).
+    pub by: &'static str,
+    /// The replayed trace: frame 0 (reset) .. the frame that makes `bad` true.
+    pub trace: BmcTrace,
+}
+
+impl CarriedTrace {
+    /// The trace's depth: the number of steps from reset to the frame that makes `bad` true.
+    pub fn depth(&self) -> u32 {
+        u32::try_from(self.trace.states.len().saturating_sub(1)).unwrap_or(u32::MAX)
+    }
 }
 
 impl ReachOutcome {
@@ -135,8 +165,61 @@ impl ReachOutcome {
             refused: Vec::new(),
             abstained: Vec::new(),
             undecided: Vec::new(),
+            trace: None,
+            trace_replay_failed: Vec::new(),
         }
     }
+}
+
+/// `(member, text)` notes — a refusal, an abstention, a progress line or a replay failure.
+type MemberNotes = Vec<(&'static str, String)>;
+
+/// N5.4 — where the member threads leave a replayed counterexample ([`CarriedTrace`]) or the
+/// reason their own witness did not replay; read once at the join. Shared by both drivers.
+#[derive(Debug, Default)]
+struct Carried {
+    traces: std::sync::Mutex<Vec<(&'static str, BmcTrace)>>,
+    replay_failed: std::sync::Mutex<MemberNotes>,
+}
+
+impl Carried {
+    /// Record `member`'s replayed trace, or why its witness did not replay. A refusal is also a
+    /// `warn!`: it is evidence against that member's verdict, and the report carries it
+    /// (`trace_replay_failed`).
+    fn carry(&self, member: &'static str, r: Result<BmcTrace, String>) {
+        // A poisoned lock (a member panicked while recording) loses the entry; the panic itself
+        // is the louder signal, and the verdict never depends on it (as `note_refusal`).
+        match r {
+            Ok(t) => {
+                if let Ok(mut g) = self.traces.lock() {
+                    g.push((member, t));
+                }
+            }
+            Err(why) => {
+                tracing::warn!(member, %why, "reach portfolio: the member's witness did not replay");
+                if let Ok(mut g) = self.replay_failed.lock() {
+                    g.push((member, why));
+                }
+            }
+        }
+    }
+
+    /// Everything carried so far (a poisoned lock yields nothing; the panic is the louder signal).
+    fn take(&self) -> (Vec<(&'static str, BmcTrace)>, MemberNotes) {
+        (
+            self.traces.lock().map(|g| g.clone()).unwrap_or_default(),
+            self.replay_failed
+                .lock()
+                .map(|g| g.clone())
+                .unwrap_or_default(),
+        )
+    }
+}
+
+/// N5.4 — a subprocess member's BTOR2 witness (its stdout on `sat`), replayed on the design.
+fn replayed_subprocess_witness(file: &Btor2File, stdout: &str) -> Result<BmcTrace, String> {
+    use crate::adapter::btor2::witness::{parse_btor2_witness, trace_from_witness};
+    parse_btor2_witness(stdout).and_then(|w| trace_from_witness(file, &w))
 }
 
 /// The members' individual results for one portfolio run, named — the input of [`collect`]. A
@@ -166,6 +249,12 @@ pub(crate) struct Members {
     /// `(member, progress)` for every member that searched to its bound (see
     /// [`ReachOutcome::undecided`]).
     pub undecided: Vec<(&'static str, String)>,
+    /// N5.4 — `(member, replayed trace)` for every member that carried its counterexample out
+    /// (see [`ReachOutcome::trace`]), in finishing order.
+    pub traces: Vec<(&'static str, BmcTrace)>,
+    /// N5.4 — `(member, why)` for every member whose own witness did not replay (see
+    /// [`ReachOutcome::trace_replay_failed`]).
+    pub replay_failed: Vec<(&'static str, String)>,
 }
 
 /// Record a member's refusal (an `Err`) and abstain; a clean result passes through.
@@ -354,7 +443,9 @@ fn run_sat_bmc(
     file: &Btor2File,
     deadline: std::time::Instant,
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    carried: Option<&Carried>,
 ) -> Result<Option<bool>, MemberStop> {
+    use crate::adapter::btor2::aig::AigModel;
     use crate::adapter::btor2::sat_bmc::{self, DynamicStep, SatBmcOptions, SatBmcOutcome};
     let cancelled = || cancel.load(std::sync::atomic::Ordering::Relaxed);
     let opts = SatBmcOptions {
@@ -364,7 +455,22 @@ fn run_sat_bmc(
         dynamic_step: Some(DynamicStep::default()),
         ..Default::default()
     };
-    timed("sat-bmc", || match sat_bmc::sat_bmc(file, &opts) {
+    // N5.4 — with a witness asked for, the model is kept so the counterexample's BTOR2 witness
+    // (the format the tier replays) can be built from it and replayed; the search is the same.
+    let run = || -> Result<SatBmcOutcome, String> {
+        match carried {
+            None => sat_bmc::sat_bmc(file, &opts),
+            Some(carried) => {
+                let model = AigModel::build(file)?;
+                let outcome = sat_bmc::sat_bmc_model(&model, &opts)?;
+                if let Some(witness) = sat_bmc::btor2_witness(&model, &outcome) {
+                    carried.carry("sat-bmc", replayed_subprocess_witness(file, &witness));
+                }
+                Ok(outcome)
+            }
+        }
+    };
+    timed("sat-bmc", || match run() {
         Ok(SatBmcOutcome::Violated { .. }) => Ok(Some(true)),
         Ok(SatBmcOutcome::Stopped { .. }) if cancelled() => Ok(None),
         Ok(SatBmcOutcome::Stopped { depth, reason }) => Err(MemberStop::Abstained(format!(
@@ -387,6 +493,7 @@ fn run_ic3(
     file: &Btor2File,
     deadline: std::time::Instant,
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    carried: Option<&Carried>,
 ) -> Result<Option<bool>, MemberStop> {
     use crate::adapter::btor2::ic3::{self, Ic3Options, Ic3Outcome, Replay};
     let cancelled = || cancel.load(std::sync::atomic::Ordering::Relaxed);
@@ -398,12 +505,21 @@ fn run_ic3(
     timed("ic3", || match ic3::ic3(file, &opts) {
         Ok(Ic3Outcome::Safe { .. }) => Ok(Some(false)),
         Ok(Ic3Outcome::Violated { depth, replay, .. }) => {
-            if let Replay::Unavailable(why) = replay {
-                tracing::info!(
-                    depth,
-                    why,
-                    "ic3: the counterexample ships without a simulator replay"
-                );
+            // N5.4 — the engine replayed the trace already; with a witness asked for it is
+            // carried out as it is, and a design the simulator cannot carry says so.
+            match (replay, carried) {
+                (Replay::Confirmed(trace), Some(carried)) => carried.carry("ic3", Ok(trace)),
+                (Replay::Confirmed(_), None) => {}
+                (Replay::Unavailable(why), carried) => {
+                    tracing::info!(
+                        depth,
+                        why,
+                        "ic3: the counterexample ships without a simulator replay"
+                    );
+                    if let Some(carried) = carried {
+                        carried.carry("ic3", Err(format!("not replayed: {why}")));
+                    }
+                }
             }
             Ok(Some(true))
         }
@@ -609,14 +725,7 @@ fn collect(m: Members) -> ReachOutcome {
     // The refusals arrive in FINISHING order (each member on its own thread); report them in the
     // fixed engine order so two runs of one design produce one outcome (the drivers' equality
     // tests compare whole outcomes).
-    let rank = |member: &str| {
-        [
-            "exact", "native", "interp", "sat-bmc", "ic3", "btormc", "pono", "ric3", "ric3-bmc",
-        ]
-        .iter()
-        .position(|m| *m == member)
-        .unwrap_or(usize::MAX)
-    };
+    let rank = member_rank;
     let mut refused = m.refused;
     refused.sort_by(|(a, _), (b, _)| rank(a).cmp(&rank(b)).then_with(|| a.cmp(b)));
     out.refused = refused;
@@ -626,7 +735,31 @@ fn collect(m: Members) -> ReachOutcome {
     let mut undecided = m.undecided;
     undecided.sort_by(|(a, _), (b, _)| rank(a).cmp(&rank(b)).then_with(|| a.cmp(b)));
     out.undecided = undecided;
+    // N5.4 — the carried trace: the first in the fixed order among the members that brought one.
+    out.trace = pick_carried(m.traces);
+    let mut replay_failed = m.replay_failed;
+    replay_failed.sort_by(|(a, _), (b, _)| rank(a).cmp(&rank(b)).then_with(|| a.cmp(b)));
+    out.trace_replay_failed = replay_failed;
     out
+}
+
+/// A member's position in the fixed engine order (the outcome lists' order, and the pick among
+/// several carried traces); an unknown name sorts last.
+fn member_rank(member: &str) -> usize {
+    [
+        "exact", "native", "interp", "sat-bmc", "ic3", "btormc", "pono", "ric3", "ric3-bmc",
+    ]
+    .iter()
+    .position(|m| *m == member)
+    .unwrap_or(usize::MAX)
+}
+
+/// N5.4 — the carried trace an outcome ships: the first in the fixed engine order.
+fn pick_carried(traces: Vec<(&'static str, BmcTrace)>) -> Option<CarriedTrace> {
+    traces
+        .into_iter()
+        .min_by_key(|(by, _)| member_rank(by))
+        .map(|(by, trace)| CarriedTrace { by, trace })
 }
 
 /// Decide `bad`-reachability of `file` across all six engines — the exact BDD
@@ -726,6 +859,12 @@ pub struct ReachMembers {
     pub ric3_bmc: bool,
     /// rIC3's `-e` engine; [`ric3::PORTFOLIO_ENGINE`] runs its own multi-configuration portfolio.
     pub ric3_engine: &'static str,
+    /// N5.4 — carry the deciding member's counterexample out of the run
+    /// ([`ReachOutcome::trace`]): `sat-bmc` and `ic3` replay their own trace, `btormc`, `ric3`
+    /// and `ric3-bmc` run with their witness output on and the witness is replayed on the design.
+    /// Off in every constant set (the replay is work the default verdict does not need); the
+    /// `--witness` / `witness` callers turn it on.
+    pub witness: bool,
 }
 
 impl ReachMembers {
@@ -742,6 +881,23 @@ impl ReachMembers {
         ric3: true,
         ric3_bmc: true,
         ric3_engine: ric3::DEFAULT_ENGINE,
+        witness: false,
+    };
+    /// N5.4 — the members that can carry a replayed counterexample: the witness fallback's set
+    /// ([`crate::adapter::btor2::witness::witness_for_violation`]), with `witness` on. No exact,
+    /// native, interpolation or Pono: none carries a trace yet.
+    pub const TRACE_CARRIERS: Self = Self {
+        exact: false,
+        native: false,
+        interp: false,
+        sat_bmc: true,
+        ic3: true,
+        btormc: true,
+        pono: false,
+        ric3: true,
+        ric3_bmc: true,
+        ric3_engine: ric3::DEFAULT_ENGINE,
+        witness: true,
     };
     /// The proof-directed set for a `bad` that is a BOUND on a monitor (Track V's k-liveness
     /// rung): IC3 (rIC3 in its portfolio mode, Pono) and k-induction. No exact (bit-blasting the
@@ -761,11 +917,78 @@ impl ReachMembers {
         ric3: true,
         ric3_bmc: false,
         ric3_engine: ric3::PORTFOLIO_ENGINE,
+        witness: false,
     };
 
     /// [`ReachMembers::ALL`] with the owned IC3 member on or off.
     pub const fn with_ic3(self, on: bool) -> Self {
         Self { ic3: on, ..self }
+    }
+
+    /// The same members, carrying the deciding member's counterexample out ([`Self::witness`]).
+    pub const fn with_witness(self, on: bool) -> Self {
+        Self {
+            witness: on,
+            ..self
+        }
+    }
+
+    /// Without `member` (by its outcome name); an unknown name changes nothing.
+    pub fn without(self, member: &str) -> Self {
+        match member {
+            "exact" => Self {
+                exact: false,
+                ..self
+            },
+            "native" => Self {
+                native: false,
+                ..self
+            },
+            "interp" => Self {
+                interp: false,
+                ..self
+            },
+            "sat-bmc" => Self {
+                sat_bmc: false,
+                ..self
+            },
+            "ic3" => Self { ic3: false, ..self },
+            "btormc" => Self {
+                btormc: false,
+                ..self
+            },
+            "pono" => Self {
+                pono: false,
+                ..self
+            },
+            "ric3" => Self {
+                ric3: false,
+                ..self
+            },
+            "ric3-bmc" => Self {
+                ric3_bmc: false,
+                ..self
+            },
+            _ => self,
+        }
+    }
+
+    /// The outcome names of the members this set starts, in the fixed engine order.
+    pub fn names(self) -> Vec<&'static str> {
+        [
+            ("exact", self.exact),
+            ("native", self.native),
+            ("interp", self.interp),
+            ("sat-bmc", self.sat_bmc),
+            ("ic3", self.ic3),
+            ("btormc", self.btormc),
+            ("pono", self.pono),
+            ("ric3", self.ric3),
+            ("ric3-bmc", self.ric3_bmc),
+        ]
+        .into_iter()
+        .filter_map(|(n, on)| on.then_some(n))
+        .collect()
     }
 
     /// What the shipped drivers start: [`ReachMembers::ALL`], plus the owned IC3 when opted in
@@ -842,6 +1065,10 @@ fn decide_with_members_using(
     let undecided: std::sync::Mutex<Vec<(&'static str, String)>> =
         std::sync::Mutex::new(Vec::new());
     let undecided = &undecided;
+    // N5.4 — the carried counterexamples, with a witness asked for; `None` leaves every member
+    // on its default path.
+    let carried_store = Carried::default();
+    let carried: Option<&Carried> = members.witness.then_some(&carried_store);
     // mununu#996 — the exact member runs on a DETACHED thread and reports over a channel, so the
     // join can leave it behind. It has no cancellation point inside one OxiDD apply (#816 polls
     // the budget only between stages), and when it ran on the calling thread it held the
@@ -896,9 +1123,20 @@ fn decide_with_members_using(
             scope.spawn(move || {
                 let _g = crate::adapter::run_budget::enter(budget);
                 let v = timed("btormc", || {
-                    btormc::decide_via_btormc(file, btormc_kmax, subprocess_timeout, Some(decided))
-                        .map(Some)
-                        .map_err(|e| e.message)
+                    btormc::decide_via_btormc_with_output(
+                        file,
+                        btormc_kmax,
+                        subprocess_timeout,
+                        Some(decided),
+                    )
+                    .map(|(v, out)| {
+                        // N5.4 — btormc prints its witness on `sat`; replayed and carried.
+                        if let (Some(carried), McVerdict::Violated) = (carried, v) {
+                            carried.carry("btormc", replayed_subprocess_witness(file, &out));
+                        }
+                        Some(v)
+                    })
+                    .map_err(|e| e.message)
                 });
                 let v =
                     settle_subprocess(refused, abstained, decided, "btormc", subprocess_timeout, v);
@@ -938,13 +1176,20 @@ fn decide_with_members_using(
             scope.spawn(move || {
                 let _g = crate::adapter::run_budget::enter(budget);
                 let v = timed("ric3", || {
-                    ric3::decide_via_ric3(
+                    ric3::decide_via_ric3_with_output(
                         file,
                         members.ric3_engine,
                         subprocess_timeout,
                         Some(decided),
+                        carried.is_some(),
                     )
-                    .map(Some)
+                    .map(|(v, out)| {
+                        // N5.4 — `--witness` was asked for; the witness is replayed and carried.
+                        if let (Some(carried), McVerdict::Violated) = (carried, v) {
+                            carried.carry("ric3", replayed_subprocess_witness(file, &out));
+                        }
+                        Some(v)
+                    })
                     .map_err(|e| e.message)
                 });
                 let v =
@@ -962,9 +1207,21 @@ fn decide_with_members_using(
             scope.spawn(move || {
                 let _g = crate::adapter::run_budget::enter(budget);
                 let v = timed("ric3-bmc", || {
-                    ric3::decide_via_ric3_bmc_dyn_step(file, subprocess_timeout, Some(decided))
-                        .map(Some)
-                        .map_err(|e| e.message)
+                    ric3::decide_via_ric3_bmc_dyn_step_with_output(
+                        file,
+                        subprocess_timeout,
+                        Some(decided),
+                        carried.is_some(),
+                    )
+                    .map(|(v, out)| {
+                        // N5.4 — the witness is the sticky model's; replayed on the design up to
+                        // the first frame that fires the original `bad`, and carried.
+                        if let (Some(carried), McVerdict::Violated) = (carried, v) {
+                            carried.carry("ric3-bmc", ric3::sticky_witness_trace(file, &out));
+                        }
+                        Some(v)
+                    })
+                    .map_err(|e| e.message)
                 });
                 let v = settle_subprocess(
                     refused,
@@ -993,7 +1250,7 @@ fn decide_with_members_using(
                     abstained,
                     undecided,
                     "sat-bmc",
-                    run_sat_bmc(file, deadline, cancel),
+                    run_sat_bmc(file, deadline, cancel, carried),
                 );
                 if v == Some(true) {
                     decided.store(true, Relaxed);
@@ -1014,7 +1271,7 @@ fn decide_with_members_using(
                     abstained,
                     undecided,
                     "ic3",
-                    run_ic3(file, deadline, cancel),
+                    run_ic3(file, deadline, cancel, carried),
                 );
                 if v.is_some() {
                     decided.store(true, Relaxed);
@@ -1105,6 +1362,8 @@ fn decide_with_members_using(
             refused: Vec::new(),
             abstained: Vec::new(),
             undecided: Vec::new(),
+            traces: Vec::new(),
+            replay_failed: Vec::new(),
         }
     });
     // A poisoned lock (a member panicked while recording) yields no refusal list; the panic is
@@ -1112,6 +1371,7 @@ fn decide_with_members_using(
     members.refused = refused.lock().map(|g| g.clone()).unwrap_or_default();
     members.abstained = abstained.lock().map(|g| g.clone()).unwrap_or_default();
     members.undecided = undecided.lock().map(|g| g.clone()).unwrap_or_default();
+    (members.traces, members.replay_failed) = carried_store.take();
     // mununu#1039 — silence is a defect: a member the wall stopped, with no verdict and no stop
     // of its own on record, is a budget abstention with that cause.
     if wall_fired.load(Relaxed) {
@@ -1252,8 +1512,21 @@ const OWNED_CEX_QUERY_MS: u32 = 15_000;
 ///   `"cex"` engine so a native-safe vs cex-violated split still raises the
 ///   [`ReachVerdict::Contradiction`] alarm rather than being silently merged.
 pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcome {
+    decide_reach_owned_only_with_witness(file, timeout_ms, false)
+}
+
+/// [`decide_reach_owned_only`] with the owned trace carriers (`sat-bmc`, and `ic3` when opted
+/// in) carrying their replayed counterexample out when `witness` ([`ReachOutcome::trace`],
+/// N5.4). The `cex` / `boolector` deep search and the exact member carry none.
+pub fn decide_reach_owned_only_with_witness(
+    file: &Btor2File,
+    timeout_ms: u32,
+    witness: bool,
+) -> ReachOutcome {
     use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
     use std::sync::{Arc, mpsc};
+    // N5.4 — where the carrying members leave their trace; read at return.
+    let carried_store: Arc<Carried> = Arc::default();
     // mununu#803 — a member's refusal (an `Err`, not an abstention) is kept here as the scoped
     // driver keeps it; the detached threads share the list through an `Arc`.
     let refused: Arc<std::sync::Mutex<Vec<(&'static str, String)>>> = Arc::default();
@@ -1455,9 +1728,10 @@ pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcom
             Arc::clone(&undecided),
         );
         let budget = budget.clone();
+        let carried = witness.then(|| Arc::clone(&carried_store));
         std::thread::spawn(move || {
             let _g = crate::adapter::run_budget::enter(&budget);
-            let r = run_sat_bmc(&file, deadline, Arc::clone(&decided));
+            let r = run_sat_bmc(&file, deadline, Arc::clone(&decided), carried.as_deref());
             let v = settle_native(&refused, &abstained, &undecided, "sat-bmc", r);
             if v == Some(true) {
                 decided.store(true, Relaxed);
@@ -1478,9 +1752,10 @@ pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcom
             Arc::clone(&undecided),
         );
         let budget = budget.clone();
+        let carried = witness.then(|| Arc::clone(&carried_store));
         std::thread::spawn(move || {
             let _g = crate::adapter::run_budget::enter(&budget);
-            let r = run_ic3(&file, deadline, Arc::clone(&decided));
+            let r = run_ic3(&file, deadline, Arc::clone(&decided), carried.as_deref());
             let v = settle_native(&refused, &abstained, &undecided, "ic3", r);
             if v.is_some() {
                 decided.store(true, Relaxed);
@@ -1610,6 +1885,12 @@ pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcom
     out.refused = refused.lock().map(|g| g.clone()).unwrap_or_default();
     out.abstained = abstained.lock().map(|g| g.clone()).unwrap_or_default();
     out.undecided = undecided.lock().map(|g| g.clone()).unwrap_or_default();
+    // N5.4 — what the carrying members had left by now (a member still running carries nothing
+    // into this outcome, as it is not cross-checked either).
+    let (traces, mut replay_failed) = carried_store.take();
+    out.trace = pick_carried(traces);
+    replay_failed.sort_by_key(|(a, _)| member_rank(a));
+    out.trace_replay_failed = replay_failed;
     out
 }
 
@@ -1660,6 +1941,7 @@ fn owned_members_for(ic3: bool) -> Vec<&'static str> {
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
+    use crate::adapter::btor2::cex_value::CexValue;
     use crate::adapter::btor2::parser;
 
     /// mununu#893 — a budget stop and a refusal reach different lists, and `collect` carries
@@ -1788,6 +2070,118 @@ mod tests {
     /// mununu#734 — a member's refusal (an encode error, an absent binary, a child without a
     /// verdict) rides through the merge beside the abstention it caused, so an instant
     /// `Unknown` can name its cause; a timeout or a clean `unknown` leaves the list empty.
+    /// N5.4 — among several carried traces `collect` ships the first in the fixed engine order,
+    /// and the replay failures are sorted the same way.
+    #[test]
+    fn collect_ships_the_first_carried_trace_in_engine_order() {
+        let t = |n: usize| BmcTrace {
+            states: vec![vec![]; n],
+            inputs: vec![vec![]; n],
+        };
+        let out = collect(Members {
+            sat_bmc: Some(true),
+            ric3_bmc: Some(McVerdict::Violated),
+            traces: vec![("ric3-bmc", t(9)), ("sat-bmc", t(3))],
+            replay_failed: vec![("ric3", "x".into()), ("ic3", "y".into())],
+            ..Default::default()
+        });
+        assert_eq!(out.verdict, ReachVerdict::Reachable);
+        let carried = out.trace.expect("a carried trace");
+        assert_eq!((carried.by, carried.depth()), ("sat-bmc", 2));
+        assert_eq!(
+            out.trace_replay_failed,
+            vec![("ic3", "y".to_string()), ("ric3", "x".to_string())]
+        );
+        assert_eq!(collect(Members::default()).trace, None);
+    }
+
+    /// A 3-bit counter from 0 by 1: `c = 7` first holds at depth 7.
+    const COUNTER_TO_SEVEN: &str = "1 sort bitvec 3\n2 zero 1\n3 state 1 c\n4 init 1 3 2\n5 one 1\n\
+                                    6 add 1 3 5\n7 next 1 3 6\n8 ones 1\n9 sort bitvec 1\n\
+                                    10 eq 9 3 8\n11 bad 10\n";
+
+    /// N5.4 — each owned carrier, run ALONE (so the pick cannot race), carries its replayed
+    /// counterexample out when `witness` is on and nothing when it is off.
+    #[test]
+    fn each_owned_carrier_carries_its_replayed_trace_only_when_asked() {
+        let file = parser::parse(COUNTER_TO_SEVEN).unwrap();
+        let off = ReachMembers {
+            exact: false,
+            native: false,
+            interp: false,
+            sat_bmc: false,
+            ic3: false,
+            btormc: false,
+            pono: false,
+            ric3: false,
+            ric3_bmc: false,
+            ..ReachMembers::ALL
+        };
+        for (name, members) in [
+            (
+                "sat-bmc",
+                ReachMembers {
+                    sat_bmc: true,
+                    ..off
+                },
+            ),
+            ("ic3", ReachMembers { ic3: true, ..off }),
+        ] {
+            let wall = std::time::Duration::from_secs(60);
+            let with =
+                decide_reach_portfolio_with_members(&file, wall, None, members.with_witness(true));
+            assert_eq!(with.verdict, ReachVerdict::Reachable, "{name}: {with:?}");
+            let carried = with
+                .trace
+                .clone()
+                .unwrap_or_else(|| panic!("{name} carried no trace: {with:?}"));
+            assert_eq!(carried.by, name);
+            assert_eq!(carried.depth(), 7, "{name}");
+            assert_eq!(
+                carried.trace.states[7],
+                vec![("c".to_string(), CexValue::from_u64(7, 3))]
+            );
+            assert!(with.trace_replay_failed.is_empty(), "{name}: {with:?}");
+            let without = decide_reach_portfolio_with_members(&file, wall, None, members);
+            assert_eq!(without.verdict, ReachVerdict::Reachable, "{name}");
+            assert_eq!(without.trace, None, "{name}: a trace was carried unasked");
+        }
+    }
+
+    /// N5.4 — the owned-only driver carries too (`sat-bmc` is one of its members).
+    #[test]
+    fn the_owned_only_driver_carries_the_sat_bmc_trace_when_asked() {
+        let file = parser::parse(COUNTER_TO_SEVEN).unwrap();
+        let out = decide_reach_owned_only_with_witness(&file, 60_000, true);
+        assert_eq!(out.verdict, ReachVerdict::Reachable, "{out:?}");
+        // `sat-bmc` is the only owned member that carries here (no `ic3` unless opted in); the
+        // trace is its own unless another member decided first and it was cancelled.
+        if let Some(carried) = &out.trace {
+            assert_eq!(carried.by, "sat-bmc");
+            assert_eq!(carried.depth(), 7);
+        } else {
+            assert!(
+                !out.reachable_by.contains(&"sat-bmc"),
+                "sat-bmc decided but carried nothing: {out:?}"
+            );
+        }
+        assert_eq!(decide_reach_owned_only(&file, 60_000).trace, None);
+    }
+
+    /// N5.4 — the wire rows of the replay failures mark the member whose verdict is the whole
+    /// `violated`.
+    #[test]
+    fn a_replay_failure_marks_the_sole_decider() {
+        use crate::api::models::TraceReplayFailureView;
+        let mut out = ReachOutcome::from_sets(vec!["ric3-bmc"], vec![]);
+        out.trace_replay_failed = vec![("ric3-bmc", "state index 9 out of range".to_string())];
+        let rows = TraceReplayFailureView::list(&out);
+        assert_eq!((rows.len(), rows[0].sole_decider), (1, true));
+        assert_eq!(rows[0].member, "ric3-bmc");
+        out.reachable_by.push("sat-bmc");
+        assert!(!TraceReplayFailureView::list(&out)[0].sole_decider);
+    }
+
     #[test]
     fn collect_carries_member_refusals() {
         let out = collect(Members {
@@ -1928,6 +2322,7 @@ mod tests {
             ric3: false,
             ric3_bmc: false,
             ric3_engine: ric3::DEFAULT_ENGINE,
+            witness: false,
         };
         let t0 = std::time::Instant::now();
         let out = decide_with_members_using(
@@ -1971,6 +2366,7 @@ mod tests {
             ric3: false,
             ric3_bmc: false,
             ric3_engine: ric3::DEFAULT_ENGINE,
+            witness: false,
         };
         let t0 = std::time::Instant::now();
         let out = decide_with_members_using(
@@ -2010,6 +2406,8 @@ mod tests {
             refused: vec![("sat-bmc", "x".into())],
             abstained: Vec::new(),
             undecided: Vec::new(),
+            traces: Vec::new(),
+            replay_failed: Vec::new(),
         };
         let started = ReachMembers {
             ric3_bmc: false,
@@ -2061,6 +2459,7 @@ mod tests {
             ric3: false,
             ric3_bmc: false,
             ric3_engine: ric3::DEFAULT_ENGINE,
+            witness: false,
         };
         let out = decide_reach_portfolio_with_members(
             &file,
@@ -2370,6 +2769,7 @@ mod tests {
             ric3: false,
             ric3_bmc: true,
             ric3_engine: ric3::DEFAULT_ENGINE,
+            witness: false,
         };
         // On a design this small depth 0 takes microseconds, so the dynamic step's first jump
         // lands near depth 416 666 and unrolling it took 5–26 s in the image (rIC3 1.5.2, four
@@ -2415,19 +2815,22 @@ mod tests {
         let later = || std::time::Instant::now() + std::time::Duration::from_secs(60);
         let go = || Arc::new(AtomicBool::new(false));
         let parse = |s: &str| parser::parse(s).expect("parse");
-        assert_eq!(run_sat_bmc(&parse(COUNTER), later(), go()), Ok(Some(true)));
-        match run_sat_bmc(&parse(SAFE), later(), go()) {
+        assert_eq!(
+            run_sat_bmc(&parse(COUNTER), later(), go(), None),
+            Ok(Some(true))
+        );
+        match run_sat_bmc(&parse(SAFE), later(), go(), None) {
             Err(MemberStop::Undecided(p)) => assert!(p.contains("depth 1000"), "{p}"),
             other => panic!("a bounded search must not prove: {other:?}"),
         }
         assert_eq!(
-            run_sat_bmc(&parse(SAFE), later(), Arc::new(AtomicBool::new(true))),
+            run_sat_bmc(&parse(SAFE), later(), Arc::new(AtomicBool::new(true)), None),
             Ok(None),
             "a member cancelled because a peer decided is in no list"
         );
         assert!(
             matches!(
-                run_sat_bmc(&parse(ARRAY), later(), go()),
+                run_sat_bmc(&parse(ARRAY), later(), go(), None),
                 Err(MemberStop::Refused(why)) if why.starts_with("sat-bmc:")
             ),
             "an array design is refused by name"
@@ -2454,6 +2857,7 @@ mod tests {
             ric3: false,
             ric3_bmc: false,
             ric3_engine: ric3::DEFAULT_ENGINE,
+            witness: false,
         };
         let run = |src: &str| {
             decide_reach_portfolio_with_members(
@@ -2496,20 +2900,23 @@ mod tests {
         let later = || std::time::Instant::now() + std::time::Duration::from_secs(60);
         let go = || Arc::new(AtomicBool::new(false));
         let parse = |s: &str| parser::parse(s).expect("parse");
-        assert_eq!(run_ic3(&parse(COUNTER), later(), go()), Ok(Some(true)));
-        assert_eq!(run_ic3(&parse(SAFE), later(), go()), Ok(Some(false)));
         assert_eq!(
-            run_ic3(&parse(SAFE), later(), Arc::new(AtomicBool::new(true))),
+            run_ic3(&parse(COUNTER), later(), go(), None),
+            Ok(Some(true))
+        );
+        assert_eq!(run_ic3(&parse(SAFE), later(), go(), None), Ok(Some(false)));
+        assert_eq!(
+            run_ic3(&parse(SAFE), later(), Arc::new(AtomicBool::new(true)), None),
             Ok(None),
             "a member cancelled because a peer decided is in no list"
         );
-        match run_ic3(&parse(SAFE), std::time::Instant::now(), go()) {
+        match run_ic3(&parse(SAFE), std::time::Instant::now(), go(), None) {
             Err(MemberStop::Abstained(cause)) => assert!(cause.contains("deadline"), "{cause}"),
             other => panic!("a run past its deadline abstains with the cause: {other:?}"),
         }
         assert!(
             matches!(
-                run_ic3(&parse(ARRAY), later(), go()),
+                run_ic3(&parse(ARRAY), later(), go(), None),
                 Err(MemberStop::Refused(why)) if why.starts_with("ic3:")
             ),
             "an array design is refused by name"
@@ -2536,6 +2943,7 @@ mod tests {
             ric3: false,
             ric3_bmc: false,
             ric3_engine: ric3::DEFAULT_ENGINE,
+            witness: false,
         };
         let run = |src: &str| {
             decide_reach_portfolio_with_members(
@@ -2714,5 +3122,52 @@ mod tests {
             .find(|(m, _)| *m == "native")
             .expect("native");
         assert!(why.contains("encode"), "{why}");
+    }
+
+    /// N5.4 — the row that motivated the carry (HWMCC'20 `circular_pointer_top_w16_d64_e0`: only
+    /// `ric3-bmc` decides it, at ~168 s on the box; the re-derivation reached depth 16 in the
+    /// 300 s budget, mununu#1045). With `witness` on, the portfolio ships `ric3-bmc`'s own
+    /// witness, replayed on the original file through the sticky-model prefix replay.
+    #[test]
+    #[ignore = "needs rIC3 and MUNUNU_HWMCC_FLAT (the HWMCC'20 flat bv directory); mununu-sva"]
+    fn e2e_circular_pointer_w16_d64_carries_the_ric3_bmc_trace() {
+        let Ok(flat) = std::env::var("MUNUNU_HWMCC_FLAT") else {
+            eprintln!("MUNUNU_HWMCC_FLAT unset — skipped");
+            return;
+        };
+        let text = std::fs::read_to_string(format!("{flat}/circular_pointer_top_w16_d64_e0.btor2"))
+            .unwrap();
+        let file = parser::parse(&text).unwrap();
+        let members = ReachMembers {
+            ric3_bmc: true,
+            witness: true,
+            ..ReachMembers::TRACE_CARRIERS
+                .without("sat-bmc")
+                .without("ic3")
+                .without("btormc")
+                .without("ric3")
+        };
+        let started = std::time::Instant::now();
+        let out = decide_reach_portfolio_with_members(
+            &file,
+            std::time::Duration::from_secs(420),
+            None,
+            members,
+        );
+        let elapsed = started.elapsed();
+        assert_eq!(out.verdict, ReachVerdict::Reachable, "{out:?}");
+        assert!(
+            out.trace_replay_failed.is_empty(),
+            "{:?}",
+            out.trace_replay_failed
+        );
+        let carried = out.trace.expect("ric3-bmc carried its replayed witness");
+        assert_eq!(carried.by, "ric3-bmc");
+        eprintln!(
+            "circular_pointer w16_d64: depth {} in {:.1} s",
+            carried.depth(),
+            elapsed.as_secs_f64()
+        );
+        assert!(carried.depth() >= 1);
     }
 }

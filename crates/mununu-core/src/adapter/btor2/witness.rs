@@ -29,6 +29,7 @@ use crate::adapter::btor2::native_bmc::{
 };
 use crate::adapter::btor2::{emit, parser};
 use crate::adapter::btormc::McVerdict;
+use crate::adapter::reach_portfolio::ReachOutcome;
 use crate::adapter::ric3;
 
 /// A parsed BTOR2 witness: the falsified `bad`, every state's initial value and the input
@@ -155,6 +156,17 @@ struct Cell {
     width: u32,
 }
 
+/// Where a replayed witness ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplayEnd {
+    /// The witness's last frame, which must make the falsified `bad` true (the format's meaning).
+    LastFrame,
+    /// The first frame that makes the falsified `bad` true; later frames are dropped. For a
+    /// witness of a STICKY-bad model (`ric3-bmc`, mununu#997): its last frame makes `seen ∨ bad`
+    /// true, and the original `bad` fired at some earlier frame of the same run.
+    FirstFiring,
+}
+
 /// Replay a parsed witness on `file`: the initial frame from `#0`, every later state frame
 /// recomputed through the concrete simulator ([`simulate_one_step_probe`]) from the previous frame
 /// and that frame's inputs. Every frame is checked rather than taken on the tool's word: the `#0`
@@ -167,6 +179,22 @@ struct Cell {
 /// value whose width is not the cell's, a cell the simulator's word cannot carry (> 128 bits), or
 /// an array state.
 pub fn trace_from_witness(file: &Btor2File, w: &Btor2Witness) -> Result<BmcTrace, String> {
+    replay_witness(file, w, ReplayEnd::LastFrame)
+}
+
+/// [`trace_from_witness`] ending at the FIRST frame that makes the falsified `bad` true
+/// ([`ReplayEnd::FirstFiring`]): the trace of the original design behind a sticky-bad witness.
+/// Refused when no frame of the witness fires `bad`.
+pub fn trace_from_witness_prefix(file: &Btor2File, w: &Btor2Witness) -> Result<BmcTrace, String> {
+    replay_witness(file, w, ReplayEnd::FirstFiring)
+}
+
+/// [`trace_from_witness`] with the end rule as a parameter; both checks above apply either way.
+pub fn replay_witness(
+    file: &Btor2File,
+    w: &Btor2Witness,
+    end: ReplayEnd,
+) -> Result<BmcTrace, String> {
     let symbols = parser::collect_symbols(file);
     let mut states: Vec<Cell> = Vec::new();
     let mut inputs: Vec<Cell> = Vec::new();
@@ -361,6 +389,12 @@ pub fn trace_from_witness(file: &Btor2File, w: &Btor2Witness) -> Result<BmcTrace
                 }
             }
         }
+        let fired = operand_value(&step, bad, 1)? == 1;
+        if end == ReplayEnd::FirstFiring && fired {
+            // The original `bad` fires here: the trace ends at this frame (its inputs are what
+            // `bad` read), whatever the witness goes on to say.
+            break;
+        }
         if j < last {
             regs = step.next_state;
             let k = j + 1;
@@ -390,20 +424,34 @@ pub fn trace_from_witness(file: &Btor2File, w: &Btor2Witness) -> Result<BmcTrace
                 }
             }
             state_frames.push(frame_of(&states, &regs));
-        } else {
-            let fired = operand_value(&step, bad, 1)? == 1;
-            if !fired {
-                return Err(format!(
-                    "the replayed last frame does not make bad #{} true",
-                    w.bad
-                ));
-            }
+        } else if !fired {
+            return Err(match end {
+                ReplayEnd::LastFrame => {
+                    format!("the replayed last frame does not make bad #{} true", w.bad)
+                }
+                ReplayEnd::FirstFiring => {
+                    format!("no replayed frame (0..={last}) makes bad #{} true", w.bad)
+                }
+            });
         }
     }
     Ok(BmcTrace {
         states: state_frames,
         inputs: input_frames,
     })
+}
+
+impl Btor2Witness {
+    /// Drop every state assignment whose index is `n_states` or more — the states a model
+    /// transform appended after the design's own (the sticky-bad `mununu_bad_seen_*` registers,
+    /// `ric3::sticky_bads`), which the original file does not declare. Inputs are untouched: no
+    /// transform appends one.
+    pub fn drop_states_from(&mut self, n_states: usize) {
+        self.init.retain(|(idx, _)| *idx < n_states);
+        for (_, block) in &mut self.states {
+            block.retain(|(idx, _)| *idx < n_states);
+        }
+    }
 }
 
 /// [`bmc_bad_reachable_witness`] with a bit-level member asked first (mununu#744): when rIC3 is
@@ -428,6 +476,9 @@ pub fn bad_reachable_witness_routed(
 #[derive(Debug, Clone)]
 pub struct ShippedWitness {
     pub trace: Option<BmcTrace>,
+    /// N5.4 — the member whose counterexample `trace` is: a portfolio member that carried it out
+    /// of the run, or `native-bmc` for the re-derivation. `None` exactly when `trace` is.
+    pub by: Option<&'static str>,
     /// Set ONLY when native BMC searched every frame up to the bound and found no path to `bad`:
     /// the counterexample another engine found is deeper than `--witness-max-k`. A stop on a
     /// budget, an encode failure or a missing model is NOT this (it says nothing about depth).
@@ -436,58 +487,174 @@ pub struct ShippedWitness {
     pub unavailable_reason: Option<String>,
 }
 
-/// [`bad_reachable_witness_routed`] under the caller's wall clock (mununu#1045): `deadline` (the
-/// remainder of `--timeout-ms` / the request's `timeout_ms`) is installed as this thread's
-/// [`run_budget`](crate::adapter::run_budget), which native BMC polls per depth and clamps each
-/// query to, and the rIC3 member's slice never exceeds it. `None` keeps the previous unbounded
-/// behaviour. Every way of ending without a trace names its cause.
+/// The trace a `violated` verdict ships with (N5.4): the counterexample the deciding member
+/// carried out of the portfolio ([`ReachOutcome::trace`], replayed on the design before it got
+/// there) — else, under the caller's wall clock (mununu#1045: `deadline`, the remainder of
+/// `--timeout-ms` / the request's `timeout_ms`, installed as this thread's
+/// [`run_budget`](crate::adapter::run_budget); `None` = unbounded), the fallback: the portfolio
+/// again restricted to the trace-carrying members ([`ReachMembers::TRACE_CARRIERS`], minus every
+/// member whose own witness already failed to replay — the same run would fail the same way),
+/// then native BMC to `max_k`, the one step that can set `unavailable_within_k`. Every way of
+/// ending without a trace names each member and its miss. A carried trace is the deciding
+/// member's own, not necessarily the shallowest; native BMC's is the shallowest.
 ///
-/// engine: rIC3 `-e ic3 --witness` (subprocess, bit-level IC3, under min(rescue slice, time left))
-/// then native BMC (owned, z3 QF_BV unrolling to `max_k`, wall = time left); role: witness
-/// re-derivation after the portfolio's `Reachable` — the verdict is never changed here.
+/// engine: the carried trace (none run); else `sat-bmc` / `ic3` (owned, CaDiCaL) and, where the
+/// image has them, btormc / rIC3 `-e ic3 --witness` / rIC3 `-e bmc --bmc-dyn-step --witness`
+/// (subprocess), in parallel under the time left, every witness replayed on the concrete
+/// simulator; then native BMC (owned, z3 QF_BV unrolling to `max_k`, wall = time left). Role:
+/// the trace behind the portfolio's `Reachable` — the verdict is never changed here.
 pub fn witness_for_violation(
     file: &Btor2File,
     max_k: u32,
     deadline: Option<std::time::Instant>,
+    outcome: &ReachOutcome,
+    owned_only: bool,
 ) -> ShippedWitness {
+    use crate::adapter::reach_portfolio::{
+        ReachMembers, ReachVerdict, decide_reach_portfolio_with_members,
+    };
     use crate::adapter::run_budget::{Budget, enter};
+    if let Some(carried) = &outcome.trace {
+        return ShippedWitness {
+            trace: Some(carried.trace.clone()),
+            by: Some(carried.by),
+            unavailable_within_k: None,
+            unavailable_reason: None,
+        };
+    }
     let none = |reason: String, within: Option<u32>| ShippedWitness {
         trace: None,
+        by: None,
         unavailable_within_k: within,
         unavailable_reason: Some(reason),
     };
-    let budget = match deadline {
+    // What the verdict's run already said about traces: the members whose witness failed to
+    // replay are not run again (mununu#1045 review, point 2).
+    let mut notes: Vec<String> = outcome
+        .trace_replay_failed
+        .iter()
+        .map(|(m, why)| format!("{m}: its witness did not replay ({why}); not run again"))
+        .collect();
+    let left = match deadline {
         Some(d) => {
             let left = d.saturating_duration_since(std::time::Instant::now());
             if left.is_zero() {
-                return none(
-                    "the time budget was spent by the verdict; no witness search ran".to_string(),
-                    None,
-                );
+                notes
+                    .push("the time budget was spent by the verdict; no witness search ran".into());
+                return none(notes.join("; "), None);
             }
-            Budget::with_ms(u64::try_from(left.as_millis()).unwrap_or(u64::MAX))
+            Some(left)
         }
+        None => None,
+    };
+    let budget = match left {
+        Some(left) => Budget::with_ms(u64::try_from(left.as_millis()).unwrap_or(u64::MAX)),
         None => Budget::unbounded(),
     };
     let _guard = enter(&budget);
-    match bad_reachable_witness_routed(file, max_k) {
+    // The fallback portfolio: every trace carrier whose witness has not already failed — owned
+    // ones only under `--owned-only`. Only behind a `Reachable` verdict: there is nothing to
+    // explain otherwise, and native BMC alone is the bounded re-derivation.
+    let mut members = outcome
+        .trace_replay_failed
+        .iter()
+        .fold(ReachMembers::TRACE_CARRIERS, |m, (failed, _)| {
+            m.without(failed)
+        });
+    if owned_only {
+        members = members
+            .without("btormc")
+            .without("ric3")
+            .without("ric3-bmc");
+    }
+    if outcome.verdict == ReachVerdict::Reachable && !members.names().is_empty() {
+        // The subprocess wall: the time left, else the members' default.
+        let wall = left.unwrap_or(crate::adapter::btormc::DEFAULT_TIMEOUT);
+        let again = decide_reach_portfolio_with_members(file, wall, None, members);
+        if let Some(carried) = again.trace {
+            return ShippedWitness {
+                trace: Some(carried.trace),
+                by: Some(carried.by),
+                unavailable_within_k: None,
+                unavailable_reason: None,
+            };
+        }
+        for (m, why) in again
+            .trace_replay_failed
+            .iter()
+            .map(|(m, why)| (m, format!("its witness did not replay ({why})")))
+            .chain(
+                again
+                    .refused
+                    .iter()
+                    .map(|(m, why)| (m, format!("refused ({why})"))),
+            )
+            .chain(
+                again
+                    .abstained
+                    .iter()
+                    .map(|(m, why)| (m, format!("stopped ({why})"))),
+            )
+            .chain(
+                again
+                    .undecided
+                    .iter()
+                    .map(|(m, why)| (m, format!("found nothing ({why})"))),
+            )
+        {
+            notes.push(format!("{m}: {why}"));
+        }
+        // A carrier that PROVED `bad` unreachable here contradicts the verdict this trace is
+        // for: the verdict stands (it is the first run's), the alarm reaches the report.
+        for m in &again.unreachable_by {
+            tracing::error!(
+                member = m,
+                "witness fallback: a member proved `bad` unreachable under a `violated` verdict"
+            );
+            notes.push(format!(
+                "{m}: proved `bad` unreachable — CONTRADICTION with the verdict (a soundness \
+                 alarm; one of the two engines is wrong)"
+            ));
+        }
+        for m in members.names() {
+            let named = |list: &[(&'static str, String)]| list.iter().any(|(n, _)| *n == m);
+            if !again.reachable_by.contains(&m)
+                && !named(&again.trace_replay_failed)
+                && !named(&again.refused)
+                && !named(&again.abstained)
+                && !named(&again.undecided)
+            {
+                notes.push(format!("{m}: no counterexample before the search ended"));
+            } else if again.reachable_by.contains(&m) && !named(&again.trace_replay_failed) {
+                notes.push(format!("{m}: found `bad` reachable but carried no trace"));
+            }
+        }
+    }
+    // Last: native BMC from depth 0, the shallowest path when it reaches the depth.
+    match bmc_bad_reachable_witness(file, max_k) {
         Ok((BmcOutcome::Violated { .. }, Some(t))) => ShippedWitness {
             trace: Some(t),
+            by: Some("native-bmc"),
             unavailable_within_k: None,
             unavailable_reason: None,
         },
-        Ok((BmcOutcome::Violated { depth }, None)) => none(
-            format!("native BMC reached `bad` at depth {depth} but the solver returned no model"),
-            None,
-        ),
-        Ok((BmcOutcome::NoCexWithin { k }, _)) => none(
-            format!(
+        Ok((BmcOutcome::Violated { depth }, None)) => {
+            notes.push(format!(
+                "native BMC reached `bad` at depth {depth} but the solver returned no model"
+            ));
+            none(notes.join("; "), None)
+        }
+        Ok((BmcOutcome::NoCexWithin { k }, _)) => {
+            notes.push(format!(
                 "native BMC found no path to `bad` within {k} cycles; the counterexample the \
                  verdict rests on is deeper (raise --witness-max-k)"
-            ),
-            Some(k),
-        ),
-        Err(e) => none(format!("the witness search stopped: {e}"), None),
+            ));
+            none(notes.join("; "), Some(k))
+        }
+        Err(e) => {
+            notes.push(format!("native BMC stopped: {e}"));
+            none(notes.join("; "), None)
+        }
     }
 }
 
@@ -672,6 +839,43 @@ mod tests {
         );
     }
 
+    /// N5.4 — the prefix mode ends the trace at the first frame that fires `bad`, whatever the
+    /// witness goes on to say; the default mode requires the LAST frame to fire it.
+    #[test]
+    fn the_prefix_mode_ends_at_the_first_firing_frame() {
+        let file = parser::parse(DESIGN).unwrap();
+        // `bad = s ∧ i` fires at frame 1 (s = 1, i = 1); frame 2 has i = 0.
+        let w = parse_btor2_witness("sat\nb0\n#0\n0 0\n1 0000\n@0\n0 1\n@1\n0 1\n@2\n0 0\n.\n")
+            .unwrap();
+        let err = trace_from_witness(&file, &w).unwrap_err();
+        assert!(
+            err.contains("last frame does not make bad #0 true"),
+            "{err}"
+        );
+        let t = trace_from_witness_prefix(&file, &w).expect("fires at frame 1");
+        assert_eq!(t.states.len(), 2);
+        assert_eq!(t.inputs.len(), 2);
+        assert_eq!(t.states[1][1], ("s".to_string(), CexValue::from_u64(1, 1)));
+        // No frame fires: refused with the range it checked.
+        let quiet = parse_btor2_witness("sat\nb0\n#0\n0 0\n1 0000\n@0\n0 0\n@1\n0 0\n.\n").unwrap();
+        let err = trace_from_witness_prefix(&file, &quiet).unwrap_err();
+        assert!(err.contains("no replayed frame (0..=1)"), "{err}");
+    }
+
+    /// N5.4 — `drop_states_from` removes the appended states' lines from `#0` and every `#k`
+    /// block, and nothing else.
+    #[test]
+    fn dropping_appended_states_keeps_the_designs_lines() {
+        let mut w = parse_btor2_witness(
+            "sat\nb0\n#0\n0 0\n1 0000\n2 0\n@0\n0 1\n#1\n1 0001\n2 1\n@1\n0 1\n.\n",
+        )
+        .unwrap();
+        w.drop_states_from(2);
+        assert_eq!(w.init, vec![(0, "0".to_string()), (1, "0000".to_string())]);
+        assert_eq!(w.states, vec![(1, vec![(1, "0001".to_string())])]);
+        assert_eq!(w.frames.len(), 2);
+    }
+
     #[test]
     fn a_frame_value_that_contradicts_a_next_is_refused() {
         let file = parser::parse(DESIGN).unwrap();
@@ -773,7 +977,13 @@ mod tests {
     fn the_witness_search_stops_at_the_callers_deadline_and_says_so() {
         let file = parser::parse(DEEP).unwrap();
         let t0 = std::time::Instant::now();
-        let w = witness_for_violation(&file, 3000, Some(t0 + Duration::from_millis(1)));
+        let w = witness_for_violation(
+            &file,
+            3000,
+            Some(t0 + Duration::from_millis(1)),
+            &ReachOutcome::default(),
+            false,
+        );
         let elapsed = t0.elapsed();
         assert!(w.trace.is_none(), "a 3000-deep path in 1 ms");
         assert_eq!(
@@ -784,7 +994,8 @@ mod tests {
         assert!(reason.contains("budget"), "{reason}");
         assert!(elapsed < Duration::from_secs(5), "took {elapsed:?}");
         // Unbounded, the same search ships the path: the stop above was the deadline's.
-        let full = witness_for_violation(&file, 3000, None);
+        let full = witness_for_violation(&file, 3000, None, &ReachOutcome::default(), false);
+        assert_eq!(full.by, Some("native-bmc"));
         assert_eq!(full.trace.map(|t| t.states.len()), Some(3001));
         assert_eq!(full.unavailable_reason, None);
     }
@@ -793,7 +1004,7 @@ mod tests {
     #[test]
     fn a_bound_searched_without_a_path_names_the_bound() {
         let file = parser::parse(DEEP).unwrap();
-        let w = witness_for_violation(&file, 5, None);
+        let w = witness_for_violation(&file, 5, None, &ReachOutcome::default(), false);
         assert!(w.trace.is_none());
         assert_eq!(w.unavailable_within_k, Some(5));
         let reason = w.unavailable_reason.unwrap();
@@ -803,9 +1014,70 @@ mod tests {
     #[test]
     fn a_budget_spent_by_the_verdict_runs_no_search() {
         let file = parser::parse(DEEP).unwrap();
-        let w = witness_for_violation(&file, 3000, Some(std::time::Instant::now()));
+        let w = witness_for_violation(
+            &file,
+            3000,
+            Some(std::time::Instant::now()),
+            &ReachOutcome::default(),
+            false,
+        );
         assert!(w.trace.is_none());
         assert_eq!(w.unavailable_within_k, None);
         assert!(w.unavailable_reason.unwrap().contains("spent"));
+    }
+
+    /// N5.4 — a trace the portfolio carried out ships as it is: no search runs, and `by` names
+    /// the member.
+    #[test]
+    fn a_carried_trace_ships_without_a_search() {
+        use crate::adapter::reach_portfolio::{CarriedTrace, ReachVerdict};
+        let file = parser::parse(DEEP).unwrap();
+        let carried = BmcTrace {
+            states: vec![vec![], vec![]],
+            inputs: vec![vec![], vec![]],
+        };
+        let outcome = ReachOutcome {
+            verdict: ReachVerdict::Reachable,
+            reachable_by: vec!["sat-bmc"],
+            trace: Some(CarriedTrace {
+                by: "sat-bmc",
+                trace: carried.clone(),
+            }),
+            ..ReachOutcome::default()
+        };
+        // An already-spent deadline would refuse any search; the carried trace needs none.
+        let w = witness_for_violation(&file, 1, Some(std::time::Instant::now()), &outcome, false);
+        assert_eq!(w.by, Some("sat-bmc"));
+        assert_eq!(w.trace, Some(carried));
+        assert_eq!(w.unavailable_reason, None);
+    }
+
+    /// N5.4 — a member whose own witness failed to replay is not run again by the fallback, and
+    /// the reason says so beside the fallback's own miss.
+    #[test]
+    fn a_failed_carry_is_not_retried_and_is_named() {
+        use crate::adapter::reach_portfolio::ReachVerdict;
+        let file = parser::parse(DEEP).unwrap();
+        let outcome = ReachOutcome {
+            verdict: ReachVerdict::Reachable,
+            reachable_by: vec!["sat-bmc"],
+            trace_replay_failed: vec![("sat-bmc", "a `constraint` fails at frame 1".to_string())],
+            ..ReachOutcome::default()
+        };
+        // Owned-only with `sat-bmc` struck out leaves only `ic3` as a carrier; `ic3` is not opted
+        // in here… but the fallback set is explicit (TRACE_CARRIERS), so it runs under the time
+        // left: give it a budget already spent after the note is composed, via a bound of 5 on
+        // native BMC, and check the note.
+        let w = witness_for_violation(&file, 5, None, &outcome, true);
+        assert!(w.trace.is_none() || w.by == Some("ic3"), "{w:?}");
+        if w.trace.is_none() {
+            let reason = w.unavailable_reason.unwrap();
+            assert!(
+                reason.contains("sat-bmc: its witness did not replay")
+                    && reason.contains("not run again"),
+                "{reason}"
+            );
+            assert!(reason.contains("within 5 cycles"), "{reason}");
+        }
     }
 }

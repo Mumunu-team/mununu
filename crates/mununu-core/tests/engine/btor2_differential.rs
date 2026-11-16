@@ -918,7 +918,12 @@ fn ic3_equals_the_exact_engine_and_its_traces_replay() {
                         "ic3: violated at {depth}, exact: unreachable\n{}",
                         d.text
                     );
-                    prop_assert_eq!(status, Replay::Confirmed, "{}", d.text);
+                    prop_assert!(
+                        matches!(status, Replay::Confirmed(_)),
+                        "{:?}\n{}",
+                        status,
+                        d.text
+                    );
                     if let Err(e) = replay(&d.text, depth, &initial, &inputs) {
                         prop_assert!(false, "the trace does not replay: {e}\n{}", d.text);
                     }
