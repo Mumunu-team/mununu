@@ -686,6 +686,17 @@ pub fn safety_witness(
     reset_pinned: bool,
     max_k: u32,
 ) -> Result<crate::adapter::btor2::native_bmc::BmcTrace, WitnessMiss> {
+    safety_witness_by(design_btor2, formula, reset_pinned, max_k).map(|(trace, _)| trace)
+}
+
+/// [`safety_witness`] with the member whose counterexample the trace is (`sat-bmc`, `ic3`,
+/// `btormc`, `ric3`, `ric3-bmc`, or `native-bmc`; N5.4).
+pub fn safety_witness_by(
+    design_btor2: &str,
+    formula: &Formula,
+    reset_pinned: bool,
+    max_k: u32,
+) -> Result<(crate::adapter::btor2::native_bmc::BmcTrace, &'static str), WitnessMiss> {
     let (monitored, depth) = safety_bad_model(design_btor2, formula, reset_pinned)?;
     let file = parser::parse(&monitored).map_err(|e| WitnessMiss {
         stage: "parse",
@@ -696,22 +707,20 @@ pub fn safety_witness(
         reason: format!("the monitor's depth {depth} does not fit u32"),
     })?;
     let k = max_k.saturating_add(depth);
-    match crate::adapter::btor2::witness::bad_reachable_witness_routed(&file, k).map_err(|e| {
-        WitnessMiss {
-            stage: "search",
-            reason: e.to_string(),
-        }
-    })? {
-        (crate::adapter::btor2::native_bmc::BmcOutcome::Violated { .. }, Some(trace)) => Ok(trace),
-        (crate::adapter::btor2::native_bmc::BmcOutcome::Violated { depth }, None) => {
-            Err(WitnessMiss {
-                stage: "search",
-                reason: format!("a path of depth {depth} was found but no trace was extracted"),
-            })
-        }
-        (crate::adapter::btor2::native_bmc::BmcOutcome::NoCexWithin { k }, _) => Err(WitnessMiss {
-            stage: "bound",
-            reason: format!("no reset → violation path within {k} cycles"),
+    // N5.4 seam: the trace-carrying members race on the monitored model (every witness replayed
+    // on it), then native BMC to `k` — inside this thread's run budget (the `verify-auto`
+    // per-property budget, when there is one). The rescue decided on a different monitor, so
+    // there is no carried trace to reuse here.
+    let shipped = crate::adapter::btor2::witness::search_witness(&file, k, None, &[], false);
+    match (shipped.trace, shipped.unavailable_reason) {
+        (Some(trace), _) => Ok((trace, shipped.by.unwrap_or("native-bmc"))),
+        (None, reason) => Err(WitnessMiss {
+            stage: if shipped.unavailable_within_k.is_some() {
+                "bound"
+            } else {
+                "search"
+            },
+            reason: reason.unwrap_or_else(|| "no trace and no reason (a defect)".to_string()),
         }),
     }
 }

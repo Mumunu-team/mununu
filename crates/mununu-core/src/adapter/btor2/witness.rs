@@ -510,10 +510,6 @@ pub fn witness_for_violation(
     outcome: &ReachOutcome,
     owned_only: bool,
 ) -> ShippedWitness {
-    use crate::adapter::reach_portfolio::{
-        ReachMembers, ReachVerdict, decide_reach_portfolio_with_members,
-    };
-    use crate::adapter::run_budget::{Budget, enter};
     if let Some(carried) = &outcome.trace {
         return ShippedWitness {
             trace: Some(carried.trace.clone()),
@@ -522,6 +518,47 @@ pub fn witness_for_violation(
             unavailable_reason: None,
         };
     }
+    let run_carriers = outcome.verdict == crate::adapter::reach_portfolio::ReachVerdict::Reachable;
+    search_witness_with(
+        file,
+        max_k,
+        deadline,
+        &outcome.trace_replay_failed,
+        owned_only,
+        run_carriers,
+    )
+}
+
+/// The trace search behind a `bad` the caller already knows is reachable, with no carried trace
+/// to ship (N5.4 seam, for the callers that decide on one model and search another: the
+/// `sv verify-auto` safety witness over its bounded-witness monitor, the fault adversary's
+/// injected design). The trace-carrying members ([`ReachMembers::TRACE_CARRIERS`] minus `skip`,
+/// owned ones only under `owned_only`) race under the time left, every witness replayed on
+/// `file`; then native BMC to `max_k`. The budget is a CHILD of this thread's current
+/// [`run_budget`](crate::adapter::run_budget) (a `verify-auto` per-property budget bounds it as
+/// well as `deadline`); every miss is named.
+///
+/// engine: as [`witness_for_violation`]'s fallback.
+pub fn search_witness(
+    file: &Btor2File,
+    max_k: u32,
+    deadline: Option<std::time::Instant>,
+    skip: &[(&'static str, String)],
+    owned_only: bool,
+) -> ShippedWitness {
+    search_witness_with(file, max_k, deadline, skip, owned_only, true)
+}
+
+fn search_witness_with(
+    file: &Btor2File,
+    max_k: u32,
+    deadline: Option<std::time::Instant>,
+    skip: &[(&'static str, String)],
+    owned_only: bool,
+    run_carriers: bool,
+) -> ShippedWitness {
+    use crate::adapter::reach_portfolio::{ReachMembers, decide_reach_portfolio_with_members};
+    use crate::adapter::run_budget::{Budget, current, enter};
     let none = |reason: String, within: Option<u32>| ShippedWitness {
         trace: None,
         by: None,
@@ -530,33 +567,31 @@ pub fn witness_for_violation(
     };
     // What the verdict's run already said about traces: the members whose witness failed to
     // replay are not run again (mununu#1045 review, point 2).
-    let mut notes: Vec<String> = outcome
-        .trace_replay_failed
+    let mut notes: Vec<String> = skip
         .iter()
         .map(|(m, why)| format!("{m}: its witness did not replay ({why}); not run again"))
         .collect();
-    let left = match deadline {
-        Some(d) => {
-            let left = d.saturating_duration_since(std::time::Instant::now());
-            if left.is_zero() {
-                notes
-                    .push("the time budget was spent by the verdict; no witness search ran".into());
-                return none(notes.join("; "), None);
-            }
-            Some(left)
-        }
-        None => None,
-    };
-    let budget = match left {
-        Some(left) => Budget::with_ms(u64::try_from(left.as_millis()).unwrap_or(u64::MAX)),
-        None => Budget::unbounded(),
-    };
+    // The time left: the caller's deadline, inside whatever budget this thread already runs
+    // under (a child never outlives its parent, so a `verify-auto` per-property budget still
+    // bounds the search when `deadline` is `None`).
+    let own_ms = deadline.map(|d| {
+        u64::try_from(
+            d.saturating_duration_since(std::time::Instant::now())
+                .as_millis(),
+        )
+        .unwrap_or(u64::MAX)
+    });
+    let budget = Budget::child(&current(), own_ms);
+    let left = budget.remaining_ms().map(std::time::Duration::from_millis);
+    if budget.expired() || left.is_some_and(|l| l.is_zero()) {
+        notes.push("the time budget was spent by the verdict; no witness search ran".into());
+        return none(notes.join("; "), None);
+    }
     let _guard = enter(&budget);
     // The fallback portfolio: every trace carrier whose witness has not already failed — owned
     // ones only under `--owned-only`. Only behind a `Reachable` verdict: there is nothing to
     // explain otherwise, and native BMC alone is the bounded re-derivation.
-    let mut members = outcome
-        .trace_replay_failed
+    let mut members = skip
         .iter()
         .fold(ReachMembers::TRACE_CARRIERS, |m, (failed, _)| {
             m.without(failed)
@@ -567,7 +602,7 @@ pub fn witness_for_violation(
             .without("ric3")
             .without("ric3-bmc");
     }
-    if outcome.verdict == ReachVerdict::Reachable && !members.names().is_empty() {
+    if run_carriers && !members.names().is_empty() {
         // The subprocess wall: the time left, else the members' default.
         let wall = left.unwrap_or(crate::adapter::btormc::DEFAULT_TIMEOUT);
         let again = decide_reach_portfolio_with_members(file, wall, None, members);
@@ -1079,5 +1114,22 @@ mod tests {
             );
             assert!(reason.contains("within 5 cycles"), "{reason}");
         }
+    }
+
+    /// The witness search runs INSIDE the budget its thread already has (a `verify-auto`
+    /// per-property budget, a rescue slice): with no `deadline` of its own it used to install an
+    /// unbounded budget over it, and so ran the 3000-deep search to the end under a 1 ms outer
+    /// budget.
+    #[test]
+    fn an_outer_run_budget_bounds_the_witness_search() {
+        use crate::adapter::run_budget::{Budget, enter};
+        let file = parser::parse(DEEP).unwrap();
+        let outer = Budget::with_ms(1);
+        let _guard = enter(&outer);
+        std::thread::sleep(Duration::from_millis(5));
+        let w = witness_for_violation(&file, 3000, None, &ReachOutcome::default(), false);
+        assert!(w.trace.is_none(), "the outer budget was spent: {:?}", w.by);
+        let reason = w.unavailable_reason.unwrap();
+        assert!(reason.contains("budget"), "{reason}");
     }
 }
