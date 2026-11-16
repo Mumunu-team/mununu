@@ -37,7 +37,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::BinaryHeap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
@@ -275,31 +275,12 @@ struct Ic3<'m> {
     phase: Phase,
     /// Per phase: the queries made and the time spent inside the solver (nanoseconds).
     by_phase: [(u64, u64); Phase::COUNT],
-    /// N5.2 — a cube literal's activity: how many learned clauses kept it (as `¬l`). MIC tries to
-    /// drop the rarest literals first (IC3ref's `litOrder`), so an early success's core removes
-    /// many at once.
-    activity: HashMap<i32, u32>,
-    /// N5.2 — rIC3-style activity (`MUNUNU_IC3_ACT=decay`): per VARIABLE, bumped by a growing
-    /// increment on every learned clause (recent lemmas weigh more), rescaled near overflow.
-    act_var: HashMap<i32, f64>,
-    act_inc: f64,
-    act_decay: bool,
     /// N5.2 — the widths profile: lifted CTIs (literals, count) and learned clauses (literals,
     /// count).
     cti_lits: u64,
     ctis: u64,
     learned_lits: u64,
     learned: u64,
-    /// N5.2 — `down`'s joins taken, and the drops it gave up on at the join cap.
-    down_joins: u64,
-    down_capped: u64,
-    /// N5.2 — which MIC runs (`MUNUNU_IC3_MIC`, a diagnostic for the A/B profile on one build).
-    mic: Mic,
-    /// N5.2 — how a predecessor state is lifted (`MUNUNU_IC3_LIFT`, the same diagnostic).
-    lift_mode: Lift,
-    /// N5.2 — a seed for the MIC order's tie-break (`MUNUNU_IC3_SEED`; 0 = the literal itself):
-    /// the "one lucky order" falsifier of a path-dependent proof.
-    seed: u64,
     /// N5.2 — the lifted-width profile split by obligation kind: root lifts (from `bad`) and
     /// descendant lifts (into an obligation cube), plus the descendant lifts' target widths.
     root_lits: u64,
@@ -318,83 +299,7 @@ struct Ic3<'m> {
     /// initiation repair, before any drop), summed, and the count.
     mic_in_lits: u64,
     mic_ins: u64,
-    /// N5.2 — the ternary X-out probe (`MUNUNU_IC3_PROBE=<lifts per kind>`, 0 = off): on the first
-    /// lifts of each kind, how many state literals an offline ternary simulation can leave at X
-    /// while the target keeps its value — from the full state, and from the SAT-lifted cube.
-    probe: Probe,
 }
-
-/// N5.2 — the ternary X-out probe's budget and tallies (see [`Ic3::probe`]).
-#[derive(Default)]
-struct Probe {
-    /// Lifts of each kind still to probe.
-    left_root: u32,
-    left_desc: u32,
-    /// Per kind: probes run, SAT-lifted width, ternary width from the full state, ternary width
-    /// from the SAT-lifted cube, and how many SAT-lifted cubes ternary simulation could not
-    /// justify (its X-propagation is weaker than a SAT core).
-    root: ProbeTally,
-    desc: ProbeTally,
-}
-
-#[derive(Default)]
-struct ProbeTally {
-    n: u64,
-    sat_lits: u64,
-    tern_lits: u64,
-    tern_from_sat_lits: u64,
-    sat_unjustified: u64,
-}
-
-impl ProbeTally {
-    fn summary(&self, kind: &str) -> String {
-        let avg = |lits: u64| if self.n == 0 { 0.0 } else { lits as f64 / self.n as f64 };
-        format!(
-            "probe_{kind}: n={} sat_w={:.1} tern_w={:.1} tern_from_sat_w={:.1} sat_unjustified={}",
-            self.n,
-            avg(self.sat_lits),
-            avg(self.tern_lits),
-            avg(self.tern_from_sat_lits),
-            self.sat_unjustified
-        )
-    }
-}
-
-/// A ternary value: `0` false, `1` true, `2` unknown (X).
-const TX: u8 = 2;
-
-/// N5.2 — the MIC variants under measurement (`MUNUNU_IC3_MIC=legacy|order|join`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Mic {
-    /// Before N5.2: one pass in the cube's order, a failed drop keeps the literal.
-    Legacy,
-    /// Activity order (rarest literals first), each literal tried once, no join.
-    Order,
-    /// `Order` plus Bradley's `down` join on a failed drop, up to [`DOWN_JOINS`] joins.
-    Join,
-}
-
-/// N5.2 — the lifting variants under measurement (`MUNUNU_IC3_LIFT=core|iter|first`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Lift {
-    /// The failed-assumption core of one query (state, inputs, free next bits assumed in that
-    /// order).
-    Core,
-    /// `Core`, then the query re-solved on the core alone until it stops shrinking (at most
-    /// [`LIFT_ROUNDS`] rounds): a solver's core is rarely minimal on the first pass.
-    Iter,
-    /// `Iter` with the inputs and free next bits assumed BEFORE the state literals, so the
-    /// conflict is attributed to as few state literals as the decision order allows.
-    IterFirst,
-}
-
-/// N5.2 — the most re-solves [`Lift::Iter`] / [`Lift::IterFirst`] spend shrinking one core.
-const LIFT_ROUNDS: usize = 3;
-
-/// N5.2 — how many times a failed drop may be joined with its predecessor before the literal is
-/// given up (Bradley's `down`, without CTGs): each join weakens the candidate towards a cube that
-/// is relatively inductive; a join that admits an initial state fails the drop.
-const DOWN_JOINS: usize = 3;
 
 /// N5.2 — where the search's SAT queries go, for the per-phase profile in the `ic3 search` log
 /// line (`RUST_LOG=mununu_core::adapter::btor2::ic3=debug`) and the manual profile test.
@@ -458,7 +363,7 @@ impl<'m> Ic3<'m> {
             })
             .collect();
         parts.push(format!(
-            "latches={} trans_clauses={} vars={} init_queries={} init_ms={} repair_queries={} repair_ms={} mic_in_width={:.1}/{} cti_width={:.1} root_width={:.1}/{} desc_width={:.1}/{} target_width={:.1} clause_width={:.1} down_joins={} down_capped={} mic={:?} lift={:?} seed={} act={}",
+            "latches={} trans_clauses={} vars={} init_queries={} init_ms={} repair_queries={} repair_ms={} mic_in_width={:.1}/{} cti_width={:.1} root_width={:.1}/{} desc_width={:.1}/{} target_width={:.1} clause_width={:.1}",
             self.cur.len(),
             self.trans.len(),
             self.next_var,
@@ -475,188 +380,8 @@ impl<'m> Ic3<'m> {
             self.descs,
             avg(self.target_lits, self.descs),
             avg(self.learned_lits, self.learned),
-            self.down_joins,
-            self.down_capped,
-            self.mic,
-            self.lift_mode,
-            self.seed,
-            if self.act_decay { "decay" } else { "count" }
         ));
-        if self.probe.root.n + self.probe.desc.n > 0 {
-            parts.push(self.probe.root.summary("root"));
-            parts.push(self.probe.desc.summary("desc"));
-        }
         parts.join(" ")
-    }
-
-    /// N5.2 — the MIC order's tie-break: the literal itself, or a seeded hash of it.
-    fn tie(&self, lit: i32) -> u64 {
-        if self.seed == 0 {
-            return lit.unsigned_abs() as u64 * 2 + u64::from(lit < 0);
-        }
-        // splitmix64 of (lit, seed): a fixed, seed-dependent permutation of the literals.
-        let mut z = (lit as i64 as u64)
-            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-            .wrapping_add(self.seed);
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
-    }
-
-    /// N5.2 — the ternary X-out probe on one lift (a diagnostic: it never changes the search).
-    /// Simulates one step of the AIG over `{0, 1, X}` under the witness's concrete inputs and free
-    /// next bits, and greedily sets state bits to X while the target (`succ'`, or `bad`) keeps its
-    /// value — once from the full state, once from the SAT-lifted cube `lifted`.
-    fn probe_lift(&mut self, w: &Witness, succ: Option<&[i32]>, lifted: &[i32]) {
-        let tally_left = match succ {
-            Some(_) => &mut self.probe.left_desc,
-            None => &mut self.probe.left_root,
-        };
-        if *tally_left == 0 {
-            return;
-        }
-        *tally_left -= 1;
-        let model = self.model;
-        let n = model.aig.len();
-        // Leaf node → value, for the inputs (fixed for the whole probe).
-        let mut base = vec![TX; n];
-        let mut flat = 0usize;
-        for i in &model.inputs {
-            for l in &i.leaves {
-                let v = w.inputs.get(flat).copied().unwrap_or(0);
-                base[l.node() as usize] = u8::from(v > 0);
-                flat += 1;
-            }
-        }
-        // Flat state bit → its leaf node and its next literal (`None`: free or fresh).
-        let mut state_leaf = Vec::with_capacity(self.cur.len());
-        let mut state_next: Vec<Option<Lit>> = Vec::with_capacity(self.cur.len());
-        for s in &model.states {
-            for (bi, l) in s.leaves.iter().enumerate() {
-                state_leaf.push(l.node() as usize);
-                state_next.push(s.next.as_ref().and_then(|nx| nx.get(bi).copied()));
-            }
-        }
-        // The target: next literals that must evaluate to a value (`None` = free, always met).
-        let targets: Vec<(Option<Lit>, bool)> = match succ {
-            Some(c) => c
-                .iter()
-                .map(|&l| {
-                    let bit = (l.unsigned_abs() - 2) as usize;
-                    (state_next.get(bit).copied().flatten(), l > 0)
-                })
-                .collect(),
-            None => Vec::new(),
-        };
-        let sim = |vals: &mut Vec<u8>| {
-            for i in 0..n {
-                if let Some(AigNode::And(a, b)) = model.aig.node(i as u32) {
-                    let va = vals[a.node() as usize];
-                    let vb = vals[b.node() as usize];
-                    let va = if va == TX { TX } else { va ^ u8::from(a.is_complemented()) };
-                    let vb = if vb == TX { TX } else { vb ^ u8::from(b.is_complemented()) };
-                    vals[i] = if va == 0 || vb == 0 {
-                        0
-                    } else if va == 1 && vb == 1 {
-                        1
-                    } else {
-                        TX
-                    };
-                }
-            }
-            vals[0] = 0;
-        };
-        let tval = |vals: &[u8], l: Lit| -> u8 {
-            let v = vals[l.node() as usize];
-            if v == TX { TX } else { v ^ u8::from(l.is_complemented()) }
-        };
-        let holds = |vals: &[u8]| -> bool {
-            match succ {
-                Some(_) => targets
-                    .iter()
-                    .all(|&(nx, want)| nx.is_none_or(|nx| tval(vals, nx) == u8::from(want))),
-                None => model.bads.iter().any(|&b| tval(vals, b) == 1),
-            }
-        };
-        // Greedy X-out from a starting assignment of the state bits (`Some(v)` concrete, `None` X),
-        // trying only the bits in `order`; returns the number left concrete, or `None` when the
-        // start itself does not hold.
-        let xout = |start: &[Option<bool>], order: &[usize]| -> Option<usize> {
-            let mut vals = base.clone();
-            let mut cur: Vec<Option<bool>> = start.to_vec();
-            let set = |vals: &mut Vec<u8>, cur: &[Option<bool>]| {
-                for (bit, &leaf) in state_leaf.iter().enumerate() {
-                    vals[leaf] = match cur[bit] {
-                        Some(v) => u8::from(v),
-                        None => TX,
-                    };
-                }
-            };
-            set(&mut vals, &cur);
-            sim(&mut vals);
-            if !holds(&vals) {
-                return None;
-            }
-            for &bit in order {
-                if cur[bit].is_none() {
-                    continue;
-                }
-                let saved = cur[bit];
-                cur[bit] = None;
-                set(&mut vals, &cur);
-                sim(&mut vals);
-                if !holds(&vals) {
-                    cur[bit] = saved;
-                }
-            }
-            Some(cur.iter().filter(|v| v.is_some()).count())
-        };
-        let full: Vec<Option<bool>> = w.state.iter().map(|&l| Some(l > 0)).collect();
-        let all: Vec<usize> = (0..self.cur.len()).collect();
-        let tern_w = xout(&full, &all).unwrap_or(self.cur.len());
-        let in_lifted: HashSet<usize> = lifted
-            .iter()
-            .map(|&l| (l.unsigned_abs() - 2) as usize)
-            .collect();
-        let from_sat: Vec<Option<bool>> = full
-            .iter()
-            .enumerate()
-            .map(|(bit, &v)| if in_lifted.contains(&bit) { v } else { None })
-            .collect();
-        let lifted_bits: Vec<usize> = in_lifted.iter().copied().collect();
-        let from_sat_w = xout(&from_sat, &lifted_bits);
-        let tally = match succ {
-            Some(_) => &mut self.probe.desc,
-            None => &mut self.probe.root,
-        };
-        tally.n += 1;
-        tally.sat_lits += lifted.len() as u64;
-        tally.tern_lits += tern_w as u64;
-        match from_sat_w {
-            Some(wd) => tally.tern_from_sat_lits += wd as u64,
-            None => {
-                tally.sat_unjustified += 1;
-                tally.tern_from_sat_lits += lifted.len() as u64;
-            }
-        }
-    }
-
-    /// N5.2 — a cube literal's activity (see the field).
-    fn activity(&self, lit: i32) -> u32 {
-        self.activity.get(&lit).copied().unwrap_or(0)
-    }
-
-    /// N5.2 — the MIC sort key: the literal's count activity, or under `MUNUNU_IC3_ACT=decay` the
-    /// variable's decayed activity quantised to an integer (the order is all that matters).
-    fn mic_key(&self, lit: i32) -> (u64, u64) {
-        let a = if self.act_decay {
-            let v = self.act_var.get(&lit.abs()).copied().unwrap_or(0.0);
-            // Ascending in activity; the scale keeps distinct values distinct after quantising.
-            (v / self.act_inc * 1e6) as u64
-        } else {
-            u64::from(self.activity(lit))
-        };
-        (a, self.tie(lit))
     }
 
     fn new(model: &'m AigModel, stop: Stop) -> Self {
@@ -763,38 +488,10 @@ impl<'m> Ic3<'m> {
             queries: 0,
             phase: Phase::Other,
             by_phase: [(0, 0); Phase::COUNT],
-            activity: HashMap::new(),
-            act_var: HashMap::new(),
-            act_inc: 1.0,
-            act_decay: matches!(
-                crate::adapter::env_var::read("MUNUNU_IC3_ACT").as_deref().map(str::trim),
-                Some("decay")
-            ),
             cti_lits: 0,
             ctis: 0,
             learned_lits: 0,
             learned: 0,
-            down_joins: 0,
-            down_capped: 0,
-            mic: match crate::adapter::env_var::read("MUNUNU_IC3_MIC")
-                .as_deref()
-                .map(str::trim)
-            {
-                Some("legacy") => Mic::Legacy,
-                Some("order") => Mic::Order,
-                _ => Mic::Join,
-            },
-            lift_mode: match crate::adapter::env_var::read("MUNUNU_IC3_LIFT")
-                .as_deref()
-                .map(str::trim)
-            {
-                Some("iter") => Lift::Iter,
-                Some("first") => Lift::IterFirst,
-                _ => Lift::Core,
-            },
-            seed: crate::adapter::env_var::read("MUNUNU_IC3_SEED")
-                .and_then(|s| s.trim().parse().ok())
-                .unwrap_or(0),
             root_lits: 0,
             roots: 0,
             desc_lits: 0,
@@ -806,16 +503,6 @@ impl<'m> Ic3<'m> {
             repair_ns: 0,
             mic_in_lits: 0,
             mic_ins: 0,
-            probe: {
-                let per_kind: u32 = crate::adapter::env_var::read("MUNUNU_IC3_PROBE")
-                    .and_then(|s| s.trim().parse().ok())
-                    .unwrap_or(0);
-                Probe {
-                    left_root: per_kind,
-                    left_desc: per_kind,
-                    ..Probe::default()
-                }
-            },
         };
         me.rebuild();
         me
@@ -970,54 +657,26 @@ impl<'m> Ic3<'m> {
             }
             None => self.temp_clause([-self.bad]),
         };
-        // The fixed part of every lift query: the target's negation, the inputs and (for a step
-        // into `succ`) the free next bits; the state literals go before or after it by mode.
-        let mut fixed = vec![t];
-        fixed.extend_from_slice(&w.inputs);
+        let mut a = vec![t];
+        a.extend_from_slice(&w.state);
+        a.extend_from_slice(&w.inputs);
         if succ.is_some() {
-            fixed.extend_from_slice(&w.free_next);
+            a.extend_from_slice(&w.free_next);
         }
-        let assumptions = |me: &Self, state: &[i32]| -> Vec<i32> {
-            let mut a = Vec::with_capacity(fixed.len() + state.len());
-            match me.lift_mode {
-                Lift::IterFirst => {
-                    a.extend_from_slice(&fixed);
-                    a.extend_from_slice(state);
-                }
-                Lift::Core | Lift::Iter => {
-                    a.push(fixed[0]);
-                    a.extend_from_slice(state);
-                    a.extend_from_slice(&fixed[1..]);
-                }
-            }
-            a
-        };
-        let rounds = match self.lift_mode {
-            Lift::Core => 0,
-            Lift::Iter | Lift::IterFirst => LIFT_ROUNDS,
-        };
-        let r = (|| {
-            let mut core = w.state.clone();
-            for round in 0..=rounds {
-                let a = assumptions(self, &core);
-                if self.solve(&a)? {
-                    // Cannot happen on the first round (the assignment is a model that steps
-                    // there), and a shrunk core is a subset of a core: keep what we have.
-                    break;
-                }
-                let smaller: Vec<i32> = core
+        let r = match self.solve(&a) {
+            Ok(false) => {
+                let lifted: Vec<i32> = w
+                    .state
                     .iter()
                     .copied()
                     .filter(|&l| self.solver.failed(l))
                     .collect();
-                let shrank = smaller.len() < core.len();
-                core = smaller;
-                if !shrank || round == rounds {
-                    break;
-                }
+                Ok(lifted)
             }
-            Ok::<Vec<i32>, Halted>(core)
-        })();
+            // Cannot happen (the assignment is a model that steps there); keep the full state.
+            Ok(true) => Ok(w.state.clone()),
+            Err(h) => Err(h),
+        };
         let r = r.map(|lifted| {
             self.cti_lits += lifted.len() as u64;
             self.ctis += 1;
@@ -1032,7 +691,6 @@ impl<'m> Ic3<'m> {
                     self.roots += 1;
                 }
             }
-            self.probe_lift(w, succ, &lifted);
             lifted
         });
         self.release(t);
@@ -1089,11 +747,11 @@ impl<'m> Ic3<'m> {
     }
 
     /// MIC: drop literals while `¬g` stays inductive relative to `F_{level-1}` and `g` stays clear
-    /// of `Init`. N5.2: the rarest literals (by [`Self::activity`]) are tried first, each literal
-    /// at most once, the UNSAT core of every success shrinks the cube further, and a failed drop
-    /// is joined with its predecessor ([`Self::down`]) before the literal is given up. Measured
-    /// (frogs.5, 120 s): the earlier one-pass MIC made ~75 queries per learned clause, 93 % of
-    /// the search's queries.
+    /// of `Init`. Bounded in attempts; the order is the cube's. N5.2 measured the alternatives
+    /// (activity order with a seeded tie-break, rIC3-style decayed activity, Bradley's `down`
+    /// join, iterated lifting) on the HWMCC'20 rows the owned member loses and none moved the
+    /// learned-clause width or the frame count outside seed noise; the one-pass MIC stays, the
+    /// variants live in the N5.2 diagnostic commit (see the PR) and the private measurement.
     fn generalize(
         &mut self,
         core: Vec<i32>,
@@ -1112,50 +770,6 @@ impl<'m> Ic3<'m> {
         let mut g = self.repair_initiation(core, cube)?;
         self.mic_in_lits += g.len() as u64;
         self.mic_ins += 1;
-        if self.mic == Mic::Legacy {
-            return self.generalize_legacy(g, level);
-        }
-        let joins = if self.mic == Mic::Join { DOWN_JOINS } else { 0 };
-        // Rarest first: the literals few learned clauses kept are the ones most likely to drop.
-        g.sort_by_key(|&l| self.mic_key(l));
-        // Literals whose drop failed (or that a join put back): not tried again.
-        let mut kept: HashSet<i32> = HashSet::new();
-        let mut tries = 0usize;
-        let budget = 3 * g.len() + 8;
-        while g.len() > 1 && tries < budget {
-            let Some(i) = g.iter().position(|l| !kept.contains(l)) else {
-                break;
-            };
-            tries += 1;
-            let lit = g[i];
-            let cand: Vec<i32> = g
-                .iter()
-                .enumerate()
-                .filter(|&(j, _)| j != i)
-                .map(|(_, &l)| l)
-                .collect();
-            match self.down(level, cand, joins)? {
-                Some(smaller) => {
-                    // The literals the join or the core kept are settled; the rest stay in order.
-                    for &l in &smaller {
-                        if !g.contains(&l) {
-                            kept.insert(l);
-                        }
-                    }
-                    g = smaller;
-                    g.sort_by_key(|&l| self.mic_key(l));
-                }
-                None => {
-                    kept.insert(lit);
-                }
-            }
-        }
-        Ok(g)
-    }
-
-    /// The MIC before N5.2 (`MUNUNU_IC3_MIC=legacy`): one pass in the cube's order, a failed drop
-    /// keeps the literal, no join. Kept for the A/B profile only.
-    fn generalize_legacy(&mut self, mut g: Vec<i32>, level: usize) -> Result<Vec<i32>, Halted> {
         let mut i = 0usize;
         let mut tries = 0usize;
         let budget = 3 * g.len() + 8;
@@ -1182,42 +796,6 @@ impl<'m> Ic3<'m> {
         Ok(g)
     }
 
-    /// Bradley's `down` (no CTGs): is some sub-cube of `cand`, clear of `Init`, inductive relative
-    /// to `F_{level-1}`? A predecessor that steps into `cand` is JOINED with it (the literals the
-    /// predecessor disagrees with are dropped), up to [`DOWN_JOINS`] times; a join that admits an
-    /// initial state, or runs out of joins, fails. `Some(g)`: the inductive cube, its initiation
-    /// repaired from the core.
-    fn down(
-        &mut self,
-        level: usize,
-        mut cand: Vec<i32>,
-        max_joins: usize,
-    ) -> Result<Option<Vec<i32>>, Halted> {
-        for join in 0..=max_joins {
-            if cand.is_empty() || self.initial(&cand)? {
-                return Ok(None);
-            }
-            match self.relative(level - 1, &cand)? {
-                Rel::Inductive(core) => return Ok(Some(self.repair_initiation(core, &cand)?)),
-                Rel::Predecessor(w) => {
-                    if join == max_joins {
-                        self.down_capped += 1;
-                        return Ok(None);
-                    }
-                    let agrees: HashSet<i32> = w.state.iter().copied().collect();
-                    let before = cand.len();
-                    cand.retain(|l| agrees.contains(l));
-                    if cand.len() == before {
-                        // The predecessor is inside the candidate already: no join can help.
-                        return Ok(None);
-                    }
-                    self.down_joins += 1;
-                }
-            }
-        }
-        Ok(None)
-    }
-
     /// Add `¬g` at the highest frame it is inductive up to (from `level`); returns that frame.
     fn add_blocked(&mut self, g: Vec<i32>, level: usize) -> Result<usize, Halted> {
         let mut n = level;
@@ -1226,19 +804,6 @@ impl<'m> Ic3<'m> {
                 Rel::Inductive(_) => n += 1,
                 Rel::Predecessor(_) => break,
             }
-        }
-        for &l in &g {
-            *self.activity.entry(l).or_insert(0) += 1;
-            *self.act_var.entry(l.abs()).or_insert(0.0) += self.act_inc;
-        }
-        // rIC3's `bump_cube_activity`: the increment grows by 1/0.9 per learned clause, so recent
-        // clauses weigh more; everything is rescaled before the increment overflows.
-        self.act_inc /= 0.9;
-        if self.act_inc > 1e100 {
-            for v in self.act_var.values_mut() {
-                *v *= 1e-100;
-            }
-            self.act_inc *= 1e-100;
         }
         self.learned_lits += g.len() as u64;
         self.learned += 1;
