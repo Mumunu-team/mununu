@@ -312,6 +312,10 @@ impl<'m> Ic3<'m> {
                     }
                     Some(n) => match n.get(bi) {
                         Some(&l) => nxt.push(enc.encode(l)),
+                        // SOUNDNESS: a `next` narrower than its register leaves the high bits
+                        // unconstrained — fresh, and not carried by `free_words` — an
+                        // over-approximation of the transition; a proof over it is a proof, and
+                        // every trace is replayed before it ships.
                         None => nxt.push(enc.fresh()),
                     },
                 }
@@ -1313,6 +1317,31 @@ mod tests {
             } => {
                 assert_eq!((depth, initial), (1, vec![("c".to_string(), 0)]));
                 assert_eq!(free_states, vec![vec![("c".to_string(), 5)]]);
+                assert_eq!(replay, Replay::Confirmed);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// The free register is the SECOND state: the `#k` block `btor2_witness_with_free` writes
+    /// (model order) must name the index the replay reads (file order), or the replay refuses the
+    /// trace and the member abstains.
+    #[test]
+    fn a_free_register_that_is_not_the_first_state_is_indexed_alike_by_writer_and_replay() {
+        let text = "1 sort bitvec 1\n2 sort bitvec 3\n3 state 1 a\n4 zero 1\n5 init 1 3 4\n\
+                    6 one 1\n7 next 1 3 6\n8 state 2 f\n9 zero 2\n10 init 2 8 9\n\
+                    11 constd 2 5\n12 eq 1 8 11\n13 and 1 3 12\n14 bad 13\n";
+        match run(text) {
+            Ic3Outcome::Violated {
+                depth,
+                initial,
+                free_states,
+                replay,
+                ..
+            } => {
+                assert_eq!(depth, 1);
+                assert_eq!(initial, vec![("a".to_string(), 0), ("f".to_string(), 0)]);
+                assert_eq!(free_states, vec![vec![("f".to_string(), 5)]]);
                 assert_eq!(replay, Replay::Confirmed);
             }
             other => panic!("{other:?}"),
