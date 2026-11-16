@@ -112,7 +112,7 @@ Design notes: [`docs/design/bdd-variable-ordering.md`](design/bdd-variable-order
 | `MUNUNU_INTERP_DUMP` | path for the failing cvc5 interpolation query of the native interpolation engine — distinguishes an interpolation incompleteness from a serialisation bug. |
 | `MUNUNU_KLIVENESS_MONITOR_DUMP` | path prefix: the k-liveness ladder writes each round-counter monitor it builds to `<prefix>.k<width>.btor2` (justice rung and the response verbs' fallback), so another engine can decide the same monitor, e.g. `btor2 verify --owned-only`. Diagnostic only; never changes a verdict. |
 | `MUNUNU_OWNED_TIMEOUT_MS` | per-check timeout of the owned (in-process) reachability members. |
-| `MUNUNU_REACH_IC3` (`=1`) | adds the owned IC3 member (`ic3`, Track N N5.1: CaDiCaL IC3/PDR, proves and refutes) to the full reach portfolio and to `--owned-only`; off by default until its N5.3 gate. Its `Safe` ships only after a direct check of the invariant in a fresh solver, its `Violated` only after a replay on the concrete simulator. |
+| `MUNUNU_REACH_IC3` (`=1`) | adds the owned IC3 member (`ic3`, Track N N5.1: CaDiCaL IC3/PDR, proves and refutes) to the full reach portfolio and to `--owned-only`; off by default until its N5.5 gate. Its `Safe` ships only after a direct check of the invariant in a fresh solver, its `Violated` only after a replay on the concrete simulator. |
 | `MUNUNU_BOOLECTOR_TRACE` (`=1`) | per-bound `sat()` wall times of the native Boolector BMC member. |
 
 ## Test-harness knobs (read only by `#[ignore]`d tests and probes)
@@ -132,4 +132,5 @@ Design notes: [`docs/design/bdd-variable-ordering.md`](design/bdd-variable-order
 | `MUNUNU_R3_UPDATE_BASELINE` (`=1`) | rewrite the R3 Kleene baseline fixture instead of comparing against it. |
 | `MUNUNU_DIFF_TIER_EXPLORE` | the random-BTOR2 differential tier draws a fresh seed instead of replaying `TIER_SEED` (`make diff-tier-explore`); the gate run never sets it. |
 | `MUNUNU_IC3_FRAMES`, `MUNUNU_IC3_REFINE`, `MUNUNU_IC3_QTO` | the IC3ia probe in `btor2/abs_safety.rs` (frame cap 40, refinement cap 24, per-query ms 8000); read only under `MUNUNU_INTERP_PROBE`. |
+| `MUNUNU_IC3_PROFILE_FILE`, `MUNUNU_IC3_PROFILE_MS` | the owned IC3's per-phase profile of one BTOR2 file (`ic3_phase_profile_of_one_file`, N5.2): queries and solver time per phase, lifted / learned / MIC-entry widths, init-check share, CNF size; deadline in ms (default 60 000). |
 | `MUNUNU_INTERP_SUFFIX`, `MUNUNU_INTERP_ITERS`, `MUNUNU_INTERP_QTO`, `MUNUNU_INTERP_OVERALL` | the native interpolation probe in `btor2/native_interp.rs` (suffix depth 24, iterations 64, per-query ms 10 000, overall ms 60 000); read only under `MUNUNU_INTERP_PROBE`. |

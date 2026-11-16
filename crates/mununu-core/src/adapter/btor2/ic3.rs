@@ -270,9 +270,120 @@ struct Ic3<'m> {
     dead: usize,
     seq: u64,
     queries: u64,
+    /// N5.2 — the phase the next SAT query is charged to ([`Phase`]); a diagnostic that never
+    /// changes the search.
+    phase: Phase,
+    /// Per phase: the queries made and the time spent inside the solver (nanoseconds).
+    by_phase: [(u64, u64); Phase::COUNT],
+    /// N5.2 — the widths profile: lifted CTIs (literals, count) and learned clauses (literals,
+    /// count).
+    cti_lits: u64,
+    ctis: u64,
+    learned_lits: u64,
+    learned: u64,
+    /// N5.2 — the lifted-width profile split by obligation kind: root lifts (from `bad`) and
+    /// descendant lifts (into an obligation cube), plus the descendant lifts' target widths.
+    root_lits: u64,
+    roots: u64,
+    desc_lits: u64,
+    descs: u64,
+    target_lits: u64,
+    /// N5.2 — how many of the queries were `initial` checks (a syntactic check could replace
+    /// them when every `init` is a constant).
+    init_queries: u64,
+    /// … and the solver time they took (nanoseconds); the same for `repair_initiation`.
+    init_ns: u64,
+    repair_queries: u64,
+    repair_ns: u64,
+    /// N5.2 — the width of the cube entering MIC's drop loop (after the relative core and the
+    /// initiation repair, before any drop), summed, and the count.
+    mic_in_lits: u64,
+    mic_ins: u64,
+}
+
+/// N5.2 — where the search's SAT queries go, for the per-phase profile in the `ic3 search` log
+/// line (`RUST_LOG=mununu_core::adapter::btor2::ic3=debug`) and the manual profile test.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Phase {
+    /// The obligation loop's own queries: relative inductiveness of a CTI, `initial` checks.
+    Block,
+    /// MIC: the literal-drop queries.
+    Generalize,
+    /// Pushing a learned clause to the highest frame it is inductive at.
+    AddBlocked,
+    /// Forward propagation of every frame's clauses.
+    Propagate,
+    /// Shrinking a predecessor state to the literals that force the step.
+    Lift,
+    /// The certificate check and the top-level `bad_state` queries.
+    Other,
+}
+
+impl Phase {
+    const COUNT: usize = 6;
+    const ALL: [Phase; Phase::COUNT] = [
+        Phase::Block,
+        Phase::Generalize,
+        Phase::AddBlocked,
+        Phase::Propagate,
+        Phase::Lift,
+        Phase::Other,
+    ];
+    fn name(self) -> &'static str {
+        match self {
+            Phase::Block => "block",
+            Phase::Generalize => "generalize",
+            Phase::AddBlocked => "add_blocked",
+            Phase::Propagate => "propagate",
+            Phase::Lift => "lift",
+            Phase::Other => "other",
+        }
+    }
 }
 
 impl<'m> Ic3<'m> {
+    /// Run `f` with the queries charged to `phase`, then charge the caller's phase again.
+    fn in_phase<T>(&mut self, phase: Phase, f: impl FnOnce(&mut Self) -> T) -> T {
+        let outer = self.phase;
+        self.phase = phase;
+        let r = f(self);
+        self.phase = outer;
+        r
+    }
+
+    /// `phase: queries / solver ms` for every phase, then the average lifted-CTI and learned-clause
+    /// widths, in one string for the log line.
+    fn phase_summary(&self) -> String {
+        let avg = |lits: u64, n: u64| if n == 0 { 0.0 } else { lits as f64 / n as f64 };
+        let mut parts: Vec<String> = Phase::ALL
+            .iter()
+            .map(|&p| {
+                let (q, ns) = self.by_phase[p as usize];
+                format!("{}={}q/{}ms", p.name(), q, ns / 1_000_000)
+            })
+            .collect();
+        parts.push(format!(
+            "latches={} trans_clauses={} vars={} init_queries={} init_ms={} repair_queries={} repair_ms={} mic_in_width={:.1}/{} cti_width={:.1} root_width={:.1}/{} desc_width={:.1}/{} target_width={:.1} clause_width={:.1}",
+            self.cur.len(),
+            self.trans.len(),
+            self.next_var,
+            self.init_queries,
+            self.init_ns / 1_000_000,
+            self.repair_queries,
+            self.repair_ns / 1_000_000,
+            avg(self.mic_in_lits, self.mic_ins),
+            self.mic_ins,
+            avg(self.cti_lits, self.ctis),
+            avg(self.root_lits, self.roots),
+            self.roots,
+            avg(self.desc_lits, self.descs),
+            self.descs,
+            avg(self.target_lits, self.descs),
+            avg(self.learned_lits, self.learned),
+        ));
+        parts.join(" ")
+    }
+
     fn new(model: &'m AigModel, stop: Stop) -> Self {
         let mut enc = Encoder {
             model,
@@ -375,6 +486,23 @@ impl<'m> Ic3<'m> {
             dead: 0,
             seq: 0,
             queries: 0,
+            phase: Phase::Other,
+            by_phase: [(0, 0); Phase::COUNT],
+            cti_lits: 0,
+            ctis: 0,
+            learned_lits: 0,
+            learned: 0,
+            root_lits: 0,
+            roots: 0,
+            desc_lits: 0,
+            descs: 0,
+            target_lits: 0,
+            init_queries: 0,
+            init_ns: 0,
+            repair_queries: 0,
+            repair_ns: 0,
+            mic_in_lits: 0,
+            mic_ins: 0,
         };
         me.rebuild();
         me
@@ -423,7 +551,12 @@ impl<'m> Ic3<'m> {
 
     fn solve(&mut self, assumptions: &[i32]) -> Result<bool, Halted> {
         self.queries += 1;
-        match self.solver.solve_with(assumptions.iter().copied()) {
+        let t0 = Instant::now();
+        let r = self.solver.solve_with(assumptions.iter().copied());
+        let slot = &mut self.by_phase[self.phase as usize];
+        slot.0 += 1;
+        slot.1 += u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        match r {
             Some(sat) => Ok(sat),
             None => Err(Halted),
         }
@@ -477,9 +610,13 @@ impl<'m> Ic3<'m> {
 
     /// Does `cube` contain an initial state?
     fn initial(&mut self, cube: &[i32]) -> Result<bool, Halted> {
+        self.init_queries += 1;
         let mut a = vec![self.act_init];
         a.extend_from_slice(cube);
-        self.solve(&a)
+        let t0 = Instant::now();
+        let r = self.solve(&a);
+        self.init_ns += u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        r
     }
 
     /// `F_level ∧ ¬cube ∧ T ∧ cube'`.
@@ -509,6 +646,10 @@ impl<'m> Ic3<'m> {
     /// Shrink a model's state to the literals that, with its inputs and free next bits, force the
     /// step into `succ` (`None`: force `bad`): the failed assumptions of the negated target.
     fn lift(&mut self, w: &Witness, succ: Option<&[i32]>) -> Result<Vec<i32>, Halted> {
+        self.in_phase(Phase::Lift, |me| me.lift_in(w, succ))
+    }
+
+    fn lift_in(&mut self, w: &Witness, succ: Option<&[i32]>) -> Result<Vec<i32>, Halted> {
         let t = match succ {
             Some(c) => {
                 let neg: Vec<i32> = c.iter().map(|&l| -self.prime(l)).collect();
@@ -536,6 +677,21 @@ impl<'m> Ic3<'m> {
             Ok(true) => Ok(w.state.clone()),
             Err(h) => Err(h),
         };
+        if let Ok(lifted) = &r {
+            self.cti_lits += lifted.len() as u64;
+            self.ctis += 1;
+            match succ {
+                Some(c) => {
+                    self.desc_lits += lifted.len() as u64;
+                    self.descs += 1;
+                    self.target_lits += c.len() as u64;
+                }
+                None => {
+                    self.root_lits += lifted.len() as u64;
+                    self.roots += 1;
+                }
+            }
+        }
         self.release(t);
         r
     }
@@ -561,7 +717,19 @@ impl<'m> Ic3<'m> {
     }
 
     /// `core ⊆ cube` with `Init ∧ core` UNSAT: literals of `cube` are added back until it is.
-    fn repair_initiation(&mut self, mut core: Vec<i32>, cube: &[i32]) -> Result<Vec<i32>, Halted> {
+    fn repair_initiation(&mut self, core: Vec<i32>, cube: &[i32]) -> Result<Vec<i32>, Halted> {
+        let (q0, t0) = (self.queries, Instant::now());
+        let r = self.repair_initiation_in(core, cube);
+        self.repair_queries += self.queries - q0;
+        self.repair_ns += u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        r
+    }
+
+    fn repair_initiation_in(
+        &mut self,
+        mut core: Vec<i32>,
+        cube: &[i32],
+    ) -> Result<Vec<i32>, Halted> {
         if !self.initial(&core)? {
             return Ok(core);
         }
@@ -578,14 +746,29 @@ impl<'m> Ic3<'m> {
     }
 
     /// MIC: drop literals while `¬g` stays inductive relative to `F_{level-1}` and `g` stays clear
-    /// of `Init`. Bounded in attempts; the order is the cube's.
+    /// of `Init`. Bounded in attempts; the order is the cube's. N5.2 measured the alternatives
+    /// (activity order with a seeded tie-break, rIC3-style decayed activity, Bradley's `down`
+    /// join, iterated lifting) on the HWMCC'20 rows the owned member loses and none moved the
+    /// learned-clause width or the frame count outside seed noise; the one-pass MIC stays, the
+    /// variants live in the N5.2 diagnostic commit (see the PR) and the private measurement.
     fn generalize(
         &mut self,
         core: Vec<i32>,
         cube: &[i32],
         level: usize,
     ) -> Result<Vec<i32>, Halted> {
+        self.in_phase(Phase::Generalize, |me| me.generalize_in(core, cube, level))
+    }
+
+    fn generalize_in(
+        &mut self,
+        core: Vec<i32>,
+        cube: &[i32],
+        level: usize,
+    ) -> Result<Vec<i32>, Halted> {
         let mut g = self.repair_initiation(core, cube)?;
+        self.mic_in_lits += g.len() as u64;
+        self.mic_ins += 1;
         let mut i = 0usize;
         let mut tries = 0usize;
         let budget = 3 * g.len() + 8;
@@ -616,11 +799,13 @@ impl<'m> Ic3<'m> {
     fn add_blocked(&mut self, g: Vec<i32>, level: usize) -> Result<usize, Halted> {
         let mut n = level;
         while n < self.k() {
-            match self.relative(n, &g)? {
+            match self.in_phase(Phase::AddBlocked, |me| me.relative(n, &g))? {
                 Rel::Inductive(_) => n += 1,
                 Rel::Predecessor(_) => break,
             }
         }
+        self.learned_lits += g.len() as u64;
+        self.learned += 1;
         let clause: Vec<i32> = g.iter().map(|&l| -l).collect();
         for f in self.frames[1..=n].iter_mut() {
             let before = f.clauses.len();
@@ -638,6 +823,10 @@ impl<'m> Ic3<'m> {
     /// Block the CTI `s` at `F_k`, recursively. `Ok(None)`: blocked; `Ok(Some(..))`: a
     /// counterexample (or the reason one did not concretise).
     fn block(&mut self, s: Vec<i32>) -> Result<Option<Ic3Outcome>, Halted> {
+        self.in_phase(Phase::Block, |me| me.block_in(s))
+    }
+
+    fn block_in(&mut self, s: Vec<i32>) -> Result<Option<Ic3Outcome>, Halted> {
         let mut arena: Vec<Obligation> = Vec::new();
         let mut heap: BinaryHeap<Reverse<(usize, u64, usize)>> = BinaryHeap::new();
         let k = self.k();
@@ -841,6 +1030,10 @@ impl<'m> Ic3<'m> {
 
     /// Propagate every frame's clauses forward; `Some(inv)` when a frame empties (`F_i == F_{i+1}`).
     fn propagate(&mut self) -> Result<Option<Vec<Vec<i32>>>, Halted> {
+        self.in_phase(Phase::Propagate, |me| me.propagate_in())
+    }
+
+    fn propagate_in(&mut self) -> Result<Option<Vec<Vec<i32>>>, Halted> {
         let top = self.k();
         for j in 1..top {
             let clauses = self.frames[j].clauses.clone();
@@ -1058,10 +1251,52 @@ pub fn ic3_model(file: &Btor2File, model: &AigModel, opts: &Ic3Options) -> Ic3Ou
         clauses = search.live_clauses(),
         queries = search.queries,
         elapsed_ms = t0.elapsed().as_millis() as u64,
+        phases = %search.phase_summary(),
         outcome = kind,
         "ic3 search"
     );
     out
+}
+
+/// N5.2 — the per-phase profile of one corpus row, for the generalisation work: `frames`,
+/// `clauses`, `queries` and `phase: queries / solver ms` per phase, printed to stderr. Reads
+/// `MUNUNU_IC3_PROFILE_FILE` (a BTOR2 file) and `MUNUNU_IC3_PROFILE_MS` (the deadline, default
+/// 60 000). `#[ignore]`d: an external file, minutes.
+#[cfg(test)]
+#[test]
+#[ignore = "manual: ic3 phase profile of one BTOR2 file; set MUNUNU_IC3_PROFILE_FILE (+ MUNUNU_IC3_PROFILE_MS)"]
+fn ic3_phase_profile_of_one_file() {
+    let Some(path) = crate::adapter::env_var::read("MUNUNU_IC3_PROFILE_FILE") else {
+        eprintln!("MUNUNU_IC3_PROFILE_FILE unset — skipped");
+        return;
+    };
+    let ms: u64 = crate::adapter::env_var::read("MUNUNU_IC3_PROFILE_MS")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(60_000);
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+    let file = crate::adapter::btor2::parser::parse(&text).unwrap_or_else(|e| panic!("{e:?}"));
+    let model = AigModel::build(&file).unwrap_or_else(|e| panic!("{e}"));
+    let stop = Stop {
+        deadline: Some(Instant::now() + std::time::Duration::from_millis(ms)),
+        cancel: None,
+    };
+    let t0 = Instant::now();
+    let mut search = Ic3::new(&model, stop);
+    let out = search.run(&Ic3Options::default());
+    let kind = match &out {
+        Ok(Ic3Outcome::Safe { .. }) => "safe",
+        Ok(Ic3Outcome::Violated { .. }) => "violated",
+        Ok(Ic3Outcome::Stopped { .. }) => "stopped",
+        Err(Halted) => "halted",
+    };
+    eprintln!(
+        "ic3 profile {path}: outcome={kind} frames={} clauses={} queries={} elapsed_ms={} {}",
+        search.k(),
+        search.live_clauses(),
+        search.queries,
+        t0.elapsed().as_millis(),
+        search.phase_summary()
+    );
 }
 
 /// The direct invariant check on its own, for the negative controls: does `inv` (clauses over the
