@@ -217,6 +217,30 @@ pub fn simulate_one_step_observe(
     PreparedStep::new(file).step(register_values, input_values, observe)
 }
 
+/// One concrete step with the current-cycle values of chosen nodes: what the witness replay reads
+/// to check a frame rather than take it on the tool's word.
+#[derive(Debug, Clone)]
+pub struct ProbedStep {
+    /// The post-step state values, keyed by step name (as [`simulate_one_step`]).
+    pub next_state: std::collections::HashMap<String, u128>,
+    /// The current-cycle value (low 128 bits) of every requested node the evaluator computed.
+    pub probed: std::collections::HashMap<Nid, u128>,
+    /// Whether every `constraint` holds under this `(state, inputs)` assignment.
+    pub admissible: bool,
+}
+
+/// [`simulate_one_step_observe`] with the observation by NODE, not by name: any node of the file
+/// (a `bad` or `constraint` operand, an `init` operand, an internal wire) read at the current
+/// cycle, after the combinational cone is evaluated and before `next` is committed.
+pub fn simulate_one_step_probe(
+    file: &Btor2File,
+    register_values: &std::collections::HashMap<String, u128>,
+    input_values: &std::collections::HashMap<String, u128>,
+    probe: &[Nid],
+) -> Result<ProbedStep, AdapterError> {
+    PreparedStep::new(file).step_probe(register_values, input_values, probe)
+}
+
 /// P1 #4 Phase 2b (IR-unification track, Q2 = B) — a prepared one-step
 /// evaluator. Builds the per-design setup ONCE — the state / input lists
 /// (each keyed by its *step name*: the [`parser::collect_symbols`] symbol,
@@ -378,6 +402,49 @@ impl<'a> PreparedStep<'a> {
         Ok(crate::adapter::sts_ir::StepOutcome {
             next_state,
             observed,
+            admissible,
+        })
+    }
+
+    /// [`Self::step`] reading `probe` nodes by NID instead of names (see
+    /// [`simulate_one_step_probe`]).
+    fn step_probe(
+        &self,
+        register_values: &std::collections::HashMap<String, u128>,
+        input_values: &std::collections::HashMap<String, u128>,
+        probe: &[Nid],
+    ) -> Result<ProbedStep, AdapterError> {
+        let mut env = Env::default();
+        for sv in &self.states {
+            let bits = register_values.get(&sv.symbol).copied().unwrap_or(0);
+            env.values
+                .insert(sv.nid, Bv::from_u128_width(bits, sv.width));
+        }
+        for sv in &self.inputs {
+            let bits = input_values.get(&sv.symbol).copied().unwrap_or(0);
+            env.values
+                .insert(sv.nid, Bv::from_u128_width(bits, sv.width));
+        }
+        evaluate_pure(self.file, &mut env, false)?;
+        let admissible = constraints_hold(self.file, &env)?;
+        let probed = probe
+            .iter()
+            .filter_map(|nid| env.values.get(nid).map(|bv| (*nid, bv.low128())))
+            .collect();
+        apply_next(self.file, &mut env, &self.states)?;
+        let next_state = self
+            .states
+            .iter()
+            .map(|sv| {
+                (
+                    sv.symbol.clone(),
+                    env.values.get(&sv.nid).map(|v| v.low128()).unwrap_or(0),
+                )
+            })
+            .collect();
+        Ok(ProbedStep {
+            next_state,
+            probed,
             admissible,
         })
     }

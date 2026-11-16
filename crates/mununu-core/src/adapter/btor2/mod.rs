@@ -35,6 +35,7 @@ pub mod concrete_oracle;
 pub mod dep_graph;
 pub mod emit;
 pub mod fault;
+pub mod ic3;
 pub mod input_state;
 pub mod kliveness_monitor;
 pub mod kmts_lift;

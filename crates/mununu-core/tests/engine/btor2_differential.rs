@@ -880,3 +880,74 @@ fn the_replay_rejects_a_trace_that_misses_bad() {
     assert!(replay(text, 7, &initial, &inputs).is_ok());
     assert!(replay(text, 6, &initial, &inputs).is_err());
 }
+
+// ---- N5.1: the owned IC3 against the exact engine ------------------------------------------------
+use mununu_core::adapter::btor2::ic3::{Ic3Options, Ic3Outcome, Replay, ic3};
+
+/// Every verdict the owned IC3 gives on the shared draw agrees with the exact engine; every
+/// `Violated` replays on the concrete simulator (the engine's own replay AND this file's, two
+/// independent readings of the trace); every `Safe` carries a certified invariant. With no budget
+/// set the engine may not stop.
+#[test]
+fn ic3_equals_the_exact_engine_and_its_traces_replay() {
+    let config = ProptestConfig {
+        cases: cases_from_env().max(96),
+        rng_seed: tier_seed(),
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    };
+    let mut runner = proptest::test_runner::TestRunner::new(config);
+    let tally = std::cell::Cell::new((0usize, 0usize));
+    runner
+        .run(&design_strategy(), |d| {
+            let file = parser::parse(&d.text).expect("parses");
+            let exact = exact_bad_reachable(&d.text).expect("exact decides");
+            let out = ic3(&file, &Ic3Options::default())
+                .unwrap_or_else(|e| panic!("ic3 refused a generated design: {e}\n{}", d.text));
+            let (mut v, mut n) = tally.get();
+            match out {
+                Ic3Outcome::Violated {
+                    depth,
+                    initial,
+                    inputs,
+                    replay: status,
+                    ..
+                } => {
+                    prop_assert!(
+                        exact,
+                        "ic3: violated at {depth}, exact: unreachable\n{}",
+                        d.text
+                    );
+                    prop_assert_eq!(status, Replay::Confirmed, "{}", d.text);
+                    if let Err(e) = replay(&d.text, depth, &initial, &inputs) {
+                        prop_assert!(false, "the trace does not replay: {e}\n{}", d.text);
+                    }
+                    v += 1;
+                }
+                Ic3Outcome::Safe { frames, clauses } => {
+                    prop_assert!(
+                        !exact,
+                        "ic3: safe at frame {frames} ({clauses} clauses), exact: reachable\n{}",
+                        d.text
+                    );
+                    n += 1;
+                }
+                Ic3Outcome::Stopped { frames, reason } => {
+                    prop_assert!(
+                        false,
+                        "ic3 stopped at frame {frames} with no budget set: {reason}\n{}",
+                        d.text
+                    );
+                }
+            }
+            tally.set((v, n));
+            Ok(())
+        })
+        .unwrap_or_else(|e| panic!("{e}"));
+    let (v, n) = tally.get();
+    eprintln!("ic3 tier: {v} violated (replayed), {n} safe (certified)");
+    assert!(
+        v > 0 && n > 0,
+        "the draw must exercise both answers: {v} violated, {n} safe"
+    );
+}
