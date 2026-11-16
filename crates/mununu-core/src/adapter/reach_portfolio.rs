@@ -150,7 +150,7 @@ pub(crate) struct Members {
     /// N5.4 — the owned SAT BMC (CaDiCaL, dynamic step): counterexamples only.
     pub sat_bmc: Option<bool>,
     /// N5.1 — the owned IC3 (CaDiCaL): proves and refutes, each verdict checked before it ships;
-    /// opt-in (`MUNUNU_REACH_IC3=1`) until its N5.3 gate.
+    /// opt-in (`MUNUNU_REACH_IC3=1`) until its N5.5 gate.
     pub ic3: Option<bool>,
     pub btormc: Option<McVerdict>,
     pub pono: Option<McVerdict>,
@@ -677,7 +677,7 @@ pub fn decide_reach_portfolio_cancellable(
 }
 
 /// N5.1 — `MUNUNU_REACH_IC3=1` opts the owned IC3 member into the full portfolio and into
-/// `--owned-only`; off by default until its N5.3 gate.
+/// `--owned-only`; off by default until its N5.5 gate.
 pub(crate) fn ic3_opted_in() -> bool {
     crate::adapter::env_var::read("MUNUNU_REACH_IC3").is_some_and(|v| v.trim() == "1")
 }
@@ -700,7 +700,7 @@ pub struct ReachMembers {
     pub sat_bmc: bool,
     /// N5.1 — the owned IC3 (in-process CaDiCaL): proves and refutes, each verdict checked before
     /// it ships. Off in every constant set; [`ReachMembers::shipped`] turns it on under
-    /// `MUNUNU_REACH_IC3=1` until its N5.3 gate.
+    /// `MUNUNU_REACH_IC3=1` until its N5.5 gate.
     pub ic3: bool,
     /// btormc (subprocess BMC — finds `bad` reachable, never proves).
     pub btormc: bool,
@@ -1451,7 +1451,7 @@ pub fn decide_reach_owned_only(file: &Btor2File, timeout_ms: u32) -> ReachOutcom
             let _ = tx.send(("sat-bmc", v));
         });
     }
-    // N5.1 — the owned IC3, opt-in (`MUNUNU_REACH_IC3=1`) until its N5.3 gate: the first owned
+    // N5.1 — the owned IC3, opt-in (`MUNUNU_REACH_IC3=1`) until its N5.5 gate: the first owned
     // member that PROVES. Its `Safe` is an invariant re-checked in a fresh solver, its `Violated`
     // a trace replayed on the concrete simulator; either failure abstains with the cause.
     if members.contains(&"ic3") {

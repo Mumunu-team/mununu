@@ -3,11 +3,12 @@
 //! `btormc`, `pono` and rIC3 (`--witness`) print a falsifying run in the BTOR2 witness format:
 //! `sat`, `b<i>` (which `bad` is falsified), `#0` followed by `<state-index> <bits>` lines (every
 //! state's initial value, in declaration order), then one `@k` block per frame with
-//! `<input-index> <bits>` lines, and `.`. Later `#k` state blocks are optional in the format and are
-//! ignored here: the replay recomputes every state frame from the initial frame and the inputs
-//! through the concrete simulator ([`simulate_one_step`]), so a witness whose inputs do not lead
-//! where it claims is refused, never shipped; where the falsified `bad` operand carries a symbol it
-//! is read at the last frame too.
+//! `<input-index> <bits>` lines, and `.`. The replay recomputes every state frame from the initial
+//! frame and the inputs through the concrete simulator ([`simulate_one_step_probe`]) and checks
+//! what the tool claims rather than taking its word: the `#0` frame against every `init`, every
+//! `constraint` on every frame, a later `#k` state block against the simulator (a register without
+//! `next` is free, and takes the block's value), and the falsified `bad` operand, read by its node
+//! at the last frame. A witness that fails any of these is refused, never shipped.
 //!
 //! engine: rIC3 `-e ic3 --witness` (bit-level IC3/PDR, subprocess — the same engine the portfolio
 //! member runs) as the witness finder under the rescue slice; native BMC (z3 QF_BV, owned) as the
@@ -17,11 +18,11 @@
 //! 120 s, native BMC found nothing in 900 s).
 #![deny(clippy::unwrap_used)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use crate::adapter::btor2::ast::{Btor2File, Node};
-use crate::adapter::btor2::bit_blast::{simulate_one_step, simulate_one_step_observe};
+use crate::adapter::btor2::ast::{Btor2File, Nid, Node, Operand};
+use crate::adapter::btor2::bit_blast::{ProbedStep, simulate_one_step_probe};
 use crate::adapter::btor2::cex_value::CexValue;
 use crate::adapter::btor2::native_bmc::{
     BmcError, BmcOutcome, BmcTrace, bmc_bad_reachable_witness,
@@ -39,6 +40,10 @@ pub struct Btor2Witness {
     pub bad: usize,
     pub init: Vec<(usize, String)>,
     pub frames: Vec<Vec<(usize, String)>>,
+    /// State assignments the tool printed at frames `k > 0` (`#k` blocks), in order. The replay
+    /// takes them for a register without `next` (it is free there) and checks them against the
+    /// simulator for every other register.
+    pub states: Vec<(usize, Vec<(usize, String)>)>,
 }
 
 /// Parse a tool's stdout for the witness block. Lines before `sat` (rIC3's `[INFO]` log, its bare
@@ -62,6 +67,7 @@ pub fn parse_btor2_witness(text: &str) -> Result<Btor2Witness, String> {
     let mut section = Section::None;
     let mut init = Vec::new();
     let mut frames: Vec<Vec<(usize, String)>> = Vec::new();
+    let mut states: Vec<(usize, Vec<(usize, String)>)> = Vec::new();
     let mut terminated = false;
     for line in lines {
         if line == "." {
@@ -75,6 +81,7 @@ pub fn parse_btor2_witness(text: &str) -> Result<Btor2Witness, String> {
             section = if k == 0 {
                 Section::Init
             } else {
+                states.push((k, Vec::new()));
                 Section::StateFrame
             };
             continue;
@@ -116,8 +123,11 @@ pub fn parse_btor2_witness(text: &str) -> Result<Btor2Witness, String> {
                     frame.push((idx, value.to_string()));
                 }
             }
-            // A `#k` state block (k > 0) is advisory: the replay recomputes it.
-            Section::StateFrame => {}
+            Section::StateFrame => {
+                if let Some((_, block)) = states.last_mut() {
+                    block.push((idx, value.to_string()));
+                }
+            }
             Section::None => {
                 return Err(format!("assignment `{line}` before any frame header"));
             }
@@ -129,7 +139,12 @@ pub fn parse_btor2_witness(text: &str) -> Result<Btor2Witness, String> {
     if frames.is_empty() {
         return Err("a witness with no input frame".to_string());
     }
-    Ok(Btor2Witness { bad, init, frames })
+    Ok(Btor2Witness {
+        bad,
+        init,
+        frames,
+        states,
+    })
 }
 
 struct Cell {
@@ -141,15 +156,20 @@ struct Cell {
 }
 
 /// Replay a parsed witness on `file`: the initial frame from `#0`, every later state frame
-/// recomputed through [`simulate_one_step`] from the previous frame and that frame's inputs.
-/// Refuses, with the reason, a witness naming a state or input the file does not have, a value
-/// whose width is not the cell's, a cell the simulator's word cannot carry (> 128 bits), an array
-/// state, or — when the falsified `bad` operand carries a symbol — one whose last frame does not
-/// make it true.
+/// recomputed through the concrete simulator ([`simulate_one_step_probe`]) from the previous frame
+/// and that frame's inputs. Every frame is checked rather than taken on the tool's word: the `#0`
+/// values satisfy every `init`; every `constraint` holds on every frame; a `#k` value the witness
+/// gives for a register WITH `next` agrees with the simulator, and a register WITHOUT `next` takes
+/// it (the register is free there; left out, it holds its value — one of its free choices); and
+/// the falsified `bad`'s operand is true at the last frame, read by its node, whether or not it has
+/// a symbol. Refuses, with the reason, a witness naming a state or input the file does not have, a
+/// value whose width is not the cell's, a cell the simulator's word cannot carry (> 128 bits), or
+/// an array state.
 pub fn trace_from_witness(file: &Btor2File, w: &Btor2Witness) -> Result<BmcTrace, String> {
     let symbols = parser::collect_symbols(file);
     let mut states: Vec<Cell> = Vec::new();
     let mut inputs: Vec<Cell> = Vec::new();
+    let mut key_of: HashMap<Nid, (String, u32)> = HashMap::new();
     for l in &file.lines {
         let (sort, is_state) = match &l.node {
             Node::State { sort, .. } => (*sort, true),
@@ -172,6 +192,7 @@ pub fn trace_from_witness(file: &Btor2File, w: &Btor2Witness) -> Result<BmcTrace
         let key = name
             .clone()
             .unwrap_or_else(|| format!("{}{}", if is_state { "st_n" } else { "in_n" }, l.nid));
+        key_of.insert(l.nid, (key.clone(), width));
         let cell = Cell { key, name, width };
         if is_state {
             states.push(cell);
@@ -179,6 +200,53 @@ pub fn trace_from_witness(file: &Btor2File, w: &Btor2Witness) -> Result<BmcTrace
             inputs.push(cell);
         }
     }
+    let bad: Operand = file
+        .lines
+        .iter()
+        .filter_map(|l| match &l.node {
+            Node::Bad { signal } => Some(*signal),
+            _ => None,
+        })
+        .nth(w.bad)
+        .ok_or_else(|| {
+            format!(
+                "the witness falsifies bad #{}, which the file does not declare",
+                w.bad
+            )
+        })?;
+    // (state key, state width, the `init` operand) of every `init` line.
+    let inits: Vec<(String, u32, Operand)> = file
+        .lines
+        .iter()
+        .filter_map(|l| match &l.node {
+            Node::Init { state, value, .. } => {
+                let (key, width) = key_of.get(state)?;
+                Some((key.clone(), *width, *value))
+            }
+            _ => None,
+        })
+        .collect();
+    let with_next: HashSet<Nid> = file
+        .lines
+        .iter()
+        .filter_map(|l| match &l.node {
+            Node::Next { state, .. } => Some(*state),
+            _ => None,
+        })
+        .collect();
+    let nextless: HashSet<String> = file
+        .lines
+        .iter()
+        .filter_map(|l| match &l.node {
+            Node::State { .. } if !with_next.contains(&l.nid) => {
+                key_of.get(&l.nid).map(|(key, _)| key.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    let probes: Vec<Nid> = std::iter::once(bad.nid())
+        .chain(inits.iter().map(|(_, _, v)| v.nid()))
+        .collect();
     let parse_bits = |bits: &str, width: u32, what: &str| -> Result<u128, String> {
         if bits.len() != width as usize {
             return Err(format!(
@@ -199,6 +267,24 @@ pub fn trace_from_witness(file: &Btor2File, w: &Btor2Witness) -> Result<BmcTrace
             .collect();
         out.sort();
         out
+    };
+    // An operand's value at the current cycle: the probed node, negated and masked to `width`.
+    let operand_value = |step: &ProbedStep, op: Operand, width: u32| -> Result<u128, String> {
+        let raw = step
+            .probed
+            .get(&op.nid())
+            .copied()
+            .ok_or_else(|| format!("node {} was not evaluated by the simulator", op.nid()))?;
+        let mask = if width >= 128 {
+            u128::MAX
+        } else {
+            (1u128 << width) - 1
+        };
+        Ok(if op.is_negated() {
+            !raw & mask
+        } else {
+            raw & mask
+        })
     };
 
     // Frame 0 — a state the tool left out is 0, the simulator's `setundef -zero` convention.
@@ -223,71 +309,65 @@ pub fn trace_from_witness(file: &Btor2File, w: &Btor2Witness) -> Result<BmcTrace
             ins.insert(cell.key.clone(), parse_bits(bits, cell.width, &what)?);
         }
         input_frames.push(frame_of(&inputs, &ins));
+        let step = simulate_one_step_probe(file, &regs, &ins, &probes)
+            .map_err(|e| format!("replay at frame {j}: {e:?}"))?;
+        if !step.admissible {
+            return Err(format!("a `constraint` fails at frame {j}"));
+        }
+        if j == 0 {
+            for (key, width, value) in &inits {
+                let want = operand_value(&step, *value, *width)?;
+                let got = regs.get(key).copied().unwrap_or(0);
+                if got != want {
+                    return Err(format!(
+                        "state `{key}` is {got} at #0; its `init` requires {want}"
+                    ));
+                }
+            }
+        }
         if j < last {
-            regs = simulate_one_step(file, &regs, &ins)
-                .map_err(|e| format!("replay at frame {j}: {e:?}"))?;
+            regs = step.next_state;
+            let k = j + 1;
+            for (idx, bits) in w
+                .states
+                .iter()
+                .filter(|(at, _)| *at == k)
+                .flat_map(|(_, a)| a)
+            {
+                let cell = states.get(*idx).ok_or_else(|| {
+                    format!(
+                        "state index {idx} out of range ({} states) at #{k}",
+                        states.len()
+                    )
+                })?;
+                let v = parse_bits(bits, cell.width, &format!("state {} at #{k}", cell.key))?;
+                if nextless.contains(&cell.key) {
+                    regs.insert(cell.key.clone(), v);
+                } else {
+                    let computed = regs.get(&cell.key).copied().unwrap_or(0);
+                    if computed != v {
+                        return Err(format!(
+                            "the witness gives state `{}` = {v} at #{k}; the replay computes {computed}",
+                            cell.key
+                        ));
+                    }
+                }
+            }
             state_frames.push(frame_of(&states, &regs));
         } else {
-            check_bad_at(file, w.bad, &regs, &ins)?;
+            let fired = operand_value(&step, bad, 1)? == 1;
+            if !fired {
+                return Err(format!(
+                    "the replayed last frame does not make bad #{} true",
+                    w.bad
+                ));
+            }
         }
     }
     Ok(BmcTrace {
         states: state_frames,
         inputs: input_frames,
     })
-}
-
-/// Read the falsified `bad` at the last frame when its operand carries a symbol — its own line's
-/// (an `Op` alias, a state, an input), which the simulator resolves by name; a witness whose last
-/// frame does not make it true is refused. An unnamed operand (a monitor's `bad` wire is an
-/// internal node) cannot be observed by name and is accepted on the tool's word — the verdict was
-/// the portfolio's anyway, and every transition was replayed.
-fn check_bad_at(
-    file: &Btor2File,
-    bad: usize,
-    regs: &HashMap<String, u128>,
-    ins: &HashMap<String, u128>,
-) -> Result<(), String> {
-    let Some(signal) = file
-        .lines
-        .iter()
-        .filter_map(|l| match &l.node {
-            Node::Bad { signal } => Some(*signal),
-            _ => None,
-        })
-        .nth(bad)
-    else {
-        return Err(format!(
-            "the witness falsifies bad #{bad}, which the file does not declare"
-        ));
-    };
-    let name = file.lookup(signal.nid()).and_then(|l| match &l.node {
-        Node::Op {
-            symbol: Some(s), ..
-        }
-        | Node::State {
-            symbol: Some(s), ..
-        }
-        | Node::Input {
-            symbol: Some(s), ..
-        } => Some(s.clone()),
-        _ => None,
-    });
-    let Some(name) = name else {
-        return Ok(());
-    };
-    let step = simulate_one_step_observe(file, regs, ins, std::slice::from_ref(&name))
-        .map_err(|e| format!("observing `{name}` at the last frame: {e:?}"))?;
-    let Some(&v) = step.observed.get(&name) else {
-        return Ok(());
-    };
-    if (v & 1 == 1) != signal.is_negated() {
-        Ok(())
-    } else {
-        Err(format!(
-            "the replayed last frame does not make bad #{bad} (`{name}`) true"
-        ))
-    }
 }
 
 /// [`bmc_bad_reachable_witness`] with a bit-level member asked first (mununu#744): when rIC3 is
@@ -405,6 +485,72 @@ mod tests {
         // The same frames with `i = 1` at the end are accepted.
         let honest = parse_btor2_witness(RIC3_SAMPLE).unwrap();
         assert!(trace_from_witness(&file, &honest).is_ok());
+    }
+
+    /// `bad` here is an unnamed internal node (`and s i`): the replay reads it by node and refuses
+    /// a last frame that does not fire it (the tool's word is not enough).
+    #[test]
+    fn a_witness_whose_last_frame_does_not_fire_an_unnamed_bad_is_refused() {
+        let file = parser::parse(DESIGN).unwrap();
+        let w = parse_btor2_witness("sat\nb0\n#0\n0 0\n1 0000\n@0\n0 1\n@1\n0 0\n.\n").unwrap();
+        let err = trace_from_witness(&file, &w).unwrap_err();
+        assert!(err.contains("does not make bad #0 true"), "{err}");
+        // The same witness with `i` high at the end replays.
+        let ok = parse_btor2_witness(RIC3_SAMPLE).unwrap();
+        trace_from_witness(&file, &ok).expect("the firing witness replays");
+    }
+
+    #[test]
+    fn a_frame_that_breaks_a_constraint_is_refused() {
+        let text = format!("{DESIGN}17 not 1 7\n18 constraint 17\n");
+        let file = parser::parse(&text).unwrap();
+        let w = parse_btor2_witness(RIC3_SAMPLE).unwrap();
+        let err = trace_from_witness(&file, &w).unwrap_err();
+        assert!(err.contains("`constraint` fails at frame 0"), "{err}");
+    }
+
+    #[test]
+    fn an_initial_frame_that_violates_an_init_is_refused() {
+        let file = parser::parse(DESIGN).unwrap();
+        // `s` starts at 1 where its `init` says 0.
+        let w = parse_btor2_witness("sat\nb0\n#0\n0 1\n1 0000\n@0\n0 1\n@1\n0 1\n.\n").unwrap();
+        let err = trace_from_witness(&file, &w).unwrap_err();
+        assert!(
+            err.contains("`s` is 1 at #0; its `init` requires 0"),
+            "{err}"
+        );
+    }
+
+    /// `f` has no `next`: the replay takes its `#k` value (it is free), and holds it when the
+    /// witness gives none — here holding 0 never fires `f ∧ i`.
+    #[test]
+    fn a_register_without_next_follows_the_witness_frame_values() {
+        let text = "1 sort bitvec 1\n2 state 1 f\n3 zero 1\n4 init 1 2 3\n5 input 1 i\n\
+                    6 and 1 2 5\n7 bad 6\n";
+        let file = parser::parse(text).unwrap();
+        let w = parse_btor2_witness("sat\nb0\n#0\n0 0\n@0\n0 1\n#1\n0 1\n@1\n0 1\n.\n").unwrap();
+        assert_eq!(w.states, vec![(1, vec![(0, "1".to_string())])]);
+        let trace = trace_from_witness(&file, &w).expect("the free register follows #1");
+        assert_eq!(
+            trace.states[1],
+            vec![("f".to_string(), CexValue::from_u128(1, 1))]
+        );
+        let held = parse_btor2_witness("sat\nb0\n#0\n0 0\n@0\n0 1\n@1\n0 1\n.\n").unwrap();
+        let err = trace_from_witness(&file, &held).unwrap_err();
+        assert!(err.contains("does not make bad #0 true"), "{err}");
+    }
+
+    #[test]
+    fn a_frame_value_that_contradicts_a_next_is_refused() {
+        let file = parser::parse(DESIGN).unwrap();
+        // `s` has `next 1`, so `#1` must say 1; the witness says 0.
+        let w = parse_btor2_witness("sat\nb0\n#0\n0 0\n1 0000\n@0\n0 1\n#1\n0 0\n@1\n0 1\n.\n")
+            .unwrap();
+        let err = trace_from_witness(&file, &w).unwrap_err();
+        assert!(
+            err.contains("state `s` = 0 at #1; the replay computes 1"),
+            "{err}"
+        );
     }
 
     #[test]

@@ -419,6 +419,20 @@ pub fn btor2_witness_for(
     initial: &[(String, u128)],
     inputs: &[Vec<(String, u128)>],
 ) -> String {
+    btor2_witness_with_free(model, bad_index, initial, inputs, &[])
+}
+
+/// [`btor2_witness_for`] with the registers WITHOUT `next` given at every later frame:
+/// `free_states[k - 1]` holds their frame-`k` values (model order), written as the `#k` block the
+/// witness format has for exactly this — a free register's value is the tool's choice, and the
+/// replay follows it instead of holding the register.
+pub fn btor2_witness_with_free(
+    model: &AigModel,
+    bad_index: usize,
+    initial: &[(String, u128)],
+    inputs: &[Vec<(String, u128)>],
+    free_states: &[Vec<(String, u128)>],
+) -> String {
     let bits = |v: u128, w: usize| -> String {
         (0..w)
             .rev()
@@ -436,6 +450,22 @@ pub fn btor2_witness_for(
         out.push_str(&format!("{i} {}\n", bits(*v, s.leaves.len())));
     }
     for (f, frame) in inputs.iter().enumerate() {
+        if let Some(free) = f.checked_sub(1).and_then(|k| free_states.get(k)) {
+            let mut values = free.iter();
+            let block: String = model
+                .states
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| s.next.is_none())
+                .filter_map(|(i, s)| {
+                    let (_, v) = values.next()?;
+                    Some(format!("{i} {}\n", bits(*v, s.leaves.len())))
+                })
+                .collect();
+            if !block.is_empty() {
+                out.push_str(&format!("#{f}\n{block}"));
+            }
+        }
         out.push_str(&format!("@{f}\n"));
         for (i, (inp, (_, v))) in model.inputs.iter().zip(frame).enumerate() {
             out.push_str(&format!("{i} {}\n", bits(*v, inp.leaves.len())));

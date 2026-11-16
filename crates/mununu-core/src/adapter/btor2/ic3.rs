@@ -44,7 +44,7 @@ use std::time::Instant;
 
 use crate::adapter::btor2::aig::{AigModel, AigNode, Lit};
 use crate::adapter::btor2::ast::Btor2File;
-use crate::adapter::btor2::sat_bmc::{btor2_witness_for, cell_name};
+use crate::adapter::btor2::sat_bmc::{btor2_witness_with_free, cell_name};
 use crate::adapter::btor2::witness::{parse_btor2_witness, trace_from_witness};
 
 /// How long the search may run.
@@ -82,6 +82,10 @@ pub enum Ic3Outcome {
         bad_index: usize,
         initial: Vec<(String, u128)>,
         inputs: Vec<Vec<(String, u128)>>,
+        /// The values the registers WITHOUT `next` take at frame `k ≥ 1` (`free_states[k - 1]`,
+        /// model order): a free register's step is the model's choice, so the trace carries it and
+        /// the replay follows it. Empty when every register has a `next`.
+        free_states: Vec<Vec<(String, u128)>>,
         replay: Replay,
     },
     /// The search stopped (the deadline, a cancellation, the frame bound, or a check that did not
@@ -202,7 +206,9 @@ impl<'m> Encoder<'m> {
             }
             let value = match self.model.aig.node(n) {
                 None | Some(AigNode::False) => Some(-1),
-                // A leaf that is neither a state nor an input bit (the model creates none; defensive).
+                // SOUNDNESS: a leaf that is neither a state nor an input bit (the model creates
+                // none; defensive) becomes a free variable — an over-approximation of T: a proof
+                // over it still transfers, and a trace is replayed concretely before it ships.
                 Some(AigNode::Leaf) => Some(self.fresh()),
                 Some(AigNode::And(a, b)) => {
                     let (av, bv) = (self.enc[a.node() as usize], self.enc[b.node() as usize]);
@@ -296,13 +302,18 @@ impl<'m> Ic3<'m> {
         let mut free_next = Vec::new();
         for s in &model.states {
             for bi in 0..s.leaves.len() {
-                match s.next.as_ref().and_then(|n| n.get(bi)) {
-                    Some(&l) => nxt.push(enc.encode(l)),
+                match s.next.as_ref() {
+                    // A register without `next` is free at every step; its value at the next
+                    // frame is one of the model's choices, carried into the trace (`free_words`).
                     None => {
                         let v = enc.fresh();
                         free_next.push(v);
                         nxt.push(v);
                     }
+                    Some(n) => match n.get(bi) {
+                        Some(&l) => nxt.push(enc.encode(l)),
+                        None => nxt.push(enc.fresh()),
+                    },
                 }
             }
         }
@@ -734,6 +745,22 @@ impl<'m> Ic3<'m> {
             .collect()
     }
 
+    /// The values the registers without `next` take at the next frame (model order), from the
+    /// current SAT model — the trace carries them so the replay follows the same free choices.
+    fn free_words(&self) -> Vec<(String, u128)> {
+        let mut flat = 0usize;
+        self.model
+            .states
+            .iter()
+            .filter(|s| s.next.is_none())
+            .map(|s| {
+                let w = self.word(&self.free_next[flat..flat + s.leaves.len()]);
+                flat += s.leaves.len();
+                (cell_name(&s.symbol, "st", s.nid), w)
+            })
+            .collect()
+    }
+
     /// Turn the obligation chain ending at `id` (whose cube meets `Init`) into a concrete trace,
     /// one SAT model of `T` per step, then replay it on the concrete simulator.
     fn concretize(&mut self, arena: &[Obligation], id: usize) -> Result<Ic3Outcome, Halted> {
@@ -763,6 +790,10 @@ impl<'m> Ic3<'m> {
         }
         let initial = self.state_words(&self.cur);
         let mut inputs = vec![self.input_words()];
+        let mut free_states = Vec::new();
+        if chain.len() > 1 {
+            free_states.push(self.free_words());
+        }
         let next_state = |me: &Self| -> Vec<i32> {
             me.cur
                 .iter()
@@ -781,6 +812,9 @@ impl<'m> Ic3<'m> {
                 return Ok(stopped(step));
             }
             inputs.push(self.input_words());
+            if chain.get(step + 1).is_some() {
+                free_states.push(self.free_words());
+            }
             state = next_state(self);
         }
         let bad_index = self
@@ -793,6 +827,7 @@ impl<'m> Ic3<'m> {
             bad_index,
             initial,
             inputs,
+            free_states,
             replay: Replay::Confirmed,
         })
     }
@@ -866,13 +901,7 @@ impl<'m> Ic3<'m> {
         }
     }
 
-    fn run(&mut self, file: &Btor2File, opts: &Ic3Options) -> Result<Ic3Outcome, Halted> {
-        if self.model.bads.is_empty() {
-            return Ok(Ic3Outcome::Safe {
-                frames: 0,
-                clauses: 0,
-            });
-        }
+    fn run(&mut self, opts: &Ic3Options) -> Result<Ic3Outcome, Halted> {
         // Depth 0: an initial state that is bad.
         if self.solve(&[self.act_init, self.bad])? {
             let w = self.witness();
@@ -913,6 +942,8 @@ impl<'m> Ic3<'m> {
                         frames,
                         clauses: inv.len(),
                     },
+                    // The deadline or a cancel inside the check is a stop, not a failed certificate.
+                    Err(_) if fresh.stop.halted() => return Err(Halted),
                     Err(why) => {
                         tracing::warn!(why, "ic3: the converged invariant failed its check");
                         Ic3Outcome::Stopped {
@@ -924,7 +955,6 @@ impl<'m> Ic3<'m> {
                     }
                 });
             }
-            let _ = file;
         }
     }
 }
@@ -937,12 +967,13 @@ fn replayed(file: &Btor2File, model: &AigModel, out: Ic3Outcome, frames: u32) ->
         bad_index,
         initial,
         inputs,
+        free_states,
         ..
     } = out
     else {
         return out;
     };
-    let witness = btor2_witness_for(model, bad_index, &initial, &inputs);
+    let witness = btor2_witness_with_free(model, bad_index, &initial, &inputs, &free_states);
     let too_wide = model
         .states
         .iter()
@@ -969,6 +1000,7 @@ fn replayed(file: &Btor2File, model: &AigModel, out: Ic3Outcome, frames: u32) ->
         bad_index,
         initial,
         inputs,
+        free_states,
         replay,
     }
 }
@@ -977,18 +1009,32 @@ fn replayed(file: &Btor2File, model: &AigModel, out: Ic3Outcome, frames: u32) ->
 /// refuses), with the reason; every other way of not answering is a `Stopped` with its reason.
 pub fn ic3(file: &Btor2File, opts: &Ic3Options) -> Result<Ic3Outcome, String> {
     let model = AigModel::build(file)?;
+    if model.bads.is_empty() {
+        // A design with no `bad` has nothing for a reachability engine to decide; every other
+        // member refuses it, and so does this one — `Safe` would read as a proof of nothing.
+        return Err(NO_BAD.to_string());
+    }
     Ok(ic3_model(file, &model, opts))
 }
 
-/// [`ic3`] over an already-built model.
+const NO_BAD: &str = "the design has no bad property; nothing to decide";
+
+/// [`ic3`] over an already-built model. A model without a `bad` is a `Stopped` with the reason
+/// ([`ic3`] refuses it before the search).
 pub fn ic3_model(file: &Btor2File, model: &AigModel, opts: &Ic3Options) -> Ic3Outcome {
+    if model.bads.is_empty() {
+        return Ic3Outcome::Stopped {
+            frames: 0,
+            reason: NO_BAD.to_string(),
+        };
+    }
     let stop = Stop {
         deadline: opts.deadline,
         cancel: opts.cancel.clone(),
     };
     let t0 = Instant::now();
     let mut search = Ic3::new(model, stop);
-    let out = match search.run(file, opts) {
+    let out = match search.run(opts) {
         Ok(out) => replayed(file, model, out, search.k() as u32),
         Err(Halted) => Ic3Outcome::Stopped {
             frames: search.k() as u32,
@@ -1079,6 +1125,7 @@ mod tests {
                 initial,
                 inputs,
                 replay,
+                ..
             } => {
                 assert_eq!((depth, bad_index), (7, 0));
                 assert_eq!(initial, vec![("c".to_string(), 0)]);
@@ -1235,17 +1282,41 @@ mod tests {
         }
     }
 
+    /// No `bad` is nothing to decide: a refusal (as every other member), never a `Safe`.
     #[test]
-    fn a_design_without_bad_is_trivially_safe() {
+    fn a_design_without_bad_is_refused_not_proved() {
         let text = "1 sort bitvec 3\n2 zero 1\n3 state 1 c\n4 init 1 3 2\n5 one 1\n6 add 1 3 5\n\
                     7 next 1 3 6\n";
-        assert_eq!(
-            run(text),
-            Ic3Outcome::Safe {
-                frames: 0,
-                clauses: 0
+        let file = parser::parse(text).unwrap();
+        let err = ic3(&file, &Ic3Options::default()).unwrap_err();
+        assert!(err.contains("no bad property"), "{err}");
+        let model = AigModel::build(&file).unwrap();
+        assert!(matches!(
+            ic3_model(&file, &model, &Ic3Options::default()),
+            Ic3Outcome::Stopped { frames: 0, reason } if reason.contains("no bad property")
+        ));
+    }
+
+    /// A register without `next` is free at every step; the trace carries the value it takes at
+    /// each frame, and the replay follows it (held at 0 it would never reach 5).
+    #[test]
+    fn a_register_without_next_is_free_and_its_trace_carries_each_frames_value() {
+        let text = "1 sort bitvec 3\n2 sort bitvec 1\n3 state 1 c\n4 zero 1\n5 init 1 3 4\n\
+                    6 constd 1 5\n7 eq 2 3 6\n8 bad 7\n";
+        match run(text) {
+            Ic3Outcome::Violated {
+                depth,
+                initial,
+                free_states,
+                replay,
+                ..
+            } => {
+                assert_eq!((depth, initial), (1, vec![("c".to_string(), 0)]));
+                assert_eq!(free_states, vec![vec![("c".to_string(), 5)]]);
+                assert_eq!(replay, Replay::Confirmed);
             }
-        );
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
