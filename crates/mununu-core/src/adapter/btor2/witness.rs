@@ -387,10 +387,85 @@ pub fn bad_reachable_witness_routed(
     bmc_bad_reachable_witness(file, max_k)
 }
 
+/// The trace a `violated` verdict ships with, or why it ships without one (mununu#1045). Exactly
+/// one of `trace` and `unavailable_reason` is set.
+#[derive(Debug, Clone)]
+pub struct ShippedWitness {
+    pub trace: Option<BmcTrace>,
+    /// Set ONLY when native BMC searched every frame up to the bound and found no path to `bad`:
+    /// the counterexample another engine found is deeper than `--witness-max-k`. A stop on a
+    /// budget, an encode failure or a missing model is NOT this (it says nothing about depth).
+    pub unavailable_within_k: Option<u32>,
+    /// Why there is no trace, in words; `None` exactly when `trace` is set.
+    pub unavailable_reason: Option<String>,
+}
+
+/// [`bad_reachable_witness_routed`] under the caller's wall clock (mununu#1045): `deadline` (the
+/// remainder of `--timeout-ms` / the request's `timeout_ms`) is installed as this thread's
+/// [`run_budget`](crate::adapter::run_budget), which native BMC polls per depth and clamps each
+/// query to, and the rIC3 member's slice never exceeds it. `None` keeps the previous unbounded
+/// behaviour. Every way of ending without a trace names its cause.
+///
+/// engine: rIC3 `-e ic3 --witness` (subprocess, bit-level IC3, under min(rescue slice, time left))
+/// then native BMC (owned, z3 QF_BV unrolling to `max_k`, wall = time left); role: witness
+/// re-derivation after the portfolio's `Reachable` — the verdict is never changed here.
+pub fn witness_for_violation(
+    file: &Btor2File,
+    max_k: u32,
+    deadline: Option<std::time::Instant>,
+) -> ShippedWitness {
+    use crate::adapter::run_budget::{Budget, enter};
+    let none = |reason: String, within: Option<u32>| ShippedWitness {
+        trace: None,
+        unavailable_within_k: within,
+        unavailable_reason: Some(reason),
+    };
+    let budget = match deadline {
+        Some(d) => {
+            let left = d.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return none(
+                    "the time budget was spent by the verdict; no witness search ran".to_string(),
+                    None,
+                );
+            }
+            Budget::with_ms(u64::try_from(left.as_millis()).unwrap_or(u64::MAX))
+        }
+        None => Budget::unbounded(),
+    };
+    let _guard = enter(&budget);
+    match bad_reachable_witness_routed(file, max_k) {
+        Ok((BmcOutcome::Violated { .. }, Some(t))) => ShippedWitness {
+            trace: Some(t),
+            unavailable_within_k: None,
+            unavailable_reason: None,
+        },
+        Ok((BmcOutcome::Violated { depth }, None)) => none(
+            format!("native BMC reached `bad` at depth {depth} but the solver returned no model"),
+            None,
+        ),
+        Ok((BmcOutcome::NoCexWithin { k }, _)) => none(
+            format!(
+                "native BMC found no path to `bad` within {k} cycles; the counterexample the \
+                 verdict rests on is deeper (raise --witness-max-k)"
+            ),
+            Some(k),
+        ),
+        Err(e) => none(format!("the witness search stopped: {e}"), None),
+    }
+}
+
 fn ric3_witness(file: &Btor2File) -> Option<BmcTrace> {
     let bin = ric3::locate_ric3().ok()?;
-    // A disabled rescue slice (`MUNUNU_RESCUE_SLICE_MS=0`) disables this member too.
-    let slice = Duration::from_millis(crate::adapter::run_budget::rescue_slice_ms()?);
+    // A disabled rescue slice (`MUNUNU_RESCUE_SLICE_MS=0`) disables this member too; under a
+    // caller's budget (mununu#1045) the slice never outlives it.
+    let slice_ms = crate::adapter::run_budget::rescue_slice_ms()?;
+    let slice_ms = match crate::adapter::run_budget::current().remaining_ms() {
+        Some(0) => return None,
+        Some(left) => slice_ms.min(left),
+        None => slice_ms,
+    };
+    let slice = Duration::from_millis(slice_ms);
     let btor2 = emit::emit_btor2(file);
     let (verdict, stdout) = match ric3::run_ric3_with_output(
         &bin,
@@ -627,5 +702,53 @@ mod tests {
         );
         assert!(trace.states.len() >= 2);
         assert!(elapsed < Duration::from_secs(120), "took {elapsed:?}");
+    }
+
+    /// A 16-bit counter whose `bad` (`cnt == 3000`) is 3000 steps deep: native BMC unrolls frame
+    /// by frame, so a short deadline lands mid-search.
+    const DEEP: &str = "1 sort bitvec 16\n2 sort bitvec 1\n3 state 1 cnt\n4 zero 1\n5 init 1 3 4\n\
+                        6 one 1\n7 add 1 3 6\n8 next 1 3 7\n9 constd 1 3000\n10 eq 2 3 9\n11 bad 10\n";
+
+    /// mununu#1045 — the caller's deadline bounds the witness search (a CLI call with
+    /// `--timeout-ms 300000 --witness` ran > 1,500 s here), and the stop is named as a budget
+    /// stop, never as "no path within the bound".
+    #[test]
+    fn the_witness_search_stops_at_the_callers_deadline_and_says_so() {
+        let file = parser::parse(DEEP).unwrap();
+        let t0 = std::time::Instant::now();
+        let w = witness_for_violation(&file, 3000, Some(t0 + Duration::from_millis(1)));
+        let elapsed = t0.elapsed();
+        assert!(w.trace.is_none(), "a 3000-deep path in 1 ms");
+        assert_eq!(
+            w.unavailable_within_k, None,
+            "a budget stop is not a searched bound"
+        );
+        let reason = w.unavailable_reason.unwrap();
+        assert!(reason.contains("budget"), "{reason}");
+        assert!(elapsed < Duration::from_secs(5), "took {elapsed:?}");
+        // Unbounded, the same search ships the path: the stop above was the deadline's.
+        let full = witness_for_violation(&file, 3000, None);
+        assert_eq!(full.trace.map(|t| t.states.len()), Some(3001));
+        assert_eq!(full.unavailable_reason, None);
+    }
+
+    /// The depth bound itself searched without a path: `unavailable_within_k` names it.
+    #[test]
+    fn a_bound_searched_without_a_path_names_the_bound() {
+        let file = parser::parse(DEEP).unwrap();
+        let w = witness_for_violation(&file, 5, None);
+        assert!(w.trace.is_none());
+        assert_eq!(w.unavailable_within_k, Some(5));
+        let reason = w.unavailable_reason.unwrap();
+        assert!(reason.contains("within 5 cycles"), "{reason}");
+    }
+
+    #[test]
+    fn a_budget_spent_by_the_verdict_runs_no_search() {
+        let file = parser::parse(DEEP).unwrap();
+        let w = witness_for_violation(&file, 3000, Some(std::time::Instant::now()));
+        assert!(w.trace.is_none());
+        assert_eq!(w.unavailable_within_k, None);
+        assert!(w.unavailable_reason.unwrap().contains("spent"));
     }
 }
