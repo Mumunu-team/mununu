@@ -677,7 +677,7 @@ impl<'m> Ic3<'m> {
             Ok(true) => Ok(w.state.clone()),
             Err(h) => Err(h),
         };
-        let r = r.map(|lifted| {
+        if let Ok(lifted) = &r {
             self.cti_lits += lifted.len() as u64;
             self.ctis += 1;
             match succ {
@@ -691,8 +691,7 @@ impl<'m> Ic3<'m> {
                     self.roots += 1;
                 }
             }
-            lifted
-        });
+        }
         self.release(t);
         r
     }
@@ -1267,12 +1266,11 @@ pub fn ic3_model(file: &Btor2File, model: &AigModel, opts: &Ic3Options) -> Ic3Ou
 #[test]
 #[ignore = "manual: ic3 phase profile of one BTOR2 file; set MUNUNU_IC3_PROFILE_FILE (+ MUNUNU_IC3_PROFILE_MS)"]
 fn ic3_phase_profile_of_one_file() {
-    let Ok(path) = std::env::var("MUNUNU_IC3_PROFILE_FILE") else {
+    let Some(path) = crate::adapter::env_var::read("MUNUNU_IC3_PROFILE_FILE") else {
         eprintln!("MUNUNU_IC3_PROFILE_FILE unset — skipped");
         return;
     };
-    let ms: u64 = std::env::var("MUNUNU_IC3_PROFILE_MS")
-        .ok()
+    let ms: u64 = crate::adapter::env_var::read("MUNUNU_IC3_PROFILE_MS")
         .and_then(|s| s.parse().ok())
         .unwrap_or(60_000);
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
