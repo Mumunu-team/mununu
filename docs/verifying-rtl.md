@@ -614,7 +614,11 @@ refutes ships its lasso best-effort: when the extraction fails after the verdict
 arena, a panic caught at that site) the verdict stands, the trace is absent, and the row carries the
 same `witness-unavailable` note with `items: ["exact-witness"]` and the engine's reason (2026-10-27). Every verb that returns a path uses this one
 `Trace` shape since 0.5 (`btor2 verify` with `--witness` or a fault `--target`, cegar, the game's
-starvation lasso); see [`docs/api-schemas/verdict.md`](api-schemas/verdict.md).
+starvation lasso); see [`docs/api-schemas/verdict.md`](api-schemas/verdict.md). Since N5.4 (2026-11-16) `btor2 verify --witness` ships the
+counterexample the **deciding member** carried out of the portfolio, replayed on the concrete simulator
+(`trace_by` names it: `sat-bmc`, `ic3`, `btormc`, `ric3`, `ric3-bmc`, or `native-bmc` for the
+re-derivation) — that member's own path, **not necessarily the shallowest**; a member whose own witness
+did not replay is listed in `trace_replay_failed` (`sole_decider` when the verdict rests on it alone).
 
 ### Replaying a counterexample under Verilator: `--emit-testbench` (2026-10-24)
 

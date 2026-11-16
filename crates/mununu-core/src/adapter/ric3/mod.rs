@@ -200,9 +200,24 @@ pub fn decide_via_ric3(
     timeout: Duration,
     cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<McVerdict, AdapterError> {
+    decide_via_ric3_with_output(file, engine, timeout, cancel, false).map(|(v, _)| v)
+}
+
+/// [`decide_via_ric3`] with rIC3's stdout kept, and `--witness` asked for when `witness` (N5.4:
+/// the portfolio carries the decider's witness out of the run; the stdout then holds the BTOR2
+/// witness of the EMITTED design, whose state and input order is the file's —
+/// [`emit_btor2_for_subprocess`](crate::adapter::btor2::emit::emit_btor2_for_subprocess)
+/// renumbers only — so [`crate::adapter::btor2::witness::trace_from_witness`] replays it on `file`).
+pub fn decide_via_ric3_with_output(
+    file: &crate::adapter::btor2::ast::Btor2File,
+    engine: &str,
+    timeout: Duration,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+    witness: bool,
+) -> Result<(McVerdict, String), AdapterError> {
     let btor2 = crate::adapter::btor2::emit::emit_btor2_for_subprocess(file);
     let bin = locate_ric3()?;
-    run_ric3_cancellable(&bin, &btor2, engine, timeout, cancel)
+    run_ric3_with_output(&bin, &btor2, engine, witness, timeout, cancel)
 }
 
 /// mununu#997 — the dynamic-step BMC member: `rIC3 -e bmc --bmc-dyn-step`. It only ever FINDS a
@@ -212,20 +227,56 @@ pub fn decide_via_ric3_bmc_dyn_step(
     timeout: Duration,
     cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<McVerdict, AdapterError> {
+    decide_via_ric3_bmc_dyn_step_with_output(file, timeout, cancel, false).map(|(v, _)| v)
+}
+
+/// [`decide_via_ric3_bmc_dyn_step`] with rIC3's stdout kept and `--witness` asked for when
+/// `witness`. The witness is one of the STICKY model ([`sticky_bads`]): [`sticky_witness_trace`]
+/// turns it into the original design's trace.
+pub fn decide_via_ric3_bmc_dyn_step_with_output(
+    file: &crate::adapter::btor2::ast::Btor2File,
+    timeout: Duration,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+    witness: bool,
+) -> Result<(McVerdict, String), AdapterError> {
     let btor2 = sticky_bads(&crate::adapter::btor2::emit::emit_btor2_for_subprocess(
         file,
     ));
     let bin = locate_ric3()?;
-    let (v, _) = run_ric3_args(
+    let (v, out) = run_ric3_args(
         &bin,
         &btor2,
         BMC_DYN_STEP_ENGINE,
         BMC_DYN_STEP_ARGS,
-        false,
+        witness,
         timeout,
         cancel,
     )?;
-    Ok(bmc_member_verdict(v))
+    Ok((bmc_member_verdict(v), out))
+}
+
+/// N5.4 — the original design's trace behind a witness of its sticky-bad model
+/// ([`sticky_bads`]): the appended `mununu_bad_seen_*` states (indices from the file's state count
+/// on) are dropped — the transform appends states only, never an input or a constraint — and the
+/// witness is replayed on `file` up to the FIRST frame that fires the original `bad`
+/// ([`crate::adapter::btor2::witness::trace_from_witness_prefix`]): the sticky bad `seen ∨ bad` is
+/// true at the witness's last frame because the original fired at some earlier frame of the same
+/// run. Every check of the replay applies; a witness that does not replay is refused with the
+/// reason, never shipped.
+pub fn sticky_witness_trace(
+    file: &crate::adapter::btor2::ast::Btor2File,
+    stdout: &str,
+) -> Result<crate::adapter::btor2::native_bmc::BmcTrace, String> {
+    use crate::adapter::btor2::ast::Node;
+    use crate::adapter::btor2::witness::{parse_btor2_witness, trace_from_witness_prefix};
+    let n_states = file
+        .lines
+        .iter()
+        .filter(|l| matches!(l.node, Node::State { .. }))
+        .count();
+    let mut w = parse_btor2_witness(stdout)?;
+    w.drop_states_from(n_states);
+    trace_from_witness_prefix(file, &w)
 }
 
 /// mununu#997 — make every `bad` STICKY: `seen` starts 0, `next(seen) = seen | bad`, and the
@@ -320,6 +371,87 @@ mod tests {
         assert_eq!(bmc_member_verdict(McVerdict::Violated), McVerdict::Violated);
         assert_eq!(bmc_member_verdict(McVerdict::Safe), McVerdict::Unknown);
         assert_eq!(bmc_member_verdict(McVerdict::Unknown), McVerdict::Unknown);
+    }
+
+    /// `s` is set after one step, `cnt` counts, `bad = s ∧ i` — the witness module's design.
+    const DESIGN: &str = "1 sort bitvec 1\n2 state 1 s\n3 zero 1\n4 init 1 2 3\n5 one 1\n\
+                          6 next 1 2 5\n7 input 1 i\n8 sort bitvec 4\n9 state 8 cnt\n10 zero 8\n\
+                          11 init 8 9 10\n12 one 8\n13 add 8 9 12\n14 next 8 9 13\n\
+                          15 and 1 2 7\n16 bad 15\n";
+
+    /// N5.4 — the sticky transform appends STATES only (one `seen` per `bad`), after the design's
+    /// own, and the subprocess emission keeps the state and input order: a sticky witness's
+    /// indices below the design's state count are the design's, and its inputs are the design's.
+    #[test]
+    fn the_sticky_model_appends_states_only_and_keeps_the_order() {
+        use crate::adapter::btor2::ast::Node;
+        use crate::adapter::btor2::{emit, parser};
+        let file = parser::parse(DESIGN).unwrap();
+        let emitted = emit::emit_btor2_for_subprocess(&file);
+        let sticky = sticky_bads(&emitted);
+        let names = |text: &str, state: bool| -> Vec<String> {
+            let f = parser::parse(text).unwrap();
+            let symbols = parser::collect_symbols(&f);
+            f.lines
+                .iter()
+                .filter(|l| match &l.node {
+                    Node::State { .. } => state,
+                    Node::Input { .. } => !state,
+                    _ => false,
+                })
+                .map(|l| symbols.get(&l.nid).cloned().unwrap_or_default())
+                .collect()
+        };
+        assert_eq!(names(DESIGN, true), vec!["s", "cnt"]);
+        assert_eq!(names(&emitted, true), vec!["s", "cnt"], "{emitted}");
+        assert_eq!(
+            names(&sticky, true),
+            vec!["s", "cnt", "mununu_bad_seen_0"],
+            "{sticky}"
+        );
+        assert_eq!(names(&sticky, false), vec!["i"]);
+        assert_eq!(
+            sticky.matches(" constraint ").count(),
+            DESIGN.matches(" constraint ").count()
+        );
+    }
+
+    /// N5.4 — a witness of the sticky model replays on the ORIGINAL design up to the first frame
+    /// that fires its `bad`: the `seen` state's lines are dropped and the frames after the firing
+    /// (where only `seen ∨ bad` holds) are cut. The same witness read as the design's own is
+    /// refused, which is why the prefix mode exists.
+    #[test]
+    fn a_sticky_witness_replays_as_the_designs_trace_up_to_the_first_firing() {
+        use crate::adapter::btor2::cex_value::CexValue;
+        use crate::adapter::btor2::parser;
+        use crate::adapter::btor2::witness::{parse_btor2_witness, trace_from_witness};
+        let file = parser::parse(DESIGN).unwrap();
+        // Frame 0: s = 0. Frame 1: s = 1, i = 1 → the original `bad` fires. Frame 2: i = 0, so
+        // only the sticky `seen` keeps the sticky bad true — what rIC3 prints for the sticky model
+        // (state 2 is `mununu_bad_seen_0`).
+        let stdout = "[INFO ] bmc depth: 2\nSAT\nsat\nb0\n#0\n0 0\n1 0000\n2 0\n@0\n0 1\n#1\n0 1\n1 0001\n2 1\n@1\n0 1\n#2\n2 1\n@2\n0 0\n.\n";
+        let trace = sticky_witness_trace(&file, stdout).expect("the sticky witness replays");
+        assert_eq!(trace.states.len(), 2, "{trace:?}");
+        assert_eq!(
+            trace.states[1],
+            vec![
+                ("cnt".to_string(), CexValue::from_u64(1, 4)),
+                ("s".to_string(), CexValue::from_u64(1, 1)),
+            ]
+        );
+        assert_eq!(
+            trace.inputs[1],
+            vec![("i".to_string(), CexValue::from_u64(1, 1))]
+        );
+        // Negative control: as the design's own witness it names a state the design lacks, and
+        // with that line dropped its last frame does not fire `bad`.
+        let w = parse_btor2_witness(stdout).unwrap();
+        let err = trace_from_witness(&file, &w).unwrap_err();
+        assert!(err.contains("state index 2 out of range"), "{err}");
+        let mut dropped = w.clone();
+        dropped.drop_states_from(2);
+        let err = trace_from_witness(&file, &dropped).unwrap_err();
+        assert!(err.contains("does not make bad #0 true"), "{err}");
     }
 
     /// mununu#997 — the dynamic step samples depths, so the member hands rIC3 a design whose bad

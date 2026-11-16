@@ -10946,6 +10946,8 @@ mod tests {
                     .to_string(),
             )],
             undecided: Vec::new(),
+            trace: None,
+            trace_replay_failed: Vec::new(),
         };
         let mut notes = Vec::new();
         attribute_portfolio_abstention(&mut prop, &reach, false, &mut notes);

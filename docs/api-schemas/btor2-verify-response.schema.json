@@ -556,6 +556,29 @@
       },
       "type": "object"
     },
+    "TraceReplayFailureView": {
+      "description": "N5.4 — one member whose own counterexample did not replay (see [`Btor2VerifyResponse::trace_replay_failed`]).",
+      "properties": {
+        "member": {
+          "description": "The member (`sat-bmc`, `ic3`, `btormc`, `ric3`, `ric3-bmc`).",
+          "type": "string"
+        },
+        "reason": {
+          "description": "Why its witness did not replay, in the replay's words.",
+          "type": "string"
+        },
+        "sole_decider": {
+          "description": "`true` when this member is the only one in `reachable_by`: the `violated` verdict rests on a counterexample the design's simulator did not confirm.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "member",
+        "reason",
+        "sole_decider"
+      ],
+      "type": "object"
+    },
     "TraceStep": {
       "description": "One step of a [`Trace`]: the state at `cycle` and what drives the step out of it.",
       "properties": {
@@ -674,7 +697,21 @@
           "type": "null"
         }
       ],
-      "description": "The counterexample: with a `target` and a `violated` verdict, the shallowest attack found (`kind: \"attack\"`, the injections on `steps[].faults`); with `witness` and a `violated` verdict, the shallowest reset → `bad` path (`kind: \"finite\"`)."
+      "description": "The counterexample: with a `target` and a `violated` verdict, the shallowest attack found (`kind: \"attack\"`, the injections on `steps[].faults`); with `witness` and a `violated` verdict, a reset → `bad` path (`kind: \"finite\"`) replayed on the concrete simulator — the deciding member's own counterexample (`trace_by`), not necessarily the shallowest; only a `native-bmc` trace is (N5.4)."
+    },
+    "trace_by": {
+      "description": "N5.4 — with `trace`: the member whose counterexample it is (`sat-bmc`, `ic3`, `btormc`, `ric3`, `ric3-bmc`, or `native-bmc` for the re-derivation). Which member is picked when several finished with one can differ between runs of one design. Absent without a trace.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "trace_replay_failed": {
+      "description": "N5.4 — with `witness`: the members that found `bad` reachable but whose OWN witness did not replay on the design (evidence against that member's verdict — an encode or emit defect, a tool's witness for a different model — or a design the simulator cannot carry; the reason says which). The verdict is unchanged; `sole_decider` marks the member whose verdict is the whole `violated`. Absent when none failed.",
+      "items": {
+        "$ref": "#/definitions/TraceReplayFailureView"
+      },
+      "type": "array"
     },
     "trace_unavailable_reason": {
       "description": "mununu#1045 — with `witness` and a `violated` verdict but no `trace`: why (the bound was searched, the time budget ran out, the design could not be encoded, …). Absent otherwise.",

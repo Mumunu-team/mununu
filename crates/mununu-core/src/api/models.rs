@@ -1137,9 +1137,16 @@ pub struct Btor2VerifyResponse {
     pub target: Option<String>,
     /// The counterexample: with a `target` and a `violated` verdict, the shallowest attack found
     /// (`kind: "attack"`, the injections on `steps[].faults`); with `witness` and a `violated`
-    /// verdict, the shallowest reset → `bad` path (`kind: "finite"`).
+    /// verdict, a reset → `bad` path (`kind: "finite"`) replayed on the concrete simulator — the
+    /// deciding member's own counterexample (`trace_by`), not necessarily the shallowest; only a
+    /// `native-bmc` trace is (N5.4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trace: Option<Trace>,
+    /// N5.4 — with `trace`: the member whose counterexample it is (`sat-bmc`, `ic3`, `btormc`,
+    /// `ric3`, `ric3-bmc`, or `native-bmc` for the re-derivation). Which member is picked when
+    /// several finished with one can differ between runs of one design. Absent without a trace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_by: Option<String>,
     /// With `witness`: the bound within which no path was re-derived although the verdict is
     /// `violated` (another engine found a deeper one).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1148,6 +1155,41 @@ pub struct Btor2VerifyResponse {
     /// searched, the time budget ran out, the design could not be encoded, …). Absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trace_unavailable_reason: Option<String>,
+    /// N5.4 — with `witness`: the members that found `bad` reachable but whose OWN witness did
+    /// not replay on the design (evidence against that member's verdict — an encode or emit
+    /// defect, a tool's witness for a different model — or a design the simulator cannot carry;
+    /// the reason says which). The verdict is unchanged; `sole_decider` marks the member whose
+    /// verdict is the whole `violated`. Absent when none failed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trace_replay_failed: Vec<TraceReplayFailureView>,
+}
+
+/// N5.4 — one member whose own counterexample did not replay (see
+/// [`Btor2VerifyResponse::trace_replay_failed`]).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct TraceReplayFailureView {
+    /// The member (`sat-bmc`, `ic3`, `btormc`, `ric3`, `ric3-bmc`).
+    pub member: String,
+    /// Why its witness did not replay, in the replay's words.
+    pub reason: String,
+    /// `true` when this member is the only one in `reachable_by`: the `violated` verdict rests on
+    /// a counterexample the design's simulator did not confirm.
+    pub sole_decider: bool,
+}
+
+impl TraceReplayFailureView {
+    /// The outcome's replay failures as the wire rows.
+    pub fn list(outcome: &crate::adapter::reach_portfolio::ReachOutcome) -> Vec<Self> {
+        outcome
+            .trace_replay_failed
+            .iter()
+            .map(|(member, reason)| Self {
+                member: (*member).to_string(),
+                reason: reason.clone(),
+                sole_decider: outcome.reachable_by.len() == 1 && outcome.reachable_by[0] == *member,
+            })
+            .collect()
+    }
 }
 
 /// Request for the response-liveness endpoint

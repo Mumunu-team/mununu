@@ -44,6 +44,7 @@ use std::time::Instant;
 
 use crate::adapter::btor2::aig::{AigModel, AigNode, Lit};
 use crate::adapter::btor2::ast::Btor2File;
+use crate::adapter::btor2::native_bmc::BmcTrace;
 use crate::adapter::btor2::sat_bmc::{btor2_witness_with_free, cell_name};
 use crate::adapter::btor2::witness::{parse_btor2_witness, trace_from_witness};
 
@@ -61,8 +62,9 @@ pub struct Ic3Options {
 /// Whether a `Violated` trace was replayed on the concrete simulator.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Replay {
-    /// The simulator reached the falsified `bad` on the trace.
-    Confirmed,
+    /// The simulator reached the falsified `bad` on the trace — carried as the replayed trace
+    /// itself (N5.4: the portfolio ships it, so no witness is re-derived).
+    Confirmed(BmcTrace),
     /// The simulator cannot carry this design (the reason says why); the trace is the SAT
     /// concretisation alone, the same trust `sat-bmc`'s traces have.
     Unavailable(String),
@@ -832,7 +834,8 @@ impl<'m> Ic3<'m> {
             initial,
             inputs,
             free_states,
-            replay: Replay::Confirmed,
+            // Set by `replayed` before the outcome leaves `ic3`; never shipped as is.
+            replay: Replay::Unavailable("not replayed yet".to_string()),
         })
     }
 
@@ -985,7 +988,7 @@ fn replayed(file: &Btor2File, model: &AigModel, out: Ic3Outcome, frames: u32) ->
         .chain(model.inputs.iter().map(|i| i.leaves.len()))
         .any(|w| w > 128);
     let replay = match parse_btor2_witness(&witness).and_then(|w| trace_from_witness(file, &w)) {
-        Ok(_) => Replay::Confirmed,
+        Ok(trace) => Replay::Confirmed(trace),
         Err(why) if too_wide => Replay::Unavailable(format!(
             "the concrete simulator carries 128-bit cells; this design has a wider one ({why})"
         )),
@@ -1134,7 +1137,7 @@ mod tests {
                 assert_eq!((depth, bad_index), (7, 0));
                 assert_eq!(initial, vec![("c".to_string(), 0)]);
                 assert_eq!(inputs.len(), 8);
-                assert_eq!(replay, Replay::Confirmed);
+                assert!(matches!(replay, Replay::Confirmed(_)), "{replay:?}");
             }
             other => panic!("{other:?}"),
         }
@@ -1175,7 +1178,7 @@ mod tests {
                         .all(|fr| fr == &vec![("go".to_string(), 1)]),
                     "{inputs:?}"
                 );
-                assert_eq!(replay, Replay::Confirmed);
+                assert!(matches!(replay, Replay::Confirmed(_)), "{replay:?}");
             }
             other => panic!("{other:?}"),
         }
@@ -1317,7 +1320,7 @@ mod tests {
             } => {
                 assert_eq!((depth, initial), (1, vec![("c".to_string(), 0)]));
                 assert_eq!(free_states, vec![vec![("c".to_string(), 5)]]);
-                assert_eq!(replay, Replay::Confirmed);
+                assert!(matches!(replay, Replay::Confirmed(_)), "{replay:?}");
             }
             other => panic!("{other:?}"),
         }
@@ -1342,7 +1345,7 @@ mod tests {
                 assert_eq!(depth, 1);
                 assert_eq!(initial, vec![("a".to_string(), 0), ("f".to_string(), 0)]);
                 assert_eq!(free_states, vec![vec![("f".to_string(), 5)]]);
-                assert_eq!(replay, Replay::Confirmed);
+                assert!(matches!(replay, Replay::Confirmed(_)), "{replay:?}");
             }
             other => panic!("{other:?}"),
         }
