@@ -2736,22 +2736,43 @@ mod tests {
         );
     }
 
+    /// Two runs of the shipped portfolio on the same design agree in everything but the
+    /// finish order: the in-process members (`exact`, `native`, `sat-bmc`, and `ic3` on a host
+    /// without rIC3 since N5.5) race, and which of them has finished when the first verdict
+    /// cancels the rest is timing-dependent. The verdict, the refusals, the abstentions and the
+    /// trace are not, and every decider is a shipped member.
+    fn agree_up_to_finish_order(a: &ReachOutcome, b: &ReachOutcome) {
+        assert_eq!(a.verdict, b.verdict, "{a:?}\n{b:?}");
+        assert_eq!(a.refused, b.refused);
+        assert_eq!(a.abstained, b.abstained);
+        assert_eq!(a.undecided, b.undecided);
+        assert_eq!(a.trace, b.trace);
+        assert_eq!(a.trace_replay_failed, b.trace_replay_failed);
+        let shipped = ReachMembers::shipped().names();
+        for out in [a, b] {
+            assert!(
+                !out.reachable_by.is_empty() || !out.unreachable_by.is_empty(),
+                "{out:?}"
+            );
+            for m in out.reachable_by.iter().chain(&out.unreachable_by) {
+                assert!(shipped.contains(m), "{m} is not a shipped member: {out:?}");
+            }
+        }
+    }
+
     #[test]
     fn default_driver_is_the_explicit_budget_driver_at_the_default_budget() {
         // S1 retired the sequential driver: `decide_reach_portfolio` IS the parallel,
         // cancelling driver at the default subprocess budget. With no subprocess
-        // members on PATH both reduce to the exact-only verdict; the point is they
-        // agree byte-for-byte.
+        // members on PATH both reduce to the owned verdict; the point is they agree
+        // (up to the finish order, which the race decides).
         const COUNTER: &str = "1 sort bitvec 3\n2 zero 1\n3 state 1\n4 init 1 3 2\n5 one 1\n\
                                6 add 1 3 5\n7 next 1 3 6\n8 ones 1\n9 sort bitvec 1\n\
                                10 eq 9 3 8\n11 bad 10\n";
         let file = parser::parse(COUNTER).expect("parse");
         let default = decide_reach_portfolio(&file);
         let explicit = decide_reach_portfolio_parallel_with_timeout(&file, btormc::DEFAULT_TIMEOUT);
-        assert_eq!(
-            default, explicit,
-            "the default driver is the explicit-budget one"
-        );
+        agree_up_to_finish_order(&default, &explicit);
         assert_eq!(default.verdict, ReachVerdict::Reachable);
     }
 
@@ -2769,10 +2790,7 @@ mod tests {
             &file,
             std::time::Duration::from_secs(120),
         );
-        assert_eq!(
-            default, custom,
-            "budget override must not change an exact-decided verdict"
-        );
+        agree_up_to_finish_order(&default, &custom);
         assert_eq!(custom.verdict, ReachVerdict::Reachable);
     }
 
