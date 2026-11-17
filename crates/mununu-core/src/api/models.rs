@@ -1076,6 +1076,11 @@ pub struct Btor2VerifyRequest {
     /// The BMC bound for `witness` (the CLI's `--witness-max-k`, default 200).
     #[serde(default)]
     pub witness_max_k: Option<u32>,
+    /// mununu#1045 — the wall for the whole request, milliseconds (the CLI's `--timeout-ms`): the
+    /// portfolio runs under it and the `witness` re-derivation on what it left. Absent = no wall
+    /// beyond the members' own defaults.
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
 }
 
 /// One injection of an attack witness (`attack[]`).
@@ -1112,6 +1117,15 @@ pub struct Btor2VerifyResponse {
     /// abstained.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub refused: Vec<MemberRefusalView>,
+    /// mununu#1022 — the members that abstained on a budget (a resource limit, a wall clock, or
+    /// still running at the owned-only deadline), each with its cause. Absent when none did.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub abstained: Vec<MemberRefusalView>,
+    /// mununu#1022 — the members that searched to their own bound without a verdict, each with
+    /// how far it got (native: the depth and k reached). Absent when none did; a member cancelled
+    /// after another decided is in no list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub undecided: Vec<MemberRefusalView>,
     /// The single engine's own diagnosis under `engine: "cube"`, when it has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
@@ -1123,13 +1137,59 @@ pub struct Btor2VerifyResponse {
     pub target: Option<String>,
     /// The counterexample: with a `target` and a `violated` verdict, the shallowest attack found
     /// (`kind: "attack"`, the injections on `steps[].faults`); with `witness` and a `violated`
-    /// verdict, the shallowest reset → `bad` path (`kind: "finite"`).
+    /// verdict, a reset → `bad` path (`kind: "finite"`) replayed on the concrete simulator — the
+    /// deciding member's own counterexample (`trace_by`), not necessarily the shallowest; only a
+    /// `native-bmc` trace is (N5.4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trace: Option<Trace>,
+    /// N5.4 — with `trace`: the member whose counterexample it is (`sat-bmc`, `ic3`, `btormc`,
+    /// `ric3`, `ric3-bmc`, or `native-bmc` for the re-derivation). Which member is picked when
+    /// several finished with one can differ between runs of one design. Absent without a trace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_by: Option<String>,
     /// With `witness`: the bound within which no path was re-derived although the verdict is
     /// `violated` (another engine found a deeper one).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trace_unavailable_within_k: Option<u32>,
+    /// mununu#1045 — with `witness` and a `violated` verdict but no `trace`: why (the bound was
+    /// searched, the time budget ran out, the design could not be encoded, …). Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_unavailable_reason: Option<String>,
+    /// N5.4 — with `witness`: the members that found `bad` reachable but whose OWN witness did
+    /// not replay on the design (evidence against that member's verdict — an encode or emit
+    /// defect, a tool's witness for a different model — or a design the simulator cannot carry;
+    /// the reason says which). The verdict is unchanged; `sole_decider` marks the member whose
+    /// verdict is the whole `violated`. Absent when none failed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trace_replay_failed: Vec<TraceReplayFailureView>,
+}
+
+/// N5.4 — one member whose own counterexample did not replay (see
+/// [`Btor2VerifyResponse::trace_replay_failed`]).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct TraceReplayFailureView {
+    /// The member (`sat-bmc`, `ic3`, `btormc`, `ric3`, `ric3-bmc`).
+    pub member: String,
+    /// Why its witness did not replay, in the replay's words.
+    pub reason: String,
+    /// `true` when this member is the only one in `reachable_by`: the `violated` verdict rests on
+    /// a counterexample the design's simulator did not confirm.
+    pub sole_decider: bool,
+}
+
+impl TraceReplayFailureView {
+    /// The outcome's replay failures as the wire rows.
+    pub fn list(outcome: &crate::adapter::reach_portfolio::ReachOutcome) -> Vec<Self> {
+        outcome
+            .trace_replay_failed
+            .iter()
+            .map(|(member, reason)| Self {
+                member: (*member).to_string(),
+                reason: reason.clone(),
+                sole_decider: outcome.reachable_by.len() == 1 && outcome.reachable_by[0] == *member,
+            })
+            .collect()
+    }
 }
 
 /// Request for the response-liveness endpoint
@@ -1732,6 +1792,8 @@ pub struct SvLiftRequest {
     pub cutpoints: Vec<String>,
     /// Lift a multi-clock design onto the model's one implicit clock instead of refusing it.
     /// An UNDER-approximation: the domains only ever tick together, so a HOLDS does not transfer.
+    /// Also lets through a design clocked only by a derived (gated, divided, muxed) clock, which
+    /// then ticks on every step.
     #[serde(default)]
     pub merge_clock_domains: bool,
 }
@@ -2679,6 +2741,7 @@ impl From<&crate::adapter::slang::verify_auto::AutoVerifyReport> for SvVerifyAut
                             decided_by: a.decided_by.clone(),
                             refused: views(&a.refused),
                             abstained: views(&a.abstained),
+                            undecided: views(&a.undecided),
                         }
                     }),
                     // A `⊥` ALWAYS carries a reason, with `unclassified-bottom` as the floor.
@@ -2993,8 +3056,9 @@ pub struct ModelDiagnosticsView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lift_retry: Option<String>,
     /// The clock domains `merge_clock_domains` lifted onto one clock, each
-    /// `"<net> (<edge>, <n> cells)"`; empty for a single-clock design. Non-empty means every
-    /// verdict assumes the domains tick together (the `clock-domains-merged` note).
+    /// `"<net> (<edge>, <n> cells)"`, a derived clock suffixed `", derived: driven by \`<cell>\`"`;
+    /// empty for a design on one root clock. Non-empty means every verdict assumes the domains
+    /// tick together, and a derived one on every step (the `clock-domains-merged` note).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub merged_clock_domains: Vec<String>,
     /// mununu#536 — config inputs pinned for this run, each `"<signal>=<value>"`. A verdict
@@ -3349,6 +3413,10 @@ pub struct PortfolioAttributionView {
     /// a larger budget may decide the row. Absent on older reports; empty when none stopped.
     #[serde(default)]
     pub abstained: Vec<MemberRefusalView>,
+    /// mununu#1022 — the members that searched to their own bound without a verdict, each with
+    /// how far it got. Absent on older reports; empty when none did.
+    #[serde(default)]
+    pub undecided: Vec<MemberRefusalView>,
 }
 
 /// mununu#873 — one portfolio member's refusal of a design (mununu#893: also one member's budget
@@ -3362,9 +3430,21 @@ pub struct MemberRefusalView {
 impl MemberRefusalView {
     /// The refusals a reach portfolio recorded, in its reporting order.
     pub fn list(reach: &crate::adapter::reach_portfolio::ReachOutcome) -> Vec<Self> {
-        reach
-            .refused
-            .iter()
+        Self::of(&reach.refused)
+    }
+
+    /// mununu#1022 — the budget abstentions a reach portfolio recorded.
+    pub fn list_abstained(reach: &crate::adapter::reach_portfolio::ReachOutcome) -> Vec<Self> {
+        Self::of(&reach.abstained)
+    }
+
+    /// mununu#1022 — the members that searched to their bound, with their progress.
+    pub fn list_undecided(reach: &crate::adapter::reach_portfolio::ReachOutcome) -> Vec<Self> {
+        Self::of(&reach.undecided)
+    }
+
+    fn of(list: &[(&'static str, String)]) -> Vec<Self> {
+        list.iter()
             .map(|(member, reason)| Self {
                 member: (*member).to_string(),
                 reason: reason.clone(),
@@ -3533,6 +3613,7 @@ mod bottom_reason_view_tests {
                     decided_by: Vec::new(),
                     refused: vec![("exact".into(), "over cap".into())],
                     abstained: vec![("native".into(), "resource limit at depth 2".into())],
+                    undecided: vec![("interp".into(), "no fixpoint within 24 iterations".into())],
                 }),
                 ..bottom_prop(None)
             }],
@@ -3548,6 +3629,11 @@ mod bottom_reason_view_tests {
         assert_eq!(
             json["properties"][0]["portfolio"]["abstained"][0]["member"],
             "native"
+        );
+        // mununu#1022 — a member that searched to its bound reaches the row with its progress.
+        assert_eq!(
+            json["properties"][0]["portfolio"]["undecided"][0]["reason"],
+            "no fixpoint within 24 iterations"
         );
     }
 

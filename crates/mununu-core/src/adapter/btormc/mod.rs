@@ -197,6 +197,19 @@ pub fn run_btormc_cancellable(
     timeout: Duration,
     cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<McVerdict, AdapterError> {
+    run_btormc_with_output(bin, btor2, kmax, timeout, cancel).map(|(v, _)| v)
+}
+
+/// [`run_btormc_cancellable`] with btormc's stdout kept: on `sat` it holds the BTOR2 witness
+/// (btormc prints one by default), which N5.4 carries out of the portfolio. A timeout or a
+/// cancellation is `(Unknown, "")`.
+pub fn run_btormc_with_output(
+    bin: &BtormcBin,
+    btor2: &str,
+    kmax: u32,
+    timeout: Duration,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<(McVerdict, String), AdapterError> {
     let mut command = Command::new(&bin.path);
     command.arg("--kind").arg("-kmax").arg(kmax.to_string());
     let outcome = crate::adapter::run_with_timeout_cancellable(
@@ -215,7 +228,7 @@ pub fn run_btormc_cancellable(
     })?;
     // Timed out ⇒ inconclusive (never a wrong verdict).
     let Some((status, stdout, stderr)) = outcome else {
-        return Ok(McVerdict::Unknown);
+        return Ok((McVerdict::Unknown, String::new()));
     };
 
     // MULTI-PROPERTY SOUNDNESS FIX — `--kind` reports per property and may STOP after
@@ -245,7 +258,7 @@ pub fn run_btormc_cancellable(
         });
     }
 
-    Ok(verdict)
+    Ok((verdict, stdout))
 }
 
 /// The L2-seam → subprocess decide path: emit a (possibly reduced / transformed)
@@ -269,9 +282,23 @@ pub fn decide_via_btormc(
 ) -> Result<McVerdict, AdapterError> {
     // mununu#736 — constants hoisted before the states: btor2tools' parser needs an `init`
     // value's id below the state's, and the automatic reset-value `init` appends its constant.
+    decide_via_btormc_with_output(file, kmax, timeout, cancel).map(|(v, _)| v)
+}
+
+/// [`decide_via_btormc`] with btormc's stdout kept — on `sat` the BTOR2 witness of the emitted
+/// design, whose state and input order is the file's (the emitter renumbers only), so
+/// [`crate::adapter::btor2::witness::trace_from_witness`] replays it on `file` (N5.4).
+pub fn decide_via_btormc_with_output(
+    file: &crate::adapter::btor2::ast::Btor2File,
+    kmax: u32,
+    timeout: Duration,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<(McVerdict, String), AdapterError> {
+    // mununu#736 — constants hoisted before the states: btor2tools' parser needs an `init`
+    // value's id below the state's, and the automatic reset-value `init` appends its constant.
     let btor2 = crate::adapter::btor2::emit::emit_btor2_for_subprocess(file);
     let bin = locate_btormc()?;
-    run_btormc_cancellable(&bin, &btor2, kmax, timeout, cancel)
+    run_btormc_with_output(&bin, &btor2, kmax, timeout, cancel)
 }
 
 #[cfg(test)]

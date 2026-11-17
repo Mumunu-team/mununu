@@ -845,7 +845,7 @@ pub async fn btor2_verify_handler(
 }
 
 fn btor2_verify_handler_impl(request: Btor2VerifyRequest) -> ApiResult<Json<Btor2VerifyResponse>> {
-    use crate::adapter::reach_portfolio::{ReachVerdict, decide_reach_portfolio};
+    use crate::adapter::reach_portfolio::ReachVerdict;
 
     let file = crate::adapter::btor2::parser::parse(&request.content).map_err(|e| {
         ApiError::BadRequest {
@@ -882,11 +882,16 @@ fn btor2_verify_handler_impl(request: Btor2VerifyRequest) -> ApiResult<Json<Btor
                 unreachable_by: by(crate::verdict::PropertyVerdict::Holds),
                 contradiction: false,
                 refused: Vec::new(),
+                abstained: Vec::new(),
+                undecided: Vec::new(),
                 detail,
                 fault: None,
                 target: None,
                 trace: None,
                 trace_unavailable_within_k: None,
+                trace_by: None,
+                trace_unavailable_reason: None,
+                trace_replay_failed: Vec::new(),
             }));
         }
         Some(other) => {
@@ -913,11 +918,14 @@ fn btor2_verify_handler_impl(request: Btor2VerifyRequest) -> ApiResult<Json<Btor
             request.fault_warmup.unwrap_or(10),
         )
         .map_err(bad)?;
+        // `timeout_ms` bounds the attack's trace search (it polls this thread's budget).
+        let budget = crate::adapter::run_budget::Budget::with_ms_opt(request.timeout_ms);
+        let _budget = crate::adapter::run_budget::enter(&budget);
         let o = crate::adapter::fault_adversary::verify_fault_reach(
             &request.content,
             &spec,
             Some(target),
-            200,
+            request.witness_max_k.unwrap_or(200),
         )
         .map_err(bad)?;
         return Ok(Json(Btor2VerifyResponse {
@@ -934,11 +942,19 @@ fn btor2_verify_handler_impl(request: Btor2VerifyRequest) -> ApiResult<Json<Btor
             },
             contradiction: false,
             refused: Vec::new(),
+            abstained: Vec::new(),
+            undecided: Vec::new(),
             detail: None,
             fault: Some(o.fault),
             target: o.target,
-            trace: (o.verdict == "violated").then(|| Trace::attack(o.depth, &o.attack)),
+            // An attack trace only when one was found (an empty `attack` trace on a `violated`
+            // verdict used to ship when the search missed); otherwise the reason.
+            trace: (o.verdict == "violated" && o.depth.is_some())
+                .then(|| Trace::attack(o.depth, &o.attack)),
             trace_unavailable_within_k: None,
+            trace_by: o.trace_by.map(str::to_string),
+            trace_unavailable_reason: o.trace_unavailable_reason,
+            trace_replay_failed: Vec::new(),
         }));
     }
     // `faults`: the fault-injection rewrite before any engine (the CLI `--fault`).
@@ -967,20 +983,47 @@ fn btor2_verify_handler_impl(request: Btor2VerifyRequest) -> ApiResult<Json<Btor
             .0
     };
 
-    let outcome = decide_reach_portfolio(&file);
-    // `witness`: on a violation, the shallowest reset → `bad` path, re-derived by native BMC.
-    let (trace, trace_unavailable_within_k) =
-        if request.witness && outcome.verdict == ReachVerdict::Reachable {
-            let k = request.witness_max_k.unwrap_or(200);
-            match crate::adapter::btor2::witness::bad_reachable_witness_routed(&file, k) {
-                Ok((crate::adapter::btor2::native_bmc::BmcOutcome::Violated { .. }, Some(t))) => {
-                    (Some(Trace::from_bmc(&t)), None)
-                }
-                _ => (None, Some(k)),
-            }
-        } else {
-            (None, None)
-        };
+    // mununu#1045 — `timeout_ms` (the CLI's `--timeout-ms`) bounds the whole request: the
+    // portfolio's wall, and the `witness` re-derivation runs on what it left. Absent = the
+    // previous unbounded behaviour.
+    let deadline = request
+        .timeout_ms
+        .map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+    // N5.4 — with `witness` the members carry the deciding member's counterexample out of the
+    // run (`ReachMembers::witness`); without it every member runs its default path, as before.
+    let outcome = crate::adapter::reach_portfolio::decide_reach_portfolio_with_members(
+        &file,
+        request
+            .timeout_ms
+            .map(std::time::Duration::from_millis)
+            .unwrap_or(crate::adapter::btormc::DEFAULT_TIMEOUT),
+        None,
+        crate::adapter::reach_portfolio::ReachMembers::shipped().with_witness(request.witness),
+    );
+    // `witness`: on a violation, the reset → `bad` path the deciding member carried out (N5.4,
+    // `trace_by`), else re-derived (the trace carriers again, then native BMC); without one,
+    // `trace_unavailable_reason` says why.
+    let witness = (request.witness && outcome.verdict == ReachVerdict::Reachable).then(|| {
+        crate::adapter::btor2::witness::witness_for_violation(
+            &file,
+            request.witness_max_k.unwrap_or(200),
+            deadline,
+            &outcome,
+            false,
+        )
+    });
+    let trace = witness
+        .as_ref()
+        .and_then(|w| w.trace.as_ref())
+        .map(Trace::from_bmc);
+    let trace_by = witness.as_ref().and_then(|w| w.by.map(str::to_string));
+    let trace_unavailable_within_k = witness.as_ref().and_then(|w| w.unavailable_within_k);
+    let trace_unavailable_reason = witness.and_then(|w| w.unavailable_reason);
+    let trace_replay_failed = if request.witness {
+        crate::api::models::TraceReplayFailureView::list(&outcome)
+    } else {
+        Vec::new()
+    };
     Ok(Json(Btor2VerifyResponse {
         outcome: crate::verdict::PropertyVerdict::from(outcome.verdict)
             .as_str()
@@ -993,11 +1036,16 @@ fn btor2_verify_handler_impl(request: Btor2VerifyRequest) -> ApiResult<Json<Btor
             .collect(),
         contradiction: outcome.verdict == ReachVerdict::Contradiction,
         refused: crate::api::models::MemberRefusalView::list(&outcome),
+        abstained: crate::api::models::MemberRefusalView::list_abstained(&outcome),
+        undecided: crate::api::models::MemberRefusalView::list_undecided(&outcome),
         detail: None,
         fault: fault_label,
         target: None,
         trace,
+        trace_by,
         trace_unavailable_within_k,
+        trace_unavailable_reason,
+        trace_replay_failed,
     }))
 }
 
@@ -1596,11 +1644,16 @@ fn sv_verify_handler_impl(request: SvVerifyRequest) -> ApiResult<Json<Btor2Verif
             .collect(),
         contradiction: outcome.verdict == ReachVerdict::Contradiction,
         refused: crate::api::models::MemberRefusalView::list(&outcome),
+        abstained: crate::api::models::MemberRefusalView::list_abstained(&outcome),
+        undecided: crate::api::models::MemberRefusalView::list_undecided(&outcome),
         detail: None,
         fault: None,
         target: None,
         trace: None,
         trace_unavailable_within_k: None,
+        trace_by: None,
+        trace_unavailable_reason: None,
+        trace_replay_failed: Vec::new(),
     }))
 }
 
@@ -5682,6 +5735,7 @@ members = ["x"]
             target: None,
             witness: false,
             witness_max_k: None,
+            timeout_ms: None,
             engine: None,
         };
         let Json(out) = btor2_verify_handler(Json(request))
@@ -5714,6 +5768,7 @@ members = ["x"]
             target: None,
             witness: false,
             witness_max_k: None,
+            timeout_ms: None,
             engine: Some(engine.to_string()),
         };
         let Json(out) = btor2_verify_handler(Json(request("cube")))
@@ -5741,12 +5796,51 @@ members = ["x"]
             target: None,
             witness: false,
             witness_max_k: None,
+            timeout_ms: None,
             engine: None,
         };
         let err = btor2_verify_handler(Json(request))
             .await
             .expect_err("malformed BTOR2 must be rejected");
         assert!(matches!(err, ApiError::BadRequest { .. }));
+    }
+
+    /// mununu#1045 → N5.4 — the API peer of `--timeout-ms --witness`: the request's wall bounds
+    /// the call, and the trace is the deciding member's own, carried out of the portfolio and
+    /// named by `trace_by` — here a counterexample 40 steps deep ships although the native
+    /// re-derivation bound is 5 (before N5.4 this request shipped `trace: null`, "no path within
+    /// 5 cycles"). No member's witness failed to replay.
+    #[tokio::test]
+    async fn btor2_verify_handler_ships_the_carried_trace_and_names_the_member() {
+        // `cnt == 40` is 40 steps deep; the witness bound is 5.
+        let btor2 = "1 sort bitvec 8\n2 sort bitvec 1\n3 state 1 cnt\n4 zero 1\n5 init 1 3 4\n\
+                     6 one 1\n7 add 1 3 6\n8 next 1 3 7\n9 constd 1 40\n10 eq 2 3 9\n11 bad 10\n";
+        let request = Btor2VerifyRequest {
+            content: btor2.to_string(),
+            faults: vec![],
+            fault_warmup: None,
+            target: None,
+            witness: true,
+            witness_max_k: Some(5),
+            timeout_ms: Some(60_000),
+            engine: None,
+        };
+        let Json(resp) = btor2_verify_handler(Json(request)).await.unwrap();
+        assert_eq!(resp.outcome, "violated");
+        assert!(
+            resp.trace_replay_failed.is_empty(),
+            "{:?}",
+            resp.trace_replay_failed
+        );
+        let trace = resp.trace.expect("a carried trace (the deciding member's)");
+        assert_eq!(trace.steps.len(), 41, "reset .. the frame where cnt == 40");
+        let by = resp.trace_by.expect("the member that carried it");
+        assert!(
+            ["sat-bmc", "ic3", "btormc", "ric3", "ric3-bmc"].contains(&by.as_str()),
+            "{by}"
+        );
+        assert_eq!(resp.trace_unavailable_within_k, None);
+        assert_eq!(resp.trace_unavailable_reason, None);
     }
 
     // A 4-state staller: st 0=idle,1=req,3=stuck; 2=grant unreachable. req -> stuck ->

@@ -295,6 +295,9 @@ pub struct PortfolioAttribution {
     /// (more budget may decide it) and not a clean unknown (the member did not search to its
     /// bound).
     pub abstained: Vec<(String, String)>,
+    /// mununu#1022 — `(member, progress)` for every member that searched to its own bound
+    /// without a verdict (native: the depth and k reached).
+    pub undecided: Vec<(String, String)>,
 }
 
 impl PortfolioAttribution {
@@ -308,6 +311,7 @@ impl PortfolioAttribution {
             decided_by: engines_of(reach).into_iter().map(str::to_string).collect(),
             refused: owned(&reach.refused),
             abstained: owned(&reach.abstained),
+            undecided: owned(&reach.undecided),
         }
     }
 }
@@ -552,8 +556,9 @@ pub struct ModelDiagnostics {
     /// run succeeded (every lift that succeeded before 2026-10-22 is byte-identical).
     pub lift_retry: Option<String>,
     /// The clock domains the lift MERGED onto the model's one implicit clock, each
-    /// `"<net> (<edge>, <n> cells)"` — non-empty only when the design has more than one domain
-    /// and `--merge-clock-domains` let it through (otherwise the lift refuses it). Every verdict
+    /// `"<net> (<edge>, <n> cells)"` — non-empty only when the design has more than one domain,
+    /// or one DERIVED domain (`…, derived: driven by \`$and\``, roadmap B2), and
+    /// `--merge-clock-domains` let it through (otherwise the lift refuses it). Every verdict
     /// then holds only for runs where all domains tick together (the `clock-domains-merged`
     /// soundness caveat).
     pub merged_clock_domains: Vec<String>,
@@ -2550,21 +2555,31 @@ fn build_notes(
     // The lift rerun its yosys script with `opt_clean` after the BTOR backend reported a
     // topological loop (2026-10-22, OpenTitan csrng through yosys-slang's `$buf` cells). Info:
     // the model is the same design, and a reader diffing two runs wants to know the script moved.
-    if d.merged_clock_domains.len() > 1 {
+    if !d.merged_clock_domains.is_empty() {
         notes.push(VerificationNote {
             kind: "clock-domains-merged".into(),
             level: NoteLevel::SoundnessCaveat,
-            summary: format!(
-                "lift: {} clock domains merged onto one clock — every verdict assumes they tick \
-                 together.",
-                d.merged_clock_domains.len()
-            ),
+            summary: if d.merged_clock_domains.len() > 1 {
+                format!(
+                    "lift: {} clock domains merged onto one clock — every verdict assumes they \
+                     tick together.",
+                    d.merged_clock_domains.len()
+                )
+            } else {
+                // Roadmap B2 — one domain, on a derived clock.
+                "lift: a derived clock merged onto the model's clock — every verdict assumes it \
+                 ticks on every step."
+                    .to_string()
+            },
             detail: "`--merge-clock-domains` lifted a multi-clock design onto the model's one \
                      implicit clock. That is an UNDER-approximation of the real interleavings: a \
                      crossing defect that needs one domain to tick while another does not (a \
                      lost pulse, an incoherent multi-bit bus) cannot occur in this model, so a \
                      HOLDS does not transfer to the design. A VIOLATED is a run of the design in \
-                     which the domains happen to tick together."
+                     which the domains happen to tick together. A domain marked `derived` (a \
+                     gated, divided or muxed clock) ticks here on every step: for a gated clock \
+                     that is the run where the enable stays high; a divided clock cannot tick \
+                     every step, so neither verdict transfers."
                 .to_string(),
             items: d.merged_clock_domains.clone(),
             property: None,
@@ -5928,7 +5943,9 @@ pub(crate) fn prepare_model(
     let mut trace_names = trace_names;
     fill_declarations(&mut trace_names, &declarations);
     report.diagnostics.trace_names = trace_names;
-    if clock_domains.len() > 1 {
+    // Roadmap B2 — a lone DERIVED domain (a gated or divided clock) that `--merge-clock-domains`
+    // let through is merged onto the model's clock as surely as a second domain is.
+    if clock_domains.len() > 1 || clock_domains.iter().any(|d| d.derived_from.is_some()) {
         report.diagnostics.merged_clock_domains = clock_domains
             .iter()
             .map(|d| crate::adapter::yosys::describe_clock_domains(std::slice::from_ref(d)))
@@ -9621,7 +9638,22 @@ fn attribute_portfolio_abstention(
             abstentions.join("; ")
         ),
     };
-    let items: Vec<String> = refusals.into_iter().chain(abstentions).collect();
+    // mununu#1022 — how far each member that searched to its bound got, after the reasons above.
+    let progress: Vec<String> = reach
+        .undecided
+        .iter()
+        .map(|(member, how_far)| format!("{member} undecided: {how_far}"))
+        .collect();
+    let detail = if progress.is_empty() {
+        detail
+    } else {
+        format!("{detail}; {}", progress.join("; "))
+    };
+    let items: Vec<String> = refusals
+        .into_iter()
+        .chain(abstentions)
+        .chain(progress)
+        .collect();
     prop.bottom_reason = Some(BottomReason::EngineDidNotComplete {
         engine: "reach-portfolio".to_string(),
         detail: detail.clone(),
@@ -10797,7 +10829,7 @@ mod tests {
             assert!(
                 members
                     .iter()
-                    .any(|m| ["btormc", "pono", "ric3"].contains(&m.as_str())),
+                    .any(|m| ["btormc", "pono", "ric3", "ric3-bmc"].contains(&m.as_str())),
                 "decided by a subprocess member: {members:?} ({p:?})"
             );
             return;
@@ -10913,6 +10945,9 @@ mod tests {
                  5000 ms nominal) ran out at depth 2"
                     .to_string(),
             )],
+            undecided: Vec::new(),
+            trace: None,
+            trace_replay_failed: Vec::new(),
         };
         let mut notes = Vec::new();
         attribute_portfolio_abstention(&mut prop, &reach, false, &mut notes);
@@ -10938,6 +10973,53 @@ mod tests {
         assert!(a.refused.is_empty());
         assert_eq!(a.abstained.len(), 1);
         assert_eq!(a.abstained[0].0, "native");
+    }
+
+    /// mununu#1022 — a ⊥ row whose portfolio members all searched to their bounds says how far
+    /// each got, in the bottom reason, the note's items and the attribution.
+    #[test]
+    fn a_portfolio_bottom_names_how_far_each_undecided_member_got() {
+        use crate::adapter::reach_portfolio::{ReachOutcome, ReachVerdict};
+        let mut prop = PropertyVerdict {
+            name: "p".to_string(),
+            label: None,
+            kind: crate::adapter::slang::translate::SvaKind::Assert,
+            formula: "AG p".to_string(),
+            outcome: VerifyOutcome::Unknown { unknown_cells: 0 },
+            seeded_predicates: Vec::new(),
+            counterexample: None,
+            bottom_reason: None,
+            decided_by: None,
+            vacuity: None,
+            portfolio: None,
+        };
+        let reach = ReachOutcome {
+            verdict: ReachVerdict::Unknown,
+            undecided: vec![(
+                "native",
+                "BMC found no counterexample through depth 40 and k-induction found no proof up \
+                 to k = 40 (bound 40)"
+                    .to_string(),
+            )],
+            ..Default::default()
+        };
+        let mut notes = Vec::new();
+        attribute_portfolio_abstention(&mut prop, &reach, false, &mut notes);
+        match &prop.bottom_reason {
+            Some(BottomReason::EngineDidNotComplete { detail, .. }) => {
+                assert!(
+                    detail.contains("native undecided") && detail.contains("depth 40"),
+                    "{detail}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(
+            notes[0].items.iter().any(|i| i.contains("k = 40")),
+            "{:?}",
+            notes[0].items
+        );
+        assert_eq!(PortfolioAttribution::of(&reach).undecided.len(), 1);
     }
 
     /// PR C — the classifier agrees with the reducers: a bounded chain and a chain ending in a

@@ -40,6 +40,16 @@
         "null"
       ]
     },
+    "timeout_ms": {
+      "default": null,
+      "description": "mununu#1045 — the wall for the whole request, milliseconds (the CLI's `--timeout-ms`): the portfolio runs under it and the `witness` re-derivation on what it left. Absent = no wall beyond the members' own defaults.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
     "witness": {
       "default": false,
       "description": "On a `violated` verdict, re-derive the shallowest reset → `bad` path with native BMC and return it as `trace` (the CLI's `--witness`). Default `false`.",

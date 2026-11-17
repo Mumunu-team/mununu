@@ -426,6 +426,10 @@ fn l2s_undecided_note(
     for (member, why) in &outcome.abstained {
         note.push_str(&format!("; {member} abstained: {why}"));
     }
+    // mununu#1022 — and how far each member that searched to its bound got.
+    for (member, how_far) in &outcome.undecided {
+        note.push_str(&format!("; {member} undecided: {how_far}"));
+    }
     note
 }
 
@@ -518,7 +522,7 @@ pub fn verify_justice_with(
                                 lits,
                                 total,
                                 Some(cancel),
-                                crate::adapter::reach_portfolio::ReachMembers::CANCELLABLE,
+                                crate::adapter::reach_portfolio::ReachMembers::cancellable(),
                             );
                             let r = if v == PropertyVerdict::Unknown {
                                 Err(n.join(" | "))
@@ -1008,9 +1012,14 @@ mod policy_tests {
         let outcome = crate::adapter::reach_portfolio::ReachOutcome {
             refused: vec![("pono", "array sort unsupported".to_string())],
             abstained: vec![("native", "resource limit at depth 9".to_string())],
+            undecided: vec![("interp", "no fixpoint within 24 iterations".to_string())],
             ..Default::default()
         };
         let note = l2s_undecided_note(None, &outcome);
+        assert!(
+            note.contains("interp undecided: no fixpoint within 24 iterations"),
+            "{note}"
+        );
         assert!(note.contains("60 s per subprocess member"), "{note}");
         assert!(note.contains("--timeout-ms"), "{note}");
         assert!(

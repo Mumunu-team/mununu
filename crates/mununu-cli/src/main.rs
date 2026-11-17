@@ -851,6 +851,19 @@ enum SafetyEngineArg {
     Ic3,
 }
 
+/// N5.0 — which engine `btor2 verify --bmc-only` runs.
+#[derive(Clone, Debug, Copy, clap::ValueEnum, Default, PartialEq, Eq)]
+enum BmcEngineArg {
+    /// Native bit-precise BMC on z3 (QF_BV).
+    #[default]
+    Native,
+    /// The owned bit-level BMC: AIG → CNF → CaDiCaL (N5.0).
+    Sat,
+    /// The same engine with the dynamic step (item 6, C1): one query per growing window of
+    /// depths under a conflict budget, for deep counterexamples behind hard shallow frames.
+    SatDyn,
+}
+
 /// R-F5.4.2b (2026-07-03) — which predicate-cube engine evaluates the
 /// property. Mirrors the two edge-construction strategies.
 #[derive(Clone, Debug, Copy, clap::ValueEnum, Default, PartialEq, Eq)]
@@ -1139,11 +1152,15 @@ struct Btor2VerifyArgs {
     #[arg(long, value_name = "MS")]
     timeout_ms: Option<u64>,
     /// On a `violated` verdict, also emit a concrete init→bad counterexample trace
-    /// (per-cycle state + input assignments) in the summary JSON. Re-derives the
-    /// SHALLOWEST witness via the native bit-precise BMC engine (bounded to
-    /// `--witness-max-k` cycles); omitted if that bound doesn't reach the `bad` node.
-    /// This is the actionable payload for an LLM RTL-refinement loop — verdict + the
-    /// exact stimulus that trips the assertion.
+    /// (per-cycle state + input assignments) in the summary JSON: the counterexample the
+    /// deciding member found, replayed on the concrete simulator (`trace_by` names the
+    /// member; it is that member's path, NOT necessarily the shallowest — N5.4). When no
+    /// member carried one, it is re-derived: the trace-carrying members again, then the
+    /// native bit-precise BMC from depth 0 (the shallowest), bounded to `--witness-max-k`
+    /// cycles and to what `--timeout-ms` left after the verdict; when no trace ships,
+    /// `trace_unavailable_reason` says why (mununu#1045), and a member whose own witness did
+    /// not replay is in `trace_replay_failed`. This is the actionable payload for an LLM
+    /// RTL-refinement loop — verdict + the exact stimulus that trips the assertion.
     ///
     /// surface: CLI-only — a diagnostic augmentation of the CLI-only `btor2 verify`;
     /// the default portfolio verdict remains the CLI+API+UI path.
@@ -1166,6 +1183,23 @@ struct Btor2VerifyArgs {
     /// Step bound for `--bmc-only` (default 20).
     #[arg(long, value_name = "K", default_value_t = 20)]
     bmc_k: u32,
+    /// The engine `--bmc-only` runs: `native` (default; bit-precise BMC on z3 QF_BV), `sat`
+    /// (N5.0: the owned bit-level BMC, the design bit-blasted to an AIG and unrolled into
+    /// CaDiCaL, in-process) or `sat-dyn` (the same engine with the dynamic step: one query per
+    /// growing window of depths, for deep counterexamples behind hard shallow frames). Each
+    /// searches every depth up to `--bmc-k`; `--timeout-ms` is every engine's wall deadline
+    /// (native's since mununu#1039), and a stopped search says where and why.
+    ///
+    /// surface: CLI-only — an engine-evaluation switch of the CLI-only `--bmc-only`; the
+    /// owned SAT engine reaches the API through the portfolio once it joins it (N5.4).
+    #[arg(long, value_enum, default_value_t = BmcEngineArg::Native)]
+    bmc_engine: BmcEngineArg,
+    /// With `--bmc-engine sat|sat-dyn`: on a `violated`, write the counterexample as a BTOR2
+    /// witness (the HWMCC format `btorsim -c` replays) to this path.
+    ///
+    /// surface: CLI-only — the witness of the CLI-only evaluation switch.
+    #[arg(long, value_name = "PATH")]
+    bmc_witness_out: Option<std::path::PathBuf>,
     /// Fault-injection posture on the BTOR2 (`REG[:k]`, repeatable; the one global budget,
     /// default 1): the design is rewritten as `btor2 inject-fault` does before the portfolio
     /// runs. `reachable` then reads "an attack within the budget reaches `bad`" (the attacker
@@ -2534,7 +2568,8 @@ struct SvLiftArgs {
     /// Lift a multi-clock design onto the model's one implicit clock instead of refusing it.
     /// An UNDER-approximation: the domains only ever tick together, so a crossing defect cannot
     /// occur and a HOLDS does not transfer (reported as the `clock-domains-merged` soundness
-    /// caveat).
+    /// caveat). Also lets through a design clocked only by a derived (gated, divided, muxed)
+    /// clock, which then ticks on every step.
     #[arg(long = "merge-clock-domains")]
     merge_clock_domains: bool,
     /// Extra include-search directory (`-I<dir>`), repeatable. Resolves
@@ -4292,10 +4327,6 @@ fn btor2_inject_fault(args: Btor2InjectFaultArgs) -> Result<(), String> {
 /// breakdown as JSON. Surface peer of the API `POST /api/v1/btor2/verify`; both share
 /// the verdict label via [`mununu_core::verdict::PropertyVerdict`].
 fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
-    use mununu_core::adapter::reach_portfolio::{
-        decide_reach_owned_only, decide_reach_portfolio,
-        decide_reach_portfolio_parallel_with_timeout,
-    };
     use mununu_core::verdict::PropertyVerdict;
 
     let content = std::fs::read_to_string(&args.file)
@@ -4339,6 +4370,10 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
     if let Some(target) = &args.target {
         use mununu_core::adapter::btor2::fault::FaultSpec;
         let spec = FaultSpec::parse_many(&args.fault, args.fault_warmup)?;
+        // `--timeout-ms` bounds the attack's trace search too (it polls this thread's budget,
+        // mununu#1045); without it, the members' own defaults.
+        let budget = mununu_core::adapter::run_budget::Budget::with_ms_opt(args.timeout_ms);
+        let _budget = mununu_core::adapter::run_budget::enter(&budget);
         let o = mununu_core::adapter::fault_adversary::verify_fault_reach(
             &content,
             &spec,
@@ -4352,8 +4387,10 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
             "target": o.target,
             "outcome": o.verdict,
             "decided_by": o.decided_by,
-            "trace": (o.verdict == "violated")
+            "trace": (o.verdict == "violated" && o.depth.is_some())
                 .then(|| mununu_core::api::models::Trace::attack(o.depth, &o.attack)),
+            "trace_by": o.trace_by,
+            "trace_unavailable_reason": o.trace_unavailable_reason,
         });
         println!(
             "{}",
@@ -4381,20 +4418,82 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
     // bounded-miter path for wide-datapath equivalence checks whose full proof is intractable.
     if args.bmc_only {
         use mununu_core::adapter::btor2::native_bmc::{self, BmcOutcome};
-        let (verdict, depth) = match native_bmc::bmc_bad_reachable(&file, args.bmc_k) {
-            Ok(BmcOutcome::Violated { depth }) => ("violated", Some(depth)),
-            Ok(BmcOutcome::NoCexWithin { .. }) => ("unknown", None),
-            Err(e) => return Err(format!("bmc-only: {e:?}")),
+        use mununu_core::adapter::btor2::sat_bmc::{SatBmcOptions, SatBmcOutcome};
+        let (verdict, depth, member, stopped) = match args.bmc_engine {
+            // mununu#1039 — with `--timeout-ms` the native search is wall-bounded too: every check
+            // is capped by the time left and a stop says at which depth and why. Without it the
+            // search is the unbounded `bmc_bad_reachable`, as before (one check had run 2 h 51 min
+            // past a 300 000 ms `--timeout-ms` that only the `sat` engines read).
+            BmcEngineArg::Native => match args.timeout_ms {
+                Some(ms) => {
+                    let per_query = u32::try_from(ms).unwrap_or(u32::MAX);
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+                    let never = std::sync::atomic::AtomicBool::new(false);
+                    match native_bmc::bmc_cex_until(&file, args.bmc_k, per_query, deadline, &never)
+                    {
+                        Ok(Some(depth)) => ("violated", Some(depth), "native-bmc", None),
+                        Ok(None) => ("unknown", None, "native-bmc", None),
+                        Err(
+                            e @ (native_bmc::BmcError::BudgetExpired { .. }
+                            | native_bmc::BmcError::ResourceLimit { .. }),
+                        ) => ("unknown", None, "native-bmc", Some(format!("stopped: {e}"))),
+                        Err(e) => return Err(format!("bmc-only: {e:?}")),
+                    }
+                }
+                None => match native_bmc::bmc_bad_reachable(&file, args.bmc_k) {
+                    Ok(BmcOutcome::Violated { depth }) => {
+                        ("violated", Some(depth), "native-bmc", None)
+                    }
+                    Ok(BmcOutcome::NoCexWithin { .. }) => ("unknown", None, "native-bmc", None),
+                    Err(e) => return Err(format!("bmc-only: {e:?}")),
+                },
+            },
+            BmcEngineArg::Sat | BmcEngineArg::SatDyn => {
+                let opts = SatBmcOptions {
+                    dynamic_step: (args.bmc_engine == BmcEngineArg::SatDyn)
+                        .then(mununu_core::adapter::btor2::sat_bmc::DynamicStep::default),
+                    max_depth: args.bmc_k,
+                    deadline: args
+                        .timeout_ms
+                        .map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms)),
+                    ..Default::default()
+                };
+                let model = mununu_core::adapter::btor2::aig::AigModel::build(&file)
+                    .map_err(|e| format!("bmc-only --bmc-engine sat: {e}"))?;
+                let outcome = mununu_core::adapter::btor2::sat_bmc::sat_bmc_model(&model, &opts)
+                    .map_err(|e| format!("bmc-only --bmc-engine sat: {e}"))?;
+                if let (Some(path), Some(w)) = (
+                    &args.bmc_witness_out,
+                    mununu_core::adapter::btor2::sat_bmc::btor2_witness(&model, &outcome),
+                ) {
+                    std::fs::write(path, w)
+                        .map_err(|e| format!("--bmc-witness-out {}: {e}", path.display()))?;
+                }
+                match outcome {
+                    SatBmcOutcome::Violated { depth, .. } => {
+                        ("violated", Some(depth), "sat-bmc", None)
+                    }
+                    SatBmcOutcome::NoCounterexample { .. } => ("unknown", None, "sat-bmc", None),
+                    // Silence is a defect: a search that stopped short says at which depth and why.
+                    SatBmcOutcome::Stopped { depth, reason } => (
+                        "unknown",
+                        None,
+                        "sat-bmc",
+                        Some(format!("stopped at depth {depth}: {reason}")),
+                    ),
+                }
+            }
         };
         let summary = serde_json::json!({
             "file": args.file.display().to_string(),
-            "engines": format!("bmc-only(k={})", args.bmc_k),
+            "engines": format!("bmc-only(k={}, {member})", args.bmc_k),
             "fault": fault_label,
             "outcome": verdict,
-            "reachable_by": if verdict == "violated" { vec!["native-bmc"] } else { Vec::<&str>::new() },
+            "reachable_by": if verdict == "violated" { vec![member] } else { Vec::<&str>::new() },
             "unreachable_by": Vec::<&str>::new(),
             "contradiction": false,
             "bmc_depth": depth,
+            "bmc_stopped": stopped,
         });
         println!(
             "{}",
@@ -4410,37 +4509,66 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
     // driver, but wall-clock bounded by the slowest single engine. `--timeout-ms`
     // raises the subprocess (btormc/Pono) budget so their incremental SAT reaches
     // deeper counterexamples.
+    // mununu#1045 — `--timeout-ms` bounds the WHOLE call: the `--witness` re-derivation below
+    // runs on whatever the verdict left.
+    let deadline = args
+        .timeout_ms
+        .map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+    // N5.4 — with `--witness` the members carry the deciding member's counterexample out of the
+    // run (`ReachMembers::witness`), so the trace below is usually theirs, replayed, at no extra
+    // search; without the flag every member runs its default path, as before.
     let outcome = if args.owned_only {
         let ms = args.timeout_ms.unwrap_or(60_000);
-        decide_reach_owned_only(&file, u32::try_from(ms).unwrap_or(u32::MAX))
-    } else if let Some(ms) = args.timeout_ms {
-        decide_reach_portfolio_parallel_with_timeout(&file, std::time::Duration::from_millis(ms))
+        mununu_core::adapter::reach_portfolio::decide_reach_owned_only_with_witness(
+            &file,
+            u32::try_from(ms).unwrap_or(u32::MAX),
+            args.witness,
+        )
     } else {
-        decide_reach_portfolio(&file)
+        let wall = args
+            .timeout_ms
+            .map(std::time::Duration::from_millis)
+            .unwrap_or(mununu_core::adapter::btormc::DEFAULT_TIMEOUT);
+        mununu_core::adapter::reach_portfolio::decide_reach_portfolio_with_members(
+            &file,
+            wall,
+            None,
+            mununu_core::adapter::reach_portfolio::ReachMembers::shipped()
+                .with_witness(args.witness),
+        )
     };
 
-    // `--witness`: on a `violated` (Reachable) verdict, re-derive the shallowest
-    // concrete init→bad trace with the bit-precise native BMC engine. The portfolio
-    // itself only reports WHICH engines proved reachability; the actionable payload —
-    // the exact per-cycle stimulus that trips the assertion — is what an LLM
-    // refinement loop consumes. Bounded to `--witness-max-k`; if the bound doesn't
-    // reach the `bad` node (a very deep CEX another engine found), the witness is
-    // simply omitted (null) rather than fabricated.
-    let (trace, trace_unavailable_within_k) = if args.witness
-        && outcome.verdict == mununu_core::adapter::reach_portfolio::ReachVerdict::Reachable
-    {
-        use mununu_core::adapter::btor2::native_bmc::BmcOutcome;
-        use mununu_core::adapter::btor2::witness::bad_reachable_witness_routed;
-        match bad_reachable_witness_routed(&file, args.witness_max_k) {
-            Ok((BmcOutcome::Violated { .. }, Some(t))) => {
-                (Some(mununu_core::api::models::Trace::from_bmc(&t)), None)
-            }
-            // Reachable per the portfolio but the bounded native re-derivation didn't
-            // reach it within `--witness-max-k` — report the bound honestly.
-            _ => (None, Some(args.witness_max_k)),
-        }
+    // `--witness`: on a `violated` (Reachable) verdict, the concrete init→bad trace: the one the
+    // deciding member carried out (N5.4; `trace_by` names it — its own counterexample, not
+    // necessarily the shallowest), else re-derived (the trace-carrying members again, then the
+    // bit-precise native BMC from depth 0). The portfolio itself only reports WHICH engines
+    // proved reachability; the actionable payload — the exact per-cycle stimulus that trips the
+    // assertion — is what an LLM refinement loop consumes. Bounded to `--witness-max-k` cycles
+    // and to what is left of `--timeout-ms`; without a trace, `trace_unavailable_reason` says
+    // why (mununu#1045), and `trace_unavailable_within_k` is set only when the bound itself was
+    // searched. A member whose own witness did not replay is in `trace_replay_failed`.
+    let witness = (args.witness
+        && outcome.verdict == mununu_core::adapter::reach_portfolio::ReachVerdict::Reachable)
+        .then(|| {
+            mununu_core::adapter::btor2::witness::witness_for_violation(
+                &file,
+                args.witness_max_k,
+                deadline,
+                &outcome,
+                args.owned_only,
+            )
+        });
+    let trace = witness
+        .as_ref()
+        .and_then(|w| w.trace.as_ref())
+        .map(mununu_core::api::models::Trace::from_bmc);
+    let trace_by = witness.as_ref().and_then(|w| w.by);
+    let trace_unavailable_within_k = witness.as_ref().and_then(|w| w.unavailable_within_k);
+    let trace_unavailable_reason = witness.and_then(|w| w.unavailable_reason);
+    let trace_replay_failed = if args.witness {
+        mununu_core::api::models::TraceReplayFailureView::list(&outcome)
     } else {
-        (None, None)
+        Vec::new()
     };
 
     let summary = serde_json::json!({
@@ -4454,8 +4582,14 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
             == mununu_core::adapter::reach_portfolio::ReachVerdict::Contradiction,
         // mununu#873 — the members that refused the design, with the reason (the API's field).
         "refused": mununu_core::api::models::MemberRefusalView::list(&outcome),
+        // mununu#1022 — the budget stops and the members that searched to their bound.
+        "abstained": mununu_core::api::models::MemberRefusalView::list_abstained(&outcome),
+        "undecided": mununu_core::api::models::MemberRefusalView::list_undecided(&outcome),
         "trace": trace,
+        "trace_by": trace_by,
         "trace_unavailable_within_k": trace_unavailable_within_k,
+        "trace_unavailable_reason": trace_unavailable_reason,
+        "trace_replay_failed": trace_replay_failed,
     });
     println!(
         "{}",

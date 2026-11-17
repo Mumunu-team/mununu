@@ -271,8 +271,11 @@ pub struct YosysOptions {
     /// clock of the BTOR2 model. **SOUNDNESS — an UNDER-approximation of the interleavings:**
     /// the domains only ever tick together, so a crossing defect that needs one domain to tick
     /// while the other does not (a lost pulse, an incoherent multi-bit bus) is invisible and a
-    /// HOLDS does not transfer. Default `false`: such a design is refused at lift time
-    /// ([`clock_domains`]). verify-auto reports the merged domains as a soundness caveat.
+    /// HOLDS does not transfer. Roadmap B2: it also lets through a design whose one domain is a
+    /// DERIVED clock (gated, divided, muxed — [`ClockDomain::derived_from`]), which the model then
+    /// ticks on every step; for a divided clock neither verdict transfers. Default `false`: such a
+    /// design is refused at lift time ([`clock_domains`]). verify-auto reports the merged domains
+    /// as a soundness caveat.
     pub merge_clock_domains: bool,
 }
 
@@ -988,7 +991,31 @@ fn refuse_merged_clock_domains(
     domains: &[ClockDomain],
     yopts: &YosysOptions,
 ) -> Result<(), AdapterError> {
-    if domains.len() > 1 && !yopts.merge_clock_domains {
+    if yopts.merge_clock_domains {
+        return Ok(());
+    }
+    // Roadmap B2 — one domain on a DERIVED clock: the census of 2026-11-11 found gated, divided
+    // and muxed clocks on 19 corpus designs. The multi-clock test below never fires on a design
+    // whose every flop sits on `gclk = clk & en`, and the lift used to tick `gclk` on every step,
+    // so `en` never gated anything (measured: `next(c) = c + 1` with `gclk` computed and unread).
+    if let Some(d) = domains.iter().find(|d| d.derived_from.is_some()) {
+        return Err(AdapterError {
+            kind: AdapterErrorKind::UnsupportedConstruct,
+            message: format!(
+                "adapter/yosys: the clock net `{}` is derived from logic (driven by `{}`: a \
+                 gated, divided or muxed clock); the model has one implicit clock that ticks on \
+                 every step, so lifting it would ignore the logic that gates or divides the \
+                 clock and every verdict could be wrong. Clock domains: {}. Model the gating as \
+                 a clock enable (`if (en) q <= d;` on the root clock), or pass \
+                 `--merge-clock-domains` to accept the lockstep model explicitly.",
+                d.net,
+                d.derived_from.as_deref().unwrap_or("logic"),
+                describe_clock_domains(domains)
+            ),
+            location: None,
+        });
+    }
+    if domains.len() > 1 {
         return Err(AdapterError {
             kind: AdapterErrorKind::UnsupportedConstruct,
             message: format!(
@@ -1262,6 +1289,13 @@ pub struct ClockDomain {
     pub posedge: bool,
     /// How many storage cells (flops and memory ports) fire on it.
     pub cells: usize,
+    /// Roadmap B2 — `Some(cell type)` when the net is DERIVED from logic: a gated (`$and`),
+    /// muxed (`$mux`) or divided (a flop's `Q`) clock, traced back through inverters and buffers.
+    /// `None` when it is rooted in a top-level input or a black-box output (a PLL), or undriven.
+    /// The model's one implicit clock ticks such a net on every step, ignoring the logic that
+    /// gates or divides it, so a derived domain is refused like a second domain (see
+    /// [`refuse_merged_clock_domains`]).
+    pub derived_from: Option<String>,
 }
 
 /// `clk_a (posedge, 3 cells), clk_b (posedge, 1 cell)`.
@@ -1270,11 +1304,15 @@ pub fn describe_clock_domains(domains: &[ClockDomain]) -> String {
         .iter()
         .map(|d| {
             format!(
-                "{} ({}, {} cell{})",
+                "{} ({}, {} cell{}{})",
                 d.net,
                 if d.posedge { "posedge" } else { "negedge" },
                 d.cells,
-                if d.cells == 1 { "" } else { "s" }
+                if d.cells == 1 { "" } else { "s" },
+                d.derived_from
+                    .as_ref()
+                    .map(|t| format!(", derived: driven by `{t}`"))
+                    .unwrap_or_default()
             )
         })
         .collect::<Vec<_>>()
@@ -1534,8 +1572,10 @@ pub fn clock_domains(flat_json: &str) -> Vec<ClockDomain> {
         (i < b.len()).then(|| b[b.len() - 1 - i] == b'1')
     };
     let mut count: std::collections::BTreeMap<(String, bool), usize> = Default::default();
+    let mut derived: std::collections::BTreeMap<(String, bool), String> = Default::default();
     for body in modules.values() {
         let names = net_names(body);
+        let drivers = clock_drivers(body);
         let net_of = |bit: &serde_json::Value| -> Option<String> {
             let id = bit.as_i64()?; // "0" / "1" / "x" are constants, not nets
             Some(
@@ -1566,6 +1606,9 @@ pub fn clock_domains(flat_json: &str) -> Vec<ClockDomain> {
                         }
                         if let Some(net) = net_of(bit) {
                             let edge = param_bit(cell, pol, i).unwrap_or(true);
+                            if let Some(t) = bit.as_i64().and_then(|b| drivers.derived_from(b)) {
+                                derived.entry((net.clone(), edge)).or_insert(t);
+                            }
                             *count.entry((net, edge)).or_default() += 1;
                         }
                     }
@@ -1581,6 +1624,9 @@ pub fn clock_domains(flat_json: &str) -> Vec<ClockDomain> {
             };
             if let Some(net) = net_of(bit) {
                 let edge = param_bit(cell, "CLK_POLARITY", 0).unwrap_or(true);
+                if let Some(t) = bit.as_i64().and_then(|b| drivers.derived_from(b)) {
+                    derived.entry((net.clone(), edge)).or_insert(t);
+                }
                 *count.entry((net, edge)).or_default() += 1;
             }
         }
@@ -1588,11 +1634,85 @@ pub fn clock_domains(flat_json: &str) -> Vec<ClockDomain> {
     count
         .into_iter()
         .map(|((net, posedge), cells)| ClockDomain {
+            derived_from: derived.get(&(net.clone(), posedge)).cloned(),
             net,
             posedge,
             cells,
         })
         .collect()
+}
+
+/// Roadmap B2 — who drives each bit of one flattened module, for tracing a clock to its root.
+struct ClockDrivers {
+    /// Bit → the driving cell's type and, for a pass-through cell (`$not`, `$buf`, `$pos`, the
+    /// gate-level `$_NOT_` / `$_BUF_`), the bit it passes on.
+    driver: HashMap<i64, (String, Option<i64>)>,
+}
+
+/// Single-input cells whose output ticks exactly when their input does: an inverted or buffered
+/// clock is the same clock (its edge flips, which [`clock_domains`] reads from the cell's
+/// polarity, not from the net).
+const CLOCK_PASS_THROUGH: &[&str] = &["$not", "$buf", "$pos", "$_NOT_", "$_BUF_"];
+
+fn clock_drivers(body: &serde_json::Value) -> ClockDrivers {
+    let mut driver = HashMap::new();
+    let Some(cells) = body.get("cells").and_then(|c| c.as_object()) else {
+        return ClockDrivers { driver };
+    };
+    for cell in cells.values() {
+        let ty = cell.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        let Some(conns) = cell.get("connections").and_then(|c| c.as_object()) else {
+            continue;
+        };
+        let dirs = cell.get("port_directions").and_then(|d| d.as_object());
+        let input_a = conns.get("A").and_then(|a| a.as_array());
+        for (port, bits) in conns {
+            // `port_directions` is in every yosys `write_json`; a hand-written fixture without
+            // it names outputs `Y` / `Q` as the yosys cell library does.
+            let is_output = match dirs.and_then(|d| d.get(port)).and_then(|d| d.as_str()) {
+                Some(d) => d == "output",
+                None => port == "Y" || port == "Q",
+            };
+            if !is_output {
+                continue;
+            }
+            for (i, bit) in bits.as_array().into_iter().flatten().enumerate() {
+                let Some(id) = bit.as_i64() else { continue };
+                let through = CLOCK_PASS_THROUGH
+                    .contains(&ty)
+                    .then(|| input_a.and_then(|a| a.get(i)).and_then(|b| b.as_i64()))
+                    .flatten();
+                driver.insert(id, (ty.to_string(), through));
+            }
+        }
+    }
+    ClockDrivers { driver }
+}
+
+impl ClockDrivers {
+    /// `Some(cell type)` when `bit` is driven, after any inverters and buffers, by a yosys
+    /// primitive (`$`-cell) — logic, so a derived clock. `None` when the trace ends at no driver
+    /// (a top-level input, an undriven net) or at a black-box instance's output (a PLL, a clock
+    /// generator outside the design), both of which tick on their own.
+    fn derived_from(&self, bit: i64) -> Option<String> {
+        let mut at = bit;
+        // A pass-through chain longer than the design has cells is a combinational loop; the
+        // bound keeps the walk finite and reports the loop's cell as the driver.
+        for _ in 0..=self.driver.len() {
+            match self.driver.get(&at) {
+                None => return None,
+                Some((ty, Some(next))) if CLOCK_PASS_THROUGH.contains(&ty.as_str()) => at = *next,
+                Some((ty, _)) if ty.starts_with('$') => return Some(ty.clone()),
+                // SOUNDNESS: a non-`$` driver is a black-box instance (its body is not in the
+                // flattened design). Its output is taken as a root clock, as the B1 census
+                // counted PLL outputs: the model ticks it every step, which is what an
+                // independent clock source does. A black box that DIVIDES its input clock would
+                // be missed here; the lift's black-box notes name every such cell.
+                Some(_) => return None,
+            }
+        }
+        self.driver.get(&at).map(|(ty, _)| ty.clone())
+    }
 }
 
 /// Scan the pre-flatten hierarchy JSON for cells whose `type` references a
@@ -3328,17 +3448,20 @@ mod tests {
                 ClockDomain {
                     net: "clk_a".into(),
                     posedge: false,
-                    cells: 1
+                    cells: 1,
+                    derived_from: None
                 },
                 ClockDomain {
                     net: "clk_a".into(),
                     posedge: true,
-                    cells: 2
+                    cells: 2,
+                    derived_from: None
                 },
                 ClockDomain {
                     net: "clk_b".into(),
                     posedge: true,
-                    cells: 1
+                    cells: 1,
+                    derived_from: None
                 },
             ]
         );
@@ -3567,6 +3690,126 @@ endmodule
         )
         .expect("one clock lifts");
         assert_eq!(one.clock_domains.len(), 1);
+    }
+
+    /// Roadmap B2 at the seam: a clock traced through an inverter or a buffer to a top input is
+    /// a root; a gated (`$and`), divided (a flop's `Q`) or buffered-gated clock is derived; a
+    /// black-box instance's output (a PLL) is a root. The ports' directions come from
+    /// `port_directions`, as yosys writes them.
+    #[test]
+    fn clock_domains_marks_a_gated_or_divided_clock_as_derived() {
+        let json = r#"{"modules": {"top": {
+            "netnames": {
+                "clk": {"hide_name": 0, "bits": [2]}, "en": {"hide_name": 0, "bits": [3]},
+                "clk_n": {"hide_name": 0, "bits": [4]}, "gclk": {"hide_name": 0, "bits": [5]},
+                "div": {"hide_name": 0, "bits": [6]}, "pll_out": {"hide_name": 0, "bits": [7]},
+                "gclk_b": {"hide_name": 0, "bits": [8]}
+            },
+            "cells": {
+                "inv": {"type": "$not", "port_directions": {"A": "input", "Y": "output"},
+                        "connections": {"A": [2], "Y": [4]}},
+                "gate": {"type": "$and", "port_directions": {"A": "input", "B": "input", "Y": "output"},
+                         "connections": {"A": [2], "B": [3], "Y": [5]}},
+                "buf": {"type": "$buf", "port_directions": {"A": "input", "Y": "output"},
+                        "connections": {"A": [5], "Y": [8]}},
+                "divider": {"type": "$dff", "parameters": {"CLK_POLARITY": "1"},
+                            "port_directions": {"CLK": "input", "D": "input", "Q": "output"},
+                            "connections": {"CLK": [2], "D": [9], "Q": [6]}},
+                "pll": {"type": "EHXPLLL", "port_directions": {"CLKI": "input", "CLKOP": "output"},
+                        "connections": {"CLKI": [2], "CLKOP": [7]}},
+                "on_inv": {"type": "$dff", "parameters": {"CLK_POLARITY": "1"},
+                           "connections": {"CLK": [4], "D": [9], "Q": [10]}},
+                "on_gate": {"type": "$dff", "parameters": {"CLK_POLARITY": "1"},
+                            "connections": {"CLK": [8], "D": [9], "Q": [11]}},
+                "on_div": {"type": "$dff", "parameters": {"CLK_POLARITY": "1"},
+                           "connections": {"CLK": [6], "D": [9], "Q": [12]}},
+                "on_pll": {"type": "$dff", "parameters": {"CLK_POLARITY": "1"},
+                           "connections": {"CLK": [7], "D": [9], "Q": [13]}}
+            }
+        }}}"#;
+        let derived: Vec<(String, Option<String>)> = clock_domains(json)
+            .into_iter()
+            .map(|d| (d.net, d.derived_from))
+            .collect();
+        assert_eq!(
+            derived,
+            vec![
+                ("clk".to_string(), None),
+                ("clk_n".to_string(), None),
+                ("div".to_string(), Some("$dff".to_string())),
+                ("gclk_b".to_string(), Some("$and".to_string())),
+                ("pll_out".to_string(), None),
+            ]
+        );
+    }
+
+    /// Roadmap B2 — one domain on a derived clock is refused like a second domain, naming the
+    /// net and its driver; `merge_clock_domains` lets it through; one rooted domain lifts.
+    #[test]
+    fn a_lone_derived_clock_domain_is_refused_unless_merged() {
+        let gated = vec![ClockDomain {
+            net: "gclk".into(),
+            posedge: true,
+            cells: 2,
+            derived_from: Some("$and".into()),
+        }];
+        let Err(e) = refuse_merged_clock_domains(&gated, &YosysOptions::default()) else {
+            panic!("a lone gated clock must not lift as the model's clock");
+        };
+        assert!(
+            e.message
+                .contains("`gclk` is derived from logic (driven by `$and`")
+                && e.message.contains("--merge-clock-domains"),
+            "{}",
+            e.message
+        );
+        let merged = YosysOptions {
+            merge_clock_domains: true,
+            ..Default::default()
+        };
+        assert!(refuse_merged_clock_domains(&gated, &merged).is_ok());
+        let rooted = vec![ClockDomain {
+            derived_from: None,
+            ..gated[0].clone()
+        }];
+        assert!(refuse_merged_clock_domains(&rooted, &YosysOptions::default()).is_ok());
+    }
+
+    /// Roadmap B2 end to end: every flop on `gclk = clk & en` used to lift with `next(c) = c + 1`
+    /// (`gclk` computed and unread, measured 2026-11-13 on yosys 0.68 + slang); now the lift
+    /// refuses it, and the explicit opt-in reports the derived domain. Needs yosys ⇒ the image.
+    #[test]
+    #[ignore = "requires yosys (mununu-sva image)"]
+    fn e2e_a_design_clocked_only_by_a_gated_clock_is_refused_at_lift() {
+        const GATED: &str = "\
+module gated (input logic clk, input logic en, input logic rst_n, output logic [1:0] c);
+  logic gclk;
+  assign gclk = clk & en;
+  always_ff @(posedge gclk or negedge rst_n) if (!rst_n) c <= 0; else c <= c + 1;
+endmodule
+";
+        let Err(err) = sv_to_btor2_with_blackboxes(GATED, &YosysOptions::default()) else {
+            panic!("a design clocked only by a gated clock must not lift as single-clock");
+        };
+        assert!(
+            err.message.contains("derived from logic"),
+            "{}",
+            err.message
+        );
+        let merged = sv_to_btor2_with_blackboxes(
+            GATED,
+            &YosysOptions {
+                merge_clock_domains: true,
+                ..Default::default()
+            },
+        )
+        .expect("the explicit opt-in lifts it");
+        assert_eq!(merged.clock_domains.len(), 1);
+        assert!(
+            merged.clock_domains[0].derived_from.is_some(),
+            "{:?}",
+            merged.clock_domains
+        );
     }
 
     // A2 — port net-type stripping (`input tri0 x` → `input x`).

@@ -20,6 +20,7 @@
 //! - Multi-clock designs.
 
 pub mod abs_safety;
+pub mod aig;
 pub mod antecedent_propagation;
 pub mod array_prophecy;
 pub mod assume_monitor;
@@ -34,6 +35,7 @@ pub mod concrete_oracle;
 pub mod dep_graph;
 pub mod emit;
 pub mod fault;
+pub mod ic3;
 pub mod input_state;
 pub mod kliveness_monitor;
 pub mod kmts_lift;
@@ -52,6 +54,7 @@ pub mod r_s8_encoder;
 pub mod refine;
 pub mod repair;
 pub mod reset_init;
+pub mod sat_bmc;
 pub mod shadow;
 pub mod smt_must_edge;
 pub mod symbolic_bitblast;

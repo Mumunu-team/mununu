@@ -106,6 +106,8 @@ Add the lever's column (or run the existing ones), confirm the **soundness invar
 
 All corpus work flows through two private, gitignored artifacts: the **benchmark-property ledger** (`.claude/plans/benchmark-property-ledger.md` — measured verdicts only, non-vacuity-gated (`EF(target != v)` dual reachable), RTL-native with the recipe recorded; honest ∅ / ⊥ rows included) and the **lever-fit shape catalog** (`.claude/plans/lever-fit-shape-catalog.md` — design shape → lever → recipe). After any corpus measurement or lever hunt, update the ledger rows (measured + backlog with its lift wall named) and extend the catalog; a lever integration also runs the matrix. The usual bottleneck is the P1.1 harness-lift track, not lever fit.
 
+**Headline results and tool comparisons** (2026-11-13) have one home, the private **benchmark scoreboard** (`mununu-private/docs/benchmarks/scoreboard.md`): one current row per benchmark set, recomputed from the committed raw rows, never transcribed from a summary. A comparator's times count only when it ran on the same host, set and budget; otherwise the row compares reach only. A run on a scoreboard set (gate runs included) replaces its row in the same private commit as the data. Elsewhere, quote a number with its date and build, and never keep a second "current" copy. The upkeep rules are in the scoreboard's §5.
+
 ## Documentation Traceability
 
 Full text: [`docs/policies/documentation-traceability.md`](docs/policies/documentation-traceability.md).

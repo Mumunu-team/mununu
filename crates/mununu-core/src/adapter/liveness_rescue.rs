@@ -587,6 +587,13 @@ pub fn undecided_notes(outcome: &ReachOutcome) -> Vec<String> {
                 .iter()
                 .map(|(m, why)| format!("{m}: {why}")),
         )
+        // mununu#1022 — and how far each member that searched to its bound got.
+        .chain(
+            outcome
+                .undecided
+                .iter()
+                .map(|(m, how_far)| format!("{m} undecided: {how_far}")),
+        )
         .collect()
 }
 
@@ -671,8 +678,8 @@ pub fn response_liveness_rescue_under_fairness(
 /// [`response_liveness_rescue_under_fairness`] with an external cancellation flag threaded into
 /// the reachability portfolio ([`crate::adapter::reach_portfolio::decide_reach_portfolio_cancellable`]).
 /// A cancelled run reports `Inconclusive`. `members` picks the portfolio's members
-/// ([`ReachMembers::ALL`](crate::adapter::reach_portfolio::ReachMembers::ALL) is the shipped one;
-/// a caller that races and joins this passes `ReachMembers::CANCELLABLE`).
+/// ([`ReachMembers::shipped`](crate::adapter::reach_portfolio::ReachMembers::shipped) is the shipped one;
+/// a caller that races and joins this passes `ReachMembers::cancellable()`).
 pub fn response_liveness_rescue_under_fairness_cancellable(
     design_btor2: &str,
     ante: &Atom,
