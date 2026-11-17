@@ -233,7 +233,8 @@ pub(crate) struct Members {
     /// N5.4 — the owned SAT BMC (CaDiCaL, dynamic step): counterexamples only.
     pub sat_bmc: Option<bool>,
     /// N5.1 — the owned IC3 (CaDiCaL): proves and refutes, each verdict checked before it ships;
-    /// opt-in (`MUNUNU_REACH_IC3=1`) until its N5.5 gate.
+    /// started by default since its N5.5 gate under `--owned-only` and on hosts without rIC3
+    /// ([`ic3_default`]).
     pub ic3: Option<bool>,
     pub btormc: Option<McVerdict>,
     pub pono: Option<McVerdict>,
@@ -823,10 +824,38 @@ pub fn decide_reach_portfolio_cancellable(
     decide_reach_portfolio_with_members(file, subprocess_timeout, cancel, ReachMembers::shipped())
 }
 
-/// N5.1 — `MUNUNU_REACH_IC3=1` opts the owned IC3 member into the full portfolio and into
-/// `--owned-only`; off by default until its N5.5 gate.
-pub(crate) fn ic3_opted_in() -> bool {
-    crate::adapter::env_var::read("MUNUNU_REACH_IC3").is_some_and(|v| v.trim() == "1")
+/// N5.5 — where the owned IC3 member runs as a DECIDER by default, from `MUNUNU_REACH_IC3`: `0` in
+/// no member set, `1` in every one (the N5.1 opt-in spelling), unset (or any other value) =
+/// [`Ic3Default::Auto`]: under `--owned-only`, and in the full portfolio only on a host where no
+/// rIC3 is invokable. The N5.4 trace-carrier search ([`ReachMembers::TRACE_CARRIERS`]) is not a
+/// decider and keeps `ic3` whatever the setting, as it did before N5.5.
+/// The gate measured both halves: beside an invokable rIC3 the member decided no row the
+/// portfolio did not (all-136 arm C: 101 with it, 102 without) and costs a core; with no rIC3 it
+/// is the only IC3 and carries the owned-only gain (52 / 68 against 35 / 68 on the M2 set, 0
+/// disagreements). Private evidence: `experiments/competitiveness-2026-11/n55-default-on-gate/`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Ic3Default {
+    Off,
+    On,
+    Auto,
+}
+
+pub(crate) fn ic3_default() -> Ic3Default {
+    match crate::adapter::env_var::read("MUNUNU_REACH_IC3")
+        .as_deref()
+        .map(str::trim)
+    {
+        Some("0") => Ic3Default::Off,
+        Some("1") => Ic3Default::On,
+        _ => Ic3Default::Auto,
+    }
+}
+
+/// Whether an rIC3 is invokable on this host, probed once per process with the probe the `ric3`
+/// member itself runs ([`crate::adapter::ric3::locate_ric3`]); the member refuses when it fails.
+fn ric3_invokable() -> bool {
+    static PROBE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *PROBE.get_or_init(|| crate::adapter::ric3::locate_ric3().is_ok())
 }
 
 /// Which members [`decide_reach_portfolio_with_members`] starts. [`ReachMembers::ALL`] is the
@@ -846,8 +875,9 @@ pub struct ReachMembers {
     /// reachable, never proves).
     pub sat_bmc: bool,
     /// N5.1 — the owned IC3 (in-process CaDiCaL): proves and refutes, each verdict checked before
-    /// it ships. Off in every constant set; [`ReachMembers::shipped`] turns it on under
-    /// `MUNUNU_REACH_IC3=1` until its N5.5 gate.
+    /// it ships. In [`ReachMembers::ALL`] (the roster) since its N5.5 gate; [`ReachMembers::shipped`]
+    /// includes it per [`ic3_default`] (beside an invokable rIC3 only when forced on). Not in
+    /// [`ReachMembers::PROOF_DIRECTED`] (the k-liveness rungs), which has its own measurement.
     pub ic3: bool,
     /// btormc (subprocess BMC — finds `bad` reachable, never proves).
     pub btormc: bool,
@@ -875,7 +905,7 @@ impl ReachMembers {
         native: true,
         interp: true,
         sat_bmc: true,
-        ic3: false,
+        ic3: true,
         btormc: true,
         pono: true,
         ric3: true,
@@ -991,10 +1021,21 @@ impl ReachMembers {
         .collect()
     }
 
-    /// What the shipped drivers start: [`ReachMembers::ALL`], plus the owned IC3 when opted in
-    /// ([`ic3_opted_in`]).
+    /// What the shipped drivers start: [`ReachMembers::ALL`] with the owned IC3 decided by
+    /// [`ic3_default`] and the rIC3 probe ([`ReachMembers::shipped_for`]).
     pub fn shipped() -> Self {
-        Self::ALL.with_ic3(ic3_opted_in())
+        Self::shipped_for(ic3_default(), ric3_invokable())
+    }
+
+    /// [`ReachMembers::shipped`] with its two inputs explicit — the seam its test pins: `Auto`
+    /// includes the owned IC3 exactly when no rIC3 is invokable.
+    pub(crate) fn shipped_for(setting: Ic3Default, ric3_invokable: bool) -> Self {
+        let ic3 = match setting {
+            Ic3Default::Off => false,
+            Ic3Default::On => true,
+            Ic3Default::Auto => !ric3_invokable,
+        };
+        Self::ALL.with_ic3(ic3)
     }
 }
 
@@ -1739,8 +1780,8 @@ pub fn decide_reach_owned_only_with_witness(
             let _ = tx.send(("sat-bmc", v));
         });
     }
-    // N5.1 — the owned IC3, opt-in (`MUNUNU_REACH_IC3=1`) until its N5.5 gate: the first owned
-    // member that PROVES. Its `Safe` is an invariant re-checked in a fresh solver, its `Violated`
+    // N5.1 — the owned IC3 (started per [`ic3_default`] since N5.5): the first owned member that
+    // PROVES. Its `Safe` is an invariant re-checked in a fresh solver, its `Violated`
     // a trace replayed on the concrete simulator; either failure abstains with the cause.
     if members.contains(&"ic3") {
         let (file, decided, tx, refused, abstained, undecided) = (
@@ -1924,9 +1965,10 @@ const OWNED_MEMBERS: [&str; 5] = ["native", "interp", "boolector", "sat-bmc", "e
 #[cfg(not(feature = "boolector"))]
 const OWNED_MEMBERS: [&str; 5] = ["native", "interp", "cex", "sat-bmc", "exact"];
 
-/// [`OWNED_MEMBERS`], plus `ic3` when the owned IC3 is opted in (`MUNUNU_REACH_IC3=1`).
+/// [`OWNED_MEMBERS`], plus `ic3` unless `MUNUNU_REACH_IC3=0` ([`ic3_default`]): under
+/// `--owned-only` no rIC3 runs, so the owned IC3 is on in `Auto` as well as `On`.
 fn owned_members() -> Vec<&'static str> {
-    owned_members_for(ic3_opted_in())
+    owned_members_for(ic3_default() != Ic3Default::Off)
 }
 
 fn owned_members_for(ic3: bool) -> Vec<&'static str> {
@@ -2414,9 +2456,10 @@ mod tests {
             ric3_bmc: false,
             ..ReachMembers::ALL
         };
+        // N5.5 — `ic3` is in the roster, so a started, silent `ic3` is named like the others.
         assert_eq!(
             stopped_by_wall_unrecorded(&started, &m),
-            vec!["exact", "native", "btormc", "ric3"]
+            vec!["exact", "native", "ic3", "btormc", "ric3"]
         );
     }
 
@@ -2964,9 +3007,48 @@ mod tests {
             safe.refused.is_empty() && safe.abstained.is_empty() && safe.undecided.is_empty(),
             "{safe:?}"
         );
-        const { assert!(!ReachMembers::ALL.ic3 && !ReachMembers::PROOF_DIRECTED.ic3) };
+        const { assert!(ReachMembers::ALL.ic3 && !ReachMembers::PROOF_DIRECTED.ic3) };
         assert!(ReachMembers::ALL.with_ic3(true).ic3);
         assert!(!ReachMembers::ALL.with_ic3(false).ic3);
+    }
+
+    /// N5.5 — the default is scoped by the gate's two measurements: on beside no rIC3 (the
+    /// owned-only gain), off beside an invokable one (arm C: no row); `1` / `0` force either way,
+    /// and `--owned-only` runs it unless `0`. Nothing but the `ic3` flag moves.
+    #[test]
+    fn the_owned_ic3_default_follows_the_setting_and_the_ric3_probe() {
+        use Ic3Default::{Auto, Off, On};
+        for (setting, ric3, expect) in [
+            (Auto, false, true),
+            (Auto, true, false),
+            (On, true, true),
+            (On, false, true),
+            (Off, false, false),
+            (Off, true, false),
+        ] {
+            let m = ReachMembers::shipped_for(setting, ric3);
+            assert_eq!(m.ic3, expect, "{setting:?} ric3={ric3}");
+            assert_eq!(
+                m,
+                ReachMembers::ALL.with_ic3(expect),
+                "{setting:?} ric3={ric3}"
+            );
+        }
+        let g = crate::adapter::env_var::override_for_test("MUNUNU_REACH_IC3", "0");
+        assert_eq!(ic3_default(), Off);
+        assert_eq!(owned_members(), OWNED_MEMBERS.to_vec());
+        drop(g);
+        let g = crate::adapter::env_var::override_for_test("MUNUNU_REACH_IC3", " 1 ");
+        assert_eq!(ic3_default(), On);
+        assert_eq!(owned_members().last(), Some(&"ic3"));
+        drop(g);
+        let g = crate::adapter::env_var::unset_for_test("MUNUNU_REACH_IC3");
+        assert_eq!(ic3_default(), Auto);
+        assert_eq!(owned_members().last(), Some(&"ic3"));
+        drop(g);
+        let g = crate::adapter::env_var::override_for_test("MUNUNU_REACH_IC3", "yes");
+        assert_eq!(ic3_default(), Auto, "any other value reads as unset");
+        drop(g);
     }
 
     #[test]
