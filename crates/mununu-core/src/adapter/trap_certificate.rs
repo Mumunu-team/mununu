@@ -222,7 +222,7 @@ fn register_domain(file: &Btor2File, nid: Nid) -> BTreeSet<u64> {
 /// Named primary inputs are the environment, not a free leaf. `None` when `signal` names nothing in
 /// the file.
 pub fn free_leaves_in_cone(file: &Btor2File, signal: &str) -> Option<Vec<String>> {
-    leaves_in_cone(file, signal, true)
+    leaves_in_cone(file, signal, Leaves::UndrivenAndCuts)
 }
 
 /// The undriven nets (anonymous BTOR2 `input`s, rendered `input_<nid>`) in the sequential cone of
@@ -231,10 +231,33 @@ pub fn free_leaves_in_cone(file: &Btor2File, signal: &str) -> Option<Vec<String>
 /// a `(* blackbox *)` stub — a state with no `next`) is not counted. `None` when `signal` names
 /// nothing in the file.
 pub fn undriven_nets_in_cone(file: &Btor2File, signal: &str) -> Option<Vec<String>> {
-    leaves_in_cone(file, signal, false)
+    leaves_in_cone(file, signal, Leaves::Undriven)
 }
 
-fn leaves_in_cone(file: &Btor2File, signal: &str, with_cuts: bool) -> Option<Vec<String>> {
+/// mununu#1030 — the named primary inputs in the sequential cone of `signal` whose name is in
+/// `names`. Called with the design's clock nets: a clock the model reads as DATA is a free input
+/// there, unrelated to the model's implicit step (a latch enabled by a clock level lifts as
+/// `l = ite(clk, S, d)`). `None` when `signal` names nothing in the file.
+pub fn named_inputs_in_cone(
+    file: &Btor2File,
+    signal: &str,
+    names: &[String],
+) -> Option<Vec<String>> {
+    leaves_in_cone(file, signal, Leaves::NamedInputs(names))
+}
+
+/// Which leaves [`leaves_in_cone`] collects.
+#[derive(Clone, Copy)]
+enum Leaves<'a> {
+    /// Anonymous inputs only.
+    Undriven,
+    /// Anonymous inputs and states with no `next`.
+    UndrivenAndCuts,
+    /// Named inputs whose symbol is in the list.
+    NamedInputs(&'a [String]),
+}
+
+fn leaves_in_cone(file: &Btor2File, signal: &str, kind: Leaves<'_>) -> Option<Vec<String>> {
     let start = file.lines.iter().find_map(|l| match &l.node {
         Node::State {
             symbol: Some(s), ..
@@ -278,13 +301,22 @@ fn leaves_in_cone(file: &Btor2File, signal: &str, with_cuts: bool) -> Option<Vec
             continue;
         };
         match &line.node {
-            Node::Input { symbol: None, .. } => {
+            Node::Input { symbol: None, .. } if !matches!(kind, Leaves::NamedInputs(_)) => {
                 leaves.insert(format!("input_{nid}"));
+            }
+            Node::Input {
+                symbol: Some(s), ..
+            } => {
+                if let Leaves::NamedInputs(names) = kind
+                    && names.iter().any(|n| n == s)
+                {
+                    leaves.insert(s.clone());
+                }
             }
             Node::State { symbol, .. } => {
                 match next_of.get(&nid) {
                     Some(v) => stack.push(v.nid()),
-                    None if with_cuts => {
+                    None if matches!(kind, Leaves::UndrivenAndCuts) => {
                         leaves.insert(symbol.clone().unwrap_or_else(|| format!("state_{nid}")));
                     }
                     None => {}

@@ -1615,6 +1615,25 @@ the missing module's ports, marked `(* mununu_missing_module *)`, restores the u
 reading this withholding was written for; unmarked it is the deliberate-cut form. See §"Two things
 sv-elab needs" under the agent-over-HTTP section.)
 
+### A violation through a clock read as data: `violation-over-clock-as-data` (mununu#1030)
+
+> Source of truth: [`BottomReason::ViolationOverClockAsData`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) + [`trap_certificate::named_inputs_in_cone`](../crates/mununu-core/src/adapter/trap_certificate.rs) — surface: (CLI+API)
+
+The third withheld VIOLATED. The model steps once per clock edge, so a flop never sees its clock
+as a value. Logic that reads the clock *level* does: a latch enabled by the clock
+(`always_latch if (!clk) l = d;`, the classic clock-gate and latch-based pipeline) lifts as
+`l = ite(clk, S, d)`, and `clk` becomes a free input, unrelated to the edges the flops fire on.
+The hardware's schedule, with the clock low before each edge, is one of the model's input
+sequences, so a `HOLDS` transfers. A `VIOLATED` may need a clock value between edges the
+hardware never shows: on the issue's design, a property that holds on the hardware shipped
+`VIOLATED`. So a `violated` row whose cone reads a clock net (one of the design's clock domains,
+the names in `diagnostics.trace_names.clocks`) as a BTOR2 input becomes `unknown` with
+`bottom_reason.kind = "violation-over-clock-as-data"`, the clocks named in `detail`, and the trace
+kept as a may-trace. A refuted `EF p` and a `HOLDS` keep their verdict, as under
+`violation-over-free-leaves`. A latch enabled by a data signal is not affected: it lifts
+correctly at cycle level (`q = ite(en, d, S)`). The over-approximation is argued from the lifted
+model on one design, not proved for the class (mununu#1030).
+
 ### An init-less register is free at cycle 0 on every path: `unestablished-initial-cubes` (mununu#579, #609)
 
 > Source of truth: [`BottomReason::UnestablishedInitialCubes`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) + [`kmts_lift::initial_cube_indices`](../crates/mununu-core/src/adapter/btor2/kmts_lift.rs) — surface: (CLI+API)
