@@ -824,9 +824,11 @@ pub fn decide_reach_portfolio_cancellable(
     decide_reach_portfolio_with_members(file, subprocess_timeout, cancel, ReachMembers::shipped())
 }
 
-/// N5.5 — where the owned IC3 member runs by default, from `MUNUNU_REACH_IC3`: `0` nowhere, `1`
-/// everywhere (the N5.1 opt-in spelling), unset (or any other value) = [`Ic3Default::Auto`]:
-/// under `--owned-only`, and in the full portfolio only on a host where no rIC3 is invokable.
+/// N5.5 — where the owned IC3 member runs as a DECIDER by default, from `MUNUNU_REACH_IC3`: `0` in
+/// no member set, `1` in every one (the N5.1 opt-in spelling), unset (or any other value) =
+/// [`Ic3Default::Auto`]: under `--owned-only`, and in the full portfolio only on a host where no
+/// rIC3 is invokable. The N5.4 trace-carrier search ([`ReachMembers::TRACE_CARRIERS`]) is not a
+/// decider and keeps `ic3` whatever the setting, as it did before N5.5.
 /// The gate measured both halves: beside an invokable rIC3 the member decided no row the
 /// portfolio did not (all-136 arm C: 101 with it, 102 without) and costs a core; with no rIC3 it
 /// is the only IC3 and carries the owned-only gain (52 / 68 against 35 / 68 on the M2 set, 0
