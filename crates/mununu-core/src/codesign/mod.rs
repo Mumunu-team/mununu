@@ -40,6 +40,7 @@ pub mod c_extract_llvm;
 pub mod cmsis_emit;
 pub mod compose;
 pub mod coupling;
+pub(crate) mod include_scan;
 pub mod project_config;
 pub mod reconcile;
 pub mod register_map;
