@@ -2164,6 +2164,9 @@ fn downgrade_violated_on_unestablished_init(report: &mut AutoVerifyReport, model
 /// stub, a state with no `next` (mununu#578: a cut asked for keeps its verdict, under its
 /// `control-slice` / `blackbox-cut` caveat). Measured: requested cuts lift as symbol-less
 /// next-less states, so telling them apart by name is not possible; by kind it is exact.
+///
+/// mununu#1030 — the same pass withholds a `Violated` whose cone reads a CLOCK net as data
+/// (`violation-over-clock-as-data`): the lift keeps such a read as a free named input.
 fn withhold_violated_over_free_leaves(report: &mut AutoVerifyReport, model_btor2: &str) {
     if !report
         .properties
@@ -2175,6 +2178,7 @@ fn withhold_violated_over_free_leaves(report: &mut AutoVerifyReport, model_btor2
     let Ok(file) = crate::adapter::btor2::parser::parse(model_btor2) else {
         return;
     };
+    let clock_nets = report.diagnostics.trace_names.clocks.clone();
     for p in report.properties.iter_mut() {
         if !matches!(p.outcome, VerifyOutcome::Violated { .. }) {
             continue;
@@ -2194,14 +2198,35 @@ fn withhold_violated_over_free_leaves(report: &mut AutoVerifyReport, model_btor2
                 leaves.extend(found);
             }
         }
-        if leaves.is_empty() {
+        if !leaves.is_empty() {
+            // SOUNDNESS: the refutation rests on values the real driver may never produce.
+            p.outcome = VerifyOutcome::Unknown { unknown_cells: 0 };
+            p.bottom_reason = Some(BottomReason::ViolationOverFreeLeaves {
+                leaves: leaves.into_iter().collect(),
+            });
             continue;
         }
-        // SOUNDNESS: the refutation rests on values the real driver may never produce.
-        p.outcome = VerifyOutcome::Unknown { unknown_cells: 0 };
-        p.bottom_reason = Some(BottomReason::ViolationOverFreeLeaves {
-            leaves: leaves.into_iter().collect(),
-        });
+        // mununu#1030 — a clock net the model reads as DATA (a latch enabled by a clock level,
+        // `l = ite(clk, S, d)`) is a free input, unrelated to the implicit step the flops fire on.
+        let mut clocks: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for atom in crate::adapter::btor2::symbolic_bitblast::formula_seed_atoms(&formula) {
+            if let Some(found) =
+                crate::adapter::trap_certificate::named_inputs_in_cone(&file, &atom, &clock_nets)
+            {
+                clocks.extend(found);
+            }
+        }
+        if !clocks.is_empty() {
+            // SOUNDNESS: over-approximation, argued from the lifted model on the #1030 design (the
+            // hardware's schedule, the clock low before each edge, is one of the model's input
+            // sequences), not proved for the class. A HOLDS transfers and an `EF` refutation is
+            // kept (both read the model as a superset, as above); a VIOLATED may rest on a clock
+            // value between edges the hardware never shows, so it is withheld as a may-trace.
+            p.outcome = VerifyOutcome::Unknown { unknown_cells: 0 };
+            p.bottom_reason = Some(BottomReason::ViolationOverClockAsData {
+                clocks: clocks.into_iter().collect(),
+            });
+        }
     }
 }
 
@@ -8250,7 +8275,10 @@ pub(crate) fn escalate_bottom_with_slice(
         // may-trace on this model, so a rescue would spend its slice to be withheld again.
         if matches!(
             prop.bottom_reason,
-            Some(BottomReason::ViolationOverFreeLeaves { .. })
+            Some(
+                BottomReason::ViolationOverFreeLeaves { .. }
+                    | BottomReason::ViolationOverClockAsData { .. }
+            )
         ) {
             continue;
         }
@@ -8847,6 +8875,16 @@ pub enum BottomReason {
         /// The undriven nets in the property's cone, `input_<nid>`.
         leaves: Vec<String>,
     },
+    /// mununu#1030 — the property was refuted on a model whose cone reads a CLOCK net as data: a
+    /// latch enabled by a clock level (`always_latch if (!clk) l = d;`) lifts as
+    /// `l = ite(clk, S, d)` with `clk` a free input, unrelated to the step the flops fire on. The
+    /// trace may rest on a clock value between edges the hardware never shows, so it is a
+    /// may-trace. Measured: a property that holds on the hardware shipped VIOLATED. Reproducible —
+    /// a property of the model.
+    ViolationOverClockAsData {
+        /// The clock nets the property's cone reads as data.
+        clocks: Vec<String>,
+    },
     /// mununu#579 — the cube path's initial cube set could not be read. Every predicate bit with
     /// no established cycle-0 truth (a free input, or a predicate over a register with no `init`
     /// line) is a free initial dimension and the initial cube set is their product; past
@@ -8958,6 +8996,7 @@ impl BottomReason {
             | Self::EngineContradiction { .. }
             | Self::UnestablishedInitialState { .. }
             | Self::ViolationOverFreeLeaves { .. }
+            | Self::ViolationOverClockAsData { .. }
             | Self::UnestablishedInitialCubes { .. }
             | Self::ReportSelfContradiction { .. }
             | Self::NotAttempted => BottomDeterminism::Reproducible,
@@ -8977,6 +9016,7 @@ impl BottomReason {
             Self::MemoryCeilingExceeded => "memory-ceiling-exceeded",
             Self::UnestablishedInitialState { .. } => "unestablished-initial-state",
             Self::ViolationOverFreeLeaves { .. } => "violation-over-free-leaves",
+            Self::ViolationOverClockAsData { .. } => "violation-over-clock-as-data",
             Self::UnestablishedInitialCubes { .. } => "unestablished-initial-cubes",
             Self::ReportSelfContradiction { .. } => "report-self-contradiction",
             Self::NotAttempted => "not-attempted",
@@ -9037,6 +9077,16 @@ impl BottomReason {
                  this property; a HOLDS over the same model would have transferred.",
                 leaves.len(),
                 leaves.join(", ")
+            ),
+            Self::ViolationOverClockAsData { clocks } => format!(
+                "the violation was found on a model that reads {} clock net(s) ({}) as DATA — a \
+                 latch enabled by a clock level, or other logic on the clock: the model treats \
+                 that read as a free input, not as the clock the flops fire on, so the trace may \
+                 need a clock value between edges the hardware never shows. The trace is kept as \
+                 a MAY-trace and the violation is withheld rather than reported. A HOLDS over the \
+                 same model would have transferred (mununu#1030).",
+                clocks.len(),
+                clocks.join(", ")
             ),
             Self::UnestablishedInitialCubes {
                 free_dimensions,
@@ -12865,6 +12915,109 @@ mod tests {
             matches!(by("hold").outcome, VerifyOutcome::Holds),
             "a HOLDS is sound under a freer start set and must not be touched"
         );
+    }
+
+    /// mununu#1030 — a violation whose cone reads a CLOCK net as data (the latch of the issue,
+    /// `l = ite(clk, S, d)`, feeding `r`) is withheld as ⊥ (`violation-over-clock-as-data`, the
+    /// clock named) and keeps its trace. Controls in the same model: a cone that reads a named
+    /// input that is not a clock (`en`, a data-enabled latch) keeps its VIOLATED; an `EF`
+    /// refutation over the clock-read cone keeps its verdict; and with no clock nets recorded the
+    /// clock-read row keeps its VIOLATED (so the trigger is the clock list, not the shape).
+    #[test]
+    fn a_violation_over_a_clock_read_as_data_is_withheld_with_its_trace() {
+        // 2 clk, 3 d, 4 en: named inputs. 5: the clock-enabled latch's hold cell, `l = clk ? S : d`
+        // (6), registered into `r` (8). 10: a data-enabled latch `q = en ? d : T` (11, 12).
+        const DESIGN: &str = "\
+1 sort bitvec 1
+2 input 1 clk
+3 input 1 d
+4 input 1 en
+5 state 1
+6 ite 1 2 5 3
+7 next 1 5 6
+8 state 1 r
+9 zero 1
+10 init 1 8 9
+11 next 1 8 6
+12 state 1
+13 ite 1 4 3 12
+14 next 1 12 13
+15 state 1 q
+16 init 1 15 9
+17 next 1 15 13
+";
+        let mk = |name: &str, formula: &str| PropertyVerdict {
+            name: name.into(),
+            label: None,
+            kind: SvaKind::Assert,
+            formula: formula.into(),
+            outcome: VerifyOutcome::Violated { false_cells: 1 },
+            seeded_predicates: Vec::new(),
+            counterexample: Some(ExactCounterexample {
+                prefix: vec![Vec::new(), Vec::new()],
+                cycle: Vec::new(),
+                inputs: Vec::new(),
+                unreachable_target: Vec::new(),
+            }),
+            bottom_reason: None,
+            decided_by: Some("exact-symbolic".into()),
+            vacuity: None,
+            portfolio: None,
+        };
+        let fresh = |clocks: &[&str]| {
+            let mut r = AutoVerifyReport {
+                properties: vec![
+                    mk("over_clock", "nu X. ((r == 0) && [] X)"),
+                    mk("over_data_enable", "nu X. ((q == 0) && [] X)"),
+                    mk("ef_over_clock", "mu X. ((r == 1) || <> X)"),
+                ],
+                ..Default::default()
+            };
+            r.diagnostics.trace_names.clocks = clocks.iter().map(|c| c.to_string()).collect();
+            r
+        };
+        let by = |r: &AutoVerifyReport, n: &str| {
+            r.properties.iter().find(|p| p.name == n).unwrap().clone()
+        };
+        let mut report = fresh(&["clk"]);
+        withhold_violated_over_free_leaves(&mut report, DESIGN);
+        let p = by(&report, "over_clock");
+        assert!(
+            matches!(p.outcome, VerifyOutcome::Unknown { .. }),
+            "{:?}",
+            p.outcome
+        );
+        assert_eq!(
+            p.bottom_reason,
+            Some(BottomReason::ViolationOverClockAsData {
+                clocks: vec!["clk".to_string()]
+            })
+        );
+        assert_eq!(
+            p.bottom_reason.as_ref().map(BottomReason::tag),
+            Some("violation-over-clock-as-data")
+        );
+        assert!(p.counterexample.is_some(), "the may-trace is kept");
+        assert!(
+            matches!(
+                by(&report, "over_data_enable").outcome,
+                VerifyOutcome::Violated { .. }
+            ),
+            "a named input that is not a clock is the environment"
+        );
+        assert!(
+            matches!(
+                by(&report, "ef_over_clock").outcome,
+                VerifyOutcome::Violated { .. }
+            ),
+            "an EF refutation reads the model as a superset and is kept"
+        );
+        let mut no_clocks = fresh(&[]);
+        withhold_violated_over_free_leaves(&mut no_clocks, DESIGN);
+        assert!(matches!(
+            by(&no_clocks, "over_clock").outcome,
+            VerifyOutcome::Violated { .. }
+        ));
     }
 
     /// mununu#750 — a violation found through an undriven net is a may-trace: it is withheld as ⊥
@@ -20144,6 +20297,74 @@ endmodule
             free_input_init_cubes_feasible(0, &bits, &dims).len(),
             4,
             "`a == 1` twice is consistent; excluding it would drop reachable states"
+        );
+    }
+
+    /// mununu#1030 — the issue's reproducer: a latch transparent while `clk` is low feeds a
+    /// `posedge clk` flop, so `r` takes last cycle's `d` and `Follows_A` HOLDS on the hardware. The
+    /// lift reads `clk` as a free input, and on the parent the row shipped VIOLATED with no note;
+    /// here it is withheld as ⊥ `violation-over-clock-as-data`, naming `clk`, with the may-trace
+    /// kept. Control in the same run: a data-enabled latch's rows keep their verdicts (two HOLDS
+    /// and the negative control VIOLATED).
+    #[test]
+    #[ignore = "requires slang + Yosys (use the mununu-sva docker image); run with --ignored"]
+    fn e2e_a_latch_enabled_by_the_clock_level_withholds_its_violation() {
+        const SV: &str = r#"module latch_clk(input logic clk, input logic rst_n, input logic d,
+                 input logic en, output logic r, output logic q);
+  logic l;
+  always_latch if (!clk) l = d;
+  always_ff @(posedge clk or negedge rst_n) if (!rst_n) r <= 1'b0; else r <= l;
+  always_latch if (en) q = d;
+  Follows_A: assert property (@(posedge clk) disable iff (!rst_n) ##1 r == $past(d));
+  Transparent_A: assert property (@(posedge clk) disable iff (!rst_n) en |-> q == d);
+  Holds_A: assert property (@(posedge clk) disable iff (!rst_n) !en |-> q == $past(q));
+  Frozen_A: assert property (@(posedge clk) disable iff (!rst_n) q == $past(q));
+endmodule
+"#;
+        let sources = vec![("latch_clk.sv".to_string(), SV.to_string())];
+        let yopts = YosysOptions {
+            top: Some("latch_clk".to_string()),
+            ..Default::default()
+        };
+        let report = verify_auto(&sources, &yopts, &VerifyAutoOptions::default())
+            .expect("verify_auto runs on latch_clk");
+        let by = |label: &str| {
+            report
+                .properties
+                .iter()
+                .find(|p| p.label.as_deref() == Some(label))
+                .unwrap_or_else(|| panic!("{label}: {:?}", report.properties))
+        };
+        let follows = by("Follows_A");
+        assert!(
+            !matches!(follows.outcome, VerifyOutcome::Violated { .. }),
+            "a clock read as data must not ship a definite VIOLATED: {:?} {:?}",
+            follows.outcome,
+            follows.bottom_reason
+        );
+        if matches!(follows.outcome, VerifyOutcome::Unknown { .. }) {
+            assert_eq!(
+                follows.bottom_reason.as_ref().map(BottomReason::tag),
+                Some("violation-over-clock-as-data"),
+                "{:?}",
+                follows.bottom_reason
+            );
+            assert!(follows.counterexample.is_some(), "the may-trace is kept");
+        }
+        assert!(
+            matches!(by("Transparent_A").outcome, VerifyOutcome::Holds),
+            "{:?}",
+            by("Transparent_A")
+        );
+        assert!(
+            matches!(by("Holds_A").outcome, VerifyOutcome::Holds),
+            "{:?}",
+            by("Holds_A")
+        );
+        assert!(
+            matches!(by("Frozen_A").outcome, VerifyOutcome::Violated { .. }),
+            "the negative control: {:?}",
+            by("Frozen_A")
         );
     }
 
