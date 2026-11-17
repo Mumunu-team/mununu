@@ -2190,21 +2190,24 @@ mod tests {
         }
     }
 
-    /// N5.4 — the owned-only driver carries too (`sat-bmc` is one of its members).
+    /// N5.4 — the owned-only driver carries too. Its carriers are `sat-bmc` and, since the N5.5
+    /// default, `ic3`; whichever decides first carries, and the trace is a depth-7 one either way.
     #[test]
-    fn the_owned_only_driver_carries_the_sat_bmc_trace_when_asked() {
+    fn the_owned_only_driver_carries_a_trace_when_asked() {
         let file = parser::parse(COUNTER_TO_SEVEN).unwrap();
         let out = decide_reach_owned_only_with_witness(&file, 60_000, true);
         assert_eq!(out.verdict, ReachVerdict::Reachable, "{out:?}");
-        // `sat-bmc` is the only owned member that carries here (no `ic3` unless opted in); the
-        // trace is its own unless another member decided first and it was cancelled.
+        let carriers = ["sat-bmc", "ic3"];
+        // The trace is a carrier's own unless a non-carrying member decided first and the
+        // carriers were cancelled.
         if let Some(carried) = &out.trace {
-            assert_eq!(carried.by, "sat-bmc");
+            assert!(carriers.contains(&carried.by), "{out:?}");
+            assert!(out.reachable_by.contains(&carried.by), "{out:?}");
             assert_eq!(carried.depth(), 7);
         } else {
             assert!(
-                !out.reachable_by.contains(&"sat-bmc"),
-                "sat-bmc decided but carried nothing: {out:?}"
+                !out.reachable_by.iter().any(|m| carriers.contains(m)),
+                "a carrier decided but carried nothing: {out:?}"
             );
         }
         assert_eq!(decide_reach_owned_only(&file, 60_000).trace, None);
