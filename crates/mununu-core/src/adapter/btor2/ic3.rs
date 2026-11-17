@@ -813,18 +813,12 @@ impl<'m> Ic3<'m> {
         if !self.initial(&core)? {
             return Ok(core);
         }
-        // N5.6 — one literal of `cube` that contradicts its register's constant init makes
-        // `Init ∧ core` UNSAT on its own: add that one, no call. (It is not in `core` yet: with it
-        // in, the check above would have said UNSAT.) Before this the loop below added the
-        // cube's literals back in order, one solver call each — ~170 calls per repair on the edn
-        // sec_cm monitors, 99,311 of a slice's 101,502 queries.
-        if let Some(&l) = cube
-            .iter()
-            .find(|&&l| self.init_const_of(l).is_some_and(|v| v != (l > 0)))
-        {
-            core.push(l);
-            return Ok(core);
-        }
+        // The add-back is in the cube's order, one `initial` check per literal: on a constant-init
+        // design every check is syntactic (N5.6), so the loop costs nothing — before N5.6 it was
+        // ~170 solver calls per repair on the edn sec_cm monitors, 99,311 of a slice's 101,502
+        // queries. N5.6 also tried adding ONLY the first literal that contradicts its constant
+        // init (a narrower core, no walk): no row gained on the M2 68 and no time won on the edn
+        // monitors, so the cores stay exactly what the solver-based walk returned.
         for &l in cube {
             if core.contains(&l) {
                 continue;
@@ -1694,25 +1688,34 @@ mod tests {
         assert_eq!(me.queries, queries, "the empty-cube answer is kept");
     }
 
-    /// N5.6 — the initiation repair adds ONE literal that contradicts its constant init, with no
-    /// solver call, when the cube has such a literal; the add-back loop stays for a cube without.
+    /// N5.6 — the initiation repair keeps its add-back order (the core it returns is the one the
+    /// solver-based repair returned) and makes no solver call on constant-init literals; a
+    /// literal on a register without a constant init still costs one call.
     #[test]
-    fn the_initiation_repair_adds_one_contradicting_constant_literal_without_the_solver() {
+    fn the_initiation_repair_keeps_its_order_and_makes_no_call_on_constant_init_literals() {
         let (model, stop) = search_of(MIXED_INIT);
         let mut me = Ic3::new(&model, stop);
-        // `b[0] ∧ a[1] ∧ a[0]`: the core `b[0]` meets `Init`; `a[1]` contradicts `a`'s init.
-        let cube = vec![me.cur[4], me.cur[1], me.cur[0]];
+        // All on constant-init registers: `d[0]` agrees with `d = 5`, `a[0]` with `a = 0`,
+        // `a[1]` contradicts. The walk keeps `a[0]` (it passes it before `a[1]`), as before N5.6.
+        let cube = vec![me.cur[12], -me.cur[0], me.cur[1], me.cur[2]];
         let queries = me.queries;
-        let core = me.repair_initiation_in(vec![me.cur[4]], &cube).unwrap();
-        assert_eq!(core, vec![me.cur[4], me.cur[1]]);
+        let core = me.repair_initiation_in(vec![me.cur[12]], &cube).unwrap();
+        assert_eq!(core, vec![me.cur[12], -me.cur[0], me.cur[1]]);
         assert_eq!(
             me.queries - queries,
             1,
-            "one solver call: the core's own check"
+            "one solver call: whether Init has a state at all, asked once"
         );
         assert!(!initial_by_solver(&mut me, &core));
-        // `b[0] ∧ c[0]`, on the non-constant registers only, goes through the add-back loop:
-        // `c = a = 0` initially, so the core grows to `b[0] ∧ c[0]` after one solver call.
+        let queries = me.queries;
+        let core = me.repair_initiation_in(vec![-me.cur[3]], &cube).unwrap();
+        assert_eq!(core, vec![-me.cur[3], me.cur[12], -me.cur[0], me.cur[1]]);
+        assert_eq!(
+            me.queries, queries,
+            "no solver call on constant-init literals"
+        );
+        // `b[0] ∧ c[0]`, on the non-constant registers only, is the solver's: `c = a = 0`
+        // initially, so the core grows to `b[0] ∧ c[0]` after the core's check and one add-back.
         let cube = vec![me.cur[4], me.cur[8]];
         let queries = me.queries;
         let core = me.repair_initiation_in(vec![me.cur[4]], &cube).unwrap();
