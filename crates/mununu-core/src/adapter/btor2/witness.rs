@@ -479,6 +479,10 @@ pub struct ShippedWitness {
     /// N5.4 — the member whose counterexample `trace` is: a portfolio member that carried it out
     /// of the run, or `native-bmc` for the re-derivation. `None` exactly when `trace` is.
     pub by: Option<&'static str>,
+    /// mununu#1057 — with `trace`: whether `by` established that no shorter counterexample
+    /// exists ([`CarriedTrace::shortest`]; `native-bmc` always does, one query per depth).
+    /// `None` when the member does not say, and without a trace.
+    pub shortest: Option<bool>,
     /// Set ONLY when native BMC searched every frame up to the bound and found no path to `bad`:
     /// the counterexample another engine found is deeper than `--witness-max-k`. A stop on a
     /// budget, an encode failure or a missing model is NOT this (it says nothing about depth).
@@ -514,6 +518,7 @@ pub fn witness_for_violation(
         return ShippedWitness {
             trace: Some(carried.trace.clone()),
             by: Some(carried.by),
+            shortest: carried.shortest,
             unavailable_within_k: None,
             unavailable_reason: None,
         };
@@ -562,6 +567,7 @@ fn search_witness_with(
     let none = |reason: String, within: Option<u32>| ShippedWitness {
         trace: None,
         by: None,
+        shortest: None,
         unavailable_within_k: within,
         unavailable_reason: Some(reason),
     };
@@ -610,6 +616,7 @@ fn search_witness_with(
             return ShippedWitness {
                 trace: Some(carried.trace),
                 by: Some(carried.by),
+                shortest: carried.shortest,
                 unavailable_within_k: None,
                 unavailable_reason: None,
             };
@@ -670,6 +677,8 @@ fn search_witness_with(
         Ok((BmcOutcome::Violated { .. }, Some(t))) => ShippedWitness {
             trace: Some(t),
             by: Some("native-bmc"),
+            // One query per depth from 0: every shorter depth was refuted.
+            shortest: Some(true),
             unavailable_within_k: None,
             unavailable_reason: None,
         },
@@ -1077,6 +1086,7 @@ mod tests {
             trace: Some(CarriedTrace {
                 by: "sat-bmc",
                 trace: carried.clone(),
+                shortest: Some(false),
             }),
             ..ReachOutcome::default()
         };

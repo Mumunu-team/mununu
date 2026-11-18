@@ -139,6 +139,12 @@ pub struct CarriedTrace {
     pub by: &'static str,
     /// The replayed trace: frame 0 (reset) .. the frame that makes `bad` true.
     pub trace: BmcTrace,
+    /// mununu#1057 — whether the member established that no shorter counterexample exists:
+    /// `Some(true)` when it refuted every depth below the trace's (`sat-bmc`'s plain search, or
+    /// its dynamic step when the hit sits at its window's base), `Some(false)` when it did not
+    /// (a dynamic-step window answered with a deeper path), `None` when the member does not
+    /// say (`ic3`, btormc, rIC3: their traces are their own, never claimed shortest).
+    pub shortest: Option<bool>,
 }
 
 impl CarriedTrace {
@@ -174,25 +180,30 @@ impl ReachOutcome {
 /// `(member, text)` notes — a refusal, an abstention, a progress line or a replay failure.
 type MemberNotes = Vec<(&'static str, String)>;
 
+/// N5.4 — `(member, replayed trace, shortest)` for every member that carried a counterexample
+/// out of a run (see [`CarriedTrace`] and its `shortest`).
+pub type CarriedTraces = Vec<(&'static str, BmcTrace, Option<bool>)>;
+
 /// N5.4 — where the member threads leave a replayed counterexample ([`CarriedTrace`]) or the
 /// reason their own witness did not replay; read once at the join. Shared by both drivers.
 #[derive(Debug, Default)]
 struct Carried {
-    traces: std::sync::Mutex<Vec<(&'static str, BmcTrace)>>,
+    traces: std::sync::Mutex<CarriedTraces>,
     replay_failed: std::sync::Mutex<MemberNotes>,
 }
 
 impl Carried {
-    /// Record `member`'s replayed trace, or why its witness did not replay. A refusal is also a
-    /// `warn!`: it is evidence against that member's verdict, and the report carries it
+    /// Record `member`'s replayed trace (with whether the member established it is the
+    /// shortest, [`CarriedTrace::shortest`]), or why its witness did not replay. A refusal is
+    /// also a `warn!`: it is evidence against that member's verdict, and the report carries it
     /// (`trace_replay_failed`).
-    fn carry(&self, member: &'static str, r: Result<BmcTrace, String>) {
+    fn carry(&self, member: &'static str, r: Result<BmcTrace, String>, shortest: Option<bool>) {
         // A poisoned lock (a member panicked while recording) loses the entry; the panic itself
         // is the louder signal, and the verdict never depends on it (as `note_refusal`).
         match r {
             Ok(t) => {
                 if let Ok(mut g) = self.traces.lock() {
-                    g.push((member, t));
+                    g.push((member, t, shortest));
                 }
             }
             Err(why) => {
@@ -205,7 +216,7 @@ impl Carried {
     }
 
     /// Everything carried so far (a poisoned lock yields nothing; the panic is the louder signal).
-    fn take(&self) -> (Vec<(&'static str, BmcTrace)>, MemberNotes) {
+    fn take(&self) -> (CarriedTraces, MemberNotes) {
         (
             self.traces.lock().map(|g| g.clone()).unwrap_or_default(),
             self.replay_failed
@@ -250,9 +261,10 @@ pub(crate) struct Members {
     /// `(member, progress)` for every member that searched to its bound (see
     /// [`ReachOutcome::undecided`]).
     pub undecided: Vec<(&'static str, String)>,
-    /// N5.4 — `(member, replayed trace)` for every member that carried its counterexample out
-    /// (see [`ReachOutcome::trace`]), in finishing order.
-    pub traces: Vec<(&'static str, BmcTrace)>,
+    /// N5.4 — `(member, replayed trace, shortest)` for every member that carried its
+    /// counterexample out (see [`ReachOutcome::trace`], [`CarriedTrace::shortest`]), in
+    /// finishing order.
+    pub traces: CarriedTraces,
     /// N5.4 — `(member, why)` for every member whose own witness did not replay (see
     /// [`ReachOutcome::trace_replay_failed`]).
     pub replay_failed: Vec<(&'static str, String)>,
@@ -494,7 +506,20 @@ fn run_sat_bmc(
                 let model = AigModel::build(file)?;
                 let outcome = sat_bmc::sat_bmc_model(&model, &opts)?;
                 if let Some(witness) = sat_bmc::btor2_witness(&model, &outcome) {
-                    carried.carry("sat-bmc", replayed_subprocess_witness(file, &witness));
+                    // mununu#1057 — the member says whether it refuted every shorter depth.
+                    let shortest = match &outcome {
+                        SatBmcOutcome::Violated {
+                            depth,
+                            refuted_below,
+                            ..
+                        } => Some(refuted_below == depth),
+                        _ => None,
+                    };
+                    carried.carry(
+                        "sat-bmc",
+                        replayed_subprocess_witness(file, &witness),
+                        shortest,
+                    );
                 }
                 Ok(outcome)
             }
@@ -540,7 +565,9 @@ fn run_ic3(
             // N5.4 — the engine replayed the trace already; with a witness asked for it is
             // carried out as it is, and a design the simulator cannot carry says so.
             match (replay, carried) {
-                (Replay::Confirmed(trace), Some(carried)) => carried.carry("ic3", Ok(trace)),
+                (Replay::Confirmed(trace), Some(carried)) => {
+                    carried.carry("ic3", Ok(trace), None);
+                }
                 (Replay::Confirmed(_), None) => {}
                 (Replay::Unavailable(why), carried) => {
                     tracing::info!(
@@ -549,7 +576,7 @@ fn run_ic3(
                         "ic3: the counterexample ships without a simulator replay"
                     );
                     if let Some(carried) = carried {
-                        carried.carry("ic3", Err(format!("not replayed: {why}")));
+                        carried.carry("ic3", Err(format!("not replayed: {why}")), None);
                     }
                 }
             }
@@ -798,11 +825,15 @@ fn member_rank(member: &str) -> usize {
 }
 
 /// N5.4 — the carried trace an outcome ships: the first in the fixed engine order.
-fn pick_carried(traces: Vec<(&'static str, BmcTrace)>) -> Option<CarriedTrace> {
+fn pick_carried(traces: CarriedTraces) -> Option<CarriedTrace> {
     traces
         .into_iter()
-        .min_by_key(|(by, _)| member_rank(by))
-        .map(|(by, trace)| CarriedTrace { by, trace })
+        .min_by_key(|(by, _, _)| member_rank(by))
+        .map(|(by, trace, shortest)| CarriedTrace {
+            by,
+            trace,
+            shortest,
+        })
 }
 
 /// Decide `bad`-reachability of `file` across all six engines — the exact BDD
@@ -1279,7 +1310,7 @@ fn decide_with_members_using(
                     .map(|(v, out)| {
                         // N5.4 — btormc prints its witness on `sat`; replayed and carried.
                         if let (Some(carried), McVerdict::Violated) = (carried, v) {
-                            carried.carry("btormc", replayed_subprocess_witness(file, &out));
+                            carried.carry("btormc", replayed_subprocess_witness(file, &out), None);
                         }
                         Some(v)
                     })
@@ -1347,7 +1378,7 @@ fn decide_with_members_using(
                     .map(|(v, out)| {
                         // N5.4 — `--witness` was asked for; the witness is replayed and carried.
                         if let (Some(carried), McVerdict::Violated) = (carried, v) {
-                            carried.carry("ric3", replayed_subprocess_witness(file, &out));
+                            carried.carry("ric3", replayed_subprocess_witness(file, &out), None);
                         }
                         Some(v)
                     })
@@ -1385,7 +1416,7 @@ fn decide_with_members_using(
                         // N5.4 — the witness is the sticky model's; replayed on the design up to
                         // the first frame that fires the original `bad`, and carried.
                         if let (Some(carried), McVerdict::Violated) = (carried, v) {
-                            carried.carry("ric3-bmc", ric3::sticky_witness_trace(file, &out));
+                            carried.carry("ric3-bmc", ric3::sticky_witness_trace(file, &out), None);
                         }
                         Some(v)
                     })
@@ -2347,13 +2378,15 @@ mod tests {
         let out = collect(Members {
             sat_bmc: Some(true),
             ric3_bmc: Some(McVerdict::Violated),
-            traces: vec![("ric3-bmc", t(9)), ("sat-bmc", t(3))],
+            traces: vec![("ric3-bmc", t(9), None), ("sat-bmc", t(3), Some(false))],
             replay_failed: vec![("ric3", "x".into()), ("ic3", "y".into())],
             ..Default::default()
         });
         assert_eq!(out.verdict, ReachVerdict::Reachable);
         let carried = out.trace.expect("a carried trace");
         assert_eq!((carried.by, carried.depth()), ("sat-bmc", 2));
+        // mununu#1057 — what the member said about its depth travels with the trace.
+        assert_eq!(carried.shortest, Some(false));
         assert_eq!(
             out.trace_replay_failed,
             vec![("ic3", "y".to_string()), ("ric3", "x".to_string())]
