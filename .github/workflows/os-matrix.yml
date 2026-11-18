@@ -84,10 +84,25 @@ jobs:
           "Z3_LIBRARY_PATH_OVERRIDE=$bin" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
           $bin | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
           & "$bin\z3.exe" --version
+      # The cache key carries the installed Z3 version. z3-sys's build script records the library's
+      # link-search path, and on Homebrew that path names the versioned Cellar directory
+      # (`Cellar/z3/<version>/lib`). A cache saved under one Homebrew z3 and restored on a runner
+      # that installed another keeps the old path, and the link fails with `library 'z3' not found`
+      # (main f5cfa52d: cached 5.3.3, installed 5.4.1). A new Z3 version starts a new cache.
+      - name: Record the Z3 version for the cache key
+        id: z3v
+        shell: bash
+        run: |
+          # pkg-config on Linux (apt's libz3-dev ships no `z3` binary) and macOS; `z3.exe` from
+          # the release zip on Windows (no pkg-config there).
+          v=$(pkg-config --modversion z3 2>/dev/null || z3 --version | awk '{print $3}')
+          test -n "$v" || { echo "could not read the Z3 version"; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "Z3 $v"
       - name: Restore the dependency cache
         uses: Swatinem/rust-cache@v2
         with:
-          key: os-matrix-${{ matrix.name }}
+          key: os-matrix-${{ matrix.name }}-z3-${{ steps.z3v.outputs.version }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Build
         shell: bash
