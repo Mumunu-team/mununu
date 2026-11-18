@@ -263,6 +263,13 @@ struct Ic3<'m> {
     trans: Vec<Vec<i32>>,
     /// The `init` equalities, each already carrying `¬act_init`.
     init_clauses: Vec<Vec<i32>>,
+    /// N5.6 — per register bit (indexed like `cur`), its `init` when that is a CONSTANT; `None`
+    /// for a register without `init` or with an expression init. [`Self::initial_syntactic`]
+    /// reads it.
+    init_const: Vec<Option<bool>>,
+    /// N5.6 — whether `Init ∧ constraints` has a state (the solver's answer to the empty cube),
+    /// asked once, the first time the syntactic check decides a cube `Init` implies.
+    init_nonempty: Option<bool>,
     /// `frames[0]` stands for `Init` (its clause list stays empty); the search's frames follow.
     frames: Vec<Frame>,
     /// Clauses in the solver that no longer matter (released temporaries, moved frame clauses);
@@ -288,11 +295,12 @@ struct Ic3<'m> {
     desc_lits: u64,
     descs: u64,
     target_lits: u64,
-    /// N5.2 — how many of the queries were `initial` checks (a syntactic check could replace
-    /// them when every `init` is a constant).
+    /// N5.2 — how many `initial` checks the search asked (N5.6: the syntactic ones included).
     init_queries: u64,
     /// … and the solver time they took (nanoseconds); the same for `repair_initiation`.
     init_ns: u64,
+    /// N5.6 — how many of the `initial` checks the syntactic path answered without the solver.
+    init_syntactic: u64,
     repair_queries: u64,
     repair_ns: u64,
     /// N5.2 — the width of the cube entering MIC's drop loop (after the relative core and the
@@ -363,11 +371,12 @@ impl<'m> Ic3<'m> {
             })
             .collect();
         parts.push(format!(
-            "latches={} trans_clauses={} vars={} init_queries={} init_ms={} repair_queries={} repair_ms={} mic_in_width={:.1}/{} cti_width={:.1} root_width={:.1}/{} desc_width={:.1}/{} target_width={:.1} clause_width={:.1}",
+            "latches={} trans_clauses={} vars={} init_queries={} init_syntactic={} init_ms={} repair_queries={} repair_ms={} mic_in_width={:.1}/{} cti_width={:.1} root_width={:.1}/{} desc_width={:.1}/{} target_width={:.1} clause_width={:.1}",
             self.cur.len(),
             self.trans.len(),
             self.next_var,
             self.init_queries,
+            self.init_syntactic,
             self.init_ns / 1_000_000,
             self.repair_queries,
             self.repair_ns / 1_000_000,
@@ -436,6 +445,7 @@ impl<'m> Ic3<'m> {
         }
         let act_init = enc.fresh();
         let mut init_clauses = Vec::new();
+        let mut init_const = vec![None; cur.len()];
         for (si, s) in model.states.iter().enumerate() {
             if let Some(init) = &s.init {
                 for (bi, &il) in init.iter().enumerate() {
@@ -443,6 +453,17 @@ impl<'m> Ic3<'m> {
                     if let Some(&c) = cur.get(first[si] + bi) {
                         init_clauses.push(vec![-act_init, -c, iv]);
                         init_clauses.push(vec![-act_init, c, -iv]);
+                    }
+                    if let Some(slot) = init_const.get_mut(first[si] + bi) {
+                        // The AIG is structurally hashed: an `init` that folds to a constant
+                        // IS `Lit::TRUE` / `Lit::FALSE` here.
+                        *slot = if il == Lit::FALSE {
+                            Some(false)
+                        } else if il == Lit::TRUE {
+                            Some(true)
+                        } else {
+                            None
+                        };
                     }
                 }
             }
@@ -479,6 +500,8 @@ impl<'m> Ic3<'m> {
             act_init,
             trans: enc.clauses,
             init_clauses,
+            init_const,
+            init_nonempty: None,
             frames: vec![Frame {
                 act: act_init,
                 clauses: Vec::new(),
@@ -499,6 +522,7 @@ impl<'m> Ic3<'m> {
             target_lits: 0,
             init_queries: 0,
             init_ns: 0,
+            init_syntactic: 0,
             repair_queries: 0,
             repair_ns: 0,
             mic_in_lits: 0,
@@ -608,14 +632,70 @@ impl<'m> Ic3<'m> {
         }
     }
 
-    /// Does `cube` contain an initial state?
+    /// Does `cube` contain an initial state? N5.6 — answered without the solver when the cube
+    /// decides it syntactically ([`Self::initial_syntactic`]); by the solver otherwise. On the
+    /// OpenTitan edn sec_cm monitors (every register with a constant init) the solver form took
+    /// 99.7 % of a 300 s slice (N5.5 gate, 100,280 calls at ~3 ms in an 82k-clause solver).
     fn initial(&mut self, cube: &[i32]) -> Result<bool, Halted> {
         self.init_queries += 1;
+        match self.initial_syntactic(cube) {
+            Some(false) => {
+                self.init_syntactic += 1;
+                return Ok(false);
+            }
+            Some(true) => {
+                self.init_syntactic += 1;
+                return self.init_nonempty();
+            }
+            None => {}
+        }
         let mut a = vec![self.act_init];
         a.extend_from_slice(cube);
         let t0 = Instant::now();
         let r = self.solve(&a);
         self.init_ns += u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        r
+    }
+
+    /// N5.6 — the three-way syntactic initiation check. A literal that contradicts its
+    /// register's CONSTANT init: `Init ∧ cube` is UNSAT, `Some(false)`. Every literal on a
+    /// constant-init register and none contradicts: `Init` implies `cube`, so `Init ∧ cube ≡
+    /// Init`, `Some(true)` — and the caller asks once whether `Init` itself has a state under the
+    /// constraints ([`Self::init_nonempty`]). Any literal on a register without `init` or with an
+    /// expression init: `None`, the solver decides. Both decided answers equal the solver's by
+    /// construction; the differential test
+    /// `the_syntactic_initiation_check_agrees_with_the_solver` pins it on a mixed design.
+    fn initial_syntactic(&self, cube: &[i32]) -> Option<bool> {
+        let mut all_constant = true;
+        for &l in cube {
+            match self.init_const_of(l) {
+                Some(v) if v != (l > 0) => return Some(false),
+                Some(_) => {}
+                None => all_constant = false,
+            }
+        }
+        all_constant.then_some(true)
+    }
+
+    /// The constant init of the register bit `lit` is on; `None` when that bit's init is not a
+    /// constant, or `lit` is not a register bit.
+    fn init_const_of(&self, lit: i32) -> Option<bool> {
+        let bit = lit.unsigned_abs().checked_sub(2)? as usize;
+        self.init_const.get(bit).copied().flatten()
+    }
+
+    /// `Init ∧ constraints` has a state: the solver's answer to the empty cube, asked once and
+    /// kept (a `rebuild` keeps `Init`, `T` and the constraints, so the answer stands).
+    fn init_nonempty(&mut self) -> Result<bool, Halted> {
+        if let Some(v) = self.init_nonempty {
+            return Ok(v);
+        }
+        let t0 = Instant::now();
+        let r = self.solve(&[self.act_init]);
+        self.init_ns += u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        if let Ok(v) = r {
+            self.init_nonempty = Some(v);
+        }
         r
     }
 
@@ -733,6 +813,12 @@ impl<'m> Ic3<'m> {
         if !self.initial(&core)? {
             return Ok(core);
         }
+        // The add-back is in the cube's order, one `initial` check per literal: on a constant-init
+        // design every check is syntactic (N5.6), so the loop costs nothing — before N5.6 it was
+        // ~170 solver calls per repair on the edn sec_cm monitors, 99,311 of a slice's 101,502
+        // queries. N5.6 also tried adding ONLY the first literal that contradicts its constant
+        // init (a narrower core, no walk): no row gained on the M2 68 and no time won on the edn
+        // monitors, so the cores stay exactly what the solver-based walk returned.
         for &l in cube {
             if core.contains(&l) {
                 continue;
@@ -1468,6 +1554,176 @@ mod tests {
             matches!(run(text), Ic3Outcome::Safe { .. }),
             "{:?}",
             run(text)
+        );
+    }
+
+    /// N5.6 — four 4-bit registers of every init kind: `a` constant 0, `b` without `init`, `c`
+    /// with an expression init (`c = a`), `d` constant 5. Bits `cur[0..4]`, `[4..8]`, `[8..12]`,
+    /// `[12..16]`.
+    const MIXED_INIT: &str = "1 sort bitvec 4\n2 sort bitvec 1\n3 zero 1\n4 state 1 a\n5 init 1 4 3\n\
+                              6 state 1 b\n7 state 1 c\n8 init 1 7 4\n9 constd 1 5\n10 state 1 d\n\
+                              11 init 1 10 9\n12 one 1\n13 add 1 4 12\n14 next 1 4 13\n\
+                              15 next 1 6 6\n16 add 1 7 12\n17 next 1 7 16\n18 next 1 10 10\n\
+                              19 ones 1\n20 eq 2 4 19\n21 bad 20\n";
+
+    fn search_of(text: &str) -> (AigModel, Stop) {
+        let model = AigModel::build(&parser::parse(text).unwrap()).unwrap();
+        (
+            model,
+            Stop {
+                deadline: None,
+                cancel: None,
+            },
+        )
+    }
+
+    /// The solver's own answer to `Init ∧ cube`, as [`Ic3::initial`] asked it before N5.6.
+    fn initial_by_solver(me: &mut Ic3<'_>, cube: &[i32]) -> bool {
+        let mut a = vec![me.act_init];
+        a.extend_from_slice(cube);
+        me.solve(&a).unwrap()
+    }
+
+    /// N5.6 — the three-way check on the mixed design: every answer it gives equals the solver's
+    /// (3,000 random cubes of width 1–8 over the 16 bits), it decides every cube that lies on the
+    /// constant-init registers only, and it declines every cube that touches `b` or `c`.
+    #[test]
+    fn the_syntactic_initiation_check_agrees_with_the_solver() {
+        let (model, stop) = search_of(MIXED_INIT);
+        let mut me = Ic3::new(&model, stop);
+        assert_eq!(me.cur.len(), 16);
+        let expect: Vec<Option<bool>> = (0..16)
+            .map(|i| match i {
+                0..=3 => Some(false),
+                12 => Some(true),
+                13 => Some(false),
+                14 => Some(true),
+                15 => Some(false),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(me.init_const, expect);
+        let mut seed: u64 = 0x5eed_1234_abcd_0001;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let (mut unsat, mut sat, mut declined) = (0, 0, 0);
+        for _ in 0..3_000 {
+            let width = (next() % 8 + 1) as usize;
+            let mut bits: Vec<usize> = Vec::new();
+            while bits.len() < width {
+                let b = (next() % 16) as usize;
+                if !bits.contains(&b) {
+                    bits.push(b);
+                }
+            }
+            let cube: Vec<i32> = bits
+                .iter()
+                .map(|&b| {
+                    if next() % 2 == 0 {
+                        me.cur[b]
+                    } else {
+                        -me.cur[b]
+                    }
+                })
+                .collect();
+            // The expectation from the table alone: a literal against a constant init decides
+            // UNSAT whatever else the cube holds; a cube on constant-init bits only, SAT;
+            // anything else is the solver's.
+            let contradicts = bits
+                .iter()
+                .zip(&cube)
+                .any(|(&b, &l)| expect[b].is_some_and(|v| v != (l > 0)));
+            let on_constants_only = bits.iter().all(|&b| expect[b].is_some());
+            let syntactic = me.initial_syntactic(&cube);
+            let expected = if contradicts {
+                Some(false)
+            } else if on_constants_only {
+                Some(true)
+            } else {
+                None
+            };
+            assert_eq!(syntactic, expected, "cube {cube:?} bits {bits:?}");
+            match syntactic {
+                Some(v) => {
+                    assert_eq!(v, initial_by_solver(&mut me, &cube), "cube {cube:?}");
+                    if v {
+                        sat += 1;
+                    } else {
+                        unsat += 1;
+                    }
+                }
+                None => declined += 1,
+            }
+            // The shipped entry point agrees with the solver on every cube, decided or not.
+            assert_eq!(
+                me.initial(&cube).unwrap(),
+                initial_by_solver(&mut me, &cube),
+                "cube {cube:?}"
+            );
+        }
+        assert!(
+            unsat > 1_000 && sat > 20 && declined > 300,
+            "unsat {unsat} sat {sat} declined {declined}"
+        );
+        assert_eq!(me.init_syntactic, (unsat + sat) as u64);
+    }
+
+    /// N5.6 — a cube `Init` implies is still not initial when the constraints leave `Init` no
+    /// state: the syntactic SAT answer defers to one solver call on the empty cube, kept after.
+    #[test]
+    fn a_cube_init_implies_is_not_initial_when_the_constraints_empty_init() {
+        let text = format!("{MIXED_INIT}22 neq 2 10 9\n23 constraint 22\n");
+        let (model, stop) = search_of(&text);
+        let mut me = Ic3::new(&model, stop);
+        let cube = vec![-me.cur[0], me.cur[12]];
+        assert_eq!(me.initial_syntactic(&cube), Some(true));
+        assert!(!me.initial(&cube).unwrap());
+        assert_eq!(me.init_nonempty, Some(false));
+        let queries = me.queries;
+        assert!(!me.initial(&cube).unwrap());
+        assert_eq!(me.queries, queries, "the empty-cube answer is kept");
+    }
+
+    /// N5.6 — the initiation repair keeps its add-back order (the core it returns is the one the
+    /// solver-based repair returned) and makes no solver call on constant-init literals; a
+    /// literal on a register without a constant init still costs one call.
+    #[test]
+    fn the_initiation_repair_keeps_its_order_and_makes_no_call_on_constant_init_literals() {
+        let (model, stop) = search_of(MIXED_INIT);
+        let mut me = Ic3::new(&model, stop);
+        // All on constant-init registers: `d[0]` agrees with `d = 5`, `a[0]` with `a = 0`,
+        // `a[1]` contradicts. The walk keeps `a[0]` (it passes it before `a[1]`), as before N5.6.
+        let cube = vec![me.cur[12], -me.cur[0], me.cur[1], me.cur[2]];
+        let queries = me.queries;
+        let core = me.repair_initiation_in(vec![me.cur[12]], &cube).unwrap();
+        assert_eq!(core, vec![me.cur[12], -me.cur[0], me.cur[1]]);
+        assert_eq!(
+            me.queries - queries,
+            1,
+            "one solver call: whether Init has a state at all, asked once"
+        );
+        assert!(!initial_by_solver(&mut me, &core));
+        let queries = me.queries;
+        let core = me.repair_initiation_in(vec![-me.cur[3]], &cube).unwrap();
+        assert_eq!(core, vec![-me.cur[3], me.cur[12], -me.cur[0], me.cur[1]]);
+        assert_eq!(
+            me.queries, queries,
+            "no solver call on constant-init literals"
+        );
+        // `b[0] ∧ c[0]`, on the non-constant registers only, is the solver's: `c = a = 0`
+        // initially, so the core grows to `b[0] ∧ c[0]` after the core's check and one add-back.
+        let cube = vec![me.cur[4], me.cur[8]];
+        let queries = me.queries;
+        let core = me.repair_initiation_in(vec![me.cur[4]], &cube).unwrap();
+        assert_eq!(core, vec![me.cur[4], me.cur[8]]);
+        assert_eq!(
+            me.queries - queries,
+            2,
+            "two solver calls: the core, then one add-back"
         );
     }
 
