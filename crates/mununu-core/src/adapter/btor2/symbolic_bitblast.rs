@@ -12963,6 +12963,34 @@ mod tests {
 8 init 1 3 4
 "#;
 
+    /// mununu#1062 — a cut net in the cone of a property ATOM. `accept = in_valid & (!v |
+    /// mergeable)` and `v' = accept`, so "an accepted beat is presented next cycle" holds for
+    /// every value of the cut net `mergeable` (a state with no `next`). The atom-cone walk used
+    /// to stop at the cut net as at a register: it was neither sampled with the inputs nor
+    /// refused, the atom read one value of it and the transition another, and the engine
+    /// reported VIOLATED where k-induction, btormc and rIC3 prove the property.
+    #[test]
+    fn x1062_a_cut_net_in_an_atoms_cone_does_not_decouple_the_atom_from_the_step() {
+        const CUT_IN_ATOM_CONE: &str = "1 sort bitvec 1\n2 input 1 in_valid\n\
+3 state 1 mergeable\n4 state 1 v\n5 zero 1\n6 init 1 4 5\n7 not 1 4\n8 or 1 7 3\n\
+9 and 1 2 8\n10 output 9 accept\n11 next 1 4 9\n";
+        let presented =
+            crate::mu_calculus::parser::parse("nu Y.(((accept == 0) || [] (v == 1)) && [] Y)")
+                .expect("parse");
+        assert_eq!(
+            exact_symbolic_verdict(CUT_IN_ATOM_CONE, &presented),
+            Ok(ExactVerdict::Holds),
+            "v' = accept whatever the cut net is"
+        );
+        // And the cut net is still free: `v` can be both set and left clear.
+        let never_set =
+            crate::mu_calculus::parser::parse("nu Y.((v == 0) && [] Y)").expect("parse");
+        assert_eq!(
+            exact_symbolic_verdict(CUT_IN_ATOM_CONE, &never_set),
+            Ok(ExactVerdict::Violated)
+        );
+    }
+
     #[test]
     fn state_without_next_is_free_each_step_not_a_held_register() {
         // `f` has no `next` line ⇒ free. `st` starts 0 and becomes 1 whenever f=1.

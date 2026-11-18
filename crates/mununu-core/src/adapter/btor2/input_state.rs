@@ -55,7 +55,7 @@ pub struct InputStateLift {
 /// The named primary inputs the atoms read: an atom over an input itself, or over a signal
 /// whose combinational cone reaches one (`cone_inputs`). Sorted and deduplicated.
 pub fn atom_inputs(file: &Btor2File, atom_registers: &HashSet<String>) -> Vec<String> {
-    let input_names: HashSet<String> = file
+    let mut input_names: HashSet<String> = file
         .inputs()
         .filter_map(|l| match &l.node {
             Node::Input {
@@ -64,6 +64,8 @@ pub fn atom_inputs(file: &Btor2File, atom_registers: &HashSet<String>) -> Vec<St
             _ => None,
         })
         .collect();
+    // mununu#1062 — a named next-less state (a cut net) is an input here too.
+    input_names.extend(free_states(file).into_values().map(|(_, name)| name));
     let mut name_to_nid: HashMap<String, Nid> = collect_symbols(file)
         .into_iter()
         .map(|(nid, name)| (name, nid))
@@ -99,6 +101,33 @@ pub fn atom_inputs(file: &Btor2File, atom_registers: &HashSet<String>) -> Vec<St
         }
     }
     out.into_iter().collect()
+}
+
+/// mununu#1062 — the named state cells with no `next` line: `nid → (sort, name)`. Such a cell is
+/// free at every step (a `--cutpoint` net, a black-boxed output), so for an atom that reads it
+/// it is an input: the lift gives it `next = name$next`, a fresh free input, which makes it the
+/// sampled cell of that input — the same product `(s, i)` the rewrite builds for an `input`
+/// line, with no reader to redirect because every reader already reads the cell. Its `init`, if
+/// it has one, stays; with none it is free at cycle 0 like every sampled input.
+fn free_states(file: &Btor2File) -> HashMap<Nid, (Nid, String)> {
+    let has_next: HashSet<Nid> = file
+        .lines
+        .iter()
+        .filter_map(|l| match &l.node {
+            Node::Next { state, .. } => Some(*state),
+            _ => None,
+        })
+        .collect();
+    let symbols = collect_symbols(file);
+    file.lines
+        .iter()
+        .filter_map(|l| match &l.node {
+            Node::State { sort, .. } if !has_next.contains(&l.nid) => symbols
+                .get(&l.nid)
+                .map(|name| (l.nid, (*sort, name.clone()))),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Lift the atoms' inputs into the state (see the module doc). `None` when the atoms read no
@@ -154,7 +183,14 @@ pub fn lift_inputs(file: &Btor2File, inputs: &[String]) -> Btor2File {
             to_lift.insert(l.nid, (*sort, s.clone()));
         }
     }
-    if to_lift.is_empty() {
+    // mununu#1062 — the wanted next-less states: closed below with a fresh next-cycle input.
+    let mut to_close: Vec<(Nid, Nid, String)> = free_states(file)
+        .into_iter()
+        .filter(|(_, (_, name))| wanted.contains(name.as_str()))
+        .map(|(nid, (sort, name))| (nid, sort, name))
+        .collect();
+    to_close.sort();
+    if to_lift.is_empty() && to_close.is_empty() {
         return file.clone();
     }
     let mut next_nid: Nid = file.lines.iter().map(|l| l.nid).max().unwrap_or(0) + 1;
@@ -261,6 +297,30 @@ pub fn lift_inputs(file: &Btor2File, inputs: &[String]) -> Btor2File {
         });
         next_nid += 1;
     }
+    // mununu#1062 — `next f = f$next` for each wanted next-less state `f`.
+    for (state, sort, name) in to_close {
+        let input = next_nid;
+        lines.push(Line {
+            nid: input,
+            node: Node::Input {
+                sort,
+                symbol: Some(format!("{name}$next")),
+            },
+            immediates: Vec::new(),
+            source_line: 0,
+        });
+        lines.push(Line {
+            nid: input + 1,
+            node: Node::Next {
+                sort,
+                state,
+                value: Operand(input),
+            },
+            immediates: Vec::new(),
+            source_line: 0,
+        });
+        next_nid += 2;
+    }
     let by_nid = lines.iter().enumerate().map(|(i, l)| (l.nid, i)).collect();
     Btor2File { lines, by_nid }
 }
@@ -275,6 +335,42 @@ mod tests {
     const MEALY: &str = "1 sort bitvec 1\n2 input 1 req\n3 input 1 ready\n4 state 1 busy_q\n\
 5 zero 1\n6 init 1 4 5\n7 not 1 4\n8 and 1 2 3\n9 and 1 8 7\n10 output 9 gnt\n\
 11 xor 1 4 2\n12 next 1 4 11\n";
+
+    /// mununu#1062 — `accept = in_valid & (!v | mergeable)`, `v' = accept`, and `mergeable` is a
+    /// cut net: a state with no `next`.
+    const CUT_IN_ATOM_CONE: &str = "1 sort bitvec 1\n2 input 1 in_valid\n3 state 1 mergeable\n\
+4 state 1 v\n5 zero 1\n6 init 1 4 5\n7 not 1 4\n8 or 1 7 3\n9 and 1 2 8\n10 output 9 accept\n\
+11 next 1 4 9\n";
+
+    /// mununu#1062 — a cut net an atom reads is one of the atom's inputs, and the lift closes it
+    /// with a fresh next-cycle input so the atom and the transition read one value per cycle.
+    #[test]
+    fn x1062_a_cut_net_in_an_atoms_cone_is_sampled_like_an_input() {
+        let file = parse(CUT_IN_ATOM_CONE).expect("parses");
+        let regs: HashSet<String> = ["accept".to_string()].into_iter().collect();
+        assert_eq!(atom_inputs(&file, &regs), vec!["in_valid", "mergeable"]);
+        let lift = lift_atom_inputs(&file, &regs).expect("lifts");
+        assert_eq!(lift.lifted, vec!["in_valid", "mergeable"]);
+        let symbols = collect_symbols(&lift.file);
+        let next_of_cut = lift
+            .file
+            .lines
+            .iter()
+            .find_map(|l| match &l.node {
+                Node::Next {
+                    state: 3, value, ..
+                } => Some(value.nid()),
+                _ => None,
+            })
+            .expect("the cut net has a `next` after the lift");
+        assert_eq!(
+            symbols.get(&next_of_cut).map(String::as_str),
+            Some("mergeable$next")
+        );
+        // After the lift the atom reads registers only.
+        let accept = 9;
+        assert!(cone_inputs(&lift.file, accept).is_empty());
+    }
 
     #[test]
     fn x656_the_atoms_inputs_are_the_named_inputs_in_their_cone() {
