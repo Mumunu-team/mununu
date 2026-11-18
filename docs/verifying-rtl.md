@@ -627,7 +627,10 @@ re-derivation) — that member's own path, **not necessarily the shallowest**: `
 the member established that no shorter counterexample exists (`true` for `native-bmc` and for `sat-bmc`'s
 plain search; `false` when `sat-bmc`'s dynamic step answered a window with a deeper path, mununu#1057;
 absent when the member does not say — `ic3`, btormc, rIC3); a member whose own witness
-did not replay is listed in `trace_replay_failed` (`sole_decider` when the verdict rests on it alone).
+did not replay is listed in `trace_replay_failed` (`sole_decider` when the verdict rests on it alone). A member
+of that second search that PROVES `bad` unreachable is a contradiction, not a note (mununu#1076): the verdict becomes
+`unknown` with `contradiction: true`, that member joins `unreachable_by` beside `reachable_by`, no trace ships, and
+`trace_unavailable_reason` says so; a `sv verify-auto` row goes to `unknown` with `bottom_reason: engine-contradiction`.
 
 ### Replaying a counterexample under Verilator: `--emit-testbench` (2026-10-24)
 

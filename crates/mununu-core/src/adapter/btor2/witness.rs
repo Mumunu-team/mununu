@@ -489,6 +489,127 @@ pub struct ShippedWitness {
     pub unavailable_within_k: Option<u32>,
     /// Why there is no trace, in words; `None` exactly when `trace` is set.
     pub unavailable_reason: Option<String>,
+    /// mununu#1076 — the members of the fallback search that PROVED `bad` unreachable under the
+    /// `violated` verdict this witness is for: a soundness alarm (one of the two engines is
+    /// wrong), and the caller never ships `violated` on it — the verdict becomes the
+    /// contradiction one ([`apply_fallback_contradiction`]; a verify-auto row goes to `unknown`
+    /// with `engine-contradiction` as its bottom reason). Set whether or not a trace was found
+    /// beside it (a path contradicted by a proof is not evidence). Empty on a carried trace and
+    /// on every path where no member proved unreachability.
+    pub contradicted_by: Vec<&'static str>,
+}
+
+/// mununu#1076 — the report's contradiction rule applied to the witness fallback: when the
+/// fallback's carriers include a member that proved `bad` unreachable, the outcome's verdict
+/// becomes [`ReachVerdict::Contradiction`] (`unknown` on every surface, `contradiction: true`),
+/// with that member in `unreachable_by` beside the members that found it reachable, so the
+/// report names both sides; a trace found beside the proof is not shipped (it is not evidence),
+/// and `unavailable_reason` says why. Returns the witness unchanged without such a member.
+pub fn apply_fallback_contradiction(
+    outcome: &mut ReachOutcome,
+    witness: ShippedWitness,
+) -> ShippedWitness {
+    if witness.contradicted_by.is_empty() {
+        return witness;
+    }
+    for m in &witness.contradicted_by {
+        if !outcome.unreachable_by.contains(m) {
+            outcome.unreachable_by.push(m);
+        }
+    }
+    outcome.verdict = crate::adapter::reach_portfolio::ReachVerdict::Contradiction;
+    ShippedWitness {
+        trace: None,
+        by: None,
+        shortest: None,
+        unavailable_within_k: None,
+        unavailable_reason: Some(format!(
+            "contradiction: {} proved `bad` unreachable under the `violated` verdict — a \
+             soundness alarm (one of the two engines is wrong); the verdict is the contradiction \
+             and no path ships on it",
+            witness.contradicted_by.join(", ")
+        )),
+        contradicted_by: witness.contradicted_by,
+    }
+}
+
+/// mununu#1076 — the fallback's reading of a second portfolio run (the seam the reproducer
+/// drives): the carried trace when one was found, the notes for every member that carried
+/// none, and the members that PROVED `bad` unreachable — the contradiction, named whether or
+/// not a trace came with it.
+fn fallback_view(
+    again: ReachOutcome,
+    members: &crate::adapter::reach_portfolio::ReachMembers,
+    notes: &mut Vec<String>,
+) -> (Option<ShippedWitness>, Vec<&'static str>) {
+    // A carrier that PROVED `bad` unreachable here contradicts the verdict this trace is for:
+    // the alarm reaches the report as the contradiction verdict, never as a log line alone.
+    let contradicted: Vec<&'static str> = again.unreachable_by.clone();
+    for m in &contradicted {
+        tracing::error!(
+            member = m,
+            "witness fallback: a member proved `bad` unreachable under a `violated` verdict"
+        );
+    }
+    if let Some(carried) = again.trace {
+        return (
+            Some(ShippedWitness {
+                trace: Some(carried.trace),
+                by: Some(carried.by),
+                shortest: carried.shortest,
+                unavailable_within_k: None,
+                unavailable_reason: None,
+                contradicted_by: contradicted.clone(),
+            }),
+            contradicted,
+        );
+    }
+    for (m, why) in again
+        .trace_replay_failed
+        .iter()
+        .map(|(m, why)| (m, format!("its witness did not replay ({why})")))
+        .chain(
+            again
+                .refused
+                .iter()
+                .map(|(m, why)| (m, format!("refused ({why})"))),
+        )
+        .chain(
+            again
+                .abstained
+                .iter()
+                .map(|(m, why)| (m, format!("stopped ({why})"))),
+        )
+        .chain(
+            again
+                .undecided
+                .iter()
+                .map(|(m, why)| (m, format!("found nothing ({why})"))),
+        )
+    {
+        notes.push(format!("{m}: {why}"));
+    }
+    for m in &contradicted {
+        notes.push(format!(
+            "{m}: proved `bad` unreachable — CONTRADICTION with the verdict (a soundness \
+             alarm; one of the two engines is wrong)"
+        ));
+    }
+    for m in members.names() {
+        let named = |list: &[(&'static str, String)]| list.iter().any(|(n, _)| *n == m);
+        if !again.reachable_by.contains(&m)
+            && !contradicted.contains(&m)
+            && !named(&again.trace_replay_failed)
+            && !named(&again.refused)
+            && !named(&again.abstained)
+            && !named(&again.undecided)
+        {
+            notes.push(format!("{m}: no counterexample before the search ended"));
+        } else if again.reachable_by.contains(&m) && !named(&again.trace_replay_failed) {
+            notes.push(format!("{m}: found `bad` reachable but carried no trace"));
+        }
+    }
+    (None, contradicted)
 }
 
 /// The trace a `violated` verdict ships with (N5.4): the counterexample the deciding member
@@ -521,6 +642,7 @@ pub fn witness_for_violation(
             shortest: carried.shortest,
             unavailable_within_k: None,
             unavailable_reason: None,
+            contradicted_by: Vec::new(),
         };
     }
     let run_carriers = outcome.verdict == crate::adapter::reach_portfolio::ReachVerdict::Reachable;
@@ -588,6 +710,7 @@ pub fn shortest_path_for(file: &Btor2File, shipped: ShippedWitness) -> ShippedWi
                 shortest: Some(true),
                 unavailable_within_k: None,
                 unavailable_reason: None,
+                contradicted_by: shipped.contradicted_by.clone(),
             }
         }
         other => {
@@ -618,13 +741,15 @@ fn search_witness_with(
 ) -> ShippedWitness {
     use crate::adapter::reach_portfolio::{ReachMembers, decide_reach_portfolio_with_members};
     use crate::adapter::run_budget::{Budget, current, enter};
-    let none = |reason: String, within: Option<u32>| ShippedWitness {
-        trace: None,
-        by: None,
-        shortest: None,
-        unavailable_within_k: within,
-        unavailable_reason: Some(reason),
-    };
+    let none =
+        |reason: String, within: Option<u32>, contradicted_by: Vec<&'static str>| ShippedWitness {
+            trace: None,
+            by: None,
+            shortest: None,
+            unavailable_within_k: within,
+            unavailable_reason: Some(reason),
+            contradicted_by,
+        };
     // What the verdict's run already said about traces: the members whose witness failed to
     // replay are not run again (mununu#1045 review, point 2).
     let mut notes: Vec<String> = skip
@@ -645,7 +770,7 @@ fn search_witness_with(
     let left = budget.remaining_ms().map(std::time::Duration::from_millis);
     if budget.expired() || left.is_some_and(|l| l.is_zero()) {
         notes.push("the time budget was spent by the verdict; no witness search ran".into());
-        return none(notes.join("; "), None);
+        return none(notes.join("; "), None, Vec::new());
     }
     let _guard = enter(&budget);
     // The fallback portfolio: every trace carrier whose witness has not already failed — owned
@@ -662,68 +787,17 @@ fn search_witness_with(
             .without("ric3")
             .without("ric3-bmc");
     }
+    // mununu#1076 — the members of the fallback that proved `bad` unreachable: carried on every
+    // way out of here, with or without a trace.
+    let mut contradicted: Vec<&'static str> = Vec::new();
     if run_carriers && !members.names().is_empty() {
         // The subprocess wall: the time left, else the members' default.
         let wall = left.unwrap_or(crate::adapter::btormc::DEFAULT_TIMEOUT);
         let again = decide_reach_portfolio_with_members(file, wall, None, members);
-        if let Some(carried) = again.trace {
-            return ShippedWitness {
-                trace: Some(carried.trace),
-                by: Some(carried.by),
-                shortest: carried.shortest,
-                unavailable_within_k: None,
-                unavailable_reason: None,
-            };
-        }
-        for (m, why) in again
-            .trace_replay_failed
-            .iter()
-            .map(|(m, why)| (m, format!("its witness did not replay ({why})")))
-            .chain(
-                again
-                    .refused
-                    .iter()
-                    .map(|(m, why)| (m, format!("refused ({why})"))),
-            )
-            .chain(
-                again
-                    .abstained
-                    .iter()
-                    .map(|(m, why)| (m, format!("stopped ({why})"))),
-            )
-            .chain(
-                again
-                    .undecided
-                    .iter()
-                    .map(|(m, why)| (m, format!("found nothing ({why})"))),
-            )
-        {
-            notes.push(format!("{m}: {why}"));
-        }
-        // A carrier that PROVED `bad` unreachable here contradicts the verdict this trace is
-        // for: the verdict stands (it is the first run's), the alarm reaches the report.
-        for m in &again.unreachable_by {
-            tracing::error!(
-                member = m,
-                "witness fallback: a member proved `bad` unreachable under a `violated` verdict"
-            );
-            notes.push(format!(
-                "{m}: proved `bad` unreachable — CONTRADICTION with the verdict (a soundness \
-                 alarm; one of the two engines is wrong)"
-            ));
-        }
-        for m in members.names() {
-            let named = |list: &[(&'static str, String)]| list.iter().any(|(n, _)| *n == m);
-            if !again.reachable_by.contains(&m)
-                && !named(&again.trace_replay_failed)
-                && !named(&again.refused)
-                && !named(&again.abstained)
-                && !named(&again.undecided)
-            {
-                notes.push(format!("{m}: no counterexample before the search ended"));
-            } else if again.reachable_by.contains(&m) && !named(&again.trace_replay_failed) {
-                notes.push(format!("{m}: found `bad` reachable but carried no trace"));
-            }
+        let (shipped, named) = fallback_view(again, &members, &mut notes);
+        contradicted = named;
+        if let Some(shipped) = shipped {
+            return shipped;
         }
     }
     // Last: native BMC from depth 0, the shallowest path when it reaches the depth.
@@ -735,23 +809,24 @@ fn search_witness_with(
             shortest: Some(true),
             unavailable_within_k: None,
             unavailable_reason: None,
+            contradicted_by: contradicted,
         },
         Ok((BmcOutcome::Violated { depth }, None)) => {
             notes.push(format!(
                 "native BMC reached `bad` at depth {depth} but the solver returned no model"
             ));
-            none(notes.join("; "), None)
+            none(notes.join("; "), None, contradicted)
         }
         Ok((BmcOutcome::NoCexWithin { k }, _)) => {
             notes.push(format!(
                 "native BMC found no path to `bad` within {k} cycles; the counterexample the \
                  verdict rests on is deeper (raise --witness-max-k)"
             ));
-            none(notes.join("; "), Some(k))
+            none(notes.join("; "), Some(k), contradicted)
         }
         Err(e) => {
             notes.push(format!("native BMC stopped: {e}"));
-            none(notes.join("; "), None)
+            none(notes.join("; "), None, contradicted)
         }
     }
 }
@@ -1175,6 +1250,7 @@ mod tests {
             shortest,
             unavailable_within_k: None,
             unavailable_reason: None,
+            contradicted_by: Vec::new(),
         };
         let w = shortest_path_for(&file, shipped(Some(six_steps.clone()), Some(false)));
         assert_eq!((w.by, w.shortest), (Some("native-bmc"), Some(true)));
@@ -1199,6 +1275,102 @@ mod tests {
         let w = shortest_path_for(&file, shipped(Some(one_step.clone()), Some(false)));
         assert_eq!((w.by, w.shortest), (Some("sat-bmc"), Some(false)));
         assert_eq!(w.trace, Some(one_step));
+    }
+
+    /// REPRODUCER (mununu#1076) — the fallback names the members that proved `bad` unreachable
+    /// under the `violated` verdict it searches for, whether or not another member carried a
+    /// trace beside them: with a trace the alarm used to be a log line only (the JSON carried no
+    /// note at all); without one it was a note on a row still shipped `violated`.
+    #[test]
+    fn the_fallback_names_the_members_that_proved_bad_unreachable() {
+        use crate::adapter::reach_portfolio::{CarriedTrace, ReachMembers, ReachVerdict};
+        let t = BmcTrace {
+            states: vec![vec![], vec![]],
+            inputs: vec![vec![], vec![]],
+        };
+        let members = ReachMembers::TRACE_CARRIERS;
+        // A trace from `sat-bmc` beside a proof of unreachability from `ic3`.
+        let again = ReachOutcome {
+            verdict: ReachVerdict::Contradiction,
+            reachable_by: vec!["sat-bmc"],
+            unreachable_by: vec!["ic3"],
+            trace: Some(CarriedTrace {
+                by: "sat-bmc",
+                trace: t.clone(),
+                shortest: Some(true),
+            }),
+            ..ReachOutcome::default()
+        };
+        let mut notes = Vec::new();
+        let (shipped, named) = fallback_view(again, &members, &mut notes);
+        assert_eq!(named, vec!["ic3"]);
+        let shipped = shipped.expect("the trace still ships, marked");
+        assert_eq!(
+            (shipped.by, shipped.trace),
+            (Some("sat-bmc"), Some(t.clone()))
+        );
+        assert_eq!(shipped.contradicted_by, vec!["ic3"]);
+        // No trace: the alarm is named too, beside the other members' misses.
+        let again = ReachOutcome {
+            verdict: ReachVerdict::Unreachable,
+            unreachable_by: vec!["ric3"],
+            abstained: vec![("sat-bmc", "stopped".into())],
+            ..ReachOutcome::default()
+        };
+        let mut notes = Vec::new();
+        let (shipped, named) = fallback_view(again, &members, &mut notes);
+        assert!(shipped.is_none());
+        assert_eq!(named, vec!["ric3"]);
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.starts_with("ric3: proved `bad` unreachable — CONTRADICTION")),
+            "{notes:?}"
+        );
+        assert!(
+            notes.iter().any(|n| n == "sat-bmc: stopped (stopped)"),
+            "{notes:?}"
+        );
+        // The report's rule: the verdict becomes the contradiction, both sides named.
+        let mut outcome = ReachOutcome {
+            verdict: ReachVerdict::Reachable,
+            reachable_by: vec!["exact"],
+            ..ReachOutcome::default()
+        };
+        let w = apply_fallback_contradiction(&mut outcome, shipped_with(vec!["ric3"], Some(t)));
+        assert_eq!(outcome.verdict, ReachVerdict::Contradiction);
+        assert_eq!(outcome.unreachable_by, vec!["ric3"]);
+        assert_eq!(outcome.reachable_by, vec!["exact"]);
+        // The path found beside the proof does not ship; the reason names the alarm.
+        assert_eq!((w.trace, w.by), (None, None));
+        assert!(
+            w.unavailable_reason
+                .as_deref()
+                .is_some_and(|r| r.starts_with("contradiction: ric3 proved `bad` unreachable")),
+            "{:?}",
+            w.unavailable_reason
+        );
+        assert_eq!(w.contradicted_by, vec!["ric3"]);
+        // And a no-op without one.
+        let mut outcome = ReachOutcome {
+            verdict: ReachVerdict::Reachable,
+            reachable_by: vec!["exact"],
+            ..ReachOutcome::default()
+        };
+        let w = apply_fallback_contradiction(&mut outcome, shipped_with(Vec::new(), None));
+        assert_eq!(outcome.verdict, ReachVerdict::Reachable);
+        assert_eq!(w.unavailable_reason.as_deref(), Some("x"));
+    }
+
+    fn shipped_with(contradicted_by: Vec<&'static str>, trace: Option<BmcTrace>) -> ShippedWitness {
+        ShippedWitness {
+            by: trace.as_ref().map(|_| "sat-bmc"),
+            trace,
+            shortest: None,
+            unavailable_within_k: None,
+            unavailable_reason: Some("x".into()),
+            contradicted_by,
+        }
     }
 
     /// N5.4 — a member whose own witness failed to replay is not run again by the fallback, and

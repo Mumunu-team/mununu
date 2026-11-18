@@ -4549,6 +4549,7 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
     // and to what is left of `--timeout-ms`; without a trace, `trace_unavailable_reason` says
     // why (mununu#1045), and `trace_unavailable_within_k` is set only when the bound itself was
     // searched. A member whose own witness did not replay is in `trace_replay_failed`.
+    let mut outcome = outcome;
     let witness = (args.witness
         && outcome.verdict == mununu_core::adapter::reach_portfolio::ReachVerdict::Reachable)
         .then(|| {
@@ -4559,6 +4560,11 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
                 &outcome,
                 args.owned_only,
             )
+        })
+        // mununu#1076 — a fallback carrier that proved `bad` unreachable turns the verdict into
+        // the contradiction (`unknown`, `contradiction: true`, both sides listed); no path ships.
+        .map(|w| {
+            mununu_core::adapter::btor2::witness::apply_fallback_contradiction(&mut outcome, w)
         });
     let trace = witness
         .as_ref()

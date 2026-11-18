@@ -631,6 +631,14 @@ pub fn reach_portfolio_rescue_diagnosed(
 pub struct WitnessMiss {
     pub stage: &'static str,
     pub reason: String,
+    /// mununu#1076 — stage `unreachable`: the members of the path search that PROVED the
+    /// monitor's `bad` unreachable. Every production caller holds a `violated` verdict for that
+    /// `bad`, so for them this is the contradiction — a soundness alarm, not a miss: the row
+    /// does not stay `violated` (it goes to `unknown` with `engine-contradiction` as its bottom
+    /// reason, naming both sides), and a path found beside such a proof is not shipped. A
+    /// caller without a verdict (a test on a formula that holds) reads it as what it says.
+    /// Empty at every other stage.
+    pub contradicted_by: Vec<&'static str>,
 }
 
 impl WitnessMiss {
@@ -638,7 +646,28 @@ impl WitnessMiss {
         Self {
             stage: "shape",
             reason: reason.to_string(),
+            contradicted_by: Vec::new(),
         }
+    }
+
+    /// mununu#1076 — a member of the path search proved the monitor's `bad` unreachable (see
+    /// `contradicted_by`).
+    pub fn unreachable(contradicted_by: Vec<&'static str>) -> Self {
+        Self {
+            stage: "unreachable",
+            reason: format!(
+                "{} proved `bad` unreachable — under a `violated` verdict a soundness alarm (one \
+                 of the two engines is wrong), and the row is not shipped `violated`",
+                contradicted_by.join(", ")
+            ),
+            contradicted_by,
+        }
+    }
+
+    /// Whether a member proved `bad` unreachable (`contradicted_by` non-empty): the
+    /// contradiction for a caller holding a `violated` verdict.
+    pub fn proved_unreachable(&self) -> bool {
+        !self.contradicted_by.is_empty()
     }
 }
 
@@ -646,6 +675,24 @@ impl std::fmt::Display for WitnessMiss {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}: {}", self.stage, self.reason)
     }
+}
+
+/// mununu#1076 — whether the safety witness monitor of `formula` DECIDES it: its block is the
+/// `nu Z. (block && [] Z)` shape and [`chain_is_exact`](crate::adapter::btor2::bad_monitor::chain_is_exact)
+/// holds (every `||` has at most one box-bearing side), so an unreachable monitor `bad` is a
+/// proof that the formula holds. `false` for a shape the monitor does not compile, and for a
+/// `||` of boxes, where the one-path reading is a witness extractor only.
+pub fn safety_block_is_exact(formula: &Formula) -> bool {
+    let Node::Nu { var, body } = formula.node(formula.root()) else {
+        return false;
+    };
+    let Node::And(l, r) = formula.node(*body) else {
+        return false;
+    };
+    let Some((block, _)) = classify_and(formula, *l, *r, *var) else {
+        return false;
+    };
+    crate::adapter::btor2::bad_monitor::chain_is_exact(formula, block)
 }
 
 /// The design with a safety row's violation as a `bad` (2026-10-30): the bounded safety witness
@@ -677,6 +724,7 @@ pub fn safety_bad_model(
     .map_err(|e| WitnessMiss {
         stage: "monitor",
         reason: format!("{e:?}"),
+        contradicted_by: Vec::new(),
     })
 }
 
@@ -701,10 +749,12 @@ pub fn safety_witness_by(
     let file = parser::parse(&monitored).map_err(|e| WitnessMiss {
         stage: "parse",
         reason: format!("{e:?}"),
+        contradicted_by: Vec::new(),
     })?;
     let depth = u32::try_from(depth).map_err(|_| WitnessMiss {
         stage: "bound",
         reason: format!("the monitor's depth {depth} does not fit u32"),
+        contradicted_by: Vec::new(),
     })?;
     let k = max_k.saturating_add(depth);
     // N5.4 seam: the trace-carrying members race on the monitored model (every witness replayed
@@ -712,6 +762,27 @@ pub fn safety_witness_by(
     // per-property budget, when there is one). The rescue decided on a different monitor, so
     // there is no carried trace to reuse here.
     let shipped = crate::adapter::btor2::witness::search_witness(&file, k, None, &[], false);
+    // mununu#1076 — a member of the path search proved the monitor's `bad` unreachable. With a
+    // path found beside the proof, the monitor model's own members contradict each other: a
+    // contradiction whatever the formula. Without one, it contradicts the row's `violated` only
+    // where the monitor DECIDES the formula (`chain_is_exact`: every `||` has at most one
+    // box-bearing side); for `[] a || [] b` the one-path reading can be unreachable while the
+    // branching reading fails — the honest "no single-path witness" miss, not an alarm.
+    if !shipped.contradicted_by.is_empty() {
+        if shipped.trace.is_some() || safety_block_is_exact(formula) {
+            return Err(WitnessMiss::unreachable(shipped.contradicted_by));
+        }
+        return Err(WitnessMiss {
+            stage: "shape",
+            reason: format!(
+                "{} proved the one-path reading's `bad` unreachable, and the formula's `||` of \
+                 boxes is decided only by the branching reading: a violation with no single-path \
+                 witness",
+                shipped.contradicted_by.join(", ")
+            ),
+            contradicted_by: Vec::new(),
+        });
+    }
     // mununu#1057 — the slice and `--localize` read this trace cycle by cycle, so a path the
     // carrier did not establish as the shortest is re-derived bounded by its own depth.
     let shipped = crate::adapter::btor2::witness::shortest_path_for(&file, shipped);
@@ -724,6 +795,7 @@ pub fn safety_witness_by(
                 "search"
             },
             reason: reason.unwrap_or_else(|| "no trace and no reason (a defect)".to_string()),
+            contradicted_by: Vec::new(),
         }),
     }
 }
@@ -1705,9 +1777,16 @@ mod tests {
         // which the native encoder rejected, and an engine reading it at width read `cnt != 3`.)
         let wide = parse("nu Z. ((cnt != 7) && [] Z)");
         let miss = safety_witness(COUNTER, &wide, false, 10).unwrap_err();
+        // mununu#1076 — the owned `ic3` proves the monitor's `bad` unreachable (the property
+        // holds), and the miss says so by name; a caller holding a `violated` verdict for this
+        // `bad` would read it as the contradiction. Before, the proof was a note inside the
+        // `bound` reason of the native search that followed it.
         assert_eq!(
-            miss.stage, "bound",
-            "a tautology has no violation path: {miss}"
+            miss.stage, "unreachable",
+            "a tautology has no violation path, and a prover says why: {miss}"
         );
+        // Which prover finishes first (the owned `ic3`, or rIC3 / btormc where the image has
+        // them) is a race; at least one is named.
+        assert!(miss.proved_unreachable(), "{miss}");
     }
 }
