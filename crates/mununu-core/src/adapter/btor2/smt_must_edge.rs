@@ -295,7 +295,9 @@ where
 /// proves the cube empty at cycle 0; `Unknown` (a timeout, or a predicate name the view cannot
 /// resolve) proves nothing, and the caller keeps the cube. A pin whose name the view cannot
 /// resolve is dropped: fewer constraints admit more cubes, which is the conservative direction
-/// here — dropping an initial state is what could hide a violation.
+/// here — dropping an initial state is what could hide a violation. `array_inits` is each
+/// memory's `init` value ([`encode_array_inits`](crate::adapter::sidecar::predicate_image::btor2_encode::encode_array_inits)),
+/// asserted equal to the memory at cycle 0 (mununu#1061).
 ///
 /// **Caller must hold a [`z3::with_z3_config`] scope.**
 pub(crate) fn smt_cube_feasible_at_cycle_zero<P: PredicateLike>(
@@ -304,9 +306,20 @@ pub(crate) fn smt_cube_feasible_at_cycle_zero<P: PredicateLike>(
     predicates: &[P],
     nid_map: &HashMap<String, Nid>,
     pins: &HashMap<String, Vec<u64>>,
+    array_inits: &HashMap<Nid, z3::ast::Array>,
     timeout_ms: u32,
 ) -> z3::SatResult {
     let mut constraints: Vec<z3::ast::Bool> = Vec::new();
+    // mununu#1061 — a memory with an `init` line starts AT that value. `pins` carries scalar
+    // values only, and an array has no bit-vector term to compare one with, so the memory's pin
+    // was dropped by the `continue` below and the memory was free at cycle 0: a cube that needs
+    // a non-reset cell value (`v[ptr] == 1` over a zero-initialised `v`) counted as inhabited,
+    // became an initial state, and a safety property read VIOLATED at it.
+    for (nid, init) in array_inits {
+        if let Some(curr) = view.state_curr_arr.get(nid) {
+            constraints.push(z3::ast::Ast::eq(curr, init));
+        }
+    }
     for (i, pred) in predicates.iter().enumerate() {
         let polarity = (cube_bits >> i) & 1 == 1;
         let Some(c) = build_pred_constraint_source(view, nid_map, pred, polarity) else {

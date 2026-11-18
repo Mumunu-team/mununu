@@ -725,6 +725,23 @@ pub(crate) fn cycle_zero_feasible_cubes(
         };
         let nid_map = build_register_nid_map_with_inputs(&view);
         let preds = cube_predicates(predicates, compound_exprs);
+        // mununu#1061 — every memory's `init`, so the query starts the memory where the design
+        // does. A memory whose `init` cannot be encoded stays free at cycle 0, as before; that
+        // admits initial cubes the design never occupies, so it is said, not swallowed.
+        let array_inits =
+            match crate::adapter::sidecar::predicate_image::btor2_encode::encode_array_inits(
+                file, &view,
+            ) {
+                Ok(inits) => inits,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "a memory `init` did not encode: the memory is free at cycle 0 in the \
+                         initial-cube filter, and a violation at an initial cube may be spurious"
+                    );
+                    HashMap::new()
+                }
+            };
         candidates
             .iter()
             .copied()
@@ -743,6 +760,7 @@ pub(crate) fn cycle_zero_feasible_cubes(
                         &preds,
                         &nid_map,
                         pins,
+                        &array_inits,
                         crate::adapter::run_budget::clamp_query_ms(5_000)
                     ),
                     z3::SatResult::Unsat
@@ -5513,6 +5531,43 @@ mod tests {
             initial,
             vec![0b000, 0b011],
             "the reset states are (a, b) ∈ {{(0,0), (1,0)}} with out = a; got {initial:?}"
+        );
+    }
+
+    // mununu#1061 — a two-cell memory `v` initialised to 0, read through `ptr` (also 0 at
+    // reset) as the output `out_valid`, beside a flag `fresh`. Nothing ever changes.
+    const MEMORY_READ_AT_RESET_BTOR2: &str = "1 sort bitvec 1\n2 sort array 1 1\n3 zero 1\n\
+4 state 2 v\n5 init 2 4 3\n6 state 1 ptr\n7 init 1 6 3\n8 read 1 4 6\n9 output 8 out_valid\n\
+10 state 1 fresh\n11 init 1 10 3\n12 next 2 4 4\n13 next 1 6 6\n14 next 1 10 10\n";
+
+    /// mununu#1061 — a memory's `init` line binds at cycle 0. `out_valid = v[ptr]` reads a
+    /// memory whose every cell is 0 at reset, so `out_valid == 1` is not an initial cell. The
+    /// memory's pin used to be dropped (an array has no scalar to compare), the memory was free
+    /// in the cycle-0 query, and the cell `{out_valid == 1, fresh == 0}` was initial: the
+    /// explicit cube then reported a safety property VIOLATED there while k-induction and rIC3
+    /// proved it.
+    #[test]
+    fn x1061_a_memory_init_line_binds_the_initial_cubes() {
+        let file =
+            crate::adapter::btor2::parser::parse(MEMORY_READ_AT_RESET_BTOR2).expect("parses");
+        let preds = vec![
+            PredicateSpec {
+                name: "out_valid".into(),
+                register: "out_valid".into(),
+                value: 1,
+            },
+            PredicateSpec {
+                name: "fresh".into(),
+                register: "fresh".into(),
+                value: 1,
+            },
+        ];
+        let none = std::collections::HashMap::new();
+        let initial = initial_cube_indices(&preds, &none, &HashMap::new(), &file);
+        assert_eq!(
+            initial,
+            vec![0b00],
+            "v is all-zero at reset, so out_valid = v[ptr] = 0 and fresh = 0; got {initial:?}"
         );
     }
 
