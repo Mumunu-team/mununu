@@ -451,12 +451,13 @@ fn build_properties(
         None => return Ok(vec![]),
     };
 
-    let registry =
-        crate::adapter::templates::TemplateRegistry::configured(&[]).map_err(|e| AdapterError {
+    let registry = crate::adapter::templates::TemplateRegistry::configured_default().map_err(
+        |message| AdapterError {
             kind: AdapterErrorKind::ParseError,
-            message: format!("the template catalog: {e}"),
+            message,
             location: None,
-        })?;
+        },
+    )?;
     let mut out = Vec::with_capacity(ann.properties.len());
     for p in &ann.properties {
         let role = match p.role.as_str() {

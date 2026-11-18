@@ -370,6 +370,15 @@ impl TemplateRegistry {
         Ok(reg)
     }
 
+    /// mununu#966 — [`configured`](Self::configured) with no project files and the error already
+    /// worded for a caller's message (`the template catalog: <why>`): the form every surface
+    /// that has no project pack list used to build and map by hand (the API's template routes,
+    /// a CTXDSL `template` clause, the XState and extraction adapters). The caller wraps the
+    /// string in its own error type.
+    pub fn configured_default() -> Result<Self, String> {
+        Self::configured(&[]).map_err(|e| format!("the template catalog: {e}"))
+    }
+
     /// The registry this process should use: the built-in catalog, the system pack directory, the
     /// deployment configuration's packs and domains ([`crate::deployment::current`]) and the
     /// project's `project_files`.
