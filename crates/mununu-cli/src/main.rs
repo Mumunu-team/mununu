@@ -2107,10 +2107,12 @@ enum SvCommand {
     /// can't bind them) — never given a misleading verdict. Surface peer of
     /// `POST /api/v1/sv/verify-auto` + the extraction-tab verify-auto panel.
     VerifyAuto(Box<SvVerifyAutoArgs>),
-    /// Lift SV (yosys-slang) and decide `bad`-reachability of the `bad` lines yosys lowers its
-    /// immediate assertions to, with the multi-engine safety portfolio — one call, no
-    /// `emit-btor2` step. Not the SVA property set: that is `sv verify-auto`. (0.5: renamed from
-    /// `sv verify`.) Surface peer of `POST /api/v1/sv/verify-bad`.
+    /// Lift SV (yosys-slang) and decide `bad`-reachability of the `bad` lines in the lifted
+    /// model, with the multi-engine safety portfolio — one call, no `emit-btor2` step. The lift
+    /// drops immediate assertions and does not lower SVA, so a design whose checks are those
+    /// lifts to no `bad` line and this verb refuses it (mununu#1064): the SVA property set is
+    /// `sv verify-auto`. (0.5: renamed from `sv verify`.) Surface peer of
+    /// `POST /api/v1/sv/verify-bad`.
     #[command(name = "verify-bad")]
     Verify(SvVerifyArgs),
     /// Lift SV and decide liveness — the SV-direct peer of `btor2 verify-liveness`:

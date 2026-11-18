@@ -1114,6 +1114,25 @@ pub fn decide_reach_portfolio_with_members(
     decide_with_members_using(file, subprocess_timeout, cancel, members, run_exact)
 }
 
+/// mununu#1064 — the stated reason a model with no `bad` line is not decided.
+pub const NO_BAD_LINE_REASON: &str = "the model has no `bad` line: there is no obligation to \
+     decide, so no member ran (a proof of an empty obligation set is not `holds`)";
+
+/// mununu#1064 — a model with no `bad` line carries no obligation. A proof engine handed one
+/// answers "unreachable" (rIC3 and k-induction both do), which read as `holds` on a design whose
+/// only assertion the lift had dropped. Every portfolio driver calls this first and returns the
+/// abstention instead: `Unknown`, with the reason under the pseudo-member `portfolio` in
+/// [`ReachOutcome::refused`].
+fn no_obligation(file: &Btor2File) -> Option<ReachOutcome> {
+    if file.bads().next().is_some() {
+        return None;
+    }
+    Some(ReachOutcome {
+        refused: vec![("portfolio", NO_BAD_LINE_REASON.to_string())],
+        ..ReachOutcome::default()
+    })
+}
+
 /// [`decide_reach_portfolio_with_members`] with the exact member's runner as a parameter: the
 /// shipped driver passes [`run_exact`]; a test passes a runner that does not return, which is
 /// what one long OxiDD apply looks like from the join (mununu#996).
@@ -1125,6 +1144,9 @@ fn decide_with_members_using(
     exact_runner: fn(&str) -> Result<Option<bool>, String>,
 ) -> ReachOutcome {
     use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+    if let Some(outcome) = no_obligation(file) {
+        return outcome;
+    }
     // mununu#726 — read the thread-local budget ONCE: an already-expired budget decides nothing
     // (deterministic: no member is spawned), and the members' bounds follow the time left. The
     // scoped threads re-enter the same budget — a spawned thread inherits none (`run_budget`'s
@@ -1691,6 +1713,9 @@ pub fn decide_reach_owned_only_with_witness(
 ) -> ReachOutcome {
     use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
     use std::sync::{Arc, mpsc};
+    if let Some(outcome) = no_obligation(file) {
+        return outcome;
+    }
     // N5.4 — where the carrying members leave their trace; read at return.
     let carried_store: Arc<Carried> = Arc::default();
     // mununu#803 — a member's refusal (an `Err`, not an abstention) is kept here as the scoped
@@ -2122,6 +2147,30 @@ mod tests {
     use super::*;
     use crate::adapter::btor2::cex_value::CexValue;
     use crate::adapter::btor2::parser;
+
+    /// A one-register design with no `bad` line: nothing to decide.
+    const NO_BAD: &str = "1 sort bitvec 1\n2 zero 1\n3 state 1 q\n4 init 1 3 2\n\
+                          5 input 1 d\n6 next 1 3 5\n";
+
+    /// mununu#1064 — a proof engine handed a model with no `bad` answers "unreachable"; that is
+    /// a proof of nothing and must not surface as `holds`. Both drivers abstain with the reason.
+    #[test]
+    fn a_model_with_no_bad_line_is_unknown_with_a_reason_never_holds() {
+        let file = parser::parse(NO_BAD).expect("parse");
+        assert!(file.bads().next().is_none());
+        for (driver, out) in [
+            ("full", decide_reach_portfolio(&file)),
+            ("owned-only", decide_reach_owned_only(&file, 5_000)),
+        ] {
+            assert_eq!(out.verdict, ReachVerdict::Unknown, "{driver}: {out:?}");
+            assert!(out.unreachable_by.is_empty(), "{driver}: {out:?}");
+            assert_eq!(
+                out.refused,
+                vec![("portfolio", NO_BAD_LINE_REASON.to_string())],
+                "{driver}"
+            );
+        }
+    }
 
     /// mununu#986 — the member sets a RACED rung runs. The parallel justice policy joins the
     /// losers, so it needs every member to stop on cancel (no exact). Its k-liveness rung runs rIC3

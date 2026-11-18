@@ -2034,7 +2034,7 @@ module *and* decides one property in one call:
 ```bash
 mununu sv verify-recoverability my_module.sv --target "state_q == 3"
 mununu sv verify-liveness      my_module.sv --request "req == 1" --grant "grant == 1"
-mununu sv verify-bad               my_module.sv                       # safety of its assertions
+mununu sv verify-bad               my_module.sv                       # the lifted model's `bad` lines; refuses a model with none (SVA: `sv verify-auto`)
 ```
 
 Same over HTTP: `POST /api/v1/sv/verify-bad` · `/sv/verify-liveness` ·
