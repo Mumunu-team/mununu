@@ -6689,14 +6689,14 @@ over = "Sys"
         assert!(
             message.contains(&format!(
                 "{}:2: #include \"/etc/hostname\"",
-                base.join("inc/board.h").display()
+                base.join("inc").join("board.h").display()
             )),
             "{message}"
         );
         assert!(
             message.contains(&format!(
                 "{}:1: #include \"../../escape.h\"",
-                base.join("inc/regs.h").display()
+                base.join("inc").join("regs.h").display()
             )),
             "{message}"
         );
