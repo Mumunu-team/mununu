@@ -993,7 +993,7 @@ fn btor2_verify_handler_impl(request: Btor2VerifyRequest) -> ApiResult<Json<Btor
         .map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
     // N5.4 — with `witness` the members carry the deciding member's counterexample out of the
     // run (`ReachMembers::witness`); without it every member runs its default path, as before.
-    let outcome = crate::adapter::reach_portfolio::decide_reach_portfolio_with_members(
+    let mut outcome = crate::adapter::reach_portfolio::decide_reach_portfolio_with_members(
         &file,
         request
             .timeout_ms
@@ -1005,15 +1005,19 @@ fn btor2_verify_handler_impl(request: Btor2VerifyRequest) -> ApiResult<Json<Btor
     // `witness`: on a violation, the reset → `bad` path the deciding member carried out (N5.4,
     // `trace_by`), else re-derived (the trace carriers again, then native BMC); without one,
     // `trace_unavailable_reason` says why.
-    let witness = (request.witness && outcome.verdict == ReachVerdict::Reachable).then(|| {
-        crate::adapter::btor2::witness::witness_for_violation(
-            &file,
-            request.witness_max_k.unwrap_or(200),
-            deadline,
-            &outcome,
-            false,
-        )
-    });
+    let witness = (request.witness && outcome.verdict == ReachVerdict::Reachable)
+        .then(|| {
+            crate::adapter::btor2::witness::witness_for_violation(
+                &file,
+                request.witness_max_k.unwrap_or(200),
+                deadline,
+                &outcome,
+                false,
+            )
+        })
+        // mununu#1076 — a fallback carrier that proved `bad` unreachable turns the verdict into
+        // the contradiction (`unknown`, `contradiction: true`, both sides listed); no path ships.
+        .map(|w| crate::adapter::btor2::witness::apply_fallback_contradiction(&mut outcome, w));
     let trace = witness
         .as_ref()
         .and_then(|w| w.trace.as_ref())

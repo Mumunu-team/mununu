@@ -82,7 +82,7 @@ pub fn verify_fault_reach(
                 .map_err(|e| format!("--target `{atom}`: {e:?}"))?;
             let (v, outcome) = reach_portfolio_rescue_diagnosed(&model, &formula, false)
                 .map_err(|d| format!("--target `{atom}`: the reach rescue declined ({d:?})"))?;
-            let (verdict, decided_by) = match v {
+            let (mut verdict, mut decided_by) = match v {
                 RescueVerdict::Holds => ("holds", outcome.unreachable_by.clone()),
                 RescueVerdict::Violated => ("violated", outcome.reachable_by.clone()),
                 _ => ("unknown", Vec::new()),
@@ -99,6 +99,14 @@ pub fn verify_fault_reach(
                             Some(by),
                             None,
                         )
+                    }
+                    // mununu#1076 — a carrier of the path search proved `bad` unreachable:
+                    // the verdict is the contradiction (`unknown`, both sides named), not
+                    // `violated` with a note.
+                    Err(miss) if miss.proved_unreachable() => {
+                        verdict = "unknown";
+                        decided_by.extend(miss.contradicted_by.iter().copied());
+                        (Vec::new(), None, None, Some(miss.to_string()))
                     }
                     Err(miss) => (Vec::new(), None, None, Some(miss.to_string())),
                 }
@@ -129,24 +137,38 @@ pub fn verify_fault_reach(
                 None,
                 ReachMembers::shipped().with_witness(true),
             );
-            let (verdict, decided_by) = match outcome.verdict {
+            let (mut verdict, mut decided_by) = match outcome.verdict {
                 ReachVerdict::Reachable => ("violated", outcome.reachable_by.clone()),
                 ReachVerdict::Unreachable => ("holds", outcome.unreachable_by.clone()),
                 _ => ("unknown", Vec::new()),
             };
             let (attack, depth, trace_by, trace_unavailable_reason) = if verdict == "violated" {
                 let w = witness_for_violation(&injected_file, witness_max_k, None, &outcome, false);
-                match w.trace {
-                    Some(trace) => {
-                        let d = trace.states.len().saturating_sub(1);
-                        (
-                            faults_in_trace(&trace, &injected, spec),
-                            Some(d),
-                            w.by,
-                            None,
-                        )
+                if !w.contradicted_by.is_empty() {
+                    // mununu#1076 — a carrier of the fallback proved `bad` unreachable: the
+                    // verdict is the contradiction (`unknown`, both sides named); a path found
+                    // beside the proof is not an attack.
+                    verdict = "unknown";
+                    decided_by.extend(w.contradicted_by.iter().copied());
+                    let reason = format!(
+                        "contradiction: {} proved `bad` unreachable under the `violated` verdict \
+                         — a soundness alarm (one of the two engines is wrong)",
+                        w.contradicted_by.join(", ")
+                    );
+                    (Vec::new(), None, None, Some(reason))
+                } else {
+                    match w.trace {
+                        Some(trace) => {
+                            let d = trace.states.len().saturating_sub(1);
+                            (
+                                faults_in_trace(&trace, &injected, spec),
+                                Some(d),
+                                w.by,
+                                None,
+                            )
+                        }
+                        None => (Vec::new(), None, None, w.unavailable_reason),
                     }
-                    None => (Vec::new(), None, None, w.unavailable_reason),
                 }
             } else {
                 (Vec::new(), None, None, None)

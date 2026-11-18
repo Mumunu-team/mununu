@@ -419,12 +419,27 @@ fn check_candidate(
     // The certificate stands without a path; a declined finder is said in the log (the report's
     // channel for it is the verify-auto note — mununu#803 "not covered").
     let witness = under_check_budget(|| {
-        crate::adapter::reach_rescue::safety_witness(btor2, &dual, reset_pinned, WITNESS_MAX_K)
-            .map_err(|miss| {
-                tracing::warn!(%miss, signal, "trap certificate: no path to the trap shipped");
-            })
-            .ok()
+        Some(crate::adapter::reach_rescue::safety_witness(
+            btor2,
+            &dual,
+            reset_pinned,
+            WITNESS_MAX_K,
+        ))
     });
+    let witness = match witness {
+        // mununu#1076 — a carrier of the path search proved the trap unreachable under the
+        // certificate's own reachability: the certificate does not stand on a contradiction.
+        Some(Err(miss)) if miss.proved_unreachable() => {
+            tracing::error!(%miss, signal, "trap certificate: the path search contradicted it");
+            return (CandidateOutcome::Contradiction, None);
+        }
+        Some(Err(miss)) => {
+            tracing::warn!(%miss, signal, "trap certificate: no path to the trap shipped");
+            None
+        }
+        Some(Ok(trace)) => Some(trace),
+        None => None,
+    };
     (
         CandidateOutcome::Certified,
         Some(TrapCertificate {

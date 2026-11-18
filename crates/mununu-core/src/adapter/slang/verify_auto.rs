@@ -2006,6 +2006,29 @@ fn witness_miss_note(
     }
 }
 
+/// mununu#1076 — the path search contradicted the row: a member proved `bad` unreachable under
+/// the row's `violated`. The row does not ship `violated` (the same rule the reach portfolio
+/// applies to its own contradiction): it goes to `unknown` with `engine-contradiction` as its
+/// bottom reason, naming both sides, and the `bottom-reason` note says so. Returns the note.
+fn contradicted_row(
+    prop: &mut PropertyVerdict,
+    decided_by: Option<&str>,
+    miss: &crate::adapter::reach_rescue::WitnessMiss,
+) -> VerificationNote {
+    let reason = BottomReason::EngineContradiction {
+        detail: format!(
+            "Violated@[{}] vs Holds@[{}] — the path search's carrier proved `bad` unreachable \
+             under the row's `violated` (mununu#1076); one of the two engines is wrong",
+            decided_by.unwrap_or("unknown"),
+            miss.contradicted_by.join(", ")
+        ),
+    };
+    prop.outcome = VerifyOutcome::Unknown { unknown_cells: 0 };
+    prop.counterexample = None;
+    prop.bottom_reason = Some(reason.clone());
+    bottom_reason_note(&prop.name, reason)
+}
+
 fn attach_safety_witnesses(report: &mut AutoVerifyReport, design_btor2: &str, reset_pinned: bool) {
     use crate::mu_calculus::{PropertyClass, parser as mu_parser};
     let mut misses: Vec<VerificationNote> = Vec::new();
@@ -2042,6 +2065,7 @@ fn attach_safety_witnesses(report: &mut AutoVerifyReport, design_btor2: &str, re
                         reason: "the engine that decided this non-safety row returned a verdict \
                                  and no path, and the safety path finder does not cover its shape"
                             .to_string(),
+                        contradicted_by: Vec::new(),
                     },
                 ));
             }
@@ -2054,6 +2078,11 @@ fn attach_safety_witnesses(report: &mut AutoVerifyReport, design_btor2: &str, re
             SAFETY_WITNESS_MAX_K,
         ) {
             Ok(trace) => prop.counterexample = Some(safety_counterexample(trace)),
+            // mununu#1076 — a contradiction is not a miss: the row leaves `violated`.
+            Err(miss) if miss.proved_unreachable() => {
+                let decided_by = prop.decided_by.clone();
+                misses.push(contradicted_row(prop, decided_by.as_deref(), &miss));
+            }
             Err(miss) => misses.push(witness_miss_note(
                 &prop.name,
                 prop.decided_by.as_deref(),
@@ -7544,6 +7573,7 @@ pub(crate) fn verify_auto_impl(
                                             "the exact engine refused the row ({e}); the \
                                              recoverability engine that decided it builds no path"
                                         ),
+                                        contradicted_by: Vec::new(),
                                     },
                                 ));
                             }
@@ -7569,6 +7599,7 @@ pub(crate) fn verify_auto_impl(
                     &crate::adapter::reach_rescue::WitnessMiss {
                         stage: "exact-witness",
                         reason,
+                        contradicted_by: Vec::new(),
                     },
                 ));
             }
@@ -8475,6 +8506,13 @@ pub(crate) fn escalate_bottom_with_slice(
                             });
                             prop.counterexample = match witness {
                                 Some(Ok(trace)) => Some(safety_counterexample(trace)),
+                                // mununu#1076 — a contradiction is not a miss: the row
+                                // leaves `violated` (the rescue note below would name a
+                                // verdict the row no longer carries, so it is skipped).
+                                Some(Err(miss)) if miss.proved_unreachable() => {
+                                    notes.push(contradicted_row(prop, Some("reach-rescue"), &miss));
+                                    None
+                                }
                                 Some(Err(miss)) => {
                                     notes.push(witness_miss_note(
                                         &prop.name,
@@ -8489,6 +8527,7 @@ pub(crate) fn escalate_bottom_with_slice(
                                         reason:
                                             "the rescue slice expired before the path search ran"
                                                 .to_string(),
+                                        contradicted_by: Vec::new(),
                                     };
                                     notes.push(witness_miss_note(
                                         &prop.name,
@@ -8498,7 +8537,9 @@ pub(crate) fn escalate_bottom_with_slice(
                                     None
                                 }
                             };
-                            notes.push(rescue_note(&prop.name, "VIOLATED", &engines));
+                            if matches!(prop.outcome, VerifyOutcome::Violated { .. }) {
+                                notes.push(rescue_note(&prop.name, "VIOLATED", &engines));
+                            }
                         }
                         RescueVerdict::Inconclusive => attribute_portfolio_abstention(
                             prop,
@@ -9695,6 +9736,7 @@ pub(crate) fn rescue_skipped_via_exact(
                         &crate::adapter::reach_rescue::WitnessMiss {
                             stage: "exact-witness",
                             reason,
+                            contradicted_by: Vec::new(),
                         },
                     ));
                 }
@@ -15446,6 +15488,7 @@ module uart_tx(); endmodule"#;
             &crate::adapter::reach_rescue::WitnessMiss {
                 stage: "exact-refused",
                 reason: "the exact engine refused the row".to_string(),
+                contradicted_by: Vec::new(),
             },
         ));
         report.properties.push(row);
@@ -15485,6 +15528,7 @@ module uart_tx(); endmodule"#;
             &crate::adapter::reach_rescue::WitnessMiss {
                 stage: "monitor",
                 reason: "the body is not a bounded-depth box / boolean shape".into(),
+                contradicted_by: Vec::new(),
             },
         ));
         report.notes.push(VerificationNote {
@@ -23552,6 +23596,53 @@ endmodule
         assert_eq!(resolve_named_constants("q == SCRAM.x", &c), "q == SCRAM.x");
     }
 
+    /// mununu#1076 — a path search whose carrier proved `bad` unreachable does not leave the row
+    /// `violated`: it goes to `unknown` with `engine-contradiction` naming both sides, the
+    /// `bottom-reason` note says so, and a counterexample attached before is dropped.
+    #[test]
+    fn a_contradicted_path_search_takes_the_row_to_unknown_with_both_sides_named() {
+        let mut prop = PropertyVerdict {
+            name: "u_x.sva_3".into(),
+            label: None,
+            kind: SvaKind::Assert,
+            formula: "nu Y. ((a_q == 0) && [] Y)".into(),
+            outcome: VerifyOutcome::Violated { false_cells: 1 },
+            seeded_predicates: vec![],
+            counterexample: None,
+            bottom_reason: None,
+            decided_by: Some("exact-symbolic".into()),
+            vacuity: None,
+            portfolio: None,
+        };
+        let miss = crate::adapter::reach_rescue::WitnessMiss::unreachable(vec!["ic3", "btormc"]);
+        assert!(miss.proved_unreachable());
+        assert_eq!(miss.stage, "unreachable");
+        let n = contradicted_row(&mut prop, Some("exact-symbolic"), &miss);
+        assert!(
+            matches!(prop.outcome, VerifyOutcome::Unknown { .. }),
+            "{:?}",
+            prop.outcome
+        );
+        match &prop.bottom_reason {
+            Some(BottomReason::EngineContradiction { detail }) => {
+                assert!(detail.contains("Violated@[exact-symbolic]"), "{detail}");
+                assert!(detail.contains("Holds@[ic3, btormc]"), "{detail}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(n.kind, "bottom-reason");
+        assert_eq!(n.property.as_deref(), Some("u_x.sva_3"));
+        assert!(n.summary.contains("u_x.sva_3"), "{}", n.summary);
+        assert!(n.detail.contains("engine-contradiction"), "{}", n.detail);
+        // A miss at any other stage is not the alarm.
+        let miss = crate::adapter::reach_rescue::WitnessMiss {
+            stage: "search",
+            reason: "x".into(),
+            contradicted_by: Vec::new(),
+        };
+        assert!(!miss.proved_unreachable());
+    }
+
     // mununu#803 — the note a VIOLATED row carries when no path shipped: kind, the stage as its
     // operand, and the property it is about (not a prose prefix).
     #[test]
@@ -23559,6 +23650,7 @@ endmodule
         let miss = crate::adapter::reach_rescue::WitnessMiss {
             stage: "search",
             reason: "native BMC: encode failed".to_string(),
+            contradicted_by: Vec::new(),
         };
         let n = witness_miss_note("u_x.sva_3", Some("reach-rescue"), &miss);
         assert_eq!(n.kind, "witness-unavailable");
