@@ -2142,11 +2142,14 @@ mod tests {
         // `cargo test` the portfolio cancels native before it reports. So the test asks
         // that a sound in-process member decided, not which one, and that nothing
         // (the interpolation member included) reports the design reachable.
+        // Since N5.5 the set also holds `ic3` on a host without rIC3, and under a loaded
+        // `cargo test` it has proved this design before both (2026-11-17), so the test asks
+        // that a shipped in-process member decided, whichever it was.
+        let shipped = ReachMembers::shipped().names();
         assert!(
-            out.unreachable_by
-                .iter()
-                .any(|m| *m == "exact" || *m == "native"),
-            "exact or native proves the 1-inductive design safe: {out:?}"
+            !out.unreachable_by.is_empty()
+                && out.unreachable_by.iter().all(|m| shipped.contains(m)),
+            "a shipped member proves the 1-inductive design safe: {out:?}"
         );
         assert!(
             out.reachable_by.is_empty(),
@@ -2314,21 +2317,48 @@ mod tests {
 
     #[test]
     fn portfolio_decides_reachable_without_subprocess() {
-        // With no btormc/pono on PATH the two subprocess members abstain (Err),
-        // but the exact engine alone decides the small in-cap counter — so the
-        // portfolio still returns a definite verdict. (In mununu-sva all three
-        // run; here we prove the exact-only fallback + the merge shape.)
+        // With no btormc/pono/rIC3 on PATH the subprocess members abstain (Err) and the
+        // in-process members decide the small in-cap counter — so the portfolio still returns
+        // a definite verdict. WHICH in-process member reports first is a race the host decides
+        // (since N5.5 `ic3` is in the shipped set on a host without rIC3, and it beat `exact`
+        // on the macOS runner, 2026-11-17), so the shipped driver is held to the verdict and
+        // the merge shape, and the exact-only fallback is pinned with the exact member alone.
         const COUNTER: &str = "1 sort bitvec 3\n2 zero 1\n3 state 1\n4 init 1 3 2\n5 one 1\n\
                                6 add 1 3 5\n7 next 1 3 6\n8 ones 1\n9 sort bitvec 1\n\
                                10 eq 9 3 8\n11 bad 10\n";
         let file = parser::parse(COUNTER).expect("parse");
         let out = decide_reach_portfolio(&file);
-        assert_eq!(out.verdict, ReachVerdict::Reachable);
-        assert!(out.reachable_by.contains(&"exact"));
+        assert_eq!(out.verdict, ReachVerdict::Reachable, "{out:?}");
+        let shipped = ReachMembers::shipped().names();
+        assert!(
+            !out.reachable_by.is_empty() && out.reachable_by.iter().all(|m| shipped.contains(m)),
+            "every decider is a shipped member: {out:?}"
+        );
         assert!(
             out.unreachable_by.is_empty(),
             "no engine should call the reachable counter unreachable"
         );
+        let exact_only = ReachMembers {
+            exact: true,
+            native: false,
+            interp: false,
+            sat_bmc: false,
+            ic3: false,
+            btormc: false,
+            pono: false,
+            ric3: false,
+            ric3_bmc: false,
+            ric3_engine: ric3::DEFAULT_ENGINE,
+            witness: false,
+        };
+        let alone = decide_reach_portfolio_with_members(
+            &file,
+            std::time::Duration::from_secs(60),
+            None,
+            exact_only,
+        );
+        assert_eq!(alone.verdict, ReachVerdict::Reachable, "{alone:?}");
+        assert_eq!(alone.reachable_by, vec!["exact"], "{alone:?}");
     }
 
     /// mununu#996 — the join's seam. A member that never reports (one long OxiDD apply) is left
@@ -2740,14 +2770,41 @@ mod tests {
         let file = parser::parse(WIDE_SAFE).expect("parse");
         let out = decide_reach_portfolio(&file);
         assert_eq!(out.verdict, ReachVerdict::Unreachable, "outcome: {out:?}");
+        // Which proof member reports first is a race the host decides (since N5.5 `ic3` is in
+        // the set on a host without rIC3 and has beaten `native` under a loaded `cargo test`,
+        // 2026-11-17); the shipped driver is held to the verdict, the members' names and the
+        // exact engine's abstention, and the native claim is pinned with that member alone.
+        let shipped = ReachMembers::shipped().names();
         assert!(
-            out.unreachable_by.contains(&"native"),
-            "the native engine must carry the beyond-cap verdict: {out:?}"
+            !out.unreachable_by.is_empty()
+                && out.unreachable_by.iter().all(|m| shipped.contains(m)),
+            "a shipped in-process member carries the beyond-cap verdict: {out:?}"
         );
         assert!(
             !out.unreachable_by.contains(&"exact"),
             "the exact engine must abstain on the over-cap 300-bit design: {out:?}"
         );
+        let native_only = ReachMembers {
+            exact: false,
+            native: true,
+            interp: false,
+            sat_bmc: false,
+            ic3: false,
+            btormc: false,
+            pono: false,
+            ric3: false,
+            ric3_bmc: false,
+            ric3_engine: ric3::DEFAULT_ENGINE,
+            witness: false,
+        };
+        let alone = decide_reach_portfolio_with_members(
+            &file,
+            std::time::Duration::from_secs(60),
+            None,
+            native_only,
+        );
+        assert_eq!(alone.verdict, ReachVerdict::Unreachable, "{alone:?}");
+        assert_eq!(alone.unreachable_by, vec!["native"], "{alone:?}");
     }
 
     #[test]
