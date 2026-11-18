@@ -712,6 +712,9 @@ pub fn safety_witness_by(
     // per-property budget, when there is one). The rescue decided on a different monitor, so
     // there is no carried trace to reuse here.
     let shipped = crate::adapter::btor2::witness::search_witness(&file, k, None, &[], false);
+    // mununu#1057 — the slice and `--localize` read this trace cycle by cycle, so a path the
+    // carrier did not establish as the shortest is re-derived bounded by its own depth.
+    let shipped = crate::adapter::btor2::witness::shortest_path_for(&file, shipped);
     match (shipped.trace, shipped.unavailable_reason) {
         (Some(trace), _) => Ok((trace, shipped.by.unwrap_or("native-bmc"))),
         (None, reason) => Err(WitnessMiss {

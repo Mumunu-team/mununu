@@ -623,7 +623,10 @@ same `witness-unavailable` note with `items: ["exact-witness"]` and the engine's
 starvation lasso); see [`docs/api-schemas/verdict.md`](api-schemas/verdict.md). Since N5.4 (2026-11-16) `btor2 verify --witness` ships the
 counterexample the **deciding member** carried out of the portfolio, replayed on the concrete simulator
 (`trace_by` names it: `sat-bmc`, `ic3`, `btormc`, `ric3`, `ric3-bmc`, or `native-bmc` for the
-re-derivation) — that member's own path, **not necessarily the shallowest**; a member whose own witness
+re-derivation) — that member's own path, **not necessarily the shallowest**: `trace_shortest` says whether
+the member established that no shorter counterexample exists (`true` for `native-bmc` and for `sat-bmc`'s
+plain search; `false` when `sat-bmc`'s dynamic step answered a window with a deeper path, mununu#1057;
+absent when the member does not say — `ic3`, btormc, rIC3); a member whose own witness
 did not replay is listed in `trace_replay_failed` (`sole_decider` when the verdict rests on it alone).
 
 ### Replaying a counterexample under Verilator: `--emit-testbench` (2026-10-24)

@@ -4565,6 +4565,8 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
         .and_then(|w| w.trace.as_ref())
         .map(mununu_core::api::models::Trace::from_bmc);
     let trace_by = witness.as_ref().and_then(|w| w.by);
+    // mununu#1057 — whether the carrier refuted every shorter depth (the API's field).
+    let trace_shortest = witness.as_ref().and_then(|w| w.shortest);
     let trace_unavailable_within_k = witness.as_ref().and_then(|w| w.unavailable_within_k);
     let trace_unavailable_reason = witness.and_then(|w| w.unavailable_reason);
     let trace_replay_failed = if args.witness {
@@ -4589,6 +4591,7 @@ fn btor2_verify(args: Btor2VerifyArgs) -> Result<(), String> {
         "undecided": mununu_core::api::models::MemberRefusalView::list_undecided(&outcome),
         "trace": trace,
         "trace_by": trace_by,
+        "trace_shortest": trace_shortest,
         "trace_unavailable_within_k": trace_unavailable_within_k,
         "trace_unavailable_reason": trace_unavailable_reason,
         "trace_replay_failed": trace_replay_failed,

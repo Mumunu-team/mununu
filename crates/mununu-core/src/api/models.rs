@@ -1138,8 +1138,8 @@ pub struct Btor2VerifyResponse {
     /// The counterexample: with a `target` and a `violated` verdict, the shallowest attack found
     /// (`kind: "attack"`, the injections on `steps[].faults`); with `witness` and a `violated`
     /// verdict, a reset → `bad` path (`kind: "finite"`) replayed on the concrete simulator — the
-    /// deciding member's own counterexample (`trace_by`), not necessarily the shallowest; only a
-    /// `native-bmc` trace is (N5.4).
+    /// deciding member's own counterexample (`trace_by`), not necessarily the shallowest
+    /// (`trace_shortest` says what the member established; a `native-bmc` trace always is).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trace: Option<Trace>,
     /// N5.4 — with `trace`: the member whose counterexample it is (`sat-bmc`, `ic3`, `btormc`,
@@ -1147,6 +1147,16 @@ pub struct Btor2VerifyResponse {
     /// several finished with one can differ between runs of one design. Absent without a trace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trace_by: Option<String>,
+    /// mununu#1057 — with `trace`: whether `trace_by` established that no shorter counterexample
+    /// exists. `true`: it refuted every depth below the trace's (`native-bmc`; `sat-bmc`'s plain
+    /// search, or its dynamic step when the hit is at its window's base). `false`: it did not
+    /// (`sat-bmc`'s dynamic step answered a window with a deeper path — a shorter one may exist
+    /// inside the window). Absent when the member does not say (`ic3`, `btormc`, `ric3`,
+    /// `ric3-bmc`: their own paths, never claimed shortest) and without a trace. A consumer that
+    /// reads the trace cycle by cycle (a slice, a localisation) treats anything but `true` as a
+    /// path, not the first path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_shortest: Option<bool>,
     /// With `witness`: the bound within which no path was re-derived although the verdict is
     /// `violated` (another engine found a deeper one).
     #[serde(default, skip_serializing_if = "Option::is_none")]

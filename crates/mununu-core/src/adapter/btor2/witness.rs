@@ -479,6 +479,10 @@ pub struct ShippedWitness {
     /// N5.4 — the member whose counterexample `trace` is: a portfolio member that carried it out
     /// of the run, or `native-bmc` for the re-derivation. `None` exactly when `trace` is.
     pub by: Option<&'static str>,
+    /// mununu#1057 — with `trace`: whether `by` established that no shorter counterexample
+    /// exists ([`CarriedTrace::shortest`]; `native-bmc` always does, one query per depth).
+    /// `None` when the member does not say, and without a trace.
+    pub shortest: Option<bool>,
     /// Set ONLY when native BMC searched every frame up to the bound and found no path to `bad`:
     /// the counterexample another engine found is deeper than `--witness-max-k`. A stop on a
     /// budget, an encode failure or a missing model is NOT this (it says nothing about depth).
@@ -514,6 +518,7 @@ pub fn witness_for_violation(
         return ShippedWitness {
             trace: Some(carried.trace.clone()),
             by: Some(carried.by),
+            shortest: carried.shortest,
             unavailable_within_k: None,
             unavailable_reason: None,
         };
@@ -549,6 +554,60 @@ pub fn search_witness(
     search_witness_with(file, max_k, deadline, skip, owned_only, true)
 }
 
+/// mununu#1057 — the shortest path behind a shipped witness, for the consumers that read a
+/// trace cycle by cycle (the `sv verify-auto` slice and `--localize`, the fault adversary's
+/// attack): a trace whose carrier established it is the shortest (`shortest == Some(true)`)
+/// ships as it is; any other (`sat-bmc`'s dynamic step answered a window with a deeper path;
+/// `ic3` and the tools' traces are their own) is re-derived by native BMC bounded by the
+/// trace's own depth — one query per depth, so the first path it finds is the first one, and
+/// the bound guarantees one exists at or below it. A re-derivation that misses (its budget,
+/// an encode failure) keeps the carried trace and says so in the log; the verdict is never
+/// touched. Without a trace, unchanged.
+///
+/// engine: native BMC (owned, z3 QF_BV unrolling to the carried depth, under this thread's
+/// run budget); role: the shortest trace behind a verdict another member decided.
+pub fn shortest_path_for(file: &Btor2File, shipped: ShippedWitness) -> ShippedWitness {
+    let Some(trace) = &shipped.trace else {
+        return shipped;
+    };
+    if shipped.shortest == Some(true) {
+        return shipped;
+    }
+    let depth = u32::try_from(trace.states.len().saturating_sub(1)).unwrap_or(u32::MAX);
+    match bmc_bad_reachable_witness(file, depth) {
+        Ok((BmcOutcome::Violated { depth: first }, Some(shortest))) => {
+            tracing::info!(
+                by = shipped.by,
+                depth,
+                first,
+                "witness: the carried path was not established shortest; re-derived by native BMC"
+            );
+            ShippedWitness {
+                trace: Some(shortest),
+                by: Some("native-bmc"),
+                shortest: Some(true),
+                unavailable_within_k: None,
+                unavailable_reason: None,
+            }
+        }
+        other => {
+            // Silence is a defect: the carried path ships, and the log says the shortest
+            // one was not re-derived and why.
+            tracing::warn!(
+                by = shipped.by,
+                depth,
+                outcome = %match &other {
+                    Ok((o, t)) => format!("{o:?}, model: {}", t.is_some()),
+                    Err(e) => format!("{e:?}"),
+                },
+                "witness: the carried path is not established shortest and native BMC did \
+                 not re-derive one within its depth; the carried path ships"
+            );
+            shipped
+        }
+    }
+}
+
 fn search_witness_with(
     file: &Btor2File,
     max_k: u32,
@@ -562,6 +621,7 @@ fn search_witness_with(
     let none = |reason: String, within: Option<u32>| ShippedWitness {
         trace: None,
         by: None,
+        shortest: None,
         unavailable_within_k: within,
         unavailable_reason: Some(reason),
     };
@@ -610,6 +670,7 @@ fn search_witness_with(
             return ShippedWitness {
                 trace: Some(carried.trace),
                 by: Some(carried.by),
+                shortest: carried.shortest,
                 unavailable_within_k: None,
                 unavailable_reason: None,
             };
@@ -670,6 +731,8 @@ fn search_witness_with(
         Ok((BmcOutcome::Violated { .. }, Some(t))) => ShippedWitness {
             trace: Some(t),
             by: Some("native-bmc"),
+            // One query per depth from 0: every shorter depth was refuted.
+            shortest: Some(true),
             unavailable_within_k: None,
             unavailable_reason: None,
         },
@@ -1077,6 +1140,7 @@ mod tests {
             trace: Some(CarriedTrace {
                 by: "sat-bmc",
                 trace: carried.clone(),
+                shortest: Some(false),
             }),
             ..ReachOutcome::default()
         };
@@ -1085,6 +1149,56 @@ mod tests {
         assert_eq!(w.by, Some("sat-bmc"));
         assert_eq!(w.trace, Some(carried));
         assert_eq!(w.unavailable_reason, None);
+    }
+
+    /// mununu#1057 — a shipped path its carrier did not establish as the shortest is re-derived
+    /// by native BMC bounded by its depth; one the carrier did establish, one with no trace, and
+    /// one whose depth native BMC cannot reach ship as they are. Two counters on one input:
+    /// `a` reaches 3 after three steps of `i` high (a 3-step path), `b` reaches 6 after six
+    /// steps of `i` low — the design on which `sat-bmc`'s window answers with either path.
+    #[test]
+    fn a_path_not_established_shortest_is_rederived_bounded_by_its_depth() {
+        let two_counters = "1 sort bitvec 3\n2 sort bitvec 1\n3 zero 1\n4 state 1 a\n5 init 1 4 3\n\
+                            6 state 1 b\n7 init 1 6 3\n8 input 2 i\n9 one 1\n10 add 1 4 9\n\
+                            11 add 1 6 9\n12 ite 1 8 10 4\n13 next 1 4 12\n14 ite 1 8 6 11\n\
+                            15 next 1 6 14\n16 constd 1 3\n17 eq 2 4 16\n18 constd 1 6\n\
+                            19 eq 2 6 18\n20 or 2 17 19\n21 bad 20\n";
+        let file = parser::parse(two_counters).unwrap();
+        // A 6-step path (frames 0..=6) the carrier did not establish as the shortest.
+        let six_steps = BmcTrace {
+            states: vec![vec![]; 7],
+            inputs: vec![vec![]; 7],
+        };
+        let shipped = |trace: Option<BmcTrace>, shortest: Option<bool>| ShippedWitness {
+            by: trace.as_ref().map(|_| "sat-bmc"),
+            trace,
+            shortest,
+            unavailable_within_k: None,
+            unavailable_reason: None,
+        };
+        let w = shortest_path_for(&file, shipped(Some(six_steps.clone()), Some(false)));
+        assert_eq!((w.by, w.shortest), (Some("native-bmc"), Some(true)));
+        let t = w.trace.expect("the re-derived path");
+        assert_eq!(t.states.len(), 4, "{t:?}");
+        // The same without a claim either way (`ic3`'s trace) is re-derived too.
+        let w = shortest_path_for(&file, shipped(Some(six_steps.clone()), None));
+        assert_eq!((w.by, w.shortest), (Some("native-bmc"), Some(true)));
+        // Established shortest: ships as it is, no search.
+        let w = shortest_path_for(&file, shipped(Some(six_steps.clone()), Some(true)));
+        assert_eq!((w.by, w.shortest), (Some("sat-bmc"), Some(true)));
+        assert_eq!(w.trace, Some(six_steps));
+        // No trace: unchanged.
+        let w = shortest_path_for(&file, shipped(None, None));
+        assert_eq!((w.trace, w.by), (None, None));
+        // A depth native BMC finds nothing within (a 1-step "path" on a design whose first
+        // violation is at depth 3): the carried path ships, unchanged.
+        let one_step = BmcTrace {
+            states: vec![vec![]; 2],
+            inputs: vec![vec![]; 2],
+        };
+        let w = shortest_path_for(&file, shipped(Some(one_step.clone()), Some(false)));
+        assert_eq!((w.by, w.shortest), (Some("sat-bmc"), Some(false)));
+        assert_eq!(w.trace, Some(one_step));
     }
 
     /// N5.4 — a member whose own witness failed to replay is not run again by the fallback, and

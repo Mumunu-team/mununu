@@ -2,7 +2,9 @@
 
 > **Audience:** maintainers of the repositories that read a `violated` row's counterexample from `mununu sv verify-auto` (the slice, `--localize`), `mununu btor2 verify --witness`, or the HTTP routes behind them (rosf, monono, mununu-ui). Not a release note.
 >
-> Source of truth: [`dynamic_search`](../../crates/mununu-core/src/adapter/btor2/sat_bmc.rs#L327) · [`DynamicStep`](../../crates/mununu-core/src/adapter/btor2/sat_bmc.rs#L67) — surface: CLI+API
+> Source of truth: [`dynamic_search`](../../crates/mununu-core/src/adapter/btor2/sat_bmc.rs#L341) · [`DynamicStep`](../../crates/mununu-core/src/adapter/btor2/sat_bmc.rs#L69) — surface: CLI+API
+
+> **Superseded 2026-11-18** by [`2026-11-sat-bmc-shortest-reported.md`](2026-11-sat-bmc-shortest-reported.md): the in-place shrink described here ran out of its conflict budget on every HWMCC'20 row measured and tripled the member's wall for the same trace; it was reverted, and the report now carries `trace_shortest` instead. Kept as history.
 
 ## TL;DR
 

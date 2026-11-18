@@ -890,6 +890,7 @@ fn btor2_verify_handler_impl(request: Btor2VerifyRequest) -> ApiResult<Json<Btor
                 trace: None,
                 trace_unavailable_within_k: None,
                 trace_by: None,
+                trace_shortest: None,
                 trace_unavailable_reason: None,
                 trace_replay_failed: Vec::new(),
             }));
@@ -953,6 +954,7 @@ fn btor2_verify_handler_impl(request: Btor2VerifyRequest) -> ApiResult<Json<Btor
                 .then(|| Trace::attack(o.depth, &o.attack)),
             trace_unavailable_within_k: None,
             trace_by: o.trace_by.map(str::to_string),
+            trace_shortest: None,
             trace_unavailable_reason: o.trace_unavailable_reason,
             trace_replay_failed: Vec::new(),
         }));
@@ -1017,6 +1019,7 @@ fn btor2_verify_handler_impl(request: Btor2VerifyRequest) -> ApiResult<Json<Btor
         .and_then(|w| w.trace.as_ref())
         .map(Trace::from_bmc);
     let trace_by = witness.as_ref().and_then(|w| w.by.map(str::to_string));
+    let trace_shortest = witness.as_ref().and_then(|w| w.shortest);
     let trace_unavailable_within_k = witness.as_ref().and_then(|w| w.unavailable_within_k);
     let trace_unavailable_reason = witness.and_then(|w| w.unavailable_reason);
     let trace_replay_failed = if request.witness {
@@ -1043,6 +1046,7 @@ fn btor2_verify_handler_impl(request: Btor2VerifyRequest) -> ApiResult<Json<Btor
         target: None,
         trace,
         trace_by,
+        trace_shortest,
         trace_unavailable_within_k,
         trace_unavailable_reason,
         trace_replay_failed,
@@ -1652,6 +1656,7 @@ fn sv_verify_handler_impl(request: SvVerifyRequest) -> ApiResult<Json<Btor2Verif
         trace: None,
         trace_unavailable_within_k: None,
         trace_by: None,
+        trace_shortest: None,
         trace_unavailable_reason: None,
         trace_replay_failed: Vec::new(),
     }))

@@ -57,12 +57,14 @@ pub struct SatBmcOptions {
 /// `NoCounterexample` is reported only once every depth up to `max_depth` was refuted; otherwise
 /// the outcome is `Stopped`.
 ///
-/// The depth is the FIRST one (mununu#1057): the model of a window's disjunction is whatever
-/// path the solver found, not the shallowest, so a hit is shrunk by asking for any pending `bad`
-/// strictly below it, under the same conflict budget, until UNSAT. A shrink query that runs out
-/// of budget keeps the depth it has (still a counterexample, logged as possibly not the
-/// shortest); this is what makes `sat-bmc`'s trace the shortest one wherever the plain search's
-/// would be, which the `sv verify-auto` slice and `--localize` read cycle by cycle.
+/// The depth is NOT established as the first one (mununu#1057): the model of a window's
+/// disjunction is whatever path the solver found, not the shallowest in the window, and the
+/// search says so instead of searching for it — `Violated::refuted_below` is the window's base,
+/// the first depth it did not refute, so the depth is the shortest exactly when the two are
+/// equal. The in-place shrink of #1068 (re-asking for any `bad` below the hit under the same
+/// conflict budget until UNSAT) was reverted: on every HWMCC'20 row measured the shrink ran out
+/// of its budget without refuting anything and tripled the member's wall, shipping the same
+/// trace (`docs/consumer-briefings/2026-11-sat-bmc-shortest-reported.md`).
 #[derive(Clone, Debug)]
 pub struct DynamicStep {
     /// The first query's conflict budget; it doubles after every query that runs out of budget.
@@ -83,9 +85,13 @@ pub enum SatBmcOutcome {
     /// `bad` number `bad_index` holds at `depth` on a path that meets every constraint.
     /// `inputs[k]` is each input's value at frame `k`, and `initial` each register's value at
     /// frame 0, keyed as the concrete simulator keys them (the symbol, else `st_n<nid>` /
-    /// `in_n<nid>`); a bit the solver never encoded reads 0.
+    /// `in_n<nid>`); a bit the solver never encoded reads 0. Every depth below `refuted_below`
+    /// was refuted before the hit, so the counterexample is the shortest one exactly when
+    /// `refuted_below == depth`: always for the plain search (one query per depth), and for the
+    /// dynamic step only when the hit sits at its window's base (mununu#1057).
     Violated {
         depth: u32,
+        refuted_below: u32,
         bad_index: usize,
         initial: Vec<(String, u128)>,
         inputs: Vec<Vec<(String, u128)>>,
@@ -294,8 +300,15 @@ pub(crate) fn cell_name(
     symbol.clone().unwrap_or_else(|| format!("{prefix}_n{nid}"))
 }
 
-/// The counterexample the solver's model holds, for a `bad` that is true at frame `f`.
-fn counterexample(u: &Unroller, model: &AigModel, f: usize, bad_index: usize) -> SatBmcOutcome {
+/// The counterexample the solver's model holds, for a `bad` that is true at frame `f`;
+/// `refuted_below` is the first depth the search did not refute before this hit.
+fn counterexample(
+    u: &Unroller,
+    model: &AigModel,
+    f: usize,
+    bad_index: usize,
+    refuted_below: u32,
+) -> SatBmcOutcome {
     let initial = model
         .states
         .iter()
@@ -317,6 +330,7 @@ fn counterexample(u: &Unroller, model: &AigModel, f: usize, bad_index: usize) ->
         .collect();
     SatBmcOutcome::Violated {
         depth: f as u32,
+        refuted_below,
         bad_index,
         initial,
         inputs,
@@ -370,66 +384,18 @@ fn dynamic_search(
                     .filter(|&&(_, _, l)| u.solver.value(l) == Some(true))
                     .min_by_key(|&&(f, bi, _)| (f, bi))
                     .copied();
-                let (mut f, bi, _) = hit.ok_or_else(|| {
+                let (f, bi, _) = hit.ok_or_else(|| {
                     "sat-bmc: the dynamic-step query was SAT with no pending bad true".to_string()
                 })?;
                 // mununu#1057 — the earliest `bad` true in THIS model is not the earliest
                 // reachable one in the window: the solver answers the window's disjunction with
                 // whatever path it finds first (the slice fixture's 4-step counterexample came
-                // back as 7 steps from the window [3, 7)). So the depth is shrunk in place:
-                // ask for any pending bad strictly below `f`, under the same conflict budget,
-                // until UNSAT — every depth below the window was refuted before it was
-                // encoded, so UNSAT means `f` is the first depth. The trace is read off each
-                // model as it is found (the next query discards it). A shrink query that runs
-                // out of budget keeps the depth it has: the trace is a genuine counterexample
-                // (SOUNDNESS: `Violated` stays exact), only its minimality is unestablished,
-                // and the log says so.
-                let mut best = counterexample(u, model, f, bi);
-                loop {
-                    let below: Vec<i32> = pending
-                        .iter()
-                        .filter(|&&(g, _, _)| g < f)
-                        .map(|&(_, _, l)| l)
-                        .collect();
-                    if below.is_empty() || halted() {
-                        break;
-                    }
-                    let shorter = u.fresh();
-                    u.solver
-                        .add_clause(std::iter::once(-shorter).chain(below.iter().copied()));
-                    u.solver
-                        .set_limit("conflicts", conflicts)
-                        .map_err(|e| format!("sat-bmc: {}", e.msg))?;
-                    let answer = u.solver.solve_with([shorter]);
-                    if answer == Some(true) {
-                        let (g, gi, _) = pending
-                            .iter()
-                            .filter(|&&(g, _, l)| g < f && u.solver.value(l) == Some(true))
-                            .min_by_key(|&&(g, gi, _)| (g, gi))
-                            .copied()
-                            .ok_or_else(|| {
-                                "sat-bmc: the shrink query was SAT with no shallower bad true"
-                                    .to_string()
-                            })?;
-                        best = counterexample(u, model, g, gi);
-                        f = g;
-                    }
-                    // The query's `shorter` stays in the solver, inert (assumed only).
-                    u.solver.add_clause([-shorter]);
-                    match answer {
-                        Some(true) => continue,
-                        Some(false) => break,
-                        None => {
-                            tracing::warn!(
-                                depth = f,
-                                "sat-bmc: the shortest-depth check ran out of its conflict budget; \
-                                 the counterexample at this depth ships and may not be the shortest"
-                            );
-                            break;
-                        }
-                    }
-                }
-                return Ok(best);
+                // back as 7 steps from the window [3, 7)). The outcome says which depths were
+                // refuted (`refuted_below`, the window's base) instead of searching for the
+                // shortest one: the in-place shrink of #1068 ran out of its conflict budget on
+                // every HWMCC'20 row measured and tripled the wall for the same trace.
+                // SOUNDNESS: `Violated` stays exact — the path is a genuine counterexample.
+                return Ok(counterexample(u, model, f, bi, refuted_below));
             }
             Some(false) => {
                 for &(_, _, l) in &pending {
@@ -614,7 +580,9 @@ pub fn sat_bmc_model(model: &AigModel, opts: &SatBmcOptions) -> Result<SatBmcOut
                     .iter()
                     .position(|&l| u.solver.value(l) == Some(true))
                     .unwrap_or(0);
-                return Ok(counterexample(&u, model, f, bad_index));
+                // One query per depth: every depth below this one was refuted, so the
+                // counterexample is the shortest.
+                return Ok(counterexample(&u, model, f, bad_index, k));
             }
             Some(false) => u.solver.add_clause([-any]),
             None => {
@@ -772,21 +740,28 @@ mod tests {
             other => panic!("{other:?}"),
         }
         match run_dyn(COUNTER, 100, 1_000) {
-            SatBmcOutcome::Violated { depth, .. } => assert_eq!(depth, 7),
+            SatBmcOutcome::Violated {
+                depth,
+                refuted_below,
+                ..
+            } => {
+                assert_eq!(depth, 7);
+                assert!(refuted_below <= depth, "{refuted_below}");
+            }
             other => panic!("{other:?}"),
         }
     }
 
-    /// REPRODUCER (mununu#1057) — the dynamic step reports the FIRST depth, not the depth of the
-    /// path the solver happened to find. Two counters share one input: `a` steps while `i` holds
-    /// and reaches 3 at depth 3; `b` steps while `i` is low and reaches 6 at depth 6. Both
-    /// depths sit in the window [3, 7), so the window's one query is satisfied by either path,
-    /// and on the parent the solver's choice was the answer (the `sv verify-auto` slice fixture
-    /// shipped a 7-step counterexample for a 4-step violation this way). Both polarities of the
-    /// input are tried, so a solver phase preference cannot make the shallow path the one it
-    /// finds first by luck.
+    /// mununu#1057 — the dynamic step does NOT establish that its depth is the first one, and
+    /// says so. Two counters share one input: `a` steps while `i` holds and reaches 3 at depth
+    /// 3; `b` steps while `i` is low and reaches 6 at depth 6. Both depths sit in the window
+    /// [3, 7), so the window's one query is satisfied by either path and the solver's choice is
+    /// the answer (the `sv verify-auto` slice fixture shipped a 7-step counterexample for a
+    /// 4-step violation this way). Whichever path it is, `refuted_below` is the window's base,
+    /// so the consumer can tell a shortest trace (`refuted_below == depth`) from one that is
+    /// not established as such; the plain search's always is. Both input polarities are tried.
     #[test]
-    fn the_dynamic_step_reports_the_first_depth_not_the_first_path_it_found() {
+    fn the_dynamic_step_says_which_depths_it_refuted_below_its_hit() {
         // `i` high steps `a` (bad at depth 3); `i` low steps `b` (bad at depth 6).
         let high_is_short = "1 sort bitvec 3\n2 sort bitvec 1\n3 zero 1\n4 state 1 a\n5 init 1 4 3\n\
                              6 state 1 b\n7 init 1 6 3\n8 input 2 i\n9 one 1\n10 add 1 4 9\n\
@@ -799,23 +774,36 @@ mod tests {
             .replace("14 ite 1 8 6 11\n", "14 ite 1 8 11 6\n");
         for (name, text) in [("high", high_is_short), ("low", low_is_short.as_str())] {
             match run_dyn(text, 100, 1_000) {
-                SatBmcOutcome::Violated { depth, inputs, .. } => {
-                    assert_eq!(depth, 3, "{name}: {inputs:?}");
-                    // Frames 0..=3: the shallow path's input held on every step before the hit.
-                    assert_eq!(inputs.len(), 4, "{name}: {inputs:?}");
-                    let short_value = if name == "high" { 1 } else { 0 };
-                    assert!(
-                        inputs[..3]
-                            .iter()
-                            .all(|fr| fr == &vec![("i".to_string(), short_value)]),
-                        "{name}: {inputs:?}"
-                    );
+                SatBmcOutcome::Violated {
+                    depth,
+                    refuted_below,
+                    inputs,
+                    ..
+                } => {
+                    // Any depth in the window is a genuine path (`a` reaches 3 after three
+                    // steps of its input, at any frame from 3 on; `b` reaches 6 at frame 6).
+                    assert!((3..=6).contains(&depth), "{name}: {depth} {inputs:?}");
+                    // Frames 0..=depth, one input frame each.
+                    assert_eq!(inputs.len(), depth as usize + 1, "{name}: {inputs:?}");
+                    // The window [3, 7) (or a wider one after a budget miss) was the first
+                    // not refuted: a deeper path is reported as not established shortest.
+                    assert!(refuted_below <= 3, "{name}: {refuted_below}");
+                    if depth > 3 {
+                        assert_ne!(refuted_below, depth, "{name}");
+                    }
                 }
                 other => panic!("{name}: {other:?}"),
             }
-            // The plain search agrees, frame by frame.
+            // The plain search, one query per depth, establishes the first depth.
             match run(text, 10) {
-                SatBmcOutcome::Violated { depth, .. } => assert_eq!(depth, 3, "{name}"),
+                SatBmcOutcome::Violated {
+                    depth,
+                    refuted_below,
+                    ..
+                } => {
+                    assert_eq!(depth, 3, "{name}");
+                    assert_eq!(refuted_below, 3, "{name}");
+                }
                 other => panic!("{name}: {other:?}"),
             }
         }
