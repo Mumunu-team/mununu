@@ -18,6 +18,14 @@
 //! random expression over the registers and inputs from a small op menu, `init`
 //! constants, one `bad` that is a random comparison or bit of a register.
 //!
+//! **Memory tier (mununu#959).** [`memory_design_strategy`] adds one two-cell memory (a 1-bit
+//! address), whole-initialised, written from random enable / address / data expressions, read
+//! by the register nexts and by `bad`, with an optional `constraint`. Each draw is rendered
+//! twice: as a BTOR2 array for native BMC (QF_AUFBV), and with each cell a register for the
+//! exact engine, which cannot bit-blast an array sort. A third test checks the two renderings
+//! against each other with native alone, so a wrong cell rendering cannot hide behind the
+//! oracle.
+//!
 //! **Gate vs explorer.** Under `make ci` the tier replays one fixed draw ([`TIER_SEED`]), so
 //! a red gate names a regression the change made, never a pre-existing engine bug the dice
 //! happened to find (mununu#852 turned two unrelated PRs red that way). Fresh draws are
@@ -48,6 +56,15 @@ fn tier_seed() -> RngSeed {
 #[derive(Debug, Clone)]
 pub struct Design {
     pub text: String,
+    /// mununu#959 — the same design without arrays (each memory cell a register), for an
+    /// oracle that cannot bit-blast an array sort. `None`: the oracle reads `text`.
+    pub oracle: Option<String>,
+}
+
+impl Design {
+    fn oracle_text(&self) -> &str {
+        self.oracle.as_deref().unwrap_or(&self.text)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -61,6 +78,9 @@ enum Expr {
     Xor(Box<Expr>, Box<Expr>),
     Add(Box<Expr>, Box<Expr>),
     Ite(Box<Expr>, Box<Expr>, Box<Expr>),
+    /// mununu#959 — the memory cell at the low bit of the address expression. Only the memory
+    /// tier draws it, so the other tiers' draws are unchanged.
+    Read(Box<Expr>),
 }
 
 fn expr_strategy(regs: usize, inputs: usize, width: u32, depth: u32) -> BoxedStrategy<Expr> {
@@ -128,6 +148,25 @@ struct Emitter {
     width: u32,
     reg_nids: Vec<i64>,
     in_nids: Vec<i64>,
+    mem: Option<MemRender>,
+}
+
+/// mununu#959 — how a two-cell memory is rendered: as a BTOR2 array (the engine under test) or
+/// as one register per cell (the oracle). The two renderings are the same transition system.
+#[derive(Debug, Clone, Copy)]
+enum MemRender {
+    Array { sort: i64, state: i64 },
+    Cells { c0: i64, c1: i64 },
+}
+
+/// mununu#959 — a two-cell memory (1-bit address), initialised whole to `init`, and written at
+/// the low bit of `addr` with `data` on every step whose `we` low bit is set.
+#[derive(Debug, Clone)]
+struct MemSpec {
+    init: u64,
+    we: Expr,
+    addr: Expr,
+    data: Expr,
 }
 
 impl Emitter {
@@ -141,6 +180,7 @@ impl Emitter {
             width,
             reg_nids: Vec::new(),
             in_nids: Vec::new(),
+            mem: None,
         };
         em.sort_w = em.push(format!("sort bitvec {width}"));
         em.sort_1 = if width == 1 {
@@ -251,7 +291,113 @@ impl Emitter {
                 let (a, b) = (self.emit(a), self.emit(b));
                 self.push(format!("ite {s} {bit} {a} {b}"))
             }
+            Expr::Read(addr) => {
+                let bit = self.low_bit(addr);
+                let s = self.sort_w;
+                match self.mem.expect("only the memory tier draws a read") {
+                    MemRender::Array { state, .. } => self.push(format!("read {s} {state} {bit}")),
+                    MemRender::Cells { c0, c1 } => self.push(format!("ite {s} {bit} {c1} {c0}")),
+                }
+            }
         }
+    }
+
+    /// The low bit of `e`, as a 1-bit signal.
+    fn low_bit(&mut self, e: &Expr) -> i64 {
+        let n = self.emit(e);
+        if self.width == 1 {
+            n
+        } else {
+            let s1 = self.sort_1;
+            self.push(format!("slice {s1} {n} 0 0"))
+        }
+    }
+
+    /// mununu#959 — sorts, registers, the memory, inputs, inits and nexts, in either rendering.
+    fn memory_body(
+        width: u32,
+        inputs: usize,
+        inits: &[u64],
+        nexts: &[Expr],
+        mem: &MemSpec,
+        as_array: bool,
+    ) -> Self {
+        let mut em = Emitter {
+            lines: Vec::new(),
+            next_nid: 1,
+            sort_w: 0,
+            sort_1: 0,
+            width,
+            reg_nids: Vec::new(),
+            in_nids: Vec::new(),
+            mem: None,
+        };
+        em.sort_w = em.push(format!("sort bitvec {width}"));
+        em.sort_1 = if width == 1 {
+            em.sort_w
+        } else {
+            em.push("sort bitvec 1".to_string())
+        };
+        let s = em.sort_w;
+        for i in 0..inits.len() {
+            let n = em.push(format!("state {s} r{i}"));
+            em.reg_nids.push(n);
+        }
+        em.mem = Some(if as_array {
+            let s1 = em.sort_1;
+            let sort = em.push(format!("sort array {s1} {s}"));
+            let state = em.push(format!("state {sort} mem"));
+            MemRender::Array { sort, state }
+        } else {
+            let c0 = em.push(format!("state {s} mem0"));
+            let c1 = em.push(format!("state {s} mem1"));
+            MemRender::Cells { c0, c1 }
+        });
+        for i in 0..inputs {
+            let n = em.push(format!("input {s} i{i}"));
+            em.in_nids.push(n);
+        }
+        for (i, c) in inits.iter().enumerate() {
+            let cn = em.push(format!("constd {s} {c}"));
+            let r = em.reg_nids[i];
+            em.push(format!("init {s} {r} {cn}"));
+        }
+        let m = em.push(format!("constd {s} {}", mem.init));
+        match em.mem.expect("set above") {
+            // BTOR2's whole-memory init: a bit-vector value fills every cell.
+            MemRender::Array { sort, state } => {
+                em.push(format!("init {sort} {state} {m}"));
+            }
+            MemRender::Cells { c0, c1 } => {
+                em.push(format!("init {s} {c0} {m}"));
+                em.push(format!("init {s} {c1} {m}"));
+            }
+        }
+        for (i, e) in nexts.iter().enumerate() {
+            let n = em.emit(e);
+            let r = em.reg_nids[i];
+            em.push(format!("next {s} {r} {n}"));
+        }
+        let we = em.low_bit(&mem.we);
+        let addr = em.low_bit(&mem.addr);
+        let data = em.emit(&mem.data);
+        let s1 = em.sort_1;
+        match em.mem.expect("set above") {
+            MemRender::Array { sort, state } => {
+                let w = em.push(format!("write {sort} {state} {addr} {data}"));
+                let n = em.push(format!("ite {sort} {we} {w} {state}"));
+                em.push(format!("next {sort} {state} {n}"));
+            }
+            MemRender::Cells { c0, c1 } => {
+                let not_addr = em.push(format!("not {s1} {addr}"));
+                for (cell, sel) in [(c0, not_addr), (c1, addr)] {
+                    let hit = em.push(format!("and {s1} {we} {sel}"));
+                    let n = em.push(format!("ite {s} {hit} {data} {cell}"));
+                    em.push(format!("next {s} {cell} {n}"));
+                }
+            }
+        }
+        em
     }
 }
 
@@ -274,6 +420,72 @@ pub fn design_strategy() -> BoxedStrategy<Design> {
             em.push(format!("bad {bad_nid}"));
             Design {
                 text: em.lines.join("\n") + "\n",
+                oracle: None,
+            }
+        })
+        .boxed()
+}
+
+/// mununu#959 — an expression that may read the memory: a plain expression, a read, or a read
+/// combined with one.
+fn mem_expr_strategy(regs: usize, inputs: usize, width: u32) -> BoxedStrategy<Expr> {
+    let read = expr_strategy(regs, inputs, width, 1).prop_map(|a| Expr::Read(Box::new(a)));
+    prop_oneof![
+        expr_strategy(regs, inputs, width, 2),
+        read.clone(),
+        (read, expr_strategy(regs, inputs, width, 1))
+            .prop_map(|(r, e)| Expr::Xor(Box::new(r), Box::new(e))),
+    ]
+    .boxed()
+}
+
+/// mununu#959 — the memory tier's design: 1–2 registers, 0–2 inputs, one two-cell memory
+/// written from random expressions, register nexts and `bad` that may read it, and an optional
+/// `constraint`. `text` renders the memory as a BTOR2 array, `oracle` as two registers.
+pub fn memory_design_strategy() -> BoxedStrategy<Design> {
+    (1u32..=3, 1usize..=2, 0usize..=2)
+        .prop_flat_map(|(width, regs, inputs)| {
+            let nexts = proptest::collection::vec(mem_expr_strategy(regs, inputs, width), regs);
+            let inits = proptest::collection::vec(0..(1u64 << width), regs);
+            let mem = (
+                0..(1u64 << width),
+                expr_strategy(regs, inputs, width, 1),
+                expr_strategy(regs, inputs, width, 1),
+                mem_expr_strategy(regs, inputs, width),
+            )
+                .prop_map(|(init, we, addr, data)| MemSpec {
+                    init,
+                    we,
+                    addr,
+                    data,
+                });
+            let bad = mem_expr_strategy(regs, inputs, width);
+            let constraint =
+                proptest::option::weighted(0.3, mem_expr_strategy(regs, inputs, width));
+            (
+                Just(width),
+                Just(inputs),
+                nexts,
+                inits,
+                mem,
+                bad,
+                constraint,
+            )
+        })
+        .prop_map(|(width, inputs, nexts, inits, mem, bad, constraint)| {
+            let render = |as_array: bool| {
+                let mut em = Emitter::memory_body(width, inputs, &inits, &nexts, &mem, as_array);
+                if let Some(c) = &constraint {
+                    let c = em.low_bit(c);
+                    em.push(format!("constraint {c}"));
+                }
+                let b = em.low_bit(&bad);
+                em.push(format!("bad {b}"));
+                em.lines.join("\n") + "\n"
+            };
+            Design {
+                text: render(true),
+                oracle: Some(render(false)),
             }
         })
         .boxed()
@@ -319,6 +531,7 @@ fn check_floor(t: Tally) -> Result<(), String> {
 /// and fail (with the proptest-shrunk design) on the first contradiction; otherwise return
 /// what `native` decided.
 fn run_tier(
+    strategy: &BoxedStrategy<Design>,
     cases: u32,
     max_shrink_iters: u32,
     native: impl Fn(&Btor2File) -> SafetyVerdict,
@@ -334,11 +547,14 @@ fn run_tier(
     let mut runner = proptest::test_runner::TestRunner::new(config);
     let tally = Cell::new(Tally::default());
     runner
-        .run(&design_strategy(), |d| {
+        .run(strategy, |d| {
             let file = parser::parse(&d.text)
                 .unwrap_or_else(|e| panic!("generated BTOR2 does not parse: {e}\n{}", d.text));
-            let exact = exact_bad_reachable(&d.text).unwrap_or_else(|e| {
-                panic!("exact engine refused a generated design: {e}\n{}", d.text)
+            let exact = exact_bad_reachable(d.oracle_text()).unwrap_or_else(|e| {
+                panic!(
+                    "exact engine refused a generated design: {e}\n{}",
+                    d.oracle_text()
+                )
             });
             let mut t = tally.get();
             match native(&file) {
@@ -384,10 +600,15 @@ fn native_bmc(file: &Btor2File) -> SafetyVerdict {
 /// decides enough of the draw, both ways, for the agreement to mean something.
 #[test]
 fn native_bmc_never_contradicts_the_exact_engine() {
-    let tally = run_tier(cases_from_env(), 1024, native_bmc).unwrap_or_else(|e| panic!("{e}"));
+    let tally = run_tier(&design_strategy(), cases_from_env(), 1024, native_bmc)
+        .unwrap_or_else(|e| panic!("{e}"));
     eprintln!("btor2_differential: {tally:?}");
-    // The floor is measured on the gate's draw; an explorer draw or another case count only
-    // reports it.
+    enforce_floor_on_the_gate_draw(tally);
+}
+
+/// The floor is measured on the gate's draw; an explorer draw or another case count only
+/// reports it.
+fn enforce_floor_on_the_gate_draw(tally: Tally) {
     let explorer = std::env::var_os("MUNUNU_DIFF_TIER_EXPLORE").is_some()
         || std::env::var_os("PROPTEST_RNG_SEED").is_some()
         || std::env::var_os("PROPTEST_CASES").is_some();
@@ -406,7 +627,7 @@ fn the_gate_fails_when_native_flips_a_verdict() {
         SafetyVerdict::Violated { depth } => SafetyVerdict::Safe { k: depth },
         v => v,
     };
-    let err = run_tier(cases_from_env(), 0, flipped)
+    let err = run_tier(&design_strategy(), cases_from_env(), 0, flipped)
         .expect_err("a native that calls a reachable bad Safe must fail the gate");
     assert!(err.contains("exact says bad reachable"), "{err}");
 }
@@ -415,11 +636,83 @@ fn the_gate_fails_when_native_flips_a_verdict() {
 /// floor can catch it — and must.
 #[test]
 fn the_gate_fails_when_native_abstains_everywhere() {
-    let tally = run_tier(cases_from_env(), 0, |_| SafetyVerdict::Unknown { k: 0 })
-        .expect("an abstaining native contradicts nothing");
+    let tally = run_tier(&design_strategy(), cases_from_env(), 0, |_| {
+        SafetyVerdict::Unknown { k: 0 }
+    })
+    .expect("an abstaining native contradicts nothing");
     assert_eq!(tally.safe + tally.violated, 0);
     let err = check_floor(tally).expect_err("an all-abstain tally must fail the floor");
     assert!(err.contains("under the"), "{err}");
+}
+
+/// mununu#959 — the memory path: native BMC / k-induction decides the array rendering under
+/// QF_AUFBV, the exact engine decides the same design with each cell a register, and they must
+/// agree whenever native is definite. Same floor as the bit-vector gate: measured 2026-11-18 on
+/// the gate's draw at 46/48 decided (12 Safe, 34 Violated); a 300-case explorer draw decided
+/// 268/300 (84 Safe, 184 Violated) with no contradiction.
+#[test]
+fn native_bmc_on_memories_never_contradicts_the_exact_engine() {
+    let tally = run_tier(
+        &memory_design_strategy(),
+        cases_from_env(),
+        1024,
+        native_bmc,
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    eprintln!("btor2_differential memory: {tally:?}");
+    enforce_floor_on_the_gate_draw(tally);
+}
+
+/// mununu#959 negative control: a native that calls every reachable `bad` Safe turns the memory
+/// gate red, so the tier's memory draws do reach reachable and unreachable cases.
+#[test]
+fn the_memory_gate_fails_when_native_flips_a_verdict() {
+    let flipped = |f: &Btor2File| match native_bmc(f) {
+        SafetyVerdict::Violated { depth } => SafetyVerdict::Safe { k: depth },
+        v => v,
+    };
+    let err = run_tier(&memory_design_strategy(), cases_from_env(), 0, flipped)
+        .expect_err("a native that calls a reachable bad Safe must fail the memory gate");
+    assert!(err.contains("exact says bad reachable"), "{err}");
+}
+
+/// mununu#959 — the two renderings are one transition system: native BMC run on each must
+/// reach the same definite verdict. A wrong cell rendering would make the exact oracle check
+/// a different design; this catches it without trusting that oracle.
+#[test]
+fn the_array_and_cell_renderings_of_a_memory_agree() {
+    let config = ProptestConfig {
+        cases: cases_from_env(),
+        rng_seed: tier_seed(),
+        max_shrink_iters: 256,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    };
+    let mut runner = proptest::test_runner::TestRunner::new(config);
+    runner
+        .run(&memory_design_strategy(), |d| {
+            let array = parser::parse(&d.text).expect("the array rendering parses");
+            let cells = parser::parse(d.oracle_text()).expect("the cell rendering parses");
+            let definite = |v: SafetyVerdict| match v {
+                SafetyVerdict::Violated { .. } => Some(true),
+                SafetyVerdict::Safe { .. } => Some(false),
+                SafetyVerdict::Unknown { .. } => None,
+            };
+            if let (Some(a), Some(c)) = (definite(native_bmc(&array)), definite(native_bmc(&cells)))
+            {
+                prop_assert_eq!(
+                    a,
+                    c,
+                    "array says reachable={}, cells say reachable={}\n{}\n---\n{}",
+                    a,
+                    c,
+                    d.text,
+                    d.oracle_text()
+                );
+            }
+            Ok(())
+        })
+        .unwrap_or_else(|e| panic!("{e}"));
 }
 
 /// The floor's other arms, without engines.
@@ -503,6 +796,7 @@ pub fn justice_design_strategy() -> BoxedStrategy<Design> {
                 em.push(format!("justice {} {}", lits.len(), list.join(" ")));
                 Design {
                     text: em.lines.join("\n") + "\n",
+                    oracle: None,
                 }
             },
         )
