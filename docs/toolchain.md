@@ -36,7 +36,10 @@ passes `scripts/test_count_gate.sh`, and `scripts/os_matrix_compare.sh` then req
 counts to agree within the allowance of
 [`measurements/os-matrix-unix-only-tests.txt`](../measurements/os-matrix-unix-only-tests.txt) (the
 tests that test a Unix-only mechanism, by name). A lane that runs fewer tests and goes green is
-C3's bug in a new coat; a test is made to run everywhere, never `cfg`-skipped to go green.
+C3's bug in a new coat; a test is made to run everywhere, never `cfg`-skipped to go green. Each
+lane's dependency cache is keyed on the installed Z3 version (pkg-config, else `z3 --version`). On macOS the
+link-search path z3-sys records names Homebrew's versioned Cellar directory, so a cache restored
+across a Homebrew z3 upgrade would keep a path that no longer exists.
 
 **First measurement (2026-11-08, the PR that added the workflow):** Linux 3746 tests passed, macOS
 3746 — identical suites; Windows built, linked Z3 from the zip, and ran 3740: three tests failed
