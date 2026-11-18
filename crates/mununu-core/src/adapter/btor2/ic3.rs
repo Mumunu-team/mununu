@@ -1149,12 +1149,15 @@ impl<'m> Ic3<'m> {
                 step -= 1;
             }
         };
-        // Read off the last model before any clause is added (a `release` invalidates it).
-        let bad_index = self
-            .bad_lits
-            .iter()
-            .position(|&b| self.is_true(b))
-            .unwrap_or(0);
+        // Read off the last model before any clause is added (a `release` invalidates it), and
+        // only after a SAT answer: a stopped loop ended on an UNSAT solve, and reading a value
+        // then is a CaDiCaL API violation that aborts the process.
+        let bad_index = failed.is_none().then(|| {
+            self.bad_lits
+                .iter()
+                .position(|&b| self.is_true(b))
+                .unwrap_or(0)
+        });
         self.concretize_retries += retries;
         for t in blocks.into_iter().flatten() {
             self.release(t);
@@ -1162,6 +1165,8 @@ impl<'m> Ic3<'m> {
         if let Some(outcome) = failed {
             return Ok(outcome);
         }
+        // `Some` whenever the loop reached `bad` (it is computed exactly then).
+        let bad_index = bad_index.unwrap_or(0);
         Ok(Ic3Outcome::Violated {
             depth: depth as u32,
             bad_index,
@@ -1547,6 +1552,36 @@ mod tests {
                 assert!(matches!(replay, Replay::Confirmed(_)), "{replay:?}");
             }
             other => panic!("{other:?}"),
+        }
+    }
+
+    /// A concretisation that stops (here a dry step 0: the chain's only cube contradicts `Init`)
+    /// returns `Stopped` with its reason. It used to read the bad index from the solver after that
+    /// last UNSAT solve, and CaDiCaL aborts the process on a model read in an unsatisfied state:
+    /// every stopped concretisation crashed the run instead of abstaining.
+    #[test]
+    fn a_concretisation_that_stops_abstains_instead_of_reading_a_model() {
+        let file = parser::parse(COUNTER).unwrap();
+        let model = AigModel::build(&file).unwrap();
+        let mut search = Ic3::new(
+            &model,
+            Stop {
+                deadline: None,
+                cancel: None,
+            },
+        );
+        // `c` starts at 0, so bit 0 set is no initial state.
+        let arena = vec![Obligation {
+            cube: vec![search.cur[0]],
+            level: 0,
+            parent: None,
+        }];
+        match search.concretize(&arena, 0) {
+            Ok(Ic3Outcome::Stopped { reason, .. }) => {
+                assert!(reason.contains("step 0"), "{reason}");
+            }
+            Ok(other) => panic!("a cube outside Init must not concretise: {other:?}"),
+            Err(_) => panic!("no deadline or cancel was set"),
         }
     }
 
