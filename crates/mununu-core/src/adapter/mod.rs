@@ -1006,6 +1006,60 @@ pub(crate) fn run_with_timeout(
 /// cancelled and the attribution is the same as before S1.
 pub(crate) const MEMBER_CANCEL_GRACE: std::time::Duration = std::time::Duration::from_millis(250);
 
+/// The portfolio's cooperative cancel with its grace, in one place (mununu#966 — it was written
+/// by hand at four sites): the clock starts the first time the flag is seen set, and
+/// [`past_grace`](Self::past_grace) is true once [`MEMBER_CANCEL_GRACE`] has elapsed since —
+/// a member that finishes inside the window still lands. A flag that is never set, or no flag,
+/// never trips it.
+#[derive(Debug, Default)]
+pub(crate) struct CancelLatch {
+    seen: Option<std::time::Instant>,
+}
+
+impl CancelLatch {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Poll the flag: `true` once it has been set for the grace. `None` = no flag.
+    pub(crate) fn past_grace(&mut self, cancel: Option<&std::sync::atomic::AtomicBool>) -> bool {
+        cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+            && self
+                .seen
+                .get_or_insert_with(std::time::Instant::now)
+                .elapsed()
+                >= MEMBER_CANCEL_GRACE
+    }
+}
+
+#[cfg(test)]
+mod cancel_latch_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// The grace runs from the FIRST sighting of the flag, not from the latch's creation, and
+    /// a latch without a flag, or with one that is never set, never trips.
+    #[test]
+    fn the_latch_trips_one_grace_after_the_flag_is_first_seen() {
+        let flag = AtomicBool::new(false);
+        let mut latch = CancelLatch::new();
+        assert!(!latch.past_grace(None));
+        std::thread::sleep(MEMBER_CANCEL_GRACE + std::time::Duration::from_millis(20));
+        assert!(
+            !latch.past_grace(Some(&flag)),
+            "never set: never trips, however old"
+        );
+        flag.store(true, Ordering::Relaxed);
+        assert!(
+            !latch.past_grace(Some(&flag)),
+            "the first sighting starts the clock"
+        );
+        std::thread::sleep(MEMBER_CANCEL_GRACE + std::time::Duration::from_millis(20));
+        assert!(latch.past_grace(Some(&flag)));
+        assert!(latch.past_grace(Some(&flag)), "and stays tripped");
+    }
+}
+
 /// [`run_with_timeout`] with a cooperative **cancel** flag (S1 of the engine-performance
 /// roadmap, category 4). Polled on the same 20 ms cadence as the timeout; once the flag is
 /// set the child gets [`MEMBER_CANCEL_GRACE`] and is then killed and reaped, which the
@@ -1019,7 +1073,6 @@ pub(crate) fn run_with_timeout_cancellable(
 ) -> std::io::Result<Option<(std::process::ExitStatus, String, String)>> {
     use std::io::{Read, Write};
     use std::process::Stdio;
-    use std::sync::atomic::Ordering::Relaxed;
     let (mut child, group) = command
         .stdin(if stdin_data.is_some() {
             Stdio::piped()
@@ -1052,17 +1105,12 @@ pub(crate) fn run_with_timeout_cancellable(
         s
     });
     let start = std::time::Instant::now();
-    let mut cancel_seen: Option<std::time::Instant> = None;
+    let mut latch = CancelLatch::new();
     let status = loop {
         if let Some(st) = child.try_wait()? {
             break Some(st);
         }
-        let cancelled = cancel.is_some_and(|c| c.load(Relaxed))
-            && cancel_seen
-                .get_or_insert_with(std::time::Instant::now)
-                .elapsed()
-                >= MEMBER_CANCEL_GRACE;
-        if cancelled || start.elapsed() >= timeout {
+        if latch.past_grace(cancel) || start.elapsed() >= timeout {
             group.kill_and_reap(&mut child); // the group's pipes close, so the readers return
             break None;
         }
