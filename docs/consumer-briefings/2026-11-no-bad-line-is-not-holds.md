@@ -34,5 +34,5 @@
 
 ## Not covered here
 
-- `sv verify-bad` has had no `bad` line to decide on most designs since the slang-only lift, which reads every design with `--ignore-assertions`. Whether the verb keeps a role is open on #1064.
+- `sv verify-bad` has had no `bad` line to decide on most designs since the slang-only lift, which reads every design with `--ignore-assertions`. Whether the verb keeps a role is open on #1074.
 - `sv verify-auto` already reports the immediate assertions the lift dropped (mununu#988); that is unchanged.
