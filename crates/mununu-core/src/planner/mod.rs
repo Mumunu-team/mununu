@@ -254,6 +254,12 @@ fn replan_once(
     // PR A1 — the fault posture's post-pass runs on the merged report whether or not a row is
     // undecided (every row may be definite and still vacuous).
     crate::adapter::slang::verify_auto::finish_fault_posture(&mut merged, prepared);
+    // mununu#1073 — a response row a member refuted without the run's `GF` fairness is undecided:
+    // reopened here, before the count, so a report whose every row "is decided" still re-plans it.
+    crate::adapter::slang::verify_auto::reopen_violations_decided_without_fairness(
+        &mut merged,
+        prepared.fairness_assumes(),
+    );
     let before = undecided(&merged);
     if before == 0 {
         return merged;

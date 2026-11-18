@@ -4292,18 +4292,13 @@ fn annotation_note(scan: &AnnotationScan) -> Option<VerificationNote> {
         items.push(format!("assume: {a}"));
     }
     for a in &scan.fairness_assumes {
+        // mununu#1073 — written at scan time, before any member runs: it states what the
+        // assumption binds, not that it was applied. The row's `fair-cycle-rescue` note (or its
+        // `violation-without-fairness` reason) says what happened.
         items.push(format!(
-            "assume: GF ({} {} {}) — auto-applied via fair-cycle l2s (mununu#477)",
-            a.signal,
-            match a.op {
-                crate::adapter::btor2::predicate_expr::CmpOp::Eq => "==",
-                crate::adapter::btor2::predicate_expr::CmpOp::Ne => "!=",
-                crate::adapter::btor2::predicate_expr::CmpOp::Lt => "<",
-                crate::adapter::btor2::predicate_expr::CmpOp::Le => "<=",
-                crate::adapter::btor2::predicate_expr::CmpOp::Gt => ">",
-                crate::adapter::btor2::predicate_expr::CmpOp::Ge => ">=",
-            },
-            a.value,
+            "assume: {} — binds response-shape rows `AG(a → AF b)`, decided under it by the \
+             fair-cycle l2s (mununu#477)",
+            render_fairness_atom(a)
         ));
     }
     for s in &scan.skipped {
@@ -5105,6 +5100,9 @@ pub(crate) fn replan_merged(
     fairness_atoms: &[crate::adapter::liveness_rescue::Atom],
     opts: &VerifyAutoOptions,
 ) {
+    // mununu#1073 — before the "every row is decided" return: a response row refuted without the
+    // run's fairness is not decided.
+    reopen_violations_decided_without_fairness(report, fairness_atoms);
     if report
         .properties
         .iter()
@@ -8197,6 +8195,62 @@ pub(crate) fn verify_auto_impl(
     Ok(report)
 }
 
+/// `GF (sig op value)`, as the notes and the abstention reason print a fairness atom.
+fn render_fairness_atom(a: &crate::adapter::liveness_rescue::Atom) -> String {
+    use crate::adapter::btor2::predicate_expr::CmpOp;
+    let op = match a.op {
+        CmpOp::Eq => "==",
+        CmpOp::Ne => "!=",
+        CmpOp::Lt => "<",
+        CmpOp::Le => "<=",
+        CmpOp::Gt => ">",
+        CmpOp::Ge => ">=",
+    };
+    format!("GF ({} {} {})", a.signal, op, a.value)
+}
+
+fn violation_without_fairness(
+    fairness_atoms: &[crate::adapter::liveness_rescue::Atom],
+) -> BottomReason {
+    BottomReason::ViolationWithoutFairness {
+        assumptions: fairness_atoms.iter().map(render_fairness_atom).collect(),
+    }
+}
+
+/// mununu#1073 — a `@mununu_assume GF <atom>` binds response-shape rows (`AG(a → AF b)`), and
+/// the only code that carries it is the fair-cycle arm of the ⊥ re-plan. A member that returns a
+/// definite verdict for such a row — the exact engine, the cube — decided it WITHOUT the
+/// assumption, and its `violated` may rest on a schedule the assumption forbids (the responder
+/// never ready). Such a row is made ⊥ here, with the reason, so the re-plan decides it under the
+/// fairness; if the fair-cycle route cannot, the row stays `unknown` and says why.
+///
+/// SOUNDNESS: only a VIOLATED is reopened. A `holds` without the assumption holds under it
+/// (fairness removes paths, and a response property is universal over paths). Rows that are not
+/// response-shaped are untouched: the assumption is documented not to apply to them.
+pub(crate) fn reopen_violations_decided_without_fairness(
+    report: &mut AutoVerifyReport,
+    fairness_atoms: &[crate::adapter::liveness_rescue::Atom],
+) {
+    if fairness_atoms.is_empty() {
+        return;
+    }
+    for prop in report.properties.iter_mut() {
+        if !matches!(prop.outcome, VerifyOutcome::Violated { .. }) {
+            continue;
+        }
+        let Ok(formula) = crate::mu_calculus::parser::parse(&prop.formula) else {
+            continue;
+        };
+        if crate::adapter::liveness_rescue::reduce_response_shape(&formula).is_none() {
+            continue;
+        }
+        prop.outcome = VerifyOutcome::Unknown { unknown_cells: 0 };
+        prop.bottom_reason = Some(violation_without_fairness(fairness_atoms));
+        prop.decided_by = None;
+        prop.counterexample = None;
+    }
+}
+
 /// Unified ⊥-escalation router (P3): for each property the cube portfolio left `⊥`,
 /// dispatch by [`property_class`](crate::mu_calculus::Formula::property_class) to the
 /// sound reduction matching its shape and upgrade the verdict in place —
@@ -8252,6 +8306,10 @@ pub(crate) fn escalate_bottom_with_slice(
     };
     use crate::mu_calculus::{PropertyClass, parser as mu_parser};
     use crate::verdict::PropertyVerdict;
+
+    // mununu#1073 — before anything else: a response row a member refuted WITHOUT the stated
+    // fairness is ⊥ again, so the fair-cycle arm below decides it under the assumption.
+    reopen_violations_decided_without_fairness(report, fairness_atoms);
 
     // Trap-certificate candidates the report already establishes: every row that HOLDS the
     // terminal idiom `AG (R == v → AG R == v)`. They only order the search below — its closure is
@@ -8505,6 +8563,13 @@ pub(crate) fn escalate_bottom_with_slice(
                             prop.outcome = VerifyOutcome::Holds;
                             notes.push(liveness_rescue_note(&prop.name, "HOLDS", &engines));
                         }
+                        // mununu#1073 — reached only when the fair-cycle arm could not build its
+                        // monitor (an atom it cannot bind). This reduction carries no fairness,
+                        // so its counterexample may be a schedule the stated `GF` assumption
+                        // forbids: withheld, with the reason.
+                        LivenessVerdict::Violated if !fairness_atoms.is_empty() => {
+                            prop.bottom_reason = Some(violation_without_fairness(fairness_atoms));
+                        }
                         LivenessVerdict::Violated => {
                             prop.outcome = VerifyOutcome::Violated { false_cells: 0 };
                             notes.push(liveness_rescue_note(&prop.name, "VIOLATED", &engines));
@@ -8698,6 +8763,15 @@ pub(crate) fn escalate_bottom_with_slice(
             }
             _ => {}
         }
+        // mununu#1073 — a reopened row the fair-cycle arm decided carries no withheld violation.
+        if !matches!(prop.outcome, VerifyOutcome::Unknown { .. })
+            && matches!(
+                prop.bottom_reason,
+                Some(BottomReason::ViolationWithoutFairness { .. })
+            )
+        {
+            prop.bottom_reason = None;
+        }
         // A row still ⊥ after its arm, with the row budget or a rescue slice expired, is a budget
         // abstention — attributed here so the classifier below does not read it as a shape it
         // could not reduce (and so a consumer knows that MORE TIME is the right response).
@@ -8885,6 +8959,15 @@ pub enum BottomReason {
         /// The clock nets the property's cone reads as data.
         clocks: Vec<String>,
     },
+    /// mununu#1073 — a response property (`AG(a → AF b)`) was refuted by a member that does not
+    /// carry the run's `GF` fairness assumption(s), and the fair-cycle route could not decide it
+    /// under them (an atom its monitor cannot bind, or no verdict in its slice). The refutation
+    /// may rest on a schedule the assumption forbids, so it is withheld. Reproducible — a
+    /// property of the model and the assumption.
+    ViolationWithoutFairness {
+        /// The assumptions the violation was found without, as `GF (sig op value)`.
+        assumptions: Vec<String>,
+    },
     /// mununu#579 — the cube path's initial cube set could not be read. Every predicate bit with
     /// no established cycle-0 truth (a free input, or a predicate over a register with no `init`
     /// line) is a free initial dimension and the initial cube set is their product; past
@@ -8997,6 +9080,7 @@ impl BottomReason {
             | Self::UnestablishedInitialState { .. }
             | Self::ViolationOverFreeLeaves { .. }
             | Self::ViolationOverClockAsData { .. }
+            | Self::ViolationWithoutFairness { .. }
             | Self::UnestablishedInitialCubes { .. }
             | Self::ReportSelfContradiction { .. }
             | Self::NotAttempted => BottomDeterminism::Reproducible,
@@ -9017,6 +9101,7 @@ impl BottomReason {
             Self::UnestablishedInitialState { .. } => "unestablished-initial-state",
             Self::ViolationOverFreeLeaves { .. } => "violation-over-free-leaves",
             Self::ViolationOverClockAsData { .. } => "violation-over-clock-as-data",
+            Self::ViolationWithoutFairness { .. } => "violation-without-fairness",
             Self::UnestablishedInitialCubes { .. } => "unestablished-initial-cubes",
             Self::ReportSelfContradiction { .. } => "report-self-contradiction",
             Self::NotAttempted => "not-attempted",
@@ -9087,6 +9172,16 @@ impl BottomReason {
                  same model would have transferred (mununu#1030).",
                 clocks.len(),
                 clocks.join(", ")
+            ),
+            Self::ViolationWithoutFairness { assumptions } => format!(
+                "the violation was found by a member that does not carry the run's fairness \
+                 assumption(s) ({}), and the fair-cycle route did not decide the row under them \
+                 — its monitor could not bind an atom, or it returned no verdict in its slice. \
+                 The counterexample may be a schedule the assumption forbids, so the violation \
+                 is withheld rather than reported. Fairness atoms must be single register \
+                 comparisons; `mununu sv verify-liveness --fairness` decides one response \
+                 directly (mununu#1073).",
+                assumptions.join(" && ")
             ),
             Self::UnestablishedInitialCubes {
                 free_dimensions,
@@ -11965,6 +12060,164 @@ mod tests {
             notes.iter().any(|n| n.summary.contains("GF (fair == 1)")),
             "the note must name the fairness assumption applied"
         );
+    }
+
+    /// A one-row report whose row a first-pass member already decided `outcome`.
+    fn decided_report(formula: &str, outcome: VerifyOutcome) -> AutoVerifyReport {
+        AutoVerifyReport {
+            properties: vec![PropertyVerdict {
+                name: "req_ack".to_string(),
+                label: None,
+                kind: crate::adapter::slang::translate::SvaKind::Assert,
+                formula: formula.to_string(),
+                outcome,
+                seeded_predicates: Vec::new(),
+                counterexample: None,
+                bottom_reason: None,
+                decided_by: Some("exact-symbolic".to_string()),
+                vacuity: None,
+                portfolio: None,
+            }],
+            ..Default::default()
+        }
+    }
+
+    const RESPONSE: &str = "nu Z. ((!(req == 1) || mu Y. ((ack == 1) || [] Y)) && [] Z)";
+
+    /// mununu#1073 — a response row a first-pass member refuted WITHOUT the fairness is decided
+    /// again under it. The exact engine answers `violated` on `FAIR_GATED` (the responder may
+    /// never be fair); under `GF (fair == 1)` the property holds, and the report must say so
+    /// whichever member reached the row first. Before the fix the re-plan skipped every row that
+    /// was not ⊥, so the first member's `violated` shipped beside an "auto-applied" note.
+    #[test]
+    fn a_response_row_refuted_without_its_fairness_is_decided_again_under_it() {
+        use crate::adapter::btor2::predicate_expr::CmpOp;
+        use crate::adapter::liveness_rescue::Atom;
+        let mut report = decided_report(RESPONSE, VerifyOutcome::Violated { false_cells: 1 });
+        let fair = [Atom {
+            signal: "fair".to_string(),
+            op: CmpOp::Eq,
+            value: 1,
+        }];
+        let notes = escalate_bottom(
+            &mut report,
+            FAIR_GATED,
+            false,
+            &VerifyAutoOptions::default(),
+            &fair,
+        );
+        let row = &report.properties[0];
+        assert!(
+            matches!(row.outcome, VerifyOutcome::Holds),
+            "{:?}",
+            row.outcome
+        );
+        assert!(row.bottom_reason.is_none(), "{:?}", row.bottom_reason);
+        assert_ne!(row.decided_by.as_deref(), Some("exact-symbolic"));
+        assert!(notes.iter().any(|n| n.kind == "fair-cycle-rescue"));
+    }
+
+    /// mununu#1073 — the merged re-plan (the portfolio path) returns early when every row is
+    /// decided. A response row refuted without the fairness is not decided: it must be reopened
+    /// before that return, or the default command keeps the first member's `violated`.
+    #[test]
+    fn the_merged_replan_reopens_a_refuted_response_row_before_its_all_decided_return() {
+        use crate::adapter::btor2::predicate_expr::CmpOp;
+        use crate::adapter::liveness_rescue::Atom;
+        let mut report = decided_report(RESPONSE, VerifyOutcome::Violated { false_cells: 1 });
+        let fair = [Atom {
+            signal: "fair".to_string(),
+            op: CmpOp::Eq,
+            value: 1,
+        }];
+        replan_merged(
+            &mut report,
+            FAIR_GATED,
+            &fair,
+            &VerifyAutoOptions::default(),
+        );
+        assert!(
+            matches!(report.properties[0].outcome, VerifyOutcome::Holds),
+            "{:?}",
+            report.properties[0].outcome
+        );
+        assert!(report.notes.iter().any(|n| n.kind == "fair-cycle-rescue"));
+    }
+
+    /// mununu#1073 — when the fair-cycle route cannot carry the assumption (here an atom that
+    /// binds no signal), the unfair refutation is WITHHELD with its reason, never reported: not
+    /// by the first member, and not by the plain liveness rescue the re-plan falls back to.
+    #[test]
+    fn a_refutation_the_fair_route_cannot_check_is_withheld_with_its_reason() {
+        use crate::adapter::btor2::predicate_expr::CmpOp;
+        use crate::adapter::liveness_rescue::Atom;
+        let mut report = decided_report(RESPONSE, VerifyOutcome::Violated { false_cells: 1 });
+        let unbound = [Atom {
+            signal: "no_such_signal".to_string(),
+            op: CmpOp::Eq,
+            value: 1,
+        }];
+        let _ = escalate_bottom(
+            &mut report,
+            FAIR_GATED,
+            false,
+            &VerifyAutoOptions::default(),
+            &unbound,
+        );
+        let row = &report.properties[0];
+        assert!(
+            matches!(row.outcome, VerifyOutcome::Unknown { .. }),
+            "{:?}",
+            row.outcome
+        );
+        assert_eq!(
+            row.bottom_reason.as_ref().map(BottomReason::tag),
+            Some("violation-without-fairness")
+        );
+    }
+
+    /// mununu#1073 — the reopening is exactly as wide as the assumption: a refuted response row
+    /// with NO fairness in the run, a refuted SAFETY row under fairness (a finite counterexample
+    /// no fairness removes) and a row that HOLDS are all left as the first member decided them.
+    #[test]
+    fn fairness_reopens_only_refuted_response_rows() {
+        use crate::adapter::btor2::predicate_expr::CmpOp;
+        use crate::adapter::liveness_rescue::Atom;
+        let fair = [Atom {
+            signal: "fair".to_string(),
+            op: CmpOp::Eq,
+            value: 1,
+        }];
+        let untouched = |formula: &str, outcome: VerifyOutcome, atoms: &[Atom]| {
+            let mut report = decided_report(formula, outcome.clone());
+            let _ = escalate_bottom(
+                &mut report,
+                FAIR_GATED,
+                false,
+                &VerifyAutoOptions::default(),
+                atoms,
+            );
+            let row = &report.properties[0];
+            assert_eq!(
+                std::mem::discriminant(&row.outcome),
+                std::mem::discriminant(&outcome),
+                "{formula}: {:?}",
+                row.outcome
+            );
+            assert_eq!(
+                row.decided_by.as_deref(),
+                Some("exact-symbolic"),
+                "{formula}"
+            );
+            assert!(row.bottom_reason.is_none(), "{formula}");
+        };
+        untouched(RESPONSE, VerifyOutcome::Violated { false_cells: 1 }, &[]);
+        untouched(
+            "nu Z. ((ack == 0) && [] Z)",
+            VerifyOutcome::Violated { false_cells: 1 },
+            &fair,
+        );
+        untouched(RESPONSE, VerifyOutcome::Holds, &fair);
     }
 
     /// mununu#871 — an escalation stopped by a budget says so on the row it stopped at. The
