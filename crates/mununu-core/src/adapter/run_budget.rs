@@ -153,6 +153,72 @@ pub fn expired() -> bool {
     CURRENT.with(|c| c.borrow().expired())
 }
 
+/// What [`run_or_abandon`] came back with.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Bounded<T> {
+    /// The work returned.
+    Done(T),
+    /// The budget (plus the grace) passed with the work still running. Its thread is left
+    /// behind: it keeps running until it next polls its budget or the process ends.
+    Abandoned { waited_ms: u64 },
+    /// The worker thread could not be started, or it panicked.
+    Died,
+}
+
+/// mununu#1063 — run `work` under this thread's budget and stop WAITING for it when the budget
+/// runs out, for work that cannot be interrupted from inside.
+///
+/// The budget is cooperative: the leaves poll it. One leaf cannot — a single OxiDD apply (the
+/// exact engine's `box_pre` substitution) returns to Rust only when it is done, and on a wide
+/// cone one apply outlived a 60 s property budget and a 240 s run budget with nothing able to
+/// stop it. For that work the caller's only bound is to stop waiting.
+///
+/// - With no deadline in effect `work` runs inline, on the calling thread, exactly as before.
+/// - Otherwise it runs on a named worker thread that re-enters the caller's budget (a spawned
+///   thread inherits none), and the caller waits for the time left plus `grace` — the grace lets
+///   work that DOES poll report its own, more specific, stop first.
+///
+/// This is the thread-per-task shape the module doc argues against as a general mechanism, and
+/// the cost named there is real: an abandoned worker keeps its memory and may keep allocating
+/// until it polls. It is used only where the alternative is an unbounded run, and the caller
+/// says so in the report. mununu#996 made the same trade for the reach portfolio's exact member.
+pub fn run_or_abandon<T, F>(
+    thread_name: &str,
+    stack_bytes: usize,
+    grace: Duration,
+    work: F,
+) -> Bounded<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let budget = current();
+    let Some(left_ms) = budget.remaining_ms() else {
+        return Bounded::Done(work());
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    let worker_budget = budget.clone();
+    let spawned = std::thread::Builder::new()
+        .name(thread_name.to_string())
+        .stack_size(stack_bytes)
+        .spawn(move || {
+            let _guard = enter(&worker_budget);
+            // The receiver is gone when the caller abandoned this worker: nothing to report to.
+            let _ = tx.send(work());
+        });
+    if spawned.is_err() {
+        return Bounded::Died;
+    }
+    let wait = Duration::from_millis(left_ms) + grace;
+    match rx.recv_timeout(wait) {
+        Ok(v) => Bounded::Done(v),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Bounded::Abandoned {
+            waited_ms: u64::try_from(wait.as_millis()).unwrap_or(u64::MAX),
+        },
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Bounded::Died,
+    }
+}
+
 /// Clamp a per-query solver timeout to the time actually left, so the LAST query cannot overshoot
 /// the deadline by its own full timeout. Never returns 0 (z3 reads 0 as "no timeout", which would
 /// be the exact opposite of what an expired budget wants); an expired budget yields 1 ms, and the
@@ -290,6 +356,60 @@ pub fn query_ms_up_to_remaining(default_ms: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// mununu#1063 — work that never polls is left behind when the budget runs out: the caller
+    /// gets `Abandoned` at about the deadline, not when the work ends. The worker here stands
+    /// for one long OxiDD apply. Before `run_or_abandon` the exact first pass ran such work on
+    /// the driver thread, and a 60 s budget did not stop a run that was still going at 300 s.
+    #[test]
+    fn work_that_never_polls_is_abandoned_at_the_deadline() {
+        let _g = enter(&Budget::with_ms(40));
+        let t0 = Instant::now();
+        let out = run_or_abandon("never-polls", 1 << 20, Duration::from_millis(20), || {
+            std::thread::sleep(Duration::from_secs(20));
+            7u32
+        });
+        assert!(matches!(out, Bounded::Abandoned { .. }), "{out:?}");
+        assert!(
+            t0.elapsed() < Duration::from_secs(10),
+            "the caller waited for the work: {:?}",
+            t0.elapsed()
+        );
+    }
+
+    /// The other three outcomes: work inside the budget is `Done`; with no deadline it runs
+    /// inline on the calling thread (same thread id — the unbudgeted path is unchanged); a
+    /// worker that panics is `Died`, not a hang and not a caller panic. The worker re-enters the
+    /// caller's budget, which a spawned thread does not inherit.
+    #[test]
+    fn run_or_abandon_returns_the_work_inline_or_from_the_worker_and_survives_a_panic() {
+        let here = std::thread::current().id();
+        let inline = run_or_abandon("inline", 1 << 20, Duration::ZERO, move || {
+            std::thread::current().id() == here
+        });
+        assert_eq!(
+            inline,
+            Bounded::Done(true),
+            "no deadline ⇒ the calling thread"
+        );
+
+        let _g = enter(&Budget::with_ms(60_000));
+        let worker = run_or_abandon("worker", 1 << 20, Duration::ZERO, move || {
+            (
+                std::thread::current().id() == here,
+                current().remaining_ms().is_some(),
+            )
+        });
+        assert_eq!(
+            worker,
+            Bounded::Done((false, true)),
+            "a deadline ⇒ a worker thread that carries the caller's budget"
+        );
+
+        let died: Bounded<u32> =
+            run_or_abandon("panics", 1 << 20, Duration::ZERO, || panic!("worker panic"));
+        assert_eq!(died, Bounded::Died);
+    }
 
     #[test]
     fn unbounded_never_expires_and_has_no_remaining() {
