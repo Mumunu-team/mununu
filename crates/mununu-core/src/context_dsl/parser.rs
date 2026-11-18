@@ -1290,6 +1290,17 @@ impl<'a> Parser<'a> {
                 key.span.line,
                 key.span.column,
             );
+            // mununu#966 — a key bound twice is refused here: the realizer collects the
+            // bindings into a map, where the later value would silently replace the earlier.
+            if let Some(first) = args.iter().find(|a: &&TemplateArg| a.name.name == key.name) {
+                return Err(ParseError::InvalidExpr {
+                    span,
+                    message: format!(
+                        "template argument `{}` is bound twice (line {}, then line {})",
+                        key.name, first.span.line, span.line
+                    ),
+                });
+            }
             args.push(TemplateArg {
                 name: key,
                 value,
