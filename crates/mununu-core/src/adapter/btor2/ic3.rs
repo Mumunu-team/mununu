@@ -30,10 +30,12 @@
 //!   simulator cannot carry (a cell wider than 128 bits) ships with [`Replay::Unavailable`] and its
 //!   reason; a trace the simulator REFUSES is a bug, and the engine abstains with it.
 //!
-//! SOUNDNESS: with constraints, a lifted cube may contain states that admit no constraint-satisfying
-//! input (dead states): keeping them in a cube over-approximates, which is sound for blocking; the
-//! concretisation re-solves every step with `C` asserted and abstains (`Stopped`, with the step) if a
-//! chain does not concretise, so no trace is ever assembled from a cube's guarantee alone.
+//! SOUNDNESS: with constraints, a lift proves `C` along with its target (mununu#1056: the
+//! constraints hang off an activation literal every other query assumes), so a lifted cube keeps no
+//! state whose witness inputs violate `C`. The concretisation still re-solves every step with `C`
+//! asserted, backs up around a dead state if one appears (#1072), and abstains (`Stopped`, with the
+//! step) if a chain does not concretise, so no trace is ever assembled from a cube's guarantee
+//! alone.
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 
 use std::cmp::Reverse;
@@ -259,7 +261,16 @@ struct Ic3<'m> {
     bad: i32,
     bad_lits: Vec<i32>,
     act_init: i32,
-    /// `T`'s clauses (the Tseitin definitions, the constraints as units, the `bad` disjunction).
+    /// mununu#1056 — the activation literal the constraints hang off (`0`: the design has none).
+    /// [`Self::solve`] assumes it on every query except a lift's: a lift must PROVE the
+    /// constraints from its state and inputs, not take them as given (see [`Self::lift_in`]).
+    act_c: i32,
+    /// mununu#1056 — each constraint's literal, for the lift's target (`¬target' ∨ ¬c₁ ∨ …`).
+    constraint_lits: Vec<i32>,
+    /// mununu#1056 — set while a lift's query runs, so [`Self::solve`] leaves `act_c` out.
+    lifting: bool,
+    /// `T`'s clauses (the Tseitin definitions, the constraints under `act_c`, the `bad`
+    /// disjunction).
     trans: Vec<Vec<i32>>,
     /// The `init` equalities, each already carrying `¬act_init`.
     init_clauses: Vec<Vec<i32>>,
@@ -475,9 +486,20 @@ impl<'m> Ic3<'m> {
                 }
             }
         }
+        // mununu#1056 — the constraints hang off `act_c` rather than being hard units: with them
+        // hard, a lift's query is UNSAT for any state whose witness inputs violate a constraint,
+        // so its core could drop exactly the state literals that keep the constraints true, and
+        // the lifted cube kept dead states (states with no constraint-satisfying input).
+        let act_c = if model.constraints.is_empty() {
+            0
+        } else {
+            enc.fresh()
+        };
+        let mut constraint_lits = Vec::with_capacity(model.constraints.len());
         for &c in &model.constraints {
             let l = enc.encode(c);
-            enc.clauses.push(vec![l]);
+            enc.clauses.push(vec![-act_c, l]);
+            constraint_lits.push(l);
         }
         let bad_lits: Vec<i32> = model.bads.iter().map(|&b| enc.encode(b)).collect();
         let bad = match bad_lits.as_slice() {
@@ -505,6 +527,9 @@ impl<'m> Ic3<'m> {
             bad,
             bad_lits,
             act_init,
+            act_c,
+            constraint_lits,
+            lifting: false,
             trans: enc.clauses,
             init_clauses,
             init_const,
@@ -584,7 +609,11 @@ impl<'m> Ic3<'m> {
     fn solve(&mut self, assumptions: &[i32]) -> Result<bool, Halted> {
         self.queries += 1;
         let t0 = Instant::now();
-        let r = self.solver.solve_with(assumptions.iter().copied());
+        // Every query but a lift's assumes the constraints (mununu#1056).
+        let act_c = (self.act_c != 0 && !self.lifting).then_some(self.act_c);
+        let r = self
+            .solver
+            .solve_with(assumptions.iter().copied().chain(act_c));
         let slot = &mut self.by_phase[self.phase as usize];
         slot.0 += 1;
         slot.1 += u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX);
@@ -738,12 +767,17 @@ impl<'m> Ic3<'m> {
     }
 
     fn lift_in(&mut self, w: &Witness, succ: Option<&[i32]>) -> Result<Vec<i32>, Halted> {
+        // mununu#1056 — the target is `target' ∧ C` (a successor in `succ` reached under the
+        // constraints, or a `bad` under them), and the query runs WITHOUT assuming the
+        // constraints: UNSAT then proves that the kept state literals and the inputs force the
+        // constraints too, so no lifted cube keeps a state those inputs are forbidden in.
+        let not_c: Vec<i32> = self.constraint_lits.iter().map(|&l| -l).collect();
         let t = match succ {
             Some(c) => {
-                let neg: Vec<i32> = c.iter().map(|&l| -self.prime(l)).collect();
+                let neg: Vec<i32> = c.iter().map(|&l| -self.prime(l)).chain(not_c).collect();
                 self.temp_clause(neg)
             }
-            None => self.temp_clause([-self.bad]),
+            None => self.temp_clause(std::iter::once(-self.bad).chain(not_c)),
         };
         let mut a = vec![t];
         a.extend_from_slice(&w.state);
@@ -751,7 +785,10 @@ impl<'m> Ic3<'m> {
         if succ.is_some() {
             a.extend_from_slice(&w.free_next);
         }
-        let r = match self.solve(&a) {
+        self.lifting = true;
+        let solved = self.solve(&a);
+        self.lifting = false;
+        let r = match solved {
             Ok(false) => {
                 let lifted: Vec<i32> = w
                     .state
@@ -1582,6 +1619,56 @@ mod tests {
             }
             Ok(other) => panic!("a cube outside Init must not concretise: {other:?}"),
             Err(_) => panic!("no deadline or cancel was set"),
+        }
+    }
+
+    /// mununu#1056 — a lifted cube keeps no dead state. `x` is set freely by the input `k`; `z`
+    /// copies `i`; `y` becomes `z ∧ i`; `bad` is `y`; a constraint forbids `x ∧ i` (the mirror:
+    /// `¬x ∧ i`). The real path keeps `x` at its live value and drives `i` twice. The predecessor
+    /// of `bad` is `z` under `i`: with the constraints as hard units, the lift's query held
+    /// whatever `x` was, so the cube could drop it and keep the dead value of `x`, where `i` is
+    /// forbidden; the concretisation then had to back up around it (one retry in one polarity
+    /// on the parent). With the constraints proved by the lift, the cube keeps `x`'s live value
+    /// and no step needs a retry, in either polarity.
+    #[test]
+    fn a_lift_under_constraints_keeps_no_dead_state() {
+        let x_dead = "1 sort bitvec 1\n2 zero 1\n3 state 1 x\n4 state 1 z\n5 state 1 y\n\
+                      6 init 1 4 2\n7 init 1 5 2\n8 input 1 i\n9 input 1 k\n10 next 1 3 9\n\
+                      11 next 1 4 8\n12 and 1 4 8\n13 next 1 5 12\n14 bad 5\n\
+                      15 and 1 3 8\n16 not 1 15\n17 constraint 16\n";
+        let nx_dead = x_dead.replace(
+            "15 and 1 3 8\n16 not 1 15\n17 constraint 16\n",
+            "15 not 1 3\n16 and 1 15 8\n17 not 1 16\n18 constraint 17\n",
+        );
+        for (name, text) in [("x", x_dead.to_string()), ("nx", nx_dead)] {
+            let file = parser::parse(&text).unwrap();
+            let model = AigModel::build(&file).unwrap();
+            let mut search = Ic3::new(
+                &model,
+                Stop {
+                    deadline: None,
+                    cancel: None,
+                },
+            );
+            let out = search.run(&Ic3Options::default()).ok();
+            assert!(
+                matches!(out, Some(Ic3Outcome::Violated { depth: 2, .. })),
+                "{name}: {out:?}"
+            );
+            assert_eq!(
+                search.concretize_retries, 0,
+                "{name}: a lifted cube kept a dead state"
+            );
+            assert!(
+                matches!(
+                    run(&text),
+                    Ic3Outcome::Violated {
+                        replay: Replay::Confirmed(_),
+                        ..
+                    }
+                ),
+                "{name}: the shipped trace replays"
+            );
         }
     }
 
