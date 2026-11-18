@@ -1201,6 +1201,92 @@ mod tests {
         );
     }
 
+    /// mununu#959 — a memory whose `init` is an array EXPRESSION (a `write` over the zero
+    /// array: cell 1 holds 5, every other cell 0), never written afterwards. Verdicts derived by
+    /// hand from that one-line init.
+    fn mem_write_chain_init(bad_when_cell1_is_5: bool) -> String {
+        format!(
+            "1 sort bitvec 1\n2 sort bitvec 2\n3 sort bitvec 4\n4 sort array 2 3\n\
+             5 state 4 mem\n6 zero 3\n7 one 2\n8 constd 3 5\n9 state 4 zmem\n10 init 4 9 6\n\
+             11 next 4 9 9\n12 write 4 9 7 8\n13 init 4 5 12\n14 next 4 5 5\n\
+             15 read 3 5 7\n16 {} 1 15 8\n17 bad 16\n",
+            if bad_when_cell1_is_5 { "eq" } else { "neq" }
+        )
+    }
+
+    /// mununu#959 — the write-chain `init` is the frame-0 memory: cell 1 is 5, so `bad` = "cell
+    /// 1 ≠ 5" is unreachable and k-induction proves it; the dual `bad` = "cell 1 = 5" fires at
+    /// depth 0. Were the expression dropped (memory free) the first would be violated at depth
+    /// 0; were it read as the constant array of its operand, the second would never fire.
+    #[test]
+    fn a_memory_init_given_as_a_write_chain_is_the_frame_zero_memory() {
+        let safe = parser::parse(&mem_write_chain_init(false)).expect("parse");
+        assert_eq!(
+            bmc_bad_reachable(&safe, 4).expect("encodes the array-expression init"),
+            BmcOutcome::NoCexWithin { k: 4 }
+        );
+        assert!(matches!(
+            decide_bad_safety(&safe, 4, Some(5_000)).expect("decides"),
+            SafetyVerdict::Safe { .. }
+        ));
+        let dual = parser::parse(&mem_write_chain_init(true)).expect("parse");
+        assert_eq!(
+            bmc_bad_reachable(&dual, 4).expect("encodes"),
+            BmcOutcome::Violated { depth: 0 }
+        );
+    }
+
+    /// mununu#959 — a whole-memory `init` whose bit-vector value is narrower than the element
+    /// sort (a 2-bit zero for 4-bit cells) cannot be carried, so the design is refused with the
+    /// width, never run with a free frame-0 memory (which would report a spurious violation).
+    #[test]
+    fn a_memory_init_of_the_wrong_width_is_refused_not_run_free() {
+        let src = "1 sort bitvec 1\n2 sort bitvec 2\n3 sort bitvec 4\n4 sort array 2 3\n\
+                   5 state 4 mem\n6 zero 2\n7 init 4 5 6\n8 zero 2\n9 read 3 5 8\n\
+                   10 zero 3\n11 neq 1 9 10\n12 bad 11\n13 next 4 5 5\n";
+        // The parser accepts the init (it does not check a whole-memory init's width), so the
+        // encoder is the layer that must refuse it.
+        let file = parser::parse(src).expect("the parser leaves the width to the encoder");
+        match bmc_bad_reachable(&file, 4) {
+            Err(BmcError::Encode(EncodeError::WidthMismatch {
+                state_width,
+                operand_width,
+                ..
+            })) => assert_eq!((state_width, operand_width), (4, 2)),
+            other => panic!("a mis-sized memory init must be refused with its widths: {other:?}"),
+        }
+        assert!(matches!(
+            decide_bad_safety(&file, 4, Some(5_000)),
+            Err(BmcError::Encode(EncodeError::WidthMismatch { .. }))
+        ));
+    }
+
+    /// mununu#959 — `MEM_WRITE_READ` under `constraint ¬we`: the memory is never written, so the
+    /// zero-initialised cell 3 never holds 15 and k-induction proves `bad` unreachable. Without
+    /// the constraint the same design is violated at depth 1
+    /// (`bmc_decides_a_write_then_read_on_a_memory`), so a dropped constraint fails this test.
+    #[test]
+    fn a_constraint_on_a_memory_design_is_kept_in_every_frame() {
+        let src = format!("{MEM_WRITE_READ}19 not 1 8\n20 constraint 19\n");
+        let file = parser::parse(&src).expect("parse");
+        assert_eq!(
+            bmc_bad_reachable(&file, 4).expect("encodes"),
+            BmcOutcome::NoCexWithin { k: 4 }
+        );
+        assert!(matches!(
+            decide_bad_safety(&file, 4, Some(5_000)).expect("decides"),
+            SafetyVerdict::Safe { .. }
+        ));
+        // A constraint on the DATA (never 15) is the same proof by a different route: writes
+        // happen, but none of them makes `bad` true.
+        let src = format!("{MEM_WRITE_READ}19 neq 1 10 16\n20 constraint 19\n");
+        let file = parser::parse(&src).expect("parse");
+        assert!(matches!(
+            decide_bad_safety(&file, 4, Some(5_000)).expect("decides"),
+            SafetyVerdict::Safe { .. }
+        ));
+    }
+
     /// mununu#878 — a check the watchdog interrupted is discarded, whatever z3 answered.
     #[test]
     fn an_interrupted_check_is_read_as_unknown_even_when_it_answers() {
