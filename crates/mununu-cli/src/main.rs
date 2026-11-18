@@ -5045,22 +5045,13 @@ fn sv_verify_auto(args: SvVerifyAutoArgs) -> Result<(), String> {
     // Track H3 — one usage-ledger record per run, success or failure, written HERE: below, the
     // CI gate exits the process, and a record written after it would be lost on every red run.
     // Counts and identities only, never design content (`usage_ledger`'s key-set test).
-    {
-        use mununu_core::usage_ledger::{LedgerWrite, Surface, UsageRecord};
-        let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let rec = UsageRecord::for_run(
-            "sv verify-auto",
-            Surface::Cli,
-            outcome.as_ref().ok(),
-            wall_ms,
-        );
-        if let LedgerWrite::Failed { path, error } = mununu_core::usage_ledger::record(&rec) {
-            eprintln!(
-                "warning: usage ledger {}: {error} — this run's record is lost; the run itself is \
-                 unaffected",
-                path.display()
-            );
-        }
+    if let Some(lost) = mununu_core::usage_ledger::record_run(
+        "sv verify-auto",
+        mununu_core::usage_ledger::Surface::Cli,
+        outcome.as_ref().ok(),
+        started,
+    ) {
+        eprintln!("warning: {lost}");
     }
     let report = outcome.map_err(|e| format!("sv verify-auto: {}", e.message))?;
 

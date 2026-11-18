@@ -19,7 +19,7 @@
 //! reads (a stderr warning on the CLI, a `warn` in the server log) and the run is unaffected —
 //! a ledger must not be able to fail a verification.
 //!
-//! > Source of truth: [`record`] + [`UsageRecord::for_run`] — surface: CLI+API (`sv verify-auto`
+//! > Source of truth: [`record_run`] ([`record`] + [`UsageRecord::for_run`]) — surface: CLI+API (`sv verify-auto`
 //! > on both writes one record; `mununu licence status` / `GET /api/v1/licence` show the ledger's
 //! > path as `ledger`)
 
@@ -219,6 +219,29 @@ pub fn record(rec: &UsageRecord) -> LedgerWrite {
             path: PathBuf::from("(deployment configuration)"),
             error,
         },
+    }
+}
+
+/// mununu#966 — the per-run ledger block the CLI and the API each wrote by hand: one record for
+/// the run of `verb` on `surface` (`report` is `None` when the run failed before a report), the
+/// wall taken from `started`, appended to the configured ledger. `None` when the record was
+/// written or no ledger is configured; `Some(message)` when the ledger is configured and the
+/// write failed — the run is unaffected, and the caller prints the message where ITS operator
+/// reads (the CLI's stderr, the server log), which is why this does not log it itself.
+pub fn record_run(
+    verb: &str,
+    surface: Surface,
+    report: Option<&AutoVerifyReport>,
+    started: std::time::Instant,
+) -> Option<String> {
+    let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let rec = UsageRecord::for_run(verb, surface, report, wall_ms);
+    match record(&rec) {
+        LedgerWrite::Failed { path, error } => Some(format!(
+            "usage ledger {}: {error} — this run's record is lost; the run is unaffected",
+            path.display()
+        )),
+        LedgerWrite::Off | LedgerWrite::Written(_) => None,
     }
 }
 
@@ -467,6 +490,43 @@ mod tests {
             let _env = crate::adapter::env_var::unset_for_test(ENV_VAR);
             assert_eq!(locate().unwrap(), None);
             assert_eq!(record(&sample()), LedgerWrite::Off);
+        }
+    }
+
+    /// mununu#966 — the shared per-run block: a written record and no ledger are silent, an
+    /// unwritable ledger comes back as the message the caller prints on its own channel, naming
+    /// the path; the record carries the verb and the surface it was given.
+    #[test]
+    fn record_run_is_silent_on_success_and_names_the_path_on_a_lost_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger.ndjson");
+        let started = std::time::Instant::now();
+        {
+            let _env = crate::adapter::env_var::override_for_test(ENV_VAR, &path);
+            assert_eq!(
+                record_run("sv verify-auto", Surface::Cli, None, started),
+                None
+            );
+            let line = std::fs::read_to_string(&path).unwrap();
+            assert!(line.contains("\"verb\":\"sv verify-auto\""), "{line}");
+            assert!(line.contains("\"surface\":\"cli\""), "{line}");
+        }
+        let blocker = dir.path().join("a-regular-file");
+        std::fs::write(&blocker, "x").unwrap();
+        let bad = blocker.join("ledger.ndjson");
+        {
+            let _env = crate::adapter::env_var::override_for_test(ENV_VAR, &bad);
+            let lost = record_run("sv verify-auto", Surface::Api, None, started)
+                .expect("an unwritable ledger is reported");
+            assert!(lost.contains(&bad.display().to_string()), "{lost}");
+            assert!(lost.contains("this run's record is lost"), "{lost}");
+        }
+        {
+            let _env = crate::adapter::env_var::unset_for_test(ENV_VAR);
+            assert_eq!(
+                record_run("sv verify-auto", Surface::Api, None, started),
+                None
+            );
         }
     }
 
