@@ -7076,6 +7076,102 @@ pub fn exact_ladder(
     )
 }
 
+/// [`LadderOutcome::stage`] when [`exact_ladder_within_run_budget`] stopped waiting for the
+/// ladder: the caller's budget passed inside one uninterruptible BDD apply.
+pub const LADDER_STAGE_ABANDONED: &str = "exact-abandoned-on-run-budget";
+
+/// The worker's stack: the BDD apply recursion is deep on a wide cone, and a spawned thread's
+/// default stack is smaller than the main thread's.
+const LADDER_WORKER_STACK_BYTES: usize = 256 << 20;
+
+/// How long past the deadline the caller still waits, so a ladder that polls its budget between
+/// steps (mununu#804) reports its own abstention — with the step count — before it is abandoned.
+const LADDER_ABANDON_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// mununu#1063 — [`exact_ladder`] bounded from OUTSIDE by the caller's run budget.
+///
+/// The ladder polls the budget between fixpoint steps, and a step is one uninterruptible BDD
+/// apply: on a wide cone a single `box_pre` substitution outlived both the per-property and the
+/// run budget, on the driver thread, and the run printed nothing. Here the ladder runs on a
+/// worker ([`run_or_abandon`](crate::adapter::run_budget::run_or_abandon)); when the budget
+/// passes the caller gets an `Err` naming it, with `stage ==` [`LADDER_STAGE_ABANDONED`], and
+/// goes on to its next member. The worker's cancel flag is raised, so it stops at its next poll.
+/// With no deadline in effect this is `exact_ladder`, inline. The verdicts are the ladder's.
+///
+/// engine: `exact-symbolic` (full-state ROBDD, bit-blast μ-fixpoint), first-pass decider.
+pub fn exact_ladder_within_run_budget(
+    btor2_content: &str,
+    formula: &Formula,
+    controllable: &std::collections::HashSet<String>,
+    opts: &ExactSymbolicOptions,
+) -> LadderOutcome {
+    use crate::adapter::run_budget::{Bounded, run_or_abandon};
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (btor2, formula, controllable, opts, worker_cancel) = (
+        btor2_content.to_string(),
+        formula.clone(),
+        controllable.clone(),
+        *opts,
+        std::sync::Arc::clone(&cancel),
+    );
+    let refused = |stage: &'static str, why: String| LadderOutcome {
+        result: Err(why),
+        stage,
+        notes: Vec::new(),
+        witness_miss: None,
+    };
+    // The per-thread TEST hooks the engine reads (an env override, the arena size, the injected
+    // witness failure) follow the work to its worker, so a test sees one behaviour whichever
+    // thread runs the ladder. Production has no such state: the budget is the only thread-local
+    // the engine reads, and `run_or_abandon` carries it.
+    #[cfg(test)]
+    let test_hooks = (
+        crate::adapter::env_var::snapshot_overrides(),
+        ARENA_NODES_OVERRIDE.with(|c| c.get()),
+        WITNESS_EXTRACTION_FAILS.with(|c| c.get()),
+    );
+    match run_or_abandon(
+        "exact-ladder",
+        LADDER_WORKER_STACK_BYTES,
+        LADDER_ABANDON_GRACE,
+        move || {
+            #[cfg(test)]
+            if std::thread::current().name() == Some("exact-ladder") {
+                let (env, arena, witness_fails) = test_hooks;
+                crate::adapter::env_var::adopt_overrides(env);
+                ARENA_NODES_OVERRIDE.with(|c| c.set(arena));
+                WITNESS_EXTRACTION_FAILS.with(|c| c.set(witness_fails));
+            }
+            exact_ladder(
+                &btor2,
+                &formula,
+                &controllable,
+                &opts,
+                None,
+                Some(worker_cancel),
+            )
+        },
+    ) {
+        Bounded::Done(outcome) => outcome,
+        Bounded::Abandoned { waited_ms } => {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            refused(
+                LADDER_STAGE_ABANDONED,
+                format!(
+                    "abstained on the caller's RUN budget: the exact engine had not returned \
+                     after {waited_ms} ms — it was inside one uninterruptible BDD apply, which \
+                     polls no budget. Its worker thread was left behind and stops at its next \
+                     poll (mununu#1063)"
+                ),
+            )
+        }
+        Bounded::Died => refused(
+            "exact-worker-died",
+            "the exact engine's worker thread could not be started, or it panicked".to_string(),
+        ),
+    }
+}
+
 /// [`exact_ladder`] with the first stage's budget explicit (the tests force a stage).
 pub fn exact_ladder_with(
     btor2_content: &str,

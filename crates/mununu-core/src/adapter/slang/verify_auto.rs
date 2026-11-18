@@ -7474,16 +7474,16 @@ pub(crate) fn verify_auto_impl(
             // Plan P3 / P4 — the first-pass exact member runs the LADDER (unrestricted ≤ 2 s,
             // then reach-restricted with a 5 s probe and a 30 s cap, then unrestricted with the
             // engine's own budgets). The easy cases decide on stage 1 and pay for no lever.
-            let ladder = crate::adapter::btor2::symbolic_bitblast::exact_ladder(
+            // mununu#1063 — bounded from outside by the row's budget: one BDD apply polls nothing.
+            let ladder = crate::adapter::btor2::symbolic_bitblast::exact_ladder_within_run_budget(
                 &btor2,
                 &formula,
                 &std::collections::HashSet::new(),
                 &exact_opts,
-                None,
-                None,
             );
             let exact_stage = ladder.stage;
             let exact_witness_miss = ladder.witness_miss.clone();
+            let mut exact_bottom: Option<BottomReason> = None;
             let mut by_ladder = false;
             let mut fallback_decided_by: Option<&'static str> = None;
             let (outcome, counterexample) = match ladder.result {
@@ -7505,6 +7505,19 @@ pub(crate) fn verify_auto_impl(
                             .map(|w| exact_counterexample_from_lasso(w, &cell_widths_of(&btor2)))
                             .or_else(|| ef_unreachable_counterexample(&formula)),
                     )
+                }
+                // mununu#1063 — a budget stop is `unknown` with its reason, never `skipped`
+                // (`--fail-on unknown` must see it), and the next member and the re-plan still
+                // get the row.
+                Err(e)
+                    if exact_stage
+                        == crate::adapter::btor2::symbolic_bitblast::LADDER_STAGE_ABANDONED =>
+                {
+                    exact_bottom = Some(BottomReason::BudgetExpired);
+                    report
+                        .notes
+                        .push(exact_abandoned_note(&t.name, "first pass", &e));
+                    (VerifyOutcome::Unknown { unknown_cells: 0 }, None)
                 }
                 Err(e) => {
                     // RANKING RESCUE — the bit-blaster is over-cap (a wide counter);
@@ -7567,7 +7580,7 @@ pub(crate) fn verify_auto_impl(
                 outcome,
                 seeded_predicates: Vec::new(),
                 counterexample,
-                bottom_reason: None,
+                bottom_reason: exact_bottom,
                 decided_by: by_ladder
                     .then(|| exact_stage.to_string())
                     .or_else(|| fallback_decided_by.map(str::to_string)),
@@ -9641,14 +9654,21 @@ pub(crate) fn rescue_skipped_via_exact(
         // inputs-in-the-state lift and a cap-ladder retry each) and charged nobody: on edn eight
         // such rows cost ~26 s each, 207 of the 233 s the report could not attribute after J4c.
         let row_t0 = std::time::Instant::now();
-        let ladder = crate::adapter::btor2::symbolic_bitblast::exact_ladder(
-            design_btor2,
-            &formula,
-            &std::collections::HashSet::new(),
-            &exact_opts,
-            None,
-            None,
-        );
+        // mununu#1063 — this pass ran under the RUN budget alone; the row gets the per-property
+        // budget like every other pass, and the ladder is bounded from outside by it.
+        let ladder = {
+            let row_budget = crate::adapter::run_budget::Budget::child(
+                &crate::adapter::run_budget::current(),
+                crate::adapter::run_budget::property_budget_ms(),
+            );
+            let _row_guard = crate::adapter::run_budget::enter(&row_budget);
+            crate::adapter::btor2::symbolic_bitblast::exact_ladder_within_run_budget(
+                design_btor2,
+                &formula,
+                &std::collections::HashSet::new(),
+                &exact_opts,
+            )
+        };
         let stage = ladder.stage;
         let witness_miss = ladder.witness_miss.clone();
         match ladder.result {
@@ -9678,6 +9698,11 @@ pub(crate) fn rescue_skipped_via_exact(
                         },
                     ));
                 }
+            }
+            // mununu#1063 — a budget stop is said: the row stays Skipped (the cube could not
+            // seed it and the exact engine did not finish), with the stop in a note.
+            Err(e) if stage == crate::adapter::btor2::symbolic_bitblast::LADDER_STAGE_ABANDONED => {
+                notes.push(exact_abandoned_note(&prop.name, "atom-less rescue", &e));
             }
             // Err (over cap / intractable design): leave the property Skipped.
             Err(_) => {}
@@ -9718,6 +9743,26 @@ fn exact_skip_rescue_note(name: &str, verdict: &str) -> VerificationNote {
             .into(),
         items: Vec::new(),
         property: None,
+    }
+}
+
+/// mununu#1063 — the exact engine was left behind on the row's budget: which pass, and the
+/// engine's own words. Kind `time-budget-exceeded`, the kind the other budget stops use.
+fn exact_abandoned_note(name: &str, pass: &str, why: &str) -> VerificationNote {
+    VerificationNote {
+        kind: "time-budget-exceeded".into(),
+        level: NoteLevel::ScopeCaveat,
+        summary: format!("`{name}`: `exact-symbolic` ({pass}) {why}"),
+        detail: format!(
+            "mununu#1063 — the per-property budget (`{}`) bounds the exact engine from outside: \
+             a single BDD apply cannot be interrupted, so the driver stops waiting for it at \
+             the deadline and the row goes to the next member and the re-plan. The stop is a \
+             wall clock, so this abstention is host-dependent. A larger budget may let the \
+             exact engine finish; `--engine explicit` skips it.",
+            crate::adapter::run_budget::PROPERTY_BUDGET_ENV
+        ),
+        items: Vec::new(),
+        property: Some(name.to_string()),
     }
 }
 

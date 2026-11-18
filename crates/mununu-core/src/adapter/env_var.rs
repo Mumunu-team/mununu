@@ -58,6 +58,32 @@ mod overrides {
     pub(super) fn pop(id: u64) {
         STACK.with(|s| s.borrow_mut().retain(|(_, i, _)| *i != id));
     }
+
+    /// This thread's overrides, for a worker thread that must see what its caller sees.
+    pub(super) fn snapshot() -> Vec<Entry> {
+        STACK.with(|s| s.borrow().clone())
+    }
+
+    pub(super) fn install(entries: Vec<Entry>) {
+        STACK.with(|s| *s.borrow_mut() = entries);
+    }
+}
+
+/// The calling thread's overrides, to hand to a worker thread ([`adopt_overrides`]). Overrides
+/// are per thread so tests need no serialisation; code under test that moves work to a worker
+/// (mununu#1063) carries them across, or the worker would read the real environment.
+#[cfg(test)]
+pub(crate) struct OverrideSnapshot(Vec<(&'static str, u64, Option<String>)>);
+
+#[cfg(test)]
+pub(crate) fn snapshot_overrides() -> OverrideSnapshot {
+    OverrideSnapshot(overrides::snapshot())
+}
+
+/// Install a caller's overrides on this (worker) thread, for its whole life.
+#[cfg(test)]
+pub(crate) fn adopt_overrides(snapshot: OverrideSnapshot) {
+    overrides::install(snapshot.0);
 }
 
 /// Holds an override in force; dropping it removes that override and nothing else.
