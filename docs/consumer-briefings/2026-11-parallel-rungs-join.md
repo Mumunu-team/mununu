@@ -50,7 +50,7 @@ After both fixes, compared with the sequential order: 13 rows lost (all `l2s+ric
 
 ## Provenance
 
-- #986. The join defect has an in-repo reproducer, `adapter::justice::tests::the_parallel_policy_returns_when_the_exact_rung_wins_without_waiting_for_l2s`: it fails on the parent (36.6 s, notes empty) and passes on the fix (< 1 s).
+- #986. The join defect has an in-repo reproducer, `adapter::justice::policy_tests::the_parallel_policy_returns_when_the_first_rung_wins_and_keeps_the_winner`: it fails on the parent (36.6 s, notes empty) and passes on the fix (< 1 s). Which rung wins the race is the host's (on a runner without rIC3, l2s with the N5.5 `ic3` member can beat the exact rung); the test asserts both winners.
 - The rIC3 change is a CPU-contention measure. It has no unit-test reproducer; the evidence is the 129-row runs above and a 16-row probe (4 of the 7 rows lost after the join fix came back under `-e ic3`).
 - Run data is kept privately with the other competitiveness runs.
 
