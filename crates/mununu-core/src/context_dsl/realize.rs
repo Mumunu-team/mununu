@@ -1670,12 +1670,12 @@ fn collect_formulas(
                         None => {
                             if configured_registry.is_none() {
                                 configured_registry =
-                                    Some(TemplateRegistry::configured(&[]).map_err(|e| {
-                                        RealizationError::InvalidFormula {
+                                    Some(TemplateRegistry::configured_default().map_err(
+                                        |error| RealizationError::InvalidFormula {
                                             name: name.clone(),
-                                            error: format!("the template catalog: {e}"),
-                                        }
-                                    })?);
+                                            error,
+                                        },
+                                    )?);
                             }
                             configured_registry
                                 .as_ref()
@@ -1683,13 +1683,16 @@ fn collect_formulas(
                         }
                     };
                     let id = spec.template.name.clone();
+                    // The clause's bindings, read once: the registry takes them as a map, the
+                    // expansion record keeps them sorted.
+                    let args: Vec<(String, String)> = spec
+                        .args
+                        .iter()
+                        .map(|a| (a.name.name.clone(), a.value.clone()))
+                        .collect();
                     let tref = TemplateRef {
                         template: id.clone(),
-                        args: spec
-                            .args
-                            .iter()
-                            .map(|a| (a.name.name.clone(), a.value.clone()))
-                            .collect(),
+                        args: args.iter().cloned().collect(),
                     };
                     let inst = registry.instantiate(&tref).map_err(|e| {
                         RealizationError::InvalidFormula {
@@ -1708,11 +1711,7 @@ fn collect_formulas(
                     })?;
                     template = Some(TemplateExpansion {
                         template: id,
-                        args: spec
-                            .args
-                            .iter()
-                            .map(|a| (a.name.name.clone(), a.value.clone()))
-                            .collect(),
+                        args: args.into_iter().collect(),
                         formula: inst.formula.clone(),
                     });
                     (parsed, None, inst.formula)
