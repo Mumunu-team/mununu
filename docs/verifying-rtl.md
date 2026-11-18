@@ -274,7 +274,7 @@ in effect — that is the user's own clock, reported as `budget-expired`.
 
 > Source of truth: [`escalate_bottom`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L8027) — surface: (CLI+API+UI)
 
-A `// @mununu_assume GF <REG op VALUE>` inline annotation is **auto-applied to any response-shape guarantee** (`AG(a → AF b)`) in the same source. The SV verify-auto orchestration parses the `GF <atom>` into a typed fairness atom during annotation scanning; when a response-shape guarantee's cube-abstraction verdict is ⊥, the ⊥-escalation router dispatches through [`response_liveness_rescue_under_fairness`](../crates/mununu-core/src/adapter/liveness_rescue.rs) (the fair-cycle l2s primitive described above) instead of the plain `response_liveness_rescue`. A definite `holds` under fairness means the guarantee holds against every environment schedule satisfying the assumption infinitely often; a definite `violated` is a reachable lasso satisfying the assumption that still leaves the request forever ungranted.
+A `// @mununu_assume GF <REG op VALUE>` inline annotation is **auto-applied to any response-shape guarantee** (`AG(a → AF b)`) in the same source. The SV verify-auto orchestration parses the `GF <atom>` into a typed fairness atom during annotation scanning; when a response-shape guarantee is left ⊥ by the first-pass members — or is refuted by one of them, which decides without the assumption (mununu#1073, §`violation-without-fairness`) — the ⊥-escalation router dispatches through [`response_liveness_rescue_under_fairness`](../crates/mununu-core/src/adapter/liveness_rescue.rs) (the fair-cycle l2s primitive described above) instead of the plain `response_liveness_rescue`. A definite `holds` under fairness means the guarantee holds against every environment schedule satisfying the assumption infinitely often; a definite `violated` is a reachable lasso satisfying the assumption that still leaves the request forever ungranted.
 
 Multiple `// @mununu_assume GF <atom>` in one source accumulate as a conjunction `(⋀ⱼ GF fairⱼ)`. The scanner records the applied assume in the `annotation-properties` verification note; each fair-cycle rescue emits a `fair-cycle-rescue` note naming the assumption(s) applied.
 
@@ -1633,6 +1633,23 @@ kept as a may-trace. A refuted `EF p` and a `HOLDS` keep their verdict, as under
 `violation-over-free-leaves`. A latch enabled by a data signal is not affected: it lifts
 correctly at cycle level (`q = ite(en, d, S)`). The over-approximation is argued from the lifted
 model on one design, not proved for the class (mununu#1030).
+
+### A violation found without the stated fairness: `violation-without-fairness` (mununu#1073)
+
+> Source of truth: [`BottomReason::ViolationWithoutFairness`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) + [`reopen_violations_decided_without_fairness`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) — surface: (CLI+API)
+
+A `// @mununu_assume GF <REG op VALUE>` binds the response-shape rows (`AG(a → AF b)`), and one
+route carries it: the fair-cycle liveness-to-safety reduction of the re-plan. The first-pass
+members (the exact engine, the cube) decide a row without it. Their `HOLDS` stands, because a
+response that holds on every path holds on the fair ones. Their `VIOLATED` does not: the
+counterexample may be a schedule the assumption forbids, such as a responder that is never ready.
+So a response row a first-pass member refutes, in a run that states a `GF` assumption, is decided
+again by the fair-cycle route, and the report carries that verdict with a `fair-cycle-rescue`
+note. When the fair-cycle route cannot decide it (a fairness atom that binds no register, or no
+verdict within the rescue slice) the row is `unknown` with
+`bottom_reason.kind = "violation-without-fairness"` and the assumptions in `detail`; the plain
+liveness rescue's `VIOLATED` is withheld the same way. Rows of any other shape, and every row of
+a run with no `GF` assumption, are untouched.
 
 ### An init-less register is free at cycle 0 on every path: `unestablished-initial-cubes` (mununu#579, #609)
 

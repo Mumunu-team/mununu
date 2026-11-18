@@ -53,7 +53,9 @@ input (a kick, a clock-stretch, a competing request, a bus-cycle drop) can stall
 On the `sv verify-auto` flagship path, a `// @mununu_assume GF <REG op VALUE>` assumption is **auto-applied
 to any response-shape guarantee** (`AG(a → AF b)`) via the Emerson–Lei fair-cycle l2s (mununu#477 Option B):
 each `GF` assume adds a `fair_seen` monitor latch, and a `holds` verdict under fairness means the guarantee
-holds against every environment schedule satisfying the assumption infinitely often. For assumptions that
+holds against every environment schedule satisfying the assumption infinitely often. A response row a first-pass
+engine refutes is decided again under the assumption (mununu#1073), so the verdict does not depend on which engine
+reached the row; if the fair-cycle route cannot decide it the row is `unknown` (`violation-without-fairness`). For assumptions that
 don't fit `GF <REG op VALUE>` — a state predicate, a non-response guarantee, or coupled multi-guarantee
 fairness — use `mununu btor2 verify-liveness --fairness` on the emitted BTOR2, or model in CTXDSL where
 the GR(1) game engine `(⋀ GF envᵢ) → (⋀ GF sysⱼ)` discharges multi-pair assume-guarantee liveness directly.
