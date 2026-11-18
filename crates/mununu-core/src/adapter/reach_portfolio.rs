@@ -1215,6 +1215,12 @@ fn decide_with_members_using(
         // the z3 check in flight, mununu#878). Stops when the members are joined.
         scope.spawn(move || {
             while !finished.load(Relaxed) {
+                // A peer's verdict already raised `decided`: every member is winding down on it,
+                // and a wall or budget firing during that wind-down must not relabel their stops
+                // as clock stops (mununu#1067 review).
+                if decided.load(Relaxed) {
+                    break;
+                }
                 // An external cancellation is a caller's decision (another rung won): no clock.
                 if cancel.is_some_and(|c| c.load(Relaxed)) {
                     decided.store(true, Relaxed);
@@ -1513,21 +1519,38 @@ fn decide_with_members_using(
     // of its own on record, is a budget abstention with that cause.
     // mununu#1043 — and so is one the run budget stopped (the same sweep; until #1043 a budget
     // stop recorded nothing for a member that had not noted its own cause).
-    if clock_stop.load(Relaxed) {
-        let wall_ms = subprocess_timeout.as_millis();
-        let cause = if wall_fired.load(Relaxed) {
-            format!(
-                "stopped at the portfolio's wall deadline ({wall_ms} ms, --timeout-ms) before it \
-                 reached a verdict"
-            )
-        } else {
-            "stopped when the run budget expired, before it reached a verdict".to_string()
-        };
+    // A definite verdict means a peer stopped the rest, which stays in no list, even when the
+    // clock rose in the same instant (the watchdog's check races the peer's store).
+    if clock_stop.load(Relaxed) && !any_definite(&members) {
+        let cause = clock_sweep_cause(wall_fired.load(Relaxed), subprocess_timeout.as_millis());
         for name in stopped_by_wall_unrecorded(&started, &members) {
             members.abstained.push((name, cause.clone()));
         }
     }
     collect(members)
+}
+
+/// mununu#1039 / #1043 — the cause the post-join sweep records: the wall's, or the run budget's.
+fn clock_sweep_cause(wall_fired: bool, wall_ms: u128) -> String {
+    if wall_fired {
+        format!(
+            "stopped at the portfolio's wall deadline ({wall_ms} ms, --timeout-ms) before it \
+             reached a verdict"
+        )
+    } else {
+        "stopped when the run budget expired, before it reached a verdict".to_string()
+    }
+}
+
+/// Whether any member reached a definite verdict (a reachable or unreachable answer).
+fn any_definite(m: &Members) -> bool {
+    let definite = |v: Option<McVerdict>| matches!(v, Some(McVerdict::Violated | McVerdict::Safe));
+    [m.exact, m.native, m.interp, m.sat_bmc, m.ic3]
+        .iter()
+        .any(Option::is_some)
+        || [m.btormc, m.pono, m.ric3, m.ric3_bmc]
+            .into_iter()
+            .any(definite)
 }
 
 /// mununu#1039 — the members that were started, returned no verdict, and appear in none of the
@@ -2642,6 +2665,44 @@ mod tests {
         assert_eq!(
             stopped_by_wall_unrecorded(&started, &m),
             vec!["exact", "native", "ic3", "btormc", "ric3"]
+        );
+    }
+
+    /// mununu#1067 review — the clock sweep runs only when no member decided: a definite verdict
+    /// means a peer stopped the rest, and a subprocess `Unknown` is no verdict.
+    #[test]
+    fn the_clock_sweep_is_skipped_once_a_member_decided() {
+        let unknown = || Members {
+            btormc: Some(McVerdict::Unknown),
+            ..Members::default()
+        };
+        assert!(
+            !any_definite(&unknown()),
+            "an Unknown subprocess is no verdict"
+        );
+        let owned = Members {
+            ic3: Some(true),
+            ..unknown()
+        };
+        assert!(any_definite(&owned));
+        let subprocess = Members {
+            ric3: Some(McVerdict::Safe),
+            ..unknown()
+        };
+        assert!(any_definite(&subprocess));
+    }
+
+    /// mununu#1043 — the sweep names which clock stopped the member.
+    #[test]
+    fn the_clock_sweep_names_the_wall_or_the_budget() {
+        assert_eq!(
+            clock_sweep_cause(true, 60_000),
+            "stopped at the portfolio's wall deadline (60000 ms, --timeout-ms) before it reached \
+             a verdict"
+        );
+        assert_eq!(
+            clock_sweep_cause(false, 60_000),
+            "stopped when the run budget expired, before it reached a verdict"
         );
     }
 
