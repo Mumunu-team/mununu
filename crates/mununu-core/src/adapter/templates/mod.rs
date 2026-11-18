@@ -174,9 +174,40 @@ fn default_standalone() -> String {
 pub struct TemplateRef {
     /// Template ID to instantiate.
     pub template: String,
-    /// Argument bindings: param_name → value.
-    #[serde(default)]
+    /// Argument bindings: param_name → value. A key given twice is refused.
+    // mununu#966 — serde would otherwise keep a repeated key's last value silently.
+    #[serde(default, deserialize_with = "unique_args")]
     pub args: HashMap<String, String>,
+}
+
+/// Deserialize `args`, refusing a key that appears twice.
+fn unique_args<'de, D>(de: D) -> Result<HashMap<String, String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct Unique;
+    impl<'de> serde::de::Visitor<'de> for Unique {
+        type Value = HashMap<String, String>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a map of template argument names to values")
+        }
+        fn visit_map<M: serde::de::MapAccess<'de>>(
+            self,
+            mut map: M,
+        ) -> Result<Self::Value, M::Error> {
+            let mut out = HashMap::with_capacity(map.size_hint().unwrap_or(0));
+            while let Some((k, v)) = map.next_entry::<String, String>()? {
+                if out.contains_key(&k) {
+                    return Err(serde::de::Error::custom(format!(
+                        "template argument `{k}` is given twice"
+                    )));
+                }
+                out.insert(k, v);
+            }
+            Ok(out)
+        }
+    }
+    de.deserialize_map(Unique)
 }
 
 /// The full template catalog (deserialized from JSON) — the built-in one, or a template pack.
@@ -579,6 +610,24 @@ fn parse_property_role(s: &str) -> PropertyRole {
 
 #[cfg(test)]
 mod tests {
+    /// mununu#966 — a JSON `args` object with a repeated key is refused naming the key; before,
+    /// serde kept the last value. A key given once, or no `args`, reads as before.
+    #[test]
+    fn a_template_ref_with_a_repeated_json_arg_is_refused() {
+        let err = serde_json::from_str::<TemplateRef>(
+            r#"{"template": "reachable", "args": {"TARGET": "S", "TARGET": "T"}}"#,
+        )
+        .expect_err("a repeated key is refused");
+        assert!(err.to_string().contains("`TARGET` is given twice"), "{err}");
+        let ok: TemplateRef =
+            serde_json::from_str(r#"{"template": "reachable", "args": {"TARGET": "S"}}"#)
+                .expect("one binding");
+        assert_eq!(ok.args["TARGET"], "S");
+        let none: TemplateRef =
+            serde_json::from_str(r#"{"template": "no_deadlock"}"#).expect("no args");
+        assert!(none.args.is_empty());
+    }
+
     use super::*;
 
     #[test]
