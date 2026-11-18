@@ -72,15 +72,28 @@ pub(crate) fn unconfined_c_includes_in_tree(
         let text = strip_c_comments(&content);
         for (target, quoted) in directives(&text).filter_map(|(_, _, t)| t) {
             let candidates = quoted
-                .then(|| dir.join(target))
+                .then(|| join_target(&dir, target))
                 .into_iter()
-                .chain(include_dirs.iter().map(|d| d.join(target)));
+                .chain(include_dirs.iter().map(|d| join_target(d, target)));
             if let Some(found) = candidates.filter(|c| c.is_file()).find(|c| under_root(c)) {
                 queue.push_back(found);
             }
         }
     }
     out
+}
+
+/// `dir` joined with an `#include` target one component at a time, so the path the refusal names
+/// uses the host's separator throughout. `Path::join` on the target text keeps its `/` verbatim,
+/// so on Windows a header reached through `"inc/board.h"` read `…\fw\inc/board.h` while the same
+/// header reached through `-I inc` read `…\fw\inc\board.h` (the OS matrix's Windows lane, red on
+/// every `main` push since 21724845). The target is already confined to plain relative
+/// components when this runs ([`include_target`]).
+fn join_target(dir: &Path, target: &str) -> PathBuf {
+    target
+        .split('/')
+        .filter(|c| !c.is_empty())
+        .fold(dir.to_path_buf(), |p, c| p.join(c))
 }
 
 /// The bound on files one scan follows; a firmware tree is hundreds, never thousands.
@@ -238,11 +251,11 @@ mod tests {
             vec![
                 format!(
                     "{}:2: #include \"/etc/hostname\"",
-                    fw.join("inc/board.h").display()
+                    fw.join("inc").join("board.h").display()
                 ),
                 format!(
                     "{}:1: #include \"../../../escape.h\"",
-                    fw.join("inc/board2.h").display()
+                    fw.join("inc").join("board2.h").display()
                 ),
             ]
         );
