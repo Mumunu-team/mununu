@@ -593,6 +593,32 @@ impl<'a> Unroller<'a> {
         }
     }
 
+    /// mununu#966 — the first step of every unrolled path, once instead of at each search:
+    /// frame 0's constraints on `solver` (a FREE path, the k-induction step's: no `init`).
+    fn seed_free_path(&self, solver: &z3::Solver) {
+        for c in self.constraints_at(0) {
+            solver.assert(&c);
+        }
+    }
+
+    /// mununu#966 — an INIT-constrained path's first step: the initial state
+    /// ([`assert_init`](Self::assert_init)) and frame 0's constraints on `solver` (the BMC
+    /// witness search, the k-induction base, the counterexample search).
+    fn seed_init_path(&self, solver: &z3::Solver, init_pairs: &[(Nid, Operand)]) {
+        self.assert_init(solver, init_pairs);
+        self.seed_free_path(solver);
+    }
+
+    /// mununu#966 — one frame further on `solver`: the transition out of frame `k` and frame
+    /// `k + 1`'s constraints, in that order at every search (the callers add anything of their
+    /// own — the step's `¬bad` at frame `k` — before this).
+    fn extend(&self, solver: &z3::Solver, k: usize) {
+        solver.assert(self.transition_at(k));
+        for c in self.constraints_at(k + 1) {
+            solver.assert(&c);
+        }
+    }
+
     /// Extract the concrete `Init → bad` witness from a SAT `model` whose `bad`
     /// fired at frame `k`: per-frame state and input valuations (frames `0..=k`) for the
     /// NAMED cells, each a sorted `(symbol, value)` list. The input at frame `k` is part of
@@ -680,10 +706,7 @@ pub fn bmc_bad_reachable_witness(
 
         // A single init-constrained path: check `bad` at each frame, extend if clean.
         let solver = z3::Solver::new();
-        u.assert_init(&solver, &init_pairs);
-        for c in u.constraints_at(0) {
-            solver.assert(&c);
-        }
+        u.seed_init_path(&solver, &init_pairs);
         // mununu#726 — under a thread-local budget every frame's query is bounded by the time
         // left (unbounded stays unbounded: the floor is today's behaviour), and the loop polls
         // the budget per depth. A query that times out is an ERROR, not "no cex at this depth".
@@ -727,10 +750,7 @@ pub fn bmc_bad_reachable_witness(
             }
             solver.pop(1);
             if k < n {
-                solver.assert(u.transition_at(k));
-                for c in u.constraints_at(k + 1) {
-                    solver.assert(&c);
-                }
+                u.extend(&solver, k);
             }
         }
         Ok((BmcOutcome::NoCexWithin { k: max_k }, None))
@@ -951,11 +971,8 @@ fn decide_bad_safety_ladder(
         // mununu#893 — the per-check budget is a deterministic resource limit (plus the run
         // budget's wall remainder); applied before every check below, never only once.
         let budget = QueryBudget::for_nominal(nominal_ms);
-        u.assert_init(&base, init_pairs);
-        for c in u.constraints_at(0) {
-            base.assert(&c);
-            step.assert(&c);
-        }
+        u.seed_init_path(&base, init_pairs);
+        u.seed_free_path(&step);
 
         let mut latch = crate::adapter::CancelLatch::new();
         for k in 0..=n {
@@ -1007,14 +1024,10 @@ fn decide_bad_safety_ladder(
                 z3::SatResult::Sat => {}
             }
             if k < n {
-                // Extend both paths to frame k+1.
-                base.assert(u.transition_at(k));
-                step.assert(u.bad_at(k).not()); // assume ¬bad on the inductive path
-                step.assert(u.transition_at(k));
-                for c in u.constraints_at(k + 1) {
-                    base.assert(&c);
-                    step.assert(&c);
-                }
+                // Extend both paths to frame k+1; the inductive path assumes ¬bad first.
+                u.extend(&base, k);
+                step.assert(u.bad_at(k).not());
+                u.extend(&step, k);
             }
         }
         Ok(SafetyVerdict::Unknown { k: max_k })
@@ -1084,10 +1097,7 @@ fn cex_search(
     // mununu#893 — a deterministic resource limit per check (the nominal allowance), plus the run
     // budget's wall remainder; mununu#955 — and the time left to this search's own `deadline`.
     let budget = QueryBudget::for_nominal(Some(per_query_ms));
-    u.assert_init(&base, init_pairs);
-    for c in u.constraints_at(0) {
-        base.assert(&c);
-    }
+    u.seed_init_path(&base, init_pairs);
     for k in 0..=n {
         // A peer decided: abstain (never a wrong verdict), and not a budget stop.
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
@@ -1117,10 +1127,7 @@ fn cex_search(
             z3::SatResult::Unsat => {}
         }
         if k < n {
-            base.assert(u.transition_at(k));
-            for c in u.constraints_at(k + 1) {
-                base.assert(&c);
-            }
+            u.extend(&base, k);
         }
     }
     Ok(None)
@@ -1445,11 +1452,8 @@ mod tests {
                 .expect("no memory");
             let base = z3::Solver::new();
             let step = z3::Solver::new();
-            u.assert_init(&base, &init_pairs);
-            for c in u.constraints_at(0) {
-                base.assert(&c);
-                step.assert(&c);
-            }
+            u.seed_init_path(&base, &init_pairs);
+            u.seed_free_path(&step);
             let mut max_units = 0u64;
             let mut total = 0u64;
             for k in 0..=40usize {
@@ -1469,13 +1473,9 @@ mod tests {
                 max_units = max_units.max(bu).max(su);
                 total += bu + su;
                 if k < 40 {
-                    base.assert(u.transition_at(k));
+                    u.extend(&base, k);
                     step.assert(u.bad_at(k).not());
-                    step.assert(u.transition_at(k));
-                    for c in u.constraints_at(k + 1) {
-                        base.assert(&c);
-                        step.assert(&c);
-                    }
+                    u.extend(&step, k);
                 }
             }
             eprintln!(
