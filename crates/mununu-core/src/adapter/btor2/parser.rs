@@ -823,6 +823,19 @@ pub fn signal_reaches_anonymous_input(file: &Btor2File, name: &str) -> bool {
 /// not seedable by name).
 pub fn cone_inputs(file: &Btor2File, start: Nid) -> Vec<String> {
     let symbols = collect_symbols(file);
+    // mununu#1062 — a `state` with no `next` line is free at every step (the format's free
+    // variable; what `--cutpoint` leaves behind): an input in everything but its keyword. The
+    // walk used to stop at it as at a register, so an atom reading a cut net was neither
+    // sampled with the inputs nor refused, and the exact engine read one value of the net in
+    // the atom and another in the transition.
+    let has_next: std::collections::HashSet<Nid> = file
+        .lines
+        .iter()
+        .filter_map(|l| match &l.node {
+            Node::Next { state, .. } => Some(*state),
+            _ => None,
+        })
+        .collect();
     let mut seen: std::collections::HashSet<Nid> = std::collections::HashSet::new();
     let mut inputs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut work: Vec<Nid> = vec![start];
@@ -839,7 +852,14 @@ pub fn cone_inputs(file: &Btor2File, start: Nid) -> Vec<String> {
                     inputs.insert(s.clone());
                 }
             }
-            Node::State { .. } | Node::Const { .. } | Node::Sort { .. } => {}
+            Node::State { .. } => {
+                if !has_next.contains(&nid)
+                    && let Some(s) = symbols.get(&nid)
+                {
+                    inputs.insert(s.clone());
+                }
+            }
+            Node::Const { .. } | Node::Sort { .. } => {}
             Node::Op { args, .. } => {
                 for a in args {
                     work.push(a.nid());
