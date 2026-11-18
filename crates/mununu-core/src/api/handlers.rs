@@ -4368,6 +4368,8 @@ fn verify_project_handler_impl(
     let root = file_root()?;
     let base_dir = confine_under(root.as_deref(), "base_dir", &request.base_dir)?;
     confine_config_paths(&mut config, root.as_deref(), &base_dir)?;
+    // mununu#994 — and what the C sources' CONTENT names: an `#include` that could leave the root.
+    confine_c_includes_under(root.as_deref(), &config, &base_dir)?;
     crate::verify::verify_project(&config, &base_dir)
         .map(Json)
         .map_err(|e| ApiError::BadRequest {
@@ -4440,6 +4442,65 @@ pub(crate) fn confine_config_paths(
             Ok(rel) if !rel.as_os_str().is_empty() => rel.to_path_buf(),
             _ => real,
         })
+    })
+}
+
+/// mununu#994 (the C half) — under a `[server] file_root`, every `#include` of the config's
+/// `c-codesign` sources, and of the headers they reach under the root, must be a quoted or angled
+/// relative path of plain components; anything else is a 400 naming each directive by file and
+/// line. #935 / [`confine_config_paths`] confine the paths the config NAMES (so `files` and
+/// `include_paths` are under the root when this runs); this is the half the files' content
+/// names. Without a root nothing changes.
+pub(crate) fn confine_c_includes_under(
+    root: Option<&std::path::Path>,
+    config: &crate::verify::config::VerifyConfig,
+    base_dir: &std::path::Path,
+) -> Result<(), ApiError> {
+    let Some(root) = root else {
+        return Ok(());
+    };
+    let onto_base = |p: &std::path::Path| {
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            base_dir.join(p)
+        }
+    };
+    let refused: Vec<String> = config
+        .sources
+        .iter()
+        .filter(|s| s.adapter == "c-codesign")
+        .flat_map(|s| {
+            let files: Vec<std::path::PathBuf> = s.files.iter().map(|p| onto_base(p)).collect();
+            let include_dirs: Vec<std::path::PathBuf> = s
+                .options
+                .get("include_paths")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str())
+                        .map(|p| onto_base(std::path::Path::new(p)))
+                        .collect()
+                })
+                .unwrap_or_default();
+            crate::codesign::include_scan::unconfined_c_includes_in_tree(
+                &files,
+                &include_dirs,
+                root,
+            )
+        })
+        .collect();
+    if refused.is_empty() {
+        return Ok(());
+    }
+    Err(ApiError::BadRequest {
+        message: format!(
+            "a server with a file_root compiles a `c-codesign` source only when every `#include` \
+             it reaches is a quoted or angled relative path of plain components (no leading `/`, \
+             no `..`, no macro-built target); refused: {}",
+            refused.join("; ")
+        ),
+        details: None,
     })
 }
 
@@ -6555,6 +6616,80 @@ mod context_sanity_tests {
                 .is_ok()
         );
         assert!(super::confine_includes_under(None, sources).is_ok());
+    }
+
+    /// mununu#994 (the C half) — under a `file_root`, a `c-codesign` source's `#include`s, and
+    /// those of the headers it reaches under the root, may name only relative files; the refusal
+    /// names each directive by file and line, including one in a header reached through the
+    /// config's `include_paths`. Without a root the sources are taken as given. On the parent the
+    /// absolute include went through to clang, whose diagnostic quotes the included file's text
+    /// in the report's error.
+    #[test]
+    fn a_c_include_outside_the_root_is_refused_under_a_file_root() {
+        let root = tempfile::tempdir().expect("root");
+        let base = root.path().join("proj");
+        std::fs::create_dir_all(base.join("inc")).expect("mkdir");
+        std::fs::write(
+            base.join("firmware.c"),
+            "#include <stdint.h>\n#include \"board.h\"\nint main(void) { return 0; }\n",
+        )
+        .expect("write");
+        std::fs::write(
+            base.join("inc/board.h"),
+            "#include \"regs.h\"\n#include \"/etc/hostname\"\n",
+        )
+        .expect("write");
+        std::fs::write(base.join("inc/regs.h"), "#include \"../../escape.h\"\n").expect("write");
+        let toml = r#"
+[project]
+name = "fw"
+
+[[sources]]
+id = "fw"
+adapter = "c-codesign"
+files = ["firmware.c"]
+options = { include_paths = ["inc"] }
+
+[[sources]]
+id = "periph"
+adapter = "sv-yosys"
+files = ["uart.sv"]
+
+[composition]
+semantics = "asynchronous"
+members = ["fw", "periph"]
+name = "Sys"
+
+[[properties]]
+name = "init_reachable"
+template = "reachable"
+over = "Sys"
+"#;
+        let config = crate::verify::config::VerifyConfig::from_toml(toml).expect("config");
+        let err = super::confine_c_includes_under(Some(root.path()), &config, &base)
+            .expect_err("refused under a root");
+        let ApiError::BadRequest { message, .. } = err else {
+            panic!("a 400: {err:?}")
+        };
+        assert!(
+            message.contains(&format!(
+                "{}:2: #include \"/etc/hostname\"",
+                base.join("inc/board.h").display()
+            )),
+            "{message}"
+        );
+        assert!(
+            message.contains(&format!(
+                "{}:1: #include \"../../escape.h\"",
+                base.join("inc/regs.h").display()
+            )),
+            "{message}"
+        );
+        assert!(!message.contains("firmware.c:"), "{message}");
+        assert!(super::confine_c_includes_under(None, &config, &base).is_ok());
+        std::fs::write(base.join("inc/board.h"), "#include \"regs.h\"\n").expect("write");
+        std::fs::write(base.join("inc/regs.h"), "#define REG 1\n").expect("write");
+        assert!(super::confine_c_includes_under(Some(root.path()), &config, &base).is_ok());
     }
 
     /// mununu#935 — under a `file_root`, a request path must canonicalise inside it: `..` and a
