@@ -856,12 +856,9 @@ fn with_cancel_watchdog<T>(
                 use std::sync::atomic::Ordering::Relaxed;
                 // The member grace applies here as at the depth boundary: a query that is
                 // about to finish still lands; one still running past the grace is cut.
-                let mut seen: Option<std::time::Instant> = None;
+                let mut latch = crate::adapter::CancelLatch::new();
                 while !done.load(Relaxed) {
-                    if c.load(Relaxed)
-                        && seen.get_or_insert_with(std::time::Instant::now).elapsed()
-                            >= crate::adapter::MEMBER_CANCEL_GRACE
-                    {
+                    if latch.past_grace(Some(c)) {
                         gate.interrupt_if_in_query(&interrupt);
                     }
                     std::thread::sleep(std::time::Duration::from_millis(20));
@@ -960,14 +957,9 @@ fn decide_bad_safety_ladder(
             step.assert(&c);
         }
 
-        let mut cancel_seen: Option<std::time::Instant> = None;
+        let mut latch = crate::adapter::CancelLatch::new();
         for k in 0..=n {
-            if cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed))
-                && cancel_seen
-                    .get_or_insert_with(std::time::Instant::now)
-                    .elapsed()
-                    >= crate::adapter::MEMBER_CANCEL_GRACE
-            {
+            if latch.past_grace(cancel) {
                 return Ok(SafetyVerdict::Unknown { k: k as u32 });
             }
             // mununu#726 — the thread-local budget stops the ladder at a depth boundary (no

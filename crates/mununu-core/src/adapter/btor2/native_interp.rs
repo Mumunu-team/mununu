@@ -820,16 +820,13 @@ pub(crate) fn run_cvc5_raw_cancellable(
         .write_all(query.as_bytes())
         .map_err(|e| format!("write cvc5 stdin: {e}"))?;
     let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64 + 2_000);
-    let mut cancel_seen: Option<Instant> = None;
+    let mut latch = crate::adapter::CancelLatch::new();
     let mut killed = None;
     loop {
         match child.try_wait() {
             Ok(Some(_)) => break,
             Ok(None) => {
-                let cancelled = cancel
-                    .is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed))
-                    && cancel_seen.get_or_insert_with(Instant::now).elapsed()
-                        >= crate::adapter::MEMBER_CANCEL_GRACE;
+                let cancelled = latch.past_grace(cancel);
                 if cancelled || Instant::now() > deadline {
                     group.kill_and_reap(&mut child);
                     killed = Some(if cancelled {
