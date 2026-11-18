@@ -43,7 +43,7 @@
             "type": "string"
           },
           "default": {},
-          "description": "Argument bindings: param_name → value.",
+          "description": "Argument bindings: param_name → value. A key given twice is refused.",
           "type": "object"
         },
         "template": {
