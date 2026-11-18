@@ -5810,9 +5810,19 @@ members = ["x"]
         // Canonical verdict: `bad` reachable ⇒ the safety property is VIOLATED. The
         // reachability detail (which engine found it) stays in `reachable_by`.
         assert_eq!(out.outcome, "violated", "outcome: {out:?}");
+        // Which member decides first is a race (N5.5: ic3 and sat-bmc run beside exact and can
+        // win on a loaded host), so the handler test holds the verdict and that a shipped member
+        // decided it; exact deciding the counter alone is the exact engine's own test.
         assert!(
-            out.reachable_by.contains(&"exact".to_string()),
-            "the exact engine should decide the small reachable counter: {out:?}"
+            !out.reachable_by.is_empty()
+                && out.reachable_by.iter().all(|m| {
+                    [
+                        "exact", "native", "interp", "sat-bmc", "ic3", "btormc", "pono", "ric3",
+                        "ric3-bmc",
+                    ]
+                    .contains(&m.as_str())
+                }),
+            "a shipped member decides the small reachable counter: {out:?}"
         );
         assert!(
             !out.contradiction,
