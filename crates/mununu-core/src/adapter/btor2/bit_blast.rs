@@ -6848,6 +6848,24 @@ fn eval_op(
             let e = read(2)?;
             Ok(if c.to_bool() { t } else { e })
         }
+        // mununu#1055 — the division family and the overflow detectors, with the circuit's
+        // conventions (`Aig::udivrem` / `sdiv` / `srem` / `smod`): a counterexample the owned
+        // IC3 found through `srem` (HWMCC'20 `anderson.3`) was dropped because this replay could
+        // not evaluate it.
+        Op::Udiv => Ok(read(0)?.udiv(&read(1)?)),
+        Op::Urem => Ok(read(0)?.urem(&read(1)?)),
+        Op::Sdiv => Ok(read(0)?.sdiv(&read(1)?)),
+        Op::Srem => Ok(read(0)?.srem(&read(1)?)),
+        Op::Smod => Ok(read(0)?.smod(&read(1)?)),
+        Op::Uaddo => Ok(Bv::from_bool(read(0)?.uaddo(&read(1)?))),
+        Op::Usubo => Ok(Bv::from_bool(read(0)?.usubo(&read(1)?))),
+        Op::Saddo => Ok(Bv::from_bool(read(0)?.saddo(&read(1)?))),
+        Op::Ssubo => Ok(Bv::from_bool(read(0)?.ssubo(&read(1)?))),
+        Op::Umulo => Ok(Bv::from_bool(read(0)?.umulo(&read(1)?))),
+        Op::Smulo => Ok(Bv::from_bool(read(0)?.smulo(&read(1)?))),
+        Op::Sdivo => Ok(Bv::from_bool(read(0)?.sdivo(&read(1)?))),
+        // Arrays (`read` / `write`) are the one shape left: the simulator carries bit-vector
+        // cells only, and the engines refuse array designs before a trace exists.
         _ => Err(format!(
             "operator {op:?} unsupported in Phase 1 bit-blaster"
         )),
