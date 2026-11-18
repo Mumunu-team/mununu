@@ -491,11 +491,6 @@ pub(crate) fn encode_primed(
     })
 }
 
-/// §Phase 10 stage 3.c.1 — resolve the index + element bit-widths of
-/// an array sort. Thin alias over [`crate::adapter::btor2::parser::array_widths`]
-/// (the canonical implementation, shared with the `walk_design` driver);
-/// kept as a module-local name so existing call sites + the test read
-/// unchanged.
 /// N5 — the initial value of every array-sorted state cell that has an `init` line, as a term
 /// over the CURRENT-step variables (a caller instantiates it at frame 0 by substitution).
 ///
@@ -573,6 +568,11 @@ pub fn encode_array_inits(
     Ok(out)
 }
 
+/// §Phase 10 stage 3.c.1 — resolve the index + element bit-widths of
+/// an array sort. Thin alias over [`crate::adapter::btor2::parser::array_widths`]
+/// (the canonical implementation, shared with the `walk_design` driver);
+/// kept as a module-local name so existing call sites + the test read
+/// unchanged.
 fn array_widths(file: &Btor2File, sort_nid: Nid) -> Option<(u32, u32)> {
     crate::adapter::btor2::parser::array_widths(file, sort_nid)
 }

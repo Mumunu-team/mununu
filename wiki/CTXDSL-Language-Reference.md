@@ -403,7 +403,8 @@ mu_formulas {
 identifier, a string literal or an integer, validated as on the command line: a `Predicate` / `State`
 parameter takes a bare identifier, never an expression (`TARGET = "n == 2"` is refused). An unknown
 template id, a missing argument or a bad value refuses realization naming the formula; nothing is
-dropped silently. The CLI prints every expansion before the verdict —
+dropped silently. A key bound twice in one clause is a parse error naming the key and both lines (as a
+repeated `--template-arg` key is on the CLI); the later value never silently replaces the earlier. The CLI prints every expansion before the verdict —
 `Template 'reachable' → formula 'trip_exists': mu X. (Lof || <> X)` — read it before trusting a
 template's name (`response` is AG(T → **EF** R), the possibility reading). `template` is not a
 keyword: a label, a state or an automaton may still be called `template`.

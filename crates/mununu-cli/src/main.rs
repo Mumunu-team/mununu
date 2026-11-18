@@ -10293,9 +10293,18 @@ fn template_refs(
             }
         };
         let idx = idx.ok_or_else(|| format!("--template-arg '{arg}': no such --template"))?;
-        refs[idx]
+        // mununu#966 — a key bound twice is refused, never the later value silently kept.
+        if refs[idx]
             .args
-            .insert(key.trim().to_string(), value.trim().to_string());
+            .insert(key.trim().to_string(), value.trim().to_string())
+            .is_some()
+        {
+            return Err(format!(
+                "--template-arg '{arg}': `{}` is given twice for template `{}`",
+                key.trim(),
+                refs[idx].template
+            ));
+        }
     }
     Ok(refs)
 }
@@ -10326,7 +10335,13 @@ fn resolve_formula_name(
         let (key, value) = arg
             .split_once('=')
             .ok_or_else(|| format!("invalid --template-arg '{arg}': expected KEY=VALUE"))?;
-        args_map.insert(key.to_string(), value.to_string());
+        // mununu#966 — a key bound twice is refused, never the later value silently kept.
+        if args_map
+            .insert(key.to_string(), value.to_string())
+            .is_some()
+        {
+            return Err(format!("--template-arg '{arg}': `{key}` is given twice"));
+        }
     }
 
     let registry = mununu_core::adapter::templates::TemplateRegistry::configured(templates_files)
@@ -10380,6 +10395,34 @@ fn vacuity_warning_for_state_count(state_count: usize) -> Option<String> {
         ))
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod template_arg_tests {
+    use super::template_refs;
+
+    /// mununu#966 — `--template-arg` binding one key twice is refused naming it; before, the
+    /// later value silently replaced the earlier.
+    #[test]
+    fn a_template_arg_bound_twice_is_refused() {
+        let err = template_refs(
+            &["reachable".to_string()],
+            &["TARGET=S".to_string(), "TARGET=T".to_string()],
+        )
+        .expect_err("a key bound twice is refused");
+        assert!(err.contains("TARGET") && err.contains("twice"), "{err}");
+        // The same key on two different templates is two bindings, not a duplicate.
+        let refs = template_refs(
+            &["reachable".to_string(), "unreachable".to_string()],
+            &[
+                "reachable.TARGET=S".to_string(),
+                "unreachable.TARGET=T".to_string(),
+            ],
+        )
+        .expect("one binding per template");
+        assert_eq!(refs[0].args["TARGET"], "S");
+        assert_eq!(refs[1].args["TARGET"], "T");
     }
 }
 

@@ -680,11 +680,11 @@ fn interp_member(
 /// remainder as its wall, the subprocess members' wall IS the remainder (above 60 s btormc's
 /// depth cap lifts automatically, as before).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MemberTimeouts {
-    pub native_query_ms: u32,
-    pub interp_query_ms: u32,
-    pub interp_overall_ms: u64,
-    pub subprocess: std::time::Duration,
+pub(crate) struct MemberTimeouts {
+    pub(crate) native_query_ms: u32,
+    pub(crate) interp_query_ms: u32,
+    pub(crate) interp_overall_ms: u64,
+    pub(crate) subprocess: std::time::Duration,
 }
 
 /// The full portfolio's member budgets (mununu#892). With a run budget in effect every member
@@ -695,7 +695,7 @@ pub struct MemberTimeouts {
 /// per-query default: two HWMCC'20 array rows were ⊥ in the full run with ten minutes of
 /// subprocess time and decided by native alone with sixty seconds of query time. At the default
 /// wall nothing changes.
-pub fn portfolio_member_timeouts(
+pub(crate) fn portfolio_member_timeouts(
     remaining_ms: Option<u64>,
     subprocess: std::time::Duration,
 ) -> MemberTimeouts {
@@ -2997,6 +2997,44 @@ mod tests {
 
     /// mununu#726 — with no budget the members keep the constants they always had (the floor);
     /// under a budget every bound follows the time left.
+    /// mununu#892 — in the full reach portfolio, a `--timeout-ms` raised above the subprocess
+    /// default reaches the owned members too. Before, it set the subprocess wall and btormc's
+    /// depth cap only; native kept its 5 s per-query default, and two HWMCC'20 array rows native
+    /// decides in under forty seconds of query time stayed ⊥ in a full run given ten minutes.
+    /// (Moved from `tests/native_budget_892.rs`, mununu#966: the seam is crate-internal.)
+    #[test]
+    fn a_raised_timeout_becomes_natives_query_budget_in_the_full_portfolio() {
+        let t = portfolio_member_timeouts(None, std::time::Duration::from_secs(600));
+        assert_eq!(t.native_query_ms, 600_000);
+        assert_eq!(t.interp_overall_ms, 600_000);
+        assert_eq!(t.subprocess, std::time::Duration::from_secs(600));
+    }
+
+    /// mununu#892 — at the default wall, and below it, every member budget is as before.
+    #[test]
+    fn the_default_wall_leaves_every_budget_as_before() {
+        let t = portfolio_member_timeouts(None, btormc::DEFAULT_TIMEOUT);
+        assert_eq!(t.native_query_ms, 5_000, "native's per-query default");
+        assert_eq!(t.subprocess, btormc::DEFAULT_TIMEOUT);
+        let shorter = portfolio_member_timeouts(None, std::time::Duration::from_secs(10));
+        assert_eq!(
+            shorter.native_query_ms, 5_000,
+            "a wall below the default raises nothing"
+        );
+        assert_eq!(shorter.subprocess, std::time::Duration::from_secs(10));
+    }
+
+    /// mununu#892 — a run budget in effect still bounds every member.
+    #[test]
+    fn a_run_budget_in_effect_still_wins() {
+        let t = portfolio_member_timeouts(Some(2_000), std::time::Duration::from_secs(600));
+        assert_eq!(
+            t.native_query_ms, 2_000,
+            "the time left bounds every member"
+        );
+        assert_eq!(t.subprocess, std::time::Duration::from_millis(2_000));
+    }
+
     #[test]
     fn member_timeouts_floor_is_todays_constants_and_follows_the_budget() {
         let sixty = std::time::Duration::from_secs(60);

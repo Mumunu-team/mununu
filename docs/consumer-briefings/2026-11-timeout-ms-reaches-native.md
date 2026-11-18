@@ -34,7 +34,7 @@
 ## Provenance
 
 - **mununu#892**, found during the N9 owned-only sweep of the HWMCC'20 array track: `zipcpu_zipcpu_dcache-p236` and `-p428`.
-- **Tests:** `tests/native_budget_892.rs` (a raised wall becomes native's query budget; the default wall leaves every budget as before; a run budget in effect still wins).
+- **Tests:** `adapter::reach_portfolio` unit tests, moved there from `tests/native_budget_892.rs` by mununu#966 (a raised wall becomes native's query budget; the default wall leaves every budget as before; a run budget in effect still wins).
 
 ## Not covered here
 

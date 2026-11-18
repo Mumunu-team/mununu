@@ -5329,6 +5329,30 @@ context t {
         );
     }
 
+    /// mununu#966 — a key bound twice in one template clause is refused at parse time, naming the
+    /// key and both lines. Before, both bindings reached the realizer, which collected them into
+    /// a map: the later value silently replaced the earlier one.
+    #[test]
+    fn a_template_argument_bound_twice_is_refused_not_overwritten() {
+        let err = parse(
+            r#"
+context t {
+    automata { automaton A { states { state S initial; state T; } } }
+    mu_formulas { formula f { over A; template reachable {
+        TARGET = S;
+        TARGET = T;
+    } } }
+}
+"#,
+        )
+        .expect_err("a key bound twice is refused");
+        let text = err.to_string();
+        assert!(
+            text.contains("TARGET") && text.contains("twice") && text.contains("line 5"),
+            "{text}"
+        );
+    }
+
     #[test]
     fn a_template_clause_missing_a_required_argument_is_refused_naming_the_formula() {
         let doc = parse(
