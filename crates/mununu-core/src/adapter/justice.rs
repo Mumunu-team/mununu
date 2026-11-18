@@ -951,9 +951,14 @@ mod policy_tests {
     /// member, which has no cancellation point (mununu#816), so the join waited for it: measured
     /// in `mununu-sva` with 4 CPUs, exact alone answers this design in 0.1 s, and the parallel
     /// policy returned in 24.8 s. On HWMCC'17 LIVE, 23 of the 129 m3d rows were lost and 54 got ≥2× slower.
-    /// The same test pins that the winning exact rung keeps its notes (the parent dropped them).
+    /// The same test pins that the winner is kept whole (the parent dropped the exact rung's
+    /// notes). WHICH rung wins is a race the host decides: the exact rung answers in ~0.1 s, and
+    /// once this fix took the exact member out of l2s's set that rung is fast on this design too,
+    /// so on a host without rIC3 (`ic3` in the set since N5.5) l2s won some PR-runner runs
+    /// (#1060's CI, 2026-11-17: `Violated` in 0.25 s, no cone note). Both winners are asserted: an
+    /// exact win keeps its cone note, an l2s win names `l2s` and the member that found the lasso.
     #[test]
-    fn the_parallel_policy_returns_when_the_exact_rung_wins_without_waiting_for_l2s() {
+    fn the_parallel_policy_returns_when_the_first_rung_wins_and_keeps_the_winner() {
         let _serial = PARALLEL_POLICY.lock().unwrap_or_else(|e| e.into_inner());
         let start = std::time::Instant::now();
         let r = verify_justice_with(
@@ -973,11 +978,21 @@ mod policy_tests {
              cancelled rung held the join ({:?})",
             r[0]
         );
-        assert!(
-            r[0].notes.iter().any(|n| n.contains("exact cone")),
-            "the winning exact rung's notes were dropped: {:?}",
-            r[0].notes
-        );
+        let by = &r[0].decided_by;
+        assert!(!by.is_empty(), "the winning rung is unnamed: {:?}", r[0]);
+        if by[0] == "l2s" {
+            let members = crate::adapter::reach_portfolio::ReachMembers::cancellable().names();
+            assert!(
+                by.len() >= 2 && members.contains(&by[1].as_str()),
+                "an l2s win names the member that found the lasso: {by:?}"
+            );
+        } else {
+            assert!(
+                r[0].notes.iter().any(|n| n.contains("exact cone")),
+                "the winning exact rung's notes were dropped: {:?}",
+                r[0].notes
+            );
+        }
     }
 
     /// REPRODUCER — the justice budget must reach the l2s rung. Before the fix `l2s_rung` took no

@@ -11190,9 +11190,12 @@ mod tests {
             .portfolio
             .as_ref()
             .expect("a rescued row carries its portfolio members");
+        // Which proof member reports first (`native` k-induction, or `ic3` on a host without
+        // rIC3 since N5.5) is a race the host decides; the row names whoever it was.
+        let shipped = crate::adapter::reach_portfolio::ReachMembers::shipped().names();
         assert!(
-            a.decided_by.iter().any(|m| m == "native"),
-            "the deciding member is named: {a:?}"
+            !a.decided_by.is_empty() && a.decided_by.iter().all(|m| shipped.contains(&m.as_str())),
+            "the deciding member is named and is a shipped member: {a:?}"
         );
         assert!(
             a.refused.iter().any(|(m, _)| m == "exact"),
