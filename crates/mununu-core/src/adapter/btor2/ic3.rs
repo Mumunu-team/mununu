@@ -307,7 +307,13 @@ struct Ic3<'m> {
     /// initiation repair, before any drop), summed, and the count.
     mic_in_lits: u64,
     mic_ins: u64,
+    /// mununu#1056 — how many dead states the concretisation blocked and re-solved around.
+    concretize_retries: u64,
 }
+
+/// mununu#1056 — the bound on dead states one concretisation blocks before it abstains; each
+/// one is a distinct state of a chain cube, so the walk ends, but not within a budget on its own.
+const MAX_CONCRETIZE_RETRIES: u64 = 4_096;
 
 /// N5.2 — where the search's SAT queries go, for the per-phase profile in the `ic3 search` log
 /// line (`RUST_LOG=mununu_core::adapter::btor2::ic3=debug`) and the manual profile test.
@@ -371,7 +377,7 @@ impl<'m> Ic3<'m> {
             })
             .collect();
         parts.push(format!(
-            "latches={} trans_clauses={} vars={} init_queries={} init_syntactic={} init_ms={} repair_queries={} repair_ms={} mic_in_width={:.1}/{} cti_width={:.1} root_width={:.1}/{} desc_width={:.1}/{} target_width={:.1} clause_width={:.1}",
+            "latches={} trans_clauses={} vars={} init_queries={} init_syntactic={} init_ms={} repair_queries={} repair_ms={} mic_in_width={:.1}/{} cti_width={:.1} root_width={:.1}/{} desc_width={:.1}/{} target_width={:.1} clause_width={:.1} concretize_retries={}",
             self.cur.len(),
             self.trans.len(),
             self.next_var,
@@ -389,6 +395,7 @@ impl<'m> Ic3<'m> {
             self.descs,
             avg(self.target_lits, self.descs),
             avg(self.learned_lits, self.learned),
+            self.concretize_retries,
         ));
         parts.join(" ")
     }
@@ -527,6 +534,7 @@ impl<'m> Ic3<'m> {
             repair_ns: 0,
             mic_in_lits: 0,
             mic_ins: 0,
+            concretize_retries: 0,
         };
         me.rebuild();
         me
@@ -1052,29 +1060,38 @@ impl<'m> Ic3<'m> {
             cur = arena[i].parent;
         }
         let depth = chain.len() - 1;
-        let stopped = |step: usize| Ic3Outcome::Stopped {
+        let stopped = |step: usize, retries: u64| Ic3Outcome::Stopped {
             frames: 0,
-            reason: format!(
-                "the counterexample chain did not concretise at step {step} of {depth} (a cube \
-                 kept a state with no constraint-satisfying input)"
-            ),
+            reason: if retries >= MAX_CONCRETIZE_RETRIES {
+                format!(
+                    "the counterexample chain did not concretise: {retries} dead states were \
+                     blocked and re-solved around (the cap) and step {step} of {depth} still has \
+                     no constraint-satisfying input"
+                )
+            } else {
+                format!(
+                    "the counterexample chain did not concretise at step {step} of {depth} (a \
+                     cube kept a state with no constraint-satisfying input; {retries} dead states \
+                     blocked and re-solved around)"
+                )
+            },
         };
-        // Step 0: an initial state in chain[0] that steps into chain[1] (or is bad).
-        let mut a = vec![self.act_init];
-        a.extend_from_slice(chain[0]);
-        match chain.get(1) {
-            Some(next) => a.extend(next.iter().map(|&l| self.prime(l))),
-            None => a.push(self.bad),
-        }
-        if !self.solve(&a)? {
-            return Ok(stopped(0));
-        }
-        let initial = self.state_words(&self.cur);
-        let mut inputs = vec![self.input_words()];
-        let mut free_states = Vec::new();
-        if chain.len() > 1 {
-            free_states.push(self.free_words());
-        }
+        // mununu#1056 — a lifted cube is a MAY set: with input constraints it keeps states whose
+        // constraint-satisfying inputs never reach the next cube (the lift proves
+        // `state ∧ inputs ∧ T → next'` with the constraints as hard units, so a state those
+        // inputs are forbidden in satisfies it vacuously). Step 0 starts from an initial state
+        // in chain[0]; step `s` from the concrete state the previous model stepped into. When a
+        // step has no model, the state it starts from is such a dead state: it is blocked as a
+        // successor of the previous step (a temporary clause over the primed literals) and that
+        // step is re-solved, backing up as far as needed; only a dry step 0, or the cap, abstains.
+        // Every shipped step is still one SAT model of `T`, and the trace is replayed before it
+        // ships. HWMCC'20 `shift_register_top_w16_d8_e0` (pop forbidden when empty, push when
+        // full) is the measured case: a depth-11 chain died at step 10.
+        let assignment = |me: &Self, vars: &[i32]| -> Vec<i32> {
+            vars.iter()
+                .map(|&v| if me.is_true(v) { v } else { -v })
+                .collect()
+        };
         let next_state = |me: &Self| -> Vec<i32> {
             me.cur
                 .iter()
@@ -1082,27 +1099,69 @@ impl<'m> Ic3<'m> {
                 .map(|(&c, &n)| if me.is_true(n) { c } else { -c })
                 .collect()
         };
-        let mut state = next_state(self);
-        for step in 1..=depth {
-            let mut a = state.clone();
+        // `blocks[s]`: the activation literals of the clauses blocking dead states at step `s`,
+        // assumed by the query that produces step `s` (the one at `s - 1`).
+        let mut blocks: Vec<Vec<i32>> = vec![Vec::new(); depth + 1];
+        let mut states: Vec<Vec<i32>> = Vec::with_capacity(depth + 1);
+        let mut initial = Vec::new();
+        let mut inputs: Vec<Vec<(String, u128)>> = Vec::with_capacity(depth + 1);
+        let mut free_states: Vec<Vec<(String, u128)>> = Vec::with_capacity(depth);
+        let mut step = 0usize;
+        let mut retries = 0u64;
+        let failed = loop {
+            let mut a: Vec<i32> = if step == 0 {
+                let mut v = vec![self.act_init];
+                v.extend_from_slice(chain[0]);
+                v
+            } else {
+                states[step].clone()
+            };
             match chain.get(step + 1) {
                 Some(next) => a.extend(next.iter().map(|&l| self.prime(l))),
                 None => a.push(self.bad),
             }
-            if !self.solve(&a)? {
-                return Ok(stopped(step));
+            if let Some(b) = blocks.get(step + 1) {
+                a.extend_from_slice(b);
             }
-            inputs.push(self.input_words());
-            if chain.get(step + 1).is_some() {
+            if self.solve(&a)? {
+                if step == 0 {
+                    initial = self.state_words(&self.cur);
+                    states.clear();
+                    states.push(assignment(self, &self.cur));
+                }
+                inputs.truncate(step);
+                inputs.push(self.input_words());
+                if step == depth {
+                    break None;
+                }
+                free_states.truncate(step);
                 free_states.push(self.free_words());
+                states.truncate(step + 1);
+                states.push(next_state(self));
+                step += 1;
+            } else if step == 0 || retries >= MAX_CONCRETIZE_RETRIES {
+                break Some(stopped(step, retries));
+            } else {
+                retries += 1;
+                let dead: Vec<i32> = states[step].iter().map(|&l| -self.prime(l)).collect();
+                let t = self.temp_clause(dead);
+                blocks[step].push(t);
+                step -= 1;
             }
-            state = next_state(self);
-        }
+        };
+        // Read off the last model before any clause is added (a `release` invalidates it).
         let bad_index = self
             .bad_lits
             .iter()
             .position(|&b| self.is_true(b))
             .unwrap_or(0);
+        self.concretize_retries += retries;
+        for t in blocks.into_iter().flatten() {
+            self.release(t);
+        }
+        if let Some(outcome) = failed {
+            return Ok(outcome);
+        }
         Ok(Ic3Outcome::Violated {
             depth: depth as u32,
             bad_index,
@@ -1469,6 +1528,69 @@ mod tests {
         match run(EVEN_COUNTER) {
             Ic3Outcome::Safe { clauses, .. } => assert!(clauses >= 1, "clauses {clauses}"),
             other => panic!("{other:?}"),
+        }
+    }
+
+    /// REPRODUCER (mununu#1055) — a counterexample through `srem` ships. The concrete simulator
+    /// evaluates the signed-division family, so the replay confirms the trace instead of the
+    /// engine abstaining with "operator Srem unsupported in Phase 1 bit-blaster" (HWMCC'20
+    /// `anderson.3`: a real counterexample at frame 3, dropped). A 4-bit input divided by 3
+    /// (signed) leaves −1 or −2 for a negative dividend; `bad` is the remainder being −1.
+    #[test]
+    fn a_counterexample_through_srem_replays_and_ships() {
+        let text = "1 sort bitvec 4\n2 sort bitvec 1\n3 zero 1\n4 state 1 r\n5 init 1 4 3\n\
+                    6 input 1 x\n7 constd 1 3\n8 srem 1 6 7\n9 next 1 4 8\n10 ones 1\n\
+                    11 eq 2 4 10\n12 bad 11\n";
+        match run(text) {
+            Ic3Outcome::Violated { depth, replay, .. } => {
+                assert_eq!(depth, 1);
+                assert!(matches!(replay, Replay::Confirmed(_)), "{replay:?}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// mununu#1056 — a chain whose cube keeps a dead state still concretises. Three-bit `s`
+    /// from `000`: on `i ∧ j` to the DEAD state `011`, on `i ∧ ¬j` to the ALIVE state `010`;
+    /// `010` reaches `bad` (`111`) on `i ∧ j`; a constraint forbids `i ∧ j` in `011`, which on
+    /// `i ∧ ¬j` goes to `010`; every other state stays. The lifted predecessor of `bad` under the
+    /// witness inputs `i ∧ j` is `01x`: `010` steps to `bad`, `011` only vacuously (the inputs are
+    /// forbidden there), and the lift drops bit 0 because nothing distinguishes them to the
+    /// solver. Step 0 of the concretisation may land in `011`, and step 1 then has no
+    /// constraint-satisfying input into `bad`: the concretisation backs up, blocks `011` as a
+    /// successor of step 0 and re-solves to `010`. The shipped path is a real one (two steps
+    /// through `010`, or three through `011` then `010`) and replays. The mirror swaps which
+    /// inputs lead where, so a solver phase preference cannot pick the alive state by luck in
+    /// both.
+    #[test]
+    fn a_chain_through_a_dead_state_concretises_by_backing_up() {
+        let dead_on_ij = "1 sort bitvec 3\n2 sort bitvec 1\n3 zero 1\n4 state 1 s\n5 init 1 4 3\n\
+                          6 input 2 i\n7 input 2 j\n8 constd 1 2\n9 constd 1 3\n10 constd 1 7\n\
+                          11 eq 2 4 3\n12 eq 2 4 8\n13 eq 2 4 9\n14 not 2 7\n15 and 2 6 7\n\
+                          16 and 2 6 14\n17 ite 1 15 9 4\n18 ite 1 16 8 17\n19 ite 1 15 10 4\n\
+                          20 ite 1 16 8 4\n21 ite 1 11 18 4\n22 ite 1 12 19 21\n\
+                          23 ite 1 13 20 22\n24 next 1 4 23\n25 eq 2 4 10\n26 bad 25\n\
+                          27 and 2 13 15\n28 not 2 27\n29 constraint 28\n";
+        // The mirror: `i ∧ ¬j` leads to the dead state and is the forbidden / bad-reaching input.
+        let dead_on_inj = dead_on_ij
+            .replace("17 ite 1 15 9 4\n", "17 ite 1 16 9 4\n")
+            .replace("18 ite 1 16 8 17\n", "18 ite 1 15 8 17\n")
+            .replace("19 ite 1 15 10 4\n", "19 ite 1 16 10 4\n")
+            .replace("20 ite 1 16 8 4\n", "20 ite 1 15 8 4\n")
+            .replace("27 and 2 13 15\n", "27 and 2 13 16\n");
+        for (name, text) in [("ij", dead_on_ij), ("inj", dead_on_inj.as_str())] {
+            match run(text) {
+                Ic3Outcome::Violated {
+                    depth,
+                    inputs,
+                    replay,
+                    ..
+                } => {
+                    assert!((2..=3).contains(&depth), "{name}: depth {depth} {inputs:?}");
+                    assert!(matches!(replay, Replay::Confirmed(_)), "{name}: {replay:?}");
+                }
+                other => panic!("{name}: {other:?}"),
+            }
         }
     }
 

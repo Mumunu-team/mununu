@@ -314,6 +314,103 @@ impl Bv {
         self.binop_small_or_wide(other, |a, b| a % b, |a, b| a % b)
     }
 
+    /// `|self|` in two's complement (`INT_MIN` stays `INT_MIN`, as the circuit's `neg` wraps).
+    fn abs(&self) -> Bv {
+        if self.is_negative() {
+            self.neg()
+        } else {
+            self.clone()
+        }
+    }
+
+    /// SMT-LIB `bvsdiv` (mununu#1055): `|a| udiv |b|`, negated when the signs differ. A zero
+    /// divisor follows from `udiv`'s all-ones: all-ones for a non-negative dividend, `1` for a
+    /// negative one — the same values the circuit's `Aig::sdiv` produces, so a replay agrees with
+    /// the search.
+    pub fn sdiv(&self, other: &Bv) -> Bv {
+        let q = self.abs().udiv(&other.abs());
+        if self.is_negative() != other.is_negative() {
+            q.neg()
+        } else {
+            q
+        }
+    }
+
+    /// SMT-LIB `bvsrem`: the sign follows the dividend (a zero divisor gives the dividend).
+    pub fn srem(&self, other: &Bv) -> Bv {
+        let r = self.abs().urem(&other.abs());
+        if self.is_negative() { r.neg() } else { r }
+    }
+
+    /// SMT-LIB `bvsmod`: the sign follows the divisor (a zero divisor gives the dividend; a zero
+    /// remainder stays zero).
+    pub fn smod(&self, other: &Bv) -> Bv {
+        let u = self.abs().urem(&other.abs());
+        if u.is_zero() {
+            return u;
+        }
+        match (self.is_negative(), other.is_negative()) {
+            (false, false) => u,
+            (true, false) => u.neg().add(other),
+            (false, true) => u.add(other),
+            (true, true) => u.neg(),
+        }
+    }
+
+    /// BTOR2 `uaddo`: the unsigned sum does not fit the width.
+    pub fn uaddo(&self, other: &Bv) -> bool {
+        self.add(other).ult(self).to_bool()
+    }
+
+    /// BTOR2 `usubo`: the unsigned difference would be negative.
+    pub fn usubo(&self, other: &Bv) -> bool {
+        self.ult(other).to_bool()
+    }
+
+    /// BTOR2 `saddo`: the operands agree in sign and the sum's sign differs.
+    pub fn saddo(&self, other: &Bv) -> bool {
+        let r = self.add(other);
+        self.is_negative() == other.is_negative() && r.is_negative() != self.is_negative()
+    }
+
+    /// BTOR2 `ssubo`: the operands differ in sign and the difference's sign differs from the
+    /// minuend's.
+    pub fn ssubo(&self, other: &Bv) -> bool {
+        let r = self.sub(other);
+        self.is_negative() != other.is_negative() && r.is_negative() != self.is_negative()
+    }
+
+    /// BTOR2 `umulo`: the unsigned product does not fit the width (its upper half is non-zero).
+    pub fn umulo(&self, other: &Bv) -> bool {
+        let n = self.width();
+        if n == 0 {
+            return false;
+        }
+        let p = self.uext(n).mul(&other.uext(n));
+        p.slice(2 * n - 1, n).is_nonzero()
+    }
+
+    /// BTOR2 `smulo`: the signed product does not fit the width (bits `n-1 ..= 2n-1` of the
+    /// double-width product are not all equal).
+    pub fn smulo(&self, other: &Bv) -> bool {
+        let n = self.width();
+        if n == 0 {
+            return false;
+        }
+        let p = self.sext(n).mul(&other.sext(n));
+        let top = p.slice(2 * n - 1, n - 1);
+        !(top.is_zero() || top == Bv::ones(n + 1))
+    }
+
+    /// BTOR2 `sdivo`: the one overflowing signed division, `INT_MIN / −1`.
+    pub fn sdivo(&self, other: &Bv) -> bool {
+        let w = self.width();
+        if w == 0 {
+            return false;
+        }
+        *self == Bv::one(w).shl(w - 1) && *other == Bv::ones(w)
+    }
+
     pub fn neg(&self) -> Bv {
         Bv::zero(self.width()).sub(self)
     }
@@ -672,5 +769,48 @@ mod tests {
         assert_eq!(cat.width(), 200);
         assert_eq!(cat.slice(199, 100), h);
         assert_eq!(cat.slice(99, 0), l);
+    }
+
+    /// mununu#1055 — the signed-division family and the overflow detectors against integer
+    /// arithmetic, every 4-bit pair (zero divisors included), with SMT-LIB's total extensions:
+    /// `udiv` by zero is all-ones, the remainders by zero are the dividend, `sdiv` by zero is
+    /// all-ones (non-negative dividend) or 1 (negative), `smod`'s sign follows the divisor.
+    #[test]
+    fn the_division_family_and_overflow_detectors_match_integer_semantics_at_four_bits() {
+        let w = 4u32;
+        let signed = |v: u128| -> i128 { if v >= 8 { v as i128 - 16 } else { v as i128 } };
+        let wrap = |v: i128| -> u128 { (v.rem_euclid(16)) as u128 };
+        for a in 0..16u128 {
+            for b in 0..16u128 {
+                let (x, y) = (Bv::from_u128(a, w), Bv::from_u128(b, w));
+                let (sa, sb) = (signed(a), signed(b));
+                let udiv = a.checked_div(b).unwrap_or(15);
+                let urem = a.checked_rem(b).unwrap_or(a);
+                let sdiv = if b == 0 {
+                    if sa < 0 { 1 } else { 15 }
+                } else {
+                    wrap(sa.wrapping_div(sb))
+                };
+                let srem = if b == 0 { a } else { wrap(sa.wrapping_rem(sb)) };
+                let smod = if b == 0 {
+                    a
+                } else {
+                    wrap(((sa % sb) + sb) % sb)
+                };
+                let ctx = format!("a={a} b={b}");
+                assert_eq!(x.udiv(&y).low128(), udiv, "udiv {ctx}");
+                assert_eq!(x.urem(&y).low128(), urem, "urem {ctx}");
+                assert_eq!(x.sdiv(&y).low128(), sdiv, "sdiv {ctx}");
+                assert_eq!(x.srem(&y).low128(), srem, "srem {ctx}");
+                assert_eq!(x.smod(&y).low128(), smod, "smod {ctx}");
+                assert_eq!(x.uaddo(&y), a + b >= 16, "uaddo {ctx}");
+                assert_eq!(x.usubo(&y), a < b, "usubo {ctx}");
+                assert_eq!(x.saddo(&y), !(-8..=7).contains(&(sa + sb)), "saddo {ctx}");
+                assert_eq!(x.ssubo(&y), !(-8..=7).contains(&(sa - sb)), "ssubo {ctx}");
+                assert_eq!(x.umulo(&y), a * b >= 16, "umulo {ctx}");
+                assert_eq!(x.smulo(&y), !(-8..=7).contains(&(sa * sb)), "smulo {ctx}");
+                assert_eq!(x.sdivo(&y), a == 8 && b == 15, "sdivo {ctx}");
+            }
+        }
     }
 }
