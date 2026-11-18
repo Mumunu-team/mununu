@@ -1417,17 +1417,96 @@ mod tests {
         }
     }
 
+    /// An 8-bit counter from 0 whose `bad` (255) is beyond a 40-deep ladder and never
+    /// k-inductive: 41 depths, 82 trivial checks, no verdict.
+    const CNT8: &str = "1 sort bitvec 8\n2 zero 1\n3 state 1 cnt\n4 init 1 3 2\n5 one 1\n\
+                        6 add 1 3 5\n7 next 1 3 6\n8 ones 1\n9 sort bitvec 1\n\
+                        10 eq 9 3 8\n11 bad 10\n";
+
+    /// mununu#966 — the per-check resource limit the `CNT8` ladder test pins, DERIVED from the
+    /// ladder's measured cost rather than guessed. Measured 2026-11-18 in `mununu-sva` (z3 4.16)
+    /// with `probe_cnt8_per_check_units`, three identical runs: the base check costs 2 units at
+    /// every depth, the step check 64 + 40·k units (1 662 at k = 40), 35 426 units over the 82
+    /// checks. The pin must sit ABOVE the largest single check and BELOW the ladder's total,
+    /// or the test cannot tell a per-check limit from a cumulative one — the former 100 000 was
+    /// 60× the largest check but also 2.8× the total, so a cumulative limit would have passed it
+    /// too. 10 000 is 6.0× the largest check (a z3 release that doubles the per-check cost still
+    /// passes) and 0.28× the total (a cumulative limit stops the ladder near k = 19).
+    const CNT8_PER_CHECK_UNITS: u32 = 10_000;
+
+    /// mununu#966 — the headroom behind the per-check pin (`CNT8_PER_CHECK_UNITS`) of
+    /// `the_resource_limit_is_per_check_not_cumulative_over_the_ladder`: the ladder's 82 checks on
+    /// `CNT8` replayed with the same unroller and query sequence (base and step solvers, the
+    /// transition extended per depth) and NO resource limit, reading z3's `rlimit count` delta
+    /// across each check. Prints the per-depth units, the maximum and the pin's margin over it.
+    /// Host and z3-version facts, not asserted. Run by hand:
+    /// `cargo test -p mununu-core --lib probe_cnt8 -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "manual: z3 per-check units on the CNT8 ladder; run with --ignored --nocapture"]
+    fn probe_cnt8_per_check_units() {
+        let file = parser::parse(CNT8).expect("parses");
+        let (bad_ops, init_pairs, constraint_ops) = extract_props(&file);
+        let cfg = z3::Config::new();
+        z3::with_z3_config(&cfg, || {
+            let (view, array_inits) = encode_for_bmc(&file).expect("encodes");
+            let u = Unroller::build(&view, array_inits, &bad_ops, &constraint_ops, 40)
+                .expect("no memory");
+            let base = z3::Solver::new();
+            let step = z3::Solver::new();
+            u.assert_init(&base, &init_pairs);
+            for c in u.constraints_at(0) {
+                base.assert(&c);
+                step.assert(&c);
+            }
+            let mut max_units = 0u64;
+            let mut total = 0u64;
+            for k in 0..=40usize {
+                base.push();
+                base.assert(u.bad_at(k));
+                let b0 = rlimit_count(&base);
+                let br = base.check();
+                let bu = rlimit_count(&base).saturating_sub(b0);
+                base.pop(1);
+                step.push();
+                step.assert(u.bad_at(k));
+                let s0 = rlimit_count(&step);
+                let sr = step.check();
+                let su = rlimit_count(&step).saturating_sub(s0);
+                step.pop(1);
+                eprintln!("k={k:>2} base {br:?} {bu:>7} units  step {sr:?} {su:>7} units");
+                max_units = max_units.max(bu).max(su);
+                total += bu + su;
+                if k < 40 {
+                    base.assert(u.transition_at(k));
+                    step.assert(u.bad_at(k).not());
+                    step.assert(u.transition_at(k));
+                    for c in u.constraints_at(k + 1) {
+                        base.assert(&c);
+                        step.assert(&c);
+                    }
+                }
+            }
+            eprintln!(
+                "CNT8 ladder: 82 checks, max {max_units} units per check, total {total}; the \
+                 pin ({CNT8_PER_CHECK_UNITS}) is {:.1}x the maximum and {:.2}x the total",
+                f64::from(CNT8_PER_CHECK_UNITS) / max_units.max(1) as f64,
+                f64::from(CNT8_PER_CHECK_UNITS) / total.max(1) as f64
+            );
+        });
+    }
+
     /// The resource limit is per CHECK, not cumulative over the ladder: an 8-bit counter whose
     /// `bad` (255) is beyond the bound and never k-inductive runs all 41 depths (82 checks) of
-    /// trivial queries under a limit a single check fits in and reaches the depth bound. A
-    /// cumulative limit would stop it as a resource-limit error long before.
+    /// trivial queries under a limit a single check fits in — and the ladder as a whole does
+    /// not (`CNT8_PER_CHECK_UNITS`, derived from the measured cost) — and reaches the depth
+    /// bound. A cumulative limit would stop it as a resource-limit error near k = 19.
     #[test]
     fn the_resource_limit_is_per_check_not_cumulative_over_the_ladder() {
-        const CNT8: &str = "1 sort bitvec 8\n2 zero 1\n3 state 1 cnt\n4 init 1 3 2\n5 one 1\n\
-                            6 add 1 3 5\n7 next 1 3 6\n8 ones 1\n9 sort bitvec 1\n\
-                            10 eq 9 3 8\n11 bad 10\n";
         let file = parser::parse(CNT8).expect("parses");
-        let _rl = crate::adapter::env_var::override_for_test(QUERY_RLIMIT_ENV, "100000");
+        let _rl = crate::adapter::env_var::override_for_test(
+            QUERY_RLIMIT_ENV,
+            CNT8_PER_CHECK_UNITS.to_string(),
+        );
         let _to = crate::adapter::env_var::unset_for_test(QUERY_TIMEOUT_ENV);
         let v =
             decide_bad_safety(&file, 40, Some(1)).expect("no budget stop under a per-check limit");
