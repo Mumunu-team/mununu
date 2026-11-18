@@ -40,6 +40,10 @@ pub mod c_extract_llvm;
 pub mod cmsis_emit;
 pub mod compose;
 pub mod coupling;
+// mununu#994 — its one caller is the HTTP API's `file_root` check (`api/handlers.rs`), so without
+// the `api` feature the module is unused; it stays compiled (not cfg-gated) so its own tests run
+// in the per-crate pre-commit check too.
+#[cfg_attr(not(feature = "api"), allow(dead_code))]
 pub(crate) mod include_scan;
 pub mod project_config;
 pub mod reconcile;
