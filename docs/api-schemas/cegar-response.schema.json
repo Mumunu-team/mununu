@@ -78,6 +78,17 @@
           "format": "uint",
           "minimum": 0.0,
           "type": "integer"
+        },
+        "violation_at_reset": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ViolationAtResetView"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "mununu#1106 — what a non-zero `false_cells` means AT A RESET STATE: `established` when an initial cube proved inhabited at cycle 0 falsifies the formula; otherwise `detail` says why not (every falsifying initial cube kept on doubt — mununu#1085 — or no initial cube falsifying at all). Absent when no cell falsifies, and on per-iteration summaries."
         }
       },
       "required": [
@@ -701,6 +712,24 @@
       },
       "required": [
         "cycle"
+      ],
+      "type": "object"
+    },
+    "ViolationAtResetView": {
+      "description": "mununu#1106 — the reset-state reading of a VIOLATED cegar tally.",
+      "properties": {
+        "detail": {
+          "description": "The reading in words, naming the cube, or the doubt and its remedy per doubtful cube.",
+          "type": "string"
+        },
+        "established": {
+          "description": "`true` iff an initial cube proved inhabited at cycle 0 falsifies the formula.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "detail",
+        "established"
       ],
       "type": "object"
     },

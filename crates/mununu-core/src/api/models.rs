@@ -3587,6 +3587,21 @@ pub struct CegarVerdictSummary {
     /// counts above are over the remaining cells. Always 0 on the symbolic engine's summaries.
     #[serde(default)]
     pub unlifted_cells: usize,
+    /// mununu#1106 — what a non-zero `false_cells` means AT A RESET STATE: `established` when an
+    /// initial cube proved inhabited at cycle 0 falsifies the formula; otherwise `detail` says
+    /// why not (every falsifying initial cube kept on doubt — mununu#1085 — or no initial cube
+    /// falsifying at all). Absent when no cell falsifies, and on per-iteration summaries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub violation_at_reset: Option<ViolationAtResetView>,
+}
+
+/// mununu#1106 — the reset-state reading of a VIOLATED cegar tally.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
+pub struct ViolationAtResetView {
+    /// `true` iff an initial cube proved inhabited at cycle 0 falsifies the formula.
+    pub established: bool,
+    /// The reading in words, naming the cube, or the doubt and its remedy per doubtful cube.
+    pub detail: String,
 }
 
 /// A predicate spec, response-shaped.

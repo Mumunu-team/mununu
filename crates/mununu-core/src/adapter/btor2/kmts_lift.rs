@@ -2125,6 +2125,7 @@ pub fn materialize_clts_from_lazy(
 
     Ok(PredicateCubeLiftResult {
         clts,
+        initial_cubes: initial_cubes.clone(),
         predicates,
         cube_count,
         unreached_cells: Vec::new(),
@@ -2394,6 +2395,10 @@ fn compute_cube_outgoing_edges(cube_index: usize, ctx: &LazyLiftContext) -> Vec<
 /// information for the §10.1 R.2.5 binary capability check.
 #[derive(Debug, Clone)]
 pub struct PredicateCubeLiftResult {
+    /// mununu#1085 / mununu#1106 — the cycle-0 filter's answer: which cubes are initial, and
+    /// which of them were kept on doubt rather than on a cycle-0 state proved to inhabit them.
+    /// A consumer that reads a verdict "at a reset state" reads it against this.
+    pub initial_cubes: InitialCubes,
     /// Abstract state space — `Clts` whose state count equals the
     /// number of satisfiable predicate cubes. At the R.2.5 MVP every
     /// cube is treated as satisfiable (no SMT check yet); the Clts
@@ -3473,6 +3478,7 @@ pub fn predicate_cube_lift(
 
     Ok(PredicateCubeLiftResult {
         clts,
+        initial_cubes: initial_cubes.clone(),
         predicates,
         cube_count,
         unreached_cells,
