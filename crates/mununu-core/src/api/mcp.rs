@@ -110,7 +110,9 @@ fn templates_input_schema() -> JsonObject {
     }))
 }
 
-/// The compact text block beside the structured result: the outcome, then one line per result.
+/// The compact text block beside the structured result: the outcome, then one line per result,
+/// then one `note:` line per realization note (mununu#1106 item 5) — an agent reading the text
+/// alone must see what the verdict was read against.
 pub fn summary(response: &ContextVerifyResponse) -> String {
     let mut text = response.outcome.clone();
     for r in &response.results {
@@ -119,6 +121,11 @@ pub fn summary(response: &ContextVerifyResponse) -> String {
             "{} @ {}: {}",
             r.formula_name, r.automaton, r.outcome
         ));
+    }
+    for note in &response.notes {
+        text.push('\n');
+        text.push_str("note: ");
+        text.push_str(note);
     }
     text
 }
@@ -380,6 +387,7 @@ context violated_props {
                 },
             ],
             sanity: vec![],
+            notes: vec![],
         };
         assert_eq!(
             summary(&response),

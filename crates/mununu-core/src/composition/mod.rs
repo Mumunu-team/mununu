@@ -649,6 +649,95 @@ pub fn compose(
     right: &Clts<DefaultStateIdx, DefaultLabelIdx>,
     options: &CompositionOptions,
 ) -> CltsResult<Clts<DefaultStateIdx, DefaultLabelIdx>> {
+    let (composed, notes) = compose_with_notes(left, right, options)?;
+    // A caller through this entry has no report to carry the notes; the log is all it gets
+    // (the realization path uses `compose_with_notes` and ships them).
+    for note in &notes {
+        tracing::warn!("{}", note.render("left", "right"));
+    }
+    Ok(composed)
+}
+
+/// Which member of a pairwise composition a [`CompositionNote`] refers to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    Left,
+    Right,
+}
+
+/// A decision taken while composing two automata that changes what the composed model means,
+/// reported beside the result (mununu#1106 item 5) — a log line alone is not a report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompositionNote {
+    /// mununu#592 — `label` is controllable in `controllable_in` but the other member carries
+    /// it too, so in the composition it is UNCONTROLLABLE; a realizability verdict over the
+    /// product can differ from the member's.
+    ControllabilityDemoted {
+        label: String,
+        controllable_in: Side,
+    },
+    /// mununu#570 — a compound action that no partner transition matches, so it can never fire
+    /// and its automaton freezes where it would take it (`allow_dead_vectors` let the
+    /// composition through; the note says what was left dead).
+    DeadCompoundAction {
+        labels: Vec<String>,
+        shared_projection: Vec<String>,
+    },
+}
+
+impl CompositionNote {
+    /// The note as the user reads it, with the two members named (`left_name` is the member
+    /// composed so far on the realization path, `right_name` the one being folded in).
+    pub fn render(&self, left_name: &str, right_name: &str) -> String {
+        let name = |side: &Side| match side {
+            Side::Left => left_name,
+            Side::Right => right_name,
+        };
+        match self {
+            CompositionNote::ControllabilityDemoted {
+                label,
+                controllable_in,
+            } => {
+                let other = match controllable_in {
+                    Side::Left => right_name,
+                    Side::Right => left_name,
+                };
+                format!(
+                    "[mununu#592] label `{label}` is controllable in `{}` but `{other}` carries it \
+                     too, so in the composition it is UNCONTROLLABLE: a controller cannot withhold \
+                     a step the partner takes, and a realizability verdict over the product can \
+                     differ from one over `{}` alone. Keep a controllable decision and its effect \
+                     in one automaton, or expose the effect through a follow-up uncontrollable \
+                     label.",
+                    name(controllable_in),
+                    name(controllable_in)
+                )
+            }
+            CompositionNote::DeadCompoundAction {
+                labels,
+                shared_projection,
+            } => format!(
+                "[mununu#570] compound action {{{}}} can never fire in `{left_name}` ∥ \
+                 `{right_name}`: no transition in the partner automaton projects to the same set \
+                 over the shared alphabet {{{}}}, so the automaton that owns it freezes where it \
+                 would take it (`allow_dead_vectors;` let the composition through). A multi-label \
+                 transition is a SYNCHRONISATION VECTOR — it fires on the whole set together, not \
+                 on any one label. If these are independent alternatives, write them as `on label \
+                 a | label b`.",
+                labels.join(", "),
+                shared_projection.join(", "),
+            ),
+        }
+    }
+}
+
+/// [`compose`], also returning the decisions that changed what the composed model means
+/// (see [`CompositionNote`]); the caller carries them to its report.
+pub fn compose_with_notes(
+    left: &Clts<DefaultStateIdx, DefaultLabelIdx>,
+    right: &Clts<DefaultStateIdx, DefaultLabelIdx>,
+    options: &CompositionOptions,
+) -> CltsResult<(Clts<DefaultStateIdx, DefaultLabelIdx>, Vec<CompositionNote>)> {
     // Validate mutual exclusivity of controllable and internal actions.
     ControllabilityChecker::validate_composition(left, right)?;
 
@@ -658,6 +747,7 @@ pub fn compose(
         .intersection(&right_alphabet)
         .cloned()
         .collect();
+    let mut notes = Vec::new();
 
     // mununu#592 — a label declared controllable in one member and merely USED by the other
     // composes as UNCONTROLLABLE: the composed step carries the partner's uncontrollable reading
@@ -666,10 +756,8 @@ pub fn compose(
     // That is the sound reading (the partner's step is not the controller's to withhold), but
     // it must be loud; the modelling consequence is to keep a controllable decision and its
     // effect in one automaton, or to expose the effect through a follow-up uncontrollable label.
-    for (this, other, this_side, other_side) in [
-        (left, right, "left", "right"),
-        (right, left, "right", "left"),
-    ] {
+    // mununu#1106 item 5 — loud means ON THE RESULT: the note travels with the composed model.
+    for (this, other, this_side) in [(left, right, Side::Left), (right, left, Side::Right)] {
         let this_ctrl =
             ControllabilityChecker::collect_label_names(this, this.controllable_alphabet());
         let other_alphabet = collect_alphabet(other);
@@ -679,13 +767,10 @@ pub fn compose(
             .collect();
         demoted.sort();
         for label in demoted {
-            tracing::warn!(
-                "[mununu#592] label `{label}` is controllable in the {this_side} member but the \
-                 {other_side} member carries it too, so in the composition it is UNCONTROLLABLE: \
-                 a controller cannot withhold a step the partner takes. Keep a controllable \
-                 decision and its effect in one automaton, or expose the effect through a \
-                 follow-up uncontrollable label."
-            );
+            notes.push(CompositionNote::ControllabilityDemoted {
+                label: label.clone(),
+                controllable_in: this_side,
+            });
         }
     }
 
@@ -715,16 +800,12 @@ pub fn compose(
              disabled."
         )));
     }
+    // mununu#1106 item 5 — the dead action reaches the result as a note, not the log alone.
     for side in dead {
-        tracing::warn!(
-            "[mununu#570] compound action {{{}}} can never fire: no transition in the partner \
-             automaton projects to the same set over the shared alphabet {{{}}}. A multi-label \
-             transition is a SYNCHRONISATION VECTOR — it fires on the whole set together, not on \
-             any one label. If these are independent alternatives, write them as separate \
-             single-label transitions.",
-            side.labels.join(", "),
-            side.shared_projection.join(", "),
-        );
+        notes.push(CompositionNote::DeadCompoundAction {
+            labels: side.labels,
+            shared_projection: side.shared_projection,
+        });
     }
     let mut product_builder = ProductStateBuilder::default();
     let mut builder = Clts::builder();
@@ -739,7 +820,7 @@ pub fn compose(
     // Coverage Status: Covered by test `composition_with_empty_initial_states`
     if left_initials.is_empty() || right_initials.is_empty() {
         // If either side has no initial states, return an empty CLTS.
-        return Clts::builder().build();
+        return Ok((Clts::builder().build()?, notes));
     }
 
     let arena = ProductStateArena::default();
@@ -1159,7 +1240,7 @@ pub fn compose(
         builder.transition_ids_with_modality(key.source, &[label_id], key.target, key.modality);
     }
 
-    builder.build()
+    Ok((builder.build()?, notes))
 }
 
 #[cfg(test)]
@@ -2063,6 +2144,68 @@ mod tests {
             vec![TransitionModality::Sharp, TransitionModality::MayOnly],
             "left's Sharp and right's MayOnly must both survive on their respective interleaving edges"
         );
+        Ok(())
+    }
+
+    /// mununu#1106 item 5 — a controllability demotion (mununu#592) and a dead compound action
+    /// (mununu#570) are RETURNED beside the product, each knowing which member it is about, so
+    /// the caller can name the members the user wrote; `compose` alone only logs them.
+    #[test]
+    fn x1106_compose_with_notes_returns_the_demotion_with_its_side_and_names_the_members()
+    -> TestResult {
+        let ctl = {
+            let mut b = Clts::builder();
+            b.state("C0");
+            b.initial("C0");
+            let c0 = b.state_id_or_insert("C0").unwrap();
+            let go = b.labels().intern(["go"])?;
+            b.set_label_controllability(go, LabelControllability::Controllable);
+            b.transition_ids(c0, &[go], c0);
+            b.build()?
+        };
+        let plant = {
+            let mut b = Clts::builder();
+            b.state("P0");
+            b.initial("P0");
+            let p0 = b.state_id_or_insert("P0").unwrap();
+            let go = b.labels().intern(["go"])?;
+            // The partner merely carries `go` (a label is controllable by default in the builder,
+            // and two members may not both declare it controllable).
+            b.set_label_controllability(go, LabelControllability::Uncontrollable);
+            b.transition_ids(p0, &[go], p0);
+            b.build()?
+        };
+        let options = CompositionOptions::new(CompositionSemantics::Asynchronous);
+        let (_, notes) = compose_with_notes(&ctl, &plant, &options)?;
+        assert_eq!(
+            notes,
+            vec![CompositionNote::ControllabilityDemoted {
+                label: "go".into(),
+                controllable_in: Side::Left,
+            }]
+        );
+        let text = notes[0].render("Ctl", "Plant");
+        assert!(
+            text.starts_with(
+                "[mununu#592] label `go` is controllable in `Ctl` but `Plant` carries it too"
+            ) && text.contains("differ from one over `Ctl` alone"),
+            "{text}"
+        );
+        // The same pair the other way round: the side follows the member.
+        let (_, notes) = compose_with_notes(&plant, &ctl, &options)?;
+        assert_eq!(
+            notes,
+            vec![CompositionNote::ControllabilityDemoted {
+                label: "go".into(),
+                controllable_in: Side::Right,
+            }]
+        );
+        assert!(notes[0].render("Plant", "Ctl").starts_with(
+            "[mununu#592] label `go` is controllable in `Ctl` but `Plant` carries it too"
+        ));
+        // A pair with nothing to say returns no note.
+        let (_, notes) = compose_with_notes(&plant, &plant, &options)?;
+        assert!(notes.is_empty(), "{notes:?}");
         Ok(())
     }
 }

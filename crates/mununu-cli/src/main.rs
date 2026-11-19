@@ -8568,17 +8568,24 @@ fn context_eval(args: ContextEvalArgs) -> Result<(), String> {
 fn print_context_eval_json(
     results: Vec<mununu_core::api::models::FormulaVerificationResult>,
     sanity: Vec<mununu_core::context::sanity::SanityReport>,
+    notes: &[String],
     fail_on: FailOn,
 ) -> Result<(), String> {
     let holds = results.iter().all(|r| r.outcome == "holds");
     let formula_holds = (!results.is_empty()).then_some(holds);
     let outcome = context_eval_outcome(formula_holds, sanity.iter().all(|r| r.is_clean()));
-    let doc = serde_json::json!({
+    // `notes` mirrors `ContextVerifyResponse.notes` (mununu#1106 item 5): what realization
+    // decided that changes what the model means, e.g. a controllability demotion under
+    // composition; the key is present only when there is something to say, as on the API.
+    let mut doc = serde_json::json!({
         "success": true,
         "outcome": outcome,
         "results": results,
         "sanity": sanity,
     });
+    if !notes.is_empty() {
+        doc["notes"] = serde_json::json!(notes);
+    }
     print_json_summary(&doc)?;
     ci_gate_exit(outcome, fail_on);
     Ok(())
@@ -8629,7 +8636,15 @@ fn context_eval_impl(args: ContextEvalArgs) -> Result<(), String> {
         sanity_reports.push(report);
         if formula_name.is_empty() {
             if as_json {
-                return print_context_eval_json(Vec::new(), sanity_reports, args.ci.fail_on);
+                return print_context_eval_json(
+                    Vec::new(),
+                    sanity_reports,
+                    &realized.notes,
+                    args.ci.fail_on,
+                );
+            }
+            for note in &realized.notes {
+                println!("note: {note}");
             }
             ci_gate_exit(context_eval_outcome(None, sanity_clean), args.ci.fail_on);
             return Ok(());
@@ -8822,9 +8837,24 @@ fn context_eval_impl(args: ContextEvalArgs) -> Result<(), String> {
             satisfying_state_names: satisfying.clone(),
             counterstrategy: None,
         };
-        return print_context_eval_json(vec![result], sanity_reports, args.ci.fail_on);
+        return print_context_eval_json(
+            vec![result],
+            sanity_reports,
+            &realized.notes,
+            args.ci.fail_on,
+        );
     }
 
+    // mununu#1106 item 5 — what realization decided that changes what the model means (a
+    // controllability demotion under composition, a dead compound action) prints BEFORE the
+    // verdict it qualifies; on `--json` it is the `notes` key.
+    if !realized.notes.is_empty() {
+        println!("Notes (realization decisions that shape this verdict):");
+        for note in &realized.notes {
+            println!("  - {note}");
+        }
+        println!();
+    }
     println!(
         "Formula '{}' over automaton '{}':",
         formula_name, args.automaton

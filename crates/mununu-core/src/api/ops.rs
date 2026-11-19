@@ -253,6 +253,7 @@ pub fn context_verify(request: ContextVerifyRequest) -> ApiResult<ContextVerifyR
         outcome: outcome.to_string(),
         results,
         sanity,
+        notes: realized.notes.clone(),
     })
 }
 
@@ -608,6 +609,70 @@ context Light {
         assert!(
             a.find("A = \"1\"").unwrap() < a.find("B = \"2\"").unwrap(),
             "{a}"
+        );
+    }
+
+    /// mununu#1106 item 5 — REPRODUCER: a label controllable in one member and carried by its
+    /// partner composes as uncontrollable (mununu#592); the verdict over the composition is read
+    /// against that, so the response carries it in `notes`, naming the composition and the
+    /// members. On the parent the response has no `notes` key: the demotion reached the log only.
+    /// Names no API this change adds (the request is built from JSON, the response read as JSON),
+    /// so it compiles on the parent and fails there.
+    #[test]
+    fn x1106_a_controllability_demotion_reaches_the_verify_response_as_a_note() {
+        let src = r#"
+context C {
+    automata {
+        automaton Ctl {
+            controllable { label go; label wait; }
+            states { state C0 initial; state C1; }
+            transitions { transition C0 -> C1 on label go; transition C0 -> C0 on label wait; transition C1 -> C1 on label wait; }
+        }
+        automaton Plant {
+            controllable { }
+            states { state P0 initial; state Bad; }
+            transitions { transition P0 -> Bad on label go; transition P0 -> P0 on label tick; transition Bad -> Bad on label tick; }
+        }
+    }
+    composition { asynchronous Sys { members [Ctl, Plant]; } }
+    mu_formulas {
+        formula live { over Sys; body = nu X. (true && [] X); }
+    }
+}
+"#;
+        let request: ContextVerifyRequest = serde_json::from_value(serde_json::json!({
+            "context": { "name": "demotion.ctx", "content": src },
+            "formula": "live",
+            "automaton": "Sys",
+        }))
+        .expect("a verify request");
+        let response =
+            serde_json::to_value(context_verify(request).expect("verifies")).expect("serializes");
+        assert_eq!(response["success"], true, "{response}");
+        let notes = response["notes"]
+            .as_array()
+            .unwrap_or_else(|| panic!("the response carries `notes`: {response}"));
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        let note = notes[0].as_str().expect("a string");
+        assert!(
+            note.starts_with("composition `Sys`: [mununu#592] label `go` is controllable in `Ctl` but `Plant` carries it too"),
+            "{note}"
+        );
+        // The MCP text block beside the structured result says the same.
+        let summary = crate::api::mcp::summary(
+            &context_verify(
+                serde_json::from_value(serde_json::json!({
+                    "context": { "name": "demotion.ctx", "content": src },
+                    "formula": "live",
+                    "automaton": "Sys",
+                }))
+                .expect("a verify request"),
+            )
+            .expect("verifies"),
+        );
+        assert!(
+            summary.contains("\nnote: composition `Sys`: [mununu#592]"),
+            "{summary}"
         );
     }
 }
