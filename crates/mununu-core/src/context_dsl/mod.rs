@@ -30,5 +30,60 @@ pub use realize::{
 };
 pub use runtime::ResolvedControllerOptions;
 
+/// `value` as a CTXDSL string literal — the one way a caller writes user-supplied text into
+/// generated CTXDSL (mununu#966: the API's `template_ref` arguments). Escapes exactly what the
+/// lexer unescapes (`"`, `\`, a line break, a tab; see `lexer::lexes_string_escapes`), so the
+/// literal round-trips to `value` and cannot close the clause it sits in or start another
+/// declaration whatever `value` holds.
+pub fn string_literal(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+#[cfg(test)]
+mod string_literal_tests {
+    use super::*;
+
+    /// Every value the escaper handles comes back through the lexer unchanged, including the
+    /// characters that would otherwise end a binding or a block.
+    #[test]
+    fn a_string_literal_round_trips_through_the_lexer_whatever_it_holds() {
+        for value in [
+            "Lof",
+            "a}b",
+            "x; y",
+            "say \"hi\"",
+            "back\\slash",
+            "two\nlines",
+            "tab\tbed",
+            "} formula evil { over a; body = true; }",
+            "",
+        ] {
+            let lit = string_literal(value);
+            let tokens = lex(&lit).unwrap_or_else(|e| panic!("{lit}: {e:?}"));
+            match &tokens[0].kind {
+                token::TokenKind::String(s) => assert_eq!(s, value, "{lit}"),
+                other => panic!("{lit}: {other:?}"),
+            }
+            assert!(
+                tokens.len() <= 2,
+                "{lit}: one string token (plus EOF), got {}",
+                tokens.len()
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests;

@@ -1481,8 +1481,16 @@ impl ClusterCoiInputs {
 fn harvest_property_seeds(config: &VerifyConfig) -> Vec<(String, Vec<String>)> {
     // Best-effort (see above): the configured catalog without the project's packs, whose paths
     // need the manifest directory this pass does not have; a seed it misses only widens a cone.
-    let registry =
-        TemplateRegistry::configured(&[]).unwrap_or_else(|_| TemplateRegistry::builtin());
+    // mununu#966 — the fallback to the built-in catalog is SAID (a deployment pack that does not
+    // load used to vanish here; its real error still surfaces in the eval phase).
+    let registry = TemplateRegistry::configured_default().unwrap_or_else(|why| {
+        tracing::warn!(
+            %why,
+            "property seeds: the configured template catalog did not load; seeding from the \
+             built-in catalog only (a template from a deployment pack contributes no seeds here)"
+        );
+        TemplateRegistry::builtin()
+    });
     config
         .properties
         .iter()
