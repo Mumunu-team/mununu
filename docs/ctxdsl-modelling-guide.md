@@ -76,25 +76,29 @@ pointer) captures the **pre-advance** value, exactly as the RTL would.
 
 > Source of truth: [the numeric-valuation gate](../crates/mununu-core/src/context_dsl/realize.rs#L354)
 > and [the `IntConstant`-only emit](../crates/mununu-core/src/context_dsl/realize.rs#L3037);
-> unknown names reach [`UnknownVariable → GuardResult::Maybe`](../crates/mununu-core/src/abstraction/evaluator.rs#L184).
+> a name no state carries a value for is refused by [`EvaluationError::UndeclaredVariable`](../crates/mununu-core/src/mu_calculus/evaluator.rs) (mununu#1106 item 7).
 > Surface: CLI+API+UI.
 
 An unrolled state publishes a per-state valuation for each of its
 `IntConstant` variables, and `var == value` atoms bind against those.
-`bool`-typed variables emit **no** valuation, so an atom naming one is an
-unknown-variable reference, which resolves to `Maybe` and is **included** —
-i.e. it evaluates to **true at every state**. So does a misspelled name.
+`bool`-typed variables emit **no** valuation, so an atom naming one reads a
+variable no state carries a value for. Since mununu#1106 such an atom is
+**refused** (the error names the atom, the unknown name, the variables that do
+carry per-state values, and the remedy); it used to resolve to `Maybe`, be
+included, and hold at **every** state. So is a misspelled name.
 
 | atom | binds? | value when it doesn't |
 |---|---|---|
 | `n == 2` where `var n : i64` | yes | — |
 | `p == r` between two `i64` vars | yes | — |
-| `flag == true` where `var flag : bool` | **no** | **true everywhere** |
-| `nosuchvar == 1` (typo) | **no** | **true everywhere** |
+| `flag == true` where `var flag : bool` | **no** | **refused** — the error names `flag` and the numeric variables; write a `predicate` over the bool |
+| `nosuchvar == 1` (typo) | **no** | **refused** — the error names `nosuchvar` and the declared variables |
 
-Both `flag == true` and `flag == false` return *every* state. A safety
-property written over a `bool` is therefore vacuous, and a reachability
-property spuriously holds.
+Before mununu#1106 both `flag == true` and `flag == false` returned *every*
+state, so a safety property written over a `bool` was vacuous and a
+reachability property spuriously held; now neither evaluates. A bare unknown
+name with no comparison (`nosuchpred`) is no variable expression and falls to
+the documented under-approximation for an unknown predicate: assumed false.
 
 **Rules.**
 
