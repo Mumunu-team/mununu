@@ -4622,16 +4622,26 @@ fn cube_outcome(
                             .collect();
                         format!("cube {cube} {{{}}}", lits.join(", "))
                     };
+                    // `unknown_cells` counts the withheld start cells; the run stops only when
+                    // the doubt is the run budget's own expiry (the `any_unknown` arm's rule).
+                    let on_run_budget = doubts.iter().any(|(_, d)| {
+                        matches!(
+                            d,
+                            crate::adapter::btor2::kmts_lift::InitialCubeDoubt::BudgetExpired
+                        )
+                    });
                     return (
-                        VerifyOutcome::Unknown { unknown_cells: 0 },
+                        VerifyOutcome::Unknown {
+                            unknown_cells: doubts.len(),
+                        },
                         Some(BottomReason::ViolationAtUnestablishedInitialCubes {
                             cubes: doubts
                                 .iter()
-                                .map(|(ic, d)| format!("{}: {d}", render(*ic)))
+                                .map(|(ic, d)| format!("{}: {d} — {}", render(*ic), d.remedy()))
                                 .collect(),
                             host_dependent: doubts.iter().any(|(_, d)| d.is_host_dependent()),
                         }),
-                        false,
+                        on_run_budget && run_expired,
                     );
                 }
                 let false_cells = (0..v.len())
@@ -9103,7 +9113,8 @@ pub enum BottomReason {
     /// `violated` (the design may never occupy the cube at cycle 0) — so the violation is
     /// withheld rather than reported. A VIOLATED at any ESTABLISHED initial cube ships as
     /// before. Host-dependent when a clock or a resource bound caused the doubt, reproducible
-    /// when an encoding did.
+    /// when an encoding did. The row's `unknown_cells` counts the withheld start cells; the
+    /// run stops from here only when the doubt is the run budget's own expiry.
     ViolationAtUnestablishedInitialCubes {
         /// The falsifying initial cubes, each as its predicate literals and the reason it was
         /// kept — `cube 3 {out_valid == 1, !(fresh == 1)}: the cycle-0 query was inconclusive`.
@@ -9348,11 +9359,11 @@ impl BottomReason {
                 cubes.len(),
                 cubes.join("; "),
                 if *host_dependent {
-                    "The doubt is a clock or a resource bound (MUNUNU_CUBE_SMT_RLIMIT, the run \
-                     budget): a re-run with more of it may decide this property."
+                    "At least one doubt is a clock or a resource bound: a re-run with more of it \
+                     may decide this property (each cube above names its own remedy)."
                 } else {
-                    "The doubt is an encoding gap of the input: a re-run cannot help; supply an \
-                     `init` the filter can encode, or decide the row with another engine."
+                    "No doubt is a clock: a re-run cannot help; each cube above names its own \
+                     remedy, or decide the row with another engine."
                 }
             ),
             Self::ReportSelfContradiction { detail } => format!(
@@ -11679,21 +11690,42 @@ mod tests {
             doubtful: vec![(2, InitialCubeDoubt::QueryInconclusive)],
         };
         let (o, r, stop) = cube_outcome(Ok((set.clone(), false)), &doubted, &names, false, false);
-        assert_eq!(o.label(), "unknown", "{o:?}");
+        assert_eq!(
+            o,
+            VerifyOutcome::Unknown { unknown_cells: 1 },
+            "one withheld start cell"
+        );
         assert!(!stop);
         match r {
             Some(BottomReason::ViolationAtUnestablishedInitialCubes {
                 cubes,
                 host_dependent,
             }) => {
-                assert_eq!(
-                    cubes,
-                    vec!["cube 2 {!(a == 1), b == 1}: the cycle-0 query was inconclusive"]
+                assert_eq!(cubes.len(), 1);
+                assert!(
+                    cubes[0].starts_with(
+                        "cube 2 {!(a == 1), b == 1}: the cycle-0 query was inconclusive — a re-run"
+                    ),
+                    "{}",
+                    cubes[0]
                 );
                 assert!(host_dependent, "an inconclusive query is the host's");
             }
             other => panic!("{other:?}"),
         }
+        // The run budget's own expiry stops the run from here too, as from the ⊥ arm.
+        let on_budget = InitialCubes {
+            cubes: vec![1, 2],
+            doubtful: vec![(2, InitialCubeDoubt::BudgetExpired)],
+        };
+        let (_, _, stop_b) = cube_outcome(Ok((set.clone(), false)), &on_budget, &names, true, true);
+        assert!(
+            stop_b,
+            "a run-budget doubt with the run budget spent stops the run"
+        );
+        let (_, _, stop_c) =
+            cube_outcome(Ok((set.clone(), false)), &on_budget, &names, true, false);
+        assert!(!stop_c, "a per-property expiry does not");
         let reason = BottomReason::ViolationAtUnestablishedInitialCubes {
             cubes: vec!["cube 2 {..}: a memory `init` did not encode".into()],
             host_dependent: false,

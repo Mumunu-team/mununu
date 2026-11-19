@@ -726,6 +726,31 @@ impl InitialCubeDoubt {
     pub fn is_host_dependent(&self) -> bool {
         matches!(self, Self::QueryInconclusive | Self::BudgetExpired)
     }
+
+    /// What decides a cube kept on this doubt — one sentence per cause, since the causes
+    /// have different remedies (a clock is re-run; an encoding gap is not).
+    pub fn remedy(&self) -> &'static str {
+        match self {
+            Self::QueryInconclusive => {
+                "a re-run with a larger `MUNUNU_CUBE_SMT_RLIMIT` or query clock may decide it"
+            }
+            Self::BudgetExpired => "a re-run with a larger run budget may decide it",
+            Self::DesignNotEncoded(_) => {
+                "the design is outside the cycle-0 encoder; decide the row with another engine"
+            }
+            Self::MemoryInitNotEncoded(_) => {
+                "supply a memory `init` the encoder takes, or decide the row with another engine"
+            }
+            Self::EveryCandidateProvedEmpty => {
+                "no candidate start cell is inhabited: check the `init` lines and the pins \
+                 against the predicates"
+            }
+            Self::NoCandidate => {
+                "no start cell is consistent with the `init` lines and the pins: check them \
+                 against the predicates"
+            }
+        }
+    }
 }
 
 impl std::fmt::Display for InitialCubeDoubt {
@@ -777,7 +802,9 @@ impl InitialCubes {
     }
 
     /// The lift-side honesty line for a lift whose initial set carries doubt: `None` when every
-    /// cube is established.
+    /// cube is established. Read beside `btor2 cegar`'s tally, which counts cells and has no
+    /// start-state semantics: the line says which start cells the tally may be counting from
+    /// without a cycle-0 state behind them; it does not contradict the tally.
     pub fn warning(&self) -> Option<crate::adapter::AdapterWarning> {
         if self.doubtful.is_empty() {
             return None;
@@ -785,14 +812,14 @@ impl InitialCubes {
         let listed: Vec<String> = self
             .doubtful
             .iter()
-            .map(|(c, d)| format!("cube {c}: {d}"))
+            .map(|(c, d)| format!("cube {c}: {d} — {}", d.remedy()))
             .collect();
         Some(crate::adapter::AdapterWarning {
             kind: crate::adapter::WarningKind::ApproximateTranslation,
             message: format!(
                 "[mununu#1085] {} of {} initial cube(s) kept without a cycle-0 state proved to \
-                 inhabit them — a definite verdict read only at one of them is not established \
-                 ({})",
+                 inhabit them; the cell tally counts from them too, so a violation carried only \
+                 by cells reached from such a cube is not established at a reset state ({})",
                 self.doubtful.len(),
                 self.cubes.len(),
                 listed.join("; ")
@@ -893,7 +920,13 @@ pub(crate) fn cycle_zero_feasible_cubes(
                     crate::adapter::run_budget::clamp_query_ms(5_000),
                 ) {
                     z3::SatResult::Unsat => continue,
-                    z3::SatResult::Unknown => Some(InitialCubeDoubt::QueryInconclusive),
+                    // An un-encoded memory `init` outranks an inconclusive query: even a `Sat`
+                    // would be a doubt, so a re-run with more resource cannot decide the cube.
+                    z3::SatResult::Unknown => Some(
+                        memory_doubt
+                            .clone()
+                            .unwrap_or(InitialCubeDoubt::QueryInconclusive),
+                    ),
                     z3::SatResult::Sat => memory_doubt.clone(),
                 }
             };
