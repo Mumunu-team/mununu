@@ -1,7 +1,9 @@
 //! AIGER ASCII (.aag) format parser.
 //!
-//! Parses the AAG (ASCII AIGER) format as defined in the AIGER 1.9 specification.
-//! Binary .aig format is not yet supported.
+//! Parses the AAG (ASCII AIGER) format as defined in the AIGER 1.9 specification. The binary
+//! `.aig` encoding is decoded by [`parse_bytes`], which the `btor2` verbs reach for on a file
+//! whose header is `aig`; [`parse`] takes text only, so an `aig` header there is refused with
+//! that route named (mununu#1106 item 2).
 
 use super::ast::*;
 use crate::adapter::{AdapterError, AdapterErrorKind, SourceLocation};
@@ -16,14 +18,32 @@ pub fn parse(content: &str) -> Result<Circuit, AdapterError> {
         .ok_or_else(|| err(0, "empty file (expected 'aag' header line)"))?;
 
     let parts: Vec<&str> = header_line.split_whitespace().collect();
-    if parts.is_empty() || parts[0] != "aag" {
-        return Err(err(
-            line_num,
-            &format!(
-                "expected 'aag' header but found '{}' (binary .aig format is not supported)",
-                parts[0]
-            ),
-        ));
+    // mununu#1106 item 2 — a blank first line used to index `parts[0]` on the empty branch
+    // and panic; it is a refusal like any other malformed header. A binary `aig` header
+    // reaching the text reader names the route that decodes it instead of the stale "not
+    // supported".
+    match parts.first() {
+        Some(&"aag") => {}
+        None => {
+            return Err(err(
+                line_num,
+                "blank first line: expected the 'aag M I L O A [B [C [J [F]]]]' header",
+            ));
+        }
+        Some(&"aig") => {
+            return Err(err(
+                line_num,
+                "binary AIGER ('aig' header): this reader takes ASCII 'aag' text; on the CLI pass the \
+                 .aig file to `mununu btor2 from-aiger` (or any `btor2` verb), which decodes it; over \
+                 the HTTP API send the ASCII .aag text or the BTOR2 that conversion produces",
+            ));
+        }
+        Some(found) => {
+            return Err(err(
+                line_num,
+                &format!("expected 'aag' header but found '{found}'"),
+            ));
+        }
     }
     if parts.len() < 6 {
         return Err(err(
@@ -450,6 +470,52 @@ fn err(line: usize, msg: &str) -> AdapterError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// mununu#1106 item 2 — REPRODUCER: a blank first line is a refusal that names the header
+    /// it expected, not a panic (the parent indexed `parts[0]` on the empty branch).
+    #[test]
+    fn a_blank_first_line_is_refused_with_the_expected_header_named() {
+        for content in ["\n", "   \naag 0 0 0 0 0\n", "\t\n"] {
+            let e = parse(content).expect_err("a blank first line is not an AIGER header");
+            assert_eq!(e.kind, AdapterErrorKind::ParseError, "{content:?}");
+            assert!(
+                e.message.contains("blank first line")
+                    && e.message.contains("aag M I L O A [B [C [J [F]]]]"),
+                "{content:?}: {}",
+                e.message
+            );
+            assert_eq!(e.location.map(|l| l.line), Some(1), "{content:?}");
+        }
+        // Negative control: the empty file keeps its own message.
+        let e = parse("").expect_err("empty");
+        assert!(e.message.contains("empty file"), "{}", e.message);
+    }
+
+    /// A binary `aig` header given to the text reader names the route that decodes it (the
+    /// `btor2` verbs via [`parse_bytes`]) instead of the stale "not supported"; any other first
+    /// word is the plain header mismatch.
+    #[test]
+    fn a_binary_aig_header_given_as_text_names_the_route_that_decodes_it() {
+        let e = parse("aig 4 0 2 0 2 0 0 1 0\n").expect_err("binary header in the text reader");
+        assert!(
+            e.message.contains("binary AIGER")
+                && e.message.contains("mununu btor2 from-aiger")
+                && e.message.contains("HTTP API")
+                && !e.message.contains("not supported"),
+            "{}",
+            e.message
+        );
+        // The bytes route does decode that header (the control: the remedy is real).
+        let mut bin: Vec<u8> = b"aig 4 0 2 0 2 0 0 1 0\n3\n7\n1\n6\n".to_vec();
+        bin.extend_from_slice(&[2u8, 2u8, 3u8, 2u8]);
+        assert_eq!(parse_bytes(&bin).expect("binary parses").gates.len(), 2);
+        let e = parse("btor 1 sort bitvec 1\n").expect_err("not AIGER at all");
+        assert!(
+            e.message.contains("expected 'aag' header but found 'btor'"),
+            "{}",
+            e.message
+        );
+    }
 
     #[test]
     fn parse_alarm_circuit() {
