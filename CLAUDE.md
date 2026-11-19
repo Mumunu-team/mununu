@@ -151,6 +151,8 @@ Reference implementations: `crates/mununu-core/src/adapter/emit.rs` (turn-aware 
 
 Prefer `--abort` / `git reset --soft`; stash with `-u -m "<reason>"` before any routine operation that must discard a tree, and surface the stash; on a hook failure make a **new** commit — never `--amend`, never `--no-verify` without authorisation; before touching files the user is editing, push a savepoint branch. Subagents inherit this; destructive actions only inside `isolation: "worktree"` agents.
 
+**Worktrees have one home and one owner** (2026-11-19, after 21 sibling worktrees and ~127 GB of per-tree `target/` accumulated, 17 of them for PRs already merged). A hand-made worktree lives at `../.worktrees/<repo>-<slug>` relative to the checkout — never as a `<repo>-<slug>` sibling of the repository. The session that merges the PR removes the worktree and its local branch in the same step (`git worktree remove <path>`, no `--force`); a session that ends without merging says in its final message which worktree it leaves and what is uncommitted in it. A worktree with uncommitted or unpushed work is never force-removed without the user's instruction. Before creating one, run `git worktree list` and reuse or remove what is already merged.
+
 ## Code Reuse, Dead Code, Performance, Security
 
 - Check for existing functionality before writing utility code; prefer established libraries, pinned with ranges. Remove unused code and dependencies promptly (`cargo clippy`, `cargo audit`); no "just in case" packages.
