@@ -3529,6 +3529,35 @@ mod tests {
         )
     }
 
+    /// mununu#967 — `verify_no_verific` (the runtime refusal of a Verific-built yosys) was removed
+    /// on purpose in #847 (R1): the product lift's only front-end command is yosys-slang's
+    /// `read_slang`, so the module's "never enable Verific" rule holds because the script never
+    /// calls it. This pins that structural guarantee: the product script for any source set,
+    /// top, cut list, include dir and parameter contains no `verific` command and no generic
+    /// `read` / `read_verilog` command, and opens with `read_slang`.
+    #[test]
+    fn the_product_lift_script_never_calls_verific_or_a_generic_read() {
+        let sources = [PathBuf::from("/tmp/a.sv"), PathBuf::from("/tmp/b.sv")];
+        let inc = [PathBuf::from("/tmp/inc")];
+        let params = [("WIDTH".to_string(), "8".to_string())];
+        let cuts = ["u_x.state_q".to_string()];
+        for (top, cuts, inc, params) in [
+            (None, &[][..], &[][..], &[][..]),
+            (Some("top"), &cuts[..], &inc[..], &params[..]),
+        ] {
+            let script = slang_script(&sources, top, cuts, inc, params);
+            let lower = script.to_ascii_lowercase();
+            assert!(!lower.contains("verific"), "{script}");
+            assert!(script.trim_start().starts_with("read_slang"), "{script}");
+            for cmd in script.split(';').map(str::trim) {
+                assert!(
+                    !(cmd == "read" || cmd.starts_with("read ") || cmd.starts_with("read_verilog")),
+                    "a generic read command in the product script: `{cmd}`\n{script}"
+                );
+            }
+        }
+    }
+
     /// The dev-only oracle's script (`test_support`): `read_verilog` lines + `chparam`.
     #[cfg(feature = "test_support")]
     fn oracle_script(
