@@ -23,6 +23,18 @@ pub struct TlsfSpec {
 }
 
 /// Parse a TLSF specification from text.
+/// The MAIN sections of the full TLSF format that the basic format unfolds into
+/// ASSUMPTIONS / INVARIANTS / GUARANTEES; this reader takes the basic format only, and
+/// names the gap when it meets one of these (mununu#1106 item 1).
+const FULL_FORMAT_SECTIONS: &[&str] = &[
+    "INITIALLY",
+    "PRESET",
+    "REQUIRE",
+    "ASSERT",
+    "ASSUME",
+    "GUARANTEE",
+];
+
 pub fn parse(content: &str) -> Result<TlsfSpec, AdapterError> {
     let mut parser = TlsfParser::new(content);
     parser.parse_spec()
@@ -479,8 +491,29 @@ impl<'a> TlsfParser<'a> {
                     }
                     self.expect(&Token::RBrace)?;
                 }
-                _ => {
-                    self.advance()?;
+                // mununu#1106 item 1 — an unknown section used to be skipped one token at a
+                // time; its closing `}` then ended MAIN, and every section after it (the
+                // GUARANTEES included) never reached `TlsfSpec`, so the spec went to synthesis
+                // with fewer obligations than it declares. Refuse, naming the section and the
+                // sections this reader takes.
+                Token::Ident(name) => {
+                    let remedy = if FULL_FORMAT_SECTIONS.contains(&name.as_str()) {
+                        "it is a full-format TLSF section; this reader takes the basic format: \
+                         unfold the specification to basic form (syfco's basic output) or rewrite \
+                         the section as ASSUMPTIONS / INVARIANTS / GUARANTEES"
+                    } else {
+                        "the sections this reader takes are INPUTS, OUTPUTS, ASSUMPTIONS, \
+                         INVARIANTS and GUARANTEES"
+                    };
+                    return Err(self.lexer.err(&format!(
+                        "unknown MAIN section '{name}' (the sections after it would not be read): {remedy}"
+                    )));
+                }
+                other => {
+                    return Err(self.lexer.err(&format!(
+                        "unexpected {other:?} in MAIN: expected a section (INPUTS, OUTPUTS, \
+                         ASSUMPTIONS, INVARIANTS, GUARANTEES) or the closing brace"
+                    )));
                 }
             }
         }
@@ -722,5 +755,60 @@ MAIN {
         assert_eq!(spec.inputs, vec!["a"]);
         assert_eq!(spec.outputs, vec!["b"]);
         assert_eq!(spec.guarantees.len(), 1);
+    }
+
+    /// mununu#1106 item 1 — REPRODUCER (the falsifier of the review's reading): a section this
+    /// reader does not know, placed before GUARANTEES, is refused by name. On the parent the
+    /// same text parsed `Ok` with ZERO of its one guarantee reaching `TlsfSpec` (the unknown
+    /// section's closing brace ended MAIN), so the review's consequence is confirmed.
+    #[test]
+    fn an_unknown_main_section_is_refused_by_name_instead_of_dropping_what_follows() {
+        let input = r#"
+MAIN {
+  INPUTS { a; }
+  OUTPUTS { b; }
+  ASSERT { G (b); }
+  GUARANTEES {
+    G (!a || b);
+  }
+}
+"#;
+        let e = parse(input).expect_err("an unknown MAIN section is refused");
+        assert!(
+            e.message.contains("unknown MAIN section 'ASSERT'")
+                && e.message.contains("would not be read")
+                && e.message.contains("full-format")
+                && e.message.contains("ASSUMPTIONS / INVARIANTS / GUARANTEES"),
+            "{}",
+            e.message
+        );
+        // A section that is not a full-format one gets the list of sections read.
+        let e =
+            parse("MAIN { INPUTS { a; } FOO { x; } GUARANTEES { G (a); } }").expect_err("refused");
+        assert!(
+            e.message.contains("unknown MAIN section 'FOO'")
+                && e.message
+                    .contains("INPUTS, OUTPUTS, ASSUMPTIONS, INVARIANTS and GUARANTEES"),
+            "{}",
+            e.message
+        );
+        // A stray token that is no section name is refused too, not skipped.
+        let e = parse("MAIN { INPUTS { a; } ; GUARANTEES { G (a); } }").expect_err("refused");
+        assert!(e.message.contains("in MAIN"), "{}", e.message);
+        // Negative control: the known sections in any order still parse in full.
+        let spec = parse(
+            "MAIN { GUARANTEES { G (a); } INVARIANTS { a; } ASSUMPTIONS { F (a); } OUTPUTS { b; } INPUTS { a; } }",
+        )
+        .expect("every known section parses");
+        assert_eq!(
+            (
+                spec.inputs.len(),
+                spec.outputs.len(),
+                spec.assumptions.len(),
+                spec.invariants.len(),
+                spec.guarantees.len()
+            ),
+            (1, 1, 1, 1, 1)
+        );
     }
 }
