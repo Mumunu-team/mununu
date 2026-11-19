@@ -254,11 +254,21 @@ fn build_variable_automata(
                         automata.push(create_int_variable_automaton(var_name, lo, hi, init_i));
                     }
                     None => {
+                        // mununu#1106 item 4 — the remedy names the one route that exists (the
+                        // `__mununu.bounds` annotation; no CLI verb or API field sets
+                        // `AdapterOptions::variable_bounds` for XState) and says what skipping
+                        // does: the variable is absent from the model. XState guards are opaque
+                        // names (`test_<guard>` labels), so transitions keep firing as if the
+                        // guard could hold; a property that reads the variable has nothing to
+                        // bind to.
                         warnings.push(AdapterWarning {
                             kind: WarningKind::ApproximateTranslation,
                             message: format!(
-                                "Context variable '{var_name}' is numeric with no bounds annotation; \
-                                 skipping (add bounds via __mununu.bounds or --variable-bounds)"
+                                "context variable '{var_name}' is numeric with no bounds, so it is \
+                                 left out of the model: transitions guarded on it still fire (a \
+                                 guard is an opaque name here), and no property can read it. Give \
+                                 it a range in the machine's annotation block: \"__mununu\": {{ \
+                                 \"bounds\": {{ \"{var_name}\": [lo, hi] }} }}"
                             ),
                             location: None,
                         });
@@ -559,6 +569,49 @@ fn collect_events_recursive(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// mununu#1106 item 4 — REPRODUCER: the warning for a numeric context variable without
+    /// bounds names the one remedy that exists (the `__mununu.bounds` annotation; no verb has a
+    /// `--variable-bounds`) and says what leaving the variable out does. On the parent the
+    /// message offered `--variable-bounds`.
+    #[test]
+    fn x1106_a_numeric_variable_without_bounds_is_left_out_with_a_remedy_the_user_can_take() {
+        let json = r#"{
+            "id": "m",
+            "initial": "s0",
+            "context": { "count": 0 },
+            "states": { "s0": { "on": { "GO": { "target": "s1", "guard": "isReady" } } }, "s1": {} }
+        }"#;
+        let out = XStateAdapter::translate(json, &AdapterOptions::default()).expect("translates");
+        let w = out
+            .warnings
+            .iter()
+            .find(|w| w.message.contains("'count'"))
+            .unwrap_or_else(|| panic!("a warning about `count`: {:?}", out.warnings));
+        assert!(
+            w.message.contains("left out of the model")
+                && w.message.contains("transitions guarded on it still fire")
+                && w.message
+                    .contains("\"__mununu\": { \"bounds\": { \"count\": [lo, hi] } }")
+                && !w.message.contains("--variable-bounds"),
+            "{}",
+            w.message
+        );
+        // Control: with the annotation the variable is modelled and no such warning is raised.
+        let json = r#"{
+            "id": "m",
+            "initial": "s0",
+            "context": { "count": 0 },
+            "__mununu": { "bounds": { "count": [0, 3] } },
+            "states": { "s0": { "on": { "GO": "s1" } }, "s1": {} }
+        }"#;
+        let out = XStateAdapter::translate(json, &AdapterOptions::default()).expect("translates");
+        assert!(
+            !out.warnings.iter().any(|w| w.message.contains("'count'")),
+            "{:?}",
+            out.warnings
+        );
+    }
 
     fn translate_json(json: &str) -> AdapterOutput {
         let options = AdapterOptions::default();
