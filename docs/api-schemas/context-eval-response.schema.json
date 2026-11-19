@@ -920,6 +920,13 @@
   },
   "description": "Response from context verification",
   "properties": {
+    "notes": {
+      "description": "Decisions taken while realizing the context that change what the model means, each naming its composition and members (mununu#1106 item 5): a label controllable in one member but carried by its partner composes as uncontrollable (mununu#592), a compound action no partner matches can never fire (mununu#570). Read a verdict over a composition against them; absent when there is nothing to say.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
     "outcome": {
       "description": "The worst `outcome` over `results`, with a sanity finding counting as `unknown` when no formula is `violated` (the same reading as `context eval`'s exit code).",
       "type": "string"

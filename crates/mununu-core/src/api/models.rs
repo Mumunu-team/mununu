@@ -605,6 +605,13 @@ pub struct ContextVerifyResponse {
     /// One structural report per checked automaton, when `sanity` was requested.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub sanity: Vec<crate::context::sanity::SanityReport>,
+    /// Decisions taken while realizing the context that change what the model means, each
+    /// naming its composition and members (mununu#1106 item 5): a label controllable in one
+    /// member but carried by its partner composes as uncontrollable (mununu#592), a compound
+    /// action no partner matches can never fire (mununu#570). Read a verdict over a
+    /// composition against them; absent when there is nothing to say.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 /// Verification result for a single formula–automaton pair

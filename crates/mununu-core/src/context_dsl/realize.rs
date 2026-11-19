@@ -76,6 +76,10 @@ fn merged_state_valuation(
     Ok(merged)
 }
 
+/// What building the context yields: the automata (base and composed), each composition's
+/// member names, and the notes the folds produced (mununu#1106 item 5).
+type ComposedContext = (Context, HashMap<String, Vec<String>>, Vec<String>);
+
 /// Result of realising a DSL context into runtime structures.
 #[derive(Debug)]
 pub struct RealizedContext {
@@ -90,6 +94,12 @@ pub struct RealizedContext {
     /// Every automaton's declared alphabet (its `alphabet { }` block and transition labels), for
     /// the checks that need labels no transition takes ([`crate::context::sanity`]).
     declared_alphabets: HashMap<String, Vec<String>>,
+    /// Decisions taken while realizing that change what the model means — today the
+    /// composition notes (mununu#592 controllability demotion, mununu#570 dead compound
+    /// action), each prefixed by the composition's name and naming the members the user
+    /// wrote. Every surface that reads this context ships them beside its verdict
+    /// (mununu#1106 item 5): a verdict over a composition is read against them.
+    pub notes: Vec<String>,
 }
 
 /// Resolved μ-calculus formula with metadata.
@@ -1253,7 +1263,7 @@ fn build_context_with_compositions(
     doc: &ContextDoc,
     label_universe: &LabelUniverse,
     input_signals: &HashSet<String>,
-) -> Result<(Context, HashMap<String, Vec<String>>), RealizationError> {
+) -> Result<ComposedContext, RealizationError> {
     // Build a constants map for evaluating indexed member references.
     let constants: HashMap<String, i64> = doc
         .constants
@@ -1370,8 +1380,10 @@ fn compose_and_register(
     doc: &ContextDoc,
     constants: &HashMap<String, i64>,
     context: Context,
-) -> Result<(Context, HashMap<String, Vec<String>>), RealizationError> {
+) -> Result<ComposedContext, RealizationError> {
     let mut composition_members: HashMap<String, Vec<String>> = HashMap::new();
+    // mununu#1106 item 5 — what each fold decided, for `RealizedContext::notes`.
+    let mut notes: Vec<String> = Vec::new();
     // Topologically sort compositions to support hierarchical composition
     // (compositions referencing other compositions as members).
     let composition_name_set: HashSet<String> = doc
@@ -1490,6 +1502,7 @@ fn compose_and_register(
         // Compose members left-associatively.
         // Members can be base automata (from context) or previously realized compositions.
         let first_name = &member_names[0];
+        let mut composed_name = first_name.clone();
         let mut composed_clts = context
             .clts(first_name)
             .or_else(|| realized.get(first_name.as_str()))
@@ -1517,17 +1530,21 @@ fn compose_and_register(
             // Use finish() (no controllability re-validation) because members
             // may themselves be composed CLTS that carry inherited labels.
             // The original automata were already validated at registration time.
-            let temp_context = ContextBuilder::default()
-                .register_clts("left".to_string(), composed_clts.clone())
-                .register_clts("right".to_string(), member_clts.clone())
-                .finish();
-
-            composed_clts = temp_context
-                .compose_named("left", "right", &options)
-                .map_err(|e| RealizationError::InvalidComposition {
-                    name: composition_name.clone(),
-                    reason: format!("failed to compose automata: {}", e),
-                })?;
+            // mununu#1106 item 5 — composed directly (no `left` / `right` temp context), so the
+            // notes a fold produces name the members the user wrote, and reach the result.
+            let (next, fold_notes) =
+                crate::composition::compose_with_notes(&composed_clts, &member_clts, &options)
+                    .map_err(|e| RealizationError::InvalidComposition {
+                        name: composition_name.clone(),
+                        reason: format!("failed to compose automata: {}", e),
+                    })?;
+            composed_clts = next;
+            for note in &fold_notes {
+                let text = note.render(&composed_name, member_name);
+                tracing::warn!(composition = %composition_name, "{text}");
+                notes.push(format!("composition `{composition_name}`: {text}"));
+            }
+            composed_name = format!("{composed_name} ∥ {member_name}");
         }
 
         realized.insert(composition_name, composed_clts);
@@ -1581,7 +1598,7 @@ fn compose_and_register(
         final_builder.finish()
     };
 
-    Ok((context, composition_members))
+    Ok((context, composition_members, notes))
 }
 
 /// The labels a composition member moves on: an automaton's declared alphabet and transition
@@ -1863,7 +1880,7 @@ fn realize_inner(
     // The arithmetic sidecar contains the __input_signals__ formula.
     let input_signals = extract_input_signals_from_documents(&docs);
 
-    let (context, composition_members) =
+    let (context, composition_members, notes) =
         build_context_with_compositions(doc, &label_universe, &input_signals)?;
 
     let mut formulas = collect_formulas(&docs, registry)?;
@@ -1918,6 +1935,7 @@ fn realize_inner(
         predicate_metadata,
         predicate_bitsets,
         composition_members,
+        notes,
         declared_alphabets: docs
             .iter()
             .flat_map(|d| d.automata.iter())
@@ -4035,6 +4053,88 @@ context C {
             !go_controllable,
             "`go` is controllable in Ctl alone but Plant carries it: in Sys it is uncontrollable"
         );
+        // mununu#1106 item 5 — the demotion is a NOTE on the realized context, naming the
+        // composition and the members the user wrote (not `left` / `right`).
+        assert_eq!(realized.notes.len(), 1, "{:?}", realized.notes);
+        let note = &realized.notes[0];
+        assert!(
+            note.starts_with("composition `Sys`: [mununu#592] label `go` is controllable in `Ctl` but `Plant` carries it too")
+                && note.contains("UNCONTROLLABLE")
+                && !note.contains("left member"),
+            "{note}"
+        );
+    }
+
+    /// mununu#1106 item 5 — a dead compound action let through by `allow_dead_vectors;` is a
+    /// note too (the mununu#570 fixture: `Owner`'s `{a, b}` has no partner step that projects to
+    /// the same set), beside the demotion notes the same fixture produces; a composition with
+    /// nothing to say carries none.
+    #[test]
+    fn x1106_a_dead_compound_action_let_through_is_a_note_and_a_clean_composition_has_none() {
+        let src = r#"
+context dead {
+    alphabet { label a; label b; label c; }
+    automata {
+        automaton Owner {
+            alphabet { label a; label b; label c; }
+            controllable { label a; label b; label c; }
+            states { state S initial; state T; }
+            transitions {
+                transition S -> T on {label a, label b};
+                transition T -> S on label c;
+            }
+        }
+        automaton Partner {
+            alphabet { label a; label b; label c; }
+            controllable { }
+            states { state P initial; }
+            transitions {
+                transition P -> P on label a;
+                transition P -> P on label b;
+                transition P -> P on label c;
+            }
+        }
+    }
+    composition { synchronous Sys { members [Owner, Partner]; allow_dead_vectors; } }
+}
+"#;
+        let doc = parse(src).expect("parses");
+        let realized = realize(&doc, &[]).expect("realizes with the dead vector allowed");
+        let dead: Vec<&String> = realized
+            .notes
+            .iter()
+            .filter(|n| n.contains("[mununu#570]"))
+            .collect();
+        assert_eq!(dead.len(), 1, "{:?}", realized.notes);
+        assert!(
+            dead[0].starts_with(
+                "composition `Sys`: [mununu#570] compound action {a, b} can never fire in `Owner` ∥ `Partner`"
+            ),
+            "{}",
+            dead[0]
+        );
+        // The same fixture demotes `a`, `b`, `c` (controllable in Owner, carried by Partner).
+        assert_eq!(
+            realized
+                .notes
+                .iter()
+                .filter(|n| n.contains("[mununu#592]"))
+                .count(),
+            3,
+            "{:?}",
+            realized.notes
+        );
+        let clean = r#"
+context C {
+    automata {
+        automaton A { controllable { } states { state A0 initial; } transitions { transition A0 -> A0 on label a; } }
+        automaton B { controllable { } states { state B0 initial; } transitions { transition B0 -> B0 on label b; } }
+    }
+    composition { asynchronous Sys { members [A, B]; } }
+}
+"#;
+        let realized = realize(&parse(clean).expect("parses"), &[]).expect("realizes");
+        assert!(realized.notes.is_empty(), "{:?}", realized.notes);
     }
 
     /// mununu#589 — a synchronisation vector whose two labels sit on two DIFFERENT partner
