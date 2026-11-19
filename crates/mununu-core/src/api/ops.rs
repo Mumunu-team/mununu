@@ -260,12 +260,13 @@ pub fn context_verify(request: ContextVerifyRequest) -> ApiResult<ContextVerifyR
 /// `GET /api/v1/templates` and the MCP `templates` tool: the template catalog, or the templates of
 /// one domain.
 pub fn templates(domain: Option<&str>) -> ApiResult<serde_json::Value> {
-    let registry = crate::adapter::templates::TemplateRegistry::configured_default().map_err(
-        |message| ApiError::BadRequest {
-            message,
-            details: None,
-        },
-    )?;
+    let registry =
+        crate::adapter::templates::TemplateRegistry::configured_default().map_err(|message| {
+            ApiError::BadRequest {
+                message,
+                details: None,
+            }
+        })?;
 
     if let Some(domain_str) = domain {
         let domain: crate::adapter::templates::TemplateDomain =

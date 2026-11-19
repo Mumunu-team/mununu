@@ -3878,12 +3878,13 @@ pub(crate) fn resolve_template_ref_for_cache(
         None => return Ok((None, None)),
     };
 
-    let registry = crate::adapter::templates::TemplateRegistry::configured_default().map_err(
-        |message| ApiError::BadRequest {
-            message,
-            details: None,
-        },
-    )?;
+    let registry =
+        crate::adapter::templates::TemplateRegistry::configured_default().map_err(|message| {
+            ApiError::BadRequest {
+                message,
+                details: None,
+            }
+        })?;
     let inst = registry
         .instantiate(tref)
         .map_err(|e| ApiError::BadRequest {
