@@ -664,6 +664,65 @@ pub enum EvaluationError {
         usage: u64,
         limit: u64,
     },
+    /// mununu#1106 item 7 — a variable atom (`n == 2`, `p < q`) names a variable no state of
+    /// the model carries a value for. It used to resolve to `Maybe` and be INCLUDED, i.e. hold
+    /// at every state, so a misspelled name made a safety property vacuous and a reachability
+    /// property spuriously true; the same typo in a guard is a hard error. Refused instead,
+    /// with the variables that do carry values named.
+    #[error(
+        "atom `{atom}` reads {} no state of the model carries a value for; it would have held at \
+         every state (mununu#1106). Variables with per-state values: {}. Check the spelling, or \
+         declare the variable with a numeric type — a `bool` variable publishes no per-state \
+         value, so write a `predicate` over it instead.",
+        describe_variables(variables),
+        if declared.is_empty() { "none".to_string() } else { declared.join(", ") }
+    )]
+    UndeclaredVariable {
+        /// The atom as written in the formula.
+        atom: String,
+        /// The names the atom reads that no abstract state declares, sorted.
+        variables: Vec<String>,
+        /// The names some abstract state does declare, sorted.
+        declared: Vec<String>,
+    },
+}
+
+/// The variable names a guard expression reads (every `Expr::Var` under it), in order of
+/// appearance, duplicates included — the caller sorts and dedups.
+fn guard_variables(guard: &crate::abstraction::expression::GuardExpr, out: &mut Vec<String>) {
+    use crate::abstraction::expression::{Expr, GuardExpr};
+    fn expr_variables(expr: &Expr, out: &mut Vec<String>) {
+        match expr {
+            Expr::Var(name) => out.push(name.clone()),
+            Expr::Const(_) | Expr::Bool(_) => {}
+            Expr::Add(l, r) | Expr::Sub(l, r) | Expr::Mul(l, r) | Expr::Div(l, r) => {
+                expr_variables(l, out);
+                expr_variables(r, out);
+            }
+        }
+    }
+    match guard {
+        GuardExpr::True | GuardExpr::False | GuardExpr::Predicate(_) => {}
+        GuardExpr::Comparison { left, right, .. } => {
+            expr_variables(left, out);
+            expr_variables(right, out);
+        }
+        GuardExpr::And(l, r) | GuardExpr::Or(l, r) => {
+            guard_variables(l, out);
+            guard_variables(r, out);
+        }
+        GuardExpr::Not(inner) => guard_variables(inner, out),
+    }
+}
+
+/// `variable \`x\`` or `variables \`x\`, \`y\`` for [`EvaluationError::UndeclaredVariable`].
+fn describe_variables(variables: &[String]) -> String {
+    let quoted: Vec<String> = variables.iter().map(|v| format!("`{v}`")).collect();
+    if quoted.len() == 1 {
+        format!("variable {}", quoted[0])
+    } else {
+        format!("variables {}", quoted.join(", "))
+    }
 }
 
 /// Evaluates `formula` over `clts`, returning the set of satisfying states.
@@ -3068,6 +3127,41 @@ where
             Some(expr) => expr,
             None => return Ok(None), // Not a variable expression
         };
+
+        // mununu#1106 item 7 — a bare name that is no registered predicate is not a variable
+        // expression either: it falls to the documented under-approximation below (assumed
+        // false), the same as on a model without valuations, instead of `Maybe → true`.
+        if matches!(
+            guard_expr,
+            crate::abstraction::expression::GuardExpr::Predicate(_)
+        ) {
+            return Ok(None);
+        }
+        // mununu#1106 item 7 — a variable the atom reads that NO state carries a value for
+        // would resolve to `Maybe` at every state and be included everywhere (a misspelled
+        // name made a safety property vacuous). Refuse it, naming the variables that do
+        // carry values. A variable some states carry and others do not keeps the per-state
+        // `Maybe → include` reading below.
+        let declared: std::collections::BTreeSet<&str> = abstract_states
+            .iter()
+            .flat_map(|s| s.variables.keys().map(String::as_str))
+            .collect();
+        let mut read = Vec::new();
+        guard_variables(&guard_expr, &mut read);
+        read.sort();
+        read.dedup();
+        let missing: Vec<String> = read
+            .iter()
+            .filter(|v| !declared.contains(v.as_str()))
+            .cloned()
+            .collect();
+        if !missing.is_empty() {
+            return Err(EvaluationError::UndeclaredVariable {
+                atom: predicate_name.to_string(),
+                variables: missing,
+                declared: declared.into_iter().map(str::to_string).collect(),
+            });
+        }
 
         // Evaluate guard over all states
         let mut result = self.alloc_bitvec(false)?;

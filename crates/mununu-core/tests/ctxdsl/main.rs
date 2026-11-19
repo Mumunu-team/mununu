@@ -9,6 +9,7 @@
 mod asynchronous_examples;
 mod context_dsl_controllability;
 mod context_dsl_integration;
+mod ctxdsl_undeclared_atom_variable_1106;
 mod ctxdsl_variable_atom_binding;
 mod diagnostics;
 mod dual_condition_start;
