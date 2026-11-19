@@ -1682,6 +1682,33 @@ enumerates it only up to **16**; past that the property abstains with
 The remedy is the same: establish the value — keep reset-gating on (the reset's values are injected
 as `init`), add an `init` through a sidecar, or pin the register with `--pin`.
 
+### A violation read only at a doubtful start cell: `violation-at-unestablished-initial-cubes` (mununu#1085)
+
+> Source of truth: [`BottomReason::ViolationAtUnestablishedInitialCubes`](../crates/mununu-core/src/adapter/slang/verify_auto.rs) + [`kmts_lift::InitialCubes`](../crates/mununu-core/src/adapter/btor2/kmts_lift.rs) + [`kmts_lift::cycle_zero_feasible_cubes`](../crates/mununu-core/src/adapter/btor2/kmts_lift.rs) — surface: (CLI+API)
+
+**The start set is filtered, and the filter can only drop.** Once the cube path's predicates are
+coupled (two over one register, a compound, an atom over a combinational output), the product of
+their free dimensions admits cells no cycle-0 state inhabits (mununu#637), so each candidate initial
+cube is asked of Z3 under the design's `init` lines (and, since mununu#1061, its memories' `init`).
+A cube is dropped on a **proven `Unsat` only**. An inconclusive query, a run budget that had already
+expired, a design or a memory `init` the encoder could not take, and a candidate set that proves
+empty throughout (the product is kept rather than an empty start set, which every consumer would
+read as a vacuous HOLDS) all **keep** the cube. That direction is right for a HOLDS — a kept
+infeasible cube can only add ⊥ — and wrong for a VIOLATED: a violation read at a cube the design
+never occupies at cycle 0 is not definite.
+
+**What ships.** The filter now names every cube it kept on doubt, with the reason. A `violated` the
+cube path read **only** at such cubes is withheld: the row is `unknown` with
+`bottom_reason.kind == "violation-at-unestablished-initial-cubes"`, whose `detail` lists each cube
+over the row's predicates and why it was kept — `cube 1 {!(out_valid == 0)}: the cycle-0 query was
+inconclusive`. A `violated` read at any **established** initial cube (proved `Sat`, or part of an
+exact product that needed no query) ships as before, whatever the other cubes carry. `determinism`
+follows the doubt: `host-dependent` when a clock or the `MUNUNU_CUBE_SMT_RLIMIT` resource bound
+caused it (a re-run with more of it may decide the row), `reproducible` when an encoding gap did.
+The ⊥ re-plan still runs on the row, so another engine may decide it. On `btor2 cegar` (CLI and
+API), whose verdict is over every lifted cell rather than the start set, the same doubt reaches the
+`warnings` list.
+
 ### A guarantee judged against its witness: `vacuity` (mununu#599) and the report self-check (mununu#579)
 
 > Source of truth: [`PropertyVerdict::vacuity`](../crates/mununu-core/src/adapter/slang/verify_auto.rs#L242) + [`report_consistency::vacuity_of_guarantee`](../crates/mununu-core/src/adapter/slang/report_consistency.rs) + [`report_consistency::definite_pair_contradicts`](../crates/mununu-core/src/adapter/slang/report_consistency.rs) — surface: (CLI+API)

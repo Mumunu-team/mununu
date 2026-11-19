@@ -509,7 +509,7 @@ fn reachable_lift_roots(
     file: &crate::adapter::btor2::ast::Btor2File,
 ) -> Vec<usize> {
     let truth = reset_truth_per_bit(predicates, compound_exprs, config_values, file);
-    let mut roots = initial_cube_indices(predicates, compound_exprs, config_values, file);
+    let mut roots = initial_cube_indices(predicates, compound_exprs, config_values, file).cubes;
     for cube in cubes_consistent_with(&truth, predicates.len()) {
         if !roots.contains(&cube) {
             roots.push(cube);
@@ -655,7 +655,9 @@ fn combinational_reset_truth(
 ///   `--pin` pins was a verdict at a fictitious initial state.
 ///
 /// `cube_0` remains the defensive fallback when neither rule yields a cube, so the Clts never
-/// has zero initial states (an evaluator-time error).
+/// has zero initial states (an evaluator-time error) — kept on doubt
+/// ([`InitialCubeDoubt::NoCandidate`]), like every other cube no cycle-0 state was proved to
+/// inhabit.
 fn initial_cube_indices(
     predicates: &[PredicateSpec],
     compound_exprs: &std::collections::HashMap<
@@ -664,7 +666,7 @@ fn initial_cube_indices(
     >,
     config_values: &std::collections::HashMap<String, Vec<u64>>,
     file: &crate::adapter::btor2::ast::Btor2File,
-) -> Vec<usize> {
+) -> InitialCubes {
     let (cubes, pins) = if config_values.is_empty() {
         let truth = reset_truth_per_bit(predicates, compound_exprs, config_values, file);
         let init: std::collections::HashMap<String, Vec<u64>> =
@@ -683,7 +685,148 @@ fn initial_cube_indices(
         )
     };
     let cubes = cycle_zero_feasible_cubes(file, predicates, compound_exprs, cubes, &pins);
-    if cubes.is_empty() { vec![0] } else { cubes }
+    if cubes.cubes.is_empty() {
+        InitialCubes {
+            cubes: vec![0],
+            doubtful: vec![(0, InitialCubeDoubt::NoCandidate)],
+        }
+    } else {
+        cubes
+    }
+}
+
+/// mununu#1085 — why a candidate initial cube was KEPT without a cycle-0 state proved to inhabit
+/// it. The cycle-0 filter drops a cube on a proven `Unsat` only; every other answer keeps it,
+/// which is the right direction for `holds` (a kept infeasible cube is more ⊥) and the wrong one
+/// for `violated` (a violation read at a cube the design never occupies is not definite). The
+/// reason travels with the cube so the verdict path can withhold a `violated` read there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InitialCubeDoubt {
+    /// The cycle-0 query returned `Unknown`: a timeout, the `MUNUNU_CUBE_SMT_RLIMIT` resource
+    /// bound, or a predicate the encoded view cannot resolve.
+    QueryInconclusive,
+    /// The run budget had expired before the cube's query ran.
+    BudgetExpired,
+    /// The design did not encode for the query, so no cube was queried.
+    DesignNotEncoded(String),
+    /// A memory `init` did not encode, so the query ran with the memory free at cycle 0: a `Sat`
+    /// admits cycle-0 states the design never occupies.
+    MemoryInitNotEncoded(String),
+    /// Every candidate proved empty, so the whole product was kept (an empty initial set reads as
+    /// a vacuous Holds in every consumer).
+    EveryCandidateProvedEmpty,
+    /// No candidate at all; `cube_0` was kept so the Clts has an initial state.
+    NoCandidate,
+}
+
+impl InitialCubeDoubt {
+    /// Whether the reason is a function of the host (a clock or a resource bound) rather than
+    /// of the input — the [`BottomDeterminism`](crate::adapter::slang::verify_auto::BottomDeterminism)
+    /// reading of a verdict withheld over it.
+    pub fn is_host_dependent(&self) -> bool {
+        matches!(self, Self::QueryInconclusive | Self::BudgetExpired)
+    }
+
+    /// What decides a cube kept on this doubt — one sentence per cause, since the causes
+    /// have different remedies (a clock is re-run; an encoding gap is not).
+    pub fn remedy(&self) -> &'static str {
+        match self {
+            Self::QueryInconclusive => {
+                "a re-run with a larger `MUNUNU_CUBE_SMT_RLIMIT` or query clock may decide it"
+            }
+            Self::BudgetExpired => "a re-run with a larger run budget may decide it",
+            Self::DesignNotEncoded(_) => {
+                "the design is outside the cycle-0 encoder; decide the row with another engine"
+            }
+            Self::MemoryInitNotEncoded(_) => {
+                "supply a memory `init` the encoder takes, or decide the row with another engine"
+            }
+            Self::EveryCandidateProvedEmpty => {
+                "no candidate start cell is inhabited: check the `init` lines and the pins \
+                 against the predicates"
+            }
+            Self::NoCandidate => {
+                "no start cell is consistent with the `init` lines and the pins: check them \
+                 against the predicates"
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for InitialCubeDoubt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::QueryInconclusive => f.write_str("the cycle-0 query was inconclusive"),
+            Self::BudgetExpired => f.write_str("the run budget expired before its cycle-0 query"),
+            Self::DesignNotEncoded(e) => write!(f, "the design did not encode for the query ({e})"),
+            Self::MemoryInitNotEncoded(e) => {
+                write!(
+                    f,
+                    "a memory `init` did not encode, the memory was free at cycle 0 ({e})"
+                )
+            }
+            Self::EveryCandidateProvedEmpty => {
+                f.write_str("every candidate proved empty at cycle 0, the product was kept")
+            }
+            Self::NoCandidate => f.write_str("no candidate at all, cube 0 was kept"),
+        }
+    }
+}
+
+/// mununu#1085 — the cycle-0 filter's answer: the cubes it kept, and which of them it kept on
+/// doubt rather than on a cycle-0 state proved to inhabit them. A cube in `cubes` and not in
+/// `doubtful` is established — proved `Sat`, or part of an exact product that needed no query.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct InitialCubes {
+    /// The initial cube indices, in candidate order.
+    pub cubes: Vec<usize>,
+    /// The cubes among `cubes` kept on doubt, each with its reason.
+    pub doubtful: Vec<(usize, InitialCubeDoubt)>,
+}
+
+impl InitialCubes {
+    /// Every cube established (an exact product, or no cube to doubt).
+    pub fn established(cubes: Vec<usize>) -> Self {
+        Self {
+            cubes,
+            doubtful: Vec::new(),
+        }
+    }
+
+    /// Why `cube` was kept on doubt, or `None` when it is established.
+    pub fn doubt_of(&self, cube: usize) -> Option<&InitialCubeDoubt> {
+        self.doubtful
+            .iter()
+            .find(|(c, _)| *c == cube)
+            .map(|(_, d)| d)
+    }
+
+    /// The lift-side honesty line for a lift whose initial set carries doubt: `None` when every
+    /// cube is established. Read beside `btor2 cegar`'s tally, which counts cells and has no
+    /// start-state semantics: the line says which start cells the tally may be counting from
+    /// without a cycle-0 state behind them; it does not contradict the tally.
+    pub fn warning(&self) -> Option<crate::adapter::AdapterWarning> {
+        if self.doubtful.is_empty() {
+            return None;
+        }
+        let listed: Vec<String> = self
+            .doubtful
+            .iter()
+            .map(|(c, d)| format!("cube {c}: {d} — {}", d.remedy()))
+            .collect();
+        Some(crate::adapter::AdapterWarning {
+            kind: crate::adapter::WarningKind::ApproximateTranslation,
+            message: format!(
+                "[mununu#1085] {} of {} initial cube(s) kept without a cycle-0 state proved to \
+                 inhabit them; the cell tally counts from them too, so a violation carried only \
+                 by cells reached from such a cube is not established at a reset state ({})",
+                self.doubtful.len(),
+                self.cubes.len(),
+                listed.join("; ")
+            ),
+            location: None,
+        })
+    }
 }
 
 /// mununu#637 — the candidate initial cubes a concrete cycle-0 state inhabits.
@@ -702,6 +845,10 @@ fn initial_cube_indices(
 /// that would drop every candidate keeps them all (an empty initial set reads as a vacuous Holds
 /// in every consumer). `pins` are each register's admissible cycle-0 values — the `init` lines,
 /// or the sidecar's config values where those win.
+///
+/// mununu#1085 — every cube kept on one of those doubts is named in the result's `doubtful`,
+/// with its reason: the direction is right for `holds` and wrong for `violated`, and the verdict
+/// path withholds a `violated` read only at such a cube.
 pub(crate) fn cycle_zero_feasible_cubes(
     file: &crate::adapter::btor2::ast::Btor2File,
     predicates: &[PredicateSpec],
@@ -711,74 +858,102 @@ pub(crate) fn cycle_zero_feasible_cubes(
     >,
     candidates: Vec<usize>,
     pins: &std::collections::HashMap<String, Vec<u64>>,
-) -> Vec<usize> {
+) -> InitialCubes {
     use crate::adapter::btor2::smt_must_edge::{
         build_register_nid_map_with_inputs, smt_cube_feasible_at_cycle_zero,
     };
     if candidates.is_empty() || !cube_dimensions_are_coupled(file, predicates, compound_exprs) {
-        return candidates;
+        return InitialCubes::established(candidates);
     }
     let cfg = z3::Config::new();
-    let kept = z3::with_z3_config(&cfg, || -> Vec<usize> {
-        let Ok(view) = encode_design_for_lift(file) else {
-            return candidates.clone();
+    let kept = z3::with_z3_config(&cfg, || -> InitialCubes {
+        let view = match encode_design_for_lift(file) {
+            Ok(view) => view,
+            Err(e) => {
+                let reason = InitialCubeDoubt::DesignNotEncoded(e.to_string());
+                return InitialCubes {
+                    doubtful: candidates.iter().map(|&c| (c, reason.clone())).collect(),
+                    cubes: candidates.clone(),
+                };
+            }
         };
         let nid_map = build_register_nid_map_with_inputs(&view);
         let preds = cube_predicates(predicates, compound_exprs);
         // mununu#1061 — every memory's `init`, so the query starts the memory where the design
         // does. A memory whose `init` cannot be encoded stays free at cycle 0, as before; that
-        // admits initial cubes the design never occupies, so it is said, not swallowed.
-        let array_inits =
+        // admits initial cubes the design never occupies, so it is said, not swallowed: every
+        // `Sat` under it is a doubt (mununu#1085).
+        let (array_inits, memory_doubt) =
             match crate::adapter::sidecar::predicate_image::btor2_encode::encode_array_inits(
                 file, &view,
             ) {
-                Ok(inits) => inits,
+                Ok(inits) => (inits, None),
                 Err(e) => {
                     tracing::warn!(
                         error = %e,
                         "a memory `init` did not encode: the memory is free at cycle 0 in the \
                          initial-cube filter, and a violation at an initial cube may be spurious"
                     );
-                    HashMap::new()
+                    (
+                        HashMap::new(),
+                        Some(InitialCubeDoubt::MemoryInitNotEncoded(e.to_string())),
+                    )
                 }
             };
-        candidates
-            .iter()
-            .copied()
-            .filter(|&cube| {
-                // mununu#728 — up to 2^|P| queries, up to three times per property: the clamp is
-                // re-read per query (it used to be computed once, before the loop), and an expired
-                // budget KEEPS the candidate — the direction an inconclusive query already takes
-                // (a kept infeasible cube is more ⊥, never a wrong verdict).
-                if crate::adapter::run_budget::expired() {
-                    return true;
-                }
-                !matches!(
-                    smt_cube_feasible_at_cycle_zero(
-                        &view,
-                        cube as u64,
-                        &preds,
-                        &nid_map,
-                        pins,
-                        &array_inits,
-                        crate::adapter::run_budget::clamp_query_ms(5_000)
+        let mut kept = InitialCubes::default();
+        for &cube in &candidates {
+            // mununu#728 — up to 2^|P| queries, up to three times per property: the clamp is
+            // re-read per query (it used to be computed once, before the loop), and an expired
+            // budget KEEPS the candidate — the direction an inconclusive query already takes
+            // (a kept infeasible cube is more ⊥ for `holds`; for `violated` it is a doubt the
+            // verdict path reads).
+            let doubt = if crate::adapter::run_budget::expired() {
+                Some(InitialCubeDoubt::BudgetExpired)
+            } else {
+                match smt_cube_feasible_at_cycle_zero(
+                    &view,
+                    cube as u64,
+                    &preds,
+                    &nid_map,
+                    pins,
+                    &array_inits,
+                    crate::adapter::run_budget::clamp_query_ms(5_000),
+                ) {
+                    z3::SatResult::Unsat => continue,
+                    // An un-encoded memory `init` outranks an inconclusive query: even a `Sat`
+                    // would be a doubt, so a re-run with more resource cannot decide the cube.
+                    z3::SatResult::Unknown => Some(
+                        memory_doubt
+                            .clone()
+                            .unwrap_or(InitialCubeDoubt::QueryInconclusive),
                     ),
-                    z3::SatResult::Unsat
-                )
-            })
-            .collect()
+                    z3::SatResult::Sat => memory_doubt.clone(),
+                }
+            };
+            kept.cubes.push(cube);
+            if let Some(doubt) = doubt {
+                kept.doubtful.push((cube, doubt));
+            }
+        }
+        kept
     });
-    if kept.is_empty() {
+    if kept.cubes.is_empty() {
         tracing::debug!(
             candidates = candidates.len(),
             "every candidate initial cube proved empty at cycle 0; keeping the product"
         );
-        return candidates;
+        return InitialCubes {
+            doubtful: candidates
+                .iter()
+                .map(|&c| (c, InitialCubeDoubt::EveryCandidateProvedEmpty))
+                .collect(),
+            cubes: candidates,
+        };
     }
-    if kept.len() != candidates.len() {
+    if kept.cubes.len() != candidates.len() {
         tracing::debug!(
-            dropped = candidates.len() - kept.len(),
-            kept = kept.len(),
+            dropped = candidates.len() - kept.cubes.len(),
+            kept = kept.cubes.len(),
             "initial cubes no cycle-0 state inhabits dropped"
         );
     }
@@ -1793,13 +1968,16 @@ pub fn materialize_clts_from_lazy(
     }
     // mununu#609 — the initial cube set from the design's `init` lines (or the sidecar's
     // config values), not `cube_0`. The lazy lift admits no compounds (the U.4 backstop).
-    for cube_idx in initial_cube_indices(
+    // mununu#1085 — a cube kept on doubt is said on the lift's warnings.
+    let initial_cubes = initial_cube_indices(
         &predicates,
         &std::collections::HashMap::new(),
         &lazy.ctx.config_values,
         &lazy.ctx.file,
-    ) {
-        if let Some(state_id) = state_ids.get(cube_idx) {
+    );
+    warnings.extend(initial_cubes.warning());
+    for cube_idx in &initial_cubes.cubes {
+        if let Some(state_id) = state_ids.get(*cube_idx) {
             builder.initial_state_id(*state_id);
         }
     }
@@ -2597,13 +2775,15 @@ pub fn predicate_cube_lift(
     // the R-S8 admissible cubes when `lift_opts.config_values` pins registers, else the cubes
     // consistent with the design's `init` lines (free-init registers admit both polarities);
     // `cube_0` only as the defensive fallback so the Clts never has zero initial states.
+    // mununu#1085 — a cube kept on doubt is said on the lift's warnings.
     let initial_cubes = initial_cube_indices(
         &predicates,
         &lift_opts.compound_exprs,
         &lift_opts.config_values,
         &file,
     );
-    for cube_idx in &initial_cubes {
+    warnings.extend(initial_cubes.warning());
+    for cube_idx in &initial_cubes.cubes {
         if let Some(state_id) = state_ids.get(*cube_idx) {
             builder.initial_state_id(*state_id);
         }
@@ -4153,8 +4333,12 @@ mod tests {
         let unbounded =
             cycle_zero_feasible_cubes(&file, &preds, &compounds, vec![0, 1, 2, 3], &pins);
         assert!(
-            !unbounded.contains(&3),
+            !unbounded.cubes.contains(&3),
             "unbounded: the contradictory cube is dropped, got {unbounded:?}"
+        );
+        assert!(
+            unbounded.doubtful.is_empty(),
+            "every kept cube was proved inhabited, got {unbounded:?}"
         );
         let t0 = std::time::Instant::now();
         let starved = {
@@ -4167,9 +4351,73 @@ mod tests {
             t0.elapsed()
         );
         assert_eq!(
-            starved,
+            starved.cubes,
             vec![0, 1, 2, 3],
-            "a spent budget keeps every candidate (more ⊥, never a wrong verdict)"
+            "a spent budget keeps every candidate (more ⊥ for holds; a doubt for violated)"
+        );
+        // mununu#1085 — and says so, per cube.
+        assert_eq!(
+            starved.doubtful,
+            (0..4)
+                .map(|c| (c, InitialCubeDoubt::BudgetExpired))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// mununu#1085 — the filter names the cubes it keeps without a cycle-0 state proved to
+    /// inhabit them, with the reason: an inconclusive query (here forced by a 1-unit Z3
+    /// resource bound) keeps every coupled cube on `QueryInconclusive`; a candidate set that
+    /// proves empty throughout is kept whole on `EveryCandidateProvedEmpty`; a `Sat` keeps its
+    /// cube established. The lift's warning says the same, so `btor2 cegar` readers see it.
+    #[test]
+    fn the_cycle_zero_filter_names_the_cubes_it_keeps_on_doubt() {
+        const B: &str = "1 sort bitvec 2\n2 state 1 q\n3 zero 1\n4 init 1 2 3\n5 next 1 2 2\n";
+        let file = crate::adapter::btor2::parser::parse(B).expect("parse");
+        let preds = vec![
+            PredicateSpec {
+                name: "q == 0".into(),
+                register: "q".into(),
+                value: 0,
+            },
+            PredicateSpec {
+                name: "q == 1".into(),
+                register: "q".into(),
+                value: 1,
+            },
+        ];
+        let compounds = std::collections::HashMap::new();
+        let pins = std::collections::HashMap::new();
+        // Only the contradictory cube as a candidate: it proves empty, and the product is kept.
+        let all_empty = cycle_zero_feasible_cubes(&file, &preds, &compounds, vec![3], &pins);
+        assert_eq!(all_empty.cubes, vec![3]);
+        assert_eq!(
+            all_empty.doubtful,
+            vec![(3, InitialCubeDoubt::EveryCandidateProvedEmpty)]
+        );
+        assert!(all_empty.warning().is_some());
+        // Established: `q == 0 ∧ q != 1` is the reset state.
+        let sat = cycle_zero_feasible_cubes(&file, &preds, &compounds, vec![1], &pins);
+        assert_eq!(sat, InitialCubes::established(vec![1]));
+        assert!(sat.warning().is_none());
+        // Inconclusive: every query runs out of resource at once.
+        let _rl = crate::adapter::env_var::override_for_test("MUNUNU_CUBE_SMT_RLIMIT", "1");
+        let inconclusive = cycle_zero_feasible_cubes(&file, &preds, &compounds, vec![1, 3], &pins);
+        assert_eq!(inconclusive.cubes, vec![1, 3], "an Unknown keeps the cube");
+        assert_eq!(
+            inconclusive.doubtful,
+            vec![
+                (1, InitialCubeDoubt::QueryInconclusive),
+                (3, InitialCubeDoubt::QueryInconclusive)
+            ]
+        );
+        let warning = inconclusive.warning().expect("a doubt is said");
+        assert!(
+            warning.message.contains("2 of 2 initial cube(s)")
+                && warning
+                    .message
+                    .contains("cube 3: the cycle-0 query was inconclusive"),
+            "{}",
+            warning.message
         );
     }
 
@@ -5566,7 +5814,7 @@ mod tests {
         let initial = initial_cube_indices(&preds, &none, &HashMap::new(), &file);
         assert_eq!(
             initial,
-            vec![0b00],
+            InitialCubes::established(vec![0b00]),
             "v is all-zero at reset, so out_valid = v[ptr] = 0 and fresh = 0; got {initial:?}"
         );
     }
@@ -5584,14 +5832,14 @@ mod tests {
             cycle_zero_feasible_cubes(&file, &preds, &none, all.clone(), &HashMap::new());
         assert_eq!(
             consistent,
-            vec![0b000, 0b011, 0b101, 0b110],
-            "exactly the cells with out = a ^ b"
+            InitialCubes::established(vec![0b000, 0b011, 0b101, 0b110]),
+            "exactly the cells with out = a ^ b, each proved inhabited"
         );
         let pins = HashMap::from([("b_q".to_string(), vec![0u64])]);
         let at_reset = cycle_zero_feasible_cubes(&file, &preds, &none, all, &pins);
         assert_eq!(
             at_reset,
-            vec![0b000, 0b011],
+            InitialCubes::established(vec![0b000, 0b011]),
             "b = 0 at reset, a free, out = a"
         );
     }
