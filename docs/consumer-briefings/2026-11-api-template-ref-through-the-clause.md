@@ -12,6 +12,8 @@ A request with `template_ref: { template, args }` used to be instantiated inside
 2. **Error texts for a bad reference are realization's.** An unknown template, a missing or ill-typed argument comes back as a `400` whose message is the realizer's (`Failed to parse/realize context: … template `reachable`: unknown template …`) instead of `Template instantiation failed: …`. The condition and the status code are unchanged.
 3. **Argument values are written as string literals, escaped.** A value is user input placed into generated CTXDSL text; it is now a quoted literal with `"`, `\`, line breaks and tabs escaped (`context_dsl::string_literal`), so a value cannot close the clause or declare anything. A value that is a bare identifier or a number behaves as before (the registry validates it against the parameter's type, as it did).
 
+4. **An id, an argument key or an automaton name that is not a CTXDSL identifier is refused with a `400`** naming the position (follow-up to this change, found in review: those three sit in identifier positions of the generated text, where escaping is no help, and an id such as `x { } } } context evil {` could close the sidecar's blocks). Letters, digits and `_`, not starting with a digit, not a keyword — the lexer's own rule.
+
 The cache key still covers the template and its arguments (the sidecar text is deterministic: bindings in key order), so repeated identical requests still hit the realization cache.
 
 ## What does not change
