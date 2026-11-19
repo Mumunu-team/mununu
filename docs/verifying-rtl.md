@@ -1935,6 +1935,17 @@ removed in 0.5, and `MUNUNU_NO_ANTECEDENT_SHADOW` is read by nothing. Design not
 black-boxed submodule output, an undriven net) — a verdict over it would read a chaotic
 stub.
 
+**A cut net is an input in all but its keyword (mununu#1062, #1086).** A `state` with no
+`next` line — what `--cutpoint` and a `(* blackbox *)` output leave behind — is free at every
+step, so when a property atom's cone reaches one it is sampled exactly like a primary input:
+the lift gives it `next = name$next`, a fresh free choice, and the atom and the transition
+read one value per cycle. A cut net nothing names (no symbol, no alias) is sampled under the
+name the engine gives every symbol-less cell, `state_<nid>` — it used to be skipped, and the
+engine read one value of it in the atom and another in the step, a verdict that was neither
+reading of the design. With the lift opted out such an atom is refused (the `--no-input-state`
+message names the cell and says what it is). A design that already names another cell
+`state_<nid>` keeps the anonymous cell unsampled, said on the log.
+
 ---
 
 ## Driving it from an external agent (e.g. an agent writing RTL)
