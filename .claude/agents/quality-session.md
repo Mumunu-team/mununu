@@ -100,6 +100,8 @@ Save the table plus a one-line precedence trace for every non-GREEN cell to `$SE
 
 Produce four ranked lists and save them to `$SESSION_DIR/shortlists.md`:
 
+If a `repo-maintainer` report exists (the newest `*-maintainer-*.md` in the `.claude/reviews` directory; gitignored, may be absent), read it first: its S3 findings with a `MERGE` or `DELETE` disposition inside the target scope enter the Duplication and Bloat lists with their finding number, ahead of entries this session derives itself — the maintainer already checked that they are reached by nothing or said twice. Its `KEEP — <reason>` entries are not re-proposed.
+
 1. **Bloat** — top 10 files by SLOC, top 10 functions by line count, top 10 modules by pub-item count. Cross-reference with git churn:
    ```bash
    git log --since="3 months ago" --name-only --pretty=format: -- '*.rs' \
