@@ -6676,7 +6676,15 @@ impl ExactSession {
             let Some(&nid) = name_to_nid.get(reg) else {
                 continue;
             };
-            let derived_inputs = crate::adapter::btor2::parser::cone_inputs(&file, nid);
+            let mut derived_inputs = crate::adapter::btor2::parser::cone_inputs(&file, nid);
+            // mununu#1086 — a symbol-less state with no `next` (a cut or black-boxed output
+            // nothing names) is an input in all but its keyword; `cone_inputs` reports named
+            // cells only. Sampled under `state_<nid>` by the lift above when it is on; here,
+            // with the lift opted out, it is refused like the named ones instead of being read
+            // once in the atom and again in the step.
+            let anonymous_cuts =
+                crate::adapter::btor2::input_state::anonymous_free_states_in_cone(&file, nid);
+            derived_inputs.extend(anonymous_cuts.iter().cloned());
             if !derived_inputs.is_empty() {
                 let inputs = derived_inputs
                     .iter()
@@ -6692,12 +6700,23 @@ impl ExactSession {
                 } else {
                     ""
                 };
+                let anon_note = if anonymous_cuts.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " `{}`: a symbol-less state cell with no `next` (a cut or a black-boxed \
+                         output nothing names), free at every step — an input in all but its \
+                         keyword (mununu#1086); with inputs-in-the-state on it is sampled once \
+                         per step under that name.",
+                        anonymous_cuts.join("`, `")
+                    )
+                };
                 return Err(format!(
                     "exact MC: atom `{reg}` is combinationally driven by primary input(s) {inputs}. \
                  The exact-symbolic engine leaves inputs free/quantified, so a temporal property \
                  whose antecedent depends on inputs decouples the antecedent from its consequent \
                  and would report an unsound verdict. Use the default `explicit` cube engine, or \
-                 lift the antecedent through a shadow register.{ctrl_note}"
+                 lift the antecedent through a shadow register.{ctrl_note}{anon_note}"
                 ));
             }
         }
@@ -13085,6 +13104,63 @@ mod tests {
             exact_symbolic_verdict(CUT_IN_ATOM_CONE, &never_set),
             Ok(ExactVerdict::Violated)
         );
+    }
+
+    /// mununu#1086 — REPRODUCER: the same cut net with NO symbol (`3 state 1`). Nothing names
+    /// it, so the #1062 lift skipped it and the atom-cone walk never saw it: the exact engine
+    /// read one value of the cell in `accept` and another in the step `v' = accept`, and the
+    /// property "an accepted beat is presented next cycle" — true for every value of the cell —
+    /// read VIOLATED. Now the cell is sampled once per step under its synthesized name
+    /// `state_3`, and the property HOLDS; the control shows the cell is still free.
+    #[test]
+    fn x1086_an_anonymous_cut_net_in_an_atoms_cone_does_not_decouple_the_atom_from_the_step() {
+        const ANONYMOUS_CUT: &str = "1 sort bitvec 1\n2 input 1 in_valid\n3 state 1\n\
+4 state 1 v\n5 zero 1\n6 init 1 4 5\n7 not 1 4\n8 or 1 7 3\n9 and 1 2 8\n10 output 9 accept\n\
+11 next 1 4 9\n";
+        let presented =
+            crate::mu_calculus::parser::parse("nu Y.(((accept == 0) || [] (v == 1)) && [] Y)")
+                .expect("parse");
+        assert_eq!(
+            exact_symbolic_verdict(ANONYMOUS_CUT, &presented),
+            Ok(ExactVerdict::Holds),
+            "v' = accept whatever the anonymous cut net is"
+        );
+        let never_set =
+            crate::mu_calculus::parser::parse("nu Y.((v == 0) && [] Y)").expect("parse");
+        assert_eq!(
+            exact_symbolic_verdict(ANONYMOUS_CUT, &never_set),
+            Ok(ExactVerdict::Violated),
+            "the anonymous cut net is still free: `v` can be set"
+        );
+    }
+
+    /// mununu#1086 — with inputs-in-the-state OFF the anonymous cut net cannot be sampled, so an
+    /// atom whose cone reaches it is REFUSED like one reaching a named cut (the #476 guard), and
+    /// the refusal names the cell by its synthesized name and says what it is.
+    #[test]
+    fn x1086_with_inputs_in_the_state_off_an_atom_reaching_an_anonymous_cut_net_is_refused() {
+        const ANONYMOUS_CUT: &str = "1 sort bitvec 1\n2 input 1 in_valid\n3 state 1\n\
+4 state 1 v\n5 zero 1\n6 init 1 4 5\n7 not 1 4\n8 or 1 7 3\n9 and 1 2 8\n10 output 9 accept\n\
+11 next 1 4 9\n";
+        let presented =
+            crate::mu_calculus::parser::parse("nu Y.(((accept == 0) || [] (v == 1)) && [] Y)")
+                .expect("parse");
+        let err = exact_symbolic_verdict_with_options(
+            ANONYMOUS_CUT,
+            &presented,
+            &ExactSymbolicOptions {
+                input_state_enabled: false,
+                ..Default::default()
+            },
+        )
+        .expect_err("opted out, the atom reaching the anonymous cut net is refused");
+        assert!(
+            err.contains("combinationally driven by primary input(s)")
+                && err.contains("`state_3`")
+                && err.contains("symbol-less state cell with no `next`"),
+            "{err}"
+        );
+        assert_eq!(abstention_kind(&err), AbstentionKind::RefusedInputAtom);
     }
 
     #[test]

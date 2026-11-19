@@ -64,8 +64,10 @@ pub fn atom_inputs(file: &Btor2File, atom_registers: &HashSet<String>) -> Vec<St
             _ => None,
         })
         .collect();
-    // mununu#1062 — a named next-less state (a cut net) is an input here too.
-    input_names.extend(free_states(file).into_values().map(|(_, name)| name));
+    // mununu#1062 — a named next-less state (a cut net) is an input here too; mununu#1086 — so
+    // is a symbol-less one, under the name the engines give it (`state_<nid>`).
+    let free = free_states(file);
+    input_names.extend(free.values().map(|(_, name)| name.clone()));
     let mut name_to_nid: HashMap<String, Nid> = collect_symbols(file)
         .into_iter()
         .map(|(nid, name)| (name, nid))
@@ -98,17 +100,29 @@ pub fn atom_inputs(file: &Btor2File, atom_registers: &HashSet<String>) -> Vec<St
         }
         if let Some(&nid) = name_to_nid.get(reg) {
             out.extend(cone_inputs(file, nid));
+            // mununu#1086 — `cone_inputs` reports NAMED cells only (its other reader, the
+            // verify-auto seeder, seeds by name); the symbol-less next-less states the cone
+            // reaches are collected here under their synthesized names.
+            out.extend(anonymous_free_states_in_cone_of(file, nid, &free));
         }
     }
     out.into_iter().collect()
 }
 
-/// mununu#1062 — the named state cells with no `next` line: `nid → (sort, name)`. Such a cell is
-/// free at every step (a `--cutpoint` net, a black-boxed output), so for an atom that reads it
-/// it is an input: the lift gives it `next = name$next`, a fresh free input, which makes it the
+/// mununu#1062 — the state cells with no `next` line: `nid → (sort, name)`. Such a cell is free
+/// at every step (a `--cutpoint` net, a black-boxed output), so for an atom that reads it it is
+/// an input: the lift gives it `next = name$next`, a fresh free input, which makes it the
 /// sampled cell of that input — the same product `(s, i)` the rewrite builds for an `input`
 /// line, with no reader to redirect because every reader already reads the cell. Its `init`, if
 /// it has one, stays; with none it is free at cycle 0 like every sampled input.
+///
+/// mununu#1086 — a cell with no symbol and no alias is named `state_<nid>`, the name
+/// [`crate::adapter::btor2::parser::resolve_leaf_symbol`] gives it everywhere else (so the
+/// engine's sampled-cell lookup finds it after the lift). Before this such a cell was skipped:
+/// neither sampled nor refused, the exact engine read one value of it in the atom and another
+/// in the transition. A design that already carries that name on another cell keeps the cell
+/// unsampled, said on the log — the collision is the design's, and the alternative (two cells
+/// under one name) is worse.
 fn free_states(file: &Btor2File) -> HashMap<Nid, (Nid, String)> {
     let has_next: HashSet<Nid> = file
         .lines
@@ -119,15 +133,78 @@ fn free_states(file: &Btor2File) -> HashMap<Nid, (Nid, String)> {
         })
         .collect();
     let symbols = collect_symbols(file);
+    let taken: HashSet<&String> = symbols.values().collect();
     file.lines
         .iter()
         .filter_map(|l| match &l.node {
-            Node::State { sort, .. } if !has_next.contains(&l.nid) => symbols
-                .get(&l.nid)
-                .map(|name| (l.nid, (*sort, name.clone()))),
+            Node::State { sort, .. } if !has_next.contains(&l.nid) => {
+                let name = match symbols.get(&l.nid) {
+                    Some(name) => name.clone(),
+                    None => {
+                        let name = format!("state_{}", l.nid);
+                        if taken.contains(&name) {
+                            tracing::warn!(
+                                nid = l.nid,
+                                "a symbol-less state with no `next` cannot be sampled: the \
+                                 design already names another cell `{name}`; an atom reading \
+                                 it is read per step (mununu#1086)"
+                            );
+                            return None;
+                        }
+                        name
+                    }
+                };
+                Some((l.nid, (*sort, name)))
+            }
             _ => None,
         })
         .collect()
+}
+
+/// mununu#1086 — the symbol-less next-less states (under their synthesized names) in the
+/// combinational cone of `start`, stopping at every register as
+/// [`crate::adapter::btor2::parser::cone_inputs`] does. What the exact engine's fan-in guard
+/// adds to `cone_inputs` when the lift is opted out, so such an atom is refused rather than
+/// read per step. Sorted and deduplicated; empty after the lift (the cell has a `next` then).
+pub(crate) fn anonymous_free_states_in_cone(file: &Btor2File, start: Nid) -> Vec<String> {
+    anonymous_free_states_in_cone_of(file, start, &free_states(file))
+}
+
+fn anonymous_free_states_in_cone_of(
+    file: &Btor2File,
+    start: Nid,
+    free: &HashMap<Nid, (Nid, String)>,
+) -> Vec<String> {
+    let symbols = collect_symbols(file);
+    let mut seen: HashSet<Nid> = HashSet::new();
+    let mut out: BTreeSet<String> = BTreeSet::new();
+    let mut work: Vec<Nid> = vec![start];
+    while let Some(nid) = work.pop() {
+        if !seen.insert(nid) {
+            continue;
+        }
+        let Some(line) = file.lookup(nid) else {
+            continue;
+        };
+        match &line.node {
+            Node::State { .. } => {
+                if !symbols.contains_key(&nid)
+                    && let Some((_, name)) = free.get(&nid)
+                {
+                    out.insert(name.clone());
+                }
+            }
+            Node::Input { .. } | Node::Const { .. } | Node::Sort { .. } => {}
+            Node::Op { args, .. } => work.extend(args.iter().map(Operand::nid)),
+            Node::Init { value, .. } | Node::Next { value, .. } => work.push(value.nid()),
+            Node::Bad { signal }
+            | Node::Constraint { signal }
+            | Node::Fair { signal }
+            | Node::Output { signal, .. } => work.push(signal.nid()),
+            Node::Justice { signals } => work.extend(signals.iter().map(Operand::nid)),
+        }
+    }
+    out.into_iter().collect()
 }
 
 /// Lift the atoms' inputs into the state (see the module doc). `None` when the atoms read no
@@ -370,6 +447,61 @@ mod tests {
         // After the lift the atom reads registers only.
         let accept = 9;
         assert!(cone_inputs(&lift.file, accept).is_empty());
+    }
+
+    /// mununu#1086 — the same cut net with NO symbol (`3 state 1`): nothing names it, so it is
+    /// sampled under the engines' synthesized name `state_3`, closed with `state_3$next`, and
+    /// the atom's cone reaches no free cell afterwards. Before this the cell was skipped by
+    /// `free_states` and by the cone walk alike: neither sampled nor refused.
+    #[test]
+    fn x1086_an_anonymous_cut_net_in_an_atoms_cone_is_sampled_under_its_synthesized_name() {
+        const ANONYMOUS_CUT: &str = "1 sort bitvec 1\n2 input 1 in_valid\n3 state 1\n\
+4 state 1 v\n5 zero 1\n6 init 1 4 5\n7 not 1 4\n8 or 1 7 3\n9 and 1 2 8\n10 output 9 accept\n\
+11 next 1 4 9\n";
+        let file = parse(ANONYMOUS_CUT).expect("parses");
+        assert!(
+            !collect_symbols(&file).contains_key(&3),
+            "the fixture's cut net has no name from any pass"
+        );
+        assert_eq!(anonymous_free_states_in_cone(&file, 9), vec!["state_3"]);
+        assert!(
+            cone_inputs(&file, 9) == vec!["in_valid"],
+            "the named walk still reports the named input only: {:?}",
+            cone_inputs(&file, 9)
+        );
+        let regs: HashSet<String> = ["accept".to_string()].into_iter().collect();
+        assert_eq!(atom_inputs(&file, &regs), vec!["in_valid", "state_3"]);
+        let lift = lift_atom_inputs(&file, &regs).expect("lifts");
+        assert_eq!(lift.lifted, vec!["in_valid", "state_3"]);
+        let symbols = collect_symbols(&lift.file);
+        let next_of_cut = lift
+            .file
+            .lines
+            .iter()
+            .find_map(|l| match &l.node {
+                Node::Next {
+                    state: 3, value, ..
+                } => Some(value.nid()),
+                _ => None,
+            })
+            .expect("the anonymous cut net has a `next` after the lift");
+        assert_eq!(
+            symbols.get(&next_of_cut).map(String::as_str),
+            Some("state_3$next")
+        );
+        assert!(cone_inputs(&lift.file, 9).is_empty());
+        assert!(anonymous_free_states_in_cone(&lift.file, 9).is_empty());
+        // A design that already names another cell `state_3` keeps the anonymous cell as is.
+        const COLLISION: &str = "1 sort bitvec 1\n2 input 1 state_3\n3 state 1\n\
+4 state 1 v\n5 zero 1\n6 init 1 4 5\n7 not 1 4\n8 or 1 7 3\n9 and 1 2 8\n10 output 9 accept\n\
+11 next 1 4 9\n";
+        let file = parse(COLLISION).expect("parses");
+        assert_eq!(
+            atom_inputs(&file, &regs),
+            vec!["state_3"],
+            "the input, not the cell"
+        );
+        assert!(anonymous_free_states_in_cone(&file, 9).is_empty());
     }
 
     #[test]
